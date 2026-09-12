@@ -56,7 +56,9 @@ export function specFiles(): string[] {
     .map((name) => join(E2E, name));
 }
 
-const EQUALITY_MATCHERS = new Set(["toBe", "toEqual", "toStrictEqual", "toBeCloseTo", "toMatchObject"]);
+const EQUALITY_MATCHERS = new Set(["toBe", "toEqual", "toStrictEqual", "toBeCloseTo", "toMatchObject", "toContainEqual"]);
+/** `toHaveProperty("height", 86)` puts the key in the FIRST argument and the value in the second. */
+const KEYED_MATCHER = "toHaveProperty";
 const LOWER_BOUND_MATCHERS = new Set(["toBeGreaterThan", "toBeGreaterThanOrEqual"]);
 const UPPER_BOUND_MATCHERS = new Set(["toBeLessThan", "toBeLessThanOrEqual"]);
 const INCLUSIVE_MATCHERS = new Set(["toBeGreaterThanOrEqual", "toBeLessThanOrEqual"]);
@@ -113,10 +115,18 @@ function measuredNames(parsed: ts.SourceFile): Map<number, Set<string>> {
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "test") {
       nextScope = node.getStart(parsed);
     }
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer
+    if (ts.isVariableDeclaration(node) && node.initializer
       && measuresGeometry(node.initializer.getText(parsed))) {
       const names = byScope.get(nextScope) ?? new Set<string>();
-      names.add(node.name.text);
+      // Every name the declaration BINDS, not only a plain identifier. `const { height: value } =
+      // box` renames a measurement, and recording nothing for it let the alias pass as unrelated.
+      const bind = (name: ts.BindingName): void => {
+        if (ts.isIdentifier(name)) { names.add(name.text); return; }
+        for (const element of name.elements) {
+          if (ts.isBindingElement(element)) bind(element.name);
+        }
+      };
+      bind(node.name);
       byScope.set(nextScope, names);
     }
     ts.forEachChild(node, (child) => visit(child, nextScope));
@@ -260,9 +270,14 @@ export function bareNumber(node: ts.Expression, constants: Map<string, number> =
  * does — `poll`'s callback returns the very value the matcher compares. An earlier comment here
  * claimed otherwise and excluded both, which made "write it with `expect.soft`" a one-word bypass.
  */
-function expectArgument(node: ts.LeftHandSideExpression): ts.Expression | null {
+function expectArgument(node: ts.LeftHandSideExpression, parsed: ts.SourceFile): ts.Expression | null {
   let current: ts.Expression = node;
-  while (ts.isPropertyAccessExpression(current)) current = current.expression;
+  // `.not` REJECTS the value rather than pinning it, so reporting `not.toBe(86)` as a pin was a
+  // false positive — and the only remedy on offer would have been a misleading allowlist entry.
+  while (ts.isPropertyAccessExpression(current)) {
+    if (current.name.text === "not") return null;
+    current = current.expression;
+  }
   if (!ts.isCallExpression(current)) return null;
   const callee = current.expression;
   const named = ts.isIdentifier(callee)
@@ -290,7 +305,10 @@ function expectArgument(node: ts.LeftHandSideExpression): ts.Expression | null {
       ts.forEachChild(node, walk);
     };
     ts.forEachChild(argument.body, walk);
-    return returned.at(-1) ?? null;
+    // ANY return that measures something, not just the last one written. A fallback-shaped callback
+    // — `if (box) return box.height; return fallback;` — compares the height at runtime, and taking
+    // only the final return read `fallback` and reported nothing.
+    return returned.find((value) => measuresGeometry(value.getText(parsed))) ?? returned.at(-1) ?? null;
   }
   return argument;
 }
@@ -312,11 +330,19 @@ function structuredNumbers(node: ts.Expression, constants: Map<string, number>):
   const inner = stripWrappers(node);
   if (ts.isObjectLiteralExpression(inner)) {
     return inner.properties.flatMap((property) => {
+      // `{ ...{ height: 86 } }` — a spread carries the same pins, one level in.
+      if (ts.isSpreadAssignment(property)) {
+        return structuredNumbers(property.expression, constants);
+      }
       if (!ts.isPropertyAssignment(property)) return [];
       const key = ts.isIdentifier(property.name) || ts.isStringLiteral(property.name) ? property.name.text : null;
-      if (key === null || !GEOMETRY_NAMES.test(key)) return [];
+      if (key === null) return [];
       const number = bareNumber(property.initializer, constants);
-      return number === null ? [] : [{ path: `.${key}`, number }];
+      if (number !== null) return GEOMETRY_NAMES.test(key) ? [{ path: `.${key}`, number }] : [];
+      // `{ card: { height: 86 } }` — the geometry name is on the INNER key, so recurse rather than
+      // requiring this level to be geometric.
+      return structuredNumbers(property.initializer, constants)
+        .map(({ path, number: nested }) => ({ path: `.${key}${path}`, number: nested }));
     });
   }
   // An array of shapes, as in `toEqual([{ x: 12, y: 5 }, { x: 12, y: 12 }])`, which pins two SVG
@@ -345,12 +371,23 @@ function subjectLiterals(node: ts.Expression, constants: Map<string, number>): R
   // honest centre-alignment checks.
   const found: ResolvedNumber[] = [];
   const visit = (current: ts.Node): void => {
+    // `/` and `*` count only against a LARGE literal. `box.width / 2` is a midpoint and `x * 2` a
+    // ratio — the idiom every centring check in this suite uses — but `card.height / 86` normalises
+    // the measurement so the matcher can compare it to 1, which pins it exactly as hard as equality.
+    // Ten is the line: no centring or doubling uses a divisor that big, and no pinned size is that
+    // small.
+    const NORMALISING = 10;
+    const scaling = ts.isBinaryExpression(current)
+      && (current.operatorToken.kind === ts.SyntaxKind.SlashToken
+        || current.operatorToken.kind === ts.SyntaxKind.AsteriskToken);
     if (ts.isBinaryExpression(current)
       && (current.operatorToken.kind === ts.SyntaxKind.PlusToken
-        || current.operatorToken.kind === ts.SyntaxKind.MinusToken)) {
+        || current.operatorToken.kind === ts.SyntaxKind.MinusToken
+        || scaling)) {
       for (const [operand, other] of [[current.left, current.right], [current.right, current.left]] as const) {
         const resolved = bareNumber(operand, constants);
-        if (!resolved || Math.abs(resolved.value) <= TOLERANCE) continue;
+        const floor = scaling ? NORMALISING : TOLERANCE;
+        if (!resolved || Math.abs(resolved.value) <= floor) continue;
         // The other side has to be the measurement; `86 - 1` is arithmetic, not a comparison.
         if (bareNumber(other, constants) !== null) continue;
         found.push(resolved);
@@ -400,8 +437,27 @@ function comparisons(parsed: ts.SourceFile, constants: Map<string, number>, meas
     }
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
       const matcher = node.expression.name.text;
+      // `toHaveProperty("height", 86)` names the key and the value in separate arguments, so it
+      // reads as neither a bare number nor an object literal. Rewritten here into the object form
+      // the rest of this function already understands.
+      if (matcher === KEYED_MATCHER && node.arguments.length >= 2) {
+        const key = node.arguments[0];
+        const subject = expectArgument(node.expression.expression, parsed);
+        const number = bareNumber(node.arguments[1]!, constants);
+        if (subject && number && ts.isStringLiteral(key) && GEOMETRY_NAMES.test(key.text)
+          && Math.abs(number.value) > TOLERANCE) {
+          const subjectText = collapse(subject.getText(parsed));
+          equalities.push({
+            id: `${subjectText}.${key.text}|${matcher}|${number.text}`,
+            file: "",
+            line: parsed.getLineAndCharacterOfPosition(node.getStart(parsed)).line + 1,
+            kind: "equality",
+            detail: `expect(${subjectText}).${matcher}("${key.text}", ${number.text})`,
+          });
+        }
+      }
       if (ALL_MATCHERS.has(matcher)) {
-        const subject = expectArgument(node.expression.expression);
+        const subject = expectArgument(node.expression.expression, parsed);
         const argument = node.arguments[0];
         if (subject && argument && !isCountExpression(subject)) {
           const subjectText = collapse(subject.getText(parsed));
@@ -780,4 +836,41 @@ test("two tests may reuse a local name without one lending the other its meaning
     'test("b", () => { const value = requestCount(); expect(value).toBe(3); });',
   ].join("\n");
   assert.deepEqual(sample(source).map((finding) => finding.detail), ["expect(value).toBe(86)"]);
+});
+
+// --- Round three. Every one of these is an ordinary way to write an assertion, which is the point:
+// the routes that matter are the ones an author reaches for without thinking. ---
+
+test("a negated assertion rejects a value rather than pinning it", () => {
+  // This was a FALSE positive, and the only remedy on offer would have been an allowlist entry
+  // claiming a legitimate assertion was a pin.
+  assert.deepEqual(sample("expect(card.height).not.toBe(86);"), []);
+});
+
+test("toHaveProperty names the key and the value separately, and still pins", () => {
+  const source = 'expect((await card.boundingBox())!).toHaveProperty("height", 86);';
+  assert.equal(sample(source).length, 1);
+});
+
+test("toContainEqual and a nested object are both reached", () => {
+  assert.equal(sample("expect(boxes).toContainEqual({ height: 86 });").length, 1);
+  assert.equal(sample("expect(layout).toMatchObject({ card: { height: 86 } });").length, 1);
+  assert.equal(sample("expect(box).toMatchObject({ ...{ height: 86 } });").length, 1);
+});
+
+test("a destructured alias carries its provenance", () => {
+  const source = 'test("t", () => { const { height: value } = (await card.boundingBox())!; expect(value).toBe(86); });';
+  assert.deepEqual(sample(source).map((finding) => finding.detail), ["expect(value).toBe(86)"]);
+});
+
+test("a poll callback is read for ANY returned measurement, not only its last return", () => {
+  const source = "await expect.poll(async () => { const box = await card.boundingBox(); if (box) return box.height; return fallback; }).toBe(86);";
+  assert.deepEqual(sample(source).map((finding) => finding.detail), ["expect(box.height).toBe(86)"]);
+});
+
+test("a large divisor normalises a measurement; a small one centres it", () => {
+  // `card.height / 86` compares to 1 and pins the height exactly as hard as equality would.
+  assert.equal(sample("expect(card.height / 86).toBeCloseTo(1);").length, 1);
+  // `/ 2` is how every centring check in this suite is written and must stay clean.
+  assert.deepEqual(sample("expect(Math.abs((a.x + a.width / 2) - (b.x + b.width / 2))).toBeLessThanOrEqual(1);"), []);
 });

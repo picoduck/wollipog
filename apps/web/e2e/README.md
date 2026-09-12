@@ -75,11 +75,30 @@ default; both want room.
 
 ### What it cannot see, and why you still have to think
 
-Two reviewers attacked this guard across several rounds and between them walked through it fifteen
-ways. Thirteen are closed and pinned by tests — including three that had LIVE instances in this
-suite the scanner could not see: a block-bodied `expect.poll` callback, an array of coordinate
-objects, and a measured local wrapped in `Math.round`. Two are not closable statically, and it is
-better to know that than to trust the green tick:
+Two reviewers attacked this guard across four rounds and between them walked through it
+twenty-four ways. Twenty are closed and pinned by tests — including three that had LIVE instances in
+this suite the scanner could not see: a block-bodied `expect.poll` callback, an array of coordinate
+objects, and a measured local wrapped in `Math.round`.
+
+**Five remain open, and knowing them is worth more than trusting the green tick.** Three are reachable
+by ordinary code and are simply beyond what a single-file scanner can see:
+
+- **A constant imported from another module.** `import { CARD_HEIGHT } from "./fixtures"` then
+  `expect(card.height).toBe(CARD_HEIGHT)`. Constant resolution reads the file being scanned, nothing
+  else.
+- **A `let` reassigned after declaration.** The initializer is folded; a later `target = 86` is not
+  followed.
+- **A local helper's return.** `function read(box) { return box.height; }` then
+  `expect(read(box)).toBe(86)` — provenance is tracked through variables, not through call graphs.
+
+Two more turn on something no static reading can recover, because the discriminator only exists at
+runtime — the margin between the asserted bound and the value actually observed:
+
+- **A relative assertion with no headroom.** `expect(crowded.width).toBeGreaterThan(roomy.width * 0.4)`
+  where the true ratio is 0.42. Both sides are measurements, so it is relative by this guard's rule —
+  and it still failed on CI. It is statically identical to the same line with a true ratio of 0.9.
+  **This shape has broken CI here once already.**
+- **A tight one-sided bound**, for the same reason.
 
 - **A relative assertion with no headroom.** `expect(crowded.width).toBeGreaterThan(roomy.width * 0.4)`
   where the true ratio is 0.42. Both sides are measurements, so it is relative by this guard's rule —
@@ -88,10 +107,14 @@ better to know that than to trust the green tick:
   here once already.**
 - **A tight one-sided bound**, for the same reason.
 
-Both share a discriminator the scanner cannot reach: the margin between the asserted bound and the
-value actually observed. Closing them means checking at runtime — a helper that knows both numbers
-and fails when they sit too close together — which would catch everything above as a side effect.
-That is worth doing and is not what this file is.
+Closing the last two means checking at runtime — a helper that knows both numbers and fails when
+they sit too close together — which would catch every route above as a side effect, including the
+three this scanner cannot reach. That is the real fix and it is tracked separately; it is not what
+this file is.
+
+So read this section as the guard's honest range rather than its failure list. It catches the shapes
+people actually write, and it caught a pin added by another pull request the first time it ran in
+CI. It does not catch everything, and nothing here will tell you when it has missed something.
 
 Until then: when you write any numeric bound on something text-derived, satisfy yourself that it has
 room, because nothing here will do it for you.
