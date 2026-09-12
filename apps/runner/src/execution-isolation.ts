@@ -227,6 +227,22 @@ function seatbeltLiteral(value: string): string {
   return `"${posix.normalize(value).replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
 
+/** Exactly the roots a Seatbelt session may write to. Anything that must REPORT what the sandbox
+ * permits reads this rather than re-deriving it: a second copy of the list drifts, and a caller
+ * told a path is blocked when the profile in fact grants it waits for a relaunch it never needed. */
+export function seatbeltWritableRoots(
+  state: IsolationStateOptions,
+  home: string,
+  nativeTmp = tmpdir(),
+): string[] {
+  const mapping = statePath(state.driver);
+  const paths = new Set([state.cwd, state.dataDir, nativeTmp, ...(state.additionalWritableRoots ?? [])]);
+  if (mapping) paths.add(state.providerStatePath ?? posix.join(
+    absoluteHome(state.env.HOME ?? home, "HOME on macOS"), ...mapping.relative.split("/"),
+  ));
+  return [...paths];
+}
+
 /** A parameter-free Seatbelt profile. It intentionally grants read access for installed CLI,
  * credential, toolchain, and system compatibility while restricting writes to the worktree,
  * runner data, temporary directory, and the provider's real transcript leaf. Unlike bwrap,
@@ -237,12 +253,8 @@ export function buildSeatbeltProfile(
   network: "inherit" | "deny",
   nativeTmp = tmpdir(),
 ): string {
-  const mapping = statePath(state.driver);
-  const paths = new Set([state.cwd, state.dataDir, nativeTmp, ...(state.additionalWritableRoots ?? [])]);
-  if (mapping) paths.add(state.providerStatePath ?? posix.join(
-    absoluteHome(state.env.HOME ?? home, "HOME on macOS"), ...mapping.relative.split("/"),
-  ));
-  const writeRules = [...paths].map((path) => `    (subpath ${seatbeltLiteral(path)})`).join("\n");
+  const writeRules = seatbeltWritableRoots(state, home, nativeTmp)
+    .map((path) => `    (subpath ${seatbeltLiteral(path)})`).join("\n");
   return [
     "(version 1)",
     "(deny default)",

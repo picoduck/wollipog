@@ -31,13 +31,15 @@ import {
   POLICY_HOOK_ABANDONMENT_MS,
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
+  SESSION_NAMING_RUNNER_BUDGET_MS,
+  SESSION_NAMING_SUPERVISION_MARGIN_MS,
   WORKSPACE_REFERENCE_MIME_TYPE,
   pendingRequests,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { parseRateTable } from "./usage-pricing.js";
 import { automationCommandDigest, canonicalAutomationCommandJson } from "./automation-command-outbox.js";
-import { Hub, RunnerRequestNotSentError, type RunnerRequestResult } from "./hub.js";
+import { Hub, RunnerRequestNotSentError, RunnerRequestTimeoutError, type RunnerRequestResult } from "./hub.js";
 import { agentDelegationAuthorizationError, type AgentPrincipal } from "./identity.js";
 import { pushDecision } from "./push-decision.js";
 import { SessionTitleGenerationError, type SessionTitleGenerator } from "./session-title-generator.js";
@@ -769,7 +771,8 @@ test("session spawn policy parks the exact child request and creates only after 
     const created = create();
     assert.equal(created.ok, true, created.error);
     assert.equal(created.data!.parentSessionId, parent.id);
-    assert.equal(created.data!.costBudgetUsd, 5);
+    assert.equal(created.data!.costBudgetUsd, null);
+    assert.equal(created.data!.maxToolCalls, null);
     assert.equal(db.childSessionAllocations(parent.id).count, 1);
     assert.equal(create().status, 428, "a second child requires a fresh approval");
   } finally {
@@ -777,25 +780,203 @@ test("session spawn policy parks the exact child request and creates only after 
   }
 });
 
-test("children use their parent Project defaults even when filed elsewhere", () => {
+test("agent-created children inherit their parent Project assignment", () => {
   const { db, svc } = makeHarness();
   try {
     const owner = db.localIdentityContext();
     const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
-    const project = db.createProject({ name: "Parent Budget", scope });
+    const project = db.createProject({ name: "Parent Project", scope });
+    const location = db.addProjectLocation(project.id, { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID });
     const defaults = { costBudgetUsd: 2.5, maxToolCalls: 30 };
     db.updateProject(project.id, { childSessionDefaults: defaults });
     const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
-    const parent = svc.createSession({ ...request, projectId: null }, undefined, scope).data!;
-    db.raw().prepare("UPDATE sessions SET project_id=? WHERE id=?").run(project.id, parent.id);
+    const parent = svc.createSession({
+      ...request,
+      projectId: project.id,
+      projectLocationId: location.id,
+    }, undefined, scope).data!;
     db.updateSessionStatus(parent.id, "running", Date.now());
-    const created = svc.createSession({ ...request, projectId: null }, undefined, undefined, false, false, false,
+    const created = svc.createSession(request, undefined, undefined, false, false, false,
       { parentSessionId: parent.id });
     assert.equal(created.ok, true, created.error);
     assert.equal(created.data!.costBudgetUsd, defaults.costBudgetUsd);
     assert.equal(created.data!.maxToolCalls, defaults.maxToolCalls);
     assert.equal(created.data!.parentSessionId, parent.id);
-    assert.equal(created.data!.projectId, null);
+    assert.equal(created.data!.projectId, project.id);
+    assert.equal(created.data!.projectLocationId, location.id);
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+      id: created.data!.id,
+      workspaceId: WORKSPACE_ID,
+      status: "running",
+    })]);
+    assert.equal(db.getSession(created.data!.id)!.projectId, project.id);
+    assert.equal(db.getSession(created.data!.id)!.projectLocationId, location.id);
+  } finally { db.close(); }
+});
+
+test("agent-created children preserve explicit overrides and No Project inheritance", () => {
+  const { db, svc } = makeHarness();
+  try {
+    const owner = db.localIdentityContext();
+    const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+    const parentProject = db.createProject({ name: "Parent Project", scope });
+    const parentLocation = db.addProjectLocation(
+      parentProject.id,
+      { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID },
+    );
+    const otherProject = db.createProject({ name: "Explicit Project", scope });
+    const otherLocation = db.addProjectLocation(
+      otherProject.id,
+      { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID },
+    );
+    const parent = svc.createSession({
+      ...request,
+      projectId: parentProject.id,
+      projectLocationId: parentLocation.id,
+    }, undefined, scope).data!;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+
+    const explicitNoProject = svc.createSession({
+      ...request,
+      projectId: null,
+      projectLocationId: null,
+    }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    assert.ok(explicitNoProject.ok, explicitNoProject.error);
+    assert.equal(explicitNoProject.data!.projectId, null);
+    assert.equal(explicitNoProject.data!.projectLocationId, null);
+
+    const explicitProject = svc.createSession({
+      ...request,
+      projectId: otherProject.id,
+      projectLocationId: otherLocation.id,
+    }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    assert.ok(explicitProject.ok, explicitProject.error);
+    assert.equal(explicitProject.data!.projectId, otherProject.id);
+    assert.equal(explicitProject.data!.projectLocationId, otherLocation.id);
+
+    const noProjectParent = svc.createSession({
+      ...request,
+      projectId: null,
+      projectLocationId: null,
+    }, undefined, scope).data!;
+    db.updateSessionStatus(noProjectParent.id, "running", Date.now());
+    const inheritedNoProject = svc.createSession(
+      request,
+      undefined,
+      undefined,
+      false,
+      false,
+      false,
+      { parentSessionId: noProjectParent.id },
+    );
+    assert.ok(inheritedNoProject.ok, inheritedNoProject.error);
+    assert.equal(inheritedNoProject.data!.projectId, null);
+    assert.equal(inheritedNoProject.data!.projectLocationId, null);
+  } finally { db.close(); }
+});
+
+test("agent-created children select a compatible parent Project Location and reject missing ones", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const owner = db.localIdentityContext();
+    const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
+    const project = db.createProject({ name: "Single Location", scope });
+    const location = db.addProjectLocation(project.id, { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID });
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+    const parent = svc.createSession({
+      ...request,
+      projectId: project.id,
+      projectLocationId: location.id,
+    }, undefined, scope).data!;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    const meta = runnerMeta();
+    meta.workspaces.push(
+      { id: "ws-2", name: "Compatible", path: "/repos/compatible" },
+      { id: "ws-3", name: "Incompatible", path: "/repos/incompatible" },
+    );
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const compatibleLocation = db.addProjectLocation(
+      project.id,
+      { runnerId: RUNNER_ID, workspaceId: "ws-2" },
+    );
+    const compatible = svc.createSession({
+      ...request,
+      workspaceId: "ws-2",
+    }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    assert.ok(compatible.ok, compatible.error);
+    assert.equal(compatible.data!.projectId, project.id);
+    assert.equal(compatible.data!.projectLocationId, compatibleLocation.id);
+    const before = db.listSessions().length;
+
+    const rejected = svc.createSession({
+      ...request,
+      workspaceId: "ws-3",
+    }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    assert.equal(rejected.status, 409);
+    assert.match(rejected.error ?? "", /parent Project has no available Location/);
+    assert.equal(db.listSessions().length, before);
+    assert.equal(hub.sentOfType("start_session").some((message) => message.spec.workspaceId === "ws-3"), false);
+  } finally { db.close(); }
+});
+
+test("agent-created ad-hoc children inherit a parent Project Location containing their path", () => {
+  const { db, svc } = makeHarness();
+  try {
+    const owner = db.localIdentityContext();
+    const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
+    const project = db.createProject({ name: "Ad-Hoc Parent", scope });
+    const location = db.addProjectLocation(project.id, { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID });
+    const parent = svc.createSession({
+      runnerId: RUNNER_ID,
+      workspaceId: WORKSPACE_ID,
+      agentId: AGENT_ID,
+      projectId: project.id,
+      projectLocationId: location.id,
+    }, undefined, scope).data!;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+
+    const compatible = svc.createSession({
+      runnerId: RUNNER_ID,
+      workspaceId: WORKSPACE_ID,
+      workspacePath: `${WORKSPACE_PATH}/packages/core`,
+      agentId: AGENT_ID,
+    }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    assert.ok(compatible.ok, compatible.error);
+    assert.equal(compatible.data!.workspaceId, null, "ad-hoc launch semantics remain unchanged");
+    assert.equal(compatible.data!.projectId, project.id);
+    assert.equal(compatible.data!.projectLocationId, location.id);
+    svc.hydrateRunnerSessions(RUNNER_ID, [
+      snapshot({ id: parent.id, status: "running" }),
+      snapshot({
+        id: compatible.data!.id,
+        workspaceId: null,
+        workspacePath: `${WORKSPACE_PATH}/packages/core`,
+        status: "running",
+      }),
+    ]);
+    assert.equal(db.getSession(compatible.data!.id)!.projectId, project.id);
+    assert.equal(db.getSession(compatible.data!.id)!.projectLocationId, location.id);
+
+    const otherProject = db.createProject({ name: "Refiled Ad-Hoc Child", scope });
+    const otherLocation = db.addProjectLocation(
+      otherProject.id,
+      { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID },
+    );
+    const refiled = svc.setProject(compatible.data!.id, otherProject.id);
+    assert.ok(refiled.ok, refiled.error);
+    assert.equal(refiled.data!.workspaceId, null, "re-filing does not change ad-hoc launch identity");
+    assert.equal(refiled.data!.projectId, otherProject.id);
+    assert.equal(refiled.data!.projectLocationId, otherLocation.id);
+
+    const incompatible = svc.createSession({
+      runnerId: RUNNER_ID,
+      workspaceId: WORKSPACE_ID,
+      workspacePath: "/tmp/unrelated",
+      agentId: AGENT_ID,
+    }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    assert.equal(incompatible.status, 409);
+    assert.match(incompatible.error ?? "", /parent Project has no available Location/);
   } finally { db.close(); }
 });
 
@@ -820,7 +1001,7 @@ test("agent-created sessions retain trusted parent attribution and reserve bound
     }
     const denied = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.id });
     assert.equal(denied.ok, false);
-    assert.match(denied.error!, /spawn cap/);
+    assert.match(denied.error!, /0 remaining live child slots/);
     db.deleteSession(children[0]!.id);
     assert.equal(db.childSessionAllocations(parent.id).count, 4);
     assert.equal(svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.id }).ok, false);
@@ -834,26 +1015,121 @@ test("agent-created sessions retain trusted parent attribution and reserve bound
   }
 });
 
+test("terminal or archived children free live slots while lifetime spend reservations remain", () => {
+  const { db, svc } = makeHarness();
+  try {
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+    const owner = db.localIdentityContext();
+    const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
+    const parent = svc.createSession(request, undefined, scope).data!;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    const children = Array.from({ length: 4 }, () => {
+      const created = svc.createSession(request, undefined, undefined, false, false, false, {
+        parentSessionId: parent.id,
+      });
+      assert.ok(created.ok, created.error);
+      return created.data!;
+    });
+    assert.equal(db.childSessionAllocations(parent.id).liveCount, 4);
+    assert.match(
+      svc.createSession(request, undefined, undefined, false, false, false, {
+        parentSessionId: parent.id,
+      }).error ?? "",
+      /0 remaining live child slots/,
+    );
+
+    db.updateSessionStatus(children[0]!.id, "completed", Date.now());
+    db.updateSessionStatus(children[1]!.id, "failed", Date.now());
+    db.updateSessionStatus(children[2]!.id, "stopped", Date.now());
+    db.setSessionArchived(children[3]!.id, true, Date.now());
+    assert.deepEqual({ ...db.childSessionAllocations(parent.id) }, {
+      count: 4,
+      liveCount: 0,
+      costBudgetUsd: 0,
+      maxToolCalls: 0,
+    });
+
+    const fifth = svc.createSession(request, undefined, undefined, false, false, false, {
+      parentSessionId: parent.id,
+    });
+    assert.ok(fifth.ok, fifth.error);
+    assert.equal(fifth.data!.costBudgetUsd, null);
+    assert.equal(fifth.data!.maxToolCalls, null);
+    assert.deepEqual({ ...db.childSessionAllocations(parent.id) }, {
+      count: 5,
+      liveCount: 1,
+      costBudgetUsd: 0,
+      maxToolCalls: 0,
+    });
+  } finally { db.close(); }
+});
+
+test("a live owner can raise the concurrent child cap and restarts consume the same slots", () => {
+  const { db, svc } = makeHarness();
+  try {
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+    const owner = db.localIdentityContext();
+    const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
+    const parent = svc.createSession({ ...request, config: { maxChildSessions: 1 } }, undefined, scope).data!;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    const child = svc.createSession(request, undefined, undefined, false, false, false, {
+      parentSessionId: parent.id,
+    }).data!;
+    assert.equal(svc.createSession(request, undefined, undefined, false, false, false, {
+      parentSessionId: parent.id,
+    }).status, 409);
+    assert.equal(svc.setConfig(parent.id, { maxChildSessions: 65 }).status, 400);
+    const selfEscalation = svc.setConfig(
+      parent.id,
+      { costBudgetUsd: 0, maxChildSessions: 2 },
+      { kind: "agent", id: parent.id },
+    );
+    assert.equal(selfEscalation.status, 403, "self-service never clears a spend ceiling");
+    assert.equal(db.getSession(parent.id)!.maxChildSessions, 1, "a rejected mixed edit is atomic");
+    assert.ok(svc.setConfig(parent.id, { maxChildSessions: 2 }, { kind: "agent", id: parent.id }).ok);
+    assert.equal(db.getSession(parent.id)!.maxChildSessions, 2);
+    const sibling = svc.createSession(request, undefined, undefined, false, false, false, {
+      parentSessionId: parent.id,
+    });
+    assert.ok(sibling.ok, sibling.error);
+
+    db.updateSessionStatus(child.id, "stopped", Date.now());
+    assert.ok(svc.restart(child.id).ok, "a terminal child reclaims its released live slot");
+    db.updateSessionStatus(child.id, "stopped", Date.now());
+    const replacement = svc.createSession(request, undefined, undefined, false, false, false, {
+      parentSessionId: parent.id,
+    });
+    assert.ok(replacement.ok, replacement.error);
+    assert.equal(svc.restart(child.id).status, 409, "restart cannot exceed the parent's live cap");
+  } finally { db.close(); }
+});
+
 for (const kind of ["run", "workflow"] as const) {
-  test(`agent-created ${kind} applies Project defaults and rejects explicit unlimited or invalid allowances`, () => {
+  test(`agent-created ${kind} inherits its parent Project and applies Project defaults`, () => {
     const { db, svc, hub } = makeHarness();
     try {
       const owner = db.localIdentityContext();
       const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
       const project = db.createProject({ name: "Parent Allowances", scope });
+      const location = db.addProjectLocation(project.id, { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID });
       db.updateProject(project.id, { childSessionDefaults: { costBudgetUsd: 2.5, maxToolCalls: 30 } });
-      const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, projectId: null }, undefined, scope).data!;
-      db.raw().prepare("UPDATE sessions SET project_id=? WHERE id=?").run(project.id, parent.id);
+      const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID,
+        projectId: project.id, projectLocationId: location.id }, undefined, scope).data!;
       db.updateSessionStatus(parent.id, "running", Date.now());
       const create = (overrides: { costBudgetUsd?: number; maxToolCalls?: number; config?: { maxChildSessions: number } } = {}) => {
-        const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, projectId: null, task: "Build and review", ...overrides };
+        const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, task: "Build and review", ...overrides };
         return kind === "run"
           ? svc.createRun({ ...request, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID] }, { parentSessionId: parent.id })
           : svc.createWorkflowRun({ ...request, workflowId: "builtin:build-review", agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID } },
             { kind: "agent", id: parent.id }, undefined, { parentSessionId: parent.id });
       };
       const before = hub.sentOfType("start_session").length;
-      for (const invalid of [{ costBudgetUsd: 0 }, { maxToolCalls: 0 }, { maxToolCalls: 0.5 }, { config: { maxChildSessions: 65 } }]) {
+      hub.online = false;
+      const offline = create();
+      assert.equal(offline.status, 409);
+      assert.match(offline.error ?? "", /runner .* is offline/);
+      hub.online = true;
+      for (const invalid of [{ costBudgetUsd: -1 }, { maxToolCalls: -1 }, { maxToolCalls: 0.5 }, { config: { maxChildSessions: 65 } }]) {
         assert.equal(create(invalid).ok, false);
         assert.equal(db.listRuns().length, 0);
         assert.equal(db.childSessionAllocations(parent.id).count, 0);
@@ -864,7 +1140,16 @@ for (const kind of ["run", "workflow"] as const) {
       for (const child of created.data!.sessions) {
         assert.equal(child.costBudgetUsd, 2.5);
         assert.equal(child.maxToolCalls, 30);
-        assert.equal(child.projectId, null, "defaults come from the parent even when the child is filed elsewhere");
+        assert.equal(child.projectId, project.id);
+        assert.equal(child.projectLocationId, location.id);
+        assert.deepEqual(db.sessionScope(child.id), scope);
+        db.updateSessionStatus(child.id, "completed", Date.now());
+      }
+      const unlimited = create({ costBudgetUsd: 0, maxToolCalls: 0 });
+      assert.ok(unlimited.ok, unlimited.error);
+      for (const child of unlimited.data!.sessions) {
+        assert.equal(child.costBudgetUsd, null, "explicit zero opts out of an unbounded parent's Project default");
+        assert.equal(child.maxToolCalls, null);
       }
       db.updateSessionStatus(parent.id, "completed", Date.now());
       assert.equal(create().status, 409);
@@ -901,7 +1186,7 @@ for (const kind of ["run", "workflow"] as const) {
       assert.equal(hub.sentOfType("start_session").length, before + 2);
       const denied = create();
       assert.equal(denied.status, 409);
-      assert.match(denied.error!, /spawn slots/);
+      assert.match(denied.error!, /remaining live child slot/);
       assert.equal(db.listRuns().length, 1, "a rejected fan-out must not persist an empty or partial run");
       assert.equal(db.childSessionAllocations(parent.id).count, 2);
       assert.equal(hub.sentOfType("start_session").length, before + 2);
@@ -936,10 +1221,50 @@ for (const kind of ["run", "workflow"] as const) {
       assert.ok(created.ok, created.error);
       for (const child of created.data!.sessions) {
         assert.equal(child.parentSessionId, parent.id);
-        assert.equal(child.costBudgetUsd, 5);
-        assert.equal(child.maxToolCalls, 100);
+        assert.equal(child.costBudgetUsd, null);
+        assert.equal(child.maxToolCalls, null);
       }
       assert.equal(db.childSessionAllocations(parent.id).count, 2);
+    } finally { db.close(); }
+  });
+}
+
+for (const kind of ["run", "workflow"] as const) {
+  test(`agent-created ${kind} releases its whole fan-out from the concurrent child cap`, () => {
+    const { db, svc } = makeHarness();
+    try {
+      const owner = db.localIdentityContext();
+      const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
+      const parent = svc.createSession({
+        runnerId: RUNNER_ID,
+        workspaceId: WORKSPACE_ID,
+        agentId: AGENT_ID,
+        config: { maxChildSessions: 2 },
+      }, undefined, scope).data!;
+      db.updateSessionStatus(parent.id, "running", Date.now());
+      const create = () => kind === "run"
+        ? svc.createRun({
+            runnerId: RUNNER_ID,
+            workspaceId: WORKSPACE_ID,
+            agentIds: [AGENT_ID, CODEX_APP_AGENT_ID],
+            task: "Build and review",
+          }, { parentSessionId: parent.id })
+        : svc.createWorkflowRun({
+            runnerId: RUNNER_ID,
+            workspaceId: WORKSPACE_ID,
+            workflowId: "builtin:build-review",
+            task: "Build and review",
+            agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID },
+          }, { kind: "agent", id: parent.id }, undefined, { parentSessionId: parent.id });
+      const first = create();
+      assert.ok(first.ok, first.error);
+      assert.equal(db.childSessionAllocations(parent.id).liveCount, 2);
+      assert.match(create().error ?? "", /0 remaining live child slots/);
+      for (const child of first.data!.sessions) db.updateSessionStatus(child.id, "completed", Date.now());
+      const second = create();
+      assert.ok(second.ok, second.error);
+      assert.equal(db.childSessionAllocations(parent.id).liveCount, 2);
+      assert.equal(db.childSessionAllocations(parent.id).count, 4);
     } finally { db.close(); }
   });
 }
@@ -4826,6 +5151,71 @@ test("explicit retitle waits for success and reports sanitized asynchronous fail
   assert.equal(db.getSession(id)?.titleSource, "user");
 });
 
+test("an explicit rename answered after five seconds still succeeds within the naming budget", async (context) => {
+  // Mocked timers only: the abort timer is driven virtually, and the generator is resolved by hand,
+  // so the "slow" provider response costs no wall-clock time.
+  let finish: ((value: string) => void) | undefined;
+  let namingSignal: AbortSignal | undefined;
+  const generator: SessionTitleGenerator = ({ signal }) => {
+    namingSignal = signal;
+    return new Promise((resolve) => { finish = resolve; });
+  };
+  const supervisionMs = SESSION_NAMING_RUNNER_BUDGET_MS + SESSION_NAMING_SUPERVISION_MARGIN_MS;
+  assert.ok(supervisionMs > 5_100, "the configured budget must outlast the old five-second default");
+  const { db, hub, svc } = makeHarness(generator, supervisionMs);
+  const id = seedSession(svc, hub);
+  assert.ok(svc.setTitle(id, "Current User Title").ok);
+  svc.onSessionEvent(id, { kind: "user_message", text: "Completed naming context", final: true });
+
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const pending = svc.retitleSession(id);
+    // 5.1s is the response latency that the old five-second budget rejected outright.
+    context.mock.timers.tick(5_100);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(namingSignal?.aborted, false, "a 5.1s provider response is no longer cancelled");
+    finish!("Renamed Past The Old Boundary");
+    const result = await pending;
+    assert.deepEqual(result, { ok: true, status: 200, data: { title: "Renamed Past The Old Boundary" } });
+    assert.equal(db.getSession(id)?.title, "Renamed Past The Old Boundary");
+  } finally {
+    context.mock.timers.reset();
+  }
+});
+
+test("an explicit rename that reaches the naming deadline keeps the existing title and reports a timeout", async (context) => {
+  let finish: ((value: string) => void) | undefined;
+  let namingSignal: AbortSignal | undefined;
+  const generator: SessionTitleGenerator = ({ signal }) => {
+    namingSignal = signal;
+    return new Promise((resolve) => { finish = resolve; });
+  };
+  const supervisionMs = SESSION_NAMING_RUNNER_BUDGET_MS + SESSION_NAMING_SUPERVISION_MARGIN_MS;
+  const { db, hub, svc } = makeHarness(generator, supervisionMs);
+  const id = seedSession(svc, hub);
+  assert.ok(svc.setTitle(id, "Current User Title").ok);
+  svc.onSessionEvent(id, { kind: "user_message", text: "Completed naming context", final: true });
+
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const pending = svc.retitleSession(id);
+    context.mock.timers.tick(supervisionMs - 1);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(namingSignal?.aborted, false, "the deadline must not fire early");
+    context.mock.timers.tick(1);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(namingSignal?.aborted, true, "the revised budget still ends at a bounded deadline");
+    finish!("Late Title From A Timed Out Rename");
+    const result = await pending;
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 504);
+    assert.match(result.error ?? "", /timed out/i);
+    assert.equal(db.getSession(id)?.title, "Current User Title", "a true timeout leaves the title alone");
+  } finally {
+    context.mock.timers.reset();
+  }
+});
+
 test("explicit retitle reports precise sanitized naming target drift", async () => {
   let code: SessionNamingRunnerErrorCode = "runner_outdated";
   const generator: SessionTitleGenerator = async () => {
@@ -6197,6 +6587,196 @@ test("Claude policy hook defers on no match and durably resolves non-interactive
   );
 });
 
+test("current policy-hook peers fence terminal responses behind a content-safe runner receipt", async () => {
+  const { db, hub, svc } = makeHarness();
+  try {
+    const id = seedSession(svc, hub);
+    db.updateSessionStatus(id, "running", Date.now());
+    assert.ok(svc.upsertGovernancePolicy({
+      policyId: "deny-native-hook",
+      name: "Deny Native Hook",
+      effect: "deny",
+      priority: 100,
+      enabled: true,
+      scope: { toolName: "Read" },
+    }).ok);
+    hub.requestHandler = (message) => {
+      assert.equal(message.type, "record_policy_hook_decision");
+      return {
+        type: "policy_hook_decision_recorded",
+        requestId: message.requestId,
+        sessionId: message.sessionId,
+        auditId: message.decision.auditId,
+        accepted: true,
+        eventSeq: 7,
+      };
+    };
+    const request = {
+      hookEventName: "PreToolUse" as const,
+      providerSessionId: "provider-secret",
+      permissionMode: "plan",
+      toolUseId: "tool-native",
+      context: { toolName: "Read", path: "/repos/demo/secret.txt" },
+    };
+    const result = await svc.evaluatePolicyHookCausally(id, request, true);
+    assert.equal(result.data?.decision, "deny");
+    const append = hub.sentOfType("record_policy_hook_decision").at(-1)!;
+    assert.deepEqual(Object.keys(append.decision).sort(), [
+      "actor", "auditId", "governancePolicyId", "outcome", "requestId", "stage", "toolCallId",
+    ]);
+    assert.equal(append.decision.stage, "resolution");
+    assert.equal(append.decision.outcome, "denied");
+    assert.equal(append.decision.toolCallId, "tool-native");
+    assert.doesNotMatch(JSON.stringify(append), /provider-secret|secret\.txt/);
+
+    const sent = hub.sentToRunner.length;
+    db.registerRunner(runnerMeta(), Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.nativePolicyHookEvents - 1);
+    const legacy = await svc.evaluatePolicyHookCausally(id, { ...request, toolUseId: "tool-legacy" }, true);
+    assert.equal(legacy.data?.decision, "deny");
+    assert.equal(hub.sentToRunner.length, sent, "pre-v130 runners retain audit-backed synthesis without a new command");
+  } finally { db.close(); }
+});
+
+test("native hook receipt failures block normally without opening the sidecar transport circuit", async () => {
+  const { db, hub, svc } = makeHarness();
+  try {
+    const id = seedSession(svc, hub);
+    db.updateSessionStatus(id, "running", Date.now());
+    assert.ok(svc.upsertGovernancePolicy({
+      policyId: "allow-native-hook",
+      name: "Allow Native Hook",
+      effect: "allow",
+      priority: 100,
+      enabled: true,
+      scope: { toolName: "Read" },
+    }).ok);
+    const request = (toolUseId: string) => ({
+      hookEventName: "PreToolUse" as const,
+      providerSessionId: "provider-1",
+      permissionMode: "plan",
+      toolUseId,
+      context: { toolName: "Read" },
+    });
+    const failClosed = async (toolUseId: string) => {
+      const result = await svc.evaluatePolicyHookCausally(id, request(toolUseId), true);
+      assert.equal(result.ok, true);
+      assert.equal(result.status, 200);
+      assert.equal(result.data?.decision, "deny");
+      assert.match(result.data?.reason ?? "", /blocked fail-closed/);
+    };
+
+    let resolvedBeforeFailClosed: number | null | undefined;
+    hub.requestHandler = async (message) => {
+      if (message.type === "record_policy_hook_decision") {
+        resolvedBeforeFailClosed = db.getPolicyHookApproval(id, message.decision.requestId)?.resolvedAt;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      return {
+        type: "policy_hook_decision_recorded",
+        requestId: message.type === "record_policy_hook_decision" ? message.requestId : "wrong-request",
+        sessionId: id,
+        auditId: message.type === "record_policy_hook_decision" ? message.decision.auditId : "wrong-audit",
+        accepted: false,
+        error: "append rejected",
+      };
+    };
+    await failClosed("tool-rejected");
+    const historyFailure = svc.governanceAudit(id).find((entry) =>
+      entry.actor.kind === "system" && entry.actor.id === "decision-history-unavailable");
+    assert.ok(historyFailure);
+    assert.equal(historyFailure.outcome, "denied");
+    assert.equal(db.policyHookDecisionAudit(id, historyFailure.requestId)?.auditId, historyFailure.auditId,
+      "the fail-closed resolution supersedes the prior policy allow");
+    assert.equal(db.getPolicyHookApproval(id, historyFailure.requestId)?.status, "denied");
+    assert.equal(typeof resolvedBeforeFailClosed, "number");
+    assert.equal(db.getPolicyHookApproval(id, historyFailure.requestId)?.resolvedAt, resolvedBeforeFailClosed,
+      "fail-closed conversion preserves the original terminal resolution time");
+    await failClosed("tool-rejected");
+    assert.equal(svc.governanceAudit(id).filter((entry) =>
+      entry.requestId === historyFailure.requestId &&
+      entry.actor.kind === "system" && entry.actor.id === "decision-history-unavailable").length, 1,
+    "a retried failed acknowledgement preserves one fail-closed audit row");
+
+    hub.requestHandler = (message) => ({
+      type: "policy_hook_decision_recorded",
+      requestId: message.type === "record_policy_hook_decision" ? message.requestId : "wrong-request",
+      sessionId: id,
+      auditId: "mismatched-audit",
+      accepted: true,
+      eventSeq: 1,
+    });
+    await failClosed("tool-mismatched");
+
+    hub.deliver = false;
+    await failClosed("tool-offline");
+
+    hub.deliver = true;
+    hub.requestHandler = () => { throw new RunnerRequestTimeoutError(); };
+    await failClosed("tool-timeout");
+  } finally { db.close(); }
+});
+
+test("native hook receipts cover human approval and expiry before their terminal polls return", async () => {
+  const { db, hub, svc } = makeHarness();
+  try {
+    const id = seedSession(svc, hub);
+    db.updateSessionStatus(id, "running", Date.now());
+    for (const [toolName, askTimeout] of [["ApproveTool", undefined], ["ExpireTool", 1]] as const) {
+      assert.ok(svc.upsertGovernancePolicy({
+        policyId: `ask-${toolName}`,
+        name: `Ask ${toolName}`,
+        effect: "ask",
+        priority: 100,
+        enabled: true,
+        scope: { toolName },
+        ...(askTimeout ? { askTimeout } : {}),
+      }).ok);
+    }
+    hub.requestHandler = (message) => {
+      assert.equal(message.type, "record_policy_hook_decision");
+      return {
+        type: "policy_hook_decision_recorded",
+        requestId: message.requestId,
+        sessionId: message.sessionId,
+        auditId: message.decision.auditId,
+        accepted: true,
+        eventSeq: hub.sentOfType("record_policy_hook_decision").length,
+      };
+    };
+    const request = (toolName: string) => ({
+      hookEventName: "PreToolUse" as const,
+      providerSessionId: "provider-1",
+      permissionMode: "plan",
+      toolUseId: `tool-${toolName}`,
+      context: { toolName },
+    });
+
+    const approvalRequest = request("ApproveTool");
+    const asked = await svc.evaluatePolicyHookCausally(id, approvalRequest, true);
+    assert.equal(asked.data?.decision, "ask");
+    assert.ok(svc.approve(id, asked.data!.approvalRequestId!, "allow", { kind: "human", id: "device-1" }).ok);
+    const allowed = await svc.evaluatePolicyHookCausally(id, {
+      ...approvalRequest, approvalRequestId: asked.data!.approvalRequestId,
+    }, true);
+    assert.equal(allowed.data?.decision, "allow");
+
+    const expiryRequest = request("ExpireTool");
+    const expiring = await svc.evaluatePolicyHookCausally(id, expiryRequest, true);
+    assert.equal(expiring.data?.decision, "ask");
+    assert.equal(svc.reconcilePolicyHookTimeouts(Date.now() + 2_000, id), 1);
+    const expired = await svc.evaluatePolicyHookCausally(id, {
+      ...expiryRequest, approvalRequestId: expiring.data!.approvalRequestId,
+    }, true);
+    assert.equal(expired.data?.decision, "deny");
+
+    const decisions = hub.sentOfType("record_policy_hook_decision").map((message) => message.decision);
+    assert.deepEqual(decisions.map((decision) => [decision.outcome, decision.actor]), [
+      ["allowed", { kind: "human", id: "device-1" }],
+      ["timed_out", { kind: "system", id: "policy-ask-timeout" }],
+    ]);
+  } finally { db.close(); }
+});
+
 test("hook requests without a stable tool id still evaluate non-durable policy outcomes", () => {
   const { db, hub, svc } = makeHarness();
   const evaluate = (
@@ -6480,7 +7060,7 @@ test("hook asks are idempotent, serialize through one slot, and audit human and 
   assert.equal(svc.approve(id, second.approvalRequestId!, "allow").status, 409, "timeout wins a late click");
 });
 
-test("live hook polling heartbeats preserve an indefinite ask and abandonment terminates it", () => {
+test("live hook polling heartbeats preserve an indefinite ask and abandonment records a terminal event", async () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
   db.updateSessionStatus(id, "running", Date.now());
@@ -6542,10 +7122,19 @@ test("live hook polling heartbeats preserve an indefinite ask and abandonment te
     entry.requestId === asked.approvalRequestId &&
     entry.outcome === "aborted" &&
     entry.actor.id === "policy-hook-abandoned"));
-  assert.equal(svc.evaluatePolicyHook(id, {
+  hub.requestHandler = (message) => ({
+    type: "policy_hook_decision_recorded",
+    requestId: message.type === "record_policy_hook_decision" ? message.requestId : "wrong-request",
+    sessionId: id,
+    auditId: message.type === "record_policy_hook_decision" ? message.decision.auditId : "wrong-audit",
+    accepted: true,
+    eventSeq: 1,
+  });
+  assert.equal((await svc.evaluatePolicyHookCausally(id, {
     ...request,
     approvalRequestId: asked.approvalRequestId,
-  }).data?.decision, "deny");
+  }, true)).data?.decision, "deny");
+  assert.equal(hub.sentOfType("record_policy_hook_decision").at(-1)?.decision.outcome, "aborted");
   assert.equal(svc.approve(id, asked.approvalRequestId!, "allow").status, 409);
 });
 
@@ -11211,6 +11800,193 @@ test("setConfig persists a tool-call limit in its own column and clears on 0", (
   assert.equal(db.getSession(id)!.maxToolCalls, 2);
   svc.setConfig(id, { maxToolCalls: 0 });
   assert.equal(db.getSession(id)!.maxToolCalls, null);
+});
+
+test("unparked live guardrail edits synchronize explicit values and clears or roll back atomically", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { config: { model: "sonnet", maxChildSessions: 3 } });
+  db.raw().prepare("UPDATE sessions SET resolved_model=?, context_window=? WHERE id=?")
+    .run("claude-sonnet-resolved", 200_000, id);
+  hub.sentToRunner.length = 0;
+
+  assert.ok(svc.setConfig(id, { costBudgetUsd: 7, maxToolCalls: 12 }).ok);
+  assert.deepEqual(hub.sentOfType("rearm_governance").at(-1)!.config, {
+    costBudgetUsd: 7,
+    maxToolCalls: 12,
+  });
+  assert.ok(svc.setConfig(id, { costBudgetUsd: 0, maxToolCalls: 0 }).ok);
+  assert.deepEqual(hub.sentOfType("rearm_governance").at(-1)!.config, {
+    costBudgetUsd: null,
+    maxToolCalls: null,
+  });
+  assert.equal(db.getSession(id)!.costBudgetUsd, null);
+  assert.equal(db.getSession(id)!.maxToolCalls, null);
+
+  db.raw().prepare("UPDATE sessions SET service_tier=? WHERE id=?").run("fast", id);
+  hub.deliver = false;
+  const failed = svc.setConfig(id, {
+    model: "opus",
+    maxToolCalls: 50,
+    maxChildSessions: 9,
+  });
+  assert.equal(failed.status, 409);
+  assert.equal(failed.error, "runner is offline");
+  const rolledBack = db.getSession(id)!;
+  assert.equal(rolledBack.model, "sonnet");
+  assert.equal(rolledBack.resolvedModel, "claude-sonnet-resolved");
+  assert.equal(rolledBack.contextWindow, 200_000);
+  assert.equal(rolledBack.serviceTier, "fast");
+  assert.equal(rolledBack.maxToolCalls, null);
+  assert.equal(rolledBack.maxChildSessions, 3);
+});
+
+test("a model-only edit never releases or round-trips an existing guardrail card", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { config: { model: "sonnet" } });
+  assert.ok(svc.setConfig(id, { costBudgetUsd: 1 }).ok);
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.onSessionEvent(id, { kind: "token_usage", costUsd: 2 });
+  const requestId = db.getSession(id)!.pendingApproval!.requestId;
+  hub.sentToRunner.length = 0;
+
+  assert.ok(svc.setConfig(id, { model: "opus" }).ok);
+  assert.equal(hub.sentOfType("rearm_governance").length, 0);
+  assert.equal(db.getSession(id)!.pendingApproval?.requestId, requestId);
+  assert.equal(db.getSession(id)!.status, "input_required");
+  assert.equal(db.getSession(id)!.model, "opus");
+});
+
+test("runner trip reports create one replay-safe card and Continue honors changed or cleared rules", () => {
+  const { db, hub, svc } = makeHarness();
+  const cleared = seedSession(svc, hub);
+  db.updateSessionStatus(cleared, "running", Date.now());
+  db.setPendingApproval(cleared, {
+    requestId: "permission-1",
+    title: "Allow Bash?",
+    options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+  });
+  const clearedTrip = {
+    type: "governance_tripped" as const,
+    sessionId: cleared,
+    tripId: "trip-cleared",
+    kind: "max_tool_calls" as const,
+    threshold: 100,
+    observed: 100,
+  };
+  svc.onGovernanceTripped(RUNNER_ID, clearedTrip);
+  svc.onGovernanceTripped(RUNNER_ID, clearedTrip);
+  let requests = pendingRequests(db.getSession(cleared)!.pendingApproval);
+  assert.equal(requests.length, 2, "duplicate/reconnect reports retain one runner card");
+  assert.equal(requests[0]!.requestId, "permission-1", "an unrelated request keeps the primary slot");
+  const runnerCard = requests[1]!;
+  assert.equal(runnerCard.requestId, "runner-max_tool_calls:trip-cleared");
+  assert.deepEqual(runnerCard.runnerGuardrail, {
+    tripId: "trip-cleared", kind: "max_tool_calls", threshold: 100, observed: 100,
+  });
+  assert.equal(svc.governanceAudit(cleared).filter((entry) =>
+    entry.requestId === runnerCard.requestId && entry.stage === "policy_decision").length, 1);
+
+  for (const refresh of [
+    () => svc.onSessionStatus(cleared, "idle"),
+    () => svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id: cleared, status: "idle", pendingApproval: null })]),
+    () => svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({ id: cleared, status: "idle", pendingApproval: null })),
+  ]) {
+    refresh();
+    assert.equal(db.getSession(cleared)!.status, "input_required");
+    assert.deepEqual(
+      pendingRequests(db.getSession(cleared)!.pendingApproval).map((request) => request.requestId),
+      ["permission-1", runnerCard.requestId],
+      "runner idle/status hydration preserves every request when a policy card is additional",
+    );
+  }
+
+  // A legacy/displacing path may have kept only the provider request. Reconnect replay must
+  // restore the unresolved trip without writing a second asked-audit entry.
+  db.setPendingApproval(cleared, {
+    requestId: "permission-2",
+    title: "Allow Read?",
+    options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+  });
+  svc.onGovernanceTripped(RUNNER_ID, clearedTrip);
+  requests = pendingRequests(db.getSession(cleared)!.pendingApproval);
+  assert.deepEqual(requests.map((request) => request.requestId), ["permission-2", runnerCard.requestId]);
+  assert.equal(svc.governanceAudit(cleared).filter((entry) =>
+    entry.requestId === runnerCard.requestId && entry.stage === "policy_decision").length, 1);
+
+  // A new live provider ask takes the primary card but retains the runner trip behind it. Once the
+  // provider ask resolves, Continue remains immediately reachable and no queued prompt is stranded.
+  svc.onSessionEvent(cleared, {
+    kind: "permission_request",
+    requestId: "permission-3",
+    title: "Allow Write?",
+    options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+  });
+  requests = pendingRequests(db.getSession(cleared)!.pendingApproval);
+  assert.deepEqual(requests.map((request) => request.requestId), ["permission-3", runnerCard.requestId]);
+  assert.ok(svc.approve(cleared, "permission-3", "allow").ok);
+  requests = pendingRequests(db.getSession(cleared)!.pendingApproval);
+  assert.deepEqual(requests.map((request) => request.requestId), [runnerCard.requestId]);
+
+  hub.sentToRunner.length = 0;
+  assert.ok(svc.approve(cleared, runnerCard.requestId, "continue").ok);
+  assert.deepEqual(hub.sentOfType("rearm_governance").at(-1)!.config, { maxToolCalls: null });
+  requests = pendingRequests(db.getSession(cleared)!.pendingApproval);
+  assert.deepEqual(requests, []);
+  svc.onGovernanceTripped(RUNNER_ID, clearedTrip);
+  assert.equal(db.getSession(cleared)!.pendingApproval, null, "a stale replay cannot resurrect a resolved trip");
+
+  const changed = seedSession(svc, hub);
+  db.updateSessionMaxToolCalls(changed, 200, Date.now(), 200);
+  db.updateSessionStatus(changed, "running", Date.now());
+  svc.onGovernanceTripped(RUNNER_ID, {
+    type: "governance_tripped",
+    sessionId: changed,
+    tripId: "trip-changed",
+    kind: "max_tool_calls",
+    threshold: 100,
+    observed: 100,
+  });
+  const changedCard = db.getSession(changed)!.pendingApproval!;
+  assert.match(changedCard.title, /100 distinct tool calls/);
+  assert.ok(svc.approve(changed, changedCard.requestId, "continue").ok);
+  assert.deepEqual(hub.sentOfType("rearm_governance").at(-1)!.config, { maxToolCalls: 200 });
+  assert.equal(db.getSession(changed)!.maxToolCalls, 200, "a newer raised rule is not advanced again");
+});
+
+test("a runner cost trip promotes the CP crossing instead of granting two budget windows", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { config: { costBudgetUsd: 1 } });
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.onSessionEvent(id, { kind: "token_usage", costUsd: 2 });
+  const cpRequestId = db.getSession(id)!.pendingApproval!.requestId;
+  const trip = {
+    type: "governance_tripped" as const,
+    sessionId: id,
+    tripId: "trip-cost-crossing",
+    kind: "cost_budget" as const,
+    threshold: 1,
+    observed: 2,
+  };
+
+  svc.onGovernanceTripped(RUNNER_ID, trip);
+  svc.onGovernanceTripped(RUNNER_ID, trip);
+  const requests = pendingRequests(db.getSession(id)!.pendingApproval);
+  assert.equal(requests.length, 1, "one crossing retains exactly one approval card");
+  assert.equal(requests[0]!.requestId, cpRequestId, "the existing card remains safe for an in-flight click");
+  assert.deepEqual(requests[0]!.runnerGuardrail, {
+    tripId: "trip-cost-crossing", kind: "cost_budget", threshold: 1, observed: 2,
+  });
+  assert.equal(svc.governanceAudit(id).filter((entry) =>
+    entry.requestId === "runner-cost_budget:trip-cost-crossing" &&
+    entry.stage === "policy_decision" && entry.outcome === "asked").length, 1);
+
+  hub.sentToRunner.length = 0;
+  assert.ok(svc.approve(id, cpRequestId, "continue").ok);
+  assert.equal(db.getSession(id)!.pendingApproval, null);
+  assert.equal(db.getSession(id)!.costBudgetUsd, 3, "the crossing advances by one original budget window");
+  assert.deepEqual(hub.sentOfType("rearm_governance").at(-1)!.config, { costBudgetUsd: 3 });
+  svc.onGovernanceTripped(RUNNER_ID, trip);
+  assert.equal(db.getSession(id)!.pendingApproval, null, "a promoted card records the deterministic trip resolution too");
 });
 
 test("crossing the tool-call limit parks the session at turn settle", () => {

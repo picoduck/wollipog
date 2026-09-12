@@ -6,6 +6,7 @@ import { Window } from "happy-dom";
 import type { SubscriptionUsageResponse, UsageAggregationResponse } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
+import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { bucketLabel, UsageView } from "./UsageView.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -22,6 +23,11 @@ for (const [name, value] of Object.entries({
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+
+// `UsageView` starts a 30s `setInterval` that only its effect teardown clears, so an assertion that
+// throws before this file's trailing `root.unmount()` would leave the timer rescheduling and the
+// process unable to exit — a plain failure reading as a hung suite (#690, #899).
+installDomTestCleanup(domWindow);
 
 const response = (
   series: UsageAggregationResponse["series"],

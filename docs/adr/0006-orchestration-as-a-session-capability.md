@@ -29,16 +29,20 @@ may manage descendant worktrees; ordinary credentials retain only their own work
 The CLI `session archive` and MCP `archive_session` reuse stop-before-archive and retain history.
 Agent credentials cannot unarchive sessions. Human device authority is unchanged.
 
-Agent-created children receive finite guardrails before their initial prompt can execute.
-An unbounded parent defaults each child to the parent Project's human-managed child allowances,
-or $5 and 100 tool calls when no Project override exists. Project settings and the human-only
+Agent-created children receive their effective guardrails before their initial prompt can execute.
+An explicit creation value takes precedence over the parent Project's human-managed child allowance,
+and a finite parent's remaining allowance is always the ceiling. When none of those sources supplies
+a cost or tool-call limit, that dimension remains unlimited; an agent caller may also pass zero to
+request no limit when the parent itself is unbounded. Project settings and the human-only
 `PATCH /api/projects/:id` surface accept `childSessionDefaults` with a positive finite
-`costBudgetUsd` and a positive integer `maxToolCalls`; null restores the installation fallback.
+`costBudgetUsd` and a positive integer `maxToolCalls`; null removes the Project defaults.
 The parent's Project supplies these defaults even when the child is filed elsewhere.
 A bounded parent divides its
 remaining, unreserved allowance across its remaining spawn slots; explicit child limits can narrow
-that allocation. The default lifetime spawn cap is four, configurable at session creation with
-`config.maxChildSessions` from zero through 64. Reservations survive deletion of child history.
+that allocation. The default concurrent live-child cap is four, configurable at creation or on a
+live session with `config.maxChildSessions` from zero through 64. Completed, failed, stopped, and
+archived children free live slots. Lifetime usage reservations survive terminal states and deletion,
+so a finite parent's already-allocated spend cannot be reused.
 These are admission allowances; existing runtime cost and tool-call enforcement remains responsible
 for stopping a child when it reaches its limit.
 

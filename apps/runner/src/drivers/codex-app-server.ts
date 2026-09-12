@@ -38,6 +38,7 @@ import type {
   StopReason,
 } from "./driver.js";
 import { classifyPoisonedProviderHistory, poisonedProviderHistoryMessage } from "./poisoned-provider-history.js";
+import { providerRejectionShape } from "./provider-rejection-shape.js";
 import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
 import { stagePromptImages, type StagedPromptImages } from "./prompt-images.js";
 import { codexOrchestratorMcpArgs } from "../orchestrator-preset.js";
@@ -264,7 +265,9 @@ export async function waitForWslProviderAttemptTeardown(
   timeoutMs = 10_000,
 ): Promise<void> {
   const relay = child.wslAgentControl?.relay;
-  let providerClosed = child.closeObserved === true;
+  // A ChildProcess has no pid when spawn failed asynchronously. No provider exists to reap in
+  // that case, and Node does not guarantee a later close event after the terminal error.
+  let providerClosed = child.closeObserved === true || child.pid === undefined;
   let relayClosed = !relay || relay.exitCode !== null || relay.signalCode !== null;
   child.wslAgentControl?.dispose();
   const closed = new Promise<void>((resolve, reject) => {
@@ -470,13 +473,12 @@ export class CodexAppServerDriver implements Driver {
         else this.emitProviderStderr(s);
       }
     });
-    // JSON-RPC stdout may still contain a response or final notification when
-    // `exit` fires. Tear the peer down only at the post-stdio `close` boundary.
-    child.on("close", (code) => {
-      peer.dispose("codex app-server exited");
-      // A rejected feature probe can be replaced before its delayed close event arrives.
+    const finishChild = (code: number | null, reason: string, spawnError?: Error) => {
+      peer.dispose(reason);
+      // A rejected feature probe can be replaced before its delayed error/close event arrives.
       // Only the current launch may tear down session state or report an exit.
       if (this.peer !== peer && this.child !== child) return;
+      if (spawnError) this.emitProviderStderr(`spawn error: ${spawnError.message}`);
       // The persistent server is gone: drop our handles so a later prompt() fails fast
       // instead of parking a turn/start request that never settles.
       if (this.peer === peer) this.peer = null;
@@ -490,6 +492,16 @@ export class CodexAppServerDriver implements Driver {
         if (this.initializing) this.initializationExit = { code };
         else this.cb.onExit(code);
       }
+    };
+    // POSIX spawn failures are asynchronous `error` events and may never emit `close`. Without an
+    // explicit listener, one missing executable or cwd becomes a process-fatal uncaughtException.
+    child.on("error", (error: Error) => {
+      finishChild(null, `codex app-server spawn error: ${error.message}`, error);
+    });
+    // JSON-RPC stdout may still contain a response or final notification when
+    // `exit` fires. Tear the peer down only at the post-stdio `close` boundary.
+    child.on("close", (code) => {
+      finishChild(code, "codex app-server exited");
     });
 
     this.registerHandlers(peer);
@@ -1410,6 +1422,11 @@ export class CodexAppServerDriver implements Driver {
       return;
     }
     this.cb.onEvent({ kind: "error", message });
+    // Not a recognized poisoned-history rejection. If it still names an indexed item in the
+    // request, record its shape so a second classifier case can one day be evidenced rather than
+    // guessed at (#876). This is observation only; the error's handling is unchanged.
+    const shape = providerRejectionShape(message);
+    if (shape) this.cb.onUnclassifiedProviderRejection?.(shape);
   }
 
   private signalAuthenticationFailure(): void {

@@ -11,10 +11,13 @@ MAX_MD = 65536
 MAX_LEASE_RECORDS = 16
 MAX_COMPACTION_SIBLINGS = 64
 MAX_COMPACTION_RECORDS = 4096
+MAX_CLEANUP_ALIAS_SCAN_ENTRIES = 4096
+MAX_CLEANUP_ALIASES = 128
 RENAME_EXCHANGE = 2
 DRIVER_DIRS = {"claude-code": ".claude/skills", "codex": ".codex/skills", "codex-app-server": ".codex/skills"}
 COMPACTION = re.compile(r"^\.mutable-home\.compact-([0-9a-f-]{36})-([0-9a-f]{64})-([0-9a-f]{32})$")
 CLEANUP_PROOF = re.compile(r"^\.mutable-home\.cleanup-([0-9a-f]{32})\.json$")
+PUBLICATION_TEMP = re.compile(r"^\.provider-home-lease-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.tmp$")
 diagnostics = []
 
 def fail(message):
@@ -154,11 +157,75 @@ def process_alive(pid):
     except PermissionError: return True
     except: return True
 
+def discover_cleanup_proof_aliases(root):
+    # An incomplete inventory cannot prove that a two-link proof has exactly one strict alias.
+    # Return no inventory on mutation or overflow so single-link cleanup can continue safely.
+    aliases = {}
+    scanned = 0
+    retained = 0
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                scanned += 1
+                if scanned > MAX_CLEANUP_ALIAS_SCAN_ENTRIES: return None
+                if not PUBLICATION_TEMP.fullmatch(entry.name): continue
+                retained += 1
+                if retained > MAX_CLEANUP_ALIASES: return None
+                info = entry.stat(follow_symlinks=False)
+                aliases.setdefault((info.st_dev, info.st_ino), []).append(entry.name)
+    except: return None
+    return aliases
+
+def normalize_cleanup_proof(root, proof_name, proof_identity, proof_raw, aliases_by_identity, retained_fd=None):
+    proof_fd = retained_fd if retained_fd is not None else os.open(
+        proof_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root)
+    try:
+        info = os.fstat(proof_fd)
+        named = os.stat(proof_name, dir_fd=root, follow_symlinks=False)
+        os.lseek(proof_fd, 0, os.SEEK_SET)
+        if ((info.st_dev, info.st_ino) != proof_identity or
+            (named.st_dev, named.st_ino) != proof_identity or
+            not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or
+            stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink not in (1, 2) or
+            info.st_size > 4096 or os.read(proof_fd, info.st_size + 1) != proof_raw):
+            fail("compaction cleanup proof changed during recovery")
+        if info.st_nlink == 1: return proof_identity
+        if aliases_by_identity is None: fail("unverified compaction cleanup proof alias")
+        aliases = aliases_by_identity.get(proof_identity, [])
+        if len(aliases) != 1: fail("unverified compaction cleanup proof alias")
+        alias_name = aliases[0]
+        if not PUBLICATION_TEMP.fullmatch(alias_name): fail("unverified compaction cleanup proof alias")
+        alias_fd = os.open(alias_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root)
+        try:
+            alias_opened = os.fstat(alias_fd)
+            named = os.stat(proof_name, dir_fd=root, follow_symlinks=False)
+            alias_named = os.stat(alias_name, dir_fd=root, follow_symlinks=False)
+            if ((alias_opened.st_dev, alias_opened.st_ino) != proof_identity or
+                (named.st_dev, named.st_ino) != proof_identity or named.st_nlink != 2 or
+                (alias_named.st_dev, alias_named.st_ino) != proof_identity or alias_named.st_nlink != 2 or
+                not stat.S_ISREG(alias_opened.st_mode) or alias_opened.st_uid != os.geteuid() or
+                stat.S_IMODE(alias_opened.st_mode) != 0o600 or alias_opened.st_nlink != 2 or
+                alias_opened.st_size != info.st_size or
+                os.read(alias_fd, alias_opened.st_size + 1) != proof_raw):
+                fail("unverified compaction cleanup proof alias")
+            os.unlink(alias_name, dir_fd=root)
+        finally: os.close(alias_fd)
+        os.fsync(root)
+        recovered = os.fstat(proof_fd)
+        named = os.stat(proof_name, dir_fd=root, follow_symlinks=False)
+        if ((recovered.st_dev, recovered.st_ino) != proof_identity or recovered.st_nlink != 1 or
+            (named.st_dev, named.st_ino) != proof_identity or named.st_nlink != 1):
+            fail("compaction cleanup proof changed during recovery")
+        return proof_identity
+    finally:
+        if retained_fd is None: os.close(proof_fd)
+
 def cleanup_compactions(root, lock):
     try:
         _, _, canonical = read_lease_chain(lock, True)
         names = [name for name in sorted(os.listdir(root)) if COMPACTION.fullmatch(name)]
     except: return
+    aliases_by_identity = discover_cleanup_proof_aliases(root)
     for name in names[:MAX_COMPACTION_SIBLINGS]:
         candidate = None
         try:
@@ -177,14 +244,16 @@ def cleanup_compactions(root, lock):
             proof_name = ".mutable-home.cleanup-%s.json" % proof_token
             proof = None
             proof_identity = None
+            proof_raw = None
             try:
                 proof_fd = os.open(proof_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root)
                 try:
                     proof_info = os.fstat(proof_fd)
                     if (not stat.S_ISREG(proof_info.st_mode) or proof_info.st_uid != os.geteuid() or
-                        stat.S_IMODE(proof_info.st_mode) != 0o600 or proof_info.st_nlink != 1 or
+                        stat.S_IMODE(proof_info.st_mode) != 0o600 or proof_info.st_nlink not in (1, 2) or
                         proof_info.st_size > 4096): fail("unverified compaction cleanup proof")
-                    proof = json.loads(os.read(proof_fd, proof_info.st_size + 1).decode("utf-8"))
+                    proof_raw = os.read(proof_fd, proof_info.st_size + 1)
+                    proof = json.loads(proof_raw.decode("utf-8"))
                     proof_identity = (proof_info.st_dev, proof_info.st_ino)
                 finally: os.close(proof_fd)
             except FileNotFoundError: pass
@@ -208,6 +277,8 @@ def cleanup_compactions(root, lock):
                         valid_name = (value.get("version") == 2 and value.get("previousLeaseId") is not None and
                             entry == "next-%s.json" % value["previousLeaseId"])
                     if not valid_name: fail("unverified compaction journal")
+                proof_identity = normalize_cleanup_proof(
+                    root, proof_name, proof_identity, proof_raw, aliases_by_identity)
             else:
                 if not entries: fail("unverified compaction journal")
                 canonical_record = canonical.get(lease_id)
@@ -252,8 +323,9 @@ def cleanup_compactions(root, lock):
             proof_fd = os.open(proof_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root)
             info = os.fstat(proof_fd)
             if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or
-                stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1 or info.st_size > 4096): continue
-            proof = json.loads(os.read(proof_fd, info.st_size + 1).decode("utf-8"))
+                stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink not in (1, 2) or info.st_size > 4096): continue
+            proof_raw = os.read(proof_fd, info.st_size + 1)
+            proof = json.loads(proof_raw.decode("utf-8"))
             match = CLEANUP_PROOF.fullmatch(proof_name)
             candidate_name = proof.get("name") if isinstance(proof, dict) else None
             candidate_match = COMPACTION.fullmatch(candidate_name) if isinstance(candidate_name, str) else None
@@ -263,10 +335,17 @@ def cleanup_compactions(root, lock):
                 not isinstance(proof.get("inode"), int)): continue
             try: os.stat(candidate_name, dir_fd=root, follow_symlinks=False)
             except FileNotFoundError:
+                proof_identity = normalize_cleanup_proof(
+                    root, proof_name, (info.st_dev, info.st_ino), proof_raw, aliases_by_identity, proof_fd)
+                verified = os.fstat(proof_fd)
                 named = os.stat(proof_name, dir_fd=root, follow_symlinks=False)
-                if (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino):
+                os.lseek(proof_fd, 0, os.SEEK_SET)
+                if ((verified.st_dev, verified.st_ino) != proof_identity or
+                    (named.st_dev, named.st_ino) != proof_identity or
+                    not stat.S_ISREG(verified.st_mode) or verified.st_uid != os.geteuid() or
+                    stat.S_IMODE(verified.st_mode) != 0o600 or verified.st_nlink != 1 or
+                    verified.st_size > 4096 or os.read(proof_fd, verified.st_size + 1) != proof_raw):
                     fail("compaction cleanup proof changed during cleanup")
-                os.close(proof_fd); proof_fd = None
                 os.unlink(proof_name, dir_fd=root)
                 os.fsync(root)
         except: pass

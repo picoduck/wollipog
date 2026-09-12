@@ -8,6 +8,8 @@ import type { TimelineItem } from "../timeline.js";
 import { RightPanel, useRightPanelState, type RightPanelState } from "./RightPanel.js";
 import type { GitStatus } from "./useGitStatus.js";
 import { StoreProvider } from "../store.js";
+import { api, ApiError, type ApiClient } from "../api.js";
+import { ApiProvider } from "../api-context.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime } from "../ui-transport.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
@@ -17,6 +19,21 @@ const connection: UiConnectionRuntime = {
     onclose: null, onerror: null, send() {}, close() {} }),
   close() {},
 };
+
+/**
+ * The panel asks for a durable child-session registry as soon as it mounts. Left unstubbed, that
+ * request goes to the real control-plane origin over the network and settles whenever the socket
+ * says so — routinely after the test that mounted the panel has ended and `after` has restored
+ * `window`, where React's own `resolveUpdatePriority` reads `window.event` and throws into a
+ * promise nothing is waiting on (#911).
+ *
+ * Rejecting is what this fixture has always exercised, unknowingly: no control plane it reaches
+ * knows `session-1`, so the roster these tests assert on is the one projected from `items`.
+ */
+const client = {
+  ...api,
+  childSessions: () => Promise.reject(new ApiError("This fixture has no durable child-session registry.", 404)),
+} as ApiClient;
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -114,7 +131,7 @@ function PanelHarness({
         setSession((current) => ({ ...current, adopted: true, status: "running" }));
         setRunnerOnline(true);
       }}>Adopted Live</button>
-      <StoreProvider connection={connection}><RightPanel
+      <ApiProvider client={client}><StoreProvider connection={connection}><RightPanel
         state={state}
         session={session}
         runnerOnline={runnerOnline}
@@ -125,7 +142,7 @@ function PanelHarness({
         onClearSourceLocation={() => {}}
         onOpenTerminal={() => {}}
         onInsertSideChatDraft={() => {}}
-      /></StoreProvider>
+      /></StoreProvider></ApiProvider>
     </>
   );
 }

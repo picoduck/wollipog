@@ -44,6 +44,15 @@ const MAX_STORED_ACTION_BYTES = 64 * 1024;
 const MISFIRE_GRACE_MS = 60_000;
 const MAX_MISSED_OCCURRENCES = 10_000;
 const COMMAND_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
+/** How long an execution may hold an automation while nothing of its plan has reached a runner.
+ * The retention horizon above is a storage bound, not a scheduling one: waiting it out parks a
+ * `wait` automation for a month over a single unreachable runner. The automation's own cadence is
+ * the honest limit — once the next occurrence is due, this one is a loss. The floor stays well
+ * clear of the bounded provider-retry chain, whose last replacement is due four minutes after the
+ * refusal that produced it, and the ceiling keeps a daily or weekly automation from parking a dead
+ * occurrence for its whole period. */
+const MIN_DELIVERY_BOUND_MS = 30 * 60_000;
+const MAX_DELIVERY_BOUND_MS = 12 * 60 * 60_000;
 
 type Logger = { info: (message: string) => void; warn: (message: string) => void };
 type AutomationNotifier = (
@@ -334,11 +343,13 @@ export class AutomationsService {
       hub,
       log,
       (executionId, now) => this.reconcileExecution(executionId, now),
+      (row, now) => this.commandStillDeliverable(row, now),
     );
   }
 
   recover(now = Date.now()): number {
     const failed = this.db.failInterruptedAutomationExecutions(now);
+    this.expireUndeliverableExecutions(now);
     this.resumeReceiptedExecutions(now);
     this.processPendingTriggerInvocations(now);
     this.commandOutbox.recover(now);
@@ -485,6 +496,7 @@ export class AutomationsService {
 
   tick(now = Date.now()): number {
     this.db.compactAutomationTriggerInvocations(now);
+    this.expireUndeliverableExecutions(now);
     this.resumeReceiptedExecutions(now);
     this.processPendingTriggerInvocations(now);
     this.commandOutbox.flush(now);
@@ -557,6 +569,79 @@ export class AutomationsService {
     const commands = this.db.listAutomationCommands(executionId);
     return commands.some((command) => command.supersededBy !== undefined) &&
       commands.some((command) => !["completed", "rejected", "uncertain"].includes(command.state));
+  }
+
+  /** True once nothing of the execution's plan has reached its runner within the delivery bound.
+   * A command the runner acknowledged means the work is under way and only its own receipts may
+   * end it; the bound is measured from the newest command so a replacement issued for a
+   * transiently refused launch gets the full window rather than the remains of its predecessor's. */
+  private undeliverable(
+    execution: AutomationExecution,
+    schedule: AutomationSchedule,
+    commands: AutomationCommandRecord[],
+    now: number,
+  ): boolean {
+    if (commands.some((command) => ["accepted", "started", "completed"].includes(command.state))) return false;
+    if (!commands.some((command) => ["staged", "pending", "sent"].includes(command.state))) return false;
+    // No bound is shorter than the floor, so a plan younger than it is deliverable whatever the
+    // cadence — and answering from the age alone keeps `nextCronFire` off the five-second sweep,
+    // where a per-minute cron costs ~7ms per execution (~15ms outside UTC).
+    const age = now - Math.max(...commands.map((command) => command.createdAt));
+    if (age < MIN_DELIVERY_BOUND_MS) return false;
+    const cadence = nextCronFire(schedule.cron, schedule.timezone, execution.scheduledFor) - execution.scheduledFor;
+    return age >= Math.min(MAX_DELIVERY_BOUND_MS, Math.max(MIN_DELIVERY_BOUND_MS, cadence));
+  }
+
+  /** The bound as the outbox sees it, for one command about to be sent. A command past it is left
+   * alone rather than expired here: mutating inside the flush loop would reorder the very decision
+   * this exists to sequence, and the sweep settles it on the next pass. */
+  private commandStillDeliverable(row: AutomationCommandRecord, now: number): boolean {
+    // Settle the ordinary case without touching the database or the cron parser. The bound is
+    // measured from the execution's newest command, which is at least as new as this row, so a row
+    // younger than the floor cannot be past any bound. Every healthy flush takes this exit, which
+    // matters: `nextCronFire` costs ~7ms for `* * * * *` (~15ms outside UTC), and a hundred of
+    // those inside a synchronous flush would stall the control plane for over a second.
+    if (now - row.createdAt < MIN_DELIVERY_BOUND_MS) return true;
+    const execution = this.db.getAutomationExecution(row.executionId);
+    if (!execution || execution.deliveryMode !== "receipted_v53") return true;
+    const schedule = this.executionSchedule(execution);
+    if (!schedule) return true;
+    try {
+      return !this.undeliverable(execution, schedule, this.db.listAutomationCommands(row.executionId), now);
+    } catch {
+      // An unparseable stored cron must not stop ordinary delivery; the sweep logs it.
+      return true;
+    }
+  }
+
+  /**
+   * Write off executions whose plan never reached a runner, before the outbox can transmit any of
+   * it. Ordering is the whole point: the outbox marks a command `sent` and writes it to the runner
+   * in the same step, so expiring afterwards would hand a launch to the runner and simultaneously
+   * release the `wait` policy for the next occurrence — two live sessions for an automation whose
+   * policy exists to prevent exactly that. Deciding here, before any flush, makes the two mutually
+   * exclusive: an expired command is terminal and no longer due, and a command the flush sends is
+   * one this sweep has already judged still deliverable.
+   */
+  private expireUndeliverableExecutions(now: number): void {
+    for (const candidate of this.db.activeAutomationExecutions()) {
+      if (candidate.deliveryMode !== "receipted_v53") continue;
+      const commands = this.db.listAutomationCommands(candidate.executionId);
+      if (!commands.length) continue;
+      const schedule = this.executionSchedule(candidate);
+      if (!schedule) continue;
+      let overdue: boolean;
+      try {
+        overdue = this.undeliverable(candidate, schedule, commands, now);
+      } catch (error) {
+        // A stored cron this build can no longer parse must not take the scheduler down with it.
+        this.log.warn(`automation '${candidate.automationId}' delivery bound skipped: ${(error as Error).message}`);
+        continue;
+      }
+      if (!overdue) continue;
+      this.db.expireUndeliveredAutomationCommands(candidate.executionId, now);
+      this.reconcileExecution(candidate.executionId, now);
+    }
   }
 
   private reconcileExecution(executionId: string, now: number): void {

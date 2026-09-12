@@ -190,6 +190,19 @@ function selectProject(container: HTMLDivElement, value: string): void {
   select.dispatchEvent(new domWindow.Event("change", { bubbles: true }) as never);
 }
 
+/**
+ * Whether a ChoiceCard option is refused, by the attribute the primitive actually uses.
+ *
+ * `ChoiceCards` marks an unavailable option `aria-disabled` rather than setting the `disabled`
+ * property, deliberately: the DOM property removes the control from the tab order, so a keyboard
+ * user could not reach the option to hear why it is unavailable. The Harness group moved onto the
+ * primitive, so its assertions moved onto the same contract.
+ */
+function cardRefused(card: Element | undefined): boolean {
+  assert.ok(card, "the card is rendered even when it cannot be chosen");
+  return card.getAttribute("aria-disabled") === "true";
+}
+
 function createButton(container: HTMLDivElement): HTMLButtonElement {
   const button = [...container.querySelectorAll("button")].find((candidate) =>
     candidate.textContent?.trim() === "Create Session");
@@ -197,13 +210,25 @@ function createButton(container: HTMLDivElement): HTMLButtonElement {
   return button;
 }
 
+/**
+ * No trigger to open any more, which is the point of #832: both presets are on screen, so choosing
+ * one is a single click and there is no popup whose height could disagree with its touch targets.
+ */
 async function choosePermissionPreset(container: HTMLDivElement, label: string) {
-  const trigger = container.querySelector<HTMLButtonElement>('button[aria-label^="Permission Preset:"]')!;
-  await act(async () => { trigger.click(); });
-  const option = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
-    .find((button) => button.textContent?.trim() === label)!;
-  assert.ok(option);
+  const option = permissionPresetCard(container, label);
+  assert.ok(option, `Permission Preset offers ${label}`);
   await act(async () => { option.click(); });
+}
+
+function permissionPresetGroup(container: HTMLDivElement): Element {
+  const group = container.querySelector('[role="radiogroup"][aria-label="Permission Preset"]');
+  assert.ok(group, "Permission Preset renders an always-visible choice group");
+  return group;
+}
+
+function permissionPresetCard(container: HTMLDivElement, title: string): HTMLButtonElement | undefined {
+  return [...permissionPresetGroup(container).querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+    .find((button) => button.querySelector(".ui-choice-card-title")?.textContent?.trim() === title);
 }
 
 function submitWithEnter(container: HTMLDivElement): void {
@@ -321,7 +346,7 @@ test("Native TUI orchestrator creation is gated by its own runner capability", a
       const tui = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
         .find((button) => button.textContent?.includes("Native TUI"))!;
       assert.ok(tui);
-      assert.equal(tui.disabled, protocolVersion < 112);
+      assert.equal(cardRefused(tui), protocolVersion < 112);
       if (protocolVersion === 112) {
         await act(async () => { tui.click(); });
         await act(async () => { createButton(fixture.container).click(); });
@@ -355,7 +380,7 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
     const tui = [...ordinary.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
       .find((button) => button.textContent?.includes("Native TUI"))!;
     assert.ok(tui);
-    assert.equal(tui.disabled, false, "ordinary WSL Native TUI remains available");
+    assert.equal(cardRefused(tui), false, "ordinary WSL Native TUI remains available");
     await act(async () => { tui.click(); });
     assert.equal(createButton(ordinary.container).disabled, false,
       "ordinary WSL Native TUI remains launchable rather than only selectable");
@@ -374,7 +399,8 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
   }] }));
   try {
     await act(async () => { selectProject(orchestrator.container, project.id); });
-    assert.match(orchestrator.container.textContent ?? "", /saved Orchestrator preset requires a supported native host/u);
+    assert.match(orchestrator.container.textContent ?? "",
+      /verified Direct WSL bridge and a bubblewrap-isolated runner/u);
     assert.equal(createButton(orchestrator.container).disabled, true);
     await act(async () => { submitWithEnter(orchestrator.container); });
     assert.equal(orchestrator.requests.length, 0);
@@ -434,7 +460,7 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
     assert.equal(createButton(bridged.container).disabled, false, "verified bridge enables Direct creation");
     const tui = [...bridged.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
       .find((button) => button.textContent?.includes("Native TUI"))!;
-    assert.equal(tui.disabled, true, "WSL Orchestrator Native TUI stays fail-closed");
+    assert.equal(cardRefused(tui), true, "WSL Orchestrator Native TUI stays fail-closed");
     await choosePermissionPreset(bridged.container, "Orchestrator");
     await act(async () => { createButton(bridged.container).click(); });
     assert.equal(bridged.requests[0]?.launchSurface, undefined, "the omitted field is the Direct launch default");
@@ -458,10 +484,11 @@ test("saved Orchestrator default is visible and gates Native TUI without requiri
     }] }));
     try {
       await act(async () => { selectProject(fixture.container, project.id); });
-      assert.ok(fixture.container.querySelector('button[aria-label="Permission Preset: Saved Default — Orchestrator"]'));
+      assert.ok(permissionPresetCard(fixture.container, "Saved Default — Orchestrator"),
+        "the saved default names itself on an always-visible card rather than inside a closed menu");
       const tui = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
         .find((button) => button.textContent?.includes("Native TUI"))!;
-      assert.equal(tui.disabled, protocolVersion < 112);
+      assert.equal(cardRefused(tui), protocolVersion < 112);
       if (protocolVersion === 112) {
         await act(async () => { tui.click(); });
         assert.match(fixture.container.textContent!, /spending and tool calls are not included/);
@@ -524,7 +551,7 @@ test("saved Orchestrator cannot launch on an incompatible runner even through Di
   }] }));
   try {
     await act(async () => { selectProject(fixture.container, project.id); });
-    assert.match(fixture.container.textContent!, /saved Orchestrator preset requires/);
+    assert.match(fixture.container.textContent!, /runner is too old to orchestrate child sessions/);
     assert.equal(createButton(fixture.container).disabled, true);
     await act(async () => { submitWithEnter(fixture.container); });
     assert.equal(fixture.requests.length, 0);
@@ -680,7 +707,10 @@ test("Native TUI is capability-gated, sends one-shot intent, and opens Terminal 
     const native = [...harness.querySelectorAll('button[role="radio"]')]
       .find((button) => button.textContent?.includes("Native TUI")) as HTMLButtonElement | undefined;
     assert.ok(native);
-    assert.equal(native.disabled, false);
+    // `cardRefused`, not `.disabled`: ChoiceCards never sets the DOM property, so asserting it is
+    // `false` would pass even for a refused card. The click below only means something if the
+    // option is genuinely selectable.
+    assert.equal(cardRefused(native), false);
 
     await act(async () => { native.click(); });
     assert.match(
@@ -749,8 +779,11 @@ test("Native TUI is disabled when the control plane does not advertise atomic la
     const native = [...fixture.container.querySelectorAll('button[role="radio"]')]
       .find((button) => button.textContent?.includes("Native TUI")) as HTMLButtonElement | undefined;
     assert.ok(native);
-    assert.equal(native.disabled, true);
-    assert.match(fixture.container.textContent ?? "", /requires a newer control plane/);
+    assert.equal(cardRefused(native), true);
+    // The reason now lives ON the refused card rather than in a sibling paragraph, so assert it
+    // there — a sentence elsewhere in the dialog would satisfy the old container-wide match while
+    // the control itself explained nothing.
+    assert.match(native.textContent ?? "", /requires a newer control plane/);
   } finally {
     await unmountFixture(fixture);
   }
@@ -772,8 +805,9 @@ test("Native TUI initial launch fails closed against a v66 runner", async () => 
     const native = [...fixture.container.querySelectorAll('button[role="radio"]')]
       .find((button) => button.textContent?.includes("Native TUI")) as HTMLButtonElement | undefined;
     assert.ok(native);
-    assert.equal(native.disabled, true);
-    assert.match(fixture.container.textContent ?? "", /Initial Native TUI launch requires protocol v67/);
+    assert.equal(cardRefused(native), true);
+    // The start-fence hint is the refused card's own reason now, not a sibling paragraph.
+    assert.match(native.textContent ?? "", /Initial Native TUI launch requires protocol v67/);
   } finally {
     await unmountFixture(fixture);
   }
@@ -868,6 +902,122 @@ test("failed Native TUI compensation exposes the retained session and disables r
     assert.equal(createButton(fixture.container).disabled, true);
     assert.ok([...fixture.container.querySelectorAll("button")]
       .some((button) => button.textContent === "Open Retained Session"));
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+/**
+ * #832: a two-option control must not hide part of either choice.
+ *
+ * The defect was a height disagreement — the Select asked for 76px over 98px of coarse-pointer
+ * touch targets — but the fix is structural rather than arithmetic. Permission Preset has two
+ * options that each need a sentence, which is what a Choice Card is for, so there is no popup left
+ * to mis-measure. The arithmetic half is guarded separately in ChoiceControls.test.ts, for the
+ * Selects that legitimately remain.
+ */
+test("both permission presets are on screen without opening anything", async () => {
+  const orchestratorRunner: RunnerView = {
+    ...runner,
+    protocolVersion: 124,
+    agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    } })),
+  };
+  const fixture = await mountFixture({ runners: [orchestratorRunner] });
+  try {
+    await act(async () => { selectProject(fixture.container, project.id); });
+
+    const cards = [...permissionPresetGroup(fixture.container).querySelectorAll('[role="radio"]')];
+    assert.equal(cards.length, 2, "both presets are rendered");
+    // No trigger, so nothing can be behind one. This is the assertion that would have failed
+    // before the migration, when the group was a closed listbox with a single visible button.
+    assert.equal(
+      fixture.container.querySelector('button[aria-label^="Permission Preset:"]'), null,
+      "the preset no longer hides behind a popover trigger",
+    );
+    assert.equal(fixture.container.querySelector(".ui-select-list"), null, "and opens no list");
+
+    assert.ok(permissionPresetCard(fixture.container, "Orchestrator"));
+    assert.equal(permissionPresetCard(fixture.container, "Orchestrator")?.getAttribute("aria-disabled"), null,
+      "a supported Orchestrator is selectable");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an unsupported Orchestrator is disabled and says why, rather than vanishing", async () => {
+  // It used to be dropped from the option list entirely, leaving a control with one choice and no
+  // way to learn whether the runner, the agent, the context or the target was the reason — the one
+  // thing §11.3 forbids. The sentence has to be the SPECIFIC cause, not the union of all four.
+  const fixture = await mountFixture({ runners: [{ ...runner, protocolVersion: 67 }] });
+  try {
+    await act(async () => { selectProject(fixture.container, project.id); });
+
+    const orchestrator = permissionPresetCard(fixture.container, "Orchestrator");
+    assert.ok(orchestrator, "Orchestrator is rendered even where it cannot be chosen");
+    assert.equal(orchestrator.getAttribute("aria-disabled"), "true");
+    assert.match(orchestrator.textContent ?? "", /runner is too old to orchestrate child sessions/);
+
+    // Disabled, not merely styled: clicking must not select it, and the reason must be readable
+    // rather than living in a `title` a touch user cannot reach.
+    await act(async () => { orchestrator.click(); });
+    assert.equal(orchestrator.getAttribute("aria-checked"), "false");
+    assert.ok(orchestrator.querySelector(".ui-choice-card-reason"));
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an unavailable Project Location is refused with the availability as its reason", async () => {
+  // The bespoke `.loc-pick` button used the DOM `disabled` property, which took the option out of
+  // the tab order — so the availability badge explaining WHY it could not be chosen was reachable
+  // by mouse and by nothing else. On ChoiceCards it is `aria-disabled`, and the reason is a
+  // sentence on the card rather than a badge the user has to interpret.
+  const offlineRunner: RunnerView = { ...runner, status: "offline" };
+  const fixture = await mountFixture({
+    runners: [offlineRunner],
+    projects: [{
+      ...project,
+      locations: [{ ...project.locations[0]!, availability: "runner_offline" }],
+    }],
+  });
+  try {
+    await act(async () => { selectProject(fixture.container, project.id); });
+    const group = fixture.container.querySelector('[role="radiogroup"][aria-label="Project Location"]');
+    assert.ok(group, "Project Location renders as a choice group");
+
+    const card = [...group.querySelectorAll<HTMLButtonElement>('[role="radio"]')][0];
+    assert.ok(card);
+    assert.equal(card.getAttribute("aria-disabled"), "true");
+    assert.match(card.textContent ?? "", /Runner Offline/);
+    assert.match(card.textContent ?? "", /cannot host a session right now/);
+
+    // Refused, not merely styled: clicking must not select it or enable creation.
+    await act(async () => { card.click(); });
+    assert.equal(card.getAttribute("aria-checked"), "false");
+    assert.equal(createButton(fixture.container).disabled, true);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("the Location groups and Harness share one control family", async () => {
+  // The point of #832: the same question asked the same way. Before this, the dialog answered
+  // "pick one of N" with two bespoke `.loc-pick` grids, a `.workflow-preset` grid, a custom
+  // listbox and a segmented control, inside one 520px form.
+  const fixture = await mountFixture();
+  try {
+    await act(async () => { selectProject(fixture.container, project.id); });
+    for (const label of ["Project Location", "Permission Preset", "Harness"]) {
+      const group = fixture.container.querySelector(`[role="radiogroup"][aria-label="${label}"]`);
+      assert.ok(group, `${label} is a labelled radiogroup`);
+      assert.ok(group.querySelector(".ui-choice-card"), `${label} uses the shared Choice Card`);
+    }
+    // And nothing bespoke is left from the families this PR retired.
+    assert.equal(fixture.container.querySelector(".loc-pick"), null);
+    assert.equal(fixture.container.querySelector(".workflow-preset"), null);
   } finally {
     await unmountFixture(fixture);
   }

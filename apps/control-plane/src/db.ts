@@ -123,6 +123,9 @@ import {
   type PodReconciliation,
   type PodView,
   type RunnerMetadata,
+  type RunnerCapacityBlocker,
+  type RunnerCapacityConfiguration,
+  type RunnerCapacityState,
   type RunnerCredentialView,
   type RunnerStatus,
   type RunnerView,
@@ -155,6 +158,7 @@ import {
   type SessionTitleSource,
   type SessionView,
   type SessionWorktreeView,
+  type UsageCostSource,
   type QueuedPromptView,
   type SteerDisposition,
   type SteerResultReason,
@@ -343,8 +347,11 @@ CREATE TABLE IF NOT EXISTS runners (
 -- User-owned Machine metadata must survive runner re-registration and also exist before an SSH
 -- box's runner first connects. Keep it outside the runner-authored registration row.
 CREATE TABLE IF NOT EXISTS machine_overrides (
-  runner_id    TEXT PRIMARY KEY,
-  display_name TEXT
+  runner_id           TEXT PRIMARY KEY,
+  display_name        TEXT,
+  runner_capacity     INTEGER CHECK (runner_capacity BETWEEN 1 AND 256),
+  capacity_revision   INTEGER NOT NULL DEFAULT 0 CHECK (capacity_revision >= 0),
+  capacity_updated_at INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -456,6 +463,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   background_work_state TEXT,
   background_work_tracking TEXT,
   history_quarantine TEXT,
+  capacity_wait TEXT,
   status         TEXT NOT NULL DEFAULT 'queued',
   board_column   TEXT,
   run_id         TEXT,
@@ -2031,6 +2039,7 @@ interface RunnerRow {
   editors: string | null;
   runtime: string | null;
   container_targets: string | null;
+  capacity_status: string | null;
 }
 
 interface RunnerCredentialRow {
@@ -2066,6 +2075,7 @@ interface SessionRow {
   background_work_state: string | null;
   background_work_tracking: string | null;
   history_quarantine: string | null;
+  capacity_wait: string | null;
   status: string;
   board_column: string | null;
   run_id: string | null;
@@ -3995,6 +4005,8 @@ export class ControlPlaneDb {
       "runtime TEXT",
       // Protocol v61 runner-checked, digest-pinned container target definitions.
       "container_targets TEXT",
+      // v132 live lease accounting and precise queued-demand bottlenecks.
+      "capacity_status TEXT",
     ]) {
       try {
         db.exec(`ALTER TABLE runners ADD COLUMN ${col}`);
@@ -4004,6 +4016,22 @@ export class ControlPlaneDb {
     }
     try {
       db.exec("ALTER TABLE workspaces ADD COLUMN additional_directory_grants TEXT");
+    } catch {
+      /* column already present */
+    }
+    for (const column of [
+      "runner_capacity INTEGER CHECK (runner_capacity BETWEEN 1 AND 256)",
+      "capacity_revision INTEGER NOT NULL DEFAULT 0 CHECK (capacity_revision >= 0)",
+      "capacity_updated_at INTEGER",
+    ]) {
+      try {
+        db.exec(`ALTER TABLE machine_overrides ADD COLUMN ${column}`);
+      } catch {
+        /* column already present */
+      }
+    }
+    try {
+      db.exec("ALTER TABLE sessions ADD COLUMN capacity_wait TEXT");
     } catch {
       /* column already present */
     }
@@ -4409,7 +4437,7 @@ export class ControlPlaneDb {
         this.stmt(
             `UPDATE runners SET hostname=?, os=?, version=?, protocol_version=?, status='online',
                 connected_at=?, last_seen=?, updated_at=?, agents_refreshed_at=NULL,
-                editors=COALESCE(?, editors), runtime=?, container_targets=? WHERE runner_id=?`,
+                editors=COALESCE(?, editors), runtime=?, container_targets=?, capacity_status=NULL WHERE runner_id=?`,
           )
           .run(meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, editors, runtime, containerTargets, meta.runnerId);
       } else {
@@ -4658,13 +4686,69 @@ export class ControlPlaneDb {
   setMachineDisplayName(runnerId: string, displayName: string): void {
     const trimmed = displayName.trim();
     if (!trimmed) {
-      this.stmt("DELETE FROM machine_overrides WHERE runner_id=?").run(runnerId);
+      this.stmt("UPDATE machine_overrides SET display_name=NULL WHERE runner_id=?").run(runnerId);
+      this.stmt("DELETE FROM machine_overrides WHERE runner_id=? AND runner_capacity IS NULL").run(runnerId);
       return;
     }
     this.stmt(
       `INSERT INTO machine_overrides (runner_id, display_name) VALUES (?, ?)
        ON CONFLICT(runner_id) DO UPDATE SET display_name=excluded.display_name`,
     ).run(runnerId, trimmed);
+  }
+
+  machineRunnerCapacityConfiguration(runnerId: string): RunnerCapacityConfiguration | null {
+    const row = this.stmt(
+      "SELECT runner_capacity, capacity_revision FROM machine_overrides WHERE runner_id=?",
+    ).get(runnerId) as { runner_capacity: number | null; capacity_revision: number } | undefined;
+    return row?.runner_capacity == null ? null : {
+      configuredUnits: row.runner_capacity,
+      revision: row.capacity_revision,
+    };
+  }
+
+  setMachineRunnerCapacity(
+    runnerId: string,
+    configuredUnits: number,
+    expectedRevision: number,
+    now: number,
+  ): { ok: true; configuration: RunnerCapacityConfiguration } |
+     { ok: false; configuration: RunnerCapacityConfiguration | null } {
+    return this.atomic(() => {
+      const current = this.machineRunnerCapacityConfiguration(runnerId);
+      if ((current?.revision ?? 0) !== expectedRevision) return { ok: false, configuration: current };
+      const revision = expectedRevision + 1;
+      this.stmt(
+        `INSERT INTO machine_overrides
+           (runner_id, runner_capacity, capacity_revision, capacity_updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(runner_id) DO UPDATE SET
+           runner_capacity=excluded.runner_capacity,
+           capacity_revision=excluded.capacity_revision,
+           capacity_updated_at=excluded.capacity_updated_at`,
+      ).run(runnerId, configuredUnits, revision, now);
+      return { ok: true, configuration: { configuredUnits, revision } };
+    });
+  }
+
+  updateRunnerCapacityStatus(runnerId: string, status: RunnerCapacityState, now: number): boolean {
+    const runner = this.getRunner(runnerId);
+    if (!runner || !Number.isInteger(status.configuredUnits) || status.configuredUnits < 1 ||
+        status.configuredUnits > 256 || !Number.isSafeInteger(status.revision) || status.revision < 0 ||
+        !Number.isSafeInteger(status.usedUnits) || status.usedUnits! < 0 ||
+        status.availableUnits !== Math.max(0, status.configuredUnits - status.usedUnits!) ||
+        !Number.isSafeInteger(status.queuedSessions) || status.queuedSessions! < 0 ||
+        !Array.isArray(status.blockers) || status.blockers.length > 256 ||
+        status.blockers.some((blocker) => !validRunnerCapacityBlocker(blocker, true)) ||
+        status.blockers.reduce((sum, blocker) => sum + blocker.waitingSessions!, 0) !== status.queuedSessions) return false;
+    const configured = this.machineRunnerCapacityConfiguration(runnerId);
+    const expectedUnits = configured?.configuredUnits ?? runner.runtime?.maxConcurrentSessions;
+    const expectedRevision = configured?.revision ?? 0;
+    const authority = configured ? "control_plane" : "runner_local";
+    if (status.configuredUnits !== expectedUnits || status.revision !== expectedRevision ||
+        status.authority !== authority) return false;
+    this.stmt("UPDATE runners SET capacity_status=?, updated_at=? WHERE runner_id=?")
+      .run(JSON.stringify({ ...status, reportedAt: now }), now, runnerId);
+    return true;
   }
 
   private machineDisplayName(runnerId: string): string | undefined {
@@ -5375,15 +5459,23 @@ export class ControlPlaneDb {
     if (projectId !== null && !this.getProject(projectId)) throw new Error("project not found");
     const projectScope = projectId === null ? null : this.projectScope(projectId);
     if (projectId !== null && !projectScope) throw new Error("project ownership is unavailable");
+    const adHocWorkspacePath = session.workspaceId === null
+      ? this.getAdHocWorkspacePath(sessionId)
+      : null;
+    const assignmentWorkspaceId = session.workspaceId ?? (
+      adHocWorkspacePath
+        ? this.resolveImportedSessionLocation(session.runnerId, adHocWorkspacePath).workspaceId
+        : null
+    );
     if (projectLocationId !== null) {
       const location = this.projectLocation(projectLocationId);
       if (!location || location.projectId !== projectId) throw new Error("project location does not belong to project");
-      if (location.runnerId !== session.runnerId || location.workspaceId !== session.workspaceId) {
+      if (location.runnerId !== session.runnerId || location.workspaceId !== assignmentWorkspaceId) {
         throw new Error("project location does not match session runner/workspace");
       }
     }
-    const executionScope = session.workspaceId
-      ? this.workspaceScope(session.runnerId, session.workspaceId) ?? this.runnerScope(session.runnerId)
+    const executionScope = assignmentWorkspaceId
+      ? this.workspaceScope(session.runnerId, assignmentWorkspaceId) ?? this.runnerScope(session.runnerId)
       : this.runnerScope(session.runnerId);
     if (projectScope &&
         (!executionScope || !this.scopeAudienceContainedWithMembership(projectScope, executionScope))) {
@@ -5550,7 +5642,7 @@ export class ControlPlaneDb {
 
   getRunner(runnerId: string): RunnerView | null {
     const row = this.stmt(
-        "SELECT runner_id, hostname, os, version, status, connected_at, last_seen, protocol_version, agents_refreshed_at, editors, runtime, container_targets FROM runners WHERE runner_id=?",
+        "SELECT runner_id, hostname, os, version, status, connected_at, last_seen, protocol_version, agents_refreshed_at, editors, runtime, container_targets, capacity_status FROM runners WHERE runner_id=?",
       )
       .get(runnerId) as unknown as RunnerRow | undefined;
     return row ? this.runnerView(row) : null;
@@ -5558,7 +5650,7 @@ export class ControlPlaneDb {
 
   listRunners(): RunnerView[] {
     const rows = this.stmt(
-        "SELECT runner_id, hostname, os, version, status, connected_at, last_seen, protocol_version, agents_refreshed_at, editors, runtime, container_targets FROM runners ORDER BY runner_id",
+        "SELECT runner_id, hostname, os, version, status, connected_at, last_seen, protocol_version, agents_refreshed_at, editors, runtime, container_targets, capacity_status FROM runners ORDER BY runner_id",
       )
       .all() as unknown as RunnerRow[];
     return rows.map((r) => this.runnerView(r));
@@ -7351,6 +7443,16 @@ export class ControlPlaneDb {
     return scope ? this.principalCanAccessScope(principal, scope) : false;
   }
 
+  canManageRunner(principal: AuthPrincipal, runnerId: string): boolean {
+    if (principal.kind !== "human") return false;
+    const scope = this.runnerScope(runnerId);
+    if (!scope || principal.organizationId !== scope.organizationId) return false;
+    if (principal.role === "owner" || principal.role === "admin") return true;
+    if (scope.owner.kind === "organization") return false;
+    if (scope.owner.kind === "user") return scope.owner.userId === principal.userId;
+    return this.principalCanAccessScope(principal, scope);
+  }
+
   canAccessWorkspace(principal: AuthPrincipal, runnerId: string, workspaceId: string): boolean {
     const scope = this.workspaceScope(runnerId, workspaceId);
     return scope ? this.principalCanAccessScope(principal, scope) : false;
@@ -7377,6 +7479,7 @@ export class ControlPlaneDb {
       .filter((runner) => this.canAccessRunner(principal, runner.runnerId))
       .map((runner) => ({
         ...runner,
+        canManage: this.canManageRunner(principal, runner.runnerId),
         ...(() => {
           const scope = this.runnerScope(runner.runnerId);
           return scope ? { scope } : {};
@@ -8684,6 +8787,9 @@ export class ControlPlaneDb {
       acpTransport: a.acp_transport === "stdio" ? "stdio" : undefined,
     }));
 
+    const runtime = runnerSupportsProtocol(row.protocol_version, "runtimeDiagnostics")
+      ? (parseJson<RunnerView["runtime"]>(row.runtime) ?? undefined)
+      : undefined;
     const view: RunnerView = {
       runnerId: row.runner_id,
       displayName: this.machineDisplayName(row.runner_id),
@@ -8704,10 +8810,25 @@ export class ControlPlaneDb {
       editors: runnerSupportsProtocol(row.protocol_version, "hostActions")
         ? (parseJson<EditorInfo[]>(row.editors) ?? undefined)
         : undefined,
-      runtime: runnerSupportsProtocol(row.protocol_version, "runtimeDiagnostics")
-        ? (parseJson<RunnerView["runtime"]>(row.runtime) ?? undefined)
-        : undefined,
+      runtime,
     };
+    if (runnerSupportsProtocol(row.protocol_version, "machineRunnerCapacity")) {
+      const configured = this.machineRunnerCapacityConfiguration(row.runner_id);
+      const configuration = configured ?? (runtime ? {
+        configuredUnits: runtime.maxConcurrentSessions,
+        revision: 0,
+      } : null);
+      if (configuration) {
+        const reported = parseJson<RunnerCapacityState>(row.capacity_status);
+        view.capacity = reported?.configuredUnits === configuration.configuredUnits &&
+            reported.revision === configuration.revision
+          ? reported
+          : {
+              ...configuration,
+              authority: configured ? "control_plane" : "runner_local",
+            };
+      }
+    }
     if (runnerSupportsProtocol(row.protocol_version, "executionTargets")) {
       const hostTargets = executionTargetsForRunner(view, this.boxIdForRunner(row.runner_id) !== null);
       let runnerTargets: ExecutionTargetDefinition[] = [];
@@ -9373,6 +9494,35 @@ export class ControlPlaneDb {
     return { totals: amount(totals), byModel };
   }
 
+  /** Lightweight provenance projection for SessionView. It uses the same source counters and
+   * driver-aware processed-token expression as `sessionUsageByModel` without loading/sorting every
+   * model row on the hot Inbox path. */
+  private sessionCostSource(sessionId: string, liveProcessedTokens: number): UsageCostSource | undefined {
+    const row = this.stmt(
+      `SELECT
+         COALESCE(SUM(provider_reported_records), 0) AS provider_reported_records,
+         COALESCE(SUM(model_priced_records), 0) AS model_priced_records,
+         COALESCE(SUM(unpriced_records), 0) AS unpriced_records,
+         COALESCE(SUM(CASE WHEN driver IN ('codex', 'codex-app-server')
+                       THEN input_tokens + cache_creation_tokens + output_tokens
+                       ELSE input_tokens + cached_input_tokens + cache_creation_tokens + output_tokens END), 0)
+           AS processed_tokens
+       FROM usage_session_models WHERE session_id=?`,
+    ).get(sessionId) as {
+      provider_reported_records: number;
+      model_priced_records: number;
+      unpriced_records: number;
+      processed_tokens: number;
+    };
+    const processedTokens = Number(row.processed_tokens);
+    if (processedTokens < liveProcessedTokens || processedTokens === 0) return undefined;
+    return resolveCostSource({
+      providerReported: Number(row.provider_reported_records),
+      modelPriced: Number(row.model_priced_records),
+      unpriced: Number(row.unpriced_records),
+    });
+  }
+
   queryUsageAggregation(principal: AuthPrincipal, query: UsageAggregationQuery): UsageAggregationResponse {
     if (principal.kind !== "human") throw new Error("usage aggregation requires a human principal");
     const policy = this.ensureUsageRetentionPolicy(principal.organizationId);
@@ -9812,12 +9962,24 @@ export class ControlPlaneDb {
     `).get(targetId, ancestorId));
   }
 
-  childSessionAllocations(parentSessionId: string): { count: number; costBudgetUsd: number; maxToolCalls: number } {
+  childSessionAllocations(parentSessionId: string): {
+    /** Lifetime creations remain the stable ordinal and deletion-resistant accounting fence. */
+    count: number;
+    /** Only nonterminal, unarchived children occupy the concurrent admission cap. */
+    liveCount: number;
+    costBudgetUsd: number;
+    maxToolCalls: number;
+  } {
     return this.stmt(
       `SELECT child_spawn_count AS count, child_cost_reserved_usd AS costBudgetUsd,
-              child_tool_calls_reserved AS maxToolCalls
+              child_tool_calls_reserved AS maxToolCalls,
+              (SELECT COUNT(*) FROM sessions child
+                WHERE child.parent_session_id=? AND child.archived=0
+                  AND child.status NOT IN ('completed','failed','stopped')) AS liveCount
        FROM sessions WHERE id=?`,
-    ).get(parentSessionId) as unknown as { count: number; costBudgetUsd: number; maxToolCalls: number };
+    ).get(parentSessionId, parentSessionId) as unknown as {
+      count: number; liveCount: number; costBudgetUsd: number; maxToolCalls: number;
+    };
   }
 
   sessionHasIndividualOwner(sessionId: string): boolean {
@@ -9853,7 +10015,10 @@ export class ControlPlaneDb {
       const location = this.projectLocation(projectLocationId);
       if (!location || location.projectId !== projectId) throw new Error("session project location does not belong to project");
       if (location.availability === "runner_removed") throw new Error("session project location is no longer available");
-      if (location.runnerId !== input.runnerId || location.workspaceId !== input.workspaceId) {
+      const targetWorkspaceId = input.workspaceId ?? (input.workspacePath
+        ? this.resolveImportedSessionLocation(input.runnerId, input.workspacePath).workspaceId
+        : null);
+      if (location.runnerId !== input.runnerId || location.workspaceId !== targetWorkspaceId) {
         throw new Error("session project location does not match runner/workspace");
       }
     }
@@ -9973,10 +10138,10 @@ export class ControlPlaneDb {
     try {
       this.stmt(
          `INSERT INTO sessions
-           (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, provider_updated_at, background_work_state, background_work_tracking, history_quarantine, status, use_worktree, worktree_path, workspace_path, archived,
+           (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, provider_updated_at, background_work_state, background_work_tracking, history_quarantine, capacity_wait, status, use_worktree, worktree_path, workspace_path, archived,
              driver, model, resolved_model, effort, service_tier, permission_mode, agent_capabilities, preview, pending_approval, input_tokens, output_tokens, context_tokens_used, context_window, cost_usd,
               acp_session_context, created_at, updated_at, last_event_at, hydrated_seq, runner_history_epoch, runner_history_tail_seq, adopted)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
       )
       .run(
         snap.id,
@@ -9991,6 +10156,7 @@ export class ControlPlaneDb {
         backgroundWorkStateForStorage(snap.backgroundWorkState),
         snap.backgroundWorkTracking ?? null,
         snap.historyQuarantine ? JSON.stringify(snap.historyQuarantine) : null,
+        capacityWaitForStorage(snap.status, snap.capacityWait),
         snap.status,
         snap.useWorktree ? 1 : 0,
         snap.worktreePath,
@@ -10115,7 +10281,7 @@ export class ControlPlaneDb {
     let keepPolicyPause = false;
     try {
       const cur = existing?.pending_approval ? (JSON.parse(existing.pending_approval) as PendingApproval) : null;
-      keepPolicyPause = isPolicyApproval(cur) && !isTerminal(snap.status);
+      keepPolicyPause = pendingRequests(cur).some((request) => isPolicyApproval(request)) && !isTerminal(snap.status);
     } catch {
       /* malformed cached approval — fall through to the snapshot */
     }
@@ -10162,7 +10328,7 @@ export class ControlPlaneDb {
         );
       }
       this.stmt(
-        `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), history_quarantine=NULLIF(COALESCE(?, history_quarantine), ''), preview=?, pending_approval=?, worktree_path=?, worktrees=?, workspace_path=?, use_worktree=?,
+        `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), history_quarantine=NULLIF(COALESCE(?, history_quarantine), ''), capacity_wait=?, preview=?, pending_approval=?, worktree_path=?, worktrees=?, workspace_path=?, use_worktree=?,
             model=?, resolved_model=?, effort=?, service_tier=?, permission_mode=?, agent_capabilities=?, input_tokens=?, output_tokens=?, context_tokens_used=?, context_window=?, cost_usd=?, adopted=?,
             acp_session_context=COALESCE(?, acp_session_context),
             updated_at=? WHERE id=?`,
@@ -10179,6 +10345,7 @@ export class ControlPlaneDb {
         // whatever is stored; the empty-string sentinel is a supporting runner saying the
         // conversation is healthy, which NULLIF turns into a real clear.
         historyQuarantineForStorage(snap.historyQuarantine),
+        capacityWaitForStorage(status, snap.capacityWait),
         snap.preview,
         pendingJson,
         snap.worktreePath,
@@ -10835,7 +11002,7 @@ export class ControlPlaneDb {
     // Terminality couples the status write to its fences below; commit them together so a crash
     // between statements cannot persist a terminal status with a stale armed marker.
     this.atomic(() => {
-    this.stmt("UPDATE sessions SET status=?, updated_at=? WHERE id=?")
+    this.stmt("UPDATE sessions SET status=?, capacity_wait=NULL, updated_at=? WHERE id=?")
       .run(status, now, id);
     if (status === "completed" || status === "failed" || status === "stopped") {
       // Session terminality is the retry fence, regardless of which service path observed it.
@@ -10873,6 +11040,13 @@ export class ControlPlaneDb {
       this.stmt("UPDATE sessions SET pending_approval=NULL WHERE id=?").run(id);
     }
     });
+  }
+
+  setSessionCapacityWait(id: string, wait: SessionView["capacityWait"]): boolean {
+    if (wait && !validRunnerCapacityBlocker(wait, false)) return false;
+    const result = this.stmt("UPDATE sessions SET capacity_wait=? WHERE id=? AND status='queued'")
+      .run(wait ? JSON.stringify(wait) : null, id);
+    return Number(result.changes) > 0;
   }
 
   setSessionColumn(id: string, column: BoardColumn | null, now: number): void {
@@ -11269,6 +11443,12 @@ export class ControlPlaneDb {
       .run(max, step, now, id);
   }
 
+  /** Concurrent directly-created child limit. Zero pauses new child/restart admission; null
+   * restores the installation fallback when an atomic config delivery rolls back. */
+  updateSessionMaxChildSessions(id: string, max: number | null, now: number): void {
+    this.stmt("UPDATE sessions SET max_child_sessions=?, updated_at=? WHERE id=?").run(max, now, id);
+  }
+
   /** Advance the absolute cost threshold by its original fixed allowance window. */
   rearmSessionCostBudget(id: string, observedCostUsd: number, now: number): number | null {
     const row = this.stmt(
@@ -11319,6 +11499,31 @@ export class ControlPlaneDb {
               effort=?, service_tier=?, permission_mode=?, updated_at=?
         WHERE id=?`,
     ).run(model, model, model, config.effort ?? null, config.serviceTier ?? null, config.permissionMode ?? null, now, id);
+  }
+
+  /** Restore the complete selected/provider model projection after an atomic live-config delivery
+   * fails. updateSessionConfig intentionally clears provider evidence on a forward model change,
+   * so applying only the old selected config cannot reconstruct these two fields. */
+  restoreSessionConfig(
+    id: string,
+    config: SessionConfig,
+    resolvedModel: string | null,
+    contextWindow: number | null,
+    now: number,
+  ): void {
+    this.stmt(
+      `UPDATE sessions SET model=?, resolved_model=?, effort=?, service_tier=?, permission_mode=?, context_window=?, updated_at=?
+       WHERE id=?`,
+    ).run(
+      config.model ?? null,
+      resolvedModel,
+      config.effort ?? null,
+      config.serviceTier ?? null,
+      config.permissionMode ?? null,
+      contextWindow,
+      now,
+      id,
+    );
   }
 
   /** Accumulate a turn's token/cost usage into the session totals. */
@@ -11715,6 +11920,52 @@ export class ControlPlaneDb {
     }
   }
 
+  /** A native-history acknowledgement is part of the hook's safety boundary. If it cannot be
+   * proven, atomically replace even a previously allowed terminal result with a durable deny and
+   * one content-safe system resolution. Retries preserve both the original resolution time and
+   * the single fail-closed audit row. */
+  failClosedPolicyHookDecision(
+    sessionId: string,
+    requestId: string,
+    now: number,
+    audit: Omit<GovernanceAuditEntry, "auditId">,
+  ): PolicyHookApprovalRecord | null {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.getPolicyHookApproval(sessionId, requestId);
+      if (!existing) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      this.stmt(
+        `UPDATE policy_hook_approvals
+         SET status='denied', resolved_at=COALESCE(resolved_at, ?)
+         WHERE session_id=? AND request_id=?`,
+      ).run(now, sessionId, requestId);
+      this.stmt(
+        `UPDATE sessions
+         SET pending_approval=NULL,
+             status=CASE WHEN status='input_required' THEN ? ELSE status END,
+             updated_at=?
+         WHERE id=? AND json_extract(pending_approval, '$.requestId')=?`,
+      ).run(existing.resumeStatus ?? "running", now, sessionId, requestId);
+      const recorded = this.stmt(
+        `SELECT 1 FROM governance_audit
+         WHERE session_id=? AND request_id=? AND approval_kind='policy_hook'
+           AND stage='resolution' AND outcome='denied'
+           AND actor_kind='system' AND actor_id='decision-history-unavailable'
+         LIMIT 1`,
+      ).get(sessionId, requestId);
+      if (!recorded) this.appendGovernanceAudit(audit);
+      const denied = this.getPolicyHookApproval(sessionId, requestId)!;
+      this.db.exec("COMMIT");
+      return denied;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   appendGovernanceAudit(input: Omit<GovernanceAuditEntry, "auditId">): GovernanceAuditEntry {
     const entry: GovernanceAuditEntry = { ...input, auditId: randomUUID() };
     this.stmt(
@@ -11741,6 +11992,49 @@ export class ControlPlaneDb {
     return entry;
   }
 
+  /** Canonical terminal audit row used to materialize one native policy-hook transcript event.
+   * Resolution is the last content-safe fact for a hook invocation, including human approval and
+   * expiry, and is inserted before a terminal hook response can be released. */
+  policyHookDecisionAudit(sessionId: string, requestId: string): GovernanceAuditEntry | null {
+    const row = this.stmt(
+      `SELECT audit_id, request_id, approval_kind, stage, outcome, actor_kind, actor_id,
+              scope, content_digest, policy_rule, governance_policy_id, option_id, created_at
+       FROM governance_audit
+       WHERE session_id=? AND request_id=? AND approval_kind='policy_hook'
+         AND stage='resolution' AND outcome IN ('allowed','denied','timed_out','aborted')
+       ORDER BY created_at DESC, row_id DESC LIMIT 1`,
+    ).get(sessionId, requestId) as unknown as {
+      audit_id: string;
+      request_id: string;
+      approval_kind: GovernanceAuditEntry["approvalKind"];
+      stage: GovernanceAuditEntry["stage"];
+      outcome: GovernanceAuditEntry["outcome"];
+      actor_kind: GovernanceAuditEntry["actor"]["kind"];
+      actor_id: string | null;
+      scope: string;
+      content_digest: string | null;
+      policy_rule: string | null;
+      governance_policy_id: string | null;
+      option_id: string | null;
+      created_at: number;
+    } | undefined;
+    if (!row) return null;
+    return {
+      auditId: row.audit_id,
+      requestId: row.request_id,
+      approvalKind: row.approval_kind,
+      stage: row.stage,
+      outcome: row.outcome,
+      actor: { kind: row.actor_kind, ...(row.actor_id ? { id: row.actor_id } : {}) },
+      scope: JSON.parse(row.scope) as GovernanceAuditEntry["scope"],
+      ...(row.content_digest ? { contentDigest: row.content_digest } : {}),
+      ...(row.policy_rule ? { policyRule: JSON.parse(row.policy_rule) as GovernanceAuditEntry["policyRule"] } : {}),
+      ...(row.governance_policy_id ? { governancePolicyId: row.governance_policy_id } : {}),
+      ...(row.option_id ? { optionId: row.option_id } : {}),
+      timestamp: row.created_at,
+    };
+  }
+
   hasGovernanceAuditEntry(
     sessionId: string,
     requestId: string,
@@ -11751,6 +12045,15 @@ export class ControlPlaneDb {
       `SELECT 1 FROM governance_audit
        WHERE session_id=? AND request_id=? AND stage=? AND outcome=? LIMIT 1`,
     ).get(sessionId, requestId, stage, outcome));
+  }
+
+  hasTerminalGovernanceResolution(sessionId: string, requestId: string): boolean {
+    return Boolean(this.stmt(
+      `SELECT 1 FROM governance_audit
+       WHERE session_id=? AND request_id=? AND stage='resolution'
+         AND outcome IN ('allowed', 'denied', 'dismissed', 'answered', 'timed_out', 'aborted')
+       LIMIT 1`,
+    ).get(sessionId, requestId));
   }
 
   pruneGovernanceAudit(createdBefore: number, limit = 1_000): number {
@@ -11766,14 +12069,42 @@ export class ControlPlaneDb {
 
   /** Latest bounded audit window returned oldest-first for a stable timeline. */
   listGovernanceAudit(sessionId: string, limit = 200): GovernanceAuditEntry[] {
+    return this.governanceAuditPage(sessionId, limit)?.entries ?? [];
+  }
+
+  /**
+   * One stable newest-first cursor page, presented oldest-first to callers. The opaque audit id is
+   * resolved inside the requested session before its (created_at, row_id) coordinate is used, so a
+   * cursor can neither cross session boundaries nor skip/repeat rows whose timestamps tie.
+   */
+  governanceAuditPage(
+    sessionId: string,
+    limit = 200,
+    before?: string,
+  ): { entries: GovernanceAuditEntry[]; nextBefore?: string; hasMore: boolean } | null {
     const normalized = Number.isFinite(limit) ? Math.trunc(limit) : 200;
     const bounded = Math.max(1, Math.min(500, normalized));
+    const cursor = before === undefined
+      ? undefined
+      : this.stmt(
+        `SELECT created_at, row_id FROM governance_audit WHERE session_id=? AND audit_id=?`,
+      ).get(sessionId, before) as { created_at: number; row_id: number } | undefined;
+    if (before !== undefined && !cursor) return null;
     const rows = this.stmt(
       `SELECT audit_id, request_id, approval_kind, stage, outcome, actor_kind, actor_id,
-              scope, content_digest, policy_rule, governance_policy_id, option_id, created_at
-       FROM governance_audit WHERE session_id=?
+              scope, content_digest, policy_rule, governance_policy_id, option_id, created_at, row_id
+       FROM governance_audit
+       WHERE session_id=?
+         AND (? IS NULL OR created_at < ? OR (created_at = ? AND row_id < ?))
        ORDER BY created_at DESC, row_id DESC LIMIT ?`,
-    ).all(sessionId, bounded) as unknown as Array<{
+    ).all(
+      sessionId,
+      cursor?.created_at ?? null,
+      cursor?.created_at ?? null,
+      cursor?.created_at ?? null,
+      cursor?.row_id ?? null,
+      bounded + 1,
+    ) as unknown as Array<{
       audit_id: string;
       request_id: string;
       approval_kind: GovernanceAuditEntry["approvalKind"];
@@ -11787,8 +12118,11 @@ export class ControlPlaneDb {
       governance_policy_id: string | null;
       option_id: string | null;
       created_at: number;
+      row_id: number;
     }>;
-    return rows.reverse().map((row) => ({
+    const hasMore = rows.length > bounded;
+    const page = rows.slice(0, bounded);
+    const entries = page.reverse().map((row) => ({
       auditId: row.audit_id,
       requestId: row.request_id,
       approvalKind: row.approval_kind,
@@ -11802,6 +12136,12 @@ export class ControlPlaneDb {
       ...(row.option_id ? { optionId: row.option_id } : {}),
       timestamp: row.created_at,
     }));
+    const oldest = entries[0];
+    return {
+      entries,
+      hasMore,
+      ...(hasMore && oldest ? { nextBefore: oldest.auditId } : {}),
+    };
   }
 
   governanceRequestProvenance(sessionId: string, requestId: string): ApprovalQueueProvenance | null {
@@ -14139,6 +14479,11 @@ export class ControlPlaneDb {
 
     const durablePromptQueue = this.pendingSessionPromptQueue(row.id);
     const pendingPrompts = this.pendingSessionPrompts(row.id);
+    // Provenance is useful on the lightweight session projection only when it describes all usage
+    // in that projection. A lagging ledger must not let an older provider-priced zero characterize
+    // newer runner counters whose cost is not known yet; the detailed `/usage` consumer applies
+    // the same processed-token freshness test before accepting its provenance.
+    const costSource = this.sessionCostSource(row.id, row.input_tokens + row.output_tokens);
     return {
       id: row.id,
       runnerId: row.runner_id,
@@ -14173,6 +14518,9 @@ export class ControlPlaneDb {
         } : { backgroundJobsAvailable: false };
       })() : { backgroundJobsAvailable: this.managedBackgroundJobsPresent(row.id) }),
       status,
+      capacityWait: status === "queued"
+        ? (parseJson<SessionView["capacityWait"]>(row.capacity_wait) ?? undefined)
+        : undefined,
       column,
       runId: row.run_id,
       parentSessionId: row.parent_session_id ?? null,
@@ -14234,6 +14582,7 @@ export class ControlPlaneDb {
       contextTokensUsed: row.context_tokens_used ?? undefined,
       contextWindow: row.context_window ?? undefined,
       costUsd: row.cost_usd ?? 0,
+      costSource,
       adopted: row.adopted === 1,
       costBudgetUsd: row.cost_budget_usd ?? null,
       costBudgetStepUsd: row.cost_budget_step_usd ?? row.cost_budget_usd ?? null,
@@ -18154,6 +18503,32 @@ export class ControlPlaneDb {
     return expired;
   }
 
+  /** Write off the commands of an execution that ran out its delivery bound. Same at-most-once
+   * split as `expireAutomationCommands`: staged and pending never left the control plane, while a
+   * `sent` attempt may be running on a runner we can no longer reach, so it settles `uncertain`. */
+  expireUndeliveredAutomationCommands(executionId: string, now: number): AutomationCommandRecord[] {
+    const rows = this.stmt(
+      `SELECT * FROM automation_commands WHERE execution_id=? AND state IN ('staged','pending','sent')
+       ORDER BY ordinal, command_id`,
+    ).all(executionId) as unknown as AutomationCommandRow[];
+    const expired: AutomationCommandRecord[] = [];
+    for (const row of rows) {
+      const accepted = row.state === "sent";
+      const applied = this.recordAutomationCommandReceipt({
+        commandId: row.command_id,
+        runnerId: row.runner_id,
+        state: accepted ? "uncertain" : "rejected",
+        revision: row.revision + 1,
+        error: `durable automation command '${row.command_id}' was not delivered to runner ` +
+          `'${row.runner_id}' within its delivery bound` +
+          (accepted ? "; the runner may already have accepted it, so it was not replayed" : ""),
+        now,
+      });
+      if (applied) expired.push(applied.command);
+    }
+    return expired;
+  }
+
   markAutomationCommandSent(
     commandId: string,
     requestId: string,
@@ -18690,6 +19065,36 @@ function jsonObject(raw: string): Record<string, string> {
   } catch {
     return {};
   }
+}
+
+const RUNNER_CAPACITY_BLOCKER_KINDS = new Set([
+  "runner_capacity",
+  "agent_quota",
+  "target_quota",
+  "exclusive_group",
+  "request_weight",
+  "queue_order",
+]);
+
+function validRunnerCapacityBlocker(value: unknown, aggregate: boolean): value is RunnerCapacityBlocker {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const blocker = value as Partial<RunnerCapacityBlocker>;
+  const validIdentity = (identity: unknown) => identity === undefined ||
+    (typeof identity === "string" && identity.length <= 256 && !/[\0-\x1f\x7f]/.test(identity));
+  const validWaiting = blocker.waitingSessions === undefined
+    ? !aggregate
+    : Number.isSafeInteger(blocker.waitingSessions) && blocker.waitingSessions >= 1;
+  return typeof blocker.kind === "string" && RUNNER_CAPACITY_BLOCKER_KINDS.has(blocker.kind) &&
+    typeof blocker.description === "string" && blocker.description.length >= 1 &&
+    blocker.description.length <= 512 && !/[\0-\x1f\x7f]/.test(blocker.description) &&
+    Number.isSafeInteger(blocker.usedUnits) && blocker.usedUnits! >= 0 &&
+    Number.isSafeInteger(blocker.limitUnits) && blocker.limitUnits! >= 1 &&
+    Number.isSafeInteger(blocker.requiredUnits) && blocker.requiredUnits! >= 1 &&
+    validIdentity(blocker.agentId) && validIdentity(blocker.targetId) && validWaiting;
+}
+
+function capacityWaitForStorage(status: SessionStatus, value: unknown): string | null {
+  return status === "queued" && validRunnerCapacityBlocker(value, false) ? JSON.stringify(value) : null;
 }
 
 function parseJson<T>(raw: string | null): T | null {

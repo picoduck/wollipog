@@ -310,7 +310,7 @@ test("the Add and Modes icon stays centered independently of font metrics", asyn
   await expectCentered("disabled");
 });
 
-test("guardrail controls explain their behavior and align at desktop and phone widths", async ({ page }) => {
+test("guardrail guidance stays compact and aligns at desktop and phone widths", async ({ page }) => {
   for (const viewport of [
     { name: "desktop", width: 1280, height: 800 },
     { name: "phone", width: 390, height: 800 },
@@ -322,14 +322,32 @@ test("guardrail controls explain their behavior and align at desktop and phone w
     const recurring = page.getByRole("spinbutton", { name: "Recurring Cost Threshold" });
     const checkpoints = page.getByRole("textbox", { name: "Cost Checkpoints" });
     const toolCalls = page.getByRole("spinbutton", { name: "Tool-Call Threshold" });
-    await expect(recurring).toHaveAccessibleDescription(
-      "Pauses when spend reaches this amount. Continue advances the next threshold by another equal allowance.",
-    );
-    await expect(checkpoints).toHaveAccessibleDescription(
-      "Enter absolute spend amounts separated by commas. Each pauses once; after approval, it does not ask again. " +
-      "Checkpoints at or above the recurring cost threshold do not pause separately.",
-    );
-    await expect(toolCalls).toHaveAccessibleDescription("Pauses after this many tool calls.");
+    for (const [label, hint] of [
+      [
+        "Recurring Cost Threshold",
+        "Pauses when spend reaches this amount. Continue advances the next threshold by another equal allowance.",
+      ],
+      [
+        "Cost Checkpoints",
+        "Enter absolute spend amounts separated by commas. Each pauses once; after approval, it does not ask again. " +
+          "Checkpoints at or above the recurring cost threshold do not pause separately.",
+      ],
+      ["Tool-Call Threshold", "Pauses after this many tool calls."],
+      [
+        "Live Child Limit",
+        "A session can run four live children by default. Set 0 to pause new child admission. " +
+          "Terminal and archived children release their slots.",
+      ],
+    ] as const) {
+      const help = page.getByRole("button", { name: `About ${label}` });
+      await expect(help).toHaveAccessibleDescription(`About ${label}`);
+      await help.click();
+      await expect(help).toHaveAccessibleDescription(hint);
+      await expect(page.getByRole("note")).toHaveText(hint);
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("note")).toHaveCount(0);
+      await expect(help).toBeFocused();
+    }
 
     const geometry = await Promise.all([recurring, checkpoints, toolCalls].map((control) => control.evaluate((input) => {
       const element = input.closest(".plus-budget")!;

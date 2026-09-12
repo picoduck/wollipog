@@ -8,6 +8,11 @@ import { DatabaseSync } from "node:sqlite";
 import Fastify from "fastify";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
 import type { ControlPlaneToRunner, RunnerView } from "@wollipog/protocol";
+import {
+  SESSION_NAMING_RUNNER_BUDGET_MS,
+  SESSION_NAMING_SUPERVISION_MARGIN_MS,
+  SESSION_NAMING_TRANSPORT_MARGIN_MS,
+} from "@wollipog/protocol";
 import type { Hub } from "./hub.js";
 import { ControlPlaneDb } from "./db.js";
 import { registerSessionNamingRoutes } from "./session-naming-route.js";
@@ -287,7 +292,17 @@ test("runner-account mode is capability-gated, reports only billing boundaries, 
   if (sent[0]?.message.type === "generate_session_title") {
     assert.equal(sent[0].message.sessionId, "session-one");
     assert.deepEqual(sent[0].message.messages, [{ role: "user", text: "Name this session" }]);
+    // The runner receives the whole preparation-plus-generation budget, not a five-second total,
+    // and each enclosing deadline is strictly larger than the one it supervises.
+    assert.equal(sent[0].message.timeoutMs, SESSION_NAMING_RUNNER_BUDGET_MS);
+    assert.ok(sent[0].message.timeoutMs > 5_000);
+    assert.equal(settings.runnerBudgetForSession("session-one"), SESSION_NAMING_RUNNER_BUDGET_MS);
   }
+  assert.equal(sent[0]?.timeoutMs, SESSION_NAMING_RUNNER_BUDGET_MS + SESSION_NAMING_TRANSPORT_MARGIN_MS);
+  assert.equal(settings.timeoutForSession("session-one"),
+    SESSION_NAMING_RUNNER_BUDGET_MS + SESSION_NAMING_SUPERVISION_MARGIN_MS);
+  assert.ok(settings.timeoutForSession("session-one") > sent[0]!.timeoutMs,
+    "the control-plane abort timer outlasts its own runner request deadline");
 
   protocolVersion = 92;
   const mixedVersion = settings.view("org_personal", true);

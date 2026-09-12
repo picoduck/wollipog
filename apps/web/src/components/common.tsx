@@ -9,7 +9,10 @@ import {
   type BackgroundWorkState,
   type SessionStatus,
   type SessionView,
+  type SessionAttentionGroup,
+  sessionAttentionBreakdown,
 } from "@wollipog/protocol";
+import { BACKGROUND_DELIVERY_STATUS, backgroundDeliveryAccessibleName } from "../background-delivery-status.js";
 import { statusMeta, type StatusMeta } from "../format.js";
 import type { SessionChangeStatus } from "../session-status.js";
 import { CheckIcon, CloseIcon, CopyIcon, WarningIcon } from "./Icons.js";
@@ -210,11 +213,76 @@ export function AttentionBadge({ session, ariaLabel, onOpen }: {
   );
 }
 
-export function SessionStatusIndicators({ session, disconnected = false, onOpenAttention }: {
+/** One child's dot on a parent's family chip (#896). Literal class names, so the stylesheet guard can
+ * see every state rendered; the state itself comes off the wire. */
+export function ThreadDot({ state, title }: { state: "blocked" | "stalled" | "running" | "done" | "idle"; title: string }) {
+  return <i
+    className={state === "blocked"
+      ? "inbox-thread-dot blocked"
+      : state === "stalled"
+        ? "inbox-thread-dot stalled"
+        : state === "running"
+          ? "inbox-thread-dot running"
+          : state === "done" ? "inbox-thread-dot done" : "inbox-thread-dot"}
+    title={title}
+  />;
+}
+
+/**
+ * Attention as one pill PER KIND, each carrying its count, in priority order: "Answer Required 2 ·
+ * Approval Required" where the rolled-up badge says "3 Actions Required" (#896). A single request
+ * keeps the rolled-up label so a child-owned request still names its owner; the tooltip lists each
+ * request's owner and title, bounded so a runaway provider cannot grow a card's title attribute.
+ */
+export function AttentionPills({ session, compact = false }: {
+  session: Pick<SessionView, "status" | "pendingApproval" | "attentionOwners">;
+  /** A phone card has one line for the sender AND the signals: show the top-priority kind with a
+   * "+N" for the rest instead of one pill per kind, so three kinds cannot push the sender off the card. */
+  compact?: boolean;
+}) {
+  const groups = sessionAttentionBreakdown(session);
+  if (groups.length === 0) return null;
+  if (groups.length === 1 && groups[0]!.count <= 1) {
+    const attention = sessionAttentionStatus(session);
+    return attention
+      ? <span className="inbox-status-pill blocked" title={attention.description} aria-label={"Attention: " + attention.label}>
+        {attention.label}
+      </span>
+      : null;
+  }
+  const describe = (group: SessionAttentionGroup) =>
+    group.requests.slice(0, 10).map((request, index) => `${group.owners[index]}: ${request.title}`);
+  if (compact) {
+    const top = groups[0]!;
+    const total = groups.reduce((sum, group) => sum + group.count, 0);
+    const listed = groups.flatMap(describe).slice(0, 10);
+    const more = total - listed.length;
+    return <span className="inbox-status-pill blocked"
+      title={[...listed, ...(more > 0 ? [`${more} more`] : [])].join("\n")}
+      aria-label={`Attention: ${top.label}, ${total} Requests`}>
+      {top.label}
+      <span className="inbox-status-pill-count" aria-hidden="true">+{total - 1}</span>
+    </span>;
+  }
+  return <>{groups.map((group) => {
+    const listed = describe(group);
+    const more = group.count - listed.length;
+    const title = [...listed, ...(more > 0 ? [`${more} more`] : [])].join("\n");
+    return <span key={group.label} className="inbox-status-pill blocked" title={title}
+      aria-label={`Attention: ${group.label}${group.count > 1 ? `, ${group.count} Requests` : ""}`}>
+      {group.label}
+      {group.count > 1 && <span className="inbox-status-pill-count" aria-hidden="true">{group.count}</span>}
+    </span>;
+  })}</>;
+}
+
+export function SessionStatusIndicators({ session, disconnected = false, onOpenAttention, attention = "badge" }: {
   session: Pick<SessionView, "status" | "pendingApproval" | "archiveStatus" | "archiveOperation" |
-    "stopOperation" | "historyQuarantine">;
+    "stopOperation" | "historyQuarantine" | "attentionOwners" | "capacityWait">;
   disconnected?: boolean;
   onOpenAttention?: () => void;
+  /** Board cards show the per-kind pills; headers keep the single badge that opens the panel. */
+  attention?: "badge" | "pills";
 }) {
   const lifecycle = sessionStatusBadgeMeta(
     session.status,
@@ -223,7 +291,7 @@ export function SessionStatusIndicators({ session, disconnected = false, onOpenA
     session.stopOperation,
     session.historyQuarantine,
   );
-  const attention = sessionAttentionStatus(session);
+  const attentionStatus = sessionAttentionStatus(session);
   return (
     <span className="session-status-indicators" role="group" aria-label="Session Status">
       <StatusBadge
@@ -234,7 +302,29 @@ export function SessionStatusIndicators({ session, disconnected = false, onOpenA
         historyQuarantine={session.historyQuarantine}
         ariaLabel={`Activity: ${lifecycle.label}`}
       />
-      <AttentionBadge session={session} ariaLabel={attention ? `Attention: ${attention.label}` : undefined} onOpen={onOpenAttention} />
+      {session.status === "queued" && session.capacityWait && (
+        <span
+          className="status-badge st-idle"
+          title={session.capacityWait.description}
+          aria-label={`Queue Reason: ${session.capacityWait.description}`}
+        >
+          <span className="status-dot2" aria-hidden="true" />
+          {session.capacityWait.kind === "runner_capacity"
+            ? "Runner Capacity"
+            : session.capacityWait.kind === "agent_quota"
+              ? "Agent Quota"
+              : session.capacityWait.kind === "target_quota"
+                ? "Target Quota"
+                : session.capacityWait.kind === "exclusive_group"
+                  ? "Provider Slot"
+                  : session.capacityWait.kind === "request_weight"
+                    ? "Agent Weight"
+                    : "Queue Order"}
+        </span>
+      )}
+      {attention === "pills"
+        ? <AttentionPills session={session} />
+        : <AttentionBadge session={session} ariaLabel={attentionStatus ? `Attention: ${attentionStatus.label}` : undefined} onOpen={onOpenAttention} />}
       {disconnected && (
         <span className="status-badge st-failed" title="The session runner is disconnected." aria-label="Health: Disconnected">
           <span className="status-dot2" aria-hidden="true" />
@@ -282,9 +372,18 @@ const COMPACT_BACKGROUND_WORK_LABELS: Record<BackgroundWorkState, string> = {
   resumed: "Background Work Resumed",
 };
 
-export function BackgroundWorkBadge({ state, compact = false, announce = true, onOpen }: {
+const NARROW_BACKGROUND_WORK_LABELS: Record<BackgroundWorkState, string> = {
+  running: "Job",
+  continuation_pending: "Pending",
+  orphaned: "Orphaned",
+  resumed: "Resumed",
+};
+
+export function BackgroundWorkBadge({ state, compact = false, responsiveCompact = false, announce = true, onOpen }: {
   state: BackgroundWorkState;
   compact?: boolean;
+  /** Switch compact visible text again on narrow phones; the accessible name stays complete. */
+  responsiveCompact?: boolean;
   announce?: boolean;
   onOpen?: () => void;
 }) {
@@ -300,7 +399,12 @@ export function BackgroundWorkBadge({ state, compact = false, announce = true, o
     {compact ? (
       <>
         <span className="sr-only">{label}</span>
-        <span aria-hidden="true">{COMPACT_BACKGROUND_WORK_LABELS[state]}</span>
+        {responsiveCompact ? (
+          <>
+            <span className="background-work-label-wide" aria-hidden="true">{COMPACT_BACKGROUND_WORK_LABELS[state]}</span>
+            <span className="background-work-label-narrow" aria-hidden="true">{NARROW_BACKGROUND_WORK_LABELS[state]}</span>
+          </>
+        ) : <span aria-hidden="true">{COMPACT_BACKGROUND_WORK_LABELS[state]}</span>}
       </>
     ) : label}
   </>;
@@ -383,26 +487,25 @@ export function ActiveSubagentsBadge({ count, onOpen, workers = false }: { count
   );
 }
 
-const BACKGROUND_DELIVERY_LABELS: Record<BackgroundDeliveryWatchdogState, string> = {
-  terminal_without_continuation: "Terminal Result Awaiting Continuation",
-  accepted_without_result: "Accepted Continuation Awaiting Result",
-  result_not_projected: "Result Awaiting Transcript Projection",
-  dashboard_observation_pending: "Notification Awaiting Dashboard",
-};
-
 export function BackgroundDeliveryBadge({ state, onOpen }: { state: BackgroundDeliveryWatchdogState; onOpen?: () => void }) {
-  const label = `Background Delivery: ${BACKGROUND_DELIVERY_LABELS[state]}`;
+  const status = BACKGROUND_DELIVERY_STATUS[state];
+  const accessibleName = backgroundDeliveryAccessibleName(state);
   if (onOpen) return (
-    <button type="button" className="background-work-badge background-work-orphaned"
-      aria-label={label} aria-controls="right-panel" title={`Open ${label}`} onClick={onOpen}>
+    <button type="button" className={status.severity === "missing"
+      ? "background-work-badge background-work-orphaned"
+      : "background-work-badge background-delivery-pending"}
+      aria-label={accessibleName} aria-controls="right-panel" title={status.description} onClick={onOpen}>
       <span className="background-work-dot" aria-hidden="true" />
-      {label}
+      {status.label}
     </button>
   );
   return (
-    <span className="background-work-badge background-work-orphaned" aria-label={label}>
+    <span className={status.severity === "missing"
+      ? "background-work-badge background-work-orphaned"
+      : "background-work-badge background-delivery-pending"}
+      aria-label={accessibleName} title={status.description}>
       <span className="background-work-dot" aria-hidden="true" />
-      {label}
+      {status.label}
     </span>
   );
 }

@@ -86,3 +86,35 @@ test("handoff destination settings fail closed for unsupported or unauthenticate
   assert.match(handoffDestinationError(agent, "codex-app-server", { model: "missing" })!, /supported destination model/);
   assert.match(handoffDestinationError(agent, "codex-app-server", { model: "model", effort: "unsupported" })!, /effort/);
 });
+
+test("a handoff carries the source service tier and refuses one the destination cannot honour", () => {
+  const tiered = {
+    ...agent,
+    capabilities: {
+      ...agent.capabilities!,
+      models: [{ id: "model", serviceTiers: [{ id: "priority", name: "Priority" }] }],
+    },
+  };
+  // The tier is a deliberate cost and latency choice, so it must survive the handoff.
+  assert.equal(handoffDestinationError(tiered, "codex-app-server", { model: "model", serviceTier: "priority" }), null);
+  // `default` is the provider-standard tier and needs no per-model advertisement.
+  assert.equal(handoffDestinationError(tiered, "codex-app-server", { model: "model", serviceTier: "default" }), null);
+  assert.equal(handoffDestinationError(agent, "codex-app-server", { model: "model", serviceTier: "default" }), null);
+  assert.equal(handoffDestinationError(tiered, "codex-app-server", { model: "model" }), null);
+
+  // A tier this model does not advertise is refused with an explanation rather than silently
+  // replaced by the destination default, which is the whole point of #875.
+  assert.match(
+    handoffDestinationError(tiered, "codex-app-server", { model: "model", serviceTier: "flex" })!,
+    /does not support this service tier/,
+  );
+  assert.match(
+    handoffDestinationError(agent, "codex-app-server", { model: "model", serviceTier: "priority" })!,
+    /does not support this service tier/,
+  );
+  // The allowlist still fails closed for anything genuinely unsupported.
+  assert.match(
+    handoffDestinationError(tiered, "codex-app-server", { model: "model", costBudgetUsd: 5 } as never)!,
+    /Unsupported handoff settings/,
+  );
+});

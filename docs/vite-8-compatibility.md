@@ -11,12 +11,39 @@ are included as well.
 ## Dependency and Platform Contract
 
 - Vite is 8.2.2 and the `@vitejs/plugin-react` 6.1 line resolves to 6.1.1.
-- Production JavaScript and CSS target Chrome 107, Edge 107, Firefox 104, and Safari 16.
-  This intentionally raises the legacy Vite 6 `modules` floor while avoiding Vite 8's moving
-  `baseline-widely-available` default. It covers the WebView2/WebKit families used by the supported
-  Windows, macOS, and Linux desktop builds. The same artifact powers the browser/PWA client, so
-  Safari 16 is also its explicit iOS compilation floor; installed iOS push notifications already
-  require Safari 16.4 or newer.
+- Production JavaScript and CSS target Chrome 111, Edge 111, Firefox 121, and Safari 16.2.
+  These versions are **computed, not chosen** (#914): `apps/web/src/css-support.ts` records the
+  non-downlevelable CSS features the stylesheet uses along with the first browser version that
+  supports each, and `WOLLIPOG_WEBVIEW_TARGETS` is their maximum. Adopting a newer feature therefore
+  raises the floor in the same commit.
+
+  What keeps that registry complete is an allowlist, not a watchlist. `CSS_SURFACE` names every
+  at-rule, property, pseudo, and function the stylesheet is allowed to contain, and a unit test
+  fails on anything outside it — including syntax nobody anticipated. A watchlist of known-risky
+  constructs was tried first and leaked repeatedly, because it has to predict what CSS will be
+  invented; the allowlist is bounded by what this stylesheet actually contains.
+
+  Not everything new raises the floor. Each feature is classified: `requires-floor` for what breaks
+  where it is unsupported, `downlevelled` for what the build compiles away, and `degrades` for what
+  an engine simply ignores at no real cost. `scrollbar-width` is the live example of the last —
+  it needs Chrome 121 and Safari 18.2, and treating it like the others would have pushed the whole
+  app's floor to Safari 18.2 in exchange for scrollbar cosmetics.
+
+  The binding constraint differs per engine: `color-mix()` sets Chrome, Edge, and Safari; `:has()`
+  sets Firefox, from a version well above what anything else needs. Safari's `.2` is load-bearing —
+  16.0 and 16.1 cannot parse `color-mix()`.
+
+  This still avoids Vite 8's moving `baseline-widely-available` default, whose floor changes between
+  builds. It covers the WebView2/WebKit families used by the supported Windows, macOS, and Linux
+  desktop builds. The same artifact powers the browser/PWA client, so Safari 16.2 is also its
+  explicit iOS compilation floor; installed iOS push notifications already require Safari 16.4 or
+  newer, which is the higher bar of the two.
+
+  The previous floor — Chrome 107, Edge 107, Firefox 104, Safari 16 — was a hand-maintained list and
+  was below what the bundle shipped on **every** engine, not just Firefox. It went stale silently
+  because a build target is not a validator: Lightning CSS rewrites what it can and passes the rest
+  through unchanged, with no warning. Nothing the desktop app ships uses Gecko, so the Firefox entry
+  only ever described the browser/PWA client.
 - The frozen lockfile contains Rolldown 1.2.6 and Lightning CSS 1.33.0 native packages for all six
   release targets: macOS arm64/x64, Linux GNU arm64/x64, and Windows MSVC arm64/x64. A unit
   contract fails if any of those bindings disappears.

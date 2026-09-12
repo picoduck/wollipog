@@ -46,3 +46,26 @@ test("question policy controls fit mobile and expose policy attribution", async 
   await expect(page.getByRole("switch").nth(1)).toHaveAttribute("aria-checked", "true");
   if (process.env.QUESTION_POLICY_EVIDENCE) await page.screenshot({ path: process.env.QUESTION_POLICY_EVIDENCE + "/mobile-dark.png", fullPage: true });
 });
+
+test("governance history pages older decisions and keeps the native decision after its tool request", async ({ page }) => {
+  await page.goto("/question-policies-e2e.html");
+  const timeline = page.getByRole("list", { name: "Native Governance Event" });
+  await timeline.getByRole("button", { name: /Worked · 1 Command/ }).click();
+  await expect(timeline.getByText("Run Shell Command", { exact: true })).toBeVisible();
+  await expect(timeline.locator('[data-audit-id="hook-audit"]')).toBeVisible();
+  const timelineText = await timeline.innerText();
+  expect(timelineText.indexOf("Run Shell Command")).toBeLessThan(timelineText.indexOf("Blocked by Policy"));
+
+  const history = page.getByRole("list", { name: "Governance History" });
+  await expect(history.locator("[data-audit-id]")).toHaveCount(1);
+  if (process.env.GOVERNANCE_EVIDENCE) {
+    await page.screenshot({ path: process.env.GOVERNANCE_EVIDENCE + "/governance-history-before.png", fullPage: true });
+  }
+  await page.getByRole("button", { name: "Load Older Decisions" }).click();
+  await expect(history.locator("[data-audit-id]")).toHaveCount(2);
+  await expect(history.getByText("Approved by You", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Load Older Decisions" })).toHaveCount(0);
+  if (process.env.GOVERNANCE_EVIDENCE) {
+    await page.screenshot({ path: process.env.GOVERNANCE_EVIDENCE + "/governance-history-after.png", fullPage: true });
+  }
+});

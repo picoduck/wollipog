@@ -79,7 +79,8 @@ function clamp(value: number, min: number, max: number): number {
  * VIEWPORT from the trigger's rectangle rather than flowing inside an ancestor that would cut it
  * off. Placed below when there is room, else above. Escape and an outside pointer close it, both
  * on the capture phase so a view-level Escape handler that stops propagation (the composer's, the
- * menus') cannot swallow the key while this panel is the thing the user is trying to close.
+ * menus') cannot swallow the key while this panel is the thing the user is trying to close. A
+ * nested popover can consume Escape so one key closes only the innermost layer.
  *
  * Placement runs in a LAYOUT effect: the panel's un-placed fallback position is absolute, and a
  * status-strip track clips overflow, so a passive effect would let one clipped frame paint.
@@ -88,9 +89,9 @@ function clamp(value: number, min: number, max: number): number {
  * the panel's own CSS still bounds it.
  */
 export function useAnchoredPopover<Root extends HTMLElement, Anchor extends HTMLElement>(
-  size: { width: number; height: number },
+  size: { width: number; height: number; consumeEscape?: boolean },
 ): AnchoredPopover<Root, Anchor> {
-  const { width, height } = size;
+  const { width, height, consumeEscape = false } = size;
   const [open, setOpen] = useState(false);
   const [placement, setPlacement] = useState<Placement | null>(null);
   const rootRef = useRef<Root | null>(null);
@@ -118,7 +119,14 @@ export function useAnchoredPopover<Root extends HTMLElement, Anchor extends HTML
 
   useEffect(() => {
     if (!open) return;
-    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") setOpen(false); };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (consumeEscape) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      setOpen(false);
+    };
     const onPointer = (event: PointerEvent) => {
       if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false);
     };
@@ -128,7 +136,7 @@ export function useAnchoredPopover<Root extends HTMLElement, Anchor extends HTML
       document.removeEventListener("keydown", onKey, true);
       document.removeEventListener("pointerdown", onPointer, true);
     };
-  }, [open]);
+  }, [consumeEscape, open]);
 
   return {
     open,

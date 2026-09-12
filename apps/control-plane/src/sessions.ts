@@ -51,6 +51,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type GovernanceAuditEntry,
   type GovernanceAuditOutcome,
   type GovernanceAuditStage,
+  type GovernanceTrippedMessage,
   type GovernancePolicy,
   type GitSummaryInfo,
   type ForgeReviewReconciliation,
@@ -64,6 +65,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type PendingApproval,
   type PolicyHookEvaluationRequest,
   type PolicyHookEvaluationResponse,
+  type RecordPolicyHookDecisionMessage,
   type PodContextEntry,
   type PodMemberRole,
   type PodOrchestrationActionResult,
@@ -88,6 +90,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type ResourceScope,
   type ReviewFindingsResponse,
   type RunnerProtocolCapability,
+  type RunnerCapacityBlocker,
   type SessionConfig,
   type SessionEventPayload,
   type SessionLaunchSpec,
@@ -114,6 +117,8 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type WorkflowInstanceView,
   type WorkflowNodeDefinition,
   type WorkflowNodeOutcome,
+  SESSION_NAMING_RUNNER_BUDGET_MS,
+  SESSION_NAMING_SUPERVISION_MARGIN_MS,
 } from "@wollipog/protocol";
 import {
   MAX_PENDING_STEERING_RESOLUTION_REPLAYS,
@@ -180,6 +185,8 @@ type Logger = { info: (m: string) => void; warn: (m: string) => void; error: (m:
 export const EXTERNAL_SESSION_ENUMERATION_TIMEOUT_MS = 30_000;
 export const EXTERNAL_SESSION_ADOPTION_TIMEOUT_MS = 45_000;
 export const STEERING_REQUEST_TIMEOUT_MS = 15_000;
+/** Leave headroom inside the hook sidecar's 1.5s HTTP deadline for request parsing and response. */
+export const POLICY_HOOK_EVENT_APPEND_TIMEOUT_MS = 1_000;
 export const SESSION_COMMAND_INVOCATION_EXPIRY_MS = 24 * 60 * 60_000;
 export const SESSION_COMMAND_INVOCATION_RETENTION_MS = 30 * 24 * 60 * 60_000;
 /** One day beyond the browser's seven-day queued-edit recovery window. */
@@ -360,6 +367,11 @@ function sessionGuardrailConfigError(config: unknown): string | null {
     if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value))) {
       return `${key} must be a finite number`;
     }
+  }
+  if (candidate.maxChildSessions !== undefined &&
+      (!Number.isSafeInteger(candidate.maxChildSessions) ||
+        (candidate.maxChildSessions as number) < 0 || (candidate.maxChildSessions as number) > 64)) {
+    return "maxChildSessions must be an integer from 0 to 64";
   }
   const checkpoints = candidate.costCheckpointsUsd;
   if (checkpoints !== undefined && (!Array.isArray(checkpoints) || checkpoints.some(
@@ -920,7 +932,8 @@ export class SessionsService {
     private readonly notify?: (prev: SessionView, view: SessionView) => void,
     private readonly steeringRequestTimeoutMs = STEERING_REQUEST_TIMEOUT_MS,
     private readonly titleGenerator?: SessionTitleGenerator,
-    private readonly titleGenerationTimeoutMs: number | ((sessionId: string) => number) = 5_000,
+    private readonly titleGenerationTimeoutMs: number | ((sessionId: string) => number) =
+      SESSION_NAMING_RUNNER_BUDGET_MS + SESSION_NAMING_SUPERVISION_MARGIN_MS,
     private readonly titleGenerationEnabled?: (sessionId: string) => boolean,
     private readonly titleGenerationRevision?: (sessionId: string) => string,
   ) {
@@ -1458,6 +1471,15 @@ export class SessionsService {
     return this.db.listGovernanceAudit(sessionId, limit);
   }
 
+  governanceAuditPage(
+    sessionId: string,
+    limit = 200,
+    before?: string,
+  ): ServiceResult<{ entries: GovernanceAuditEntry[]; nextBefore?: string; hasMore: boolean }> {
+    const page = this.db.governanceAuditPage(sessionId, limit, before);
+    return page ? ok(page) : fail("governance audit cursor is invalid for this session", 400);
+  }
+
   governancePolicies(): GovernancePolicy[] {
     return [sessionSpawnSafetyPolicy(), ...this.db.listGovernancePolicies()];
   }
@@ -1905,6 +1927,116 @@ export class SessionsService {
     });
   }
 
+  /** Evaluate one hook invocation and, for v130 peers, fence its terminal response behind the
+   * runner-owned event append. The hook process cannot release the matching provider tool call
+   * until this promise settles, so the runner allocates the decision's sequence first even when
+   * its provider adapter later delivers events in a batch. */
+  async evaluatePolicyHookCausally(
+    sessionId: string,
+    input: unknown,
+    hookCanPollDurableAsk = false,
+  ): Promise<ServiceResult<PolicyHookEvaluationResponse>> {
+    const result = this.evaluatePolicyHook(sessionId, input, hookCanPollDurableAsk);
+    if (!result.ok || !result.data ||
+        (result.data.decision !== "allow" && result.data.decision !== "deny")) return result;
+
+    const parsed = parsePolicyHookRequest(input);
+    if (!parsed.ok || parsed.value.hookEventName !== "PreToolUse" || !parsed.value.toolUseId) {
+      return result;
+    }
+    const session = this.db.getSession(sessionId);
+    if (!session || !runnerSupportsProtocol(
+      this.db.getRunner(session.runnerId)?.protocolVersion,
+      "nativePolicyHookEvents",
+    )) return result;
+
+    const requestId = policyHookRequestId(sessionId, parsed.value);
+    const audit = this.db.policyHookDecisionAudit(sessionId, requestId);
+    const failClosed = (): ServiceResult<PolicyHookEvaluationResponse> => {
+      const approval = this.db.getPolicyHookApproval(sessionId, requestId);
+      const now = Date.now();
+      const deniedAudit: Omit<GovernanceAuditEntry, "auditId"> = audit
+        ? {
+            requestId,
+            approvalKind: "policy_hook",
+            stage: "resolution",
+            outcome: "denied",
+            actor: { kind: "system", id: "decision-history-unavailable" },
+            scope: audit.scope,
+            ...(audit.governancePolicyId ? { governancePolicyId: audit.governancePolicyId } : {}),
+            timestamp: now,
+          }
+        : this.governanceAuditRecord(
+            session,
+            {
+              requestId,
+              kind: "policy_hook",
+              ...(parsed.value.context ? { context: parsed.value.context } : {}),
+            },
+            "resolution",
+            "denied",
+            { kind: "system", id: "decision-history-unavailable" },
+            now,
+            approval?.governancePolicyId
+              ? { governancePolicyId: approval.governancePolicyId }
+              : {},
+          );
+      try {
+        this.db.failClosedPolicyHookDecision(sessionId, requestId, now, deniedAudit);
+      } catch (error) {
+        this.log.warn(`failed to persist policy-hook fail-closed resolution for ${sessionId}: ${
+          error instanceof Error ? error.message : "unknown database error"
+        }`);
+      }
+      return ok({
+        decision: "deny",
+        reason: "Policy decision history could not be recorded; the tool was blocked fail-closed.",
+      });
+    };
+    if (!audit || audit.stage !== "resolution" ||
+        !["allowed", "denied", "timed_out", "aborted"].includes(audit.outcome)) {
+      return failClosed();
+    }
+    const appendRequestId = `policy_hook_event_${randomUUID()}`;
+    const message: RecordPolicyHookDecisionMessage = {
+      type: "record_policy_hook_decision",
+      requestId: appendRequestId,
+      sessionId,
+      decision: {
+        auditId: audit.auditId,
+        requestId: audit.requestId,
+        stage: audit.stage,
+        outcome: audit.outcome,
+        actor: audit.actor,
+        ...(audit.governancePolicyId ? { governancePolicyId: audit.governancePolicyId } : {}),
+        toolCallId: parsed.value.toolUseId,
+      },
+    };
+    try {
+      const recorded = await this.hub.requestFromRunner(
+        session.runnerId,
+        appendRequestId,
+        message,
+        POLICY_HOOK_EVENT_APPEND_TIMEOUT_MS,
+      );
+      if (recorded.type !== "policy_hook_decision_recorded" ||
+          recorded.sessionId !== sessionId || recorded.auditId !== audit.auditId ||
+          !recorded.accepted || !Number.isSafeInteger(recorded.eventSeq) || recorded.eventSeq! < 1) {
+        return failClosed();
+      }
+      return result;
+    } catch (error) {
+      this.log.warn(
+        `policy-hook event append failed for ${sessionId}: ${
+          isRunnerRequestTimeoutError(error) ? "runner acknowledgement timed out"
+            : isRunnerRequestNotSentError(error) ? "runner is offline"
+              : error instanceof Error ? error.message : "unknown runner error"
+        }`,
+      );
+      return failClosed();
+    }
+  }
+
   /** Expire durable asks even when their hook process is gone, then promote the next queued ask. */
   reconcilePolicyHookTimeouts(now = Date.now(), sessionId?: string): number {
     const affected = new Set<string>();
@@ -2253,6 +2385,32 @@ export class SessionsService {
     ));
   }
 
+  /** A promoted control-plane card keeps its visible request id, while reconnect replay uses the
+   * runner trip's deterministic id. Record a terminal result under both identities so a stale
+   * duplicate cannot resurrect a trip that was already continued, stopped, or dismissed. */
+  private recordRunnerGuardrailResolution(
+    session: SessionView,
+    request: PendingApproval,
+    outcome: GovernanceAuditOutcome,
+    actor: GovernanceActor,
+    now: number,
+    options: { content?: unknown; optionId?: string | null } = {},
+  ): void {
+    this.recordGovernanceAudit(session, request, "resolution", outcome, actor, now, options);
+    const replayRequestId = runnerGuardrailRequestId(request);
+    if (replayRequestId && replayRequestId !== request.requestId) {
+      this.recordGovernanceAudit(
+        session,
+        { ...request, requestId: replayRequestId },
+        "resolution",
+        outcome,
+        actor,
+        now,
+        options,
+      );
+    }
+  }
+
   private governanceAuditRecord(
     session: SessionView,
     request: Pick<PendingApproval, "requestId" | "kind" | "context">,
@@ -2438,8 +2596,25 @@ export class SessionsService {
     runnerId: string,
     workspaceId: string | null,
     allowProjectWithoutLocation = false,
+    parentSessionId?: string,
+    workspacePath?: string,
   ): ServiceResult<{ projectId?: string | null; projectLocationId?: string | null }> {
     const explicit = req.projectId !== undefined || req.projectLocationId !== undefined;
+    if (!explicit && parentSessionId) {
+      const parent = this.db.getSession(parentSessionId);
+      if (!parent) return fail("parent session not found", 404);
+      if (!parent.projectId) return ok({ projectId: null, projectLocationId: null });
+      const assignmentWorkspaceId = workspaceId ?? (workspacePath
+        ? this.db.resolveImportedSessionLocation(runnerId, workspacePath).workspaceId
+        : null);
+      const location = assignmentWorkspaceId
+        ? this.db.findProjectLocationForProject(parent.projectId, runnerId, assignmentWorkspaceId)
+        : null;
+      if (!location || location.availability !== "available") {
+        return fail("the parent Project has no available Location matching the selected runner and workspace", 409);
+      }
+      return ok({ projectId: parent.projectId, projectLocationId: location.id });
+    }
     if (!explicit) return ok({});
     if (req.projectId === null) {
       if (req.projectLocationId != null) return fail("No Project sessions cannot have a project location", 400);
@@ -2582,8 +2757,9 @@ export class SessionsService {
       return fail("the creating parent session is no longer active", 409);
     }
     const reserved = { ...this.db.childSessionAllocations(parentSessionId) };
-    if (configs.length > (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.count) {
-      return fail("the parent session has insufficient remaining child spawn slots for this run", 409);
+    if (configs.length > (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount) {
+      const remaining = Math.max(0, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount);
+      return fail(`the parent session has ${remaining} remaining live child slot${remaining === 1 ? "" : "s"}; raise maxChildSessions before creating this run`, 409);
     }
     const applied: SessionConfig[] = [];
     for (const config of configs) {
@@ -2595,13 +2771,14 @@ export class SessionsService {
         ...parent,
         costUsd: (parent.costUsd ?? 0) + reserved.costBudgetUsd,
         toolCallCount: (parent.toolCallCount ?? 0) + reserved.maxToolCalls,
-      }, config, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.count,
+      }, config, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount,
       parent.projectId ? this.db.projectChildSessionDefaults(parent.projectId) : null);
       if ("error" in guarded) return fail(guarded.error, 409);
       applied.push(guarded.config);
       reserved.count++;
-      reserved.costBudgetUsd += guarded.config.costBudgetUsd!;
-      reserved.maxToolCalls += guarded.config.maxToolCalls!;
+      reserved.liveCount++;
+      reserved.costBudgetUsd += guarded.config.costBudgetUsd ?? 0;
+      reserved.maxToolCalls += guarded.config.maxToolCalls ?? 0;
     }
     const gate = this.sessionSpawnGate(parentSessionId, request, configs.length);
     return gate.ok ? ok(applied) : fail(gate.error!, gate.status);
@@ -2629,17 +2806,19 @@ export class SessionsService {
       return fail("The Conductor agent is retired; select an ordinary agent to orchestrate child sessions.", 409);
     }
     const parentSessionId = creationContext?.parentSessionId;
+    let parentSession: SessionView | null = null;
     if (parentSessionId) {
       const parent = this.db.getSession(parentSessionId);
       if (!parent || !["starting", "running", "input_required"].includes(parent.status)) {
         return fail("the creating parent session is no longer active", 409);
       }
+      parentSession = parent;
       const allocated = this.db.childSessionAllocations(parentSessionId);
       const guarded = childSessionGuardrails({
         ...parent,
         costUsd: (parent.costUsd ?? 0) + allocated.costBudgetUsd,
         toolCallCount: (parent.toolCallCount ?? 0) + allocated.maxToolCalls,
-      }, req.config, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - allocated.count,
+      }, req.config, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - allocated.liveCount,
       parent.projectId ? this.db.projectChildSessionDefaults(parent.projectId) : null);
       if ("error" in guarded) return fail(guarded.error, 409);
       req = { ...req, config: guarded.config };
@@ -2907,12 +3086,13 @@ export class SessionsService {
     }
     const workspaceId = snapshotSpec ? snapshotSpec.workspaceId : (adHoc ? null : req.workspaceId);
     const requestedProject = this.requestedProjectAssignment(
-      req, req.runnerId, workspaceId, allowProjectWithoutLocation,
+      req, req.runnerId, workspaceId, allowProjectWithoutLocation, parentSessionId, workspacePath,
     );
     if (!requestedProject.ok || !requestedProject.data) {
       return fail(requestedProject.error ?? "project assignment is invalid", requestedProject.status);
     }
-    let sessionScope = scope;
+    let sessionScope = scope ?? (parentSession ? this.db.sessionScope(parentSession.id) ?? undefined : undefined);
+    if (parentSession && !sessionScope) return fail("parent session ownership is unavailable", 409);
     if (requestedProject.data.projectId) {
       const projectSessionScope = this.sessionScopeForProjectAssignment(
         requestedProject.data,
@@ -3433,6 +3613,11 @@ export class SessionsService {
     if (!session) return fail("session not found", 404);
     const configInputError = sessionGuardrailConfigError(config);
     if (configInputError) return fail(configInputError, 400);
+    if (actor.kind === "agent" && actor.id === sessionId &&
+        (config.maxChildSessions === undefined ||
+          Object.keys(config).some((key) => key !== "maxChildSessions"))) {
+      return fail("an agent may change only its own maxChildSessions", 403);
+    }
     const tuiGuardrailError = this.activeAgentTuiGuardrailError(session, config);
     if (tuiGuardrailError) return fail(tuiGuardrailError, 409);
     if (config.permissionMode !== undefined && (config.permissionMode === "orchestrator") !== (session.permissionMode === "orchestrator")) {
@@ -3491,75 +3676,107 @@ export class SessionsService {
       serviceTier,
       permissionMode: config.permissionMode ?? session.permissionMode ?? undefined,
     }, agentCapabilities, session.agentId, session.driver);
-    this.db.updateSessionConfig(sessionId, merged, Date.now());
+    const now = Date.now();
+    this.db.updateSessionConfig(sessionId, merged, now);
     // Guardrails ride their own columns so config writes never clobber them. Only touch one when
     // the caller explicitly sent a value: a positive number sets the limit, 0/negative clears it.
     if (config.costBudgetUsd !== undefined) {
-      this.db.updateSessionCostBudget(sessionId, config.costBudgetUsd > 0 ? config.costBudgetUsd : null, Date.now());
+      this.db.updateSessionCostBudget(sessionId, config.costBudgetUsd > 0 ? config.costBudgetUsd : null, now);
     }
     if (config.maxToolCalls !== undefined) {
       // Floor BEFORE the positivity check: 0.5 must clear (floored 0), not store a phantom 0
       // that looks armed in the UI but never gates.
       const floored = Math.floor(config.maxToolCalls);
-      this.db.updateSessionMaxToolCalls(sessionId, floored > 0 ? floored : null, Date.now());
+      this.db.updateSessionMaxToolCalls(sessionId, floored > 0 ? floored : null, now);
     }
     if (config.costCheckpointsUsd !== undefined) {
       // An empty list clears the checkpoints and the approved level with them.
-      this.db.updateSessionCostCheckpoints(sessionId, normalizeCostCheckpoints(config.costCheckpointsUsd), Date.now());
+      this.db.updateSessionCostCheckpoints(sessionId, normalizeCostCheckpoints(config.costCheckpointsUsd), now);
+    }
+    if (config.maxChildSessions !== undefined) {
+      this.db.updateSessionMaxChildSessions(sessionId, config.maxChildSessions, now);
     }
     // A guardrail change while parked on a policy card must re-evaluate: drop the (possibly
     // stale) card and re-gate — re-parks with a fresh card if a rule still trips, otherwise
     // unlocks the composer. Without this, raising a limit leaves the session 409-locked behind
     // a card whose rule no longer trips, and Continue would blind-clear the new limit.
-    const guardrailChanged = config.costBudgetUsd !== undefined || config.maxToolCalls !== undefined ||
+    const thresholdChanged = config.costBudgetUsd !== undefined || config.maxToolCalls !== undefined;
+    const guardrailChanged = thresholdChanged ||
       config.costCheckpointsUsd !== undefined;
     const parked = session.pendingApproval;
-    // A soft rule armed on an unparked session that already exceeds it must park now: nothing on
-    // the runner will cancel the turn, so the next prompt would otherwise be admitted first.
-    if (guardrailChanged && !parked) this.gateOnPolicy(sessionId, Date.now(), true, true);
-    if (guardrailChanged && parked && isGuardrailApproval(parked)) {
-      const now = Date.now();
-      const configured = this.db.getSession(sessionId)!;
-      const holdFor = this.runnerHoldAfter(configured, this.guardrailFields(configured));
-      const thresholdPatch: { costBudgetUsd?: number | null; maxToolCalls?: number | null } = {};
-      if (config.costBudgetUsd !== undefined) thresholdPatch.costBudgetUsd = configured.costBudgetUsd ?? null;
-      if (config.maxToolCalls !== undefined) thresholdPatch.maxToolCalls = configured.maxToolCalls ?? null;
-      // A checkpoint-only edit sends an empty threshold patch: a v105 runner still applies the
-      // hold change, and queued prompts keep the per-prompt budgets they were queued with.
-      const runner = this.db.getRunner(session.runnerId);
-      if (runnerSupportsProtocol(runner?.protocolVersion, "governanceRearm")) {
-        const sent = this.hub.sendToRunner(session.runnerId, {
-          type: "rearm_governance",
-          sessionId,
-          config: thresholdPatch,
-          ...(holdFor ? { holdFor } : {}),
-        });
-        if (!sent) {
-          this.recordGovernanceAudit(session, parked, "resolution", "delivery_failed", actor, now, { content: config });
-          this.db.updateSessionConfig(sessionId, {
-            model: session.model ?? undefined,
-            effort: session.effort ?? undefined,
-            serviceTier: session.serviceTier ?? undefined,
-            permissionMode: session.permissionMode ?? undefined,
-          }, now);
-          if (config.costBudgetUsd !== undefined) {
-            this.db.updateSessionCostBudget(sessionId, session.costBudgetUsd ?? null, now, session.costBudgetStepUsd ?? null);
-          }
-          if (config.maxToolCalls !== undefined) {
-            this.db.updateSessionMaxToolCalls(sessionId, session.maxToolCalls ?? null, now, session.maxToolCallsStep ?? null);
-          }
-          if (config.costCheckpointsUsd !== undefined) {
-            this.db.restoreSessionCostCheckpoints(sessionId, session.costCheckpointsUsd ?? null, session.costCheckpointApprovedUsd ?? null, now);
-          }
-          return fail("runner is offline", 409);
-        }
+    const parkedGuardrail = pendingRequests(parked).find((request) => isGuardrailApproval(request));
+    const configured = this.db.getSession(sessionId)!;
+    const holdFor = parkedGuardrail
+      ? this.runnerHoldAfter(configured, this.guardrailFields(configured))
+      : undefined;
+    const thresholdPatch: { costBudgetUsd?: number | null; maxToolCalls?: number | null } = {};
+    if (config.costBudgetUsd !== undefined) thresholdPatch.costBudgetUsd = configured.costBudgetUsd ?? null;
+    if (config.maxToolCalls !== undefined) thresholdPatch.maxToolCalls = configured.maxToolCalls ?? null;
+    const rollback = () => {
+      this.db.restoreSessionConfig(sessionId, {
+        model: session.model ?? undefined,
+        effort: session.effort ?? undefined,
+        serviceTier: session.serviceTier ?? undefined,
+        permissionMode: session.permissionMode ?? undefined,
+      }, session.resolvedModel ?? null, session.contextWindow ?? null, now);
+      if (config.costBudgetUsd !== undefined) {
+        this.db.updateSessionCostBudget(sessionId, session.costBudgetUsd ?? null, now, session.costBudgetStepUsd ?? null);
       }
-      this.db.setPendingApproval(sessionId, null);
-      this.db.updateSessionStatus(sessionId, "idle", now);
-      this.recordGovernanceAudit(session, parked, "resolution", "dismissed", actor, now, { content: config });
-      this.gateOnPolicy(sessionId, now);
+      if (config.maxToolCalls !== undefined) {
+        this.db.updateSessionMaxToolCalls(sessionId, session.maxToolCalls ?? null, now, session.maxToolCallsStep ?? null);
+      }
+      if (config.costCheckpointsUsd !== undefined) {
+        this.db.restoreSessionCostCheckpoints(
+          sessionId,
+          session.costCheckpointsUsd ?? null,
+          session.costCheckpointApprovedUsd ?? null,
+          now,
+        );
+      }
+      if (config.maxChildSessions !== undefined) {
+        this.db.updateSessionMaxChildSessions(sessionId, session.maxChildSessions ?? null, now);
+      }
+    };
+    // Every live threshold edit is a runner round trip, including explicit clears. A parked card
+    // also needs a re-arm when only a control-plane checkpoint changed so its queue hold follows
+    // the freshly evaluated rule. Persist first for one authoritative computed snapshot, but roll
+    // the whole config request back if that live runner cannot receive it.
+    const runner = this.db.getRunner(session.runnerId);
+    if (!isTerminal(session.status) && (thresholdChanged || (guardrailChanged && parkedGuardrail)) &&
+        runnerSupportsProtocol(runner?.protocolVersion, "governanceRearm")) {
+      const sent = this.hub.sendToRunner(session.runnerId, {
+        type: "rearm_governance",
+        sessionId,
+        config: thresholdPatch,
+        ...(holdFor ? { holdFor } : {}),
+      });
+      if (!sent) {
+        if (parkedGuardrail) {
+          this.recordRunnerGuardrailResolution(
+            session,
+            parkedGuardrail,
+            "delivery_failed",
+            actor,
+            now,
+            { content: config },
+          );
+        }
+        rollback();
+        return fail("runner is offline", 409);
+      }
+    }
+    if (guardrailChanged && parkedGuardrail) {
+      const remaining = removePendingRequest(this.db.getSession(sessionId)?.pendingApproval, parkedGuardrail.requestId);
+      this.db.setPendingApproval(sessionId, remaining);
+      this.db.updateSessionStatus(sessionId, remaining ? "input_required" : "idle", now);
+      this.recordRunnerGuardrailResolution(session, parkedGuardrail, "dismissed", actor, now, { content: config });
+      if (!remaining) this.gateOnPolicy(sessionId, now);
       this.reconcilePolicyHookTimeouts(now, sessionId);
       this.clearSettledPolicyResumeStatus(sessionId);
+    } else if (guardrailChanged && !parked) {
+      // A soft rule armed on an unparked session that already exceeds it must park now: nothing on
+      // the runner will cancel the turn, so the next prompt would otherwise be admitted first.
+      this.gateOnPolicy(sessionId, now, true, true);
     }
     const updated = this.db.getSession(sessionId)!;
     this.hub.sessionChanged(updated);
@@ -4416,6 +4633,16 @@ export class SessionsService {
     if (session.archived) {
       return fail("unarchive the session before restarting it", 409);
     }
+    if (session.parentSessionId && isTerminal(session.status)) {
+      const parent = this.db.getSession(session.parentSessionId);
+      if (parent) {
+        const allocated = this.db.childSessionAllocations(parent.id);
+        const cap = parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP;
+        if (allocated.liveCount >= cap) {
+          return fail("the parent session has 0 remaining live child slots; raise maxChildSessions before restarting this child", 409);
+        }
+      }
+    }
     const reconciliationBlock = this.podReconciliationMutationError(sessionId);
     if (reconciliationBlock) return fail(reconciliationBlock, 409);
     if (!session.agentId) return fail("session is missing its agent", 400);
@@ -4761,22 +4988,38 @@ export class SessionsService {
     if (isGuardrailApproval(pending)) {
       if (optionId === "continue") {
         const runner = this.db.getRunner(session.runnerId);
-        const nextConfig: Pick<SessionConfig, "costBudgetUsd" | "maxToolCalls"> = {};
+        const nextConfig: { costBudgetUsd?: number | null; maxToolCalls?: number | null } = {};
         if (pending.kind === "cost_budget") {
           const step = session.costBudgetStepUsd ?? session.costBudgetUsd;
-          if (!session.costBudgetUsd || !step) return fail("cost guardrail has no re-arm window", 409);
-          nextConfig.costBudgetUsd = Math.max(session.costBudgetUsd, session.costUsd) + step;
+          if (pending.runnerGuardrail && session.costBudgetUsd == null) {
+            nextConfig.costBudgetUsd = null;
+          } else {
+            if (!session.costBudgetUsd || !step) return fail("cost guardrail has no re-arm window", 409);
+            const observed = Math.max(session.costUsd, pending.runnerGuardrail?.observed ?? session.costUsd);
+            nextConfig.costBudgetUsd = pending.runnerGuardrail && session.costBudgetUsd > observed
+              ? session.costBudgetUsd
+              : Math.max(session.costBudgetUsd, observed) + step;
+          }
         } else {
           const step = session.maxToolCallsStep ?? session.maxToolCalls;
-          if (!session.maxToolCalls || !step) return fail("tool guardrail has no re-arm window", 409);
-          nextConfig.maxToolCalls = Math.max(session.maxToolCalls, session.toolCallCount ?? 0) + step;
+          if (pending.runnerGuardrail && session.maxToolCalls == null) {
+            nextConfig.maxToolCalls = null;
+          } else {
+            if (!session.maxToolCalls || !step) return fail("tool guardrail has no re-arm window", 409);
+            const observed = Math.max(session.toolCallCount ?? 0, pending.runnerGuardrail?.observed ?? 0);
+            nextConfig.maxToolCalls = pending.runnerGuardrail && session.maxToolCalls > observed
+              ? session.maxToolCalls
+              : Math.max(session.maxToolCalls, observed) + step;
+          }
         }
         // Every rule, not only the two runner-owned thresholds: a checkpoint or the owner's daily
         // allowance that trips after this re-arm must keep the runner's queue held too.
         const holdFor = this.runnerHoldAfter(session, {
           ...this.guardrailFields(session),
-          costBudgetUsd: nextConfig.costBudgetUsd ?? session.costBudgetUsd,
-          maxToolCalls: nextConfig.maxToolCalls ?? session.maxToolCalls,
+          costBudgetUsd: Object.hasOwn(nextConfig, "costBudgetUsd")
+            ? nextConfig.costBudgetUsd : session.costBudgetUsd,
+          maxToolCalls: Object.hasOwn(nextConfig, "maxToolCalls")
+            ? nextConfig.maxToolCalls : session.maxToolCalls,
         });
         if (runnerSupportsProtocol(runner?.protocolVersion, "governanceRearm")) {
           const sent = this.hub.sendToRunner(session.runnerId, {
@@ -4786,17 +5029,23 @@ export class SessionsService {
             ...(holdFor ? { holdFor } : {}),
           });
           if (!sent) {
-            this.recordGovernanceAudit(session, pending, "resolution", "delivery_failed", actor, now, { optionId });
+            this.recordRunnerGuardrailResolution(session, pending, "delivery_failed", actor, now, { optionId });
             return fail("runner is offline", 409);
           }
         }
-        this.db.setPendingApproval(sessionId, null);
-        if (pending.kind === "cost_budget") this.db.rearmSessionCostBudget(sessionId, session.costUsd, now);
-        else this.db.rearmSessionMaxToolCalls(sessionId, session.toolCallCount ?? 0, now);
-        this.db.updateSessionStatus(sessionId, "idle", now);
+        const remaining = removePendingRequest(this.db.getSession(sessionId)?.pendingApproval, pending.requestId);
+        this.db.setPendingApproval(sessionId, remaining);
+        if (pending.kind === "cost_budget") {
+          if (nextConfig.costBudgetUsd != null && nextConfig.costBudgetUsd !== session.costBudgetUsd) {
+            this.db.updateSessionCostBudget(sessionId, nextConfig.costBudgetUsd, now, session.costBudgetStepUsd);
+          }
+        } else if (nextConfig.maxToolCalls != null && nextConfig.maxToolCalls !== session.maxToolCalls) {
+          this.db.updateSessionMaxToolCalls(sessionId, nextConfig.maxToolCalls, now, session.maxToolCallsStep);
+        }
+        this.db.updateSessionStatus(sessionId, remaining ? "input_required" : "idle", now);
         // Asks are serialized through the single approval slot: if ANOTHER rule is also tripped,
         // park again immediately with its own card instead of waiting for the next turn settle.
-        this.gateOnPolicy(sessionId, now);
+        if (!remaining) this.gateOnPolicy(sessionId, now);
         this.reconcilePolicyHookTimeouts(now, sessionId);
         this.clearSettledPolicyResumeStatus(sessionId);
       } else {
@@ -4805,10 +5054,9 @@ export class SessionsService {
         this.sendStopCommand(session.runnerId, sessionId);
         this.db.updateSessionStatus(sessionId, "stopped", now);
       }
-      this.recordGovernanceAudit(
+      this.recordRunnerGuardrailResolution(
         session,
         pending,
-        "resolution",
         optionId === "continue" ? "allowed" : "denied",
         actor,
         now,
@@ -5038,8 +5286,15 @@ export class SessionsService {
     let linkedLocation = false;
     if (projectId !== null) {
       if (!this.db.getProject(projectId)) return fail("project not found", 404);
-      const location = session.workspaceId
-        ? this.db.findProjectLocationForProject(projectId, session.runnerId, session.workspaceId)
+      const adHocWorkspaceId = session.workspaceId === null
+        ? this.db.resolveImportedSessionLocation(
+            session.runnerId,
+            this.db.getAdHocWorkspacePath(sessionId) ?? "",
+          ).workspaceId
+        : null;
+      const assignmentWorkspaceId = session.workspaceId ?? adHocWorkspaceId;
+      const location = assignmentWorkspaceId
+        ? this.db.findProjectLocationForProject(projectId, session.runnerId, assignmentWorkspaceId)
         : null;
       if (!location) {
         if (!options.linkLocation) {
@@ -5411,11 +5666,13 @@ export class SessionsService {
       ? snapshotStarts[0].spec.workspacePath
       : this.db.getWorkspacePath(req.runnerId, req.workspaceId);
     if (!workspacePath) return fail(`unknown workspace '${req.workspaceId}'`, 404);
-    const requestedProject = this.requestedProjectAssignment(req, req.runnerId, req.workspaceId);
+    if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
+    const requestedProject = this.requestedProjectAssignment(
+      req, req.runnerId, req.workspaceId, false, parentSessionId,
+    );
     if (!requestedProject.ok || !requestedProject.data) {
       return fail(requestedProject.error ?? "project assignment is invalid", requestedProject.status);
     }
-    if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
     if (req.config?.serviceTier) {
       const unsupported = this.capabilityFailure(req.runnerId, "codexServiceTiers", "Codex Service Tier selection");
       if (unsupported) return unsupported;
@@ -5510,9 +5767,18 @@ export class SessionsService {
     if (!workerSessionScope.ok || !workerSessionScope.data) {
       return fail(workerSessionScope.error ?? "workflow session ownership is unavailable", workerSessionScope.status);
     }
+    let childSessionScope = workerSessionScope.data;
+    if (parentSessionId) {
+      const parentScope = this.db.sessionScope(parentSessionId);
+      if (!parentScope) return fail("parent session ownership is unavailable", 409);
+      if (!this.db.scopeAudienceContainedWithMembership(parentScope, workerSessionScope.data)) {
+        return fail("parent session access is broader than the selected Project or execution Location", 409);
+      }
+      childSessionScope = parentScope;
+    }
     // Trusted orchestrators require organization scope for organization workflow tools. When a
     // Project is narrower, keep only that infrastructure session explicitly outside the Project;
-    // every worker still adopts the selected Project scope and identity.
+    // every ordinary workflow child still adopts the inherited Project and parent scope.
     const orchestratorProject = members.some((member) => member.orchestrator) &&
       requestedProject.data.projectId && orchestratorScope &&
       !this.db.scopeAudienceContainedWithMembership(
@@ -5573,7 +5839,7 @@ export class SessionsService {
         runId,
         driver: member.launch.driver,
         config,
-        scope: member.orchestrator ? orchestratorScope! : workerSessionScope.data,
+        scope: member.orchestrator ? orchestratorScope! : childSessionScope,
         now,
       });
       const costBudget = parentSessionId ? config.costBudgetUsd : req.costBudgetUsd;
@@ -6518,21 +6784,32 @@ export class SessionsService {
     if (typeof req.task !== "string" || !req.task.trim()) return fail("a task is required");
     const workspacePath = this.db.getWorkspacePath(req.runnerId, req.workspaceId);
     if (!workspacePath) return fail(`unknown workspace '${req.workspaceId}'`, 404);
-    const requestedProject = this.requestedProjectAssignment(req, req.runnerId, req.workspaceId);
+    if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
+    const requestedProject = this.requestedProjectAssignment(
+      req, req.runnerId, req.workspaceId, false, parentSessionId,
+    );
     if (!requestedProject.ok || !requestedProject.data) {
       return fail(requestedProject.error ?? "project assignment is invalid", requestedProject.status);
     }
-    const sessionScope = this.sessionScopeForProjectAssignment(
+    const projectSessionScope = this.sessionScopeForProjectAssignment(
       requestedProject.data,
       this.db.workspaceScope(req.runnerId, req.workspaceId) ?? this.db.runnerScope(req.runnerId),
     );
-    if (!sessionScope.ok || !sessionScope.data) {
-      return fail(sessionScope.error ?? "run session ownership is unavailable", sessionScope.status);
+    if (!projectSessionScope.ok || !projectSessionScope.data) {
+      return fail(projectSessionScope.error ?? "run session ownership is unavailable", projectSessionScope.status);
     }
-    if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
+    let sessionScope = projectSessionScope.data;
+    if (parentSessionId) {
+      const parentScope = this.db.sessionScope(parentSessionId);
+      if (!parentScope) return fail("parent session ownership is unavailable", 409);
+      if (!this.db.scopeAudienceContainedWithMembership(parentScope, projectSessionScope.data)) {
+        return fail("parent session access is broader than the selected Project or execution Location", 409);
+      }
+      sessionScope = parentScope;
+    }
     // Every member session carries the run's scope, so an owner over their daily allowance
     // cannot launch a fleet of new turns through a run either.
-    const runAdmissionDenied = this.dailyBudgetAdmissionError(sessionScope.data);
+    const runAdmissionDenied = this.dailyBudgetAdmissionError(sessionScope);
     if (runAdmissionDenied) return fail(runAdmissionDenied, 409);
 
     // Resolve every agent before creating the run so we never persist an empty run.
@@ -6600,7 +6877,7 @@ export class SessionsService {
         runId,
         driver: launch.driver,
         config,
-        scope: sessionScope.data,
+        scope: sessionScope,
         now,
       });
       // Run-level guardrails apply to every member session; each member gates independently.
@@ -6650,6 +6927,7 @@ export class SessionsService {
     worktreePath?: string | null,
     fromRunnerId?: string,
     controlPlaneLaunchId?: string,
+    capacityWait?: RunnerCapacityBlocker,
   ): void {
     const session = this.db.getSession(sessionId);
     if (!session) return;
@@ -6690,7 +6968,7 @@ export class SessionsService {
     // A trailing idle must not pass THROUGH a parked guardrail card: updateSessionStatus would
     // wipe it and the re-gate would mint a fresh requestId, invalidating an in-flight
     // Continue/Stop click (and flickering the card). The pause is CP state — keep it sticky.
-    if (status === "idle" && isPolicyApproval(session.pendingApproval)) {
+    if (status === "idle" && hasPolicyApproval(session.pendingApproval)) {
       this.db.notePolicyResumeStatus(sessionId, "idle");
       this.hub.sessionChangedById(sessionId);
       return;
@@ -6704,6 +6982,9 @@ export class SessionsService {
       this.abortPolicyHookApprovals(session, Date.now(), "provider-session-ended");
     }
     this.db.updateSessionStatus(sessionId, childAttention ? "input_required" : status, Date.now());
+    if (!childAttention && status === "queued" && capacityWait) {
+      this.db.setSessionCapacityWait(sessionId, capacityWait);
+    }
     // If the session ended while an approval was pending, clear the stale card.
     if (isTerminal(status) && session.pendingApproval) {
       this.db.setPendingApproval(sessionId, null);
@@ -6723,6 +7004,74 @@ export class SessionsService {
     // the notification carries the ask instead of a misleading "ready".
     this.notifyTransition(session, sessionId);
     this.hub.sessionChangedById(sessionId);
+  }
+
+  /** Materialize the decision for a runner-owned cancellation even when the control-plane rule
+   * was changed or cleared before the trip arrived. Duplicate/reconnect notices retain one card,
+   * and an unrelated unanswered request keeps ownership of the visible primary slot. */
+  onGovernanceTripped(runnerId: string, message: GovernanceTrippedMessage): void {
+    const session = this.db.getSession(message.sessionId);
+    if (!session || session.runnerId !== runnerId || session.archived || isTerminal(session.status)) return;
+    if (typeof message.tripId !== "string" || !message.tripId || message.tripId.length > 128 ||
+        (message.kind !== "cost_budget" && message.kind !== "max_tool_calls") ||
+        !Number.isFinite(message.threshold) || message.threshold <= 0 ||
+        !Number.isFinite(message.observed) || message.observed < message.threshold ||
+        (message.kind === "max_tool_calls" &&
+          (!Number.isSafeInteger(message.threshold) || !Number.isSafeInteger(message.observed)))) {
+      this.log.warn(`ignoring malformed governance trip for ${message.sessionId} from ${runnerId}`);
+      return;
+    }
+    const requestId = `runner-${message.kind}:${message.tripId}`;
+    const pending = pendingRequests(session.pendingApproval);
+    if (pending.some((request) => request.runnerGuardrail?.tripId === message.tripId &&
+        request.runnerGuardrail.kind === message.kind)) return;
+    if (this.db.hasTerminalGovernanceResolution(message.sessionId, requestId)) return;
+    const alreadyAsked = this.db.hasGovernanceAuditEntry(
+      message.sessionId,
+      requestId,
+      "policy_decision",
+      "asked",
+    );
+    const existing = pending.find((request) =>
+      request.kind === message.kind && !request.runnerGuardrail);
+    const title = message.kind === "cost_budget"
+      ? `Runner paused at the $${message.threshold.toFixed(2)} cost threshold. Continue with the current guardrails?`
+      : `Runner paused at ${message.threshold} distinct tool calls. Continue with the current guardrails?`;
+    const runnerGuardrail = {
+      tripId: message.tripId,
+      kind: message.kind,
+      threshold: message.threshold,
+      observed: message.observed,
+    };
+    // Cost usage reaches the CP before the runner's following trip frame, so the CP may already
+    // have parked the same crossing. Promote that card with the runner evidence instead of asking
+    // twice (and advancing the threshold twice). Keep its request identity for an in-flight click;
+    // the separate runner request id below makes reconnect replay idempotent.
+    const approval: PendingApproval = existing ? { ...existing, runnerGuardrail } : {
+      requestId,
+      kind: message.kind,
+      title,
+      options: [
+        { optionId: "continue", name: "Continue", kind: "allow_once" },
+        { optionId: "cancel", name: "Stop", kind: "reject_once" },
+      ],
+      runnerGuardrail,
+    };
+    const now = Date.now();
+    this.db.setPendingApproval(message.sessionId, existing
+      ? replacePendingApproval(session.pendingApproval, approval)
+      : appendPendingApproval(session.pendingApproval, approval));
+    if (session.status === "idle") this.db.notePolicyResumeStatus(message.sessionId, "idle");
+    this.db.updateSessionStatus(message.sessionId, "input_required", now);
+    if (!alreadyAsked) {
+      this.recordGovernanceAudit(session, { ...approval, requestId }, "policy_decision", "asked",
+        { kind: "system", id: "runner-governance" }, now, {
+          policyRule: message.kind === "cost_budget"
+            ? { kind: "cost_budget", budgetUsd: message.threshold }
+            : { kind: "max_tool_calls", maxCalls: message.threshold },
+        });
+    }
+    this.hub.sessionChangedById(message.sessionId);
   }
 
   private reconcileWorkflowSessionStatus(sessionId: string, status: SessionStatus, now: number): void {
@@ -7217,7 +7566,10 @@ export class SessionsService {
         });
       }
 
-      this.db.setPendingApproval(sessionId, addPendingRequest(this.db.getSession(sessionId)?.pendingApproval, approval));
+      this.db.setPendingApproval(
+        sessionId,
+        addPendingRequestPreservingRunnerGuardrails(this.db.getSession(sessionId)?.pendingApproval, approval),
+      );
       this.db.updateSessionStatus(sessionId, "input_required", now);
       // Push BEFORE any runner-side trailing status event (which would then be a non-transition).
       this.notifyTransition(session, sessionId);
@@ -7307,7 +7659,10 @@ export class SessionsService {
         }
       }
       this.hub.sessionEvent(ev);
-      this.db.setPendingApproval(sessionId, addPendingRequest(this.db.getSession(sessionId)?.pendingApproval, approval));
+      this.db.setPendingApproval(
+        sessionId,
+        addPendingRequestPreservingRunnerGuardrails(this.db.getSession(sessionId)?.pendingApproval, approval),
+      );
       this.db.updateSessionStatus(sessionId, "input_required", now);
       this.notifyTransition(session, sessionId);
     }
@@ -7452,7 +7807,7 @@ export class SessionsService {
           // snapshot. The old invocation cannot resume, so never resurrect its durable card.
           this.abortPolicyHookApprovals(existing, now, "provider-session-inactive");
           this.db.clearPolicyResumeStatus(snap.id);
-        } else if (snap.status === "idle" && isPolicyApproval(existing.pendingApproval)) {
+        } else if (snap.status === "idle" && hasPolicyApproval(existing.pendingApproval)) {
           this.db.notePolicyResumeStatus(snap.id, "idle");
         } else if (snap.status !== "idle") {
           this.db.clearPolicyResumeStatus(snap.id);
@@ -7545,7 +7900,7 @@ export class SessionsService {
     if (isTerminal(runtimeSnapshot.status)) {
       this.abortPolicyHookApprovals(existing, now, "provider-session-ended");
       this.db.clearPolicyResumeStatus(snapshot.id);
-    } else if (runtimeSnapshot.status === "idle" && isPolicyApproval(existing.pendingApproval)) {
+    } else if (runtimeSnapshot.status === "idle" && hasPolicyApproval(existing.pendingApproval)) {
       this.db.notePolicyResumeStatus(snapshot.id, "idle");
     } else if (runtimeSnapshot.status !== "idle") {
       this.db.clearPolicyResumeStatus(snapshot.id);
@@ -8213,4 +8568,47 @@ type RunnerHoldKind = RunnerGuardrailKind | "control_plane";
 
 function runnerHoldFor(kind: PolicyRuleKind | undefined): RunnerGuardrailKind | undefined {
   return kind === "cost_budget" || kind === "max_tool_calls" ? kind : undefined;
+}
+
+function hasPolicyApproval(pending: PendingApproval | null | undefined): boolean {
+  return pendingRequests(pending).some((request) => isPolicyApproval(request));
+}
+
+/** Unlike addPendingRequest (which intentionally gives a CP policy card exclusive ownership), a
+ * runner trip must wait behind an unrelated provider request without replacing it. */
+function appendPendingApproval(
+  current: PendingApproval | null | undefined,
+  next: PendingApproval,
+): PendingApproval {
+  const requests = pendingRequests(current);
+  if (requests.some((request) => request.requestId === next.requestId)) return current!;
+  const [first, ...rest] = [...requests, next];
+  return { ...first!, ...(rest.length ? { additionalRequests: rest } : {}) };
+}
+
+/** A live provider ask owns the primary card, but it cannot erase a runner trip: that trip already
+ * cancelled the turn and holds the FIFO until its own Continue/Stop decision. CP-only soft cards
+ * keep their historical displacement semantics and are re-derived after the provider ask settles. */
+function addPendingRequestPreservingRunnerGuardrails(
+  current: PendingApproval | null | undefined,
+  next: PendingApproval,
+): PendingApproval {
+  const runnerCards = pendingRequests(current).filter((request) => request.runnerGuardrail);
+  let combined = addPendingRequest(current, next);
+  for (const runnerCard of runnerCards) combined = appendPendingApproval(combined, runnerCard);
+  return combined;
+}
+
+function runnerGuardrailRequestId(request: PendingApproval): string | null {
+  const trip = request.runnerGuardrail;
+  return trip ? `runner-${trip.kind}:${trip.tripId}` : null;
+}
+
+function replacePendingApproval(
+  current: PendingApproval | null | undefined,
+  replacement: PendingApproval,
+): PendingApproval {
+  const [first, ...rest] = pendingRequests(current).map((request) =>
+    request.requestId === replacement.requestId ? replacement : request);
+  return { ...first!, ...(rest.length ? { additionalRequests: rest } : {}) };
 }

@@ -16,6 +16,7 @@ import type {
 } from "@wollipog/protocol";
 import type { SpawnIsolation } from "../spawn.js";
 import type { PoisonedProviderHistory } from "./poisoned-provider-history.js";
+import type { ProviderRejectionShape } from "./provider-rejection-shape.js";
 
 declare const preparedDriverCommandBrand: unique symbol;
 
@@ -108,6 +109,9 @@ export interface DriverCallbacks {
   onBackgroundWork?: (update: DriverBackgroundWorkUpdate) => void;
   /** Exact provider input acknowledgement for the currently active prompt. */
   onPromptAccepted?: () => void;
+  /** A persistent provider began or settled a turn without a runner prompt owning it. The session
+   * manager uses this to keep status, approvals, and governance aligned with the live turn. */
+  onProviderInitiatedTurn?: (state: "started" | "settled", turnId: string) => void;
   /** The provider proved that its resumable conversation coordinate exists. Drivers must not
    * emit this for a locally minted id until provider initialization confirms it. */
   onSessionEstablished?: (providerSessionId: string) => void;
@@ -121,6 +125,10 @@ export interface DriverCallbacks {
    * instead of retrying, continuing, or compacting. Structure only: the offending value stays
    * inside the driver. */
   onProviderHistoryUnrecoverable?: (detail: PoisonedProviderHistory) => void;
+  /** The provider rejected an indexed item in the request that the history classifier does not
+   * recognize. Evidence only: it changes nothing about how the error is handled, and carries a
+   * content-free structural shape rather than the provider's message. */
+  onUnclassifiedProviderRejection?: (shape: ProviderRejectionShape) => void;
   onAcpCapabilities?: (capabilities: AcpRuntimeCapabilities) => void;
   /** Session-scoped ACP controls/config; never merge these onto the agent row because two live
    * sessions may advertise different modes or commands. */

@@ -20,10 +20,11 @@ test("orchestrator credentials expose only session management and governance rea
   for (const [method, route] of [
     ["GET", "/api/sessions"], ["GET", "/api/governance/policies"],
     ["POST", "/api/sessions"], ["POST", "/api/sessions/:id/stop"],
+    ["POST", "/api/sessions/:id/restart"], ["POST", "/api/sessions/:id/config"],
     ["POST", "/api/sessions/:id/worktrees"], ["POST", "/api/sessions/:id/archive"],
   ]) assert.equal(isAgentControlApiRouteAllowed(method!, route!, "orchestrator"), true, route);
   for (const [method, route] of [
-    ["POST", "/api/runs"], ["POST", "/api/sessions/:id/config"], ["POST", "/api/sessions/:id/approve"],
+    ["POST", "/api/runs"], ["POST", "/api/sessions/:id/approve"],
     ["PUT", "/api/governance/policies/:policyId"], ["POST", "/api/artifacts/screenshots"],
     ["POST", "/api/workflow-instances/:instanceId/nodes/:nodeId/dispatch"],
   ]) assert.equal(isAgentControlApiRouteAllowed(method!, route!, "orchestrator"), false, route);
@@ -82,6 +83,8 @@ test("session-management REST access is method- and route-scoped to its publishe
     ["GET", "/api/sessions/:id/events"],
     ["POST", "/api/sessions"],
     ["POST", "/api/sessions/:id/prompt"],
+    ["POST", "/api/sessions/:id/restart"],
+    ["POST", "/api/sessions/:id/config"],
     ["POST", "/api/sessions/:id/worktrees"],
     ["POST", "/api/sessions/:id/worktrees/attach"],
     ["POST", "/api/sessions/:id/worktrees/select"],
@@ -117,6 +120,8 @@ test("general CLI/MCP access shares the closed manager route allowlist", () => {
   assert.equal(isAgentControlApiRouteAllowed("GET", "/api/compatibility"), true);
   assert.equal(isAgentControlApiRouteAllowed("GET", "/api/sessions"), true);
   assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/prompt"), true);
+  assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/restart"), true);
+  assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/config"), true);
   assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/worktrees"), true);
   assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/worktrees/attach"), true);
   assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/worktrees/select"), true);

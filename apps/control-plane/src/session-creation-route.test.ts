@@ -127,6 +127,35 @@ test("No Project session creation remains user-scoped", () => {
   }
 });
 
+test("agent-authenticated creation preserves an omitted Project for parent inheritance", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    db.registerRunner(runner, 2, 53);
+    assert.ok(db.findProjectLocation(runner.runnerId, runner.workspaces[0]!.id));
+
+    const inherited = resolveSessionCreationOwnership(db, null, request(), {
+      preserveOmittedProject: true,
+    });
+    assert.equal(inherited.ok, true);
+    if (inherited.ok) {
+      assert.equal(inherited.body.projectId, undefined);
+      assert.equal(inherited.body.projectLocationId, undefined);
+      assert.equal(inherited.scope, undefined);
+    }
+
+    const explicitNoProject = resolveSessionCreationOwnership(db, null, {
+      ...request(), projectId: null, projectLocationId: null,
+    }, { preserveOmittedProject: true });
+    assert.equal(explicitNoProject.ok, true);
+    if (explicitNoProject.ok) {
+      assert.equal(explicitNoProject.body.projectId, null);
+      assert.equal(explicitNoProject.body.projectLocationId, null);
+    }
+  } finally {
+    db.close();
+  }
+});
+
 test("Project assignment permits shared targets but protects detach authority", () => {
   const db = ControlPlaneDb.open(":memory:");
   try {

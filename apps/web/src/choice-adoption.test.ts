@@ -103,9 +103,10 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/NewRunDialog.tsx", "native-select", 6],
   ["components/NewRunDialog.tsx", "workflow-preset", 3],
   ["components/NewSessionDialog.tsx", "agent-pick", 2],
-  ["components/NewSessionDialog.tsx", "loc-pick", 4],
-  ["components/NewSessionDialog.tsx", "native-select", 5],
-  ["components/NewSessionDialog.tsx", "workflow-preset", 3],
+  /* Down from 5 on 2026-09-11: Machine, Workspace and Execution Target adopted the shared Select.
+     The two left are Project and Agent, which #218 specifies as SEARCHABLE comboboxes — migrating
+     them to the plain listbox first would mean rewriting both controls twice. */
+  ["components/NewSessionDialog.tsx", "native-select", 2],
   ["components/OnboardRunnerDialog.tsx", "seg", 2],
   ["components/PeopleDevicesPanel.tsx", "access-choice", 2],
   ["components/PeopleDevicesPanel.tsx", "native-select", 4],
@@ -126,7 +127,13 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/BrowserPanel.tsx", "raw-radiogroup", 2],
   ["components/FilesPanel.tsx", "raw-radiogroup", 3],
   ["components/NewRunDialog.tsx", "raw-radiogroup", 5],
-  ["components/NewSessionDialog.tsx", "raw-radiogroup", 10],
+  /* Down from 10 on 2026-09-11: the Harness picker adopted ChoiceCards, retiring its bespoke
+     `.workflow-preset` radiogroup and its two radios. The remaining seven are the two `.loc-pick`
+     Location groups, the Advanced Agents radio group, and the Additional Directories checkbox. */
+  /* Down from 7 on 2026-09-11: both `.loc-pick` Location groups adopted ChoiceCards. The three
+     that remain are the Advanced Agents radio group and the Additional Directories checkbox, which
+     wait on the Agent-selection rework in #218. */
+  ["components/NewSessionDialog.tsx", "raw-radiogroup", 3],
   ["components/OnboardRunnerDialog.tsx", "raw-radiogroup", 2],
   ["components/PeopleDevicesPanel.tsx", "raw-radiogroup", 3],
   ["components/ReviewPanel.tsx", "raw-radiogroup", 9],

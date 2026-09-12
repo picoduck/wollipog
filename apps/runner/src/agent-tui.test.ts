@@ -7,6 +7,7 @@ import type { SessionMeta } from "./session-store.js";
 import { agentTuiLaunch, prepareAgentTuiLaunch } from "./agent-tui.js";
 import { provisionAgentControl } from "./agent-control.js";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
+import { waitForPendingKills } from "./spawn.js";
 import { openWindowsConpty } from "./windows-conpty.js";
 
 function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
@@ -70,7 +71,7 @@ test("Windows agent TUI launch supports cmd shims inside ConPTY", () => {
   });
 });
 
-test("Windows cmd shim receives spaced and metacharacter TUI args intact through ConPTY", { skip: process.platform !== "win32" }, async () => {
+test("Windows cmd shim receives spaced and metacharacter TUI args intact through ConPTY", { skip: process.platform !== "win32" }, async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "wollipog-tui-argv (x86) & Tools "));
   const capture = join(dir, "capture.cjs");
   const shim = join(dir, "echo args.cmd");
@@ -102,6 +103,7 @@ test("Windows cmd shim receives spaced and metacharacter TUI args intact through
   });
   let output = "";
   child.stdout.on("data", (chunk) => { output += chunk.toString(); });
+  const closed = new Promise<void>((resolve) => { child.once("close", () => resolve()); });
   try {
     const started = Date.now();
     while (!output.includes("TUI_ARGV=") && Date.now() - started < 10_000) {
@@ -111,8 +113,22 @@ test("Windows cmd shim receives spaced and metacharacter TUI args intact through
     assert.ok(encoded, output);
     assert.deepEqual(JSON.parse(encoded), argv);
   } finally {
+    // kill() only starts taskkill, so the shim can still hold this directory as its working
+    // directory once the call returns, and Windows then rejects the removal with EPERM - which
+    // force: true does not suppress. Wait for the pseudoconsole to close and the kill to land.
     child.kill();
-    rmSync(dir, { recursive: true, force: true });
+    await new Promise<void>((resolve) => {
+      const expiry = setTimeout(resolve, 10_000);
+      void closed.then(() => { clearTimeout(expiry); resolve(); });
+    });
+    await waitForPendingKills(10_000);
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    } catch (error) {
+      // The assertions above have already decided this test. A temp directory the OS still holds
+      // open is the runner image's to reap; failing here would look just like an argv regression.
+      t.diagnostic(`ConPTY temp directory cleanup failed: ${String(error)}`);
+    }
   }
 });
 

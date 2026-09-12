@@ -20,21 +20,16 @@ function harnessPath(page: Page): string | null {
   return new URL(page.url()).searchParams.get("path");
 }
 
-test("Inbox attention navigation contains keyboard shortcuts and retains exact request identity", async ({ page }) => {
+test("Inbox rows name their pending request and F2 opens the session on it without approving", async ({ page }) => {
   await openHarness(page);
   const row = page.locator(".inbox-row-shell", { hasText: "Approval Session" });
+  // No disclosure under the card (#896): the pill says what is pending, and F2 goes to it.
+  await expect(row.locator(".attention-requests")).toHaveCount(0);
+  await expect(row.locator(".inbox-status-pill.blocked")).toHaveAttribute("aria-label", "Attention: Approval Required");
   await row.locator(".inbox-row").click();
-  const summary = row.locator(".attention-requests > summary");
-  await summary.focus();
-  await summary.press("a");
-  expect(await page.evaluate(() => window.__approveCalls)).toEqual([]);
-  await expect(summary).toHaveText("1 Request");
-  await summary.press("Enter");
-  await row.getByRole("button", { name: "View All Requests", exact: true }).press("Escape");
-  await expect(summary).toBeFocused();
-  await expect(row.locator(".attention-requests")).not.toHaveAttribute("open");
-  await summary.press("Space");
-  await row.getByRole("button", { name: "Request 1 · Approval Required", exact: true }).press("Enter");
+  const grid = page.getByRole("grid", { name: "Sessions", exact: true });
+  await grid.focus();
+  await grid.press("F2");
   expect(harnessPath(page)).toMatch(/\/attention\/~[^/]+\?epoch=0$/);
   expect(await page.evaluate(() => window.__approveCalls)).toEqual([]);
 });

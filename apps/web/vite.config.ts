@@ -4,13 +4,19 @@ import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { DESKTOP_EXCLUDED_ASSETS, isDesktopBuild, stripManifestLink } from "./src/desktop-bundle.js";
+import { webviewTargets } from "./src/css-support.js";
 
 const appRoot = dirname(fileURLToPath(import.meta.url));
 
 // Keep production output compatible with the webviews supported by the desktop application rather
-// than inheriting a moving Vite default. Windows 11 WebView2 and current WebKitGTK are newer than
-// these floors; Safari 16 is the conservative macOS WebKit floor used for packaged builds.
-export const WOLLIPOG_WEBVIEW_TARGETS = ["chrome107", "edge107", "firefox104", "safari16"];
+// than inheriting a moving Vite default.
+//
+// COMPUTED, not declared (#914). A hand-written list drifted silently for exactly as long as nobody
+// checked it: a build target is not a validator, so the stylesheet adopted `:has()`, `color-mix()`,
+// and container queries while the list still named versions that could parse none of them. Deriving
+// it from `FEATURE_SUPPORT` means adopting a newer feature raises the floor in the same commit, and
+// `css-support.test.ts` fails if the stylesheet uses anything that registry does not account for.
+export const WOLLIPOG_WEBVIEW_TARGETS = webviewTargets();
 
 /**
  * §23.6 — the desktop bundle ships neither a service worker nor a web-app manifest.

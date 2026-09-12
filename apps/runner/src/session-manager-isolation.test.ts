@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,20 @@ import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { ProviderStateCleanupJournal } from "./provider-state-reconciliation.js";
 import { requestedWorktreeBoundary, setStatfsForTests } from "./worktree.js";
+
+/** Cloud placements snapshot the session's real host worktree and launch re-proves that exact
+ * coordinate before any adapter runs, so these fixtures materialize one instead of naming a path
+ * that was never a worktree. */
+function hostWorktree(root: string, sessionId: string): { repoPath: string; worktreePath: string } {
+  const repoPath = join(root, "repo");
+  const worktreePath = join(root, "worktree");
+  execFileSync("git", ["init", "-q", repoPath]);
+  execFileSync("git", ["-C", repoPath, "config", "user.email", "test@example.com"]);
+  execFileSync("git", ["-C", repoPath, "config", "user.name", "Test"]);
+  execFileSync("git", ["-C", repoPath, "commit", "-q", "--allow-empty", "-m", "base"]);
+  execFileSync("git", ["-C", repoPath, "worktree", "add", "-q", "-b", `agent/${sessionId}`, worktreePath]);
+  return { repoPath, worktreePath };
+}
 
 function meta(): SessionMeta {
   return {
@@ -388,7 +403,7 @@ test("cloud launch persists a content-safe receipt, keeps the reconnect key runn
     const store = new SessionStore(root);
     const target = cloudTarget();
     store.create({
-      ...meta(), worktreePath: "/repo-worktree", executionTarget: target,
+      ...meta(), ...hostWorktree(root, "s1"), executionTarget: target,
       executionHandoffRequest: { artifacts: [] }, config: { costBudgetUsd: 5 },
     });
     const isolation = {
@@ -439,7 +454,7 @@ test("a newly prepared cloud allocation is cancelled when driver construction fa
     const store = new SessionStore(root);
     const target = cloudTarget();
     store.create({
-      ...meta(), worktreePath: "/repo-worktree", executionTarget: target,
+      ...meta(), ...hostWorktree(root, "s1"), executionTarget: target,
       executionHandoffRequest: { artifacts: [] }, config: { costBudgetUsd: 5 },
     });
     const receipt = {
@@ -480,7 +495,7 @@ test("a cloud allocation prepared after its session row is deleted is cancelled"
     const store = new SessionStore(root);
     const target = cloudTarget();
     store.create({
-      ...meta(), worktreePath: "/repo-worktree", executionTarget: target,
+      ...meta(), ...hostWorktree(root, "s1"), executionTarget: target,
       executionHandoffRequest: { artifacts: [] }, config: { costBudgetUsd: 5 },
     });
     const receipt = {
@@ -535,7 +550,7 @@ test("a superseded cloud launch does not cancel the replacement session's handof
     const store = new SessionStore(root);
     const target = cloudTarget();
     store.create({
-      ...meta(), worktreePath: "/repo-worktree", executionTarget: target,
+      ...meta(), ...hostWorktree(root, "s1"), executionTarget: target,
       executionHandoffRequest: { artifacts: [] }, config: { costBudgetUsd: 5 },
     });
     const receipt = {

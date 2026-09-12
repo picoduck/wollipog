@@ -322,10 +322,12 @@ test("offline Composer Response preserves its draft boundary and recovers after 
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/agent-questions-e2e.html?style=composer&offline=1");
   const response = page.locator(".composer-answer-input");
-  await expect(response).toBeDisabled();
+  await expect(response).toHaveAttribute("aria-disabled", "true");
+  await expect(response).toHaveAttribute("readonly", "");
   await expect(page.locator(".composer-answer-help")).toContainText("Responses are unavailable until the runner reconnects");
   await page.evaluate(() => window.setAgentQuestionOnline(true));
-  await expect(response).toBeEnabled();
+  await expect(response).not.toHaveAttribute("aria-disabled", "true");
+  await expect(response).not.toHaveAttribute("readonly", "");
   await response.fill("1");
   await response.press("Enter");
   await expect(page.getByRole("status")).toHaveText("Question Answered");

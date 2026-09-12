@@ -605,6 +605,7 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
     routePath === "/api/skill-groups" || routePath.startsWith("/api/skill-groups/") ||
     routePath === "/api/skill-assignments" || routePath.startsWith("/api/skill-assignments/") ||
     routePath === "/api/runners/:id/skills" ||
+    routePath === "/api/runners/:id/capacity" ||
     routePath === "/api/runners/:id/skills/sync" ||
     routePath === "/api/runners/:id/skill-snapshots" ||
     routePath.startsWith("/api/skill-machine/") ||
@@ -1076,6 +1077,9 @@ app.register(async (instance) => {
           serverTime: Date.now(),
           heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
           protocolVersion: PROTOCOL_VERSION,
+          ...(runnerSupportsProtocol(msg.protocolVersion, "machineRunnerCapacity")
+            ? { runnerCapacity: db.machineRunnerCapacityConfiguration(runnerId) ?? undefined }
+            : {}),
         });
         // Close/forget requests made while this runner was offline are durable. The registered
         // frame is ordered first, so the runner can safely process these immediately afterward.
@@ -1123,6 +1127,7 @@ app.register(async (instance) => {
           msg.worktreePath,
           runnerId ?? undefined,
           msg.controlPlaneLaunchId,
+          msg.capacityWait,
         );
         break;
       case "stop_session_result":
@@ -1143,6 +1148,11 @@ app.register(async (instance) => {
           }
         }
         break;
+      case "policy_hook_decision_recorded":
+        if (runnerId && !hub.resolveRunnerRequest(msg, runnerId)) {
+          app.log.warn(`runner ${runnerId} sent an unsolicited policy-hook decision receipt`);
+        }
+        break;
       case "agent_control_credential":
         {
           const accepted = db.setAgentControlCredential(msg.sessionId, runnerId!, msg.tokenHash, Date.now());
@@ -1160,6 +1170,13 @@ app.register(async (instance) => {
         break;
       case "session_runtime_updated":
         svc.applySessionRuntimeUpdate(runnerId!, msg.snapshot);
+        break;
+      case "governance_tripped":
+        if (!runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "governanceTripReporting")) {
+          app.log.warn(`runner ${runnerId} sent a governance trip without negotiated support`);
+          break;
+        }
+        svc.onGovernanceTripped(runnerId!, msg);
         break;
       case "session_event":
         svc.onSessionEvent(msg.sessionId, msg.payload, msg.seq, msg.ts, runnerId ?? undefined);
@@ -1188,6 +1205,17 @@ app.register(async (instance) => {
           pushSkillsSync(msg.runnerId);
           app.log.info(`runner ${msg.runnerId} agents: [${msg.agents.map((a) => a.id).join(", ")}]`);
         }
+        break;
+      case "runner_capacity_status":
+        if (!runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "machineRunnerCapacity")) {
+          app.log.warn(`runner ${runnerId} sent capacity status without negotiated support`);
+          break;
+        }
+        if (!db.updateRunnerCapacityStatus(runnerId!, msg.status, Date.now())) {
+          app.log.warn(`runner ${runnerId} sent invalid or stale capacity status`);
+          break;
+        }
+        hub.runnerChanged(runnerId!);
         break;
       case "subscription_usage_updated":
         if (!runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "subscriptionUsage")) {
@@ -2376,6 +2404,45 @@ app.patch("/api/runners/:id", async (req, reply) => {
   return { ok: true };
 });
 
+app.put("/api/runners/:id/capacity", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (!principal || !db.canManageRunner(principal, id)) {
+    return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
+  }
+  const body = (req.body ?? {}) as { configuredUnits?: unknown; expectedRevision?: unknown };
+  if (!Number.isInteger(body.configuredUnits) || (body.configuredUnits as number) < 1 ||
+      (body.configuredUnits as number) > 256) {
+    return reply.code(400).send({ error: "configuredUnits must be an integer from 1 to 256" });
+  }
+  if (!Number.isSafeInteger(body.expectedRevision) || (body.expectedRevision as number) < 0) {
+    return reply.code(400).send({ error: "expectedRevision must be a non-negative integer" });
+  }
+  const runner = db.getRunner(id);
+  const boxId = db.boxIdForRunner(id);
+  if (!runner && !boxId) return reply.code(404).send({ error: "runner not found" });
+  if (runner?.status === "online" && !runnerSupportsProtocol(runner.protocolVersion, "machineRunnerCapacity")) {
+    return reply.code(409).send({
+      error: runnerCapabilityRequirement(runner.protocolVersion, "machineRunnerCapacity", "Runner Capacity changes"),
+    });
+  }
+  const changed = db.setMachineRunnerCapacity(
+    id,
+    body.configuredUnits as number,
+    body.expectedRevision as number,
+    Date.now(),
+  );
+  if (!changed.ok) {
+    return reply.code(409).send({ error: "Runner Capacity changed in another client", current: changed.configuration });
+  }
+  if (runner?.status === "online") {
+    hub.sendToRunner(id, { type: "configure_runner_capacity", ...changed.configuration });
+  }
+  hub.runnerChanged(id);
+  if (boxId) hub.boxChanged(boxId);
+  return { capacity: changed.configuration };
+});
+
 app.delete("/api/runners/:id", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   if (hub.isRunnerOnline(id)) return reply.code(409).send({ error: "runner is online — stop it before removing" });
@@ -3271,7 +3338,12 @@ app.post("/api/sessions", async (req, reply) => {
   if (body.launchSurface !== undefined && body.launchSurface !== "direct" && body.launchSurface !== "native_tui") {
     return reply.code(400).send({ error: "launchSurface must be direct or native_tui" });
   }
-  const ownership = resolveSessionCreationOwnership(db, principal, body);
+  const ownership = resolveSessionCreationOwnership(
+    db,
+    principal,
+    body,
+    { preserveOmittedProject: Boolean(parentSessionId) },
+  );
   if (!ownership.ok) return reply.code(ownership.status).send({ error: ownership.error });
   const launchError = nativeTuiCreationError(db, hub, ownership.body);
   if (launchError) return reply.code(launchError.status).send({ error: launchError.error });
@@ -3445,7 +3517,7 @@ app.post("/api/sessions/:id/policy-hook", { bodyLimit: 128 * 1024 }, async (req,
     return reply.code(403).send({ error: "policy hook session claim does not match the route" });
   }
   if (!pollHeader.ok) return reply.code(403).send({ error: "policy hook capability headers conflict" });
-  return respond(reply, svc.evaluatePolicyHook(
+  return respond(reply, await svc.evaluatePolicyHookCausally(
     id,
     req.body,
     pollHeader.value === POLICY_HOOK_POLL_CAPABILITY,
@@ -3463,12 +3535,14 @@ app.post("/api/sessions/:id/approve", async (req, reply) => {
 
 app.get("/api/sessions/:id/governance-audit", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const rawLimit = (req.query as { limit?: string }).limit;
+  const query = req.query as { limit?: string; before?: string };
+  const rawLimit = query.limit;
   const limit = rawLimit == null ? 200 : Number(rawLimit);
   if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
     return reply.code(400).send({ error: "limit must be an integer between 1 and 500" });
   }
-  return { entries: svc.governanceAudit(id, limit) };
+  const before = typeof query.before === "string" && query.before ? query.before : undefined;
+  return respond(reply, svc.governanceAuditPage(id, limit, before));
 });
 
 function questionPolicyAdministrator(req: FastifyRequest) {
@@ -3636,7 +3710,9 @@ async function runSessionWorktreeRequest(
     if (!res.ok || !res.snapshot) return reply.code(409).send({ error: res.error ?? "worktree operation failed" });
     db.updateSessionFromSnapshot(sessionId, res.snapshot, Date.now());
     if (request.operation !== "create") worktreeCreates.invalidateSession(sessionId);
-    return { worktree: res.worktree, session: db.getSession(sessionId) };
+    // v133+ runners say whether a live platform sandbox can already write to an attached path.
+    // A pre-v133 runner omits it, and the field stays absent rather than being guessed here.
+    return { worktree: res.worktree, session: db.getSession(sessionId), ...(res.isolation ? { isolation: res.isolation } : {}) };
   } catch (error) {
     return reply.code(502).send({ error: (error as Error).message });
   }

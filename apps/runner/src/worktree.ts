@@ -96,8 +96,9 @@ export interface SessionWorktreeHandle extends WorktreeHandle {
 }
 
 export interface RequestedWorktreeOptions extends WorktreeOptions {
-  /** Exact configured Project Location roots. Existing worktrees may only be attached from one of
-   * these roots (or from the runner-owned worktree root). */
+  /** Exact configured Project Location roots. An existing worktree may be attached when one of
+   * these roots contains the repository that registers it, when the worktree itself sits inside
+   * one of them, or when it sits inside the runner-owned worktree root. */
   allowedProjectPaths?: string[];
 }
 
@@ -495,7 +496,7 @@ function parseWorktreePorcelain(value: string): ListedWorktree[] {
   });
 }
 
-function pathWithin(context: AgentContext, candidate: string, root: string): boolean {
+export function pathWithin(context: AgentContext, candidate: string, root: string): boolean {
   if (sameWorktreePath(context, candidate, root)) return true;
   if (context.kind === "wsl") return candidate.startsWith(root.replace(/\/$/u, "") + "/");
   const normalizedCandidate = canonicalNativePath(candidate).replace(/\\/gu, "/");
@@ -505,8 +506,15 @@ function pathWithin(context: AgentContext, candidate: string, root: string): boo
     .startsWith((insensitive ? normalizedRoot.toLowerCase() : normalizedRoot) + "/");
 }
 
-/** Attach only a Git-registered linked worktree from the same repository and an operator-configured
- * location boundary. Merely existing on disk is insufficient. */
+/** Attach only a Git-registered linked worktree of the session's own repository. Merely existing on
+ * disk is insufficient — and so is living inside a configured Project Location, which is not what
+ * ties a worktree to a project. The repository's worktree list is that authoritative link, so the
+ * Location boundary is applied to the REPOSITORY rather than to the worktree's own directory: a
+ * worktree a configured project registers may live anywhere, which the common
+ * `../<repo>-worktrees/<slug>` layout beside the checkout routinely does. This never widens what a
+ * session may reach beyond its own repository's worktrees, because registration is still required.
+ * Callers re-verifying an already-attributed coordinate keep passing that exact path, and the
+ * runner-owned session boundary stays accepted on its own. */
 export async function attachRequestedWorktree(
   repoPath: string,
   sessionId: string,
@@ -515,20 +523,65 @@ export async function attachRequestedWorktree(
 ): Promise<SessionWorktreeHandle> {
   const context = options.context ?? nativeContext;
   const path = safeGitArgument(requestedPath, "worktree path");
-  const runnerBoundary = await requestedWorktreeBoundary(repoPath, sessionId, options, false);
-  const allowed = [runnerBoundary, ...(options.allowedProjectPaths ?? [])];
-  if (!allowed.some((root) => pathWithin(context, path, root))) {
-    throw new Error("worktree path is outside the runner's configured Project Locations");
-  }
   const listed = parseWorktreePorcelain(await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]));
+  // Git documents the main worktree first, so this is the repository every listed entry belongs
+  // to. It is named in both refusals below: a caller has to be able to tell "this repository does
+  // not know that path" from "no Project Location covers this repository".
+  const repository = listed.find((entry) => entry.primary)?.path ?? repoPath;
+  if (!listed.some((entry) => sameWorktreePath(context, entry.path, path))) {
+    throw new Error(`worktree path is not registered by the repository it was matched against (${repository})`);
+  }
+  const allowedRoots = options.allowedProjectPaths ?? [];
+  const runnerBoundary = await requestedWorktreeBoundary(repoPath, sessionId, options, false);
+  const registeringRepositoryIsConfigured = allowedRoots.some((root) =>
+    pathWithin(context, repository, root) || pathWithin(context, repoPath, root));
+  const pathIsInsideAnAllowedRoot = pathWithin(context, path, runnerBoundary) ||
+    allowedRoots.some((root) => pathWithin(context, path, root));
+  if (!registeringRepositoryIsConfigured && !pathIsInsideAnAllowedRoot) {
+    throw new Error(
+      `worktree path matched none of the runner's configured Project Locations: the repository that registers it (${repository}) is outside every configured Location`,
+    );
+  }
+  return registeredSessionWorktree(repoPath, path, options);
+}
+
+/** Prove a path is still a usable linked worktree of `repoPath`: registered, not the primary
+ * workspace, not detached, and healthy. Split out of attachRequestedWorktree() so callers that
+ * already hold a runner-persisted coordinate can re-prove it without the Project Locations boundary
+ * check — and, more importantly, without the boundary's `mkdir`, which has no business running on a
+ * read path such as a file listing. */
+export async function registeredSessionWorktree(
+  repoPath: string,
+  requestedPath: string,
+  options: WorktreeOptions = {},
+): Promise<SessionWorktreeHandle> {
+  const context = options.context ?? nativeContext;
+  const path = safeGitArgument(requestedPath, "worktree path");
+  const listed = parseWorktreePorcelain(await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]));
+  const repository = listed.find((entry) => entry.primary)?.path ?? repoPath;
   const match = listed.find((entry) => sameWorktreePath(context, entry.path, path));
-  if (!match) throw new Error("worktree path is not registered with the session repository");
+  if (!match) {
+    throw new Error(`worktree path is not registered by the repository it was matched against (${repository})`);
+  }
   if (match.primary) {
     throw new Error("the repository's primary workspace cannot be attached as a session worktree");
   }
   if (!match.branch || !match.head) throw new Error("a detached worktree cannot be attached to a session");
   const healthy = (await command(context, match.path, ["rev-parse", "--is-inside-work-tree"])).trim() === "true";
   if (!healthy) throw new Error("registered worktree is not healthy");
+  // Registration proves only that the repository once recorded this path, and the health check
+  // proves only that *some* work tree is there now. A stale or tampered record whose directory has
+  // since become — or come to symlink to — a different repository would otherwise be accepted, and
+  // bound writable at the next launch, handing the session a repository it never had. Registration
+  // is what bounds reach here, so compare the repository each side actually resolves to rather than
+  // trusting the path that named it.
+  const [attachedRepository, sessionRepository] = await Promise.all([
+    command(context, match.path, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+    command(context, repoPath, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+  ]);
+  if (!sameWorktreePath(context, attachedRepository.trim(), sessionRepository.trim())) {
+    throw new Error(`registered worktree belongs to a different repository than the session (${repository})`);
+  }
   return {
     path: match.path,
     branch: match.branch,
@@ -579,6 +632,43 @@ export async function reuseRegisteredLegacyWslWorktree(
     // Fail closed below so user changes are never replaced.
   }
   throw new Error("persisted legacy WSL worktree is not healthy; recover it manually before restarting this session");
+}
+
+/** The branch `createWorktree` gives a session its own worktree under `path`. Session metadata that
+ * predates `worktreeBranch` records no identity of its own, so verification derives it here instead
+ * of inventing one. The owner-instance root is the only layout that carries the hash prefix: a
+ * pre-attestation worktree under the legacy home root keeps the plain name even on an owner-hashed
+ * runner, because that is the branch `createWorktree` reuses it under. Matching the owner root
+ * positively — rather than ruling the legacy root out — keeps an unusual WSL `$HOME` from
+ * misclassifying a real owner-rooted path. Deliberately free of WSL command execution so every case
+ * is covered on any CI host. */
+/** True when `path` is exactly this session's pre-attestation legacy WSL worktree: the root
+ * `worktreeRootPath({ legacyWslRoot: true })` builds, followed by this repository's key and session
+ * id. Deciding it by that whole suffix rather than by a bare `/.agent-manager/worktrees/` substring
+ * is what keeps an owner-instance path out: its own `worktrees` segment sits under
+ * `runner-instances/<ownerHash>`, so it can never end this way, however unusual the distro user's
+ * `$HOME` is. `$HOME` is deliberately not consulted — resolving it costs a round trip into the
+ * distro, and `reuseRegisteredLegacyWslWorktree()` re-proves the whole path before reusing
+ * anything, so a wrong guess here fails closed rather than adopting a foreign tree. */
+export function isLegacyWslSessionWorktreePath(
+  path: string,
+  repoPath: string,
+  sessionId: string,
+): boolean {
+  return path.replace(/\/$/u, "")
+    .endsWith(`/.agent-manager/worktrees/${repoKey(repoPath)}/${sessionId}`);
+}
+
+export function sessionWorktreeBranch(
+  sessionId: string,
+  path: string,
+  context: AgentContext,
+  ownerHash?: string,
+): string {
+  return context.kind === "wsl" && ownerHash &&
+    path.includes(`/.agent-manager/runner-instances/${ownerHash}/worktrees/`)
+    ? `agent/${ownerHash.slice(0, 16)}/${sessionId}`
+    : `agent/${sessionId}`;
 }
 
 export async function createWorktree(repoPath: string, sessionId: string, options: WorktreeOptions = {}): Promise<WorktreeHandle> {
@@ -677,6 +767,10 @@ export async function worktreeHead(worktreePath: string, options: WorktreeOption
 }
 
 export type PullRequestLifecycleState = "open" | "merged" | "closed";
+export type PullRequestLifecycleProof = {
+  state: PullRequestLifecycleState;
+  headOid?: string;
+};
 type LinkedChangeRequest = {
   provider: ForgeProvider;
   host: string;
@@ -705,16 +799,27 @@ function linkedChangeRequest(value: string): LinkedChangeRequest | null {
 export function parseWorktreePullRequestState(
   raw: string,
   expectedUrl: string,
-): PullRequestLifecycleState | null {
+): PullRequestLifecycleProof | null {
   const expected = linkedChangeRequest(expectedUrl);
   if (!expected) return null;
   try {
-    const parsed = JSON.parse(raw) as { url?: unknown; web_url?: unknown; state?: unknown };
-    if ((expected.provider === "github" ? parsed.url : parsed.web_url) !== expectedUrl || typeof parsed.state !== "string") return null;
+    const parsed = JSON.parse(raw) as {
+      url?: unknown;
+      web_url?: unknown;
+      state?: unknown;
+      headRefOid?: unknown;
+      sha?: unknown;
+    };
+    const headOid = expected.provider === "github" ? parsed.headRefOid : parsed.sha;
+    if ((expected.provider === "github" ? parsed.url : parsed.web_url) !== expectedUrl ||
+        typeof parsed.state !== "string") return null;
+    const proof = typeof headOid === "string" && /^[a-f0-9]{40,64}$/iu.test(headOid)
+      ? { headOid: headOid.toLowerCase() }
+      : {};
     const state = parsed.state.toUpperCase();
-    if (state === "OPEN" || state === "OPENED") return "open";
-    if (state === "MERGED") return "merged";
-    if (state === "CLOSED") return "closed";
+    if (state === "OPEN" || state === "OPENED") return { state: "open", ...proof };
+    if (state === "MERGED") return { state: "merged", ...proof };
+    if (state === "CLOSED") return { state: "closed", ...proof };
     return null;
   } catch {
     return null;
@@ -727,7 +832,7 @@ export async function worktreePullRequestState(
   worktreePath: string,
   pullRequestUrl: string,
   options: WorktreeOptions & { provider?: ForgeProvider } = {},
-): Promise<PullRequestLifecycleState | null> {
+): Promise<PullRequestLifecycleProof | null> {
   const request = linkedChangeRequest(pullRequestUrl);
   if (!request || (request.provider === "gitlab" && options.provider !== "gitlab")) return null;
   try {
@@ -735,7 +840,7 @@ export async function worktreePullRequestState(
       options.context ?? nativeContext,
       request.provider === "github" ? "gh" : "glab",
       request.provider === "github"
-        ? ["pr", "view", pullRequestUrl, "--json", "url,state"]
+        ? ["pr", "view", pullRequestUrl, "--json", "url,state,headRefOid"]
         : [
           "api", `projects/${encodeURIComponent(request.project)}/merge_requests/${request.number}`,
           "--hostname", request.host,
@@ -763,7 +868,7 @@ export async function discardWorktreeIfSafe(
   repoPath: string,
   sessionId: string,
   handle: WorktreeHandle & { source: "legacy" | "created" },
-  options: WorktreeOptions = {},
+  options: WorktreeOptions & { verifiedMergedHead?: string } = {},
 ): Promise<SafeWorktreeDiscardResult> {
   const context = options.context ?? nativeContext;
   const branch = await validateBranch(context, repoPath, handle.branch);
@@ -817,18 +922,27 @@ export async function discardWorktreeIfSafe(
     }
     if (!/^[a-f0-9]{40,64}$/u.test(head)) return { removed: false, reason: "unavailable" };
 
+    let hasUpstream = true;
     try {
       await command(context, repoPath, ["rev-parse", "--verify", `${branch}@{upstream}`]);
     } catch {
-      return { removed: false, reason: "no_upstream" };
+      hasUpstream = false;
     }
-    const ahead = (await command(
-      context,
-      repoPath,
-      ["rev-list", "--count", `${branch}@{upstream}..${ref}`],
-    )).trim();
-    if (!/^\d+$/u.test(ahead)) return { removed: false, reason: "unavailable" };
-    if (ahead !== "0") return { removed: false, reason: "unpushed" };
+    if (hasUpstream) {
+      const ahead = (await command(
+        context,
+        repoPath,
+        ["rev-list", "--count", `${branch}@{upstream}..${ref}`],
+      )).trim();
+      if (!/^\d+$/u.test(ahead)) return { removed: false, reason: "unavailable" };
+      if (ahead !== "0") return { removed: false, reason: "unpushed" };
+    } else {
+      const mergedHead = options.verifiedMergedHead;
+      if (typeof mergedHead !== "string" || !/^[a-f0-9]{40,64}$/u.test(mergedHead)) {
+        return { removed: false, reason: "no_upstream" };
+      }
+      if (mergedHead !== head) return { removed: false, reason: "unpushed" };
+    }
 
     if (registered) {
       // Close the widest observable race before the non-force removal. Git independently rejects

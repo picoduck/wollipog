@@ -28,7 +28,15 @@ export function handoffDestinationError(
   if (!model) return "Choose a supported destination model.";
   if (config.effort && !(model.efforts?.length ? model.efforts : capabilities?.effortLevels)?.includes(config.effort)) return "The destination does not support this effort.";
   if (config.permissionMode && !capabilities?.permissionModes?.includes(config.permissionMode)) return "The destination does not support this permission mode.";
-  if (Object.keys(config).some((key) => !["model", "effort", "permissionMode"].includes(key))) return "Unsupported handoff settings.";
+  // A service tier is a cost and latency choice the user made deliberately, so it travels with the
+  // handoff rather than being silently replaced by the destination's default. `default` is the
+  // provider-standard tier and is always available; anything else must be advertised by this exact
+  // model, because tier catalogs are per-model open strings.
+  if (config.serviceTier && config.serviceTier !== "default" &&
+      !model.serviceTiers?.some((tier) => tier.id === config.serviceTier)) {
+    return "The destination does not support this service tier.";
+  }
+  if (Object.keys(config).some((key) => !["model", "effort", "permissionMode", "serviceTier"].includes(key))) return "Unsupported handoff settings.";
   return null;
 }
 

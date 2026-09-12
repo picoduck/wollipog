@@ -352,12 +352,19 @@ function RunnerDetails({ runner, online }: { runner: RunnerView; online: boolean
             <dt>Last Seen</dt>
             <dd>{relativeTime(runner.lastSeen)}</dd>
           </div>
+          {runner.capacity && (
+            <div>
+              <dt>Runner Capacity</dt>
+              <dd>
+                {runner.capacity.usedUnits === undefined
+                  ? `${runner.capacity.configuredUnits} Units`
+                  : `${runner.capacity.usedUnits} of ${runner.capacity.configuredUnits} Units Used`}
+              </dd>
+            </div>
+          )}
           {runner.runtime && (
             <>
-              <div>
-                <dt>Capacity</dt>
-                <dd>{runner.runtime.maxConcurrentSessions} Units</dd>
-              </div>
+              {!runner.capacity && <div><dt>Runner Capacity</dt><dd>{runner.runtime.maxConcurrentSessions} Units</dd></div>}
               {formatAdmissionPolicy(runner.runtime) && (
                 <div>
                   <dt>Admission Policy</dt>
@@ -589,11 +596,13 @@ function MachineSettingsDialog({
   box,
   onClose,
   onDelete,
+  capacityOnly = false,
 }: {
   runner: RunnerView | undefined;
   box?: BoxView;
   onClose: () => void;
   onDelete: () => Promise<void>;
+  capacityOnly?: boolean;
 }) {
   const api = useApi();
   const { confirm } = useFeedback();
@@ -602,6 +611,10 @@ function MachineSettingsDialog({
   const configuredName = runner?.displayName ?? box?.displayName ?? "";
   const [machineName, setMachineName] = useState(configuredName || display.name);
   const [savingName, setSavingName] = useState(false);
+  const configuredCapacity = runner?.capacity?.configuredUnits ?? runner?.runtime?.maxConcurrentSessions;
+  const [runnerCapacity, setRunnerCapacity] = useState(configuredCapacity?.toString() ?? "");
+  const [capacityRevision, setCapacityRevision] = useState(runner?.capacity?.revision ?? 0);
+  const [savingCapacity, setSavingCapacity] = useState(false);
   const [addingWorkspace, setAddingWorkspace] = useState(false);
   const [browsing, setBrowsing] = useState(false);
   const [workspacePath, setWorkspacePath] = useState("");
@@ -613,6 +626,9 @@ function MachineSettingsDialog({
   const canBrowse = runner?.status === "online" &&
     runnerSupportsProtocol(runner.protocolVersion, "directoryListing");
   const onlineNativeRunner = !box && runner?.status === "online";
+  const capacitySupported = !!runner && runnerSupportsProtocol(runner.protocolVersion, "machineRunnerCapacity");
+  const capacityValue = Number(runnerCapacity);
+  const capacityValid = Number.isInteger(capacityValue) && capacityValue >= 1 && capacityValue <= 256;
 
   const saveName = async () => {
     const nextName = machineName.trim();
@@ -633,6 +649,24 @@ function MachineSettingsDialog({
     if (!nameEdited) setWorkspaceName(workspaceNameFromPath(path));
     setBrowsing(false);
     setError(null);
+  };
+
+  const saveCapacity = async () => {
+    if (!runner || !capacityValid || savingCapacity || runner.canManage !== true) return;
+    setSavingCapacity(true);
+    setError(null);
+    try {
+      const result = await api.updateMachineCapacity(runner.runnerId, {
+        configuredUnits: capacityValue,
+        expectedRevision: capacityRevision,
+      });
+      setCapacityRevision(result.capacity.revision);
+      setRunnerCapacity(result.capacity.configuredUnits.toString());
+    } catch (cause) {
+      setError(machineSettingsMutationError(cause));
+    } finally {
+      setSavingCapacity(false);
+    }
   };
 
   const addWorkspace = async () => {
@@ -718,7 +752,7 @@ function MachineSettingsDialog({
       className="machine-settings-dialog"
       footer={<button type="button" className="btn" onClick={onClose}>Close</button>}
     >
-      <section className="machine-settings-section">
+      {!capacityOnly && <section className="machine-settings-section">
         <h3>Machine Details</h3>
         <div className="machine-name-row">
           <label className="field">
@@ -744,9 +778,79 @@ function MachineSettingsDialog({
           {box && <div><dt>SSH Target</dt><dd>{box.sshTarget}</dd></div>}
           <div><dt>Machine ID</dt><dd><code>{runnerId}</code></dd></div>
         </dl>
-      </section>
+      </section>}
 
-      <section className="machine-settings-section">
+      {runner && (
+        <section className="machine-settings-section machine-capacity-settings">
+          <div className="machine-settings-heading">
+            <div>
+              <h3>Runner Capacity</h3>
+              <p>
+                Idle sessions with resident provider processes still consume capacity. Choose a limit from 1 to 256
+                based on the work this Machine can support; Wollipog does not infer it from CPU or memory.
+              </p>
+            </div>
+          </div>
+          <div className="machine-name-row">
+            <label className="field">
+              <span>Runner Capacity</span>
+              <input
+                type="number"
+                min={1}
+                max={256}
+                step={1}
+                value={runnerCapacity}
+                disabled={!capacitySupported || runner.canManage !== true}
+                onChange={(event) => setRunnerCapacity(event.target.value)}
+                onKeyDown={(event) => event.key === "Enter" && void saveCapacity()}
+              />
+            </label>
+            <button
+              type="button"
+              className="btn primary"
+              disabled={!capacitySupported || runner.canManage !== true || !capacityValid ||
+                capacityValue === configuredCapacity || savingCapacity}
+              onClick={() => void saveCapacity()}
+            >
+              {savingCapacity ? "Saving…" : "Save Capacity"}
+            </button>
+          </div>
+          {!capacitySupported && <p className="hint">{runnerCapabilityRequirement(
+            runner.protocolVersion,
+            "machineRunnerCapacity",
+            "Runner Capacity changes",
+          )}</p>}
+          {capacitySupported && runner.canManage !== true && (
+            <p className="hint">Only the Machine owner or an organization administrator can change Runner Capacity.</p>
+          )}
+          {runner.capacity?.usedUnits === undefined ? (
+            <p className="muted">Waiting for live capacity usage from this Machine.</p>
+          ) : (
+            <>
+              <dl className="runner-meta runner-system-meta" aria-label="Runner Capacity Usage">
+                <div><dt>Configured</dt><dd>{runner.capacity.configuredUnits} Units</dd></div>
+                <div><dt>Used</dt><dd>{runner.capacity.usedUnits} Units</dd></div>
+                <div><dt>Available</dt><dd>{runner.capacity.availableUnits} Units</dd></div>
+                <div><dt>Queued Sessions</dt><dd>{runner.capacity.queuedSessions}</dd></div>
+              </dl>
+              <p className="machine-capacity-summary">
+                {runner.capacity.usedUnits} of {runner.capacity.configuredUnits} Units Used · {runner.capacity.queuedSessions} Sessions Queued
+              </p>
+              {!!runner.capacity.blockers?.length && (
+                <ul className="machine-capacity-blockers" aria-label="Current Capacity Bottlenecks">
+                  {runner.capacity.blockers.map((blocker) => (
+                    <li key={`${blocker.kind}:${blocker.agentId ?? ""}:${blocker.targetId ?? ""}`}>
+                      {blocker.description} · {blocker.waitingSessions} Waiting
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          )}
+        </section>
+      )}
+
+      {!capacityOnly && <section className="machine-settings-section">
         <div className="machine-settings-heading">
           <div>
             <h3>Workspaces</h3>
@@ -814,9 +918,9 @@ function MachineSettingsDialog({
             </button>
           </div>
         )}
-      </section>
+      </section>}
 
-      <section className="machine-settings-section machine-danger-zone">
+      {!capacityOnly && <section className="machine-settings-section machine-danger-zone">
         <h3>Danger Zone</h3>
         {box?.runnerDataLayout === "legacy" && box.legacyDataAccountStatus === "adopted" && (
           <div className="machine-settings-danger-action">
@@ -867,7 +971,7 @@ function MachineSettingsDialog({
         >
           {deleting ? "Deleting…" : "Delete Machine"}
         </button>
-      </section>
+      </section>}
       {error && <div className="form-error" role="alert">{error}</div>}
     </Modal>
   );
@@ -1049,11 +1153,13 @@ export function BoxCard({
               <RefreshIcon />
               <span>{reconnecting ? "Reconnecting…" : "Reconnect"}</span>
             </button>
-            <button className="btn-rediscover" onClick={() => setShowMachineSettings(true)} title="Manage this Machine">
-              <SettingsIcon />
-              <span>Manage</span>
-            </button>
           </>
+        )}
+        {(canManage || runner?.canManage === true) && (
+          <button className="btn-rediscover" onClick={() => setShowMachineSettings(true)} title="Manage this Machine">
+            <SettingsIcon />
+            <span>Manage</span>
+          </button>
         )}
         <button
           type="button"
@@ -1100,6 +1206,7 @@ export function BoxCard({
         box={box}
         onClose={() => setShowMachineSettings(false)}
         onDelete={() => onRemove(box.boxId)}
+        capacityOnly={!canManage}
       />
     )}
     {showConnectionDetails && <BoxConnectionDetailsDialog box={box} onClose={() => setShowConnectionDetails(false)} />}
@@ -1148,7 +1255,7 @@ export function NativeRunnerCard({
           <RefreshIcon />
           <span>{busy ? "Rediscovering…" : "Rediscover"}</span>
         </button>}
-        {canManage && (
+        {(canManage || runner.canManage === true) && (
           <button
             className="btn-rediscover"
             onClick={() => onManage(runner.runnerId)}
@@ -1264,6 +1371,7 @@ export function RunnersView() {
           runner={runners.get(settingsRunnerId)}
           onClose={() => setSettingsRunnerId(null)}
           onDelete={() => api.removeRunner(settingsRunnerId)}
+          capacityOnly={!canManageMachines}
         />
       )}
     </>

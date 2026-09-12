@@ -86,8 +86,10 @@ interface PendingBackgroundTask {
 
 interface PersistentTurn {
   id: number;
+  origin: "runner" | "provider";
   promptText: string;
   images: PromptImage[];
+  done: Promise<StopReason>;
   resolve: (reason: StopReason) => void;
   settled: boolean;
   writeAcknowledged: boolean;
@@ -436,6 +438,10 @@ export class ClaudeCodeDriver implements Driver {
   /** Provider account of why the active turn produced no output, kept for the durable receipt the
    * session manager writes after `prompt()` resolves. */
   private turnErrorText: string | null = null;
+  /** Error captured at a runner-owned settlement boundary. An unsolicited provider turn may begin
+   * in the same stdout chunk before the runner promise resumes, so the next turn's accumulator
+   * cannot be the durable receipt's only source. */
+  private settledRunnerTurnErrorText: string | null = null;
   private persistentBuffer: BoundedNdjsonBuffer | null = null;
   /** Monotonic across persistent and one-shot transports so late lifecycle events cannot alias a
    * turn from the transport used before a circuit fallback. */
@@ -531,7 +537,7 @@ export class ClaudeCodeDriver implements Driver {
   }
 
   lastTurnError(): string | null {
-    return this.turnErrorText;
+    return this.settledRunnerTurnErrorText ?? this.turnErrorText;
   }
 
   setConfig(config: SessionConfig): void {
@@ -701,18 +707,10 @@ export class ClaudeCodeDriver implements Driver {
     // A disposed driver must never spawn a fresh agent process (a caller racing stop()/restart
     // against an awaited pre-turn step would otherwise launch an invisible rogue turn).
     if (this.disposed) return Promise.resolve("cancelled");
-    // Each turn names its own model: a turn that settles before any assistant record must not
-    // inherit the previous turn's, which after a model switch would misattribute it.
-    this.turnModel = null;
-    this.turnContextOccupancy = null;
-    this.turnShownText = "";
-    this.turnUnshownText = "";
-    this.turnStreamedMessageIds.clear();
-    this.turnAnonymousShownText = "";
-    this.turnAnonymousShownOverflow = false;
-    this.turnErrorText = null;
+    this.settledRunnerTurnErrorText = null;
     const capabilityError = claudeCapabilityError(this.config, images ?? [], this.opts.capabilities);
     if (capabilityError) {
+      this.settledRunnerTurnErrorText = capabilityError;
       this.cb.onEvent({ kind: "error", message: capabilityError });
       return Promise.resolve("refusal");
     }
@@ -723,7 +721,25 @@ export class ClaudeCodeDriver implements Driver {
     if (this.persistentRequested && !this.persistentCircuitOpen) {
       return this.promptPersistent(text, images, slashCommand);
     }
+    this.resetTurnEventState();
     return this.promptOneShot(text, images, slashCommand);
+  }
+
+  /** Reset fields whose values belong to exactly one provider turn. This happens when a turn
+   * actually takes ownership of the stream, not when a runner prompt is queued behind an
+   * unsolicited provider turn. Resetting at queue time would erase the provider turn's model,
+   * completion, and duplicate-suppression state while its reply is still arriving. */
+  private resetTurnEventState(): void {
+    // Each turn names its own model: a turn that settles before any assistant record must not
+    // inherit the previous turn's, which after a model switch would misattribute it.
+    this.turnModel = null;
+    this.turnContextOccupancy = null;
+    this.turnShownText = "";
+    this.turnUnshownText = "";
+    this.turnStreamedMessageIds.clear();
+    this.turnAnonymousShownText = "";
+    this.turnAnonymousShownOverflow = false;
+    this.turnErrorText = null;
   }
 
   async steer({ submissionId, text, images = [], deadlineAt }: DriverSteerInput): Promise<DriverSteerResult> {
@@ -891,6 +907,7 @@ export class ClaudeCodeDriver implements Driver {
         // that omit system/init. Refused/cancelled turns rely on init alone.
         if (r !== "refusal" && r !== "cancelled") this.markSessionEstablished();
         if (r !== "refusal" && r !== "cancelled") this.settleUnverifiedBackgroundTasks();
+        this.settledRunnerTurnErrorText = this.turnErrorText;
         resolve(r);
       };
 
@@ -987,28 +1004,66 @@ export class ClaudeCodeDriver implements Driver {
   }
 
   private promptPersistent(text: string, images?: PromptImage[], slashCommand?: string): Promise<StopReason> {
-    if (this.activePersistentTurn) {
+    const activeTurn = this.activePersistentTurn;
+    if (activeTurn?.origin === "provider") {
+      // Claude can begin a turn itself after a background-task notification. Preserve FIFO at the
+      // provider boundary: only write this real prompt once that turn's own result has arrived.
+      return activeTurn.done.then(() => {
+        if (this.disposed || this.cancelled) return "cancelled";
+        return this.promptPersistent(text, images, slashCommand);
+      });
+    }
+    if (activeTurn) {
       this.cb.onEvent({ kind: "error", message: "Claude persistent transport received overlapping prompts." });
       return Promise.resolve("refusal");
     }
+    this.resetTurnEventState();
     this.clearIdleTimer();
     this.cancelled = false;
     this.pendingApprovals.clear();
     this.streamedAgentResponse = false;
     const promptText = slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text;
-    return new Promise<StopReason>((resolve) => {
-      const turn: PersistentTurn = {
-        id: ++this.providerTurnSeq,
-        promptText,
-        images: images ?? [],
-        resolve,
-        settled: false,
-        writeAcknowledged: false,
-        launchAttempts: 0,
-      };
-      this.activePersistentTurn = turn;
-      this.startPersistentTurn(turn);
-    });
+    let resolveTurn!: (reason: StopReason) => void;
+    const done = new Promise<StopReason>((resolve) => { resolveTurn = resolve; });
+    const turn: PersistentTurn = {
+      id: ++this.providerTurnSeq,
+      origin: "runner",
+      promptText,
+      images: images ?? [],
+      done,
+      resolve: resolveTurn,
+      settled: false,
+      writeAcknowledged: false,
+      launchAttempts: 0,
+    };
+    this.activePersistentTurn = turn;
+    this.startPersistentTurn(turn);
+    return done;
+  }
+
+  /** Claim an unsolicited user frame and all following turn-bound frames until its result. */
+  private beginProviderInitiatedTurn(): PersistentTurn {
+    this.resetTurnEventState();
+    this.clearIdleTimer();
+    this.pendingApprovals.clear();
+    this.streamedAgentResponse = false;
+    let resolveTurn!: (reason: StopReason) => void;
+    const done = new Promise<StopReason>((resolve) => { resolveTurn = resolve; });
+    const turn: PersistentTurn = {
+      id: ++this.providerTurnSeq,
+      origin: "provider",
+      promptText: "",
+      images: [],
+      done,
+      resolve: resolveTurn,
+      settled: false,
+      // The provider already owns this input. It must never enter the runner prompt retry path.
+      writeAcknowledged: true,
+      launchAttempts: 0,
+    };
+    this.activePersistentTurn = turn;
+    this.cb.onProviderInitiatedTurn?.("started", `provider:${turn.id}`);
+    return turn;
   }
 
   /** Launch (or reuse) the long-lived stream-json CLI and deliver exactly one queued turn. */
@@ -1167,10 +1222,16 @@ export class ClaudeCodeDriver implements Driver {
       this.persistentTransport = false;
       this.persistentFingerprint = null;
       if (this.disposed || this.intentionalPersistentStop) return;
-      if (this.pendingBackgroundTasks.size > 0) this.markOrphaned("process_exit");
+      const lostPendingWork = this.pendingBackgroundTasks.size > 0;
+      if (lostPendingWork) this.markOrphaned("process_exit");
       const turn = this.activePersistentTurn;
       if (turn && !turn.settled) {
         this.handlePersistentFailure(`persistent claude exited${code == null ? "" : ` with code ${code}`}`, turn);
+      } else if (lostPendingWork) {
+        // An idle persistent transport normally resumes lazily on the next prompt. Pending work is
+        // different: the dead process owned its notifications, so surface the loss to the manager
+        // as an unexpected exit and let durable orphan recovery relaunch immediately.
+        this.cb.onExit(code);
       }
       // An idle process may exit on its own. The next queued turn transparently resumes.
     });
@@ -1198,14 +1259,23 @@ export class ClaudeCodeDriver implements Driver {
     }
 
     if (this.acknowledgeClaudeSteer(msg)) return;
+    if (this.disposed) return;
 
-    const turn = this.activePersistentTurn;
+    let turn = this.activePersistentTurn;
+    if (!turn && msg.type === "user") {
+      turn = this.beginProviderInitiatedTurn();
+    }
     if (!turn) {
       this.observeBackgroundLifecycle(msg);
       if (msg.type === "rate_limit_event") {
         this.cb.onSubscriptionUsage?.({ provider: "claude", kind: "sparse", payload: msg });
       } else if (msg.type !== "system") {
-        this.cb.onStderr(`ignored ${String(msg.type ?? "unknown")} outside an active Claude turn`);
+        const type = String(msg.type ?? "unknown");
+        if (type === "assistant" || type === "result" || type === "control_request" || type === "stream_event") {
+          this.cb.onEvent({ kind: "error", message: `Claude sent a ${type} frame outside an active Claude turn.` });
+        } else {
+          this.cb.onStderr(`ignored ${type} outside an active Claude turn`);
+        }
       }
       return;
     }
@@ -1221,13 +1291,12 @@ export class ClaudeCodeDriver implements Driver {
       turn.id,
       "Claude provider turn closed before steering acknowledgement",
     );
-    turn.settled = true;
-    this.activePersistentTurn = null;
     this.pendingApprovals.clear();
     if (reason !== "cancelled") this.preparedBaseArgs();
     if (reason !== "refusal" && reason !== "cancelled") this.markSessionEstablished();
     if (reason !== "refusal" && reason !== "cancelled") this.settleUnverifiedBackgroundTasks();
-    turn.resolve(reason);
+    if (turn.origin === "runner") this.settledRunnerTurnErrorText = this.turnErrorText;
+    this.settlePersistentTurn(turn, reason);
     // Claude may have committed this result just before consuming a concurrently written steer as
     // its next input turn. The absent replay receipt makes that unknowable. Retire this process so
     // a possible unowned turn can never alias the next Wollipog prompt's events or result.
@@ -1241,6 +1310,17 @@ export class ClaudeCodeDriver implements Driver {
     } else {
       this.armIdleEviction();
     }
+  }
+
+  /** Retire one exact turn owner and wake its waiter. Provider-owned turns have no public prompt
+   * promise, so their callback is the manager's only authoritative settlement boundary. */
+  private settlePersistentTurn(turn: PersistentTurn, reason: StopReason): boolean {
+    if (turn.settled || this.activePersistentTurn !== turn) return false;
+    turn.settled = true;
+    this.activePersistentTurn = null;
+    if (turn.origin === "provider") this.cb.onProviderInitiatedTurn?.("settled", `provider:${turn.id}`);
+    turn.resolve(reason);
+    return true;
   }
 
   private acknowledgeClaudeSteer(msg: Json): boolean {
@@ -1635,6 +1715,15 @@ export class ClaudeCodeDriver implements Driver {
 
   private handlePersistentFailure(message: string, turn: PersistentTurn): void {
     if (turn.settled || this.activePersistentTurn !== turn) return;
+    if (turn.origin === "provider") {
+      this.cb.onEvent({
+        kind: "error",
+        message: `${message}; the provider-initiated turn ended before its terminal result`,
+      });
+      this.stopPersistentTransport(false, "process_exit");
+      this.settlePersistentTurn(turn, "refusal");
+      return;
+    }
     // A failed write that was never acknowledged is the only safe automatic retry. Once
     // acknowledged, the CLI may already have persisted the message, so retrying could duplicate it.
     if (!turn.writeAcknowledged && turn.launchAttempts < 2) {
@@ -1650,11 +1739,7 @@ export class ClaudeCodeDriver implements Driver {
         message: `${message}; the acknowledged prompt was not replayed, and the next distinct prompt will restart and resume once`,
       });
       this.stopPersistentTransport(false);
-      if (!turn.settled && this.activePersistentTurn === turn) {
-        turn.settled = true;
-        this.activePersistentTurn = null;
-        turn.resolve("refusal");
-      }
+      this.settlePersistentTurn(turn, "refusal");
       return;
     }
     this.openPersistentCircuit(`${message}; persistent mode disabled for this session`, turn);
@@ -1665,11 +1750,7 @@ export class ClaudeCodeDriver implements Driver {
     if (this.opts.capabilities?.supportsSteering === true) this.cb.onSteeringAvailability?.(false);
     this.cb.onEvent({ kind: "error", message });
     this.stopPersistentTransport(false, "process_exit");
-    if (!turn.settled && this.activePersistentTurn === turn) {
-      turn.settled = true;
-      this.activePersistentTurn = null;
-      turn.resolve("refusal");
-    }
+    this.settlePersistentTurn(turn, "refusal");
   }
 
   private stopPersistentTransport(
@@ -1694,9 +1775,7 @@ export class ClaudeCodeDriver implements Driver {
     this.persistentGeneration += 1;
     if (cancelActive && this.activePersistentTurn && !this.activePersistentTurn.settled) {
       const turn = this.activePersistentTurn;
-      turn.settled = true;
-      this.activePersistentTurn = null;
-      turn.resolve("cancelled");
+      this.settlePersistentTurn(turn, "cancelled");
     }
     if (child) {
       this.retiringPersistentChild = child;
@@ -1836,12 +1915,11 @@ export class ClaudeCodeDriver implements Driver {
   }
 
   cancel(): void {
+    this.cancelled = true;
     this.streamingMessageIds.clear();
     if (this.activePersistentTurn) {
       const turn = this.activePersistentTurn;
-      this.activePersistentTurn = null;
-      turn.settled = true;
-      turn.resolve("cancelled");
+      this.settlePersistentTurn(turn, "cancelled");
       this.stopPersistentTransport(true, undefined, true);
       return;
     }
@@ -1916,9 +1994,7 @@ export class ClaudeCodeDriver implements Driver {
     this.unacknowledgedSteerMessages.clear();
     this.activeOneShotTurnId = null;
     if (this.activePersistentTurn && !this.activePersistentTurn.settled) {
-      this.activePersistentTurn.settled = true;
-      this.activePersistentTurn.resolve("cancelled");
-      this.activePersistentTurn = null;
+      this.settlePersistentTurn(this.activePersistentTurn, "cancelled");
     }
     this.clearIdleTimer();
     this.clearPendingTimer();

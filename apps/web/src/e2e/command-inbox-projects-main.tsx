@@ -337,6 +337,9 @@ function initialModel(): FixtureModel {
   if (SCENARIO === "conversation-handoff") {
     Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
       status: "idle", activeTurnId: null, useWorktree: true, worktreePath: "/repos/alpha/checkpoint",
+      // A deliberate non-default tier that the destination model below does not advertise, so the
+      // dialog must say so rather than substitute a default.
+      serviceTier: "flex",
     });
   }
   if (SCENARIO === "history-quarantine" || SCENARIO === "history-quarantine-handoff") {
@@ -483,6 +486,9 @@ let pendingCancelTurnSettlement: (() => void) | null = null;
 let deferNextPromptRequest = false;
 let pendingPromptSettlement: (() => void) | null = null;
 const promptRequests: PromptFixtureRequest[] = [];
+/** Handoff requests the fixture observed, so a spec can prove which config actually crossed the
+ * boundary rather than inferring it from the resulting session. */
+const handoffRequests: Array<{ id: string; turn: number; agentId: string; config: SessionConfig }> = [];
 /** Recovery requests the fixture observed, so a spec can prove the client asked for the recorded
  * safe checkpoint and never submitted a prompt into the quarantined conversation. */
 const recoveryRequests: Array<{ id: string; turn: number; handoff?: { agentId: string; config: SessionConfig } }> = [];
@@ -523,8 +529,9 @@ if (SCENARIO === "history-quarantine" || SCENARIO === "history-quarantine-handof
 if (SCENARIO === "conversation-handoff") {
   sessionEvents.set("session-alpha", [
     { id: 1, sessionId: "session-alpha", seq: 1, ts: 1, payload: { kind: "user_message", text: "Keep the interface accessible on mobile.", final: true } },
-    { id: 2, sessionId: "session-alpha", seq: 2, ts: 2, payload: { kind: "agent_message", text: "The checkpoint preserves the accessible layout.", final: true } },
-    { id: 3, sessionId: "session-alpha", seq: 3, ts: 3, payload: { kind: "conversation_checkpoint", turn: 1 } },
+    { id: 2, sessionId: "session-alpha", seq: 2, ts: 2, payload: { kind: "checkpoint", turn: 1, tree: "tree-before-turn" } },
+    { id: 3, sessionId: "session-alpha", seq: 3, ts: 3, payload: { kind: "agent_message", text: "The checkpoint preserves the accessible layout.", final: true } },
+    { id: 4, sessionId: "session-alpha", seq: 4, ts: 4, payload: { kind: "conversation_checkpoint", turn: 1 } },
   ]);
 }
 const sessionEventPageRequests: Array<{ sessionId: string; after: number; direction?: "backward" }> = [];
@@ -653,7 +660,8 @@ const runner: RunnerView = {
 if (SCENARIO === "conversation-handoff") runner.agents.push({
   id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code",
   authStatus: "authenticated", available: true,
-  capabilities: { models: [{ id: "opus", displayName: "Opus", inputModalities: ["text", "image"] }],
+  capabilities: { models: [{ id: "opus", displayName: "Opus", inputModalities: ["text", "image"],
+      serviceTiers: [{ id: "priority", name: "Priority" }] }],
     effortLevels: ["high"], permissionModes: ["default", "plan"], supportsImages: true, supportsApprovals: true, slashCommands: [] },
 });
 
@@ -918,6 +926,7 @@ const client = {
     return structuredClone(value);
   },
   handoff: async (id: string, turn: number, agentId: string, config: SessionConfig) => {
+    handoffRequests.push({ id, turn, agentId, config: structuredClone(config) });
     const source = model.sessions.find((candidate) => candidate.id === id)!;
     const agent = runner.agents.find((candidate) => candidate.id === agentId)!;
     const handoffDraft = buildConversationHandoff(sessionEvents.get(id) ?? [], 3, agent, config);
@@ -1445,7 +1454,7 @@ declare global {
         patch: Partial<Pick<SessionView,
           "projectId" | "projectName" | "projectLocationId" | "audience" | "status" | "queued" | "queueHeld" |
           "pendingApproval" | "activeTurnId" | "adopted" | "importLocationReady" | "agentCapabilities" |
-          "steeringAttempts" | "preview" | "lastEventAt" | "title" | "titleSource">>,
+          "steeringAttempts" | "preview" | "lastEventAt" | "title" | "titleSource" | "maxChildSessions">>,
       ): void;
       emitUserMessage(id: string, text: string, turnId: string): void;
       emitAgentMessage(id: string, text: string): void;
@@ -1459,6 +1468,7 @@ declare global {
       settleDeferredSteeringResult(result: SteeringFixtureResult): void;
       promptRequests(): PromptFixtureRequest[];
       recoveryRequests(): Array<{ id: string; turn: number; handoff?: { agentId: string; config: SessionConfig } }>;
+      handoffRequests(): Array<{ id: string; turn: number; agentId: string; config: SessionConfig }>;
       restartRequests(): string[];
       sessionCommandRequests(): SessionCommandFixtureRequest[];
       retitleRequests(): string[];
@@ -1634,6 +1644,7 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
   },
   promptRequests: () => structuredClone(promptRequests),
   recoveryRequests: () => structuredClone(recoveryRequests),
+  handoffRequests: () => structuredClone(handoffRequests),
   restartRequests: () => structuredClone(restartRequests),
   sessionCommandRequests: () => structuredClone(sessionCommandRequests),
   composerDraft: (id) => loadComposerDraft(id, "project-inbox-e2e"),
@@ -1765,9 +1776,10 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
     const value = model.sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error(`unknown session: ${id}`);
     const seq = value.messageCount + 1;
+    const resumed = value.queued?.[0];
     value.messageCount = seq;
     value.status = "idle";
-    value.queueHeld = true;
+    value.queueHeld = false;
     value.activeTurnId = undefined;
     value.updatedAt += 1;
     value.lastEventAt = value.updatedAt;
@@ -1777,6 +1789,17 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
       event: { id: seq, sessionId: id, seq, ts: value.updatedAt, payload: { kind: "turn_interrupted" } },
     });
     socket?.push({ type: "session_upsert", session: structuredClone(value) });
+    if (resumed) {
+      setTimeout(() => {
+        value.queued?.shift();
+        value.status = "running";
+        value.activeTurnId = resumed.id;
+        value.updatedAt += 1;
+        value.lastEventAt = value.updatedAt;
+        saveModel();
+        socket?.push({ type: "session_upsert", session: structuredClone(value) });
+      }, 0);
+    }
   },
   upsertProject(project) {
     const index = model.projects.findIndex((candidate) => candidate.id === project.id);

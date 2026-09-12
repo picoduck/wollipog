@@ -64,6 +64,8 @@ function harness(config: SessionConfig) {
     running: true,
     queue: [],
     toolCallIds: config.maxToolCalls ? new Set<string>() : undefined,
+    policyHookToolCallIds: new Set<string>(),
+    policyHookDecisionEvents: new Map(),
   };
   // Deliberately exercise the normalized driver callback seam without spawning a provider.
   (sm as any).active.set("s_governance", entry);
@@ -78,6 +80,154 @@ function harness(config: SessionConfig) {
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
 }
+
+test("policy-hook decisions wait for their exact buffered tool event and deduplicate by audit id", async () => {
+  const h = harness({});
+  try {
+    const decision = {
+      auditId: "audit-exact",
+      requestId: "policy-hook:s_governance:exact",
+      stage: "resolution",
+      outcome: "allowed",
+      actor: { kind: "human", id: "device-1" },
+      governancePolicyId: "policy-1",
+      toolCallId: "tool-exact",
+    };
+    const pending = h.sm.recordPolicyHookDecision("s_governance", decision);
+    const joinedRetry = h.sm.recordPolicyHookDecision("s_governance", decision);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(h.store.readEvents("s_governance").length, 0, "the decision cannot race ahead of a buffered tool");
+
+    (h.sm as any).onDriverEvent("s_governance", {
+      kind: "tool_call", toolCallId: "tool-other", title: "Read", status: "pending",
+    });
+    assert.equal(h.store.readEvents("s_governance").length, 1, "an unrelated tool id cannot release the fence");
+    (h.sm as any).onDriverEvent("s_governance", {
+      kind: "tool_call", toolCallId: "tool-exact", title: "Write", status: "pending",
+    });
+
+    const recorded = await pending;
+    assert.deepEqual(recorded, { accepted: true, auditId: "audit-exact", eventSeq: 3 });
+    assert.deepEqual(await joinedRetry, recorded, "a concurrent retry joins the same causal append");
+    assert.deepEqual(h.store.readEvents("s_governance").map((event) => event.payload.kind), [
+      "tool_call", "tool_call", "policy_hook_decision",
+    ]);
+    const replay = await h.sm.recordPolicyHookDecision("s_governance", decision);
+    assert.deepEqual(replay, recorded, "a lost acknowledgement cannot append the same audit twice");
+    const conflict = await h.sm.recordPolicyHookDecision("s_governance", { ...decision, outcome: "denied" });
+    assert.equal(conflict.accepted, false);
+    assert.match(conflict.error ?? "", /conflicts/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("policy-hook causal and dedup indexes survive more than the bounded recovery scan in one turn", async () => {
+  const h = harness({});
+  try {
+    const decision = {
+      auditId: "audit-noisy-turn",
+      requestId: "policy-hook:s_governance:noisy-turn",
+      stage: "resolution",
+      outcome: "allowed",
+      actor: { kind: "policy", id: "allow-noisy" },
+      toolCallId: "tool-noisy-turn",
+    };
+    (h.sm as any).onDriverEvent("s_governance", {
+      kind: "tool_call", toolCallId: decision.toolCallId, title: "Read", status: "pending",
+    });
+    for (let index = 0; index < 501; index += 1) {
+      (h.sm as any).onDriverEvent("s_governance", { kind: "agent_message", text: `before-${index}` });
+    }
+    const readEvents = h.store.readEvents.bind(h.store);
+    let fullHistoryReads = 0;
+    (h.store as any).readEvents = (...args: Parameters<SessionStore["readEvents"]>) => {
+      fullHistoryReads += 1;
+      return readEvents(...args);
+    };
+    const recorded = await h.sm.recordPolicyHookDecision("s_governance", decision);
+    assert.equal(recorded.accepted, true, "the exact turn index retains an old matching tool call");
+    for (let index = 0; index < 501; index += 1) {
+      (h.sm as any).onDriverEvent("s_governance", { kind: "agent_message", text: `after-${index}` });
+    }
+    assert.deepEqual(
+      await h.sm.recordPolicyHookDecision("s_governance", decision),
+      recorded,
+      "the exact turn index deduplicates an acknowledgement after its event leaves the recovery scan",
+    );
+    assert.equal(fullHistoryReads, 0, "the governed hot path never parses the whole durable history");
+    assert.equal(readEvents("s_governance")
+      .filter((event) => event.payload.kind === "policy_hook_decision").length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("policy-hook restart recovery uses the indexed bounded page instead of a full-history scan", async () => {
+  const h = harness({});
+  try {
+    h.store.appendEvent("s_governance", {
+      kind: "tool_call", toolCallId: "tool-recovered", title: "Read", status: "pending",
+    });
+    h.store.flushAll();
+    h.entry.policyHookToolCallIds = undefined;
+    h.entry.policyHookDecisionEvents = undefined;
+    (h.store as any).readEvents = () => { throw new Error("full history scan is forbidden"); };
+    const recorded = await h.sm.recordPolicyHookDecision("s_governance", {
+      auditId: "audit-recovered",
+      requestId: "policy-hook:s_governance:recovered",
+      stage: "resolution",
+      outcome: "denied",
+      actor: { kind: "policy", id: "deny-recovered" },
+      toolCallId: "tool-recovered",
+    });
+    assert.deepEqual(recorded, { accepted: true, auditId: "audit-recovered", eventSeq: 2 });
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("a policy-hook decision times out when its matching tool event never arrives", async () => {
+  const h = harness({});
+  try {
+    const recorded = await h.sm.recordPolicyHookDecision("s_governance", {
+      auditId: "audit-aborted",
+      requestId: "policy-hook:s_governance:aborted",
+      stage: "resolution",
+      outcome: "aborted",
+      actor: { kind: "system", id: "policy-hook-abandoned" },
+      toolCallId: "tool-never-observed",
+    });
+    assert.deepEqual(recorded, {
+      accepted: false,
+      auditId: "audit-aborted",
+      error: "matching tool event was not observed",
+    });
+    assert.equal(h.store.readEvents("s_governance").length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("policy-hook decision append rejects fields outside the content-safe protocol subset", async () => {
+  const h = harness({});
+  try {
+    const rejected = await h.sm.recordPolicyHookDecision("s_governance", {
+      auditId: "audit-unsafe",
+      requestId: "request-unsafe",
+      stage: "resolution",
+      outcome: "denied",
+      actor: { kind: "policy" },
+      toolCallId: "tool-unsafe",
+      toolInput: { secret: true },
+    });
+    assert.equal(rejected.accepted, false);
+    assert.match(rejected.error ?? "", /unsafe fields/);
+    assert.equal(h.store.readEvents("s_governance").length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
 
 test("a budget trip with managed work settles idle and reconciles a killed receipt without another turn", async () => {
   const h = harness({ costBudgetUsd: 8 });
@@ -154,6 +304,42 @@ test("runner cancels once at the distinct tool threshold and ignores duplicate f
   } finally {
     h.cleanup();
   }
+});
+
+test("runner reconnect replay pins the original trip identity, threshold, and observation", () => {
+  const h = harness({ maxToolCalls: 2 });
+  try {
+    for (const toolCallId of ["one", "two"]) {
+      (h.sm as any).onDriverEvent("s_governance", {
+        kind: "tool_call", toolCallId, title: "Tool", status: "pending",
+      });
+    }
+    const first = h.sent.find((message) => message.type === "governance_tripped");
+    assert.ok(first && first.type === "governance_tripped");
+    h.store.patchMeta("s_governance", { config: { maxToolCalls: 50 } });
+    h.entry.toolCallIds.add("later");
+    h.sm.reportGovernanceTrips();
+    const replay = h.sent.filter((message) => message.type === "governance_tripped").at(-1)!;
+    assert.deepEqual(replay, first, "reconnect does not reread changed metadata for an old crossing");
+  } finally { h.cleanup(); }
+});
+
+test("explicit null re-arm clears runner metadata and delivers a prompt queued behind a real trip", async () => {
+  const h = harness({ costBudgetUsd: 5, maxToolCalls: 1 });
+  try {
+    (h.sm as any).onDriverEvent("s_governance", {
+      kind: "tool_call", toolCallId: "one", title: "Tool", status: "pending",
+    });
+    assert.equal(h.entry.governanceTripped, "max_tool_calls");
+    h.entry.running = false;
+    h.entry.queue.push({ id: "queued", text: "next", images: [] });
+    h.sm.rearmGovernance("s_governance", { costBudgetUsd: null, maxToolCalls: null });
+    for (let i = 0; i < 20 && h.prompts() === 0; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(h.prompts(), 1);
+    assert.deepEqual(h.store.readMeta("s_governance")!.config, {});
+    assert.equal(h.entry.governanceTripped, undefined);
+    assert.equal(h.entry.governanceTrip, undefined);
+  } finally { h.cleanup(); }
 });
 
 test("runner cost gate uses authoritative parentless usage and re-arm clears the hold", () => {
@@ -260,6 +446,49 @@ test("re-arm never emits an idle status while an untripped turn is still running
     assert.equal(h.store.readMeta("s_governance")!.config.costBudgetUsd, 10);
     assert.equal(h.sent.some((message) => message.type === "session_status"), false);
     assert.equal(h.entry.governanceTripped, undefined);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("live threshold synchronization preserves an unrelated turn-interruption hold", () => {
+  const h = harness({});
+  try {
+    h.entry.activeTurnId = "turn-live";
+    assert.equal(h.sm.interruptTurn("s_governance", "turn-live"), "applied");
+    assert.equal(h.entry.interruptRequested, true);
+    assert.equal(h.entry.holdQueuedPromptsAfterInterrupt, true);
+
+    h.sm.rearmGovernance("s_governance", { costBudgetUsd: 10 });
+
+    assert.equal(h.store.readMeta("s_governance")!.config.costBudgetUsd, 10);
+    assert.equal(h.entry.interruptRequested, true);
+    assert.equal(h.entry.holdQueuedPromptsAfterInterrupt, true);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("idle threshold synchronization preserves a provider-owned approval status", () => {
+  const h = harness({});
+  try {
+    h.entry.running = false;
+    h.store.patchMeta("s_governance", {
+      status: "input_required",
+      pendingApproval: {
+        requestId: "question-live",
+        kind: "question",
+        title: "Choose a target",
+        options: [],
+      },
+    });
+
+    h.sm.rearmGovernance("s_governance", { costBudgetUsd: 10 });
+
+    const statuses = h.sent.filter((message) => message.type === "session_status");
+    assert.equal(statuses.at(-1)?.status, "input_required");
+    assert.equal(h.store.readMeta("s_governance")!.status, "input_required");
+    assert.equal(h.store.readMeta("s_governance")!.pendingApproval?.requestId, "question-live");
   } finally {
     h.cleanup();
   }

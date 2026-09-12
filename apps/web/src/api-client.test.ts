@@ -70,6 +70,27 @@ test("cancelTurn posts to the encoded non-terminal turn endpoint", async () => {
   assert.deepEqual(calls, [{ path: "/api/sessions/session%2F1/cancel", method: "POST" }]);
 });
 
+test("governance audit requests encode the optional older-page cursor", async () => {
+  const paths: string[] = [];
+  const client = createApiClient({
+    instanceId: "instance-a",
+    publicOrigin: "https://instance-a.example.test",
+    async request(path) {
+      paths.push(path);
+      return new Response(JSON.stringify({ entries: [], hasMore: false }), {
+        headers: { "content-type": "application/json" },
+      });
+    },
+    close() {},
+  });
+  await client.governanceAudit("session/1", 200);
+  await client.governanceAudit("session/1", 200, "audit/id+older");
+  assert.deepEqual(paths, [
+    "/api/sessions/session%2F1/governance-audit?limit=200",
+    "/api/sessions/session%2F1/governance-audit?limit=200&before=audit%2Fid%2Bolder",
+  ]);
+});
+
 test("steering methods use encoded correlated paths and exact mutation bodies", async () => {
   const calls: Array<{ path: string; method: string; body: unknown }> = [];
   const client = createApiClient({

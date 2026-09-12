@@ -715,9 +715,10 @@ export function createApiClient(transport: ApiTransport) {
       body: JSON.stringify(body),
     }),
 
-  governanceAudit: (id: string, limit = 50) =>
-    req<{ entries: GovernanceAuditEntry[] }>(
-      `/api/sessions/${encodeURIComponent(id)}/governance-audit?limit=${limit}`,
+  governanceAudit: (id: string, limit = 50, before?: string) =>
+    req<{ entries: GovernanceAuditEntry[]; nextBefore?: string; hasMore: boolean }>(
+      `/api/sessions/${encodeURIComponent(id)}/governance-audit?limit=${limit}` +
+        (before ? `&before=${encodeURIComponent(before)}` : ""),
     ),
 
   approvalQueue: () => req<{ items: ApprovalQueueItem[] }>("/api/governance/approval-queue"),
@@ -1055,6 +1056,11 @@ export function createApiClient(transport: ApiTransport) {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
+  updateMachineCapacity: (runnerId: string, body: { configuredUnits: number; expectedRevision: number }) =>
+    req<{ capacity: import("@wollipog/protocol").RunnerCapacityConfiguration }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/capacity`,
+      { method: "PUT", body: JSON.stringify(body) },
+    ),
 
   // Phase 3: external (CLI-started) sessions on a box.
   listExternalSessions: (runnerId: string, agentId?: string) =>

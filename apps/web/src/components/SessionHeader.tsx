@@ -26,6 +26,7 @@ import { reachableTranscriptShareOrigin, transcriptShareUrl } from "../transcrip
 import type { ConversationForkAvailability } from "../session-actions.js";
 import {
   ActiveSubagentsBadge,
+  BackgroundDeliveryBadge,
   BackgroundWorkBadge,
   ChangeStatusBadge,
   CopyButton,
@@ -51,10 +52,9 @@ import { useIsMobile } from "./useIsMobile.js";
  * group and then the passive change statuses yield to it, rather than it taking a line of its own.
  * Within a tier the leftmost badge is claimed first, so what survives still reads left to right.
  *
- * Offering rather than reserving is the point: a row too narrow for the background badge at all
- * (320px cannot hold "Waiting on External Job") keeps the statuses that DO fit instead of emptying
- * itself for one that never will. Clipping is never an option, so that case belongs to the `+N`
- * disclosure — which lists every status either way — and to the badge's own live region.
+ * Offering rather than reserving is the point: narrow phones shorten the badge's visible copy,
+ * while this fitter still keeps any status that fits and moves the rest into `+N`. Clipping is
+ * never an option, and the badge's accessible name remains complete in both locations.
  */
 export function statusKeepOrder(items: HTMLElement[]): HTMLElement[] {
   // The active-subagents badge shares the background-work badge's CLASS but not its rank: workers
@@ -180,6 +180,7 @@ export function SessionHeader({
     session.stopOperation,
     session.backgroundWorkState,
     session.backgroundWorkTracking,
+    session.backgroundDeliveries?.find((delivery) => delivery.watchdogState)?.watchdogState,
     changeStatus,
     runnerOnline,
     activeSubagents?.count,
@@ -188,6 +189,8 @@ export function SessionHeader({
   const visibleBackgroundWorkState = session.backgroundWorkState === "resumed"
     ? undefined
     : session.backgroundWorkState;
+  const backgroundDeliveryState = session.backgroundDeliveries
+    ?.find((delivery) => delivery.watchdogState)?.watchdogState;
   const reprocessSupported = runnerSupportsProtocol(runnerProtocolVersion, "sessionReprocess");
   const logoutSupported = runnerSupportsProtocol(runnerProtocolVersion, "acpLogout");
   const dashboardOrigin = instancePublicOrigin(instances);
@@ -195,7 +198,7 @@ export function SessionHeader({
     ? absoluteViewUrl(dashboardOrigin, { name: "session", id: session.id })
     : null;
   const renderBackgroundWork = () => visibleBackgroundWorkState && (
-    <BackgroundWorkBadge state={visibleBackgroundWorkState} compact announce={false}
+    <BackgroundWorkBadge state={visibleBackgroundWorkState} compact responsiveCompact announce={false}
       onOpen={onOpenBackgroundWork ? () => {
         // A direct badge stays mounted; only restore focus when dismissing its popover copy.
         closeStatusPopover(statusPopoverOpen);
@@ -209,6 +212,12 @@ export function SessionHeader({
         onOpenAttention();
       } : undefined} />
       {renderBackgroundWork()}
+      {backgroundDeliveryState && (
+        <BackgroundDeliveryBadge state={backgroundDeliveryState} onOpen={onOpenBackgroundWork ? () => {
+          closeStatusPopover(statusPopoverOpen);
+          onOpenBackgroundWork();
+        } : undefined} />
+      )}
       <ChangeStatusBadge change={changeStatus ?? null} />
       {!visibleBackgroundWorkState && session.backgroundWorkTracking === "untracked" && (
         <UntrackedBackgroundWorkBadge onOpen={onOpenBackgroundWork ? () => {
@@ -471,7 +480,7 @@ export function SessionHeader({
       )}
       {visibleBackgroundWorkState && (
         <span className="sr-only">
-          <BackgroundWorkBadge state={visibleBackgroundWorkState} compact />
+          <BackgroundWorkBadge state={visibleBackgroundWorkState} compact responsiveCompact />
         </span>
       )}
       {note && <span className="detail-note session-header-note" role="status" aria-live="polite">{note}</span>}
