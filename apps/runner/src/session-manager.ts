@@ -1059,7 +1059,14 @@ export class SessionManager {
     this.maxConcurrentSessions = configuration.configuredUnits;
     if (!this.activeTurnLimitConfigured) {
       this.activeTurnLimit = configuration.configuredUnits;
-      this.activeTurnAdmission.setLimit(configuration.configuredUnits);
+      // A Machine-capacity decrease preserves existing resident leases. The implicit active-turn
+      // gate must preserve the same legacy behavior for those residents instead of becoming a new,
+      // narrower boundary until they naturally drain. Reporting still follows Machine capacity;
+      // steady-state active turns cannot exceed it because every turn owns a resident lease.
+      this.activeTurnAdmission.setLimit(Math.max(
+        configuration.configuredUnits,
+        this.boxAdmission.usedCapacity(),
+      ));
     }
     this.worktreePreparationLimit = configuration.configuredUnits;
     this.boxAdmission.setLimit(configuration.configuredUnits);
@@ -3769,12 +3776,25 @@ export class SessionManager {
   }
 
   /** A provider turn and its runner-authoritative detached work share one active-work permit.
-   * Continuation-pending work keeps the permit too: releasing it between the detached result and
-   * its required continuation would make the Machine under-report work it is committed to finish. */
+   * Runnable continuation work keeps the permit too: releasing it between the detached result and
+   * its required continuation would under-report work the Machine can immediately finish. Terminal
+   * orphan diagnostics and policy-held continuations remain visible without blocking all turns. */
   private hasAuthoritativeBackgroundWork(meta: SessionMeta | null | undefined): boolean {
-    return !!meta?.backgroundWorkState || !!meta?.pendingBackgroundTaskIds?.length ||
-      !!meta?.backgroundJobs?.some((job) => !job.terminalStatus ||
-        job.continuationRequired && !job.assistantResultPersistedAt && !job.continuationMissingResultAt);
+    if (!meta) return false;
+    // Orphaned tasks have no executing provider. Their durable diagnostic/recovery state can block
+    // parking, but it must not consume active-turn capacity indefinitely while recovery is refused,
+    // held by governance/budget, or already attempted. A live callback replaces this state with
+    // running before provider work can again rely on the parent-turn permit.
+    if (meta.backgroundWorkState === "orphaned") return false;
+    const liveDetachedWork = meta.backgroundWorkState === "running" || !meta.orphanedWork && (
+      !!meta.pendingBackgroundTaskIds?.length ||
+      !!meta.backgroundJobs?.some((job) => !job.terminalStatus)
+    );
+    if (liveDetachedWork) return true;
+    const continuationPending = meta.backgroundWorkState === "continuation_pending" ||
+      !!meta.backgroundJobs?.some((job) => job.continuationRequired &&
+        !job.assistantResultPersistedAt && !job.continuationMissingResultAt);
+    return continuationPending && automaticClaudeRecoveryAllowed(meta) && !this.backgroundRecoveryHeld(meta);
   }
 
   private settleActiveWorkPermit(sessionId: string, entry: ActiveSession): void {
@@ -6854,7 +6874,15 @@ export class SessionManager {
   /** Run queued prompts one at a time, holding the box lock only while turns are draining. */
   private async drain(sessionId: string): Promise<void> {
     const entry = this.active.get(sessionId);
-    if (!entry || entry.running || entry.authenticationBlocked || entry.historyQuarantined ||
+    if (!entry) return;
+    // Containment and rebind failures can clear a FIFO without using removeQueuedPrompt. Prune its
+    // durable waiter before any gate returns, otherwise the retry timer and fairness break survive
+    // forever even though no provider work remains to dispatch.
+    if (entry.queue.length === 0 && this.cancelActiveTurnWait(sessionId) &&
+        this.store.readMeta(sessionId)?.status === "queued") {
+      this.emitStatus(sessionId, "idle");
+    }
+    if (entry.running || entry.authenticationBlocked || entry.historyQuarantined ||
         entry.historyIntegrityFailure || entry.governanceTripped || this.queueHeld(entry) ||
         this.steerFences(entry).size ||
         this.reservedPromotionPrecedesQueue(sessionId, entry)) return;
@@ -7128,7 +7156,9 @@ export class SessionManager {
     this.preLaunchAdmissionGenerations.set(sessionId, launchGeneration);
     const queued = entry.queue.splice(0);
     if (queued.length) this.preLaunchQueues.set(sessionId, queued);
-    this.deleteActiveSession(sessionId, entry, false);
+    // Keep the cached inventory resident until the exact closing-process fence is installed below;
+    // otherwise releaseActiveTurn() can publish a transient parked count for a live process.
+    this.deleteActiveSession(sessionId, entry, false, false);
     this.emitQueue(sessionId);
     let launched = false;
     let preserveRebindLockForQueue = false;
