@@ -112,6 +112,160 @@ test.beforeEach(async ({ page }) => {
   await expect(page.getByRole("tab", { name: /Alpha/ })).toBeVisible();
 });
 
+const composerQuestion = {
+  requestId: "ask-from-sessions",
+  title: "Choose a target",
+  options: [],
+  kind: "question" as const,
+  questions: [{
+    id: "target",
+    question: "Choose a target",
+    options: [{ label: "Staging" }, { label: "Production" }],
+  }],
+};
+
+async function openComposerResponseFixture(page: Page) {
+  await page.evaluate(() => localStorage.setItem("wollipog.question-response-style", "composer"));
+  await page.goto("/command-inbox-projects-e2e.html?fullShell=1");
+  await expect(page.getByRole("tab", { name: /Alpha/ })).toBeVisible();
+}
+
+async function focusZoneWithKeyboard(page: Page, zone: "list" | "detail") {
+  const presses = zone === "list" ? 2 : 3;
+  for (let index = 0; index < presses; index += 1) await page.keyboard.press("F6");
+  await expect.poll(() => page.evaluate(() =>
+    document.activeElement?.closest<HTMLElement>("[data-focus-zone]")?.dataset.focusZone ?? null))
+    .toBe(zone);
+}
+
+test("one R from the Sessions list focuses an already-active Composer Response before the next digit", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openComposerResponseFixture(page);
+  await page.evaluate((pendingApproval) => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+      status: "input_required",
+      pendingApproval,
+    });
+  }, composerQuestion);
+  await expect(page.locator(".question-bar").getByText("Choose a target", { exact: true })).toBeVisible();
+
+  await focusZoneWithKeyboard(page, "list");
+  await page.keyboard.press("r");
+  await page.keyboard.press("1");
+
+  const response = page.locator(".composer-answer-input");
+  await expect(page.getByRole("region", { name: "Session Activity" })).toBeVisible();
+  await expect(response).toBeFocused();
+  await expect(response).toHaveValue("1");
+});
+
+test("offline Composer Response owns the immediate digit after R from the Sessions list", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openComposerResponseFixture(page);
+  await page.evaluate((pendingApproval) => {
+    const fixture = window.__WOLLIPOG_PROJECT_INBOX_E2E__;
+    fixture.updateSession("session-alpha", {
+      status: "input_required",
+      pendingApproval,
+    });
+    fixture.setRunnerStatus("offline");
+  }, composerQuestion);
+  await expect(page.getByText("Responses are unavailable until the runner reconnects.", { exact: true })).toBeVisible();
+
+  await focusZoneWithKeyboard(page, "list");
+  await page.keyboard.press("r");
+  await page.keyboard.press("1");
+
+  const response = page.locator(".composer-answer-input");
+  await expect(page.getByRole("region", { name: "Session Activity" })).toBeVisible();
+  await expect(response).toBeFocused();
+  await expect(response).toHaveAttribute("aria-disabled", "true");
+  await expect(response).toHaveAttribute("readonly", "");
+  await expect(response).toHaveValue("");
+
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("online"));
+  await expect(response).not.toHaveAttribute("aria-disabled", "true");
+  await expect(response).not.toHaveAttribute("readonly", "");
+  await page.keyboard.press("1");
+  await expect(response).toHaveValue("1");
+});
+
+test("one R from the split preview enters Composer Response without losing the ordinary draft", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openComposerResponseFixture(page);
+
+  // Build the ordinary draft through the real keyboard path, then return to the split view.
+  await focusZoneWithKeyboard(page, "list");
+  await page.keyboard.press("r");
+  const composer = page.locator(".composer-input");
+  await expect(composer).toBeFocused();
+  await composer.pressSequentially("preserved draft");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("region", { name: "Session Preview Activity" })).toBeVisible();
+
+  await page.evaluate((pendingApproval) => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+      status: "input_required",
+      pendingApproval,
+    });
+  }, composerQuestion);
+  await expect(page.locator(".question-bar").getByText("Choose a target", { exact: true })).toBeVisible();
+
+  await page.keyboard.press("F6");
+  await expect.poll(() => page.evaluate(() =>
+    document.activeElement?.closest<HTMLElement>("[data-focus-zone]")?.dataset.focusZone ?? null))
+    .toBe("detail");
+  await page.keyboard.press("r");
+  await page.keyboard.press("1");
+
+  const response = page.locator(".composer-answer-input");
+  await expect(response).toBeFocused();
+  await expect(response).toHaveValue("1");
+  await page.keyboard.press("Escape");
+  await expect(composer).toBeFocused();
+  await expect(composer).toHaveValue("preserved draft");
+});
+
+test("offline Composer Response owns the immediate digit after R from the split preview", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openComposerResponseFixture(page);
+
+  await focusZoneWithKeyboard(page, "list");
+  await page.keyboard.press("r");
+  const composer = page.locator(".composer-input");
+  await expect(composer).toBeFocused();
+  await composer.pressSequentially("offline preserved draft");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("region", { name: "Session Preview Activity" })).toBeVisible();
+
+  await page.evaluate((pendingApproval) => {
+    const fixture = window.__WOLLIPOG_PROJECT_INBOX_E2E__;
+    fixture.updateSession("session-alpha", {
+      status: "input_required",
+      pendingApproval,
+    });
+    fixture.setRunnerStatus("offline");
+  }, composerQuestion);
+  await expect(page.locator(".question-bar").getByText("Choose a target", { exact: true })).toBeVisible();
+
+  await page.keyboard.press("F6");
+  await expect.poll(() => page.evaluate(() =>
+    document.activeElement?.closest<HTMLElement>("[data-focus-zone]")?.dataset.focusZone ?? null))
+    .toBe("detail");
+  await page.keyboard.press("r");
+  await page.keyboard.press("1");
+
+  const response = page.locator(".composer-answer-input");
+  await expect(page.getByRole("region", { name: "Session Activity" })).toBeVisible();
+  await expect(response).toBeFocused();
+  await expect(response).toHaveValue("");
+  await page.keyboard.press("Escape");
+  await expect(page.getByText("Answer Mode", { exact: true })).toHaveCount(0);
+  await expect(composer).toHaveValue("offline preserved draft");
+});
+
 for (const viewport of [
   { name: "mobile", width: 390, height: 720 },
   { name: "desktop", width: 1280, height: 760 },

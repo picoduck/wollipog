@@ -29,7 +29,22 @@ Worktree commands default to `WOLLIPOG_SESSION_ID`; paired-device callers add `-
 Creation without `--base` fetches the repository's remote default branch. Use the returned path
 for file and Git commands in the current turn; a later provider launch resumes in the selection.
 Discard permanently removes only a runner-owned worktree that is not used by a live provider, is
-clean, and has no commits ahead of its upstream. It refuses attached, dirty, or unpushed trees.
+clean, and has no commits ahead of its upstream. A forge-verified merged head may replace an
+upstream deleted with the remote branch, but only when it exactly matches the local head. Discard
+refuses attached, dirty, arbitrary upstream-less, or unpushed trees.
+
+## Retiring a Worktree
+
+Remove a Wollipog-created worktree only with `wollipog worktree discard` (or the `discard_worktree`
+MCP tool). Never run `git worktree remove` against a session-linked path, and never offer it as the
+cleanup command in a report: raw Git deletes the directory without telling the control plane, so the
+session keeps selecting a path that no longer exists and its next launch refuses to start there.
+
+Discard is deliberately conservative. It retains the worktree and explains why whenever the tree is
+still in use — including the one this session is running in, which stays until the session's own
+provider exits. That is a deferral, not a failure: report the retained path and its reason in the
+cleanup summary and leave it alone. Runner reconciliation removes a clean, fully pushed worktree
+whose pull request reached a terminal state once nothing is using it.
 
 If `wollipog` is not on `PATH`, invoke the runner-provided location with its mode:
 

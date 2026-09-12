@@ -36,8 +36,12 @@ import { TextDecoder } from "node:util";
 import {
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
+  runnerSupportsProtocol,
   projectSessionEventPayloadForProtocol,
   sessionEventWireProjectionRequiredForProtocol,
+  sessionEventWireProjectionVariant,
+  SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET,
+  SESSION_EVENT_WIRE_PROJECTION_VARIANTS,
 } from "@wollipog/protocol";
 import type {
   AgentCapabilities,
@@ -51,6 +55,9 @@ import type {
   ExecutionTargetRef,
   PendingApproval,
   PromptImageInput,
+  ProviderHistoryQuarantineView,
+  ProviderHistoryRecoveryMode,
+  RunnerCapacityBlocker,
   SessionConfig,
   AcpSessionContextConfig,
   SessionEventPayload,
@@ -104,6 +111,8 @@ export interface SessionMeta {
   /** Last live ACP handshake; determines whether the persisted id can resume after process loss. */
   acpCapabilities?: AcpRuntimeCapabilities;
   status: SessionStatus;
+  /** Current durable admission wait explanation; cleared on every non-queued status. */
+  capacityWait?: RunnerCapacityBlocker;
   title: string;
   titleSource?: SessionTitleSource;
   providerUpdatedAt?: string;
@@ -128,6 +137,9 @@ export interface SessionMeta {
   providerCredentialScopeId?: string;
   /** Runner-only account/credential digest observed while provider-native status was authenticated. */
   providerCredentialIdentityId?: string;
+  /** Per-field runner-keyed digests let the runner distinguish a changed account field from a
+   * provider status observation that merely omitted a field. Raw account values never persist. */
+  providerCredentialIdentityEvidence?: ProviderAuthIdentityEvidence;
   /** Durable authentication recovery state. Never projected into SessionSnapshot; the browser sees
    * only the bounded pendingApproval card and its random recovery request id. */
   providerAuthBlock?: {
@@ -140,7 +152,10 @@ export interface SessionMeta {
     canStartLogin: boolean;
     configuredCredential: boolean;
     expectedIdentityId?: string;
+    expectedIdentityEvidence?: ProviderAuthIdentityEvidence;
     identityMismatch?: boolean;
+    /** Redacted field names only; safe for runner logs and the authentication card. */
+    reason?: string;
     /** Correlates one live login subprocess; stale cancels cannot target a later generation. */
     loginOperationId?: string;
     retry?: {
@@ -154,6 +169,33 @@ export interface SessionMeta {
   };
   /** At-most-once tombstone written and flushed before an automatic recovery prompt is enqueued. */
   providerAuthRetryAttemptedRecoveryId?: string;
+  /** Durable quarantine of a provider-owned conversation whose stored history the provider rejects
+   * before inference. Authoritative across process restart: while it is set, no prompt, automatic
+   * continuation, or compaction may be submitted to this thread, because every submission resends
+   * the same history and fails identically. Content-free by construction. */
+  providerHistoryBlock?: {
+    version: 1;
+    reason: "oversized_tool_call";
+    detectedAt: number;
+    /** Structural provider evidence only; the offending value is never persisted. */
+    detail: { itemIndex?: number; field: "arguments"; limit?: number; length?: number };
+    /** Completed turn whose conversation checkpoint precedes the invalid item. Absent when the
+     * session never recorded one, which leaves nothing to recover in place. */
+    recoveryTurn?: number;
+    recovery?: ProviderHistoryRecoveryMode;
+    /** The prompt attempted after quarantine, retained unsent. Never submitted by the runner:
+     * only a recovered session can carry it forward. */
+    retry?: {
+      text: string;
+      images: PromptImageInput[];
+      slashCommand?: string;
+      config?: SessionConfig;
+    };
+  };
+  /** This session was created to recover `fromSessionId`'s quarantined conversation. A provider
+   * fork copies history through the checkpoint, so a fork that is quarantined again proves the
+   * invalid item predates that checkpoint; its own recovery must escalate to a fresh thread. */
+  providerHistoryRecoveryOf?: { fromSessionId: string; mode: ProviderHistoryRecoveryMode };
   /** Claude background work observed by the runner. Optional for older sessions and other drivers. */
   backgroundWorkState?: BackgroundWorkState;
   /** Runner-authoritative durable records for structured provider-managed background jobs. */
@@ -218,6 +260,14 @@ export interface SessionMeta {
   updatedAt: number;
 }
 
+export type ProviderAuthIdentityField = "email" | "orgId" | "authMethod" | "apiProvider";
+
+export interface ProviderAuthIdentityEvidence {
+  version: 1;
+  /** Each value is a runner-keyed digest of the field name and value, never the provider value. */
+  fields: Partial<Record<ProviderAuthIdentityField, string>>;
+}
+
 export interface DurableBackgroundJob {
   /** Stable provider task identity after provisional tool-use promotion. */
   id: string;
@@ -239,6 +289,8 @@ export interface DurableBackgroundJob {
   continuationQueuedAt?: number;
   continuationSubmittedAt?: number;
   continuationAcceptedAt?: number;
+  /** Durable proof that the accepted provider turn ended without a complete assistant result. */
+  continuationMissingResultAt?: number;
   assistantResultPersistedAt?: number;
   /** Runner-private proof that v82 structured delivery evidence was durably published. */
   structuredDeliveryPublishedAt?: number;
@@ -1998,12 +2050,19 @@ export class SessionStore {
     localEpoch: number,
     protocolVersion: number | null | undefined,
   ): number {
-    const variant = this.eventProjectionRequired(protocolVersion) ? 1 : 0;
+    // One dense sequence space per distinct projection, not per "projected or not": a peer that
+    // omits two event kinds numbers the log differently from one that omits a single kind, so they
+    // must never share an epoch or a reconnect would reuse cursors that now name different events.
+    const variant = sessionEventWireProjectionVariant(protocolVersion);
     if (!Number.isSafeInteger(localEpoch) || localEpoch < 0 ||
-        localEpoch > Math.floor((Number.MAX_SAFE_INTEGER - variant) / 2)) {
+        localEpoch > Math.floor(
+          (Number.MAX_SAFE_INTEGER - SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET - variant) /
+            SESSION_EVENT_WIRE_PROJECTION_VARIANTS,
+        )) {
       throw new HistoryStoreError("history_corrupt", "session history epoch cannot be projected safely");
     }
-    return localEpoch * 2 + variant;
+    return SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET +
+      localEpoch * SESSION_EVENT_WIRE_PROJECTION_VARIANTS + variant;
   }
 
   private projectEventsWithIndex(
@@ -2095,7 +2154,14 @@ export class SessionStore {
     try {
       if (!this.eventProjectionRequired(protocolVersion)) {
         const wireEpoch = request.logEpoch;
-        const localEpoch = wireEpoch === undefined ? undefined : Math.floor(wireEpoch / 2);
+        if (wireEpoch !== undefined && wireEpoch < SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET) {
+          throw new HistoryStoreError("history_epoch_changed", "session history projection format changed");
+        }
+        const localEpoch = wireEpoch === undefined ? undefined
+          : Math.floor(
+              (wireEpoch - SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET) /
+                SESSION_EVENT_WIRE_PROJECTION_VARIANTS,
+            );
         if (localEpoch !== undefined && this.projectedHistoryEpoch(localEpoch, protocolVersion) !== wireEpoch) {
           throw new HistoryStoreError("history_epoch_changed", "session history projection changed during pagination");
         }
@@ -2687,6 +2753,22 @@ const NATIVE_ELICITATION_OVERLAY_PROTOCOL_VERSION = 66;
 const NATIVE_SLASH_COMMAND_OVERLAY_PROTOCOL_VERSION = 74;
 const MANAGED_BACKGROUND_JOBS_PROTOCOL_VERSION = RUNNER_CAPABILITY_MIN_PROTOCOL.managedBackgroundDelivery;
 const BACKGROUND_WORK_TRACKING_PROTOCOL_VERSION = RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundWorkTracking;
+const PROVIDER_HISTORY_QUARANTINE_PROTOCOL_VERSION = RUNNER_CAPABILITY_MIN_PROTOCOL.providerHistoryQuarantine;
+
+/** Bounded projection of the durable quarantine. Sizes and the offending item's position are
+ * structural provider evidence; the retained prompt is reported only as a boolean so its text
+ * stays on the runner until a recovered session carries it into a composer draft. */
+export function providerHistoryQuarantineView(m: SessionMeta): ProviderHistoryQuarantineView | undefined {
+  const block = m.providerHistoryBlock;
+  if (!block) return undefined;
+  return {
+    reason: block.reason,
+    detectedAt: block.detectedAt,
+    ...(block.recoveryTurn === undefined ? {} : { recoveryTurn: block.recoveryTurn }),
+    ...(block.recovery === undefined ? {} : { recovery: block.recovery }),
+    ...(block.retry ? { retainedPrompt: true } : {}),
+  };
+}
 
 export function metaToSnapshot(
   m: SessionMeta,
@@ -2720,6 +2802,9 @@ export function metaToSnapshot(
     titleSource: m.titleSource,
     providerUpdatedAt: m.providerUpdatedAt,
     status: m.status,
+    capacityWait: runnerSupportsProtocol(controlPlaneProtocolVersion, "machineRunnerCapacity")
+      ? m.capacityWait
+      : undefined,
     driver: m.driver,
     useWorktree: m.worktreePath != null,
     worktreePath: m.worktreePath,
@@ -2737,6 +2822,13 @@ export function metaToSnapshot(
       : nativeCapabilities,
     preview: m.preview,
     pendingApproval: m.pendingApproval,
+    // A supporting peer always hears the current truth, including its absence: `null` is how a
+    // restart onto a fresh provider conversation clears the control plane's guard. `undefined` is
+    // reserved for peers and registration snapshots that carry no information at all.
+    historyQuarantine: controlPlaneProtocolVersion != null &&
+      controlPlaneProtocolVersion >= PROVIDER_HISTORY_QUARANTINE_PROTOCOL_VERSION
+      ? providerHistoryQuarantineView(m) ?? null
+      : undefined,
     backgroundWorkState: m.backgroundWorkState,
     backgroundWorkTracking: controlPlaneProtocolVersion != null &&
       controlPlaneProtocolVersion >= BACKGROUND_WORK_TRACKING_PROTOCOL_VERSION
@@ -2759,6 +2851,10 @@ export function metaToSnapshot(
           continuationQueuedAt: job.continuationQueuedAt,
           continuationSubmittedAt: job.continuationSubmittedAt,
           continuationAcceptedAt: job.continuationAcceptedAt,
+          continuationMissingResultAt: runnerSupportsProtocol(
+            controlPlaneProtocolVersion,
+            "backgroundMissingResultRecovery",
+          ) ? job.continuationMissingResultAt : undefined,
           assistantResultPersistedAt: job.assistantResultPersistedAt,
         }))
       : undefined,

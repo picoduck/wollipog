@@ -206,6 +206,7 @@ function publicMessages(
       case "status":
       case "error":
       case "policy_transport":
+      case "policy_hook_decision":
       case "review_decision":
       case "permission_request":
       case "permission_resolved":

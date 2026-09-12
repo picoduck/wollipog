@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, fetchRemoteDefaultBase, isGitRepo, nativeRepositoryPathIsUnavailable, parseWorktreePullRequestState, readRepositoryDefaultBranch, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
+import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, nativeRepositoryPathIsUnavailable, parseMergedWorktreePullRequestForBranch, parseWorktreePullRequestState, readRepositoryDefaultBranch, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
 import { createHash, randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { SessionStore } from "./session-store.js";
@@ -15,8 +15,8 @@ function haveGit(): boolean {
   try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; }
 }
 
-async function waitForCondition(predicate: () => boolean, message: string): Promise<void> {
-  for (let attempt = 0; attempt < 500; attempt++) {
+async function waitForCondition(predicate: () => boolean, message: string, attempts = 500): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt++) {
     if (predicate()) return;
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
@@ -39,21 +39,51 @@ function initRepoWithOrigin(root: string): { repo: string; remote: string } {
 
 test("change-request lifecycle parsing requires an exact forge URL and terminal vocabulary", () => {
   const url = "https://github.com/picoduck/wollipog/pull/701";
-  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url, state: "OPEN" }), url), "open");
-  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url, state: "MERGED" }), url), "merged");
-  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url, state: "CLOSED" }), url), "closed");
-  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url, state: "UNKNOWN" }), url), null);
-  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url: `${url}/files`, state: "MERGED" }), url), null);
-  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url, state: "MERGED" }), "javascript:alert(1)"), null);
+  const githubHead = "A".repeat(40);
+  assert.deepEqual(parseWorktreePullRequestState(JSON.stringify({ url, state: "OPEN", headRefOid: githubHead }), url),
+    { state: "open", headOid: githubHead.toLowerCase() });
+  assert.deepEqual(parseWorktreePullRequestState(JSON.stringify({ url, state: "MERGED", headRefOid: githubHead }), url),
+    { state: "merged", headOid: githubHead.toLowerCase() });
+  assert.deepEqual(parseWorktreePullRequestState(JSON.stringify({ url, state: "CLOSED", headRefOid: githubHead }), url),
+    { state: "closed", headOid: githubHead.toLowerCase() });
+  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url, state: "UNKNOWN", headRefOid: githubHead }), url), null);
+  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url: `${url}/files`, state: "MERGED", headRefOid: githubHead }), url), null);
+  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url, state: "MERGED", headRefOid: githubHead }), "javascript:alert(1)"), null);
+  assert.deepEqual(parseWorktreePullRequestState(JSON.stringify({ url, state: "MERGED" }), url),
+    { state: "merged" }, "lifecycle proof remains usable without deletion proof");
+  assert.deepEqual(parseWorktreePullRequestState(JSON.stringify({ url, state: "MERGED", headRefOid: "not-an-oid" }), url),
+    { state: "merged" }, "a malformed OID is never exposed as deletion proof");
   assert.equal(parseWorktreePullRequestState("not json", url), null);
 
   const gitlab = "https://gitlab.example.test/team/sub/repo/-/merge_requests/19";
-  assert.equal(parseWorktreePullRequestState(JSON.stringify({ web_url: gitlab, state: "opened" }), gitlab), "open");
-  assert.equal(parseWorktreePullRequestState(JSON.stringify({ web_url: gitlab, state: "merged" }), gitlab), "merged");
-  assert.equal(parseWorktreePullRequestState(JSON.stringify({ web_url: gitlab, state: "closed" }), gitlab), "closed");
-  assert.equal(parseWorktreePullRequestState(JSON.stringify({ web_url: `${gitlab}.evil.test`, state: "merged" }), gitlab), null);
-  assert.equal(parseWorktreePullRequestState(JSON.stringify({ web_url: gitlab, state: "merged" }),
+  const gitlabHead = "b".repeat(64);
+  assert.deepEqual(parseWorktreePullRequestState(JSON.stringify({ web_url: gitlab, state: "opened", sha: gitlabHead }), gitlab),
+    { state: "open", headOid: gitlabHead });
+  assert.deepEqual(parseWorktreePullRequestState(JSON.stringify({ web_url: gitlab, state: "merged", sha: gitlabHead }), gitlab),
+    { state: "merged", headOid: gitlabHead });
+  assert.deepEqual(parseWorktreePullRequestState(JSON.stringify({ web_url: gitlab, state: "closed", sha: gitlabHead }), gitlab),
+    { state: "closed", headOid: gitlabHead });
+  assert.equal(parseWorktreePullRequestState(JSON.stringify({ web_url: `${gitlab}.evil.test`, state: "merged", sha: gitlabHead }), gitlab), null);
+  assert.equal(parseWorktreePullRequestState(JSON.stringify({ web_url: gitlab, state: "merged", sha: gitlabHead }),
     "https://token@gitlab.example.test/team/sub/repo/-/merge_requests/19"), null);
+});
+
+test("merged branch discovery requires the exact branch and head", () => {
+  const branch = "fix/external-pr";
+  const head = "a".repeat(40);
+  const exact = { url: "https://github.com/picoduck/wollipog/pull/983", state: "MERGED", headRefOid: head.toUpperCase(), headRefName: branch };
+  assert.deepEqual(parseMergedWorktreePullRequestForBranch(JSON.stringify([exact]), branch, head), {
+    url: exact.url,
+    state: "merged",
+    headOid: head,
+    provider: "github",
+    kind: "pull_request",
+  });
+  assert.equal(parseMergedWorktreePullRequestForBranch(JSON.stringify([{ ...exact, state: "CLOSED" }]), branch, head), null);
+  assert.equal(parseMergedWorktreePullRequestForBranch(JSON.stringify([{ ...exact, headRefName: "fix/other" }]), branch, head), null);
+  assert.equal(parseMergedWorktreePullRequestForBranch(JSON.stringify([{ ...exact, headRefOid: "b".repeat(40) }]), branch, head), null);
+  assert.equal(parseMergedWorktreePullRequestForBranch(JSON.stringify([{ ...exact, url: "https://example.test/pull/983" }]), branch, head), null);
+  assert.equal(parseMergedWorktreePullRequestForBranch("{}", branch, head), null);
 });
 
 test("git preflight distinguishes a non-repo from a broken context/path", { skip: !haveGit() }, async () => {
@@ -334,6 +364,35 @@ test("safe discard removes only a clean fully-pushed runner-owned worktree", { s
       source: "created",
     }, { dataDir }), { removed: false, reason: "no_upstream" });
 
+    const mismatchedMerged = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "fix/mismatched-merged-head",
+    }, { dataDir });
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...mismatchedMerged,
+      source: "created",
+    }, { dataDir, verifiedMergedHead: "0".repeat(40) }), { removed: false, reason: "unpushed" });
+    assert.equal(existsSync(mismatchedMerged.path), true,
+      "a merge proof for any other commit cannot authorize cleanup");
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...mismatchedMerged,
+      source: "created",
+    }, { dataDir, verifiedMergedHead: "not-an-oid" }), { removed: false, reason: "no_upstream" });
+
+    const verifiedMerged = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "fix/verified-merged-head",
+    }, { dataDir });
+    const verifiedMergedHead = execFileSync("git", ["-C", verifiedMerged.path, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    }).trim();
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...verifiedMerged,
+      source: "created",
+    }, { dataDir, verifiedMergedHead }), { removed: true });
+    assert.equal(existsSync(verifiedMerged.path), false,
+      "the exact forge-verified merged head replaces only the missing upstream proof");
+
     const drifted = await createRequestedWorktree(repo, "s_safe", {
       baseRef: "HEAD",
       branch: "fix/drift-original",
@@ -356,7 +415,7 @@ test("safe discard removes only a clean fully-pushed runner-owned worktree", { s
   }
 });
 
-test("existing worktree attach requires both Git registration and an allowed Location", { skip: !haveGit() }, async () => {
+test("existing worktree attach requires Git registration by a configured Location's repository", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-attach-wt-"));
   const repo = join(root, "repo");
   const dataDir = join(root, "data");
@@ -387,14 +446,16 @@ test("existing worktree attach requires both Git registration and an allowed Loc
     });
     assert.equal(reattached.path, existing);
     setStatfsForTests();
+    // The repository is NOT inside the one configured Location here, and neither is `outside`, so
+    // nothing ties that path to a configured project.
     await assert.rejects(
       attachRequestedWorktree(repo, "s_attach", outside, { dataDir, allowedProjectPaths: [allowed] }),
-      /outside the runner's configured Project Locations/,
+      /matched none of the runner's configured Project Locations/,
     );
     const unregistered = join(allowed, "not-registered");
     await assert.rejects(
       attachRequestedWorktree(repo, "s_attach", unregistered, { dataDir, allowedProjectPaths: [allowed] }),
-      /not registered with the session repository/,
+      /not registered by the repository it was matched against/,
     );
     await assert.rejects(
       attachRequestedWorktree(repo, "s_attach", repo, { dataDir, allowedProjectPaths: [root] }),
@@ -402,6 +463,110 @@ test("existing worktree attach requires both Git registration and an allowed Loc
     );
   } finally {
     setStatfsForTests();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("attach accepts a worktree the configured Location's repository registers outside every Location", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-attach-external-wt-"));
+  const repo = join(root, "repo");
+  const other = join(root, "other-repo");
+  const dataDir = join(root, "data");
+  // The issue-workflow skill's fallback layout: beside the repository, inside no Project Location.
+  const beside = join(root, "repo-worktrees", "example");
+  const detached = join(root, "repo-worktrees", "detached");
+  const foreign = join(root, "other-repo-worktrees", "example");
+  try {
+    for (const path of [repo, other]) {
+      execFileSync("git", ["init", path]);
+      execFileSync("git", ["-C", path, "config", "user.email", "test@example.com"]);
+      execFileSync("git", ["-C", path, "config", "user.name", "Test"]);
+      execFileSync("git", ["-C", path, "commit", "--allow-empty", "-m", "base"]);
+    }
+    execFileSync("git", ["-C", repo, "worktree", "add", "-b", "fix/example", beside]);
+    execFileSync("git", ["-C", repo, "worktree", "add", "--detach", detached]);
+    execFileSync("git", ["-C", other, "worktree", "add", "-b", "fix/foreign", foreign]);
+    const head = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+
+    // The repository IS the only configured Project Location; its worktree is not inside one.
+    const attached = await attachRequestedWorktree(repo, "s_external", beside, {
+      dataDir,
+      allowedProjectPaths: [repo],
+    });
+    assert.equal(attached.path, beside);
+    assert.equal(attached.branch, "fix/example");
+    assert.equal(attached.baseCommit, head);
+    assert.equal(attached.attached, true);
+
+    await assert.rejects(
+      attachRequestedWorktree(repo, "s_external", detached, { dataDir, allowedProjectPaths: [repo] }),
+      /detached worktree cannot be attached/,
+    );
+    await assert.rejects(
+      attachRequestedWorktree(repo, "s_external", repo, { dataDir, allowedProjectPaths: [repo] }),
+      /primary workspace cannot be attached/,
+    );
+    // Registration is what ties a path to a project, so a second configured repository's worktree
+    // stays out of reach: this session's repository does not register it.
+    const foreignRefusal = await attachRequestedWorktree(repo, "s_external", foreign, {
+      dataDir,
+      allowedProjectPaths: [repo, other],
+    }).then(() => undefined, (error: Error) => error.message);
+    assert.match(foreignRefusal ?? "", /not registered by the repository it was matched against/);
+    assert.ok(foreignRefusal?.includes("repo"), `refusal names the repository: ${foreignRefusal}`);
+
+    const absentRefusal = await attachRequestedWorktree(repo, "s_external", join(root, "repo-worktrees", "absent"), {
+      dataDir,
+      allowedProjectPaths: [repo],
+    }).then(() => undefined, (error: Error) => error.message);
+    assert.match(absentRefusal ?? "", /not registered by the repository it was matched against \(/);
+
+    // With no Project Location covering the repository, the refusal says so rather than implying
+    // the worktree itself is the problem.
+    const unconfigured = await attachRequestedWorktree(repo, "s_external", beside, {
+      dataDir,
+      allowedProjectPaths: [],
+    }).then(() => undefined, (error: Error) => error.message);
+    assert.match(unconfigured ?? "", /matched none of the runner's configured Project Locations/);
+    assert.ok(unconfigured?.includes("repo"), `refusal names the repository: ${unconfigured}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("attach refuses a registered path whose tree is now a different repository", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-attach-foreign-tree-"));
+  const repo = join(root, "repo");
+  const other = join(root, "other-repo");
+  const dataDir = join(root, "data");
+  const beside = join(root, "repo-worktrees", "example");
+  try {
+    for (const path of [repo, other]) {
+      execFileSync("git", ["init", path]);
+      execFileSync("git", ["-C", path, "config", "user.email", "test@example.com"]);
+      execFileSync("git", ["-C", path, "config", "user.name", "Test"]);
+      execFileSync("git", ["-C", path, "commit", "--allow-empty", "-m", "base"]);
+    }
+    execFileSync("git", ["-C", repo, "worktree", "add", "-b", "fix/example", beside]);
+
+    // The registration in `repo` outlives the directory it names. Git keeps reporting the path with
+    // the branch and head it recorded, and a work-tree health check at that path still passes —
+    // because a DIFFERENT repository is there now. Accepting it would hand the session a repository
+    // its own never registered, and bind it writable at the next launch.
+    rmSync(beside, { recursive: true, force: true });
+    symlinkSync(other, beside);
+    assert.match(
+      execFileSync("git", ["-C", repo, "worktree", "list", "--porcelain"], { encoding: "utf8" }),
+      /fix\/example/,
+      "the stale registration is still advertised by the repository",
+    );
+
+    const refusal = await attachRequestedWorktree(repo, "s_foreign_tree", beside, {
+      dataDir,
+      allowedProjectPaths: [repo],
+    }).then(() => undefined, (error: Error) => error.message);
+    assert.match(refusal ?? "", /belongs to a different repository than the session/);
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -476,6 +641,122 @@ test("session deletion removes its external worktree and durable store row", { s
     ).trim(), "");
     assert.throws(() => execFileSync("git", ["-C", handle.path, "status"], { stdio: "ignore" }));
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a session attaches a worktree beside its repository and states the isolation boundary", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-external-wt-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  // The reproduction from the issue: the repository is the only configured Project Location and
+  // the worktree lives beside it, in no Location at all.
+  const beside = join(root, "repo-worktrees", "example");
+  let manager: SessionManager | undefined;
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    execFileSync("git", ["-C", repo, "worktree", "add", "-b", "fix/example", beside]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_ext", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "external",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, dataDir, 1,
+      undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      { mode: "bwrap", network: "deny" },
+    );
+    const internals = manager as unknown as {
+      configuredProjectPaths: string[];
+      active: Map<string, {
+        sessionId: string;
+        cwd: string;
+        context: { kind: "native" | "wsl" };
+        seatbeltWritableRoots?: string[];
+      }>;
+      executionIsolation: { mode: string; network: string };
+      attachIsolationNotice(meta: unknown, path: string): Promise<unknown>;
+      requestedWorktreeIsolation(meta: unknown): Promise<string[]>;
+    };
+    internals.configuredProjectPaths = [repo];
+
+    const attached = await manager.attachWorktree("s_ext", beside);
+    assert.equal(attached.worktree.path, beside);
+    assert.equal(attached.worktree.branch, "fix/example");
+    assert.equal(attached.worktree.source, "attached");
+    assert.equal(attached.snapshot.worktreePath, beside);
+    assert.equal(attached.snapshot.useWorktree, true);
+    const listed = attached.snapshot.worktrees?.find((item) => item.path === beside);
+    assert.equal(listed?.branch, "fix/example");
+    assert.equal(listed?.source, "attached");
+    assert.equal(typeof listed?.baseCommit, "string");
+    assert.equal(store.readMeta("s_ext")?.worktreePath, beside);
+    assert.equal(store.readMeta("s_ext")?.worktreeBranch, "fix/example");
+    // The PR surface reads the same record, so it is no longer blind to this session.
+    await manager.linkWorktreePullRequest("s_ext", beside, "https://example.test/pull/9");
+    assert.equal(store.readMeta("s_ext")?.worktrees?.find((item) => item.path === beside)?.pullRequest?.url,
+      "https://example.test/pull/9");
+    // Nothing is running, so the next launch binds the path before anything can write to it.
+    assert.deepEqual(attached.isolation, { writableNow: true, writableAtNextLaunch: true });
+
+    // That next launch really does carry the external path into the writable boundary.
+    const boundary = await requestedWorktreeBoundary(repo, "s_ext", { dataDir }, false);
+    assert.deepEqual(await internals.requestedWorktreeIsolation(store.readMeta("s_ext")), [boundary, beside]);
+
+    // A live provider keeps the boundary it launched with, and the response says so rather than
+    // letting the agent meet it as a mid-turn write denial.
+    internals.active.set("s_ext", { sessionId: "s_ext", cwd: repo, context: { kind: "native" } });
+    assert.deepEqual(await internals.attachIsolationNotice(store.readMeta("s_ext"), beside), {
+      writableNow: false,
+      writableAtNextLaunch: true,
+    });
+
+    // Direct WSL read-only-binds `/` and makes only the launch cwd writable, and it never carries
+    // the requested-worktree boundary, so a live WSL session must not be told it can already write
+    // here — an agent that believed it would meet permission failures instead.
+    const wslMeta = { ...store.readMeta("s_ext"), context: { kind: "wsl" } };
+    internals.active.set("s_ext", { sessionId: "s_ext", cwd: repo, context: { kind: "wsl" } });
+    assert.deepEqual(await internals.attachIsolationNotice(wslMeta, beside), {
+      writableNow: false,
+      writableAtNextLaunch: true,
+    });
+
+    // Seatbelt grants the native temporary directory outright, so a worktree under it is writable
+    // already and reporting otherwise would send the agent into a pointless relaunch.
+    // Seatbelt also grants the provider's transcript leaf. The notice reads the profile's own list
+    // rather than restating it, so a worktree under that leaf is reported writable too. This fake
+    // active session carries the same launch snapshot a real Seatbelt process retains.
+    const providerHome = join(root, "provider-home");
+    internals.active.set("s_ext", {
+      sessionId: "s_ext",
+      cwd: repo,
+      context: { kind: "native" },
+      seatbeltWritableRoots: [repo, dataDir, tmpdir(), join(providerHome, ".claude", "projects")],
+    });
+    internals.executionIsolation = { mode: "seatbelt", network: "deny" };
+    assert.deepEqual(await internals.attachIsolationNotice(store.readMeta("s_ext"), beside), {
+      writableNow: true,
+      writableAtNextLaunch: true,
+    });
+    const providerMeta = { ...store.readMeta("s_ext"), env: { HOME: providerHome } };
+    assert.deepEqual(
+      await internals.attachIsolationNotice(providerMeta, join(providerHome, ".claude", "projects", "wt")),
+      { writableNow: true, writableAtNextLaunch: true },
+    );
+    internals.executionIsolation = { mode: "bwrap", network: "deny" };
+    internals.active.delete("s_ext");
+
+    await manager.delete("s_ext");
+    assert.equal(existsSync(beside), true, "an attached worktree is never runner-owned");
+    execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/fix/example"]);
+  } finally {
+    manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -607,10 +888,11 @@ test("PR reconciliation and explicit discard retain every unsafe worktree", { sk
       await manager.linkWorktreePullRequest("s_pr_cleanup", worktree.path, url);
     }
     (manager as unknown as {
-      resolveWorktreePullRequestState: (path: string) => Promise<"merged" | "closed" | null>;
+      resolveWorktreePullRequestState: (path: string) => Promise<{ state: "merged" | "closed"; headOid: string } | null>;
     }).resolveWorktreePullRequestState = async (path) => {
-      if (path === clean.worktree.path || path === attached.worktree.path) return "merged";
-      if (path === dirty.worktree.path) return "closed";
+      const headOid = execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      if (path === clean.worktree.path || path === attached.worktree.path) return { state: "merged", headOid };
+      if (path === dirty.worktree.path) return { state: "closed", headOid };
       return null;
     };
 
@@ -630,6 +912,334 @@ test("PR reconciliation and explicit discard retain every unsafe worktree", { sk
     execFileSync("git", ["-C", dirty.worktree.path, "clean", "-fd"]);
     await manager.discardWorktree("s_pr_cleanup", dirty.worktree.path);
     assert.equal(existsSync(dirty.worktree.path), false, "explicit discard uses the same safe removal checks");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("merged PR worktrees remain discardable after their remote branches are deleted", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-merged-pr-no-upstream-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_merged_no_upstream", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "cleanup",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const automatic = await manager.requestWorktree(
+      "s_merged_no_upstream",
+      { baseRef: "HEAD", branch: "fix/merged-automatic" },
+    );
+    const explicit = await manager.requestWorktree(
+      "s_merged_no_upstream",
+      { baseRef: "HEAD", branch: "fix/merged-explicit" },
+    );
+    const legacyMerged = await manager.requestWorktree(
+      "s_merged_no_upstream",
+      { baseRef: "HEAD", branch: "fix/legacy-merged-explicit" },
+    );
+    const unprovenMerged = await manager.requestWorktree(
+      "s_merged_no_upstream",
+      { baseRef: "HEAD", branch: "fix/unproven-merged" },
+    );
+    const discoveredAutomatic = await manager.requestWorktree(
+      "s_merged_no_upstream",
+      { baseRef: "HEAD", branch: "fix/discovered-merged-automatic" },
+    );
+    const discoveredExplicit = await manager.requestWorktree(
+      "s_merged_no_upstream",
+      { baseRef: "HEAD", branch: "fix/discovered-merged-explicit" },
+    );
+    const unmergedMissingUpstream = await manager.requestWorktree(
+      "s_merged_no_upstream",
+      { baseRef: "HEAD", branch: "fix/discovered-unmerged" },
+    );
+    const neverPushed = await manager.requestWorktree(
+      "s_merged_no_upstream",
+      { baseRef: "HEAD", branch: "fix/never-pushed" },
+    );
+    for (const worktree of [
+      automatic.worktree,
+      explicit.worktree,
+      legacyMerged.worktree,
+      unprovenMerged.worktree,
+      discoveredAutomatic.worktree,
+      discoveredExplicit.worktree,
+      unmergedMissingUpstream.worktree,
+    ]) {
+      execFileSync("git", ["-C", worktree.path, "push", "-u", "origin", worktree.branch]);
+      if (![legacyMerged.worktree, discoveredAutomatic.worktree, discoveredExplicit.worktree,
+        unmergedMissingUpstream.worktree].includes(worktree)) {
+        await manager.linkWorktreePullRequest(
+          "s_merged_no_upstream",
+          worktree.path,
+          `https://github.com/picoduck/wollipog/pull/${worktree === automatic.worktree
+            ? "710"
+            : worktree === explicit.worktree ? "711" : "713"}`,
+        );
+      }
+      execFileSync("git", ["-C", worktree.path, "push", "origin", "--delete", worktree.branch]);
+    }
+    const forgeCalls = new Map<string, number>();
+    const discoveryCalls = new Map<string, number>();
+    let enableExplicitDiscovery = false;
+    let forgeUnavailablePath: string | undefined;
+    let removeSiblingOnResolve: string | undefined;
+    (manager as unknown as {
+      resolveWorktreePullRequestState: (path: string) => Promise<{ state: "merged"; headOid?: string } | null>;
+    }).resolveWorktreePullRequestState = async (path) => {
+      forgeCalls.set(path, (forgeCalls.get(path) ?? 0) + 1);
+      if (removeSiblingOnResolve) {
+        const latest = store.readMeta("s_merged_no_upstream")!;
+        store.patchMeta("s_merged_no_upstream", {
+          worktrees: latest.worktrees?.filter((item) => item.path !== removeSiblingOnResolve),
+        });
+        removeSiblingOnResolve = undefined;
+      }
+      if (path === forgeUnavailablePath) return null;
+      if (path === unprovenMerged.worktree.path) return { state: "merged" };
+      return {
+        state: "merged",
+        headOid: execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+      };
+    };
+    (manager as unknown as {
+      discoverMergedWorktreePullRequest: (
+        path: string,
+        branch: string,
+      ) => Promise<{
+        url: string;
+        state: "merged";
+        headOid: string;
+        provider: "github";
+        kind: "pull_request";
+      } | null>;
+    }).discoverMergedWorktreePullRequest = async (path, branch) => {
+      discoveryCalls.set(path, (discoveryCalls.get(path) ?? 0) + 1);
+      const isDiscoverable = path === discoveredAutomatic.worktree.path ||
+        (enableExplicitDiscovery && path === discoveredExplicit.worktree.path);
+      if (!isDiscoverable) return null;
+      return {
+        url: `https://github.com/picoduck/wollipog/pull/${path === discoveredAutomatic.worktree.path ? "714" : "715"}`,
+        state: "merged",
+        headOid: execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+        provider: "github",
+        kind: "pull_request",
+      };
+    };
+
+    const activeEntries = (manager as unknown as { active: Map<string, unknown> }).active;
+    activeEntries.set("s_merged_no_upstream", {
+      context: { kind: "native" },
+      cwd: explicit.worktree.path,
+      worktree: { path: explicit.worktree.path, branch: explicit.worktree.branch },
+    });
+    const beforeReconciliation = store.readMeta("s_merged_no_upstream")!;
+    const reconciliationSiblingPath = join(root, "reconciliation-sibling");
+    store.patchMeta("s_merged_no_upstream", {
+      worktrees: [
+        ...(beforeReconciliation.worktrees ?? []),
+        {
+          id: "reconciliation-sibling",
+          path: reconciliationSiblingPath,
+          branch: "fix/reconciliation-sibling",
+          source: "created",
+        },
+      ],
+    });
+    removeSiblingOnResolve = reconciliationSiblingPath;
+    await manager.reconcileWorktreePullRequests();
+
+    assert.equal(existsSync(automatic.worktree.path), false,
+      "automatic reconciliation removes the inactive merged worktree without its remote branch");
+    assert.equal(existsSync(discoveredAutomatic.worktree.path), false,
+      "automatic reconciliation discovers and removes an externally opened merged PR worktree");
+    assert.equal(existsSync(discoveredExplicit.worktree.path), true,
+      "an unlinked worktree remains until forge discovery provides exact merged-head proof");
+    assert.equal(existsSync(unmergedMissingUpstream.worktree.path), true,
+      "a deleted upstream without merged-head proof remains protected");
+    assert.equal(existsSync(neverPushed.worktree.path), true,
+      "a never-pushed worktree remains protected");
+    assert.equal(existsSync(explicit.worktree.path), true,
+      "the worktree still used by a provider remains protected");
+    const persistedExplicit = store.readMeta("s_merged_no_upstream")?.worktrees
+      ?.find((item) => item.path === explicit.worktree.path)?.pullRequest;
+    assert.equal(persistedExplicit?.state, "merged",
+      "the terminal forge proof remains available for a later explicit discard",
+    );
+    assert.equal(persistedExplicit?.headOid,
+      execFileSync("git", ["-C", explicit.worktree.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+      "the exact merged head survives the durable session-store round trip");
+    assert.equal(forgeCalls.get(unprovenMerged.worktree.path), 1,
+      "a reconciliation pass does not repeat a forge lookup that returned no head proof");
+    assert.equal(existsSync(unprovenMerged.worktree.path), true,
+      "a merged lifecycle state without head proof cannot replace the missing upstream");
+    assert.equal(store.readMeta("s_merged_no_upstream")?.worktrees
+      ?.some((item) => item.id === "reconciliation-sibling"), false,
+      "automatic reconciliation cannot resurrect a sibling record removed during forge I/O");
+
+    activeEntries.delete("s_merged_no_upstream");
+    await manager.discardWorktree("s_merged_no_upstream", explicit.worktree.path);
+    assert.equal(existsSync(explicit.worktree.path), false,
+      "explicit discard also accepts the verified merged worktree without its remote branch");
+
+    enableExplicitDiscovery = true;
+    await manager.discardWorktree("s_merged_no_upstream", discoveredExplicit.worktree.path);
+    assert.equal(existsSync(discoveredExplicit.worktree.path), false,
+      "explicit discard discovers an externally opened merged PR before applying the same head proof");
+    await assert.rejects(
+      manager.discardWorktree("s_merged_no_upstream", unmergedMissingUpstream.worktree.path),
+      /branch has no upstream/,
+    );
+    await assert.rejects(
+      manager.discardWorktree("s_merged_no_upstream", neverPushed.worktree.path),
+      /branch has no upstream/,
+    );
+    assert.ok((discoveryCalls.get(discoveredAutomatic.worktree.path) ?? 0) >= 1);
+    assert.ok((discoveryCalls.get(unmergedMissingUpstream.worktree.path) ?? 0) >= 1);
+
+    await manager.linkWorktreePullRequest(
+      "s_merged_no_upstream",
+      legacyMerged.worktree.path,
+      "https://github.com/picoduck/wollipog/pull/712",
+    );
+    const beforeUpgrade = store.readMeta("s_merged_no_upstream")!;
+    store.patchMeta("s_merged_no_upstream", {
+      worktrees: [
+        ...(beforeUpgrade.worktrees?.map((item) => item.path === legacyMerged.worktree.path
+          ? { ...item, pullRequest: { ...item.pullRequest!, state: "merged", headOid: undefined } }
+          : item) ?? []),
+        {
+          id: "concurrently-removed-sibling",
+          path: join(root, "concurrently-removed-sibling"),
+          branch: "fix/concurrently-removed-sibling",
+          source: "created",
+        },
+      ],
+    });
+    removeSiblingOnResolve = join(root, "concurrently-removed-sibling");
+    await manager.discardWorktree("s_merged_no_upstream", legacyMerged.worktree.path);
+    assert.equal(existsSync(legacyMerged.worktree.path), false,
+      "explicit discard refreshes a merged record persisted by a pre-proof runner");
+    assert.equal(store.readMeta("s_merged_no_upstream")?.worktrees
+      ?.some((item) => item.id === "concurrently-removed-sibling"), false,
+      "forge re-verification cannot resurrect a sibling record removed by another runner");
+
+    forgeUnavailablePath = unprovenMerged.worktree.path;
+    await assert.rejects(manager.discardWorktree("s_merged_no_upstream", unprovenMerged.worktree.path),
+      /branch has no upstream/);
+    assert.equal(existsSync(unprovenMerged.worktree.path), true,
+      "a legacy merged record remains fail-closed when forge proof is unavailable");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy merged-worktree discard refreshes launch state and reports vanished records", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-legacy-discard-refresh-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_legacy_discard_refresh", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "cleanup",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const launching = await manager.requestWorktree(
+      "s_legacy_discard_refresh",
+      { baseRef: "HEAD", branch: "fix/legacy-discard-launching" },
+    );
+    const vanished = await manager.requestWorktree(
+      "s_legacy_discard_refresh",
+      { baseRef: "HEAD", branch: "fix/legacy-discard-vanished" },
+    );
+    for (const [worktree, pullRequest] of [
+      [launching.worktree, "https://github.com/picoduck/wollipog/pull/720"],
+      [vanished.worktree, "https://github.com/picoduck/wollipog/pull/721"],
+    ] as const) {
+      execFileSync("git", ["-C", worktree.path, "push", "-u", "origin", worktree.branch]);
+      await manager.linkWorktreePullRequest("s_legacy_discard_refresh", worktree.path, pullRequest);
+      execFileSync("git", ["-C", worktree.path, "push", "origin", "--delete", worktree.branch]);
+    }
+    const beforeLegacyPatch = store.readMeta("s_legacy_discard_refresh")!;
+    store.patchMeta("s_legacy_discard_refresh", {
+      status: "idle",
+      worktreePath: null,
+      worktreePending: false,
+      worktrees: beforeLegacyPatch.worktrees?.map((item) => ({
+        ...item,
+        pullRequest: item.pullRequest
+          ? { ...item.pullRequest, state: "merged" as const, headOid: undefined }
+          : undefined,
+      })),
+    });
+
+    const internals = manager as unknown as {
+      resolveWorktreePullRequestState: (path: string) => Promise<{ state: "merged"; headOid: string }>;
+    };
+    const deferForgeResolution = (expectedPath: string) => {
+      let signalStarted!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => { signalStarted = resolve; });
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      internals.resolveWorktreePullRequestState = async (path) => {
+        assert.equal(path, expectedPath);
+        const headOid = execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+        signalStarted();
+        await gate;
+        return { state: "merged", headOid };
+      };
+      return { started, release };
+    };
+
+    const launchingResolution = deferForgeResolution(launching.worktree.path);
+    const launchingDiscard = manager.discardWorktree("s_legacy_discard_refresh", launching.worktree.path);
+    await launchingResolution.started;
+    store.patchMeta("s_legacy_discard_refresh", {
+      status: "starting",
+      worktreePath: launching.worktree.path,
+      worktreeBranch: launching.worktree.branch,
+      worktreePending: true,
+    });
+    launchingResolution.release();
+    await assert.rejects(launchingDiscard, /still being launched by a provider process/);
+    assert.equal(existsSync(launching.worktree.path), true,
+      "a launch recorded during forge verification keeps the merged worktree intact");
+    assert.equal(store.readMeta("s_legacy_discard_refresh")?.worktrees
+      ?.find((item) => item.path === launching.worktree.path)?.pullRequest?.headOid,
+      execFileSync("git", ["-C", launching.worktree.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+      "the refreshed merge proof is retained while launch state blocks cleanup");
+
+    store.patchMeta("s_legacy_discard_refresh", {
+      status: "idle",
+      worktreePath: null,
+      worktreeBranch: undefined,
+      worktreePending: false,
+    });
+    const vanishedResolution = deferForgeResolution(vanished.worktree.path);
+    const vanishedDiscard = manager.discardWorktree("s_legacy_discard_refresh", vanished.worktree.path);
+    await vanishedResolution.started;
+    const beforeRemoval = store.readMeta("s_legacy_discard_refresh")!;
+    store.patchMeta("s_legacy_discard_refresh", {
+      worktrees: beforeRemoval.worktrees?.filter((item) => item.path !== vanished.worktree.path),
+    });
+    vanishedResolution.release();
+    await assert.rejects(vanishedDiscard, /worktree record was removed while checking forge state/);
+    assert.equal(existsSync(vanished.worktree.path), true,
+      "a vanished metadata record is not misreported as a filesystem removal");
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
@@ -659,8 +1269,11 @@ test("terminal PR cleanup waits until the provider releases its exact cwd", { sk
       "https://github.com/picoduck/wollipog/pull/705",
     );
     (manager as unknown as {
-      resolveWorktreePullRequestState: () => Promise<"merged">;
-    }).resolveWorktreePullRequestState = async () => "merged";
+      resolveWorktreePullRequestState: (path: string) => Promise<{ state: "merged"; headOid: string }>;
+    }).resolveWorktreePullRequestState = async (path) => ({
+      state: "merged",
+      headOid: execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+    });
     const activeEntries = (manager as unknown as { active: Map<string, unknown> }).active;
     activeEntries.set("s_active_pr", {
       cwd: active.worktree.path,
@@ -1326,7 +1939,7 @@ test("a control-plane hold survives rebind and its release resumes an empty defe
   }
 });
 
-test("an interrupt hold defers worktree rebind until an explicit prompt resumes the queue", { skip: !haveGit() }, async () => {
+test("an interrupt hold defers worktree rebind until settlement then resumes the queue automatically", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-interrupt-worktree-rebind-"));
   const repo = join(root, "repo");
   const dataDir = join(root, "data");
@@ -1375,18 +1988,14 @@ test("an interrupt hold defers worktree rebind until an explicit prompt resumes 
     });
     manager.prompt(spec.sessionId, "held");
     assert.equal(manager.interruptTurn(spec.sessionId), "applied");
-    releasePrompt();
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
-    assert.deepEqual(launchedCwds, [repo], "the interrupt hold must defer provider replacement");
+    assert.deepEqual(launchedCwds, [repo], "the interrupt hold must defer provider replacement before settlement");
     assert.deepEqual(prompts, [{ cwd: repo, text: "first" }],
-      "the preserved FIFO must not run until a later explicit prompt");
-    manager.prompt(spec.sessionId, "resume");
-    await waitForCondition(() => prompts.length === 3, "explicit resume did not drain the preserved FIFO");
+      "the preserved FIFO must not run before cancellation settles");
+    releasePrompt();
+    await waitForCondition(() => prompts.length === 2, "settlement did not drain the preserved FIFO");
     assert.deepEqual(launchedCwds, [repo, requested.worktree.path]);
-    assert.deepEqual(prompts.slice(1), [
-      { cwd: requested.worktree.path, text: "held" },
-      { cwd: requested.worktree.path, text: "resume" },
-    ]);
+    assert.deepEqual(prompts[1], { cwd: requested.worktree.path, text: "held" });
     manager.stop(spec.sessionId);
     await manager.delete(spec.sessionId);
   } finally {
@@ -1461,6 +2070,170 @@ test("an authentication hold defers worktree rebind and preserves its FIFO until
     await manager.delete(spec.sessionId);
   } finally {
     releasePrompt();
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("pending Claude background work defers rebind until its automatic continuation is recorded", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-background-worktree-rebind-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  let releaseFirst = () => {};
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const launchedCwds: string[] = [];
+    const prompts: Array<{ cwd: string; text: string }> = [];
+    const callbacksByLaunch: Array<{
+      onBackgroundWork?: (update: {
+        state: "running" | "orphaned" | null;
+        pendingTaskIds: string[];
+        jobs?: Array<{ id: string; launchType: "agent"; startedAt: number }>;
+        terminalJobs?: Array<{
+          id: string;
+          launchType: "agent";
+          startedAt: number;
+          status: "completed";
+          terminalAt: number;
+          continuationRequired: boolean;
+        }>;
+      }) => void;
+      onPromptAccepted?: () => void;
+      onEvent: (event: { kind: "agent_message"; text: string }) => void;
+    }> = [];
+    let firstStartedResolve!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { firstStartedResolve = resolve; });
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const factory = (
+      _driver: unknown,
+      launch: { cwd: string },
+      callbacks: (typeof callbacksByLaunch)[number],
+    ) => {
+      launchedCwds.push(launch.cwd);
+      callbacksByLaunch.push(callbacks);
+      return {
+        pid: launchedCwds.length, initialize: async () => {}, newSession: async () => {}, close: async () => {},
+        prompt: async (text: string) => {
+          prompts.push({ cwd: launch.cwd, text });
+          if (text === "first") {
+            callbacks.onBackgroundWork?.({
+              state: "running",
+              pendingTaskIds: ["task-1"],
+              jobs: [{ id: "task-1", launchType: "agent", startedAt: 1 }],
+            });
+            firstStartedResolve();
+            await firstGate;
+          } else if (/Managed background jobs reached their terminal barrier/.test(text)) {
+            callbacks.onPromptAccepted?.();
+            callbacks.onEvent({ kind: "agent_message", text: "Background task completed." });
+          }
+          return "end_turn" as const;
+        },
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "provider-session-id",
+      };
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    const spec = {
+      sessionId: "s_background_rebind", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: false, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    };
+    await manager.start(spec);
+    manager.prompt(spec.sessionId, "first");
+    await firstStarted;
+    const requested = await manager.requestWorktree(spec.sessionId, {
+      baseRef: "HEAD", branch: "fix/background-rebind",
+    });
+    manager.prompt(spec.sessionId, "second");
+    releaseFirst();
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(launchedCwds, [repo], "the task-owning provider must stay alive after its turn ends");
+    assert.equal(store.readMeta(spec.sessionId)?.backgroundWorkState, "running");
+
+    callbacksByLaunch[0]!.onBackgroundWork?.({
+      state: null,
+      pendingTaskIds: [],
+      terminalJobs: [{
+        id: "task-1",
+        launchType: "agent",
+        startedAt: 1,
+        status: "completed",
+        terminalAt: 2,
+        continuationRequired: true,
+      }],
+    });
+    await waitForCondition(() => prompts.length === 3, "the background continuation and held prompt were not submitted", 3_000);
+    await waitForCondition(() => launchedCwds.length === 2, "rebind did not resume after background delivery", 3_000);
+    assert.equal(prompts.length, 3);
+    assert.equal(prompts[1]!.cwd, repo, "the task notification is consumed by its owning provider");
+    assert.match(prompts[1]!.text, /Managed background jobs reached their terminal barrier/);
+    assert.deepEqual(prompts[2], { cwd: requested.worktree.path, text: "second" },
+      "ordinary queued work remains FIFO-held until the rebind finishes");
+    assert.equal(store.readEvents(spec.sessionId).some((event) =>
+      event.payload.kind === "agent_message" && event.payload.text === "Background task completed."), true);
+    assert.deepEqual(launchedCwds, [repo, requested.worktree.path]);
+    manager.stop(spec.sessionId);
+    await manager.delete(spec.sessionId);
+  } finally {
+    releaseFirst();
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a spent one-shot orphan recovery does not hold a worktree rebind forever", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-spent-orphan-worktree-rebind-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const launchedCwds: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: launchedCwds.length, initialize: async () => {}, newSession: async () => {}, close: async () => {},
+        prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {}, setConfig: () => {},
+        resolvePermission: () => false, agentSessionId: () => "provider-session-id",
+      };
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    const spec = {
+      sessionId: "s_spent_orphan_rebind", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: false, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    };
+    await manager.start(spec);
+    store.patchMeta(spec.sessionId, {
+      backgroundWorkState: "orphaned",
+      pendingBackgroundTaskIds: ["task-1"],
+      orphanedWork: {
+        pendingTaskIds: ["task-1"],
+        markedAt: 1,
+        reason: "process_exit",
+        recoveryAttemptedAt: 2,
+      },
+    });
+    const requested = await manager.requestWorktree(spec.sessionId, {
+      baseRef: "HEAD", branch: "fix/spent-orphan-rebind",
+    });
+    await waitForCondition(() => launchedCwds.length === 2, "terminal orphan metadata held the rebind");
+    assert.deepEqual(launchedCwds, [repo, requested.worktree.path]);
+    assert.equal(store.readMeta(spec.sessionId)?.orphanedWork?.recoveryAttemptedAt, 2,
+      "the retained diagnostic still proves that billing-safe recovery was spent");
+    manager.stop(spec.sessionId);
+    await manager.delete(spec.sessionId);
+  } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
@@ -2599,6 +3372,658 @@ test("a running session discards its own finished worktrees despite the per-sess
     await assert.rejects(manager.discardWorktree("s_own_lease", fifth.worktree.path), /leased by another runner process/);
     store.releaseWorktreeLease("s_own_lease", "sibling-runner:provider");
     assert.equal(existsSync(fifth.worktree.path), true);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("post-merge cleanup keeps the worktree the running session still selects", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-selected-cleanup-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_selected_cleanup", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "running", title: "cleanup",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const merged = await manager.requestWorktree("s_selected_cleanup", { baseRef: "HEAD", branch: "fix/merged-work" });
+    // Exactly the post-merge state routine cleanup runs in: clean, fully pushed, nothing to lose.
+    execFileSync("git", ["-C", merged.worktree.path, "push", "-u", "origin", merged.worktree.branch]);
+    assert.equal(store.readMeta("s_selected_cleanup")?.worktreePath, merged.worktree.path);
+
+    const providerOwner = "runner:provider:1:selected";
+    assert.equal(store.acquireWorktreeLease("s_selected_cleanup", providerOwner), true);
+    const activeEntries = (manager as unknown as { active: Map<string, unknown> }).active;
+    activeEntries.set("s_selected_cleanup", {
+      sessionId: "s_selected_cleanup",
+      context: { kind: "native" },
+      cwd: merged.worktree.path,
+      worktree: { path: merged.worktree.path, branch: merged.worktree.branch },
+      worktreeLeaseOwner: providerOwner,
+    });
+
+    // The agent performing its own post-merge cleanup asks for the worktree it is running in.
+    await assert.rejects(
+      manager.discardWorktree("s_selected_cleanup", merged.worktree.path),
+      /worktree retained: the worktree is still active in a provider process/,
+      "the managed API reports the deferral instead of removing the session's own worktree",
+    );
+    assert.equal(existsSync(merged.worktree.path), true, "the directory survives the refused cleanup");
+    const retained = store.readMeta("s_selected_cleanup");
+    assert.equal(retained?.worktreePath, merged.worktree.path, "the durable selection is left intact");
+    assert.equal(retained?.worktrees?.some((item) => item.path === merged.worktree.path), true,
+      "and so is the worktree's attribution record");
+
+    // Once the provider that selected it is gone, the same inactive clean pushed tree discards.
+    activeEntries.delete("s_selected_cleanup");
+    store.releaseWorktreeLease("s_selected_cleanup", providerOwner);
+    await manager.discardWorktree("s_selected_cleanup", merged.worktree.path);
+    assert.equal(existsSync(merged.worktree.path), false);
+    assert.equal(store.readMeta("s_selected_cleanup")?.worktreePath, null,
+      "the managed path clears the selection with the directory, leaving no dangling reference");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a worktree removed between turns fails the resume instead of spawning a provider in it", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-resume-removed-wt-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const messages: Array<{ type: string; status?: string; payload?: { kind?: string; message?: string } }> = [];
+    const launchedCwds: string[] = [];
+    const prompts: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async (text: string) => { prompts.push(text); return "end_turn" as const; },
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "provider-session-id",
+      };
+    };
+    manager = new SessionManager(
+      (message) => messages.push(message as never), () => {}, store, "runner", undefined,
+      factory as never, dataDir, 1,
+    );
+    const spec = {
+      sessionId: "s_removed_resume", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: true, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    };
+    assert.equal(await manager.start(spec), true);
+    const worktreePath = store.readMeta(spec.sessionId)?.worktreePath;
+    assert.ok(worktreePath);
+    manager.prompt(spec.sessionId, "first");
+    await waitForCondition(() => prompts.length === 1, "the first turn never reached the provider");
+    manager.stop(spec.sessionId);
+    await waitForCondition(() => !(manager as unknown as { active: Map<string, unknown> }).active.has(spec.sessionId),
+      "the provider never released the session");
+
+    // The bypass this guards: a raw Git removal of a session-linked worktree between turns.
+    execFileSync("git", ["-C", repo, "worktree", "remove", "--force", worktreePath]);
+    assert.equal(existsSync(worktreePath), false);
+
+    const before = launchedCwds.length;
+    manager.prompt(spec.sessionId, "second");
+    await waitForCondition(
+      () => messages.some((message) => message.payload?.kind === "error" &&
+        /could not be verified before provider launch/.test(message.payload.message ?? "")),
+      "the resume never reported the invalid worktree",
+    );
+    assert.equal(launchedCwds.length, before, "no provider process was created for the removed worktree");
+    assert.deepEqual(prompts, ["first"], "and the resumed turn never reached a provider");
+    assert.equal(messages.some((message) => message.type === "session_status" && message.status === "failed"), true,
+      "the affected session fails with a durable status");
+    const meta = store.readMeta(spec.sessionId);
+    assert.equal(meta?.worktreePath, worktreePath,
+      "the selection is retained rather than silently falling back to the primary workspace");
+    assert.equal(launchedCwds.includes(repo), false, "the primary repository was never used as a substitute cwd");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("queued app-server recovery refuses to relaunch into a removed worktree", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-recovery-removed-wt-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const messages: Array<{ type: string; status?: string; payload?: { kind?: string; message?: string } }> = [];
+    const launchedCwds: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async () => "end_turn" as const,
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "thread-1",
+      };
+    };
+    store.create({
+      sessionId: "s_recovery_wt", agentId: "codex", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "codex-app-server", command: "codex", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: "thread-1", status: "idle", title: "recovery",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(
+      (message) => messages.push(message as never), () => {}, store, "runner", undefined,
+      factory as never, dataDir, 1,
+    );
+    const selected = await manager.requestWorktree("s_recovery_wt", { baseRef: "HEAD", branch: "fix/recovery-removed" });
+    execFileSync("git", ["-C", repo, "worktree", "remove", "--force", selected.worktree.path]);
+
+    const internals = manager as unknown as {
+      recoveryQueues: Map<string, unknown[]>;
+      recoverQueuedAppServer: (sessionId: string) => Promise<void>;
+    };
+    const queued = [{ id: "q1", text: "held", images: [], queuedAt: 1 }];
+    internals.recoveryQueues.set("s_recovery_wt", queued);
+    await internals.recoverQueuedAppServer("s_recovery_wt");
+
+    assert.deepEqual(launchedCwds, [], "recovery never spawned a provider in the removed worktree");
+    assert.equal(messages.some((message) => message.payload?.kind === "error" &&
+      /could not be verified before provider launch/.test(message.payload.message ?? "")), true,
+      "recovery reported the invalid worktree state");
+    assert.equal(internals.recoveryQueues.get("s_recovery_wt"), queued, "the queued prompts stay held");
+    assert.equal(messages.some((message) => message.payload?.kind === "error" &&
+      /queued prompt\(s\) remain held/.test(message.payload.message ?? "")), true,
+      "and the session is told they were not lost");
+    assert.equal(store.readMeta("s_recovery_wt")?.worktreePath, selected.worktree.path,
+      "the selection is retained rather than silently falling back to the primary workspace");
+    // The refusal happens before any lease is taken, and the caller's ordinary unwind gives the
+    // session lock back, so another runner can still pick this session up.
+    assert.equal(store.readWorktreeLease("s_recovery_wt"), null, "no worktree lease was left held");
+    assert.equal(store.acquireLock("s_recovery_wt", "another-runner"), true, "the session lock was released");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a launch refused by worktree verification retains the tree it could not identify", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-refused-launch-retain-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const launchedCwds: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async () => "end_turn" as const,
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => null,
+      };
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    const worktreePath = join(root, "materialized");
+    // Materialization publishes the worktree to the Native TUI, shells, and Files before capacity
+    // admission resolves. Reproduce a user who used that window: a different branch and an
+    // uncommitted edit, both made in a tree this launch created and would otherwise reap.
+    (manager as unknown as { createSessionWorktree: (...args: unknown[]) => Promise<unknown> })
+      .createSessionWorktree = async () => {
+        execFileSync("git", ["-C", repo, "worktree", "add", "-b", "agent/s_refused_retain", worktreePath]);
+        execFileSync("git", ["-C", worktreePath, "switch", "-c", "user/kept-work"]);
+        writeFileSync(join(worktreePath, "uncommitted.txt"), "work the user has not pushed\n");
+        return { path: worktreePath, branch: "agent/s_refused_retain" };
+      };
+
+    const started = await manager.start({
+      sessionId: "s_refused_retain", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: true, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    });
+    assert.equal(started, false, "the launch fails closed on the drifted branch");
+    assert.deepEqual(launchedCwds, [], "and never reaches provider construction");
+    assert.equal(existsSync(worktreePath), true, "the unverifiable worktree is retained, not reaped");
+    assert.equal(existsSync(join(worktreePath, "uncommitted.txt")), true, "so the user's uncommitted work survives");
+    assert.equal(store.readMeta("s_refused_retain")?.worktreePath, worktreePath,
+      "and the selection still names the tree the error is about");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a non-host execution target verifies its host worktree before the adapter is reached", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-target-worktree-verify-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const messages: Array<{ type: string; status?: string; payload?: { kind?: string; message?: string } }> = [];
+    const launchedCwds: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async () => "end_turn" as const,
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "thread-1",
+      };
+    };
+    store.create({
+      sessionId: "s_container_wt", agentId: "codex", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "codex-app-server", command: "codex", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: "thread-1", status: "idle", title: "target",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(
+      (message) => messages.push(message as never), () => {}, store, "runner", undefined,
+      factory as never, dataDir, 1,
+    );
+    const selected = await manager.requestWorktree("s_container_wt", { baseRef: "HEAD", branch: "fix/container-target" });
+    // A container target bind-mounts this exact host directory into the guest, so the local tree is
+    // as load-bearing there as it is for a host launch.
+    store.patchMeta("s_container_wt", {
+      executionTarget: {
+        id: "runner:container:test", runnerId: "runner", kind: "container",
+        workspaceStrategy: "worktree", adapter: "container",
+        boundaries: { filesystem: "container", network: "deny", secrets: "none", billing: "none" },
+      },
+    });
+    execFileSync("git", ["-C", repo, "worktree", "remove", "--force", selected.worktree.path]);
+
+    const internals = manager as unknown as {
+      recoveryQueues: Map<string, unknown[]>;
+      recoverQueuedAppServer: (sessionId: string) => Promise<void>;
+    };
+    internals.recoveryQueues.set("s_container_wt", [{ id: "q1", text: "held", images: [], queuedAt: 1 }]);
+    await internals.recoverQueuedAppServer("s_container_wt");
+
+    assert.deepEqual(launchedCwds, [], "no driver was constructed for the removed mount source");
+    assert.equal(messages.some((message) => message.payload?.kind === "error" &&
+      /could not be verified before provider launch/.test(message.payload.message ?? "")), true,
+      "the worktree is proved before any adapter-specific preparation runs");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("conversation fork refuses to spawn its temporary provider in a removed worktree", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-fork-removed-wt-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const launchedCwds: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async () => "end_turn" as const, forkConversation: async () => "forked-thread",
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "thread-1",
+      };
+    };
+    store.create({
+      sessionId: "s_fork_source", agentId: "codex", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "codex-app-server", command: "codex", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: "thread-1", status: "idle", title: "fork source",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      turnCount: 1, seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    const selected = await manager.requestWorktree("s_fork_source", { baseRef: "HEAD", branch: "fix/fork-source" });
+    const head = execFileSync("git", ["-C", selected.worktree.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const tree = execFileSync("git", ["-C", selected.worktree.path, "rev-parse", "HEAD^{tree}"], { encoding: "utf8" }).trim();
+    store.patchMeta("s_fork_source", {
+      forkPoints: { "1": { tree, baseCommit: head, agentTurnId: "turn-1", eventSeq: 1 } },
+    });
+    execFileSync("git", ["-C", repo, "worktree", "remove", "--force", selected.worktree.path]);
+
+    const forked = await manager.forkConversation("s_fork_source", "s_fork_target", 1, "Forked");
+    assert.equal(forked.ok, false);
+    assert.match(forked.error ?? "", /source worktree could not be verified before fork/);
+    assert.deepEqual(launchedCwds, [], "the temporary provider was never constructed");
+    assert.equal(store.has("s_fork_target"), false, "and no target session row was published");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a legacy row without a recorded branch still fails closed when its worktree switches", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-legacy-branch-verify-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const messages: Array<{ type: string; status?: string; payload?: { kind?: string; message?: string } }> = [];
+    const launchedCwds: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async () => "end_turn" as const,
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "thread-1",
+      };
+    };
+    // Metadata predating worktreeBranch: only worktreePath, on the runner's deterministic legacy
+    // name for this session. Absence is not permission to skip the identity check.
+    const legacy = await createWorktree(repo, "s_legacy_branch", { dataDir });
+    assert.equal(legacy.branch, "agent/s_legacy_branch");
+    store.create({
+      sessionId: "s_legacy_branch", agentId: "codex", workspaceId: "repo", repoPath: repo,
+      worktreePath: legacy.path, driver: "codex-app-server", command: "codex", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: "thread-1", status: "idle", title: "legacy",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    assert.equal(store.readMeta("s_legacy_branch")?.worktreeBranch, undefined);
+    manager = new SessionManager(
+      (message) => messages.push(message as never), () => {}, store, "runner", undefined,
+      factory as never, dataDir, 1,
+    );
+    execFileSync("git", ["-C", legacy.path, "switch", "-c", "operator/other-work"]);
+
+    const internals = manager as unknown as {
+      recoveryQueues: Map<string, unknown[]>;
+      recoverQueuedAppServer: (sessionId: string) => Promise<void>;
+    };
+    internals.recoveryQueues.set("s_legacy_branch", [{ id: "q1", text: "held", images: [], queuedAt: 1 }]);
+    await internals.recoverQueuedAppServer("s_legacy_branch");
+
+    assert.deepEqual(launchedCwds, [], "a switched legacy worktree never reaches a provider");
+    assert.equal(messages.some((message) => message.payload?.kind === "error" &&
+      /instead of agent\/s_legacy_branch/.test(message.payload.message ?? "")), true,
+      "and the error names the identity the legacy row implies");
+
+    // An owner-hashed runner derives the prefixed name only for a WSL owner root. Switching a
+    // native legacy tree to that form is still a switch, not an alternative spelling of itself.
+    (manager as unknown as { runnerOwnerHash?: string }).runnerOwnerHash = "f".repeat(64);
+    const ownerBranch = `agent/${"f".repeat(16)}/s_legacy_branch`;
+    execFileSync("git", ["-C", legacy.path, "switch", "-c", ownerBranch]);
+    internals.recoveryQueues.set("s_legacy_branch", [{ id: "q2", text: "held", images: [], queuedAt: 2 }]);
+    await internals.recoverQueuedAppServer("s_legacy_branch");
+    assert.deepEqual(launchedCwds, [], "the owner-prefixed form is not accepted for a native row");
+    assert.equal(messages.some((message) => message.payload?.kind === "error" &&
+      message.payload.message?.includes(`now on branch ${ownerBranch} instead of agent/s_legacy_branch`)), true,
+      "and the refusal names the one branch the path's creation mode implies");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the derived session worktree branch follows the root that created the path", () => {
+  const hash = "a".repeat(64);
+  const wsl = { kind: "wsl" as const, distro: "Ubuntu" };
+  const native = { kind: "native" as const };
+  const prefixed = `agent/${"a".repeat(16)}/s1`;
+  assert.equal(
+    sessionWorktreeBranch("s1", `/home/me/.agent-manager/runner-instances/${hash}/worktrees/repo/s1`, wsl, hash),
+    prefixed, "an owner-instance root carries the hash prefix, exactly as createWorktree names it");
+  assert.equal(
+    sessionWorktreeBranch("s1", "/home/me/.agent-manager/worktrees/repo/s1", wsl, hash),
+    "agent/s1", "a pre-attestation legacy root keeps the plain name even on an owner-hashed runner");
+  assert.equal(
+    sessionWorktreeBranch("s1", "/home/me/.agent-manager/worktrees/repo/s1", wsl, undefined),
+    "agent/s1", "and so does a runner with no owner hash at all");
+  assert.equal(
+    sessionWorktreeBranch("s1", `/data/runners/wollipog/worktrees/repo/s1`, native, hash),
+    "agent/s1", "a native worktree is never owner-prefixed, whatever the runner's hash");
+  // A HOME that itself contains the legacy segment must not demote a real owner-rooted path: the
+  // owner root is matched positively rather than by ruling the legacy root out.
+  assert.equal(
+    sessionWorktreeBranch(
+      "s1",
+      `/home/.agent-manager/worktrees/me/.agent-manager/runner-instances/${hash}/worktrees/repo/s1`,
+      wsl,
+      hash,
+    ),
+    prefixed, "an owner root under an unusual HOME is still owner-rooted");
+  assert.equal(
+    sessionWorktreeBranch("s1", `/home/me/.agent-manager/runner-instances/${"b".repeat(64)}/worktrees/repo/s1`, wsl, hash),
+    "agent/s1", "another owner's root is not this runner's, so no prefix is claimed for it");
+});
+
+test("legacy WSL worktree classification keys on the whole session suffix, not a bare segment", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-legacy-wsl-classify-"));
+  try {
+    const repo = join(root, "repo");
+    execFileSync("git", ["init", "-q", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "-q", "--allow-empty", "-m", "base"]);
+    // Let production name the path, so the repository key under test is the real one rather than a
+    // second copy of its hashing rule.
+    const created = await createWorktree(repo, "s_legacy", { dataDir: join(root, "data") });
+    const key = created.path.split(/[\\/]/u).at(-2)!;
+    const owner = "a".repeat(64);
+
+    for (const [path, expected, why] of [
+      [`/home/dev/.agent-manager/worktrees/${key}/s_legacy`, true,
+        "the legacy root, this repository's key, and this session id"],
+      [`/home/dev/.agent-manager/worktrees/${key}/s_legacy/`, true,
+        "a trailing slash names the same worktree"],
+      [`/home/dev/.agent-manager/runner-instances/${owner}/worktrees/${key}/s_legacy`, false,
+        "an owner-instance root is never legacy"],
+      // The reported failure: the owner root nested under a distro HOME that itself contains the
+      // legacy segment. A bare substring test reads this as legacy and fails the restart closed.
+      [`/home/.agent-manager/worktrees/dev/.agent-manager/runner-instances/${owner}/worktrees/${key}/s_legacy`,
+        false, "an owner root under a legacy-looking HOME stays owner-rooted"],
+      [`/home/dev/.agent-manager/worktrees/other-repo-key/s_legacy`, false,
+        "another repository's legacy worktree is not this session's"],
+      [`/home/dev/.agent-manager/worktrees/${key}/s_other`, false,
+        "another session's legacy worktree is not this one"],
+    ] as const) {
+      assert.equal(isLegacyWslSessionWorktreePath(path, repo, "s_legacy"), expected, why);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the shells and Files root is re-proved without the boundary's side effects", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-files-root-verify-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    // A legacy-layout worktree sits beside the `<sessionId>.requested` boundary rather than inside
+    // it, so whether re-proving the root creates that directory is observable.
+    const worktree = await createWorktree(repo, "s_files_root", { dataDir });
+    const boundary = `${worktree.path}.requested`;
+    store.create({
+      sessionId: "s_files_root", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: worktree.path, worktreeBranch: worktree.branch,
+      driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "files",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    // A standing proof is reused for a couple of seconds, so retire it between the steps below that
+    // deliberately change Git state behind the runner's back.
+    const proofs = (manager as unknown as { verifiedWorktreeRoots: Map<string, { at: number }> })
+      .verifiedWorktreeRoots;
+    const verify = () => {
+      proofs.delete("s_files_root");
+      return manager!.sessionWorktreeRootFailure(store.readMeta("s_files_root")!);
+    };
+
+    assert.equal(await verify(), null, "a healthy selected worktree resolves with no complaint");
+    assert.equal(existsSync(boundary), false,
+      "re-proving a read path creates no worktree boundary directory");
+
+    execFileSync("git", ["-C", worktree.path, "switch", "-c", "operator/elsewhere"]);
+    assert.match(await verify() ?? "", /instead of agent\/s_files_root/,
+      "a switched branch is reported as the drift it is");
+
+    execFileSync("git", ["-C", worktree.path, "switch", worktree.branch]);
+    assert.equal(await verify(), null);
+    execFileSync("git", ["-C", repo, "worktree", "remove", "--force", worktree.path]);
+    assert.match(await verify() ?? "", /not registered by the repository it was matched against \(/,
+      "a worktree removed outside Wollipog is named, not surfaced as a bare filesystem error");
+
+    // A session with no worktree keeps using the repository root, with nothing to prove.
+    store.patchMeta("s_files_root", { worktreePath: null, worktreeBranch: undefined });
+    assert.equal(await verify(), null);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("worktree reconciliation records the identity a legacy row implied, and only that", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-branch-backfill-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const legacyRow = (sessionId: string, worktreePath: string) => ({
+      sessionId, agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath, driver: "claude-code" as const, command: "claude", args: [], env: {},
+      context: { kind: "native" as const }, agentSessionId: null, status: "idle" as const,
+      title: sessionId, config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null,
+      pendingApproval: null, seq: 0, createdAt: 1, updatedAt: 1,
+    });
+
+    const converges = await createWorktree(repo, "s_converges", { dataDir });
+    const switched = await createWorktree(repo, "s_switched", { dataDir });
+    const gone = await createWorktree(repo, "s_gone", { dataDir });
+    store.create(legacyRow("s_converges", converges.path));
+    store.create(legacyRow("s_switched", switched.path));
+    store.create(legacyRow("s_gone", gone.path));
+    // A row written since the field existed must not be touched, even if it disagrees with Git.
+    const recorded = await createWorktree(repo, "s_recorded", { dataDir });
+    store.create({ ...legacyRow("s_recorded", recorded.path), worktreeBranch: "fix/recorded-by-hand" });
+
+    execFileSync("git", ["-C", switched.path, "switch", "-c", "operator/elsewhere"]);
+    execFileSync("git", ["-C", repo, "worktree", "remove", "--force", gone.path]);
+
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    await manager.reconcileWorktreePullRequests();
+
+    assert.equal(store.readMeta("s_converges")?.worktreeBranch, "agent/s_converges",
+      "a legacy row whose worktree still matches its layout records that identity");
+    assert.equal(store.readMeta("s_switched")?.worktreeBranch, undefined,
+      "a switched worktree is never blessed by the backfill");
+    assert.equal(store.readMeta("s_gone")?.worktreeBranch, undefined,
+      "an unreachable worktree simply does not converge this pass");
+    assert.equal(store.readMeta("s_recorded")?.worktreeBranch, "fix/recorded-by-hand",
+      "an already recorded identity is left exactly as it was");
+
+    // The switched row must still fail closed at launch: the backfill did not retire that check.
+    const failure = await manager.sessionWorktreeRootFailure(store.readMeta("s_switched")!);
+    assert.match(failure ?? "", /instead of agent\/s_switched/);
+
+    // Converged rows make the pass a no-op rather than a repeating git cost.
+    const before = store.readMeta("s_converges")?.updatedAt;
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(store.readMeta("s_converges")?.updatedAt, before, "a converged row is not rewritten");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an interactive root proof is memoized against its own identity, never past a change", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-root-proof-memo-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_memo", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "memo",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const first = await manager.requestWorktree("s_memo", { baseRef: "HEAD", branch: "fix/memo-one" });
+    const second = await manager.requestWorktree("s_memo", { baseRef: "HEAD", branch: "fix/memo-two" });
+
+    // Count the git work the proof actually does, rather than inferring it from timings.
+    const internals = manager as unknown as { verifiedWorktreeRoots: Map<string, unknown> };
+    let proofs = 0;
+    const original = (manager as unknown as { sessionWorktreeRootFailure: unknown })
+      .sessionWorktreeRootFailure as (meta: SessionMeta) => Promise<string | null>;
+    const counted = async (meta: SessionMeta) => {
+      const before = internals.verifiedWorktreeRoots.get("s_memo");
+      const result = await original.call(manager, meta);
+      if (internals.verifiedWorktreeRoots.get("s_memo") !== before) proofs++;
+      return result;
+    };
+
+    const meta = () => store.readMeta("s_memo")!;
+    assert.equal(await counted(meta()), null);
+    assert.equal(proofs, 1, "the first request proves the root");
+    assert.equal(await counted(meta()), null);
+    assert.equal(await counted(meta()), null);
+    assert.equal(proofs, 1, "an overlapping burst on the same identity reuses that proof");
+
+    // A selection this runner makes changes the identity, so the memo cannot answer for it.
+    await manager.selectWorktree("s_memo", first.worktree.path);
+    assert.equal(await counted(meta()), null);
+    assert.equal(proofs, 2, "switching worktrees re-proves rather than reusing the previous root");
+
+    // Drift introduced outside Wollipog changes nothing the memo is keyed on, so it is answered by
+    // the standing proof until that proof ages out. This is the documented bound on the window.
+    execFileSync("git", ["-C", first.worktree.path, "switch", "-c", "operator/elsewhere"]);
+    assert.equal(await counted(meta()), null, "a fresh proof still stands within its window");
+
+    const entry = internals.verifiedWorktreeRoots.get("s_memo") as { at: number };
+    entry.at -= 60_000;
+    assert.match(await counted(meta()) ?? "", /instead of fix\/memo-one/,
+      "once the proof ages out the drift is reported");
+    assert.match(await counted(meta()) ?? "", /instead of fix\/memo-one/,
+      "and a failure is never memoized, so it is re-checked every time");
+
+    execFileSync("git", ["-C", first.worktree.path, "switch", first.worktree.branch]);
+    assert.equal(await counted(meta()), null, "so a repair is seen on the very next request");
+
+    // The requests this memo exists for overlap, so a burst can arrive entirely before the first
+    // proof returns. Hold one open and confirm the others join it instead of each proving again.
+    const prover = manager as unknown as {
+      proveRegisteredWorktree: (...args: unknown[]) => Promise<unknown>;
+    };
+    const real = prover.proveRegisteredWorktree.bind(manager);
+    let started = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    prover.proveRegisteredWorktree = async (...args: unknown[]) => {
+      started++;
+      await gate;
+      return real(...args);
+    };
+    internals.verifiedWorktreeRoots.delete("s_memo");
+    const burst = [meta(), meta(), meta()].map((snapshot) => manager!.sessionWorktreeRootFailure(snapshot));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(started, 1, "three overlapping requests start one proof between them");
+    release();
+    assert.deepEqual(await Promise.all(burst), [null, null, null], "and every one of them is answered");
+    assert.equal(started, 1, "with no second proof started behind the first");
+    void second;
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });

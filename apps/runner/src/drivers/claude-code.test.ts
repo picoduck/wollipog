@@ -24,6 +24,8 @@ import {
   claudeContextOccupancy,
   claudeContextWindowRejection,
   claudeEffectiveContextWindow,
+  claudeErrorResultText,
+  PROVIDER_AUTHENTICATION_ERROR,
   claudePermissionArgs,
   claudePersistentSettings,
   claudePersistentSettingsForAgent,
@@ -106,7 +108,7 @@ test("Claude rate-limit events forward during and between turns without transcri
   assert.equal(h.feed(active), null);
   (h.driver as any).processPersistentLine(JSON.stringify({
     type: "rate_limit_event",
-    rate_limits: { seven_day: { used_percentage: 45 } },
+    rate_limit_info: { status: "allowed", rateLimitType: "seven_day", utilization: 0.45 },
   }));
   assert.equal(h.subscriptionUsage.length, 2);
   assert.deepEqual(h.subscriptionUsage[0], { provider: "claude", kind: "sparse", payload: active });
@@ -1232,6 +1234,340 @@ test("an idle terminal notification preserves launch metadata and requests one c
   driver.dispose();
 });
 
+test("an idle provider-initiated turn records its reply instead of discarding every frame", async () => {
+  const child = fakeProcess();
+  const events: SessionEventPayload[] = [];
+  const stderr: string[] = [];
+  const lifecycle: Array<[string, string]> = [];
+  const driver = new ClaudeCodeDriver(
+    {
+      ...baseOpts,
+      env: { [CLAUDE_PERSISTENT_FLAG]: "1" },
+      capabilities: steeringCapabilities,
+      config: { permissionMode: "acceptEdits" },
+    },
+    {
+      ...noopCb,
+      onEvent: (event) => events.push(event),
+      onStderr: (text) => stderr.push(text),
+      onProviderInitiatedTurn: (state, turnId) => lifecycle.push([state, turnId]),
+    },
+    { spawn: () => child, kill: () => {} } as any,
+  );
+  const first = driver.prompt("launch background work");
+  await nextTask();
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await first, "end_turn");
+
+  child.stdout.write(JSON.stringify({
+    type: "user",
+    session_id: (driver as any).sessionId,
+    message: { role: "user", content: [{ type: "text", text: "<task-notification>done</task-notification>" }] },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "stream_event",
+    event: { type: "message_start", message: { id: "provider-turn" } },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "stream_event",
+    event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Background reply" } },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "assistant",
+    message: { id: "provider-turn", content: [{ type: "tool_use", id: "provider-tool", name: "Bash", input: { command: "pwd" } }] },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "user",
+    message: { role: "user", content: [{ type: "tool_result", tool_use_id: "provider-tool", content: "done" }] },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "result", subtype: "success", usage: { input_tokens: 2, output_tokens: 3 },
+  }) + "\n");
+  await nextTask();
+
+  assert.equal(events.some((event) => event.kind === "agent_message" && event.text === "Background reply"), true);
+  assert.equal(events.some((event) => event.kind === "tool_call" && event.toolCallId === "provider-tool"), true);
+  assert.equal(events.some((event) => event.kind === "tool_call_update" && event.toolCallId === "provider-tool"), true);
+  assert.equal(events.some((event) => event.kind === "token_usage"), true);
+  assert.equal(stderr.some((text) => /outside an active Claude turn/.test(text)), false);
+  assert.deepEqual(lifecycle, [["started", "provider:2"], ["settled", "provider:2"]]);
+  driver.dispose();
+  child.emit("close", 0);
+});
+
+test("a runner error survives a provider turn beginning in the same stdout chunk", async () => {
+  const child = fakeProcess();
+  const lifecycle: string[] = [];
+  const driver = new ClaudeCodeDriver(
+    {
+      ...baseOpts,
+      env: { [CLAUDE_PERSISTENT_FLAG]: "1" },
+      capabilities: steeringCapabilities,
+      config: { permissionMode: "acceptEdits" },
+    },
+    { ...noopCb, onProviderInitiatedTurn: (state) => lifecycle.push(state) },
+    { spawn: () => child, kill: () => {} } as any,
+  );
+  const turn = driver.prompt("fail before background completion");
+  await nextTask();
+  child.stdout.write(
+    JSON.stringify({
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      result: "Specific runner failure",
+      usage: {},
+    }) + "\n" + JSON.stringify({
+      type: "user",
+      session_id: (driver as any).sessionId,
+      message: { role: "user", content: [{ type: "text", text: "<task-notification>done</task-notification>" }] },
+    }) + "\n",
+  );
+
+  assert.equal(await turn, "refusal");
+  assert.equal(driver.lastTurnError(), "Specific runner failure");
+  assert.deepEqual(lifecycle, ["started"]);
+  driver.dispose();
+  child.emit("close", 0);
+});
+
+test("a trailing provider user frame cannot start a lifecycle after disposal", async () => {
+  const child = fakeProcess();
+  const lifecycle: string[] = [];
+  const driver = new ClaudeCodeDriver(
+    {
+      ...baseOpts,
+      env: { [CLAUDE_PERSISTENT_FLAG]: "1" },
+      capabilities: steeringCapabilities,
+      config: { permissionMode: "acceptEdits" },
+    },
+    { ...noopCb, onProviderInitiatedTurn: (state) => lifecycle.push(state) },
+    { spawn: () => child, kill: () => {}, trackKill: () => {} } as any,
+  );
+  const turn = driver.prompt("establish the transport");
+  await nextTask();
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await turn, "end_turn");
+  child.stdout.write(JSON.stringify({
+    type: "user",
+    session_id: (driver as any).sessionId,
+    message: { role: "user", content: [{ type: "text", text: "trailing" }] },
+  }));
+
+  driver.dispose();
+  child.emit("close", 0);
+  await nextTask();
+  assert.deepEqual(lifecycle, []);
+});
+
+test("a real prompt waits for an earlier provider-initiated turn and receives its own reply", async () => {
+  const child = fakeProcess();
+  const writes: string[] = [];
+  child.stdin.on("data", (chunk: Buffer) => writes.push(chunk.toString("utf8")));
+  const events: SessionEventPayload[] = [];
+  const stderr: string[] = [];
+  const driver = new ClaudeCodeDriver(
+    {
+      ...baseOpts,
+      env: { [CLAUDE_PERSISTENT_FLAG]: "1" },
+      capabilities: steeringCapabilities,
+      config: { permissionMode: "acceptEdits" },
+    },
+    {
+      ...noopCb,
+      onEvent: (event) => events.push(event),
+      onStderr: (text) => stderr.push(text),
+    },
+    { spawn: () => child, kill: () => {} } as any,
+  );
+  const first = driver.prompt("launch background work");
+  await nextTask();
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await first, "end_turn");
+
+  child.stdout.write(JSON.stringify({
+    type: "user",
+    session_id: (driver as any).sessionId,
+    message: { role: "user", content: [{ type: "text", text: "<task-notification>done</task-notification>" }] },
+  }) + "\n");
+  await nextTask();
+  let realSettled = false;
+  const real = driver.prompt("the real prompt").then((reason) => {
+    realSettled = true;
+    return reason;
+  });
+  await nextTask();
+  assert.equal(writes.filter((write) => write.includes("\"type\":\"user\"")).length, 1);
+
+  child.stdout.write(JSON.stringify({
+    type: "stream_event",
+    event: { type: "message_start", message: { id: "provider-turn" } },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "stream_event",
+    event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Provider reply" } },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  await nextTask();
+  assert.equal(realSettled, false, "the provider result must not settle the queued real prompt");
+  assert.equal(writes.filter((write) => write.includes("\"type\":\"user\"")).length, 2);
+  assert.ok(writes.some((write) => write.includes("the real prompt")));
+
+  child.stdout.write(JSON.stringify({
+    type: "stream_event",
+    event: { type: "message_start", message: { id: "real-turn" } },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "stream_event",
+    event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Real reply" } },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await real, "end_turn");
+  assert.deepEqual(
+    events.filter((event) => event.kind === "agent_message").map((event) => event.text),
+    ["Provider reply", "Real reply"],
+  );
+  assert.deepEqual(stderr, []);
+  driver.dispose();
+  child.emit("close", 0);
+});
+
+test("provider-initiated turns surface answerable approvals and structured questions", async () => {
+  const child = fakeProcess();
+  const writes: string[] = [];
+  child.stdin.on("data", (chunk: Buffer) => writes.push(chunk.toString("utf8")));
+  const events: SessionEventPayload[] = [];
+  const driver = new ClaudeCodeDriver(
+    {
+      ...baseOpts,
+      env: { [CLAUDE_PERSISTENT_FLAG]: "1" },
+      capabilities: { ...steeringCapabilities, permissionModes: ["default"] },
+      config: { permissionMode: "default" },
+    },
+    { ...noopCb, onEvent: (event) => events.push(event) },
+    { spawn: () => child, kill: () => {} } as any,
+  );
+  const first = driver.prompt("launch background work");
+  await nextTask();
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await first, "end_turn");
+
+  child.stdout.write(JSON.stringify({
+    type: "user",
+    session_id: (driver as any).sessionId,
+    message: { role: "user", content: [{ type: "text", text: "<task-notification>done</task-notification>" }] },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "control_request",
+    request_id: "provider-approval",
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "pwd" } },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "control_request",
+    request_id: "provider-question",
+    request: {
+      subtype: "can_use_tool",
+      tool_name: "AskUserQuestion",
+      input: { questions: [{ question: "Continue?", header: "Choice", options: [{ label: "Yes", description: "Continue." }], multiSelect: false }] },
+    },
+  }) + "\n");
+  await nextTask();
+  assert.ok(events.some((event) => event.kind === "permission_request" && event.requestId === "provider-approval"));
+  assert.ok(events.some((event) => event.kind === "question_request" && event.requestId === "provider-question"));
+  assert.equal(driver.resolvePermission("provider-approval", "allow"), true);
+  assert.equal(driver.answerQuestion("provider-question", { "Continue?": "Yes" }), true);
+  await nextTask();
+  assert.ok(writes.some((write) => write.includes("provider-approval") && write.includes("control_response")));
+  assert.ok(writes.some((write) => write.includes("provider-question") && write.includes("answers")));
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  await nextTask();
+  driver.dispose();
+  child.emit("close", 0);
+});
+
+test("unattributable persistent turn frames emit structured errors without changing idle system handling", async () => {
+  const child = fakeProcess();
+  const events: SessionEventPayload[] = [];
+  const stderr: string[] = [];
+  const driver = new ClaudeCodeDriver(
+    {
+      ...baseOpts,
+      env: { [CLAUDE_PERSISTENT_FLAG]: "1" },
+      config: { permissionMode: "acceptEdits" },
+    },
+    {
+      ...noopCb,
+      onEvent: (event) => events.push(event),
+      onStderr: (text) => stderr.push(text),
+    },
+    { spawn: () => child, kill: () => {} } as any,
+  );
+  const first = driver.prompt("establish transport");
+  await nextTask();
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await first, "end_turn");
+
+  child.stdout.write(JSON.stringify({ type: "assistant", message: { content: [] } }) + "\n");
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "control_request",
+    request_id: "ownerless",
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "pwd" } },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({ type: "system", subtype: "status", status: "idle" }) + "\n");
+  await nextTask();
+
+  const errors = events.filter((event) => event.kind === "error");
+  assert.equal(errors.length, 3);
+  assert.ok(errors.every((event) => /outside an active Claude turn/.test(event.message)));
+  assert.equal(driver.resolvePermission("ownerless", "allow"), false);
+  assert.deepEqual(stderr, []);
+  driver.dispose();
+  child.emit("close", 0);
+});
+
+test("an idle persistent exit with pending work reaches the manager exit callback", async () => {
+  const child = fakeProcess();
+  const background: Parameters<NonNullable<DriverCallbacks["onBackgroundWork"]>>[0][] = [];
+  const exits: Array<number | null> = [];
+  const driver = new ClaudeCodeDriver(
+    {
+      ...baseOpts,
+      env: { [CLAUDE_PERSISTENT_FLAG]: "1" },
+      config: { permissionMode: "acceptEdits" },
+    },
+    {
+      ...noopCb,
+      onBackgroundWork: (update) => background.push(update),
+      onExit: (code) => exits.push(code),
+    },
+    { spawn: () => child, kill: () => {}, now: () => 1234 } as any,
+  );
+  const turn = driver.prompt("launch an agent");
+  await nextTask();
+  child.stdout.write(JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id: "spawn", name: "Task", input: { run_in_background: true } }] },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "system", subtype: "task_started", task_id: "task-1", tool_use_id: "spawn",
+  }) + "\n");
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await turn, "end_turn");
+
+  child.emit("close", 0);
+  await nextTask();
+  assert.deepEqual(background.at(-1), {
+    state: "orphaned",
+    pendingTaskIds: ["task-1"],
+    observedTaskIds: ["task-1"],
+    oldestPendingAt: 1234,
+    reason: "process_exit",
+  });
+  assert.deepEqual(exits, [0], "code-zero loss is still an unexpected exit while work is pending");
+  driver.dispose();
+});
+
 test("a task finishing during an unrelated turn still requests its parent continuation", async () => {
   const child = fakeProcess();
   const background: Parameters<NonNullable<DriverCallbacks["onBackgroundWork"]>>[0][] = [];
@@ -2287,6 +2623,10 @@ test("runner-side capability gate rejects stale optional flags and image input",
   };
   assert.match(claudeCapabilityError({ effort: "max" }, [], capabilities)!, /effort/);
   assert.match(claudeCapabilityError({ permissionMode: "auto" }, [], capabilities)!, /permission mode/);
+  assert.match(claudeCapabilityError({ permissionMode: "orchestrator" }, [], capabilities)!, /dontAsk/);
+  assert.equal(claudeCapabilityError({ permissionMode: "orchestrator" }, [], {
+    ...capabilities, permissionModes: ["dontAsk"],
+  }), null);
   assert.match(claudeCapabilityError({}, [{ mimeType: "image/png", data: "x" }], capabilities)!, /image input/);
   assert.equal(claudeCapabilityError({ effort: "low", permissionMode: "acceptEdits" }, [], capabilities), null);
 });
@@ -3542,6 +3882,180 @@ test("Claude result.modelUsage publishes the effective context window and last r
   assert.equal(claudeContextOccupancy({ model: "<synthetic>", usage: { input_tokens: 0, cache_read_input_tokens: 0 } }), null);
   assert.equal(claudeContextOccupancy({ model: "claude-opus-5", usage: { input_tokens: 3, cache_read_input_tokens: 7, output_tokens: 900 } }), 10);
   assert.equal(claudeContextOccupancy({ model: "claude-opus-5" }), null);
+});
+
+const OAUTH_REFUSAL = "Failed to refresh OAuth token: another Claude Code process is refreshing it or " +
+  "exited mid-refresh. This is usually transient; retry in a minute, and if it persists close other " +
+  "Claude Code processes or sign in again";
+
+test("Claude forwards the provider's account of an error result instead of an empty turn", () => {
+  const h = makeHarness();
+  h.feed({ type: "system", subtype: "init", session_id: "s1", model: "claude-opus-5" });
+  // A synthetic record carries no stream deltas, so its text reaches the UI through nothing else.
+  h.feed({
+    type: "assistant",
+    message: { id: "msg_synth", model: "<synthetic>", content: [{ type: "text", text: OAUTH_REFUSAL }], usage: { input_tokens: 0 } },
+  });
+  const stop = h.feed({
+    type: "result",
+    subtype: "success",
+    is_error: true,
+    result: OAUTH_REFUSAL,
+    usage: {},
+    duration_ms: 6_701,
+  });
+  assert.equal(stop, "refusal");
+  const errors = h.events.filter((event) => event.kind === "error");
+  assert.equal(errors.length, 1);
+  assert.equal((errors[0] as { message: string }).message, OAUTH_REFUSAL);
+  // The same text has to reach the durable receipt, or the automation still settles on a stop reason.
+  assert.equal(h.driver.lastTurnError(), OAUTH_REFUSAL);
+});
+
+test("Claude falls back to the synthetic message when an error result carries no text", () => {
+  const h = makeHarness();
+  h.feed({ type: "system", subtype: "init", session_id: "s1", model: "claude-opus-5" });
+  h.feed({ type: "assistant", message: { id: "msg_synth", model: "<synthetic>", content: [{ type: "text", text: OAUTH_REFUSAL }] } });
+  assert.equal(h.feed({ type: "result", subtype: "error_during_execution", usage: {} }), "refusal");
+  const errors = h.events.filter((event) => event.kind === "error");
+  assert.equal(errors.length, 1);
+  assert.equal((errors[0] as { message: string }).message, OAUTH_REFUSAL);
+});
+
+test("Claude does not repeat assistant text that already streamed, and keeps the window story", () => {
+  const streamed = makeHarness();
+  streamed.feed({ type: "system", subtype: "init", session_id: "s1", model: "claude-opus-5" });
+  streamed.feed({ type: "stream_event", event: { type: "message_start", message: { id: "msg_1" } } });
+  streamed.feed({
+    type: "stream_event",
+    event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "partial answer" } },
+  });
+  streamed.feed({ type: "assistant", message: { id: "msg_1", model: "claude-opus-5", content: [{ type: "text", text: "partial answer" }] } });
+  // Claude sets `result` to the partial answer it already streamed; echoing it would show the
+  // reader the same text twice.
+  assert.equal(streamed.feed({
+    type: "result", subtype: "error_during_execution", is_error: true, result: "partial answer", usage: {},
+  }), "refusal");
+  const errors = streamed.events.filter((event) => event.kind === "error");
+  assert.equal(errors.length, 1);
+  assert.match((errors[0] as { message: string }).message, /error_during_execution/);
+  assert.doesNotMatch((errors[0] as { message: string }).message, /partial answer/);
+  // Text the provider did not already show still gets through after a partial stream.
+  const late = makeHarness();
+  late.feed({ type: "stream_event", event: { type: "message_start", message: { id: "msg_1" } } });
+  late.feed({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "half" } } });
+  late.feed({ type: "assistant", message: { id: "msg_1", model: "claude-opus-5", content: [{ type: "text", text: "half" }] } });
+  late.feed({ type: "result", subtype: "success", is_error: true, result: "API Error: 500 Internal", usage: {} });
+  assert.equal((late.events.filter((event) => event.kind === "error")[0] as { message: string }).message,
+    "API Error: 500 Internal");
+
+  // A context-window rejection still wins: it names the cause and the way out, the raw text does not.
+  const rejected = makeHarness();
+  rejected.feed({ type: "system", subtype: "init", session_id: "s1", model: "claude-opus-5[1m]" });
+  rejected.feed({
+    type: "result",
+    subtype: "success",
+    is_error: true,
+    api_error_status: 400,
+    result: "API Error: 400 The long context beta is not yet available.",
+    usage: {},
+  });
+  assert.match(
+    (rejected.events.filter((event) => event.kind === "error")[0] as { message: string }).message,
+    /Choose a different Context Window/,
+  );
+
+  // A delta that streamed without a usable provider message id still reached the reader, so the
+  // id-less assistant record for it is not an unshown one.
+  const anonymous = makeHarness();
+  anonymous.feed({ type: "stream_event", event: { type: "message_start", message: {} } });
+  anonymous.feed({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "visible answer" } } });
+  anonymous.feed({ type: "assistant", message: { model: "claude-opus-5", content: [{ type: "text", text: "visible answer" }] } });
+  assert.equal(anonymous.feed({ type: "result", subtype: "error_during_execution", usage: {} }), "refusal");
+  const anonymousError = anonymous.events.filter((event) => event.kind === "error")[0] as { message: string };
+  assert.doesNotMatch(anonymousError.message, /visible answer/);
+  assert.match(anonymousError.message, /error_during_execution/);
+
+  // ...but a *different* id-less record after anonymous output is a synthetic failure, not a second
+  // copy of what streamed. Losing it here would lose both the explanation and the retry signal.
+  const anonymousThenSynthetic = makeHarness();
+  anonymousThenSynthetic.feed({ type: "stream_event", event: { type: "message_start", message: {} } });
+  anonymousThenSynthetic.feed({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "partial answer" } } });
+  anonymousThenSynthetic.feed({ type: "assistant", message: { model: "claude-opus-5", content: [{ type: "text", text: "partial answer" }] } });
+  anonymousThenSynthetic.feed({ type: "assistant", message: { model: "<synthetic>", content: [{ type: "text", text: OAUTH_REFUSAL }] } });
+  assert.equal(anonymousThenSynthetic.feed({ type: "result", subtype: "error_during_execution", usage: {} }), "refusal");
+  assert.equal(
+    (anonymousThenSynthetic.events.filter((event) => event.kind === "error")[0] as { message: string }).message,
+    OAUTH_REFUSAL,
+  );
+  assert.equal(anonymousThenSynthetic.driver.lastTurnError(), OAUTH_REFUSAL);
+
+  // A subagent's failed result is its parent's business, not a session-level error.
+  const nested = makeHarness();
+  nested.feed({ type: "result", subtype: "success", is_error: true, result: "nested", parent_tool_use_id: "task-1", usage: {} });
+  assert.deepEqual(nested.events.filter((event) => event.kind === "error"), []);
+
+  // Nothing at all to say leaves the channel silent rather than inventing a reason.
+  assert.equal(claudeErrorResultText({ is_error: true }, null, null), null);
+  assert.equal(claudeErrorResultText({ is_error: true, result: "   " }, "  ", null), null);
+  assert.equal(claudeErrorResultText(null, "synthetic only", null), "synthetic only");
+  assert.equal(claudeErrorResultText({ result: "already shown" }, null, "already shown"), null);
+});
+
+test("a synthetic failure after streamed output still reaches the timeline", () => {
+  // The turn answered partially, then died on the credential refresh. The partial answer is
+  // already on screen; the synthetic record is the only account of why nothing followed it, and
+  // the terminal result carries no text of its own.
+  const h = makeHarness();
+  h.feed({ type: "system", subtype: "init", session_id: "s1", model: "claude-opus-5" });
+  h.feed({ type: "stream_event", event: { type: "message_start", message: { id: "msg_1" } } });
+  h.feed({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "partial answer" } } });
+  h.feed({ type: "assistant", message: { id: "msg_1", model: "claude-opus-5", content: [{ type: "text", text: "partial answer" }] } });
+  h.feed({ type: "assistant", message: { id: "msg_2", model: "<synthetic>", content: [{ type: "text", text: OAUTH_REFUSAL }] } });
+  assert.equal(h.feed({ type: "result", subtype: "error_during_execution", usage: {} }), "refusal");
+  const errors = h.events.filter((event) => event.kind === "error");
+  assert.equal(errors.length, 1);
+  assert.equal((errors[0] as { message: string }).message, OAUTH_REFUSAL);
+  assert.equal(h.driver.lastTurnError(), OAUTH_REFUSAL);
+});
+
+test("an authentication diagnostic never reaches the timeline in its own words", () => {
+  // Provider auth text can carry a token or an authorization URL. Every other driver call site
+  // replaces it with static guidance; the error-result path must not be the exception.
+  const h = makeHarness();
+  const secret = "sk-ant-oat01-SENTINEL-DO-NOT-PERSIST";
+  h.feed({ type: "system", subtype: "init", session_id: "s1", model: "claude-opus-5" });
+  h.feed({
+    type: "assistant",
+    message: { id: "msg_1", model: "<synthetic>", content: [{ type: "text", text: `Invalid OAuth token ${secret}` }] },
+  });
+  assert.equal(h.feed({
+    type: "result", subtype: "success", is_error: true,
+    result: `Invalid OAuth token ${secret}; visit https://console.example/auth?code=${secret}`, usage: {},
+  }), "refusal");
+  const errors = h.events.filter((event) => event.kind === "error");
+  assert.equal(errors.length, 1);
+  assert.equal((errors[0] as { message: string }).message, PROVIDER_AUTHENTICATION_ERROR);
+  assert.equal(h.driver.lastTurnError(), PROVIDER_AUTHENTICATION_ERROR);
+  assert.equal(h.authenticationFailures, 1, "the durable provider-auth recovery lane is signalled");
+  const serialized = JSON.stringify(h.events) + String(h.driver.lastTurnError()) + h.stderr.join("");
+  assert.equal(serialized.includes(secret), false, "no event or receipt text may carry the credential");
+
+  // The identifying phrase can sit past the bound the emitted text is truncated to, while a
+  // credential sits at the front. Classification therefore has to see the complete text.
+  const long = makeHarness();
+  long.feed({ type: "system", subtype: "init", session_id: "s1", model: "claude-opus-5" });
+  assert.equal(long.feed({
+    type: "result", subtype: "success", is_error: true,
+    result: `${secret} ${"padding ".repeat(400)} invalid OAuth token`, usage: {},
+  }), "refusal");
+  const longErrors = long.events.filter((event) => event.kind === "error");
+  assert.equal(longErrors.length, 1);
+  assert.equal((longErrors[0] as { message: string }).message, PROVIDER_AUTHENTICATION_ERROR);
+  assert.equal((JSON.stringify(long.events) + String(long.driver.lastTurnError())).includes(secret), false);
+  // The static replacement must also stay out of the transient-retry lane; it names a durable
+  // condition, so the automation layer classifies it terminal.
+  assert.match(PROVIDER_AUTHENTICATION_ERROR, /Sign in again/);
 });
 
 test("Claude result without a matching modelUsage entry leaves the context gauge untouched", () => {

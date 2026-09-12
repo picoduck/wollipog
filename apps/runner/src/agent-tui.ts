@@ -5,7 +5,11 @@ import type { SessionMeta } from "./session-store.js";
 import type { ShellProcessLaunch } from "./shell-manager.js";
 import { windowsCommandLine } from "./windows-conpty.js";
 import { runnerSupportsProtocol } from "@wollipog/protocol";
-import { codexOrchestratorMcpArgs } from "./orchestrator-preset.js";
+import {
+  codexOrchestratorMcpArgs,
+  supportsNativeOrchestratorBoundary,
+  type OrchestratorIsolationMode,
+} from "./orchestrator-preset.js";
 import { windowsCmdInvocationSpec } from "./windows-cmd.js";
 
 const TUI_DRIVERS = new Set(["claude-code", "codex", "codex-app-server"]);
@@ -17,26 +21,41 @@ export async function prepareAgentTuiLaunch(
   dependencies: {
     controlPlaneProtocolVersion: number | null;
     provision(meta: SessionMeta): Promise<void> | void;
+    prepareScratch(meta: SessionMeta): Promise<string>;
     probe?: typeof codexOrchestratorMcpArgs;
+    platform?: NodeJS.Platform;
+    executionIsolationMode?: OrchestratorIsolationMode;
   },
 ): Promise<ShellProcessLaunch | null> {
   if (meta.config?.permissionMode !== "orchestrator") return agentTuiLaunch(meta);
+  const platform = dependencies.platform ?? process.platform;
   if (!runnerSupportsProtocol(dependencies.controlPlaneProtocolVersion, "orchestratorNativeTui") ||
       meta.context.kind !== "native" || (meta.executionTarget && meta.executionTarget.adapter !== "host") ||
       !TUI_DRIVERS.has(meta.driver)) {
     throw new Error("Orchestrator Native TUI requires a current native host harness and control plane.");
   }
+  if (!supportsNativeOrchestratorBoundary(
+    meta.driver, platform, dependencies.executionIsolationMode,
+  )) {
+    throw new Error("Orchestrator Native TUI requires an attested native filesystem boundary for this harness.");
+  }
   if (!["idle", "starting", "running", "input_required"].includes(meta.status)) {
     throw new Error("Orchestrator Native TUI requires an active session; resume the session first.");
   }
+  const cwd = await dependencies.prepareScratch(meta);
   const prepared = { ...meta, args: [...meta.args], env: { ...meta.env } };
   await dependencies.provision(prepared);
+  prepared.env = {
+    ...prepared.env,
+    ...(platform === "win32" ? { TEMP: cwd, TMP: cwd } : { TMPDIR: cwd }),
+  };
   if (prepared.driver !== "claude-code") {
     prepared.args.push(...await (dependencies.probe ?? codexOrchestratorMcpArgs)(
-      prepared, prepared.worktreePath ?? prepared.repoPath,
+      prepared, cwd,
     ));
   }
-  return agentTuiLaunch(prepared);
+  const launch = agentTuiLaunch(prepared, { platform, comspec: process.env.ComSpec });
+  return launch ? { ...launch, cwd } : null;
 }
 
 function scrubInheritedEnv(driver: SessionMeta["driver"]): string[] {

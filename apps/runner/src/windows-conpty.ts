@@ -172,9 +172,15 @@ export interface WindowsConptyOptions {
   verbatimCommandLine?: string;
 }
 
+interface WindowsConptyEventMap {
+  error: [error: Error];
+  close: [code: number | null];
+  spawn: [];
+}
+
 /** Process-shaped ConPTY endpoint consumed by ShellManager. stderr is merged into the terminal's
  * VT output by Windows, so the stderr PassThrough intentionally remains empty. */
-export class WindowsConptyProcess extends EventEmitter {
+export class WindowsConptyProcess extends EventEmitter<WindowsConptyEventMap> {
   readonly stdout = new PassThrough();
   readonly stderr = new PassThrough();
   readonly stdin: Socket;
@@ -231,7 +237,8 @@ export class WindowsConptyProcess extends EventEmitter {
       this.handleWorkerMessage(message);
     });
     this.worker.on("error", (error) => {
-      this.fail(error);
+      // A worker may throw any JavaScript value; @types/node 26 now reflects that as unknown.
+      this.fail(error instanceof Error ? error : new Error("ConPTY output worker failed", { cause: error }));
     });
     queueMicrotask(() => this.emit("spawn"));
   }

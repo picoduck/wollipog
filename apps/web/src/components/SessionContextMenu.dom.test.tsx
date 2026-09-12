@@ -25,13 +25,14 @@ interface Log {
   closed: number;
   restored: number;
   renamed: string[];
+  toggledPin: string[];
   snoozed: string[];
   dismissed: string[];
   archived: string[];
 }
 
-async function mount(overrides: { snoozeAvailable?: boolean; reminder?: SessionReminderView } = {}): Promise<{ root: Root; log: Log; menu: HTMLElement }> {
-  const log: Log = { closed: 0, restored: 0, renamed: [], snoozed: [], dismissed: [], archived: [] };
+async function mount(overrides: { pinned?: boolean; snoozeAvailable?: boolean; reminder?: SessionReminderView } = {}): Promise<{ root: Root; log: Log; menu: HTMLElement }> {
+  const log: Log = { closed: 0, restored: 0, renamed: [], toggledPin: [], snoozed: [], dismissed: [], archived: [] };
   const restoreHost = domWindow.document.createElement("button") as unknown as HTMLElement;
   domWindow.document.body.append(restoreHost as never);
   restoreHost.addEventListener("focus", () => { log.restored += 1; });
@@ -48,10 +49,12 @@ async function mount(overrides: { snoozeAvailable?: boolean; reminder?: SessionR
       <SessionContextMenu
         state={state}
         sessionTitle="Fix the Parser"
+        pinned={overrides.pinned ?? false}
         snoozeAvailable={overrides.snoozeAvailable ?? true}
         {...(overrides.reminder ? { reminder: overrides.reminder } : {})}
         onClose={() => { log.closed += 1; }}
         onRename={(id) => log.renamed.push(id)}
+        onTogglePin={(id) => log.toggledPin.push(id)}
         onSnooze={(id) => log.snoozed.push(id)}
         onDismissReminder={(id) => log.dismissed.push(id)}
         onArchive={(id) => log.archived.push(id)}
@@ -68,12 +71,12 @@ async function unmount(root: Root) {
   domWindow.document.body.innerHTML = "";
 }
 
-test("the menu names its session, offers the three actions, and takes initial focus", async () => {
+test("the menu names its session, offers its actions, and takes initial focus", async () => {
   const { root, menu } = await mount();
   try {
     assert.equal(menu.getAttribute("aria-label"), "Session Actions for Fix the Parser");
     const items = [...menu.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent);
-    assert.deepEqual(items, ["Rename Session…", "Snooze Session…", "Archive"]);
+    assert.deepEqual(items, ["Rename Session…", "Pin Session", "Snooze Session…", "Archive"]);
     assert.equal(domWindow.document.activeElement?.textContent, "Rename Session…",
       "the virtualized collections never focus rows, so the menu takes focus itself");
     assert.ok(menu.querySelector(".menu-item.menu-danger")?.textContent === "Archive");
@@ -95,7 +98,7 @@ test("returned reminders expose Snooze Again and direct dismissal", async () => 
   const { root, log, menu } = await mount({ reminder: fired });
   try {
     const items = [...menu.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent);
-    assert.deepEqual(items, ["Rename Session…", "Snooze Again…", "Dismiss Reminder", "Archive"]);
+    assert.deepEqual(items, ["Rename Session…", "Pin Session", "Snooze Again…", "Dismiss Reminder", "Archive"]);
     await act(async () => {
       [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
         .find((item) => item.textContent === "Dismiss Reminder")!.click();
@@ -111,13 +114,13 @@ test("snooze is omitted when reminders are unsupported", async () => {
   const { root, menu } = await mount({ snoozeAvailable: false });
   try {
     const items = [...menu.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent);
-    assert.deepEqual(items, ["Rename Session…", "Archive"]);
+    assert.deepEqual(items, ["Rename Session…", "Pin Session", "Archive"]);
   } finally {
     await unmount(root);
   }
 });
 
-test("dialog actions close without restoring focus; archive and dismissal restore it", async () => {
+test("dialog actions close without restoring focus; pin, archive, and dismissal restore it", async () => {
   const { root, log, menu } = await mount();
   try {
     await act(async () => {
@@ -128,6 +131,19 @@ test("dialog actions close without restoring focus; archive and dismissal restor
     assert.equal(log.restored, 0, "the rename dialog takes focus; restoring would fight it");
   } finally {
     await unmount(root);
+  }
+
+  const pin = await mount({ pinned: true });
+  try {
+    await act(async () => {
+      [...pin.menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+        .find((item) => item.textContent === "Unpin Session")!.click();
+    });
+    assert.deepEqual(pin.log.toggledPin, ["s-1"], "the action keeps the menu target identity");
+    assert.equal(pin.log.closed, 1);
+    assert.equal(pin.log.restored, 1, "pinning opens no dialog, so keyboard position returns");
+  } finally {
+    await unmount(pin.root);
   }
 
   const second = await mount();
@@ -152,7 +168,7 @@ test("Escape and arrow roving come from the collection-owned keyboard handler", 
     await act(async () => {
       menu.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as never);
     });
-    assert.equal(domWindow.document.activeElement?.textContent, "Snooze Session…");
+    assert.equal(domWindow.document.activeElement?.textContent, "Pin Session");
     await act(async () => {
       menu.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
     });

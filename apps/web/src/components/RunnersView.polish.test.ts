@@ -91,6 +91,11 @@ test("machine cards use consistent action rows and progressively disclose deploy
   assert.match(view, /<span>Add Workspace<\/span>/);
   assert.match(view, /"Delete Machine"/);
   assert.match(view, /api\.registerMachineWorkspace/);
+  assert.match(view, /<h3>Runner Capacity<\/h3>/);
+  assert.match(view, /api\.updateMachineCapacity/);
+  assert.match(view, /aria-label="Runner Capacity Usage"/);
+  assert.match(view, /aria-label="Current Capacity Bottlenecks"/);
+  assert.match(view, /does not infer it from CPU or memory/);
   assert.match(view, /machineSettingsMutationError\(cause\)/);
   assert.match(view, /disabled=\{deleting \|\| onlineNativeRunner\}/);
   assert.match(view, /box\?\.runnerDataLayout === "legacy"/);

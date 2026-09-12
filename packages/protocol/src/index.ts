@@ -349,7 +349,31 @@
 // 126: Codex service-tier discovery and per-session selection. AgentModel carries the provider's
 //      open-string tier catalog/default and SessionConfig carries the selected tier through
 //      persistence, forks, resumes, and turn starts. Older peers omit the additive fields.
-export const PROTOCOL_VERSION = 126;
+// 127: Codex App Server usage derives each turn from replay-safe cumulative thread deltas while
+//      retaining the final response for context occupancy. Codex usage written by older runners
+//      may contain only the final upstream response and must be presented as incomplete history.
+// 128: provider-history quarantine. A conversation whose stored history the provider rejects
+//      before inference is durably marked unusable, stops accepting prompts and compaction, and
+//      exposes a bounded, content-free recovery coordinate instead.
+// 129: runners report an exact runner-owned governance trip so the control plane can always
+//      materialize the Continue / Stop decision that holds the runner queue.
+// 130: policy-hook terminal decisions become content-safe runner-owned session events. A
+//      correlated CP -> runner append fence orders the event before the hook response can release
+//      its exact tool call; pre-v130 peers retain audit-backed client synthesis.
+// 131: merged change-request linkage may carry the forge-verified head OID so runners can safely
+//      discard its worktree after the remote branch and local upstream disappear.
+// 132: control-plane-authoritative, revisioned per-Machine runner capacity can be applied live;
+//      runners report lease usage, queued demand, and exact admission bottlenecks.
+// 133: attach matches a worktree against the REPOSITORY that registers it rather than against the
+//      worktree's own directory, so a registered worktree outside every configured Project
+//      Location is attachable, and the result carries a content-free platform-isolation notice
+//      saying whether the live process can already write there. Older runners omit the notice and
+//      the control plane presents it as unknown.
+// 134: managed background continuations record a durable terminal missing-result boundary after
+//      provider acceptance. The control plane keeps that audit evidence separately from a user's
+//      idempotent acknowledgement, so accepted in-flight work is never mislabeled or replayed.
+export const PROTOCOL_VERSION = 134;
+export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
  * A requested worktree can spend minutes preparing remote and local Git state before it is ready.
@@ -359,10 +383,49 @@ export const PROTOCOL_VERSION = 126;
 export const SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS = 4 * 60_000;
 export const SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS =
   SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS + 30_000;
+
+/**
+ * Session naming deadline chain, innermost first. Preparation (neutral directory, provider
+ * authentication, process start) is budgeted separately from generation so its normal variance
+ * cannot silently consume the provider's allowance, and every enclosing layer is strictly larger
+ * than the layer it supervises so an outer transport can never expire first:
+ *
+ *   preparation (<= 3s) + generation (>= 12s) = runner budget 15s
+ *     -> runner teardown allowance (<= 1s), inside the margin below rather than competing with it
+ *       -> control-plane runner request 17s
+ *         -> control-plane supervision abort 18s
+ *           -> desktop remote read budget 35s (apps/desktop/src-tauri/src/remote_transport.rs)
+ *
+ * A custom endpoint may be configured up to 30s, so its supervision worst case is 33s — still
+ * under the desktop read budget.
+ *
+ * The total stays bounded: the runner clamps any requested budget to the runner budget below.
+ */
+export const SESSION_NAMING_PREPARATION_BUDGET_MS = 3_000;
+export const SESSION_NAMING_GENERATION_BUDGET_MS = 12_000;
+export const SESSION_NAMING_RUNNER_BUDGET_MS =
+  SESSION_NAMING_PREPARATION_BUDGET_MS + SESSION_NAMING_GENERATION_BUDGET_MS;
+/** After the title is known the runner still tears down its neutral directory and isolation
+ * boundary, and a `return` inside `try` does not settle until `finally` completes. A WSL `rm -rf`
+ * alone is allowed five seconds, so awaiting teardown unbounded would let housekeeping push a
+ * generated title past the control plane's round-trip deadline and report it as a timeout. The
+ * runner therefore waits only this long for teardown and lets an overrun finish detached. */
+export const SESSION_NAMING_CLEANUP_BUDGET_MS = 1_000;
+/** Extra time the control plane waits on the runner round trip beyond the runner's own budget.
+ * Must exceed the cleanup budget, or teardown can still outlast the deadline it sits inside. */
+export const SESSION_NAMING_TRANSPORT_MARGIN_MS = SESSION_NAMING_CLEANUP_BUDGET_MS + 1_000;
+/** Extra time the control plane's own abort timer allows beyond that runner request deadline. */
+export const SESSION_NAMING_SUPERVISION_MARGIN_MS = SESSION_NAMING_TRANSPORT_MARGIN_MS + 1_000;
 export { buildConversationHandoff, handoffDestinationError } from "./conversation-handoff.js";
 export type { ConversationHandoffDraft } from "./conversation-handoff.js";
-import { pendingRequests } from "./worker-attention.js";
-export { pendingRequests, addPendingRequest, removePendingRequest } from "./worker-attention.js";
+import { pendingRequests, prioritizedPendingRequests } from "./worker-attention.js";
+export {
+  attentionRequestRank,
+  pendingRequests,
+  prioritizedPendingRequests,
+  addPendingRequest,
+  removePendingRequest,
+} from "./worker-attention.js";
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -469,6 +532,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   checkpointRewind: 25,
   conversationFork: 28,
   conversationHandoff: 110,
+  /** Runner reports provider-history quarantine and accepts recovery forks/handoffs for it. */
+  providerHistoryQuarantine: 128,
   runtimeDiagnostics: 32,
   acpLogout: 34,
   acpSessionContext: 38,
@@ -486,6 +551,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   subscriptionUsage: 80,
   managedBackgroundDelivery: 82,
   managedBackgroundInventory: 82,
+  backgroundMissingResultRecovery: 134,
   workerAttention: 108,
   backgroundWorkTracking: 83,
   correlatedRestartEcho: 84,
@@ -520,6 +586,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   wslAgentControlBridge: 123,
   /** Fresh discovery attests the no-follow target-local launcher required for Direct WSL. */
   wslSafeLauncher: 124,
+  /** Correlated runner-owned policy-hook decision events replace timestamp-based UI synthesis. */
+  nativePolicyHookEvents: 130,
   /** v103 runners emit the cache-creation and reasoning token buckets on token_usage. */
   usageTokenBuckets: 103,
   /** v104 runners stamp the producing model on token_usage. */
@@ -528,6 +596,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   controlPlaneQueueHold: 105,
   /** v106 runners enforce the control-plane-priced cumulative cost during the active turn. */
   pricedSessionCost: 106,
+  /** v129 runners report the exact threshold that cancelled a turn. */
+  governanceTripReporting: 129,
   /** v107 runners durably resume non-secret structured-question answers after process loss. */
   resumableQuestionAnswers: 107,
   sessionWorktrees: 101,
@@ -537,6 +607,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   hostAdministration: 114,
   /** `GET /api/admin/doctor`: pass/warn/fail operational checks (`wollipog admin doctor`). */
   hostAdminDoctor: 117,
+  /** Revisioned per-Machine capacity configuration, live resize, and usage/queue reporting. */
+  machineRunnerCapacity: 132,
 } as const;
 
 /* ========================================================================== */
@@ -671,12 +743,51 @@ export function providerAuthenticationReceiptCode(
 /** Additive event kinds that have an explicit older-peer wire policy. Kinds absent from this
  * table are sent unchanged: an unreviewed event must fail closed at an older consumer rather than
  * being silently discarded. */
+/**
+ * Additive event kinds that older peers must not receive.
+ *
+ * Adding an entry changes the projected-history-epoch encoding (`localEpoch * VARIANTS + variant`).
+ * Protocol v130 therefore reserves an offset before the three-way encoding. For the same or any
+ * later local epoch, every new-format value sorts above both values the one-policy format could
+ * have published, forcing a resync before a cached sequence number can name a different event.
+ *
+ * Prefer carrying additive state on the session snapshot, which is version-gated per field and
+ * needs no sequence space at all.
+ */
 const SESSION_EVENT_WIRE_POLICIES = {
   agent_response_completed: { minProtocol: 87, legacy: "omit" },
+  policy_hook_decision: { minProtocol: 130, legacy: "omit" },
 } as const satisfies Partial<Record<SessionEventKind, {
   minProtocol: number;
   legacy: "omit";
 }>>;
+
+/**
+ * Which projection this peer receives, as a dense index. 0 is the exact local history; each higher
+ * value omits one more event kind.
+ *
+ * Thresholds are an ordered chain — a peer below a lower threshold is below every higher one — so
+ * counting unmet policies yields a contiguous index rather than a sparse bitmask.
+ *
+ * This must identify WHICH projection a peer gets, not merely that it gets one. Two peers omitting
+ * different event sets number the same log differently, so they occupy different dense sequence
+ * spaces; collapsing them to a single "projected" flag lets a reconnect at a different version
+ * reuse cursors whose sequence numbers now name different events.
+ */
+export function sessionEventWireProjectionVariant(
+  protocolVersion: number | null | undefined,
+): number {
+  return Object.values(SESSION_EVENT_WIRE_POLICIES).filter(
+    (policy) => !Number.isInteger(protocolVersion) || protocolVersion! < policy.minProtocol,
+  ).length;
+}
+
+/** Total distinct projections, including the exact one. */
+export const SESSION_EVENT_WIRE_PROJECTION_VARIANTS =
+  Object.keys(SESSION_EVENT_WIRE_POLICIES).length + 1;
+
+/** Numeric fence between the retired two-way encoding and the v130 three-way encoding. */
+export const SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET = 2;
 
 /** Whether this peer needs any explicit additive session-event compatibility projection.
  * Keeping policy inspection beside the policy table avoids callers probing it with a fabricated
@@ -684,9 +795,7 @@ const SESSION_EVENT_WIRE_POLICIES = {
 export function sessionEventWireProjectionRequiredForProtocol(
   protocolVersion: number | null | undefined,
 ): boolean {
-  return Object.values(SESSION_EVENT_WIRE_POLICIES).some(
-    (policy) => !Number.isInteger(protocolVersion) || protocolVersion! < policy.minProtocol,
-  );
+  return sessionEventWireProjectionVariant(protocolVersion) > 0;
 }
 
 /** Project one exact runner-local event payload for the currently connected control plane.
@@ -1142,7 +1251,8 @@ export interface NativeTuiAccountingBoundary {
 
 /** Resolved per-session knobs (model / reasoning effort / service tier / approval preset). */
 export interface SessionConfig {
-  /** Control-plane-owned lifetime cap on directly created child sessions. Default: four. */
+  /** Control-plane-owned concurrent live-child cap. Terminal or archived children do not occupy
+   * a slot, but their already-reserved usage remains part of parent ceiling accounting. */
   maxChildSessions?: number;
   model?: string;
   effort?: string;
@@ -1487,6 +1597,42 @@ export interface RunnerRuntimeInfo {
   };
 }
 
+export type RunnerCapacityBlockerKind =
+  | "runner_capacity"
+  | "agent_quota"
+  | "target_quota"
+  | "exclusive_group"
+  | "request_weight"
+  | "queue_order";
+
+/** Content-free explanation of the exact admission boundary holding one or more sessions. */
+export interface RunnerCapacityBlocker {
+  kind: RunnerCapacityBlockerKind;
+  description: string;
+  usedUnits: number;
+  limitUnits: number;
+  requiredUnits: number;
+  agentId?: string;
+  targetId?: string;
+  waitingSessions?: number;
+}
+
+/** Durable control-plane configuration coordinate sent to the runner. */
+export interface RunnerCapacityConfiguration {
+  configuredUnits: number;
+  revision: number;
+}
+
+/** Runner-authored live lease accounting projected into Machine settings. */
+export interface RunnerCapacityState extends RunnerCapacityConfiguration {
+  authority: "runner_local" | "control_plane";
+  usedUnits?: number;
+  availableUnits?: number;
+  queuedSessions?: number;
+  blockers?: RunnerCapacityBlocker[];
+  reportedAt?: number;
+}
+
 export type RunnerStatus = "online" | "offline";
 
 /** Denormalised runner record as the UI consumes it (REST + WS). */
@@ -1505,6 +1651,10 @@ export interface RunnerView {
   /** Editors found on the host (for "Open in …"); absent/empty hides the control. */
   editors?: EditorInfo[];
   runtime?: RunnerRuntimeInfo;
+  /** v132 authoritative configuration plus latest runner-authored usage. */
+  capacity?: RunnerCapacityState;
+  /** Principal-specific mutation permission; absent on older control planes. */
+  canManage?: boolean;
   /** Protocol v60 projection. Placement is separate from the agent definitions above. */
   executionTargets?: ExecutionTargetDefinition[];
   connectedAt: number | null;
@@ -1989,6 +2139,51 @@ export function sessionAttentionStatus(
     description: `A child agent owns this request. ${result.description} Open Agents to inspect the owner and exact request.` };
 }
 
+/** One kind of attention a session needs, with every request of that kind behind it. */
+export interface SessionAttentionGroup extends SessionAttentionStatus {
+  /** How many requests carry this label. */
+  count: number;
+  /** In priority order, then arrival. */
+  requests: PendingApproval[];
+  /** Who owns each request, in the same order: the main agent, a resolved child, or an unresolvable child. */
+  owners: string[];
+}
+
+/**
+ * The per-kind breakdown a list card shows instead of the rolled-up "N Actions Required": one group
+ * per attention label, in priority order, each with its count. A session with one request yields
+ * one group of one, so a surface can use this for every card and never special-case the rollup.
+ */
+export function sessionAttentionBreakdown(
+  session: Pick<SessionView, "status" | "pendingApproval" | "attentionOwners">,
+): SessionAttentionGroup[] {
+  const requests = prioritizedPendingRequests(session.pendingApproval);
+  if (requests.length === 0) {
+    const fallback = singleSessionAttentionStatus(session);
+    return fallback ? [{ ...fallback, count: 0, requests: [], owners: [] }] : [];
+  }
+  const groups: SessionAttentionGroup[] = [];
+  for (const request of requests) {
+    const status = singleSessionAttentionStatus({ status: session.status, pendingApproval: request });
+    if (!status) continue;
+    const owner = session.attentionOwners?.find((value) =>
+      value.requestId === request.requestId && value.toolCallId === request.ownerToolUseId);
+    const role = owner?.role?.replace(/\b\p{L}/gu, (letter) => letter.toUpperCase());
+    const ownerLabel = !request.ownerToolUseId
+      ? "Main Agent"
+      : owner?.resolved ? `${owner.name ?? "Subagent"}${role ? ` · ${role}` : ""}` : "Child Owner Unavailable";
+    const group = groups.find((candidate) => candidate.label === status.label);
+    if (group) {
+      group.count += 1;
+      group.requests.push(request);
+      group.owners.push(ownerLabel);
+    } else {
+      groups.push({ ...status, count: 1, requests: [request], owners: [ownerLabel] });
+    }
+  }
+  return groups;
+}
+
 function singleSessionAttentionStatus(
   session: Pick<SessionView, "status" | "pendingApproval">,
 ): SessionAttentionStatus | null {
@@ -2240,6 +2435,15 @@ export interface PendingApproval {
   governancePolicyId?: string;
   /** Absolute deadline for a policy hook ask. Absence means wait indefinitely. */
   expiresAt?: number;
+  /** v129: content-free runner evidence for a runner-owned threshold cancellation. It lets
+   * Continue synchronize a cleared or changed control-plane rule instead of assuming the stale
+   * runner threshold is still authoritative. */
+  runnerGuardrail?: {
+    tripId: string;
+    kind: RunnerGuardrailKind;
+    threshold: number;
+    observed: number;
+  };
 }
 
 export type GovernanceActorKind = "human" | "agent" | "policy" | "system";
@@ -2912,6 +3116,7 @@ export type SessionEventPayload =
       /** Recovery can restore session-scoped hook elicitation only when v66 provisioning proved it. */
       restoresElicitation?: boolean;
     }
+  | PolicyHookDecisionEvent
   | ({ kind: "review_decision" } & ReviewDecision)
   | { kind: "permission_request"; requestId: string; title: string; options: PermissionOption[]; context?: ApprovalContext; purpose?: "authentication"; ownerToolUseId?: string }
   | {
@@ -2965,6 +3170,19 @@ export interface SessionEvent {
   seq: number;
   ts: number;
   payload: SessionEventPayload;
+}
+
+/** Content-safe terminal policy-hook provenance. It deliberately excludes tool input, answers,
+ * policy predicates, and scope details; `toolCallId` is only the provider's opaque causal key. */
+export interface PolicyHookDecisionEvent {
+  kind: "policy_hook_decision";
+  auditId: string;
+  requestId: string;
+  stage: GovernanceAuditStage;
+  outcome: GovernanceAuditOutcome;
+  actor: GovernanceActor;
+  governancePolicyId?: string;
+  toolCallId: string;
 }
 
 /* ---------------------- Usage and cost aggregation ---------------------- */
@@ -3432,6 +3650,8 @@ export interface ManagedBackgroundJobSnapshot {
   continuationQueuedAt?: number;
   continuationSubmittedAt?: number;
   continuationAcceptedAt?: number;
+  /** The accepted provider turn ended without a complete durable top-level assistant result. */
+  continuationMissingResultAt?: number;
   assistantResultPersistedAt?: number;
 }
 
@@ -3453,6 +3673,7 @@ export interface ManagedBackgroundJobView {
   continuationQueuedAt?: number;
   continuationSubmittedAt?: number;
   continuationAcceptedAt?: number;
+  continuationMissingResultAt?: number;
   assistantResultPersistedAt?: number;
 }
 
@@ -3503,6 +3724,10 @@ export interface BackgroundDeliveryView {
   queuedAt?: number;
   submittedAt?: number;
   acceptedAt?: number;
+  /** Runner proof that the accepted provider turn is terminal without a complete durable result. */
+  missingResultAt?: number;
+  /** Durable user resolution of a terminal missing result; audit evidence remains intact. */
+  missingResultAcknowledgedAt?: number;
   runnerResultPersistedAt?: number;
   transcriptProjectedAt?: number;
   notificationQueuedAt?: number;
@@ -3666,6 +3891,28 @@ export interface SessionCommandInvocationView {
   updatedAt: number;
 }
 
+/** How recovery rebuilds a usable conversation from the last safe checkpoint. "fork" asks the
+ * provider to branch the thread at that turn, which excludes every later item including the
+ * invalid one. "handoff" starts a fresh provider thread seeded with a bounded, sanitized draft of
+ * the visible dialogue, for providers or checkpoints where a safe fork is unavailable. */
+export type ProviderHistoryRecoveryMode = "fork" | "handoff";
+
+/** A provider-owned conversation that can no longer accept turns because its stored history
+ * contains an item the provider rejects before inference. Bounded and content-free: it names the
+ * structural cause and the recovery coordinate, never the offending value, the prompt text, or any
+ * provider thread/credential identifier. */
+export interface ProviderHistoryQuarantineView {
+  reason: "oversized_tool_call";
+  detectedAt: number;
+  /** Completed turn whose checkpoint precedes the invalid item. Absent means no safe conversation
+   * checkpoint was ever recorded, so this session cannot be recovered in place. */
+  recoveryTurn?: number;
+  /** Absent alongside `recoveryTurn` for the same reason: there is nothing to recover from. */
+  recovery?: ProviderHistoryRecoveryMode;
+  /** True once a prompt attempted after quarantine was retained as an unsent draft. */
+  retainedPrompt?: boolean;
+}
+
 /** Denormalised session record for the UI (board cards + lists). */
 export interface SessionView {
   id: string;
@@ -3691,6 +3938,9 @@ export interface SessionView {
   titleSource?: SessionTitleSource;
   /** Canonical provider activity timestamp from stable ACP session_info_update; presentation-only. */
   providerUpdatedAt?: string;
+  /** Set when the provider conversation is quarantined; ordinary prompts and `/compact` cannot
+   * reach it and clients must offer recovery instead. Omitted by pre-v128 control planes. */
+  historyQuarantine?: ProviderHistoryQuarantineView;
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
   /** Explicit provider capability boundary. Omitted by pre-v83 control planes. */
@@ -3704,6 +3954,8 @@ export interface SessionView {
   /** True when older managed-job history exists beyond the projected bounded window. */
   backgroundJobsTruncated?: boolean;
   status: SessionStatus;
+  /** Exact current admission boundary for a capacity-queued session. */
+  capacityWait?: RunnerCapacityBlocker;
   column: BoardColumn;
   runId: string | null;
   useWorktree: boolean;
@@ -3756,6 +4008,9 @@ export interface SessionView {
   contextTokensUsed?: number;
   contextWindow?: number;
   costUsd: number;
+  /** Provenance for `costUsd` when the per-model ledger has caught up with the session totals.
+   * Omitted by older control planes and while the ledger trails the runner's live counters. */
+  costSource?: UsageCostSource;
   /** True for sessions adopted from an external CLI transcript — only these can be reprocessed. */
   adopted: boolean;
   /** Sidebar grouping. Absent ⇒ derive from `workspaceId` (null ⇒ "chat"). */
@@ -3780,7 +4035,7 @@ export interface SessionView {
   queued?: QueuedPromptView[];
   /** Durable user prompts rendered in the transcript while delivery remains incomplete/terminal. */
   pendingPrompts?: PendingPromptView[];
-  /** The runner interrupted the active turn and is holding the preserved FIFO for explicit resume. */
+  /** The runner is temporarily holding the preserved FIFO behind a runtime or control boundary. */
   queueHeld?: boolean;
   /** Ephemeral runner-owned coordinate for the currently dequeued turn. */
   activeTurnId?: string;
@@ -3840,6 +4095,14 @@ export interface SessionSnapshot {
   title: string;
   titleSource?: SessionTitleSource;
   providerUpdatedAt?: string;
+  /** Set when the provider conversation is quarantined. Runner-authoritative and durable, so a
+   * reconnecting control plane never re-offers submission into a poisoned thread.
+   *
+   * Three-valued on purpose. `undefined` means this snapshot carries no information — a pre-v128
+   * peer, or a registration snapshot built before version negotiation — and must never overwrite
+   * what the control plane already stored. Explicit `null` is a v126 runner stating there is no
+   * quarantine, which is what lets a restart onto a fresh provider conversation clear the guard. */
+  historyQuarantine?: ProviderHistoryQuarantineView | null;
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
   /** Explicit provider capability boundary. Omitted for pre-v83 control planes. */
@@ -3847,6 +4110,8 @@ export interface SessionSnapshot {
   /** Bounded projection-safe managed-job inventory. Omitted for pre-v82 control planes. */
   backgroundJobs?: ManagedBackgroundJobSnapshot[];
   status: SessionStatus;
+  /** Durable runner-owned wait explanation for reconnect hydration. */
+  capacityWait?: RunnerCapacityBlocker;
   driver: AgentDriverKind;
   useWorktree: boolean;
   worktreePath: string | null;
@@ -3907,6 +4172,8 @@ export interface SessionWorktreeView {
   pullRequest?: {
     url: string;
     state: "open" | "merged" | "closed";
+    /** Forge-verified head OID. Only a merged record may use it as delivery proof. */
+    headOid?: string;
     provider?: ForgeProvider;
     kind?: ForgeChangeRequestKind;
   };
@@ -4517,6 +4784,9 @@ export interface AutomationCommandView {
   revision: number;
   attemptCount: number;
   lastError?: string;
+  /** Command id of the replacement issued after a retryable provider failure. A superseded command
+   * is terminal but no longer the execution's verdict; the replacement carries the outcome. */
+  supersededBy?: string;
   createdAt: number;
   updatedAt: number;
   lastSentAt?: number;
@@ -4620,6 +4890,8 @@ export interface SessionStatusMessage {
   sessionId: string;
   status: SessionStatus;
   detail?: string;
+  /** v132 exact admission boundary while status is queued; absent clears a prior wait reason. */
+  capacityWait?: RunnerCapacityBlocker;
   /** Set once when the runner creates an isolated worktree for the session. */
   worktreePath?: string | null;
   /** Opaque identity of the accepted start_session command that owns this lifecycle. */
@@ -4654,6 +4926,25 @@ export interface PolicyHookCredentialRegisteredMessage {
   error?: string;
 }
 
+/** Correlated causal append: the control plane waits for this runner-owned history write before
+ * returning a terminal PreToolUse response that can release the matching provider tool call. */
+export interface RecordPolicyHookDecisionMessage {
+  type: "record_policy_hook_decision";
+  requestId: string;
+  sessionId: string;
+  decision: Omit<PolicyHookDecisionEvent, "kind">;
+}
+
+export interface PolicyHookDecisionRecordedMessage {
+  type: "policy_hook_decision_recorded";
+  requestId: string;
+  sessionId: string;
+  auditId: string;
+  accepted: boolean;
+  eventSeq?: number;
+  error?: string;
+}
+
 /** Hash-only binding for one runner-minted, exact-session CLI/MCP credential. The plaintext stays
  * in a protected runner-local file and is never placed in argv or a durable command snapshot. */
 export interface AgentControlCredentialMessage {
@@ -4676,6 +4967,18 @@ export interface AgentControlCredentialRegisteredMessage {
 export interface SessionRuntimeUpdatedMessage {
   type: "session_runtime_updated";
   snapshot: SessionSnapshot;
+}
+
+/** A runner-owned threshold cancelled the active turn and is holding its queue. This notice is
+ * replay-safe and contains no provider content; the control plane owns the durable decision card. */
+export interface GovernanceTrippedMessage {
+  type: "governance_tripped";
+  sessionId: string;
+  /** Runner-process occurrence id. Reconnect replays retain it; a later crossing gets a new id. */
+  tripId: string;
+  kind: RunnerGuardrailKind;
+  threshold: number;
+  observed: number;
 }
 
 /** Runner streams a normalized session event. In Phase 2 the runner owns the per-session `seq`
@@ -4756,6 +5059,12 @@ export interface AgentsUpdatedMessage {
   agents: AgentDefinition[];
   /** Editors found by the same discovery pass (absent on pre-v22 runners). */
   editors?: EditorInfo[];
+}
+
+/** Authoritative live capacity/queue accounting after registration and every admission change. */
+export interface RunnerCapacityStatusMessage {
+  type: "runner_capacity_status";
+  status: RunnerCapacityState;
 }
 
 /** Event-driven or initial account-level provider usage update. The control plane validates the
@@ -4968,8 +5277,10 @@ export type RunnerToControlPlane =
   | SessionStatusMessage
   | StopSessionResultMessage
   | PolicyHookCredentialMessage
+  | PolicyHookDecisionRecordedMessage
   | AgentControlCredentialMessage
   | SessionRuntimeUpdatedMessage
+  | GovernanceTrippedMessage
   | SessionEventMessage
   | SessionHistoryResultMessage
   | SessionHistoryPageResultMessage
@@ -4988,6 +5299,7 @@ export type RunnerToControlPlane =
   | ShellInventoryCompleteMessage
   | ProcessStatusMessage
   | AgentsUpdatedMessage
+  | RunnerCapacityStatusMessage
   | SubscriptionUsageUpdatedMessage
   | SubscriptionUsageInventoryMessage
   | SubscriptionUsageRefreshResultMessage
@@ -5027,6 +5339,8 @@ export interface RegisteredMessage {
   heartbeatIntervalMs: number;
   /** The control-plane protocol version. Absent means a pre-negotiation control plane. */
   protocolVersion?: number;
+  /** Present once an administrator has made the control plane authoritative for this Machine. */
+  runnerCapacity?: RunnerCapacityConfiguration;
 }
 
 export interface RegisterRejectedMessage {
@@ -5264,7 +5578,7 @@ export interface CancelSessionMessage {
 }
 
 /** Interrupt only the active turn. Unlike cancel_session, the session remains non-terminal and
- * queued prompts are preserved until a later explicit prompt resumes their FIFO. */
+ * queued prompts resume in FIFO order after the interrupted turn safely settles. */
 export interface InterruptTurnMessage {
   type: "interrupt_turn";
   sessionId: string;
@@ -5385,6 +5699,9 @@ export interface ForkSessionMessage {
    * the new session through session_history_page after materializing its snapshot. */
   deferHistory?: boolean;
   handoff?: { agentId: string; config: SessionConfig };
+  /** v128: recover a quarantined provider conversation. The runner revalidates the source's
+   * durable quarantine and its recovery turn, and only then accepts a same-provider handoff. */
+  recovery?: true;
 }
 
 export interface ForkResultMessage {
@@ -5395,6 +5712,9 @@ export interface ForkResultMessage {
   snapshot?: SessionSnapshot;
   events?: { seq: number; ts: number; payload: SessionEventPayload }[];
   handoffDraft?: import("./conversation-handoff.js").ConversationHandoffDraft;
+  /** v128: a prompt the source retained unsent while quarantined, handed to the recovered session
+   * as a composer draft. It is never submitted by the runner or the control plane. */
+  retainedPrompt?: { text: string; images: PromptImageInput[] };
 }
 
 /** Create, attach, or select the worktree targeted by a session's Git/file actions. The runner
@@ -5427,6 +5747,22 @@ export interface SessionWorktreeProgressMessage {
   phase: SessionWorktreeProgressPhase;
 }
 
+/**
+ * Protocol v133: what platform isolation makes of a freshly attached worktree path.
+ *
+ * A bwrap/Seatbelt boundary is bound at launch and cannot gain a mount afterwards, so attaching a
+ * worktree outside the boundary a live provider already holds leaves that path readable but not
+ * writable until the session relaunches. This states that instead of letting the agent discover it
+ * as a permission error mid-turn. Absent means unknown: either a pre-v133 runner, or an operation
+ * other than attach.
+ */
+export interface SessionWorktreeIsolationNotice {
+  /** True when the session's current provider process can already write to the attached path. */
+  writableNow: boolean;
+  /** True when the session's next launch binds the attached path into its writable boundary. */
+  writableAtNextLaunch: boolean;
+}
+
 export interface SessionWorktreeResultMessage {
   type: "session_worktree_result";
   requestId: string;
@@ -5437,12 +5773,19 @@ export interface SessionWorktreeResultMessage {
   error?: string;
   worktree?: SessionWorktreeView;
   snapshot?: SessionSnapshot;
+  /** Protocol v133+, attach only. */
+  isolation?: SessionWorktreeIsolationNotice;
 }
 
 /** Control plane asks the runner to re-probe installed agents and push the result. */
 export interface RediscoverMessage {
   type: "rediscover";
   runnerId: string;
+}
+
+/** Idempotent monotonic application of the control plane's durable Machine capacity setting. */
+export interface ConfigureRunnerCapacityMessage extends RunnerCapacityConfiguration {
+  type: "configure_runner_capacity";
 }
 
 /** Ask the runner to refresh provider-owned account usage without starting or interrupting a turn. */
@@ -6365,6 +6708,7 @@ export type ControlPlaneToRunner =
   | RegisteredMessage
   | RegisterRejectedMessage
   | PolicyHookCredentialRegisteredMessage
+  | RecordPolicyHookDecisionMessage
   | AgentControlCredentialRegisteredMessage
   | StartSessionMessage
   | PromptSessionMessage
@@ -6386,6 +6730,7 @@ export type ControlPlaneToRunner =
   | ForkSessionMessage
   | SessionWorktreeRequestMessage
   | RediscoverMessage
+  | ConfigureRunnerCapacityMessage
   | RefreshSubscriptionUsageMessage
   | GenerateSessionTitleMessage
   | ConfigureSessionNamingCustomModelMessage
@@ -6759,7 +7104,7 @@ export interface CreateProjectRequest {
 
 /** Rename and/or show/hide a durable Project. Omitted fields remain unchanged. */
 export interface UpdateProjectRequest {
-  /** Human-managed defaults; null restores the installation fallback. */
+  /** Human-managed defaults; null removes them so omitted child limits can remain unlimited. */
   childSessionDefaults?: ChildSessionDefaults | null;
   name?: string;
   hidden?: boolean;

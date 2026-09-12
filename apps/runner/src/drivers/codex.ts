@@ -167,7 +167,7 @@ export class CodexDriver implements Driver {
       const promptText = slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text;
 
       const cfg = this.config;
-      const sandbox = cfg.permissionMode === "orchestrator" ? "read-only"
+      const sandbox = cfg.permissionMode === "orchestrator" ? "workspace-write"
         : cfg.permissionMode && SANDBOX_MODES.has(cfg.permissionMode) ? cfg.permissionMode : "workspace-write";
 
       // model/effort apply to both first turn and resume.
@@ -184,7 +184,10 @@ export class CodexDriver implements Driver {
       // one containing %VAR%, quotes, etc.) can't be mangled by the Windows shell.
       const args = [...this.opts.args, ...isolationArgs, "exec"];
       if (this.threadId) {
-        // `resume` inherits cwd + sandbox from the original session (no -C/-s).
+        // Current Codex rebuilds resume policy from the invocation config and process cwd. Pin
+        // Orchestrator explicitly as well so an upgraded thread can never recover its former
+        // project cwd if provider resume semantics drift back to inheriting persisted state.
+        if (cfg.permissionMode === "orchestrator") args.push("-C", this.cwd, "-s", sandbox);
         args.push("resume", "--json", "--skip-git-repo-check", ...modelEffort, ...imageArgs, this.threadId, "-");
       } else {
         args.push("--json", "--skip-git-repo-check", "-C", this.cwd, "-s", sandbox, ...modelEffort, ...imageArgs, "-");

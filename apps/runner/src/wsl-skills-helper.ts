@@ -9,11 +9,23 @@ LEASE_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]
 MAX_ENTRIES = 256
 MAX_MD = 65536
 MAX_LEASE_RECORDS = 16
+MAX_COMPACTION_SIBLINGS = 64
+MAX_COMPACTION_RECORDS = 4096
+MAX_CLEANUP_ALIAS_SCAN_ENTRIES = 4096
+MAX_CLEANUP_ALIASES = 128
 RENAME_EXCHANGE = 2
 DRIVER_DIRS = {"claude-code": ".claude/skills", "codex": ".codex/skills", "codex-app-server": ".codex/skills"}
+COMPACTION = re.compile(r"^\.mutable-home\.compact-([0-9a-f-]{36})-([0-9a-f]{64})-([0-9a-f]{32})$")
+CLEANUP_PROOF = re.compile(r"^\.mutable-home\.cleanup-([0-9a-f]{32})\.json$")
+PUBLICATION_TEMP = re.compile(r"^\.provider-home-lease-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.tmp$")
+diagnostics = []
 
 def fail(message):
     raise RuntimeError(message)
+
+def diagnose(message):
+    value = re.sub(r"[\x00-\x1f\x7f]+", " ", str(message)).strip()[:500]
+    if value and value not in diagnostics and len(diagnostics) < 16: diagnostics.append(value)
 
 def open_root(path):
     resolved = os.path.realpath(path)
@@ -84,7 +96,7 @@ def read_lease_record(lock, name):
     else: fail("provider home lease is invalid")
     return value, hashlib.sha256(raw).hexdigest()
 
-def read_lease_chain(lock):
+def read_lease_chain(lock, include_records=False):
     entries = sorted(os.listdir(lock))
     if not entries: fail("provider home lease is incomplete")
     if "lease.json" in entries:
@@ -99,10 +111,11 @@ def read_lease_chain(lock):
         if (value.get("version") != 2 or value.get("state") != "active" or value.get("previousLeaseId") is not None or
             value.get("previousRecordHash") is not None or marker != "lease-%s.json" % value["leaseId"]):
             fail("provider home lease is incomplete or foreign")
-    consumed, seen = {marker}, set()
+    consumed, seen, records = {marker}, set(), {}
     while True:
         if value["leaseId"] in seen: fail("provider home lease is incomplete or foreign")
         seen.add(value["leaseId"])
+        records[value["leaseId"]] = (record_hash, value)
         next_marker = "next-%s.json" % value["leaseId"]
         if next_marker not in entries: break
         successor, successor_hash = read_lease_record(lock, next_marker)
@@ -117,7 +130,7 @@ def read_lease_chain(lock):
         consumed.add(next_marker)
         value, record_hash = successor, successor_hash
     if len(consumed) != len(entries): fail("provider home lease is incomplete or foreign")
-    return value, record_hash
+    return (value, record_hash, records) if include_records else (value, record_hash)
 
 def write_all(fd, value):
     sent = 0
@@ -144,6 +157,201 @@ def process_alive(pid):
     except PermissionError: return True
     except: return True
 
+def discover_cleanup_proof_aliases(root):
+    # An incomplete inventory cannot prove that a two-link proof has exactly one strict alias.
+    # Return no inventory on mutation or overflow so single-link cleanup can continue safely.
+    aliases = {}
+    scanned = 0
+    retained = 0
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                scanned += 1
+                if scanned > MAX_CLEANUP_ALIAS_SCAN_ENTRIES: return None
+                if not PUBLICATION_TEMP.fullmatch(entry.name): continue
+                retained += 1
+                if retained > MAX_CLEANUP_ALIASES: return None
+                info = entry.stat(follow_symlinks=False)
+                aliases.setdefault((info.st_dev, info.st_ino), []).append(entry.name)
+    except: return None
+    return aliases
+
+def normalize_cleanup_proof(root, proof_name, proof_identity, proof_raw, aliases_by_identity, retained_fd=None):
+    proof_fd = retained_fd if retained_fd is not None else os.open(
+        proof_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root)
+    try:
+        info = os.fstat(proof_fd)
+        named = os.stat(proof_name, dir_fd=root, follow_symlinks=False)
+        os.lseek(proof_fd, 0, os.SEEK_SET)
+        if ((info.st_dev, info.st_ino) != proof_identity or
+            (named.st_dev, named.st_ino) != proof_identity or
+            not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or
+            stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink not in (1, 2) or
+            info.st_size > 4096 or os.read(proof_fd, info.st_size + 1) != proof_raw):
+            fail("compaction cleanup proof changed during recovery")
+        if info.st_nlink == 1: return proof_identity
+        if aliases_by_identity is None: fail("unverified compaction cleanup proof alias")
+        aliases = aliases_by_identity.get(proof_identity, [])
+        if len(aliases) != 1: fail("unverified compaction cleanup proof alias")
+        alias_name = aliases[0]
+        if not PUBLICATION_TEMP.fullmatch(alias_name): fail("unverified compaction cleanup proof alias")
+        alias_fd = os.open(alias_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root)
+        try:
+            alias_opened = os.fstat(alias_fd)
+            named = os.stat(proof_name, dir_fd=root, follow_symlinks=False)
+            alias_named = os.stat(alias_name, dir_fd=root, follow_symlinks=False)
+            if ((alias_opened.st_dev, alias_opened.st_ino) != proof_identity or
+                (named.st_dev, named.st_ino) != proof_identity or named.st_nlink != 2 or
+                (alias_named.st_dev, alias_named.st_ino) != proof_identity or alias_named.st_nlink != 2 or
+                not stat.S_ISREG(alias_opened.st_mode) or alias_opened.st_uid != os.geteuid() or
+                stat.S_IMODE(alias_opened.st_mode) != 0o600 or alias_opened.st_nlink != 2 or
+                alias_opened.st_size != info.st_size or
+                os.read(alias_fd, alias_opened.st_size + 1) != proof_raw):
+                fail("unverified compaction cleanup proof alias")
+            os.unlink(alias_name, dir_fd=root)
+        finally: os.close(alias_fd)
+        os.fsync(root)
+        recovered = os.fstat(proof_fd)
+        named = os.stat(proof_name, dir_fd=root, follow_symlinks=False)
+        if ((recovered.st_dev, recovered.st_ino) != proof_identity or recovered.st_nlink != 1 or
+            (named.st_dev, named.st_ino) != proof_identity or named.st_nlink != 1):
+            fail("compaction cleanup proof changed during recovery")
+        return proof_identity
+    finally:
+        if retained_fd is None: os.close(proof_fd)
+
+def cleanup_compactions(root, lock):
+    try:
+        _, _, canonical = read_lease_chain(lock, True)
+        names = [name for name in sorted(os.listdir(root)) if COMPACTION.fullmatch(name)]
+    except: return
+    aliases_by_identity = discover_cleanup_proof_aliases(root)
+    for name in names[:MAX_COMPACTION_SIBLINGS]:
+        candidate = None
+        try:
+            match = COMPACTION.fullmatch(name)
+            info = os.stat(name, dir_fd=root, follow_symlinks=False)
+            if (not match or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or
+                stat.S_IMODE(info.st_mode) != 0o700): continue
+            candidate = child_dir(root, name)
+            opened = os.fstat(candidate)
+            named = os.stat(name, dir_fd=root, follow_symlinks=False)
+            if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+                fail("compaction journal changed during cleanup")
+            entries = sorted(os.listdir(candidate))
+            if len(entries) > MAX_COMPACTION_RECORDS: continue
+            lease_id, proof_hash, proof_token = match.group(1), match.group(2), match.group(3)
+            proof_name = ".mutable-home.cleanup-%s.json" % proof_token
+            proof = None
+            proof_identity = None
+            proof_raw = None
+            try:
+                proof_fd = os.open(proof_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root)
+                try:
+                    proof_info = os.fstat(proof_fd)
+                    if (not stat.S_ISREG(proof_info.st_mode) or proof_info.st_uid != os.geteuid() or
+                        stat.S_IMODE(proof_info.st_mode) != 0o600 or proof_info.st_nlink not in (1, 2) or
+                        proof_info.st_size > 4096): fail("unverified compaction cleanup proof")
+                    proof_raw = os.read(proof_fd, proof_info.st_size + 1)
+                    proof = json.loads(proof_raw.decode("utf-8"))
+                    proof_identity = (proof_info.st_dev, proof_info.st_ino)
+                finally: os.close(proof_fd)
+            except FileNotFoundError: pass
+            for entry in entries:
+                record = os.stat(entry, dir_fd=candidate, follow_symlinks=False)
+                if (not stat.S_ISREG(record.st_mode) or record.st_uid != os.geteuid() or
+                    stat.S_IMODE(record.st_mode) != 0o600 or record.st_nlink != 1):
+                    fail("unverified compaction journal")
+            expected_proof = {"version": 1, "name": name, "leaseId": lease_id, "proofHash": proof_hash,
+                "device": opened.st_dev, "inode": opened.st_ino}
+            if proof is not None:
+                if proof != expected_proof: fail("unverified compaction cleanup proof")
+                for entry in entries:
+                    value, _ = read_lease_record(candidate, entry)
+                    if entry == "lease.json":
+                        valid_name = value.get("version") == 1
+                    elif entry == "lease-%s.json" % value["leaseId"]:
+                        valid_name = (value.get("version") == 2 and value.get("state") == "active" and
+                            value.get("previousLeaseId") is None and value.get("previousRecordHash") is None)
+                    else:
+                        valid_name = (value.get("version") == 2 and value.get("previousLeaseId") is not None and
+                            entry == "next-%s.json" % value["previousLeaseId"])
+                    if not valid_name: fail("unverified compaction journal")
+                proof_identity = normalize_cleanup_proof(
+                    root, proof_name, proof_identity, proof_raw, aliases_by_identity)
+            else:
+                if not entries: fail("unverified compaction journal")
+                canonical_record = canonical.get(lease_id)
+                if canonical_record is None: fail("unverified compaction journal")
+                abandoned, abandoned_hash = read_lease_chain(candidate)
+                if (abandoned["leaseId"] != lease_id or proof_hash not in
+                    (abandoned_hash, canonical_record[0])):
+                    fail("unverified compaction journal")
+                expected = canonical_record[1]
+                if any(abandoned.get(key) != expected.get(key) for key in
+                    ("leaseId", "state", "ownerHash", "hostname", "pid", "provider", "createdAt")):
+                    fail("unverified compaction journal")
+                publish_lease(root, root, proof_name, expected_proof)
+                os.fsync(root)
+                proof_info = os.stat(proof_name, dir_fd=root, follow_symlinks=False)
+                proof_identity = (proof_info.st_dev, proof_info.st_ino)
+            named = os.stat(name, dir_fd=root, follow_symlinks=False)
+            if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+                fail("compaction journal changed during cleanup")
+            for entry in entries: os.unlink(entry, dir_fd=candidate)
+            os.fsync(candidate)
+            named = os.stat(name, dir_fd=root, follow_symlinks=False)
+            if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+                fail("compaction journal changed during cleanup")
+            os.close(candidate); candidate = None
+            os.rmdir(name, dir_fd=root)
+            os.fsync(root)
+            proof_info = os.stat(proof_name, dir_fd=root, follow_symlinks=False)
+            if proof_identity != (proof_info.st_dev, proof_info.st_ino):
+                fail("compaction cleanup proof changed during cleanup")
+            os.unlink(proof_name, dir_fd=root)
+            os.fsync(root)
+        except: pass
+        finally:
+            if candidate is not None: os.close(candidate)
+    try:
+        proof_names = [name for name in sorted(os.listdir(root)) if CLEANUP_PROOF.fullmatch(name)]
+    except: return
+    for proof_name in proof_names[:MAX_COMPACTION_SIBLINGS]:
+        proof_fd = None
+        try:
+            proof_fd = os.open(proof_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root)
+            info = os.fstat(proof_fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or
+                stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink not in (1, 2) or info.st_size > 4096): continue
+            proof_raw = os.read(proof_fd, info.st_size + 1)
+            proof = json.loads(proof_raw.decode("utf-8"))
+            match = CLEANUP_PROOF.fullmatch(proof_name)
+            candidate_name = proof.get("name") if isinstance(proof, dict) else None
+            candidate_match = COMPACTION.fullmatch(candidate_name) if isinstance(candidate_name, str) else None
+            if (not match or not candidate_match or match.group(1) != candidate_match.group(3) or
+                proof.get("version") != 1 or proof.get("leaseId") != candidate_match.group(1) or
+                proof.get("proofHash") != candidate_match.group(2) or not isinstance(proof.get("device"), int) or
+                not isinstance(proof.get("inode"), int)): continue
+            try: os.stat(candidate_name, dir_fd=root, follow_symlinks=False)
+            except FileNotFoundError:
+                proof_identity = normalize_cleanup_proof(
+                    root, proof_name, (info.st_dev, info.st_ino), proof_raw, aliases_by_identity, proof_fd)
+                verified = os.fstat(proof_fd)
+                named = os.stat(proof_name, dir_fd=root, follow_symlinks=False)
+                os.lseek(proof_fd, 0, os.SEEK_SET)
+                if ((verified.st_dev, verified.st_ino) != proof_identity or
+                    (named.st_dev, named.st_ino) != proof_identity or
+                    not stat.S_ISREG(verified.st_mode) or verified.st_uid != os.geteuid() or
+                    stat.S_IMODE(verified.st_mode) != 0o600 or verified.st_nlink != 1 or
+                    verified.st_size > 4096 or os.read(proof_fd, verified.st_size + 1) != proof_raw):
+                    fail("compaction cleanup proof changed during cleanup")
+                os.unlink(proof_name, dir_fd=root)
+                os.fsync(root)
+        except: pass
+        finally:
+            if proof_fd is not None: os.close(proof_fd)
+
 def acquire_lease(home_fd, owner):
     root = walk_dir(home_fd, ".agent-manager/provider-home-leases-v1", True)
     try:
@@ -154,6 +362,7 @@ def acquire_lease(home_fd, owner):
                 value = lease_value(owner, "active")
                 publish_lease(root, lock, "lease-%s.json" % value["leaseId"], value)
                 os.fsync(root)
+                cleanup_compactions(root, lock)
                 return root, lock, value["leaseId"]
             except:
                 os.close(lock)
@@ -177,6 +386,7 @@ def acquire_lease(home_fd, owner):
                 published, _ = read_lease_chain(lock)
                 if published.get("state") != "active" or published["leaseId"] != value["leaseId"]:
                     fail("provider home lease changed during recovery")
+                cleanup_compactions(root, lock)
                 return root, lock, value["leaseId"]
             except:
                 os.close(lock); raise
@@ -191,10 +401,11 @@ def exchange_directories(root, left, right):
         return renameat2(root, os.fsencode(left), root, os.fsencode(right), RENAME_EXCHANGE) == 0
     except: return False
 
-def compact_lease(root, lock, current):
+def compact_lease(root, lock, current, current_hash):
     if len(os.listdir(lock)) <= MAX_LEASE_RECORDS: return lock
-    temporary = ".mutable-home.compact-%s" % uuid.uuid4().hex
+    temporary = ".mutable-home.compact-%s-%s-%s" % (current["leaseId"], current_hash, uuid.uuid4().hex)
     fresh = None
+    exchange_attempted = False
     try:
         os.mkdir(temporary, 0o700, dir_fd=root)
         fresh = child_dir(root, temporary)
@@ -205,6 +416,7 @@ def compact_lease(root, lock, current):
         if compacted["leaseId"] != current["leaseId"] or compacted.get("state") != "active":
             fail("provider home lease compaction failed")
         os.fsync(fresh); os.fsync(root)
+        exchange_attempted = True
         if not exchange_directories(root, temporary, "mutable-home.lock"):
             fail("provider home lease compaction is unavailable")
     except:
@@ -216,18 +428,15 @@ def compact_lease(root, lock, current):
         try: os.rmdir(temporary, dir_fd=root)
         except: pass
         # Compaction is an availability optimization. If this kernel lacks atomic directory
-        # exchange, preserve the valid old chain and still publish its release transition.
+        # exchange, preserve the valid old chain and keep appending. This intentionally favors
+        # lease integrity and reconciliation availability over the configured journal bound.
+        diagnose("Provider-home lease journal compaction %s; the valid journal remains append-only beyond %d records. Check WSL filesystem support for renameat2(RENAME_EXCHANGE)." %
+            ("is unavailable" if exchange_attempted else "failed before exchange", MAX_LEASE_RECORDS))
         return lock
     try: os.fsync(root)
     except: pass
-    try:
-        for name in os.listdir(lock):
-            try: os.unlink(name, dir_fd=lock)
-            except: pass
-    except: pass
     os.close(lock)
-    try: os.rmdir(temporary, dir_fd=root)
-    except: pass
+    cleanup_compactions(root, fresh)
     return fresh
 
 def release_lease(lease):
@@ -236,7 +445,7 @@ def release_lease(lease):
         current, current_hash = read_lease_chain(lock)
         if current.get("version") != 2 or current.get("state") != "active" or current["leaseId"] != lease_id:
             fail("provider home lease changed before release")
-        lock = compact_lease(root, lock, current)
+        lock = compact_lease(root, lock, current, current_hash)
         current, current_hash = read_lease_chain(lock)
         released = dict(current)
         released.update({"state": "released", "leaseId": str(uuid.uuid4()), "previousLeaseId": current["leaseId"],
@@ -527,7 +736,7 @@ def reconcile(spec):
                 row = {"agentId": binding["agentId"], "name": item["name"]}
                 if item.get("description"): row["description"] = item["description"]
                 unmanaged.append(row)
-        return {"deployed": deployed, "unmanaged": unmanaged, "removedLinks": removals}
+        return {"deployed": deployed, "unmanaged": unmanaged, "removedLinks": removals, "warnings": diagnostics}
     finally:
         if lease is not None: release_lease(lease)
         os.close(state); os.close(store_fd); os.close(home_fd)

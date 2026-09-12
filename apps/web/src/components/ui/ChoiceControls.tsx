@@ -1,4 +1,14 @@
-import React, { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import React, {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import { CheckIcon, ChevronDownIcon } from "../Icons.js";
 import {
   handleRovingChoiceKeyDown,
@@ -6,6 +16,7 @@ import {
   useAnchoredMenuStyle,
   useDismissiblePopover,
 } from "../interactions.js";
+import { MOBILE_BREAKPOINT_PX } from "../useIsMobile.js";
 
 /**
  * An always-open listbox owned by another control, such as an autocomplete textbox.
@@ -21,9 +32,12 @@ export function InlineListbox<T>({
   getKey,
   renderOption,
   onSelect,
+  onActiveChange,
+  isOptionDisabled,
   className,
   before,
   after,
+  style,
 }: {
   id: string;
   label: string;
@@ -32,28 +46,37 @@ export function InlineListbox<T>({
   getKey: (option: T) => string;
   renderOption: (option: T) => ReactNode;
   onSelect: (option: T) => void;
+  onActiveChange?: (index: number) => void;
+  isOptionDisabled?: (option: T) => boolean;
   className?: string;
   before?: ReactNode;
   after?: ReactNode;
+  style?: CSSProperties;
 }) {
   return (
-    <div className={className} role="listbox" id={id} aria-label={label}>
+    <div className={className} role="listbox" id={id} aria-label={label} style={style}>
       {before}
-      {options.map((option, index) => (
-        <button
-          type="button"
-          role="option"
-          id={`${id}-${index}`}
-          aria-selected={index === activeIndex}
-          tabIndex={-1}
-          className={`ui-inline-listbox-option${index === activeIndex ? " is-active" : ""}`}
-          key={getKey(option)}
-          onMouseDown={(event) => event.preventDefault()}
-          onClick={() => onSelect(option)}
-        >
-          {renderOption(option)}
-        </button>
-      ))}
+      {options.map((option, index) => {
+        const optionDisabled = isOptionDisabled?.(option) ?? false;
+        return (
+          <button
+            type="button"
+            role="option"
+            id={`${id}-${index}`}
+            aria-selected={index === activeIndex}
+            aria-disabled={optionDisabled || undefined}
+            tabIndex={-1}
+            className={`ui-inline-listbox-option${index === activeIndex ? " is-active" : ""}`
+              + `${optionDisabled ? " is-disabled" : ""}`}
+            key={getKey(option)}
+            onMouseDown={(event) => event.preventDefault()}
+            onMouseEnter={() => onActiveChange?.(index)}
+            onClick={() => { if (!optionDisabled) onSelect(option); }}
+          >
+            {renderOption(option)}
+          </button>
+        );
+      })}
       {after}
     </div>
   );
@@ -97,7 +120,8 @@ export function Checkbox({
  *
  *   SegmentedControl  2-4 short, mutually exclusive options, always visible. A filter, a mode.
  *   ChoiceCard        options that need a description or an icon to choose between. A preset.
- *   Select            too many to show at once, or the list is data. A project, an agent.
+ *   Select            data-backed options that fit ordinary listbox navigation. A machine.
+ *   SearchableCombobox data-backed options users need to narrow by typing. A project, an agent.
  *
  * All three share one selected treatment — accent border plus a tint — because that is the one the
  * app already used most, so adoption changes the fewest screens.
@@ -189,7 +213,9 @@ export function SegmentedControl<T extends string>({
         role="radiogroup"
         aria-label={label}
         aria-describedby={groupReason ? reasonId : undefined}
-        onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio")}
+        // See the note beside ChoiceCards' handler: disabled options stay in the arrow order so
+        // their reason is reachable without a mouse.
+        onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio", { includeAriaDisabled: true })}
       >
         {options.map((option, index) => {
           const selected = option.value === value;
@@ -238,6 +264,19 @@ export function SegmentedControl<T extends string>({
 export interface ChoiceCardOption<T extends string> {
   value: T;
   title: string;
+  /**
+   * Short status shown BESIDE the title — a kind, a state, an availability.
+   *
+   * §11.1 names "options that need descriptions or status" as this primitive's remit, and the
+   * Location pickers are the status half: a machine name alone does not say whether it is local or
+   * SSH, or whether it can host a session right now. It sits on the title row rather than in
+   * `description`, because a badge that wraps under a path reads as part of the path.
+   *
+   * It joins the option's accessible name, which is intended: "runner-1, Local, Available" is what
+   * a screen-reader user needs to choose between two machines. Callers must therefore pass text, or
+   * mark decorative parts `aria-hidden` themselves.
+   */
+  status?: ReactNode;
   description?: ReactNode;
   icon?: ReactNode;
   disabled?: boolean;
@@ -252,6 +291,19 @@ export interface ChoiceCardOption<T extends string> {
  * `.agent-pick` and `.advanced-agent-pick` were checkbox-backed multiples, and a user could not
  * tell which was which until they clicked a second card and the first one either stayed on or
  * turned off. The role now says it, and so does the marker: a dot for one-of, a tick for many-of.
+ */
+/*
+ * Arrows reach a DISABLED option; only activating it is refused.
+ *
+ * `handleRovingChoiceKeyDown` filters `aria-disabled` out of the roving set by default, and neither
+ * primitive opted out — so an option the comments above promise is "rendered, never hidden" was
+ * reachable by mouse and by nothing else. `rovingChoiceStop` never puts the tab stop on a disabled
+ * option either, which left the arrows as the only way in, and they skipped it.
+ *
+ * Including them is safe because the activation guard lives on the option: the handler clicks
+ * whatever it focuses, and each `onClick` below returns early when `option.disabled`. So focus
+ * moves, the screen reader announces the option and its reason, and nothing is selected — which is
+ * what the ARIA practices recommend for a radio that must explain why it is unavailable.
  */
 export function ChoiceCards<T extends string>({
   options,
@@ -286,7 +338,7 @@ export function ChoiceCards<T extends string>({
       className={`ui-choice-cards${className ? ` ${className}` : ""}`}
       role={multiple ? "group" : "radiogroup"}
       aria-label={label}
-      onKeyDown={multiple ? undefined : (event) => handleRovingChoiceKeyDown(event, "radio")}
+      onKeyDown={multiple ? undefined : (event) => handleRovingChoiceKeyDown(event, "radio", { includeAriaDisabled: true })}
     >
       {options.map((option, index) => {
         const selected = isSelected(option);
@@ -303,7 +355,10 @@ export function ChoiceCards<T extends string>({
           >
             {option.icon && <span className="ui-choice-card-icon" aria-hidden="true">{option.icon}</span>}
             <span className="ui-choice-card-body">
-              <span className="ui-choice-card-title">{option.title}</span>
+              <span className="ui-choice-card-title">
+                {option.title}
+                {option.status && <span className="ui-choice-card-status">{option.status}</span>}
+              </span>
               {option.description && <span className="ui-choice-card-desc">{option.description}</span>}
               {option.disabled && option.disabledReason && (
                 <small className="ui-choice-card-reason">{option.disabledReason}</small>
@@ -315,6 +370,248 @@ export function ChoiceCards<T extends string>({
           </button>
         );
       })}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * SearchableCombobox
+ * ---------------------------------------------------------------------------------------------- */
+
+export interface SearchableComboboxOption<T extends string> {
+  value: T;
+  label: string;
+  /** Visible context that distinguishes duplicate or similarly named choices. */
+  description?: string;
+  /** Additional already-authorized terms that are useful to search but need not be repeated. */
+  keywords?: readonly string[];
+  disabled?: boolean;
+  /** Rendered with the option so an unavailable result explains itself when arrows reach it. */
+  disabledReason?: string;
+}
+
+/**
+ * Filter without inventing metadata: every searchable term is supplied by the caller, which owns
+ * the authorization boundary for Project paths, runner details and other potentially private
+ * context. Terms are ANDed so "dashboard remote" can distinguish duplicate names.
+ */
+export function filterSearchableComboboxOptions<T extends string>(
+  options: readonly SearchableComboboxOption<T>[],
+  query: string,
+): SearchableComboboxOption<T>[] {
+  const terms = query.trim().toLowerCase().split(/\s+/u).filter(Boolean);
+  if (terms.length === 0) return [...options];
+  return options.filter((option) => {
+    const haystack = [
+      option.label,
+      option.description,
+      option.disabled ? option.disabledReason : undefined,
+      ...(option.keywords ?? []),
+    ].filter((part): part is string => Boolean(part)).join(" ").toLowerCase();
+    return terms.every((term) => haystack.includes(term));
+  });
+}
+
+/**
+ * An editable list autocomplete built on InlineListbox.
+ *
+ * DOM focus stays on the input while `aria-activedescendant` moves through the popup. Unavailable
+ * options stay in that arrow order so their rendered reason can be inspected, but activation is
+ * refused in both this owner and InlineListbox. Enter belongs to selection only while the popup is
+ * open; once closed it is deliberately untouched so an enclosing form can own default submission.
+ */
+export function SearchableCombobox<T extends string>({
+  options,
+  value,
+  onChange,
+  label,
+  describedBy,
+  placeholder = "Search…",
+  emptyLabel = "No Matches",
+  disabled = false,
+  className,
+}: {
+  options: readonly SearchableComboboxOption<T>[];
+  value: T | null;
+  onChange: (value: T) => void;
+  label: string;
+  describedBy?: string;
+  placeholder?: string;
+  emptyLabel?: string;
+  disabled?: boolean;
+  className?: string;
+}) {
+  const generatedId = useId();
+  const listboxId = `${generatedId}-listbox`;
+  const rootRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [open, setOpen] = useState(false);
+  const [searching, setSearching] = useState(false);
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  const coarsePointer = useCoarsePointer();
+  const selected = options.find((option) => option.value === value) ?? null;
+  const results = useMemo(
+    () => filterSearchableComboboxOptions(options, searching ? query : ""),
+    [options, query, searching],
+  );
+  // Options may change while open (agent setup and runner availability are live), and filtering can
+  // shrink the list under the previous index. Derive the safe index rather than repairing state in
+  // an effect and rendering one frame with an aria-activedescendant that names nothing.
+  const activeIndex = results.length === 0 ? 0 : Math.min(active, results.length - 1);
+  const inputValue = searching ? query : selected?.label ?? "";
+  const desiredHeight = selectMenuDesiredHeight({
+    optionCount: results.length,
+    maxOptionLines: results.reduce((most, option) => Math.max(most, 1
+      + (option.description ? 1 : 0)
+      + (option.disabled && option.disabledReason ? 1 : 0)), 1),
+    coarsePointer,
+  });
+  const listStyle = useAnchoredMenuStyle(open, inputRef, {
+    desiredHeight,
+    matchTriggerWidth: true,
+  });
+
+  const close = () => {
+    setOpen(false);
+    setSearching(false);
+  };
+  const openAll = () => {
+    const selectedIndex = options.findIndex((option) => option.value === value);
+    setSearching(false);
+    setActive(Math.max(0, selectedIndex));
+    setOpen(true);
+  };
+  const commit = (option: SearchableComboboxOption<T>) => {
+    if (option.disabled) return;
+    onChange(option.value);
+    close();
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const dismiss = (event: Event) => {
+      if (!rootRef.current?.contains(event.target as Node)) close();
+    };
+    const leaveWindow = () => close();
+    document.addEventListener("pointerdown", dismiss, true);
+    document.addEventListener("focusin", dismiss, true);
+    window.addEventListener("blur", leaveWindow);
+    return () => {
+      document.removeEventListener("pointerdown", dismiss, true);
+      document.removeEventListener("focusin", dismiss, true);
+      window.removeEventListener("blur", leaveWindow);
+    };
+  }, [open]);
+
+  const moveActive = (delta: number) => {
+    if (results.length === 0) return;
+    setActive((activeIndex + delta + results.length) % results.length);
+  };
+  const activeOption = results[activeIndex];
+  const firstEnabledIndex = Math.max(0, results.findIndex((option) => !option.disabled));
+  const lastEnabledIndex = results.reduce(
+    (last, option, index) => option.disabled ? last : index,
+    0,
+  );
+
+  return (
+    <div
+      className={`ui-searchable-combobox${className ? ` ${className}` : ""}`}
+      ref={rootRef}
+    >
+      <input
+        ref={inputRef}
+        type="text"
+        role="combobox"
+        aria-label={label}
+        aria-describedby={describedBy}
+        aria-autocomplete="list"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={open ? listboxId : undefined}
+        aria-activedescendant={open && activeOption ? `${listboxId}-${activeIndex}` : undefined}
+        aria-disabled={disabled || undefined}
+        readOnly={disabled}
+        autoComplete="off"
+        className="ui-searchable-combobox-input"
+        placeholder={placeholder}
+        value={inputValue}
+        onFocus={(event) => {
+          if (disabled) return;
+          if (!open) openAll();
+          event.currentTarget.select();
+        }}
+        onClick={() => { if (!disabled && !open) openAll(); }}
+        onChange={(event) => {
+          if (disabled) return;
+          setQuery(event.target.value);
+          setSearching(true);
+          setActive(0);
+          setOpen(true);
+        }}
+        onKeyDown={(event) => {
+          if (disabled || event.nativeEvent.isComposing || event.keyCode === 229) return;
+          if (event.key === "Tab") {
+            if (open) close();
+            return;
+          }
+          const plainKey = !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey;
+          if (!plainKey) return;
+          if (event.key === "Escape" && open) {
+            event.preventDefault();
+            event.stopPropagation();
+            close();
+            return;
+          }
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            if (!open) {
+              openAll();
+              return;
+            }
+            moveActive(event.key === "ArrowDown" ? 1 : -1);
+            return;
+          }
+          if (open && (event.key === "Home" || event.key === "End")) {
+            event.preventDefault();
+            // Up/Down deliberately reach unavailable results so their reason can be inspected;
+            // Home/End retain Select's boundary shortcut to the first/last commit-capable result.
+            setActive(event.key === "Home" ? firstEnabledIndex : lastEnabledIndex);
+            return;
+          }
+          if (event.key === "Enter" && open) {
+            event.preventDefault();
+            if (activeOption) commit(activeOption);
+          }
+        }}
+      />
+      {open && (
+        <InlineListbox
+          id={listboxId}
+          label={`${label} Options`}
+          options={results}
+          activeIndex={activeIndex}
+          getKey={(option) => option.value}
+          onActiveChange={setActive}
+          isOptionDisabled={(option) => Boolean(option.disabled)}
+          onSelect={commit}
+          className="ui-searchable-combobox-list ui-select-list"
+          style={listStyle}
+          before={results.length === 0
+            ? <p className="ui-select-empty">{emptyLabel}</p>
+            : undefined}
+          renderOption={(option) => (
+            <span className="ui-select-option-body">
+              <span>{option.label}</span>
+              {option.description && <small className="ui-select-option-desc">{option.description}</small>}
+              {option.disabled && option.disabledReason && (
+                <small className="ui-select-option-reason">{option.disabledReason}</small>
+              )}
+            </span>
+          )}
+        />
+      )}
     </div>
   );
 }
@@ -411,6 +708,120 @@ export function resetSelectPreviewRegistry(): void {
   livePreviews.length = 0;
 }
 
+/* ------------------------------------------------------------------------------------------------
+ * How tall the open list ASKS to be
+ * ---------------------------------------------------------------------------------------------- */
+
+/**
+ * The touch target `styles.css` gives every `.ui-select-option` under {@link TOUCH_TARGET_MEDIA}.
+ *
+ * Duplicated from the stylesheet because CSS cannot export a number, which is exactly how the two
+ * drifted: the estimator below budgeted 34px for an option the stylesheet was rendering at 44px.
+ * The unit test asserts the arithmetic; the mobile E2E spec asserts the rendered list agrees.
+ */
+export const TOUCH_OPTION_MIN_HEIGHT_PX = 44;
+
+/**
+ * `.ui-select-list`'s own box: 4px of padding top and bottom, plus its 1px border on each edge.
+ *
+ * It counts because `box-sizing: border-box` is global, so the `max-height` the anchored-menu
+ * helper sets has to cover the chrome as well as the rows inside it. The old estimate budgeted 8px
+ * here and forgot the border — 2px of the 22px it was short.
+ */
+export const SELECT_LIST_CHROME_PX = 10;
+
+/** Past this the list scrolls on purpose: the options genuinely do not fit. */
+export const SELECT_MENU_MAX_HEIGHT_PX = 320;
+
+/** One line of option: the label on its own, for a pointer the touch floor does not apply to. */
+const COMPACT_OPTION_HEIGHT_PX = 34;
+/**
+ * What each line AFTER the first adds.
+ *
+ * 18px, so a two-line option still budgets the 52px it always did — the rewrite below moved from
+ * "described or not" to a line count, and the cases that already worked must not move with it.
+ */
+const EXTRA_OPTION_LINE_PX = 18;
+
+/**
+ * The exact condition `styles.css` applies the 44px touch floor under.
+ *
+ * Kept character-for-character identical to the stylesheet's query, and built from the breakpoint
+ * constant the rest of the app already shares, so a change to one is a visible change to the other.
+ */
+export const TOUCH_TARGET_MEDIA =
+  `(max-width: ${MOBILE_BREAKPOINT_PX}px), (pointer: coarse), (hover: none)`;
+
+/**
+ * The open list's height REQUEST, which the anchored-menu helper turns into a `max-height`.
+ *
+ * A request below what the options actually render is not a shorter list — it is a clipped one.
+ * #832 hit that on the control least able to afford it: Permission Preset has two options, the
+ * estimator asked for `2 × 34 + 8 = 76px`, and the coarse-pointer stylesheet was drawing them at
+ * 44px each inside 10px of chrome. 98px of content in a 76px box scrolls, so half of one of only
+ * two choices sat below the fold on a phone.
+ *
+ * So the per-option budget is the MAXIMUM of the caller's estimate and the floor the stylesheet
+ * enforces for this pointer type — never a replacement for it, because a described option is
+ * already taller than the floor and clamping it down would clip two-line options on exactly the
+ * devices this exists to fix.
+ */
+export function selectMenuDesiredHeight(input: {
+  optionCount: number;
+  /**
+   * The most lines any one option renders — its label, plus a description, plus a disabled reason.
+   *
+   * A line count rather than a `hasDescription` flag because an option renders up to three lines
+   * and the flag could only distinguish two. #986's review caught the consequence: giving an option
+   * a `disabledReason` added a line the budget did not know about, so the list asked for less height
+   * than it drew and reproduced #832's clipping from the other direction. A count cannot fall behind
+   * the markup the same way.
+   */
+  maxOptionLines: number;
+  /** A caller's row budget for content that may wrap. Raised to the touch floor, never lowered. */
+  estimatedOptionHeight?: number;
+  coarsePointer: boolean;
+}): number {
+  const lines = Math.max(1, input.maxOptionLines);
+  const estimated = input.estimatedOptionHeight
+    ?? COMPACT_OPTION_HEIGHT_PX + EXTRA_OPTION_LINE_PX * (lines - 1);
+  const perOption = input.coarsePointer
+    ? Math.max(estimated, TOUCH_OPTION_MIN_HEIGHT_PX)
+    : estimated;
+  // An empty list still renders its `emptyLabel` paragraph, so it gets a row rather than the chrome
+  // alone — the sliver a bare `optionCount` of 0 produced had nowhere to put the sentence that is
+  // the whole reason an empty list stays open.
+  const rows = Math.max(1, input.optionCount);
+  return Math.min(SELECT_MENU_MAX_HEIGHT_PX, rows * perOption + SELECT_LIST_CHROME_PX);
+}
+
+/**
+ * Whether the touch floor is live right now, tracked rather than sampled once.
+ *
+ * Rotating a tablet, docking a laptop, or merely dragging a window across 760px changes which rule
+ * the stylesheet applies, and a menu whose height was budgeted under the other one is this same
+ * clipping defect arriving a second way.
+ */
+function useCoarsePointer(): boolean {
+  return useSyncExternalStore(
+    (onChange) => {
+      const mq = window.matchMedia(TOUCH_TARGET_MEDIA);
+      mq.addEventListener("change", onChange);
+      // `resize` as well as the query, for the reason `useIsMobile` subscribes to both: an emulated
+      // or automated viewport can deliver the resize before the MediaQueryList change event.
+      window.addEventListener("resize", onChange);
+      return () => {
+        mq.removeEventListener("change", onChange);
+        window.removeEventListener("resize", onChange);
+      };
+    },
+    () => window.matchMedia(TOUCH_TARGET_MEDIA).matches,
+    // Server-rendered markup has no pointer to ask about. The compact budget is the safe guess —
+    // it is what the desktop stylesheet renders — and the first client layout corrects it.
+    () => false,
+  );
+}
+
 /**
  * A popover list, for when the options are data rather than a fixed set.
  *
@@ -466,6 +877,7 @@ export function Select<T extends string>({
 }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
+  const coarsePointer = useCoarsePointer();
   const popover = useDismissiblePopover(open, setOpen, "ui-select");
   const rootRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -550,11 +962,19 @@ export function Select<T extends string>({
   // when there is no room below. Hardcoding `top: 100%` put the list off-screen for any control in
   // the lower half of the viewport — which is most of them, since selects sit inside dialogs.
   const listStyle = useAnchoredMenuStyle(open, popover.triggerRef, {
-    // A described option is TWO lines, so budgeting one line for it asks for a list half the height
-    // of what it renders and scrolls a five-item picker that would have fitted. Still a request
-    // rather than a size — the helper clamps to the viewport and flips above the trigger.
-    desiredHeight: Math.min(320, Math.max(1, options.length)
-      * (estimatedOptionHeight ?? (options.some((option) => option.description) ? 52 : 34)) + 8),
+    // A described option is TWO lines, and a touch option is 44px whatever it contains, so the row
+    // budget answers to both. Still a request rather than a size — the helper clamps to the
+    // viewport and flips above the trigger.
+    desiredHeight: selectMenuDesiredHeight({
+      optionCount: options.length,
+      // Counted from what each option will actually render, so a caller cannot add a line the
+      // budget has not accounted for.
+      maxOptionLines: options.reduce((most, option) => Math.max(most, 1
+        + (option.description ? 1 : 0)
+        + (option.disabled && option.disabledReason ? 1 : 0)), 1),
+      estimatedOptionHeight,
+      coarsePointer,
+    }),
     ...(menuWidth === undefined
       ? { matchTriggerWidth: true }
       : { desiredWidth: menuWidth, minTriggerWidth: true }),

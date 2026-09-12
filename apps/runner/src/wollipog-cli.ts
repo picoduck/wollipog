@@ -60,6 +60,7 @@ function positional(args: string[]): string[] {
     "--url", "--token-file", "--runner", "--agent", "--workspace", "--path", "--prompt",
     "--title", "--model", "--permission-mode", "--after", "--limit", "--for", "--timeout",
     "--interval", "--cost-budget", "--max-tool-calls", "--session", "--branch", "--base", "--base-ref",
+    "--max-child-sessions",
   ]);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -83,7 +84,7 @@ function usage(): string {
     "       wollipog worktree <create|attach|select|discard> [options]",
     "       wollipog admin <pairing-url|status|user|device|runner-credential> [options]",
     "       wollipog service <install|status|restart|logs|uninstall> [options]",
-    "Session Commands: list, get, events, create, prompt, wait, stop, archive",
+    "Session Commands: list, get, events, create, prompt, wait, stop, restart, archive, guardrails",
     "Worktree Options: --session <id>, --branch <name>, --base <ref>, --path <absolute-path>",
     "Admin Commands: run on the control-plane host with its protected local credential; see `wollipog admin`.",
     "Service Commands: Linux systemd deployment of the control plane and a colocated runner; see `wollipog service`.",
@@ -160,6 +161,7 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
           useWorktree: flag(args, "--worktree"),
           costBudgetUsd: numeric(option(args, "--cost-budget")),
           maxToolCalls: numeric(option(args, "--max-tool-calls")),
+          maxChildSessions: numeric(option(args, "--max-child-sessions")),
         },
       };
     }
@@ -181,8 +183,22 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
         : { error: "session wait requires an id" };
     case "stop":
       return words[2] ? { tool: "stop_session", input: { sessionId: words[2] } } : { error: "session stop requires an id" };
+    case "restart":
+      return words[2] ? { tool: "restart_session", input: { sessionId: words[2] } } : { error: "session restart requires an id" };
     case "archive":
       return words[2] ? { tool: "archive_session", input: { sessionId: words[2] } } : { error: "session archive requires an id" };
+    case "guardrails":
+      return words[2]
+        ? {
+            tool: "set_guardrails",
+            input: {
+              sessionId: words[2],
+              costBudgetUsd: numeric(option(args, "--cost-budget")),
+              maxToolCalls: numeric(option(args, "--max-tool-calls")),
+              maxChildSessions: numeric(option(args, "--max-child-sessions")),
+            },
+          }
+        : { error: "session guardrails requires an id" };
     default:
       return { error: usage() };
   }

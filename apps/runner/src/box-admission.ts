@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
+import type { RunnerCapacityBlocker } from "@wollipog/protocol";
 
 interface SlotOwner { pid: number; token: string; sessionId: string; agentId: string; }
 
@@ -23,9 +24,20 @@ export class BoxAdmission {
   private readonly token = randomUUID();
   private readonly held = new Map<string, string[]>();
 
-  constructor(dataDir: string, private readonly limit: number) {
+  constructor(dataDir: string, private limit: number) {
     this.root = join(dataDir, "admission");
     mkdirSync(this.root, { recursive: true });
+  }
+
+  setLimit(limit: number): void {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 256) {
+      throw new Error("runner capacity must be an integer from 1 to 256");
+    }
+    this.limit = limit;
+  }
+
+  capacity(): number {
+    return this.limit;
   }
 
   acquire(request: AdmissionRequest | string): boolean {
@@ -66,7 +78,24 @@ export class BoxAdmission {
       return false;
     }
     claimed.push(...provider);
-    const global = this.claimSlots(this.root, this.limit, normalized.weight, normalized);
+    // A lowered limit can leave valid leases in slots above the new ceiling. Serialize the
+    // count-and-claim boundary so those leases still consume capacity and concurrent processes
+    // cannot all race through the same observed remainder.
+    const mutationRoot = join(this.root, "capacity-mutation");
+    mkdirSync(mutationRoot, { recursive: true });
+    const mutation = this.claimSlots(mutationRoot, 1, 1, normalized);
+    if (!mutation) {
+      this.releaseSlots(claimed);
+      return false;
+    }
+    let global: string[] | null = null;
+    try {
+      if (this.usedCapacity() + normalized.weight <= this.limit) {
+        global = this.claimSlots(this.root, this.limit, normalized.weight, normalized);
+      }
+    } finally {
+      this.releaseSlots(mutation);
+    }
     if (!global) {
       this.releaseSlots(claimed);
       return false;
@@ -131,11 +160,80 @@ export class BoxAdmission {
   }
 
   usedCapacity(): number {
+    return this.usedSlots(this.root);
+  }
+
+  availableCapacity(): number {
+    return Math.max(0, this.limit - this.usedCapacity());
+  }
+
+  /** Explain the first lease boundary acquire() evaluates without mutating admission state. */
+  blocker(request: AdmissionRequest): RunnerCapacityBlocker | null {
+    if (this.held.has(request.sessionId)) return null;
+    if (!Number.isInteger(request.weight) || request.weight < 1 || request.weight > this.limit) {
+      return {
+        kind: "request_weight",
+        description: `${request.agentId} requires ${request.weight} units but Runner Capacity is ${this.limit}`,
+        usedUnits: this.usedCapacity(),
+        limitUnits: this.limit,
+        requiredUnits: request.weight,
+        agentId: request.agentId,
+      };
+    }
+    if (request.exclusiveGroup) {
+      const root = join(this.root, "exclusive", createHash("sha256").update(request.exclusiveGroup).digest("hex"));
+      const used = this.usedSlots(root);
+      if (used >= 1) return {
+        kind: "exclusive_group",
+        description: `${request.agentId} is waiting for its exclusive provider slot`,
+        usedUnits: used,
+        limitUnits: 1,
+        requiredUnits: 1,
+        agentId: request.agentId,
+      };
+    }
+    if (request.targetId && request.targetLimit) {
+      const root = join(this.root, "targets", createHash("sha256").update(request.targetId).digest("hex"));
+      const used = this.usedSlots(root);
+      if (used >= request.targetLimit) return {
+        kind: "target_quota",
+        description: `Execution target ${request.targetId} is using ${used} of ${request.targetLimit} slots`,
+        usedUnits: used,
+        limitUnits: request.targetLimit,
+        requiredUnits: 1,
+        targetId: request.targetId,
+      };
+    }
+    if (request.agentLimit !== undefined) {
+      const root = join(this.root, "providers", createHash("sha256").update(request.agentId).digest("hex"));
+      const used = this.usedSlots(root);
+      if (used >= request.agentLimit) return {
+        kind: "agent_quota",
+        description: `${request.agentId} is using ${used} of ${request.agentLimit} provider slots`,
+        usedUnits: used,
+        limitUnits: request.agentLimit,
+        requiredUnits: 1,
+        agentId: request.agentId,
+      };
+    }
+    const used = this.usedCapacity();
+    if (used + request.weight > this.limit) return {
+      kind: "runner_capacity",
+      description: `Runner Capacity is ${used} of ${this.limit} units used; this session needs ${request.weight}`,
+      usedUnits: used,
+      limitUnits: this.limit,
+      requiredUnits: request.weight,
+      agentId: request.agentId,
+    };
+    return null;
+  }
+
+  private usedSlots(root: string): number {
     try {
-      return readdirSync(this.root, { withFileTypes: true })
+      return readdirSync(root, { withFileTypes: true })
         .filter((entry) => {
           if (!entry.isDirectory() || !/^slot-\d+$/.test(entry.name)) return false;
-          return !this.reclaimIfStale(join(this.root, entry.name));
+          return !this.reclaimIfStale(join(root, entry.name));
         }).length;
     } catch {
       return 0;

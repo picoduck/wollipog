@@ -29,16 +29,20 @@ may manage descendant worktrees; ordinary credentials retain only their own work
 The CLI `session archive` and MCP `archive_session` reuse stop-before-archive and retain history.
 Agent credentials cannot unarchive sessions. Human device authority is unchanged.
 
-Agent-created children receive finite guardrails before their initial prompt can execute.
-An unbounded parent defaults each child to the parent Project's human-managed child allowances,
-or $5 and 100 tool calls when no Project override exists. Project settings and the human-only
+Agent-created children receive their effective guardrails before their initial prompt can execute.
+An explicit creation value takes precedence over the parent Project's human-managed child allowance,
+and a finite parent's remaining allowance is always the ceiling. When none of those sources supplies
+a cost or tool-call limit, that dimension remains unlimited; an agent caller may also pass zero to
+request no limit when the parent itself is unbounded. Project settings and the human-only
 `PATCH /api/projects/:id` surface accept `childSessionDefaults` with a positive finite
-`costBudgetUsd` and a positive integer `maxToolCalls`; null restores the installation fallback.
+`costBudgetUsd` and a positive integer `maxToolCalls`; null removes the Project defaults.
 The parent's Project supplies these defaults even when the child is filed elsewhere.
 A bounded parent divides its
 remaining, unreserved allowance across its remaining spawn slots; explicit child limits can narrow
-that allocation. The default lifetime spawn cap is four, configurable at session creation with
-`config.maxChildSessions` from zero through 64. Reservations survive deletion of child history.
+that allocation. The default concurrent live-child cap is four, configurable at creation or on a
+live session with `config.maxChildSessions` from zero through 64. Completed, failed, stopped, and
+archived children free live slots. Lifetime usage reservations survive terminal states and deletion,
+so a finite parent's already-allocated spend cannot be reused.
 These are admission allowances; existing runtime cost and tool-call enforcement remains responsible
 for stopping a child when it reaches its limit.
 
@@ -59,24 +63,42 @@ delivery retain their existing behavior; agent creation cannot use automation de
 The compact MCP and CLI session responses preserve archive progress when the control plane supplies
 it, so a successful request with Stop Pending or Stop Failed is not confused with completed archival.
 
-The orchestrator preset is a separate permission boundary for an ordinary session. It must expose
-only session-management operations and governance reads, and must enforce refusal of its own
-worktree writes and shell commands. Advertise it only where the harness can enforce that boundary;
-unsupported adapters must fail closed. ACP transport availability alone does not establish tool
-restriction capability.
+The orchestrator preset is a separate permission boundary for an ordinary session. It exposes the
+planning and coordination operations needed to inspect projects and delegate work while enforcing
+refusal of project writes and implementation commands. Advertise it only where the harness can
+enforce that boundary; unsupported adapters must fail closed. ACP transport availability alone does
+not establish tool restriction capability.
 
-The initial implementation supports native host Codex and Claude Code. Codex disables native
-execution features, hooks, extensions, web search and ambient MCP servers; it uses read-only
-sandboxing with no approval escalation. Its configuration probe runs at the effective launch
-directory and refuses launch if MCP isolation cannot be verified. Claude Code starts with no
-built-in tools, disabled hooks, and a strict runner-owned MCP configuration. The shared MCP
-server exposes a reduced management-only tool list, and the control plane independently permits
-mutations only on trusted descendants. Neither the user nor a child can switch this preset
-on an existing session.
+The initial implementation supports native host Codex and Claude Code where their boundaries can be
+verified. Native Windows harnesses are withheld because Windows Job Objects do not attest filesystem
+confinement and Claude Bash-prefix rules cannot prevent output redirection. Codex disables native
+extensions, hooks, ambient MCP servers, multi-agent tools, and browser/computer/image tools. It
+keeps shell and live web search available under a no-approval workspace-write sandbox whose sole
+project-independent writable root is a session-private scratch directory. Claude Code receives
+Read, Grep, Glob, WebFetch, WebSearch, and an explicit Bash allowlist for read-only Git and bounded
+GitHub issue coordination; Write, Edit, Agent, and Task remain disabled, hooks and settings sources
+remain empty, and permission mode is `dontAsk`, which must be advertised by the installed CLI.
+Configured Project Locations in the agent's execution namespace are supplied as read-only context.
+Both harnesses start in scratch, use it for temporary files, may read user skills and project files,
+and may use the reduced runner-owned Wollipog MCP server; the control plane independently permits
+mutations only on trusted descendants. Unsupported or unverifiable configurations fail closed.
+Neither the user nor a child can switch this preset on an existing session.
+
+On native Linux and macOS, Claude Code and the exact Claude Agent ACP adapter advertise this preset
+only with the runner's `bwrap` or `seatbelt` boundary respectively. Native Codex can rely on its
+audited provider sandbox there and is withheld on other native operating systems. Catalog filtering, structured launch, and Native TUI preparation all
+apply the same boundary check so persisted sessions cannot resume under a weaker host policy.
+
+The preset is a cooperative safety boundary for trusted planning agents, not a hostile-model
+sandbox. In particular, networked shell access can clone a repository into scratch and credentials
+available to the provider may permit remote writes. The runner therefore combines filesystem
+isolation, narrow Claude command patterns, explicit role instructions, and control-plane checks,
+but does not claim to prevent a deliberately adversarial same-user process from bypassing intent.
 
 Protocol v112 extends this boundary to native host Claude Code and Codex TUIs. Every initial or
-manual TUI launch re-provisions runner-local credentials and restrictions, and Codex repeats its
-MCP isolation probe at the selected workspace. Cancellation, deletion, replacement launches, and
+manual TUI launch re-provisions runner-local credentials and restrictions, prepares the same
+session-private scratch directory, and Codex repeats its MCP isolation probe there. Cancellation,
+deletion, replacement launches, and
 workspace changes fence asynchronous preparation before process creation. An idle orchestrator
 credential remains usable only while its online owning runner has a running Agent TUI; ordinary
 idle credentials, exited/reconnecting TUIs, and terminal sessions do not gain authority. Stop also
@@ -113,8 +135,9 @@ Native-host structured sessions also support the exact audited
 `@agentclientprotocol/claude-agent-acp` 0.75.1 adapter. The runner advertises the preset only for
 the official Registry identity/version or an exact pinned `npx` package launch, then verifies the
 live ACP initialize name and version before `session/new`. It supplies runner-owned Claude SDK
-options with no built-in tools, settings sources, hooks, ambient MCP servers, additional
-directories, or provider commands; the sole allowed server is the session-scoped Wollipog MCP.
+options with the same read/search/web and restricted Bash planning tools, no settings sources,
+hooks, ambient MCP servers, or provider commands, plus configured Project Locations as additional
+read-only directories; the sole allowed server is the session-scoped Wollipog MCP.
 The pinned adapter routes `session/resume` and its `session/load` fallback through the same query
 creation function, forwarding the request `_meta` and reapplying these options before the resumed
 provider conversation is exposed.

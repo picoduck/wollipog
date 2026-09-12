@@ -125,10 +125,17 @@ cleanup journals retain their exact unscoped layout until explicit offline adopt
 mode remains the broadest compatibility default but takes an exclusive whole-HOME lease shared by
 Claude, Codex, ACP, Seatbelt, Windows Job, and Agent TUI launches. Protocol-v124 Direct WSL bwrap is
 available only for freshly discovered Codex/Claude structured drivers in the Orchestrator preset:
-the target-local launcher pins the authoritative cwd and writable sources through bwrap exec, and a
-root-owned per-session state anchor plus a target-local HOME lease bounds provider state and relay
-lifetime. Direct WSL provider mode, generic ACP, conversation fork/state adoption, and WSL Native TUI
+the target-local launcher pins a session-private scratch cwd and writable sources through bwrap exec,
+and a root-owned per-session state anchor plus a target-local HOME lease bounds provider state,
+scratch, and relay lifetime. Direct WSL provider mode, generic ACP, conversation fork/state adoption, and WSL Native TUI
 remain fail-closed. Use a supported native, container, or cloud execution target for those modes.
+
+Native Windows harnesses do not advertise the Orchestrator preset because a Job Object alone cannot
+attest the scratch-only filesystem boundary. Claude Bash-prefix rules are also insufficient there:
+an otherwise read-only Git command can redirect its output into a Project Location.
+For the same reason, native Claude Code and Claude Agent ACP require runner isolation mode `bwrap`
+on Linux or `seatbelt` on macOS. Native Codex uses its provider sandbox on those platforms and is
+withheld on other native operating systems where that boundary is not attested.
 
 On upgrade, a persisted Conductor `--mcp-config` argument is rewritten to the attested runner's
 owned data directory before launch. The former `~/.agent-manager/conductor/*.mcp.json` file is never
@@ -660,7 +667,7 @@ their `supportedReasoningEfforts` come from the `model/list` request (also used 
 | child-thread item/delta notifications | the ordinary mapped payload plus `parentToolUseId` for the spawning collaboration call; nested `spawnAgent` calls recursively preserve that ownership |
 | `turn/plan/updated {plan:[{step,status}]}` | `{kind:"plan", entries: plan.map(p=>({content:p.step,status:p.status}))}` |
 | `turn/diff/updated {diff}` | `{kind:"file_edit", path:"worktree", diff}` |
-| `thread/tokenUsage/updated {…}` | retain latest schema-pinned `last`, then emit one `{kind:"token_usage",…}` at turn settlement; never add restored cumulative `total` usage |
+| `thread/tokenUsage/updated {…}` | derive complete per-turn usage from replay-safe cumulative `total` deltas, retain `last` only for context occupancy, then emit one `{kind:"token_usage",…}` at turn settlement; old servers without `total` use a best-effort compatibility fallback |
 | `turn/completed {turn.status}` | end turn → `StopReason` (`completed`→`end_turn`, `interrupted`→`cancelled`, `failed`→`refusal`); `{kind:"status", status:"idle"}` |
 | `error {error:{message,codexErrorInfo?}}` | `{kind:"error", message}` |
 

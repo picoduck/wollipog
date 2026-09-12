@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
+import { mkdtempSync, rmSync } from "node:fs";
 import { test } from "node:test";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   MAX_SHELLS_PER_SESSION,
   ShellManager,
@@ -184,6 +186,25 @@ test("orchestrator Stop can close its TUI without closing human shells", {
   } finally {
     mgr.dispose();
     await waitFor(() => mgr.count("parent") === 0);
+  }
+});
+
+test("agent TUI launch uses its private scratch cwd instead of the session project root", {
+  skip: !agentTuiPlatformSupported(process.platform, NATIVE),
+}, async () => {
+  const scratch = mkdtempSync(join(tmpdir(), "wollipog-tui-scratch-"));
+  const { out, exits, cb } = collector();
+  const mgr = new ShellManager(cb);
+  try {
+    mgr.open("scratch-tui", "parent", "/", NATIVE, undefined, {
+      kind: "agent_tui",
+      launch: { command: process.execPath, args: ["-e", "console.log(process.cwd())"], cwd: scratch },
+    });
+    await waitFor(() => exits.some((exit) => exit.shellId === "scratch-tui"));
+    assert.ok(out.some((chunk) => chunk.data.includes(scratch)));
+  } finally {
+    mgr.dispose();
+    rmSync(scratch, { recursive: true, force: true });
   }
 });
 

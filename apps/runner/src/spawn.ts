@@ -155,6 +155,8 @@ export interface SeatbeltSpawnIsolation {
   network: "inherit" | "deny";
   /** Complete parameter-free Seatbelt profile. Paths are escaped before reaching this field. */
   profile: string;
+  /** Canonical roots rendered into profile, retained so live-process notices report that exact boundary. */
+  writableRoots: string[];
 }
 
 export interface WindowsJobSpawnIsolation {

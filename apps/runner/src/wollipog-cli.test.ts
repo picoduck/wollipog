@@ -112,6 +112,7 @@ test("CLI emits stable JSON and authenticates list requests as the exact session
         agentId: null, runId: null, costBudgetUsd: null, costCheckpointsUsd: null, costCheckpointApprovedUsd: null, maxToolCalls: null, pendingApproval: null,
         archived: false,
         parentSessionId: null,
+        maxChildSessions: null,
       }],
     });
     assert.equal(calls[1]!.url, "http://127.0.0.1:4317/api/sessions");
@@ -163,6 +164,32 @@ test("CLI JSON create and prompt commands reuse the manager routes and reject in
     oldFetch,
   ), 1);
   assert.match(JSON.parse(incompatible).error, /incompatible/);
+});
+
+test("CLI exposes restart and all live guardrail controls", async () => {
+  const requests: Array<{ url: string; body?: string }> = [];
+  const fetch: McpFetch = async (url, init) => {
+    requests.push({ url, body: init?.body });
+    return { ok: true, status: 200, text: async () => JSON.stringify(
+      url.endsWith("/api/compatibility") ? { protocolVersion: PROTOCOL_VERSION }
+        : { id: "child", status: "starting", maxChildSessions: 9 },
+    ) };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "token", WOLLIPOG_SESSION_ID: "parent" };
+  const io = { stdout: () => {}, stderr: () => assert.fail("unexpected CLI error") };
+  assert.equal(await runWollipogCli(
+    ["node", "cli.js", "--wollipog-cli", "session", "restart", "child", "--json"], env, io, fetch,
+  ), 0);
+  assert.equal(requests[1]!.url, "http://cp/api/sessions/child/restart");
+  requests.length = 0;
+  assert.equal(await runWollipogCli([
+    "node", "cli.js", "--wollipog-cli", "session", "guardrails", "child",
+    "--cost-budget", "0", "--max-tool-calls", "0", "--max-child-sessions", "9", "--json",
+  ], env, io, fetch), 0);
+  assert.equal(requests[1]!.url, "http://cp/api/sessions/child/config");
+  assert.deepEqual(JSON.parse(requests[1]!.body!), {
+    costBudgetUsd: 0, maxToolCalls: 0, maxChildSessions: 9,
+  });
 });
 
 test("CLI keeps v100 core commands compatible while gating worktree commands on v101", async () => {

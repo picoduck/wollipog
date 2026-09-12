@@ -19,7 +19,8 @@ const mcp = { command: "/runner", args: ["agent", "mcp"], env: { WOLLIPOG_PERMIS
 test("orchestrator capability requires a native harness or discovery-verified WSL bridge and never revives conductor", () => {
   const agent: AgentDefinition = { id: "agent", name: "Agent", command: "agent", args: [], env: {}, driver: "codex",
     capabilities: { models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true, permissionModes: ["read-only"] } };
-  assert.deepEqual(withOrchestratorPreset([agent])[0]!.capabilities!.permissionModes, ["read-only", "orchestrator"]);
+  assert.deepEqual(withOrchestratorPreset([agent], { platform: "linux" })[0]!.capabilities!.permissionModes,
+    ["read-only", "orchestrator"]);
   assert.deepEqual(withOrchestratorPreset([{ ...agent, id: "conductor" }]), []);
   for (const unsupported of [{ ...agent, driver: "acp" as const }, { ...agent, context: { kind: "wsl" as const, distro: "Ubuntu" } }]) {
     assert.equal(withOrchestratorPreset([unsupported])[0]!.capabilities!.permissionModes!.includes("orchestrator"), false);
@@ -34,7 +35,7 @@ test("orchestrator capability requires a native harness or discovery-verified WS
   assert.equal(withOrchestratorPreset([wsl], { wslIsolationMode: "bwrap" })[0]!
     .capabilities!.permissionModes!.includes("orchestrator"), true);
   const wslClaude = { ...wsl, driver: "claude-code" as const,
-    capabilities: { ...wsl.capabilities, permissionModes: ["default"] } };
+    capabilities: { ...wsl.capabilities, permissionModes: ["default", "dontAsk"] } };
   assert.equal(withOrchestratorPreset([wslClaude], {
     platform: "win32", env: {}, exists: () => false, wslIsolationMode: "bwrap",
   })[0]!
@@ -44,6 +45,21 @@ test("orchestrator capability requires a native harness or discovery-verified WS
   assert.equal(withOrchestratorPreset([{ ...agent, context: { kind: "wsl", distro: "Ubuntu" },
     capabilities: { ...agent.capabilities!, permissionModes: ["read-only", "orchestrator"] } }])[0]!
     .capabilities!.permissionModes!.includes("orchestrator"), false, "stale configured capability cannot self-attest the bridge");
+
+  const claude = { ...agent, driver: "claude-code" as const,
+    capabilities: { ...agent.capabilities!, permissionModes: ["default", "dontAsk"] } };
+  assert.equal(withOrchestratorPreset([claude], { platform: "linux", isolationMode: "provider" })[0]!
+    .capabilities!.permissionModes!.includes("orchestrator"), false);
+  assert.equal(withOrchestratorPreset([claude], { platform: "linux", isolationMode: "bwrap" })[0]!
+    .capabilities!.permissionModes!.includes("orchestrator"), true);
+  assert.equal(withOrchestratorPreset([claude], { platform: "darwin", isolationMode: "provider" })[0]!
+    .capabilities!.permissionModes!.includes("orchestrator"), false);
+  assert.equal(withOrchestratorPreset([claude], { platform: "darwin", isolationMode: "seatbelt" })[0]!
+    .capabilities!.permissionModes!.includes("orchestrator"), true);
+  const staleClaude = { ...claude, capabilities: { ...claude.capabilities,
+    permissionModes: ["default", "dontAsk", "orchestrator"] } };
+  assert.equal(withOrchestratorPreset([staleClaude], { platform: "linux", isolationMode: "provider" })[0]!
+    .capabilities!.permissionModes!.includes("orchestrator"), false, "unsupported native isolation strips stale claims");
 });
 
 test("Codex MCP isolation probes an in-distro WSL binary through exact argv", () => {
@@ -63,26 +79,35 @@ test("Codex MCP isolation probes an in-distro WSL binary through exact argv", ()
   assert.equal(built.env.EXISTING, "override");
 });
 
-test("native Windows Claude advertises orchestrator only with verified Git Bash", () => {
+test("native Windows harnesses withhold orchestrator without filesystem confinement", () => {
   const agent: AgentDefinition = {
     id: "claude-code", name: "Claude Code", command: "claude.cmd", args: [], driver: "claude-code",
     env: {}, context: { kind: "native" },
     capabilities: { models: [], effortLevels: [], slashCommands: [], supportsImages: true,
-      supportsApprovals: true, permissionModes: ["default"] },
+      supportsApprovals: true, permissionModes: ["default", "dontAsk"] },
   };
   const exists = (path: string) => path === "C:\\Program Files\\Git\\bin\\bash.exe";
   assert.equal(withOrchestratorPreset([agent], { platform: "win32", env: {}, exists })[0]!.capabilities!.permissionModes!.includes("orchestrator"), false);
   const ready = { ...agent, env: { CLAUDE_CODE_GIT_BASH_PATH: "C:\\Program Files\\Git\\bin\\bash.exe" } };
-  assert.equal(withOrchestratorPreset([ready], { platform: "win32", env: {}, exists })[0]!.capabilities!.permissionModes!.includes("orchestrator"), true);
+  assert.equal(withOrchestratorPreset([ready], { platform: "win32", env: {}, exists })[0]!.capabilities!.permissionModes!.includes("orchestrator"), false);
+  const missingDontAsk = { ...ready, capabilities: { ...ready.capabilities!, permissionModes: ["default"] } };
+  assert.equal(withOrchestratorPreset([missingDontAsk], { platform: "win32", env: {}, exists })[0]!
+    .capabilities!.permissionModes!.includes("orchestrator"), false);
   const relative = { ...agent, env: { CLAUDE_CODE_GIT_BASH_PATH: "Git\\bin\\bash.exe" } };
   assert.equal(withOrchestratorPreset([relative], { platform: "win32", env: {}, exists })[0]!.capabilities!.permissionModes!.includes("orchestrator"), false);
+  const codex = { ...agent, id: "codex", command: "codex.exe", driver: "codex" as const,
+    capabilities: { ...agent.capabilities!, permissionModes: ["workspace-write"] } };
+  assert.equal(withOrchestratorPreset([codex], { platform: "win32" })[0]!.capabilities!.permissionModes!.includes("orchestrator"), false,
+    "Windows Codex stays fail closed until its filesystem sandbox can be attested");
+  assert.equal(withOrchestratorPreset([codex], { platform: "freebsd" })[0]!.capabilities!.permissionModes!.includes("orchestrator"), false,
+    "Codex stays fail closed on platforms without an audited provider sandbox");
   const acp: AgentDefinition = {
     id: "claude-acp", name: "Claude ACP", command: "npx.cmd",
     args: ["-y", `@agentclientprotocol/claude-agent-acp@${CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION}`],
     env: {}, driver: "acp", context: { kind: "native" },
   };
   assert.equal(withOrchestratorPreset([acp], { platform: "win32", env: {}, exists })[0]!.capabilities, undefined);
-  assert.deepEqual(withOrchestratorPreset([{ ...acp, env: ready.env }], { platform: "win32", env: {}, exists })[0]!.capabilities!.permissionModes, ["orchestrator"]);
+  assert.equal(withOrchestratorPreset([{ ...acp, env: ready.env }], { platform: "win32", env: {}, exists })[0]!.capabilities, undefined);
 });
 
 test("only the exact audited native Claude ACP adapter advertises orchestrator", () => {
@@ -97,11 +122,13 @@ test("only the exact audited native Claude ACP adapter advertises orchestrator",
     source: "config",
   };
   assert.equal(supportsClaudeAgentAcpOrchestrator(configured), true);
-  const advertised = withOrchestratorPreset([configured])[0]!.capabilities!;
+  const advertised = withOrchestratorPreset([configured], { platform: "linux", isolationMode: "bwrap" })[0]!.capabilities!;
   assert.deepEqual(advertised.permissionModes, ["orchestrator"]);
   assert.equal(advertised.supportsImages, true);
   assert.equal(advertised.supportsApprovals, true);
-  const secondAdvertisement = withOrchestratorPreset([configured])[0]!.capabilities!;
+  const secondAdvertisement = withOrchestratorPreset([configured], {
+    platform: "linux", isolationMode: "bwrap",
+  })[0]!.capabilities!;
   assert.notEqual(advertised.permissionModes, secondAdvertisement.permissionModes,
     "catalog advertisements do not share mutable capability arrays");
   for (const unsupported of [
@@ -141,16 +168,22 @@ test("only the exact audited native Claude ACP adapter advertises orchestrator",
   }), false);
 });
 
-test("Claude ACP orchestrator metadata and live identity are exact and fail closed", () => {
-  const meta = orchestratorAcpSessionMeta() as {
+test("Claude ACP orchestrator metadata grants planning tools while preserving the implementation boundary", () => {
+  const meta = orchestratorAcpSessionMeta(["/repo"]) as {
     claudeCode: { options: Record<string, unknown> };
   };
-  assert.deepEqual(meta.claudeCode.options.tools, []);
-  assert.deepEqual(meta.claudeCode.options.allowedTools, ["mcp__wollipog__*"]);
+  assert.deepEqual(meta.claudeCode.options.tools, ["Read", "Grep", "Glob", "WebFetch", "WebSearch", "Bash"]);
+  const allowed = meta.claudeCode.options.allowedTools as string[];
+  for (const tool of ["Read", "Grep", "Glob", "WebFetch", "WebSearch", "mcp__wollipog__*",
+    "Bash(git diff:*)", "Bash(gh issue comment:*)"]) assert.ok(allowed.includes(tool));
+  assert.equal(allowed.includes("Bash(git branch:*)"), false, "branch inspection does not permit mutation flags");
+  assert.equal(allowed.some((tool) => tool.includes("git push") || tool.includes("gh pr create")), false);
+  assert.equal(meta.claudeCode.options.permissionMode, "dontAsk");
+  assert.match(JSON.stringify(meta.claudeCode.options.systemPrompt), /Project locations are read-only.*\/repo/s);
   assert.deepEqual(meta.claudeCode.options.settingSources, []);
   assert.deepEqual(meta.claudeCode.options.settings, { disableAllHooks: true });
   assert.deepEqual(meta.claudeCode.options.mcpServers, {});
-  assert.deepEqual(meta.claudeCode.options.additionalDirectories, []);
+  assert.deepEqual(meta.claudeCode.options.additionalDirectories, ["/repo"]);
   assert.doesNotThrow(() => assertClaudeAgentAcpOrchestratorIdentity({
     name: "@agentclientprotocol/claude-agent-acp",
     title: "Claude Agent",
@@ -163,19 +196,32 @@ test("Claude ACP orchestrator metadata and live identity are exact and fail clos
   ]) assert.throws(() => assertClaudeAgentAcpOrchestratorIdentity(implementation), /launch refused/);
 });
 
-test("native orchestrator flags disable execution, hooks, and ambient tool sources", () => {
-  const claude = orchestratorLaunchArgs("claude-code", mcp);
-  assert.equal(claude[claude.indexOf("--tools") + 1], "");
+test("native orchestrator flags enable bounded planning while disabling implementation and ambient tool sources", () => {
+  const claude = orchestratorLaunchArgs("claude-code", mcp, ["/repo"]);
+  assert.match(claude[claude.indexOf("--tools") + 1] ?? "", /Read/);
+  assert.equal(claude[claude.indexOf("--permission-mode") + 1], "dontAsk");
+  assert.equal(claude[claude.indexOf("--add-dir") + 1], "/repo");
+  assert.match(claude[claude.indexOf("--allowedTools") + 1] ?? "", /Bash\(git log:\*\)/);
+  assert.equal(claude.some((arg) => /[\r\n]/u.test(arg)), false, "Windows-safe argv contains no multiline prompt");
+  assert.doesNotMatch(claude[claude.indexOf("--allowedTools") + 1] ?? "", /git push|gh pr create/);
   assert.ok(claude.includes("--strict-mcp-config"));
   assert.ok(claude.includes("--setting-sources"), "use the option recognized by the Claude CLI");
   assert.equal(claude[claude.indexOf("--setting-sources") + 1], "");
   assert.equal(claude.includes("--settings-sources"), false, "the historical spelling prevents launch");
   assert.ok(claude.includes('{"disableAllHooks":true}'));
-  const codex = orchestratorLaunchArgs("codex", mcp);
-  for (const setting of ['sandbox_mode="read-only"', 'approval_policy="never"', 'web_search="disabled"']) assert.ok(codex.includes(setting));
-  for (const feature of ["shell_tool", "unified_exec", "js_repl", "code_mode", "hooks", "multi_agent", "plugins", "apps"]) {
+  const codex = orchestratorLaunchArgs("codex", mcp, ["/repo"]);
+  for (const setting of ['sandbox_mode="workspace-write"', "sandbox_workspace_write.writable_roots=[]",
+    "sandbox_workspace_write.network_access=true", "sandbox_workspace_write.exclude_slash_tmp=true",
+    'approval_policy="never"', 'web_search="live"']) assert.ok(codex.includes(setting));
+  assert.equal(codex.some((arg) => arg.includes("exclude_tmpdir_env_var")), false,
+    "TMPDIR names scratch and must remain writable through the explicit workspace root");
+  for (const feature of ["hooks", "multi_agent", "plugins", "apps"]) {
     assert.equal(codex[codex.indexOf(feature) - 1], "--disable");
   }
+  for (const feature of ["shell_tool", "unified_exec", "js_repl", "code_mode"]) {
+    assert.equal(codex.includes(feature), false);
+  }
+  assert.match(codex.find((arg) => arg.startsWith("developer_instructions=")) ?? "", /Project locations are read-only/);
   assert.throws(() => orchestratorLaunchArgs("acp", mcp), /native harness/);
 });
 
@@ -184,6 +230,9 @@ test("resume replaces stale safety flags without stacking managed MCP configurat
     const flags = orchestratorLaunchArgs(driver, mcp);
     assert.deepEqual(stripOrchestratorLaunchArgs(["--model", "example", ...flags], driver), ["--model", "example"]);
   }
+  assert.deepEqual(stripOrchestratorLaunchArgs([
+    "--model", "example", "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions",
+  ], "claude-code"), ["--model", "example"]);
   assert.deepEqual(stripOrchestratorLaunchArgs(["--yolo", "--sandbox=workspace-write", "-a", "on-request", "-C", "/other", "--enable", "shell_tool"], "codex"), []);
 });
 

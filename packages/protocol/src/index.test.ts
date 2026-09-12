@@ -10,6 +10,12 @@ import {
   LEGACY_POLICY_HOOK_POLL_CAPABILITY_HEADER,
   POLICY_HOOK_POLL_CAPABILITY_HEADER,
   PROTOCOL_VERSION,
+  SESSION_NAMING_CLEANUP_BUDGET_MS,
+  SESSION_NAMING_GENERATION_BUDGET_MS,
+  SESSION_NAMING_PREPARATION_BUDGET_MS,
+  SESSION_NAMING_RUNNER_BUDGET_MS,
+  SESSION_NAMING_SUPERVISION_MARGIN_MS,
+  SESSION_NAMING_TRANSPORT_MARGIN_MS,
   SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
   SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS,
   providerAuthenticationReceiptCode,
@@ -17,6 +23,9 @@ import {
   projectSessionEventPayloadForProtocol,
   sessionNamingAgentFailureCode,
   sessionEventWireProjectionRequiredForProtocol,
+  sessionEventWireProjectionVariant,
+  SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET,
+  SESSION_EVENT_WIRE_PROJECTION_VARIANTS,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_CONTROL_PLANE_SERVICE,
   WOLLIPOG_POLICY_HOOK_POLL_CAPABILITY_HEADER,
@@ -145,14 +154,22 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 126", () => {
-  assert.equal(PROTOCOL_VERSION, 126);
+test("PROTOCOL_VERSION is 134", () => {
+  assert.equal(PROTOCOL_VERSION, 134);
+  assert.equal(runnerSupportsProtocol(131, "machineRunnerCapacity"), false);
+  assert.equal(runnerSupportsProtocol(132, "machineRunnerCapacity"), true);
+  assert.equal(runnerSupportsProtocol(127, "providerHistoryQuarantine"), false);
+  assert.equal(runnerSupportsProtocol(128, "providerHistoryQuarantine"), true);
   assert.equal(runnerSupportsProtocol(121, "contextWindowVariants"), false);
   assert.equal(runnerSupportsProtocol(122, "contextWindowVariants"), true);
   assert.equal(runnerSupportsProtocol(122, "wslAgentControlBridge"), false);
   assert.equal(runnerSupportsProtocol(123, "wslAgentControlBridge"), true);
   assert.equal(runnerSupportsProtocol(123, "wslSafeLauncher"), false);
   assert.equal(runnerSupportsProtocol(124, "wslSafeLauncher"), true);
+  assert.equal(runnerSupportsProtocol(128, "governanceTripReporting"), false);
+  assert.equal(runnerSupportsProtocol(129, "governanceTripReporting"), true);
+  assert.equal(runnerSupportsProtocol(129, "nativePolicyHookEvents"), false);
+  assert.equal(runnerSupportsProtocol(130, "nativePolicyHookEvents"), true);
   assert.equal(runnerSupportsProtocol(112, "progressAwareSessionWorktrees"), false);
   assert.equal(runnerSupportsProtocol(113, "progressAwareSessionWorktrees"), true);
   assert.equal(runnerSupportsProtocol(113, "hostAdministration"), false);
@@ -210,6 +227,8 @@ test("PROTOCOL_VERSION is 126", () => {
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.managedBackgroundInventory, 82);
   assert.equal(runnerSupportsProtocol(81, "managedBackgroundInventory"), false);
   assert.equal(runnerSupportsProtocol(82, "managedBackgroundInventory"), true);
+  assert.equal(runnerSupportsProtocol(133, "backgroundMissingResultRecovery"), false);
+  assert.equal(runnerSupportsProtocol(134, "backgroundMissingResultRecovery"), true);
 });
 
 test("worktree create deadlines preserve transport and error-reporting order", () => {
@@ -219,6 +238,25 @@ test("worktree create deadlines preserve transport and error-reporting order", (
     "the client receives a server-side timeout before its own abort fires");
   assert.ok(SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS < 300_000,
     "Node fetch's default transport deadline must not preempt the client signal");
+});
+
+test("session naming budgets account for preparation and stay ordered outermost-last", () => {
+  assert.ok(SESSION_NAMING_GENERATION_BUDGET_MS > 5_000,
+    "provider generation alone must outlast the old five-second total budget");
+  assert.equal(SESSION_NAMING_PREPARATION_BUDGET_MS + SESSION_NAMING_GENERATION_BUDGET_MS,
+    SESSION_NAMING_RUNNER_BUDGET_MS,
+    "preparation is charged explicitly rather than taken out of the generation allowance");
+  const runnerRequestMs = SESSION_NAMING_RUNNER_BUDGET_MS + SESSION_NAMING_TRANSPORT_MARGIN_MS;
+  const supervisionMs = SESSION_NAMING_RUNNER_BUDGET_MS + SESSION_NAMING_SUPERVISION_MARGIN_MS;
+  assert.ok(runnerRequestMs > SESSION_NAMING_RUNNER_BUDGET_MS,
+    "the runner reports its own timeout before the control plane gives up on the round trip");
+  assert.ok(supervisionMs > runnerRequestMs,
+    "the control-plane abort must not preempt its own runner request deadline");
+  // The desktop transport grants 35s and the runner clamps naming to 15s: the chain stays bounded.
+  assert.ok(SESSION_NAMING_TRANSPORT_MARGIN_MS > SESSION_NAMING_CLEANUP_BUDGET_MS,
+    "teardown after a generated title must fit inside the round-trip margin it sits within");
+  assert.ok(SESSION_NAMING_RUNNER_BUDGET_MS <= 15_000, "the runner rejects budgets above 15s");
+  assert.ok(supervisionMs < 35_000, "the desktop naming read budget must outlast the whole chain");
 });
 
 test("v99 queued prompt editing messages preserve opaque revisions and attachments", () => {
@@ -840,7 +878,34 @@ test("additive session-event kinds use explicit older-peer policies without muta
   assert.equal(projectSessionEventPayloadForProtocol(completion, 87), completion);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(undefined), true);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(86), true);
-  assert.equal(sessionEventWireProjectionRequiredForProtocol(87), false);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(87), true);
+  assert.equal(sessionEventWireProjectionVariant(86), 2);
+  assert.equal(sessionEventWireProjectionVariant(87), 1);
+
+  const hookDecision = {
+    kind: "policy_hook_decision",
+    auditId: "audit-1",
+    requestId: "request-1",
+    stage: "resolution",
+    outcome: "allowed",
+    actor: { kind: "human" },
+    toolCallId: "tool-1",
+  } as const;
+  assert.equal(projectSessionEventPayloadForProtocol(hookDecision, 129), null);
+  assert.equal(projectSessionEventPayloadForProtocol(hookDecision, 130), hookDecision);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(129), true);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(130), false);
+  assert.equal(sessionEventWireProjectionVariant(129), 1);
+  assert.equal(sessionEventWireProjectionVariant(130), 0);
+  assert.equal(SESSION_EVENT_WIRE_PROJECTION_VARIANTS, 3);
+
+  // The variant is the count of unmet policies, so it stays a dense index. The count is the
+  // projected-epoch radix, and the explicit offset fences the retired one-policy encoding.
+  assert.equal(sessionEventWireProjectionVariant(86), 2);
+  assert.equal(sessionEventWireProjectionVariant(undefined), 2);
+  assert.equal(sessionEventWireProjectionVariant(87), 1);
+  assert.equal(sessionEventWireProjectionVariant(130), 0);
+  assert.equal(SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET, 2);
 
   const required = { kind: "error", message: "still required" } as const;
   assert.equal(projectSessionEventPayloadForProtocol(required, 1), required,

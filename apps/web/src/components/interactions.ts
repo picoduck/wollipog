@@ -64,7 +64,10 @@ export function anchoredMenuPlacement(input: {
 
 export function useAnchoredMenuStyle(
   open: boolean,
-  triggerRef: RefObject<HTMLButtonElement | null>,
+  // Menus can be owned by a button (Select) or an editable input (SearchableCombobox). Positioning
+  // only needs the common HTMLElement geometry contract, so narrowing this to buttons forced every
+  // autocomplete either to cast its ref or to grow a second anchoring implementation.
+  triggerRef: RefObject<HTMLElement | null>,
   options: {
     desiredWidth?: number;
     desiredHeight: number;

@@ -8,6 +8,7 @@ import type {
   UsageRetentionPolicy,
   UserCostWindows,
 } from "@wollipog/protocol";
+import { CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useHasStore, useStoreSelector } from "../store.js";
 import {
@@ -283,6 +284,10 @@ export function UsageView() {
   const notices = data
     ? coverageMessages({ offlineMachines, unpricedRecords: data.totals.unpricedRecords ?? 0, pricing: data.pricing })
     : [];
+  const includesCodexAppServer = Boolean(data && (
+    data.byDriver.some((row) => row.key === "codex-app-server") ||
+    (data.seriesByDriver ?? []).some((row) => row.driver === "codex-app-server")
+  ));
   const periodNoun = data?.granularity === "hour" ? "Hour" : "Day";
   const onOfflineNames = useCallback((names: string[]) => setOfflineMachines(names), []);
 
@@ -377,21 +382,38 @@ export function UsageView() {
                       const remaining = remainingFor(bucket);
                       const warning = bucket.status === "warning";
                       const exhausted = bucket.status === "exhausted" || remaining === 0;
+                      // A window the provider never measured must not put a non-value where every
+                      // sibling shows a percentage, or it reads as a figure that failed to parse.
+                      // The dash marks the measurement as absent and the reset time — the only
+                      // fact there is — takes the prominent slot instead.
+                      const measured = remaining !== undefined;
+                      const resetTitle = bucket.resetsAt ? new Date(bucket.resetsAt).toLocaleString() : "";
+                      const resetText = bucket.resetsAt
+                        ? `${subscriptionResetLabel(bucket.resetsAt, subscriptionNow)} · ${resetTitle}`
+                        : "";
                       return (
-                        <div className={`subscription-bucket ${exhausted ? "exhausted" : warning ? "warning" : ""}`} key={bucket.id}>
+                        <div
+                          // Kept as one template literal: the stylesheet guardrail scans these
+                          // statically for class producers and does not see an array join.
+                          className={`subscription-bucket${exhausted ? " exhausted" : warning ? " warning" : ""}${measured ? "" : " unmeasured"}`}
+                          key={bucket.id}
+                        >
                           <dt>{bucket.label}</dt>
                           <dd>
-                            {remaining === undefined ? (
-                              <strong>Allowance Reported</strong>
-                            ) : (
+                            {measured ? (
                               <><strong>{Math.round(remaining)}% Remaining</strong><span>{Math.round(bucket.usedPercent ?? 100 - remaining)}% Used</span></>
+                            ) : (
+                              <span className="subscription-unmeasured">
+                                <span aria-hidden="true">—</span>
+                                <span className="sr-only">Utilization Not Reported</span>
+                              </span>
                             )}
                             {exhausted && <span className="subscription-warning">⛔ Exhausted</span>}
                             {!exhausted && warning && <span className="subscription-warning">⚠ Approaching Limit</span>}
                             {bucket.resetsAt && (
-                              <span title={new Date(bucket.resetsAt).toLocaleString()}>
-                                {subscriptionResetLabel(bucket.resetsAt, subscriptionNow)} · {new Date(bucket.resetsAt).toLocaleString()}
-                              </span>
+                              measured
+                                ? <span title={resetTitle}>{resetText}</span>
+                                : <strong title={resetTitle}>{resetText}</strong>
                             )}
                           </dd>
                         </div>
@@ -429,6 +451,11 @@ export function UsageView() {
           <p className="usage-coverage" role="note">
             Coverage begins {new Date(data.retention.coverageStartedAt).toLocaleString()}. Existing lifetime totals before that cutover are not backdated into buckets.
           </p>
+          {includesCodexAppServer && (
+            <p className="usage-coverage" role="note">
+              Codex App Server records written by runners before protocol v{CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL} include only the final model response and are incomplete. Protocol v{CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL}+ records complete turn usage.
+            </p>
+          )}
           {notices.length > 0 && (
             <div className="usage-notice" role="note" aria-label="Coverage">
               {notices.map((notice) => <p key={notice}>{notice}</p>)}

@@ -7,14 +7,25 @@ import type {
   DurableSessionCommandUpdateMessage,
 } from "@wollipog/protocol";
 import { isDurableSessionCommandErrorCode, runnerSupportsProtocol } from "@wollipog/protocol";
-import type { ControlPlaneDb } from "./db.js";
+import type { AutomationCommandRecord, ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
+import { isTransientProviderError } from "./provider-error.js";
 
 type Logger = { warn: (message: string) => void };
 type Receipt = DurableSessionCommandResultMessage | DurableSessionCommandUpdateMessage;
 
 const MAX_BATCH = 100;
 const MAX_RETRY_MS = 30_000;
+/** Replacement attempts for a launch the provider failed for a passing reason. The condition that
+ * motivates this — another Claude Code process holding the credential refresh — clears in about a
+ * minute, so three attempts spread over roughly seven cover it without holding the execution open
+ * long enough to collide with the automation's next scheduled tick. */
+const MAX_PROVIDER_RETRIES = 3;
+const PROVIDER_RETRY_BASE_MS = 60_000;
+
+function providerRetryDelay(attempt: number): number {
+  return PROVIDER_RETRY_BASE_MS * (2 ** Math.max(0, attempt - 1));
+}
 
 /** Stable JSON is shared with the runner receipt store so a retry can prove that a command id
  * still names the exact same payload. Arrays retain order; object keys are recursively sorted. */
@@ -49,6 +60,12 @@ export class AutomationCommandOutbox {
     private readonly hub: Hub,
     private readonly log: Logger,
     private readonly changed: (executionId: string, now: number) => void,
+    /** False once a command has outlived its execution's delivery bound. Asked here rather than
+     * only before a tick's flush because `receipt()` and runner registration flush directly: a
+     * bound enforced only by the caller would let those paths hand a runner a launch the very
+     * sweep that follows is about to write off. Skipping only defers — the sweep does the
+     * expiring — so this stays a pure predicate and mutates nothing mid-flush. */
+    private readonly deliverable: (row: AutomationCommandRecord, now: number) => boolean = () => true,
   ) {}
 
   flush(now = Date.now(), runnerId?: string): number {
@@ -70,6 +87,7 @@ export class AutomationCommandOutbox {
     }
     for (const row of this.db.dueAutomationCommands(now, runnerId, MAX_BATCH)) {
       if (!this.hub.isRunnerOnline(row.runnerId)) continue;
+      if (!this.deliverable(row, now)) continue;
       if (!runnerSupportsProtocol(this.db.getRunner(row.runnerId)?.protocolVersion, "automationCommandReceipts")) {
         this.failForCapabilityLoss(row, now);
         continue;
@@ -113,6 +131,7 @@ export class AutomationCommandOutbox {
       return false;
     }
     const state = storedState(message.state);
+    if (state === "rejected" && this.retryProviderFailure(runnerId, message, now)) return true;
     let applied: ReturnType<ControlPlaneDb["recordAutomationCommandReceipt"]>;
     try {
       applied = this.db.recordAutomationCommandReceipt({
@@ -140,6 +159,48 @@ export class AutomationCommandOutbox {
     this.changed(applied.executionId, now);
     // A receipt may satisfy a dependency or make a terminal execution observable immediately.
     this.flush(now, runnerId);
+    return true;
+  }
+
+  /**
+   * A launch the provider ended for a transient reason is not a verdict on the job. Replace the
+   * command with a fresh identity due after a delay instead of settling the execution, so the
+   * scheduled work still runs in its window. The replacement is a new command id because the
+   * runner's journal answers a replayed id with its stored terminal receipt and runs nothing.
+   *
+   * Returns true only when a replacement was durably issued; every other path falls through to
+   * the ordinary rejection so a real refusal still fails on its first attempt.
+   */
+  private retryProviderFailure(runnerId: string, message: Receipt, now: number): boolean {
+    if (!isTransientProviderError(message.error)) return false;
+    const command = this.db.getAutomationCommand(message.commandId);
+    if (!command || command.kind !== "start_session") return false;
+    const attempt = this.db.listAutomationCommands(command.executionId)
+      .filter((sibling) => sibling.supersededBy !== undefined).length + 1;
+    if (attempt > MAX_PROVIDER_RETRIES) return false;
+    let retried: ReturnType<ControlPlaneDb["retryAutomationCommand"]>;
+    try {
+      retried = this.db.retryAutomationCommand({
+        commandId: message.commandId,
+        runnerId,
+        sessionId: message.sessionId,
+        ...(message.type === "durable_session_command_result" ? { requestId: message.requestId } : {}),
+        revision: message.revision,
+        error: message.error!,
+        ...(message.code ? { code: message.code } : {}),
+        nextAttemptAt: now + providerRetryDelay(attempt),
+        now,
+      });
+    } catch (error) {
+      this.log.warn(`durable command retry was not issued: ${(error as Error).message}`);
+      return false;
+    }
+    if (!retried) return false;
+    this.log.warn(
+      `automation command '${message.commandId}' failed transiently and was replaced by ` +
+      `'${retried.replacement.commandId}' (attempt ${attempt} of ${MAX_PROVIDER_RETRIES}): ${message.error}`,
+    );
+    this.changed(retried.executionId, now);
     return true;
   }
 

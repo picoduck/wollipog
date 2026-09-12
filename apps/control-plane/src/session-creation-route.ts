@@ -27,6 +27,7 @@ export function resolveSessionCreationOwnership(
   db: ControlPlaneDb,
   principal: HumanPrincipal | null,
   body: CreateSessionRequest,
+  options: { preserveOmittedProject?: boolean } = {},
 ): SessionCreationOwnershipResolution {
   let resolvedBody = body;
   let projectScope: ResourceScope | null = null;
@@ -36,7 +37,8 @@ export function resolveSessionCreationOwnership(
       return { ok: false, status: 404, error: "project not found" };
     }
     projectScope = db.projectScope(body.projectId);
-  } else if (body.projectId === undefined && body.projectLocationId === undefined && !body.workspacePath?.trim()) {
+  } else if (!options.preserveOmittedProject && body.projectId === undefined &&
+      body.projectLocationId === undefined && !body.workspacePath?.trim()) {
     const inferred = db.findProjectLocation(body.runnerId, body.workspaceId);
     if (inferred) {
       if (principal && db.canAccessProject(principal, inferred.projectId)) {

@@ -4,6 +4,8 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { PROTOCOL_VERSION, type ManagedBackgroundJobView, type SessionView } from "@wollipog/protocol";
+import type { ApiClient } from "../api.js";
+import { ApiProvider } from "../api-context.js";
 import {
   BackgroundWorkPanel,
   backgroundJobCurrentState,
@@ -55,8 +57,185 @@ test("job and delivery presentation keep current lifecycle separate from deliver
     "a source-present row cannot claim Running without a current aggregate lifecycle");
   assert.equal(backgroundJobDeliveryStage(baseJob), "Not Started");
   assert.equal(backgroundJobDeliveryStage({ ...baseJob, terminalObservedAt: 3_000, continuationRequired: true }), "Continuation Pending");
-  assert.equal(backgroundJobDeliveryStage({ ...baseJob, continuationAcceptedAt: 4_000 }), "Continuation Accepted");
+  assert.equal(backgroundJobDeliveryStage({ ...baseJob, continuationAcceptedAt: 4_000 }), "Continuation In Flight");
+  assert.equal(backgroundJobDeliveryStage({
+    ...baseJob,
+    continuationAcceptedAt: 4_000,
+    continuationMissingResultAt: 4_500,
+  }), "Result Missing");
   assert.equal(backgroundJobDeliveryStage({ ...baseJob, assistantResultPersistedAt: 5_000 }), "Result Delivered");
+});
+
+test("every watchdog highlights its delivery and explains completion, recovery, and user action", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const cases = [
+    ["terminal_without_continuation", "Result Pending", /returning the result automatically/, /No action is needed/],
+    ["accepted_without_result", "Result Missing", /will not repeat an accepted step/, /Acknowledge the missing result/],
+    ["result_not_projected", "Transcript Delayed", /updating the transcript automatically/, /No action is needed/],
+    ["dashboard_observation_pending", "Notification Pending", /waiting for the dashboard confirmation/, /No action is needed/],
+  ] as const;
+  try {
+    for (const [watchdogState, label, recovery, action] of cases) {
+      await act(async () => root.render(
+        <BackgroundWorkPanel
+          session={{
+            id: "session",
+            runnerId: "runner",
+            backgroundWorkTracking: "managed",
+            backgroundJobs: [],
+            backgroundDeliveries: [{
+              parentTurnId: "turn-1",
+              jobCount: 1,
+              terminalCount: 1,
+              watchdogState,
+            }],
+          } as unknown as SessionView}
+          runnerOnline
+          runnerProtocolVersion={PROTOCOL_VERSION}
+          parentTurnEventIds={new Map([["turn-1", 42]])}
+          onOpenParentTurn={() => undefined}
+        />,
+      ));
+      const highlighted = container.querySelector<HTMLElement>(".background-work-group-watchdog");
+      assert.equal(highlighted?.dataset["watchdogState"], watchdogState);
+      assert.equal(highlighted?.dataset["watchdogHighlighted"], "true");
+      const summary = highlighted?.querySelector<HTMLElement>(".background-delivery-summary");
+      assert.match(summary?.textContent ?? "", new RegExp(label));
+      assert.match(summary?.textContent ?? "", /Completed.*Still Pending.*Recovery.*Your Action/s);
+      assert.match(summary?.textContent ?? "", recovery);
+      assert.match(summary?.textContent ?? "", action);
+      const details = summary?.querySelector("details");
+      assert.equal(details?.open, false);
+      assert.equal(details?.querySelector("code")?.textContent, watchdogState);
+    }
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("terminal missing continuations show age and acknowledge independently without retry", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const acknowledged: Array<[string, string]> = [];
+  const client = {
+    acknowledgeBackgroundMissingResult: async (sessionId: string, continuationId: string) => {
+      acknowledged.push([sessionId, continuationId]);
+      return {} as SessionView;
+    },
+  } as unknown as ApiClient;
+  const delivery = (continuationId: string, missingResultAt: number) => ({
+    continuationId,
+    parentTurnId: "turn-1",
+    jobCount: 1,
+    terminalCount: 1,
+    acceptedAt: missingResultAt - 1_000,
+    missingResultAt,
+    watchdogState: "accepted_without_result" as const,
+  });
+  try {
+    await act(async () => root.render(
+      <ApiProvider client={client}>
+        <BackgroundWorkPanel
+          session={{
+            id: "session",
+            runnerId: "runner",
+            backgroundWorkTracking: "managed",
+            backgroundJobs: [],
+            backgroundDeliveries: [delivery("bgcont-a", 10_000), delivery("bgcont-b", 20_000)],
+          } as unknown as SessionView}
+          runnerOnline
+          runnerProtocolVersion={PROTOCOL_VERSION}
+          parentTurnEventIds={new Map()}
+          onOpenParentTurn={() => undefined}
+        />
+      </ApiProvider>,
+    ));
+    assert.equal(container.querySelectorAll(".background-delivery-summary").length, 2);
+    assert.equal(container.querySelectorAll<HTMLButtonElement>("button").length, 2);
+    assert.match(container.textContent ?? "", /Missing Since.*Recovery State.*Acknowledgement Required/s);
+    await act(async () => {
+      container.querySelectorAll<HTMLButtonElement>("button")[0]!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.deepEqual(acknowledged, [["session", "bgcont-a"]]);
+    assert.equal(container.querySelectorAll<HTMLButtonElement>("button").length, 1,
+      "acknowledging one continuation leaves the other independently actionable");
+    assert.equal(container.querySelectorAll('[data-recovery-state="missing-result-acknowledged"]').length, 1);
+    assert.match(container.textContent ?? "", /Missing Result Acknowledged/);
+    assert.equal([...container.querySelectorAll<HTMLButtonElement>("button")]
+      .some((button) => /retry/i.test(button.textContent ?? "")), false,
+    "acknowledgement never offers replay");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("terminal missing history remains actionable without a watchdog but yields to late proof", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const client = {
+    acknowledgeBackgroundMissingResult: async () => ({} as SessionView),
+  } as unknown as ApiClient;
+  const missingDelivery = {
+    continuationId: "bgcont-suppressed",
+    parentTurnId: "turn-suppressed",
+    jobCount: 1,
+    terminalCount: 1,
+    acceptedAt: 10_000,
+    missingResultAt: 20_000,
+  };
+  const render = (delivery: typeof missingDelivery & { runnerResultPersistedAt?: number }) => root.render(
+    <ApiProvider client={client}>
+      <BackgroundWorkPanel
+        session={{
+          id: "session-suppressed",
+          runnerId: "runner",
+          backgroundWorkTracking: "managed",
+          backgroundJobs: [],
+          backgroundDeliveries: [delivery],
+        } as unknown as SessionView}
+        runnerOnline
+        runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map()}
+        onOpenParentTurn={() => undefined}
+      />
+    </ApiProvider>
+  );
+  try {
+    await act(async () => render(missingDelivery));
+    assert.match(container.textContent ?? "", /Acknowledgement Required/);
+    assert.equal(container.querySelectorAll<HTMLButtonElement>("button").length, 1,
+      "terminal missing audit remains resolvable when attention is suppressed");
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("button")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(
+      container.querySelector(".background-work-barrier strong")?.textContent,
+      "Missing Result Acknowledged",
+      "the barrier follows the successful optimistic acknowledgement",
+    );
+    await act(async () => render({ ...missingDelivery, runnerResultPersistedAt: 30_000 }));
+    assert.doesNotMatch(container.textContent ?? "", /Acknowledgement Required/);
+    assert.doesNotMatch(container.textContent ?? "", /Result Missing/);
+    assert.match(container.textContent ?? "", /Result Delivered/);
+    assert.equal(container.querySelectorAll<HTMLButtonElement>("button").length, 0,
+      "late delivery proof is authoritative and needs no acknowledgement");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
 });
 
 test("the panel renders individual jobs, their parent barrier, durable times, and a transcript action", async () => {

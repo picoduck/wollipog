@@ -41,9 +41,23 @@ const serviceTierFixture = params.has("tiers");
 const serviceTierChoice = params.get("tiers") === "1";
 const servedWindow = Number(params.get("served") ?? "0");
 // `?window=none` drops the context window (an agent that advertises no capacity); `?cost=none`
-// drops the session cost (an unpriced or cost-silent runner). Both keep the token counts.
+// marks the session unpriced, while `?cost=free` carries provider-reported zero provenance,
+// `?usage-detail=pending|failed` holds or rejects the model breakdown, and `?cost=<amount>`
+// sets the total so layout specs can stress the strip with a figure much wider than the default
+// (#893). Every variant keeps the token counts.
 const unknownContextWindow = params.get("window") === "none";
-const unpricedCost = params.get("cost") === "none";
+const costParam = params.get("cost");
+const unpricedCost = costParam === "none";
+const freeCost = costParam === "free";
+const usageDetail = params.get("usage-detail");
+const parsedCost = Number(costParam);
+const sessionCostUsd = unpricedCost || freeCost || costParam === null || !Number.isFinite(parsedCost)
+  ? 1.37
+  : parsedCost;
+/** The default fixture's 1.21 / 0.16 split, held as a ratio so a `?cost=` override still sums to the
+ * headline figure and a sub-cent total never produces a negative per-model row. */
+const miniModelCostUsd = sessionCostUsd * (0.16 / 1.37);
+const mainModelCostUsd = sessionCostUsd - miniModelCostUsd;
 
 const SESSION_ID = "session-usage-e2e";
 
@@ -96,7 +110,9 @@ const session: SessionView = {
   permissionMode: null,
   tokensIn: 184_000,
   tokensOut: 21_000,
-  costUsd: unpricedCost ? 0 : 1.37,
+  costUsd: unpricedCost || freeCost ? 0 : sessionCostUsd,
+  ...(freeCost ? { costSource: "providerReported" as const }
+    : unpricedCost ? { costSource: "unpriced" as const } : {}),
   contextTokensUsed: unknownContextWindow ? undefined : Number(params.get("used") ?? "72000"),
   adopted: false,
   // A known context window makes the ContextWindowMeter render in the strip's leading cell,
@@ -216,7 +232,7 @@ const snapshotMessage: ControlPlaneToUi = {
   pods: [],
 };
 
-function usageAmount(input: number, output: number, costUsd: number, processed: number, costSource: "providerReported" | "unpriced" = "providerReported") {
+function usageAmount(input: number, output: number, costUsd: number, processed: number, costSource: "providerReported" | "modelPriced" | "unpriced" = "providerReported") {
   return {
     inputTokens: input, outputTokens: output, costUsd, uncachedInputTokens: input, cachedInputTokens: Math.round(input * 4.2),
     cacheCreationTokens: Math.round(input / 8), reasoningTokens: 0, cacheSavingsUsd: costUsd * 0.6, costSource, unpricedRecords: costSource === "unpriced" ? 3 : 0,
@@ -271,17 +287,39 @@ let tailRequestCount = 0;
 const settledUsage = params.get("settled") !== "0";
 const client = {
   ...api,
-  sessionUsage: async () => ({
-    sessionId: SESSION_ID,
-    totals: unpricedCost
-      ? usageAmount(184_000, 21_000, 0, 205_000, "unpriced")
-      : usageAmount(184_000, 21_000, 1.37, 205_000),
-    byModel: [
-      { model: driverName === "claude-code" ? "claude-fable-5-1" : "gpt-5.5-codex", ...usageAmount(160_000, 18_000, 1.21, 178_000) },
-      { model: driverName === "claude-code" ? "claude-haiku-4-5" : "gpt-5.5-codex-mini", ...usageAmount(24_000, 3_000, 0, 27_000, "unpriced") },
-    ],
-    pricing: { status: "fresh", source: "litellm", fetchedAt: 1, knownModels: 1200 },
-  }),
+  sessionUsage: async () => {
+    if (usageDetail === "pending") return new Promise<never>(() => {});
+    if (usageDetail === "failed") throw new Error("Usage detail unavailable");
+    return {
+      sessionId: SESSION_ID,
+      totals: unpricedCost
+        ? usageAmount(184_000, 21_000, 0, 205_000, "unpriced")
+        : freeCost ? usageAmount(184_000, 21_000, 0, 205_000)
+        : usageAmount(184_000, 21_000, sessionCostUsd, 205_000, "modelPriced"),
+      byModel: [
+        {
+          model: driverName === "claude-code" ? "claude-fable-5-1" : "gpt-5.5-codex",
+          ...usageAmount(160_000, 18_000, freeCost ? 0 : mainModelCostUsd, 178_000),
+        },
+        {
+          model: driverName === "claude-code" ? "claude-haiku-4-5" : "gpt-5.5-codex-mini",
+          ...usageAmount(
+            24_000,
+            3_000,
+            unpricedCost || freeCost ? 0 : miniModelCostUsd,
+            27_000,
+            unpricedCost ? "unpriced" : freeCost ? "providerReported" : "modelPriced",
+          ),
+        },
+      ],
+      pricing: {
+        status: "fresh" as const,
+        source: "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+        fetchedAt: 1,
+        knownModels: 1200,
+      },
+    };
+  },
   session: () => new Promise<never>(() => {}),
   getSessionEventPage: () => new Promise<never>(() => {}),
   getSessionEventTailPage: (_id: string, before: number | undefined, eventEpoch: number) => {

@@ -1,7 +1,8 @@
 import { type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SourceLocation } from "@wollipog/protocol";
+import { prioritizedPendingRequests, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SourceLocation } from "@wollipog/protocol";
 import { sessionArchiveRequiresStop } from "../archive-actions.js";
 import {
+  INBOX_COLLAPSED_THREADS_KEY,
   INBOX_REORDER_SETTLE_MS,
   approvalOptionForIntent,
   buildInboxSplits,
@@ -19,6 +20,7 @@ import {
   reconcileInboxOrder,
   repairInboxSelectionForHeldOrder,
   shouldRestoreInboxScroll,
+  threadInboxRows,
   type InboxSplit,
   type InboxApprovalIntent,
 } from "../inbox.js";
@@ -227,11 +229,16 @@ export function InboxView({
   const [seen, setSeen] = useState(() => loadSeen(instanceScope));
   const [pinnedProjects, setPinnedProjects] = useState(() => loadKeySet(PROJECT_PIN_KEY, instanceScope));
   const [pinnedSessions, setPinnedSessions] = useState(() => loadKeySet(SESSION_PIN_KEY, instanceScope));
+  // Parents whose thread the user collapsed (#896), remembered per instance like pins.
+  const [collapsedThreads, setCollapsedThreads] = useState(() => loadKeySet(INBOX_COLLAPSED_THREADS_KEY, instanceScope));
   const [query, setQuery] = useState("");
   // The INPUT stays on `query` so typing is never dropped a frame; the filtering reads the deferred
   // value, so a keystroke in a 200-session inbox does not block on re-filtering and re-rendering
   // the list before the character appears.
   const deferredQuery = useDeferredValue(query);
+  // Enter may arrive before the deferred filter has committed. Keep the request in React state so
+  // the handoff uses the rows for the exact query the input displays, never the previous result set.
+  const [searchFocusPending, setSearchFocusPending] = useState(false);
   const [creatingProject, setCreatingProject] = useState(false);
   const [reminderMode, setReminderMode] = useState<ReminderInboxMode>("ordinary");
   const [snoozeSessionId, setSnoozeSessionId] = useState<string | null>(null);
@@ -323,6 +330,7 @@ export function InboxView({
   const exitSearch = useCallback(() => {
     setQuery("");
     setExitPending(true);
+    setSearchFocusPending(false);
   }, []);
 
   // Typing CANCELS a pending handoff. Escape on a nonempty query, then a new search before the
@@ -331,6 +339,7 @@ export function InboxView({
   const changeQuery = useCallback((next: string) => {
     setQuery(next);
     setExitPending(false);
+    setSearchFocusPending(false);
   }, []);
 
   useEffect(() => {
@@ -342,6 +351,7 @@ export function InboxView({
     setSeen(loadSeen(instanceScope));
     setPinnedProjects(loadKeySet(PROJECT_PIN_KEY, instanceScope));
     setPinnedSessions(loadKeySet(SESSION_PIN_KEY, instanceScope));
+    setCollapsedThreads(loadKeySet(INBOX_COLLAPSED_THREADS_KEY, instanceScope));
   }, [instanceScope]);
 
   useEffect(() => {
@@ -438,28 +448,6 @@ export function InboxView({
     }
   }, [activeSplit, expandedSessionId, inbox.selectedSessionId, inbox.splitKey, repairedSelection, selectSession, selectSplit, sessions, snapshotLoaded]);
 
-  const selectedSession = repairedSelection ? sessions.get(repairedSelection) ?? null : null;
-
-  useEffect(() => {
-    if (seenTimerRef.current !== null) window.clearTimeout(seenTimerRef.current);
-    seenTimerRef.current = null;
-    // Board mode renders no selected preview, so dwelling there must not mark the invisible
-    // list selection as read while its activity keeps arriving.
-    if (!selectedSession || boardMode) return;
-    const sessionId = selectedSession.id;
-    const seenAt = selectedSession.lastEventAt ?? selectedSession.updatedAt;
-    seenTimerRef.current = window.setTimeout(() => {
-      const next = markSeen(loadSeen(instanceScope), sessionId, seenAt);
-      saveSeen(next, instanceScope);
-      setSeen(next);
-      seenTimerRef.current = null;
-    }, SEEN_DWELL_MS);
-    return () => {
-      if (seenTimerRef.current !== null) window.clearTimeout(seenTimerRef.current);
-      seenTimerRef.current = null;
-    };
-  }, [boardMode, instanceScope, selectedSession?.id, selectedSession?.lastEventAt, selectedSession?.updatedAt]);
-
   const normalizedQuery = deferredQuery.trim().toLocaleLowerCase();
   const liveEntries = useMemo<InboxListEntry[]>(() => (activeSplit?.sessions ?? [])
     .filter((session) => inboxSessionMatchesQuery(
@@ -512,17 +500,72 @@ export function InboxView({
     });
   }, [liveIds, browsingOrderLease]);
 
-  const entries = useMemo(() => {
-    if (!heldOrder) return liveEntries;
-    return reconcileInboxItems(heldOrder, liveEntries, (entry) => entry.session.id);
-  }, [heldOrder, liveEntries]);
+  // Threading happens AFTER the held order is applied (#896): a held order is a flat list of ids,
+  // and threading only moves a child under its parent and drops a collapsed parent's children, so
+  // the rows the user was browsing keep their places. Threading the live list before holding it
+  // would have appended a re-expanded thread's children at the END of the held order instead.
+  const entries = useMemo(() => threadInboxRows(
+    heldOrder ? reconcileInboxItems(heldOrder, liveEntries, (entry) => entry.session.id) : liveEntries,
+    collapsedThreads,
+    stalledSessionIds,
+  ), [collapsedThreads, heldOrder, liveEntries, stalledSessionIds]);
   const displayedIds = useMemo(() => entries.map((entry) => entry.session.id), [entries]);
   displayedIdsRef.current = displayedIds;
+  // The order the list WOULD show if nothing were held, threaded the same way, so a collapsed
+  // thread's absent children never read as a pending reorder.
+  const liveDisplayedIds = useMemo(() => heldOrder
+    ? threadInboxRows(liveEntries, collapsedThreads, stalledSessionIds).map((entry) => entry.session.id)
+    : displayedIds, [collapsedThreads, displayedIds, heldOrder, liveEntries, stalledSessionIds]);
   const orderUpdateAvailable = !isMobile && !boardMode && heldOrder !== null && (
-    displayedIds.length !== liveIds.length || displayedIds.some((id, index) => id !== liveIds[index])
+    displayedIds.length !== liveDisplayedIds.length || displayedIds.some((id, index) => id !== liveDisplayedIds[index])
   );
-  const displayedSelection = repairedSelection && displayedIds.includes(repairedSelection) ? repairedSelection : null;
+  // A selection that threading hid (its thread was collapsed, or a search kept the parent and not
+  // the child) lands on its nearest displayed ancestor, so a row is always active and Enter, F2,
+  // and the rest keep a target. The persisted selection itself is untouched: expanding the thread
+  // again brings the child back as the selected row.
+  const displayedSelection = useMemo(() => {
+    if (!repairedSelection) return null;
+    const displayed = new Set(displayedIds);
+    const seen = new Set<string>();
+    let id: string | null = repairedSelection;
+    while (id && !displayed.has(id) && !seen.has(id)) {
+      seen.add(id);
+      id = sessions.get(id)?.parentSessionId ?? null;
+    }
+    return id && displayed.has(id) ? id : null;
+  }, [displayedIds, repairedSelection, sessions]);
   const displayedSelectedSession = displayedSelection ? sessions.get(displayedSelection) ?? null : null;
+  // The preview surface, the seen-dwell, and the row highlight must agree on ONE session. When the
+  // persisted selection was projected onto a visible ancestor above, that ancestor is the session
+  // the preview shows and the preview's own actions act on; otherwise (a search hid the row and
+  // nothing visible stands in for it) the preview keeps following the persisted selection as before.
+  const selectedSession = displayedSelectedSession ??
+    (repairedSelection ? sessions.get(repairedSelection) ?? null : null);
+  // The dwell marks the session the reader is actually looking at: the expanded one when the view
+  // is expanded (a deep link can open a child whose thread is collapsed, and the projection above
+  // would otherwise name its parent), else the selected preview.
+  const seenSession = expandedSessionId ? sessions.get(expandedSessionId) ?? null : selectedSession;
+
+  useEffect(() => {
+    if (seenTimerRef.current !== null) window.clearTimeout(seenTimerRef.current);
+    seenTimerRef.current = null;
+    // Board mode renders no selected preview, so dwelling there must not mark the invisible
+    // list selection as read while its activity keeps arriving.
+    if (!seenSession || boardMode) return;
+    const sessionId = seenSession.id;
+    const seenAt = seenSession.lastEventAt ?? seenSession.updatedAt;
+    seenTimerRef.current = window.setTimeout(() => {
+      const next = markSeen(loadSeen(instanceScope), sessionId, seenAt);
+      saveSeen(next, instanceScope);
+      setSeen(next);
+      seenTimerRef.current = null;
+    }, SEEN_DWELL_MS);
+    return () => {
+      if (seenTimerRef.current !== null) window.clearTimeout(seenTimerRef.current);
+      seenTimerRef.current = null;
+    };
+  }, [boardMode, instanceScope, seenSession?.id, seenSession?.lastEventAt, seenSession?.updatedAt]);
+
   const expanded = expandedSessionId !== null;
   useEffect(() => {
     // Board mode clears like expansion does: unmounting the list can swallow pointerleave, and a
@@ -734,10 +777,98 @@ export function InboxView({
     listRef.current?.focus();
   }, [isMobile, expand, selectSession, activeSplit?.key]);
 
-  const handleSelectAttention = useCallback((sessionId: string) => {
-    // Preserve focus on the picker; unlike selecting a mobile row, this must not expand it.
+  /** Select a row from the keyboard: hold the order, focus the grid, and bring the row into view. */
+  const selectRow = useCallback((sessionId: string) => {
+    holdOrderAfterNavigation();
     selectSession(sessionId, activeSplit?.key ?? null);
-  }, [activeSplit?.key, selectSession]);
+    listRef.current?.focus();
+    window.requestAnimationFrame(() => {
+      document.getElementById(`inbox-session-${encodeResourceId(sessionId)}`)?.scrollIntoView({ block: "nearest" });
+    });
+  }, [activeSplit?.key, holdOrderAfterNavigation, selectSession]);
+
+  useEffect(() => {
+    if (!searchFocusPending || query !== deferredQuery) return;
+    setSearchFocusPending(false);
+    if (isMobile || boardMode || entries.length === 0) return;
+    // Preserve a visible selection. A selection hidden by the filter has no active descendant, so
+    // establish one at the first displayed row before moving focus into the grid.
+    selectRow(displayedSelection ?? entries[0]!.session.id);
+  }, [boardMode, deferredQuery, displayedSelection, entries, isMobile, query, searchFocusPending, selectRow]);
+
+  const threadRowOf = useCallback((sessionId: string | null) =>
+    sessionId === null ? undefined : entries.find((entry) => entry.session.id === sessionId), [entries]);
+  /** Every visible ancestor of a row, nearest first. */
+  const threadAncestors = useCallback((sessionId: string | null): string[] => {
+    const out: string[] = [];
+    let parentId = threadRowOf(sessionId)?.thread.parentId ?? null;
+    while (parentId && !out.includes(parentId)) {
+      out.push(parentId);
+      parentId = threadRowOf(parentId)?.thread.parentId ?? null;
+    }
+    return out;
+  }, [threadRowOf]);
+  const saveCollapsedThreads = useCallback((next: Set<string>) => {
+    saveKeySet(INBOX_COLLAPSED_THREADS_KEY, next, instanceScope);
+    setCollapsedThreads(next);
+  }, [instanceScope]);
+  /** Collapse the named parents; a selection inside one of them moves to its nearest collapsed ancestor. */
+  const collapseThreads = useCallback((parentIds: readonly string[]) => {
+    const next = new Set(collapsedThreads);
+    for (const parentId of parentIds) next.add(parentId);
+    const ancestors = threadAncestors(displayedSelection);
+    const landing = ancestors.filter((id) => next.has(id)).at(-1);
+    saveCollapsedThreads(next);
+    if (landing) selectRow(landing);
+  }, [collapsedThreads, displayedSelection, saveCollapsedThreads, selectRow, threadAncestors]);
+  const expandThreads = useCallback((parentIds: readonly string[]) => {
+    const next = new Set(collapsedThreads);
+    for (const parentId of parentIds) next.delete(parentId);
+    saveCollapsedThreads(next);
+  }, [collapsedThreads, saveCollapsedThreads]);
+  /** t, the chevron, and the family chip: toggle a parent's thread; from a child, close its thread
+   * and land on the parent (#896). */
+  const toggleThread = useCallback((sessionId: string) => {
+    const row = threadRowOf(sessionId);
+    if (!row) return;
+    if (row.thread.children) {
+      if (row.thread.collapsed) expandThreads([sessionId]);
+      else collapseThreads([sessionId]);
+      return;
+    }
+    if (row.thread.parentId) {
+      collapseThreads([row.thread.parentId]);
+      selectRow(row.thread.parentId);
+    }
+  }, [collapseThreads, expandThreads, selectRow, threadRowOf]);
+  const toggleAllThreads = useCallback(() => {
+    // EVERY parent in the split, not only the rendered ones: an inner parent hidden inside a
+    // collapsed thread must expand with the rest, or "expand all" leaves it shut.
+    const present = new Set(liveEntries.map((entry) => entry.session.id));
+    const parents = [...new Set(liveEntries
+      .map((entry) => entry.session.parentSessionId)
+      .filter((parentId): parentId is string => Boolean(parentId) && present.has(parentId!)))];
+    if (parents.length === 0) return;
+    if (parents.some((id) => collapsedThreads.has(id))) expandThreads(parents);
+    else collapseThreads(parents);
+  }, [collapseThreads, collapsedThreads, expandThreads, liveEntries]);
+  const goToParent = useCallback(() => {
+    const parentId = threadRowOf(displayedSelection)?.thread.parentId;
+    if (parentId) selectRow(parentId);
+  }, [displayedSelection, selectRow, threadRowOf]);
+  const expandThread = useCallback(() => {
+    const row = threadRowOf(displayedSelection);
+    if (!row?.thread.children) return;
+    if (row.thread.collapsed) { expandThreads([row.session.id]); return; }
+    const firstChild = entries.find((entry) => entry.thread.parentId === row.session.id);
+    if (firstChild) selectRow(firstChild.session.id);
+  }, [displayedSelection, entries, expandThreads, selectRow, threadRowOf]);
+  const collapseThread = useCallback(() => {
+    const row = threadRowOf(displayedSelection);
+    if (!row) return;
+    if (row.thread.children && !row.thread.collapsed) collapseThreads([row.session.id]);
+    else if (row.thread.parentId) selectRow(row.thread.parentId);
+  }, [collapseThreads, displayedSelection, selectRow, threadRowOf]);
 
   const togglePin = useCallback((sessionId: string) => {
     clearHeldOrder();
@@ -894,15 +1025,32 @@ export function InboxView({
     }
   }, [activeSplit?.key, api, beginBusy, confirm, displayedIds, endBusy, loadSession, onCollapse, onExpand, selectSession, sessions, showToast, showUndo, stopBeforeArchiveSupported]);
 
+  /** Open the session with one exact request focused; the session's own request card takes it. */
+  const openRequest = useCallback((targetSession: SessionView, requestId: string) => {
+    selectSession(targetSession.id, activeSplit?.key ?? null);
+    navigate({ name: "session", id: targetSession.id, attention: { eventEpoch: targetSession.eventEpoch ?? 0, requestId } });
+  }, [activeSplit?.key, navigate, selectSession]);
+
+  const openTopRequest = useCallback((sessionId: string) => {
+    const targetSession = sessions.get(sessionId);
+    if (!targetSession) return;
+    const top = prioritizedPendingRequests(targetSession.pendingApproval)[0];
+    if (top) openRequest(targetSession, top.requestId);
+    else expand(sessionId);
+  }, [expand, openRequest, sessions]);
+
+  // One-key triage acts on the TOP-PRIORITY request, not the first to arrive (#896): a session
+  // with several pending requests used to be untouchable from the keyboard.
   const decide = useCallback(async (sessionId: string, intent: InboxApprovalIntent) => {
     const targetSession = sessions.get(sessionId);
-    if (!targetSession?.pendingApproval) return;
+    const approval = targetSession ? prioritizedPendingRequests(targetSession.pendingApproval)[0] : undefined;
+    if (!targetSession || !approval) return;
     if (!beginBusy(targetSession.id)) return;
-    const approval = targetSession.pendingApproval;
     try {
       if (approval.kind === "question") {
         if (intent === "approve") {
-          showToast("Choose answers in the preview before submitting this request.");
+          // A question is answered in the session, where the transcript gives it its context.
+          openRequest(targetSession, approval.requestId);
           return;
         }
         const updated = await api.answerQuestion(targetSession.id, { requestId: approval.requestId, answers: {}, action: "dismiss" });
@@ -919,7 +1067,7 @@ export function InboxView({
     } finally {
       endBusy(targetSession.id);
     }
-  }, [api, beginBusy, endBusy, loadSession, sessions, showToast]);
+  }, [api, beginBusy, endBusy, loadSession, openRequest, sessions, showToast]);
 
   const hopExpanded = useCallback((direction: "next" | "previous") => {
     if (!expandedSessionId) return;
@@ -934,6 +1082,12 @@ export function InboxView({
     next: () => moveSelection("next"),
     previous: () => moveSelection("previous"),
     expand: () => { if (displayedSelection) expand(displayedSelection); },
+    openTopRequest: () => { if (displayedSelection) openTopRequest(displayedSelection); },
+    toggleThread: () => { if (displayedSelection) toggleThread(displayedSelection); },
+    toggleAllThreads,
+    goToParent,
+    expandThread,
+    collapseThread,
     fork: () => {
       if (!previewForkControls) {
         showToast("Fork availability is still loading.", { tone: "error" });
@@ -966,7 +1120,7 @@ export function InboxView({
       const scroll = viewRef.current?.querySelector<HTMLElement>(".detail-scroll");
       pageInboxPreview(scroll, "previous", previewNavigationRef.current?.beginProgrammaticScroll);
     },
-  }), [activeSplit?.key, archive, decide, displayedSelection, expand, moveSelection, previewForkControls, selectSplit, sessionRemindersSupported, setUnread, showToast, splits, togglePin]);
+  }), [activeSplit?.key, archive, collapseThread, decide, displayedSelection, expand, expandThread, goToParent, moveSelection, openTopRequest, previewForkControls, selectSplit, sessionRemindersSupported, setUnread, showToast, splits, toggleAllThreads, togglePin, toggleThread]);
   // Board mode has no row selection, so the list's j/k/a/d… vocabulary would act on an invisible
   // row; only the shared toolbar (tabs, search, toggle) stays keyboard-reachable there.
   useInboxKeys(!isMobile && !expanded && !boardMode, keyActions);
@@ -1135,6 +1289,13 @@ export function InboxView({
                 value={query}
                 onChange={(event) => changeQuery(event.target.value)}
                 onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey &&
+                      !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229 && !isMobile && !boardMode) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setSearchFocusPending(true);
+                    return;
+                  }
                   if (event.key !== "Escape") return;
                   event.preventDefault();
                   event.stopPropagation();
@@ -1150,6 +1311,7 @@ export function InboxView({
           <Board
             sessions={boardSessions}
             reminders={reminders}
+            stalledSessionIds={stalledSessionIds}
             searchActive={normalizedQuery.length > 0 || (activeSplit?.key ?? null) !== null || reminderMode === "snoozed"}
             onShowAll={() => {
               exitSearch();
@@ -1161,8 +1323,6 @@ export function InboxView({
           />
         ) : (
         <InboxList
-          onNavigate={navigate}
-          onSelectAttention={handleSelectAttention}
           ref={captureListRef}
           entries={entries}
           selectedSessionId={displayedSelection}
@@ -1215,6 +1375,7 @@ export function InboxView({
           onNewSession={() => onNewSession?.(activeNewSessionPreset)}
           onSelect={handleSelect}
           onExpand={expand}
+          onToggleThread={toggleThread}
           onScrollPosition={(scrollTop) => inboxScrollPositions.set(instanceScope, scrollTop)}
           onPointerTargetChange={handlePointerTargetChange}
           onPointerPressChange={handlePointerPressChange}
@@ -1300,7 +1461,7 @@ export function InboxView({
                 rightPanel={rightPanel}
                 onOpenTerminal={onOpenTerminal}
                 pinnedOpen={pinnedOpen}
-                focusComposer={focusComposerSessionId === surfaceSessionId}
+                composerFocusIntent={focusComposerSessionId === surfaceSessionId ? "reply" : undefined}
                 onComposerFocusConsumed={onComposerFocusConsumed}
                 onBack={onCollapse}
                 onExpand={() => expand(surfaceSessionId)}
@@ -1343,6 +1504,7 @@ export function InboxView({
         <SessionContextMenu
           state={sessionMenu}
           sessionTitle={sessions.get(sessionMenu.sessionId)!.title}
+          pinned={pinnedSessions.has(sessionMenu.sessionId)}
           snoozeAvailable={sessionRemindersSupported}
           reminder={reminders.get(sessionMenu.sessionId)}
           onClose={() => setSessionMenu(null)}
@@ -1352,6 +1514,7 @@ export function InboxView({
             const restore = sessionMenu.restoreTarget;
             setRenameSession({ sessionId, returnFocusRef: { get current() { return restore(); } } });
           }}
+          onTogglePin={togglePin}
           onSnooze={(sessionId) => {
             const restore = sessionMenu.restoreTarget;
             setSnoozeReturnFocusRef({ get current() { return restore(); } });

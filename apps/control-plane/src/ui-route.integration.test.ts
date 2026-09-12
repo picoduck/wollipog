@@ -8,7 +8,12 @@ import { createRequire } from "node:module";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { PROTOCOL_VERSION, type ResourceScope, type RunnerMetadata } from "@wollipog/protocol";
+import {
+  PROTOCOL_VERSION,
+  WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
+  type ResourceScope,
+  type RunnerMetadata,
+} from "@wollipog/protocol";
 import { hashToken } from "./auth.js";
 import { ControlPlaneDb } from "./db.js";
 import { defaultLocalDeviceTokenPath, loadOrCreateLocalDeviceToken } from "./local-device-credential.js";
@@ -309,6 +314,77 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     },
     now: 1,
   });
+  const parentAgentToken = "ui-route-parent-agent-token";
+  const runnerUiToken = `wollipogr_${"u".repeat(43)}`;
+  seed.registerRunner({
+    runnerId: "runner-ui-route",
+    hostname: "integration-host",
+    os: "linux",
+    version: "integration",
+    workspaces: [{ id: "workspace-1", name: "Workspace", path: "/workspace" }],
+    agents: [{
+      id: "agent-1",
+      name: "Agent",
+      command: "agent",
+      args: [],
+      env: {},
+      driver: "claude-code",
+      context: { kind: "native" },
+    }],
+  }, Date.now(), PROTOCOL_VERSION);
+  seed.issueRunnerCredential({
+    credentialId: "rcred_22222222222222222222222222222222",
+    runnerId: "runner-ui-route",
+    organizationId: identity.organizationId,
+    ownerKind: "organization",
+    ownerId: identity.organizationId,
+    label: "UI route runner fixture",
+    tokenHash: hashToken(runnerUiToken),
+    createdByUserId: identity.userId,
+    now: Date.now(),
+    expiresAt: Date.now() + 60_000,
+  });
+  assert.deepEqual(seed.setMachineRunnerCapacity("runner-ui-route", 20, 0, Date.now()), {
+    ok: true,
+    configuration: { configuredUnits: 20, revision: 1 },
+  });
+  const inferredParentLocation = seed.findProjectLocation("runner-ui-route", "workspace-1");
+  assert.ok(inferredParentLocation);
+  const parentProject = seed.getProject(inferredParentLocation.projectId);
+  assert.ok(parentProject);
+  const parentLocation = inferredParentLocation;
+  seed.createSession({
+    id: "session-agent-parent",
+    runnerId: "runner-ui-route",
+    workspaceId: "workspace-1",
+    projectId: parentProject.id,
+    projectLocationId: parentLocation.id,
+    agentId: "agent-1",
+    title: "Agent Parent",
+    useWorktree: false,
+    driver: "claude-code",
+    config: {},
+    scope: {
+      organizationId: identity.organizationId,
+      owner: { kind: "organization", organizationId: identity.organizationId },
+    },
+    now: Date.now(),
+  });
+  seed.updateSessionStatus("session-agent-parent", "running", Date.now());
+  assert.equal(seed.setAgentControlCredential(
+    "session-agent-parent",
+    "runner-ui-route",
+    hashToken(parentAgentToken),
+    Date.now(),
+  ), true);
+  seed.upsertGovernancePolicy({
+    policyId: "allow-agent-child-route-fixture",
+    name: "Allow Agent Child Route Fixture",
+    effect: "allow",
+    priority: 100,
+    enabled: true,
+    scope: { toolName: "wollipog.create_session" },
+  }, Date.now());
   seed.createDevice({
     id: "dev_ui_route_operator",
     name: "UI Route Operator Device",
@@ -420,17 +496,35 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
       authorization: `Bearer ${ownerToken}`,
       "content-type": "application/json",
     },
-    body: JSON.stringify({ runnerId: "runner-ui-route", label: "UI route integration" }),
+    body: JSON.stringify({ runnerId: "runner-credential-route-fixture", label: "UI route integration" }),
   });
-  assert.equal(credentialResponse.status, 201);
+  assert.equal(credentialResponse.status, 201, await credentialResponse.clone().text());
   const credential = await credentialResponse.json() as { token: string };
   assert.match(credential.token, /^wollipogr_[A-Za-z0-9_-]{43}$/u);
+
+  const { socket: credentialRunner, inbox: credentialRunnerInbox } = await openSocketWithInbox(`${wsBase}/runner`);
+  sockets.add(credentialRunner);
+  credentialRunner.send(JSON.stringify({
+    type: "register",
+    token: credential.token,
+    protocolVersion: PROTOCOL_VERSION,
+    runner: {
+      runnerId: "runner-credential-route-fixture",
+      hostname: "credential-route-host",
+      os: "linux",
+      version: "integration",
+      workspaces: [],
+      agents: [],
+    },
+    sessionSnapshots: [],
+  }));
+  await credentialRunnerInbox.take((message) => message.type === "registered");
 
   const { socket: runner, inbox: runnerInbox } = await openSocketWithInbox(`${wsBase}/runner`);
   sockets.add(runner);
   runner.send(JSON.stringify({
     type: "register",
-    token: credential.token,
+    token: runnerUiToken,
     protocolVersion: PROTOCOL_VERSION,
     runner: {
       runnerId: "runner-ui-route",
@@ -452,9 +546,109 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
       sessionSnapshot("session-target"),
       sessionSnapshot("session-other"),
       { ...sessionSnapshot("session-history"), status: "stopped", seq: 3, historyEpoch: 9 },
+      { ...sessionSnapshot("session-agent-parent"), status: "running" },
     ],
   }));
-  await runnerInbox.take((message) => message.type === "registered");
+  const registeredRunner = await runnerInbox.take((message) => message.type === "registered");
+  assert.deepEqual(registeredRunner.runnerCapacity, { configuredUnits: 20, revision: 1 },
+    "reconnect receives the durable control-plane capacity before orphaned work recovers");
+
+  const ordinaryCapacityChange = await fetch(`${httpBase}/api/runners/runner-ui-route/capacity`, {
+    method: "PUT",
+    headers: {
+      authorization: `Bearer ${operatorToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ configuredUnits: 24, expectedRevision: 1 }),
+  });
+  assert.equal(ordinaryCapacityChange.status, 403, "an ordinary organization member cannot change capacity");
+  const ownerCapacityChange = await fetchWithBearer(
+    `${httpBase}/api/runners/runner-ui-route/capacity`,
+    ownerToken,
+    {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ configuredUnits: 24, expectedRevision: 1 }),
+    },
+  );
+  assert.equal(ownerCapacityChange.status, 200, await ownerCapacityChange.clone().text());
+  assert.deepEqual(await ownerCapacityChange.json(), {
+    capacity: { configuredUnits: 24, revision: 2 },
+  });
+  const liveCapacityChange = await runnerInbox.take((message) => message.type === "configure_runner_capacity");
+  assert.deepEqual(liveCapacityChange, {
+    type: "configure_runner_capacity",
+    configuredUnits: 24,
+    revision: 2,
+  }, "an online runner receives the authoritative revision without restarting");
+  runner.send(JSON.stringify({
+    type: "runner_capacity_status",
+    status: {
+      configuredUnits: 24,
+      revision: 2,
+      authority: "control_plane",
+      usedUnits: 12,
+      availableUnits: 12,
+      queuedSessions: 2,
+      blockers: [{
+        kind: "agent_quota",
+        description: "agent-1 is using 4 of 4 provider slots",
+        usedUnits: 4,
+        limitUnits: 4,
+        requiredUnits: 1,
+        waitingSessions: 2,
+        agentId: "agent-1",
+      }],
+    },
+  }));
+  const capacityView = await waitForValue(
+    async () => (await (await fetchWithBearer(`${httpBase}/api/runners`, ownerToken)).json() as {
+      runners: Array<{ runnerId: string; capacity?: { usedUnits?: number; blockers?: Array<{ kind: string }> } }>;
+    }).runners.find((candidate) => candidate.runnerId === "runner-ui-route")?.capacity,
+    (capacity) => capacity?.usedUnits === 12,
+    "the runner capacity report in the authenticated Machine view",
+  );
+  assert.equal(capacityView?.blockers?.[0]?.kind, "agent_quota");
+  runner.send(JSON.stringify({
+    type: "agent_control_credential",
+    sessionId: "session-agent-parent",
+    tokenHash: hashToken(parentAgentToken),
+  }));
+  const parentCredentialBound = await runnerInbox.take((message) =>
+    message.type === "agent_control_credential_registered" && message.sessionId === "session-agent-parent");
+  assert.equal(parentCredentialBound.accepted, true);
+
+  // Exercise the production auth and POST /api/sessions route together. In particular, an
+  // agent-authenticated omission must reach SessionsService unchanged so it can inherit from the
+  // credential's exact parent instead of being normalized to No Project by human ownership logic.
+  const agentChildResponse = await fetch(`${httpBase}/api/sessions`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${parentAgentToken}`,
+      [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: "session-agent-parent",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      runnerId: "runner-ui-route",
+      workspaceId: "workspace-1",
+      agentId: "agent-1",
+      useWorktree: false,
+    }),
+  });
+  const agentChild = await agentChildResponse.json() as {
+    id: string;
+    parentSessionId: string | null;
+    projectId: string | null;
+    projectLocationId: string | null;
+    error?: string;
+  };
+  assert.equal(agentChildResponse.status, 201, agentChild.error);
+  assert.equal(agentChild.parentSessionId, "session-agent-parent");
+  assert.equal(agentChild.projectId, parentProject.id);
+  assert.equal(agentChild.projectLocationId, parentLocation.id);
+  await runnerInbox.take((message) =>
+    message.type === "start_session" &&
+    (message.spec as { sessionId?: unknown } | undefined)?.sessionId === agentChild.id);
 
   const memberSearch = await fetch(`${httpBase}/api/search?q=session`, {
     headers: { authorization: `Bearer ${operatorToken}` },
@@ -708,7 +902,14 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   ]);
   assert.deepEqual(
     (snapshot.sessions as Array<{ id: string }>).map((session) => session.id).sort(),
-    [createdSessionId, "session-history", "session-other", "session-target"].sort(),
+    [
+      agentChild.id,
+      createdSessionId,
+      "session-agent-parent",
+      "session-history",
+      "session-other",
+      "session-target",
+    ].sort(),
   );
   const { socket: operatorUi, inbox: operatorUiInbox } = await openSocketWithInbox(
     authenticatedUiUrl(wsBase, operatorToken),
@@ -719,6 +920,78 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     "snapshot",
     "a paired device can authenticate the real /ui WebSocket route",
   );
+
+  const terminalMissingJobs = Array.from({ length: 33 }, (_, index) => ({
+    id: `route-missing-job-${String(index).padStart(3, "0")}`,
+    parentTurnId: `route-missing-turn-${String(index).padStart(3, "0")}`,
+    runnerId: "runner-ui-route",
+    workspaceId: "workspace-1",
+    context: { kind: "native" as const },
+    launchType: "agent" as const,
+    registeredAt: 1_000 + index,
+    terminalStatus: "completed" as const,
+    terminalObservedAt: 2_000 + index,
+    continuationRequired: true,
+    continuationId: `bgcont-route-${String(index).padStart(3, "0")}`,
+    continuationQueuedAt: 3_000 + index,
+    continuationSubmittedAt: 4_000 + index,
+    continuationAcceptedAt: 5_000 + index,
+    continuationMissingResultAt: 6_000 + index,
+  }));
+  runner.send(JSON.stringify({
+    type: "session_runtime_updated",
+    snapshot: {
+      ...sessionSnapshot("session-target"),
+      backgroundWorkTracking: "managed",
+      backgroundJobs: [
+        ...terminalMissingJobs,
+        {
+          ...terminalMissingJobs[0],
+          id: "route-inflight-job",
+          parentTurnId: "route-inflight-turn",
+          continuationId: "bgcont-route-inflight",
+          continuationMissingResultAt: undefined,
+        },
+      ],
+    },
+  }));
+  for (const inbox of [uiInbox, operatorUiInbox]) {
+    await inbox.take((message) => message.type === "session_upsert" &&
+      (message.session as { id?: string; backgroundDeliveries?: unknown[] } | undefined)?.id === "session-target" &&
+      (message.session as { backgroundDeliveries?: unknown[] } | undefined)?.backgroundDeliveries?.length === 32);
+  }
+
+  const boundedAcknowledgement = await ownerFetch(
+    "/api/sessions/session-target/background-deliveries/bgcont-route-000/acknowledge-missing-result",
+    { method: "POST" },
+  );
+  assert.equal(boundedAcknowledgement.status, 200, await boundedAcknowledgement.clone().text());
+  const boundedAcknowledgementSession = await boundedAcknowledgement.json() as {
+    backgroundDeliveries?: Array<{ continuationId?: string }>;
+  };
+  assert.equal(boundedAcknowledgementSession.backgroundDeliveries?.length, 32);
+  assert.equal(
+    boundedAcknowledgementSession.backgroundDeliveries?.some((delivery) =>
+      delivery.continuationId === "bgcont-route-000"),
+    false,
+    "a successful acknowledgement remains successful after it leaves the bounded projection",
+  );
+  for (const inbox of [uiInbox, operatorUiInbox]) {
+    await inbox.take((message) => message.type === "session_upsert" &&
+      (message.session as { id?: string } | undefined)?.id === "session-target");
+  }
+  assert.equal((await ownerFetch(
+    "/api/sessions/session-target/background-deliveries/bgcont-route-000/acknowledge-missing-result",
+    { method: "POST" },
+  )).status, 200, "repeat acknowledgement is idempotent even outside the bounded projection");
+  assert.equal((await ownerFetch(
+    "/api/sessions/session-target/background-deliveries/bgcont-route-inflight/acknowledge-missing-result",
+    { method: "POST" },
+  )).status, 409, "a plausibly in-flight continuation cannot be acknowledged");
+  assert.equal((await ownerFetch(
+    "/api/sessions/session-target/background-deliveries/bgcont-route-absent/acknowledge-missing-result",
+    { method: "POST" },
+  )).status, 404, "an unknown continuation remains indistinguishable from inaccessible history");
 
   const plainStopResponse = await ownerFetch("/api/sessions/session-other/stop", { method: "POST" });
   assert.equal(plainStopResponse.status, 200);

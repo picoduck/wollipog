@@ -475,6 +475,146 @@ test("steering resolution results validate and correlate before resolving recove
   assert.equal(db.steeringRecoveryAdmissionCount("sess-1"), 0);
 });
 
+test("Queue Again receipts retire only from exact canonical queue identity and dismiss locally", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  db.createSteeringAttempt({
+    requestId: "steer-queue-again-db", sessionId: "sess-1", submissionId: "submission-queue-again-db",
+    turnId: "turn-1", source: "direct", requestSha256: "6".repeat(64), text: "recover", now: 1,
+  });
+  db.markSteeringAttemptUncertain("steer-queue-again-db", 2);
+  assert.equal(db.stageSteeringResolution(
+    "sess-1", "submission-queue-again-db", "queue_again", "resolve-queue-again-db", 3,
+  ).kind, "staged");
+  assert.deepEqual(db.recordSteeringResolutionResult("runner-1", {
+    type: "resolve_steering_attempt_result", requestId: "resolve-queue-again-db", sessionId: "sess-1",
+    submissionId: "submission-queue-again-db", action: "queue_again", applied: true,
+    queuedPromptId: "queue-exact",
+  }, 4)?.resolution, { action: "queue_again", state: "applied", queuedPromptId: "queue-exact" });
+
+  const lateOriginalResult = db.recordSteeringResult("runner-1", {
+    type: "steer_session_result", requestId: "steer-queue-again-db", sessionId: "sess-1",
+    submissionId: "submission-queue-again-db", turnId: "turn-1",
+    disposition: "converted_to_queue", reason: "stale_turn", queuedPromptId: "queue-original-late",
+  }, 4);
+  assert.equal(lateOriginalResult?.queuedPromptId, "queue-original-late");
+  assert.deepEqual(lateOriginalResult?.resolution, {
+    action: "queue_again", state: "applied", queuedPromptId: "queue-exact",
+  }, "a late original receipt cannot overwrite the Queue Again delivery identity");
+
+  assert.equal(db.recordSteeringQueueSnapshot("sess-1", [], 5), true);
+  assert.equal(db.listSteeringAttempts("sess-1").length, 1,
+    "queue disappearance can mean cancellation and cannot retire the receipt");
+  assert.equal(db.retireQueuedAgainSteeringReceiptFromUserMessage("sess-1", "queue-other", 6), false);
+  assert.equal(db.listSteeringAttempts("sess-1").length, 1);
+  assert.equal(db.retireQueuedAgainSteeringReceiptFromUserMessage("sess-1", "queue-exact", 7), true);
+  assert.deepEqual(db.listSteeringAttempts("sess-1"), []);
+  assert.equal(db.retireQueuedAgainSteeringReceiptFromUserMessage("sess-1", "queue-exact", 8), false,
+    "retirement is idempotent");
+
+  const durable = db.findSteeringAttemptBySubmission("sess-1", "submission-queue-again-db")?.attempt;
+  assert.deepEqual(durable?.resolution, {
+    action: "queue_again", state: "applied",
+  }, "retirement hides the receipt and discards its no-longer-needed queue identity");
+});
+
+test("manual Queue Again receipt dismissal is durable without staging a runner command", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-queue-again-dismiss-"));
+  const path = join(root, "control-plane.db");
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(path);
+    db.registerRunner(meta(), 1);
+    db.createSession(newSession());
+    db.createSteeringAttempt({
+      requestId: "steer-dismiss-queue-again", sessionId: "sess-1",
+      submissionId: "submission-dismiss-queue-again", turnId: "turn-1", source: "direct",
+      requestSha256: "5".repeat(64), text: "recover", now: 2,
+    });
+    db.markSteeringAttemptUncertain("steer-dismiss-queue-again", 3);
+    db.stageSteeringResolution(
+      "sess-1", "submission-dismiss-queue-again", "queue_again", "resolve-dismiss-queue-again", 4,
+    );
+    db.recordSteeringResolutionResult("runner-1", {
+      type: "resolve_steering_attempt_result", requestId: "resolve-dismiss-queue-again",
+      sessionId: "sess-1", submissionId: "submission-dismiss-queue-again", action: "queue_again",
+      applied: true, queuedPromptId: "queue-still-live",
+    }, 5);
+
+    const dismissed = db.stageSteeringResolution(
+      "sess-1", "submission-dismiss-queue-again", "dismiss", "acknowledge-only", 6,
+    );
+    assert.equal(dismissed.kind, "staged");
+    assert.deepEqual(dismissed.attempt?.resolution, { action: "queue_again", state: "applied" });
+    assert.deepEqual(db.pendingSteeringResolutionMessages("runner-1"), []);
+    assert.deepEqual(db.listSteeringAttempts("sess-1"), []);
+    db.close();
+
+    db = ControlPlaneDb.open(path);
+    assert.deepEqual(db.listSteeringAttempts("sess-1"), [], "dismissal survives a database restart");
+    assert.deepEqual(db.findSteeringAttemptBySubmission(
+      "sess-1", "submission-dismiss-queue-again",
+    )?.attempt.resolution, { action: "queue_again", state: "applied" });
+  } finally {
+    db?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy Queue Again receipt identities migrate safely, including malformed receipt JSON", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-queue-again-migration-"));
+  const path = join(root, "control-plane.db");
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(path);
+    db.registerRunner(meta(), 1);
+    db.createSession(newSession());
+    for (const [suffix, now] of [["valid", 2], ["malformed", 10]] as const) {
+      db.createSteeringAttempt({
+        requestId: `steer-migration-${suffix}`, sessionId: "sess-1",
+        submissionId: `submission-migration-${suffix}`, turnId: `turn-${suffix}`,
+        source: "direct", requestSha256: (suffix === "valid" ? "1" : "0").repeat(64),
+        text: "recover", now,
+      });
+      db.markSteeringAttemptUncertain(`steer-migration-${suffix}`, now + 1);
+      db.stageSteeringResolution(
+        "sess-1", `submission-migration-${suffix}`, "queue_again", `resolve-migration-${suffix}`, now + 2,
+      );
+    }
+    db.recordSteeringResolutionResult("runner-1", {
+      type: "resolve_steering_attempt_result", requestId: "resolve-migration-valid",
+      sessionId: "sess-1", submissionId: "submission-migration-valid",
+      action: "queue_again", applied: true, queuedPromptId: "queue-migrated",
+    }, 5);
+    db.raw().prepare(
+      `UPDATE session_steering_attempts
+       SET resolution_receipt_json='not json',resolved_at=13
+       WHERE request_id='steer-migration-malformed'`,
+    ).run();
+    db.close();
+    db = undefined;
+
+    const legacy = new DatabaseSync(path);
+    legacy.exec("ALTER TABLE session_steering_attempts DROP COLUMN resolution_queued_prompt_id");
+    legacy.close();
+
+    assert.doesNotThrow(() => { db = ControlPlaneDb.open(path); },
+      "malformed legacy JSON must not make database startup fail");
+    assert.equal(db!.findSteeringAttemptBySubmission(
+      "sess-1", "submission-migration-valid",
+    )?.attempt.resolution?.queuedPromptId, "queue-migrated");
+    assert.equal(db!.retireQueuedAgainSteeringReceiptFromUserMessage(
+      "sess-1", "queue-migrated", 20,
+    ), true, "the backfilled identity remains eligible for exact retirement");
+    assert.deepEqual(db!.findSteeringAttemptBySubmission(
+      "sess-1", "submission-migration-malformed",
+    )?.attempt.resolution, { action: "queue_again", state: "applied" });
+  } finally {
+    db?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("rejected steering receipts can be durably acknowledged without a runner round trip", () => {
   const db = withRunner();
   db.createSession(newSession());
@@ -1172,6 +1312,93 @@ test("runner runtime storage/admission diagnostics round-trip only for v32+", ()
   assert.equal(db.getRunner("runner-1")?.runtime, undefined, "an older runner cannot advertise v32 diagnostics");
 });
 
+test("Machine Runner Capacity is durable, conflict-safe, and re-established after reconnect", () => {
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-runner-capacity-"));
+  const location = join(temp, "control-plane.sqlite");
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(location);
+    db.registerRunner(meta({ runtime: {
+      dataDir: "C:/wollipog",
+      worktreeRoot: "C:/wollipog/worktrees",
+      maxConcurrentSessions: 16,
+    } }), 100, PROTOCOL_VERSION);
+    db.setMachineDisplayName("runner-1", "Build Machine");
+    const first = db.setMachineRunnerCapacity("runner-1", 24, 0, 110);
+    assert.deepEqual(first, { ok: true, configuration: { configuredUnits: 24, revision: 1 } });
+    assert.deepEqual(db.setMachineRunnerCapacity("runner-1", 32, 0, 111), {
+      ok: false,
+      configuration: { configuredUnits: 24, revision: 1 },
+    }, "a concurrent stale writer receives the current authoritative revision");
+    assert.equal(db.updateRunnerCapacityStatus("runner-1", {
+      configuredUnits: 24,
+      revision: 1,
+      authority: "control_plane",
+      usedUnits: 20,
+      availableUnits: 4,
+      queuedSessions: 2,
+      blockers: [{
+        kind: "agent_quota",
+        description: "claude is using 4 of 4 provider slots",
+        usedUnits: 4,
+        limitUnits: 4,
+        requiredUnits: 1,
+        waitingSessions: 2,
+        agentId: "claude",
+      }],
+    }, 120), true);
+    assert.equal(db.getRunner("runner-1")?.capacity?.usedUnits, 20);
+    assert.equal(db.getRunner("runner-1")?.capacity?.blockers[0]?.kind, "agent_quota");
+    assert.equal(db.updateRunnerCapacityStatus("runner-1", {
+      configuredUnits: 24,
+      revision: 1,
+      authority: "control_plane",
+      usedUnits: 20,
+      availableUnits: 4,
+      queuedSessions: 1,
+      blockers: [{
+        kind: "not-a-real-limit" as never,
+        description: "untrusted",
+        usedUnits: 1,
+        limitUnits: 1,
+        requiredUnits: 1,
+        waitingSessions: 1,
+      }],
+    }, 121), false, "runner-authored diagnostics accept only the closed blocker vocabulary");
+
+    db.setMachineDisplayName("runner-1", "");
+    assert.deepEqual(db.machineRunnerCapacityConfiguration("runner-1"), { configuredUnits: 24, revision: 1 },
+      "clearing an unrelated Machine name cannot erase its capacity setting");
+    db.close();
+    db = undefined;
+
+    db = ControlPlaneDb.open(location);
+    assert.deepEqual(db.machineRunnerCapacityConfiguration("runner-1"), { configuredUnits: 24, revision: 1 });
+    db.registerRunner(meta({ runtime: {
+      dataDir: "C:/wollipog",
+      worktreeRoot: "C:/wollipog/worktrees",
+      maxConcurrentSessions: 16,
+    } }), 200, PROTOCOL_VERSION);
+    assert.deepEqual(db.getRunner("runner-1")?.capacity, {
+      configuredUnits: 24,
+      revision: 1,
+      authority: "control_plane",
+    }, "re-registration keeps CP authority while waiting for a fresh live lease report");
+    assert.equal(db.updateRunnerCapacityStatus("runner-1", {
+      configuredUnits: 16,
+      revision: 0,
+      authority: "runner_local",
+      usedUnits: 0,
+      availableUnits: 16,
+      queuedSessions: 0,
+      blockers: [],
+    }, 201), false, "a stale runner-local report cannot override the durable control-plane setting");
+  } finally {
+    db?.close();
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test("Codex app-server compatibility diagnostics round-trip and old rows may omit them", () => {
   const db = ControlPlaneDb.open(":memory:");
   db.registerRunner(meta({
@@ -1407,7 +1634,7 @@ test("getAgentLaunch returns command/args/env/driver/context/version", () => {
   assert.equal(db.getAgentLaunch("nope", "acp-agent"), null);
 });
 
-test("Direct WSL safe-launcher attestation round-trips only from a v124 runner", () => {
+test("Direct WSL safe-launcher attestation round-trips only from a v124+ runner", () => {
   const db = ControlPlaneDb.open(":memory:");
   const safe = {
     ...claudeAgent(),
@@ -2165,6 +2392,32 @@ test("updateSessionStatus updates status and derived column", () => {
   assert.equal(v.column, "done");
 });
 
+test("queued capacity reasons persist for discovery and clear on the next lifecycle state", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  db.updateSessionStatus("sess-1", "queued", 2_000);
+  db.setSessionCapacityWait("sess-1", {
+    kind: "runner_capacity",
+    description: "Runner Capacity is 16 of 16 units used; this session needs 2",
+    usedUnits: 16,
+    limitUnits: 16,
+    requiredUnits: 2,
+    agentId: "acp-agent",
+  });
+  assert.equal(db.getSession("sess-1")?.capacityWait?.requiredUnits, 2);
+  assert.equal(db.setSessionCapacityWait("sess-1", {
+    kind: "not-a-real-limit" as never,
+    description: "untrusted",
+    usedUnits: 1,
+    limitUnits: 1,
+    requiredUnits: 1,
+  }), false);
+  assert.equal(db.getSession("sess-1")?.capacityWait?.requiredUnits, 2,
+    "an invalid runner frame cannot overwrite the last valid queue reason");
+  db.updateSessionStatus("sess-1", "starting", 2_001);
+  assert.equal(db.getSession("sess-1")?.capacityWait, undefined);
+});
+
 test("updateSessionStatus clears pending approval when leaving input_required", () => {
   const db = withRunner();
   db.createSession(newSession());
@@ -2641,8 +2894,29 @@ test("managed background delivery stages survive reconnect, hydration, acknowled
     }), 2_100);
     assert.equal(
       db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.watchdogState,
+      undefined,
+      "provider acceptance alone remains plausibly in flight",
+    );
+
+    db.updateSessionFromSnapshot("background-delivery", snapshot({
+      id: "background-delivery",
+      driver: "claude_code",
+      backgroundJobs: [{
+        ...baseJob,
+        continuationId: "bgcont-1",
+        continuationQueuedAt: 1_200,
+        continuationSubmittedAt: 1_300,
+        continuationAcceptedAt: 1_400,
+        continuationMissingResultAt: 1_450,
+      }],
+    }), 2_150);
+    assert.equal(
+      db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.watchdogState,
       "accepted_without_result",
     );
+    assert.equal(db.acknowledgeBackgroundMissingResult("background-delivery", "bgcont-1", 1_475), true);
+    assert.equal(db.acknowledgeBackgroundMissingResult("background-delivery", "bgcont-1", 1_476), false);
+    assert.equal(db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.watchdogState, undefined);
 
     db.updateSessionFromSnapshot("background-delivery", snapshot({
       id: "background-delivery",
@@ -2668,6 +2942,8 @@ test("managed background delivery stages survive reconnect, hydration, acknowled
       parentTurnId: "turn-1",
     }, 1_500);
     const projected = db.getSession("background-delivery")?.backgroundDeliveries?.[0];
+    assert.equal(projected?.missingResultAt, 1_450, "late proof preserves the missing-result audit boundary");
+    assert.equal(projected?.missingResultAcknowledgedAt, 1_475);
     assert.equal(projected?.transcriptProjectedAt, 1_500);
     assert.equal(projected?.notificationQueuedAt, 1_500);
     assert.equal(projected?.watchdogState, "dashboard_observation_pending");
@@ -2735,6 +3011,7 @@ test("managed background delivery stages survive reconnect, hydration, acknowled
         continuationRequired: true,
         continuationId: "bgcont-promote",
         continuationAcceptedAt: 30,
+        continuationMissingResultAt: 31,
       }],
     }), 2_360);
     assert.equal(
@@ -2764,6 +3041,7 @@ test("managed background delivery stages survive reconnect, hydration, acknowled
         id: "job-stopped",
         continuationId: "bgcont-stopped",
         continuationAcceptedAt: 40,
+        continuationMissingResultAt: 41,
       }],
     }), "runner-1", 2_380);
     assert.equal(
@@ -2797,6 +3075,8 @@ test("managed background delivery stages survive reconnect, hydration, acknowled
 
     db = ControlPlaneDb.open(dbPath);
     assert.equal(db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.dashboardObservedAt, 1_600);
+    assert.equal(db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.missingResultAcknowledgedAt, 1_475,
+      "missing-result acknowledgement survives a control-plane restart");
     assert.equal(db.getSession("background-delivery")?.backgroundJobs?.[0]?.assistantResultPersistedAt, 1_500,
       "job inventory survives a control-plane restart with its delivery timestamp");
 
@@ -2881,10 +3161,58 @@ test("managed background job views are bounded, prioritize active work, and omit
     "id", "parentTurnId", "launchType", "registeredAt", "lastObservedAt", "sourcePresent",
     "terminalStatus", "terminalObservedAt", "continuationRequired", "continuationId",
     "continuationQueuedAt", "continuationSubmittedAt", "continuationAcceptedAt",
-    "assistantResultPersistedAt",
+    "continuationMissingResultAt", "assistantResultPersistedAt",
   ]);
   assert.ok(view.every((job) => Object.keys(job).every((key) => safeKeys.has(key))),
     "the dashboard projection contains only its explicit privacy-safe allowlist");
+});
+
+test("multiple terminal missing continuations remain individually resolvable", () => {
+  const db = withRunner();
+  const job = (id: string, continuationId: string, missingAt: number) => ({
+    id,
+    parentTurnId: "shared-parent",
+    runnerId: "runner-1",
+    workspaceId: null,
+    launchType: "agent" as const,
+    registeredAt: missingAt - 30,
+    terminalStatus: "completed" as const,
+    terminalObservedAt: missingAt - 20,
+    continuationRequired: true,
+    continuationId,
+    continuationQueuedAt: missingAt - 10,
+    continuationSubmittedAt: missingAt - 5,
+    continuationAcceptedAt: missingAt - 2,
+    continuationMissingResultAt: missingAt,
+  });
+  db.createSessionFromSnapshot(snapshot({
+    id: "background-multiple-missing",
+    driver: "claude_code",
+    backgroundJobs: [job("job-a", "bgcont-a", 100), job("job-b", "bgcont-b", 200)],
+  }), "runner-1", 300);
+
+  assert.deepEqual(
+    db.getSession("background-multiple-missing")?.backgroundDeliveries?.map((delivery) =>
+      [delivery.continuationId, delivery.watchdogState]).sort(),
+    [["bgcont-a", "accepted_without_result"], ["bgcont-b", "accepted_without_result"]],
+  );
+  assert.equal(db.acknowledgeBackgroundMissingResult("background-multiple-missing", "bgcont-a", 400), true);
+  assert.deepEqual(
+    db.getSession("background-multiple-missing")?.backgroundDeliveries?.map((delivery) =>
+      [delivery.continuationId, delivery.watchdogState, delivery.missingResultAcknowledgedAt]).sort(),
+    [["bgcont-a", undefined, 400], ["bgcont-b", "accepted_without_result", undefined]],
+  );
+  db.appendEvent("background-multiple-missing", {
+    kind: "background_continuation_delivered",
+    continuationId: "bgcont-b",
+    parentTurnId: "shared-parent",
+  }, 500);
+  assert.equal(
+    db.getSession("background-multiple-missing")?.backgroundDeliveries?.find((delivery) =>
+      delivery.continuationId === "bgcont-b")?.watchdogState,
+    "dashboard_observation_pending",
+    "a late valid proof independently clears the missing-result watchdog",
+  );
 });
 
 test("background push receipts are per-endpoint, retryable, capability-authenticated, and restart durable", () => {
@@ -4794,6 +5122,39 @@ test("governance audit is query-bounded, retention-bounded, and survives session
   assert.deepEqual(db.listGovernanceAudit("sess-1", 2), []);
 });
 
+test("governance audit cursor pages tied timestamps without crossing sessions", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  db.createSession(newSession({ id: "sess-2" }));
+  const append = (sessionId: string, requestId: string, timestamp: number) => db.appendGovernanceAudit({
+    requestId,
+    approvalKind: "policy_hook",
+    stage: "resolution",
+    outcome: "denied",
+    actor: { kind: "human", id: "device-1" },
+    scope: { sessionId, runnerId: "runner-1", workspaceId: "ws-1" },
+    timestamp,
+  });
+  const first = append("sess-1", "first", 1_000);
+  const second = append("sess-1", "second", 1_000);
+  const third = append("sess-1", "third", 1_000);
+  const foreign = append("sess-2", "foreign", 1_000);
+
+  assert.deepEqual(db.governanceAuditPage("sess-1", 2), {
+    entries: [second, third],
+    nextBefore: second.auditId,
+    hasMore: true,
+  });
+  assert.deepEqual(db.governanceAuditPage("sess-1", 2, second.auditId), {
+    entries: [first],
+    hasMore: false,
+  });
+  assert.equal(db.governanceAuditPage("sess-1", 2, foreign.auditId), null);
+  assert.deepEqual(db.listGovernanceAudit("sess-1", 2), [second, third], "legacy newest-N callers are unchanged");
+  assert.equal(db.policyHookDecisionAudit("sess-1", "second")?.auditId, second.auditId);
+  assert.equal(db.policyHookDecisionAudit("sess-1", "foreign"), null, "decision lookup is session-scoped");
+});
+
 test("governance policies persist ordered selectors/conditions and support update/delete", () => {
   const db = withRunner();
   const first = db.upsertGovernancePolicy({
@@ -5230,6 +5591,27 @@ test("a provider-reported cost is recorded unchanged while cache buckets still d
   assert.equal(usage.totals.cacheCreationTokens, 2_000);
   assert.equal(usage.totals.cacheSavingsUsd, 0.045);
   assert.equal(db.getSession("sess-1")!.costUsd, 0.5);
+});
+
+test("session views carry only caught-up usage cost provenance", () => {
+  const db = withRunner();
+  db.createSession(newSession({ driver: "claude-code", config: { model: "claude-fable-5-1" } }));
+  db.appendEvent("sess-1", {
+    kind: "token_usage", inputTokens: 100, outputTokens: 10, costUsd: 0,
+  }, 3_600_100, { accrueUsage: true });
+
+  assert.equal(db.getSession("sess-1")!.costSource, "providerReported",
+    "an explicit free provider record reaches the first session projection");
+
+  db.raw().prepare("UPDATE sessions SET input_tokens=1000 WHERE id='sess-1'").run();
+  assert.equal(db.getSession("sess-1")!.costSource, undefined,
+    "provenance is withheld while newer runner counters are not in the ledger");
+
+  db.createSession(newSession({ id: "unpriced", driver: "claude-code", config: { model: "unknown-model" } }));
+  db.appendEvent("unpriced", {
+    kind: "token_usage", inputTokens: 25, outputTokens: 5,
+  }, 3_600_200, { accrueUsage: true });
+  assert.equal(db.getSession("unpriced")!.costSource, "unpriced");
 });
 
 test("an unpriceable model counts its tokens, reports unpriced, and mixed provenance resolves to the weakest", () => {

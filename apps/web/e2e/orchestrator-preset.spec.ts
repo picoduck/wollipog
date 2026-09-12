@@ -1,6 +1,19 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
 
 test.use({ video: "on" });
+
+/**
+ * A Permission Preset card, scoped to its own radiogroup.
+ *
+ * Scoped because the dialog has three radiogroups — Permission Preset, Harness and Mode — and a
+ * bare `getByRole("radio")` matches across all of them. The name is anchored at the start because a
+ * ChoiceCard's accessible name is its title followed by its description, and both preset cards
+ * mention "Orchestrator": the saved-default card's name begins "Saved Default — ".
+ */
+function presetCard(dialog: Locator, name: RegExp): Locator {
+  return dialog.getByRole("radiogroup", { name: "Permission Preset" }).getByRole("radio", { name });
+}
+
 
 test.beforeEach(async ({ page }) => {
   await page.goto("/command-inbox-projects-e2e.html");
@@ -23,7 +36,9 @@ for (const theme of ["light", "dark"] as const) {
       await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
       await page.getByRole("menuitem", { name: "New Session Here" }).click();
       const dialog = page.getByRole("dialog", { name: "New Session" });
-      await expect(dialog.getByRole("button", { name: "Permission Preset: Saved Default — Orchestrator" })).toBeVisible();
+      // #832 moved Permission Preset from a popover Select to always-visible ChoiceCards, so the
+      // saved default now STATES itself on a card instead of inside a closed trigger's name.
+      await expect(presetCard(dialog, /^Saved Default — Orchestrator/)).toBeVisible();
       await dialog.getByRole("radio", { name: /^Native TUI/ }).click();
       await expect(dialog.getByText(/Usage Accounting: Unavailable/)).toBeVisible();
       await expect(dialog.getByText(/Native TUI spending and tool calls are not included/)).toBeVisible();
@@ -46,13 +61,16 @@ for (const theme of ["light", "dark"] as const) {
       await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
       await page.getByRole("menuitem", { name: "New Session Here" }).click();
       const dialog = page.getByRole("dialog", { name: "New Session" });
-      const preset = dialog.getByRole("button", { name: /^Permission Preset:/ });
-      await expect(preset).toBeVisible();
+      const orchestratorCard = presetCard(dialog, /^Orchestrator/);
+      await expect(orchestratorCard).toBeVisible();
       await expect(dialog.getByText("Conductor-Led Work", { exact: true })).toHaveCount(0);
-      await preset.scrollIntoViewIfNeeded();
+      await orchestratorCard.scrollIntoViewIfNeeded();
       await page.screenshot({ path: testInfo.outputPath("preset-unselected.png") });
-      await preset.click();
-      await dialog.getByRole("option", { name: "Orchestrator", exact: true }).click();
+      // One click, no popup to open: that IS the fix for #832, whose defect was the second of two
+      // options being clipped inside the menu this used to have to open.
+      await expect(orchestratorCard).toHaveAttribute("aria-checked", "false");
+      await orchestratorCard.click();
+      await expect(orchestratorCard).toHaveAttribute("aria-checked", "true");
       const tui = dialog.getByRole("radio", { name: /^Native TUI/ });
       await expect(tui).toBeEnabled();
       if (surface === "native_tui") await tui.click();

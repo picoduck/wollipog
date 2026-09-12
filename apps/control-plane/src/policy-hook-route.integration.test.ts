@@ -15,13 +15,14 @@ import {
   LEGACY_POLICY_HOOK_POLL_CAPABILITY_HEADER,
   LEGACY_POLICY_HOOK_SESSION_HEADER,
   POLICY_HOOK_POLL_CAPABILITY,
-  PROTOCOL_VERSION,
+  RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_POLICY_HOOK_POLL_CAPABILITY_HEADER,
   WOLLIPOG_POLICY_HOOK_SESSION_HEADER,
 } from "@wollipog/protocol";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const RUNNER_ID = "runner-hook-route";
+const CURRENT_RUNNER_ID = "runner-hook-route-current";
 const WORKSPACE_ID = "workspace-hook-route";
 const HOOK_TOKEN = "mamh_exact_session_secret";
 
@@ -70,7 +71,15 @@ function seed(database: string): void {
       version: "test",
       agents: [],
       workspaces: [{ id: WORKSPACE_ID, name: "Hook Repo", path: "C:/hook-repo" }],
-    }, 1, PROTOCOL_VERSION);
+    }, 1, RUNNER_CAPABILITY_MIN_PROTOCOL.nativePolicyHookEvents - 1);
+    db.registerRunner({
+      runnerId: CURRENT_RUNNER_ID,
+      hostname: "current-hook-host",
+      os: "windows",
+      version: "test",
+      agents: [],
+      workspaces: [{ id: WORKSPACE_ID, name: "Hook Repo", path: "C:/hook-repo" }],
+    }, 1, RUNNER_CAPABILITY_MIN_PROTOCOL.nativePolicyHookEvents);
     const create = (id: string, driver: "claude-code" | "codex", status: "running" | "idle") => {
       db.createSession({
         id,
@@ -89,6 +98,18 @@ function seed(database: string): void {
     create("session-other", "claude-code", "running");
     create("session-idle", "claude-code", "idle");
     create("session-codex", "codex", "running");
+    db.createSession({
+      id: "session-current-offline",
+      runnerId: CURRENT_RUNNER_ID,
+      workspaceId: WORKSPACE_ID,
+      agentId: null,
+      title: "session-current-offline",
+      useWorktree: false,
+      driver: "claude-code",
+      config: {},
+      now: 2,
+    });
+    db.updateSessionStatus("session-current-offline", "running", 3);
     assert.equal(
       db.setPolicyHookCredential("session-exact", RUNNER_ID, hashToken(HOOK_TOKEN), 4),
       true,
@@ -96,6 +117,7 @@ function seed(database: string): void {
     db.setPolicyHookCredential("session-other", RUNNER_ID, hashToken("mamh_other"), 4);
     db.setPolicyHookCredential("session-idle", RUNNER_ID, hashToken(HOOK_TOKEN), 4);
     db.setPolicyHookCredential("session-codex", RUNNER_ID, hashToken(HOOK_TOKEN), 4);
+    db.setPolicyHookCredential("session-current-offline", CURRENT_RUNNER_ID, hashToken(HOOK_TOKEN), 4);
     db.upsertGovernancePolicy({
       policyId: "ask-route-read",
       name: "Ask Route Read",
@@ -103,6 +125,14 @@ function seed(database: string): void {
       priority: 100,
       enabled: true,
       scope: { toolName: "Read" },
+    }, 5);
+    db.upsertGovernancePolicy({
+      policyId: "allow-route-current",
+      name: "Allow Route Current",
+      effect: "allow",
+      priority: 110,
+      enabled: true,
+      scope: { toolName: "CurrentRead" },
     }, 5);
   } finally {
     db.close();
@@ -190,6 +220,16 @@ test("real policy-hook route enforces the per-session credential, lifecycle, dri
     assert.equal(exactBody.decision, "ask");
     assert.ok(exactBody.approvalRequestId);
 
+    const currentOffline = await request("session-current-offline", HOOK_TOKEN, "session-current-offline", {
+      ...hookBody,
+      toolUseId: "tool-current-offline",
+      context: { ...hookBody.context, toolName: "CurrentRead" },
+    });
+    const currentOfflineBody = await currentOffline.json() as { decision?: string; reason?: string };
+    assert.equal(currentOffline.status, 200);
+    assert.equal(currentOfflineBody.decision, "deny", "a missing native receipt overrides the policy allow");
+    assert.match(currentOfflineBody.reason ?? "", /blocked fail-closed/);
+
     const compatibleRequest = (headers: Record<string, string>, toolUseId: string) => fetch(
       `http://127.0.0.1:${port}/api/sessions/session-exact/policy-hook`,
       {
@@ -230,6 +270,12 @@ test("real policy-hook route enforces the per-session credential, lifecycle, dri
     }, "tool-conflicting-dual-headers");
     assert.equal(conflictingDual.status, 401);
     const localToken = readFileSync(join(root, "local-device.token"), "utf8").trim();
+    const invalidAuditCursor = await fetch(
+      `http://127.0.0.1:${port}/api/sessions/session-exact/governance-audit?before=not-an-audit-id`,
+      { headers: { authorization: `Bearer ${localToken}` } },
+    );
+    assert.equal(invalidAuditCursor.status, 400);
+    assert.match((await invalidAuditCursor.json() as { error: string }).error, /cursor is invalid/);
     const approved = await fetch(`http://127.0.0.1:${port}/api/sessions/session-exact/approve`, {
       method: "POST",
       headers: {

@@ -43,6 +43,7 @@ export function PinnedSummary({
   richGitSupported,
   items,
   onOpenReview,
+  onOpenBackgroundWork,
   onOpenSourceLocation,
 }: {
   session: SessionView;
@@ -52,6 +53,7 @@ export function PinnedSummary({
   richGitSupported: boolean;
   items: TimelineItem[];
   onOpenReview: () => void;
+  onOpenBackgroundWork?: () => void;
   onOpenSourceLocation: (location: SourceLocation) => void;
 }) {
   const { navigate } = useStoreActions();
@@ -104,8 +106,7 @@ export function PinnedSummary({
 
   return (
     <aside className="pinned-summary" aria-label="Pinned Summary">
-      {/* Keep identity and freshness here. Live status belongs to the Session header so the same
-          facts are not duplicated in two nearby surfaces. */}
+      {/* Keep session identity and freshness together at the top of the pinned summary. */}
       <div className="ps-section">
         <div className="ps-section-head">
           <span>Session</span>
@@ -130,6 +131,7 @@ export function PinnedSummary({
           <div className="ps-row is-static">
             <BackgroundDeliveryBadge
               state={session.backgroundDeliveries.find((delivery) => delivery.watchdogState)!.watchdogState!}
+              onOpen={onOpenBackgroundWork}
             />
           </div>
         )}

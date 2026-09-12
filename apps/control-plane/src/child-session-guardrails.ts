@@ -1,8 +1,5 @@
 import type { ChildSessionDefaults, SessionConfig, SessionView } from "@wollipog/protocol";
 
-/** Finite fallback allowances for an agent-created session whose parent has no ceiling. */
-export const DEFAULT_CHILD_COST_BUDGET_USD = 5;
-export const DEFAULT_CHILD_MAX_TOOL_CALLS = 100;
 export const DEFAULT_CHILD_SPAWN_CAP = 4;
 
 export function childSessionDefaultsError(value: unknown): string | null {
@@ -18,8 +15,8 @@ export function childSessionDefaultsError(value: unknown): string | null {
   return null;
 }
 
-/** Divide remaining parent capacity over the remaining spawn slots. Explicit child limits may
- * narrow that allowance, but cannot bypass the parent's remaining ceiling. */
+/** Resolve caller and Project defaults, then divide a finite parent's remaining capacity over
+ * live spawn slots as the hard ceiling. Without any of those sources, the dimension is unlimited. */
 export function childSessionGuardrails(
   parent: Pick<SessionView, "costBudgetUsd" | "costUsd" | "maxToolCalls" | "toolCallCount">,
   requested: SessionConfig | undefined,
@@ -27,30 +24,44 @@ export function childSessionGuardrails(
   defaults?: ChildSessionDefaults | null,
 ): { config: SessionConfig } | { error: string } {
   if (!Number.isSafeInteger(remainingSlots) || remainingSlots < 1) {
-    return { error: "the parent session has reached its child spawn cap" };
-  }
-  const costRemaining = parent.costBudgetUsd == null
-    ? defaults?.costBudgetUsd ?? DEFAULT_CHILD_COST_BUDGET_USD
-    : (parent.costBudgetUsd - (parent.costUsd ?? 0)) / remainingSlots;
-  const toolsRemaining = parent.maxToolCalls == null
-    ? defaults?.maxToolCalls ?? DEFAULT_CHILD_MAX_TOOL_CALLS
-    : Math.floor((parent.maxToolCalls - (parent.toolCallCount ?? 0)) / remainingSlots);
-  if (!Number.isFinite(costRemaining) || costRemaining <= 0 ||
-      !Number.isFinite(toolsRemaining) || toolsRemaining < 1) {
-    return { error: "the parent session has insufficient remaining budget to create a child" };
+    return { error: "the parent session has 0 remaining live child slots; raise maxChildSessions before creating another child" };
   }
   for (const key of ["costBudgetUsd", "maxToolCalls"] as const) {
     const value = requested?.[key];
-    if (value !== undefined && (!Number.isFinite(value) || value <= 0 ||
+    if (value !== undefined && (!Number.isFinite(value) || value < 0 ||
         (key === "maxToolCalls" && !Number.isSafeInteger(value)))) {
-      return { error: `agent-created sessions require a positive ${key}` };
+      return { error: `agent-created sessions require a non-negative ${key}` };
     }
   }
+  const requestedCost = requested?.costBudgetUsd;
+  const requestedTools = requested?.maxToolCalls;
+  const costRemaining = parent.costBudgetUsd == null
+    ? null
+    : (parent.costBudgetUsd - (parent.costUsd ?? 0)) / remainingSlots;
+  const toolsRemaining = parent.maxToolCalls == null
+    ? null
+    : Math.floor((parent.maxToolCalls - (parent.toolCallCount ?? 0)) / remainingSlots);
+  if ((costRemaining != null && (!Number.isFinite(costRemaining) || costRemaining <= 0)) ||
+      (toolsRemaining != null && (!Number.isFinite(toolsRemaining) || toolsRemaining < 1))) {
+    return { error: "the parent session has insufficient remaining budget to create a child" };
+  }
+  if ((costRemaining != null && requestedCost === 0) || (toolsRemaining != null && requestedTools === 0)) {
+    return { error: "a child cannot clear a finite parent guardrail" };
+  }
+  const preferredCost = requestedCost === 0 ? undefined : requestedCost ?? defaults?.costBudgetUsd;
+  const preferredTools = requestedTools === 0 ? undefined : requestedTools ?? defaults?.maxToolCalls;
+  const costBudgetUsd = costRemaining == null
+    ? preferredCost
+    : Math.min(preferredCost ?? costRemaining, costRemaining);
+  const maxToolCalls = toolsRemaining == null
+    ? preferredTools
+    : Math.min(preferredTools ?? toolsRemaining, toolsRemaining);
+  const { costBudgetUsd: _requestedCost, maxToolCalls: _requestedTools, ...otherRequested } = requested ?? {};
   return {
     config: {
-      ...requested,
-      costBudgetUsd: Math.min(requested?.costBudgetUsd ?? costRemaining, costRemaining),
-      maxToolCalls: Math.min(requested?.maxToolCalls ?? toolsRemaining, toolsRemaining),
+      ...otherRequested,
+      ...(costBudgetUsd === undefined ? {} : { costBudgetUsd }),
+      ...(maxToolCalls === undefined ? {} : { maxToolCalls }),
     },
   };
 }

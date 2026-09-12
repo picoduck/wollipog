@@ -61,6 +61,33 @@ test("identity roles, teams, ownership, suspension, and audit fail closed", () =
   });
   const operatorPrincipal = principal(db, "operator-token");
   const viewerPrincipal = principal(db, "viewer-token");
+  const localPrincipal: HumanPrincipal = {
+    kind: "human",
+    actorId: local.userId,
+    userId: local.userId,
+    userName: local.userName,
+    organizationId: local.organizationId,
+    organizationName: local.organizationName,
+    role: "owner",
+    deviceId: "local",
+    localBootstrap: true,
+  };
+  assert.equal(db.canManageRunner(localPrincipal, "runner-1"), true, "organization owners administer Machines");
+  assert.equal(db.canManageRunner(operatorPrincipal, "runner-1"), false,
+    "ordinary members cannot administer an organization-owned Machine");
+  assert.equal(db.setResourceScope({
+    resource: "runner", resourceId: "runner-1", scope: {
+      organizationId: local.organizationId, owner: { kind: "user", userId: operator.userId },
+    }, now: 21,
+  }), true);
+  assert.equal(db.canManageRunner(operatorPrincipal, "runner-1"), true, "a Machine owner can administer their Machine");
+  assert.equal(db.canManageRunner(viewerPrincipal, "runner-1"), false, "another member remains read-only");
+  assert.equal(db.setResourceScope({
+    resource: "runner", resourceId: "runner-1", scope: {
+      organizationId: local.organizationId,
+      owner: { kind: "organization", organizationId: local.organizationId },
+    }, now: 22,
+  }), true);
   assert.equal(db.canAccessSession(operatorPrincipal, "s_operator"), true);
   assert.equal(db.canAccessSession(viewerPrincipal, "s_operator"), false);
   db.appendEvent("s_operator", { kind: "agent_message", text: "principal scoped archive needle" }, 30);

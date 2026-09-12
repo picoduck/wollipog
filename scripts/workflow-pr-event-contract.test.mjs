@@ -211,6 +211,78 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     assert.doesNotMatch(byId[id], /^    needs:/m, `${id}: the work jobs run in parallel, not chained`);
   }
   assert.match(byId.browser, /Remote-Instance Browser End-to-End Tests/, "the browser suite runs in its own job");
+
+  // The browser suite is sharded across matrix legs, and there are many ways to make that run less
+  // than the whole suite while every leg still reports green. Four rounds of review found five:
+  // a matrix list disagreeing with the `--shard` denominator; an `exclude:` removing a leg the list
+  // still declares; the same key spelled `"exclude":`; an `if:` on the run step; and a
+  // `continue-on-error` reporting a failed leg as a success. Two of those arrived only after the
+  // patch for the previous one, and one of them — a quoted key — defeated a fix I had just written
+  // for the unquoted spelling of a different key.
+  //
+  // The through-line is that a denylist cannot work here. YAML has more spellings than a pattern
+  // has branches (quoted keys, reordered mappings, blank lines), and every miss is silent: a shard
+  // that was never scheduled, or a step that was skipped, cannot fail.
+  //
+  // So the job's whole shape is asserted at once, against its exact expected text with comment-only
+  // and blank lines stripped. Not "these keys are forbidden" but "these lines are the job" — which
+  // forecloses spellings nobody has thought of yet, including inserting a key ANYWHERE rather than
+  // only where the last bypass happened to put it. Changing the job then means editing this
+  // expectation by hand, which is the reviewable act the guard exists to force.
+  const structural = byId.browser
+    .split("\n")
+    .filter((line) => line.trim().length > 0 && !line.trim().startsWith("#"))
+    .join("\n");
+
+  // The `if:` line is the shared draft guard, asserted for every job further up; matching it loosely
+  // here keeps this expectation about sharding. Everything else is fixed, in order, with nothing
+  // between the lines.
+  const header = structural.match(
+    /^  browser:\n    if: [^\n]*\n    name: Browser End-to-End Tests\n    runs-on: ubuntu-22\.04\n    timeout-minutes: \d+\n    strategy:\n      fail-fast: false\n      matrix:\n        shard: \[([^\]]*)\]\n    steps:$/m,
+  );
+  assert.ok(header,
+    "browser: the job header must be exactly its guard, name, runner, timeout, `fail-fast: false`, " +
+    "a single `shard:` list, and then `steps:` — nothing else and nothing between. `fail-fast` is " +
+    "off because the aggregator reads a cancelled job as a budget hit, so one failing test would " +
+    "otherwise be announced as several timeouts. Any other key fails here whatever it is called or " +
+    "however it is quoted: `exclude` drops a leg the list still declares, `include` can add one the " +
+    "denominator does not cover, `max-parallel` serialises the legs back into one long job, and " +
+    "`continue-on-error` reports a failed leg to the aggregator as a success.");
+
+  // Anchored on the NEXT step, so the shard command's step is exactly its name and its run line.
+  // YAML mapping order is irrelevant, so pinning only the first two lines let `if:` be appended
+  // after `run:` and skip the suite on whichever legs it excluded — which those legs then reported
+  // as success.
+  const step = structural.match(
+    /^      - name: Remote-Instance Browser End-to-End Tests\n        run: pnpm test:e2e --shard=\$\{\{ matrix\.shard \}\}\/(\d+)\n      - name: /m,
+  );
+  assert.ok(step,
+    "browser: the shard command's step must be exactly its name and its run line, followed by the " +
+    "next step. A key on either side of `run:` — an `if:` most of all — skips the suite on the legs " +
+    "it excludes, and each of those legs still reports success.");
+
+  // The header pins everything BEFORE `steps:`; this pins everything after it. A job key placed at
+  // the very end of the job — immediately before the next job's heading — is still a job key, and
+  // `continue-on-error` there reports a failed leg to the aggregator as a success. Six bypasses over
+  // four rounds, and this was the last region left unread: asserting a REGION is what kept leaving
+  // one, so the two assertions together now cover the job from its first line to its last.
+  const afterSteps = structural.slice(structural.indexOf("\n    steps:") + "\n    steps:".length);
+  const strayJobKeys = afterSteps
+    .split("\n")
+    .filter((line) => /^    \S/.test(line));
+  assert.deepEqual(strayJobKeys, [],
+    "browser: every line after `steps:` must belong to a step. A key at this indentation is a JOB " +
+    "key wherever it sits, and `continue-on-error` among them reports a failed leg to the " +
+    "aggregator as a success.");
+
+  const shards = header[1].split(",").map((value) => Number(value.trim()));
+  assert.deepEqual(shards, shards.map((_, index) => index + 1),
+    "browser: shards must be numbered 1..N with no gaps, because --shard=i/N means the i-th of N");
+  assert.equal(Number(step[1]), shards.length,
+    `browser: --shard=i/${step[1]} against ${shards.length} matrix legs runs the wrong fraction of ` +
+    "the suite. The dangerous direction is silent: fewer legs than the denominator runs a fraction " +
+    "and reports every leg green, because a shard that was never scheduled cannot fail.");
+
   assert.doesNotMatch(byId.checks, /Remote-Instance Browser End-to-End Tests|Rendered Production Browser Smoke/,
     "the browser suites must not share the unit-test job's budget");
   assert.match(byId.checks, /^      - name: Unit Tests$/m);
@@ -329,9 +401,13 @@ test("CI validates production builds and caches the pinned Playwright browser", 
     /^      - name: Validate Web Production Build\r?\n        run: pnpm --filter @wollipog\/web build$/m,
     "CI must exercise the web production build",
   );
+  // The production pass is guarded to one shard, so the `run:` no longer follows its `name:` line
+  // directly. The guard itself is asserted rather than merely tolerated: `if: false`, or a guard
+  // naming a shard the matrix does not contain, would skip this step on every leg and leave the
+  // assertion above still matching a step that never executes.
   assert.match(
     ci,
-    /^      - name: Rendered Production Browser Smoke\r?\n        run: pnpm test:e2e:production$/m,
+    /^      - name: Rendered Production Browser Smoke\r?\n        if: matrix\.shard == 1\r?\n        run: pnpm test:e2e:production$/m,
     "CI must render the built Timeline and Settings fixtures through the production preview server",
   );
   assert.match(

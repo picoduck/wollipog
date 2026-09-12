@@ -176,6 +176,13 @@ The runner owns this metadata task independently of the agent turn and prompt qu
   timeout clamp, and return only a normalized 120-character title plus a sanitized status. Provider
   processes also inherit the runner's configured execution-isolation, network, provider-HOME lease,
   and shared-store admission boundaries; an unavailable boundary fails back to prompt text.
+- That 15-second budget is split rather than shared: preparation (neutral directory, provider
+  authentication, process start) is capped at 3 seconds and the provider keeps the remaining 12 for
+  generation, so ordinary preparation variance no longer shortens the provider's allowance.
+  Preparation that overruns its own cap fails fast instead of handing the provider a fraction of a
+  second. Each enclosing deadline is strictly larger than the one it supervises — runner budget 15s,
+  control-plane runner request 16s, control-plane abort 17s, desktop remote read budget 35s — so no
+  outer transport can expire before the naming deadline it wraps.
 - Each runner admits at most two concurrent naming tasks and twelve starts per minute. Overload,
   timeouts, provider errors, missing accounts, unsupported providers, and older runners all fail
   closed to the prompt-derived title.

@@ -1,6 +1,25 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  PROTOCOL_VERSION,
+  SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET,
+  SESSION_EVENT_WIRE_PROJECTION_VARIANTS as VARIANTS,
+  sessionEventWireProjectionVariant,
+} from "@wollipog/protocol";
+
+/** The wire epoch a peer sees for a given local epoch. Expressed through the projection arithmetic
+ * rather than hardcoded, so adding an event-omission policy does not silently invalidate these
+ * expectations the way a literal would. */
+function wireEpoch(localEpoch: number, peer: number): number {
+  return SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET +
+    localEpoch * VARIANTS + sessionEventWireProjectionVariant(peer);
+}
+
+/** A peer that needs no additive session-event projection at all. It moves whenever a new event
+ * kind gets an older-peer omission policy, so these tests name the boundary instead of a literal:
+ * It moves only when a policy is added, which is a migration in its own right. */
+const CURRENT_PEER = PROTOCOL_VERSION;
+import {
   appendFileSync,
   closeSync,
   existsSync,
@@ -132,17 +151,17 @@ test("v86 wire projection omits response completions while keeping dense live an
     assert.equal(store.snapshots(86)[0]?.seq, 2);
     assert.equal(store.snapshots(86, true)[0]?.seq, 3,
       "buffered messages retain the exact local high-water until socket send");
-    assert.equal(store.snapshots(87)[0]?.seq, 3);
-    assert.equal(store.snapshots(86)[0]?.historyEpoch, 1);
+    assert.equal(store.snapshots(CURRENT_PEER)[0]?.seq, 3);
+    assert.equal(store.snapshots(86)[0]?.historyEpoch, wireEpoch(0, 86));
     assert.equal(store.snapshots(86, true)[0]?.historyEpoch, 0);
-    assert.equal(store.snapshots(87)[0]?.historyEpoch, 0);
+    assert.equal(store.snapshots(CURRENT_PEER)[0]?.historyEpoch, wireEpoch(0, CURRENT_PEER));
     assert.deepEqual(store.projectEventForProtocol("s_abc", first, 86), first);
     assert.equal(store.projectEventForProtocol("s_abc", completion, 86), null);
     assert.deepEqual(store.projectEventForProtocol("s_abc", second, 86), {
       ...second,
       seq: 2,
     });
-    assert.deepEqual(store.projectEventForProtocol("s_abc", completion, 87), completion);
+    assert.deepEqual(store.projectEventForProtocol("s_abc", completion, CURRENT_PEER), completion);
 
     let refreshCount = 0;
     const refresh = (store as any).refreshEventProjectionIndex.bind(store);
@@ -159,7 +178,7 @@ test("v86 wire projection omits response completions while keeping dense live an
     assert.deepEqual(store.readEventsForProtocol("s_abc", 1, 86).map((event) => event.seq), [2]);
     assert.deepEqual(store.readEventsForProtocol("s_abc", 99, 86), [],
       "legacy hydration preserves the empty result for a stale cursor beyond the projected tail");
-    assert.deepEqual(store.readEventsForProtocol("s_abc", 0, 87).map((event) => event.seq), [1, 2, 3]);
+    assert.deepEqual(store.readEventsForProtocol("s_abc", 0, CURRENT_PEER).map((event) => event.seq), [1, 2, 3]);
 
     refreshCount = 0;
     const projectionIndexPath = join(root, "s_abc", "events.idx");
@@ -172,7 +191,7 @@ test("v86 wire projection omits response completions while keeping dense live an
     if (!page1.ok) return;
     assert.deepEqual(page1.events.map((event) => [event.seq, event.payload.kind]), [[1, "agent_message"]]);
     assert.deepEqual(page1.page, {
-      logEpoch: 1,
+      logEpoch: wireEpoch(0, 86),
       throughSeq: 2,
       nextAfterSeq: 1,
       hasMore: true,
@@ -200,7 +219,7 @@ test("v86 wire projection omits response completions while keeping dense live an
     assert.deepEqual(frozen, {
       ok: true,
       events: [],
-      page: { logEpoch: 1, throughSeq: 2, nextAfterSeq: 2, hasMore: false },
+      page: { logEpoch: wireEpoch(0, 86), throughSeq: 2, nextAfterSeq: 2, hasMore: false },
     });
     assert.deepEqual(store.readEventsForProtocol("s_abc", 2, 86).map((event) => [event.seq, event.payload.kind]), [
       [3, "agent_message"],
@@ -217,7 +236,45 @@ test("v86 wire projection omits response completions while keeping dense live an
   }
 });
 
-test("registration keeps history neutral until one negotiated v86 or v87 generation is published", () => {
+test("v129 omits native policy decisions in its own dense history generation", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    const first = store.appendEvent("s_abc", { kind: "agent_message", text: "before" }, 1001)!;
+    const decision = store.appendEvent("s_abc", {
+      kind: "policy_hook_decision",
+      auditId: "audit-1",
+      requestId: "policy-hook:s_abc:1",
+      stage: "resolution",
+      outcome: "denied",
+      actor: { kind: "policy" },
+      governancePolicyId: "deny-shell",
+      toolCallId: "tool-1",
+    }, 1002)!;
+    const second = store.appendEvent("s_abc", { kind: "agent_message", text: "after" }, 1003)!;
+
+    assert.deepEqual(store.projectEventForProtocol("s_abc", first, 129), first);
+    assert.equal(store.projectEventForProtocol("s_abc", decision, 129), null);
+    assert.deepEqual(store.projectEventForProtocol("s_abc", second, 129), { ...second, seq: 2 });
+    assert.deepEqual(store.readEventsForProtocol("s_abc", 0, 129).map((event) => [event.seq, event.payload.kind]), [
+      [1, "agent_message"],
+      [2, "agent_message"],
+    ]);
+    assert.deepEqual(store.readEventsForProtocol("s_abc", 0, 130).map((event) => [event.seq, event.payload.kind]), [
+      [1, "agent_message"],
+      [2, "policy_hook_decision"],
+      [3, "agent_message"],
+    ]);
+    assert.deepEqual([store.snapshots(129)[0]?.seq, store.snapshots(129)[0]?.historyEpoch],
+      [2, wireEpoch(0, 129)]);
+    assert.deepEqual([store.snapshots(130)[0]?.seq, store.snapshots(130)[0]?.historyEpoch],
+      [3, wireEpoch(0, 130)]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("registration keeps history neutral until a negotiated wire generation is published", () => {
   const { store, root } = tmpStore();
   try {
     store.create(meta());
@@ -225,7 +282,7 @@ test("registration keeps history neutral until one negotiated v86 or v87 generat
     store.appendEvent("s_abc", { kind: "agent_response_completed" }, 1002);
     store.appendEvent("s_abc", { kind: "agent_message", text: "two" }, 1003);
 
-    const exact = store.snapshots(87, true)[0]!;
+    const exact = store.snapshots(CURRENT_PEER, true)[0]!;
     const historyTail = (store as any).historyTail.bind(store);
     let historyTailCalls = 0;
     (store as any).historyTail = (...args: unknown[]) => {
@@ -240,21 +297,25 @@ test("registration keeps history neutral until one negotiated v86 or v87 generat
     assert.deepEqual(reconnectRegister, firstRegister, "reconnect does not fabricate another generation");
 
     const v86 = store.projectSnapshotForProtocol(exact, 86);
-    const v87 = store.projectSnapshotForProtocol(exact, 87);
-    assert.deepEqual([v86.seq, v86.historyEpoch], [2, 1]);
-    assert.deepEqual([v87.seq, v87.historyEpoch], [3, 0]);
+    const intermediate = store.projectSnapshotForProtocol(exact, 129);
+    const currentGeneration = store.projectSnapshotForProtocol(exact, CURRENT_PEER);
+    assert.deepEqual([v86.seq, v86.historyEpoch], [2, wireEpoch(0, 86)]);
+    assert.deepEqual([intermediate.seq, intermediate.historyEpoch], [3, wireEpoch(0, 129)]);
+    assert.deepEqual([currentGeneration.seq, currentGeneration.historyEpoch], [3, wireEpoch(0, CURRENT_PEER)]);
     assert.deepEqual(store.projectSnapshotForProtocol(exact, 86), v86,
       "a v86 reconnect republishes the same negotiated generation");
-    assert.deepEqual(store.projectSnapshotForProtocol(exact, 87), v87,
-      "a v87 reconnect republishes the same negotiated generation");
+    assert.deepEqual(store.projectSnapshotForProtocol(exact, 129), intermediate,
+      "a v129 reconnect republishes its projected generation");
+    assert.deepEqual(store.projectSnapshotForProtocol(exact, CURRENT_PEER), currentGeneration,
+      "a current-peer reconnect republishes the same negotiated generation");
 
     const legacyPage = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 10 }, 86);
-    const currentPage = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 10 }, 87);
+    const currentPage = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 10 }, CURRENT_PEER);
     assert.equal(legacyPage.ok, true);
     assert.equal(currentPage.ok, true);
     if (legacyPage.ok && currentPage.ok) {
       assert.equal(legacyPage.page.logEpoch, v86.historyEpoch);
-      assert.equal(currentPage.page.logEpoch, v87.historyEpoch);
+      assert.equal(currentPage.page.logEpoch, currentGeneration.historyEpoch);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -330,10 +391,13 @@ test("projected snapshot corruption fallback never advertises an exact local tai
     };
 
     const legacy = store.snapshots(86)[0]!;
-    assert.deepEqual([legacy.seq, legacy.historyEpoch], [0, 1],
+    assert.deepEqual([legacy.seq, legacy.historyEpoch], [0, wireEpoch(0, 86)],
       "legacy fallback remains in its dense sequence space");
-    const current = store.snapshots(87)[0]!;
-    assert.deepEqual([current.seq, current.historyEpoch], [3, 0],
+    const intermediate = store.snapshots(129)[0]!;
+    assert.deepEqual([intermediate.seq, intermediate.historyEpoch], [0, wireEpoch(0, 129)],
+      "an intermediate projected peer also fails closed in its own generation");
+    const current = store.snapshots(CURRENT_PEER)[0]!;
+    assert.deepEqual([current.seq, current.historyEpoch], [3, wireEpoch(0, CURRENT_PEER)],
       "an exact current peer may retain the metadata high-water");
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -355,22 +419,106 @@ test("projection failure for a removed session is explicit for the socket contai
   }
 });
 
+test("every distinct wire projection gets its own dense sequence space", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    // Two omission policies mean three projections, and they must never share an epoch: a control
+    // plane that hydrated through one and reconnects through the other has to resync rather than
+    // reuse cursors whose sequence numbers now name different events.
+    const epochs = [86, 129, CURRENT_PEER].map((peer) => store.snapshots(peer)[0]!.historyEpoch);
+    assert.equal(new Set(epochs).size, epochs.length, `distinct epochs per projection, got ${epochs.join(",")}`);
+    assert.deepEqual(epochs, [wireEpoch(0, 86), wireEpoch(0, 129), wireEpoch(0, CURRENT_PEER)]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the second projection policy fences every prior one-policy wire generation", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    const legacy = store.snapshots(86)[0]!;
+    const intermediate = store.snapshots(129)[0]!;
+    const current = store.snapshots(CURRENT_PEER)[0]!;
+
+    // Before v130 the one-policy encoding at local epoch zero was 1 for v86 and 0 for every
+    // v87+ peer. The reserved offset makes every new projection larger, so every control plane
+    // resyncs when the runner upgrades even if its negotiated protocol changes at the same time.
+    assert.notEqual(legacy.historyEpoch, 1);
+    assert.notEqual(intermediate.historyEpoch, 0);
+    assert.equal(legacy.historyEpoch, 4);
+    assert.equal(intermediate.historyEpoch, 3);
+
+    assert.equal(current.historyEpoch, 2);
+    for (let localEpoch = 0; localEpoch < 8; localEpoch++) {
+      const retiredFormatMaximum = localEpoch * 2 + 1;
+      for (const peer of [86, 129, CURRENT_PEER]) {
+        assert.ok(store.projectedHistoryEpoch(localEpoch, peer) > retiredFormatMaximum,
+          `v${peer} local epoch ${localEpoch} sorts above the retired encoding`);
+      }
+    }
+
+    const stale = store.readEventPageForProtocol("s_abc", {
+      afterSeq: 0,
+      limit: 1,
+      logEpoch: 0,
+      throughSeq: 0,
+    }, CURRENT_PEER);
+    assert.equal(stale.ok, false);
+    if (!stale.ok) assert.equal(stale.code, "history_epoch_changed");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("peer protocol changes fence dense sequence spaces with distinct wire epochs", () => {
   const { store, root } = tmpStore();
   try {
     store.create(meta());
     store.resetEvents("s_abc");
-    assert.equal(store.snapshots(86)[0]?.historyEpoch, 3);
-    assert.equal(store.snapshots(87)[0]?.historyEpoch, 2);
+    assert.equal(store.snapshots(86)[0]?.historyEpoch, wireEpoch(1, 86));
+    assert.equal(store.snapshots(129)[0]?.historyEpoch, wireEpoch(1, 129));
+    assert.equal(store.snapshots(CURRENT_PEER)[0]?.historyEpoch, wireEpoch(1, CURRENT_PEER));
 
     const legacy = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 1 }, 86);
-    const current = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 1 }, 87);
+    const current = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 1 }, CURRENT_PEER);
     assert.equal(legacy.ok, true);
     assert.equal(current.ok, true);
     if (legacy.ok && current.ok) {
-      assert.equal(legacy.page.logEpoch, 3);
-      assert.equal(current.page.logEpoch, 2);
+      assert.equal(legacy.page.logEpoch, wireEpoch(1, 86));
+      assert.equal(current.page.logEpoch, wireEpoch(1, CURRENT_PEER));
       assert.notEqual(legacy.page.logEpoch, current.page.logEpoch);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("current protocol pagination decodes projected epochs after multiple history resets", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    store.resetEvents("s_abc");
+    store.resetEvents("s_abc");
+    store.appendEvent("s_abc", { kind: "agent_message", text: "one" }, 1001);
+    store.appendEvent("s_abc", { kind: "agent_message", text: "two" }, 1002);
+
+    const first = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 1 }, PROTOCOL_VERSION);
+    assert.equal(first.ok, true);
+    if (!first.ok) return;
+    assert.equal(first.page.logEpoch, wireEpoch(2, CURRENT_PEER));
+    assert.equal(first.page.hasMore, true);
+    const second = store.readEventPageForProtocol("s_abc", {
+      afterSeq: first.page.nextAfterSeq,
+      limit: 1,
+      logEpoch: first.page.logEpoch,
+      throughSeq: first.page.throughSeq,
+    }, PROTOCOL_VERSION);
+    assert.equal(second.ok, true);
+    if (second.ok) {
+      assert.deepEqual(second.events.map((event) => event.payload.kind), ["agent_message"]);
+      assert.equal(second.page.hasMore, false);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -552,6 +700,19 @@ test("v126 snapshots publish service tier while older control planes receive no 
   assert.deepEqual(legacy.config, { model: "gpt", effort: "high" });
 });
 
+test("v132 snapshots preserve a precise capacity wait reason while older peers receive no unknown field", () => {
+  const capacityWait = {
+    kind: "target_quota" as const,
+    description: "Execution target cloud-a is using 2 of 2 slots",
+    usedUnits: 2,
+    limitUnits: 2,
+    requiredUnits: 1,
+    targetId: "cloud-a",
+  };
+  assert.equal(metaToSnapshot(meta({ status: "queued", capacityWait }), 131).capacityWait, undefined);
+  assert.deepEqual(metaToSnapshot(meta({ status: "queued", capacityWait }), 132).capacityWait, capacityWait);
+});
+
 test("v82 snapshots expose bounded background delivery facts without runner-private context", () => {
   assert.equal(
     metaToSnapshot(meta({ backgroundJobs: undefined }), 82).backgroundJobs,
@@ -583,6 +744,7 @@ test("v82 snapshots expose bounded background delivery facts without runner-priv
     continuationQueuedAt: 21,
     continuationSubmittedAt: 22,
     continuationAcceptedAt: 23,
+    continuationMissingResultAt: 24,
     assistantResultPersistedAt: 24,
     structuredDeliveryPublishedAt: 25,
   }];
@@ -601,8 +763,12 @@ test("v82 snapshots expose bounded background delivery facts without runner-priv
     continuationQueuedAt: 21,
     continuationSubmittedAt: 22,
     continuationAcceptedAt: 23,
+    continuationMissingResultAt: undefined,
     assistantResultPersistedAt: 24,
   }]);
+  assert.equal(metaToSnapshot(meta({ backgroundJobs }), 133).backgroundJobs?.[0]?.continuationMissingResultAt,
+    undefined, "older control planes never receive the additive terminal-recovery field");
+  assert.equal(metaToSnapshot(meta({ backgroundJobs }), 134).backgroundJobs?.[0]?.continuationMissingResultAt, 24);
   const serialized = JSON.stringify(metaToSnapshot(meta({ backgroundJobs }), 82));
   assert.equal(serialized.includes("tool-secret"), false);
   assert.equal(serialized.includes("provider/artifact"), false);
@@ -1355,7 +1521,8 @@ test("registration re-reads metadata after recovering a reset intent published d
 
     const snapshot = new ResetDuringSnapshotsStore(root).snapshots()[0]!;
     assert.equal(snapshot.seq, 0);
-    assert.equal(snapshot.historyEpoch, 2, "local epoch 1 is fenced into current-peer wire epoch 2");
+    assert.equal(snapshot.historyEpoch, wireEpoch(1, CURRENT_PEER),
+      "a local epoch is fenced into its peer-specific wire epoch");
     assert.equal(readFileSync(join(root, "s_abc", "events.ndjson"), "utf8"), "");
     assert.equal(existsSync(join(root, "s_abc", "events.reset.json")), false);
   } finally {

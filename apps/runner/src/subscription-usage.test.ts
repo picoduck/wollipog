@@ -49,23 +49,42 @@ test("Codex normalization preserves arbitrary limit IDs, both windows, credits, 
 
 test("Claude normalization accepts named, model-specific, additional, and status-only windows", () => {
   const snapshot = normalizeClaudeRateLimits({
-    rate_limits: {
-      five_hour: { used_percentage: 10, resets_at: 2_000_000_000 },
-      seven_day_opus: { used_percentage: 85, resets_at: 2_000_100_000 },
-      future_lane: { utilization: 100, status: "exhausted" },
+    rate_limit_info: {
+      rate_limit_type: "seven_day_opus",
+      status: "allowed_warning",
+      resetsAt: 2_000_200_000,
+      unifiedWindows: {
+        five_hour: { utilization: 0.1, resetsAt: 2_000_000_000 },
+        seven_day_opus: { utilization: 0.85, resetsAt: 2_000_100_000 },
+        future_lane: { utilization: 1, resetsAt: 2_000_100_000 },
+      },
     },
-    rate_limit_info: { rate_limit_type: "burst_lane", status: "allowed_warning", resetsAt: 2_000_200_000 },
   }, base, 2_000);
   assert.ok(snapshot);
-  // The windows `rate_limit_info` describes lead; the forward-compatibility map follows.
+  // The limiting window folds into the unified entry naming it instead of standing alone.
   assert.deepEqual(snapshot.buckets.map((bucket) => bucket.id), [
-    "burst_lane", "five_hour", "seven_day_opus", "future_lane",
+    "five_hour", "seven_day_opus", "future_lane",
   ]);
   const byId = new Map(snapshot.buckets.map((bucket) => [bucket.id, bucket]));
   assert.equal(byId.get("seven_day_opus")?.label, "Weekly — Opus");
   assert.equal(byId.get("seven_day_opus")?.status, "warning");
+  assert.equal(byId.get("five_hour")?.status, "available");
+  // An unrecognized window id stays renderable without a Wollipog release.
+  assert.equal(byId.get("future_lane")?.label, "Future Lane");
   assert.equal(byId.get("future_lane")?.remainingPercent, 0);
-  assert.equal(byId.get("burst_lane")?.status, "warning");
+});
+
+test("a Claude payload carrying only a rate_limits map contributes no buckets", () => {
+  // `rate_limits` was a guessed forward-compatibility shape; no Claude Code release emits it, and
+  // the Claude normalizer no longer reads it. The identically named Codex fallback is unaffected.
+  assert.equal(normalizeClaudeRateLimits({
+    rate_limits: { five_hour: { used_percentage: 10, resets_at: 2_000_000_000 } },
+  }, base, 2_000), null);
+  const codex = normalizeCodexRateLimits({
+    rate_limits: { limitId: "codex", primary: { usedPercent: 25, resetsAt: 2_000_000_000 } },
+  }, base, 2_000);
+  assert.ok(codex, "the Codex fallback still reads its own rate_limits shape");
+  assert.equal(codex.buckets[0]?.usedPercent, 25);
 });
 
 test("provider-controlled bucket ids are sanitized to control-plane bounds", () => {
@@ -74,7 +93,7 @@ test("provider-controlled bucket ids are sanitized to control-plane bounds", () 
     rateLimitsByLimitId: { [rawId]: { primary: { usedPercent: 10 } } },
   }, base, 1_000);
   const claude = normalizeClaudeRateLimits({
-    rate_limits: { [rawId]: { used_percentage: 10 } },
+    rate_limit_info: { status: "allowed", unifiedWindows: { [rawId]: { utilization: 0.1, resetsAt: 2_000_000_000 } } },
   }, base, 1_000);
   assert.ok(codex);
   assert.ok(claude);
@@ -93,8 +112,12 @@ test("provider numeric sentinels are omitted instead of invalidating whole snaps
     },
   }, base, 1_000);
   const claude = normalizeClaudeRateLimits({
-    rate_limits: {
-      five_hour: { used_percentage: 10, window_duration_minutes: -1, resets_at: farFutureSeconds },
+    rate_limit_info: {
+      status: "allowed",
+      rateLimitType: "five_hour",
+      utilization: 0.1,
+      window_duration_minutes: -1,
+      resets_at: farFutureSeconds,
     },
   }, base, 1_000);
   assert.ok(codex);
@@ -391,7 +414,7 @@ test("conductor observations never create stored subscription sources", () => {
   });
   assert.equal(manager.observe("conductor", "claude-code", { kind: "native" }, {
     provider: "claude",
-    payload: { rate_limits: { five_hour: { used_percentage: 10 } } },
+    payload: { rate_limit_info: { status: "allowed", rateLimitType: "five_hour", utilization: 0.1 } },
   }), null);
   assert.equal(published, 0);
   assert.deepEqual(manager.inventory(), []);
@@ -664,42 +687,18 @@ test("a delayed event cannot walk utilization backwards inside one window", () =
   );
 });
 
-test("the combined Claude bucket list stays inside the control-plane bound", () => {
-  const windows = (prefix: string) => Object.fromEntries(
-    Array.from({ length: 64 }, (_, index) => [`${prefix}${index}`, { utilization: 0.5, resetsAt: FIVE_HOUR_RESET }]));
-  const snapshot = normalizeClaudeRateLimits({
-    rate_limits: windows("structured-"),
-    rate_limit_info: { status: "allowed", unifiedWindows: windows("unified-") },
-  }, base, OBSERVED_AT);
+test("the Claude bucket list stays inside the control-plane bound", () => {
+  const snapshot = normalizeClaudeRateLimits(rateLimitEvent({
+    status: "allowed",
+    // A limiting window the unified set does not name adds a bucket beyond the capped 64.
+    rateLimitType: "five_hour",
+    utilization: 0.5,
+    resetsAt: FIVE_HOUR_RESET,
+    unifiedWindows: Object.fromEntries(
+      Array.from({ length: 64 }, (_, index) => [`window${index}`, { utilization: 0.5, resetsAt: FIVE_HOUR_RESET }])),
+  }), base, OBSERVED_AT);
   assert.ok(snapshot);
   // The control plane rejects a snapshot above 64 buckets outright, discarding the whole update.
-  assert.equal(snapshot.buckets.length, 64);
-  assert.ok(
-    snapshot.buckets.every((bucket) => bucket.id.startsWith("unified-")),
-    "the windows the provider actually reports keep the capacity",
-  );
-});
-
-test("unrecognized Claude entries never displace or override a reported window", () => {
-  const legacy = Object.fromEntries(
-    Array.from({ length: 64 }, (_, index) => [`legacy${index}`, { used_percentage: 5 }]));
-  const snapshot = normalizeClaudeRateLimits({
-    // The colliding id leads, so it is reached before the capacity bound: the forward-compatibility
-    // map must not overwrite the window `rate_limit_info` already reported.
-    rate_limits: { five_hour: { used_percentage: 90, status: "allowed" }, ...legacy },
-    rate_limit_info: {
-      status: "rejected",
-      rateLimitType: "five_hour",
-      unifiedWindows: {
-        five_hour: { utilization: 0.4, resetsAt: FIVE_HOUR_RESET },
-        seven_day: { utilization: 0.2, resetsAt: WEEK_RESET },
-      },
-    },
-  }, base, OBSERVED_AT);
-  assert.ok(snapshot);
-  assert.deepEqual(snapshot.buckets.slice(0, 2).map((bucket) => bucket.id), ["five_hour", "seven_day"]);
-  assert.equal(snapshot.buckets[0]?.usedPercent, 40, "the reported window wins the id");
-  assert.equal(snapshot.buckets[0]?.status, "exhausted");
   assert.equal(snapshot.buckets.length, 64);
 });
 
@@ -860,10 +859,11 @@ test("newly reported Claude windows are never evicted by buckets already stored"
   });
   const observe = (payload: unknown) =>
     manager.observe("claude", "claude-code", { kind: "native" }, { provider: "claude", kind: "sparse", payload });
-  observe({
-    rate_limits: Object.fromEntries(
-      Array.from({ length: 64 }, (_, index) => [`legacy${index}`, { used_percentage: 5 }])),
-  });
+  observe(rateLimitEvent({
+    status: "allowed",
+    unifiedWindows: Object.fromEntries(
+      Array.from({ length: 64 }, (_, index) => [`retired${index}`, { utilization: 0.05, resetsAt: FIVE_HOUR_RESET }])),
+  }));
   assert.equal(manager.inventory()[0]?.buckets.length, 64);
   now = OBSERVED_AT + 60_000;
   observe(rateLimitEvent({

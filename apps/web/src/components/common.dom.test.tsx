@@ -166,6 +166,33 @@ test("presentational background-work badges do not create a duplicate live regio
   }
 });
 
+test("responsive compact background-work badges carry wide and narrow visible labels under one accessible name", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    for (const [state, full, wide, narrow] of [
+      ["running", "Waiting on External Job", "Waiting on External Job", "Job"],
+      ["continuation_pending", "Continuation Pending", "Continuation Pending", "Pending"],
+      ["orphaned", "Orphaned", "Background Work Orphaned", "Orphaned"],
+    ] as const) {
+      await act(async () => {
+        root.render(<BackgroundWorkBadge state={state} compact responsiveCompact announce={false} />);
+      });
+      const badge = container.querySelector(".background-work-badge")!;
+      assert.equal(badge.getAttribute("aria-label"), `Background Work: ${full}`);
+      assert.equal(badge.querySelector(".background-work-label-wide")?.textContent, wide);
+      assert.equal(badge.querySelector(".background-work-label-narrow")?.textContent, narrow);
+      assert.equal(badge.querySelector(".background-work-label-wide")?.getAttribute("aria-hidden"), "true");
+      assert.equal(badge.querySelector(".background-work-label-narrow")?.getAttribute("aria-hidden"), "true");
+    }
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
 test("background-work indicators become keyboard-native panel controls when actionable", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
@@ -247,7 +274,7 @@ test("attention badges retain their own accessible name without an override", as
   }
 });
 
-test("background-delivery watchdog badges use precise Title Case stage labels", async () => {
+test("background-delivery watchdog badges use compact visible labels and explanatory accessible copy", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
@@ -266,12 +293,18 @@ test("background-delivery watchdog badges use precise Title Case stage labels", 
     assert.deepEqual(
       [...container.querySelectorAll(".background-work-badge")].map((badge) => badge.textContent),
       [
-        "Background Delivery: Terminal Result Awaiting Continuation",
-        "Background Delivery: Accepted Continuation Awaiting Result",
-        "Background Delivery: Result Awaiting Transcript Projection",
-        "Background Delivery: Notification Awaiting Dashboard",
+        "Result Pending",
+        "Result Missing",
+        "Transcript Delayed",
+        "Notification Pending",
       ],
     );
+    const badges = [...container.querySelectorAll<HTMLElement>(".background-work-badge")];
+    assert.match(badges[0]!.getAttribute("aria-label") ?? "", /^Background Work: Result Pending\. A background job finished/);
+    assert.match(badges[0]!.title, /result has not yet been returned to this conversation\.$/);
+    assert.ok(badges[0]!.classList.contains("background-delivery-pending"));
+    assert.ok(badges[1]!.classList.contains("background-work-orphaned"));
+    assert.ok(badges.slice(2).every((badge) => badge.classList.contains("background-delivery-pending")));
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
@@ -327,6 +360,17 @@ test("session indicators preserve simultaneous lifecycle, attention, and change 
             kind: "question",
           },
         }} />
+        <SessionStatusIndicators session={{
+          status: "queued",
+          pendingApproval: null,
+          capacityWait: {
+            kind: "target_quota",
+            description: "Execution target cloud-a is using 2 of 2 slots",
+            usedUnits: 2,
+            limitUnits: 2,
+            requiredUnits: 1,
+          },
+        }} />
         <ChangeStatusBadge change={{
           kind: "ready_for_review",
           label: "Ready for Review",
@@ -348,6 +392,11 @@ test("session indicators preserve simultaneous lifecycle, attention, and change 
     assert.equal(container.querySelector('[aria-label="Activity: Running"]')?.textContent?.trim(), "Running");
     assert.equal(container.querySelector('[aria-label="Attention: Answer Required"]')?.textContent?.trim(), "Answer Required");
     assert.equal(container.querySelector('[aria-label="Health: Disconnected"]')?.textContent?.trim(), "Disconnected");
+    assert.equal(
+      container.querySelector('[aria-label="Queue Reason: Execution target cloud-a is using 2 of 2 slots"]')
+        ?.textContent?.trim(),
+      "Target Quota",
+    );
     assert.ok(container.querySelector('[role="group"][aria-label="Change Status"]'));
     assert.equal(container.querySelector('[aria-label="Changes: Ready for Review"]')?.textContent?.trim(), "Ready for Review");
     assert.equal(container.querySelector('[aria-label="Changes: Uncommitted Changes"]')?.textContent?.trim(), "Uncommitted Changes");
