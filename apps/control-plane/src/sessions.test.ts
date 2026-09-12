@@ -1637,6 +1637,35 @@ test("createSession validates an explicit Project Location without falling back 
   assert.equal(incomplete.status, 400);
 });
 
+test("createSession resolves explicit ad-hoc Project Locations without guessing unmatched or tied paths", () => {
+  const { db, svc } = makeHarness();
+  const location = db.findProjectLocation(RUNNER_ID, WORKSPACE_ID)!;
+  const request = {
+    runnerId: RUNNER_ID,
+    workspaceId: WORKSPACE_ID,
+    projectId: location.projectId,
+    projectLocationId: location.id,
+    agentId: AGENT_ID,
+  };
+
+  const nested = svc.createSession({ ...request, workspacePath: `${WORKSPACE_PATH}/packages/core` });
+  assert.ok(nested.ok && nested.data, nested.error);
+  assert.equal(nested.data!.workspaceId, null);
+  assert.equal(nested.data!.projectLocationId, location.id);
+
+  const beforeRejected = db.listSessions({ includeArchived: true }).length;
+  const unmatched = svc.createSession({ ...request, workspacePath: "/repos/unmatched" });
+  assert.equal(unmatched.status, 409);
+  assert.equal(db.listSessions({ includeArchived: true }).length, beforeRejected);
+
+  const meta = runnerMeta();
+  meta.workspaces.push({ id: "ws-tied", name: "Tied", path: WORKSPACE_PATH });
+  db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+  const tied = svc.createSession({ ...request, workspacePath: `${WORKSPACE_PATH}/packages/tied` });
+  assert.equal(tied.status, 409);
+  assert.equal(db.listSessions({ includeArchived: true }).length, beforeRejected);
+});
+
 test("direct createSession adopts an explicit team Project scope for automation callers", () => {
   const { db, svc } = makeHarness();
   const { project, location, scope } = makeTeamOwnedProject(db);

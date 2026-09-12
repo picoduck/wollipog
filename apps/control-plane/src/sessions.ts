@@ -2600,13 +2600,13 @@ export class SessionsService {
     workspacePath?: string,
   ): ServiceResult<{ projectId?: string | null; projectLocationId?: string | null }> {
     const explicit = req.projectId !== undefined || req.projectLocationId !== undefined;
-    const assignmentWorkspaceId = workspaceId ?? (workspacePath
-      ? this.db.resolveImportedSessionLocation(runnerId, workspacePath).workspaceId
-      : null);
     if (!explicit && parentSessionId) {
       const parent = this.db.getSession(parentSessionId);
       if (!parent) return fail("parent session not found", 404);
       if (!parent.projectId) return ok({ projectId: null, projectLocationId: null });
+      const assignmentWorkspaceId = workspaceId ?? (workspacePath
+        ? this.db.resolveImportedSessionLocation(runnerId, workspacePath).workspaceId
+        : null);
       const location = assignmentWorkspaceId
         ? this.db.findProjectLocationForProject(parent.projectId, runnerId, assignmentWorkspaceId)
         : null;
@@ -2630,6 +2630,9 @@ export class SessionsService {
     const location = this.db.projectLocation(req.projectLocationId);
     if (!location || location.projectId !== req.projectId) return fail("project location does not belong to project", 409);
     if (location.availability === "runner_removed") return fail("project location is no longer available", 409);
+    const assignmentWorkspaceId = workspaceId ?? (workspacePath
+      ? this.db.resolveImportedSessionLocation(runnerId, workspacePath).workspaceId
+      : null);
     if (location.runnerId !== runnerId || location.workspaceId !== assignmentWorkspaceId) {
       return fail("project location does not match the selected runner and workspace", 409);
     }
