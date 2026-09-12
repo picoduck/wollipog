@@ -82,7 +82,9 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
     const cols = new Map<string, SessionView[]>();
     for (const c of BOARD_COLUMNS) cols.set(c.id, []);
     for (const s of visible) cols.get(s.column)?.push(s);
-    for (const list of cols.values()) list.sort((a, b) => b.updatedAt - a.updatedAt);
+    // `scoped` already carries the canonical, pin- and family-aware Inbox order. Preserve it
+    // within each column so pinning from a card has the same immediate ordering effect as pinning
+    // from a row; sorting again by `updatedAt` would erase that structural choice.
     return cols;
   }, [visible]);
 

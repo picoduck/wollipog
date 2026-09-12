@@ -12,7 +12,7 @@ import { ApiProvider } from "../api-context.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { filterInboxSplitsForReminderMode, InboxView } from "./InboxView.js";
 import { INBOX_COLLAPSED_THREADS_KEY } from "../inbox.js";
-import { saveKeySet } from "../pins.js";
+import { loadKeySet, saveKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { loadSeen, saveSeen } from "../sessions-seen.js";
 import type { RightPanelState } from "./RightPanel.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
@@ -1245,6 +1245,103 @@ test("row and card context menus share one surface, act on their target, and nev
   assert.equal(domWindow.document.querySelector('[role="menu"]'), null);
   assert.deepEqual(pushed, [], "board-card menus never navigate either");
 
+});
+
+test("row and card context menus pin their exact target, reorder immediately, persist, and restore keyboard focus", async () => {
+  mobileViewport = false;
+  setWindowFocused(true);
+  setVisibility("visible");
+  saveKeySet(SESSION_PIN_KEY, new Set());
+  cleanup(() => saveKeySet(SESSION_PIN_KEY, new Set()));
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "session-context-pin",
+    runtimeKey: "session-context-pin:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const pushed: unknown[] = [];
+  const spyNavigation: ViewNavigation = {
+    current: () => ({ name: "inbox" }),
+    push: (view) => void pushed.push(view),
+    listen: () => () => {},
+  };
+  const mountView = (viewMode: "list" | "board") => act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={spyNavigation}>
+        <InboxView viewMode={viewMode} rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+      </StoreProvider>,
+    );
+  });
+
+  await mountView("list");
+  await act(async () => { socket.push(snapshot([session("A", 30), session("B", 20)])); });
+  assert.deepEqual(rowTitles(container), ["Session A", "Session B"]);
+  assert.equal(selectedRowTitle(container), "Session A");
+
+  // The menu target, not the currently selected row, owns the action.
+  let rowB = [...container.querySelectorAll<HTMLElement>(".inbox-row-shell")]
+    .find((row) => row.textContent?.includes("Session B"))!;
+  await act(async () => {
+    rowB.dispatchEvent(new domWindow.MouseEvent("contextmenu", {
+      bubbles: true, cancelable: true, clientX: 50, clientY: 60,
+    }) as never);
+  });
+  let menu = domWindow.document.querySelector('[role="menu"]') as unknown as HTMLElement;
+  const pin = [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+    .find((item) => item.textContent === "Pin Session")!;
+  await act(async () => { pin.click(); });
+  assert.equal(domWindow.document.querySelector('[role="menu"]'), null, "pinning dismisses the menu");
+  assert.deepEqual(rowTitles(container), ["Session B", "Session A"], "the targeted session moves immediately");
+  assert.equal(selectedRowTitle(container), "Session A", "right-click pinning never selects its target");
+  assert.deepEqual([...loadKeySet(SESSION_PIN_KEY)], ["B"], "pinning uses the existing browser persistence");
+  const grid = container.querySelector(".inbox-list") as unknown as HTMLElement;
+  assert.equal(domWindow.document.activeElement, grid, "a non-dialog action restores the collection focus");
+  assert.deepEqual(pushed, [], "pinning never navigates into the target");
+
+  // The platform keyboard interaction exposes the state-aware inverse action on the active row.
+  rowB = [...container.querySelectorAll<HTMLElement>(".inbox-row")]
+    .find((row) => row.textContent?.includes("Session B"))!;
+  await act(async () => { rowB.click(); });
+  await act(async () => {
+    grid.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+      key: "F10", shiftKey: true, bubbles: true, cancelable: true,
+    }) as never);
+  });
+  menu = domWindow.document.querySelector('[role="menu"]') as unknown as HTMLElement;
+  assert.equal(menu.getAttribute("aria-label"), "Session Actions for Session B");
+  await act(async () => {
+    menu.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as never);
+  });
+  const focusedPin = domWindow.document.activeElement as unknown as HTMLButtonElement | null;
+  assert.equal(focusedPin?.textContent, "Unpin Session", "the pin action is arrow-key reachable");
+  await act(async () => { focusedPin!.click(); });
+  assert.deepEqual(rowTitles(container), ["Session A", "Session B"]);
+  assert.equal(loadKeySet(SESSION_PIN_KEY).size, 0);
+  assert.equal(domWindow.document.activeElement, grid);
+
+  // Board cards use the same action and preserve the canonical pin-aware order within a column.
+  await mountView("board");
+  const cardB = ([...domWindow.document.querySelectorAll(".board .card")] as unknown as HTMLElement[])
+    .find((card) => card.textContent?.includes("Session B"))!;
+  await act(async () => {
+    cardB.dispatchEvent(new domWindow.MouseEvent("contextmenu", {
+      bubbles: true, cancelable: true, clientX: 200, clientY: 120,
+    }) as never);
+  });
+  menu = domWindow.document.querySelector('[role="menu"]') as unknown as HTMLElement;
+  await act(async () => {
+    [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+      .find((item) => item.textContent === "Pin Session")!.click();
+  });
+  assert.deepEqual(
+    [...domWindow.document.querySelectorAll(".board .card-title")].map((title) => title.textContent),
+    ["Session B", "Session A"],
+  );
+  assert.deepEqual([...loadKeySet(SESSION_PIN_KEY)], ["B"]);
+  assert.equal(domWindow.document.querySelector('[role="menu"]'), null);
+  assert.deepEqual(pushed, []);
 });
 
 test("a touch long-press opens the row menu and suppresses the tap it rode in on", async () => {
