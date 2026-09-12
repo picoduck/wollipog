@@ -1534,7 +1534,12 @@ export class SessionManager {
     entry.worktreeLeaseOwner = undefined;
   }
 
-  private deleteActiveSession(sessionId: string, expected?: ActiveSession, releaseLease = true): boolean {
+  private deleteActiveSession(
+    sessionId: string,
+    expected?: ActiveSession,
+    releaseLease = true,
+    refreshCapacityInventory = true,
+  ): boolean {
     const active = this.active.get(sessionId);
     if (!active || (expected && active !== expected)) return false;
     if (releaseLease) this.releaseActiveWorktreeLease(active);
@@ -1542,7 +1547,7 @@ export class SessionManager {
     if (deleted) {
       this.cancelActiveTurnWait(sessionId);
       this.releaseActiveTurn(sessionId);
-      this.refreshCapacityInventorySession(sessionId);
+      if (refreshCapacityInventory) this.refreshCapacityInventorySession(sessionId);
     }
     return deleted;
   }
@@ -3723,13 +3728,14 @@ export class SessionManager {
     return false;
   }
 
-  private cancelActiveTurnWait(sessionId: string): void {
-    if (!this.activeTurnWaiters.delete(sessionId)) return;
+  private cancelActiveTurnWait(sessionId: string): boolean {
+    if (!this.activeTurnWaiters.delete(sessionId)) return false;
     if (this.activeTurnWaiters.size === 0 && this.activeTurnRetryTimer) {
       clearTimeout(this.activeTurnRetryTimer);
       this.activeTurnRetryTimer = null;
     }
     this.reportCapacity();
+    return true;
   }
 
   private releaseActiveTurn(sessionId: string): void {
@@ -3751,17 +3757,28 @@ export class SessionManager {
   }
 
   private settleActiveWorkPermit(sessionId: string, entry: ActiveSession): void {
+    // A retired drain can settle after restart installed a replacement entry under the same
+    // session id. It must not release the replacement generation's process-wide permit.
+    if (this.active.get(sessionId) !== entry) return;
     if (entry.running || entry.providerInitiatedTurnActive ||
         this.hasAuthoritativeBackgroundWork(this.store.readMeta(sessionId))) return;
     this.releaseActiveTurn(sessionId);
   }
 
-  private reconcileAuthoritativeBackgroundWorkPermit(sessionId: string, entry: ActiveSession): void {
+  private reconcileAuthoritativeBackgroundWorkPermit(
+    sessionId: string,
+    entry: ActiveSession,
+    executing: boolean,
+  ): void {
     if (!this.hasAuthoritativeBackgroundWork(this.store.readMeta(sessionId))) {
       this.settleActiveWorkPermit(sessionId, entry);
       return;
     }
     if (this.activeTurnAdmitted.has(sessionId)) return;
+    // Orphaned and continuation-pending metadata describes retained work, not a provider that is
+    // executing right now. Preserve an already-held parent-turn permit, but do not manufacture a
+    // new one (or cancel an otherwise healthy provider) until a running callback proves execution.
+    if (!executing) return;
     if (this.activeTurnAdmission.acquire(this.activeTurnRequest(sessionId))) {
       this.activeTurnAdmitted.add(sessionId);
       this.reportCapacity();
@@ -3826,7 +3843,9 @@ export class SessionManager {
     const parkingGeneration = this.beginLaunchGeneration(sessionId);
     this.preLaunchAdmissionGenerations.set(sessionId, parkingGeneration);
     this.parkingSessions.add(sessionId);
-    this.deleteActiveSession(sessionId, entry, false);
+    // Keep the cached inventory on its resident value until `closing` is installed below. Otherwise
+    // releaseActiveTurn() can publish a transient "parked" count while this process is still alive.
+    this.deleteActiveSession(sessionId, entry, false, false);
     this.log(`parking idle provider ${sessionId} to release resident process capacity`);
     this.beginProviderRetirement(sessionId, entry, {
       parking: true,
@@ -4968,6 +4987,7 @@ export class SessionManager {
     queueBeforeLaunch = false,
     backgroundJobIds?: string[],
     recoveredQuestion?: QueuedPrompt["recoveredQuestion"],
+    queuedPromptId?: string,
   ): boolean {
     if (durable && this.store.readEvents(sessionId).some((event) =>
       recoveredQuestion
@@ -5095,7 +5115,7 @@ export class SessionManager {
       if (projectedAuthenticationBlock) this.store.patchMeta(sessionId, { pendingApproval: null });
       durable?.queued();
       this.insertQueuedPrompt(sessionId, recovering, {
-        id: durable?.commandId ?? randomUUID(),
+        id: queuedPromptId ?? durable?.commandId ?? randomUUID(),
         ordinal: reservedOrdinal ?? this.nextQueueOrdinal(sessionId),
         text,
         images,
@@ -5120,7 +5140,8 @@ export class SessionManager {
       }
       durable?.queued();
       this.insertQueuedPrompt(sessionId, queue, {
-        id: durable?.commandId ?? randomUUID(), ordinal: this.nextQueueOrdinal(sessionId), text, images, slashCommand,
+        id: queuedPromptId ?? durable?.commandId ?? randomUUID(),
+        ordinal: reservedOrdinal ?? this.nextQueueOrdinal(sessionId), text, images, slashCommand,
         config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds, recoveredQuestion,
       });
       this.preLaunchQueues.set(sessionId, queue);
@@ -5142,6 +5163,7 @@ export class SessionManager {
         queueBeforeLaunch,
         backgroundJobIds,
         recoveredQuestion,
+        queuedPromptId,
       ).catch((error) => {
         // resumeAndPrompt handles EXPECTED failures internally (durable.failed / error events). An
         // UNEXPECTED throw (e.g. a JSON.stringify RangeError writing a pathological config) escapes
@@ -5179,7 +5201,7 @@ export class SessionManager {
     // applied now: with prompts B(config X) and C(config Y) queued, B must run under X, not Y.
     durable?.queued();
     this.insertQueuedPrompt(sessionId, entry.queue, {
-      id: durable?.commandId ?? randomUUID(),
+      id: queuedPromptId ?? durable?.commandId ?? randomUUID(),
       ordinal: reservedOrdinal ?? this.nextQueueOrdinal(sessionId),
       text,
       images,
@@ -6485,7 +6507,12 @@ export class SessionManager {
     else if (retained.length) this.preLaunchQueues.set(sessionId, retained);
     else this.preLaunchQueues.delete(sessionId);
     this.rejectQueued(removed, "queued command was cancelled");
-    if (retained.length !== before) this.emitQueue(sessionId);
+    if (retained.length !== before) {
+      if (entry && retained.length === 0 && !entry.running && this.cancelActiveTurnWait(sessionId)) {
+        this.emitStatus(sessionId, "idle");
+      }
+      this.emitQueue(sessionId);
+    }
   }
 
   private rejectQueued(queue: QueuedPrompt[], error: string): void {
@@ -6562,6 +6589,7 @@ export class SessionManager {
     queueBeforeLaunch = false,
     backgroundJobIds?: string[],
     recoveredQuestion?: QueuedPrompt["recoveredQuestion"],
+    queuedPromptId?: string,
   ): Promise<void> {
     const meta = this.store.readMeta(sessionId);
     if (!meta) {
@@ -6665,7 +6693,7 @@ export class SessionManager {
       this.preLaunchAdmissionGenerations.set(sessionId, launchGeneration);
       const queue = this.preLaunchQueues.get(sessionId) ?? [];
       this.insertQueuedPrompt(sessionId, queue, {
-        id: randomUUID(),
+        id: queuedPromptId ?? durable?.commandId ?? randomUUID(),
         ordinal: reservedOrdinal ?? this.nextQueueOrdinal(sessionId),
         text,
         images,
@@ -6783,6 +6811,7 @@ export class SessionManager {
         false,
         backgroundJobIds,
         recoveredQuestion,
+        queuedPromptId,
       );
     }
   }
@@ -6802,7 +6831,8 @@ export class SessionManager {
   /** Run queued prompts one at a time, holding the box lock only while turns are draining. */
   private async drain(sessionId: string): Promise<void> {
     const entry = this.active.get(sessionId);
-    if (!entry || entry.running || entry.governanceTripped || this.queueHeld(entry) ||
+    if (!entry || entry.running || entry.authenticationBlocked || entry.historyQuarantined ||
+        entry.historyIntegrityFailure || entry.governanceTripped || this.queueHeld(entry) ||
         this.steerFences(entry).size ||
         this.reservedPromotionPrecedesQueue(sessionId, entry)) return;
     if (!this.promoteQueuedRecoveredAnswer(sessionId, entry.queue)) return;
@@ -6818,7 +6848,7 @@ export class SessionManager {
     if (entry.queue.length === 0) return;
     if (!this.acquireActiveTurn(sessionId)) return;
     if (!this.store.acquireLock(sessionId, this.lockOwner)) {
-      this.settleActiveWorkPermit(sessionId, entry);
+      if (this.active.get(sessionId) === entry) this.settleActiveWorkPermit(sessionId, entry);
       if (!this.emitEvent(sessionId, { kind: "error", message: "this session is being driven by another dashboard" })) {
         return;
       }
@@ -6961,6 +6991,7 @@ export class SessionManager {
       if (entry.pendingWorktreeRebind && this.worktreeRebindCanProceed(sessionId, entry)) {
         await this.rebindSelectedWorktree(sessionId, entry);
       } else if (this.active.get(sessionId) === entry && entry.queue.length &&
+          !entry.authenticationBlocked && !entry.historyQuarantined && !entry.historyIntegrityFailure &&
           !entry.governanceTripped && !this.queueHeld(entry)) {
         setImmediate(() => this.scheduleDrain(sessionId));
       }
@@ -8817,6 +8848,7 @@ export class SessionManager {
           index === 0,
           prompt.backgroundJobIds,
           prompt.recoveredQuestion,
+          prompt.id,
         );
       }
     });
@@ -10132,7 +10164,7 @@ export class SessionManager {
     }
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
     const entry = this.active.get(sessionId);
-    if (entry) this.reconcileAuthoritativeBackgroundWorkPermit(sessionId, entry);
+    if (entry) this.reconcileAuthoritativeBackgroundWorkPermit(sessionId, entry, update.state === "running");
     if (queuedJobIds.length > 0) this.scheduleBackgroundContinuation(sessionId);
     if (updated?.orphanedWork && update.state === "orphaned" && automaticClaudeRecoveryAllowed(updated)) {
       this.scheduleOrphanRecovery(sessionId);

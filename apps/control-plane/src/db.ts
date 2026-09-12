@@ -10174,7 +10174,8 @@ export class ControlPlaneDb {
         capacityWaitForStorage(
           snap.status,
           snap.capacityWait,
-          runnerSupportsProtocol(this.getRunner(runnerId)?.protocolVersion, "runnerCapacityDimensions"),
+          snap.capacityWait?.kind === "active_turn_capacity" &&
+            runnerSupportsProtocol(this.getRunner(runnerId)?.protocolVersion, "runnerCapacityDimensions"),
         ),
         snap.status,
         snap.useWorktree ? 1 : 0,
@@ -10367,7 +10368,7 @@ export class ControlPlaneDb {
         capacityWaitForStorage(
           status,
           snap.capacityWait,
-          runnerSupportsProtocol(
+          snap.capacityWait?.kind === "active_turn_capacity" && runnerSupportsProtocol(
             existing ? this.getRunner(existing.runner_id)?.protocolVersion : null,
             "runnerCapacityDimensions",
           ),

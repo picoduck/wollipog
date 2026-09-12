@@ -1373,6 +1373,9 @@ test("a superseded drain cannot release a same-owner replacement drain's lock", 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     assert.equal((sm as any).lockTimers.get("s_q"), replacementRefresh,
       "the replacement must retain its refresh timer");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    assert.equal((sm as any).activeTurnAdmitted.has("s_q"), true,
+      "the retired drain must not release the replacement generation's active-work permit");
   } finally {
     finishPrompt();
     if (replacementRefresh) clearInterval(replacementRefresh);

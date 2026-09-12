@@ -564,6 +564,108 @@ test("an empty scheduled drain never creates a durable active-turn waiter", asyn
   }
 });
 
+test("authentication and history gates do not self-reschedule an undrainable FIFO", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-gated-active-turn-drain-"));
+  try {
+    for (const gate of ["authenticationBlocked", "historyQuarantined"] as const) {
+      const store = new SessionStore(join(root, gate));
+      store.create({ ...meta(gate), status: "idle" });
+      const manager = new SessionManager(
+        () => {}, () => {}, store, "runner", undefined, undefined, root, 2,
+        undefined, undefined, { agentLimits: {}, agentWeights: {}, activeTurnLimit: 1 },
+      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const internals = manager as any;
+      internals.active.set(gate, {
+        sessionId: gate,
+        running: false,
+        status: "idle",
+        queue: [{ id: "queued", text: "wait", images: [] }],
+        [gate]: true,
+        client: { dispose: () => {}, cancel: () => {}, agentSessionId: () => null },
+      });
+      let reschedules = 0;
+      internals.scheduleDrain = () => { reschedules++; };
+      await internals.drain(gate);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(reschedules, 0, `${gate} must wait for its recovery transition`);
+      assert.equal(internals.activeTurnAdmitted.has(gate), false);
+      manager.shutdownAll();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cancelling the last capacity-waiting prompt removes its waiter and queued status", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-cancel-active-turn-waiter-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({ ...meta("holder"), status: "idle" });
+    store.create({ ...meta("waiting"), status: "idle" });
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, root, 2,
+      undefined, undefined, { agentLimits: {}, agentWeights: {}, activeTurnLimit: 1 },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(internals.acquireActiveTurn("holder"), true);
+    internals.active.set("waiting", {
+      sessionId: "waiting",
+      running: true,
+      status: "idle",
+      queue: [],
+      client: { dispose: () => {}, cancel: () => {}, agentSessionId: () => null },
+    });
+    manager.prompt("waiting", "cancel me");
+    const promptId = internals.active.get("waiting").queue[0].id as string;
+    internals.active.get("waiting").running = false;
+    await internals.drain("waiting");
+    assert.equal(internals.activeTurnWaiters.has("waiting"), true);
+
+    manager.removeQueuedPrompt("waiting", promptId);
+    assert.equal(internals.activeTurnWaiters.has("waiting"), false);
+    assert.equal(store.readMeta("waiting")?.status, "idle");
+    assert.equal(store.readMeta("waiting")?.capacityWait, undefined);
+    internals.releaseActiveTurn("holder");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("non-running retained background metadata does not cancel a provider at capacity", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-retained-background-capacity-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({ ...meta("holder"), status: "idle" });
+    store.create({ ...meta("orphaned"), status: "idle", backgroundWorkState: "orphaned" });
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, root, 2,
+      undefined, undefined, { agentLimits: {}, agentWeights: {}, activeTurnLimit: 1 },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(internals.acquireActiveTurn("holder"), true);
+    let cancellations = 0;
+    const entry = {
+      sessionId: "orphaned",
+      running: false,
+      status: "idle",
+      queue: [],
+      client: { dispose: () => {}, cancel: () => { cancellations++; }, agentSessionId: () => null },
+    };
+    internals.active.set("orphaned", entry);
+    internals.reconcileAuthoritativeBackgroundWorkPermit("orphaned", entry, false);
+    assert.equal(cancellations, 0);
+    assert.equal(internals.activeTurnAdmitted.has("orphaned"), false);
+    internals.releaseActiveTurn("holder");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("an undelivered capacity snapshot is retried and reconnect can force reconciliation", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-capacity-report-retry-"));
   try {
@@ -685,6 +787,34 @@ test("park-when-needed retires only a resumable idle provider and preserves its 
     assert.equal(store.readMeta("warm")?.config.model, "stable-model");
     assert.deepEqual(manager.liveSessionIds(), ["warm"]);
     manager.stop("warm");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("parking replay preserves a non-durable prompt's dashboard identity and ordinal", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-parking-prompt-identity-"));
+  try {
+    const manager = new SessionManager(
+      () => {}, () => {}, new SessionStore(join(root, "sessions")), "runner",
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    internals.launchGenerations.set("parked", 7);
+    internals.preLaunchQueues.set("parked", [{
+      id: "stable-prompt-id",
+      ordinal: 41,
+      text: "resume me",
+      images: [],
+    }]);
+    let replayed: unknown[] | undefined;
+    internals.prompt = (...args: unknown[]) => { replayed = args; return true; };
+    internals.resumePromptsQueuedDuringParking("parked", { parkingGeneration: 7 });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.equal(replayed?.[7], 41, "FIFO order survives parking");
+    assert.equal(replayed?.[11], "stable-prompt-id", "dashboard cancellation keeps the same id");
     manager.shutdownAll();
   } finally {
     rmSync(root, { recursive: true, force: true });
