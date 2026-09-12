@@ -72,35 +72,48 @@ For example, `status-badge-parity.spec.ts` needs no pinned pass: its badge compa
 font and scale together, while its responsive status-row assertions derive which badges fit from
 the current face instead of expecting a particular wrap.
 
-### There is no automated check for this — yet
+### Check Numeric Bounds at Runtime
 
-A static scanner was built for it and then withdrawn. It is worth knowing why, because the reason is
-also the reason this convention needs writing down.
+Use `expectGeometry` from `geometry-margins.ts` when a numeric bound is safe because the observed
+measurement has room to spare:
 
-Four rounds of review found twenty-four ways to pin a measurement past a source-level scanner, and
-the count per round did not fall: nine, six, nine, six. TypeScript has more ways to route a number
-into a comparison than a scanner has branches — an imported constant, a destructured alias, a local
-helper's return, a value normalised by a divisor, `toHaveProperty`, a poll callback's second return.
-Closing each one was easy; the supply did not run out.
+```ts
+expectGeometry(phone - desktop, "the phone card is at least one text line taller")
+  .toBeGreaterThan(15);
+```
 
-Worse, the last round found the scanner reporting CORRECT code as a pin: a count bounded to a narrow
-range, two bounds in mutually exclusive `if`/`else` branches, a count destructured alongside a
-measurement. A guard that flags good code is worse than one that misses bad code, because the only
-remedy it offers is an allowlist entry certifying that the correct assertion is wrong — and an
-allowlist full of those teaches reviewers to wave the next one through.
+The helper first runs the ordinary Playwright assertion, then separately requires the measured
+margin to be at least 10% of the bound's magnitude (with a one-pixel scale floor for zero and
+sub-pixel bounds). A narrow failure reports the reason, observed value, bound, actual margin, and
+required margin. `expectGeometryPoll` applies the same check after a polled upper bound settles.
 
-**What would work is a runtime check**, because the thing that distinguishes a safe bound from a
-dangerous one is the margin between the bound and the value actually observed, and that exists only
-while the browser is running. A helper that knows both numbers and fails when they sit too close
-together catches every route above, including the two no source-level reading can reach:
+Ten percent comes from the measured distribution, not a guessed renderer allowance. The #931
+regression observed 42 against a bound of 40: 5% headroom. The 51 margin-bearing assertion sites in
+`inbox-row-layout.spec.ts`, the suite's densest geometry spec, were run with
+`GEOMETRY_MARGIN_REPORT=1`; the smallest healthy size or spacing margin was 40%, and the smallest
+half-pixel agreement margin was 50%. Ten percent is therefore twice the known failure and one
+quarter of the tightest healthy margin. The helper's own spec pins both sides of that decision: 42
+against 40 fails and the audited bounds pass.
 
-- a relative assertion with no headroom — `expect(crowded.width).toBeGreaterThan(roomy.width * 0.4)`
-  where the true ratio is 0.42. Statically identical to the same line with a ratio of 0.9. **This
-  shape has broken CI here once already.**
-- a tight one-sided bound, for the same reason.
+Set `GEOMETRY_MARGIN_REPORT=1` to print a JSON record for every checked observation while auditing a
+spec. This is how a bound's current margin is recorded from the browser rather than inferred from
+source.
 
-Until that exists, this convention is enforced by review and by you. When you write any numeric bound
-on something text-derived, satisfy yourself that it has room — nothing will do it for you.
+Not every geometry assertion has a safety margin. Keep ordinary `expect` for these audited classes:
+
+- exact structural or monotonic invariants where equality is the valid outcome, such as “pressure
+  never grows the sender” when both measured widths are equal;
+- values fixed by the test or stylesheet rather than rendered text, including viewport dimensions,
+  CSS-sized touch targets and icon boxes, SVG coordinates, and spacing tokens;
+- counts, DOM order, resolved CSS structure, booleans computed from containment, and geometry used
+  only to choose an interaction coordinate.
+
+The current suite audit found 34 specs that read a bounding rectangle. The margin-bearing assertions
+in the densest one use the runtime helper; its one equality-at-zero invariant is called out beside
+the bare assertion. The remaining readings fall into the classes above. This classification is a
+review record, not a source scanner: the withdrawn scanner produced both bypasses and false
+positives, while only the running browser can say how much margin a bound actually has. New numeric
+bounds whose safety depends on room to spare must use the helper and state why the bound is safe.
 
 ## Other Conventions
 
