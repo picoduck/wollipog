@@ -22,6 +22,16 @@ async function openProjectManager(page: Page, projectName = "Alpha") {
   await page.getByRole("menuitem", { name: /Manage Project/ }).click();
 }
 
+async function chooseNewSessionProject(dialog: Locator, query: string, optionText: string | RegExp = query) {
+  const input = dialog.getByRole("combobox", { name: "Project" });
+  await input.fill(query);
+  const option = dialog.getByRole("listbox", { name: "Project Options" })
+    .getByRole("option")
+    .filter({ hasText: optionText });
+  await expect(option).toHaveCount(1);
+  await option.click();
+}
+
 async function previewScrollMetrics(page: Page) {
   return page.getByRole("region", { name: "Session Preview Activity" }).evaluate((element) => ({
     scrollTop: element.scrollTop,
@@ -864,7 +874,7 @@ test("Project launch actions submit stable Project and Location identity", async
   await page.getByRole("menuitem", { name: "New Session Here" }).click();
 
   const dialog = page.getByRole("dialog", { name: "New Session" });
-  await expect(dialog.getByLabel("Project", { exact: true })).toHaveValue("alpha");
+  await expect(dialog.getByRole("combobox", { name: "Project" })).toHaveValue("Alpha");
   await expect(dialog.getByRole("radiogroup", { name: "Project Location" }).getByRole("radio", { name: /\/repos\/alpha$/ }))
     .toHaveAttribute("aria-checked", "true");
   await dialog.getByRole("button", { name: "Create Session" }).click();
@@ -883,7 +893,7 @@ test("Project launch actions submit stable Project and Location identity", async
   await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
   await page.getByRole("menuitem", { name: "Create Permanent Worktree" }).click();
   const worktreeDialog = page.getByRole("dialog", { name: "New Session" });
-  await expect(worktreeDialog.getByLabel("Project", { exact: true })).toHaveValue("alpha");
+  await expect(worktreeDialog.getByRole("combobox", { name: "Project" })).toHaveValue("Alpha");
   await worktreeDialog.getByRole("button", { name: "Create Session" }).click();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
     .toMatchObject({
@@ -937,7 +947,7 @@ test("unified Inbox creation opens both existing workflows with the active Proje
   await expect(choices.getByRole("menuitem").allTextContents()).resolves.toEqual(["New Session", "New Project"]);
   await choices.getByRole("menuitem", { name: "New Session", exact: true }).click();
   const sessionDialog = page.getByRole("dialog", { name: "New Session" });
-  await expect(sessionDialog.getByLabel("Project", { exact: true })).toHaveValue("alpha");
+  await expect(sessionDialog.getByRole("combobox", { name: "Project" })).toHaveValue("Alpha");
   await page.keyboard.press("Escape");
   await expect(sessionDialog).toBeHidden();
   await expect(create).toBeFocused();
@@ -978,7 +988,7 @@ test("C defaults New Session to the active single-Project Inbox tab", async ({ p
 
   await page.keyboard.press("c");
   const dialog = page.getByRole("dialog", { name: "New Session" });
-  await expect(dialog.getByLabel("Project", { exact: true })).toHaveValue("alpha");
+  await expect(dialog.getByRole("combobox", { name: "Project" })).toHaveValue("Alpha");
   await expect(dialog.getByRole("radiogroup", { name: "Project Location" })
     .getByRole("radio", { name: /\/repos\/alpha$/ })).toHaveAttribute("aria-checked", "true");
 });
@@ -1003,9 +1013,9 @@ test("New Session control labels retain centred, unclipped browser geometry", as
       ];
       const geometry = await Promise.all(controls.map(controlGeometry));
 
-      for (const control of geometry) {
+      for (const [index, control] of geometry.entries()) {
         expect(control.paddingTop - control.paddingBottom,
-          `${viewport.name} ${theme} controls optically offset their line box`).toBe(2);
+          `${viewport.name} ${theme} controls centre their line box`).toBe(index < 2 ? 2 : 0);
         expect(control.scrollHeight, `${viewport.name} ${theme} control text is not vertically clipped`)
           .toBeLessThanOrEqual(control.clientHeight);
         expect(control.scrollWidth, `${viewport.name} ${theme} control text is not horizontally clipped`)
@@ -1027,12 +1037,11 @@ test("New Session control labels retain centred, unclipped browser geometry", as
     dialog.getByLabel("Agent"),
   ];
   await page.setViewportSize({ width: 390, height: 844 });
-  await dialog.getByLabel("Agent").evaluate((element) => {
-    const selected = (element as HTMLSelectElement).selectedOptions[0];
-    if (selected) selected.textContent = "Áccented Agent With Descenders ģyq — Extended Name";
+  await dialog.getByRole("combobox", { name: "Agent" }).evaluate((element) => {
+    (element as HTMLInputElement).value = "Áccented Agent With Descenders ģyq — Extended Name";
   });
   await page.addStyleTag({
-    content: ".new-session-project-control, .new-session-agent-control { font-size: 24px !important; }",
+    content: ".new-session-project-control, .ui-searchable-combobox-input { font-size: 24px !important; }",
   });
   const enlargedGeometry = await Promise.all(controls.map(controlGeometry));
   for (const control of enlargedGeometry) {
@@ -1099,7 +1108,7 @@ test("New Session creates a durable Project and links its first Location inline"
   await createProject.getByRole("button", { name: "Create Project" }).click();
 
   await expect(newSession).toBeVisible();
-  await expect(newSession.getByLabel("Project", { exact: true })).toHaveValue("project-4");
+  await expect(newSession.getByRole("combobox", { name: "Project" })).toHaveValue("Inline Project");
   await expect(newSession.getByText("No Project Locations", { exact: true })).toBeVisible();
   await newSession.getByRole("button", { name: /Add Location/ }).click();
 
@@ -1128,11 +1137,15 @@ test("an inline Project fallback cannot revive the Project after a later live de
   await createProject.getByLabel("Project Name").fill("Temporary Inline Project");
   await createProject.getByRole("button", { name: "Create Project" }).click();
 
-  await expect(newSession.getByLabel("Project", { exact: true })).toHaveValue("project-4");
+  const project = newSession.getByRole("combobox", { name: "Project" });
+  await expect(project).toHaveValue("Temporary Inline Project");
   await expect(page.getByRole("tab", { name: /Temporary Inline Project/ })).toBeVisible();
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.removeProject("project-4"));
 
-  await expect(newSession.getByLabel("Project", { exact: true }).locator('option[value="project-4"]')).toHaveCount(0);
+  await expect(project).toHaveValue("");
+  await project.click();
+  await expect(newSession.getByRole("listbox", { name: "Project Options" })
+    .getByRole("option").filter({ hasText: "Temporary Inline Project" })).toHaveCount(0);
 });
 
 test("Project-first creation distinguishes same names and explains multi-location, empty, and offline Projects", async ({ page }) => {
@@ -1205,22 +1218,25 @@ test("Project-first creation distinguishes same names and explains multi-locatio
   await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
   await page.getByRole("menuitem", { name: "New Session Here" }).click();
   const dialog = page.getByRole("dialog", { name: "New Session" });
-  const projectSelect = dialog.getByLabel("Project", { exact: true });
+  const projectCombobox = dialog.getByRole("combobox", { name: "Project" });
   const locationChoices = dialog.getByRole("radiogroup", { name: "Project Location" });
 
-  await expect(projectSelect.locator("option").filter({ hasText: "Alpha" })).toHaveCount(2);
+  await projectCombobox.click();
+  await expect(dialog.getByRole("listbox", { name: "Project Options" })
+    .getByRole("option").filter({ hasText: "Alpha" })).toHaveCount(2);
+  await page.keyboard.press("Escape");
   await expect(locationChoices.getByRole("radio")).toHaveCount(2);
   await expect(locationChoices.getByRole("radio", { name: /\/repos\/alpha$/ })).toHaveAttribute("aria-checked", "true");
 
-  await projectSelect.selectOption("gamma");
+  await chooseNewSessionProject(dialog, "Gamma");
   await expect(dialog.getByText("No Project Locations", { exact: true })).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Create Session" })).toBeDisabled();
 
-  await projectSelect.selectOption("offline");
+  await chooseNewSessionProject(dialog, "Offline Project");
   await expect(dialog.getByText(/No Locations are currently available/)).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Create Session" })).toBeDisabled();
 
-  await projectSelect.selectOption("alpha-copy");
+  await chooseNewSessionProject(dialog, "/repos/alpha-copy", "/repos/alpha-copy");
   await expect(dialog.getByRole("radiogroup", { name: "Project Location" }).getByRole("radio", { name: /\/repos\/alpha-copy$/ }))
     .toHaveAttribute("aria-checked", "true");
   await dialog.getByRole("button", { name: "Create Session" }).click();
@@ -1626,7 +1642,7 @@ test("one exact Location can be launched from two Projects and unlinked independ
   });
   await gammaLocation.getByRole("button", { name: "New Session Here" }).click();
   let sessionDialog = page.getByRole("dialog", { name: "New Session" });
-  await expect(sessionDialog.getByLabel("Project", { exact: true })).toHaveValue("gamma");
+  await expect(sessionDialog.getByRole("combobox", { name: "Project" })).toHaveValue("Gamma");
   await sessionDialog.getByRole("button", { name: "Create Session" }).click();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
     .toMatchObject({
@@ -1641,7 +1657,7 @@ test("one exact Location can be launched from two Projects and unlinked independ
   });
   await alphaLocation.getByRole("button", { name: "New Session Here" }).click();
   sessionDialog = page.getByRole("dialog", { name: "New Session" });
-  await expect(sessionDialog.getByLabel("Project", { exact: true })).toHaveValue("alpha");
+  await expect(sessionDialog.getByRole("combobox", { name: "Project" })).toHaveValue("Alpha");
   await sessionDialog.getByRole("button", { name: "Create Session" }).click();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
     .toMatchObject({
