@@ -27,7 +27,10 @@ function Harness({ actions }: { actions: InboxKeyActions }) {
       <textarea aria-label="Composer" />
       <details><summary>Requests</summary><button type="button">Open Request</button></details>
       <div className="xterm"><textarea aria-label="Terminal" /></div>
-      <div data-focus-zone="detail"><button type="button" aria-label="Allow Once">Allow Once</button></div>
+      <div data-focus-zone="detail">
+        <div className="detail-scroll" tabIndex={0}>Preview</div>
+        <button type="button" aria-label="Allow Once">Allow Once</button>
+      </div>
     </div>
   );
 }
@@ -37,7 +40,7 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
   let previewAvailable = true;
   const action = (name: keyof InboxKeyActions) => () => calls.push(name);
   const actions: InboxKeyActions = {
-    next: action("next"), previous: action("previous"), expand: action("expand"),
+    next: action("next"), previous: action("previous"), first: action("first"), last: action("last"), expand: action("expand"),
     openTopRequest: action("openTopRequest"), toggleThread: action("toggleThread"),
     toggleAllThreads: action("toggleAllThreads"), goToParent: action("goToParent"),
     expandThread: action("expandThread"), collapseThread: action("collapseThread"),
@@ -64,8 +67,11 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: " ", shiftKey: true, bubbles: true }));
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "G", shiftKey: true, bubbles: true }));
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "End", bubbles: true }));
+  domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Home", bubbles: true }));
+  domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+  domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "f", bubbles: true }));
-  assert.deepEqual(calls, ["next", "nextSplit", "pageUp", "resumeFollow", "resumeFollow", "fork"]);
+  assert.deepEqual(calls, ["next", "nextSplit", "pageUp", "resumeFollow", "last", "first", "next", "previous", "fork"]);
   // Threads (#896): t, Shift+T, p, and the arrow pair, plus F2 for the top request.
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "t", bubbles: true }));
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "T", shiftKey: true, bubbles: true }));
@@ -73,8 +79,8 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "F2", bubbles: true }));
-  assert.deepEqual(calls.slice(6), ["toggleThread", "toggleAllThreads", "goToParent", "expandThread", "collapseThread", "openTopRequest"]);
-  calls.length = 6;
+  assert.deepEqual(calls.slice(9), ["toggleThread", "toggleAllThreads", "goToParent", "expandThread", "collapseThread", "openTopRequest"]);
+  calls.length = 9;
 
   const composer = container.querySelector<HTMLTextAreaElement>('[aria-label="Composer"]')!;
   composer.focus();
@@ -89,23 +95,28 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
   for (const key of ["Enter", " ", "Tab", "a", "d"]) {
     domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, bubbles: true }));
   }
-  assert.deepEqual(calls, ["next", "nextSplit", "pageUp", "resumeFollow", "resumeFollow", "fork"],
+  assert.deepEqual(calls, ["next", "nextSplit", "pageUp", "resumeFollow", "last", "first", "next", "previous", "fork"],
     "typing contexts and native controls own their keys before the Inbox layer");
 
   container.querySelector<HTMLElement>("summary")!.focus();
   for (const key of ["Enter", " ", "Tab", "a", "d", "j"]) {
     domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, bubbles: true }));
   }
-  assert.deepEqual(calls, ["next", "nextSplit", "pageUp", "resumeFollow", "resumeFollow", "fork"],
+  assert.deepEqual(calls, ["next", "nextSplit", "pageUp", "resumeFollow", "last", "first", "next", "previous", "fork"],
     "request disclosure summaries own their keys without running any row actions");
 
+  const detail = container.querySelector<HTMLElement>(".detail-scroll")!;
+  detail.focus();
+  domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "End", bubbles: true }));
+  assert.equal(calls.at(-1), "resumeFollow", "End keeps its preview-follow behavior in the detail zone");
+
   previewAvailable = false;
-  list.focus();
+  detail.focus();
   const unownedEnd = new domWindow.KeyboardEvent("keydown", { key: "End", bubbles: true, cancelable: true });
   domWindow.dispatchEvent(unownedEnd);
   assert.equal(unownedEnd.defaultPrevented, false,
-    "End retains its native list behavior when no preview navigation surface is registered");
-  assert.deepEqual(calls, ["next", "nextSplit", "pageUp", "resumeFollow", "resumeFollow", "fork"]);
+    "End retains its native detail behavior when no preview navigation surface is registered");
+  assert.equal(calls.at(-1), "resumeFollow");
 
   domWindow.document.body.focus();
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "f", bubbles: true }));

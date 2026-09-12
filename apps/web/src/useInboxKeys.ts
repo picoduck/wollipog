@@ -5,6 +5,8 @@ import { inTypingContext, matchesShortcut, shortcutLayerActive, type ShortcutId 
 export interface InboxKeyActions {
   next: () => void;
   previous: () => void;
+  first: () => void;
+  last: () => void;
   expand: () => void;
   /** F2: open the selected session with its top-priority request focused (#896). */
   openTopRequest: () => void;
@@ -51,8 +53,8 @@ const BINDINGS: ReadonlyArray<[ShortcutId, keyof InboxKeyActions]> = [
   ["inbox-reply", "reply"],
   ["inbox-page-down", "pageDown"],
   ["inbox-page-up", "pageUp"],
-  // These explicitly own both Inbox list and detail zones: End resumes the preview transcript
-  // rather than scrolling the session grid, matching the visible follow shortcut.
+  // Preview End remains available from the detail zone. The focused Sessions grid handles End
+  // earlier as conventional last-row navigation, alongside ArrowUp/ArrowDown and Home.
   ["inbox-follow-latest", "resumeFollow"],
   ["inbox-follow-latest-end", "resumeFollow"],
 ];
@@ -69,6 +71,18 @@ export function useInboxKeys(enabled: boolean, actions: InboxKeyActions): void {
       if (active instanceof HTMLElement &&
           active.matches('button, summary, a[href], input, textarea, select, [role="button"], [role="radio"], [role="checkbox"]') &&
           !active.matches(".inbox-list")) return;
+      if (active instanceof HTMLElement && active.matches(".inbox-list")) {
+        const action = event.key === "ArrowDown" ? actions.next
+          : event.key === "ArrowUp" ? actions.previous
+          : event.key === "Home" ? actions.first
+          : event.key === "End" ? actions.last
+          : null;
+        if (action) {
+          event.preventDefault();
+          action();
+          return;
+        }
+      }
       for (const [shortcutId, action] of BINDINGS) {
         if (!matchesShortcut(event, shortcutId)) continue;
         if (action === "fork" && zone !== "list" && zone !== "detail") return;

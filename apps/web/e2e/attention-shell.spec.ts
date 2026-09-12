@@ -6,6 +6,63 @@ const opaque = (value: string) => Buffer.from(value, "utf16le").toString("base64
 const fullShell = (path?: string) =>
   `/sessions-board-e2e.html?full-shell=1${path === undefined ? "" : `&path=${encodeURIComponent(path)}`}`;
 
+test("the Sessions digit shortcut focuses the list after cross-destination navigation", async ({ page }) => {
+  await page.goto(fullShell());
+  const grid = page.getByRole("grid", { name: "Sessions", exact: true });
+  await expect(grid).toBeVisible();
+  const selectedId = await grid.getAttribute("aria-activedescendant");
+  expect(selectedId).toBeTruthy();
+
+  await page.getByRole("link", { name: /^Projects/ }).click();
+  await expect(page.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
+  await page.keyboard.press("1");
+  await expect(grid).toBeFocused();
+  await expect(grid).toHaveAttribute("aria-activedescendant", selectedId!);
+  await grid.press("ArrowDown");
+  await expect(grid).not.toHaveAttribute("aria-activedescendant", selectedId!);
+  const lastId = await grid.getByRole("row").last().getAttribute("id");
+  expect(lastId).toBeTruthy();
+  await grid.press("End");
+  await expect(grid).toHaveAttribute("aria-activedescendant", lastId!);
+});
+
+test("the Sessions digit shortcut refocuses the already-active list", async ({ page }) => {
+  await page.goto(fullShell());
+  const grid = page.getByRole("grid", { name: "Sessions", exact: true });
+  await expect(grid).toBeVisible();
+  await grid.focus();
+  await page.keyboard.press("F6");
+  await expect(page.locator('[data-focus-zone="detail"] .detail-scroll, [data-focus-zone="detail"] .inbox-preview-empty')).toBeFocused();
+  await page.keyboard.press("1");
+  await expect(grid).toBeFocused();
+  await grid.press("ArrowUp");
+  const firstId = await grid.getByRole("row").first().getAttribute("id");
+  expect(firstId).toBeTruthy();
+  await grid.press("Home");
+  await expect(grid).toHaveAttribute("aria-activedescendant", firstId!);
+});
+
+test("the Sessions digit shortcut focuses the empty-list fallback", async ({ page }) => {
+  await page.goto(`${fullShell("/projects")}&empty=1`);
+  await expect(page.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
+  await page.keyboard.press("1");
+  const emptyState = page.locator(".inbox-zero");
+  await expect(emptyState).toHaveRole("status");
+  await expect(emptyState.getByRole("button", { name: "New Session" })).toBeVisible();
+  await expect(emptyState).toBeFocused();
+});
+
+test("the Sessions digit shortcut preserves and focuses remembered Board mode", async ({ page }) => {
+  await page.goto(fullShell("/board"));
+  const board = page.locator(".board-wrap");
+  await expect(board).toBeVisible();
+  await page.getByRole("link", { name: /^Projects/ }).click();
+  await expect(page.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
+  await page.keyboard.press("1");
+  await expect(board).toBeFocused();
+  expect(new URL(page.url()).searchParams.get("path")).toBe("/board");
+});
+
 test("real shell preserves global shortcuts from the grid and F2 opens the selected session's top request", async ({ page }) => {
   await page.goto(fullShell());
   const grid = page.getByRole("grid", { name: "Sessions", exact: true });
