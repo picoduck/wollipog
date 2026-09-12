@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { pinWidestFace } from "./font-geometry";
 test.use({ video: "on" });
 
 /**
@@ -208,30 +209,7 @@ test("a phone narrows the spine and keeps the family chip's dots", async ({ page
    * case deterministic on every machine instead of only on the unlucky one.
    */
   //
-  // The face has to be PROVEN present, not merely asked for: an unavailable family falls through
-  // to the ambient one, and the pass would then re-measure what it already measured and report the
-  // tight case as clear. The probe compares a string set in the candidate face against the same
-  // string set in a family that cannot exist; equal advance widths mean the candidate resolved to
-  // the same fallback, so it is not installed.
-  const wideFace = await page.evaluate(() => {
-    const widthIn = (family: string) => {
-      const probe = document.createElement("span");
-      probe.textContent = "Claude Code · Wollipog";
-      probe.style.cssText =
-        `position:absolute;visibility:hidden;white-space:nowrap;font-size:12px;font-family:${family}`;
-      document.body.append(probe);
-      const width = probe.getBoundingClientRect().width;
-      probe.remove();
-      return width;
-    };
-    const absent = widthIn('"a face no machine has, 8f3c1"');
-    return ["DejaVu Sans", "Liberation Sans"].find((face) => widthIn(`"${face}"`) !== absent) ?? null;
-  });
-  expect(wideFace, "no wide face to measure: install fonts-dejavu-core (CI renders in DejaVu Sans)")
-    .not.toBeNull();
-  await page.addStyleTag({
-    content: `.inbox-row, .inbox-row * { font-family: "${wideFace}" !important; }`,
-  });
+  const wideFace = await pinWidestFace(page, page.locator(".inbox-row"));
   const wide = await page.locator(".inbox-row-shell").evaluateAll(measureLineOne);
   const wideThree = wide.find((row) => row.title?.startsWith("#603"))!;
   expect(wideThree.firstWordWidth, `${wideFace} is at least as wide as the ambient face`)
