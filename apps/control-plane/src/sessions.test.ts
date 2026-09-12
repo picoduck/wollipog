@@ -1707,6 +1707,7 @@ test("side chat is an idempotent hidden session with no implicit context or fork
   const created = svc.createSideChat(parentId);
 
   assert.ok(created.ok && created.data);
+  const parent = db.getSession(parentId)!;
   const child = created.data!.session;
   assert.equal(created.status, 201);
   assert.equal(child.archived, true, "the auxiliary session stays out of normal session lists");
@@ -1716,6 +1717,9 @@ test("side chat is an idempotent hidden session with no implicit context or fork
   assert.equal(child.permissionMode, "acceptEdits");
   assert.equal(child.costBudgetUsd, null, "primary accounting limits are not copied implicitly");
   assert.equal(child.maxToolCalls, null, "primary tool limits are not copied implicitly");
+  assert.equal(child.workspaceId, parent.workspaceId, "ordinary workspace identity is retained");
+  assert.equal(child.projectId, parent.projectId, "ordinary Project assignment is retained");
+  assert.equal(child.projectLocationId, parent.projectLocationId, "ordinary Project Location is retained");
   assert.deepEqual(db.sessionScope(child.id), db.sessionScope(parentId), "ownership is derived from the authorized parent");
   assert.equal(db.listEvents(child.id, 0).length, 0, "no primary transcript content is copied");
   assert.equal(db.sessionForkIncludesAncestor(child.id, parentId), false, "side chat grants no fork artifact ancestry");
@@ -1761,6 +1765,56 @@ test("side chats retain the parent Project after its historical Location is remo
   assert.ok(result.ok && result.data);
   assert.equal(result.data!.session.projectId, parent.projectId);
   assert.equal(result.data!.session.projectLocationId, null);
+});
+
+test("side chats retain an active Project Location for an ad-hoc parent sharing its workspace path", () => {
+  const { db, hub, svc } = makeHarness();
+  const owner = db.localIdentityContext();
+  const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
+  const project = db.createProject({ name: "Side-Chat Project", scope });
+  const location = db.addProjectLocation(project.id, { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID });
+  const projectParent = svc.createSession({
+    runnerId: RUNNER_ID,
+    workspaceId: WORKSPACE_ID,
+    agentId: AGENT_ID,
+    projectId: project.id,
+    projectLocationId: location.id,
+  }, undefined, scope).data!;
+  db.updateSessionStatus(projectParent.id, "running", Date.now());
+  const adHocParent = svc.createSession({
+    runnerId: RUNNER_ID,
+    workspaceId: WORKSPACE_ID,
+    workspacePath: `${WORKSPACE_PATH}/packages/core`,
+    agentId: AGENT_ID,
+  }, undefined, undefined, false, false, false, { parentSessionId: projectParent.id });
+  assert.ok(adHocParent.ok && adHocParent.data, adHocParent.error);
+  assert.equal(adHocParent.data!.workspaceId, null);
+  assert.equal(adHocParent.data!.projectId, project.id);
+  assert.equal(adHocParent.data!.projectLocationId, location.id);
+
+  const result = svc.createSideChat(adHocParent.data!.id);
+
+  assert.ok(result.ok && result.data, result.error);
+  const child = result.data!.session;
+  assert.equal(child.workspaceId, null, "the side chat remains an ad-hoc launch");
+  assert.equal(child.projectId, project.id);
+  assert.equal(child.projectLocationId, location.id);
+  assert.equal(db.getAdHocWorkspacePath(child.id), `${WORKSPACE_PATH}/packages/core`);
+  const start = hub.sentOfType("start_session").at(-1)!;
+  assert.equal(start.spec.workspaceId, null);
+  assert.equal(start.spec.workspacePath, `${WORKSPACE_PATH}/packages/core`);
+
+  const restarted = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  assert.equal(restarted.sideChat(adHocParent.data!.id).data?.session.projectLocationId, location.id);
+  restarted.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+    id: child.id,
+    workspaceId: null,
+    workspacePath: `${WORKSPACE_PATH}/packages/core`,
+    status: "completed",
+  })]);
+  assert.equal(db.getSession(child.id)!.workspaceId, null);
+  assert.equal(db.getSession(child.id)!.projectId, project.id);
+  assert.equal(db.getSession(child.id)!.projectLocationId, location.id);
 });
 
 test("deleting a primary session also tombstones and removes its side chat", () => {
