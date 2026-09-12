@@ -113,8 +113,8 @@ in the densest one use the runtime helper; its three equality-valid structural c
 called out beside their bare assertions. The remaining readings fall into the classes above. This
 classification is a review record, not a source scanner: the withdrawn scanner produced both
 bypasses and false positives, while only the running browser can say how much margin a bound
-actually has. New numeric
-bounds whose safety depends on room to spare must use the helper and state why the bound is safe.
+actually has. New numeric bounds whose safety depends on room to spare must use the helper and state
+why the bound is safe.
 
 ## Other Conventions
 

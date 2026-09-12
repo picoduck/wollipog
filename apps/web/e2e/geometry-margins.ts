@@ -10,6 +10,8 @@ const finite = (value: number, label: string): void => {
 };
 
 const describe = (value: number): string => Number.isInteger(value) ? String(value) : value.toFixed(4);
+const requiredHeadroom = (bound: number): number =>
+  Math.max(Math.abs(bound), 1) * MINIMUM_GEOMETRY_HEADROOM;
 
 function assertHeadroom(observed: number, bound: number, direction: Direction, reason: string): void {
   finite(observed, "observed geometry");
@@ -18,7 +20,7 @@ function assertHeadroom(observed: number, bound: number, direction: Direction, r
 
   const margin = direction === "above" ? observed - bound : bound - observed;
   const scale = Math.max(Math.abs(bound), 1);
-  const required = scale * MINIMUM_GEOMETRY_HEADROOM;
+  const required = requiredHeadroom(bound);
   const marginRatio = margin / scale;
   const report = {
     reason,
@@ -74,35 +76,39 @@ export function expectGeometry(observed: number, reason: string) {
 
 export function expectGeometryPoll(observe: () => number | Promise<number>, reason: string) {
   expect(reason.trim().length, "a geometry assertion must state why the bound is safe").toBeGreaterThan(0);
-  const poll = async (bound: number, direction: Direction, inclusive: boolean): Promise<void> => {
+  const poll = async (bound: number, direction: Direction): Promise<void> => {
     finite(bound, "geometry bound");
     let settled: number | undefined;
     const sample = async (): Promise<number> => {
       const observed = await observe();
-      finite(observed, "observed geometry");
+      // A transient missing element commonly reports infinity. Return NaN so every numeric matcher
+      // retries it; throwing here would escape expect.poll's matcher retry loop.
+      if (!Number.isFinite(observed)) return Number.NaN;
       settled = observed;
       return observed;
     };
+    const required = requiredHeadroom(bound);
+    const effectiveBound = direction === "above" ? bound + required : bound - required;
     const assertion = expect.poll(sample, { message: reason });
-    if (direction === "above") {
-      if (inclusive) await assertion.toBeGreaterThanOrEqual(bound);
-      else await assertion.toBeGreaterThan(bound);
-    } else if (inclusive) await assertion.toBeLessThanOrEqual(bound);
-    else await assertion.toBeLessThan(bound);
+    // Headroom is positive, so the adjusted inclusive comparison implies both strict and inclusive
+    // forms of the caller's original bound while allowing polling to continue through a tight
+    // transient sample.
+    if (direction === "above") await assertion.toBeGreaterThanOrEqual(effectiveBound);
+    else await assertion.toBeLessThanOrEqual(effectiveBound);
     assertHeadroom(settled!, bound, direction, reason);
   };
   return {
     async toBeGreaterThan(bound: number): Promise<void> {
-      await poll(bound, "above", false);
+      await poll(bound, "above");
     },
     async toBeGreaterThanOrEqual(bound: number): Promise<void> {
-      await poll(bound, "above", true);
+      await poll(bound, "above");
     },
     async toBeLessThan(bound: number): Promise<void> {
-      await poll(bound, "below", false);
+      await poll(bound, "below");
     },
     async toBeLessThanOrEqual(bound: number): Promise<void> {
-      await poll(bound, "below", true);
+      await poll(bound, "below");
     },
   };
 }

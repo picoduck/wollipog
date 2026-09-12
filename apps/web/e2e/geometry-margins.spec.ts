@@ -20,4 +20,13 @@ test("a polled geometry bound checks the sample that actually settled", async ()
     return 0;
   }, "the settled sample has headroom").toBeLessThanOrEqual(1);
   expect(samples).toBe(1);
+
+  samples = 0;
+  await expectGeometryPoll(() => {
+    samples += 1;
+    if (samples === 1) return Number.POSITIVE_INFINITY;
+    if (samples === 2) return 0.95;
+    return 0;
+  }, "transient samples retry until they have headroom").toBeLessThanOrEqual(1);
+  expect(samples).toBe(3);
 });

@@ -620,12 +620,14 @@ test("crossing the breakpoint keeps the reader's row and the list's geometry", a
       .sort((left, right) => left.index - right.index);
     let overlap = 0;
     let gap = 0;
+    let pairs = 0;
     for (let at = 1; at < rows.length; at += 1) {
       if (rows[at]!.index !== rows[at - 1]!.index + 1) continue;
+      pairs += 1;
       overlap = Math.max(overlap, rows[at - 1]!.box.bottom - rows[at]!.box.top);
       gap = Math.max(gap, rows[at]!.box.top - rows[at - 1]!.box.bottom);
     }
-    return { mounted: rows.length, overlap, gap };
+    return { pairs, overlap, gap };
   });
 
   // ONE crossing at a time, each starting from a fresh scroll to the reader's row.
@@ -666,15 +668,21 @@ test("crossing the breakpoint keeps the reader's row and the list's geometry", a
     // Polled on the predicate itself: a width change opens a new measurement epoch, and the
     // re-seeded rows settle over the next frame or two. What must never settle is an overlap or a
     // hole between consecutive cards.
-    await expect.poll(async () => (await worstNeighbours()).mounted, {
-      message: `neighbouring cards mount across ${from} to ${to}`,
-    }).toBeGreaterThan(1);
+    await expect.poll(async () => (await worstNeighbours()).pairs, {
+      message: `consecutive neighbouring cards mount across ${from} to ${to}`,
+    }).toBeGreaterThan(0);
     await expectGeometryPoll(
-      async () => (await worstNeighbours()).overlap,
+      async () => {
+        const { pairs, overlap } = await worstNeighbours();
+        return pairs > 0 ? overlap : Number.NaN;
+      },
       `neighbouring cards do not overlap across ${from} to ${to}`,
     ).toBeLessThanOrEqual(0.5);
     await expectGeometryPoll(
-      async () => (await worstNeighbours()).gap,
+      async () => {
+        const { pairs, gap } = await worstNeighbours();
+        return pairs > 0 ? gap : Number.NaN;
+      },
       `neighbouring cards do not leave a hole across ${from} to ${to}`,
     ).toBeLessThan(24);
   }
