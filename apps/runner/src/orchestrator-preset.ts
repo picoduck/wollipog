@@ -28,7 +28,7 @@ const ORCHESTRATOR_CLAUDE_BASH_RULES = [
 
 export type OrchestratorIsolationMode = "provider" | "bwrap" | "seatbelt" | "windows-job";
 
-/** Codex supplies its own audited provider sandbox on POSIX. Claude's Bash allowlist needs an
+/** Codex supplies its own audited provider sandbox on Linux and macOS. Claude's Bash allowlist needs an
  * outer OS filesystem boundary because command prefixes cannot prevent output-file options or
  * redirection. Native Windows has no attested filesystem boundary for either harness. */
 export function supportsNativeOrchestratorBoundary(
@@ -36,8 +36,9 @@ export function supportsNativeOrchestratorBoundary(
   platform: NodeJS.Platform,
   isolationMode: OrchestratorIsolationMode | undefined,
 ): boolean {
-  if (platform === "win32") return false;
-  if (driver === "codex" || driver === "codex-app-server") return true;
+  if (driver === "codex" || driver === "codex-app-server") {
+    return platform === "linux" || platform === "darwin";
+  }
   if (driver !== "claude-code" && driver !== "acp") return false;
   return (platform === "linux" && isolationMode === "bwrap") ||
     (platform === "darwin" && isolationMode === "seatbelt");

@@ -51,6 +51,10 @@ test("orchestrator capability requires a native harness or discovery-verified WS
     .capabilities!.permissionModes!.includes("orchestrator"), false);
   assert.equal(withOrchestratorPreset([claude], { platform: "linux", isolationMode: "bwrap" })[0]!
     .capabilities!.permissionModes!.includes("orchestrator"), true);
+  assert.equal(withOrchestratorPreset([claude], { platform: "darwin", isolationMode: "provider" })[0]!
+    .capabilities!.permissionModes!.includes("orchestrator"), false);
+  assert.equal(withOrchestratorPreset([claude], { platform: "darwin", isolationMode: "seatbelt" })[0]!
+    .capabilities!.permissionModes!.includes("orchestrator"), true);
   const staleClaude = { ...claude, capabilities: { ...claude.capabilities,
     permissionModes: ["default", "dontAsk", "orchestrator"] } };
   assert.equal(withOrchestratorPreset([staleClaude], { platform: "linux", isolationMode: "provider" })[0]!
@@ -94,6 +98,8 @@ test("native Windows harnesses withhold orchestrator without filesystem confinem
     capabilities: { ...agent.capabilities!, permissionModes: ["workspace-write"] } };
   assert.equal(withOrchestratorPreset([codex], { platform: "win32" })[0]!.capabilities!.permissionModes!.includes("orchestrator"), false,
     "Windows Codex stays fail closed until its filesystem sandbox can be attested");
+  assert.equal(withOrchestratorPreset([codex], { platform: "freebsd" })[0]!.capabilities!.permissionModes!.includes("orchestrator"), false,
+    "Codex stays fail closed on platforms without an audited provider sandbox");
   const acp: AgentDefinition = {
     id: "claude-acp", name: "Claude ACP", command: "npx.cmd",
     args: ["-y", `@agentclientprotocol/claude-agent-acp@${CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION}`],

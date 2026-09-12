@@ -86,7 +86,7 @@ Neither the user nor a child can switch this preset on an existing session.
 
 On native Linux and macOS, Claude Code and the exact Claude Agent ACP adapter advertise this preset
 only with the runner's `bwrap` or `seatbelt` boundary respectively. Native Codex can rely on its
-audited provider sandbox there. Catalog filtering, structured launch, and Native TUI preparation all
+audited provider sandbox there and is withheld on other native operating systems. Catalog filtering, structured launch, and Native TUI preparation all
 apply the same boundary check so persisted sessions cannot resume under a weaker host policy.
 
 The preset is a cooperative safety boundary for trusted planning agents, not a hostile-model

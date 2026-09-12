@@ -134,7 +134,8 @@ Native Windows harnesses do not advertise the Orchestrator preset because a Job 
 attest the scratch-only filesystem boundary. Claude Bash-prefix rules are also insufficient there:
 an otherwise read-only Git command can redirect its output into a Project Location.
 For the same reason, native Claude Code and Claude Agent ACP require runner isolation mode `bwrap`
-on Linux or `seatbelt` on macOS. Native Codex uses its provider sandbox on those platforms.
+on Linux or `seatbelt` on macOS. Native Codex uses its provider sandbox on those platforms and is
+withheld on other native operating systems where that boundary is not attested.
 
 On upgrade, a persisted Conductor `--mcp-config` argument is rewritten to the attested runner's
 owned data directory before launch. The former `~/.agent-manager/conductor/*.mcp.json` file is never

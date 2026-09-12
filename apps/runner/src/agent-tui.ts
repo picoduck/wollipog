@@ -46,7 +46,7 @@ export async function prepareAgentTuiLaunch(
   await dependencies.provision(prepared);
   prepared.env = {
     ...prepared.env,
-    ...(process.platform === "win32" ? { TEMP: cwd, TMP: cwd } : { TMPDIR: cwd }),
+    ...((dependencies.platform ?? process.platform) === "win32" ? { TEMP: cwd, TMP: cwd } : { TMPDIR: cwd }),
   };
   if (prepared.driver !== "claude-code") {
     prepared.args.push(...await (dependencies.probe ?? codexOrchestratorMcpArgs)(
