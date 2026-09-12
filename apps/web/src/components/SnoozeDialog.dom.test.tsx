@@ -51,6 +51,7 @@ test("a fired reminder can update policy without changing its stored past instan
       onRemove={async () => undefined}
     />);
   });
+  assert.match(container.textContent ?? "", /Approvals, questions, and failures remain available on the session in Snoozed\./);
   const expression = container.querySelector<HTMLInputElement>("#snooze-expression")!;
   assert.equal(expression.getAttribute("aria-describedby"), "snooze-expression-hint");
   await act(async () => {

@@ -60,6 +60,8 @@ test("heartbeat activity feeds cards, preview, split/footer counts, and independ
   assert.match(inbox, /stalledCount[\s\S]*inbox-activity-footer/);
   assert.match(inboxList, /state\.activity\.get\(props\.session\.id\)/);
   assert.match(detail, /<ActivityStrip activity=\{activity\} now=\{activityNow\}/);
+  assert.match(app, /sessionVisibleForReminderMode\(session, reminders\.get\(session\.id\), "ordinary"\)[\s\S]*activeSessions\.filter\(isInboxBlocked\)[\s\S]*activeSessions\.filter\(\(session\) => stalledSessionIds\.has\(session\.id\)\)/,
+    "the rail's Blocked and Stalled badges must derive from the same Active membership as Sessions");
   assert.match(rail, /rail-badge blocked[\s\S]*rail-badge stalled/);
   assert.match(css, /prefers-reduced-motion: reduce[\s\S]*activity-strip/);
 });

@@ -30,16 +30,9 @@ function reminder(sessionId: string, overrides: Partial<SessionReminderView> = {
   };
 }
 
-test("pending reminders hide ordinary active work but never hide required attention", () => {
-  const pending = reminder("running");
-  assert.equal(sessionVisibleForReminderMode(session("running", "running"), pending, "ordinary"), false);
-  assert.equal(sessionVisibleForReminderMode(session("running", "running"), pending, "snoozed"), true);
-  assert.equal(sessionVisibleForReminderMode(session("blocked", "input_required"), reminder("blocked"), "ordinary"), true);
-  assert.equal(sessionVisibleForReminderMode(session("failed", "failed"), reminder("failed"), "ordinary"), true);
-});
-
-test("only explicit attention reasons retain a snoozed session in Active", () => {
+test("pending reminders make Active and Snoozed mutually exclusive across every attention condition", () => {
   const cases: Array<[string, SessionView, string]> = [
+    ["running", session("running", "running"), ""],
     ["legacy input", session("input", "input_required"), "Input Required"],
     ["failure", session("failed", "failed"), "Failed"],
     ["approval", session("approval", "idle", {
@@ -51,24 +44,57 @@ test("only explicit attention reasons retain a snoozed session in Active", () =>
     ["orphaned background work", session("orphaned", "idle", {
       backgroundWorkState: "orphaned",
     }), "Background Work Orphaned"],
-    ["delivery watchdog", session("watchdog", "idle", {
+    ["pending result", session("pending-result", "idle", {
       backgroundDeliveries: [{
-        deliveryId: "delivery",
-        continuationId: "continuation",
+        parentTurnId: "parent",
+        jobCount: 1,
+        terminalCount: 1,
         watchdogState: "terminal_without_continuation",
-      } as never],
+      }],
     }), "Result Pending"],
+    ["missing result", session("missing-result", "idle", {
+      backgroundDeliveries: [{
+        parentTurnId: "parent",
+        jobCount: 1,
+        terminalCount: 1,
+        watchdogState: "accepted_without_result",
+      }],
+    }), "Result Missing"],
+    ["delayed transcript", session("delayed-transcript", "idle", {
+      backgroundDeliveries: [{
+        parentTurnId: "parent",
+        jobCount: 1,
+        terminalCount: 1,
+        watchdogState: "result_not_projected",
+      }],
+    }), "Transcript Delayed"],
+    ["pending notification", session("pending-notification", "idle", {
+      backgroundDeliveries: [{
+        parentTurnId: "parent",
+        jobCount: 1,
+        terminalCount: 1,
+        watchdogState: "dashboard_observation_pending",
+      }],
+    }), "Notification Pending"],
   ];
 
-  for (const [name, candidate, label] of cases) {
-    assert.equal(sessionVisibleForReminderMode(candidate, reminder(candidate.id), "ordinary"), true, name);
-    assert.equal(snoozedSessionAttentionReason(candidate)?.label, label, name);
+  for (const wakePolicy of ["until_activity", "regardless"] as const) {
+    for (const [name, candidate, label] of cases) {
+      const pending = reminder(candidate.id, { wakePolicy });
+      assert.equal(sessionVisibleForReminderMode(candidate, pending, "ordinary"), false,
+        `${wakePolicy}: ${name} must leave Active`);
+      assert.equal(sessionVisibleForReminderMode(candidate, pending, "snoozed"), true,
+        `${wakePolicy}: ${name} must remain in Snoozed`);
+      assert.equal(snoozedSessionAttentionReason(candidate)?.label ?? "", label,
+        `${wakePolicy}: ${name} must preserve its attention reason`);
+    }
   }
 
   const omittedApproval = session("omitted-approval", "idle", { pendingApproval: undefined as never });
   assert.equal(snoozedSessionAttentionReason(omittedApproval), null);
   assert.equal(sessionVisibleForReminderMode(omittedApproval, reminder(omittedApproval.id), "ordinary"), false,
     "a legacy omitted pendingApproval is absence, not an attention condition");
+  assert.equal(sessionVisibleForReminderMode(omittedApproval, reminder(omittedApproval.id), "snoozed"), true);
 });
 
 test("snoozed attention uses the shared delivery-watchdog presentation", () => {
@@ -94,10 +120,10 @@ test("snoozed attention uses the shared delivery-watchdog presentation", () => {
   }
 });
 
-test("clearing the final attention condition removes a still-snoozed session from Active", () => {
+test("attention changes never reintroduce a pending snooze into Active", () => {
   const pending = reminder("transition");
   const retained = session("transition", "idle", { backgroundWorkState: "orphaned" });
-  assert.equal(sessionVisibleForReminderMode(retained, pending, "ordinary"), true);
+  assert.equal(sessionVisibleForReminderMode(retained, pending, "ordinary"), false);
   assert.equal(sessionVisibleForReminderMode({ ...retained, backgroundWorkState: "resumed" }, pending, "ordinary"), false);
   assert.equal(sessionVisibleForReminderMode({ ...retained, backgroundWorkState: undefined }, pending, "ordinary"), false);
 
@@ -112,7 +138,7 @@ test("clearing the final attention condition removes a still-snoozed session fro
       watchdogState: "accepted_without_result",
     }],
   });
-  assert.equal(sessionVisibleForReminderMode(missing, pending, "ordinary"), true);
+  assert.equal(sessionVisibleForReminderMode(missing, pending, "ordinary"), false);
   assert.equal(sessionVisibleForReminderMode(missing, pending, "snoozed"), true);
   const acknowledged = {
     ...missing,
@@ -133,9 +159,16 @@ test("archived sessions do not appear in either reminder view", () => {
 
 test("fired reminders return to the top with a text-backed reason until dismissed", () => {
   const normal = session("normal");
-  const due = session("due");
+  const due = session("due", "input_required");
   const fired = reminder("due", { state: "fired", wakeReason: "scheduled", firedAt: 2_000 });
   const reminders = new Map([["due", fired]]);
+  assert.equal(sessionVisibleForReminderMode(due, fired, "ordinary"), true);
+  assert.equal(sessionVisibleForReminderMode(due, fired, "snoozed"), false);
+  assert.equal(snoozedSessionAttentionReason(due)?.label, "Input Required",
+    "firing a reminder must not clear unresolved state");
+  const activityFired = { ...fired, wakePolicy: "until_activity", wakeReason: "agent_response" } as const;
+  assert.equal(sessionVisibleForReminderMode(due, activityFired, "ordinary"), true);
+  assert.equal(sessionVisibleForReminderMode(due, activityFired, "snoozed"), false);
   assert.deepEqual(sortSessionsForReminders([normal, due], reminders, "ordinary").map(({ id }) => id), ["due", "normal"]);
   assert.equal(reminderBadgeLabel(fired), "Returned from Snooze");
   assert.match(reminderBadgeDescription(fired), /Returned from snooze\. Snooze ended/);

@@ -28,7 +28,7 @@ export type SnoozedAttentionReason =
     watchdogState: BackgroundDeliveryWatchdogState;
   };
 
-/** One canonical explanation for every exception that keeps a pending reminder in Active. */
+/** One canonical explanation for attention that remains visible with a snoozed session. */
 export function snoozedSessionAttentionReason(session: SessionView): SnoozedAttentionReason | null {
   // Older or partial snapshots may omit pendingApproval even though current SessionView requires
   // null. `undefined !== null` used to retain an otherwise-idle snoozed session with no reason.
@@ -73,12 +73,6 @@ export function snoozedSessionAttentionReason(session: SessionView): SnoozedAtte
   return null;
 }
 
-/** Safety and authentication work remains discoverable in the ordinary Inbox even while a
- * reminder is pending. Snooze still stays lifecycle-independent and remains visible in its view. */
-export function sessionNeedsAttentionWhileSnoozed(session: SessionView): boolean {
-  return snoozedSessionAttentionReason(session) !== null;
-}
-
 export function sessionVisibleForReminderMode(
   session: SessionView,
   reminder: SessionReminderView | undefined,
@@ -87,7 +81,7 @@ export function sessionVisibleForReminderMode(
   if (session.archived) return false;
   const pending = reminder?.state === "pending";
   if (mode === "snoozed") return pending;
-  return !pending || sessionNeedsAttentionWhileSnoozed(session);
+  return !pending;
 }
 
 /** Fired reminders precede every normal inbox item exactly once; their existing activity order is

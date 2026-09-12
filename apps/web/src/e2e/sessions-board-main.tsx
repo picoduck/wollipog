@@ -101,7 +101,18 @@ const sessions = [
       ],
     } as never,
   }),
-  session("s-snoozed", "Snoozed Session", "review"),
+  session("s-snoozed", "Snoozed Session", "review", {
+    status: "input_required",
+    pendingApproval: {
+      requestId: "approval-snoozed",
+      kind: "tool",
+      title: "Deploy at 3:30 PM?",
+      options: [
+        { optionId: "allow", name: "Allow", kind: "allow_once" },
+        { optionId: "deny", name: "Deny", kind: "deny" },
+      ],
+    } as never,
+  }),
 ];
 
 if (threads) {
