@@ -6,6 +6,7 @@ import React, {
   useRef,
   useState,
   useSyncExternalStore,
+  type CSSProperties,
   type ReactNode,
 } from "react";
 import { CheckIcon, ChevronDownIcon } from "../Icons.js";
@@ -36,6 +37,7 @@ export function InlineListbox<T>({
   className,
   before,
   after,
+  style,
 }: {
   id: string;
   label: string;
@@ -49,9 +51,10 @@ export function InlineListbox<T>({
   className?: string;
   before?: ReactNode;
   after?: ReactNode;
+  style?: CSSProperties;
 }) {
   return (
-    <div className={className} role="listbox" id={id} aria-label={label}>
+    <div className={className} role="listbox" id={id} aria-label={label} style={style}>
       {before}
       {options.map((option, index) => {
         const optionDisabled = isOptionDisabled?.(option) ?? false;
@@ -402,7 +405,7 @@ export function filterSearchableComboboxOptions<T extends string>(
     const haystack = [
       option.label,
       option.description,
-      option.disabledReason,
+      option.disabled ? option.disabledReason : undefined,
       ...(option.keywords ?? []),
     ].filter((part): part is string => Boolean(part)).join(" ").toLowerCase();
     return terms.every((term) => haystack.includes(term));
@@ -506,6 +509,11 @@ export function SearchableCombobox<T extends string>({
     setActive((activeIndex + delta + results.length) % results.length);
   };
   const activeOption = results[activeIndex];
+  const firstEnabledIndex = Math.max(0, results.findIndex((option) => !option.disabled));
+  const lastEnabledIndex = results.reduce(
+    (last, option, index) => option.disabled ? last : index,
+    0,
+  );
 
   return (
     <div
@@ -524,6 +532,7 @@ export function SearchableCombobox<T extends string>({
         aria-controls={open ? listboxId : undefined}
         aria-activedescendant={open && activeOption ? `${listboxId}-${activeIndex}` : undefined}
         aria-disabled={disabled || undefined}
+        readOnly={disabled}
         autoComplete="off"
         className="ui-searchable-combobox-input"
         placeholder={placeholder}
@@ -566,7 +575,9 @@ export function SearchableCombobox<T extends string>({
           }
           if (open && (event.key === "Home" || event.key === "End")) {
             event.preventDefault();
-            setActive(event.key === "Home" ? 0 : Math.max(0, results.length - 1));
+            // Up/Down deliberately reach unavailable results so their reason can be inspected;
+            // Home/End retain Select's boundary shortcut to the first/last commit-capable result.
+            setActive(event.key === "Home" ? firstEnabledIndex : lastEnabledIndex);
             return;
           }
           if (event.key === "Enter" && open) {
@@ -586,6 +597,7 @@ export function SearchableCombobox<T extends string>({
           isOptionDisabled={(option) => Boolean(option.disabled)}
           onSelect={commit}
           className="ui-searchable-combobox-list ui-select-list"
+          style={listStyle}
           before={results.length === 0
             ? <p className="ui-select-empty">{emptyLabel}</p>
             : undefined}

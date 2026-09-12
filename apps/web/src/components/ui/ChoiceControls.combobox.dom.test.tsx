@@ -33,9 +33,10 @@ const OPTIONS = [
     disabledReason: "Setup Required",
   },
   { value: "beta", label: "Dashboard", description: "Remote · /srv/beta" },
+  { value: "legacy", label: "Legacy Agent", disabled: true, disabledReason: "Runner Too Old" },
 ] as const;
 
-function mount(onChange: (value: string) => void = () => undefined) {
+function mount(onChange: (value: string) => void = () => undefined, disabled = false) {
   const host = document.createElement("div");
   const after = document.createElement("button");
   after.textContent = "After";
@@ -50,6 +51,7 @@ function mount(onChange: (value: string) => void = () => undefined) {
         value="alpha"
         onChange={onChange}
         placeholder="Choose an Agent"
+        disabled={disabled}
       />
     </div>,
   ));
@@ -90,7 +92,11 @@ test("typing filters the InlineListbox and exposes the active option", () => {
   try {
     act(() => input.focus());
     assert.equal(input.getAttribute("aria-expanded"), "true");
-    assert.ok(host.querySelector('[role="listbox"]'), "the popup uses the shared listbox primitive");
+    const popup = host.querySelector<HTMLElement>('[role="listbox"]')!;
+    assert.ok(popup, "the popup uses the shared listbox primitive");
+    assert.equal(popup.style.position, "fixed", "the anchored placement reaches InlineListbox");
+    assert.notEqual(popup.style.maxHeight, "", "the line-count height budget reaches the popup");
+    assert.notEqual(popup.style.width, "", "the popup is sized from its input anchor");
 
     type(input, "remote beta");
     const results = [...host.querySelectorAll<HTMLElement>('[role="option"]')];
@@ -98,6 +104,21 @@ test("typing filters the InlineListbox and exposes the active option", () => {
     assert.match(results[0]?.textContent ?? "", /Remote · \/srv\/beta/);
     assert.equal(input.getAttribute("aria-activedescendant"), results[0]?.id);
     assert.equal(results[0]?.getAttribute("aria-selected"), "true");
+  } finally {
+    unmount();
+  }
+});
+
+test("Home and End use the same enabled boundaries as Select", () => {
+  const { host, input, unmount } = mount();
+  try {
+    act(() => input.focus());
+    press(input, "End");
+    const options = [...host.querySelectorAll<HTMLElement>('[role="option"]')];
+    assert.equal(input.getAttribute("aria-activedescendant"), options[2]?.id,
+      "End skips the trailing unavailable result while arrows can still inspect it");
+    press(input, "Home");
+    assert.equal(input.getAttribute("aria-activedescendant"), options[0]?.id);
   } finally {
     unmount();
   }
@@ -203,6 +224,23 @@ test("IME Enter neither selects an option nor closes the popup", () => {
       "the browser or IME keeps ownership of composed Enter");
     assert.deepEqual(chosen, []);
     assert.equal(input.getAttribute("aria-expanded"), "true");
+  } finally {
+    unmount();
+  }
+});
+
+test("a disabled combobox stays readable without accepting edits", () => {
+  const chosen: string[] = [];
+  const { input, unmount } = mount((value) => chosen.push(value), true);
+  try {
+    assert.equal(input.readOnly, true, "native read-only behavior refuses text edits without eating them");
+    assert.equal(input.getAttribute("aria-disabled"), "true");
+    act(() => input.focus());
+    assert.equal(input.getAttribute("aria-expanded"), "false");
+    type(input, "changed");
+    assert.equal(input.value, "Dashboard");
+    assert.equal(input.getAttribute("aria-expanded"), "false");
+    assert.deepEqual(chosen, []);
   } finally {
     unmount();
   }

@@ -17,6 +17,7 @@ const SEARCH_OPTIONS = [
     disabled: true,
     disabledReason: "Setup Required",
   },
+  { value: "delta", label: "Ready Agent", disabledReason: "Stale Setup Reason" },
 ] as const;
 
 test("searchable combobox filtering is case-insensitive and matches visible context", () => {
@@ -35,13 +36,15 @@ test("searchable combobox filtering is case-insensitive and matches visible cont
 test("searchable combobox filtering preserves source order and unavailable results", () => {
   assert.deepEqual(
     filterSearchableComboboxOptions(SEARCH_OPTIONS, "").map((option) => option.value),
-    ["alpha", "beta", "gamma"],
+    ["alpha", "beta", "gamma", "delta"],
   );
   assert.deepEqual(
     filterSearchableComboboxOptions(SEARCH_OPTIONS, "setup").map((option) => option.value),
     ["gamma"],
     "an unavailable option remains discoverable by the rendered reason that explains it",
   );
+  assert.deepEqual(filterSearchableComboboxOptions(SEARCH_OPTIONS, "stale"), [],
+    "a reason that is not rendered on an enabled option cannot create an invisible match");
 });
 
 /**
