@@ -1846,6 +1846,30 @@ test("side chats retain an active Project Location for an ad-hoc parent sharing 
   assert.equal(db.getSession(child.id)!.projectLocationId, location.id);
 });
 
+test("side chats retain the Project without its Location when an ad-hoc parent path becomes ambiguous", () => {
+  const { db, svc } = makeHarness();
+  const location = db.findProjectLocation(RUNNER_ID, WORKSPACE_ID)!;
+  const adHocParent = svc.createSession({
+    runnerId: RUNNER_ID,
+    workspaceId: WORKSPACE_ID,
+    workspacePath: `${WORKSPACE_PATH}/packages/core`,
+    agentId: AGENT_ID,
+    projectId: location.projectId,
+    projectLocationId: location.id,
+  });
+  assert.ok(adHocParent.ok && adHocParent.data, adHocParent.error);
+
+  const meta = runnerMeta();
+  meta.workspaces.push({ id: "ws-tied", name: "Tied", path: WORKSPACE_PATH });
+  db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+
+  const result = svc.createSideChat(adHocParent.data!.id);
+
+  assert.ok(result.ok && result.data, result.error);
+  assert.equal(result.data!.session.projectId, location.projectId);
+  assert.equal(result.data!.session.projectLocationId, null);
+});
+
 test("deleting a primary session also tombstones and removes its side chat", () => {
   const { db, hub, svc } = makeHarness();
   const parentId = seedSession(svc, hub);
