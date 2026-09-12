@@ -35,9 +35,14 @@ test("the Sessions digit shortcut refocuses the already-active list", async ({ p
   await expect(page.locator('[data-focus-zone="detail"] .detail-scroll, [data-focus-zone="detail"] .inbox-preview-empty')).toBeFocused();
   await page.keyboard.press("1");
   await expect(grid).toBeFocused();
+  const lastId = await grid.getByRole("row").last().getAttribute("id");
+  expect(lastId).toBeTruthy();
+  await grid.press("End");
+  await expect(grid).toHaveAttribute("aria-activedescendant", lastId!);
   await grid.press("ArrowUp");
   const firstId = await grid.getByRole("row").first().getAttribute("id");
   expect(firstId).toBeTruthy();
+  await expect(grid).not.toHaveAttribute("aria-activedescendant", firstId!);
   await grid.press("Home");
   await expect(grid).toHaveAttribute("aria-activedescendant", firstId!);
 });
@@ -89,6 +94,10 @@ test("real shell preserves global shortcuts from the grid and F2 opens the selec
   const shortcutDialog = page.getByRole("dialog", { name: "Keyboard Shortcuts", exact: true });
   await expect(shortcutDialog).toBeVisible();
   await expect(shortcutDialog.getByText("Toggle Thread", { exact: true })).toBeVisible();
+  await expect(shortcutDialog.getByText("Next Session (Grid)", { exact: true })).toBeVisible();
+  await expect(shortcutDialog.getByText("Previous Session (Grid)", { exact: true })).toBeVisible();
+  await expect(shortcutDialog.getByText("First Session (Grid)", { exact: true })).toBeVisible();
+  await expect(shortcutDialog.getByText("Last Session / Follow Live Output", { exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
   // The modal owns global shortcuts until React has unmounted it. Refocusing the background and
   // sending F6 before that boundary settles races the app's intentional shortcut-layer guard on

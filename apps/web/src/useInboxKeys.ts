@@ -72,10 +72,10 @@ export function useInboxKeys(enabled: boolean, actions: InboxKeyActions): void {
           active.matches('button, summary, a[href], input, textarea, select, [role="button"], [role="radio"], [role="checkbox"]') &&
           !active.matches(".inbox-list")) return;
       if (active instanceof HTMLElement && active.matches(".inbox-list")) {
-        const action = event.key === "ArrowDown" ? actions.next
-          : event.key === "ArrowUp" ? actions.previous
-          : event.key === "Home" ? actions.first
-          : event.key === "End" ? actions.last
+        const action = matchesShortcut(event, "inbox-grid-next") ? actions.next
+          : matchesShortcut(event, "inbox-grid-previous") ? actions.previous
+          : matchesShortcut(event, "inbox-grid-first") ? actions.first
+          : matchesShortcut(event, "inbox-follow-latest-end") ? actions.last
           : null;
         if (action) {
           event.preventDefault();

@@ -25,6 +25,9 @@ export type ShortcutId =
   | "shortcut-reference"
   | "inbox-next"
   | "inbox-previous"
+  | "inbox-grid-next"
+  | "inbox-grid-previous"
+  | "inbox-grid-first"
   | "inbox-expand"
   | "inbox-open-top-request"
   | "inbox-toggle-thread"
@@ -290,6 +293,30 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     binding: { key: "k", bare: true },
   },
   {
+    id: "inbox-grid-next",
+    group: "Sessions List",
+    label: "Next Session (Grid)",
+    description: "Select the next session while the Sessions grid has focus",
+    scope: "Sessions List",
+    binding: { key: "ArrowDown", bare: true, displayKey: "↓" },
+  },
+  {
+    id: "inbox-grid-previous",
+    group: "Sessions List",
+    label: "Previous Session (Grid)",
+    description: "Select the previous session while the Sessions grid has focus",
+    scope: "Sessions List",
+    binding: { key: "ArrowUp", bare: true, displayKey: "↑" },
+  },
+  {
+    id: "inbox-grid-first",
+    group: "Sessions List",
+    label: "First Session (Grid)",
+    description: "Select the first session while the Sessions grid has focus",
+    scope: "Sessions List",
+    binding: { key: "Home", bare: true },
+  },
+  {
     id: "inbox-expand",
     group: "Sessions List",
     label: "Expand Session",
@@ -452,8 +479,8 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
   {
     id: "inbox-follow-latest-end",
     group: "Sessions List",
-    label: "Follow Live Output (End)",
-    description: "Jump to the latest preview event and resume following",
+    label: "Last Session / Follow Live Output",
+    description: "Select the last session from the grid, or jump to the latest preview event and resume following",
     scope: "Sessions List",
     binding: { key: "End", bare: true },
   },

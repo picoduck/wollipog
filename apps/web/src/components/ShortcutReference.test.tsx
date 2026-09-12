@@ -20,6 +20,11 @@ test("shortcut reference exposes the Sessions List group and terminal exit bindi
   );
   assert.match(html, /id="shortcut-sessions-list"/);
   assert.match(html, />Next Session</);
+  assert.match(html, />Next Session \(Grid\)</);
+  assert.match(html, />Previous Session \(Grid\)</);
+  assert.match(html, />First Session \(Grid\)</);
+  assert.match(html, />Last Session \/ Follow Live Output</);
+  assert.match(html, /Select the last session from the grid, or jump to the latest preview event and resume following/);
   assert.match(html, />Previous Split</);
   assert.match(html, />Mark Unread</);
   assert.match(html, />Shift\+Space</);

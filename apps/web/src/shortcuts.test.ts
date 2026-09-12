@@ -87,6 +87,9 @@ test("shortcut labels follow the current platform without changing definitions",
   assert.equal(shortcutDisplay("inbox-page-down", false), "Space");
   assert.equal(shortcutDisplay("inbox-page-up", false), "Shift+Space");
   assert.equal(shortcutDisplay("inbox-follow-latest", false), "Shift+G");
+  assert.equal(shortcutDisplay("inbox-grid-next", false), "↓");
+  assert.equal(shortcutDisplay("inbox-grid-previous", false), "↑");
+  assert.equal(shortcutDisplay("inbox-grid-first", false), "Home");
   assert.equal(shortcutDisplay("inbox-follow-latest-end", false), "End");
   assert.equal(shortcutDisplay("inbox-expand", false), "Enter");
   assert.equal(shortcutDisplay("inbox-fork", false), "F");
@@ -168,7 +171,8 @@ test("sequence matching completes inside 600ms and cancels on mismatch, timeout,
 
 test("PR2 Inbox shortcuts are registered under the Inbox scope", () => {
   const expected = [
-    "inbox-next", "inbox-previous", "inbox-expand", "inbox-open-top-request", "inbox-toggle-thread",
+    "inbox-next", "inbox-previous", "inbox-grid-next", "inbox-grid-previous", "inbox-grid-first",
+    "inbox-expand", "inbox-open-top-request", "inbox-toggle-thread",
     "inbox-toggle-all-threads", "inbox-go-to-parent", "inbox-expand-thread", "inbox-collapse-thread",
     "inbox-fork", "inbox-next-split", "inbox-previous-split",
     "inbox-approve", "inbox-deny", "inbox-archive", "inbox-snooze", "inbox-pin", "inbox-unread",
@@ -178,8 +182,11 @@ test("PR2 Inbox shortcuts are registered under the Inbox scope", () => {
   assert.equal(SHORTCUTS.filter((item) => expected.includes(item.id)).every((item) => item.group === "Sessions List"), true);
   assert.equal(shortcut("inbox-page-down").label, "Page Down");
   assert.equal(shortcut("inbox-page-up").label, "Page Up");
+  assert.equal(shortcut("inbox-grid-next").label, "Next Session (Grid)");
+  assert.equal(shortcut("inbox-grid-previous").label, "Previous Session (Grid)");
+  assert.equal(shortcut("inbox-grid-first").label, "First Session (Grid)");
   assert.equal(shortcut("inbox-follow-latest").label, "Follow Live Output");
-  assert.equal(shortcut("inbox-follow-latest-end").label, "Follow Live Output (End)");
+  assert.equal(shortcut("inbox-follow-latest-end").label, "Last Session / Follow Live Output");
 });
 
 test("Session Reading shortcuts are registered in their contextual reference group", () => {
