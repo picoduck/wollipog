@@ -27,8 +27,9 @@ function lruSet<K, V>(cache: Map<K, V>, key: K, value: V, limit: number): void {
 
 function timezoneCacheKey(timezone: string): string {
   // IANA identifiers are ASCII and Intl accepts them case-insensitively. Folding the cache key
-  // makes accepted case variants share validation, formatter, and offset-model entries.
-  return timezone.toLowerCase();
+  // makes accepted case variants share validation, formatter, and offset-model entries. Limit the
+  // fold to ASCII so Unicode lookalikes cannot collide with a previously validated identifier.
+  return timezone.replace(/[A-Z]/g, (character) => character.toLowerCase());
 }
 
 interface CronField {
