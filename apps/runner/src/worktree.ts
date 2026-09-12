@@ -778,6 +778,25 @@ export type DiscoveredMergedPullRequest = {
   provider: "github";
   kind: "pull_request";
 };
+
+export type MissingUpstreamPullRequestIdentity = {
+  remote: string;
+  merge: string;
+  headOid: string;
+};
+
+export interface MergedWorktreePullRequestDiscoveryOptions extends WorktreeOptions {
+  /** Test-only subprocess seam. Production resolves the forge command exactly as before. */
+  runForgeCommand?: typeof runContextCommand;
+  /** Periodic reconciliation shortens local probes; explicit operations retain the default. */
+  preflightTimeoutMs?: number;
+  /** Admission hook used by periodic reconciliation after all cheap fail-closed Git gates pass. */
+  onForgeAttempt?: (identity: MissingUpstreamPullRequestIdentity) => boolean;
+  /** Clears a prior negative when Git proves this branch no longer has the cached eligibility. */
+  onIneligible?: () => void;
+  /** Distinguishes transport/auth/tool failure from an authoritative empty forge response. */
+  onForgeUnavailable?: () => void;
+}
 type LinkedChangeRequest = {
   provider: ForgeProvider;
   host: string;
@@ -900,32 +919,60 @@ export async function worktreePullRequestState(
 export async function mergedWorktreePullRequestForBranch(
   worktreePath: string,
   branch: string,
-  options: WorktreeOptions = {},
+  options: MergedWorktreePullRequestDiscoveryOptions = {},
 ): Promise<DiscoveredMergedPullRequest | null> {
   const context = options.context ?? nativeContext;
+  const preflightTimeoutMs = options.preflightTimeoutMs ?? 30_000;
   try {
-    const remote = (await command(context, worktreePath, ["config", "--get", `branch.${branch}.remote`])).trim();
-    const merge = (await command(context, worktreePath, ["config", "--get", `branch.${branch}.merge`])).trim();
-    if (!remote || remote === "." || merge !== `refs/heads/${branch}`) return null;
+    const remote = (await command(
+      context, worktreePath,
+      ["config", "--get", "--default", "", `branch.${branch}.remote`],
+      preflightTimeoutMs,
+    )).trim();
+    const merge = (await command(
+      context, worktreePath,
+      ["config", "--get", "--default", "", `branch.${branch}.merge`],
+      preflightTimeoutMs,
+    )).trim();
+    if (!remote || remote === "." || merge !== `refs/heads/${branch}`) {
+      options.onIneligible?.();
+      return null;
+    }
     try {
-      await command(context, worktreePath, ["rev-parse", "--verify", `${branch}@{upstream}`]);
+      await command(context, worktreePath, ["rev-parse", "--verify", `${branch}@{upstream}`], preflightTimeoutMs);
+      options.onIneligible?.();
       return null;
     } catch {
       // A configured upstream whose ref disappeared is the only state eligible for forge recovery.
     }
-    const head = (await command(context, worktreePath, ["rev-parse", "--verify", "HEAD"])).trim();
-    if (!/^[a-f0-9]{40,64}$/u.test(head)) return null;
-    const result = await runContextCommand(
-      context,
-      "gh",
-      [
-        "pr", "list", "--head", branch, "--state", "merged", "--limit", "100",
-        "--json", "url,state,headRefOid,headRefName",
-      ],
-      { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: 1024 * 1024 },
-    );
-    return parseMergedWorktreePullRequestForBranch(result.stdout, branch, head);
+    const head = (await command(
+      context, worktreePath, ["rev-parse", "--verify", "HEAD"], preflightTimeoutMs,
+    )).trim();
+    if (!/^[a-f0-9]{40,64}$/u.test(head)) {
+      options.onIneligible?.();
+      return null;
+    }
+    const identity = { remote, merge, headOid: head };
+    if (options.onForgeAttempt && !options.onForgeAttempt(identity)) return null;
+    try {
+      const result = await (options.runForgeCommand ?? runContextCommand)(
+        context,
+        "gh",
+        [
+          "pr", "list", "--head", branch, "--state", "merged", "--limit", "100",
+          "--json", "url,state,headRefOid,headRefName",
+        ],
+        { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: 1024 * 1024 },
+      );
+      return parseMergedWorktreePullRequestForBranch(result.stdout, branch, head);
+    } catch {
+      options.onForgeUnavailable?.();
+      return null;
+    }
   } catch {
+    // A failed Git preflight is unavailable evidence, not proof that the candidate became
+    // ineligible. Preserve any authoritative negative so a transient timeout cannot defeat
+    // the reconciliation backoff.
     return null;
   }
 }
