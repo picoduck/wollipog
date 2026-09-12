@@ -36,19 +36,20 @@ expectGeometry(phone - desktop, "the phone card is at least one text line taller
 
 // The same element before and after a change.
 expectGeometry(Math.abs(after.height - before.height), "the change preserves card height")
-  .toBeLessThanOrEqual(0.6);
+  .toBeLessThanOrEqual(0.61);
 
 // A structural fact rather than a size.
 expect(resolvedGridRows).toBe(2);
 
 // Containment: nothing spills past the edge.
 expectGeometry(badge.right - (card.right - padding), "the badge stays inside the card")
-  .toBeLessThanOrEqual(0.6);
+  .toBeLessThanOrEqual(0.61);
 ```
 
-The `0.6` bounds above allow the intended 0.5px of renderer tolerance while reserving the helper's
-minimum 0.1px of headroom. The sections below explain when a second font pass is also necessary and
-how the runtime margin is checked.
+The `0.61` bounds above allow the intended 0.5px of renderer tolerance while reserving slightly more
+than the helper's minimum 0.1px of headroom. Use a value strictly above the mathematical sum because
+decimal subtraction can round an exact boundary just below the required margin. The sections below
+explain when a second font pass is also necessary and how the runtime margin is checked.
 
 ### Relative Is Necessary, Not Sufficient
 
@@ -93,9 +94,10 @@ expectGeometry(phone - desktop, "the phone card is at least one text line taller
 The helper first runs the ordinary Playwright assertion, then separately requires the measured
 margin to be at least 10% of the bound's magnitude (with a one-pixel scale floor for zero and
 sub-pixel bounds). That floor is part of the caller's allowance: to tolerate an observation up to
-0.5px, use an upper bound of 0.6px so the helper can reserve the required 0.1px margin. A narrow
-failure reports the reason, observed value, bound, actual margin, and required margin.
-`expectGeometryPoll` applies the same check after a polled bound settles.
+0.5px, use an upper bound strictly greater than 0.6px, such as 0.61px, so floating-point rounding
+cannot erase the required 0.1px margin. A narrow failure reports the reason, observed value, bound,
+actual margin, and required margin. `expectGeometryPoll` applies the same check after a polled bound
+settles.
 
 Ten percent comes from the measured distribution, not a guessed renderer allowance. The #931
 regression observed 42 against a bound of 40: 5% headroom. The 53 margin-bearing assertion sites in

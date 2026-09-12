@@ -8,6 +8,7 @@ test("geometry bounds require measured headroom and name a narrow margin", () =>
   expectGeometry(50, "an inclusive lower bound").toBeGreaterThanOrEqual(40);
   expectGeometry(70, "a strict upper bound").toBeLessThan(80);
   expectGeometry(0, "a containment tolerance").toBeLessThanOrEqual(0.5);
+  expectGeometry(0.5, "the documented half-pixel tolerance").toBeLessThanOrEqual(0.61);
 
   expect(() => expectGeometry(42, "the branch keeps a safe share").toBeGreaterThan(40))
     .toThrow(/the branch keeps a safe share: geometry margin 2 is below 4 .*observed 42, bound 40/);
@@ -56,4 +57,15 @@ test("a polled lower bound retries until the adjusted bound has headroom", async
     return 12;
   }, "the lower bound settles above its required margin").toBeGreaterThan(10);
   expect(samples).toBe(3);
+});
+
+test("polled strict and inclusive aliases keep their intended directions", async () => {
+  await expectGeometryPoll(
+    () => 12,
+    "the inclusive lower-bound alias keeps the above direction",
+  ).toBeGreaterThanOrEqual(10);
+  await expectGeometryPoll(
+    () => 0,
+    "the strict upper-bound alias keeps the below direction",
+  ).toBeLessThan(1);
 });
