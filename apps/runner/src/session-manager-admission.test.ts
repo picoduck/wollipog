@@ -394,10 +394,27 @@ test("capacity observation caching does not certify concurrent mutations or part
       if (++inspections === 2) throw new Error("simulated stale-slot cleanup failure");
       return inspectSlot(path);
     };
-    assert.equal(gate.observe().usedCapacity, 0, "an interrupted scan preserves the fail-closed legacy result");
+    assert.equal(gate.observe().usedCapacity, 0, "an interrupted scan preserves the fail-open legacy result");
     internals.inspectSlot = inspectSlot;
     assert.equal(gate.observe().usedCapacity, 2,
       "an interrupted scan is not cached and the next observation retries every slot");
+    sibling.releaseAll();
+
+    const admissionRoot = join(root, "admission");
+    const dead = join(admissionRoot, "slot-0");
+    mkdirSync(dead);
+    writeFileSync(join(dead, "owner.json"), JSON.stringify({
+      pid: 2_147_483_647,
+      token: "crashed",
+      sessionId: "dead",
+      agentId: "claude",
+    }));
+    internals.rootSignature = () => "coarse-filesystem-aba";
+    assert.equal(gate.observe().usedCapacity, 0, "a dead slot is reclaimed during observation");
+    assert.equal(sibling.acquire({ sessionId: "replacement", agentId: "claude", weight: 2 }), true);
+    assert.equal(gate.observe().usedCapacity, 2,
+      "a reclaiming scan is not cached even when a sibling restores the same root signature");
+    internals.rootSignature = rootSignature;
     sibling.releaseAll();
   } finally {
     rmSync(root, { recursive: true, force: true });
