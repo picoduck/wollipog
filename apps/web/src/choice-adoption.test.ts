@@ -102,11 +102,6 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/NewRunDialog.tsx", "agent-pick", 4],
   ["components/NewRunDialog.tsx", "native-select", 6],
   ["components/NewRunDialog.tsx", "workflow-preset", 3],
-  ["components/NewSessionDialog.tsx", "agent-pick", 2],
-  /* Down from 5 on 2026-09-11: Machine, Workspace and Execution Target adopted the shared Select.
-     The two left are Project and Agent, which #218 specifies as SEARCHABLE comboboxes — migrating
-     them to the plain listbox first would mean rewriting both controls twice. */
-  ["components/NewSessionDialog.tsx", "native-select", 2],
   ["components/OnboardRunnerDialog.tsx", "seg", 2],
   ["components/PeopleDevicesPanel.tsx", "access-choice", 2],
   ["components/PeopleDevicesPanel.tsx", "native-select", 4],
@@ -127,13 +122,6 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/BrowserPanel.tsx", "raw-radiogroup", 2],
   ["components/FilesPanel.tsx", "raw-radiogroup", 3],
   ["components/NewRunDialog.tsx", "raw-radiogroup", 5],
-  /* Down from 10 on 2026-09-11: the Harness picker adopted ChoiceCards, retiring its bespoke
-     `.workflow-preset` radiogroup and its two radios. The remaining seven are the two `.loc-pick`
-     Location groups, the Advanced Agents radio group, and the Additional Directories checkbox. */
-  /* Down from 7 on 2026-09-11: both `.loc-pick` Location groups adopted ChoiceCards. The three
-     that remain are the Advanced Agents radio group and the Additional Directories checkbox, which
-     wait on the Agent-selection rework in #218. */
-  ["components/NewSessionDialog.tsx", "raw-radiogroup", 3],
   ["components/OnboardRunnerDialog.tsx", "raw-radiogroup", 2],
   ["components/PeopleDevicesPanel.tsx", "raw-radiogroup", 3],
   ["components/ReviewPanel.tsx", "raw-radiogroup", 9],
@@ -164,6 +152,7 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
 const FULLY_MIGRATED = [
   "components/UsageView.tsx",
   "components/ProjectsView.tsx",
+  "components/NewSessionDialog.tsx",
 ];
 
 function sourceFiles(dir: string, out: string[] = []): string[] {
@@ -286,15 +275,13 @@ test("a fully migrated screen renders a primitive", () => {
   }
 });
 
-test("the screens the primitives have reached are the ones that use them", () => {
-  // A screen can adopt a primitive for ONE of its controls while others remain — NewSessionDialog
-  // is exactly that, and the first version of this file called it migrated. Partial adoption is
-  // fine and expected; what is not fine is a file claiming to be finished while its inventory
-  // entries stand, which the two tests above now separate.
-  const partial = read(join(SRC, "components/NewSessionDialog.tsx"));
-  assert.match(partial, /<SegmentedControl/, "the harness picker moved onto the primitive");
-  assert.ok(BASELINE.some(([file]) => file === "components/NewSessionDialog.tsx"),
-    "and the rest of its pickers are still counted, because they are still bespoke");
+test("New Session completed the shared-choice migration", () => {
+  const source = read(join(SRC, "components/NewSessionDialog.tsx"));
+  assert.match(source, /<SearchableCombobox/, "Project and Agent use the searchable primitive");
+  assert.match(source, /<ChoiceCards/, "described and multiple choices use shared cards");
+  assert.match(source, /<SegmentedControl/, "short fixed modes use the segmented primitive");
+  assert.equal(BASELINE.some(([file]) => file === "components/NewSessionDialog.tsx"), false,
+    "no bespoke New Session picker remains in the ratchet inventory");
 });
 
 test("a roving choice group always has exactly one tab stop", () => {

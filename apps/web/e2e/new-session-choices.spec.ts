@@ -114,10 +114,9 @@ for (const viewport of VIEWPORTS) {
       // the browser job has roughly 18 seconds of headroom against its 30-minute cap (#842).
       const form = page.locator(".form");
       const formBox = (await form.boundingBox())!;
-      // `.loc-pick` is gone: the Location groups moved onto ChoiceCards, so a selector for it
-      // would match nothing and quietly stop checking anything. Native selects are included
-      // because the dialog still renders them for Project and Agent until #218 lands.
-      for (const selector of [".ui-choice-card", ".ui-seg", ".ui-select-trigger", ".form select"]) {
+      // `.loc-pick` and the native Project/Agent selects are gone. Include the editable combobox
+      // owner explicitly so the two controls #218 migrated cannot overflow unnoticed.
+      for (const selector of [".ui-choice-card", ".ui-seg", ".ui-select-trigger", ".ui-searchable-combobox-input"]) {
         for (const control of await page.locator(selector).all()) {
           if (!(await control.isVisible())) continue;
           const box = (await control.boundingBox())!;
@@ -179,6 +178,28 @@ for (const viewport of VIEWPORTS) {
 
   });
 }
+
+test.describe("searchable Project and Agent controls", () => {
+  test.use({ viewport: { width: 390, height: 780 }, hasTouch: true, isMobile: true });
+
+  test("Advanced Agents share the searchable Agent list at phone width", async ({ page }) => {
+    await openDialog(page);
+    await expect(page.locator('select[aria-label="Project"], select[aria-label="Agent"]')).toHaveCount(0);
+    await expect(page.getByText("Advanced Agents", { exact: true })).toHaveCount(0);
+
+    const agent = page.getByRole("combobox", { name: "Agent" });
+    await agent.click();
+    const options = page.getByRole("listbox", { name: "Agent Options" }).getByRole("option");
+    await expect(options).toHaveCount(3);
+    await expect(options.filter({ hasText: "Advanced Agent" })).toHaveCount(1);
+
+    await agent.fill("non-interactive");
+    await expect(options).toHaveCount(1);
+    await expect(options.first()).toContainText("Codex — Non-Interactive");
+    await page.keyboard.press("Enter");
+    await expect(agent).toHaveValue(/Codex — Non-Interactive/);
+  });
+});
 
 test.describe("unavailable preset", () => {
   // One run, at the BINDING width rather than a comfortable one. Review caught that calling this
