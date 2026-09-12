@@ -476,9 +476,15 @@ export const SELECT_LIST_CHROME_PX = 10;
 /** Past this the list scrolls on purpose: the options genuinely do not fit. */
 export const SELECT_MENU_MAX_HEIGHT_PX = 320;
 
-/** The compact per-option budgets, for a pointer the touch floor does not apply to. */
+/** One line of option: the label on its own, for a pointer the touch floor does not apply to. */
 const COMPACT_OPTION_HEIGHT_PX = 34;
-const DESCRIBED_OPTION_HEIGHT_PX = 52;
+/**
+ * What each line AFTER the first adds.
+ *
+ * 18px, so a two-line option still budgets the 52px it always did — the rewrite below moved from
+ * "described or not" to a line count, and the cases that already worked must not move with it.
+ */
+const EXTRA_OPTION_LINE_PX = 18;
 
 /**
  * The exact condition `styles.css` applies the 44px touch floor under.
@@ -505,13 +511,23 @@ export const TOUCH_TARGET_MEDIA =
  */
 export function selectMenuDesiredHeight(input: {
   optionCount: number;
-  hasDescription: boolean;
+  /**
+   * The most lines any one option renders — its label, plus a description, plus a disabled reason.
+   *
+   * A line count rather than a `hasDescription` flag because an option renders up to three lines
+   * and the flag could only distinguish two. #986's review caught the consequence: giving an option
+   * a `disabledReason` added a line the budget did not know about, so the list asked for less height
+   * than it drew and reproduced #832's clipping from the other direction. A count cannot fall behind
+   * the markup the same way.
+   */
+  maxOptionLines: number;
   /** A caller's row budget for content that may wrap. Raised to the touch floor, never lowered. */
   estimatedOptionHeight?: number;
   coarsePointer: boolean;
 }): number {
+  const lines = Math.max(1, input.maxOptionLines);
   const estimated = input.estimatedOptionHeight
-    ?? (input.hasDescription ? DESCRIBED_OPTION_HEIGHT_PX : COMPACT_OPTION_HEIGHT_PX);
+    ?? COMPACT_OPTION_HEIGHT_PX + EXTRA_OPTION_LINE_PX * (lines - 1);
   const perOption = input.coarsePointer
     ? Math.max(estimated, TOUCH_OPTION_MIN_HEIGHT_PX)
     : estimated;
@@ -694,7 +710,11 @@ export function Select<T extends string>({
     // viewport and flips above the trigger.
     desiredHeight: selectMenuDesiredHeight({
       optionCount: options.length,
-      hasDescription: options.some((option) => option.description),
+      // Counted from what each option will actually render, so a caller cannot add a line the
+      // budget has not accounted for.
+      maxOptionLines: options.reduce((most, option) => Math.max(most, 1
+        + (option.description ? 1 : 0)
+        + (option.disabled && option.disabledReason ? 1 : 0)), 1),
       estimatedOptionHeight,
       coarsePointer,
     }),
