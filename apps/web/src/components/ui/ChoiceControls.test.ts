@@ -4,8 +4,48 @@ import {
   SELECT_LIST_CHROME_PX,
   SELECT_MENU_MAX_HEIGHT_PX,
   TOUCH_OPTION_MIN_HEIGHT_PX,
+  filterSearchableComboboxOptions,
   selectMenuDesiredHeight,
 } from "./ChoiceControls.js";
+
+const SEARCH_OPTIONS = [
+  { value: "alpha", label: "Dashboard", description: "~/dev/alpha", keywords: ["local", "primary"] },
+  { value: "beta", label: "Dashboard", description: "runner-two · /srv/beta", keywords: ["remote"] },
+  {
+    value: "gamma",
+    label: "Review Agent",
+    disabled: true,
+    disabledReason: "Setup Required",
+  },
+  { value: "delta", label: "Ready Agent", disabledReason: "Stale Setup Reason" },
+] as const;
+
+test("searchable combobox filtering is case-insensitive and matches visible context", () => {
+  assert.deepEqual(
+    filterSearchableComboboxOptions(SEARCH_OPTIONS, "DASHBOARD beta").map((option) => option.value),
+    ["beta"],
+    "all query terms may match across the label and disambiguating description",
+  );
+  assert.deepEqual(
+    filterSearchableComboboxOptions(SEARCH_OPTIONS, "LOCAL").map((option) => option.value),
+    ["alpha"],
+    "callers can add already-authorized search terms without rendering private metadata",
+  );
+});
+
+test("searchable combobox filtering preserves source order and unavailable results", () => {
+  assert.deepEqual(
+    filterSearchableComboboxOptions(SEARCH_OPTIONS, "").map((option) => option.value),
+    ["alpha", "beta", "gamma", "delta"],
+  );
+  assert.deepEqual(
+    filterSearchableComboboxOptions(SEARCH_OPTIONS, "setup").map((option) => option.value),
+    ["gamma"],
+    "an unavailable option remains discoverable by the rendered reason that explains it",
+  );
+  assert.deepEqual(filterSearchableComboboxOptions(SEARCH_OPTIONS, "stale"), [],
+    "a reason that is not rendered on an enabled option cannot create an invisible match");
+});
 
 /**
  * The open list asks the anchored-menu helper for a height, and the helper turns that request into
