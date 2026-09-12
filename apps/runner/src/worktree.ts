@@ -925,10 +925,14 @@ export async function mergedWorktreePullRequestForBranch(
   const preflightTimeoutMs = options.preflightTimeoutMs ?? 30_000;
   try {
     const remote = (await command(
-      context, worktreePath, ["config", "--get", `branch.${branch}.remote`], preflightTimeoutMs,
+      context, worktreePath,
+      ["config", "--get", "--default", "", `branch.${branch}.remote`],
+      preflightTimeoutMs,
     )).trim();
     const merge = (await command(
-      context, worktreePath, ["config", "--get", `branch.${branch}.merge`], preflightTimeoutMs,
+      context, worktreePath,
+      ["config", "--get", "--default", "", `branch.${branch}.merge`],
+      preflightTimeoutMs,
     )).trim();
     if (!remote || remote === "." || merge !== `refs/heads/${branch}`) {
       options.onIneligible?.();
@@ -966,7 +970,9 @@ export async function mergedWorktreePullRequestForBranch(
       return null;
     }
   } catch {
-    options.onIneligible?.();
+    // A failed Git preflight is unavailable evidence, not proof that the candidate became
+    // ineligible. Preserve any authoritative negative so a transient timeout cannot defeat
+    // the reconciliation backoff.
     return null;
   }
 }

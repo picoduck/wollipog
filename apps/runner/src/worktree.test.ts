@@ -102,7 +102,10 @@ test("missing-upstream discovery exercises every production Git gate before the 
     const discover = (options: Parameters<typeof mergedWorktreePullRequestForBranch>[2] = {}) =>
       mergedWorktreePullRequestForBranch(repo, branch, { ...options, runForgeCommand });
 
-    assert.equal(await discover(), null, "a never-pushed branch is ineligible");
+    let ineligible = 0;
+    assert.equal(await discover({ onIneligible: () => { ineligible++; } }), null,
+      "a never-pushed branch is ineligible");
+    assert.equal(ineligible, 1, "missing branch configuration is an authoritative ineligible state");
     assert.equal(forgeCalls.length, 0);
 
     execFileSync("git", ["-C", repo, "push", "-u", "origin", branch]);
@@ -160,6 +163,14 @@ test("missing-upstream discovery exercises every production Git gate before the 
     execFileSync("git", ["-C", repo, "config", `branch.${branch}.merge`, "refs/heads/fix/other"]);
     assert.equal(await discover(), null, "a differently named merge ref is ineligible");
     assert.equal(forgeCalls.length, callsBeforeLocalRemote);
+
+    let transientGitFailureReportedIneligible = 0;
+    assert.equal(await mergedWorktreePullRequestForBranch(join(repo, "missing"), branch, {
+      runForgeCommand,
+      onIneligible: () => { transientGitFailureReportedIneligible++; },
+    }), null, "a failed Git preflight is fail-closed");
+    assert.equal(transientGitFailureReportedIneligible, 0,
+      "Git execution failure does not invalidate an authoritative negative cache");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1259,71 +1270,75 @@ test("missing-upstream reconciliation is bounded, fair, identity-aware, and lane
     join(root, `candidate-${index.toString().padStart(2, "0")}`));
   const heads = new Map(candidatePaths.map((path, index) => [path, index.toString(16).padStart(40, "0")]));
   const laneProbePath = join(root, "lane-probe-attached");
-  const store = new SessionStore(join(dataDir, "sessions"));
-  store.create({
-    sessionId: "s_bounded_discovery", agentId: "claude", workspaceId: "repo", repoPath: root,
-    worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
-    context: { kind: "native" }, agentSessionId: null, status: "idle", title: "bounded",
-    config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
-    worktrees: [
-      ...candidatePaths.map((path, index) => ({
-        id: `candidate-${index}`, path, branch: `fix/candidate-${index}`, source: "created" as const,
-      })),
-      { id: "lane-probe", path: laneProbePath, branch: "fix/lane-probe", source: "attached" as const },
-    ],
-    seq: 0, createdAt: 1, updatedAt: 1,
-  });
-  const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
-  let now = 1_000_000;
-  let holdFirstWave = true;
-  let releaseFirstWave!: () => void;
-  const firstWave = new Promise<void>((resolve) => { releaseFirstWave = resolve; });
-  let active = 0;
-  let highWater = 0;
-  const attempts: string[] = [];
-  let mergedPath: string | undefined;
-  let ineligiblePath: string | undefined;
-  let forgeUnavailablePath: string | undefined;
-  const internals = manager as unknown as {
-    discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch;
-    resolveWorktreePullRequestState: () => Promise<null>;
-    discardSessionWorktreeIfSafe: () => Promise<{ removed: false; reason: "unavailable" }>;
-    worktreePullRequestDiscoveryNow: () => number;
-    worktreePullRequestDiscoveryCursor: number;
-    worktreePullRequestDiscoveryRetryAt: Map<string, { identity: string; retryAt: number }>;
-  };
-  internals.worktreePullRequestDiscoveryNow = () => now;
-  internals.resolveWorktreePullRequestState = async () => null;
-  internals.discardSessionWorktreeIfSafe = async () => ({ removed: false, reason: "unavailable" });
-  internals.discoverMergedWorktreePullRequest = async (path, branch, options = {}) => {
-    assert.equal(options.preflightTimeoutMs, 8_000, "periodic discovery uses the bounded Git preflight");
-    if (path === ineligiblePath) {
-      options.onIneligible?.();
-      return null;
-    }
-    const headOid = heads.get(path)!;
-    if (!options.onForgeAttempt?.({ remote: "origin", merge: `refs/heads/${branch}`, headOid })) return null;
-    attempts.push(path);
-    if (path === forgeUnavailablePath) {
-      options.onForgeUnavailable?.();
-      return null;
-    }
-    active++;
-    highWater = Math.max(highWater, active);
-    if (holdFirstWave) await firstWave;
-    active--;
-    return path === mergedPath
-      ? {
-        url: "https://github.com/picoduck/wollipog/pull/1019",
-        state: "merged",
-        headOid,
-        provider: "github",
-        kind: "pull_request",
-      }
-      : null;
-  };
-
+  let manager: SessionManager | undefined;
+  let releaseFirstWave: (() => void) | undefined;
   try {
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_bounded_discovery", agentId: "claude", workspaceId: "repo", repoPath: root,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "bounded",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      worktrees: [
+        ...[...candidatePaths].reverse().map((path) => {
+          const index = candidatePaths.indexOf(path);
+          return {
+            id: `candidate-${index}`, path, branch: `fix/candidate-${index}`, source: "created" as const,
+          };
+        }),
+        { id: "lane-probe", path: laneProbePath, branch: "fix/lane-probe", source: "attached" as const },
+      ],
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    let now = 1_000_000;
+    let holdFirstWave = true;
+    const firstWave = new Promise<void>((resolve) => { releaseFirstWave = resolve; });
+    let active = 0;
+    let highWater = 0;
+    const attempts: string[] = [];
+    let mergedPath: string | undefined;
+    let ineligiblePath: string | undefined;
+    let forgeUnavailablePath: string | undefined;
+    const internals = manager as unknown as {
+      discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch;
+      resolveWorktreePullRequestState: () => Promise<null>;
+      discardSessionWorktreeIfSafe: () => Promise<{ removed: false; reason: "unavailable" }>;
+      worktreePullRequestDiscoveryNow: () => number;
+      worktreePullRequestDiscoveryCursor: number;
+      worktreePullRequestDiscoveryRetryAt: Map<string, { identity: string; retryAt: number }>;
+    };
+    internals.worktreePullRequestDiscoveryNow = () => now;
+    internals.resolveWorktreePullRequestState = async () => null;
+    internals.discardSessionWorktreeIfSafe = async () => ({ removed: false, reason: "unavailable" });
+    internals.discoverMergedWorktreePullRequest = async (path, branch, options = {}) => {
+      assert.equal(options.preflightTimeoutMs, 8_000, "periodic discovery uses the bounded Git preflight");
+      if (path === ineligiblePath) {
+        options.onIneligible?.();
+        return null;
+      }
+      const headOid = heads.get(path)!;
+      if (!options.onForgeAttempt?.({ remote: "origin", merge: `refs/heads/${branch}`, headOid })) return null;
+      attempts.push(path);
+      if (path === forgeUnavailablePath) {
+        options.onForgeUnavailable?.();
+        return null;
+      }
+      active++;
+      highWater = Math.max(highWater, active);
+      if (holdFirstWave) await firstWave;
+      active--;
+      return path === mergedPath
+        ? {
+          url: "https://github.com/picoduck/wollipog/pull/1019",
+          state: "merged",
+          headOid,
+          provider: "github",
+          kind: "pull_request",
+        }
+        : null;
+    };
+
     const firstPass = manager.reconcileWorktreePullRequests();
     await waitForCondition(() => attempts.length === 4, "the fixed first discovery wave did not start");
     assert.equal(active, 4);
@@ -1340,6 +1355,8 @@ test("missing-upstream reconciliation is bounded, fair, identity-aware, and lane
     releaseFirstWave();
     await firstPass;
     assert.equal(attempts.length, 8, "one pass admits only the documented candidate budget");
+    assert.deepEqual(attempts, candidatePaths.slice(0, 8),
+      "candidate admission is deterministic even when persisted worktrees are reversed");
     assert.equal(highWater, 4, "forge subprocess concurrency has a fixed ceiling");
 
     await manager.reconcileWorktreePullRequests();
@@ -1391,8 +1408,8 @@ test("missing-upstream reconciliation is bounded, fair, identity-aware, and lane
     assert.equal(internals.worktreePullRequestDiscoveryRetryAt.size, 0,
       "expired negatives are purged even when no discovery candidates remain");
   } finally {
-    releaseFirstWave();
-    manager.shutdownAll();
+    releaseFirstWave?.();
+    manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
 });
