@@ -42,99 +42,35 @@ expect(resolvedGridRows).toBe(2);
 expect(badge.right - (card.right - padding)).toBeLessThanOrEqual(0.5);
 ```
 
-### What the guardrail enforces
+### There is no automated check for this — yet
 
-`apps/web/src/e2e-geometry-guardrails.test.ts` runs with the unit tests — in the fast CI job, not in
-the twenty-minute browser job it protects — and fails on the two shapes that cannot survive a
-renderer change:
+A static scanner was built for it and then withdrawn. It is worth knowing why, because the reason is
+also the reason this convention needs writing down.
 
-1. **Equality against a number**: `toBe(86)`, `toBeCloseTo(24)`. An equality has no headroom.
-2. **A narrow two-sided range** over one subject inside one test: `>= 85` with `<= 87`. That window
-   is 2.3% wide, and the drift between machines is larger.
+Four rounds of review found twenty-four ways to pin a measurement past a source-level scanner, and
+the count per round did not fall: nine, six, nine, six. TypeScript has more ways to route a number
+into a comparison than a scanner has branches — an imported constant, a destructured alias, a local
+helper's return, a value normalised by a divisor, `toHaveProperty`, a poll callback's second return.
+Closing each one was easy; the supply did not run out.
 
-Values below 1 are treated as tolerances rather than sizes, so `toBeLessThanOrEqual(0.5)` and
-`toBe(0)` are left alone: they mean the same thing everywhere. Counts are left alone too — five
-badges are five badges whatever the font.
+Worse, the last round found the scanner reporting CORRECT code as a pin: a count bounded to a narrow
+range, two bounds in mutually exclusive `if`/`else` branches, a count destructured alongside a
+measurement. A guard that flags good code is worse than one that misses bad code, because the only
+remedy it offers is an allowlist entry certifying that the correct assertion is wrong — and an
+allowlist full of those teaches reviewers to wave the next one through.
 
-### What it does not enforce, and what that asks of you
+**What would work is a runtime check**, because the thing that distinguishes a safe bound from a
+dangerous one is the margin between the bound and the value actually observed, and that exists only
+while the browser is running. A helper that knows both numbers and fails when they sit too close
+together catches every route above, including the two no source-level reading can reach:
 
-**A one-sided bound is not checked**, because a scanner cannot tell a generous bound from a tight one
-without running the browser. `expect(branch.width).toBeGreaterThan(40)` against a real 340px is
-safe; `toBeGreaterThan(300)` against the same 340px has about 10% of headroom and is one font change
-away from failing.
+- a relative assertion with no headroom — `expect(crowded.width).toBeGreaterThan(roomy.width * 0.4)`
+  where the true ratio is 0.42. Statically identical to the same line with a ratio of 0.9. **This
+  shape has broken CI here once already.**
+- a tight one-sided bound, for the same reason.
 
-When you write a one-sided bound on something text-derived, **leave it room** — aim for at least a
-quarter of the measured value, and prefer a relative comparison where one is available.
-
-**Which direction is risky depends on which way the drift goes.** CI renders text *smaller*, so a
-lower bound is the one that fails there: `expect(label.width).toBeGreaterThan(300)` against a local
-341px has about 12% of headroom and roughly 3.5% of it is spent before the assertion even runs. An
-upper bound like `toBeLessThanOrEqual(45)` is comfortable on CI for the same reason — and is the one
-that will fail on a machine whose fonts render larger than yours. Neither direction is safe by
-default; both want room.
-
-### What it cannot see, and why you still have to think
-
-Two reviewers attacked this guard across four rounds and between them walked through it
-twenty-four ways. Twenty are closed and pinned by tests — including three that had LIVE instances in
-this suite the scanner could not see: a block-bodied `expect.poll` callback, an array of coordinate
-objects, and a measured local wrapped in `Math.round`.
-
-**Five remain open, and knowing them is worth more than trusting the green tick.** Three are reachable
-by ordinary code and are simply beyond what a single-file scanner can see:
-
-- **A constant imported from another module.** `import { CARD_HEIGHT } from "./fixtures"` then
-  `expect(card.height).toBe(CARD_HEIGHT)`. Constant resolution reads the file being scanned, nothing
-  else.
-- **A `let` reassigned after declaration.** The initializer is folded; a later `target = 86` is not
-  followed.
-- **A local helper's return.** `function read(box) { return box.height; }` then
-  `expect(read(box)).toBe(86)` — provenance is tracked through variables, not through call graphs.
-
-Two more turn on something no static reading can recover, because the discriminator only exists at
-runtime — the margin between the asserted bound and the value actually observed:
-
-- **A relative assertion with no headroom.** `expect(crowded.width).toBeGreaterThan(roomy.width * 0.4)`
-  where the true ratio is 0.42. Both sides are measurements, so it is relative by this guard's rule —
-  and it still failed on CI. It is statically identical to the same line with a true ratio of 0.9.
-  **This shape has broken CI here once already.**
-- **A tight one-sided bound**, for the same reason.
-
-- **A relative assertion with no headroom.** `expect(crowded.width).toBeGreaterThan(roomy.width * 0.4)`
-  where the true ratio is 0.42. Both sides are measurements, so it is relative by this guard's rule —
-  and it still failed on CI. It is statically identical to the same line with a true ratio of 0.9;
-  the only difference is the measured value, which exists at runtime. **This shape has broken CI
-  here once already.**
-- **A tight one-sided bound**, for the same reason.
-
-Closing the last two means checking at runtime — a helper that knows both numbers and fails when
-they sit too close together — which would catch every route above as a side effect, including the
-three this scanner cannot reach. That is the real fix and it is tracked separately; it is not what
-this file is.
-
-So read this section as the guard's honest range rather than its failure list. It catches the shapes
-people actually write, and it caught a pin added by another pull request the first time it ran in
-CI. It does not catch everything, and nothing here will tell you when it has missed something.
-
-Until then: when you write any numeric bound on something text-derived, satisfy yourself that it has
-room, because nothing here will do it for you.
-
-### Legitimate exceptions
-
-Some numbers really are fixed: a viewport width the test itself set, an SVG icon's box, a button
-sized by CSS, the gap between two elements. Those live in `apps/web/src/e2e-geometry-debt.json`, each
-with the reason it holds everywhere.
-
-Adding an entry is meant to be a deliberate, reviewable act. Regenerate the list with:
-
-```bash
-node scripts/regenerate-e2e-geometry-debt.mjs
-```
-
-It preserves the reasons already written and gives any new entry a placeholder that the guardrail
-itself rejects, so regenerating cannot quietly launder an unexplained exception into the tree.
-Replace the placeholder with why that particular number is stable — or make the assertion relative
-and delete the entry.
+Until that exists, this convention is enforced by review and by you. When you write any numeric bound
+on something text-derived, satisfy yourself that it has room — nothing will do it for you.
 
 ## Other Conventions
 
