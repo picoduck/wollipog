@@ -3459,9 +3459,9 @@ test("an immediate phone remount reveals the idle textarea before restoring its 
       fixture.composer.setSelectionRange(2, 8, "backward");
       fireDomEvent.select(fixture.composer);
     });
-    textareaPrototype.focus = function(options?: FocusOptions) {
+    textareaPrototype.focus = function() {
       if (this.closest(".composer-box.idle-collapsed")) return;
-      originalFocus.call(this, options);
+      originalFocus.call(this);
     };
 
     const persisted = deferred<ComposerDraft | null>();
