@@ -8,6 +8,7 @@
  * The DB is the source of truth; the hub broadcasts deltas built from it.
  */
 
+import { isTerminal } from "@wollipog/protocol";
 import type {
   ControlPlaneToRunner,
   ControlPlaneToUi,
@@ -237,6 +238,8 @@ export class Hub {
   }>();
   /** O(1) projection of the only Session fields that affect Project/Location counts or membership. */
   private readonly sessionProjectState = new Map<string, string>();
+  /** O(1) projection of whether each Session currently occupies a live slot in its parent. */
+  private readonly sessionParentCapacityState = new Map<string, boolean>();
 
   constructor(private readonly db: ControlPlaneDb, options: HubOptions = {}) {
     this.uiSubscriptionAdmissionMaxKeys = Math.max(
@@ -259,6 +262,7 @@ export class Hub {
     try {
       for (const session of this.db.listSessions({ includeArchived: true })) {
         this.sessionProjectState.set(session.id, this.projectStateKey(session));
+        this.sessionParentCapacityState.set(session.id, this.occupiesParentCapacity(session));
       }
     } catch {
       // Narrow test doubles that exercise runner-only behavior intentionally omit session reads.
@@ -791,13 +795,18 @@ export class Hub {
     const previousState = this.sessionProjectState.get(session.id);
     const nextState = this.projectStateKey(session);
     this.sessionProjectState.set(session.id, nextState);
+    const previousParentCapacityState = this.sessionParentCapacityState.get(session.id);
+    const nextParentCapacityState = this.occupiesParentCapacity(session);
+    this.sessionParentCapacityState.set(session.id, nextParentCapacityState);
     this.broadcast({ type: "session_upsert", session: this.withQueue(session) });
-    // A child's lifecycle is part of its parent's capacity projection. Re-send the fresh parent
-    // after every child upsert so creation, restart, terminal, and archive transitions cannot leave
-    // an open Orchestrator detail view showing stale occupied/remaining slots. Broadcast directly
-    // instead of recursing through sessionChanged: a child's update does not change grandparent
-    // capacity or the parent's Project membership.
-    if (session.parentSessionId) {
+    // A child's creation, restart, terminal state, or archive transition can change its parent's
+    // live-capacity projection. Broadcast the direct parent only for those transitions and only
+    // when a dashboard can receive it; the cache still advances while no dashboard is connected.
+    if (
+      session.parentSessionId &&
+      previousParentCapacityState !== nextParentCapacityState &&
+      this.uiClients.size > 0
+    ) {
       const parent = this.db.getSession(session.parentSessionId);
       if (parent) this.broadcast({ type: "session_upsert", session: this.withQueue(parent) });
     }
@@ -811,6 +820,10 @@ export class Hub {
     const active = !session.archived && ["queued", "starting", "running", "input_required"].includes(session.status);
     return `${session.projectId ?? ""}\u0000${session.archived ? 1 : 0}\u0000${active ? 1 : 0}` +
       `\u0000${session.projectLocationId ?? ""}`;
+  }
+
+  private occupiesParentCapacity(session: SessionView): boolean {
+    return !session.archived && !isTerminal(session.status);
   }
 
   projectChanged(project: ProjectView): void {
@@ -849,7 +862,10 @@ export class Hub {
       }
     }
     for (const sessionId of this.sessionProjectState.keys()) {
-      if (!liveSessionIds.has(sessionId)) this.sessionProjectState.delete(sessionId);
+      if (!liveSessionIds.has(sessionId)) {
+        this.sessionProjectState.delete(sessionId);
+        this.sessionParentCapacityState.delete(sessionId);
+      }
     }
   }
 
@@ -907,6 +923,7 @@ export class Hub {
   sessionRemoved(sessionId: string, refreshProject = true): void {
     const previousState = this.sessionProjectState.get(sessionId);
     this.sessionProjectState.delete(sessionId);
+    this.sessionParentCapacityState.delete(sessionId);
     this.queuedBySession.delete(sessionId);
     this.broadcast({ type: "session_removed", sessionId }, (_principal, info) => {
       // Archived rows are omitted from snapshots and enter a dashboard through exact REST lookup,
