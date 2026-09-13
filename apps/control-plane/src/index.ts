@@ -3647,7 +3647,8 @@ app.post("/api/sessions/:id/approve", async (req, reply) => {
   return respond(reply, svc.approve(id, body.requestId, body.optionId ?? null, {
     kind: "human",
     id: humanActorId(req),
-  }, undefined, (sessionId) => human ? db.canAccessSession(human, sessionId) : false));
+  }, undefined, (sessionId) => human ? db.canAccessSession(human, sessionId) : false,
+  body.evidenceReviewed));
 });
 
 app.get("/api/sessions/:id/governance-audit", async (req, reply) => {

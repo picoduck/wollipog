@@ -2209,6 +2209,44 @@ test("usage migration seeds an unbucketed lifetime baseline exactly once", () =>
 
 /* ----------------------------- Sessions -------------------------------- */
 
+test("typed workflow decisions preserve their exact approval snapshot across a database restart", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-workflow-decision-restart-"));
+  const file = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(file);
+    initial.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    initial.createSession(newSession({ id: "parent" }));
+    initial.createSession(newSession({ id: "child", parentSessionId: "parent" }));
+    const snapshot = {
+      category: "ui_evidence_approval" as const,
+      evidence: [{ evidenceId: "desktop-after", uri: "https://evidence.example/after.png", sha256: "a".repeat(64) }],
+    };
+    const created = initial.createWorkflowDecision({
+      requestId: "ui-review", occurrenceId: "workflow-ui-review", sessionId: "child",
+      controllingSessionId: "parent", category: "ui_evidence_approval", resourceKey: "pr-1094-ui",
+      resourceSnapshot: snapshot, resourceDigest: "b".repeat(64), policyRevision: 3,
+      authority: "human", createdAt: 1_000,
+    });
+    assert.ok(created && !created.replay);
+    assert.ok(initial.resolveWorkflowDecision(
+      "workflow-ui-review", "human", "approved", 2_000, undefined, ["desktop-after"], "c".repeat(64),
+    ));
+    initial.close();
+
+    const reopened = ControlPlaneDb.open(file);
+    const decision = reopened.workflowDecisionByOccurrence("workflow-ui-review");
+    assert.deepEqual(decision?.resourceSnapshot, snapshot);
+    assert.equal(decision?.status, "approved");
+    assert.deepEqual(decision?.evidenceReviewed, ["desktop-after"]);
+    assert.equal(decision?.policyRevision, 3);
+    assert.equal(decision?.resourceDigest, "b".repeat(64));
+    assert.equal(reopened.consumeWorkflowDecision("workflow-ui-review", 3_000)?.status, "consumed");
+    reopened.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("createSession persists driver + config and sessionView reflects them", () => {
   const db = withRunner();
   const config: SessionConfig = {

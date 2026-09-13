@@ -5048,9 +5048,7 @@ export class SessionsService {
       this.db.markWorkflowDecisionRevoked(decision.occurrenceId, now);
       const child = this.db.getSession(decision.sessionId);
       if (child) {
-        const remaining = removePendingRequest(child.pendingApproval, decision.occurrenceId);
-        this.db.setPendingApproval(child.id, remaining);
-        if (!remaining && child.status === "input_required") this.db.updateSessionStatus(child.id, "running", now);
+        this.settleWorkflowDecisionPause(child.id, decision.occurrenceId, now);
         this.recordWorkflowDecisionAudit(decision, "revoked", { kind: "human", id: "policy-change" }, now);
         this.hub.sessionChangedById(child.id);
       }
@@ -5071,6 +5069,9 @@ export class SessionsService {
     if (!normalized.ok || !normalized.data) return fail(normalized.error!, normalized.status);
     const child = this.db.getSession(sessionId);
     if (!child) return fail("session not found", 404);
+    if (isTerminal(child.status)) {
+      return fail("a terminal session cannot request a workflow decision", 409);
+    }
     const unsupported = this.capabilityFailure(
       child.runnerId,
       "typedWorkflowDecisionDelegation",
@@ -5112,8 +5113,7 @@ export class SessionsService {
     for (const occurrenceId of created.supersededOccurrenceIds) {
       const superseded = this.db.workflowDecisionByOccurrence(occurrenceId);
       if (!superseded) continue;
-      const current = this.db.getSession(superseded.sessionId);
-      if (current) this.db.setPendingApproval(current.id, removePendingRequest(current.pendingApproval, occurrenceId));
+      this.settleWorkflowDecisionPause(superseded.sessionId, occurrenceId, now);
       this.recordWorkflowDecisionAudit(superseded, "superseded", { kind: "agent", id: sessionId }, now);
     }
     const decision = created.decision;
@@ -5186,11 +5186,7 @@ export class SessionsService {
     );
     if (!resolved) return fail("workflow decision was resolved concurrently", 409);
     const child = this.db.getSession(childSessionId);
-    if (child) {
-      const remaining = removePendingRequest(child.pendingApproval, occurrenceId);
-      this.db.setPendingApproval(childSessionId, remaining);
-      if (!remaining && child.status === "input_required") this.db.updateSessionStatus(childSessionId, "running", now);
-    }
+    if (child) this.settleWorkflowDecisionPause(childSessionId, occurrenceId, now);
     this.recordWorkflowDecisionAudit(
       resolved,
       checked.data.outcome === "approve" ? "allowed" : "denied",
@@ -5352,15 +5348,26 @@ export class SessionsService {
   private revokeWorkflowDecision(decision: WorkflowDecisionView, actor: GovernanceActor): void {
     const now = Date.now();
     this.db.markWorkflowDecisionRevoked(decision.occurrenceId, now);
-    const child = this.db.getSession(decision.sessionId);
-    if (child) {
-      const remaining = removePendingRequest(child.pendingApproval, decision.occurrenceId);
-      this.db.setPendingApproval(child.id, remaining);
-      if (!remaining && child.status === "input_required") this.db.updateSessionStatus(child.id, "running", now);
-    }
+    this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
     this.recordWorkflowDecisionAudit(decision, "revoked", actor, now);
     this.hub.sessionChangedById(decision.sessionId);
     this.hub.sessionChangedById(decision.controllingSessionId);
+  }
+
+  /** Settle a server-owned workflow card against the provider state it temporarily covered. */
+  private settleWorkflowDecisionPause(sessionId: string, occurrenceId: string, now: number): void {
+    const current = this.db.getSession(sessionId);
+    if (!current) return;
+    const remaining = removePendingRequest(current.pendingApproval, occurrenceId);
+    this.db.setPendingApproval(sessionId, remaining);
+    if (!remaining && current.status === "input_required") {
+      this.db.updateSessionStatus(
+        sessionId,
+        this.db.policyResumeStatus(sessionId) === "idle" ? "idle" : "running",
+        now,
+      );
+    }
+    this.clearSettledPolicyResumeStatus(sessionId);
   }
 
   /** A transient runner disconnect clears the projected card but not the server-owned request.
@@ -5450,7 +5457,7 @@ export class SessionsService {
             this.db.getRunner(session.runnerId)?.protocolVersion,
             "typedWorkflowDecisionDelegation",
           )) return [];
-          const decision = request.workflowDecision ?? this.db.workflowDecisionByOccurrence(request.occurrenceId);
+          const decision = this.db.workflowDecisionByOccurrence(request.occurrenceId);
           if (!decision || decision.status !== "pending" || decision.controllingSessionId !== parentSessionId ||
               decision.authority !== "orchestrator" || decision.policyRevision !== typedPolicy.revision ||
               typedPolicy.decisions[decision.category] !== "orchestrator") return [];
@@ -5686,6 +5693,7 @@ export class SessionsService {
     actor: GovernanceActor = { kind: "human", id: "local" },
     resolvedByParentSessionId?: string,
     canAccess: (sessionId: string) => boolean = () => true,
+    evidenceReviewed?: string[],
   ): ServiceResult<SessionView> {
     const now = Date.now();
     this.reconcilePolicyHookTimeouts(now, sessionId);
@@ -5701,15 +5709,30 @@ export class SessionsService {
 
     if (pending.kind === "workflow_decision") {
       if (actor.kind !== "human") return fail("this workflow decision requires an authenticated human", 403);
-      const decision = pending.workflowDecision ?? this.db.workflowDecisionByOccurrence(pending.occurrenceId ?? requestId);
-      if (!decision) return fail("workflow decision is stale or no longer pending", 409);
-      const implementation = decision.resourceSnapshot.category === "implementation_question";
-      const deny = optionId === "__workflow_deny__" || optionId === "deny" || optionId === null;
+      const decision = this.db.workflowDecisionByOccurrence(pending.occurrenceId ?? requestId);
+      if (!decision || decision.status !== "pending") {
+        return fail("workflow decision is stale or no longer pending", 409);
+      }
+      const snapshot = decision.resourceSnapshot;
+      const implementation = snapshot.category === "implementation_question";
+      let deny: boolean;
+      if (snapshot.category === "implementation_question") {
+        if (optionId !== null && optionId !== "__workflow_deny__" &&
+            !snapshot.options.some((option) => option.optionId === optionId)) {
+          return fail("implementation decision option is not offered", 409);
+        }
+        deny = optionId === "__workflow_deny__" || optionId === null;
+      } else {
+        if (optionId !== null && optionId !== "approve" && optionId !== "deny") {
+          return fail("workflow decision requires the Approve or Deny option", 409);
+        }
+        deny = optionId === "deny" || optionId === null;
+      }
       const resolution: ResolveWorkflowDecisionRequest = {
         outcome: deny ? "deny" : "approve",
         ...(implementation && !deny && optionId ? { selectedOptionId: optionId } : {}),
         ...(decision.resourceSnapshot.category === "ui_evidence_approval" && !deny
-          ? { evidenceReviewed: decision.resourceSnapshot.evidence.map((item) => item.evidenceId) }
+          ? { evidenceReviewed }
           : {}),
       };
       const resolved = this.resolveWorkflowDecision(
@@ -8078,7 +8101,7 @@ export class SessionsService {
 
   private clearSettledPolicyResumeStatus(sessionId: string): void {
     const current = this.db.getSession(sessionId);
-    if (!isPolicyApproval(current?.pendingApproval) &&
+    if (!hasPolicyApproval(current?.pendingApproval) &&
         this.db.listOpenPolicyHookApprovals(sessionId).length === 0) {
       this.db.clearPolicyResumeStatus(sessionId);
     }
@@ -8538,8 +8561,10 @@ export class SessionsService {
         requests?.delete(payload.requestId);
         if (!requests?.size) this.automaticQuestions.delete(sessionId);
       }
-      if (!isPolicyApproval(this.db.getSession(sessionId)?.pendingApproval)) {
-        this.db.setPendingApproval(sessionId, removePendingRequest(this.db.getSession(sessionId)?.pendingApproval, payload.requestId));
+      const current = this.db.getSession(sessionId)?.pendingApproval;
+      const settledRequest = pendingRequests(current).find((request) => request.requestId === payload.requestId);
+      if (!settledRequest || !isPolicyApproval(settledRequest)) {
+        this.db.setPendingApproval(sessionId, removePendingRequest(current, payload.requestId));
       }
       this.gateOnPolicy(sessionId, now);
       this.reconcilePolicyHookTimeouts(now, sessionId);
@@ -9457,16 +9482,17 @@ function appendPendingApproval(
   return { ...first!, ...(rest.length ? { additionalRequests: rest } : {}) };
 }
 
-/** A live provider ask owns the primary card, but it cannot erase a runner trip: that trip already
- * cancelled the turn and holds the FIFO until its own Continue/Stop decision. CP-only soft cards
- * keep their historical displacement semantics and are re-derived after the provider ask settles. */
+/** A live provider ask owns the primary card, but it cannot erase a runner trip or a durable typed
+ * workflow gate. Other CP-only soft cards keep their historical displacement semantics and are
+ * re-derived after the provider ask settles. */
 function addPendingRequestPreservingRunnerGuardrails(
   current: PendingApproval | null | undefined,
   next: PendingApproval,
 ): PendingApproval {
-  const runnerCards = pendingRequests(current).filter((request) => request.runnerGuardrail);
+  const durableCards = pendingRequests(current).filter((request) =>
+    request.runnerGuardrail || request.kind === "workflow_decision");
   let combined = addPendingRequest(current, next);
-  for (const runnerCard of runnerCards) combined = appendPendingApproval(combined, runnerCard);
+  for (const durableCard of durableCards) combined = appendPendingApproval(combined, durableCard);
   return combined;
 }
 

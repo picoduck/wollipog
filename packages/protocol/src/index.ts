@@ -7306,6 +7306,8 @@ export interface SetSessionTitleRequest {
 export interface ApproveRequest {
   requestId: string;
   optionId: string | null;
+  /** Exact evidence items the human affirmatively inspected before approving a UI gate. */
+  evidenceReviewed?: string[];
 }
 
 export interface SetColumnRequest {

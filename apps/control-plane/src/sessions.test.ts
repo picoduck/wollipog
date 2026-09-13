@@ -1791,6 +1791,134 @@ test("typed workflow decisions isolate categories and fail closed across stale p
   } finally { db.close(); }
 });
 
+test("typed workflow decisions preserve provider settlement and cannot be replaced by generic approvals", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+    orchestrator.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const parent = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" },
+    });
+    assert.ok(parent.ok && parent.data);
+    db.updateSessionStatus(parent.data.id, "running", Date.now());
+    const childRequest = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+    let child = svc.createSession(childRequest, undefined, undefined, false, false, false,
+      { parentSessionId: parent.data.id });
+    if (child.status === 428) {
+      const spawn = db.getSession(parent.data.id)!.pendingApproval!;
+      assert.ok(svc.approve(parent.data.id, spawn.requestId, "allow").ok);
+      child = svc.createSession(childRequest, undefined, undefined, false, false, false,
+        { parentSessionId: parent.data.id });
+    }
+    assert.ok(child.ok && child.data);
+    db.updateSessionStatus(child.data.id, "running", Date.now());
+    const policy = {
+      implementation_question: "human",
+      pr_merge: "orchestrator",
+      merged_branch_deletion: "human",
+      follow_up_issue_publication: "human",
+      ui_evidence_approval: "human",
+    } as const;
+    assert.ok(svc.setParentControlPolicy(parent.data.id, policy, 0).ok);
+    const implementationSnapshot = {
+      category: "implementation_question" as const,
+      question: "Which exact behavior should be used?",
+      options: [
+        { optionId: "deny", label: "Use Deny", description: "The option identifier is ordinary input." },
+        { optionId: "approve", label: "Use Approve", description: "This identifier is ordinary input too." },
+      ],
+    };
+
+    const choice = svc.createWorkflowDecision(child.data.id, {
+      requestId: "ordinary-deny-option", resourceKey: "implementation:choice",
+      resourceSnapshot: implementationSnapshot,
+    });
+    assert.ok(choice.ok && choice.data);
+    svc.onSessionStatus(child.data.id, "idle");
+    assert.equal(db.getSession(child.data.id)?.status, "input_required");
+    assert.equal(db.policyResumeStatus(child.data.id), "idle");
+    assert.ok(svc.approve(child.data.id, choice.data.occurrenceId, "deny",
+      { kind: "human", id: "owner" }, undefined, () => true).ok);
+    assert.equal(db.workflowDecisionByOccurrence(choice.data.occurrenceId)?.selectedOptionId, "deny",
+      "an offered option named deny is selected rather than treated as the synthetic denial action");
+    assert.equal(db.getSession(child.data.id)?.status, "idle",
+      "resolving a control-plane gate restores the provider's swallowed idle");
+    assert.equal(db.policyResumeStatus(child.data.id), null);
+    assert.ok(svc.consumeWorkflowDecision(child.data.id, choice.data.occurrenceId, {
+      resourceSnapshot: implementationSnapshot,
+    }).ok);
+
+    db.updateSessionStatus(child.data.id, "running", Date.now());
+    const durable = svc.createWorkflowDecision(child.data.id, {
+      requestId: "durable-beside-permission", resourceKey: "implementation:durable",
+      resourceSnapshot: implementationSnapshot,
+    });
+    assert.ok(durable.ok && durable.data);
+    svc.onSessionEvent(child.data.id, {
+      kind: "permission_request", requestId: "generic-permission", ownerToolUseId: "tool-use",
+      title: "Allow Read", options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+    });
+    assert.deepEqual(pendingRequests(db.getSession(child.data.id)?.pendingApproval).map((request) => request.requestId),
+      ["generic-permission", durable.data.occurrenceId]);
+    assert.ok(svc.approve(child.data.id, "generic-permission", "allow").ok);
+    svc.onSessionEvent(child.data.id, {
+      kind: "permission_resolved", requestId: "generic-permission", optionId: "allow",
+    });
+    assert.equal(db.getSession(child.data.id)?.pendingApproval?.requestId, durable.data.occurrenceId,
+      "a generic permission lifecycle cannot clear or satisfy the typed gate");
+    assert.equal(db.workflowDecisionByOccurrence(durable.data.occurrenceId)?.status, "pending");
+    assert.ok(svc.approve(child.data.id, durable.data.occurrenceId, "approve",
+      { kind: "human", id: "owner" }, undefined, () => true).ok);
+    assert.equal(db.workflowDecisionByOccurrence(durable.data.occurrenceId)?.selectedOptionId, "approve");
+    assert.ok(svc.consumeWorkflowDecision(child.data.id, durable.data.occurrenceId, {
+      resourceSnapshot: implementationSnapshot,
+    }).ok);
+
+    const staleProjection = svc.createWorkflowDecision(child.data.id, {
+      requestId: "stale-projection", resourceKey: "implementation:stale",
+      resourceSnapshot: implementationSnapshot,
+    });
+    assert.ok(staleProjection.ok && staleProjection.data);
+    assert.ok(db.resolveWorkflowDecision(staleProjection.data.occurrenceId, "human", "denied", Date.now()));
+    assert.equal(svc.approve(child.data.id, staleProjection.data.occurrenceId, "approve",
+      { kind: "human", id: "owner" }, undefined, () => true).status, 409,
+    "the durable decision row, not the embedded card copy, is authoritative");
+
+    db.setPendingApproval(child.data.id, null);
+    db.updateSessionStatus(child.data.id, "running", Date.now());
+    const mergeSnapshot = {
+      category: "pr_merge" as const,
+      repository: "picoduck/wollipog", pullRequest: 987, headSha: "a".repeat(40),
+      reviewResult: "merge" as const,
+      requiredChecks: { headSha: "a".repeat(40), status: "passed" as const, checkedAt: 10,
+        checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }] },
+    };
+    const revoked = svc.createWorkflowDecision(child.data.id, {
+      requestId: "revoke-after-idle", resourceKey: "picoduck/wollipog#987", resourceSnapshot: mergeSnapshot,
+    });
+    assert.ok(revoked.ok && revoked.data);
+    svc.onSessionStatus(child.data.id, "idle");
+    assert.ok(svc.setParentControlPolicy(parent.data.id, { ...policy, pr_merge: "human" }, 1).ok);
+    assert.equal(db.workflowDecisionByOccurrence(revoked.data.occurrenceId)?.status, "revoked");
+    assert.equal(db.getSession(child.data.id)?.status, "idle",
+      "revocation also restores the provider's swallowed idle");
+    assert.equal(db.policyResumeStatus(child.data.id), null);
+
+    db.updateSessionStatus(child.data.id, "completed", Date.now());
+    assert.equal(svc.createWorkflowDecision(child.data.id, {
+      requestId: "terminal-request", resourceKey: "implementation:terminal",
+      resourceSnapshot: implementationSnapshot,
+    }).status, 409);
+    assert.equal(db.getSession(child.data.id)?.status, "completed");
+  } finally { db.close(); }
+});
+
 test("question policy answers avoid input state, record provenance, and survive history cache resets", async () => {
   const { db, svc, hub } = makeHarness();
   const local = db.localIdentityContext();

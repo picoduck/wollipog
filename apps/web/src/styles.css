@@ -10999,6 +10999,30 @@ body.shell-dock-dragging * {
   word-break: break-word;
   width: 100%;
 }
+.approval-evidence {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  font-size: 12px;
+}
+.approval-evidence p { color: var(--text-dim); }
+.approval-evidence-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.approval-evidence-item label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+}
 .approval-selector-context {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
