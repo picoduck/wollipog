@@ -388,7 +388,7 @@ test("moving a session between Locations in one Project refreshes exact Location
   db.close();
 });
 
-test("child lifecycle upserts refresh the parent's live capacity projection", () => {
+test("child upserts refresh the parent only when live capacity changes", () => {
   const db = ControlPlaneDb.open(":memory:");
   db.registerRunner({
     runnerId: "runner-child-capacity",
@@ -409,11 +409,22 @@ test("child lifecycle upserts refresh the parent's live capacity projection", ()
     config: { maxChildSessions: 6 },
     now: 2,
   });
-  const messages: Array<{ type: string; session?: SessionView }> = [];
   const hub = new Hub(db);
-  hub.addUiClient({
-    send: (data) => messages.push(JSON.parse(data) as { type: string; session?: SessionView }),
-  });
+  const originalGetSession = db.getSession.bind(db);
+  let parentProjections = 0;
+  db.getSession = (sessionId) => {
+    if (sessionId === parent.id) parentProjections += 1;
+    return originalGetSession(sessionId);
+  };
+  const messages: Array<{ type: string; session?: SessionView; sessions?: SessionView[] }> = [];
+  const client = {
+    send: (data) => messages.push(JSON.parse(data) as {
+      type: string;
+      session?: SessionView;
+      sessions?: SessionView[];
+    }),
+  };
+  hub.addUiClient(client);
   messages.length = 0;
 
   const child = db.createSession({
@@ -429,6 +440,7 @@ test("child lifecycle upserts refresh the parent's live capacity projection", ()
     now: 3,
   });
   hub.sessionChanged(child);
+  assert.equal(parentProjections, 1, "child creation projects the parent once");
   assert.deepEqual(
     messages.findLast((message) => message.session?.id === parent.id)?.session?.liveChildCapacity,
     { limit: 6, occupied: 1, remaining: 5 },
@@ -436,12 +448,71 @@ test("child lifecycle upserts refresh the parent's live capacity projection", ()
   );
 
   messages.length = 0;
+  parentProjections = 0;
+  for (let i = 0; i < 3; i++) hub.sessionChangedById(child.id);
+  assert.equal(parentProjections, 0, "repeated capacity-neutral upserts do not project the parent");
+  assert.equal(
+    messages.filter((message) => message.session?.id === child.id).length,
+    3,
+    "capacity-neutral child upserts still reach the dashboard",
+  );
+  assert.equal(
+    messages.some((message) => message.session?.id === parent.id),
+    false,
+    "a capacity-neutral upsert does not broadcast the parent",
+  );
+
+  messages.length = 0;
   db.updateSessionStatus(child.id, "completed", 4);
   hub.sessionChangedById(child.id);
+  assert.equal(parentProjections, 1, "a live-to-terminal transition projects the parent once");
   assert.deepEqual(
     messages.findLast((message) => message.session?.id === parent.id)?.session?.liveChildCapacity,
     { limit: 6, occupied: 0, remaining: 6 },
     "a terminal child promptly releases the slot in the open parent view",
+  );
+
+  messages.length = 0;
+  parentProjections = 0;
+  db.updateSessionStatus(child.id, "running", 5);
+  hub.sessionChangedById(child.id);
+  assert.equal(parentProjections, 1, "restarting a terminal child projects the parent once");
+  assert.deepEqual(
+    messages.findLast((message) => message.session?.id === parent.id)?.session?.liveChildCapacity,
+    { limit: 6, occupied: 1, remaining: 5 },
+    "restarting a terminal child consumes a live slot",
+  );
+
+  messages.length = 0;
+  parentProjections = 0;
+  db.setSessionArchived(child.id, true, 6);
+  hub.sessionChangedById(child.id);
+  assert.equal(parentProjections, 1, "archiving a live child projects the parent once");
+  assert.deepEqual(
+    messages.findLast((message) => message.session?.id === parent.id)?.session?.liveChildCapacity,
+    { limit: 6, occupied: 0, remaining: 6 },
+    "archiving a live child releases its slot",
+  );
+
+  messages.length = 0;
+  parentProjections = 0;
+  db.setSessionArchived(child.id, false, 7);
+  hub.sessionChangedById(child.id);
+  assert.equal(parentProjections, 1, "unarchiving a live child projects the parent once");
+
+  hub.removeUiClient(client);
+  parentProjections = 0;
+  db.updateSessionStatus(child.id, "completed", 8);
+  hub.sessionChangedById(child.id);
+  assert.equal(parentProjections, 0, "a capacity change with no UI clients does not project the parent");
+
+  messages.length = 0;
+  hub.addUiClient(client);
+  const snapshot = messages.findLast((message) => message.type === "snapshot");
+  assert.deepEqual(
+    snapshot?.sessions?.find((session) => session.id === parent.id)?.liveChildCapacity,
+    { limit: 6, occupied: 0, remaining: 6 },
+    "the next snapshot reports the capacity change that occurred with no UI clients",
   );
   db.close();
 });
