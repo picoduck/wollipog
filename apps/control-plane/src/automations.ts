@@ -1060,8 +1060,20 @@ export class AutomationsService {
     target: AutomationRunnerTarget,
     commandSnapshots?: DurableSessionCommand[],
   ): PreStagedDeliveryOptions {
-    const deliveryDeadlineAt = now + automationDeliveryWindowMs(automation, execution.scheduledFor);
     const persistedCommands = commandSnapshots ? this.db.listAutomationCommands(execution.executionId) : [];
+    let deliveryDeadlineAt: number | undefined;
+    if (!commandSnapshots) {
+      try {
+        deliveryDeadlineAt = now + automationDeliveryWindowMs(automation, execution.scheduledFor);
+      } catch (error) {
+        // A schedule accepted by an older build may no longer parse after an upgrade. Preserve the
+        // existing delivery behavior while still giving every new command a finite durable bound.
+        deliveryDeadlineAt = now + MAX_DELIVERY_BOUND_MS;
+        this.log.warn(
+          `automation '${automation.automationId}' delivery bound defaulted to its maximum: ${(error as Error).message}`,
+        );
+      }
+    }
     const stage = (plan: PreStagedDeliveryPlan): void => {
       const commands = plan.commands.map((command, ordinal) => {
         if (command.type === "answer_recovered_question") {
@@ -1079,7 +1091,7 @@ export class AutomationsService {
           payloadJson: JSON.stringify(command),
           payloadSha256: automationCommandDigest(command),
           expiresAt: execution.createdAt + COMMAND_RETENTION_MS,
-          deliveryDeadlineAt: commandSnapshots ? persistedDeadline : deliveryDeadlineAt,
+          deliveryDeadlineAt: commandSnapshots ? persistedDeadline : deliveryDeadlineAt!,
         };
       });
       this.db.stageAutomationDeliveryPlan({

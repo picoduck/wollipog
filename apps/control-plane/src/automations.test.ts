@@ -264,6 +264,25 @@ test("signed webhook triggers are one-time-secret, idempotent, cron-independent,
     /delivery-old|(?:mam|wollipog)whsec_/);
 });
 
+test("a trigger preserves delivery when an upgrade no longer parses the stored cron", () => {
+  const { db, service, created } = harness();
+  const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+  const credential = service.createTrigger(automation.automationId,
+    { kind: "webhook", name: "Legacy schedule" }, { kind: "human", id: "device" }, 1_000).data!;
+  db.raw().prepare("UPDATE automations SET cron_expression='stored legacy syntax' WHERE automation_id=?")
+    .run(automation.automationId);
+
+  const invoked = receiveSignedTrigger(service, credential.trigger.triggerId, credential.secret,
+    Buffer.from('{"eventId":"legacy-cron-delivery"}'), 2_000);
+
+  assert.equal(invoked.status, 200);
+  assert.equal(invoked.data?.invocation.state, "dispatched");
+  assert.equal(created.length, 1, "a parser upgrade must not turn a trigger into a delivery failure");
+  const execution = db.getAutomationExecution(invoked.data!.invocation.executionId!)!;
+  assert.equal(db.listAutomationCommands(execution.executionId)[0]?.deliveryDeadlineAt,
+    2_000 + 12 * 60 * 60_000, "the fallback still persists a finite delivery bound");
+});
+
 test("persisted legacy trigger secrets remain valid until rotation", () => {
   const { db, service } = harness();
   const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
