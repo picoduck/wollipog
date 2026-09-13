@@ -132,6 +132,14 @@ test("resolving a focused phone request reveals and returns focus to the compose
   await expect(textarea).toBeFocused();
 });
 
+test("a focused phone request falls back to the transcript when the composer becomes disabled", async ({ page }) => {
+  await openComposer(page, 393, "&approval=checkpoint");
+  await page.getByRole("button", { name: "Continue" }).focus();
+  await page.evaluate(() => window.setSessionUsageRunnerOnline(false));
+
+  await expect(page.locator(".detail-scroll")).toBeFocused();
+});
+
 test("active dictation expands the capsule on the initial press", async ({ page }) => {
   await openComposer(page, 393);
   const composer = page.locator(".composer-box");

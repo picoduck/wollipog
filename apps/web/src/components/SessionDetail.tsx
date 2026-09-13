@@ -1219,6 +1219,7 @@ function SessionDetailLoaded({
   const focusComposerAfterRequestResolution = useCallback(() => {
     const element = inputRef.current;
     if (!element) return false;
+    if (element.disabled) return false;
     if (!isMobile || composerExpanded) {
       element.focus({ preventScroll: true });
       return element.ownerDocument.activeElement === element;

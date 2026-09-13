@@ -13,6 +13,7 @@ import "../styles.css";
 declare global {
   interface Window {
     resolveSessionUsageQuestion(): void;
+    setSessionUsageRunnerOnline(online: boolean): void;
   }
 }
 
@@ -353,6 +354,14 @@ window.resolveSessionUsageQuestion = () => {
   fixtureSocket?.onmessage?.({ data: JSON.stringify({
     type: "session_upsert",
     session: { ...session },
+  } satisfies ControlPlaneToUi) });
+};
+
+window.setSessionUsageRunnerOnline = (online) => {
+  runner.status = online ? "online" : "offline";
+  fixtureSocket?.onmessage?.({ data: JSON.stringify({
+    type: "runner_upsert",
+    runner: { ...runner },
   } satisfies ControlPlaneToUi) });
 };
 
