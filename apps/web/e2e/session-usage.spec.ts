@@ -627,10 +627,6 @@ test("mobile: context and cost sit beside Live Output, and cost opens Session Us
 test("mobile: widest status labels stay inside a 320px strip", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 844 });
   await page.goto("/session-usage-e2e.html?width=320&height=800&cost=12345.67");
-  // Make the stress independent of installed fallback fonts. CI's Linux metrics render this
-  // synthetic widest label roughly 11px wider than local Noto Sans; the extra tracking keeps the
-  // narrow geometry red-capable on either machine.
-  await page.addStyleTag({ content: ".follow-tail-chip { letter-spacing: 0.5px !important; }" });
   await page.locator(".follow-tail-chip span").first().evaluate((label) => {
     label.textContent = "Previewing · Follow Live Output";
   });
