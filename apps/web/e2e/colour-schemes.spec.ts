@@ -208,18 +208,18 @@ async function measure(page: Page) {
       const components = splitTopLevel(gradient.body);
       if (!components) return { error: `unbalanced ${gradient.name} arguments in ${image}` };
       const stops: ReturnType<typeof parse>[] = [];
+      const stopSyntax: string[] = [];
+      let interpolation: string | undefined;
       for (const [index, component] of components.entries()) {
         const candidate = functionCall(component);
         if (candidate && CSS.supports("color", candidate.full)) {
           stops.push(parse(candidate.full));
+          stopSyntax.push(candidate.full);
           continue;
         }
         // The first component may be a direction, shape, position, or colour-interpolation method.
         if (index === 0) {
-          const interpolation = component.match(/\bin\s+([\w-]+)/i)?.[1]?.toLowerCase();
-          // CSS gradients interpolate in premultiplied sRGB by default. Explicit sRGB has the same
-          // semantics; other spaces need their own interpolation implementation rather than an
-          // sRGB approximation presented as rendered evidence.
+          interpolation = component.match(/\bin\s+([\w-]+)/i)?.[1]?.toLowerCase();
           if (interpolation && interpolation !== "srgb") {
             return { error: `gradient interpolation method ${interpolation} is not modelled: ${image}` };
           }
@@ -228,6 +228,33 @@ async function measure(page: Page) {
         return { error: `gradient component ${index + 1} is not a supported colour stop: ${component}` };
       }
       if (stops.length < 2) return { error: `fewer than two supported colour stops in ${image}` };
+      if (stopSyntax.some((stop) => /\bnone\b/i.test(stop))) {
+        return { error: `gradient stops with missing colour components are not modelled: ${image}` };
+      }
+
+      const first = stops[0]!;
+      const isConstant = stops.every((stop) =>
+        stop.r === first.r && stop.g === first.g && stop.b === first.b && stop.a === first.a);
+      const legacyStops = stopSyntax.every((stop) => /^rgba?\(/i.test(stop));
+      const explicitSrgbStops = stopSyntax.every((stop) => {
+        if (/^rgba?\(/i.test(stop)) return !/\bnone\b/i.test(stop);
+        if (!/^color\(\s*srgb\s/i.test(stop) || /\bnone\b/i.test(stop)) return false;
+        const components = stop.match(/-?(?:\d+(?:\.\d*)?|\.\d+)/g)?.map(Number) ?? [];
+        return components.slice(0, 3).length === 3
+          && components.slice(0, 3).every((component) => component >= 0 && component <= 1);
+      });
+      // Chromium changes the default interpolation space to Oklab when a gradient contains a
+      // non-legacy colour. Once interpolation matters, sampling those converted sRGB endpoints
+      // would measure colours the browser never paints.
+      if (!isConstant && !interpolation && !legacyStops) {
+        return { error: `implicit Oklab interpolation for non-legacy stops is not modelled: ${image}` };
+      }
+      // Explicit sRGB is exact for computed rgb()/rgba() and in-range color(srgb) stops. Other
+      // spaces require an unclamped conversion before interpolation; the 8-bit canvas normalizer
+      // cannot provide that without changing out-of-gamut interiors.
+      if (!isConstant && interpolation === "srgb" && !explicitSrgbStops) {
+        return { error: `gradient stops cannot be modelled accurately with sRGB interpolation: ${image}` };
+      }
       return { samples: sampleGradient(stops) };
     };
 
@@ -424,6 +451,23 @@ test("non-RGB gradient stops cannot false-pass against their fallback", async ({
   expect(entries.every((entry) => entry.background.startsWith("rgb(255.00 255.00 255.00"))).toBe(true);
 });
 
+test("implicit non-legacy gradient interpolation fails closed", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    html.style.transition = "none";
+    html.style.backgroundImage = [
+      "linear-gradient(color(srgb 0 0 0), color(srgb 1 1 1))",
+    ].join("");
+  });
+
+  const { unsupported } = await measure(page);
+  expect(unsupported).toContainEqual(expect.stringMatching(
+    /^p\.slash-detail-disabled: implicit Oklab interpolation for non-legacy stops is not modelled:/,
+  ));
+});
+
 test("gradient interiors cannot false-pass when both endpoints clear AA", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
   const disabledDetail = page.locator(".slash-detail-disabled");
@@ -453,7 +497,7 @@ test("explicit sRGB gradients use sRGB interpolation", async ({ page }) => {
     html.style.transition = "none";
     html.style.backgroundColor = "rgb(0 0 0)";
     html.style.backgroundImage = [
-      "linear-gradient(in srgb, rgb(255 0 0), rgb(0 255 0), rgb(0 0 255))",
+      "linear-gradient(in srgb, color(srgb 1 0 0), color(srgb 0 1 0), color(srgb 0 0 1))",
     ].join("");
   });
 
@@ -600,6 +644,23 @@ test("unmodelled gradient interpolation methods fail with an actionable diagnost
   const { unsupported } = await measure(page);
   expect(unsupported).toContainEqual(expect.stringMatching(
     /^p\.slash-detail-disabled: gradient interpolation method oklab is not modelled:/,
+  ));
+});
+
+test("sRGB interpolation rejects gradient stops that require unclamped conversion", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    html.style.transition = "none";
+    html.style.backgroundImage = [
+      "linear-gradient(in srgb, color(display-p3 1 0 0), color(display-p3 0 1 0))",
+    ].join("");
+  });
+
+  const { unsupported } = await measure(page);
+  expect(unsupported).toContainEqual(expect.stringMatching(
+    /^p\.slash-detail-disabled: gradient stops cannot be modelled accurately with sRGB interpolation:/,
   ));
 });
 
