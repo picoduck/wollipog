@@ -5015,10 +5015,10 @@ test("automation delivery plans stage atomically, gate dependencies, and apply r
     planJson: JSON.stringify({ kind: "workflow_run", runId: "run-1" }), now: 1_001,
     commands: [
       { commandId: "cmd-worker", ordinal: 0, runnerId: "runner-1", sessionId: "worker",
-        kind: "start_session", payloadJson: firstPayload, payloadSha256: "a".repeat(64), expiresAt: 9_000,
+        kind: "start_session", payloadJson: firstPayload, payloadSha256: "a".repeat(64), expiresAt: 90_000,
         deliveryDeadlineAt: 2_000 },
       { commandId: "cmd-orchestrator", ordinal: 1, runnerId: "runner-1", sessionId: "orchestrator",
-        kind: "start_session", payloadJson: secondPayload, payloadSha256: "b".repeat(64), expiresAt: 9_000,
+        kind: "start_session", payloadJson: secondPayload, payloadSha256: "b".repeat(64), expiresAt: 90_000,
         deliveryDeadlineAt: 2_000,
         dependencyCommandId: "cmd-worker" },
     ],
@@ -5044,6 +5044,8 @@ test("automation delivery plans stage atomically, gate dependencies, and apply r
   assert.equal(accepted?.executionId, "exec-receipt");
   assert.equal(accepted?.advanced, true);
   assert.equal(accepted?.command.acceptedAt, 1_020);
+  assert.deepEqual(db.dueAutomationCommands(40_000).map((command) => command.commandId), ["cmd-worker"],
+    "an acknowledged command remains due for runner-journal recovery after the delivery bound");
   db.recordAutomationCommandReceipt({
     commandId: "cmd-worker", runnerId: "runner-1", state: "started", revision: 2, userEventSeq: 7, now: 1_030,
   });
@@ -5062,6 +5064,8 @@ test("automation delivery plans stage atomically, gate dependencies, and apply r
     commandId: "cmd-worker", runnerId: "runner-2", state: "completed", revision: 4, now: 1_060,
   }), null, "a receipt from the wrong runner cannot mutate the outbox");
   db.markAutomationCommandSent("cmd-orchestrator", "req-orchestrator-1", 1_061, 1_100);
+  assert.deepEqual(db.dueAutomationCommands(40_000).map((command) => command.commandId), ["cmd-orchestrator"],
+    "an unacknowledged workflow sibling remains recoverable once another member reached the runner");
   const validationFailure = db.recordAutomationCommandReceipt({
     commandId: "cmd-orchestrator", runnerId: "runner-1", state: "rejected", revision: 0,
     code: "INVALID_COMMAND", error: "runner rejected the envelope before journaling", now: 1_062,

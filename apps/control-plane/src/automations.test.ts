@@ -1587,6 +1587,27 @@ test("a flush outside the tick cannot transmit a command past its delivery bound
     "and it must not be expired mid-flush either — the sweep owns that decision");
 });
 
+test("an acknowledged command remains resendable for runner-journal recovery after the delivery bound", () => {
+  const { db, service, delivered } = harness();
+  const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+  service.tick(60_000);
+  const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+  const command = db.listAutomationCommands(execution.executionId)[0]!;
+  const acceptedAt = command.deliveryDeadlineAt! - 30_000;
+
+  service.onDurableCommandReceipt("runner-1", {
+    type: "durable_session_command_update", commandId: command.commandId,
+    sessionId: command.sessionId, state: "accepted", revision: 1,
+  }, acceptedAt);
+  const before = delivered.length;
+
+  service.commandOutbox.flush(command.deliveryDeadlineAt! + 1, "runner-1");
+
+  assert.equal(delivered.length, before + 1,
+    "delivery acknowledgement satisfies the bound without disabling journal recovery resends");
+  assert.equal(db.getAutomationCommand(command.commandId)?.state, "accepted");
+});
+
 test("the delivery bound is decided before the outbox can transmit anything", () => {
   // The outbox marks a command `sent` and writes it to the runner in one step. If the bound were
   // judged after that, a reconnect at the bound would hand the runner a launch and release the

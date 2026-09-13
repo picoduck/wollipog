@@ -18604,7 +18604,11 @@ export class ControlPlaneDb {
        WHERE execution.status IN ('dispatching','running')
          AND command.state IN ('pending','sent','accepted','started') AND command.next_attempt_at IS NOT NULL
          AND command.next_attempt_at<=? AND (command.expires_at IS NULL OR command.expires_at>?)
-         AND (command.delivery_deadline_at IS NULL OR command.delivery_deadline_at>?) ${runner}
+         AND (command.delivery_deadline_at IS NULL OR command.delivery_deadline_at>? OR EXISTS (
+           SELECT 1 FROM automation_commands acknowledged
+           WHERE acknowledged.execution_id=command.execution_id
+             AND acknowledged.state IN ('accepted','started','completed')
+         )) ${runner}
          AND (command.dependency_command_id IS NULL OR EXISTS (
            SELECT 1 FROM automation_commands dependency
            WHERE dependency.command_id=command.dependency_command_id AND dependency.state='completed'
