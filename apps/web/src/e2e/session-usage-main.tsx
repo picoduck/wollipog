@@ -257,6 +257,7 @@ if (composerFixture) {
   session.serviceTier = serviceTiers ? "fast" : null;
   session.contextWindow = 1_000_000;
 }
+if (params.get("plan") === "1") session.permissionMode = "plan";
 if (params.get("approval") === "checkpoint") {
   session.status = "input_required";
   session.costCheckpointsUsd = [1, 2.5];

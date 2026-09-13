@@ -107,26 +107,32 @@ test("393px Orchestrator Model Settings is a focus-safe bottom sheet with every 
   await expect(trigger).toBeFocused();
 });
 
-test("desktop Model Settings stays inside a clipped pane for a short model", async ({ page }) => {
-  await page.setViewportSize({ width: 800, height: 844 });
-  await page.goto("/session-usage-e2e.html?width=800&height=804&tiers=1");
-  const trigger = page.getByRole("button", { name: /^Model Settings:/ });
-  await trigger.click();
-  const popover = page.locator(".model-settings-pop");
-  const [frameBox, triggerBox, popoverBox] = await Promise.all([
-    page.locator("#frame").boundingBox(),
-    trigger.boundingBox(),
-    popover.boundingBox(),
-  ]);
-  expect(frameBox).not.toBeNull();
-  expect(triggerBox).not.toBeNull();
-  expect(popoverBox).not.toBeNull();
-  expect(popoverBox!.y + popoverBox!.height).toBeLessThanOrEqual(triggerBox!.y + 0.5);
-  expect(popoverBox!.x).toBeGreaterThanOrEqual(frameBox!.x);
-  expect(popoverBox!.x + popoverBox!.width).toBeLessThanOrEqual(frameBox!.x + frameBox!.width);
-  await expect(popover).toContainText("Model Settings");
-  await page.screenshot({ path: `${EVIDENCE}/after-desktop-model-settings.png` });
-});
+for (const { frameWidth, plan } of [
+  { frameWidth: 360, plan: false },
+  { frameWidth: 500, plan: true },
+]) {
+  test(`desktop Model Settings stays inside a ${frameWidth}px clipped pane${plan ? " with Plan" : ""}`, async ({ page }) => {
+    await page.setViewportSize({ width: 1024, height: 844 });
+    await page.goto(`/session-usage-e2e.html?width=${frameWidth}&height=804&tiers=1${plan ? "&plan=1" : ""}`);
+    if (plan) await expect(page.getByRole("button", { name: "◒ Plan" })).toBeVisible();
+    const trigger = page.getByRole("button", { name: /^Model Settings:/ });
+    await trigger.click();
+    const popover = page.locator(".model-settings-pop");
+    const [frameBox, triggerBox, popoverBox] = await Promise.all([
+      page.locator("#frame").boundingBox(),
+      trigger.boundingBox(),
+      popover.boundingBox(),
+    ]);
+    expect(frameBox).not.toBeNull();
+    expect(triggerBox).not.toBeNull();
+    expect(popoverBox).not.toBeNull();
+    expect(popoverBox!.y + popoverBox!.height).toBeLessThanOrEqual(triggerBox!.y + 0.5);
+    expect(popoverBox!.x).toBeGreaterThanOrEqual(frameBox!.x);
+    expect(popoverBox!.x + popoverBox!.width).toBeLessThanOrEqual(frameBox!.x + frameBox!.width);
+    await expect(popover).toContainText("Model Settings");
+    if (!plan) await page.screenshot({ path: `${EVIDENCE}/after-desktop-model-settings.png` });
+  });
+}
 
 for (const kind of ["claude", "codex"] as const) {
   for (const theme of ["light", "dark"] as const) {

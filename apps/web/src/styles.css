@@ -3600,6 +3600,7 @@ textarea {
 }
 /* Composer bar: fixed controls surround one truncating model label; Send never yields its seat. */
 .composer-bar {
+  position: relative;
   display: flex;
   min-width: 0;
   align-items: center;
@@ -3625,6 +3626,7 @@ textarea {
   position: relative;
 }
 .cbar-menu.model-settings-menu {
+  position: static;
   min-width: 0;
   max-width: 360px;
   flex: 0 1 auto;
@@ -3751,7 +3753,7 @@ textarea {
   width: min(390px, calc(100vw - 32px));
 }
 .cbar-pop.model-settings-pop {
-  width: min(380px, calc(100vw - 32px));
+  width: min(380px, 100%);
 }
 .cbar-settings-title {
   padding: 8px 9px 7px;
@@ -3776,9 +3778,6 @@ textarea {
 @media (max-width: 760px) {
   /* Use the inset composer bar as the containing block: viewport width does not
      account for the approvals trigger's offset or the session's safe-area padding. */
-  .composer-bar {
-    position: relative;
-  }
   .cbar-menu.permission-mode-menu {
     position: static;
   }
