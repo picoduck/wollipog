@@ -113,3 +113,17 @@ test("independent blockers are all reported in actionable order", () => {
     "WSL agents need the verified Direct WSL bridge and a bubblewrap-isolated runner. " +
     "Orchestrator runs only on the host execution target.");
 });
+
+test("an old runner suppresses only an unverified generic agent claim", () => {
+  assert.equal(orchestratorUnavailableReason({
+    ...AVAILABLE,
+    runnerSupportsOrchestration: false,
+    agentOffersOrchestrator: false,
+  }), "This runner is too old to orchestrate child sessions.");
+  assert.equal(orchestratorUnavailableReason({
+    ...AVAILABLE,
+    runnerSupportsOrchestration: false,
+    agentOffersOrchestrator: false,
+    agentOrchestratorRequirement: "Upgrade Codex to 0.154.0 or newer.",
+  }), "This runner is too old to orchestrate child sessions. Upgrade Codex to 0.154.0 or newer.");
+});

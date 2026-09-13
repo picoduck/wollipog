@@ -1346,6 +1346,8 @@ test("an unsupported Orchestrator is disabled and says why, rather than vanishin
     assert.ok(orchestrator, "Orchestrator is rendered even where it cannot be chosen");
     assert.equal(orchestrator.getAttribute("aria-disabled"), "true");
     assert.match(orchestrator.textContent ?? "", /runner is too old to orchestrate child sessions/);
+    assert.doesNotMatch(orchestrator.textContent ?? "", /agent does not offer/,
+      "an old runner cannot establish whether its missing capability is agent-specific");
 
     // Disabled, not merely styled: clicking must not select it, and the reason must be readable
     // rather than living in a `title` a touch user cannot reach.

@@ -46,7 +46,10 @@ export function orchestratorUnavailableReason(input: {
 }): string | undefined {
   const reasons: string[] = [];
   if (!input.runnerSupportsOrchestration) reasons.push("This runner is too old to orchestrate child sessions.");
-  if (!input.agentOffersOrchestrator) {
+  // A pre-orchestration runner may omit the mode simply because its binary never advertised it.
+  // A discovery-specific requirement remains trustworthy; the generic absence does not.
+  if (!input.agentOffersOrchestrator &&
+      (input.runnerSupportsOrchestration || input.agentOrchestratorRequirement)) {
     reasons.push(input.agentOrchestratorRequirement ?? "This agent does not offer the Orchestrator permission mode.");
   }
   if (input.contextKind === "wsl" && !input.directWslVerified) {
