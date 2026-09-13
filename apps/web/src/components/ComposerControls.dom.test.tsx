@@ -112,6 +112,51 @@ test("permission details are keyboard reachable and do not select the mode", asy
   }
 });
 
+test("Model Settings keeps provider descriptions and Service Tier selection in one menu", async () => {
+  const applied: Partial<SessionConfig>[] = [];
+  let closeCount = 0;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <div role="menu" onKeyDown={(event) => handleMenuKeyDown(event, () => undefined)}>
+        <ModelEffortMenuChoices
+          models={[{ id: "gpt", displayName: "GPT Astra", description: "Best for complex work" }]}
+          modelVal="gpt"
+          selectedModel={{ id: "gpt", displayName: "GPT Astra" }}
+          modelEfforts={["high"]}
+          effortVal="high"
+          serviceTierState={{
+            choices: [
+              { id: "default", name: "Standard", description: "Standard response speed." },
+              { id: "fast", name: "Fast", description: "Faster responses." },
+            ],
+            selected: { id: "default", name: "Standard", description: "Standard response speed." },
+          }}
+          close={() => { closeCount += 1; }}
+          apply={(patch) => applied.push(patch)}
+        />
+      </div>,
+    );
+  });
+
+  try {
+    assert.match(container.textContent ?? "", /GPT AstraBest for complex work/);
+    const tierGroup = container.querySelector('[role="group"][aria-label="Service Tier"]');
+    assert.ok(tierGroup);
+    const fast = [...tierGroup.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+      .find((button) => button.textContent?.includes("Fast"));
+    assert.ok(fast);
+    await act(async () => { fast.click(); });
+    assert.deepEqual(applied, [{ serviceTier: "fast" }]);
+    assert.equal(closeCount, 1);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
 test("the Context Window group offers provider-stated variants and switches only the model id", async () => {
   const applied: Partial<SessionConfig>[] = [];
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
