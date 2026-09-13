@@ -754,6 +754,7 @@ function SessionDetailLoaded({
   const stalled = useStoreSelector((s) => s.stalledSessionIds.has(sessionId));
   const lastActivityAt = Math.max(session.lastEventAt ?? 0, activity?.lastEventAt ?? 0) || session.updatedAt;
   const [text, setText] = useState("");
+  const [composerExpanded, setComposerExpanded] = useState(false);
   const draftDirty = useRef(false);
   const [busy, setBusy] = useState(false);
   const [handoffTurn, setHandoffTurn] = useState<number | null>(null);
@@ -1108,6 +1109,9 @@ function SessionDetailLoaded({
     const explicit = composerExplicitFocusTransferRef.current;
     composerExplicitFocusTransferRef.current = false;
     if (explicit || composerComposingRef.current || !backgroundTarget) {
+      if (explicit && !element.closest(".composer-box")?.contains(relatedElement)) {
+        setComposerExpanded(false);
+      }
       pendingComposerFocusRestoreRef.current = null;
       return;
     }
@@ -1131,19 +1135,28 @@ function SessionDetailLoaded({
     setSteeringBusy(false);
     setQueueSteeringPending(new Set());
     setSteeringResolutionPending(new Map());
+    setComposerExpanded(false);
   }, [sessionId]);
 
   const focusComposerAtDraftEnd = useCallback(() => {
     const element = inputRef.current;
     if (!element) return;
-    const moved = focusComposerAtEnd(element, composerComposingRef.current);
-    if (moved && draftHydratedSessionRef.current !== sessionId) {
-      pendingHydrationCaretRef.current = {
-        sessionId,
-        interactionVersion: composerInteractionVersionRef.current,
-      };
-    }
-  }, [sessionId]);
+    setComposerExpanded(true);
+    const focus = () => {
+      const moved = focusComposerAtEnd(element, composerComposingRef.current);
+      const focused = element.ownerDocument.activeElement === element;
+      if (moved && focused && draftHydratedSessionRef.current !== sessionId) {
+        pendingHydrationCaretRef.current = {
+          sessionId,
+          interactionVersion: composerInteractionVersionRef.current,
+        };
+      }
+      return focused;
+    };
+    // A collapsed phone composer hides its textarea. Retry after React commits the expanded
+    // state; desktop and already-expanded composers retain the immediate focus path.
+    if (!focus() && isMobile) window.requestAnimationFrame(focus);
+  }, [isMobile, sessionId]);
 
   useLayoutEffect(() => {
     const pending = retitleFocusRestoreRef.current;
@@ -3327,6 +3340,11 @@ function SessionDetailLoaded({
   const composerCommandResolution = resolveComposerCommandInvocation(text, composerCommands);
   const commandPreservesAttachedImages = composerCommandResolution.kind === "command" &&
     durableCommandPreservesAttachments(composerCommandResolution.command, images.length > 0);
+  const composerIdleCollapsed = isMobile && !composerExpanded && !/[\r\n]/u.test(text) &&
+    images.length === 0 && session.pendingApproval == null && !composerAnswerActive &&
+    !historyQuarantine && !queuedEdit && !error && !retitleFeedback && !dictation.recording &&
+    !dragActive && !paletteOpen && !workspacePickerOpen;
+  const composerIdlePreview = text.trim() ? text : composerPlaceholder;
   useEffect(() => {
     setActiveSlashCommandId((current) => retainActiveComposerCommandId(current, slashMatches));
   }, [slashMatches]);
@@ -4807,7 +4825,16 @@ function SessionDetailLoaded({
               </div>
             )}
             <div
-              className={`composer-box${dragActive ? " drag-over" : ""}${composerAnswerActive ? " answer-mode" : ""}`}
+              className={`composer-box${dragActive ? " drag-over" : ""}${composerAnswerActive ? " answer-mode" : ""}${composerIdleCollapsed ? " idle-collapsed" : ""}`}
+              onBlur={(event) => {
+                const blurredTarget = event.target as HTMLElement;
+                if (blurredTarget === inputRef.current || blurredTarget.classList.contains("composer-idle-preview")) {
+                  return;
+                }
+                if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                  setComposerExpanded(false);
+                }
+              }}
               onDragEnter={(e) => {
                 if (!canPrompt || composerAnswerActive) return;
                 e.preventDefault();
@@ -4893,6 +4920,7 @@ function SessionDetailLoaded({
                     : undefined}
                 value={text}
                 onFocus={(event) => {
+                  setComposerExpanded(true);
                   composerExplicitFocusTransferRef.current = false;
                   reportComposerFocus(sessionId, "focus", event.currentTarget, composerComposingRef.current);
                 }}
@@ -4939,6 +4967,7 @@ function SessionDetailLoaded({
                 placeholder={composerPlaceholder}
                 rows={2}
                 disabled={!canPrompt}
+                tabIndex={composerIdleCollapsed ? -1 : undefined}
               />
               <div className="composer-bar">
                 <div className="cbar-left">
@@ -4957,6 +4986,16 @@ function SessionDetailLoaded({
                     imageMimeTypes={allowedImageMimeTypes}
                     onAttachImages={addFiles}
                   />
+                  <button
+                    type="button"
+                    className="composer-idle-preview"
+                    aria-label="Edit Message"
+                    title="Edit Message"
+                    onPointerDown={(event) => event.preventDefault()}
+                    onClick={focusComposerAtDraftEnd}
+                  >
+                    {composerIdlePreview}
+                  </button>
                   <ApprovalsControl session={session} apply={applyConfig} />
                   {planActive && (
                     <button

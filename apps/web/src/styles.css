@@ -3606,6 +3606,9 @@ textarea {
   align-items: center;
   gap: 8px;
 }
+.composer-idle-preview {
+  display: none;
+}
 .cbar-left,
 .cbar-right {
   display: flex;
@@ -11753,6 +11756,44 @@ body.shell-dock-dragging * {
   .composer-input {
     min-height: 42px;
     max-height: 170px;
+  }
+  .composer-box.idle-collapsed {
+    gap: 0;
+    padding: 5px 7px;
+    border-radius: var(--radius-pill);
+  }
+  .composer-box.idle-collapsed > .composer-input {
+    display: none;
+  }
+  .composer-box.idle-collapsed .composer-bar {
+    width: 100%;
+    gap: 6px;
+  }
+  .composer-box.idle-collapsed .cbar-left {
+    gap: 4px;
+  }
+  .composer-box.idle-collapsed .cbar-left > .permission-mode-menu,
+  .composer-box.idle-collapsed .cbar-left > .cbar-permission-badge,
+  .composer-box.idle-collapsed .cbar-left > .mode-pill,
+  .composer-box.idle-collapsed .cbar-left > .model-settings-menu {
+    display: none;
+  }
+  .composer-box.idle-collapsed .composer-idle-preview {
+    display: block;
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 30px;
+    padding: 4px 2px;
+    overflow: hidden;
+    border: 0;
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    line-height: 1.35;
+    text-align: left;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: text;
   }
 
   /* Dialogs and the palette use the full phone width, minus the lateral safe areas
