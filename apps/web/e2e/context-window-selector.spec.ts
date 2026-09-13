@@ -65,6 +65,7 @@ test("no Context Window group when the catalog offers a single window for the ba
 test("mobile: the Context Window group in the composer menu", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/session-usage-e2e.html?width=390&height=800&context=choice&used=150000");
+  await page.getByRole("button", { name: /^Edit Message:/ }).click();
   const trigger = page.locator(".cbar-trigger", { hasText: "Opus 5" }).first();
   await trigger.click();
   await expect(page.getByRole("group", { name: "Context Window" }).getByRole("menuitemradio", { name: "1M" })).toHaveAttribute("aria-checked", "true");

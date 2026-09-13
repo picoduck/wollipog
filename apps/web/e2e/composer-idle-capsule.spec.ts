@@ -33,7 +33,7 @@ for (const width of [320, 360, 393, 430]) {
     await openComposer(page, width);
     const composer = page.locator(".composer-box");
     await expect(composer).toHaveClass(/idle-collapsed/);
-    await expect(page.getByRole("button", { name: "Edit Message" })).toHaveText("Do anything");
+    await expect(page.getByRole("button", { name: "Edit Message: Do anything" })).toHaveText("Do anything");
 
     const geometry = await composer.evaluate((element) => {
       const outer = element.getBoundingClientRect();
@@ -68,7 +68,7 @@ test("a single-line preview truncates visually while expansion preserves and foc
   const draft = "Keep this complete single-line draft while its compact preview becomes deliberately much wider than a phone";
   await openComposer(page, 320, `&draft=${encodeURIComponent(draft)}`);
   const composer = page.locator(".composer-box");
-  const preview = page.getByRole("button", { name: "Edit Message" });
+  const preview = page.getByRole("button", { name: `Edit Message: ${draft}` });
   await expect(composer).toHaveClass(/idle-collapsed/);
   await expect(preview).toHaveText(draft);
   const clipping = await preview.evaluate((element) => ({
@@ -108,7 +108,7 @@ for (const exception of [
     await expect(page.locator(".composer-box")).not.toHaveClass(/idle-collapsed/);
     await expect(page.locator(".composer-input")).toBeVisible();
     await expect(page.locator(exception.visible)).toBeVisible();
-    await expect(page.getByRole("button", { name: "Edit Message" })).toBeHidden();
+    await expect(page.getByRole("button", { name: /^Edit Message:/ })).toBeHidden();
   });
 }
 
@@ -143,6 +143,7 @@ test("Plus and every primary capsule action work with one activation", async ({ 
   await expect(page.locator(".plus-pop")).toBeVisible();
 
   await openComposer(page, 393, "&draft=Ship%20it");
+  await expect(page.locator(".composer-box")).toHaveClass(/idle-collapsed/);
   await page.getByRole("button", { name: "Send" }).click();
   await expect.poll(() => page.locator("body").getAttribute("data-composer-action")).toBe("send");
 
@@ -161,5 +162,5 @@ test("desktop keeps the expanded composer", async ({ page }) => {
   await openComposer(page, 900, "&draft=Desktop%20draft");
   await expect(page.locator(".composer-box")).not.toHaveClass(/idle-collapsed/);
   await expect(page.locator(".composer-input")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Edit Message" })).toBeHidden();
+  await expect(page.getByRole("button", { name: /^Edit Message:/ })).toBeHidden();
 });

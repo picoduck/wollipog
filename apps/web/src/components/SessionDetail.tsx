@@ -11,6 +11,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
+import { flushSync } from "react-dom";
 import {
   CODEX_APP_SERVER_IMAGE_MIME_TYPES,
   DEFAULT_LIVE_CHILD_LIMIT,
@@ -755,6 +756,7 @@ function SessionDetailLoaded({
   const lastActivityAt = Math.max(session.lastEventAt ?? 0, activity?.lastEventAt ?? 0) || session.updatedAt;
   const [text, setText] = useState("");
   const [composerExpanded, setComposerExpanded] = useState(false);
+  const composerExpansionSessionRef = useRef(sessionId);
   const draftDirty = useRef(false);
   const [busy, setBusy] = useState(false);
   const [handoffTurn, setHandoffTurn] = useState<number | null>(null);
@@ -964,6 +966,7 @@ function SessionDetailLoaded({
   const composerComposingRef = useRef(false);
   const pendingComposerFocusRestoreRef = useRef<ReturnType<typeof captureComposerFocus> | null>(null);
   const composerExplicitFocusTransferRef = useRef(false);
+  const composerPointerTransferRef = useRef(false);
   const composerFocusRestoreFrameRef = useRef<number | null>(null);
   const composerWindowTransferVersionRef = useRef(0);
   const composerInteractionVersionRef = useRef(0);
@@ -1011,8 +1014,11 @@ function SessionDetailLoaded({
         pendingComposerFocusRestoreRef.current = null;
       } else {
         pendingComposerFocusRestoreRef.current = remembered;
-        element.focus({ preventScroll: true });
-        if (restoreComposerFocus(element, remembered)) {
+        if (isMobile) {
+          // The idle phone capsule removes the textarea from layout. Reveal it in a commit before
+          // restoring focus, otherwise browsers correctly reject focus on the hidden control.
+          setComposerExpanded(true);
+        } else if (restoreComposerFocus(element, remembered)) {
           pendingComposerFocusRestoreRef.current = null;
           reportComposerFocus(sessionId, "restore", element, false);
         }
@@ -1032,19 +1038,21 @@ function SessionDetailLoaded({
       }
       reportComposerFocus(sessionId, "unmount", element, composerComposingRef.current);
     };
-  }, [composerFocusKey, sessionId]);
+  }, [composerFocusKey, isMobile, sessionId]);
 
   useLayoutEffect(() => {
     const pending = pendingComposerFocusRestoreRef.current;
     const element = inputRef.current;
     if (!pending || !element || composerComposingRef.current) return;
+    if (isMobile && !composerExpanded) return;
     if (!restoreComposerFocus(element, pending)) return;
     pendingComposerFocusRestoreRef.current = null;
     reportComposerFocus(sessionId, "restore", element, false);
-  }, [sessionId, text]);
+  }, [composerExpanded, isMobile, sessionId, text]);
 
   useEffect(() => {
     let clearExplicitTransferTimer: ReturnType<typeof setTimeout> | null = null;
+    let clearPointerTransferTimer: ReturnType<typeof setTimeout> | null = null;
     const markExplicitTransfer = () => {
       composerExplicitFocusTransferRef.current = true;
       if (clearExplicitTransferTimer) clearTimeout(clearExplicitTransferTimer);
@@ -1060,7 +1068,25 @@ function SessionDetailLoaded({
     };
     const markExplicitPointerTransfer = (event: PointerEvent) => {
       const composer = inputRef.current;
-      if (composer && event.target instanceof Node && !composer.contains(event.target)) markExplicitTransfer();
+      if (!composer || !(event.target instanceof Node) || composer.contains(event.target)) return;
+      markExplicitTransfer();
+      if (!composer.closest(".composer-box")?.contains(event.target)) {
+        composerPointerTransferRef.current = true;
+      }
+    };
+    const finishExplicitPointerTransfer = () => {
+      if (!composerPointerTransferRef.current) return;
+      composerPointerTransferRef.current = false;
+      if (clearPointerTransferTimer) clearTimeout(clearPointerTransferTimer);
+      clearPointerTransferTimer = null;
+      setComposerExpanded(false);
+    };
+    const schedulePointerTransferCleanup = () => {
+      if (clearPointerTransferTimer) clearTimeout(clearPointerTransferTimer);
+      clearPointerTransferTimer = setTimeout(() => {
+        composerPointerTransferRef.current = false;
+        clearPointerTransferTimer = null;
+      }, 0);
     };
     const markExplicitKeyboardTransfer = (event: globalThis.KeyboardEvent) => {
       const plainEscape = event.key === "Escape"
@@ -1075,6 +1101,9 @@ function SessionDetailLoaded({
       markExplicitTransfer();
     };
     document.addEventListener("pointerdown", markExplicitPointerTransfer, true);
+    document.addEventListener("click", finishExplicitPointerTransfer);
+    document.addEventListener("pointerup", schedulePointerTransferCleanup);
+    document.addEventListener("pointercancel", schedulePointerTransferCleanup);
     document.addEventListener("keydown", markExplicitKeyboardTransfer, true);
     window.addEventListener("blur", markWindowTransfer);
     window.addEventListener("focus", clearExplicitTransfer);
@@ -1085,11 +1114,15 @@ function SessionDetailLoaded({
     window.addEventListener(KEYBOARD_DISMISS_BLUR_EVENT, markExplicitTransfer);
     return () => {
       document.removeEventListener("pointerdown", markExplicitPointerTransfer, true);
+      document.removeEventListener("click", finishExplicitPointerTransfer);
+      document.removeEventListener("pointerup", schedulePointerTransferCleanup);
+      document.removeEventListener("pointercancel", schedulePointerTransferCleanup);
       document.removeEventListener("keydown", markExplicitKeyboardTransfer, true);
       window.removeEventListener("blur", markWindowTransfer);
       window.removeEventListener("focus", clearExplicitTransfer);
       window.removeEventListener(KEYBOARD_DISMISS_BLUR_EVENT, markExplicitTransfer);
       if (clearExplicitTransferTimer) clearTimeout(clearExplicitTransferTimer);
+      if (clearPointerTransferTimer) clearTimeout(clearPointerTransferTimer);
     };
   }, []);
 
@@ -1109,7 +1142,8 @@ function SessionDetailLoaded({
     const explicit = composerExplicitFocusTransferRef.current;
     composerExplicitFocusTransferRef.current = false;
     if (explicit || composerComposingRef.current || !backgroundTarget) {
-      if (explicit && !element.closest(".composer-box")?.contains(relatedElement)) {
+      if (explicit && !composerPointerTransferRef.current &&
+          !element.closest(".composer-box")?.contains(relatedElement)) {
         setComposerExpanded(false);
       }
       pendingComposerFocusRestoreRef.current = null;
@@ -1125,6 +1159,8 @@ function SessionDetailLoaded({
   }, [sessionId]);
 
   useEffect(() => {
+    const sessionChanged = composerExpansionSessionRef.current !== sessionId;
+    composerExpansionSessionRef.current = sessionId;
     queueSteeringInFlightRef.current.clear();
     steeringResolutionInFlightRef.current.clear();
     composerInteractionVersionRef.current += 1;
@@ -1135,7 +1171,7 @@ function SessionDetailLoaded({
     setSteeringBusy(false);
     setQueueSteeringPending(new Set());
     setSteeringResolutionPending(new Map());
-    setComposerExpanded(false);
+    if (sessionChanged) setComposerExpanded(false);
   }, [sessionId]);
 
   const focusComposerAtDraftEnd = useCallback(() => {
@@ -1157,6 +1193,13 @@ function SessionDetailLoaded({
     // state; desktop and already-expanded composers retain the immediate focus path.
     if (!focus() && isMobile) window.requestAnimationFrame(focus);
   }, [isMobile, sessionId]);
+
+  const expandIdleComposer = useCallback(() => {
+    // Keep expansion and focus inside the activating gesture so iOS is allowed to open its
+    // software keyboard. A requestAnimationFrame retry occurs too late for that permission.
+    flushSync(() => setComposerExpanded(true));
+    focusComposerAtDraftEnd();
+  }, [focusComposerAtDraftEnd]);
 
   useLayoutEffect(() => {
     const pending = retitleFocusRestoreRef.current;
@@ -3341,7 +3384,7 @@ function SessionDetailLoaded({
   const commandPreservesAttachedImages = composerCommandResolution.kind === "command" &&
     durableCommandPreservesAttachments(composerCommandResolution.command, images.length > 0);
   const composerIdleCollapsed = isMobile && !composerExpanded && !/[\r\n]/u.test(text) &&
-    images.length === 0 && session.pendingApproval == null && !composerAnswerActive &&
+    images.length === 0 && session.pendingApproval == null &&
     !historyQuarantine && !queuedEdit && !error && !retitleFeedback && !dictation.recording &&
     !dragActive && !paletteOpen && !workspacePickerOpen;
   const composerIdlePreview = text.trim() ? text : composerPlaceholder;
@@ -4832,7 +4875,7 @@ function SessionDetailLoaded({
                   return;
                 }
                 if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-                  setComposerExpanded(false);
+                  if (!composerPointerTransferRef.current) setComposerExpanded(false);
                 }
               }}
               onDragEnter={(e) => {
@@ -4989,10 +5032,10 @@ function SessionDetailLoaded({
                   <button
                     type="button"
                     className="composer-idle-preview"
-                    aria-label="Edit Message"
+                    aria-label={`Edit Message: ${composerIdlePreview}`}
                     title="Edit Message"
                     onPointerDown={(event) => event.preventDefault()}
-                    onClick={focusComposerAtDraftEnd}
+                    onClick={expandIdleComposer}
                   >
                     {composerIdlePreview}
                   </button>

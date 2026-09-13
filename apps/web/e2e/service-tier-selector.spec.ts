@@ -10,6 +10,7 @@ for (const viewport of [
   test(`${viewport.name}: Service Tier lives in Model Settings and explains every tier`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await page.goto(`/session-usage-e2e.html?width=${viewport.width}&height=${viewport.height - 40}&tiers=legacy`);
+    if (viewport.name === "mobile") await page.getByRole("button", { name: /^Edit Message:/ }).click();
     const legacyTrigger = page.getByRole("button", { name: /^Model Settings:/ });
     await legacyTrigger.click();
     await expect(page.getByRole("group", { name: "Service Tier" })).toHaveCount(0);
@@ -17,6 +18,7 @@ for (const viewport of [
     await page.screenshot({ path: `${SHOT}/${viewport.name}-before.png` });
 
     await page.goto(`/session-usage-e2e.html?width=${viewport.width}&height=${viewport.height - 40}&tiers=1`);
+    if (viewport.name === "mobile") await page.getByRole("button", { name: /^Edit Message:/ }).click();
 
     const trigger = page.getByRole("button", { name: /^Model Settings:/ });
     await expect(trigger).toBeVisible();

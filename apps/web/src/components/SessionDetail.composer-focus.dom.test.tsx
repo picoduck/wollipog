@@ -77,6 +77,7 @@ for (const [name, value] of Object.entries({
   MouseEvent: domWindow.MouseEvent,
   KeyboardEvent: domWindow.KeyboardEvent,
   MutationObserver: domWindow.MutationObserver,
+  getComputedStyle: domWindow.getComputedStyle.bind(domWindow),
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
   ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
@@ -3393,6 +3394,46 @@ test("an immediate same-session remount restores exact selection direction and t
     );
     assert.equal(remounted.scrollTop, 61);
   } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an immediate phone remount reveals the idle textarea before restoring its focus", async () => {
+  const priorMatchMedia = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: query.includes("max-width: 760px"),
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveComposerDraft(draft, { text: "phone remount draft", images: [], updatedAt: 1 });
+    await act(async () => {
+      fixture.composer.focus();
+      fixture.composer.setSelectionRange(2, 8, "backward");
+      fireDomEvent.select(fixture.composer);
+    });
+
+    const persisted = deferred<ComposerDraft | null>();
+    const remounted = await fixture.remountWithDraftLoader(() => persisted.promise);
+    assert.equal(fixture.container.querySelector(".composer-box")?.classList.contains("idle-collapsed"), false,
+      "the remount must commit its expanded state before attempting to restore the hidden textarea");
+    await resolveComposerDraft(persisted, { text: "phone remount draft", images: [], updatedAt: 2 });
+    await flushAsyncWork();
+
+    assert.equal(remounted.ownerDocument.activeElement, remounted);
+    assert.deepEqual(
+      [remounted.selectionStart, remounted.selectionEnd, remounted.selectionDirection],
+      [2, 8, "backward"],
+    );
+  } finally {
+    domWindow.matchMedia = priorMatchMedia;
     await unmountFixture(fixture);
   }
 });
