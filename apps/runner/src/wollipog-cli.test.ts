@@ -49,7 +49,7 @@ test("CLI topic help is complete, successful, and side-effect free", async () =>
     ["pair", ["pair create", "pair list", "pair revoke", "pair url", "one-time", "bootstrap"]],
     ["service", ["service install", "service status", "service restart", "service logs", "service upgrade", "service uninstall"]],
     ["admin", ["admin pairing-url", "admin status", "admin doctor", "admin device create", "admin runner-credential"]],
-    ["session", ["session list", "session create", "session wait", "session guardrails"]],
+    ["session", ["session list", "session create", "session wait", "session guardrails", "--effort"]],
     ["worktree", ["worktree create", "worktree attach", "worktree select", "worktree discard"]],
   ];
   for (const [topic, expected] of topics) {
@@ -280,7 +280,7 @@ test("CLI JSON create and prompt commands reuse the manager routes and reject in
   const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" };
   let output = "";
   assert.equal(await runWollipogCli(
-    ["node", "cli.js", "--wollipog-cli", "session", "create", "--runner", "r1", "--agent", "codex", "--workspace", "ws", "--prompt", "Do it", "--json"],
+    ["node", "cli.js", "--wollipog-cli", "session", "create", "--runner", "r1", "--agent", "codex", "--workspace", "ws", "--prompt", "Do it", "--model", "gpt-5.6-sol", "--effort", "high", "--json"],
     env,
     { stdout: (text) => { output += text; }, stderr: () => {} },
     fetch,
@@ -289,6 +289,7 @@ test("CLI JSON create and prompt commands reuse the manager routes and reject in
   assert.equal(requests[1]!.url, "http://cp/api/sessions");
   assert.deepEqual(JSON.parse(requests[1]!.body!), {
     runnerId: "r1", agentId: "codex", workspaceId: "ws", prompt: "Do it", useWorktree: false,
+    config: { model: "gpt-5.6-sol", effort: "high" },
   });
   assert.equal(requests[1]!.headers?.[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER], undefined,
     "paired-device CLI calls do not fabricate a session principal");
@@ -306,6 +307,30 @@ test("CLI JSON create and prompt commands reuse the manager routes and reject in
     oldFetch,
   ), 1);
   assert.match(JSON.parse(incompatible).error, /incompatible/);
+});
+
+test("CLI rejects explicit effort against pre-v138 control planes without creating a session", async () => {
+  const requests: string[] = [];
+  const fetch: McpFetch = async (url) => {
+    requests.push(url);
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControlReasoningEffort - 1,
+      }),
+    };
+  };
+  let output = "";
+  const code = await runWollipogCli(
+    ["node", "cli.js", "--wollipog-cli", "session", "create", "--runner", "r1", "--agent", "codex", "--workspace", "ws", "--effort", "high", "--json"],
+    { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" },
+    { stdout: (text) => { output += text; }, stderr: () => assert.fail("unexpected CLI error") },
+    fetch,
+  );
+  assert.equal(code, 1);
+  assert.match(JSON.parse(output).error, /requires v138/u);
+  assert.deepEqual(requests, ["http://cp/api/compatibility"]);
 });
 
 test("CLI exposes restart and all live guardrail controls", async () => {

@@ -3,6 +3,8 @@ import { test } from "node:test";
 import { PassThrough } from "node:stream";
 import {
   LEGACY_CONDUCTOR_ACTOR_SESSION_HEADER,
+  PROTOCOL_VERSION,
+  RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER,
 } from "@wollipog/protocol";
@@ -449,7 +451,7 @@ test("get_session redacts pendingApproval to its title and caps the preview (no 
         agentId: "claude-code",
         driver: "claude-code",
         model: "opus",
-        effort: null,
+        effort: "high",
         permissionMode: "default",
         useWorktree: true,
         worktreePath: "/repos/x/.agent-worktrees/s_9",
@@ -473,6 +475,8 @@ test("get_session redacts pendingApproval to its title and caps the preview (no 
     },
   }));
   const result = await callTool(deps, "get_session", { sessionId: "s_9" });
+  assert.equal(resultJson(result).session.model, "opus");
+  assert.equal(resultJson(result).session.effort, "high");
   const text = resultText(result);
   assert.ok(!text.includes("req-secret-77"), "no requestId to replay");
   assert.ok(!text.includes("allow_once"), "no options array either");
@@ -657,8 +661,13 @@ test("attach_worktree reports the platform-isolation boundary the runner returne
   assert.equal(legacy.isolation, null);
 });
 
-test("create_session -> POST /api/sessions with prompt riding create and config.model/permissionMode", async () => {
-  const { deps, calls } = makeDeps(() => ({ status: 201, body: { id: "s_new", title: "t", status: "queued", runnerId: "r1" } }));
+test("create_session applies model and effort in the original create request and reports the effective pair", async () => {
+  const { deps, calls } = makeDeps((call) => call.url.endsWith("/api/compatibility")
+    ? { status: 200, body: { protocolVersion: PROTOCOL_VERSION } }
+    : {
+        status: 201,
+        body: { id: "s_new", title: "t", status: "queued", runnerId: "r1", model: "opus", effort: "high" },
+      });
   const result = await callTool(deps, "create_session", {
     runnerId: "r1",
     agentId: "claude-code",
@@ -667,23 +676,53 @@ test("create_session -> POST /api/sessions with prompt riding create and config.
     title: "flaky fix",
     useWorktree: true,
     model: "opus",
+    effort: "high",
     permissionMode: "acceptEdits",
   });
-  assert.equal(calls.length, 1, "no follow-up config call without budgets");
-  assert.equal(calls[0]!.method, "POST");
-  assert.equal(calls[0]!.url, `${CP_URL}/api/sessions`);
-  assert.deepEqual(calls[0]!.body, {
+  assert.equal(calls.length, 2, "compatibility is proven before the one atomic create call");
+  assert.equal(calls[0]!.method, "GET");
+  assert.equal(calls[0]!.url, `${CP_URL}/api/compatibility`);
+  assert.equal(calls[1]!.method, "POST");
+  assert.equal(calls[1]!.url, `${CP_URL}/api/sessions`);
+  assert.deepEqual(calls[1]!.body, {
     runnerId: "r1",
     agentId: "claude-code",
     workspaceId: "ws",
     title: "flaky fix",
     prompt: "fix the flaky test",
     useWorktree: true,
-    config: { model: "opus", permissionMode: "acceptEdits" },
+    config: { model: "opus", effort: "high", permissionMode: "acceptEdits" },
   });
   assert.equal(resultJson(result).session.id, "s_new");
+  assert.equal(resultJson(result).session.model, "opus");
+  assert.equal(resultJson(result).session.effort, "high");
   assert.equal(resultJson(result).session.costBudgetUsd, null);
   assert.equal(resultJson(result).session.maxToolCalls, null);
+});
+
+test("create_session fails closed on explicit effort with an older control plane and preserves omitted-effort creation", async () => {
+  const older = makeDeps(() => ({
+    status: 200,
+    body: { protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControlReasoningEffort - 1 },
+  }));
+  const rejected = await callTool(older.deps, "create_session", {
+    runnerId: "r1", agentId: "claude-code", workspaceId: "ws", model: "opus", effort: "high",
+  });
+  assert.equal(rejected.isError, true);
+  assert.match(resultText(rejected), /requires control plane protocol v138/u);
+  assert.match(resultText(rejected), /omit effort to preserve default resolution/u);
+  assert.equal(older.calls.length, 1);
+  assert.equal(older.calls[0]!.url, `${CP_URL}/api/compatibility`);
+
+  const omitted = makeDeps(() => ({
+    status: 201, body: { id: "s_default", title: "t", status: "queued", runnerId: "r1" },
+  }));
+  const created = await callTool(omitted.deps, "create_session", {
+    runnerId: "r1", agentId: "claude-code", workspaceId: "ws", model: "opus",
+  });
+  assert.equal(created.isError, undefined);
+  assert.equal(omitted.calls.length, 1);
+  assert.deepEqual((omitted.calls[0]!.body as { config: unknown }).config, { model: "opus" });
 });
 
 test("create_session polls an exact pending spawn approval until it can create the child", async () => {

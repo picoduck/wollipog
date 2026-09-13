@@ -27,7 +27,7 @@ human-principal requests and do not send an agent-session claim header.
 wollipog session list [--archived] --json
 wollipog session get ID --json
 wollipog session events ID [--after SEQ] [--limit COUNT] --json
-wollipog session create --runner ID --agent ID (--workspace ID | --path PATH) [--prompt TEXT] [--cost-budget USD] [--max-tool-calls N] [--max-child-sessions N] --json
+wollipog session create --runner ID --agent ID (--workspace ID | --path PATH) [--prompt TEXT] [--model MODEL] [--effort EFFORT] [--cost-budget USD] [--max-tool-calls N] [--max-child-sessions N] --json
 wollipog session prompt ID TEXT --json
 wollipog session wait ID [--for STATE,...] [--timeout MS] [--interval MS] --json
 wollipog session stop ID --json
@@ -121,6 +121,20 @@ slots, and remaining capacity. Completed, failed, stopped, and archived
 children release live slots, while their lifetime usage reservations remain charged to a finite
 parent. Live cost/tool edits require delivery to an online current runner and fail closed rather
 than leaving control-plane and runner thresholds out of sync.
+
+`create_session` and `wollipog session create` accept an optional reasoning effort alongside the
+model. The control plane validates the requested pair against the selected runner harness before
+creating the session, and the same create request carries both values through governance approval,
+persistence, and the initial provider launch. Explicit values take precedence over saved Agent
+Harness defaults. Omitting effort preserves the existing default-resolution behavior, including
+harnesses that expose no configurable effort. The creation result and `get_session` report the
+effective model and effort so callers can verify what launched.
+
+Explicit effort selection requires protocol v138 between the current CLI or MCP adapter and the
+control plane. The adapter rejects an older control plane before creation and tells the caller to
+update Wollipog or omit effort; it never retries without the value. Older clients do not expose
+this option and must be upgraded before a caller can request it. Calls that omit effort remain
+compatible with the protocol-v100 Agent Control creation contract.
 
 Protocol v124 completes that contract for structured Direct WSL sessions. Discovery must resolve an
 absolute, root-owned Linux Node 22+ runtime plus distro-owned compiler and bubblewrap runtimes with

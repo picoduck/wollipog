@@ -15,7 +15,7 @@ Core commands:
 wollipog session list --json
 wollipog session get <session-id> --json
 wollipog session events <session-id> --after <seq> --json
-wollipog session create --runner <id> --agent <id> --workspace <id> --prompt <task> --json
+wollipog session create --runner <id> --agent <id> --workspace <id> --prompt <task> [--model <id>] [--effort <level>] --json
 wollipog session prompt <session-id> <message> --json
 wollipog session wait <session-id> --for input_required,completed,failed,stopped --json
 wollipog session stop <session-id> --json
@@ -32,6 +32,12 @@ Discard permanently removes only a runner-owned worktree that is not used by a l
 clean, and has no commits ahead of its upstream. A forge-verified merged head may replace an
 upstream deleted with the remote branch, but only when it exactly matches the local head. Discard
 refuses attached, dirty, arbitrary upstream-less, or unpushed trees.
+
+Child creation may select a supported model and reasoning effort in the same request. Explicit
+values apply before the initial prompt and override saved harness defaults; read the effective pair
+back from the creation result or `session get`. Omit `--effort` to retain default resolution. An
+explicit effort requires protocol v138, and a current client fails closed against older components
+instead of retrying without it.
 
 ## Retiring a Worktree
 

@@ -59,7 +59,7 @@ function positional(args: string[]): string[] {
   const values: string[] = [];
   const valueOptions = new Set([
     "--url", "--token-file", "--runner", "--agent", "--workspace", "--path", "--prompt",
-    "--title", "--model", "--permission-mode", "--after", "--limit", "--for", "--timeout",
+    "--title", "--model", "--effort", "--permission-mode", "--after", "--limit", "--for", "--timeout",
     "--interval", "--cost-budget", "--max-tool-calls", "--session", "--branch", "--base", "--base-ref",
     "--max-child-sessions",
   ]);
@@ -148,6 +148,7 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
           prompt: option(args, "--prompt"),
           title: option(args, "--title"),
           model: option(args, "--model"),
+          effort: option(args, "--effort"),
           permissionMode: option(args, "--permission-mode"),
           useWorktree: flag(args, "--worktree"),
           costBudgetUsd: numeric(option(args, "--cost-budget")),
@@ -206,7 +207,7 @@ async function compatible(
   requiredProtocol: number,
   token: string,
   sessionId: string,
-): Promise<string | null> {
+): Promise<{ error: string | null; protocolVersion?: number }> {
   try {
     const headers: Record<string, string> = { authorization: `Bearer ${token}` };
     if (sessionId) headers[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER] = sessionId;
@@ -223,14 +224,16 @@ async function compatible(
         signal: AbortSignal.timeout(10_000),
       });
     }
-    if (!response.ok) return `control plane compatibility check failed: HTTP ${response.status}`;
+    if (!response.ok) return { error: `control plane compatibility check failed: HTTP ${response.status}` };
     const body = JSON.parse(await response.text()) as { protocolVersion?: unknown };
     if (typeof body.protocolVersion !== "number" || body.protocolVersion < requiredProtocol) {
-      return `control plane protocol v${String(body.protocolVersion ?? "unknown")} is incompatible; this Wollipog CLI command requires v${requiredProtocol}`;
+      return {
+        error: `control plane protocol v${String(body.protocolVersion ?? "unknown")} is incompatible; this Wollipog CLI command requires v${requiredProtocol}`,
+      };
     }
-    return null;
+    return { error: null, protocolVersion: body.protocolVersion };
   } catch (error) {
-    return `control plane compatibility check failed: ${(error as Error).message}`;
+    return { error: `control plane compatibility check failed: ${(error as Error).message}` };
   }
 }
 
@@ -305,14 +308,16 @@ export async function runWollipogCli(
     return 1;
   }
   const worktreeTools = new Set(["create_worktree", "attach_worktree", "select_worktree"]);
-  const requiredProtocol = parsed.tool === "discard_worktree"
+  const requiredProtocol = parsed.tool === "create_session" && typeof parsed.input.effort === "string"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControlReasoningEffort
+    : parsed.tool === "discard_worktree"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeDiscard
     : worktreeTools.has(parsed.tool)
       ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktrees
       : RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControl;
-  const incompatibility = await compatible(fetchImpl, cpUrl, requiredProtocol, token, sessionId);
-  if (incompatibility) {
-    (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: incompatibility })}\n` : `${incompatibility}\n`);
+  const compatibility = await compatible(fetchImpl, cpUrl, requiredProtocol, token, sessionId);
+  if (compatibility.error) {
+    (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: compatibility.error })}\n` : `${compatibility.error}\n`);
     return 1;
   }
   const result = await executeManagerTool(parsed.tool, parsed.input, {
@@ -322,6 +327,7 @@ export async function runWollipogCli(
     token,
     actorHeader: sessionId ? WOLLIPOG_AGENT_ACTOR_SESSION_HEADER : null,
     orchestrator: env.WOLLIPOG_PERMISSION_PRESET === "orchestrator",
+    controlPlaneProtocolVersion: compatibility.protocolVersion,
   });
   const data = payload(result);
   if (json) io.stdout(`${JSON.stringify(data)}\n`);
