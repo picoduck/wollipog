@@ -2320,7 +2320,7 @@ export class SessionsService {
         this.hub.sessionChangedById(id);
       } else if (changed.has(id)) {
         const settled = this.db.getSession(id);
-        if (settled?.status === "idle") this.replayRestoredPolicyHookIdle(changed.get(id)!, id, now);
+        if (settled?.status === "idle") this.replayRestoredPolicyIdle(changed.get(id)!, id, now);
         this.hub.sessionChangedById(id);
       }
     }
@@ -5132,6 +5132,7 @@ export class SessionsService {
     );
     this.db.updateSessionStatus(sessionId, "input_required", now);
     this.recordWorkflowDecisionAudit(decision, "pending", { kind: "agent", id: sessionId }, now);
+    if (decision.authority === "human") this.notifyTransition(child, sessionId);
     this.hub.sessionChangedById(sessionId);
     this.hub.sessionChangedById(controller.session.id);
     return ok(decision, 201);
@@ -5370,15 +5371,24 @@ export class SessionsService {
     const current = this.db.getSession(sessionId);
     if (!current) return;
     const remaining = removePendingRequest(current.pendingApproval, occurrenceId);
+    const restoreIdle = !remaining && current.status === "input_required" &&
+      this.db.policyResumeStatus(sessionId) === "idle";
     this.db.setPendingApproval(sessionId, remaining);
     if (!remaining && current.status === "input_required") {
       this.db.updateSessionStatus(
         sessionId,
-        this.db.policyResumeStatus(sessionId) === "idle" ? "idle" : "running",
+        restoreIdle ? "idle" : "running",
         now,
       );
     }
-    this.clearSettledPolicyResumeStatus(sessionId);
+    if (restoreIdle) {
+      this.replayRestoredPolicyIdle(current, sessionId, now);
+    } else {
+      // Typed decisions do not suspend the provider turn. Usage can cross a soft checkpoint while
+      // the card is present, so the last settlement must immediately surface any deferred gate.
+      if (!remaining) this.gateOnPolicy(sessionId, now);
+      this.clearSettledPolicyResumeStatus(sessionId);
+    }
   }
 
   /** A transient runner disconnect clears the projected card but not the server-owned request.
@@ -5798,7 +5808,7 @@ export class SessionsService {
       if (promoted && beforePromotion) this.notifyTransition(beforePromotion, sessionId);
       if (!promoted) {
         const settled = this.db.getSession(sessionId);
-        if (settled?.status === "idle") this.replayRestoredPolicyHookIdle(session, sessionId, now);
+        if (settled?.status === "idle") this.replayRestoredPolicyIdle(session, sessionId, now);
       }
       this.hub.sessionChangedById(sessionId);
       return ok(this.db.getSession(sessionId)!);
@@ -8063,7 +8073,11 @@ export class SessionsService {
 
   private gateOnPolicy(sessionId: string, now: number, fanOut = true, softOnly = false): boolean {
     const s = this.db.getSession(sessionId);
-    if (!s || s.pendingApproval) return false;
+    if (!s) return false;
+    const occupied = pendingRequests(s.pendingApproval);
+    // A typed workflow decision is an authorization record, not a provider turn barrier. Soft
+    // guardrails must be able to park alongside it while other provider/user asks retain priority.
+    if (occupied.some((request) => request.kind !== "workflow_decision")) return false;
     const rules = rulesFromSession(this.guardrailFields(s));
     if (rules.length === 0) return false;
     // sessionView already computed the count when the guardrail is armed — don't re-query.
@@ -8081,7 +8095,9 @@ export class SessionsService {
     // A control-plane-only card must also stop the runner draining queued prompts behind the
     // turn it parks; the runner-owned thresholds already tripped on the runner itself.
     if (!runnerHoldFor(ask.rule.kind)) this.rearmRunnerAfterCard(s, "control_plane");
-    this.db.setPendingApproval(sessionId, approval);
+    let combined = approval;
+    for (const request of occupied) combined = appendPendingApproval(combined, request);
+    this.db.setPendingApproval(sessionId, combined);
     // The daily allowance is the owner's, not this session's: every other live session they own
     // is parked now, before a queued turn elsewhere can dequeue behind the breach.
     if (ask.rule.kind === "daily_budget" && fanOut) {
@@ -8100,7 +8116,7 @@ export class SessionsService {
     return true;
   }
 
-  /** A durable hook resolution that restores a swallowed runner idle must replay the same
+  /** A durable control-plane decision that restores a swallowed runner idle must replay the same
    * settlement consumers as a live idle frame before broadcasting the final state. */
   /** A live delivery frame diverted into history hydration must arm settlement durably NOW —
    * the runner's trailing idle can beat the hydration round-trip to notifyTransition. */
@@ -8114,7 +8130,7 @@ export class SessionsService {
     );
   }
 
-  private replayRestoredPolicyHookIdle(previous: SessionView, sessionId: string, now: number): void {
+  private replayRestoredPolicyIdle(previous: SessionView, sessionId: string, now: number): void {
     this.gateOnPolicy(sessionId, now);
     this.reconcileWorkflowSessionStatus(sessionId, "idle", now);
     this.handlePodOrchestrationSettle(sessionId, "idle");

@@ -1911,6 +1911,27 @@ test("typed workflow decisions preserve provider settlement and cannot be replac
     }).ok);
 
     db.updateSessionStatus(child.data.id, "running", Date.now());
+    assert.ok(svc.setConfig(child.data.id, { costCheckpointsUsd: [1] }).ok);
+    const costDecision = svc.createWorkflowDecision(child.data.id, {
+      requestId: "decision-across-checkpoint", resourceKey: "implementation:cost-checkpoint",
+      resourceSnapshot: implementationSnapshot,
+    });
+    assert.ok(costDecision.ok && costDecision.data);
+    svc.onSessionEvent(child.data.id, { kind: "token_usage", inputTokens: 1, costUsd: 1.2 });
+    svc.onSessionStatus(child.data.id, "idle");
+    const checkpointAndDecision = pendingRequests(db.getSession(child.data.id)?.pendingApproval);
+    assert.equal(checkpointAndDecision[0]?.kind, "cost_checkpoint",
+      "a soft checkpoint crossed during a typed decision becomes the primary turn barrier");
+    assert.equal(checkpointAndDecision[1]?.requestId, costDecision.data.occurrenceId);
+    assert.ok(svc.approve(child.data.id, costDecision.data.occurrenceId, "approve",
+      { kind: "human", id: "owner" }, undefined, () => true).ok);
+    const checkpoint = db.getSession(child.data.id)?.pendingApproval;
+    assert.equal(checkpoint?.kind, "cost_checkpoint",
+      "settling the typed decision cannot erase its coexisting cost checkpoint");
+    assert.ok(svc.approve(child.data.id, checkpoint!.requestId, "continue").ok);
+    assert.equal(db.getSession(child.data.id)?.status, "idle");
+
+    db.updateSessionStatus(child.data.id, "running", Date.now());
     const durable = svc.createWorkflowDecision(child.data.id, {
       requestId: "durable-beside-permission", resourceKey: "implementation:durable",
       resourceSnapshot: implementationSnapshot,
