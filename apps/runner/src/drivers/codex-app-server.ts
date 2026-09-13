@@ -701,6 +701,7 @@ export class CodexAppServerDriver implements Driver {
       }).catch((e: Json) => {
         if (generation !== this.promptGeneration || !this.turnResolve) return;
         this.emitDriverError(`turn/start failed: ${e?.message ?? String(e)}`);
+        this.closeTurnUsage();
         this.settleTurn("refusal");
       });
     });

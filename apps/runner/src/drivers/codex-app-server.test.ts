@@ -828,9 +828,16 @@ test("turn/start failure cleans staged images and returns refusal", async () => 
     cleanup: async () => { cleaned++; },
   }));
   (h.driver as any).threadId = "thread-images";
+  const notifications = notificationHandlers(h.driver);
   (h.driver as any).peer = { request: async () => { throw new Error("rejected"); } };
   assert.equal(await h.driver.prompt("inspect", [{ mimeType: "image/png", data: "cHg=" }]), "refusal");
   assert.equal(cleaned, 1);
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "thread-images",
+    tokenUsage: { last: { inputTokens: 9, outputTokens: 2 } },
+  });
+  assert.equal(h.events.some((event) => event.kind === "token_usage"), false,
+    "a rejected turn/start closes live usage accounting");
 });
 
 test("cancel cleans staged images even while turn/start is still pending", async () => {
