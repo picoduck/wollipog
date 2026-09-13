@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { pinWidestFace } from "./font-geometry";
 
 /**
  * Session-level usage (#602, #781): per-turn tokens and cost on the user message, the context ring
@@ -627,6 +628,7 @@ test("mobile: context and cost sit beside Live Output, and cost opens Session Us
 test("mobile: widest status labels stay inside a 320px strip", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 844 });
   await page.goto("/session-usage-e2e.html?width=320&height=800&cost=12345.67");
+  await pinWidestFace(page, page.locator(".transcript-status-strip"));
   await page.locator(".follow-tail-chip span").first().evaluate((label) => {
     label.textContent = "Previewing · Follow Live Output";
   });

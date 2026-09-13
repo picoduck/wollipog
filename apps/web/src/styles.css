@@ -10851,7 +10851,7 @@ body.shell-dock-dragging * {
    control. */
 @container transcript-pane (max-width: 340px) {
   .transcript-status-cluster { column-gap: 4px; }
-  .transcript-status-cluster .follow-tail-chip { padding-inline: 8px; }
+  .transcript-status-cluster .follow-tail-chip { padding-inline: 7px; }
 }
 /* Pager hints remain an inner group inside the centered status cluster. */
 .follow-tail-control {
