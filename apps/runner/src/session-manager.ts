@@ -3952,6 +3952,7 @@ export class SessionManager {
 
   private cancelActiveTurnWait(sessionId: string): boolean {
     if (!this.activeTurnWaiters.delete(sessionId)) return false;
+    this.activeTurnAdmission.clearFailure(sessionId);
     if (this.activeTurnWaiters.size === 0 && this.activeTurnRetryTimer) {
       clearTimeout(this.activeTurnRetryTimer);
       this.activeTurnRetryTimer = null;

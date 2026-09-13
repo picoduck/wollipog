@@ -651,6 +651,38 @@ test("active-turn capacity is enforced across runner processes independently of 
   }
 });
 
+test("cancelling an active-turn lock collision clears its retained failed-attempt state", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-active-turn-lock-cancel-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    store.create(meta("waiting"));
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, root, 2,
+      undefined, undefined, { agentLimits: {}, agentWeights: {}, activeTurnLimit: 1 },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const gate = manager as any;
+    const sibling = new BoxAdmission(join(root, "active-turns"), 1);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const siblingInternals = sibling as any;
+    const mutationRoot = join(root, "active-turns", "admission", "capacity-mutation");
+    mkdirSync(mutationRoot, { recursive: true });
+    const mutation = siblingInternals.claimSlots(mutationRoot, 1, 1, {
+      sessionId: "sibling-mutation", agentId: "sibling", weight: 1,
+    }) as string[];
+
+    assert.equal(gate.acquireActiveTurn("waiting"), false);
+    assert.equal(gate.activeTurnAdmission.capacityLockWaiters.has("waiting"), true);
+    assert.equal(gate.cancelActiveTurnWait("waiting"), true);
+    assert.equal(gate.activeTurnAdmission.capacityLockWaiters.has("waiting"), false);
+
+    siblingInternals.releaseSlots(mutation);
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("an active-turn waiter runs before another session drains its deeper local queue", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-active-turn-fairness-"));
   try {
@@ -3342,6 +3374,8 @@ test("shared-root capacity lock contention reports synchronization and retries w
     assert.deepEqual(manager.capacityState().blockers?.map((blocker) => blocker.kind).sort(),
       ["queue_order", "request_weight"],
       "a later bounded-fairness reservation supersedes a stale transient lock diagnostic");
+    assert.equal(gate.boxAdmission.capacityLockWaiters.has("waiting"), false,
+      "publishing the proven fairness reason retires obsolete transient state");
     gate.admissionQueue.shift();
 
     gate.controlPlaneProtocolVersion = () => 136;
