@@ -120,6 +120,18 @@ test("Answer Mode keeps the phone composer expanded", async ({ page }) => {
   await expect(page.getByText("Answer Mode", { exact: true })).toBeVisible();
 });
 
+test("resolving a focused phone request reveals and returns focus to the composer", async ({ page }) => {
+  await openComposer(page, 393, "&approval=checkpoint");
+  await page.getByRole("button", { name: "Continue" }).focus();
+  await page.evaluate(() => window.resolveSessionUsageQuestion());
+
+  const composer = page.locator(".composer-box");
+  const textarea = page.locator(".composer-input");
+  await expect(composer).not.toHaveClass(/idle-collapsed/);
+  await expect(textarea).toBeVisible();
+  await expect(textarea).toBeFocused();
+});
+
 test("active dictation expands the capsule on the initial press", async ({ page }) => {
   await openComposer(page, 393);
   const composer = page.locator(".composer-box");

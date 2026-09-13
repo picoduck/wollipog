@@ -682,6 +682,8 @@ function SessionDetailLoaded({
 }: SessionDetailProps & { session: SessionView }) {
   const api = useApi();
   const isMobile = useIsMobile();
+  const isMobileRef = useRef(isMobile);
+  isMobileRef.current = isMobile;
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
   const projects = useStoreSelector((state) => state.projects);
   const instanceScope = useInstanceScope();
@@ -972,6 +974,7 @@ function SessionDetailLoaded({
   const composerExplicitFocusTransferRef = useRef(false);
   const composerPointerTransferRef = useRef<"inside" | "outside" | null>(null);
   const composerFocusRestoreFrameRef = useRef<number | null>(null);
+  const pendingRequestFallbackFocusRef = useRef<string | null>(null);
   const composerWindowTransferVersionRef = useRef(0);
   const composerInteractionVersionRef = useRef(0);
   const composerDraftVersionRef = useRef(0);
@@ -1018,13 +1021,16 @@ function SessionDetailLoaded({
         pendingComposerFocusRestoreRef.current = null;
       } else {
         pendingComposerFocusRestoreRef.current = remembered;
-        if (isMobile) {
+        if (isMobileRef.current) {
           // The idle phone capsule removes the textarea from layout. Reveal it in a commit before
           // restoring focus, otherwise browsers correctly reject focus on the hidden control.
           setComposerExpanded(true);
-        } else if (restoreComposerFocus(element, remembered)) {
-          pendingComposerFocusRestoreRef.current = null;
-          reportComposerFocus(sessionId, "restore", element, false);
+        } else {
+          element.focus({ preventScroll: true });
+          if (restoreComposerFocus(element, remembered)) {
+            pendingComposerFocusRestoreRef.current = null;
+            reportComposerFocus(sessionId, "restore", element, false);
+          }
         }
       }
     }
@@ -1042,13 +1048,21 @@ function SessionDetailLoaded({
       }
       reportComposerFocus(sessionId, "unmount", element, composerComposingRef.current);
     };
-  }, [composerFocusKey, isMobile, sessionId]);
+  }, [composerFocusKey, sessionId]);
 
   useLayoutEffect(() => {
     const pending = pendingComposerFocusRestoreRef.current;
     const element = inputRef.current;
     if (!pending || !element || composerComposingRef.current) return;
     if (isMobile && !composerExpanded) return;
+    const active = element.ownerDocument.activeElement;
+    if (active && active !== element.ownerDocument.body && active !== element) {
+      pendingComposerFocusRestoreRef.current = null;
+      return;
+    }
+    // Preserve focus throughout asynchronous hydration even when the empty replacement textarea
+    // cannot restore the remembered selection geometry until its stored draft arrives.
+    element.focus({ preventScroll: true });
     if (!restoreComposerFocus(element, pending)) return;
     pendingComposerFocusRestoreRef.current = null;
     reportComposerFocus(sessionId, "restore", element, false);
@@ -1201,6 +1215,27 @@ function SessionDetailLoaded({
     // state; desktop and already-expanded composers retain the immediate focus path.
     if (!focus() && isMobile) window.requestAnimationFrame(focus);
   }, [isMobile, sessionId]);
+
+  const focusComposerAfterRequestResolution = useCallback(() => {
+    const element = inputRef.current;
+    if (!element) return false;
+    if (!isMobile || composerExpanded) {
+      element.focus({ preventScroll: true });
+      return element.ownerDocument.activeElement === element;
+    }
+    // The request coordinator runs after the resolving commit has hidden an idle phone textarea.
+    // Own the fallback now, reveal in the next synchronous layout commit, then focus before paint.
+    pendingRequestFallbackFocusRef.current = sessionId;
+    setComposerExpanded(true);
+    return true;
+  }, [composerExpanded, isMobile, sessionId]);
+
+  useLayoutEffect(() => {
+    if (pendingRequestFallbackFocusRef.current !== sessionId) return;
+    if (isMobile && !composerExpanded) return;
+    pendingRequestFallbackFocusRef.current = null;
+    inputRef.current?.focus({ preventScroll: true });
+  }, [composerExpanded, isMobile, sessionId]);
 
   const expandIdleComposer = useCallback(() => {
     // Keep expansion and focus inside the activating gesture so iOS is allowed to open its
@@ -4322,6 +4357,7 @@ function SessionDetailLoaded({
             runnerOnline={runnerOnline}
             fallbackFocusRef={mode === "expanded" ? inputRef : scrollRef}
             alternateFallbackFocusRef={mode === "expanded" ? scrollRef : undefined}
+            onFallbackFocus={mode === "expanded" ? focusComposerAfterRequestResolution : undefined}
             onSessionUpdate={loadSession}
             showKeyHints={!isMobile}
             // The fallback owns the request only until the matching pinned row is mounted and the

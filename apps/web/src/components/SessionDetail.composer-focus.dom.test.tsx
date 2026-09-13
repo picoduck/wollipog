@@ -3417,6 +3417,8 @@ test("an immediate same-session remount restores exact selection direction and t
 
     const persisted = deferred<ComposerDraft | null>();
     const remounted = await fixture.remountWithDraftLoader(() => persisted.promise);
+    assert.equal(remounted.ownerDocument.activeElement, remounted,
+      "the replacement textarea must own focus while its persisted draft is still loading");
     await resolveComposerDraft(persisted, {
       text: "multiline remount draft",
       images: [],
@@ -3468,6 +3470,8 @@ test("an immediate phone remount reveals the idle textarea before restoring its 
     const remounted = await fixture.remountWithDraftLoader(() => persisted.promise);
     assert.equal(fixture.container.querySelector(".composer-box")?.classList.contains("idle-collapsed"), false,
       "the remount must commit its expanded state before attempting to restore the hidden textarea");
+    assert.equal(remounted.ownerDocument.activeElement, remounted,
+      "the revealed phone textarea must own focus while its persisted draft is still loading");
     await resolveComposerDraft(persisted, { text: "phone remount draft", images: [], updatedAt: 2 });
     await flushAsyncWork();
 
