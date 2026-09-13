@@ -10845,11 +10845,13 @@ body.shell-dock-dragging * {
 @container transcript-pane (max-width: calc(330px + 16rem)) {
   .transcript-status-actions { display: none; }
 }
-/* At the narrowest supported phone width, the widest follow-state label needs four pixels back
-   from each side gap so the context ring and a useful cost sliver both remain inside their equal
-   tracks. The tracks stay symmetric, so this compression cannot move the centered control. */
+/* At the narrowest supported phone width, compact both side gaps and the widest follow-state
+   chip's horizontal padding so fallback-font differences cannot make the context ring or cost
+   collide with it. The tracks stay symmetric, so this compression cannot move the centered
+   control. */
 @container transcript-pane (max-width: 340px) {
   .transcript-status-cluster { column-gap: 4px; }
+  .transcript-status-cluster .follow-tail-chip { padding-inline: 8px; }
 }
 /* Pager hints remain an inner group inside the centered status cluster. */
 .follow-tail-control {
