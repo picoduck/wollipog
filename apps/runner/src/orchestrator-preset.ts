@@ -150,11 +150,17 @@ export function withOrchestratorPreset(
       agent.wslAgentControl.safeLauncherProtocolVersion === 1 &&
       (host.isolationMode ?? host.wslIsolationMode) === "bwrap" &&
       ["claude-code", "codex", "codex-app-server"].includes(agent.driver ?? "acp");
+    const codexApprovalSupported = agent.driver !== "codex" && agent.driver !== "codex-app-server" ||
+      agent.codexAppServer?.orchestratorApproval?.status === "supported";
+    if (!codexApprovalSupported && agent.capabilities?.permissionModes?.includes(ORCHESTRATOR_PRESET)) {
+      return { ...agent, capabilities: { ...agent.capabilities,
+        permissionModes: agent.capabilities.permissionModes.filter((mode) => mode !== ORCHESTRATOR_PRESET) } };
+    }
     if (contextKind === "wsl" && !wslSupported && agent.capabilities?.permissionModes?.includes(ORCHESTRATOR_PRESET)) {
       return { ...agent, capabilities: { ...agent.capabilities,
         permissionModes: agent.capabilities.permissionModes.filter((mode) => mode !== ORCHESTRATOR_PRESET) } };
     }
-    if ((contextKind !== "native" && !wslSupported) ||
+    if (!codexApprovalSupported || (contextKind !== "native" && !wslSupported) ||
         (!acpSupported && !["claude-code", "codex", "codex-app-server"].includes(agent.driver ?? "acp"))) return agent;
     if (contextKind === "native" && !supportsNativeOrchestratorBoundary(
       agent.driver ?? "acp", host.platform ?? process.platform, host.isolationMode ?? host.wslIsolationMode,
@@ -208,13 +214,13 @@ export function orchestratorLaunchArgs(
   }
   return [
     "--strict-config",
+    "--approve-for-me",
     ...["apps", "plugins", "hooks",
       "multi_agent", "browser_use", "computer_use", "image_generation"].flatMap((feature) => ["--disable", feature]),
     "-c", 'sandbox_mode="workspace-write"',
     "-c", "sandbox_workspace_write.writable_roots=[]",
     "-c", "sandbox_workspace_write.network_access=true",
     "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
-    "-c", 'approval_policy="never"',
     "-c", 'web_search="live"',
     "-c", `developer_instructions=${toml(instructions)}`,
     "-c", `mcp_servers=${toml({ wollipog: { ...mcp, enabled: true } })}`,

@@ -18,6 +18,8 @@ const mcp = { command: "/runner", args: ["agent", "mcp"], env: { WOLLIPOG_PERMIS
 
 test("orchestrator capability requires a native harness or discovery-verified WSL bridge and never revives conductor", () => {
   const agent: AgentDefinition = { id: "agent", name: "Agent", command: "agent", args: [], env: {}, driver: "codex",
+    codexAppServer: { status: "supported", appServerAvailable: true,
+      orchestratorApproval: { status: "supported" } },
     capabilities: { models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true, permissionModes: ["read-only"] } };
   assert.deepEqual(withOrchestratorPreset([agent], { platform: "linux" })[0]!.capabilities!.permissionModes,
     ["read-only", "orchestrator"]);
@@ -60,6 +62,35 @@ test("orchestrator capability requires a native harness or discovery-verified WS
     permissionModes: ["default", "dontAsk", "orchestrator"] } };
   assert.equal(withOrchestratorPreset([staleClaude], { platform: "linux", isolationMode: "provider" })[0]!
     .capabilities!.permissionModes!.includes("orchestrator"), false, "unsupported native isolation strips stale claims");
+});
+
+test("Codex orchestrator capability requires the discovery-verified automatic-review contract", () => {
+  const agent: AgentDefinition = {
+    id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server",
+    context: { kind: "native" },
+    capabilities: { models: [], effortLevels: [], slashCommands: [], supportsImages: true,
+      supportsApprovals: true, permissionModes: ["auto-review"] },
+  };
+  const unsupported = withOrchestratorPreset([{
+    ...agent,
+    codexAppServer: {
+      status: "supported", appServerAvailable: true, installedVersion: "0.153.0",
+      orchestratorApproval: {
+        status: "unsupported",
+        failure: "Codex 0.153.0 cannot enforce Orchestrator automatic approval review; upgrade to 0.154.0 or newer.",
+      },
+    },
+  }], { platform: "linux" })[0]!;
+  assert.equal(unsupported.capabilities!.permissionModes!.includes("orchestrator"), false);
+
+  const supported = withOrchestratorPreset([{
+    ...agent,
+    codexAppServer: {
+      status: "supported", appServerAvailable: true, installedVersion: "0.154.0",
+      orchestratorApproval: { status: "supported" },
+    },
+  }], { platform: "linux" })[0]!;
+  assert.equal(supported.capabilities!.permissionModes!.includes("orchestrator"), true);
 });
 
 test("Codex MCP isolation probes an in-distro WSL binary through exact argv", () => {
@@ -212,7 +243,9 @@ test("native orchestrator flags enable bounded planning while disabling implemen
   const codex = orchestratorLaunchArgs("codex", mcp, ["/repo"]);
   for (const setting of ['sandbox_mode="workspace-write"', "sandbox_workspace_write.writable_roots=[]",
     "sandbox_workspace_write.network_access=true", "sandbox_workspace_write.exclude_slash_tmp=true",
-    'approval_policy="never"', 'web_search="live"']) assert.ok(codex.includes(setting));
+    'web_search="live"']) assert.ok(codex.includes(setting));
+  assert.ok(codex.includes("--approve-for-me"));
+  assert.equal(codex.includes('approval_policy="never"'), false);
   assert.equal(codex.some((arg) => arg.includes("exclude_tmpdir_env_var")), false,
     "TMPDIR names scratch and must remain writable through the explicit workspace root");
   for (const feature of ["hooks", "multi_agent", "plugins", "apps"]) {

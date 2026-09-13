@@ -267,7 +267,7 @@ export function NewSessionDialog({
     "Parent Control",
   );
   useEffect(() => {
-    if (!orchestrator || !parentControlSupported) setParentControl("off");
+    setParentControl(orchestrator && parentControlSupported ? "questions_and_approvals" : "off");
   }, [orchestrator, parentControlSupported]);
   const orchestratorContext = agent?.context?.kind ?? "native";
   const directWslOrchestrator = orchestratorContext === "wsl" &&
@@ -282,6 +282,7 @@ export function NewSessionDialog({
   const orchestratorUnavailable = orchestratorUnavailableReason({
     runnerSupportsOrchestration: runnerSupportsProtocol(runner?.protocolVersion, "sessionOrchestration"),
     agentOffersOrchestrator: agent?.capabilities?.permissionModes?.includes("orchestrator") ?? false,
+    agentOrchestratorRequirement: agent?.codexAppServer?.orchestratorApproval?.failure,
     contextKind: orchestratorContext,
     directWslVerified: directWslOrchestrator,
     hostExecutionTarget,
@@ -975,7 +976,7 @@ export function NewSessionDialog({
                 {
                   value: "orchestrator",
                   title: "Orchestrator",
-                  description: "Manage child sessions without shell or file-write tools. Cannot change after creation.",
+                  description: "Manage child sessions without shell or file-write tools. Guardian reviews eligible actions automatically, and Parent Control defaults to Questions and Approvals. Cannot change after creation.",
                   // Rendered disabled rather than omitted. The list used to drop this option
                   // entirely when unsupported, leaving a one-option control that could not say
                   // whether the runner, the agent, the context or the target was the reason.

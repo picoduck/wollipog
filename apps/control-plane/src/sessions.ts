@@ -2871,7 +2871,7 @@ export class SessionsService {
       return fail("The Conductor agent is retired; select an ordinary agent to orchestrate child sessions.", 409);
     }
     const parentSessionId = creationContext?.parentSessionId;
-    const parentControl = req.parentControl ?? "off";
+    let parentControl = req.parentControl ?? "off";
     if (parentControl !== "off" && parentControl !== "questions" && parentControl !== "questions_and_approvals") {
       return fail("parentControl must be off, questions, or questions_and_approvals", 400);
     }
@@ -3101,6 +3101,9 @@ export class SessionsService {
     if (serviceTier) requestedConfig.serviceTier = serviceTier;
     else delete requestedConfig.serviceTier;
     const validationConfig = claudeModelConfigForValidation(requestedConfig, agentCapabilities, launch.driver);
+    if (!parentSessionId && req.parentControl === undefined && requestedConfig.permissionMode === "orchestrator") {
+      parentControl = "questions_and_approvals";
+    }
     if (requestedConfig.permissionMode === "orchestrator") {
       if (req.launchSurface === "native_tui") {
         const tuiUnsupported = this.capabilityFailure(req.runnerId, "orchestratorNativeTui", "Orchestrator Native TUI");

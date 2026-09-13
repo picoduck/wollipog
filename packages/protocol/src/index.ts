@@ -1187,6 +1187,12 @@ export interface CodexAppServerCapabilities {
   schemaFingerprint?: string;
   /** This installation satisfies the separately verified ephemeral, no-tool session-naming contract. */
   sessionNaming?: boolean;
+  /** This installation can enforce Guardian-backed automatic review for Orchestrator turns. */
+  orchestratorApproval?: {
+    status: "supported" | "unsupported";
+    /** Actionable, secret-free upgrade guidance when the installed CLI is too old. */
+    failure?: string;
+  };
   failure?: CodexAppServerFailure;
 }
 

@@ -399,6 +399,13 @@ export function permissionModeOutcome(
   if (permissionMode === "plan") {
     return { label: "Read-Only", description: "The agent researches and plans without editing files.", warning: false };
   }
+  if (permissionMode === "orchestrator") {
+    return {
+      label: "Approve for Me",
+      description: "Guardian reviews eligible actions automatically; Wollipog still governs child management and human-only requests.",
+      warning: false,
+    };
+  }
   if (status === "available") {
     return { label: "Approvals Available", description: "Approval requests raised through this mode reach you in Wollipog.", warning: false };
   }

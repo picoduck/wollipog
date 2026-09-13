@@ -81,6 +81,11 @@ test("permission outcomes distinguish available, blocked, unrestricted, and unkn
   assert.deepEqual(permissionModeOutcome("auto", "unknown"), {
     label: "Support Unknown", description: "Wollipog has not verified approval delivery for this mode.", warning: true,
   });
+  assert.deepEqual(permissionModeOutcome("orchestrator", "unknown"), {
+    label: "Approve for Me",
+    description: "Guardian reviews eligible actions automatically; Wollipog still governs child management and human-only requests.",
+    warning: false,
+  });
   assert.equal(
     permissionModeOptionDescription(
       "acceptEdits",

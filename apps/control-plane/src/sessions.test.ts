@@ -587,6 +587,12 @@ test("orchestrator is creation-only and requires the negotiated native harness b
     const created = svc.createSession({ ...request, config: { permissionMode: "orchestrator" } });
     assert.equal(created.ok, true, created.error);
     assert.equal(created.data!.permissionMode, "orchestrator");
+    assert.equal(created.data!.parentControl, "questions_and_approvals",
+      "a human-created Orchestrator defaults delegated one-time decisions on");
+    const explicitOff = svc.createSession({
+      ...request, config: { permissionMode: "orchestrator" }, parentControl: "off",
+    });
+    assert.equal(explicitOff.data!.parentControl, "off", "an explicit human choice remains authoritative");
     assert.equal(svc.createSession({ ...request, launchSurface: "native_tui",
       config: { permissionMode: "orchestrator" } }).ok, true);
     db.registerRunner(meta, Date.now(), 111);
@@ -1451,6 +1457,7 @@ test("opt-in Parent Control resolves exact nested request occurrences with agent
       return created.data;
     };
     const child = createChild(parent.data.id, "Child");
+    assert.equal(child.parentControl, "off", "agent-created children never inherit delegated Parent Control");
     const grandchild = createChild(child.id, "Grandchild");
     const questionOccurrence = "request_question_occurrence";
     svc.onSessionEvent(grandchild.id, {

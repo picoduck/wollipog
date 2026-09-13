@@ -54,7 +54,6 @@ for (const theme of ["light", "dark"] as const) {
       await page.setViewportSize(viewport);
       await page.evaluate((theme) => {
         document.documentElement.dataset.theme = theme;
-        window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(112);
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([], ["default", "orchestrator"]);
       }, theme);
       await page.getByRole("tab", { name: /Alpha/ }).click();
@@ -71,13 +70,18 @@ for (const theme of ["light", "dark"] as const) {
       await expect(orchestratorCard).toHaveAttribute("aria-checked", "false");
       await orchestratorCard.click();
       await expect(orchestratorCard).toHaveAttribute("aria-checked", "true");
+      const delegatedControl = dialog.getByRole("radio", { name: /^Questions and Approvals/ });
+      await expect(delegatedControl).toHaveAttribute("aria-checked", "true");
+      await expect(orchestratorCard).toContainText(/Guardian reviews eligible actions automatically/);
       const tui = dialog.getByRole("radio", { name: /^Native TUI/ });
       await expect(tui).toBeEnabled();
       if (surface === "native_tui") await tui.click();
+      if (viewport.width === 390) await delegatedControl.scrollIntoViewIfNeeded();
       await page.screenshot({ path: testInfo.outputPath("preset-selected.png") });
       await dialog.getByRole("button", { name: "Create Session" }).click();
       await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
         .toMatchObject({ config: { permissionMode: "orchestrator" },
+          parentControl: "questions_and_approvals",
           ...(surface === "native_tui" ? { launchSurface: "native_tui" } : {}) });
     });
     }
