@@ -333,6 +333,18 @@ test("CLI rejects explicit effort against pre-v138 control planes without creati
   assert.deepEqual(requests, ["http://cp/api/compatibility"]);
 });
 
+test("CLI rejects a missing or blank effort before compatibility or session creation", async () => {
+  for (const suffix of [["--effort"], ["--effort="], ["--effort", "   "], ["--effort", "--json"]]) {
+    const result = await captureCli([
+      "session", "create", "--runner", "r1", "--agent", "codex", "--workspace", "ws", ...suffix,
+    ]);
+    assert.equal(result.code, 2, suffix.join(" "));
+    const output = suffix.includes("--json") ? result.stdout : result.stderr;
+    assert.equal(suffix.includes("--json") ? result.stderr : result.stdout, "", suffix.join(" "));
+    assert.match(output, /--effort requires a non-empty value/u, suffix.join(" "));
+  }
+});
+
 test("CLI exposes restart and all live guardrail controls", async () => {
   const requests: Array<{ url: string; body?: string }> = [];
   const fetch: McpFetch = async (url, init) => {

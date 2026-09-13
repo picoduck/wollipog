@@ -138,6 +138,11 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       const runnerId = option(args, "--runner");
       const agentId = option(args, "--agent");
       if (!runnerId || !agentId) return { error: "session create requires --runner and --agent" };
+      const effort = option(args, "--effort");
+      const effortRequested = args.some((arg) => arg === "--effort" || arg.startsWith("--effort="));
+      if (effortRequested && (!effort?.trim() || effort.startsWith("--"))) {
+        return { error: "session create --effort requires a non-empty value" };
+      }
       return {
         tool: "create_session",
         input: {
@@ -148,7 +153,7 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
           prompt: option(args, "--prompt"),
           title: option(args, "--title"),
           model: option(args, "--model"),
-          effort: option(args, "--effort"),
+          effort,
           permissionMode: option(args, "--permission-mode"),
           useWorktree: flag(args, "--worktree"),
           costBudgetUsd: numeric(option(args, "--cost-budget")),
