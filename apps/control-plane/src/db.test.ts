@@ -1453,14 +1453,28 @@ test("capacity dimensions and overflow diagnostics are accepted only from protoc
     },
   };
   assert.equal(db.updateRunnerCapacityStatus("runner-1", status, 110), true);
+  const capacityLockStatus = {
+    ...status,
+    queuedSessions: 1,
+    blockers: [{
+      kind: "capacity_lock" as const,
+      description: "Waiting for a concurrent Runner Capacity update",
+      usedUnits: 1,
+      limitUnits: 1,
+      requiredUnits: 1,
+      waitingSessions: 1,
+    }],
+  };
+  assert.equal(db.updateRunnerCapacityStatus("runner-1", capacityLockStatus, 111), true,
+    "v137 Machine diagnostics accept the cross-process synchronization boundary");
   assert.equal(db.updateRunnerCapacityStatus("runner-1", {
     ...status,
     dimensions: { idleProcessPolicy: "park_when_needed", parkedSessions: 0 } as never,
-  }, 111), false, "a partial untrusted dimensions object is rejected without throwing");
+  }, 112), false, "a partial untrusted dimensions object is rejected without throwing");
   assert.equal(db.updateRunnerCapacityStatus("runner-1", {
     ...status,
     dimensions: { ...status.dimensions, activeTurns: null } as never,
-  }, 112), false, "a malformed nested dimension is rejected without throwing");
+  }, 113), false, "a malformed nested dimension is rejected without throwing");
 
   db.createSession(newSession());
   db.updateSessionStatus("sess-1", "queued", 120);
@@ -1473,6 +1487,15 @@ test("capacity dimensions and overflow diagnostics are accepted only from protoc
     agentId: "acp-agent",
   }), true);
   assert.equal(db.getSession("sess-1")?.capacityWait?.kind, "active_turn_capacity");
+  assert.equal(db.setSessionCapacityWait("sess-1", {
+    kind: "capacity_lock",
+    description: "Waiting for a concurrent Runner Capacity update",
+    usedUnits: 1,
+    limitUnits: 1,
+    requiredUnits: 1,
+  }), true);
+  assert.equal(db.getSession("sess-1")?.capacityWait?.kind, "capacity_lock",
+    "session detail and search projections retain the same v137 reason");
   assert.equal(db.setSessionCapacityWait("sess-1", {
     kind: "diagnostic_overflow",
     description: "aggregate only",
@@ -1488,6 +1511,8 @@ test("capacity dimensions and overflow diagnostics are accepted only from protoc
   );
   assert.equal(db.updateRunnerCapacityStatus("legacy", status, 140), false,
     "a rolling-deployment peer cannot introduce fields or enum members outside its vocabulary");
+  assert.equal(db.updateRunnerCapacityStatus("legacy", capacityLockStatus, 141), false,
+    "a pre-v137 runner cannot introduce the capacity-lock blocker vocabulary");
   db.close();
 });
 

@@ -4751,13 +4751,15 @@ export class ControlPlaneDb {
   updateRunnerCapacityStatus(runnerId: string, status: RunnerCapacityState, now: number): boolean {
     const runner = this.getRunner(runnerId);
     const supportsDimensions = runnerSupportsProtocol(runner?.protocolVersion, "runnerCapacityDimensions");
+    const supportsCapacityLock = runnerSupportsProtocol(runner?.protocolVersion, "capacityLockDiagnostics");
     if (!runner || !Number.isInteger(status.configuredUnits) || status.configuredUnits < 1 ||
         status.configuredUnits > 256 || !Number.isSafeInteger(status.revision) || status.revision < 0 ||
         !Number.isSafeInteger(status.usedUnits) || status.usedUnits! < 0 ||
         status.availableUnits !== Math.max(0, status.configuredUnits - status.usedUnits!) ||
         !Number.isSafeInteger(status.queuedSessions) || status.queuedSessions! < 0 ||
         !Array.isArray(status.blockers) || status.blockers.length > 256 ||
-        status.blockers.some((blocker) => !validRunnerCapacityBlocker(blocker, true, supportsDimensions)) ||
+        status.blockers.some((blocker) =>
+          !validRunnerCapacityBlocker(blocker, true, supportsDimensions, supportsCapacityLock)) ||
         status.blockers.reduce((sum, blocker) => sum + blocker.waitingSessions!, 0) !== status.queuedSessions ||
         (supportsDimensions
           ? !validRunnerCapacityDimensions(status.dimensions, status, runner.runtime?.admission)
@@ -10214,6 +10216,8 @@ export class ControlPlaneDb {
           snap.capacityWait,
           snap.capacityWait?.kind === "active_turn_capacity" &&
             runnerSupportsProtocol(this.getRunner(runnerId)?.protocolVersion, "runnerCapacityDimensions"),
+          snap.capacityWait?.kind === "capacity_lock" &&
+            runnerSupportsProtocol(this.getRunner(runnerId)?.protocolVersion, "capacityLockDiagnostics"),
         ),
         snap.status,
         snap.useWorktree ? 1 : 0,
@@ -10410,6 +10414,10 @@ export class ControlPlaneDb {
           snap.capacityWait?.kind === "active_turn_capacity" && runnerSupportsProtocol(
             existing ? this.getRunner(existing.runner_id)?.protocolVersion : null,
             "runnerCapacityDimensions",
+          ),
+          snap.capacityWait?.kind === "capacity_lock" && runnerSupportsProtocol(
+            existing ? this.getRunner(existing.runner_id)?.protocolVersion : null,
+            "capacityLockDiagnostics",
           ),
         ),
         snap.preview,
@@ -11175,7 +11183,11 @@ export class ControlPlaneDb {
       owner ? this.getRunner(owner.runner_id)?.protocolVersion : null,
       "runnerCapacityDimensions",
     );
-    if (wait && !validRunnerCapacityBlocker(wait, false, supportsDimensions)) return false;
+    const supportsCapacityLock = runnerSupportsProtocol(
+      owner ? this.getRunner(owner.runner_id)?.protocolVersion : null,
+      "capacityLockDiagnostics",
+    );
+    if (wait && !validRunnerCapacityBlocker(wait, false, supportsDimensions, supportsCapacityLock)) return false;
     const result = this.stmt("UPDATE sessions SET capacity_wait=? WHERE id=? AND status='queued'")
       .run(wait ? JSON.stringify(wait) : null, id);
     return Number(result.changes) > 0;
@@ -19223,6 +19235,7 @@ function validRunnerCapacityBlocker(
   value: unknown,
   aggregate: boolean,
   dimensions = false,
+  capacityLock = false,
 ): value is RunnerCapacityBlocker {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const blocker = value as Partial<RunnerCapacityBlocker>;
@@ -19233,6 +19246,7 @@ function validRunnerCapacityBlocker(
     : Number.isSafeInteger(blocker.waitingSessions) && blocker.waitingSessions >= 1;
   return typeof blocker.kind === "string" &&
     (RUNNER_CAPACITY_BLOCKER_KINDS.has(blocker.kind) ||
+      (capacityLock && blocker.kind === "capacity_lock") ||
       (dimensions && blocker.kind === "active_turn_capacity") ||
       (dimensions && aggregate && blocker.kind === "diagnostic_overflow")) &&
     typeof blocker.description === "string" && blocker.description.length >= 1 &&
@@ -19272,8 +19286,15 @@ function validRunnerCapacityDimensions(
     dimensions.idleProcessPolicy === idleProcessPolicy;
 }
 
-function capacityWaitForStorage(status: SessionStatus, value: unknown, dimensions = false): string | null {
-  return status === "queued" && validRunnerCapacityBlocker(value, false, dimensions) ? JSON.stringify(value) : null;
+function capacityWaitForStorage(
+  status: SessionStatus,
+  value: unknown,
+  dimensions = false,
+  capacityLock = false,
+): string | null {
+  return status === "queued" && validRunnerCapacityBlocker(value, false, dimensions, capacityLock)
+    ? JSON.stringify(value)
+    : null;
 }
 
 function parseJson<T>(raw: string | null): T | null {

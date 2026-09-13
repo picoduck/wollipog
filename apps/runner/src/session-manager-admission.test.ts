@@ -252,6 +252,34 @@ test("capacity blockers identify the exact weighted, provider, target, and runne
   }
 });
 
+test("capacity mutation contention retains its exact blocker after the sibling releases the lock", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-admission-capacity-lock-"));
+  try {
+    const holder = new BoxAdmission(root, 1);
+    const waiter = new BoxAdmission(root, 1);
+    const mutationRoot = join(root, "admission", "capacity-mutation");
+    mkdirSync(mutationRoot, { recursive: true });
+    // Separate gate instances use separate owner tokens, matching sibling runner processes while
+    // keeping the lock collision deterministic inside one test process.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const holderInternals = holder as any;
+    const mutation = holderInternals.claimSlots(mutationRoot, 1, 1, {
+      sessionId: "mutation-owner", agentId: "holder", weight: 1,
+    }) as string[];
+    assert.equal(waiter.acquire({ sessionId: "waiting", agentId: "claude", weight: 1 }), false);
+    holderInternals.releaseSlots(mutation);
+    assert.equal(waiter.blocker({ sessionId: "waiting", agentId: "claude", weight: 1 })?.kind, "capacity_lock",
+      "diagnostics retain the failed boundary even if the short-lived lock is already free");
+    assert.equal(waiter.acquire({ sessionId: "waiting", agentId: "claude", weight: 1 }), true,
+      "the next bounded retry admits after the mutation lock becomes available");
+    assert.equal(new BoxAdmission(root, 1).acquire({ sessionId: "extra", agentId: "codex", weight: 1 }), false,
+      "retrying the lock collision cannot over-admit the shared capacity ceiling");
+    waiter.releaseAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("one capacity observation scans each lease root once across a large waiter fan-out", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-admission-observation-"));
   try {
@@ -3276,6 +3304,53 @@ test("two runner processes sharing a data directory enforce one box-wide slot", 
     ]), true);
     firstManager.shutdownAll();
     secondManager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("shared-root capacity lock contention reports synchronization and retries without fabricating queue order", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-admission-shared-lock-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    store.create(meta("waiting"));
+    const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, root, 1);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const gate = manager as any;
+    let parkingAttempts = 0;
+    gate.parkOneIdleProvider = () => { parkingAttempts++; return false; };
+    const mutationRoot = join(root, "admission", "capacity-mutation");
+    mkdirSync(mutationRoot, { recursive: true });
+    const sibling = new BoxAdmission(root, 1);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const siblingInternals = sibling as any;
+    const mutation = siblingInternals.claimSlots(mutationRoot, 1, 1, {
+      sessionId: "sibling-mutation", agentId: "sibling", weight: 1,
+    }) as string[];
+
+    const waiting = gate.acquireAdmission("waiting") as Promise<boolean>;
+    assert.equal(store.readMeta("waiting")?.capacityWait?.kind, "capacity_lock",
+      "session details and search snapshots share the exact transient reason");
+    assert.deepEqual(manager.capacityState().blockers?.map((blocker) => blocker.kind), ["capacity_lock"],
+      "Machine capacity diagnostics use the same reason as the queued session");
+    assert.equal(parkingAttempts, 0, "transient synchronization cannot trigger capacity-pressure parking");
+
+    gate.controlPlaneProtocolVersion = () => 136;
+    gate.emitAdmissionWait(gate.admissionQueue[0].request);
+    assert.equal(store.readMeta("waiting")?.capacityWait?.kind, "runner_capacity",
+      "pre-v137 peers receive a valid neutral recheck reason instead of new vocabulary");
+    assert.notEqual(store.readMeta("waiting")?.capacityWait?.kind, "queue_order");
+    gate.controlPlaneProtocolVersion = () => 137;
+
+    siblingInternals.releaseSlots(mutation);
+    assert.equal(await Promise.race([
+      waiting,
+      new Promise<boolean>((_, reject) =>
+        setTimeout(() => reject(new Error("capacity-lock waiter did not retry")), 1_500)),
+    ]), true);
+    assert.deepEqual([...gate.admitted], ["waiting"]);
+    gate.releaseAdmission("waiting");
+    manager.shutdownAll();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

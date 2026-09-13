@@ -371,6 +371,17 @@ test("session indicators preserve simultaneous lifecycle, attention, and change 
             requiredUnits: 1,
           },
         }} />
+        <SessionStatusIndicators session={{
+          status: "queued",
+          pendingApproval: null,
+          capacityWait: {
+            kind: "capacity_lock",
+            description: "Waiting for a concurrent Runner Capacity update",
+            usedUnits: 1,
+            limitUnits: 1,
+            requiredUnits: 1,
+          },
+        }} />
         <ChangeStatusBadge change={{
           kind: "ready_for_review",
           label: "Ready for Review",
@@ -396,6 +407,11 @@ test("session indicators preserve simultaneous lifecycle, attention, and change 
       container.querySelector('[aria-label="Queue Reason: Execution target cloud-a is using 2 of 2 slots"]')
         ?.textContent?.trim(),
       "Target Quota",
+    );
+    assert.equal(
+      container.querySelector('[aria-label="Queue Reason: Waiting for a concurrent Runner Capacity update"]')
+        ?.textContent?.trim(),
+      "Capacity Sync",
     );
     assert.ok(container.querySelector('[role="group"][aria-label="Change Status"]'));
     assert.equal(container.querySelector('[aria-label="Changes: Ready for Review"]')?.textContent?.trim(), "Ready for Review");

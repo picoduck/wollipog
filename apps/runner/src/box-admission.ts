@@ -45,6 +45,9 @@ export class BoxAdmission {
   private readonly root: string;
   private readonly token = randomUUID();
   private readonly held = new Map<string, string[]>();
+  /** Retain the exact cause of a failed fail-fast mutation claim until the next attempt. The lock
+   * may be released before diagnostics run, but the last attempt still failed at this boundary. */
+  private readonly capacityLockWaiters = new Set<string>();
   /** Diagnostic reads may reuse a root count while its directory generation and live owners are
    * unchanged. Admission still calls usedSlots() directly and therefore remains authoritative. */
   private readonly observationCache = new Map<string, CachedSlotObservation>();
@@ -70,6 +73,7 @@ export class BoxAdmission {
       ? { sessionId: request, agentId: "default", weight: 1 }
       : request;
     if (this.held.has(normalized.sessionId)) return true;
+    this.capacityLockWaiters.delete(normalized.sessionId);
     if (!Number.isInteger(normalized.weight) || normalized.weight < 1 || normalized.weight > this.limit) return false;
 
     const claimed: string[] = [];
@@ -111,6 +115,7 @@ export class BoxAdmission {
     const mutation = this.claimSlots(mutationRoot, 1, 1, normalized);
     if (!mutation) {
       this.releaseSlots(claimed);
+      this.capacityLockWaiters.add(normalized.sessionId);
       return false;
     }
     let global: string[] | null = null;
@@ -131,10 +136,15 @@ export class BoxAdmission {
   }
 
   release(sessionId: string): void {
+    this.capacityLockWaiters.delete(sessionId);
     const slots = this.held.get(sessionId);
     if (!slots) return;
     this.held.delete(sessionId);
     this.releaseSlots(slots);
+  }
+
+  clearFailure(sessionId: string): void {
+    this.capacityLockWaiters.delete(sessionId);
   }
 
   private claimSlots(root: string, limit: number, count: number, request: AdmissionRequest): string[] | null {
@@ -264,6 +274,14 @@ export class BoxAdmission {
       usedUnits: used,
       limitUnits: this.limit,
       requiredUnits: request.weight,
+      agentId: request.agentId,
+    };
+    if (this.capacityLockWaiters.has(request.sessionId)) return {
+      kind: "capacity_lock",
+      description: "Waiting for a concurrent Runner Capacity update",
+      usedUnits: 1,
+      limitUnits: 1,
+      requiredUnits: 1,
       agentId: request.agentId,
     };
     return null;

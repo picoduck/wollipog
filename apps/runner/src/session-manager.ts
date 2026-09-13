@@ -1127,8 +1127,13 @@ export class SessionManager {
       const previous = grouped.get(key);
       grouped.set(key, { ...normalized, waitingSessions: (previous?.waitingSessions ?? 0) + 1 });
     };
-    for (const entry of this.admissionQueue) {
-      addBlocker(this.capacityBlocker(entry.request, observation));
+    for (let index = 0; index < this.admissionQueue.length; index++) {
+      const entry = this.admissionQueue[index]!;
+      addBlocker(this.capacityBlocker(
+        entry.request,
+        observation,
+        index > 0 && this.admissionQueue[0]!.bypasses >= 8,
+      ));
     }
     for (const request of this.activeTurnWaiters.values()) {
       addBlocker(this.activeTurnBlocker(request, activeTurnObservation));
@@ -3783,10 +3788,38 @@ export class SessionManager {
     this.emitStatus(request.sessionId, "queued", blocker.description, undefined, blocker);
   }
 
-  private capacityBlocker(request: AdmissionRequest, observation?: AdmissionObservation): RunnerCapacityBlocker {
-    return this.boxAdmission.blocker(request, observation) ?? {
+  private capacityBlocker(
+    request: AdmissionRequest,
+    observation?: AdmissionObservation,
+    queueOrder = this.admissionQueue.findIndex((entry) => entry.request.sessionId === request.sessionId) > 0 &&
+      this.admissionQueue[0]!.bypasses >= 8,
+  ): RunnerCapacityBlocker {
+    const blocker = this.boxAdmission.blocker(request, observation);
+    if (blocker?.kind === "capacity_lock" &&
+        !runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "capacityLockDiagnostics")) {
+      return {
+        kind: "runner_capacity",
+        description: "Waiting to recheck Runner Capacity after a concurrent update",
+        usedUnits: observation?.usedCapacity ?? this.boxAdmission.usedCapacity(),
+        limitUnits: this.maxConcurrentSessions,
+        requiredUnits: request.weight,
+        agentId: request.agentId,
+      };
+    }
+    if (blocker) return blocker;
+    if (queueOrder) return {
       kind: "queue_order",
       description: "Waiting behind older capacity requests",
+      usedUnits: observation?.usedCapacity ?? this.boxAdmission.usedCapacity(),
+      limitUnits: this.maxConcurrentSessions,
+      requiredUnits: request.weight,
+      agentId: request.agentId,
+    };
+    return {
+      kind: runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "capacityLockDiagnostics")
+        ? "capacity_lock"
+        : "runner_capacity",
+      description: "Waiting to recheck Runner Capacity after a concurrent update",
       usedUnits: observation?.usedCapacity ?? this.boxAdmission.usedCapacity(),
       limitUnits: this.maxConcurrentSessions,
       requiredUnits: request.weight,
@@ -3808,6 +3841,7 @@ export class SessionManager {
       "exclusive_group",
       "request_weight",
       "queue_order",
+      "capacity_lock",
       "active_turn_capacity",
     ];
     const selected = new Set<RunnerCapacityBlocker>();
@@ -4052,6 +4086,7 @@ export class SessionManager {
     const [entry] = this.admissionQueue.splice(index, 1);
     entry?.resolve(false);
     this.admissionWaitReasons.delete(sessionId);
+    this.boxAdmission.clearFailure(sessionId);
     if (this.admissionQueue.length === 0 && this.admissionRetryTimer) {
       clearTimeout(this.admissionRetryTimer);
       this.admissionRetryTimer = null;
@@ -4101,7 +4136,7 @@ export class SessionManager {
     if (this.admissionQueue.length > 0) {
       const observation = this.boxAdmission.observe();
       if (this.admissionQueue.some((entry) =>
-        this.capacityBlocker(entry.request, observation).kind === "runner_capacity")) {
+        this.boxAdmission.blocker(entry.request, observation)?.kind === "runner_capacity")) {
         this.parkOneIdleProvider();
       }
     }

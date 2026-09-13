@@ -377,7 +377,10 @@
 // 136: explicit human-owned Parent Control delegates eligible descendant questions and approvals.
 //      Requests carry control-plane occurrence identity and parent-resolution provenance; older
 //      runners fail closed because delegated resolutions require this protocol capability.
-export const PROTOCOL_VERSION = 136;
+// 137: capacity admission distinguishes transient cross-process mutation-lock contention from
+//      resource exhaustion and bounded-fairness queue ordering. Older peers receive a neutral
+//      runner-capacity recheck reason instead of the new blocker vocabulary.
+export const PROTOCOL_VERSION = 137;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -617,6 +620,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   machineRunnerCapacity: 132,
   /** Bounded blocker overflow plus opt-in active-turn and idle-process capacity dimensions. */
   runnerCapacityDimensions: 135,
+  /** Exact transient cross-process capacity-mutation lock diagnostics. */
+  capacityLockDiagnostics: 137,
 } as const;
 
 /* ========================================================================== */
@@ -1619,6 +1624,7 @@ export type RunnerCapacityBlockerKind =
   | "exclusive_group"
   | "request_weight"
   | "queue_order"
+  | "capacity_lock"
   | "active_turn_capacity"
   | "diagnostic_overflow";
 
