@@ -423,16 +423,43 @@ test("translucent gradient fallbacks retain the ancestor background", async ({ p
     html.style.color = "rgb(255 255 255)";
     html.style.backgroundColor = "rgb(0 0 0 / 20%)";
     html.style.backgroundImage = "linear-gradient(rgb(255 255 255 / 10%), rgb(255 255 255 / 10%))";
-    (html.parentElement as HTMLElement).style.backgroundColor = "rgb(255 255 255)";
-    (html.parentElement as HTMLElement).style.backgroundImage = "none";
+    const parent = html.parentElement as HTMLElement;
+    parent.style.transition = "none";
+    parent.style.backgroundColor = "rgb(200 200 200)";
+    parent.style.backgroundImage = "none";
   });
 
   const { results: measured, unsupported } = await measure(page);
   expect(unsupported).toEqual([]);
   const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
   expect(entries).toHaveLength(2);
-  expect(entries.every((entry) => entry.background.startsWith("rgb(209.10 209.10 209.10"))).toBe(true);
+  for (const entry of entries) {
+    const channel = Number(entry.background.match(/^rgb\(([\d.]+)/)?.[1]);
+    expect(channel).toBeCloseTo(169.5, 0);
+  }
   expect(entries.every((entry) => entry.ratio < AA)).toBe(true);
+});
+
+test("descendant fills are painted above an ancestor gradient", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    const parent = html.parentElement as HTMLElement;
+    html.style.transition = "none";
+    html.style.color = "rgb(255 255 255)";
+    html.style.backgroundColor = "rgb(0 0 0 / 50%)";
+    html.style.backgroundImage = "none";
+    parent.style.transition = "none";
+    parent.style.backgroundColor = "rgb(0 0 0)";
+    parent.style.backgroundImage = "linear-gradient(rgb(255 255 255), rgb(255 255 255))";
+  });
+
+  const { results: measured, unsupported } = await measure(page);
+  expect(unsupported).toEqual([]);
+  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  expect(entries).toHaveLength(2);
+  expect(entries.every((entry) => entry.background.startsWith("rgb(127.50 127.50 127.50"))).toBe(true);
 });
 
 test("transparent gradient stops measure the background showing through", async ({ page }) => {
@@ -485,6 +512,25 @@ test("unsupported rendered gradient syntax fails with an actionable diagnostic",
   const { unsupported } = await measure(page);
   expect(unsupported).toContainEqual(expect.stringMatching(
     /^p\.slash-detail-disabled: multiple background-image layers are not modelled:/,
+  ));
+});
+
+test("nested rendered gradients fail instead of ignoring the lower image", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    const parent = html.parentElement as HTMLElement;
+    html.style.transition = "none";
+    html.style.backgroundColor = "transparent";
+    html.style.backgroundImage = "linear-gradient(rgb(255 255 255 / 50%), rgb(255 255 255 / 50%))";
+    parent.style.transition = "none";
+    parent.style.backgroundImage = "linear-gradient(rgb(0 0 0), rgb(255 255 255))";
+  });
+
+  const { unsupported } = await measure(page);
+  expect(unsupported).toContainEqual(expect.stringMatching(
+    /^p\.slash-detail-disabled: nested background image is not modelled:/,
   ));
 });
 
