@@ -64,6 +64,7 @@ for (const width of [320, 360, 393, 430]) {
       expect(geometry.bar.right).toBeLessThanOrEqual(geometry.composer.right + 0.5);
       expect(geometry.modelWhiteSpace).toBe("nowrap");
       expect(geometry.modelClientHeight).toBeLessThanOrEqual(20);
+      expect(geometry.model.right - geometry.model.left).toBeGreaterThanOrEqual(12);
       expect(geometry.modelText).toContain(kind === "claude" ? "Claude Opus" : "GPT-6-Astra");
       expect(geometry.horizontalOverflow).toBe(false);
       await expect(page.getByRole("button", { name: "Hold to Dictate" })).toBeVisible();
@@ -106,42 +107,63 @@ test("393px Orchestrator Model Settings is a focus-safe bottom sheet with every 
   await expect(trigger).toBeFocused();
 });
 
-test("desktop Model Settings stays an anchored popover", async ({ page }) => {
-  await openFixture(page, 1200, "codex");
+test("desktop Model Settings stays inside a clipped pane for a short model", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 844 });
+  await page.goto("/session-usage-e2e.html?width=800&height=804&tiers=1");
   const trigger = page.getByRole("button", { name: /^Model Settings:/ });
   await trigger.click();
   const popover = page.locator(".model-settings-pop");
-  const [triggerBox, popoverBox] = await Promise.all([trigger.boundingBox(), popover.boundingBox()]);
+  const [frameBox, triggerBox, popoverBox] = await Promise.all([
+    page.locator("#frame").boundingBox(),
+    trigger.boundingBox(),
+    popover.boundingBox(),
+  ]);
+  expect(frameBox).not.toBeNull();
   expect(triggerBox).not.toBeNull();
   expect(popoverBox).not.toBeNull();
   expect(popoverBox!.y + popoverBox!.height).toBeLessThanOrEqual(triggerBox!.y + 0.5);
+  expect(popoverBox!.x).toBeGreaterThanOrEqual(frameBox!.x);
+  expect(popoverBox!.x + popoverBox!.width).toBeLessThanOrEqual(frameBox!.x + frameBox!.width);
   await expect(popover).toContainText("Model Settings");
   await page.screenshot({ path: `${EVIDENCE}/after-desktop-model-settings.png` });
 });
 
-for (const theme of ["light", "dark"] as const) {
-  test(`${theme}: unrestricted permission icon has warning treatment with 3:1 contrast`, async ({ page }) => {
-    await openFixture(page, 393, "codex", "&unsafe=1");
-    await page.evaluate((nextTheme) => { document.documentElement.dataset.theme = nextTheme; }, theme);
-    const warning = page.locator(".cbar-approvals.unrestricted");
-    await expect(warning).toBeVisible();
-    const ratio = await warning.evaluate((element) => {
-      const parse = (value: string) => {
-        const rgb = value.match(/rgba?\(\s*([\d.]+)[, ]+([\d.]+)[, ]+([\d.]+)/i);
-        if (rgb) return [Number(rgb[1]) / 255, Number(rgb[2]) / 255, Number(rgb[3]) / 255];
-        const srgb = value.match(/color\(srgb\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/i);
-        if (srgb) return [Number(srgb[1]), Number(srgb[2]), Number(srgb[3])];
-        throw new Error(`Unsupported computed colour: ${value}`);
-      };
-      const luminance = (channels: number[]) => channels.reduce((sum, channel, index) => {
-        const linear = channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
-        return sum + linear * [0.2126, 0.7152, 0.0722][index]!;
-      }, 0);
-      const foreground = luminance(parse(getComputedStyle(element).color));
-      const surface = luminance(parse(getComputedStyle(element.closest(".composer-box")!).backgroundColor));
-      return (Math.max(foreground, surface) + 0.05) / (Math.min(foreground, surface) + 0.05);
+for (const kind of ["claude", "codex"] as const) {
+  for (const theme of ["light", "dark"] as const) {
+    test(`${theme} ${kind}: unrestricted permission icon has warning treatment with 3:1 contrast`, async ({ page }) => {
+      await openFixture(page, 393, kind, "&unsafe=1");
+      await page.evaluate((nextTheme) => { document.documentElement.dataset.theme = nextTheme; }, theme);
+      const warning = page.locator(".cbar-approvals.unrestricted");
+      await expect(warning).toBeVisible();
+      const ratio = await warning.evaluate((element) => {
+        const parse = (value: string) => {
+          const rgb = value.match(/rgba?\(\s*([\d.]+)[, ]+([\d.]+)[, ]+([\d.]+)(?:\s*[,/]\s*([\d.]+))?/i);
+          if (rgb) return {
+            channels: [Number(rgb[1]) / 255, Number(rgb[2]) / 255, Number(rgb[3]) / 255],
+            alpha: rgb[4] === undefined ? 1 : Number(rgb[4]),
+          };
+          const srgb = value.match(/color\(srgb\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)(?:\s*\/\s*([\d.]+))?/i);
+          if (srgb) return {
+            channels: [Number(srgb[1]), Number(srgb[2]), Number(srgb[3])],
+            alpha: srgb[4] === undefined ? 1 : Number(srgb[4]),
+          };
+          throw new Error(`Unsupported computed colour: ${value}`);
+        };
+        const luminance = (channels: number[]) => channels.reduce((sum, channel, index) => {
+          const linear = channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+          return sum + linear * [0.2126, 0.7152, 0.0722][index]!;
+        }, 0);
+        const foreground = luminance(parse(getComputedStyle(element).color).channels);
+        const composerSurface = parse(getComputedStyle(element.closest(".composer-box")!).backgroundColor).channels;
+        const warningSurface = parse(getComputedStyle(element).backgroundColor);
+        const compositedSurface = warningSurface.channels.map((channel, index) => (
+          channel * warningSurface.alpha + composerSurface[index]! * (1 - warningSurface.alpha)
+        ));
+        const surface = luminance(compositedSurface);
+        return (Math.max(foreground, surface) + 0.05) / (Math.min(foreground, surface) + 0.05);
+      });
+      expect(ratio).toBeGreaterThanOrEqual(3);
+      await page.screenshot({ path: `${EVIDENCE}/after-${theme}-${kind}-unrestricted.png` });
     });
-    expect(ratio).toBeGreaterThanOrEqual(3);
-    await page.screenshot({ path: `${EVIDENCE}/after-${theme}-unrestricted.png` });
-  });
+  }
 }

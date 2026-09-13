@@ -3793,7 +3793,7 @@ textarea {
 }
 @media (max-width: 760px) {
   .model-settings-backdrop { background: var(--modal-backdrop); }
-  .cbar-menu.right .cbar-pop.model-settings-pop {
+  .model-settings-menu .cbar-pop.model-settings-pop {
     position: fixed;
     right: max(env(safe-area-inset-right), 0px);
     bottom: 0;

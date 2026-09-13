@@ -308,7 +308,7 @@ export function ModelEffortControl(
   );
   return (
     <BarMenu
-      align="right"
+      align="left"
       modelSettings
       menuTitle="Model Settings"
       label={label}
