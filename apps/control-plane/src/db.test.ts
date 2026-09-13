@@ -4034,7 +4034,7 @@ test("Parent Control defaults off and persists opt-in across restart", () => {
     malformed.close();
     const conservative = ControlPlaneDb.open(path);
     assert.deepEqual(conservative.getSession("sess-1")?.parentControlPolicy, {
-      revision: 0,
+      revision: 99,
       decisions: {
         implementation_question: "human",
         pr_merge: "human",
@@ -4043,6 +4043,10 @@ test("Parent Control defaults off and persists opt-in across restart", () => {
         ui_evidence_approval: "human",
       },
     }, "malformed or future granular policies fail closed after a rolling restart");
+    assert.equal(conservative.updateSessionParentControlPolicy("sess-1", {
+      implementation_question: "human", pr_merge: "human", merged_branch_deletion: "human",
+      follow_up_issue_publication: "human", ui_evidence_approval: "human",
+    }, 3_000, 99)?.revision, 100, "the surfaced durable revision lets the conservative UI repair the row");
     conservative.close();
   } finally {
     rmSync(root, { recursive: true, force: true });

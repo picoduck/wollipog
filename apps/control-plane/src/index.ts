@@ -3094,7 +3094,12 @@ app.post("/api/sessions/:id/parent-control-policy", async (req, reply) => {
   if (!human) return reply.code(403).send({ error: "only an authenticated human may change Parent Control policy" });
   if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
   const body = req.body as { decisions?: ParentControlDecisionPolicy; expectedRevision?: number } | undefined;
-  return respond(reply, svc.setParentControlPolicy(id, body?.decisions, body?.expectedRevision));
+  return respond(reply, svc.setParentControlPolicy(
+    id,
+    body?.decisions,
+    body?.expectedRevision,
+    { kind: "human", id: humanActorId(req) },
+  ));
 });
 
 app.post("/api/sessions/:id/workflow-decisions", async (req, reply) => {

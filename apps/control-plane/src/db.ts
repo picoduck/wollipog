@@ -11192,8 +11192,15 @@ export class ControlPlaneDb {
     // Terminality couples the status write to its fences below; commit them together so a crash
     // between statements cannot persist a terminal status with a stale armed marker.
     this.atomic(() => {
+    const current = this.stmt("SELECT pending_approval FROM sessions WHERE id=?").get(id) as
+      | { pending_approval: string | null }
+      | undefined;
+    const pending = parseJson<PendingApproval>(current?.pending_approval ?? null);
+    const keepWorkflowPause = !isTerminal(status) &&
+      pendingRequests(pending).some((request) => request.kind === "workflow_decision");
+    const effectiveStatus: SessionStatus = keepWorkflowPause ? "input_required" : status;
     this.stmt("UPDATE sessions SET status=?, capacity_wait=NULL, updated_at=? WHERE id=?")
-      .run(status, now, id);
+      .run(effectiveStatus, now, id);
     if (status === "completed" || status === "failed" || status === "stopped") {
       // Session terminality is the retry fence, regardless of which service path observed it.
       // A never-sent prompt is definitely failed; anything marked before send may have reached
@@ -11225,8 +11232,9 @@ export class ControlPlaneDb {
          WHERE session_id=? AND status IN ('queued','pending') AND resume_status IS NOT NULL`,
       ).run(id);
     }
-    // Clear a pending approval whenever we leave the input_required state.
-    if (status !== "input_required") {
+    // Provider asks and transient policy hooks follow provider status. Durable typed workflow
+    // decisions remain authoritative across nonterminal runner status changes.
+    if (effectiveStatus !== "input_required") {
       this.stmt("UPDATE sessions SET pending_approval=NULL WHERE id=?").run(id);
     }
     });
@@ -14920,7 +14928,9 @@ export class ControlPlaneDb {
       parentControlPolicy: (() => {
         const decisions = parentControlDecisionPolicyFromJson(row.parent_control_policy);
         return {
-          revision: decisions ? row.parent_control_policy_revision : 0,
+          // Keep the durable revision even when a newer/malformed policy fails closed. The UI can
+          // then repair that row with an exact CAS instead of retrying forever against revision 0.
+          revision: row.parent_control_policy_revision,
           decisions: decisions ?? { ...HUMAN_ONLY_PARENT_CONTROL_POLICY },
         };
       })(),

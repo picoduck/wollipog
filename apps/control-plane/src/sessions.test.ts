@@ -1624,6 +1624,10 @@ test("typed workflow decisions isolate categories and fail closed across stale p
     assert.equal(merge.data.authority, "orchestrator");
     assert.equal(merge.data.policyRevision, 1);
     assert.equal(db.getSession(child.id)?.pendingApproval?.kind, "workflow_decision");
+    svc.onSessionStatus(child.id, "running");
+    assert.equal(db.getSession(child.id)?.status, "input_required",
+      "a runner status frame cannot erase a control-plane workflow decision pause");
+    assert.equal(db.getSession(child.id)?.pendingApproval?.requestId, merge.data.occurrenceId);
     assert.deepEqual(svc.descendantRequests(parent.data.id, () => true).data?.requests.map((item) => item.occurrenceId), [
       merge.data.occurrenceId,
     ]);
@@ -1634,11 +1638,22 @@ test("typed workflow decisions isolate categories and fail closed across stale p
       siblingParent.data.id, child.id, merge.data.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "approve" }, () => true,
     ).status), "a different Orchestrator cannot cross the bound ancestry");
+    db.setPendingApproval(child.id, null);
+    db.updateSessionStatus(child.id, "running", Date.now());
+    assert.deepEqual(svc.descendantRequests(parent.data.id, () => true).data?.requests.map((item) => item.occurrenceId), [
+      merge.data.occurrenceId,
+    ], "the durable table remains the Orchestrator inbox authority when a projection is missing");
+    assert.equal(svc.createWorkflowDecision(child.id, {
+      requestId: "merge-1", resourceKey: "picoduck/wollipog#123", resourceSnapshot: mergeSnapshot,
+    }).data?.occurrenceId, merge.data.occurrenceId, "an idempotent replay restores the existing occurrence");
+    assert.equal(db.getSession(child.id)?.pendingApproval?.requestId, merge.data.occurrenceId);
+    db.setPendingApproval(child.id, null);
+    db.updateSessionStatus(child.id, "running", Date.now());
     assert.ok(svc.resolveDescendantRequest(
       parent.data.id, child.id, merge.data.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "approve", rationale: "Reviewed exact head and checks." },
       () => true,
-    ).ok);
+    ).ok, "typed resolution uses the durable occurrence even without its cached card");
     assert.equal(svc.resolveDescendantRequest(
       parent.data.id, child.id, merge.data.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "approve" }, () => true,
@@ -1705,7 +1720,12 @@ test("typed workflow decisions isolate categories and fail closed across stale p
     assert.ok(pending.ok && pending.data);
     assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, pending.data.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
-    assert.ok(svc.setParentControlPolicy(parent.data.id, { ...decisions, implementation_question: "orchestrator" }, 1).ok);
+    assert.ok(svc.setParentControlPolicy(
+      parent.data.id,
+      { ...decisions, implementation_question: "orchestrator" },
+      1,
+      { kind: "human", id: "policy-owner" },
+    ).ok);
     assert.equal(db.workflowDecisionByOccurrence(pending.data.occurrenceId)?.status, "revoked",
       "any policy revision revokes unconsumed approval bound to the old revision");
 
@@ -1760,6 +1780,28 @@ test("typed workflow decisions isolate categories and fail closed across stale p
     assert.equal(db.workflowDecisionByOccurrence(downgrade.data.occurrenceId)?.status, "revoked");
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
 
+    const stoppedChild = createChild(parent.data.id, "Guardrail Stop Child");
+    db.setUsageRateTable(parseRateTable({
+      "claude-fable-5-1": { input_cost_per_token: 0.00001, output_cost_per_token: 0.00001 },
+    }));
+    db.raw().prepare("UPDATE sessions SET model='claude-fable-5-1', driver='claude-code' WHERE id=?")
+      .run(stoppedChild.id);
+    assert.ok(svc.setConfig(stoppedChild.id, { costCheckpointsUsd: [1] }).ok);
+    db.appendEvent(stoppedChild.id, { kind: "token_usage", inputTokens: 1, costUsd: 1.2 }, Date.now(),
+      { accrueUsage: true });
+    svc.onSessionStatus(stoppedChild.id, "idle");
+    const guardrail = db.getSession(stoppedChild.id)!.pendingApproval!;
+    assert.equal(guardrail.kind, "cost_checkpoint");
+    const stoppedDecision = svc.createWorkflowDecision(stoppedChild.id, {
+      requestId: "guardrail-stop-decision", resourceKey: "picoduck/wollipog#130",
+      resourceSnapshot: { ...mergeSnapshot, pullRequest: 130 },
+    });
+    assert.ok(stoppedDecision.ok && stoppedDecision.data);
+    assert.ok(svc.approve(stoppedChild.id, guardrail.requestId, "cancel").ok);
+    assert.equal(db.getSession(stoppedChild.id)?.status, "stopped");
+    assert.equal(db.workflowDecisionByOccurrence(stoppedDecision.data.occurrenceId)?.status, "revoked",
+      "a guardrail Stop revokes every unconsumed workflow authorization for the stopped child");
+
     const audits = svc.governanceAudit(child.id);
     assert.ok(audits.some((entry) => entry.workflowDecision?.category === "pr_merge" &&
       entry.workflowDecision.parentSessionId === parent.data!.id &&
@@ -1768,6 +1810,9 @@ test("typed workflow decisions isolate categories and fail closed across stale p
       entry.workflowDecision.resourceDigest === merge.data!.resourceDigest &&
       entry.actor.kind === "agent"));
     assert.ok(audits.some((entry) => entry.outcome === "consumed"));
+    assert.ok(audits.some((entry) => entry.requestId === pending.data!.occurrenceId &&
+      entry.outcome === "revoked" && entry.actor.kind === "human" && entry.actor.id === "policy-owner"),
+    "policy-change revocation audits name the authenticated human actor");
     assert.ok(audits.every((entry) => !JSON.stringify(entry).includes("Reviewed exact head and checks.")),
       "audit stores a rationale digest rather than raw rationale");
     assert.equal(hub.sentOfType("resolve_permission").some((message) =>
@@ -1785,8 +1830,19 @@ test("typed workflow decisions isolate categories and fail closed across stale p
     svc.reconcileRunnerSessions(RUNNER_ID, [parent.data.id, child.id, siblingParent.data.id]);
     assert.equal(db.getSession(child.id)?.pendingApproval?.requestId, reconnect.data.occurrenceId,
       "reconnect restores the server-owned request without minting a new occurrence");
+    assert.equal(db.policyResumeStatus(child.id), "idle",
+      "a restored card remembers that the provider had already settled idle");
+    assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, reconnect.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+    assert.equal(db.getSession(child.id)?.status, "idle",
+      "resolving a restored card returns to the remembered provider state");
+    const terminal = svc.createWorkflowDecision(child.id, {
+      requestId: "merge-terminal", resourceKey: "picoduck/wollipog#129",
+      resourceSnapshot: { ...mergeSnapshot, pullRequest: 129 },
+    });
+    assert.ok(terminal.ok && terminal.data);
     svc.onSessionStatus(child.id, "completed");
-    assert.equal(db.workflowDecisionByOccurrence(reconnect.data.occurrenceId)?.status, "revoked",
+    assert.equal(db.workflowDecisionByOccurrence(terminal.data.occurrenceId)?.status, "revoked",
       "an authoritative terminal transition revokes approvals the action never consumed");
   } finally { db.close(); }
 });
@@ -1860,6 +1916,9 @@ test("typed workflow decisions preserve provider settlement and cannot be replac
       resourceSnapshot: implementationSnapshot,
     });
     assert.ok(durable.ok && durable.data);
+    svc.onSessionStatus(child.data.id, "running");
+    assert.equal(db.getSession(child.data.id)?.pendingApproval?.requestId, durable.data.occurrenceId,
+      "running frames preserve a typed decision projection");
     svc.onSessionEvent(child.data.id, {
       kind: "permission_request", requestId: "generic-permission", ownerToolUseId: "tool-use",
       title: "Allow Read", options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
@@ -1910,7 +1969,18 @@ test("typed workflow decisions preserve provider settlement and cannot be replac
       "revocation also restores the provider's swallowed idle");
     assert.equal(db.policyResumeStatus(child.data.id), null);
 
+    const terminalApproval = svc.createWorkflowDecision(child.data.id, {
+      requestId: "approved-before-terminal", resourceKey: "implementation:terminal-consume",
+      resourceSnapshot: implementationSnapshot,
+    });
+    assert.ok(terminalApproval.ok && terminalApproval.data);
+    assert.ok(svc.approve(child.data.id, terminalApproval.data.occurrenceId, "approve",
+      { kind: "human", id: "owner" }, undefined, () => true).ok);
     db.updateSessionStatus(child.data.id, "completed", Date.now());
+    assert.equal(svc.consumeWorkflowDecision(child.data.id, terminalApproval.data.occurrenceId, {
+      resourceSnapshot: implementationSnapshot,
+    }).status, 409, "an approved decision cannot be consumed after its child becomes terminal");
+    assert.equal(db.workflowDecisionByOccurrence(terminalApproval.data.occurrenceId)?.status, "revoked");
     assert.equal(svc.createWorkflowDecision(child.data.id, {
       requestId: "terminal-request", resourceKey: "implementation:terminal",
       resourceSnapshot: implementationSnapshot,
@@ -13824,11 +13894,25 @@ test("cost checkpoints park once each, approval advances, and a decline stops wi
   let parked = db.getSession(id)!;
   assert.equal(parked.pendingApproval?.kind, "cost_checkpoint");
   assert.match(parked.pendingApproval?.title ?? "", /\$1\.20 of \$1\.00/);
+  db.setPendingApproval(id, {
+    ...parked.pendingApproval!,
+    additionalRequests: [{
+      requestId: "workflow-still-pending",
+      occurrenceId: "workflow-still-pending",
+      title: "PR Merge Approval Required",
+      kind: "workflow_decision",
+      options: [{ optionId: "approve", name: "Approve", kind: "allow_once" }],
+    }],
+  });
 
   const approved = svc.approve(id, parked.pendingApproval!.requestId, "continue");
   assert.ok(approved.ok, approved.error);
   assert.equal(db.getSession(id)!.costCheckpointApprovedUsd, 1);
-  assert.equal(db.getSession(id)!.pendingApproval, null, "the next checkpoint is not reached yet");
+  assert.equal(db.getSession(id)!.pendingApproval?.requestId, "workflow-still-pending",
+    "continuing a soft guardrail removes only that card and preserves a typed workflow gate");
+  assert.equal(db.getSession(id)!.status, "input_required");
+  db.setPendingApproval(id, null);
+  db.updateSessionStatus(id, "idle", Date.now());
 
   db.appendEvent(id, { kind: "token_usage", inputTokens: 1, costUsd: 0.5 }, Date.now(), { accrueUsage: true });
   svc.onSessionStatus(id, "idle");
