@@ -290,6 +290,17 @@ if (params.get("approval") === "checkpoint") {
       { optionId: "cancel", name: "Stop", kind: "reject_once" },
     ],
   };
+} else if (params.get("approval") === "permission") {
+  session.status = "input_required";
+  session.pendingApproval = {
+    requestId: "permission:session-usage-e2e:1",
+    kind: "permission",
+    title: "Run the requested tool?",
+    options: [
+      { optionId: "allow", name: "Allow Once", kind: "allow_once" },
+      { optionId: "deny", name: "Deny", kind: "deny" },
+    ],
+  };
 } else if (params.get("approval") === "question") {
   setQuestionResponseStyle("composer");
   session.status = "input_required";

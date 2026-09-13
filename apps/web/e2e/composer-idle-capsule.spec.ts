@@ -133,8 +133,9 @@ test("resolving a focused phone request reveals and returns focus to the compose
 });
 
 test("a focused phone request falls back to the transcript when the composer becomes disabled", async ({ page }) => {
-  await openComposer(page, 393, "&approval=checkpoint");
-  await page.getByRole("button", { name: "Continue" }).focus();
+  await openComposer(page, 393, "&approval=permission");
+  await expect(page.locator(".composer-input")).toBeEnabled();
+  await page.getByRole("button", { name: "Allow Once" }).focus();
   await page.evaluate(() => window.setSessionUsageRunnerOnline(false));
 
   await expect(page.locator(".detail-scroll")).toBeFocused();

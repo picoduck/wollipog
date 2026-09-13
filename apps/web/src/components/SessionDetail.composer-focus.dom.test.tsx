@@ -3007,6 +3007,44 @@ test("phone composer controls survive a pointer click when the browser does not 
   }
 });
 
+test("a phone queue tap cannot collapse while WebKit retains textarea focus", async () => {
+  const priorMatchMedia = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: query.includes("max-width: 760px"),
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveComposerDraft(draft, { text: "preserved mobile draft", images: [], updatedAt: 1 });
+    await fixture.pushSession({
+      queued: [{ id: "queued-1", text: "Queued message", hasImages: false, steerable: true }],
+    });
+    await focusRequestedComposer(fixture);
+    const queuedText = fixture.container.querySelector(".queued-text") as HTMLElement | null;
+    assert.ok(queuedText);
+
+    await act(async () => {
+      fireDomEvent.pointerDown(queuedText, { pointerType: "touch" });
+      // iOS WebKit can retain textarea focus when the tapped target is non-focusable.
+      fireDomEvent.click(queuedText);
+    });
+
+    assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
+    assert.equal(fixture.container.querySelector(".composer-box")?.classList.contains("idle-collapsed"), false,
+      "the composer must stay expanded while its textarea still owns focus");
+  } finally {
+    domWindow.matchMedia = priorMatchMedia;
+    await unmountFixture(fixture);
+  }
+});
+
 test("a delayed mobile transcript gesture relinquishes composer focus through selection and copy", async () => {
   const draft = deferred<ComposerDraft | null>();
   const fixture = await mountFixture(draft);

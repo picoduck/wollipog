@@ -1103,7 +1103,13 @@ function SessionDetailLoaded({
       composerPointerTransferRef.current = null;
       if (clearPointerTransferTimer) clearTimeout(clearPointerTransferTimer);
       clearPointerTransferTimer = null;
-      if (transfer === "outside") setComposerExpanded(false);
+      const composer = inputRef.current;
+      const composerBox = composer?.closest(".composer-box");
+      const activeElement = composer?.ownerDocument.activeElement;
+      if (transfer === "outside" &&
+          (!composerBox || !activeElement || !composerBox.contains(activeElement))) {
+        setComposerExpanded(false);
+      }
     };
     const schedulePointerTransferFallback = () => {
       if (composerPointerTransferRef.current === null) return;
