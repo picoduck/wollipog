@@ -247,7 +247,7 @@ test("native orchestrator flags enable bounded planning while disabling implemen
   assert.equal(codex.includes("--approve-for-me"), false,
     "the broad shortcut must not let Guardian approve a project-filesystem sandbox escape");
   assert.ok(codex.includes('approvals_reviewer="auto_review"'));
-  assert.ok(codex.includes('approval_policy={ "granular" = { "mcp_elicitations" = true, "request_permissions" = false, "rules" = true, "sandbox_approval" = false, "skill_approval" = false } }'));
+  assert.ok(codex.includes('approval_policy={ "granular" = { "mcp_elicitations" = true, "request_permissions" = false, "rules" = false, "sandbox_approval" = false, "skill_approval" = false } }'));
   assert.equal(codex.includes('approval_policy="never"'), false);
   assert.ok(codex.some((arg) => arg.includes('"default_tools_approval_mode" = "approve"')),
     "only the isolated runner-owned Wollipog MCP server is pre-approved");

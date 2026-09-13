@@ -2132,7 +2132,7 @@ test("buildCodexTurnParams: orchestrator uses constrained Guardian review withou
   assert.deepEqual(params.approvalPolicy, { granular: {
     mcp_elicitations: true,
     request_permissions: false,
-    rules: true,
+    rules: false,
     sandbox_approval: false,
     skill_approval: false,
   } });

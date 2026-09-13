@@ -215,7 +215,7 @@ export function buildCodexTurnParams(
     return { threadId, input, approvalPolicy: { granular: {
       mcp_elicitations: true,
       request_permissions: false,
-      rules: true,
+      rules: false,
       sandbox_approval: false,
       skill_approval: false,
     } }, approvalsReviewer: "auto_review", sandboxPolicy: {
