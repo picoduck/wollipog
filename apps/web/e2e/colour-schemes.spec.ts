@@ -27,6 +27,11 @@ const THEMES = ["dark", "light"] as const;
 /** WCAG AA for normal text. Large text is exempt at 3:1; the harness renders none. */
 const AA = 4.5;
 
+const expectRenderedLabelCoverage = (measured: { label: string }[]) => {
+  const labels = new Set(measured.map((entry) => entry.label));
+  expect(labels.size, "the harness must render distinct text labels to measure").toBeGreaterThan(15);
+};
+
 async function waitForContrastFixture(
   page: Page,
   expected: { scheme: string; theme: typeof THEMES[number] } = { scheme: "wollipog", theme: "dark" },
@@ -171,19 +176,110 @@ async function measure(page: Page) {
     /** How many points to sample between consecutive gradient stops, including both ends. */
     const GRADIENT_SAMPLES = 257;
 
-    const sampleGradient = (stops: ReturnType<typeof parse>[]) => {
+    const resolveStopPositions = (positions: (number | undefined)[]) => {
+      const resolved = [...positions];
+      resolved[0] ??= 0;
+      resolved[resolved.length - 1] ??= 1;
+
+      let previous = resolved[0]!;
+      for (let index = 1; index < resolved.length; index++) {
+        const position = resolved[index];
+        if (position === undefined) continue;
+        resolved[index] = Math.max(previous, position);
+        previous = resolved[index]!;
+      }
+
+      for (let index = 1; index + 1 < resolved.length;) {
+        if (resolved[index] !== undefined) { index++; continue; }
+        const before = index - 1;
+        let after = index + 1;
+        while (resolved[after] === undefined) after++;
+        const span = after - before;
+        for (let offset = 1; offset < span; offset++) {
+          resolved[before + offset] = resolved[before]! + (
+            (resolved[after]! - resolved[before]!) * offset / span
+          );
+        }
+        index = after + 1;
+      }
+      return resolved as number[];
+    };
+
+    const sampleGradient = (
+      stops: ReturnType<typeof parse>[],
+      positions: number[],
+      repeating: boolean,
+    ) => {
       const samples: ReturnType<typeof parse>[] = [];
-      for (let index = 0; index + 1 < stops.length; index++) {
-        const from = stops[index]!;
-        const to = stops[index + 1]!;
+      const sampleInterval = (
+        from: ReturnType<typeof parse>,
+        to: ReturnType<typeof parse>,
+        start: number,
+        end: number,
+        visibleStart = start,
+        visibleEnd = end,
+      ) => {
+        if (end <= start || visibleEnd <= visibleStart) return;
+        const firstT = (visibleStart - start) / (end - start);
+        const lastT = (visibleEnd - start) / (end - start);
         for (let step = 0; step < GRADIENT_SAMPLES; step++) {
-          const t = step / (GRADIENT_SAMPLES - 1);
+          const t = firstT + (lastT - firstT) * step / (GRADIENT_SAMPLES - 1);
           const a = from.a * (1 - t) + to.a * t;
           const channel = (key: "r" | "g" | "b") => {
             const premultiplied = from.a * from[key] * (1 - t) + to.a * to[key] * t;
             return a === 0 ? 0 : premultiplied / a;
           };
           samples.push({ r: channel("r"), g: channel("g"), b: channel("b"), a });
+        }
+      };
+
+      if (!repeating) {
+        if (positions[0]! > 0) samples.push(stops[0]!);
+        for (let index = 0; index + 1 < stops.length; index++) {
+          const start = positions[index]!;
+          const end = positions[index + 1]!;
+          sampleInterval(
+            stops[index]!,
+            stops[index + 1]!,
+            start,
+            end,
+            Math.max(0, start),
+            Math.min(1, end),
+          );
+        }
+        if (positions.at(-1)! < 1) samples.push(stops.at(-1)!);
+        return samples;
+      }
+
+      const period = positions.at(-1)! - positions[0]!;
+      if (period <= 1) {
+        // Every colour in one complete period is painted somewhere in a viewport one period or
+        // wider, regardless of where the repetition boundary falls.
+        for (let index = 0; index + 1 < stops.length; index++) {
+          sampleInterval(stops[index]!, stops[index + 1]!, positions[index]!, positions[index + 1]!);
+        }
+        return samples;
+      }
+
+      // A period wider than the viewport may expose only part of an interval. Enumerate just the
+      // shifted copies that intersect the normalized 0..1 paint line and sample their visible part.
+      for (let index = 0; index + 1 < stops.length; index++) {
+        const start = positions[index]!;
+        const end = positions[index + 1]!;
+        if (end <= start) continue;
+        const firstRepeat = Math.floor(-end / period) + 1;
+        const lastRepeat = Math.ceil((1 - start) / period) - 1;
+        for (let repeat = firstRepeat; repeat <= lastRepeat; repeat++) {
+          const shiftedStart = start + repeat * period;
+          const shiftedEnd = end + repeat * period;
+          sampleInterval(
+            stops[index]!,
+            stops[index + 1]!,
+            shiftedStart,
+            shiftedEnd,
+            Math.max(0, shiftedStart),
+            Math.min(1, shiftedEnd),
+          );
         }
       }
       return samples;
@@ -209,12 +305,44 @@ async function measure(page: Page) {
       if (!components) return { error: `unbalanced ${gradient.name} arguments in ${image}` };
       const stops: ReturnType<typeof parse>[] = [];
       const stopSyntax: string[] = [];
+      const stopPositions: (number | undefined)[] = [];
+      const isConic = gradient.name.endsWith("conic-gradient");
+      const parseStopPosition = (position: string) => {
+        const matched = position.match(/^(-?(?:\d+(?:\.\d*)?|\.\d+))(.*)$/);
+        if (!matched) return null;
+        const value = Number(matched[1]);
+        const unit = matched[2]!.toLowerCase();
+        if (unit === "%") return value / 100;
+        if (!unit && value === 0) return 0;
+        if (!isConic) return unit && value === 0 ? 0 : null;
+        if (unit === "deg") return value / 360;
+        if (unit === "grad") return value / 400;
+        if (unit === "rad") return value / (2 * Math.PI);
+        if (unit === "turn") return value;
+        return null;
+      };
       let interpolation: string | undefined;
+      let geometry = "";
       for (const [index, component] of components.entries()) {
         const candidate = functionCall(component);
         if (candidate && CSS.supports("color", candidate.full)) {
-          stops.push(parse(candidate.full));
-          stopSyntax.push(candidate.full);
+          const positionSyntax = candidate.rest ? candidate.rest.split(/\s+/) : [];
+          if (positionSyntax.length > 2) {
+            return { error: `too many positions on a gradient stop: ${component}` };
+          }
+          const positions = positionSyntax.map(parseStopPosition);
+          const unsupportedPosition = positions.findIndex((position) => position === null);
+          if (unsupportedPosition !== -1) {
+            return {
+              error: `gradient stop position ${positionSyntax[unsupportedPosition]} is not modelled for ${gradient.name}: ${image}`,
+            };
+          }
+          const expandedPositions = positions.length ? positions : [undefined];
+          for (const position of expandedPositions) {
+            stops.push(parse(candidate.full));
+            stopSyntax.push(candidate.full);
+            stopPositions.push(position ?? undefined);
+          }
           continue;
         }
         // The first component may be a direction, shape, position, or colour-interpolation method.
@@ -223,11 +351,25 @@ async function measure(page: Page) {
           if (interpolation && interpolation !== "srgb") {
             return { error: `gradient interpolation method ${interpolation} is not modelled: ${image}` };
           }
+          geometry = component.replace(/\bin\s+srgb\b/i, "").trim().replace(/\s+/g, " ");
           continue;
         }
         return { error: `gradient component ${index + 1} is not a supported colour stop: ${component}` };
       }
       if (stops.length < 2) return { error: `fewer than two supported colour stops in ${image}` };
+      if (gradient.name.endsWith("radial-gradient") && geometry) {
+        const normalizedRadialGeometries = new Set([
+          "circle", "ellipse", "farthest-corner",
+          "circle farthest-corner", "ellipse farthest-corner",
+          "farthest-corner circle", "farthest-corner ellipse",
+        ]);
+        if (!normalizedRadialGeometries.has(geometry.toLowerCase())) {
+          return { error: `radial gradient geometry ${geometry} is not modelled: ${image}` };
+        }
+      }
+      if (gradient.name.endsWith("conic-gradient") && /\bat\b/i.test(geometry)) {
+        return { error: `off-center conic gradient geometry is not modelled: ${image}` };
+      }
       if (stopSyntax.some((stop) => /\bnone\b/i.test(stop))) {
         return { error: `gradient stops with missing colour components are not modelled: ${image}` };
       }
@@ -255,7 +397,12 @@ async function measure(page: Page) {
       if (!isConstant && interpolation === "srgb" && !explicitSrgbStops) {
         return { error: `gradient stops cannot be modelled accurately with sRGB interpolation: ${image}` };
       }
-      return { samples: sampleGradient(stops) };
+      const resolvedPositions = resolveStopPositions(stopPositions);
+      const repeating = gradient.name.startsWith("repeating-");
+      if (repeating && resolvedPositions.at(-1)! <= resolvedPositions[0]!) {
+        return { error: `repeating gradient has a non-positive repetition length: ${image}` };
+      }
+      return { samples: sampleGradient(stops, resolvedPositions, repeating) };
     };
 
     /**
@@ -399,6 +546,25 @@ async function measure(page: Page) {
   });
 }
 
+test("gradient sample density cannot satisfy the distinct-label vacuity guard", async ({ page }) => {
+  await page.setContent(`
+    <html data-contrast-fixture-ready="synthetic">
+      <body style="background: white">
+        <p class="only-label" style="color: black; background: linear-gradient(black, white)">
+          Only Label
+        </p>
+      </body>
+    </html>
+  `);
+
+  const { results: measured, unsupported } = await measure(page);
+  expect(unsupported).toEqual([]);
+  expect(measured).toHaveLength(257);
+  expect(() => expectRenderedLabelCoverage(measured)).toThrow(
+    /the harness must render distinct text labels to measure/,
+  );
+});
+
 test("rendered contrast waits for final fixture styles", async ({ page }) => {
   await page.goto("/colour-schemes-e2e.html?scheme=wollipog&theme=dark&settle=manual");
   await expect(page.locator(".slash-item.active")).toBeVisible();
@@ -465,6 +631,206 @@ test("implicit non-legacy gradient interpolation fails closed", async ({ page })
   const { unsupported } = await measure(page);
   expect(unsupported).toContainEqual(expect.stringMatching(
     /^p\.slash-detail-disabled: implicit Oklab interpolation for non-legacy stops is not modelled:/,
+  ));
+});
+
+test("equal-position hard stops do not invent intermediate grounds", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    html.style.transition = "none";
+    html.style.color = "rgb(31 31 31)";
+    html.style.backgroundImage = "linear-gradient(rgb(255 0 255) 50%, rgb(0 255 0) 50%)";
+  });
+
+  const { results: measured, unsupported } = await measure(page);
+  expect(unsupported).toEqual([]);
+  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  expect(entries.map((entry) => entry.background)).toEqual([
+    "rgb(255.00 0.00 255.00 / 1.000)",
+    "rgb(0.00 255.00 0.00 / 1.000)",
+  ]);
+  expect(entries.every((entry) => entry.ratio >= AA)).toBe(true);
+});
+
+test("decreasing gradient positions use CSS stop fix-up", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    html.style.transition = "none";
+    html.style.backgroundImage = [
+      "linear-gradient(rgb(255 0 0) 0%, rgb(0 0 255) 50%, ",
+      "rgb(0 128 0) -100%, rgb(255 255 0) 100%)",
+    ].join("");
+  });
+
+  const { results: measured, unsupported } = await measure(page);
+  expect(unsupported).toEqual([]);
+  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  expect(entries).toHaveLength(514);
+  expect(entries.some((entry) =>
+    entry.background === "rgb(0.00 128.00 0.00 / 1.000)",
+  )).toBe(true);
+});
+
+test("multi-position and repeating hard stops keep only painted colours", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  const gradients = [
+    "linear-gradient(rgb(255 0 0) 0% 50%, rgb(0 0 255) 50% 100%)",
+    "repeating-linear-gradient(rgb(255 0 0) 0% 25%, rgb(0 0 255) 25% 50%)",
+  ];
+
+  for (const gradient of gradients) {
+    await disabledDetail.evaluate((element, backgroundImage) => {
+      const html = element as HTMLElement;
+      html.style.transition = "none";
+      html.style.backgroundImage = backgroundImage;
+    }, gradient);
+    const { results: measured, unsupported } = await measure(page);
+    expect(unsupported).toEqual([]);
+    const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+    expect(entries).toHaveLength(514);
+    expect(new Set(entries.map((entry) => entry.background))).toEqual(new Set([
+      "rgb(255.00 0.00 0.00 / 1.000)",
+      "rgb(0.00 0.00 255.00 / 1.000)",
+    ]));
+  }
+});
+
+test("repeating periods wider than the paint line sample each visible copy", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    html.style.transition = "none";
+    html.style.backgroundImage = [
+      "repeating-linear-gradient(rgb(255 0 0) 50%, rgb(0 0 255) 200%)",
+    ].join("");
+  });
+
+  const { results: measured, unsupported } = await measure(page);
+  expect(unsupported).toEqual([]);
+  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  expect(entries).toHaveLength(514);
+  expect(entries[0]?.background).toBe("rgb(85.00 0.00 170.00 / 1.000)");
+  expect(entries[256]?.background).toBe("rgb(0.00 0.00 255.00 / 1.000)");
+  expect(entries[257]?.background).toBe("rgb(255.00 0.00 0.00 / 1.000)");
+  expect(entries[513]?.background).toBe("rgb(170.00 0.00 85.00 / 1.000)");
+});
+
+test("off-canvas gradient intervals contribute only their painted edge colour", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    html.style.transition = "none";
+    html.style.backgroundImage = "linear-gradient(rgb(255 0 0) -100%, rgb(0 0 255) -50%)";
+  });
+
+  const { results: measured, unsupported } = await measure(page);
+  expect(unsupported).toEqual([]);
+  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  expect(entries).toHaveLength(1);
+  expect(entries[0]?.background).toBe("rgb(0.00 0.00 255.00 / 1.000)");
+});
+
+test("position units requiring element geometry fail closed", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    html.style.transition = "none";
+    html.style.backgroundImage = "linear-gradient(rgb(255 0 0) 10px, rgb(0 0 255) 20px)";
+  });
+
+  const { unsupported } = await measure(page);
+  expect(unsupported).toContainEqual(expect.stringMatching(
+    /^p\.slash-detail-disabled: gradient stop position 10px is not modelled for linear-gradient:/,
+  ));
+});
+
+test("radial sizes with geometry-dependent visible extents fail closed", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  const geometries = [
+    "circle closest-side",
+    "circle closest-corner",
+    "circle farthest-side",
+    "circle 40px",
+    "circle farthest-corner at 25% 25%",
+  ];
+
+  for (const geometry of geometries) {
+    await disabledDetail.evaluate((element, radialGeometry) => {
+      const html = element as HTMLElement;
+      html.style.transition = "none";
+      html.style.backgroundImage = [
+        `radial-gradient(${radialGeometry}, rgb(255 255 255) 100%, rgb(0 0 0) 150%)`,
+      ].join("");
+    }, geometry);
+    const { unsupported } = await measure(page);
+    expect(unsupported[0]).toMatch(
+      /^p\.slash-detail-disabled: radial gradient geometry .+ is not modelled:/,
+    );
+  }
+});
+
+test("centered farthest-corner radial gradients retain a normalized extent", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    html.style.transition = "none";
+    html.style.backgroundImage = [
+      "radial-gradient(circle farthest-corner, rgb(255 255 255) 100%, rgb(0 0 0) 150%)",
+    ].join("");
+  });
+
+  const { results: measured, unsupported } = await measure(page);
+  expect(unsupported).toEqual([]);
+  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  expect(entries).toHaveLength(1);
+  expect(entries[0]?.background).toBe("rgb(255.00 255.00 255.00 / 1.000)");
+});
+
+test("conic angle positions normalize to one painted turn", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    html.style.transition = "none";
+    html.style.backgroundImage = [
+      "conic-gradient(rgb(255 0 0) 0deg 180deg, rgb(0 0 255) 180deg 360deg)",
+    ].join("");
+  });
+
+  const { results: measured, unsupported } = await measure(page);
+  expect(unsupported).toEqual([]);
+  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  expect(entries).toHaveLength(514);
+  expect(new Set(entries.map((entry) => entry.background))).toEqual(new Set([
+    "rgb(255.00 0.00 0.00 / 1.000)",
+    "rgb(0.00 0.00 255.00 / 1.000)",
+  ]));
+});
+
+test("off-center conic geometry fails closed", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    html.style.transition = "none";
+    html.style.backgroundImage = [
+      "conic-gradient(at 0% 0%, rgb(255 0 0) 0deg, rgb(0 0 255) 90deg)",
+    ].join("");
+  });
+
+  const { unsupported } = await measure(page);
+  expect(unsupported).toContainEqual(expect.stringMatching(
+    /^p\.slash-detail-disabled: off-center conic gradient geometry is not modelled:/,
   ));
 });
 
@@ -664,6 +1030,40 @@ test("sRGB interpolation rejects gradient stops that require unclamped conversio
   ));
 });
 
+test("explicit sRGB interpolation rejects out-of-range sRGB stops", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    html.style.transition = "none";
+    html.style.backgroundImage = [
+      "linear-gradient(in srgb, color(srgb 1.2 0 0), color(srgb 0 0 1))",
+    ].join("");
+  });
+
+  const { unsupported } = await measure(page);
+  expect(unsupported).toContainEqual(expect.stringMatching(
+    /^p\.slash-detail-disabled: gradient stops cannot be modelled accurately with sRGB interpolation:/,
+  ));
+});
+
+test("gradient stops with missing components fail closed", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    html.style.transition = "none";
+    html.style.backgroundImage = [
+      "linear-gradient(in srgb, color(srgb none 0 0), color(srgb 1 1 1))",
+    ].join("");
+  });
+
+  const { unsupported } = await measure(page);
+  expect(unsupported).toContainEqual(expect.stringMatching(
+    /^p\.slash-detail-disabled: gradient stops with missing colour components are not modelled:/,
+  ));
+});
+
 test("unsupported rendered gradient syntax fails with an actionable diagnostic", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
   const disabledDetail = page.locator(".slash-detail-disabled");
@@ -729,9 +1129,9 @@ for (const scheme of SCHEMES) {
         unsupported,
         "every rendered path must use modelled opacity and background syntax; see each diagnostic",
       ).toEqual([]);
-      // A vacuous version of the static check once passed while measuring nothing, so the count is
-      // asserted before the ratios are.
-      expect(measured.length, "the harness must render text to measure").toBeGreaterThan(15);
+      // Gradient-backed labels contribute hundreds of grounds, so raw result cardinality cannot
+      // prove that the fixture still renders a representative set of distinct labels.
+      expectRenderedLabelCoverage(measured);
 
       const failures = measured
         .filter((entry) => entry.ratio < AA)
