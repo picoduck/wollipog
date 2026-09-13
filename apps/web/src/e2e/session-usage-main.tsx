@@ -39,6 +39,7 @@ const settled = params.get("settled") === "1";
 const contextChoice = params.get("context") === "choice";
 const serviceTierFixture = params.has("tiers");
 const serviceTierChoice = params.get("tiers") === "1";
+const composerFixture = params.get("composer");
 const servedWindow = Number(params.get("served") ?? "0");
 // `?window=none` drops the context window (an agent that advertises no capacity); `?cost=none`
 // marks the session unpriced, while `?cost=free` carries provider-reported zero provenance,
@@ -187,6 +188,76 @@ if (serviceTierFixture) {
   session.effort = "high";
   session.serviceTier = serviceTierChoice ? "fast" : null;
 }
+if (composerFixture) {
+  const isClaude = composerFixture === "claude";
+  const isOrchestrator = composerFixture === "orchestrator";
+  const driver = isClaude ? "claude-code" : "codex-app-server";
+  const agentName = isOrchestrator ? "Codex Orchestrator" : isClaude ? "Claude Code" : "Codex";
+  const modelName = isClaude
+    ? "Claude Opus 5.1 Extended Context Preview"
+    : "GPT-6-Astra Extended Context Preview";
+  const permissionModes = isOrchestrator
+    ? ["orchestrator"]
+    : isClaude
+      ? ["default", "acceptEdits", "bypassPermissions"]
+      : ["auto-review", "danger-full-access"];
+  const serviceTiers = isClaude ? undefined : [{
+    id: "fast",
+    name: "Fast",
+    description: "Faster responses that use more ChatGPT credits.",
+  }];
+  runner.protocolVersion = 136;
+  runner.agents = [{
+    id: isClaude ? "claude" : "codex",
+    name: agentName,
+    command: isClaude ? "claude" : "codex",
+    args: [],
+    env: {},
+    driver,
+    available: true,
+    capabilities: {
+      modelSource: "live",
+      models: [
+        {
+          id: "long-model",
+          displayName: modelName,
+          default: true,
+          contextWindow: 200_000,
+          description: `${modelName} with a 200K context window`,
+          efforts: ["low", "medium", "high"],
+          ...(serviceTiers ? { serviceTiers, defaultServiceTier: "default" } : {}),
+        },
+        {
+          id: "long-model[1m]",
+          baseModelId: "long-model",
+          displayName: `${modelName} (1M Context)`,
+          contextWindow: 1_000_000,
+          description: `${modelName} with a 1M context window`,
+          efforts: ["low", "medium", "high"],
+          ...(serviceTiers ? { serviceTiers, defaultServiceTier: "default" } : {}),
+        },
+      ],
+      effortLevels: ["low", "medium", "high"],
+      slashCommands: [],
+      supportsImages: true,
+      supportsApprovals: true,
+      permissionModes,
+    },
+  }] as RunnerView["agents"];
+  session.agentId = isClaude ? "claude" : "codex";
+  session.agentName = agentName;
+  session.driver = driver;
+  session.model = "long-model[1m]";
+  session.effort = "high";
+  session.permissionMode = isOrchestrator
+    ? "orchestrator"
+    : params.get("unsafe") === "1"
+      ? isClaude ? "bypassPermissions" : "danger-full-access"
+      : permissionModes[0]!;
+  session.serviceTier = serviceTiers ? "fast" : null;
+  session.contextWindow = 1_000_000;
+}
+if (params.get("plan") === "1") session.permissionMode = "plan";
 if (params.get("approval") === "checkpoint") {
   session.status = "input_required";
   session.costCheckpointsUsd = [1, 2.5];

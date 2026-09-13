@@ -29,6 +29,7 @@ import {
   type ContextWindowChoice,
 } from "../context-window-options.js";
 import { useStoreSelector } from "../store.js";
+import { AgentIcon } from "./AgentIcon.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { Modal } from "./common.js";
 import { InfoIcon, ServiceTierIcon, ShieldIcon } from "./Icons.js";
@@ -72,34 +73,50 @@ function useSessionConfig(session: SessionView) {
 }
 
 /** Shared popover shell for the composer-bar dropdowns (bottom-anchored, click-away backdrop). */
-function BarMenu({ align = "left", label, title, permissionMode = false, children }: {
+function BarMenu({
+  align = "left",
+  label,
+  title,
+  ariaLabel,
+  permissionMode = false,
+  modelSettings = false,
+  showCaret = true,
+  menuTitle,
+  children,
+}: {
   align?: "left" | "right";
   label: ReactNode;
   title?: string;
+  ariaLabel?: string;
   permissionMode?: boolean;
+  modelSettings?: boolean;
+  showCaret?: boolean;
+  menuTitle?: string;
   children: (close: () => void) => ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   const menu = useAccessibleMenu(open, setOpen, "composer-control-menu");
   return (
-    <div className={`cbar-menu ${align}${permissionMode ? " permission-mode-menu" : ""}`}>
+    <div className={`cbar-menu ${align}${permissionMode ? " permission-mode-menu" : ""}${modelSettings ? " model-settings-menu" : ""}`}>
       <button
         ref={menu.triggerRef}
         type="button"
         className="cbar-trigger"
         title={title}
+        aria-label={ariaLabel}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={menu.menuId}
         onClick={menu.toggle}
         onKeyDown={menu.onTriggerKeyDown}
       >
-        {label} <span className="caret">▾</span>
+        {label} {showCaret && <span className="caret">▾</span>}
       </button>
       {open && (
         <>
-          <div className="plus-backdrop" onClick={() => menu.close(true)} />
-          <div className={`cbar-pop${permissionMode ? " permission-mode-pop" : ""}`} role="menu" id={menu.menuId} ref={menu.menuRef} onKeyDown={menu.onMenuKeyDown}>
+          <div className={`plus-backdrop${modelSettings ? " model-settings-backdrop" : ""}`} onClick={() => menu.close(true)} />
+          <div className={`cbar-pop${permissionMode ? " permission-mode-pop" : ""}${modelSettings ? " model-settings-pop" : ""}`} role="menu" id={menu.menuId} ref={menu.menuRef} onKeyDown={menu.onMenuKeyDown}>
+            {menuTitle && <div className="cbar-settings-title" role="presentation">{menuTitle}</div>}
             {children(() => menu.close(true))}
           </div>
         </>
@@ -116,9 +133,10 @@ interface MenuModelChoice {
 }
 
 /** One menu-radio option shared by the Model, Context Window, and Effort groups. */
-function MenuRadioOption({ checked, title, onSelect, children }: {
+function MenuRadioOption({ checked, title, ariaLabel, onSelect, children }: {
   checked: boolean;
   title?: string;
+  ariaLabel?: string;
   onSelect: () => void;
   children: ReactNode;
 }) {
@@ -127,6 +145,8 @@ function MenuRadioOption({ checked, title, onSelect, children }: {
       type="button"
       role="menuitemradio"
       aria-checked={checked}
+      aria-label={ariaLabel}
+      data-menu-label={ariaLabel}
       className={`cbar-opt${checked ? " on" : ""}`}
       title={title}
       onClick={onSelect}
@@ -147,6 +167,8 @@ export function ModelEffortMenuChoices({
   agentEffortLevels,
   effortVal,
   pendingEffort,
+  serviceTierState,
+  close,
   apply,
 }: {
   models: MenuModelChoice[];
@@ -163,21 +185,27 @@ export function ModelEffortMenuChoices({
    * and only catches up after `setConfig` round-trips, so a selection made moments ago is not in it
    * yet; undefined means nothing is staged. */
   pendingEffort?: () => string | undefined;
+  serviceTierState?: NonNullable<ReturnType<typeof serviceTierChoices>> | null;
+  close?: () => void;
   apply: Apply;
 }) {
   return (
     <>
       {models.length > 0 && (
         <div role="group" aria-label="Model">
-          <div className="plus-section" role="presentation">Model{modelSource === "cached" ? " (cached)" : ""}</div>
+          <div className="plus-section" role="presentation">Model{modelSource === "cached" ? " (Cached)" : ""}</div>
           {models.map((model) => (
             <MenuRadioOption
               key={model.id}
               checked={model.id === modelVal}
               title={model.description}
+              ariaLabel={model.displayName ?? model.id}
               onSelect={() => apply({ model: model.id, effort: "", serviceTier: "" })}
             >
-              {model.displayName ?? model.id}
+              <span className="cbar-model-option">
+                <span className="cbar-model-option-name">{model.displayName ?? model.id}</span>
+                {model.description && <span className="cbar-model-option-description">{model.description}</span>}
+              </span>
             </MenuRadioOption>
           ))}
         </div>
@@ -216,7 +244,7 @@ export function ModelEffortMenuChoices({
       )}
       {modelEfforts.length > 0 && (
         <div role="group" aria-label="Reasoning Effort">
-          <div className="plus-section" role="presentation">Effort</div>
+          <div className="plus-section" role="presentation">Reasoning Effort</div>
           <MenuRadioOption checked={!effortVal} onSelect={() => apply({ effort: "" })}>
             {selectedModel?.defaultEffort ? `Default (${selectedModel.defaultEffort})` : "Default"}
           </MenuRadioOption>
@@ -226,6 +254,9 @@ export function ModelEffortMenuChoices({
             </MenuRadioOption>
           ))}
         </div>
+      )}
+      {serviceTierState && (
+        <ServiceTierMenuChoices state={serviceTierState} apply={apply} close={close ?? (() => undefined)} />
       )}
     </>
   );
@@ -237,30 +268,54 @@ export function modelEffortControlLabel(selectedModel: MenuModelChoice | undefin
 }
 
 export function ModelEffortControl(
-  { session, apply, pendingEffort }: { session: SessionView; apply: Apply; pendingEffort?: () => string | undefined },
+  {
+    session,
+    apply,
+    pendingModel,
+    pendingEffort,
+    pendingServiceTier,
+  }: {
+    session: SessionView;
+    apply: Apply;
+    pendingModel?: () => string | undefined;
+    pendingEffort?: () => string | undefined;
+    pendingServiceTier?: () => string | undefined;
+  },
 ) {
+  const runner = useStoreSelector((state) => state.runners.get(session.runnerId));
+  const capabilities = resolveEffectiveCaps(runner, session);
   const { caps, models, contextChoice, modelSource, modelVal, selectedModel, modelEfforts, effortVal } = useSessionConfig(session);
-  if (models.length === 0 && modelEfforts.length === 0) return null;
+  const serviceTierState = session.driver === "codex-app-server" && runnerSupportsProtocol(runner?.protocolVersion, "codexServiceTiers")
+    ? serviceTierChoices(
+        capabilities,
+        pendingModel?.() ?? session.model,
+        pendingServiceTier?.() ?? session.serviceTier,
+      )
+    : null;
+  if (models.length === 0 && modelEfforts.length === 0 && !serviceTierState) return null;
   const pickerModel = models.find((model) => model.id === modelVal) ?? selectedModel;
   const selectedWindow = contextChoice?.options.find((option) => option.id === contextChoice.selectedId);
+  const modelLabel = modelEffortControlLabel(pickerModel, modelVal);
+  const effortSuffix = effortVal ? effortLabel(effortVal) : "";
+  const tooltip = `${modelLabel}${effortSuffix ? ` · ${effortSuffix}` : ""}. Opens Model Settings for model${contextChoice ? ", context window" : ""}, reasoning effort${serviceTierState ? ", and service tier" : ""}.`;
   const label = (
-    <>
-      <span className="cbar-model">{modelEffortControlLabel(pickerModel, modelVal)}</span>
+    <span className="cbar-model-label">
+      <AgentIcon driver={session.driver} agentName={session.agentName} size={14} />
+      <span className="cbar-model">{modelLabel}</span>
       {selectedWindow && <span className="cbar-context">{selectedWindow.label}</span>}
-      {effortVal && <span className="cbar-effort">{effortLabel(effortVal)}</span>}
-    </>
+      {effortSuffix && <span className="cbar-effort">{effortSuffix}</span>}
+    </span>
   );
   return (
     <BarMenu
-      align="right"
+      align="left"
+      modelSettings
+      menuTitle="Model Settings"
       label={label}
-      title={modelSource === "cached"
-        ? "Model metadata is cached; Rediscover to refresh"
-        : contextChoice
-          ? "Model, context window & reasoning effort (applies next turn)"
-          : "Model & reasoning effort (applies next turn)"}
+      title={modelSource === "cached" ? `${tooltip} Model metadata is cached; Rediscover to refresh.` : tooltip}
+      ariaLabel={`Model Settings: ${modelLabel}${effortSuffix ? `, ${effortSuffix}` : ""}`}
     >
-      {() => <ModelEffortMenuChoices
+      {(close) => <ModelEffortMenuChoices
         models={models}
         modelSource={modelSource}
         modelVal={modelVal}
@@ -270,6 +325,8 @@ export function ModelEffortControl(
         agentEffortLevels={caps?.effortLevels}
         effortVal={effortVal}
         pendingEffort={pendingEffort}
+        serviceTierState={serviceTierState}
+        close={close}
         apply={apply}
       />}
     </BarMenu>
@@ -337,45 +394,6 @@ export function ServiceTierMenuChoices({ state, apply, close }: {
         </MenuRadioOption>
       ))}
     </div>
-  );
-}
-
-/** Separate from reasoning effort: this is a model/account-advertised Codex scheduling tier. */
-export function ServiceTierControl({
-  session,
-  apply,
-  pendingModel,
-  pendingServiceTier,
-}: {
-  session: SessionView;
-  apply: Apply;
-  pendingModel?: () => string | undefined;
-  pendingServiceTier?: () => string | undefined;
-}) {
-  const runner = useStoreSelector((state) => state.runners.get(session.runnerId));
-  const capabilities = resolveEffectiveCaps(runner, session);
-  const state = session.driver === "codex-app-server" && runnerSupportsProtocol(runner?.protocolVersion, "codexServiceTiers")
-    ? serviceTierChoices(
-        capabilities,
-        pendingModel?.() ?? session.model,
-        pendingServiceTier?.() ?? session.serviceTier,
-      )
-    : null;
-  if (!state) return null;
-  const fast = state.selected.id.toLowerCase() === "fast";
-  return (
-    <BarMenu
-      align="right"
-      label={(
-        <span className={`cbar-service-tier${fast ? " fast" : ""}`}>
-          {fast && <ServiceTierIcon size={13} />}
-          {state.selected.name}
-        </span>
-      )}
-      title={`Service Tier: ${state.selected.name}. Applies to the next turn.`}
-    >
-      {(close) => <ServiceTierMenuChoices state={state} apply={apply} close={close} />}
-    </BarMenu>
   );
 }
 
@@ -631,23 +649,40 @@ export function ApprovalsControl({ session, apply }: { session: SessionView; app
   const detailsReturnFocusRef = useRef<HTMLElement | null>(null);
   const { caps, permModes, permVal } = useSessionConfig(session);
   if (permModes.length === 0) return null;
-  const currentStatus = elicitationAvailability(caps, permVal || defaultPermissionMode(session.driver));
+  const currentMode = permVal || defaultPermissionMode(session.driver);
+  const currentStatus = elicitationAvailability(caps, currentMode);
   const currentOutcome = permissionModeOutcome(
-    permVal || defaultPermissionMode(session.driver),
+    currentMode,
     currentStatus,
     session.driver,
   );
+  const currentLabel = approvalControlLabel(session.driver, permVal, currentStatus);
+  const unrestricted = currentMode === "bypassPermissions" || currentMode === "danger-full-access";
+  const accessibleLabel = `Permission Mode: ${currentLabel}`;
+  if (permModes.length === 1 && permModes[0] === "orchestrator") {
+    return (
+      <span
+        className="cbar-permission-badge"
+        role="img"
+        aria-label={accessibleLabel}
+        title={approvalOptionTitle(`${accessibleLabel}. Fixed for this Orchestrator session.`, currentOutcome)}
+      >
+        <ShieldIcon size={14} />
+      </span>
+    );
+  }
   return (
     <>
       <BarMenu
         permissionMode
+        showCaret={false}
         label={
-          <span className="cbar-approvals">
+          <span className={`cbar-approvals${unrestricted ? " unrestricted" : ""}`}>
             <ShieldIcon size={14} />
-            {approvalControlLabel(session.driver, permVal, currentStatus)}
           </span>
         }
-        title={approvalOptionTitle("Permission mode (applies next turn).", currentOutcome)}
+        ariaLabel={accessibleLabel}
+        title={approvalOptionTitle(`${accessibleLabel}. Applies to the next turn.`, currentOutcome)}
       >
         {(close) => (
           <ApprovalsMenuChoices
