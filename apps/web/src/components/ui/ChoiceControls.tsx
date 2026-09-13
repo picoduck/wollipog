@@ -455,7 +455,7 @@ export function SearchableCombobox<T extends string>({
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
-  const coarsePointer = useCoarsePointer();
+  const coarsePointer = useTouchTargetMode();
   const selected = options.find((option) => option.value === value) ?? null;
   const results = useMemo(
     () => filterSearchableComboboxOptions(options, searching ? query : ""),
@@ -809,7 +809,7 @@ export function selectMenuDesiredHeight(input: {
  * the stylesheet applies, and a menu whose height was budgeted under the other one is this same
  * clipping defect arriving a second way.
  */
-function useCoarsePointer(): boolean {
+export function useTouchTargetMode(): boolean {
   return useSyncExternalStore(
     (onChange) => {
       const mq = window.matchMedia(TOUCH_TARGET_MEDIA);
@@ -884,7 +884,7 @@ export function Select<T extends string>({
 }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
-  const coarsePointer = useCoarsePointer();
+  const coarsePointer = useTouchTargetMode();
   const popover = useDismissiblePopover(open, setOpen, "ui-select");
   const rootRef = useRef<HTMLDivElement>(null);
   useEffect(() => {

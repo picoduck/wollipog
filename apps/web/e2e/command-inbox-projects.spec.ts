@@ -1009,7 +1009,7 @@ test("New Session control labels retain centred, unclipped browser geometry", as
       const controls = [
         dialog.getByRole("button", { name: "Create Project…" }),
         dialog.getByRole("button", { name: "Add Location…" }),
-        dialog.getByLabel("Agent"),
+        dialog.locator('.agent-select [aria-haspopup="listbox"]'),
       ];
       const geometry = await Promise.all(controls.map(controlGeometry));
 
@@ -1030,18 +1030,23 @@ test("New Session control labels retain centred, unclipped browser geometry", as
     }
   }
 
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/command-inbox-projects-e2e.html?longAgent=1");
+  await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
+  await page.getByRole("tab", { name: /Alpha/ }).click();
+  await page.keyboard.press("c");
+
   const dialog = page.getByRole("dialog", { name: "New Session" });
   const controls = [
     dialog.getByRole("button", { name: "Create Project…" }),
     dialog.getByRole("button", { name: "Add Location…" }),
-    dialog.getByLabel("Agent"),
+    dialog.locator('.agent-select [aria-haspopup="listbox"]'),
   ];
-  await page.setViewportSize({ width: 390, height: 844 });
-  await dialog.getByRole("combobox", { name: "Agent" }).evaluate((element) => {
-    (element as HTMLInputElement).value = "Áccented Agent With Descenders ģyq — Extended Name";
-  });
+  await expect(dialog.getByRole("button", { name: /^Agent:/ })).toHaveAccessibleName(
+    /Áccented Agent With Descenders ģyq — Extended Name/,
+  );
   await page.addStyleTag({
-    content: ".new-session-project-control, .ui-searchable-combobox-input { font-size: 24px !important; }",
+    content: ".new-session-project-control, .ui-select-trigger { font-size: 24px !important; }",
   });
   const enlargedGeometry = await Promise.all(controls.map(controlGeometry));
   for (const control of enlargedGeometry) {

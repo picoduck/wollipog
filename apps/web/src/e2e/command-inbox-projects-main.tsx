@@ -59,6 +59,7 @@ const REVIEW_READY = FIXTURE_QUERY.get("reviewReady") === "1";
 const INCLUDE_SESSION_SHELL = FIXTURE_QUERY.get("sessionShell") === "1";
 const LEGACY_WORKSPACES = FIXTURE_QUERY.get("legacyWorkspaces") === "1";
 const UNFILED_WORKSPACE = FIXTURE_QUERY.get("unfiledWorkspace") === "1";
+const LONG_AGENT = FIXTURE_QUERY.get("longAgent") === "1";
 const HISTORY_PAGE_DELAY_MS = Number(FIXTURE_QUERY.get("historyDelay") ?? 25);
 const STORAGE_KEY = `wollipog.e2e.project-inbox-model${SCENARIO ? `.${SCENARIO}` : ""}`;
 
@@ -630,11 +631,11 @@ const runner: RunnerView = {
   status: "online",
   agents: [{
     id: "codex",
-    name: "Codex",
+    name: LONG_AGENT ? "Áccented Agent With Descenders ģyq — Extended Name" : "Codex",
     command: "codex",
     args: [],
     env: {},
-    driver: "codex-app-server",
+    driver: LONG_AGENT ? "acp" : "codex-app-server",
     context: { kind: "native" },
     available: true,
     capabilities: {

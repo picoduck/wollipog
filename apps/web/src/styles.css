@@ -7679,7 +7679,7 @@ button.file-head.source-path-link {
 button.agent-pick {
   background: transparent;
 }
-/* New Session picks one agent from a searchable list; the provider icon adorns the editable owner. */
+/* New Session picks one agent from a shared list; the provider icon adorns its responsive owner. */
 .btn.sm.new-session-project-control {
   /* Segoe UI's visible ink sits high inside its line box. Preserve the compact desktop control's
      total padding while moving that line box one pixel toward the optical centre. */
@@ -7695,6 +7695,10 @@ button.agent-pick {
   min-width: 0;
 }
 .new-session-choice-control .ui-searchable-combobox-input {
+  min-width: 0;
+}
+.new-session-choice-control .ui-select-trigger {
+  width: 100%;
   min-width: 0;
 }
 .agent-select .new-session-choice-control {
