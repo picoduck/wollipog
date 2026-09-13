@@ -53,6 +53,8 @@ export function sessionHelp(): string {
     "  session list [--archived] [--json]",
     "  session get <session-id> [--json]",
     "  session events <session-id> [--after <seq>] [--limit <count>] [--json]",
+    "  session capabilities --runner <runner-id> --agent <agent-id> [--offset <count>] [--limit <count>]",
+    "                       [--include-hidden | --model <exact-model-id>] [--json]",
     "  session create --runner <runner-id> --agent <agent-id> [--workspace <workspace-id> | --path <path>]",
     "                 [--prompt <text>] [--title <title>] [--model <model>] [--effort <effort>] [--permission-mode <mode>] [--worktree]",
     "                 [--cost-budget <usd>] [--max-tool-calls <count>] [--max-child-sessions <count>] [--json]",

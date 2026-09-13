@@ -61,7 +61,7 @@ function positional(args: string[]): string[] {
     "--url", "--token-file", "--runner", "--agent", "--workspace", "--path", "--prompt",
     "--title", "--model", "--effort", "--permission-mode", "--after", "--limit", "--for", "--timeout",
     "--interval", "--cost-budget", "--max-tool-calls", "--session", "--branch", "--base", "--base-ref",
-    "--max-child-sessions",
+    "--max-child-sessions", "--offset",
   ]);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -134,6 +134,22 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       return words[2]
         ? { tool: "get_session_events", input: { sessionId: words[2], after: numeric(option(args, "--after")), limit: numeric(option(args, "--limit")) } }
         : { error: "session events requires an id" };
+    case "capabilities": {
+      const runnerId = option(args, "--runner");
+      const agentId = option(args, "--agent");
+      if (!runnerId || !agentId) return { error: "session capabilities requires --runner and --agent" };
+      return {
+        tool: "get_agent_capabilities",
+        input: {
+          runnerId,
+          agentId,
+          offset: numeric(option(args, "--offset")),
+          limit: numeric(option(args, "--limit")),
+          includeHidden: flag(args, "--include-hidden"),
+          modelId: option(args, "--model"),
+        },
+      };
+    }
     case "create": {
       const runnerId = option(args, "--runner");
       const agentId = option(args, "--agent");

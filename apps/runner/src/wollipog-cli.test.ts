@@ -49,7 +49,7 @@ test("CLI topic help is complete, successful, and side-effect free", async () =>
     ["pair", ["pair create", "pair list", "pair revoke", "pair url", "one-time", "bootstrap"]],
     ["service", ["service install", "service status", "service restart", "service logs", "service upgrade", "service uninstall"]],
     ["admin", ["admin pairing-url", "admin status", "admin doctor", "admin device create", "admin runner-credential"]],
-    ["session", ["session list", "session create", "session wait", "session guardrails", "--effort"]],
+    ["session", ["session list", "session capabilities", "session create", "session wait", "session guardrails", "--effort"]],
     ["worktree", ["worktree create", "worktree attach", "worktree select", "worktree discard"]],
   ];
   for (const [topic, expected] of topics) {
@@ -266,6 +266,35 @@ test("CLI emits stable JSON and authenticates list requests as the exact session
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("CLI exposes bounded agent capability discovery with exact targeting", async () => {
+  const requests: Array<{ url: string; method?: string }> = [];
+  const fetch: McpFetch = async (url, init) => {
+    requests.push({ url, method: init?.method });
+    const body = url.endsWith("/api/compatibility")
+      ? { protocolVersion: PROTOCOL_VERSION }
+      : { runners: [{ runnerId: "r1", agents: [{
+          id: "codex", name: "Codex", capabilities: {
+            modelSource: "live", effortLevels: ["high"], models: [{ id: "gpt", hidden: true }],
+          },
+        }] }] };
+    return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+  };
+  let stdout = "";
+  const code = await runWollipogCli(
+    ["node", "cli.js", "--wollipog-cli", "session", "capabilities", "--runner", "r1", "--agent", "codex", "--model", "gpt", "--offset", "4", "--limit", "7", "--json"],
+    { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" },
+    { stdout: (text) => { stdout += text; }, stderr: () => assert.fail("unexpected CLI error") },
+    fetch,
+  );
+  assert.equal(code, 0);
+  assert.equal(JSON.parse(stdout).models[0].id, "gpt");
+  assert.equal(JSON.parse(stdout).models[0].hidden, true);
+  assert.deepEqual(requests, [
+    { url: "http://cp/api/compatibility", method: "GET" },
+    { url: "http://cp/api/runners", method: "GET" },
+  ]);
 });
 
 test("CLI JSON create and prompt commands reuse the manager routes and reject incompatible control planes", async () => {

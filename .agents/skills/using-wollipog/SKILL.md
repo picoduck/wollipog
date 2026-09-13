@@ -15,6 +15,7 @@ Core commands:
 wollipog session list --json
 wollipog session get <session-id> --json
 wollipog session events <session-id> --after <seq> --json
+wollipog session capabilities --runner <id> --agent <id> [--offset <n>] [--limit <n>] [--include-hidden | --model <id>] --json
 wollipog session create --runner <id> --agent <id> --workspace <id> --prompt <task> [--model <id>] [--effort <level>] --json
 wollipog session prompt <session-id> <message> --json
 wollipog session wait <session-id> --for input_required,completed,failed,stopped --json
@@ -38,6 +39,12 @@ values apply before the initial prompt and override saved harness defaults; read
 back from the creation result or `session get`. Omit `--effort` to retain default resolution. An
 explicit effort requires protocol v138, and a current client fails closed against older components
 instead of retrying without it.
+
+Use `session capabilities` (the MCP equivalent is `get_agent_capabilities`) before selecting a
+child model or effort. It returns paginated installation-specific models, labels per-model versus
+harness fallback efforts, distinguishes unavailable discovery from no configurable effort, and
+excludes hidden models unless explicitly requested. Follow `page.nextOffset` until `truncated` is
+false; creation still revalidates the chosen pair against current discovery.
 
 ## Retiring a Worktree
 

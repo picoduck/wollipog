@@ -136,6 +136,23 @@ update Wollipog or omit effort; it never retries without the value. Older client
 this option and must be upgraded before a caller can request it. Calls that omit effort remain
 compatible with the protocol-v100 Agent Control creation contract.
 
+Before creating a child, an Orchestrator can call `get_agent_capabilities` with an exact `runnerId`
+and `agentId`. The matching CLI command is:
+
+```sh
+wollipog session capabilities --runner <runner-id> --agent <agent-id> --limit 50 --json
+```
+
+The response returns a bounded page of exact model identifiers and advertised display names,
+defaults, descriptions, context windows, input modalities, and effective reasoning efforts.
+`effortSource` says whether each model uses its own efforts, the harness-level fallback, or has no
+configurable effort. Discovery is separately labeled available or unavailable, and known model
+sources are labeled `live` or `cached`. Hidden models are excluded by default; use
+`--include-hidden` to page through them or `--model <exact-model-id>` to inspect one persisted
+hidden selection. Continue a truncated page with its `page.nextOffset`. The lookup is advisory:
+`session create` revalidates the requested model and effort against the installation's current
+capabilities immediately before launch, so capability drift fails closed.
+
 Protocol v124 completes that contract for structured Direct WSL sessions. Discovery must resolve an
 absolute, root-owned Linux Node 22+ runtime plus distro-owned compiler and bubblewrap runtimes with
 the fd-bind contract. Before each provider launch, the Windows
