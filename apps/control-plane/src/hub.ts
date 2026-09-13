@@ -792,6 +792,15 @@ export class Hub {
     const nextState = this.projectStateKey(session);
     this.sessionProjectState.set(session.id, nextState);
     this.broadcast({ type: "session_upsert", session: this.withQueue(session) });
+    // A child's lifecycle is part of its parent's capacity projection. Re-send the fresh parent
+    // after every child upsert so creation, restart, terminal, and archive transitions cannot leave
+    // an open Orchestrator detail view showing stale occupied/remaining slots. Broadcast directly
+    // instead of recursing through sessionChanged: a child's update does not change grandparent
+    // capacity or the parent's Project membership.
+    if (session.parentSessionId) {
+      const parent = this.db.getSession(session.parentSessionId);
+      if (parent) this.broadcast({ type: "session_upsert", session: this.withQueue(parent) });
+    }
     if (!refreshProject || previousState === nextState) return;
     const previousProjectId = previousState?.split("\u0000", 1)[0] || null;
     if (previousProjectId && previousProjectId !== session.projectId) this.projectChangedById(previousProjectId);
