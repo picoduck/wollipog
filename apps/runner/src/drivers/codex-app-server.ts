@@ -340,7 +340,7 @@ export class CodexAppServerDriver implements Driver {
   private emittedTurnUsage: FlatUsage | null = null;
   private turnUsageBaseline: FlatUsage | null = null;
   /** Once a turn settles, ignore late usage/completion notifications from its interrupt race. */
-  private turnUsageClosed = false;
+  private turnUsageClosed = true;
   private readonly seenItems = new Set<string>();
   private readonly emittedErrors = new Set<string>();
   /** True after the active turn emits agent-message deltas. Successful turn settlement consumes
@@ -965,7 +965,7 @@ export class CodexAppServerDriver implements Driver {
     const parentToolUseId = this.subagentToolByThread.get(threadId);
     if (!usage || !parentToolUseId) return;
     const delta = subtractUsage(usage, this.emittedSubagentUsage.get(threadId) ?? {});
-    this.emittedSubagentUsage.set(threadId, usage);
+    this.emittedSubagentUsage.set(threadId, maxUsage(this.emittedSubagentUsage.get(threadId) ?? null, usage));
     if (!hasUsage(delta)) return;
     this.cb.onEvent({
       kind: "token_usage",
@@ -1466,7 +1466,7 @@ export class CodexAppServerDriver implements Driver {
     const u = this.pendingTurnUsage;
     if (u) {
       const delta = subtractUsage(u, this.emittedTurnUsage ?? {});
-      this.emittedTurnUsage = u;
+      this.emittedTurnUsage = maxUsage(this.emittedTurnUsage, u);
       if (!hasUsage(delta)) return;
       this.cb.onEvent({
         kind: "token_usage",
@@ -1754,6 +1754,17 @@ function subtractUsage(total: FlatUsage, baseline: FlatUsage): FlatUsage {
   for (const field of USAGE_FIELDS) {
     if (total[field] != null) {
       result[field] = Math.max(0, (total[field] ?? 0) - (baseline[field] ?? 0));
+    }
+  }
+  if (result.output != null && result.reasoning != null) result.reasoning = Math.min(result.output, result.reasoning);
+  return result;
+}
+
+function maxUsage(left: FlatUsage | null, right: FlatUsage): FlatUsage {
+  const result: FlatUsage = {};
+  for (const field of USAGE_FIELDS) {
+    if (left?.[field] != null || right[field] != null) {
+      result[field] = Math.max(left?.[field] ?? 0, right[field] ?? 0);
     }
   }
   if (result.output != null && result.reasoning != null) result.reasoning = Math.min(result.output, result.reasoning);

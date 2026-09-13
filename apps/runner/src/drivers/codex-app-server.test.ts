@@ -1051,6 +1051,7 @@ test("dispose records active subagents as unreachable without deleting their dur
 
 test("cancel emits already-consumed per-turn usage once before settling", () => {
   const h = makeHarness();
+  (h.driver as any).beginRootTurnUsage();
   (h.driver as any).pendingTurnUsage = { input: 7, output: 4, cached: 2 };
   h.driver.cancel();
   assert.deepEqual(h.events, [{ kind: "token_usage", inputTokens: 7, outputTokens: 4, cachedInputTokens: 2 }]);
@@ -1060,6 +1061,7 @@ test("cancel emits already-consumed per-turn usage once before settling", () => 
 
 test("late usage and completion after cancel cannot double-count the settled turn", () => {
   const h = makeHarness();
+  (h.driver as any).beginRootTurnUsage();
   const notifications = new Map<string, (params: any) => void>();
   (h.driver as any).registerHandlers({
     onRequest: () => {},
@@ -2524,6 +2526,7 @@ test("multi-response usage publishes replay-safe live deltas while context uses 
     onNotification: (method: string, handler: (params: any) => void) => notifications.set(method, handler),
   });
   (h.driver as any).eventContext = () => ({ accepted: true });
+  (h.driver as any).beginRootTurnUsage();
   notifications.get("thread/tokenUsage/updated")!({
     threadId: "t1",
     tokenUsage: {
@@ -2613,11 +2616,40 @@ test("resumed thread totals establish a baseline and replayed history is never b
   }]);
 });
 
+test("resumed history received before the first prompt establishes a baseline without rebilling", () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "resumed-thread";
+  const notifications = notificationHandlers(h.driver);
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "resumed-thread",
+    turnId: "historical-turn",
+    tokenUsage: {
+      last: { inputTokens: 20, outputTokens: 4, cachedInputTokens: 10 },
+      total: { inputTokens: 100, outputTokens: 20, cachedInputTokens: 60 },
+    },
+  });
+  assert.deepEqual(h.events, [], "startup history is a baseline, not a live turn");
+
+  (h.driver as any).beginRootTurnUsage();
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "resumed-thread",
+    turnId: "new-turn",
+    tokenUsage: {
+      last: { inputTokens: 10, outputTokens: 3, cachedInputTokens: 5 },
+      total: { inputTokens: 110, outputTokens: 23, cachedInputTokens: 65 },
+    },
+  });
+  assert.deepEqual(h.events, [{
+    kind: "token_usage", inputTokens: 10, outputTokens: 3, cachedInputTokens: 5,
+  }]);
+});
+
 test("failed and interrupted turns emit the complete cumulative usage exactly once", async () => {
   for (const [status, expectedStop] of [["failed", "refusal"], ["interrupted", "cancelled"]] as const) {
     const h = makeHarness();
     (h.driver as any).threadId = `root-${status}`;
     (h.driver as any).turnId = `turn-${status}`;
+    (h.driver as any).beginRootTurnUsage();
     const notifications = notificationHandlers(h.driver);
     const stopped = new Promise<string>((resolve) => { (h.driver as any).turnResolve = resolve; });
     notifications.get("thread/tokenUsage/updated")!({
@@ -2653,6 +2685,7 @@ test("failed and interrupted turns emit the complete cumulative usage exactly on
 test("legacy last-only usage accumulates distinct responses and ignores exact notification replay", () => {
   const h = makeHarness();
   (h.driver as any).threadId = "legacy-thread";
+  (h.driver as any).beginRootTurnUsage();
   const notifications = notificationHandlers(h.driver);
   const first = {
     threadId: "legacy-thread",
@@ -2674,25 +2707,31 @@ test("legacy last-only usage accumulates distinct responses and ignores exact no
 test("legacy lastTurn snapshots replace rather than add their running turn total", () => {
   const h = makeHarness();
   (h.driver as any).threadId = "legacy-turn-thread";
+  (h.driver as any).beginRootTurnUsage();
   const notifications = notificationHandlers(h.driver);
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "legacy-turn-thread",
+    tokenUsage: { lastTurn: { inputTokens: 12, outputTokens: 5, cachedInputTokens: 4 } },
+  });
   notifications.get("thread/tokenUsage/updated")!({
     threadId: "legacy-turn-thread",
     tokenUsage: { lastTurn: { inputTokens: 7, outputTokens: 3, cachedInputTokens: 2 } },
   });
   notifications.get("thread/tokenUsage/updated")!({
     threadId: "legacy-turn-thread",
-    tokenUsage: { lastTurn: { inputTokens: 12, outputTokens: 5, cachedInputTokens: 4 } },
+    tokenUsage: { lastTurn: { inputTokens: 15, outputTokens: 7, cachedInputTokens: 6 } },
   });
   (h.driver as any).emitPendingTurnUsage();
   assert.deepEqual(h.events, [
-    { kind: "token_usage", inputTokens: 7, outputTokens: 3, cachedInputTokens: 2 },
-    { kind: "token_usage", inputTokens: 5, outputTokens: 2, cachedInputTokens: 2 },
+    { kind: "token_usage", inputTokens: 12, outputTokens: 5, cachedInputTokens: 4 },
+    { kind: "token_usage", inputTokens: 3, outputTokens: 2, cachedInputTokens: 2 },
   ]);
 });
 
 test("fields omitted from cumulative totals accumulate from distinct per-response usage", () => {
   const h = makeHarness();
   (h.driver as any).threadId = "partial-total-thread";
+  (h.driver as any).beginRootTurnUsage();
   const notifications = notificationHandlers(h.driver);
   const first = {
     threadId: "partial-total-thread",
