@@ -78,10 +78,10 @@ test("live-follow status owns a reserved transcript strip with a compact centere
     "Reply and transcript discovery hints must share the same component and keycap markup");
   assert.match(detail, /className="detail-main"[\s\S]*data-active-pane=\{activePane\}[\s\S]*onFocusCapture=\{\(\) => setActivePane\("reader"\)\}/);
   assert.match(detail, /className="composer"[\s\S]*onFocusCapture=\{\(\) => setActivePane\("composer"\)\}/);
-  assert.match(detail, /className="transcript-status-cluster"[\s\S]*className="transcript-status-context"[\s\S]*className="follow-tail-control"[\s\S]*mode === "expanded" && \(\s*<SessionUsageControl session=\{session\} className="transcript-status-usage" \/>[\s\S]*className="transcript-status-actions"[\s\S]*label="Reply"/,
-    "context usage, live output, and cost form one centered cluster ahead of trailing actions");
-  assert.match(detail, /\(mode === "preview" \|\| !hasContextWindow\) && \([\s\S]*className="transcript-status-context transcript-status-context-standalone"[\s\S]*<TranscriptRecoveryStripEcho[\s\S]*className="transcript-status-cluster"/,
-    "recovery without a context meter uses the leading grid seat without shifting visible controls");
+  assert.match(detail, /className="transcript-status-cluster"[\s\S]*className="transcript-status-context"[\s\S]*className="follow-tail-control"[\s\S]*className="transcript-status-trailing"[\s\S]*mode === "expanded" && \(\s*<SessionUsageControl session=\{session\} className="transcript-status-usage" \/>[\s\S]*className="transcript-status-actions"[\s\S]*label="Reply"/,
+    "context, live output, and the cost/actions track occupy independent symmetric grid seats");
+  assert.match(detail, /className="transcript-status-cluster"[\s\S]*mode === "expanded" && hasContextWindow \? \([\s\S]*className="transcript-status-context"[\s\S]*<ContextWindowMeter[\s\S]*className="transcript-status-context transcript-status-context-standalone"[\s\S]*<TranscriptRecoveryStripEcho[\s\S]*className="follow-tail-control"/,
+    "recovery without a context meter uses the cluster's leading grid seat without overlapping the centered control");
   assert.match(detail, /const contextWindow = resolveContextWindowCapacity\(session, agentCaps\?\.models \?\? \[\]\);[\s\S]*const hasContextWindow = contextWindow\.known;/,
     "seat allocation consumes the shared capacity result");
   assert.equal(detail.match(/<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} \/>/g)?.length, 2,
@@ -96,24 +96,24 @@ test("live-follow status owns a reserved transcript strip with a compact centere
   assert.match(css, /\.transcript-status-strip\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*auto\s*minmax\(0,\s*1fr\);[^}]*flex:\s*none;[^}]*min-height:\s*42px;[^}]*padding:\s*6px 14px;[^}]*background:\s*var\(--bg\);/);
   assert.doesNotMatch(css.match(/\.transcript-status-strip\s*\{[^}]*\}/)?.[0] ?? "", /border-top/,
     "the reader status strip remains visually continuous with the transcript");
-  assert.match(css, /\.transcript-status-cluster\s*\{[^}]*display:\s*inline-flex;[^}]*grid-column:\s*2;[^}]*justify-self:\s*center;[^}]*gap:\s*8px;/,
-    "context usage and cost sit at the standard gap beside the centered live-output control");
-  assert.match(css, /\.transcript-status-context\s*\{[^}]*position:\s*relative;[^}]*flex:\s*none;[^}]*justify-content:\s*flex-end;[^}]*width:\s*auto;[^}]*min-width:\s*44px;/,
+  assert.match(css, /\.transcript-status-cluster\s*\{[^}]*display:\s*grid;[^}]*grid-column:\s*1 \/ -1;[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*auto\s*minmax\(0,\s*1fr\);[^}]*column-gap:\s*8px;[^}]*width:\s*100%;/,
+    "equal side tracks keep the live-output control centered independently of usage widths");
+  assert.match(css, /\.transcript-status-context\s*\{[^}]*position:\s*relative;[^}]*grid-column:\s*1;[^}]*flex:\s*none;[^}]*justify-content:\s*flex-end;[^}]*width:\s*auto;[^}]*min-width:\s*44px;/,
     "the context seat stays adjacent while its compact recovery echo overlays toward free space");
-  assert.match(css, /\.transcript-status-context \.transcript-recovery-strip-echo\s*\{[^}]*position:\s*absolute;[^}]*right:\s*0;[^}]*width:\s*min\(80px,\s*calc\(25cqw - 11px\)\);[^}]*max-width:\s*none;/,
+  assert.match(css, /\.transcript-status-context \.transcript-recovery-strip-echo\s*\{[^}]*position:\s*absolute;[^}]*right:\s*0;[^}]*width:\s*min\(80px,\s*calc\(25cqw - 11px\),\s*100%\);[^}]*max-width:\s*none;/,
     "the recovery echo may extend left without inserting a spacer between context and live output");
   assert.match(css, /\.transcript-status-context-standalone\s*\{[^}]*grid-column:\s*1;[^}]*width:\s*100%;[^}]*overflow:\s*hidden;/);
   assert.match(css, /\.transcript-status-context-standalone \.transcript-recovery-strip-echo\s*\{[^}]*position:\s*static;[^}]*width:\s*100%;[^}]*max-width:\s*100%;/,
     "standalone recovery stays bounded in the leading grid track while visible controls stay centered");
   assert.match(css, /\.transcript-status-usage\s*\{[^}]*flex:\s*0 1 auto;[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/,
     "cost remains bounded when the centered cluster approaches the pane width");
-  assert.match(css, /\.transcript-status-actions\s*\{[^}]*grid-column:\s*3;[^}]*justify-self:\s*end;[^}]*overflow:\s*hidden;/,
-    "Reply guidance uses trailing slack without moving the centered cluster");
+  assert.match(css, /\.transcript-status-trailing\s*\{[^}]*display:\s*flex;[^}]*grid-column:\s*3;[^}]*justify-content:\s*space-between;[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;/,
+    "cost and Reply guidance share trailing slack without moving the center track");
   assert.doesNotMatch(css, /\.cbar-usage/,
     "the composer-bar cost styles retire with the control (#893)");
   // A pane too narrow for all three tracks sheds the optional hint; engines without size queries
   // still clip it inside its trailing grid track instead of allowing overlap with the cluster.
-  assert.match(css, /\.transcript-status-actions\s*\{[^}]*grid-column:\s*3;[^}]*width:\s*100%;[^}]*max-width:\s*100%;[^}]*overflow:\s*hidden;/,
+  assert.match(css, /\.transcript-status-actions\s*\{[^}]*flex:\s*1 1000 auto;[^}]*max-width:\s*100%;[^}]*overflow:\s*hidden;/,
     "the optional hint stays bounded by the trailing grid track");
   assert.match(css, /@container transcript-pane \(max-width: \d+px\)\s*\{\s*\.transcript-status-actions\s*\{\s*display:\s*none;\s*\}/,
     "a plain-length cutoff retires the trailing actions in every engine with size container queries");
