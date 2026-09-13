@@ -531,9 +531,39 @@ test("rename-session retry preserves deliberate focus movement and keeps failure
   await expect.poll(() => page.evaluate(() => document.activeElement?.tagName)).toBe("BODY");
 });
 
+test("phone rename retry reveals the idle composer before restoring keyboard focus", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const composer = page.locator(".composer-input");
+  const preview = page.getByRole("button", { name: /^Edit Message:/ });
+  await expect(preview).toBeVisible();
+  await preview.click();
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextRetitle());
+  await composer.fill("/rename-session");
+  await page.getByRole("button", { name: "Send" }).click();
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredRetitle({
+    error: "Session naming timed out. Try again.",
+  }));
+
+  const receipt = page.getByRole("region", { name: "Rename Session Status" });
+  const retry = receipt.getByRole("button", { name: "Retry Rename" });
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextRetitle());
+  await composer.focus();
+  await page.keyboard.press("Shift+Tab");
+  await expect(retry).toBeFocused();
+  await retry.press("Enter");
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredRetitle({
+    title: "Retitled on a Phone",
+  }));
+
+  await expect(receipt).toHaveCount(0);
+  await expect(page.locator(".composer-box")).not.toHaveClass(/idle-collapsed/);
+  await expect(composer).toBeFocused();
+});
+
 test("wrapped composer errors stay in flow beside status receipts at responsive widths", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const composer = page.locator(".composer-input");
+  await page.getByRole("button", { name: /^Edit Message:/ }).click();
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextRetitle());
   await composer.fill("/rename-session");
   await page.getByRole("button", { name: "Send" }).click();

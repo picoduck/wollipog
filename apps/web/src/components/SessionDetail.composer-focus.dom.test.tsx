@@ -2969,6 +2969,44 @@ test("focus recovery distinguishes background loss from explicit transfer and IM
   }
 });
 
+test("phone composer controls survive a pointer click when the browser does not focus buttons", async () => {
+  const priorMatchMedia = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: query.includes("max-width: 760px"),
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveComposerDraft(draft, { text: "", images: [], updatedAt: 1 });
+    await focusRequestedComposer(fixture);
+    const plusTrigger = fixture.container.querySelector(
+      'button[aria-label="Add and Modes"]',
+    ) as HTMLButtonElement | null;
+    assert.ok(plusTrigger);
+
+    await act(async () => {
+      fireDomEvent.pointerDown(plusTrigger, { pointerType: "mouse" });
+      // Safari and Firefox on macOS blur the textarea without focusing the button.
+      fixture.composer.blur();
+      fireDomEvent.click(plusTrigger);
+    });
+
+    assert.equal(fixture.container.querySelector(".composer-box")?.classList.contains("idle-collapsed"), false);
+    assert.ok(fixture.container.querySelector(".plus-pop"),
+      "the original pointer activation must still open the composer menu");
+  } finally {
+    domWindow.matchMedia = priorMatchMedia;
+    await unmountFixture(fixture);
+  }
+});
+
 test("a delayed mobile transcript gesture relinquishes composer focus through selection and copy", async () => {
   const draft = deferred<ComposerDraft | null>();
   const fixture = await mountFixture(draft);
@@ -3410,6 +3448,8 @@ test("an immediate phone remount reveals the idle textarea before restoring its 
     removeListener() {},
     dispatchEvent: () => false,
   })) as never;
+  const textareaPrototype = domWindow.HTMLTextAreaElement.prototype;
+  const originalFocus = textareaPrototype.focus;
   const draft = deferred<ComposerDraft | null>();
   const fixture = await mountFixture(draft);
   try {
@@ -3419,6 +3459,10 @@ test("an immediate phone remount reveals the idle textarea before restoring its 
       fixture.composer.setSelectionRange(2, 8, "backward");
       fireDomEvent.select(fixture.composer);
     });
+    textareaPrototype.focus = function(options?: FocusOptions) {
+      if (this.closest(".composer-box.idle-collapsed")) return;
+      originalFocus.call(this, options);
+    };
 
     const persisted = deferred<ComposerDraft | null>();
     const remounted = await fixture.remountWithDraftLoader(() => persisted.promise);
@@ -3433,6 +3477,7 @@ test("an immediate phone remount reveals the idle textarea before restoring its 
       [2, 8, "backward"],
     );
   } finally {
+    textareaPrototype.focus = originalFocus;
     domWindow.matchMedia = priorMatchMedia;
     await unmountFixture(fixture);
   }

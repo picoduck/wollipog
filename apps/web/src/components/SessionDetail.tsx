@@ -217,6 +217,10 @@ import { materializePromptImages } from "../prompt-image-materialization.js";
 
 const NO_IMAGE_MIME_TYPES: readonly string[] = [];
 const STOP_TURN_RETRY_MS = 8_000;
+/** WebKit may synthesize a touch click in a later task. Keep the pointer transfer alive long
+ * enough for that click; if no click arrives, finish the collapse instead of leaving a blurred
+ * composer expanded. Pointer cancellation (the usual scroll path) finishes immediately. */
+const COMPOSER_POINTER_CLICK_FALLBACK_MS = 500;
 const EARLIER_ACTIVITY_TRIGGER_PX = 160;
 const EARLIER_ACTIVITY_REARM_DISTANCE_PX = 32;
 const EARLIER_ACTIVITY_REARM_FRAMES = 8;
@@ -966,7 +970,7 @@ function SessionDetailLoaded({
   const composerComposingRef = useRef(false);
   const pendingComposerFocusRestoreRef = useRef<ReturnType<typeof captureComposerFocus> | null>(null);
   const composerExplicitFocusTransferRef = useRef(false);
-  const composerPointerTransferRef = useRef(false);
+  const composerPointerTransferRef = useRef<"inside" | "outside" | null>(null);
   const composerFocusRestoreFrameRef = useRef<number | null>(null);
   const composerWindowTransferVersionRef = useRef(0);
   const composerInteractionVersionRef = useRef(0);
@@ -1068,25 +1072,29 @@ function SessionDetailLoaded({
     };
     const markExplicitPointerTransfer = (event: PointerEvent) => {
       const composer = inputRef.current;
-      if (!composer || !(event.target instanceof Node) || composer.contains(event.target)) return;
-      markExplicitTransfer();
-      if (!composer.closest(".composer-box")?.contains(event.target)) {
-        composerPointerTransferRef.current = true;
-      }
-    };
-    const finishExplicitPointerTransfer = () => {
-      if (!composerPointerTransferRef.current) return;
-      composerPointerTransferRef.current = false;
       if (clearPointerTransferTimer) clearTimeout(clearPointerTransferTimer);
       clearPointerTransferTimer = null;
-      setComposerExpanded(false);
+      composerPointerTransferRef.current = null;
+      if (!composer || !(event.target instanceof Node) || composer.contains(event.target)) return;
+      markExplicitTransfer();
+      // Safari and Firefox on macOS need the inside marker because clicking a button may blur the
+      // textarea without focusing the button. The control must survive until its click completes.
+      composerPointerTransferRef.current = composer.closest(".composer-box")?.contains(event.target)
+        ? "inside"
+        : "outside";
     };
-    const schedulePointerTransferCleanup = () => {
+    const finishExplicitPointerTransfer = () => {
+      const transfer = composerPointerTransferRef.current;
+      if (transfer === null) return;
+      composerPointerTransferRef.current = null;
       if (clearPointerTransferTimer) clearTimeout(clearPointerTransferTimer);
-      clearPointerTransferTimer = setTimeout(() => {
-        composerPointerTransferRef.current = false;
-        clearPointerTransferTimer = null;
-      }, 0);
+      clearPointerTransferTimer = null;
+      if (transfer === "outside") setComposerExpanded(false);
+    };
+    const schedulePointerTransferFallback = () => {
+      if (composerPointerTransferRef.current === null) return;
+      if (clearPointerTransferTimer) clearTimeout(clearPointerTransferTimer);
+      clearPointerTransferTimer = setTimeout(finishExplicitPointerTransfer, COMPOSER_POINTER_CLICK_FALLBACK_MS);
     };
     const markExplicitKeyboardTransfer = (event: globalThis.KeyboardEvent) => {
       const plainEscape = event.key === "Escape"
@@ -1102,8 +1110,8 @@ function SessionDetailLoaded({
     };
     document.addEventListener("pointerdown", markExplicitPointerTransfer, true);
     document.addEventListener("click", finishExplicitPointerTransfer);
-    document.addEventListener("pointerup", schedulePointerTransferCleanup);
-    document.addEventListener("pointercancel", schedulePointerTransferCleanup);
+    document.addEventListener("pointerup", schedulePointerTransferFallback);
+    document.addEventListener("pointercancel", finishExplicitPointerTransfer);
     document.addEventListener("keydown", markExplicitKeyboardTransfer, true);
     window.addEventListener("blur", markWindowTransfer);
     window.addEventListener("focus", clearExplicitTransfer);
@@ -1115,8 +1123,8 @@ function SessionDetailLoaded({
     return () => {
       document.removeEventListener("pointerdown", markExplicitPointerTransfer, true);
       document.removeEventListener("click", finishExplicitPointerTransfer);
-      document.removeEventListener("pointerup", schedulePointerTransferCleanup);
-      document.removeEventListener("pointercancel", schedulePointerTransferCleanup);
+      document.removeEventListener("pointerup", schedulePointerTransferFallback);
+      document.removeEventListener("pointercancel", finishExplicitPointerTransfer);
       document.removeEventListener("keydown", markExplicitKeyboardTransfer, true);
       window.removeEventListener("blur", markWindowTransfer);
       window.removeEventListener("focus", clearExplicitTransfer);
@@ -1142,7 +1150,7 @@ function SessionDetailLoaded({
     const explicit = composerExplicitFocusTransferRef.current;
     composerExplicitFocusTransferRef.current = false;
     if (explicit || composerComposingRef.current || !backgroundTarget) {
-      if (explicit && !composerPointerTransferRef.current &&
+      if (explicit && composerPointerTransferRef.current === null &&
           !element.closest(".composer-box")?.contains(relatedElement)) {
         setComposerExpanded(false);
       }
@@ -1203,15 +1211,25 @@ function SessionDetailLoaded({
 
   useLayoutEffect(() => {
     const pending = retitleFocusRestoreRef.current;
-    retitleFocusRestoreRef.current = null;
     if (retitleFeedback !== null || pending === null) return;
-    if (pending.sessionId !== sessionId || viewGenerationRef.current !== pending.generation) return;
+    if (pending.sessionId !== sessionId || viewGenerationRef.current !== pending.generation) {
+      retitleFocusRestoreRef.current = null;
+      return;
+    }
     const input = inputRef.current;
-    if (!input || input.ownerDocument.activeElement !== input.ownerDocument.body) return;
+    if (!input || input.ownerDocument.activeElement !== input.ownerDocument.body) {
+      retitleFocusRestoreRef.current = null;
+      return;
+    }
+    if (isMobile && !composerExpanded) {
+      setComposerExpanded(true);
+      return;
+    }
+    retitleFocusRestoreRef.current = null;
     if (restoreComposerFocus(input, pending.composer)) {
       reportComposerFocus(sessionId, "restore", input, false);
     }
-  }, [retitleFeedback, sessionId]);
+  }, [composerExpanded, isMobile, retitleFeedback, sessionId]);
 
   useLayoutEffect(() => {
     if (mode !== "expanded" || focusComposerRequestedRef.current || attentionTarget) return;
@@ -4875,7 +4893,7 @@ function SessionDetailLoaded({
                   return;
                 }
                 if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-                  if (!composerPointerTransferRef.current) setComposerExpanded(false);
+                  if (composerPointerTransferRef.current === null) setComposerExpanded(false);
                 }
               }}
               onDragEnter={(e) => {

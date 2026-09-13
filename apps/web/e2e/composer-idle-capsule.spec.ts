@@ -135,6 +135,36 @@ test("active dictation expands the capsule on the initial press", async ({ page 
   await expect(composer).not.toHaveClass(/idle-collapsed/);
 });
 
+test.describe("touch dismissal", () => {
+  test.use({ hasTouch: true });
+
+  test("outside taps and canceled scroll gestures collapse after relinquishing focus", async ({ page }) => {
+    await openComposer(page, 393);
+    const composer = page.locator(".composer-box");
+    const preview = page.getByRole("button", { name: /^Edit Message:/ });
+    await preview.tap();
+    await expect(page.locator(".composer-input")).toBeFocused();
+    await page.locator(".detail-reader").tap({ position: { x: 8, y: 8 } });
+    await expect(composer).toHaveClass(/idle-collapsed/);
+
+    await preview.tap();
+    const reader = page.locator(".detail-reader");
+    await reader.dispatchEvent("pointerdown", {
+      button: 0,
+      isPrimary: true,
+      pointerId: 4,
+      pointerType: "touch",
+    });
+    await reader.dispatchEvent("pointercancel", {
+      button: 0,
+      isPrimary: true,
+      pointerId: 4,
+      pointerType: "touch",
+    });
+    await expect(composer).toHaveClass(/idle-collapsed/);
+  });
+});
+
 test("Plus and every primary capsule action work with one activation", async ({ page }) => {
   await openComposer(page, 393);
   const plus = page.getByRole("button", { name: "Add and Modes" });
