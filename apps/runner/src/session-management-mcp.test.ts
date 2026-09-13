@@ -83,7 +83,7 @@ test("orchestrator MCP lists only management tools and rejects hidden mutations 
   assert.ok(names.includes("list_governance_policies"));
   for (const name of [
     "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
-    "resolve_descendant_approval",
+    "resolve_descendant_approval", "resolve_descendant_workflow_decision",
   ]) assert.ok(names.includes(name), name);
   for (const name of ["create_run", "set_session_config", "upsert_governance_policy", "create_workflow"]) {
     assert.equal(names.includes(name), false);
@@ -141,6 +141,47 @@ test("Parent Control tools are orchestrator-only and bind resolutions to exact o
   }
 });
 
+test("typed workflow decision tools preserve exact request, resolution, and consume snapshots", async () => {
+  const { deps, calls } = makeDeps(() => ({ status: 200, body: { occurrenceId: "workflow_1", status: "pending" } }));
+  const snapshot = {
+    category: "pr_merge",
+    repository: "picoduck/wollipog",
+    pullRequest: 42,
+    headSha: "a".repeat(40),
+    reviewResult: "merge",
+    requiredChecks: { headSha: "a".repeat(40), status: "passed", checkedAt: 1,
+      checks: [{ name: "Required", state: "passed" }] },
+  };
+  assert.equal((await callTool(deps, "request_workflow_decision", {
+    requestId: "merge-42", resourceKey: "picoduck/wollipog#42", resourceSnapshot: snapshot,
+  })).isError, undefined);
+  assert.deepEqual(calls.at(-1)?.body, {
+    requestId: "merge-42", resourceKey: "picoduck/wollipog#42", resourceSnapshot: snapshot,
+  });
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/workflow-decisions`);
+
+  await callTool(deps, "get_workflow_decision", { occurrenceId: "workflow_1" });
+  assert.equal(calls.at(-1)?.method, "GET");
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/workflow-decisions/workflow_1`);
+
+  await callTool(deps, "consume_workflow_decision", { occurrenceId: "workflow_1", resourceSnapshot: snapshot });
+  assert.deepEqual(calls.at(-1)?.body, { resourceSnapshot: snapshot });
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/workflow-decisions/workflow_1/consume`);
+
+  deps.orchestrator = true;
+  const resolution = await callTool(deps, "resolve_descendant_workflow_decision", {
+    sessionId: "child", occurrenceId: "workflow_1", outcome: "approve",
+    evidenceReviewed: ["desktop"], rationale: "Inspected the exact evidence.",
+  });
+  assert.equal(resultJson(resolution).decision.occurrenceId, "workflow_1");
+  assert.deepEqual(calls.at(-1)?.body, {
+    sessionId: "child", occurrenceId: "workflow_1",
+    resolution: { action: "resolve_workflow_decision", outcome: "approve",
+      evidenceReviewed: ["desktop"], rationale: "Inspected the exact evidence." },
+  });
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/descendant-requests/resolve`);
+});
+
 /* -------------------------------------------------------------------------- */
 /* Protocol surface                                                            */
 /* -------------------------------------------------------------------------- */
@@ -176,6 +217,9 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "get_agent_capabilities",
       "list_sessions",
       "get_session",
+      "request_workflow_decision",
+      "get_workflow_decision",
+      "consume_workflow_decision",
       "get_session_events",
       "wait_session",
       "list_runs",

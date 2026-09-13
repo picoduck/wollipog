@@ -25,6 +25,8 @@ import {
 import {
   EVENT_PAYLOAD_CHUNK_BYTES,
   EVENT_PAYLOAD_PREVIEW_BYTES,
+  HUMAN_ONLY_PARENT_CONTROL_POLICY,
+  WORKFLOW_DECISION_CATEGORIES,
   DEFAULT_LIVE_CHILD_LIMIT,
   columnForStatus,
   isPolicyApproval,
@@ -110,7 +112,12 @@ import {
   type UserStatus,
   type OS,
   type PendingApproval,
+  type ParentControlDecisionPolicy,
   type ParentControlMode,
+  type ParentControlPolicy,
+  type WorkflowDecisionAuthority,
+  type WorkflowDecisionStatus,
+  type WorkflowDecisionView,
   type PromptImageReference,
   type PromptSessionMessage,
   type ProjectLocationAvailability,
@@ -480,6 +487,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   preview        TEXT,
   pending_approval TEXT,
   parent_control TEXT NOT NULL DEFAULT 'off',
+  parent_control_policy TEXT,
+  parent_control_policy_revision INTEGER NOT NULL DEFAULT 0,
   policy_resume_status TEXT,
   driver         TEXT NOT NULL DEFAULT 'acp',
   model          TEXT,
@@ -507,6 +516,34 @@ CREATE TABLE IF NOT EXISTS sessions (
   FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
   FOREIGN KEY (project_location_id) REFERENCES project_locations(id) ON DELETE SET NULL
 );
+
+CREATE TABLE IF NOT EXISTS workflow_decisions (
+  request_id            TEXT NOT NULL,
+  occurrence_id         TEXT PRIMARY KEY,
+  session_id            TEXT NOT NULL,
+  controlling_session_id TEXT NOT NULL,
+  category              TEXT NOT NULL,
+  resource_key          TEXT NOT NULL,
+  resource_snapshot     TEXT NOT NULL,
+  resource_digest       TEXT NOT NULL,
+  policy_revision       INTEGER NOT NULL,
+  authority             TEXT NOT NULL CHECK (authority IN ('human','orchestrator')),
+  status                TEXT NOT NULL CHECK (status IN ('pending','approved','denied','consumed','revoked','superseded')),
+  selected_option_id    TEXT,
+  evidence_reviewed     TEXT,
+  rationale_digest      TEXT,
+  created_at            INTEGER NOT NULL,
+  resolved_at           INTEGER,
+  consumed_at           INTEGER,
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY (controlling_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_decisions_controller
+  ON workflow_decisions(controlling_session_id, status, created_at, occurrence_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_decisions_session_request
+  ON workflow_decisions(session_id, request_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_decisions_resource
+  ON workflow_decisions(session_id, category, resource_key, created_at);
 
 -- A reminder belongs to one human even when the underlying session is shared. The single row per
 -- (session,user) makes replacement atomic, while state+revision make firing and multi-client edits
@@ -957,6 +994,7 @@ CREATE TABLE IF NOT EXISTS governance_audit (
   policy_rule    TEXT,
   governance_policy_id TEXT,
   option_id      TEXT,
+  workflow_decision TEXT,
   created_at     INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_governance_audit_session
@@ -2098,6 +2136,8 @@ interface SessionRow {
   preview: string | null;
   pending_approval: string | null;
   parent_control: string;
+  parent_control_policy: string | null;
+  parent_control_policy_revision: number;
   driver: string;
   model: string | null;
   resolved_model: string | null;
@@ -2981,6 +3021,7 @@ export interface NewSessionInput {
   config: SessionConfig;
   /** Explicit human-owned descendant request delegation. */
   parentControl?: ParentControlMode;
+  parentControlPolicy?: { decisions: ParentControlDecisionPolicy };
   /** Ad-hoc browsed directory (when workspaceId is null); lets restart re-launch from it. */
   workspacePath?: string | null;
   acpSessionContext?: AcpSessionContextConfig;
@@ -3975,6 +4016,11 @@ export class ControlPlaneDb {
       /* column already present */
     }
     try {
+      db.exec("ALTER TABLE governance_audit ADD COLUMN workflow_decision TEXT");
+    } catch {
+      /* column already present */
+    }
+    try {
       db.exec("ALTER TABLE governance_policies ADD COLUMN ask_timeout INTEGER");
     } catch {
       /* column already present */
@@ -4134,6 +4180,8 @@ export class ControlPlaneDb {
       // projection for rolling peers and existing queries.
       "worktrees TEXT",
       "parent_control TEXT NOT NULL DEFAULT 'off' CHECK (parent_control IN ('off','questions','questions_and_approvals'))",
+      "parent_control_policy TEXT",
+      "parent_control_policy_revision INTEGER NOT NULL DEFAULT 0",
     ]) {
       try {
         db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`);
@@ -10088,8 +10136,9 @@ export class ControlPlaneDb {
       this.stmt(
          `INSERT INTO sessions
            (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, status, run_id, use_worktree, archived,
-             driver, model, effort, service_tier, permission_mode, parent_control, workspace_path, acp_session_context, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             driver, model, effort, service_tier, permission_mode, parent_control, parent_control_policy,
+             parent_control_policy_revision, workspace_path, acp_session_context, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.id,
@@ -10109,6 +10158,8 @@ export class ControlPlaneDb {
         input.config.serviceTier ?? null,
         input.config.permissionMode ?? null,
         input.parentControl ?? "off",
+        input.parentControlPolicy ? JSON.stringify(input.parentControlPolicy.decisions) : null,
+        input.parentControlPolicy ? 1 : 0,
         input.workspacePath ?? null,
         input.acpSessionContext ? JSON.stringify(input.acpSessionContext) : null,
         input.now,
@@ -11603,6 +11654,159 @@ export class ControlPlaneDb {
     this.stmt("UPDATE sessions SET parent_control=?, updated_at=? WHERE id=?").run(mode, now, id);
   }
 
+  updateSessionParentControlPolicy(
+    id: string,
+    decisions: ParentControlDecisionPolicy,
+    now: number,
+    expectedRevision?: number,
+  ): ParentControlPolicy | null {
+    const current = this.stmt(
+      "SELECT parent_control_policy_revision AS revision FROM sessions WHERE id=?",
+    ).get(id) as { revision: number } | undefined;
+    if (!current || (expectedRevision !== undefined && current.revision !== expectedRevision)) return null;
+    const revision = current.revision + 1;
+    const result = this.stmt(
+      `UPDATE sessions SET parent_control_policy=?, parent_control_policy_revision=?, updated_at=?
+       WHERE id=? AND parent_control_policy_revision=?`,
+    ).run(JSON.stringify(decisions), revision, now, id, current.revision);
+    return Number(result.changes) === 1 ? { revision, decisions } : null;
+  }
+
+  parentControlPolicy(id: string): ParentControlPolicy | null {
+    const row = this.stmt(
+      `SELECT parent_control_policy AS policy, parent_control_policy_revision AS revision
+       FROM sessions WHERE id=?`,
+    ).get(id) as { policy: string | null; revision: number } | undefined;
+    const decisions = parentControlDecisionPolicyFromJson(row?.policy ?? null);
+    return row && decisions ? { revision: row.revision, decisions } : null;
+  }
+
+  createWorkflowDecision(input: Omit<WorkflowDecisionView, "status"> & {
+    status?: Extract<WorkflowDecisionStatus, "pending">;
+  }): { decision: WorkflowDecisionView; replay: boolean; supersededOccurrenceIds: string[] } | null {
+    const existing = this.workflowDecisionByRequestId(input.sessionId, input.requestId);
+    if (existing) {
+      const same = existing.sessionId === input.sessionId && existing.controllingSessionId === input.controllingSessionId &&
+        existing.category === input.category && existing.resourceKey === input.resourceKey &&
+        existing.resourceDigest === input.resourceDigest && existing.policyRevision === input.policyRevision;
+      return same ? { decision: existing, replay: true, supersededOccurrenceIds: [] } : null;
+    }
+    const superseded = this.stmt(
+      `SELECT occurrence_id FROM workflow_decisions
+       WHERE session_id=? AND category=? AND resource_key=? AND status IN ('pending','approved')`,
+    ).all(input.sessionId, input.category, input.resourceKey) as unknown as Array<{ occurrence_id: string }>;
+    this.db.exec("BEGIN");
+    try {
+      this.stmt(
+        `UPDATE workflow_decisions SET status='superseded', resolved_at=?
+         WHERE session_id=? AND category=? AND resource_key=? AND status IN ('pending','approved')`,
+      ).run(input.createdAt, input.sessionId, input.category, input.resourceKey);
+      this.stmt(
+        `INSERT INTO workflow_decisions
+         (request_id, occurrence_id, session_id, controlling_session_id, category, resource_key,
+          resource_snapshot, resource_digest, policy_revision, authority, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+      ).run(
+        input.requestId, input.occurrenceId, input.sessionId, input.controllingSessionId,
+        input.category, input.resourceKey, JSON.stringify(input.resourceSnapshot), input.resourceDigest,
+        input.policyRevision, input.authority, input.createdAt,
+      );
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return {
+      decision: this.workflowDecisionByRequestId(input.sessionId, input.requestId)!,
+      replay: false,
+      supersededOccurrenceIds: superseded.map((row) => row.occurrence_id),
+    };
+  }
+
+  workflowDecisionByRequestId(sessionId: string, requestId: string): WorkflowDecisionView | null {
+    return workflowDecisionFromRow(this.stmt(
+      "SELECT * FROM workflow_decisions WHERE session_id=? AND request_id=?",
+    ).get(sessionId, requestId));
+  }
+
+  workflowDecisionByOccurrence(occurrenceId: string): WorkflowDecisionView | null {
+    return workflowDecisionFromRow(this.stmt(
+      "SELECT * FROM workflow_decisions WHERE occurrence_id=?",
+    ).get(occurrenceId));
+  }
+
+  pendingWorkflowDecisionsForController(controllingSessionId: string): WorkflowDecisionView[] {
+    return (this.stmt(
+      `SELECT * FROM workflow_decisions WHERE controlling_session_id=? AND status='pending'
+       ORDER BY created_at ASC, occurrence_id ASC`,
+    ).all(controllingSessionId) as unknown[]).map(workflowDecisionFromRow).filter(
+      (decision): decision is WorkflowDecisionView => decision !== null,
+    );
+  }
+
+  pendingWorkflowDecisionsForSession(sessionId: string): WorkflowDecisionView[] {
+    return (this.stmt(
+      `SELECT * FROM workflow_decisions WHERE session_id=? AND status='pending'
+       ORDER BY created_at ASC, occurrence_id ASC`,
+    ).all(sessionId) as unknown[]).map(workflowDecisionFromRow).filter(
+      (decision): decision is WorkflowDecisionView => decision !== null,
+    );
+  }
+
+  unconsumedWorkflowDecisionsForSession(sessionId: string): WorkflowDecisionView[] {
+    return (this.stmt(
+      `SELECT * FROM workflow_decisions WHERE session_id=? AND status IN ('pending','approved')
+       ORDER BY created_at ASC, occurrence_id ASC`,
+    ).all(sessionId) as unknown[]).map(workflowDecisionFromRow).filter(
+      (decision): decision is WorkflowDecisionView => decision !== null,
+    );
+  }
+
+  unconsumedWorkflowDecisionsForController(controllingSessionId: string): WorkflowDecisionView[] {
+    return (this.stmt(
+      `SELECT * FROM workflow_decisions WHERE controlling_session_id=? AND status IN ('pending','approved')
+       ORDER BY created_at ASC, occurrence_id ASC`,
+    ).all(controllingSessionId) as unknown[]).map(workflowDecisionFromRow).filter(
+      (decision): decision is WorkflowDecisionView => decision !== null,
+    );
+  }
+
+  resolveWorkflowDecision(
+    occurrenceId: string,
+    expectedAuthority: WorkflowDecisionAuthority,
+    outcome: "approved" | "denied",
+    now: number,
+    selectedOptionId?: string,
+    evidenceReviewed?: string[],
+    rationaleDigest?: string,
+  ): WorkflowDecisionView | null {
+    const result = this.stmt(
+      `UPDATE workflow_decisions SET status=?, selected_option_id=?, evidence_reviewed=?,
+       rationale_digest=?, resolved_at=?
+       WHERE occurrence_id=? AND status='pending' AND authority=?`,
+    ).run(
+      outcome, selectedOptionId ?? null, evidenceReviewed ? JSON.stringify(evidenceReviewed) : null,
+      rationaleDigest ?? null, now, occurrenceId, expectedAuthority,
+    );
+    return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
+  }
+
+  markWorkflowDecisionRevoked(occurrenceId: string, now: number): WorkflowDecisionView | null {
+    this.stmt(
+      `UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?)
+       WHERE occurrence_id=? AND status IN ('pending','approved')`,
+    ).run(now, occurrenceId);
+    return this.workflowDecisionByOccurrence(occurrenceId);
+  }
+
+  consumeWorkflowDecision(occurrenceId: string, now: number): WorkflowDecisionView | null {
+    const result = this.stmt(
+      `UPDATE workflow_decisions SET status='consumed', consumed_at=?
+       WHERE occurrence_id=? AND status='approved'`,
+    ).run(now, occurrenceId);
+    return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
+  }
+
   /** Advance the absolute cost threshold by its original fixed allowance window. */
   rearmSessionCostBudget(id: string, observedCostUsd: number, now: number): number | null {
     const row = this.stmt(
@@ -12129,8 +12333,8 @@ export class ControlPlaneDb {
     this.stmt(
       `INSERT INTO governance_audit
        (audit_id, session_id, request_id, approval_kind, stage, outcome, actor_kind, actor_id,
-        scope, content_digest, policy_rule, governance_policy_id, option_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        scope, content_digest, policy_rule, governance_policy_id, option_id, workflow_decision, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       entry.auditId,
       entry.scope.sessionId,
@@ -12145,6 +12349,7 @@ export class ControlPlaneDb {
       entry.policyRule ? JSON.stringify(entry.policyRule) : null,
       entry.governancePolicyId ?? null,
       entry.optionId ?? null,
+      entry.workflowDecision ? JSON.stringify(entry.workflowDecision) : null,
       entry.timestamp,
     );
     return entry;
@@ -12156,7 +12361,7 @@ export class ControlPlaneDb {
   policyHookDecisionAudit(sessionId: string, requestId: string): GovernanceAuditEntry | null {
     const row = this.stmt(
       `SELECT audit_id, request_id, approval_kind, stage, outcome, actor_kind, actor_id,
-              scope, content_digest, policy_rule, governance_policy_id, option_id, created_at
+              scope, content_digest, policy_rule, governance_policy_id, option_id, workflow_decision, created_at
        FROM governance_audit
        WHERE session_id=? AND request_id=? AND approval_kind='policy_hook'
          AND stage='resolution' AND outcome IN ('allowed','denied','timed_out','aborted')
@@ -12174,6 +12379,7 @@ export class ControlPlaneDb {
       policy_rule: string | null;
       governance_policy_id: string | null;
       option_id: string | null;
+      workflow_decision: string | null;
       created_at: number;
     } | undefined;
     if (!row) return null;
@@ -12189,6 +12395,7 @@ export class ControlPlaneDb {
       ...(row.policy_rule ? { policyRule: JSON.parse(row.policy_rule) as GovernanceAuditEntry["policyRule"] } : {}),
       ...(row.governance_policy_id ? { governancePolicyId: row.governance_policy_id } : {}),
       ...(row.option_id ? { optionId: row.option_id } : {}),
+      ...(row.workflow_decision ? { workflowDecision: JSON.parse(row.workflow_decision) as NonNullable<GovernanceAuditEntry["workflowDecision"]> } : {}),
       timestamp: row.created_at,
     };
   }
@@ -12250,7 +12457,7 @@ export class ControlPlaneDb {
     if (before !== undefined && !cursor) return null;
     const rows = this.stmt(
       `SELECT audit_id, request_id, approval_kind, stage, outcome, actor_kind, actor_id,
-              scope, content_digest, policy_rule, governance_policy_id, option_id, created_at, row_id
+              scope, content_digest, policy_rule, governance_policy_id, option_id, workflow_decision, created_at, row_id
        FROM governance_audit
        WHERE session_id=?
          AND (? IS NULL OR created_at < ? OR (created_at = ? AND row_id < ?))
@@ -12275,6 +12482,7 @@ export class ControlPlaneDb {
       policy_rule: string | null;
       governance_policy_id: string | null;
       option_id: string | null;
+      workflow_decision: string | null;
       created_at: number;
       row_id: number;
     }>;
@@ -12292,6 +12500,7 @@ export class ControlPlaneDb {
       ...(row.policy_rule ? { policyRule: JSON.parse(row.policy_rule) as GovernanceAuditEntry["policyRule"] } : {}),
       ...(row.governance_policy_id ? { governancePolicyId: row.governance_policy_id } : {}),
       ...(row.option_id ? { optionId: row.option_id } : {}),
+      ...(row.workflow_decision ? { workflowDecision: JSON.parse(row.workflow_decision) as NonNullable<GovernanceAuditEntry["workflowDecision"]> } : {}),
       timestamp: row.created_at,
     }));
     const oldest = entries[0];
@@ -14708,6 +14917,13 @@ export class ControlPlaneDb {
       parentControl: row.parent_control === "questions" || row.parent_control === "questions_and_approvals"
         ? row.parent_control
         : "off",
+      parentControlPolicy: (() => {
+        const decisions = parentControlDecisionPolicyFromJson(row.parent_control_policy);
+        return {
+          revision: decisions ? row.parent_control_policy_revision : 0,
+          decisions: decisions ?? { ...HUMAN_ONLY_PARENT_CONTROL_POLICY },
+        };
+      })(),
       useWorktree: row.use_worktree === 1,
       worktreePath: row.worktree_path,
       worktrees: (() => {
@@ -19347,6 +19563,61 @@ function parseJson<T>(raw: string | null): T | null {
   } catch {
     return null;
   }
+}
+
+function parentControlDecisionPolicyFromJson(raw: string | null): ParentControlDecisionPolicy | null {
+  const candidate = parseJson<Record<string, unknown>>(raw);
+  if (!candidate || Array.isArray(candidate) ||
+      Object.keys(candidate).length !== WORKFLOW_DECISION_CATEGORIES.length ||
+      !WORKFLOW_DECISION_CATEGORIES.every((category) =>
+        candidate[category] === "human" || candidate[category] === "orchestrator")) return null;
+  return candidate as ParentControlDecisionPolicy;
+}
+
+function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
+  const row = raw as {
+    request_id?: string;
+    occurrence_id?: string;
+    session_id?: string;
+    controlling_session_id?: string;
+    category?: WorkflowDecisionView["category"];
+    resource_key?: string;
+    resource_snapshot?: string;
+    resource_digest?: string;
+    policy_revision?: number;
+    authority?: WorkflowDecisionAuthority;
+    status?: WorkflowDecisionStatus;
+    selected_option_id?: string | null;
+    evidence_reviewed?: string | null;
+    created_at?: number;
+    resolved_at?: number | null;
+    consumed_at?: number | null;
+  } | undefined;
+  if (!row?.request_id || !row.occurrence_id || !row.session_id || !row.controlling_session_id ||
+      !row.category || !row.resource_key || !row.resource_snapshot || !row.resource_digest ||
+      !Number.isSafeInteger(row.policy_revision) || !row.authority || !row.status ||
+      !Number.isSafeInteger(row.created_at)) return null;
+  const resourceSnapshot = parseJson<WorkflowDecisionView["resourceSnapshot"]>(row.resource_snapshot);
+  if (!resourceSnapshot) return null;
+  const evidenceReviewed = parseJson<string[]>(row.evidence_reviewed ?? null);
+  return {
+    requestId: row.request_id,
+    occurrenceId: row.occurrence_id,
+    sessionId: row.session_id,
+    controllingSessionId: row.controlling_session_id,
+    category: row.category,
+    resourceKey: row.resource_key,
+    resourceSnapshot,
+    resourceDigest: row.resource_digest,
+    policyRevision: row.policy_revision!,
+    authority: row.authority,
+    status: row.status,
+    ...(row.selected_option_id ? { selectedOptionId: row.selected_option_id } : {}),
+    ...(evidenceReviewed ? { evidenceReviewed } : {}),
+    createdAt: row.created_at!,
+    ...(row.resolved_at != null ? { resolvedAt: row.resolved_at } : {}),
+    ...(row.consumed_at != null ? { consumedAt: row.consumed_at } : {}),
+  };
 }
 
 function pendingApprovalWithOccurrenceIds(

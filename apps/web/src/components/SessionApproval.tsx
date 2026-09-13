@@ -328,7 +328,7 @@ export function SessionApprovalBanner({
   const approval = session.pendingApproval!;
   const contextId = useId();
   const isPolicy = isPolicyApproval(approval);
-  const decisionNeedsRunner = approval.kind !== "policy_hook";
+  const decisionNeedsRunner = approval.kind !== "policy_hook" && approval.kind !== "workflow_decision";
 
   const decide = async (optionId: string | null) => {
     setBusy(true);
@@ -361,14 +361,16 @@ export function SessionApprovalBanner({
   return (
     <section
       className={`approval-bar${isPolicy ? " cost-budget" : ""}`}
-      aria-label={approval.kind === "authentication" ? "Authentication Required" : "Agent Approval Required"}
+      aria-label={approval.kind === "authentication" ? "Authentication Required"
+        : approval.kind === "workflow_decision" ? "Workflow Decision Required" : "Agent Approval Required"}
     >
       <div className="approval-main">
         <span className="approval-icon" aria-hidden="true">
           {approval.kind === "cost_budget" || approval.kind === "cost_checkpoint" ? "💰"
             : approval.kind === "daily_budget" ? "📅"
               : approval.kind === "cost_unpriced" ? "❓"
-                : approval.kind === "max_tool_calls" ? "🧰" : approval.kind === "authentication" ? "🔑" : "🔐"}
+                : approval.kind === "max_tool_calls" ? "🧰" : approval.kind === "authentication" ? "🔑"
+                  : approval.kind === "workflow_decision" ? "🛡️" : "🔐"}
         </span>
         <span className="approval-text">
           {approval.title}

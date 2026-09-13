@@ -79,7 +79,7 @@ test("HTTP agent management scopes descendants and composes governance policy vi
     assert.ok(healthy, logs);
     const live = ControlPlaneDb.open(database);
     try {
-      for (const mode of ["normal", "orchestrator", "policy-agent"]) {
+      for (const mode of ["normal", "orchestrator", "orchestrator-child", "policy-agent"]) {
         live.updateSessionStatus(mode, "running", Date.now());
         assert.equal(live.setAgentControlCredential(mode, "r", hashToken(`token-${mode}`), Date.now()), true);
       }
@@ -127,6 +127,55 @@ test("HTTP agent management scopes descendants and composes governance policy vi
           });
         assert.equal((await humanRequest("parent-control", { mode: "questions" })).status, 200,
           "the owning human can enable Parent Control");
+        assert.equal((await humanRequest("parent-control-policy", { expectedRevision: 0, decisions: {
+          implementation_question: "orchestrator",
+          pr_merge: "human",
+          merged_branch_deletion: "human",
+          follow_up_issue_publication: "human",
+          ui_evidence_approval: "human",
+        } })).status, 200, "only the owning human can delegate one typed category");
+        const childRequest = (operation: string, body: unknown, method = "POST") => fetch(
+          `http://127.0.0.1:${port}/api/sessions/${mode}-child/${operation}`, {
+            method, signal: AbortSignal.timeout(3000), headers: {
+              authorization: `Bearer token-${mode}-child`,
+              [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: `${mode}-child`,
+              "content-type": "application/json",
+            },
+            ...(method === "POST" ? { body: JSON.stringify(body) } : {}),
+          });
+        const snapshot = {
+          category: "implementation_question",
+          question: "Choose the bounded implementation",
+          options: [
+            { optionId: "safe", label: "Safe Option" },
+            { optionId: "alternative", label: "Alternative Option" },
+          ],
+          recommendedOptionId: "safe",
+        } as const;
+        const createdResponse = await childRequest("workflow-decisions", {
+          requestId: "implementation-1", resourceKey: "implementation:fixture", resourceSnapshot: snapshot,
+        });
+        assert.equal(createdResponse.status, 201, "the exact child credential can create a typed decision");
+        const created = await createdResponse.json() as { occurrenceId: string };
+        assert.equal((await childRequest(`workflow-decisions/${created.occurrenceId}`, undefined, "GET")).status, 200);
+        assert.equal((await request(`${mode}-child`, `workflow-decisions/${created.occurrenceId}/consume`, {
+          resourceSnapshot: snapshot,
+        })).status, 403, "an ancestor credential cannot pose as the consuming child");
+        const typedRequests = await request(mode, "descendant-requests", undefined, "GET");
+        assert.equal(typedRequests.status, 200);
+        assert.equal(((await typedRequests.json() as { requests: Array<{ occurrenceId: string }> }).requests)
+          .some((candidate) => candidate.occurrenceId === created.occurrenceId), true,
+        "the controlling Orchestrator sees only its delegated typed request");
+        assert.equal((await request(mode, "descendant-requests/resolve", {
+          sessionId: `${mode}-child`, occurrenceId: created.occurrenceId,
+          resolution: { action: "resolve_workflow_decision", outcome: "approve", selectedOptionId: "safe" },
+        })).status, 200, "the assigned Orchestrator can resolve the typed category");
+        assert.equal((await childRequest(`workflow-decisions/${created.occurrenceId}/consume`, {
+          resourceSnapshot: snapshot,
+        })).status, 200, "the matching child consumes immediately before the exact action");
+        assert.equal((await childRequest(`workflow-decisions/${created.occurrenceId}/consume`, {
+          resourceSnapshot: snapshot,
+        })).status, 409, "the grant cannot be replayed");
         assert.equal((await humanRequest("descendant-requests/resolve", {
           sessionId: `${mode}-child`, occurrenceId: "request", resolution: { action: "dismiss" },
         })).status, 403, "human credentials cannot use the parent-agent resolution route");
@@ -160,8 +209,8 @@ test("HTTP agent management scopes descendants and composes governance policy vi
       assert.equal((await archived.json() as { archived: boolean }).archived, false);
       assert.equal((await request(target, "", undefined, "GET")).status, 200, "archive retains the session");
       const idleArchive = await request(`${mode}-child`, "archive", { archived: true });
-      assert.equal(idleArchive.status, 200);
-      assert.equal((await idleArchive.json() as { archived: boolean }).archived, true);
+      assert.equal(idleArchive.status, mode === "orchestrator" ? 202 : 200);
+      assert.equal((await idleArchive.json() as { archived: boolean }).archived, mode !== "orchestrator");
       const ownWorktree = await request(mode, "worktrees", {});
       assert.equal(ownWorktree.status, mode === "orchestrator" ? 404 : 400);
       const childWorktree = await request(`${mode}-child`, "worktrees", {});

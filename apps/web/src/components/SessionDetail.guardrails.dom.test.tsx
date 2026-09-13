@@ -4,7 +4,14 @@ import { after, before, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { DescendantRequestView, ParentControlMode, SessionConfig, SessionView } from "@wollipog/protocol";
+import type {
+  DescendantRequestView,
+  ParentControlMode,
+  SessionConfig,
+  SessionView,
+  WorkflowDecisionAuthority,
+  WorkflowDecisionCategory,
+} from "@wollipog/protocol";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -143,17 +150,28 @@ test("the Composer guardrails expose and persist the concurrent live-child limit
 
 test("the Composer exposes human-controlled Parent Control only for Orchestrator sessions", async () => {
   const selected: ParentControlMode[] = [];
+  const typed: Array<[WorkflowDecisionCategory, WorkflowDecisionAuthority]> = [];
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   const render = (permissionMode: string) => root.render(<ComposerPlusMenu
-    session={{ permissionMode, parentControl: "off", costBudgetUsd: null,
+    session={{ permissionMode, parentControl: "off", parentControlPolicy: {
+      revision: 3,
+      decisions: {
+        implementation_question: "human",
+        pr_merge: "human",
+        merged_branch_deletion: "human",
+        follow_up_issue_publication: "human",
+        ui_evidence_approval: "human",
+      },
+    }, costBudgetUsd: null,
       costCheckpointsUsd: null, maxToolCalls: null } as SessionView}
     planActive={false}
     planSupported={false}
     onTogglePlan={() => {}}
     onApply={() => {}}
     onSetParentControl={(mode) => selected.push(mode)}
+    onSetParentControlPolicy={(category, authority) => typed.push([category, authority])}
     disabled={false}
     imageMimeTypes={[]}
     onAttachImages={() => {}}
@@ -174,7 +192,20 @@ test("the Composer exposes human-controlled Parent Control only for Orchestrator
     assert.ok(questions);
     await act(async () => fireDomEvent.click(questions));
     assert.deepEqual(selected, ["questions"]);
+    const mergeAuthority = container.querySelector<HTMLButtonElement>('[aria-label="PR Merge Approval: Human"]');
+    assert.ok(mergeAuthority, "each sensitive workflow category has its own authority control");
+    await act(async () => fireDomEvent.keyDown(mergeAuthority, { key: "ArrowDown" }));
+    const authorityOptions = container.querySelector<HTMLElement>('[role="listbox"][aria-label="PR Merge Approval"]');
+    assert.ok(authorityOptions);
+    await act(async () => fireDomEvent.keyDown(authorityOptions, { key: "ArrowDown" }));
+    await act(async () => fireDomEvent.keyDown(authorityOptions, { key: "Enter" }));
+    assert.deepEqual(typed, [["pr_merge", "orchestrator"]]);
+    for (const label of [
+      "Implementation Questions", "PR Merge Approval", "Merged Branch Deletion",
+      "Follow-Up Issue Publication", "UI Evidence Approval",
+    ]) assert.ok(container.querySelector(`[aria-label^="${label}:"]`), `${label} is explicitly labelled`);
     assert.match(container.textContent ?? "", /Only an authenticated human can change/);
+    assert.match(container.textContent ?? "", /unconsumed approvals are revoked/);
   } finally {
     await act(async () => root.unmount());
     container.remove();

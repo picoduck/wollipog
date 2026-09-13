@@ -136,6 +136,36 @@ update Wollipog or omit effort; it never retries without the value. Older client
 this option and must be upgraded before a caller can request it. Calls that omit effort remain
 compatible with the protocol-v100 Agent Control creation contract.
 
+## Typed Parent Control Decisions
+
+Protocol v139 lets a human assign five workflow decisions independently to the human or the
+controlling Orchestrator: implementation questions, pull-request merge approval, deletion of an
+already-merged branch, publication of a sanitized follow-up issue, and UI-evidence approval. The
+policy is revisioned. Every request records the exact controlling ancestor, child, category,
+authority, policy revision, and a digest of its validated resource snapshot. A policy change,
+ancestry change, audience loss, changed resource snapshot, duplicate response, or superseding
+request fails closed. Approval is one-shot: the child must consume it against the same snapshot
+immediately before starting the action.
+Consumption records that the external action may have started. A later policy change can revoke
+only approvals that have not been consumed; it does not claim to roll back an action already in
+progress.
+
+The control plane owns this lifecycle. A generic question answer or provider permission response
+cannot satisfy a typed workflow decision. Authentication, identity, governance-policy changes,
+secret access, and persistent permission grants are not typed categories and remain human-only.
+The merge snapshot binds the repository, pull request, exact head SHA, cross-model review result,
+and passing required checks from that same head. Branch deletion binds the merged branch and merge
+commit and requires an explicit empty dependent-pull-request check. Follow-up publication binds the
+sanitized repository, title, body, and labels. UI approval binds immutable evidence identifiers,
+URIs, and SHA-256 digests, and resolution records which evidence was actually inspected.
+
+This boundary governs actions performed through Wollipog's workflow-decision tools. It cannot
+intercept a separate shell, forge client, browser, or other credential that can independently
+perform the action. Orchestrator instructions must therefore require `request_workflow_decision`,
+the assigned authority's exact resolution, and `consume_workflow_decision` immediately before
+using a supported mutation path. Audit entries retain bounded provenance, snapshot and rationale
+digests, and outcomes without retaining raw rationale or credentials.
+
 Before creating a child, an Orchestrator can call `get_agent_capabilities` with an exact `runnerId`
 and `agentId`. The matching CLI command is:
 

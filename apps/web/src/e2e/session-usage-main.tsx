@@ -214,7 +214,7 @@ if (composerFixture) {
     name: "Fast",
     description: "Faster responses that use more ChatGPT credits.",
   }];
-  runner.protocolVersion = 136;
+  runner.protocolVersion = isOrchestrator ? 139 : 136;
   runner.agents = [{
     id: isClaude ? "claude" : "codex",
     name: agentName,
@@ -262,6 +262,19 @@ if (composerFixture) {
     : params.get("unsafe") === "1"
       ? isClaude ? "bypassPermissions" : "danger-full-access"
       : permissionModes[0]!;
+  if (isOrchestrator) {
+    session.parentControl = "questions_and_approvals";
+    session.parentControlPolicy = {
+      revision: 4,
+      decisions: {
+        implementation_question: "orchestrator",
+        pr_merge: "human",
+        merged_branch_deletion: "human",
+        follow_up_issue_publication: "orchestrator",
+        ui_evidence_approval: "human",
+      },
+    };
+  }
   session.serviceTier = serviceTiers ? "fast" : null;
   session.contextWindow = 1_000_000;
 }

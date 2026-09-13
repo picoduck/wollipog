@@ -1559,6 +1559,238 @@ test("opt-in Parent Control resolves exact nested request occurrences with agent
   } finally { db.close(); }
 });
 
+test("typed workflow decisions isolate categories and fail closed across stale policy, snapshot, replay, and ancestry", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+    orchestrator.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const parent = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, parentControl: "off",
+    });
+    assert.ok(parent.ok && parent.data, parent.error);
+    db.updateSessionStatus(parent.data.id, "running", Date.now());
+    const createChild = (parentSessionId: string, title: string) => {
+      const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, title };
+      let created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId });
+      if (created.status === 428) {
+        const spawnApproval = db.getSession(parentSessionId)!.pendingApproval!;
+        assert.ok(svc.approve(parentSessionId, spawnApproval.requestId, "allow").ok);
+        created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId });
+      }
+      assert.ok(created.ok && created.data, created.error);
+      db.updateSessionStatus(created.data.id, "running", Date.now());
+      return created.data;
+    };
+    const child = createChild(parent.data.id, "Decision Child");
+    const siblingParent = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" },
+    });
+    assert.ok(siblingParent.ok && siblingParent.data);
+    db.updateSessionStatus(siblingParent.data.id, "running", Date.now());
+
+    const decisions = {
+      implementation_question: "human",
+      pr_merge: "orchestrator",
+      merged_branch_deletion: "human",
+      follow_up_issue_publication: "human",
+      ui_evidence_approval: "orchestrator",
+    } as const;
+    const configured = svc.setParentControlPolicy(parent.data.id, decisions, 0);
+    assert.ok(configured.ok && configured.data, configured.error);
+    assert.equal(configured.data.parentControlPolicy?.revision, 1);
+
+    const mergeSnapshot = {
+      category: "pr_merge" as const,
+      repository: "picoduck/wollipog",
+      pullRequest: 123,
+      headSha: "a".repeat(40),
+      reviewResult: "merge" as const,
+      requiredChecks: {
+        headSha: "a".repeat(40), status: "passed" as const, checkedAt: 10,
+        checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }],
+      },
+    };
+    const merge = svc.createWorkflowDecision(child.id, {
+      requestId: "merge-1", resourceKey: "picoduck/wollipog#123", resourceSnapshot: mergeSnapshot,
+    });
+    assert.ok(merge.ok && merge.data, merge.error);
+    assert.equal(merge.data.authority, "orchestrator");
+    assert.equal(merge.data.policyRevision, 1);
+    assert.equal(db.getSession(child.id)?.pendingApproval?.kind, "workflow_decision");
+    assert.deepEqual(svc.descendantRequests(parent.data.id, () => true).data?.requests.map((item) => item.occurrenceId), [
+      merge.data.occurrenceId,
+    ]);
+    assert.equal(svc.approve(
+      child.id, merge.data.occurrenceId, "approve", { kind: "human", id: "owner" }, undefined, () => true,
+    ).status, 403, "a human cannot substitute for the category's Orchestrator authority");
+    assert.ok([403, 404].includes(svc.resolveDescendantRequest(
+      siblingParent.data.id, child.id, merge.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true,
+    ).status), "a different Orchestrator cannot cross the bound ancestry");
+    assert.ok(svc.resolveDescendantRequest(
+      parent.data.id, child.id, merge.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve", rationale: "Reviewed exact head and checks." },
+      () => true,
+    ).ok);
+    assert.equal(svc.resolveDescendantRequest(
+      parent.data.id, child.id, merge.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true,
+    ).status, 409, "a duplicate resolution is rejected");
+    assert.equal(svc.consumeWorkflowDecision(child.id, merge.data.occurrenceId, {
+      resourceSnapshot: { ...mergeSnapshot, pullRequest: 124 },
+    }).status, 409, "a changed resource snapshot revokes the approval before action start");
+    assert.equal(db.workflowDecisionByOccurrence(merge.data.occurrenceId)?.status, "revoked");
+
+    const exact = svc.createWorkflowDecision(child.id, {
+      requestId: "merge-2", resourceKey: "picoduck/wollipog#124", resourceSnapshot: { ...mergeSnapshot, pullRequest: 124 },
+    });
+    assert.ok(exact.ok && exact.data);
+    assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, exact.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+    assert.equal(svc.consumeWorkflowDecision(child.id, exact.data.occurrenceId, {
+      resourceSnapshot: { ...mergeSnapshot, pullRequest: 124 },
+    }).data?.status, "consumed");
+    assert.equal(svc.consumeWorkflowDecision(child.id, exact.data.occurrenceId, {
+      resourceSnapshot: { ...mergeSnapshot, pullRequest: 124 },
+    }).status, 409, "authorization is one-shot");
+
+    const publicationSnapshot = {
+      category: "follow_up_issue_publication" as const,
+      repository: "picoduck/wollipog",
+      sanitizedTitle: "Bounded Follow-Up",
+      sanitizedBody: "Exact sanitized issue body.",
+      labels: ["enhancement"],
+    };
+    const publication = svc.createWorkflowDecision(child.id, {
+      requestId: "publication-1", resourceKey: "follow-up:bounded", resourceSnapshot: publicationSnapshot,
+    });
+    assert.ok(publication.ok && publication.data);
+    assert.equal(publication.data.authority, "human");
+    assert.deepEqual(svc.descendantRequests(parent.data.id, () => true).data?.requests, [],
+      "a human-owned category is isolated from the Orchestrator inbox");
+    assert.equal(svc.resolveDescendantRequest(parent.data.id, child.id, publication.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).status, 403);
+    assert.ok(svc.approve(child.id, publication.data.occurrenceId, "approve",
+      { kind: "human", id: "owner" }, undefined, () => true).ok);
+    assert.equal(svc.consumeWorkflowDecision(child.id, publication.data.occurrenceId, {
+      resourceSnapshot: { ...publicationSnapshot, labels: ["bug"] },
+    }).status, 409, "publication approval binds exact repository, title, body, and labels");
+
+    const uiSnapshot = {
+      category: "ui_evidence_approval" as const,
+      evidence: [{ evidenceId: "after", uri: "https://evidence.example/after.png", sha256: "b".repeat(64) }],
+    };
+    const ui = svc.createWorkflowDecision(child.id, {
+      requestId: "ui-1", resourceKey: "pr-123-ui", resourceSnapshot: uiSnapshot,
+    });
+    assert.ok(ui.ok && ui.data);
+    assert.equal(svc.resolveDescendantRequest(parent.data.id, child.id, ui.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).status, 400,
+    "an Orchestrator cannot claim UI approval without identifying inspected evidence");
+    assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, ui.data.occurrenceId, {
+      action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ["after"],
+    }, () => true).ok);
+
+    const pending = svc.createWorkflowDecision(child.id, {
+      requestId: "merge-revoked", resourceKey: "picoduck/wollipog#125",
+      resourceSnapshot: { ...mergeSnapshot, pullRequest: 125 },
+    });
+    assert.ok(pending.ok && pending.data);
+    assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, pending.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+    assert.ok(svc.setParentControlPolicy(parent.data.id, { ...decisions, implementation_question: "orchestrator" }, 1).ok);
+    assert.equal(db.workflowDecisionByOccurrence(pending.data.occurrenceId)?.status, "revoked",
+      "any policy revision revokes unconsumed approval bound to the old revision");
+
+    const first = svc.createWorkflowDecision(child.id, {
+      requestId: "supersede-1", resourceKey: "picoduck/wollipog#126",
+      resourceSnapshot: { ...mergeSnapshot, pullRequest: 126 },
+    });
+    const second = svc.createWorkflowDecision(child.id, {
+      requestId: "supersede-2", resourceKey: "picoduck/wollipog#126",
+      resourceSnapshot: { ...mergeSnapshot, pullRequest: 126, headSha: "c".repeat(40),
+        requiredChecks: { ...mergeSnapshot.requiredChecks, headSha: "c".repeat(40) } },
+    });
+    assert.ok(first.ok && first.data && second.ok && second.data);
+    assert.equal(db.workflowDecisionByOccurrence(first.data.occurrenceId)?.status, "superseded");
+    assert.equal(svc.createWorkflowDecision(child.id, {
+      requestId: "supersede-2", resourceKey: "different", resourceSnapshot: mergeSnapshot,
+    }).status, 409, "idempotency keys cannot be replayed with different content");
+    assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, second.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+    assert.equal(svc.consumeWorkflowDecision(child.id, second.data.occurrenceId, {
+      resourceSnapshot: { ...mergeSnapshot, pullRequest: 126, headSha: "c".repeat(40),
+        requiredChecks: { ...mergeSnapshot.requiredChecks, headSha: "c".repeat(40) } },
+    }, (sessionId) => sessionId !== parent.data!.id).status, 409,
+    "loss of the controlling session's current audience revokes an unconsumed approval");
+
+    assert.equal(svc.createWorkflowDecision(child.id, {
+      requestId: "unsafe-delete", resourceKey: "branch:fix/test", resourceSnapshot: {
+        category: "merged_branch_deletion", repository: "picoduck/wollipog", branch: "fix/test",
+        merged: true, mergeCommitSha: "d".repeat(40),
+        dependentPullRequests: { checkedAt: 20, open: [999] },
+      },
+    }).status, 409, "dependent PR evidence blocks branch deletion authorization");
+    for (const category of ["authentication", "credentials", "identity_administration", "governance_gate", "persistent_permission"]) {
+      assert.equal(svc.createWorkflowDecision(child.id, {
+        requestId: `protected-${category}`, resourceKey: category, resourceSnapshot: { category } as never,
+      }).status, 400, `${category} cannot become a delegated workflow category`);
+    }
+    assert.equal(svc.consumeWorkflowDecision(child.id, "ordinary-question", { resourceSnapshot: mergeSnapshot }).status, 404,
+      "a generic structured question cannot substitute for a typed workflow gate");
+
+    const downgrade = svc.createWorkflowDecision(child.id, {
+      requestId: "merge-downgrade", resourceKey: "picoduck/wollipog#128",
+      resourceSnapshot: { ...mergeSnapshot, pullRequest: 128 },
+    });
+    assert.ok(downgrade.ok && downgrade.data);
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.typedWorkflowDecisionDelegation - 1);
+    assert.equal(svc.descendantRequests(parent.data.id, () => true).data?.requests.some(
+      (request) => request.occurrenceId === downgrade.data!.occurrenceId,
+    ), false, "an unsupported peer cannot surface granular authority as actionable");
+    assert.equal(svc.resolveDescendantRequest(parent.data.id, child.id, downgrade.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).status, 409);
+    assert.equal(db.workflowDecisionByOccurrence(downgrade.data.occurrenceId)?.status, "revoked");
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+
+    const audits = svc.governanceAudit(child.id);
+    assert.ok(audits.some((entry) => entry.workflowDecision?.category === "pr_merge" &&
+      entry.workflowDecision.parentSessionId === parent.data!.id &&
+      entry.workflowDecision.childSessionId === child.id &&
+      entry.workflowDecision.policyRevision === 1 &&
+      entry.workflowDecision.resourceDigest === merge.data!.resourceDigest &&
+      entry.actor.kind === "agent"));
+    assert.ok(audits.some((entry) => entry.outcome === "consumed"));
+    assert.ok(audits.every((entry) => !JSON.stringify(entry).includes("Reviewed exact head and checks.")),
+      "audit stores a rationale digest rather than raw rationale");
+    assert.equal(hub.sentOfType("resolve_permission").some((message) =>
+      message.requestId === merge.data!.occurrenceId), false,
+    "typed decisions never fall through to a runner permission response");
+
+    const reconnect = svc.createWorkflowDecision(child.id, {
+      requestId: "merge-reconnect", resourceKey: "picoduck/wollipog#127",
+      resourceSnapshot: { ...mergeSnapshot, pullRequest: 127 },
+    });
+    assert.ok(reconnect.ok && reconnect.data);
+    svc.failRunnerSessions(RUNNER_ID);
+    assert.equal(db.getSession(child.id)?.pendingApproval, null,
+      "a provisional disconnect clears the session projection");
+    svc.reconcileRunnerSessions(RUNNER_ID, [parent.data.id, child.id, siblingParent.data.id]);
+    assert.equal(db.getSession(child.id)?.pendingApproval?.requestId, reconnect.data.occurrenceId,
+      "reconnect restores the server-owned request without minting a new occurrence");
+    svc.onSessionStatus(child.id, "completed");
+    assert.equal(db.workflowDecisionByOccurrence(reconnect.data.occurrenceId)?.status, "revoked",
+      "an authoritative terminal transition revokes approvals the action never consumed");
+  } finally { db.close(); }
+});
+
 test("question policy answers avoid input state, record provenance, and survive history cache resets", async () => {
   const { db, svc, hub } = makeHarness();
   const local = db.localIdentityContext();

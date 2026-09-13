@@ -66,6 +66,8 @@ import {
   type CreateWorkflowArtifactRequest,
   type CreateSessionRequest,
   type DescendantRequestResolution,
+  type CreateWorkflowDecisionRequest,
+  type ConsumeWorkflowDecisionRequest,
   type CreateWorkspaceReferenceRequest,
   type CreateProjectRequest,
   type UpdateProjectRequest,
@@ -79,6 +81,7 @@ import {
   type ResourceOwner,
   type ResourceScope,
   type ParentControlMode,
+  type ParentControlDecisionPolicy,
   type SessionView,
   type ShellView,
   type UserStatus,
@@ -3085,6 +3088,56 @@ app.post("/api/sessions/:id/parent-control", async (req, reply) => {
   return respond(reply, svc.setParentControl(id, mode));
 });
 
+app.post("/api/sessions/:id/parent-control-policy", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const human = requestHuman(req);
+  if (!human) return reply.code(403).send({ error: "only an authenticated human may change Parent Control policy" });
+  if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
+  const body = req.body as { decisions?: ParentControlDecisionPolicy; expectedRevision?: number } | undefined;
+  return respond(reply, svc.setParentControlPolicy(id, body?.decisions, body?.expectedRevision));
+});
+
+app.post("/api/sessions/:id/workflow-decisions", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching session credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  return respond(reply, svc.createWorkflowDecision(
+    id,
+    req.body as CreateWorkflowDecisionRequest,
+    (sessionId) => db.canAccessSession(principal, sessionId),
+  ));
+});
+
+app.get("/api/sessions/:id/workflow-decisions/:occurrenceId", async (req, reply) => {
+  const { id, occurrenceId } = req.params as { id: string; occurrenceId: string };
+  const principal = requestPrincipal(req);
+  if (!principal || (principal.kind === "agent" && principal.credentialSessionId !== id)) {
+    return reply.code(403).send({ error: "a matching session credential or authenticated human is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  if (!validParentControlCoordinate(occurrenceId)) return reply.code(400).send({ error: "invalid occurrenceId" });
+  return respond(reply, svc.workflowDecision(id, occurrenceId));
+});
+
+app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/consume", async (req, reply) => {
+  const { id, occurrenceId } = req.params as { id: string; occurrenceId: string };
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching session credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  if (!validParentControlCoordinate(occurrenceId)) return reply.code(400).send({ error: "invalid occurrenceId" });
+  return respond(reply, svc.consumeWorkflowDecision(
+    id,
+    occurrenceId,
+    req.body as ConsumeWorkflowDecisionRequest,
+    (sessionId) => db.canAccessSession(principal, sessionId),
+  ));
+});
+
 app.get("/api/sessions/:id/descendant-requests", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const principal = requestPrincipal(req);
@@ -3116,7 +3169,9 @@ app.post("/api/sessions/:id/descendant-requests/resolve", async (req, reply) => 
   const resolution = body.resolution;
   const valid = resolution.action === "dismiss" ||
     (resolution.action === "answer" && resolution.answers && typeof resolution.answers === "object" && !Array.isArray(resolution.answers)) ||
-    ((resolution.action === "approve" || resolution.action === "deny") && typeof resolution.optionId === "string" && resolution.optionId);
+    ((resolution.action === "approve" || resolution.action === "deny") && typeof resolution.optionId === "string" && resolution.optionId) ||
+    (resolution.action === "resolve_workflow_decision" &&
+      (resolution.outcome === "approve" || resolution.outcome === "deny"));
   if (!valid) return reply.code(400).send({ error: "invalid descendant request resolution" });
   return respond(reply, svc.resolveDescendantRequest(
     id,
@@ -3588,10 +3643,11 @@ app.post("/api/sessions/:id/policy-hook", { bodyLimit: 128 * 1024 }, async (req,
 app.post("/api/sessions/:id/approve", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const body = req.body as ApproveRequest;
+  const human = requestHuman(req);
   return respond(reply, svc.approve(id, body.requestId, body.optionId ?? null, {
     kind: "human",
     id: humanActorId(req),
-  }));
+  }, undefined, (sessionId) => human ? db.canAccessSession(human, sessionId) : false));
 });
 
 app.get("/api/sessions/:id/governance-audit", async (req, reply) => {

@@ -3947,14 +3947,65 @@ test("Parent Control defaults off and persists opt-in across restart", () => {
   try {
     const initial = ControlPlaneDb.open(path);
     initial.registerRunner(meta(), 500);
-    assert.equal(initial.createSession(newSession()).parentControl, "off");
+    const created = initial.createSession(newSession());
+    assert.equal(created.parentControl, "off");
+    assert.deepEqual(created.parentControlPolicy, {
+      revision: 0,
+      decisions: {
+        implementation_question: "human",
+        pr_merge: "human",
+        merged_branch_deletion: "human",
+        follow_up_issue_publication: "human",
+        ui_evidence_approval: "human",
+      },
+    }, "legacy rows gain no implicit granular delegation");
     initial.updateSessionParentControl("sess-1", "questions_and_approvals", 2_000);
+    assert.deepEqual(initial.updateSessionParentControlPolicy("sess-1", {
+      implementation_question: "human",
+      pr_merge: "orchestrator",
+      merged_branch_deletion: "human",
+      follow_up_issue_publication: "human",
+      ui_evidence_approval: "human",
+    }, 2_000, 0), {
+      revision: 1,
+      decisions: {
+        implementation_question: "human",
+        pr_merge: "orchestrator",
+        merged_branch_deletion: "human",
+        follow_up_issue_publication: "human",
+        ui_evidence_approval: "human",
+      },
+    });
+    assert.equal(initial.updateSessionParentControlPolicy("sess-1", {
+      implementation_question: "human", pr_merge: "human", merged_branch_deletion: "human",
+      follow_up_issue_publication: "human", ui_evidence_approval: "human",
+    }, 2_001, 0), null, "stale policy revisions cannot overwrite a newer human choice");
     assert.equal(initial.getSession("sess-1")?.parentControl, "questions_and_approvals");
     initial.close();
 
     const reopened = ControlPlaneDb.open(path);
     assert.equal(reopened.getSession("sess-1")?.parentControl, "questions_and_approvals");
+    assert.equal(reopened.getSession("sess-1")?.parentControlPolicy?.revision, 1);
+    assert.equal(reopened.getSession("sess-1")?.parentControlPolicy?.decisions.pr_merge, "orchestrator");
     reopened.close();
+
+    const malformed = new DatabaseSync(path);
+    malformed.prepare(
+      "UPDATE sessions SET parent_control_policy=?, parent_control_policy_revision=99 WHERE id='sess-1'",
+    ).run(JSON.stringify({ pr_merge: "orchestrator", future_category: "orchestrator" }));
+    malformed.close();
+    const conservative = ControlPlaneDb.open(path);
+    assert.deepEqual(conservative.getSession("sess-1")?.parentControlPolicy, {
+      revision: 0,
+      decisions: {
+        implementation_question: "human",
+        pr_merge: "human",
+        merged_branch_deletion: "human",
+        follow_up_issue_publication: "human",
+        ui_evidence_approval: "human",
+      },
+    }, "malformed or future granular policies fail closed after a rolling restart");
+    conservative.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
