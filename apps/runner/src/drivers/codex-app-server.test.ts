@@ -114,6 +114,46 @@ test("app-server launch enables Default-mode questions before the subcommand", (
   assert.deepEqual(base, ["/opt/codex.js", "-c", "model=default"], "configured arguments remain immutable");
 });
 
+const expectedInitializeParams = {
+  clientInfo: { name: "wollipog", version: "0.4.0" },
+  capabilities: { experimentalApi: true },
+};
+
+test("app-server initialization advertises the experimental API capability", async () => {
+  const child = fakeAgentProcess();
+  const initializeParams: unknown[] = [];
+  const driver = new CodexAppServerDriver({
+    command: "codex",
+    args: [],
+    cwd: "/tmp/work",
+    env: {},
+    config: {},
+    context: { kind: "native" },
+  }, {
+    onEvent: () => {},
+    onStderr: () => {},
+    onExit: () => {},
+  }, undefined, {
+    spawn: () => {
+      child.stdin.on("data", (chunk) => {
+        const message = JSON.parse(String(chunk).trim()) as { id?: number; method?: string; params?: unknown };
+        if (message.method !== "initialize") return;
+        initializeParams.push(message.params);
+        child.stdout.write(JSON.stringify({ id: message.id, result: { userAgent: "codex-test" } }) + "\n");
+      });
+      return child;
+    },
+    kill: () => {},
+  });
+
+  try {
+    await driver.initialize();
+    assert.deepEqual(initializeParams, [expectedInitializeParams]);
+  } finally {
+    driver.dispose();
+  }
+});
+
 test("an asynchronous app-server spawn error rejects initialization without waiting for close", async () => {
   const child = fakeAgentProcess();
   const stderr: string[] = [];
@@ -187,6 +227,7 @@ test("a close after an app-server spawn error does not report a duplicate exit",
 
 test("unsupported Default-mode question feature retries the unchanged app-server launch", async () => {
   const launches: string[][] = [];
+  const initializeParams: unknown[] = [];
   const stderr: string[] = [];
   const exits: Array<number | null> = [];
   const driver = new CodexAppServerDriver({
@@ -213,8 +254,9 @@ test("unsupported Default-mode question feature retries the unchanged app-server
         child.stdin.on("data", (chunk) => {
           for (const line of String(chunk).trim().split(/\r?\n/)) {
             if (!line) continue;
-            const message = JSON.parse(line) as { id?: number; method?: string };
+            const message = JSON.parse(line) as { id?: number; method?: string; params?: unknown };
             if (message.method === "initialize") {
+              initializeParams.push(message.params);
               child.stdout.write(JSON.stringify({ id: message.id, result: { userAgent: "old-codex" } }) + "\n");
             }
           }
@@ -231,6 +273,8 @@ test("unsupported Default-mode question feature retries the unchanged app-server
       ["--config", "model=default", "--enable", DEFAULT_MODE_QUESTION_FEATURE, "app-server"],
       ["--config", "model=default", "app-server"],
     ]);
+    assert.deepEqual(initializeParams, [expectedInitializeParams],
+      "the compatibility fallback must retain the same protocol capabilities");
     assert.equal(stderr.length, 1);
     assert.match(stderr[0]!, /continuing without Default-mode structured questions/);
     assert.doesNotMatch(stderr[0]!, /Unknown feature flag/);
