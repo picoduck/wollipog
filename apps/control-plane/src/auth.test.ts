@@ -24,10 +24,14 @@ test("orchestrator credentials expose only session management and governance rea
     ["POST", "/api/sessions/:id/worktrees"], ["POST", "/api/sessions/:id/archive"],
     ["GET", "/api/sessions/:id/descendant-requests"],
     ["POST", "/api/sessions/:id/descendant-requests/resolve"],
+    ["POST", "/api/sessions/:id/workflow-decisions"],
+    ["GET", "/api/sessions/:id/workflow-decisions/:occurrenceId"],
+    ["POST", "/api/sessions/:id/workflow-decisions/:occurrenceId/consume"],
   ]) assert.equal(isAgentControlApiRouteAllowed(method!, route!, "orchestrator"), true, route);
   for (const [method, route] of [
     ["POST", "/api/runs"], ["POST", "/api/sessions/:id/approve"],
     ["POST", "/api/sessions/:id/parent-control"],
+    ["POST", "/api/sessions/:id/parent-control-policy"],
     ["PUT", "/api/governance/policies/:policyId"], ["POST", "/api/artifacts/screenshots"],
     ["POST", "/api/workflow-instances/:instanceId/nodes/:nodeId/dispatch"],
   ]) assert.equal(isAgentControlApiRouteAllowed(method!, route!, "orchestrator"), false, route);
@@ -88,6 +92,9 @@ test("session-management REST access is method- and route-scoped to its publishe
     ["POST", "/api/sessions/:id/prompt"],
     ["POST", "/api/sessions/:id/restart"],
     ["POST", "/api/sessions/:id/config"],
+    ["POST", "/api/sessions/:id/workflow-decisions"],
+    ["GET", "/api/sessions/:id/workflow-decisions/:occurrenceId"],
+    ["POST", "/api/sessions/:id/workflow-decisions/:occurrenceId/consume"],
     ["POST", "/api/sessions/:id/worktrees"],
     ["POST", "/api/sessions/:id/worktrees/attach"],
     ["POST", "/api/sessions/:id/worktrees/select"],
@@ -108,6 +115,7 @@ test("session-management REST access is method- and route-scoped to its publishe
     ["GET", "/api/sessions/:id/descendant-requests"],
     ["POST", "/api/sessions/:id/descendant-requests/resolve"],
     ["POST", "/api/sessions/:id/parent-control"],
+    ["POST", "/api/sessions/:id/parent-control-policy"],
     ["POST", "/api/sessions/:id/git"],
     ["GET", "/api/devices"],
     ["POST", "/api/devices"],

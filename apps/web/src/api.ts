@@ -50,6 +50,7 @@ import type {
   OrganizationRole,
   ResourceOwner,
   ParentControlMode,
+  ParentControlDecisionPolicy,
   PodContextEntry,
   PodContextPage,
   PodOrchestrationActionResult,
@@ -850,6 +851,11 @@ export function createApiClient(transport: ApiTransport) {
     req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/parent-control`, {
       method: "POST",
       body: JSON.stringify({ mode }),
+    }),
+  setParentControlPolicy: (id: string, decisions: ParentControlDecisionPolicy, expectedRevision: number) =>
+    req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/parent-control-policy`, {
+      method: "POST",
+      body: JSON.stringify({ decisions, expectedRevision }),
     }),
   descendantRequests: (id: string, signal?: AbortSignal) =>
     req<{ requests: DescendantRequestView[] }>(

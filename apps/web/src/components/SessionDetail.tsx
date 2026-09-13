@@ -32,6 +32,8 @@ import {
   type SessionConfig,
   type DescendantRequestView,
   type ParentControlMode,
+  type WorkflowDecisionAuthority,
+  type WorkflowDecisionCategory,
   type SessionReminderView,
   type SessionView,
   type SourceLocation,
@@ -750,7 +752,10 @@ function SessionDetailLoaded({
     refreshAfterResolution: refreshDescendantRequestsAfterResolution,
   } = useDescendantRequestPolling({
     sessionId,
-    enabled: mode === "expanded" && conn === "online" && (session.parentControl ?? "off") !== "off",
+    enabled: mode === "expanded" && conn === "online" && (
+      (session.parentControl ?? "off") !== "off" ||
+      Object.values(session.parentControlPolicy?.decisions ?? {}).includes("orchestrator")
+    ),
   });
   const anchorRecoveryPending = eventHistory?.refreshing === true ||
     (conn === "online" && eventHistory?.everComplete !== true && eventHistory?.error == null);
@@ -5087,6 +5092,16 @@ function SessionDetailLoaded({
                         setError((cause as Error).message);
                       });
                     }}
+                    onSetParentControlPolicy={(category, authority) => {
+                      const policy = session.parentControlPolicy;
+                      if (!policy) return;
+                      void api.setParentControlPolicy(sessionId, {
+                        ...policy.decisions,
+                        [category]: authority,
+                      }, policy.revision).then(loadSession, (cause) => {
+                        setError((cause as Error).message);
+                      });
+                    }}
                     disabled={!canPrompt}
                     imageMimeTypes={allowedImageMimeTypes}
                     onAttachImages={addFiles}
@@ -6030,6 +6045,7 @@ export function ComposerPlusMenu({
   onTogglePlan,
   onApply,
   onSetParentControl,
+  onSetParentControlPolicy,
   disabled,
   imageMimeTypes,
   onAttachImages,
@@ -6040,6 +6056,7 @@ export function ComposerPlusMenu({
   onTogglePlan: (on?: boolean) => void;
   onApply: (patch: Partial<SessionConfig>) => void;
   onSetParentControl?: (mode: ParentControlMode) => void;
+  onSetParentControlPolicy?: (category: WorkflowDecisionCategory, authority: WorkflowDecisionAuthority) => void;
   disabled: boolean;
   /** Exactly the types the connected runner and selected model accept; empty when images cannot be sent. */
   imageMimeTypes: readonly string[];
@@ -6205,17 +6222,42 @@ export function ComposerPlusMenu({
             {session.permissionMode === "orchestrator" && (
               <div className="plus-budget">
                 <span className="plus-budget-prefix" aria-hidden="true">↯</span>
-                <Select<ParentControlMode>
-                  label="Parent Control"
-                  value={session.parentControl ?? "off"}
-                  onChange={(value) => onSetParentControl?.(value)}
-                  options={[
-                    { value: "off", label: "Off", description: "Keep descendant requests human-only." },
-                    { value: "questions", label: "Questions", description: "Delegate non-secret descendant questions." },
-                    { value: "questions_and_approvals", label: "Questions and Approvals", description: "Also delegate eligible one-time approvals." },
-                  ]}
-                />
-                <span className="muted">Only an authenticated human can change descendant request delegation.</span>
+                <div className="parent-control-settings">
+                  <div className="parent-control-setting">
+                    <span className="parent-control-setting-label">Descendant Requests</span>
+                    <Select<ParentControlMode>
+                      label="Parent Control"
+                      value={session.parentControl ?? "off"}
+                      onChange={(value) => onSetParentControl?.(value)}
+                      options={[
+                        { value: "off", label: "Off", description: "Keep descendant requests human-only." },
+                        { value: "questions", label: "Questions", description: "Delegate non-secret descendant questions." },
+                        { value: "questions_and_approvals", label: "Questions and Approvals", description: "Also delegate eligible one-time approvals." },
+                      ]}
+                    />
+                  </div>
+                  {session.parentControlPolicy && ([
+                    ["implementation_question", "Implementation Questions"],
+                    ["pr_merge", "PR Merge Approval"],
+                    ["merged_branch_deletion", "Merged Branch Deletion"],
+                    ["follow_up_issue_publication", "Follow-Up Issue Publication"],
+                    ["ui_evidence_approval", "UI Evidence Approval"],
+                  ] as Array<[WorkflowDecisionCategory, string]>).map(([category, label]) => (
+                    <div className="parent-control-setting" key={category}>
+                      <span className="parent-control-setting-label">{label}</span>
+                      <Select<WorkflowDecisionAuthority>
+                        label={label}
+                        value={session.parentControlPolicy!.decisions[category]}
+                        onChange={(value) => onSetParentControlPolicy?.(category, value)}
+                        options={[
+                          { value: "human", label: "Human", description: "Require a human decision for this exact workflow gate." },
+                          { value: "orchestrator", label: "Orchestrator", description: "Let the controlling Orchestrator review this typed gate." },
+                        ]}
+                      />
+                    </div>
+                  ))}
+                  <span className="muted parent-control-help">Only an authenticated human can change these assignments. Existing unconsumed approvals are revoked when the policy changes.</span>
+                </div>
               </div>
             )}
           </div>

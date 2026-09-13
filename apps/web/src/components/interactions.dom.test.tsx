@@ -10,6 +10,8 @@ import { SessionApprovalRegion } from "./SessionApproval.js";
 import { handleMenuKeyDown, useAccessibleMenu } from "./interactions.js";
 import { clearQuestionDrafts } from "../question-response.js";
 import { setQuestionResponseStyle } from "../question-response-style.js";
+import { api } from "../api.js";
+import { ApiProvider } from "../api-context.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
@@ -309,6 +311,76 @@ test("provider authentication card uses the visible Authentication Required acce
   );
   await act(async () => { root.unmount(); });
   container.remove();
+});
+
+test("UI evidence approval requires an explicit review acknowledgement and sends exact evidence ids", async () => {
+  const evidence = { evidenceId: "desktop-after", uri: "https://evidence.example/after.png", sha256: "a".repeat(64) };
+  const session = {
+    id: "session-evidence",
+    runnerId: "runner-1",
+    title: "Evidence Review",
+    status: "input_required",
+    pendingApproval: {
+      kind: "workflow_decision",
+      requestId: "workflow-evidence",
+      occurrenceId: "workflow-evidence",
+      title: "UI Evidence Approval Required",
+      options: [
+        { optionId: "approve", name: "Approve", kind: "allow_once" },
+        { optionId: "deny", name: "Deny", kind: "reject_once" },
+      ],
+      workflowDecision: {
+        requestId: "evidence-request",
+        occurrenceId: "workflow-evidence",
+        sessionId: "session-evidence",
+        controllingSessionId: "session-parent",
+        category: "ui_evidence_approval",
+        resourceKey: "pr-1094-ui",
+        resourceSnapshot: { category: "ui_evidence_approval", evidence: [evidence] },
+        resourceDigest: "b".repeat(64),
+        policyRevision: 1,
+        authority: "human",
+        status: "pending",
+        createdAt: 1,
+      },
+    },
+  } as SessionView;
+  const requests: unknown[] = [];
+  const client = {
+    ...api,
+    approve: async (_id: string, body: unknown) => {
+      requests.push(body);
+      return { ...session, status: "running", pendingApproval: null } as SessionView;
+    },
+  };
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <ApiProvider client={client}>
+          <SessionApprovalRegion session={session} runnerOnline={false} fallbackFocusRef={{ current: null }} />
+        </ApiProvider>,
+      );
+    });
+    const approve = [...container.querySelectorAll<HTMLButtonElement>(".approval-actions button")]
+      .find((button) => button.textContent?.includes("Approve"))!;
+    assert.equal(approve.disabled, true);
+    assert.equal(container.querySelector<HTMLAnchorElement>('[href="https://evidence.example/after.png"]')?.textContent,
+      "Open Evidence: desktop-after");
+    const reviewed = container.querySelector<HTMLInputElement>('.approval-evidence input[type="checkbox"]')!;
+    await act(async () => { reviewed.click(); });
+    assert.equal(approve.disabled, false);
+    await act(async () => { approve.click(); await tick(); });
+    assert.deepEqual(requests, [{
+      requestId: "workflow-evidence", optionId: "approve", evidenceReviewed: ["desktop-after"],
+    }]);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
 });
 
 function OfflineApprovalHarness({

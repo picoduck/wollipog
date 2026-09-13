@@ -89,7 +89,10 @@ mutations only on trusted descendants. Unsupported or unverifiable configuration
 Neither the user nor a child can switch this preset on an existing session. New human-created
 Orchestrator sessions default Parent Control to **Questions and Approvals**; the user remains the
 only authority that can change that setting, and secret, authentication, identity, policy-gate,
-and persistent-grant requests remain non-delegable.
+and persistent-grant requests remain non-delegable. Protocol v139 supplements the legacy broad
+setting with revisioned, per-category workflow-decision authority. It binds approval to exact
+resource evidence and requires one-shot consumption immediately before supported mutations; the
+control plane does not claim to intercept independently available external credentials.
 
 On native Linux and macOS, Claude Code and the exact Claude Agent ACP adapter advertise this preset
 only with the runner's `bwrap` or `seatbelt` boundary respectively. Native Codex can rely on its

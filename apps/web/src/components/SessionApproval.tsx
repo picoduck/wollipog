@@ -21,6 +21,7 @@ import {
 import { useQuestionResponseStyle } from "../question-response-style.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
 import { StructuredQuestionText } from "./StructuredQuestionText.js";
+import { Checkbox } from "./ui/ChoiceControls.js";
 
 const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
@@ -325,16 +326,29 @@ export function SessionApprovalBanner({
   const [busy, setBusy] = useState(false);
   const [showContext, setShowContext] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [reviewedEvidence, setReviewedEvidence] = useState<string[]>([]);
   const approval = session.pendingApproval!;
   const contextId = useId();
   const isPolicy = isPolicyApproval(approval);
-  const decisionNeedsRunner = approval.kind !== "policy_hook";
+  const decisionNeedsRunner = approval.kind !== "policy_hook" && approval.kind !== "workflow_decision";
+  const evidence = approval.kind === "workflow_decision" &&
+    approval.workflowDecision?.resourceSnapshot.category === "ui_evidence_approval"
+    ? approval.workflowDecision.resourceSnapshot.evidence : [];
+  const evidenceComplete = evidence.every((item) => reviewedEvidence.includes(item.evidenceId));
+
+  useEffect(() => {
+    setReviewedEvidence([]);
+  }, [approval.requestId]);
 
   const decide = async (optionId: string | null) => {
     setBusy(true);
     setError(null);
     try {
-      const updated = await api.approve(session.id, { requestId: approval.requestId, optionId });
+      const updated = await api.approve(session.id, {
+        requestId: approval.requestId,
+        optionId,
+        ...(evidence.length && optionId === "approve" ? { evidenceReviewed: reviewedEvidence } : {}),
+      });
       onSessionUpdate?.(updated);
     } catch (cause) {
       setError((cause as Error).message);
@@ -361,14 +375,16 @@ export function SessionApprovalBanner({
   return (
     <section
       className={`approval-bar${isPolicy ? " cost-budget" : ""}`}
-      aria-label={approval.kind === "authentication" ? "Authentication Required" : "Agent Approval Required"}
+      aria-label={approval.kind === "authentication" ? "Authentication Required"
+        : approval.kind === "workflow_decision" ? "Workflow Decision Required" : "Agent Approval Required"}
     >
       <div className="approval-main">
         <span className="approval-icon" aria-hidden="true">
           {approval.kind === "cost_budget" || approval.kind === "cost_checkpoint" ? "💰"
             : approval.kind === "daily_budget" ? "📅"
               : approval.kind === "cost_unpriced" ? "❓"
-                : approval.kind === "max_tool_calls" ? "🧰" : approval.kind === "authentication" ? "🔑" : "🔐"}
+                : approval.kind === "max_tool_calls" ? "🧰" : approval.kind === "authentication" ? "🔑"
+                  : approval.kind === "workflow_decision" ? "🛡️" : "🔐"}
         </span>
         <span className="approval-text">
           {approval.title}
@@ -388,13 +404,14 @@ export function SessionApprovalBanner({
           )}
           {approval.options.map((option) => {
             const keyHint = showKeyHints ? approvalKeyHintForOption(approval.options, option.optionId) : null;
+            const evidenceBlocksApproval = evidence.length > 0 && option.optionId === "approve" && !evidenceComplete;
             return (
               <button
                 key={option.optionId}
                 type="button"
                 title={option.description}
                 className={`btn sm ${option.kind?.startsWith("allow") ? "primary" : "danger"}`}
-                disabled={busy || (decisionNeedsRunner && !runnerOnline)}
+                disabled={busy || evidenceBlocksApproval || (decisionNeedsRunner && !runnerOnline)}
                 onClick={() => void decide(option.optionId)}
               >
                 {option.name}
@@ -404,6 +421,28 @@ export function SessionApprovalBanner({
           })}
         </div>
       </div>
+      {evidence.length > 0 && (
+        <div className="approval-evidence" aria-label="Evidence Review">
+          <p>Open and inspect each evidence item, then mark it as reviewed.</p>
+          {evidence.map((item) => (
+            <div className="approval-evidence-item" key={item.evidenceId}>
+              <a href={item.uri} target="_blank" rel="noreferrer">Open Evidence: {item.evidenceId}</a>
+              <label>
+                <Checkbox
+                  label={`Mark ${item.evidenceId} as Reviewed`}
+                  checked={reviewedEvidence.includes(item.evidenceId)}
+                  onChange={(checked) => {
+                    setReviewedEvidence((current) => checked
+                      ? [...current, item.evidenceId]
+                      : current.filter((evidenceId) => evidenceId !== item.evidenceId));
+                  }}
+                />
+                I reviewed this evidence.
+              </label>
+            </div>
+          ))}
+        </div>
+      )}
       {approval.kind === "policy_hook" && (
         <ApprovalSelectorContext context={approval.context} />
       )}

@@ -11,6 +11,21 @@ import { pinWidestFace } from "./font-geometry";
 test.use({ reducedMotion: "reduce" });
 const SHOT = "test-results/session-usage";
 
+test("desktop: Parent Control exposes five independent typed workflow authorities", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  await page.goto("/session-usage-e2e.html?width=1180&height=860&composer=orchestrator");
+  await page.getByRole("button", { name: "Add and Modes" }).click();
+
+  await expect(page.getByRole("button", { name: "Implementation Questions: Orchestrator" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "PR Merge Approval: Human" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Merged Branch Deletion: Human" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Follow-Up Issue Publication: Orchestrator" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "UI Evidence Approval: Human" })).toBeVisible();
+  await expect(page.getByText(/Existing unconsumed approvals are revoked/)).toBeVisible();
+  await page.getByRole("button", { name: "UI Evidence Approval: Human" }).scrollIntoViewIfNeeded();
+  await page.locator(".composer-plus-pop").screenshot({ path: `${SHOT}/desktop-typed-parent-control.png` });
+});
+
 test("desktop: per-turn usage, the ring popover with totals and the per-model split", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 820 });
   await page.goto("/session-usage-e2e.html?width=1180&height=780");

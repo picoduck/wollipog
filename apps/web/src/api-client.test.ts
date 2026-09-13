@@ -91,14 +91,35 @@ test("Parent Control setting and descendant reads use encoded session-scoped end
   });
 
   await client.setParentControl("parent/1", "questions");
+  await client.setParentControlPolicy("parent/1", {
+    implementation_question: "human",
+    pr_merge: "orchestrator",
+    merged_branch_deletion: "human",
+    follow_up_issue_publication: "human",
+    ui_evidence_approval: "human",
+  }, 7);
   const controller = new AbortController();
   assert.deepEqual(await client.descendantRequests("parent/1", controller.signal), { requests: [] });
-  assert.equal(signals[1], controller.signal);
+  assert.equal(signals[2], controller.signal);
   assert.deepEqual(calls, [
     {
       path: "/api/sessions/parent%2F1/parent-control",
       method: "POST",
       body: { mode: "questions" },
+    },
+    {
+      path: "/api/sessions/parent%2F1/parent-control-policy",
+      method: "POST",
+      body: {
+        decisions: {
+          implementation_question: "human",
+          pr_merge: "orchestrator",
+          merged_branch_deletion: "human",
+          follow_up_issue_publication: "human",
+          ui_evidence_approval: "human",
+        },
+        expectedRevision: 7,
+      },
     },
     {
       path: "/api/sessions/parent%2F1/descendant-requests",

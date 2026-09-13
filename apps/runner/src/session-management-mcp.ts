@@ -437,18 +437,87 @@ const GOVERNANCE_POLICY_PROPERTIES: Json = {
   },
 };
 
+const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
+  oneOf: [
+    {
+      type: "object",
+      properties: {
+        category: { const: "implementation_question" },
+        question: { type: "string" },
+        options: { type: "array", minItems: 2, maxItems: 12, items: {
+          type: "object",
+          properties: { optionId: { type: "string" }, label: { type: "string" }, description: { type: "string" } },
+          required: ["optionId", "label"], additionalProperties: false,
+        } },
+        recommendedOptionId: { type: "string" },
+      },
+      required: ["category", "question", "options"], additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: {
+        category: { const: "pr_merge" }, repository: { type: "string" }, pullRequest: { type: "integer", minimum: 1 },
+        headSha: { type: "string", pattern: "^[0-9a-f]{40}$" },
+        reviewResult: { type: "string", enum: ["merge", "merge_with_acknowledged_risk"] },
+        requiredChecks: { type: "object", properties: {
+          headSha: { type: "string", pattern: "^[0-9a-f]{40}$" }, status: { const: "passed" },
+          checkedAt: { type: "integer", minimum: 1 },
+          checks: { type: "array", minItems: 1, items: { type: "object", properties: {
+            name: { type: "string" }, state: { const: "passed" }, url: { type: "string" },
+          }, required: ["name", "state"], additionalProperties: false } },
+        }, required: ["headSha", "status", "checkedAt", "checks"], additionalProperties: false },
+      },
+      required: ["category", "repository", "pullRequest", "headSha", "reviewResult", "requiredChecks"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: {
+        category: { const: "merged_branch_deletion" }, repository: { type: "string" }, branch: { type: "string" },
+        merged: { const: true }, mergeCommitSha: { type: "string", pattern: "^[0-9a-f]{40}$" },
+        dependentPullRequests: { type: "object", properties: {
+          checkedAt: { type: "integer", minimum: 1 }, open: { type: "array", maxItems: 0 },
+        }, required: ["checkedAt", "open"], additionalProperties: false },
+      },
+      required: ["category", "repository", "branch", "merged", "mergeCommitSha", "dependentPullRequests"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: {
+        category: { const: "follow_up_issue_publication" }, repository: { type: "string" },
+        sanitizedTitle: { type: "string" }, sanitizedBody: { type: "string" },
+        labels: { type: "array", maxItems: 32, items: { type: "string" } },
+      },
+      required: ["category", "repository", "sanitizedTitle", "sanitizedBody", "labels"], additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: {
+        category: { const: "ui_evidence_approval" },
+        evidence: { type: "array", minItems: 1, maxItems: 32, items: { type: "object", properties: {
+          evidenceId: { type: "string" }, uri: { type: "string" },
+          sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+        }, required: ["evidenceId", "uri", "sha256"], additionalProperties: false } },
+      },
+      required: ["category", "evidence"], additionalProperties: false,
+    },
+  ],
+};
+
 /* -------------------------------------------------------------------------- */
 /* Tool table (tool ids as claude sees them: mcp__manager__<name>)             */
 /* -------------------------------------------------------------------------- */
 
 const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "list_sessions", "get_session", "get_session_events",
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question", "resolve_descendant_approval",
+  "resolve_descendant_workflow_decision", "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
   "wait_session", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "stop_session", "restart_session", "archive_session", "set_guardrails", "create_worktree", "attach_worktree",
   "select_worktree", "discard_worktree"]);
 const PARENT_CONTROL_TOOLS = new Set([
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
-  "resolve_descendant_approval",
+  "resolve_descendant_approval", "resolve_descendant_workflow_decision",
 ]);
 
 export const TOOLS: McpTool[] = [
@@ -711,6 +780,118 @@ export const TOOLS: McpTool[] = [
       const decision = args?.decision;
       if (decision !== "approve" && decision !== "deny") return errorResult("decision must be approve or deny");
       return resolveDescendantRequestTool(args, deps, decision);
+    },
+  },
+  {
+    name: "resolve_descendant_workflow_decision",
+    description: "Resolve one exact typed descendant workflow decision. The server rechecks category authority, controlling ancestry, audience, policy revision, and evidence coverage.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string" },
+        occurrenceId: { type: "string" },
+        outcome: { type: "string", enum: ["approve", "deny"] },
+        selectedOptionId: { type: "string", description: "Required approved option for implementation questions only" },
+        evidenceReviewed: { type: "array", items: { type: "string" }, description: "Every evidence id actually inspected; required for UI evidence approval" },
+        rationale: { type: "string" },
+      },
+      required: ["sessionId", "occurrenceId", "outcome"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      if (typeof args?.sessionId !== "string" || !args.sessionId ||
+          typeof args?.occurrenceId !== "string" || !args.occurrenceId ||
+          (args?.outcome !== "approve" && args?.outcome !== "deny")) {
+        return errorResult("sessionId, occurrenceId, and an approve or deny outcome are required");
+      }
+      const r = await cpFetch(
+        deps,
+        "POST",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/descendant-requests/resolve`,
+        {
+          sessionId: args.sessionId,
+          occurrenceId: args.occurrenceId,
+          resolution: {
+            action: "resolve_workflow_decision",
+            outcome: args.outcome,
+            ...(typeof args.selectedOptionId === "string" ? { selectedOptionId: args.selectedOptionId } : {}),
+            ...(Array.isArray(args.evidenceReviewed) ? { evidenceReviewed: args.evidenceReviewed } : {}),
+            ...(typeof args.rationale === "string" ? { rationale: args.rationale } : {}),
+          },
+        },
+      );
+      return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
+    },
+  },
+  {
+    name: "request_workflow_decision",
+    description: "Create an explicit typed workflow gate bound to this session, its controlling Orchestrator, the current human-owned policy revision, and an exact resource snapshot. Generic questions and approvals cannot satisfy this gate.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        requestId: { type: "string", description: "Caller-owned idempotency key" },
+        resourceKey: { type: "string", description: "Stable action target; a new occurrence supersedes older unconsumed occurrences" },
+        resourceSnapshot: WORKFLOW_DECISION_RESOURCE_SCHEMA,
+      },
+      required: ["requestId", "resourceKey", "resourceSnapshot"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      const r = await cpFetch(
+        deps,
+        "POST",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/workflow-decisions`,
+        { requestId: args?.requestId, resourceKey: args?.resourceKey, resourceSnapshot: args?.resourceSnapshot },
+      );
+      return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
+    },
+  },
+  {
+    name: "get_workflow_decision",
+    description: "Read the authoritative state of one exact workflow decision occurrence.",
+    inputSchema: {
+      type: "object",
+      properties: { occurrenceId: { type: "string" } },
+      required: ["occurrenceId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId || typeof args?.occurrenceId !== "string" || !args.occurrenceId) {
+        return errorResult("occurrenceId and a session identity are required");
+      }
+      const r = await cpFetch(
+        deps,
+        "GET",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/workflow-decisions/${encodeURIComponent(args.occurrenceId)}`,
+      );
+      return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
+    },
+  },
+  {
+    name: "consume_workflow_decision",
+    description: "Immediately before the approved external action begins, consume its one-shot authorization using the exact current resource snapshot. Revoked, changed, replayed, stale, or superseded grants fail closed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        occurrenceId: { type: "string" },
+        resourceSnapshot: WORKFLOW_DECISION_RESOURCE_SCHEMA,
+      },
+      required: ["occurrenceId", "resourceSnapshot"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId || typeof args?.occurrenceId !== "string" || !args.occurrenceId) {
+        return errorResult("occurrenceId and a session identity are required");
+      }
+      const r = await cpFetch(
+        deps,
+        "POST",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/workflow-decisions/${encodeURIComponent(args.occurrenceId)}/consume`,
+        { resourceSnapshot: args?.resourceSnapshot },
+      );
+      return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
     },
   },
   {

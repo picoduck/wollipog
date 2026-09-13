@@ -383,7 +383,10 @@
 // 138: Agent Control child creation accepts an explicit reasoning effort alongside the model.
 //      New clients fail closed against older control planes instead of silently dropping it;
 //      calls that omit effort retain the protocol-v100 creation contract.
-export const PROTOCOL_VERSION = 138;
+// 139: typed workflow decisions bind Parent Control delegation to an explicit category, exact
+//      resource snapshot, controlling session, and human-owned policy revision. Resolution and
+//      one-shot consumption are separate server-authoritative boundaries.
+export const PROTOCOL_VERSION = 139;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -564,6 +567,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   managedBackgroundInventory: 82,
   backgroundMissingResultRecovery: 134,
   delegatedParentControl: 136,
+  typedWorkflowDecisionDelegation: 139,
   workerAttention: 108,
   backgroundWorkTracking: 83,
   correlatedRestartEcho: 84,
@@ -1308,6 +1312,33 @@ export interface SessionConfig {
 
 /** Human-owned delegation level for an eligible supervising session. */
 export type ParentControlMode = "off" | "questions" | "questions_and_approvals";
+
+/** Workflow gates that can be delegated independently. Unknown categories always fail closed. */
+export const WORKFLOW_DECISION_CATEGORIES = [
+  "implementation_question",
+  "pr_merge",
+  "merged_branch_deletion",
+  "follow_up_issue_publication",
+  "ui_evidence_approval",
+] as const;
+export type WorkflowDecisionCategory = typeof WORKFLOW_DECISION_CATEGORIES[number];
+export type WorkflowDecisionAuthority = "human" | "orchestrator";
+
+export type ParentControlDecisionPolicy = Record<WorkflowDecisionCategory, WorkflowDecisionAuthority>;
+
+/** Revision is assigned by the control plane and changes whenever any category assignment does. */
+export interface ParentControlPolicy {
+  revision: number;
+  decisions: ParentControlDecisionPolicy;
+}
+
+export const HUMAN_ONLY_PARENT_CONTROL_POLICY: ParentControlDecisionPolicy = {
+  implementation_question: "human",
+  pr_merge: "human",
+  merged_branch_deletion: "human",
+  follow_up_issue_publication: "human",
+  ui_evidence_approval: "human",
+};
 
 /** Native provider TUIs do not expose their turns through Wollipog's structured event stream.
  * A positive tracked guardrail therefore cannot coexist with a Native TUI without presenting a
@@ -2464,7 +2495,110 @@ export type ApprovalKind =
   | "daily_budget"
   | "max_tool_calls"
   | "policy_hook"
+  | "workflow_decision"
   | "question";
+
+export interface WorkflowDecisionOption {
+  optionId: string;
+  label: string;
+  description?: string;
+}
+
+export type WorkflowDecisionResourceSnapshot =
+  | {
+      category: "implementation_question";
+      question: string;
+      options: WorkflowDecisionOption[];
+      recommendedOptionId?: string;
+    }
+  | {
+      category: "pr_merge";
+      repository: string;
+      pullRequest: number;
+      headSha: string;
+      reviewResult: "merge" | "merge_with_acknowledged_risk";
+      requiredChecks: {
+        headSha: string;
+        status: "passed";
+        checkedAt: number;
+        checks: Array<{ name: string; state: "passed"; url?: string }>;
+      };
+    }
+  | {
+      category: "merged_branch_deletion";
+      repository: string;
+      branch: string;
+      merged: true;
+      mergeCommitSha: string;
+      dependentPullRequests: {
+        checkedAt: number;
+        open: number[];
+      };
+    }
+  | {
+      category: "follow_up_issue_publication";
+      repository: string;
+      sanitizedTitle: string;
+      sanitizedBody: string;
+      labels: string[];
+    }
+  | {
+      category: "ui_evidence_approval";
+      evidence: Array<{
+        evidenceId: string;
+        uri: string;
+        sha256: string;
+      }>;
+    };
+
+export type WorkflowDecisionStatus =
+  | "pending"
+  | "approved"
+  | "denied"
+  | "consumed"
+  | "revoked"
+  | "superseded";
+
+/** One exact workflow gate. Raw rationale is never retained; only its digest reaches audit. */
+export interface WorkflowDecisionView {
+  requestId: string;
+  occurrenceId: string;
+  sessionId: string;
+  controllingSessionId: string;
+  category: WorkflowDecisionCategory;
+  resourceKey: string;
+  resourceSnapshot: WorkflowDecisionResourceSnapshot;
+  resourceDigest: string;
+  policyRevision: number;
+  authority: WorkflowDecisionAuthority;
+  status: WorkflowDecisionStatus;
+  selectedOptionId?: string;
+  evidenceReviewed?: string[];
+  createdAt: number;
+  resolvedAt?: number;
+  consumedAt?: number;
+}
+
+export interface CreateWorkflowDecisionRequest {
+  /** Caller-owned idempotency key. Reuse with different content fails. */
+  requestId: string;
+  /** Stable target identity; a newer occurrence supersedes older unconsumed occurrences. */
+  resourceKey: string;
+  resourceSnapshot: WorkflowDecisionResourceSnapshot;
+}
+
+export interface ResolveWorkflowDecisionRequest {
+  outcome: "approve" | "deny";
+  selectedOptionId?: string;
+  /** Required to approve UI evidence and must exactly cover the requested evidence ids. */
+  evidenceReviewed?: string[];
+  rationale?: string;
+}
+
+export interface ConsumeWorkflowDecisionRequest {
+  /** The action supplies the exact snapshot it is about to use, not only a remembered digest. */
+  resourceSnapshot: WorkflowDecisionResourceSnapshot;
+}
 
 export interface PendingApproval {
   /** v108: runner-verified spawning tool identity; never a raw provider thread id. */
@@ -2510,6 +2644,8 @@ export interface PendingApproval {
     threshold: number;
     observed: number;
   };
+  /** Present only for a control-plane-owned typed workflow gate. */
+  workflowDecision?: WorkflowDecisionView;
 }
 
 export type GovernanceActorKind = "human" | "agent" | "policy" | "system";
@@ -2599,7 +2735,10 @@ export type GovernanceAuditOutcome =
   | "delivery_failed"
   | "escalated"
   | "timed_out"
-  | "aborted";
+  | "aborted"
+  | "consumed"
+  | "revoked"
+  | "superseded";
 
 export type ReviewDecisionOutcome = "allowed" | "denied" | "escalated" | "timed_out" | "aborted";
 export type ReviewRiskLevel = "low" | "medium" | "high";
@@ -2633,6 +2772,16 @@ export interface GovernanceAuditEntry {
   governancePolicyId?: string;
   /** Selected opaque option id. Names/descriptions are not duplicated into the audit log. */
   optionId?: string;
+  /** Typed workflow provenance. Resource content and rationale are represented only by digests. */
+  workflowDecision?: {
+    parentSessionId: string;
+    childSessionId: string;
+    category: WorkflowDecisionCategory;
+    policyRevision: number;
+    resourceDigest: string;
+    evidenceReferences?: string[];
+    rationaleDigest?: string;
+  };
   timestamp: number;
 }
 
@@ -2687,7 +2836,8 @@ export interface DescendantRequestView {
 export type DescendantRequestResolution =
   | { action: "answer"; answers: Record<string, string | string[]> }
   | { action: "dismiss" }
-  | { action: "approve" | "deny"; optionId: string };
+  | { action: "approve" | "deny"; optionId: string }
+  | ({ action: "resolve_workflow_decision" } & ResolveWorkflowDecisionRequest);
 
 /* -------------------------- Inline code review -------------------------- */
 
@@ -2804,7 +2954,7 @@ export interface PolicyDecision {
 }
 
 export const GUARDRAIL_APPROVAL_KINDS = ["cost_budget", "max_tool_calls", "cost_checkpoint", "cost_unpriced", "daily_budget"] as const;
-export const POLICY_APPROVAL_KINDS = [...GUARDRAIL_APPROVAL_KINDS, "policy_hook"] as const;
+export const POLICY_APPROVAL_KINDS = [...GUARDRAIL_APPROVAL_KINDS, "policy_hook", "workflow_decision"] as const;
 
 /** True for approvals the CONTROL PLANE owns. The card survives runner snapshots; v47 Continue
  * sends only the next threshold, never a provider permission response. */
@@ -4008,6 +4158,8 @@ export interface SessionView {
   liveChildCapacity?: LiveChildCapacity;
   /** Explicit human-owned descendant request delegation. Omitted by older control planes. */
   parentControl?: ParentControlMode;
+  /** Independent typed workflow assignments. Legacy modes never imply these grants. */
+  parentControlPolicy?: ParentControlPolicy;
   runnerId: string;
   workspaceId: string | null;
   workspaceName: string | null;
@@ -7103,6 +7255,8 @@ export interface CreateSessionRequest {
   config?: SessionConfig;
   /** Human-owned opt-in. Agent-created children may not set or broaden it. */
   parentControl?: ParentControlMode;
+  /** Optional initial typed policy. Only authenticated human creation may provide it. */
+  parentControlPolicy?: { decisions: ParentControlDecisionPolicy };
   /** An ad-hoc directory chosen via the remote browser; overrides `workspaceId` when set. */
   workspacePath?: string;
   /** ACP-only session overrides. The control plane validates and persists only secret references. */
@@ -7152,6 +7306,8 @@ export interface SetSessionTitleRequest {
 export interface ApproveRequest {
   requestId: string;
   optionId: string | null;
+  /** Exact evidence items the human affirmatively inspected before approving a UI gate. */
+  evidenceReviewed?: string[];
 }
 
 export interface SetColumnRequest {

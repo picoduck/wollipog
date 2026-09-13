@@ -26,6 +26,8 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   validatePromptImageInputs,
   validatePromptImages,
   validateQuestionAnswers,
+  HUMAN_ONLY_PARENT_CONTROL_POLICY,
+  WORKFLOW_DECISION_CATEGORIES,
   type AgentContext,
   type AgentDriverKind,
   type AcpSessionContextConfig,
@@ -65,7 +67,9 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type SessionCommandInvocationUpdateMessage,
   type SessionCommandInvocationView,
   type PendingApproval,
+  type ParentControlDecisionPolicy,
   type ParentControlMode,
+  type ParentControlPolicy,
   type PolicyHookEvaluationRequest,
   type PolicyHookEvaluationResponse,
   type RecordPolicyHookDecisionMessage,
@@ -120,6 +124,13 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type WorkflowInstanceView,
   type WorkflowNodeDefinition,
   type WorkflowNodeOutcome,
+  type WorkflowDecisionAuthority,
+  type WorkflowDecisionCategory,
+  type WorkflowDecisionResourceSnapshot,
+  type WorkflowDecisionView,
+  type CreateWorkflowDecisionRequest,
+  type ConsumeWorkflowDecisionRequest,
+  type ResolveWorkflowDecisionRequest,
   SESSION_NAMING_RUNNER_BUDGET_MS,
   SESSION_NAMING_SUPERVISION_MARGIN_MS,
 } from "@wollipog/protocol";
@@ -415,6 +426,143 @@ function ok<T>(data: T, status = 200): ServiceResult<T> {
 }
 function fail<T>(error: string, status = 400): ServiceResult<T> {
   return { ok: false, status, error };
+}
+
+function boundedDecisionString(value: unknown, max: number): value is string {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= max &&
+    !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value);
+}
+
+export function validateParentControlDecisions(value: unknown): value is ParentControlDecisionPolicy {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).length !== WORKFLOW_DECISION_CATEGORIES.length) return false;
+  return WORKFLOW_DECISION_CATEGORIES.every((category) =>
+    record[category] === "human" || record[category] === "orchestrator");
+}
+
+/** Normalize untrusted JSON into a canonical key order before hashing or persistence. */
+export function normalizeWorkflowDecisionSnapshot(
+  input: unknown,
+): ServiceResult<WorkflowDecisionResourceSnapshot> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return fail("resourceSnapshot must be an object");
+  }
+  const value = input as Record<string, unknown>;
+  const category = value.category;
+  if (!WORKFLOW_DECISION_CATEGORIES.includes(category as WorkflowDecisionCategory)) {
+    return fail("unknown workflow decision category");
+  }
+  const repository = () => boundedDecisionString(value.repository, 256) &&
+    /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(value.repository)
+    ? value.repository : null;
+  const sha = (candidate: unknown, length = 40) => typeof candidate === "string" &&
+    new RegExp(`^[0-9a-f]{${length}}$`, "u").test(candidate) ? candidate : null;
+  const checkedAt = (candidate: unknown) => Number.isSafeInteger(candidate) && (candidate as number) > 0
+    ? candidate as number : null;
+  const safeHttpsUrl = (candidate: unknown) => {
+    if (!boundedDecisionString(candidate, 4096)) return false;
+    try {
+      const parsed = new URL(candidate);
+      return parsed.protocol === "https:" && !parsed.username && !parsed.password;
+    } catch {
+      return false;
+    }
+  };
+  if (category === "implementation_question") {
+    if (!boundedDecisionString(value.question, 4000) || !Array.isArray(value.options) ||
+        value.options.length < 2 || value.options.length > 12) {
+      return fail("implementation questions require text and 2 to 12 options");
+    }
+    const options = value.options.flatMap((raw) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+      const option = raw as Record<string, unknown>;
+      return boundedDecisionString(option.optionId, 128) && boundedDecisionString(option.label, 200) &&
+        (option.description === undefined || boundedDecisionString(option.description, 1000))
+        ? [{ optionId: option.optionId, label: option.label,
+            ...(typeof option.description === "string" ? { description: option.description } : {}) }]
+        : [];
+    });
+    if (options.length !== value.options.length || options.some((option) => option.optionId === "__workflow_deny__") ||
+        new Set(options.map((option) => option.optionId)).size !== options.length) {
+      return fail("implementation question options must have unique valid ids and labels");
+    }
+    const recommended = value.recommendedOptionId;
+    if (recommended !== undefined &&
+        (typeof recommended !== "string" || !options.some((option) => option.optionId === recommended))) {
+      return fail("recommendedOptionId must identify an offered option");
+    }
+    return ok({ category, question: value.question, options,
+      ...(typeof recommended === "string" ? { recommendedOptionId: recommended } : {}) });
+  }
+  if (category === "pr_merge") {
+    const repo = repository();
+    const pullRequest = Number.isSafeInteger(value.pullRequest) && (value.pullRequest as number) > 0
+      ? value.pullRequest as number : null;
+    const headSha = sha(value.headSha);
+    const checks = value.requiredChecks && typeof value.requiredChecks === "object" && !Array.isArray(value.requiredChecks)
+      ? value.requiredChecks as Record<string, unknown> : null;
+    const checked = checks && checkedAt(checks.checkedAt);
+    const checkRows = checks && Array.isArray(checks.checks) ? checks.checks.flatMap((raw) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+      const check = raw as Record<string, unknown>;
+      if (!boundedDecisionString(check.name, 256) || check.state !== "passed") return [];
+      if (check.url !== undefined && !safeHttpsUrl(check.url)) return [];
+      return [{ name: check.name, state: "passed" as const,
+        ...(typeof check.url === "string" ? { url: check.url } : {}) }];
+    }) : [];
+    if (!repo || !pullRequest || !headSha ||
+        (value.reviewResult !== "merge" && value.reviewResult !== "merge_with_acknowledged_risk") ||
+        !checks || checks.status !== "passed" || checks.headSha !== headSha || !checked ||
+        !Array.isArray(checks.checks) || checkRows.length !== checks.checks.length || checkRows.length < 1) {
+      return fail("merge decisions require an exact repository, PR, reviewed head, and passing required checks for that head");
+    }
+    return ok({ category, repository: repo, pullRequest, headSha,
+      reviewResult: value.reviewResult, requiredChecks: {
+        headSha, status: "passed", checkedAt: checked, checks: checkRows,
+      } });
+  }
+  if (category === "merged_branch_deletion") {
+    const repo = repository();
+    const dependency = value.dependentPullRequests && typeof value.dependentPullRequests === "object" &&
+      !Array.isArray(value.dependentPullRequests)
+      ? value.dependentPullRequests as Record<string, unknown> : null;
+    const checked = dependency && checkedAt(dependency.checkedAt);
+    const open = dependency && Array.isArray(dependency.open) ? dependency.open : null;
+    if (!repo || !boundedDecisionString(value.branch, 256) || value.merged !== true ||
+        !sha(value.mergeCommitSha) || !checked || !open ||
+        open.some((item) => !Number.isSafeInteger(item) || (item as number) <= 0)) {
+      return fail("branch deletion decisions require exact merged-branch and dependent-PR evidence");
+    }
+    if (open.length > 0) return fail("branch deletion cannot be authorized while dependent PRs remain open", 409);
+    return ok({ category, repository: repo, branch: value.branch, merged: true,
+      mergeCommitSha: value.mergeCommitSha as string,
+      dependentPullRequests: { checkedAt: checked, open: [] } });
+  }
+  if (category === "follow_up_issue_publication") {
+    const repo = repository();
+    if (!repo || !boundedDecisionString(value.sanitizedTitle, 256) ||
+        !boundedDecisionString(value.sanitizedBody, 65_536) || !Array.isArray(value.labels) ||
+        value.labels.length > 32 || value.labels.some((label) => !boundedDecisionString(label, 128))) {
+      return fail("publication decisions require the exact sanitized repository, title, body, and labels");
+    }
+    return ok({ category, repository: repo, sanitizedTitle: value.sanitizedTitle,
+      sanitizedBody: value.sanitizedBody, labels: [...value.labels] as string[] });
+  }
+  if (!Array.isArray(value.evidence) || value.evidence.length < 1 || value.evidence.length > 32) {
+    return fail("UI evidence decisions require at least one evidence reference");
+  }
+  const evidence = value.evidence.flatMap((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+    const item = raw as Record<string, unknown>;
+    if (!boundedDecisionString(item.evidenceId, 256) || !safeHttpsUrl(item.uri) || !sha(item.sha256, 64)) return [];
+    return [{ evidenceId: item.evidenceId, uri: item.uri as string, sha256: item.sha256 as string }];
+  });
+  if (evidence.length !== value.evidence.length ||
+      new Set(evidence.map((item) => item.evidenceId)).size !== evidence.length) {
+    return fail("UI evidence references must be unique HTTPS resources with SHA-256 integrity");
+  }
+  return ok({ category: "ui_evidence_approval", evidence });
 }
 
 /** HTTP bodies are structurally cast at the route boundary. Validate the guardrail values before
@@ -2172,7 +2320,7 @@ export class SessionsService {
         this.hub.sessionChangedById(id);
       } else if (changed.has(id)) {
         const settled = this.db.getSession(id);
-        if (settled?.status === "idle") this.replayRestoredPolicyHookIdle(changed.get(id)!, id, now);
+        if (settled?.status === "idle") this.replayRestoredPolicyIdle(changed.get(id)!, id, now);
         this.hub.sessionChangedById(id);
       }
     }
@@ -2878,6 +3026,12 @@ export class SessionsService {
     if (parentSessionId && parentControl !== "off") {
       return fail("an agent-created child cannot enable Parent Control", 403);
     }
+    if (req.parentControlPolicy && !validateParentControlDecisions(req.parentControlPolicy.decisions)) {
+      return fail("parentControlPolicy must assign every typed category to human or orchestrator", 400);
+    }
+    if (parentSessionId && req.parentControlPolicy) {
+      return fail("an agent-created child cannot set Parent Control policy", 403);
+    }
     let parentSession: SessionView | null = null;
     if (parentSessionId) {
       const parent = this.db.getSession(parentSessionId);
@@ -3140,6 +3294,17 @@ export class SessionsService {
       );
       if (unsupported) return unsupported;
     }
+    if (req.parentControlPolicy && requestedConfig.permissionMode !== "orchestrator") {
+      return fail("Parent Control policy is available only for the Orchestrator preset", 409);
+    }
+    if (req.parentControlPolicy && Object.values(req.parentControlPolicy.decisions).includes("orchestrator")) {
+      const unsupported = this.capabilityFailure(
+        req.runnerId,
+        "typedWorkflowDecisionDelegation",
+        "Typed Parent Control workflow decisions",
+      );
+      if (unsupported) return unsupported;
+    }
     const modelImageValidation = validateModelImageSupport(images, agentCapabilities, validationConfig.model);
     if (!modelImageValidation.ok) return fail(modelImageValidation.error ?? "model does not support image input", 400);
     const configCapabilityError = capabilityConfigError(validationConfig, agentCapabilities);
@@ -3282,6 +3447,7 @@ export class SessionsService {
       driver: launch.driver,
       config,
       parentControl,
+      parentControlPolicy: req.parentControlPolicy,
       // Remember the ad-hoc browsed directory so restart re-launches from it (workspaceId is null).
       workspacePath: adHoc || null,
       acpSessionContext,
@@ -4605,6 +4771,7 @@ export class SessionsService {
     }
     this.db.addSessionStopIntent(session.id, session.runnerId, now, archiveAfterStop);
     this.promptOutbox.stopSession(session.id, now);
+    this.revokeUnconsumedWorkflowDecisionsForSession(session.id, "session-stopped");
     this.abortPolicyHookApprovals(session, now, "session-stopped");
     this.db.updateSessionStatus(session.id, "stopped", now);
     this.sendStopCommand(session.runnerId, session.id);
@@ -4815,6 +4982,7 @@ export class SessionsService {
       if (restartLaunchId) this.db.clearSessionStopRestartLaunchId(sessionId);
       return fail("runner is offline", 409);
     }
+    this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "session-restarted");
     this.abortPolicyHookApprovals(session, now, "session-restarted");
     this.db.setPendingApproval(sessionId, null);
     this.db.updateSessionStatus(sessionId, "starting", now);
@@ -4847,6 +5015,451 @@ export class SessionsService {
     return ok(this.db.getSession(sessionId)!);
   }
 
+  setParentControlPolicy(
+    sessionId: string,
+    decisions: unknown,
+    expectedRevision?: number,
+    actor: GovernanceActor = { kind: "human", id: "local" },
+  ): ServiceResult<SessionView> {
+    if (!validateParentControlDecisions(decisions)) {
+      return fail("every typed workflow decision category must be assigned to human or orchestrator", 400);
+    }
+    if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0)) {
+      return fail("expectedRevision must be a non-negative integer", 400);
+    }
+    const session = this.db.getSession(sessionId);
+    if (!session) return fail("session not found", 404);
+    if (session.permissionMode !== "orchestrator") {
+      return fail("Parent Control policy is available only for the Orchestrator preset", 409);
+    }
+    if (Object.values(decisions).includes("orchestrator")) {
+      const unsupported = this.capabilityFailure(
+        session.runnerId,
+        "typedWorkflowDecisionDelegation",
+        "Typed Parent Control workflow decisions",
+      );
+      if (unsupported) return unsupported;
+    }
+    const now = Date.now();
+    const policy = this.db.updateSessionParentControlPolicy(sessionId, decisions, now, expectedRevision);
+    if (!policy) return fail("Parent Control policy revision is stale", 409);
+    // Any unresolved grant was bound to the previous policy revision. Revoke it now rather than
+    // leaving a card that looks actionable until the child eventually attempts consumption.
+    for (const decision of this.db.unconsumedWorkflowDecisionsForController(sessionId)) {
+      if (decision.policyRevision === policy.revision) continue;
+      this.db.markWorkflowDecisionRevoked(decision.occurrenceId, now);
+      const child = this.db.getSession(decision.sessionId);
+      if (child) {
+        this.settleWorkflowDecisionPause(child.id, decision.occurrenceId, now);
+        this.recordWorkflowDecisionAudit(decision, "revoked", actor, now);
+        this.hub.sessionChangedById(child.id);
+      }
+    }
+    this.hub.sessionChangedById(sessionId);
+    return ok(this.db.getSession(sessionId)!);
+  }
+
+  createWorkflowDecision(
+    sessionId: string,
+    request: CreateWorkflowDecisionRequest,
+    canAccess: (sessionId: string) => boolean = () => true,
+  ): ServiceResult<WorkflowDecisionView> {
+    if (!boundedDecisionString(request?.requestId, 256) || !boundedDecisionString(request?.resourceKey, 512)) {
+      return fail("requestId and resourceKey are required bounded identifiers", 400);
+    }
+    const normalized = normalizeWorkflowDecisionSnapshot(request.resourceSnapshot);
+    if (!normalized.ok || !normalized.data) return fail(normalized.error!, normalized.status);
+    const child = this.db.getSession(sessionId);
+    if (!child) return fail("session not found", 404);
+    if (isTerminal(child.status)) {
+      return fail("a terminal session cannot request a workflow decision", 409);
+    }
+    const unsupported = this.capabilityFailure(
+      child.runnerId,
+      "typedWorkflowDecisionDelegation",
+      "Typed workflow decisions",
+    );
+    if (unsupported) return unsupported;
+    const controller = this.workflowDecisionController(child);
+    if (!controller) return fail("this session has no controlling Orchestrator ancestor", 409);
+    if (isTerminal(controller.session.status)) {
+      return fail("a terminal Orchestrator cannot control a new workflow decision", 409);
+    }
+    if (!canAccess(child.id) || !canAccess(controller.session.id)) {
+      return fail("workflow decision controller is outside the current audience", 404);
+    }
+    const category = normalized.data.category;
+    const authority = controller.policy.decisions[category];
+    if (authority === "orchestrator") {
+      const parentUnsupported = this.capabilityFailure(
+        controller.session.runnerId,
+        "typedWorkflowDecisionDelegation",
+        "Typed Parent Control workflow decisions",
+      );
+      if (parentUnsupported) return parentUnsupported;
+    }
+    const now = Date.now();
+    const resourceDigest = auditDigest(normalized.data)!;
+    const created = this.db.createWorkflowDecision({
+      requestId: request.requestId,
+      occurrenceId: `workflow_${randomUUID().replace(/-/gu, "")}`,
+      sessionId,
+      controllingSessionId: controller.session.id,
+      category,
+      resourceKey: request.resourceKey,
+      resourceSnapshot: normalized.data,
+      resourceDigest,
+      policyRevision: controller.policy.revision,
+      authority,
+      createdAt: now,
+    });
+    if (!created) return fail("requestId was already used for different workflow decision content", 409);
+    if (created.replay) {
+      if (created.decision.status === "pending") this.restorePendingWorkflowDecisionCards(sessionId);
+      return ok(created.decision);
+    }
+    const decision = created.decision;
+    const approval = this.workflowDecisionApproval(decision);
+    if (child.status === "idle") this.db.notePolicyResumeStatus(sessionId, "idle");
+    // Project the replacement before settling older occurrences. Otherwise a supersession after
+    // swallowed Idle briefly restores Ready, clears the resume proof, and strands the new card.
+    this.db.setPendingApproval(
+      sessionId,
+      appendPendingApproval(this.db.getSession(sessionId)?.pendingApproval, approval),
+    );
+    this.db.updateSessionStatus(sessionId, "input_required", now);
+    for (const occurrenceId of created.supersededOccurrenceIds) {
+      const superseded = this.db.workflowDecisionByOccurrence(occurrenceId);
+      if (!superseded) continue;
+      this.settleWorkflowDecisionPause(superseded.sessionId, occurrenceId, now);
+      this.recordWorkflowDecisionAudit(superseded, "superseded", { kind: "agent", id: sessionId }, now);
+    }
+    this.recordWorkflowDecisionAudit(decision, "pending", { kind: "agent", id: sessionId }, now);
+    if (decision.authority === "human") this.notifyTransition(child, sessionId);
+    this.hub.sessionChangedById(sessionId);
+    this.hub.sessionChangedById(controller.session.id);
+    return ok(decision, 201);
+  }
+
+  workflowDecision(sessionId: string, occurrenceId: string): ServiceResult<WorkflowDecisionView> {
+    const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+    return decision?.sessionId === sessionId ? ok(decision) : fail("workflow decision not found", 404);
+  }
+
+  resolveWorkflowDecision(
+    parentSessionId: string,
+    childSessionId: string,
+    occurrenceId: string,
+    resolution: ResolveWorkflowDecisionRequest,
+    authority: WorkflowDecisionAuthority,
+    actor: GovernanceActor,
+    canAccess: (sessionId: string) => boolean,
+  ): ServiceResult<WorkflowDecisionView> {
+    const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+    if (!decision || decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
+        !this.db.isSessionDescendant(parentSessionId, childSessionId) ||
+        !canAccess(parentSessionId) || !canAccess(childSessionId)) {
+      return fail("workflow decision not found", 404);
+    }
+    if (decision.status !== "pending") return fail("workflow decision is stale or already resolved", 409);
+    for (const sessionId of [childSessionId, parentSessionId]) {
+      const owner = this.db.getSession(sessionId);
+      const unsupported = owner && this.capabilityFailure(
+        owner.runnerId,
+        "typedWorkflowDecisionDelegation",
+        "Typed workflow decisions",
+      );
+      if (unsupported) {
+        this.revokeWorkflowDecision(decision, actor);
+        return fail(unsupported.error!, unsupported.status);
+      }
+    }
+    const currentChild = this.db.getSession(childSessionId);
+    const currentParent = this.db.getSession(parentSessionId);
+    const currentPolicy = currentParent?.parentControlPolicy;
+    if (!currentChild || !currentParent || isTerminal(currentChild.status) || isTerminal(currentParent.status) ||
+        !currentPolicy || currentPolicy.revision !== decision.policyRevision ||
+        currentPolicy.decisions[decision.category] !== decision.authority) {
+      this.revokeWorkflowDecision(decision, actor);
+      return fail("workflow decision authority was revoked or superseded", 409);
+    }
+    if (decision.authority !== authority) {
+      return fail(`this workflow decision requires a ${decision.authority} response`, 403);
+    }
+    const checked = this.validateWorkflowDecisionResolution(decision, resolution);
+    if (!checked.ok || !checked.data) return fail(checked.error!, checked.status);
+    const now = Date.now();
+    const resolved = this.db.resolveWorkflowDecision(
+      occurrenceId,
+      authority,
+      checked.data.outcome === "approve" ? "approved" : "denied",
+      now,
+      checked.data.selectedOptionId,
+      checked.data.evidenceReviewed,
+      auditDigest(checked.data.rationale),
+    );
+    if (!resolved) return fail("workflow decision was resolved concurrently", 409);
+    const child = this.db.getSession(childSessionId);
+    if (child) this.settleWorkflowDecisionPause(childSessionId, occurrenceId, now);
+    this.recordWorkflowDecisionAudit(
+      resolved,
+      checked.data.outcome === "approve" ? "allowed" : "denied",
+      actor,
+      now,
+      checked.data.rationale,
+    );
+    this.hub.sessionChangedById(childSessionId);
+    this.hub.sessionChangedById(parentSessionId);
+    return ok(resolved);
+  }
+
+  consumeWorkflowDecision(
+    sessionId: string,
+    occurrenceId: string,
+    request: ConsumeWorkflowDecisionRequest,
+    canAccess: (sessionId: string) => boolean = () => true,
+  ): ServiceResult<WorkflowDecisionView> {
+    const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+    if (!decision || decision.sessionId !== sessionId) return fail("workflow decision not found", 404);
+    if (decision.status !== "approved") {
+      return fail(`workflow decision cannot be consumed from ${decision.status} state`, 409);
+    }
+    const normalized = normalizeWorkflowDecisionSnapshot(request?.resourceSnapshot);
+    if (!normalized.ok || !normalized.data) return fail(normalized.error!, normalized.status);
+    if (normalized.data.category !== decision.category || auditDigest(normalized.data) !== decision.resourceDigest) {
+      this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+      return fail("workflow decision resource snapshot is stale", 409);
+    }
+    const child = this.db.getSession(sessionId);
+    const parent = this.db.getSession(decision.controllingSessionId);
+    for (const owner of [child, parent]) {
+      const unsupported = owner && this.capabilityFailure(
+        owner.runnerId,
+        "typedWorkflowDecisionDelegation",
+        "Typed workflow decisions",
+      );
+      if (unsupported) {
+        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        return fail(unsupported.error!, unsupported.status);
+      }
+    }
+    const policy = parent?.parentControlPolicy;
+    if (!child || !parent || isTerminal(child.status) || isTerminal(parent.status) ||
+        !canAccess(child.id) || !canAccess(parent.id) ||
+        !this.db.isSessionDescendant(parent.id, child.id) || !policy ||
+        policy.revision !== decision.policyRevision || policy.decisions[decision.category] !== decision.authority) {
+      this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+      return fail("workflow decision authority was revoked or ancestry changed before action start", 409);
+    }
+    const now = Date.now();
+    const consumed = this.db.consumeWorkflowDecision(occurrenceId, now);
+    if (!consumed) return fail("workflow decision was already consumed", 409);
+    this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "agent", id: sessionId }, now);
+    this.hub.sessionChangedById(sessionId);
+    this.hub.sessionChangedById(parent.id);
+    return ok(consumed);
+  }
+
+  private workflowDecisionController(child: SessionView): {
+    session: SessionView;
+    policy: ParentControlPolicy;
+  } | null {
+    const seen = new Set<string>([child.id]);
+    let parentId = child.parentSessionId ?? null;
+    for (let depth = 0; parentId && depth < 64 && !seen.has(parentId); depth += 1) {
+      seen.add(parentId);
+      const parent = this.db.getSession(parentId);
+      if (!parent) return null;
+      if (parent.permissionMode === "orchestrator") {
+        return {
+          session: parent,
+          policy: parent.parentControlPolicy ?? {
+            revision: 0,
+            decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY },
+          },
+        };
+      }
+      parentId = parent.parentSessionId ?? null;
+    }
+    return null;
+  }
+
+  private workflowDecisionApproval(decision: WorkflowDecisionView): PendingApproval {
+    const snapshot = decision.resourceSnapshot;
+    const categoryTitle: Record<WorkflowDecisionCategory, string> = {
+      implementation_question: "Implementation Decision Required",
+      pr_merge: "PR Merge Approval Required",
+      merged_branch_deletion: "Merged Branch Deletion Approval Required",
+      follow_up_issue_publication: "Follow-Up Issue Publication Approval Required",
+      ui_evidence_approval: "UI Evidence Approval Required",
+    };
+    const options = snapshot.category === "implementation_question"
+      ? [
+          ...snapshot.options.map((option) => ({
+            optionId: option.optionId,
+            name: option.label,
+            description: option.description,
+            kind: "allow_once" as const,
+          })),
+          { optionId: "__workflow_deny__", name: "Do Not Proceed", kind: "reject_once" as const },
+        ]
+      : [
+          { optionId: "approve", name: "Approve", kind: "allow_once" as const },
+          { optionId: "deny", name: "Deny", kind: "reject_once" as const },
+        ];
+    return {
+      requestId: decision.occurrenceId,
+      occurrenceId: decision.occurrenceId,
+      title: categoryTitle[decision.category],
+      options,
+      kind: "workflow_decision",
+      context: {
+        toolName: "Typed Workflow Decision",
+        input: JSON.stringify(snapshot, null, 2),
+      },
+      workflowDecision: decision,
+    };
+  }
+
+  private validateWorkflowDecisionResolution(
+    decision: WorkflowDecisionView,
+    resolution: ResolveWorkflowDecisionRequest,
+  ): ServiceResult<ResolveWorkflowDecisionRequest> {
+    if (!resolution || (resolution.outcome !== "approve" && resolution.outcome !== "deny")) {
+      return fail("workflow decision outcome must be approve or deny", 400);
+    }
+    if (resolution.rationale !== undefined &&
+        (!boundedDecisionString(resolution.rationale, 4000))) {
+      return fail("workflow decision rationale is invalid", 400);
+    }
+    const snapshot = decision.resourceSnapshot;
+    if (snapshot.category === "implementation_question") {
+      if (resolution.outcome === "approve" &&
+          (typeof resolution.selectedOptionId !== "string" ||
+            !snapshot.options.some((option) => option.optionId === resolution.selectedOptionId))) {
+        return fail("implementation approval must select one offered option", 400);
+      }
+      if (resolution.outcome === "deny" && resolution.selectedOptionId !== undefined) {
+        return fail("a denied implementation decision cannot select an option", 400);
+      }
+    } else if (resolution.selectedOptionId !== undefined) {
+      return fail("selectedOptionId is valid only for implementation questions", 400);
+    }
+    if (snapshot.category === "ui_evidence_approval" && resolution.outcome === "approve") {
+      const requested = snapshot.evidence.map((item) => item.evidenceId).sort();
+      const reviewed = Array.isArray(resolution.evidenceReviewed) &&
+        resolution.evidenceReviewed.every((item): item is string => typeof item === "string")
+        ? [...new Set(resolution.evidenceReviewed)].sort() : [];
+      if (reviewed.length !== requested.length || reviewed.some((item, index) => item !== requested[index])) {
+        return fail("UI evidence approval must identify every reviewed evidence item", 400);
+      }
+      resolution = { ...resolution, evidenceReviewed: reviewed };
+    } else if (resolution.evidenceReviewed !== undefined) {
+      return fail("evidenceReviewed is valid only for UI evidence approval", 400);
+    }
+    return ok(resolution);
+  }
+
+  private revokeWorkflowDecision(decision: WorkflowDecisionView, actor: GovernanceActor): void {
+    const now = Date.now();
+    this.db.markWorkflowDecisionRevoked(decision.occurrenceId, now);
+    this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
+    this.recordWorkflowDecisionAudit(decision, "revoked", actor, now);
+    this.hub.sessionChangedById(decision.sessionId);
+    this.hub.sessionChangedById(decision.controllingSessionId);
+  }
+
+  /** Settle a server-owned workflow card against the provider state it temporarily covered. */
+  private settleWorkflowDecisionPause(sessionId: string, occurrenceId: string, now: number): void {
+    const current = this.db.getSession(sessionId);
+    if (!current) return;
+    const remaining = removePendingRequest(current.pendingApproval, occurrenceId);
+    const restoreIdle = !remaining && current.status === "input_required" &&
+      this.db.policyResumeStatus(sessionId) === "idle";
+    this.db.setPendingApproval(sessionId, remaining);
+    if (!remaining && current.status === "input_required") {
+      this.db.updateSessionStatus(
+        sessionId,
+        restoreIdle ? "idle" : "running",
+        now,
+      );
+    }
+    if (restoreIdle) {
+      this.replayRestoredPolicyIdle(current, sessionId, now);
+    } else {
+      // Typed decisions do not suspend the provider turn. Usage can cross a soft checkpoint while
+      // the card is present, so the last settlement must immediately surface any deferred gate.
+      if (!remaining) this.gateOnPolicy(sessionId, now);
+      this.clearSettledPolicyResumeStatus(sessionId);
+    }
+  }
+
+  /** A transient runner disconnect clears the projected card but not the server-owned request.
+   * Restore only requests still bound to the same controlling ancestor and policy revision. */
+  private restorePendingWorkflowDecisionCards(sessionId: string): void {
+    const child = this.db.getSession(sessionId);
+    if (!child || isTerminal(child.status)) return;
+    const controller = this.workflowDecisionController(child);
+    let pending = child.pendingApproval;
+    let restored = false;
+    for (const decision of this.db.pendingWorkflowDecisionsForSession(sessionId)) {
+      if (!controller || decision.controllingSessionId !== controller.session.id ||
+          decision.policyRevision !== controller.policy.revision ||
+          decision.authority !== controller.policy.decisions[decision.category]) {
+        pending = removePendingRequest(pending, decision.occurrenceId);
+        this.revokeWorkflowDecision(decision, { kind: "system", id: "workflow-recovery" });
+        continue;
+      }
+      if (pendingRequests(pending).some((request) => request.requestId === decision.occurrenceId)) continue;
+      pending = appendPendingApproval(pending, this.workflowDecisionApproval(decision));
+      restored = true;
+    }
+    if (!restored) return;
+    if (child.status === "idle") this.db.notePolicyResumeStatus(sessionId, "idle");
+    this.db.setPendingApproval(sessionId, pending);
+    this.db.updateSessionStatus(sessionId, "input_required", Date.now());
+  }
+
+  private revokeUnconsumedWorkflowDecisionsForSession(sessionId: string, actorId: string): void {
+    for (const decision of this.db.unconsumedWorkflowDecisionsForSession(sessionId)) {
+      this.revokeWorkflowDecision(decision, { kind: "system", id: actorId });
+    }
+  }
+
+  private recordWorkflowDecisionAudit(
+    decision: WorkflowDecisionView,
+    outcome: GovernanceAuditOutcome,
+    actor: GovernanceActor,
+    now: number,
+    rationale?: string,
+  ): void {
+    const child = this.db.getSession(decision.sessionId);
+    if (!child) return;
+    const evidenceReferences = decision.resourceSnapshot.category === "ui_evidence_approval"
+      ? decision.resourceSnapshot.evidence.map((item) => item.evidenceId)
+      : undefined;
+    this.db.appendGovernanceAudit({
+      requestId: decision.occurrenceId,
+      approvalKind: "workflow_decision",
+      stage: outcome === "pending" ? "request" : "resolution",
+      outcome,
+      actor,
+      scope: approvalScope(child, {}),
+      contentDigest: decision.resourceDigest,
+      optionId: decision.selectedOptionId,
+      workflowDecision: {
+        parentSessionId: decision.controllingSessionId,
+        childSessionId: decision.sessionId,
+        category: decision.category,
+        policyRevision: decision.policyRevision,
+        resourceDigest: decision.resourceDigest,
+        ...(evidenceReferences?.length ? { evidenceReferences } : {}),
+        ...(rationale ? { rationaleDigest: auditDigest(rationale)! } : {}),
+      },
+      timestamp: now,
+    });
+  }
+
   descendantRequests(
     parentSessionId: string,
     canAccess: (sessionId: string) => boolean,
@@ -4854,15 +5467,41 @@ export class SessionsService {
     const parent = this.db.getSession(parentSessionId);
     if (!parent) return fail("session not found", 404);
     const mode = parent.parentControl ?? "off";
-    if (mode === "off") return fail("Parent Control is off", 403);
-    const requests = this.db.listSessionDescendantRequestCandidates(parentSessionId).flatMap((session): DescendantRequestView[] => {
+    const typedPolicy = parent.parentControlPolicy ?? {
+      revision: 0, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY },
+    };
+    if (mode === "off" && !Object.values(typedPolicy.decisions).includes("orchestrator")) {
+      return fail("Parent Control is off", 403);
+    }
+    const durableTyped = this.db.pendingWorkflowDecisionsForController(parentSessionId).flatMap(
+      (decision): DescendantRequestView[] => {
+        if (decision.authority !== "orchestrator" || decision.policyRevision !== typedPolicy.revision ||
+            typedPolicy.decisions[decision.category] !== "orchestrator" ||
+            !this.db.isSessionDescendant(parentSessionId, decision.sessionId) || !canAccess(decision.sessionId)) return [];
+        const session = this.db.getSession(decision.sessionId);
+        if (!session || isTerminal(session.status) || !runnerSupportsProtocol(
+          this.db.getRunner(session.runnerId)?.protocolVersion,
+          "typedWorkflowDecisionDelegation",
+        )) return [];
+        return [{
+          sessionId: session.id,
+          sessionTitle: session.title,
+          runnerId: session.runnerId,
+          runnerOnline: this.hub.isRunnerOnline(session.runnerId),
+          occurrenceId: decision.occurrenceId,
+          request: this.workflowDecisionApproval(decision),
+        }];
+      },
+    );
+    const generic = this.db.listSessionDescendantRequestCandidates(parentSessionId).flatMap((session): DescendantRequestView[] => {
       if (!canAccess(session.id)) return [];
-      if (!runnerSupportsProtocol(
-        this.db.getRunner(session.runnerId)?.protocolVersion,
-        "delegatedParentControl",
-      )) return [];
       return pendingRequests(session.pendingApproval).flatMap((request): DescendantRequestView[] => {
-        if (!request.occurrenceId || !parentControlRequestEligible(mode, request)) return [];
+        if (!request.occurrenceId) return [];
+        if (request.kind === "workflow_decision") return [];
+        if (!runnerSupportsProtocol(
+          this.db.getRunner(session.runnerId)?.protocolVersion,
+          "delegatedParentControl",
+        ) || !parentControlRequestEligible(mode, request)) return [];
         return [{
           sessionId: session.id,
           sessionTitle: session.title,
@@ -4873,7 +5512,7 @@ export class SessionsService {
         }];
       });
     });
-    return ok({ requests });
+    return ok({ requests: [...durableTyped, ...generic] });
   }
 
   resolveDescendantRequest(
@@ -4886,14 +5525,34 @@ export class SessionsService {
     const parent = this.db.getSession(parentSessionId);
     if (!parent) return fail("session not found", 404);
     const mode = parent.parentControl ?? "off";
-    if (mode === "off") return fail("Parent Control is off", 403);
+    const typedPolicy = parent.parentControlPolicy ?? {
+      revision: 0, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY },
+    };
+    if (mode === "off" && !Object.values(typedPolicy.decisions).includes("orchestrator")) {
+      return fail("Parent Control is off", 403);
+    }
     if (!this.db.isSessionDescendant(parentSessionId, childSessionId) || !canAccess(childSessionId)) {
       return fail("session not found", 404);
     }
     const child = this.db.getSession(childSessionId);
     if (!child) return fail("session not found", 404);
+    if (resolution.action === "resolve_workflow_decision") {
+      const resolved = this.resolveWorkflowDecision(
+        parentSessionId,
+        childSessionId,
+        occurrenceId,
+        resolution,
+        "orchestrator",
+        { kind: "agent", id: parentSessionId },
+        canAccess,
+      );
+      return resolved.ok ? ok(this.db.getSession(childSessionId)!) : fail(resolved.error!, resolved.status);
+    }
     const pending = pendingRequests(child.pendingApproval).find((request) => request.occurrenceId === occurrenceId);
     if (!pending) return fail("descendant request occurrence is stale or no longer pending", 409);
+    if (pending.kind === "workflow_decision") {
+      return fail("typed workflow decisions require a typed workflow resolution", 409);
+    }
     if (!parentControlRequestEligible(mode, pending)) {
       return fail("this request requires a human response", 403);
     }
@@ -5067,6 +5726,8 @@ export class SessionsService {
     optionId: string | null,
     actor: GovernanceActor = { kind: "human", id: "local" },
     resolvedByParentSessionId?: string,
+    canAccess: (sessionId: string) => boolean = () => true,
+    evidenceReviewed?: string[],
   ): ServiceResult<SessionView> {
     const now = Date.now();
     this.reconcilePolicyHookTimeouts(now, sessionId);
@@ -5079,6 +5740,46 @@ export class SessionsService {
     if (!pending) return fail("no pending approval for this session", 409);
     if (pending.requestId !== requestId) return fail("approval request id does not match the pending one", 409);
     if (pending.expiresAt != null && pending.expiresAt <= now) return fail("approval request has expired", 409);
+
+    if (pending.kind === "workflow_decision") {
+      if (actor.kind !== "human") return fail("this workflow decision requires an authenticated human", 403);
+      const decision = this.db.workflowDecisionByOccurrence(pending.occurrenceId ?? requestId);
+      if (!decision || decision.status !== "pending") {
+        return fail("workflow decision is stale or no longer pending", 409);
+      }
+      const snapshot = decision.resourceSnapshot;
+      const implementation = snapshot.category === "implementation_question";
+      let deny: boolean;
+      if (snapshot.category === "implementation_question") {
+        if (optionId !== null && optionId !== "__workflow_deny__" &&
+            !snapshot.options.some((option) => option.optionId === optionId)) {
+          return fail("implementation decision option is not offered", 409);
+        }
+        deny = optionId === "__workflow_deny__" || optionId === null;
+      } else {
+        if (optionId !== null && optionId !== "approve" && optionId !== "deny") {
+          return fail("workflow decision requires the Approve or Deny option", 409);
+        }
+        deny = optionId === "deny" || optionId === null;
+      }
+      const resolution: ResolveWorkflowDecisionRequest = {
+        outcome: deny ? "deny" : "approve",
+        ...(implementation && !deny && optionId ? { selectedOptionId: optionId } : {}),
+        ...(decision.resourceSnapshot.category === "ui_evidence_approval" && !deny
+          ? { evidenceReviewed }
+          : {}),
+      };
+      const resolved = this.resolveWorkflowDecision(
+        decision.controllingSessionId,
+        sessionId,
+        decision.occurrenceId,
+        resolution,
+        "human",
+        actor,
+        canAccess,
+      );
+      return resolved.ok ? ok(this.db.getSession(sessionId)!) : fail(resolved.error!, resolved.status);
+    }
 
     // A hook ask is already parked inside Claude's live PreToolUse invocation. Persist the
     // terminal decision for that SAME process to observe on its next poll; never cancel the turn
@@ -5110,7 +5811,7 @@ export class SessionsService {
       if (promoted && beforePromotion) this.notifyTransition(beforePromotion, sessionId);
       if (!promoted) {
         const settled = this.db.getSession(sessionId);
-        if (settled?.status === "idle") this.replayRestoredPolicyHookIdle(session, sessionId, now);
+        if (settled?.status === "idle") this.replayRestoredPolicyIdle(session, sessionId, now);
       }
       this.hub.sessionChangedById(sessionId);
       return ok(this.db.getSession(sessionId)!);
@@ -5160,10 +5861,12 @@ export class SessionsService {
         }
         if (next) this.db.approveSessionCostCheckpoint(sessionId, next.checkpointUsd, now);
         else if (pending.kind === "cost_unpriced") this.db.acknowledgeSessionCostUnpriced(sessionId, now);
-        this.db.setPendingApproval(sessionId, null);
+        const remaining = removePendingRequest(this.db.getSession(sessionId)?.pendingApproval, pending.requestId);
+        this.db.setPendingApproval(sessionId, remaining);
         // These cards never cancelled the provider turn: a session parked mid-turn is still
         // running, and only one parked at a settle frame goes back to idle.
-        this.db.updateSessionStatus(sessionId, this.db.policyResumeStatus(sessionId) === "idle" ? "idle" : "running", now);
+        this.db.updateSessionStatus(sessionId, remaining ? "input_required" :
+          (this.db.policyResumeStatus(sessionId) === "idle" ? "idle" : "running"), now);
         this.recordGovernanceAudit(session, pending, "resolution", "allowed", actor, now, { optionId });
         this.gateOnPolicy(sessionId, now);
         this.reconcilePolicyHookTimeouts(now, sessionId);
@@ -5172,6 +5875,7 @@ export class SessionsService {
         // Declining stops the turn and records nothing, so the same checkpoint asks again on the
         // next turn that crosses it.
         this.abortPolicyHookApprovals(session, now, "guardrail-stopped");
+        this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "guardrail-stopped");
         this.db.setPendingApproval(sessionId, null);
         this.sendStopCommand(session.runnerId, sessionId);
         this.db.updateSessionStatus(sessionId, "stopped", now);
@@ -5250,6 +5954,7 @@ export class SessionsService {
         this.clearSettledPolicyResumeStatus(sessionId);
       } else {
         this.abortPolicyHookApprovals(session, now, "guardrail-stopped");
+        this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "guardrail-stopped");
         this.db.setPendingApproval(sessionId, null);
         this.sendStopCommand(session.runnerId, sessionId);
         this.db.updateSessionStatus(sessionId, "stopped", now);
@@ -7188,9 +7893,11 @@ export class SessionsService {
     if (status !== "idle" && !isTerminal(status)) {
       this.db.clearPolicyResumeStatus(sessionId);
     }
-    const childAttention = !isTerminal(status) &&
-      pendingRequests(session.pendingApproval).some((request) => request.ownerToolUseId);
+    const childAttention = !isTerminal(status) && pendingRequests(session.pendingApproval).some(
+      (request) => request.ownerToolUseId || request.kind === "workflow_decision",
+    );
     if (isTerminal(status)) {
+      this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "provider-session-ended");
       this.abortPolicyHookApprovals(session, Date.now(), "provider-session-ended");
     }
     this.db.updateSessionStatus(sessionId, childAttention ? "input_required" : status, Date.now());
@@ -7201,9 +7908,8 @@ export class SessionsService {
     if (isTerminal(status) && session.pendingApproval) {
       this.db.setPendingApproval(sessionId, null);
     }
-    // Guardrail gate at turn-settle: updateSessionStatus() just cleared any pending card when the
-    // session landed on idle, so apply a policy pause here if a rule is tripped. This is what makes
-    // the gate stick — a token_usage-time pause would otherwise be wiped by this trailing idle.
+    // Guardrail gate at turn-settle: apply a policy pause here if a newly tripped rule does not
+    // already have one. Existing control-plane cards remain sticky across the trailing idle.
     if (status === "idle") this.gateOnPolicy(sessionId, Date.now());
     this.reconcileWorkflowSessionStatus(sessionId, status, Date.now());
     if (detail && status === "failed") {
@@ -7370,7 +8076,11 @@ export class SessionsService {
 
   private gateOnPolicy(sessionId: string, now: number, fanOut = true, softOnly = false): boolean {
     const s = this.db.getSession(sessionId);
-    if (!s || s.pendingApproval) return false;
+    if (!s) return false;
+    const occupied = pendingRequests(s.pendingApproval);
+    // A typed workflow decision is an authorization record, not a provider turn barrier. Soft
+    // guardrails must be able to park alongside it while other provider/user asks retain priority.
+    if (occupied.some((request) => request.kind !== "workflow_decision")) return false;
     const rules = rulesFromSession(this.guardrailFields(s));
     if (rules.length === 0) return false;
     // sessionView already computed the count when the guardrail is armed — don't re-query.
@@ -7388,7 +8098,9 @@ export class SessionsService {
     // A control-plane-only card must also stop the runner draining queued prompts behind the
     // turn it parks; the runner-owned thresholds already tripped on the runner itself.
     if (!runnerHoldFor(ask.rule.kind)) this.rearmRunnerAfterCard(s, "control_plane");
-    this.db.setPendingApproval(sessionId, approval);
+    let combined = approval;
+    for (const request of occupied) combined = appendPendingApproval(combined, request);
+    this.db.setPendingApproval(sessionId, combined);
     // The daily allowance is the owner's, not this session's: every other live session they own
     // is parked now, before a queued turn elsewhere can dequeue behind the breach.
     if (ask.rule.kind === "daily_budget" && fanOut) {
@@ -7407,7 +8119,7 @@ export class SessionsService {
     return true;
   }
 
-  /** A durable hook resolution that restores a swallowed runner idle must replay the same
+  /** A durable control-plane decision that restores a swallowed runner idle must replay the same
    * settlement consumers as a live idle frame before broadcasting the final state. */
   /** A live delivery frame diverted into history hydration must arm settlement durably NOW —
    * the runner's trailing idle can beat the hydration round-trip to notifyTransition. */
@@ -7421,7 +8133,7 @@ export class SessionsService {
     );
   }
 
-  private replayRestoredPolicyHookIdle(previous: SessionView, sessionId: string, now: number): void {
+  private replayRestoredPolicyIdle(previous: SessionView, sessionId: string, now: number): void {
     this.gateOnPolicy(sessionId, now);
     this.reconcileWorkflowSessionStatus(sessionId, "idle", now);
     this.handlePodOrchestrationSettle(sessionId, "idle");
@@ -7433,7 +8145,7 @@ export class SessionsService {
 
   private clearSettledPolicyResumeStatus(sessionId: string): void {
     const current = this.db.getSession(sessionId);
-    if (!isPolicyApproval(current?.pendingApproval) &&
+    if (!hasPolicyApproval(current?.pendingApproval) &&
         this.db.listOpenPolicyHookApprovals(sessionId).length === 0) {
       this.db.clearPolicyResumeStatus(sessionId);
     }
@@ -7755,7 +8467,8 @@ export class SessionsService {
         });
         if (sent) {
           const current = this.db.getSession(sessionId)?.pendingApproval;
-          const remaining = pendingRequests(current).some((request) => request.ownerToolUseId)
+          const remaining = pendingRequests(current).some((request) =>
+            request.ownerToolUseId || request.kind === "workflow_decision")
             ? removePendingRequest(current, approval.requestId) : null;
           this.db.setPendingApproval(sessionId, remaining);
           // A deny (including null-option cancellation) returns control to the still-active agent
@@ -7893,8 +8606,10 @@ export class SessionsService {
         requests?.delete(payload.requestId);
         if (!requests?.size) this.automaticQuestions.delete(sessionId);
       }
-      if (!isPolicyApproval(this.db.getSession(sessionId)?.pendingApproval)) {
-        this.db.setPendingApproval(sessionId, removePendingRequest(this.db.getSession(sessionId)?.pendingApproval, payload.requestId));
+      const current = this.db.getSession(sessionId)?.pendingApproval;
+      const settledRequest = pendingRequests(current).find((request) => request.requestId === payload.requestId);
+      if (!settledRequest || !isPolicyApproval(settledRequest)) {
+        this.db.setPendingApproval(sessionId, removePendingRequest(current, payload.requestId));
       }
       this.gateOnPolicy(sessionId, now);
       this.reconcilePolicyHookTimeouts(now, sessionId);
@@ -7951,6 +8666,7 @@ export class SessionsService {
         // Same flap-recovery rule as hydrateRunnerSessions: re-derive a policy pause the
         // disconnect wiped (pre-snapshot runners restore through this path).
         this.gateOnPolicy(s.id, now);
+        this.restorePendingWorkflowDecisionCards(s.id);
         const ev = this.db.appendEvent(s.id, { kind: "stderr", text: "runner reconnected — session restored" }, now);
         this.hub.sessionEvent(ev);
         this.hub.sessionChangedById(s.id);
@@ -7960,6 +8676,7 @@ export class SessionsService {
           this.abortPolicyHookApprovals(s, now, "provider-session-absent");
         }
         if (!isTerminal(s.status)) {
+          this.revokeUnconsumedWorkflowDecisionsForSession(s.id, "provider-session-absent");
           this.db.updateSessionStatus(s.id, "stopped", now);
         }
         if (hadOpenHookApproval || !isTerminal(s.status)) this.hub.sessionChangedById(s.id);
@@ -8017,6 +8734,7 @@ export class SessionsService {
           continue;
         }
         if (isTerminal(snap.status)) {
+          this.revokeUnconsumedWorkflowDecisionsForSession(snap.id, "provider-session-ended");
           this.abortPolicyHookApprovals(existing, now, "provider-session-ended");
           this.db.clearPolicyResumeStatus(snap.id);
         } else if (snap.status === "idle" && this.db.listOpenPolicyHookApprovals(snap.id).length > 0) {
@@ -8039,11 +8757,11 @@ export class SessionsService {
       } else {
         this.db.createSessionFromSnapshot(snap, runnerId, now);
       }
-      // A CP-side policy pause cleared by a disconnect (failRunnerSessions → updateSessionStatus
-      // wipes pending_approval for non-input_required statuses) must be re-derived — hydration is
-      // the only settle-like moment after a flap. gateOnPolicy is idempotent and no-ops when a
-      // runner card holds the slot or nothing is tripped.
+      // A provisional disconnect clears projected cards while durable policy state survives.
+      // Hydration is the settle-like moment that re-derives guardrails and restores typed cards.
+      // gateOnPolicy is idempotent and no-ops when a runner card holds the slot or nothing is tripped.
       this.gateOnPolicy(snap.id, now);
+      this.restorePendingWorkflowDecisionCards(snap.id);
       this.hub.sessionChangedById(snap.id);
     }
     for (const s of this.db.listSessions({ includeArchived: true })) {
@@ -8054,6 +8772,7 @@ export class SessionsService {
           this.abortPolicyHookApprovals(s, now, "provider-session-absent");
         }
         if (!isTerminal(s.status)) {
+          this.revokeUnconsumedWorkflowDecisionsForSession(s.id, "provider-session-absent");
           this.db.updateSessionStatus(s.id, "stopped", now);
         }
         if (hadOpenHookApproval || !isTerminal(s.status)) this.hub.sessionChangedById(s.id);
@@ -8115,6 +8834,7 @@ export class SessionsService {
       ? { ...snapshot, costUsd: existing.costUsd }
       : snapshot;
     if (isTerminal(runtimeSnapshot.status)) {
+      this.revokeUnconsumedWorkflowDecisionsForSession(snapshot.id, "provider-session-ended");
       this.abortPolicyHookApprovals(existing, now, "provider-session-ended");
       this.db.clearPolicyResumeStatus(snapshot.id);
     } else if (runtimeSnapshot.status === "idle" && hasPolicyApproval(existing.pendingApproval)) {
@@ -8137,6 +8857,7 @@ export class SessionsService {
       this.gateOnPolicy(snapshot.id, now);
       this.notifyTransition(existing, snapshot.id);
     }
+    this.restorePendingWorkflowDecisionCards(snapshot.id);
     this.hub.sessionChangedById(snapshot.id);
   }
 
@@ -8805,16 +9526,17 @@ function appendPendingApproval(
   return { ...first!, ...(rest.length ? { additionalRequests: rest } : {}) };
 }
 
-/** A live provider ask owns the primary card, but it cannot erase a runner trip: that trip already
- * cancelled the turn and holds the FIFO until its own Continue/Stop decision. CP-only soft cards
- * keep their historical displacement semantics and are re-derived after the provider ask settles. */
+/** A live provider ask owns the primary card, but it cannot erase a runner trip or a durable typed
+ * workflow gate. Other CP-only soft cards keep their historical displacement semantics and are
+ * re-derived after the provider ask settles. */
 function addPendingRequestPreservingRunnerGuardrails(
   current: PendingApproval | null | undefined,
   next: PendingApproval,
 ): PendingApproval {
-  const runnerCards = pendingRequests(current).filter((request) => request.runnerGuardrail);
+  const durableCards = pendingRequests(current).filter((request) =>
+    request.runnerGuardrail || request.kind === "workflow_decision");
   let combined = addPendingRequest(current, next);
-  for (const runnerCard of runnerCards) combined = appendPendingApproval(combined, runnerCard);
+  for (const durableCard of durableCards) combined = appendPendingApproval(combined, durableCard);
   return combined;
 }
 

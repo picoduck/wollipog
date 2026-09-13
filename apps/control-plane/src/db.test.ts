@@ -2209,6 +2209,44 @@ test("usage migration seeds an unbucketed lifetime baseline exactly once", () =>
 
 /* ----------------------------- Sessions -------------------------------- */
 
+test("typed workflow decisions preserve their exact approval snapshot across a database restart", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-workflow-decision-restart-"));
+  const file = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(file);
+    initial.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    initial.createSession(newSession({ id: "parent" }));
+    initial.createSession(newSession({ id: "child", parentSessionId: "parent" }));
+    const snapshot = {
+      category: "ui_evidence_approval" as const,
+      evidence: [{ evidenceId: "desktop-after", uri: "https://evidence.example/after.png", sha256: "a".repeat(64) }],
+    };
+    const created = initial.createWorkflowDecision({
+      requestId: "ui-review", occurrenceId: "workflow-ui-review", sessionId: "child",
+      controllingSessionId: "parent", category: "ui_evidence_approval", resourceKey: "pr-1094-ui",
+      resourceSnapshot: snapshot, resourceDigest: "b".repeat(64), policyRevision: 3,
+      authority: "human", createdAt: 1_000,
+    });
+    assert.ok(created && !created.replay);
+    assert.ok(initial.resolveWorkflowDecision(
+      "workflow-ui-review", "human", "approved", 2_000, undefined, ["desktop-after"], "c".repeat(64),
+    ));
+    initial.close();
+
+    const reopened = ControlPlaneDb.open(file);
+    const decision = reopened.workflowDecisionByOccurrence("workflow-ui-review");
+    assert.deepEqual(decision?.resourceSnapshot, snapshot);
+    assert.equal(decision?.status, "approved");
+    assert.deepEqual(decision?.evidenceReviewed, ["desktop-after"]);
+    assert.equal(decision?.policyRevision, 3);
+    assert.equal(decision?.resourceDigest, "b".repeat(64));
+    assert.equal(reopened.consumeWorkflowDecision("workflow-ui-review", 3_000)?.status, "consumed");
+    reopened.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("createSession persists driver + config and sessionView reflects them", () => {
   const db = withRunner();
   const config: SessionConfig = {
@@ -3947,14 +3985,69 @@ test("Parent Control defaults off and persists opt-in across restart", () => {
   try {
     const initial = ControlPlaneDb.open(path);
     initial.registerRunner(meta(), 500);
-    assert.equal(initial.createSession(newSession()).parentControl, "off");
+    const created = initial.createSession(newSession());
+    assert.equal(created.parentControl, "off");
+    assert.deepEqual(created.parentControlPolicy, {
+      revision: 0,
+      decisions: {
+        implementation_question: "human",
+        pr_merge: "human",
+        merged_branch_deletion: "human",
+        follow_up_issue_publication: "human",
+        ui_evidence_approval: "human",
+      },
+    }, "legacy rows gain no implicit granular delegation");
     initial.updateSessionParentControl("sess-1", "questions_and_approvals", 2_000);
+    assert.deepEqual(initial.updateSessionParentControlPolicy("sess-1", {
+      implementation_question: "human",
+      pr_merge: "orchestrator",
+      merged_branch_deletion: "human",
+      follow_up_issue_publication: "human",
+      ui_evidence_approval: "human",
+    }, 2_000, 0), {
+      revision: 1,
+      decisions: {
+        implementation_question: "human",
+        pr_merge: "orchestrator",
+        merged_branch_deletion: "human",
+        follow_up_issue_publication: "human",
+        ui_evidence_approval: "human",
+      },
+    });
+    assert.equal(initial.updateSessionParentControlPolicy("sess-1", {
+      implementation_question: "human", pr_merge: "human", merged_branch_deletion: "human",
+      follow_up_issue_publication: "human", ui_evidence_approval: "human",
+    }, 2_001, 0), null, "stale policy revisions cannot overwrite a newer human choice");
     assert.equal(initial.getSession("sess-1")?.parentControl, "questions_and_approvals");
     initial.close();
 
     const reopened = ControlPlaneDb.open(path);
     assert.equal(reopened.getSession("sess-1")?.parentControl, "questions_and_approvals");
+    assert.equal(reopened.getSession("sess-1")?.parentControlPolicy?.revision, 1);
+    assert.equal(reopened.getSession("sess-1")?.parentControlPolicy?.decisions.pr_merge, "orchestrator");
     reopened.close();
+
+    const malformed = new DatabaseSync(path);
+    malformed.prepare(
+      "UPDATE sessions SET parent_control_policy=?, parent_control_policy_revision=99 WHERE id='sess-1'",
+    ).run(JSON.stringify({ pr_merge: "orchestrator", future_category: "orchestrator" }));
+    malformed.close();
+    const conservative = ControlPlaneDb.open(path);
+    assert.deepEqual(conservative.getSession("sess-1")?.parentControlPolicy, {
+      revision: 99,
+      decisions: {
+        implementation_question: "human",
+        pr_merge: "human",
+        merged_branch_deletion: "human",
+        follow_up_issue_publication: "human",
+        ui_evidence_approval: "human",
+      },
+    }, "malformed or future granular policies fail closed after a rolling restart");
+    assert.equal(conservative.updateSessionParentControlPolicy("sess-1", {
+      implementation_question: "human", pr_merge: "human", merged_branch_deletion: "human",
+      follow_up_issue_publication: "human", ui_evidence_approval: "human",
+    }, 3_000, 99)?.revision, 100, "the surfaced durable revision lets the conservative UI repair the row");
+    conservative.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
