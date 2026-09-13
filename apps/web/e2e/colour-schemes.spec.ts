@@ -660,16 +660,19 @@ test("decreasing gradient positions use CSS stop fix-up", async ({ page }) => {
   await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     html.style.transition = "none";
-    html.style.backgroundImage = "linear-gradient(rgb(255 0 0) 75%, rgb(0 0 255) 25%)";
+    html.style.backgroundImage = [
+      "linear-gradient(rgb(255 0 0) 0%, rgb(0 0 255) 50%, ",
+      "rgb(0 128 0) -100%, rgb(255 255 0) 100%)",
+    ].join("");
   });
 
   const { results: measured, unsupported } = await measure(page);
   expect(unsupported).toEqual([]);
   const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
-  expect(entries.map((entry) => entry.background)).toEqual([
-    "rgb(255.00 0.00 0.00 / 1.000)",
-    "rgb(0.00 0.00 255.00 / 1.000)",
-  ]);
+  expect(entries).toHaveLength(514);
+  expect(entries.some((entry) =>
+    entry.background === "rgb(0.00 128.00 0.00 / 1.000)",
+  )).toBe(true);
 });
 
 test("multi-position and repeating hard stops keep only painted colours", async ({ page }) => {
@@ -695,6 +698,27 @@ test("multi-position and repeating hard stops keep only painted colours", async 
       "rgb(0.00 0.00 255.00 / 1.000)",
     ]));
   }
+});
+
+test("repeating periods wider than the paint line sample each visible copy", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    html.style.transition = "none";
+    html.style.backgroundImage = [
+      "repeating-linear-gradient(rgb(255 0 0) 50%, rgb(0 0 255) 200%)",
+    ].join("");
+  });
+
+  const { results: measured, unsupported } = await measure(page);
+  expect(unsupported).toEqual([]);
+  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  expect(entries).toHaveLength(514);
+  expect(entries[0]?.background).toBe("rgb(85.00 0.00 170.00 / 1.000)");
+  expect(entries[256]?.background).toBe("rgb(0.00 0.00 255.00 / 1.000)");
+  expect(entries[257]?.background).toBe("rgb(255.00 0.00 0.00 / 1.000)");
+  expect(entries[513]?.background).toBe("rgb(170.00 0.00 85.00 / 1.000)");
 });
 
 test("off-canvas gradient intervals contribute only their painted edge colour", async ({ page }) => {
