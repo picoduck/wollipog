@@ -380,7 +380,10 @@
 // 137: capacity admission distinguishes transient cross-process mutation-lock contention from
 //      resource exhaustion and bounded-fairness queue ordering. Older peers receive a neutral
 //      runner-capacity recheck reason instead of the new blocker vocabulary.
-export const PROTOCOL_VERSION = 137;
+// 138: Agent Control child creation accepts an explicit reasoning effort alongside the model.
+//      New clients fail closed against older control planes instead of silently dropping it;
+//      calls that omit effort retain the protocol-v100 creation contract.
+export const PROTOCOL_VERSION = 138;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -589,6 +592,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionNamingTargets: 95,
   sessionNamingDriftCodes: 97,
   sessionAgentControl: 100,
+  sessionAgentControlReasoningEffort: 138,
   sessionOrchestration: 109,
   orchestratorNativeTui: 112,
   /** Target-local Linux helper plus runner-side authenticated broker for Direct WSL only. */

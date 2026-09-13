@@ -2,6 +2,7 @@
 
 import type { Readable, Writable } from "node:stream";
 import {
+  RUNNER_CAPABILITY_MIN_PROTOCOL,
   SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
 } from "@wollipog/protocol";
@@ -62,6 +63,9 @@ export interface McpDeps {
   sleep?: (milliseconds: number) => Promise<void>;
   /** Deterministic request budgets for timeout tests. */
   requestTimeoutMs?: number;
+  /** A caller that already authenticated `/api/compatibility` may pass the exact proven version
+   * so shared handlers do not repeat the same round-trip. */
+  controlPlaneProtocolVersion?: number;
 }
 
 export interface ToolResult {
@@ -137,6 +141,30 @@ async function cpFetch(
     return { ok: false, message: `HTTP ${res.status}: ${detail}`, status: res.status };
   }
   return { ok: true, data };
+}
+
+async function explicitEffortCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControlReasoningEffort;
+  if (Number.isInteger(deps.controlPlaneProtocolVersion)) {
+    return deps.controlPlaneProtocolVersion! >= required
+      ? null
+      : errorResult(
+          `Reasoning effort selection requires control plane protocol v${required}; connected control plane reports v${deps.controlPlaneProtocolVersion}. Update Wollipog or omit effort to preserve default resolution.`,
+        );
+  }
+  const result = await cpFetch(deps, "GET", "/api/compatibility");
+  if (!result.ok) {
+    return errorResult(
+      `Reasoning effort selection requires control plane protocol v${required}, but compatibility could not be verified: ${result.message}`,
+    );
+  }
+  const actual = result.data?.protocolVersion;
+  if (!Number.isInteger(actual) || actual < required) {
+    return errorResult(
+      `Reasoning effort selection requires control plane protocol v${required}; connected control plane reports v${String(actual ?? "unknown")}. Update Wollipog or omit effort to preserve default resolution.`,
+    );
+  }
+  return null;
 }
 
 /** Keep the exact invocation alive while its CP-owned child approval is pending, including
@@ -1105,7 +1133,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "create_session",
     description:
-      "Start a child session. It gets its own worktree unless you pass useWorktree: false, so its branch, diff, checkpoints, review, and PR state are visible. Omitted cost and tool-call limits remain unlimited unless Project defaults, a finite parent ceiling, or governance policy supplies them; explicit 0 opts out when the parent is unbounded. The result reports each effective guardrail as a value or null (none). Subject to session permissions and governance policies.",
+      "Start a child session with an optional model and reasoning effort applied before its initial task. Unsupported model/effort pairs fail before launch; omitting effort preserves saved/default resolution. It gets its own worktree unless you pass useWorktree: false, so its branch, diff, checkpoints, review, and PR state are visible. Omitted cost and tool-call limits remain unlimited unless Project defaults, a finite parent ceiling, or governance policy supplies them; explicit 0 opts out when the parent is unbounded. The result reports the effective model, effort, and each guardrail as a value or null (none). Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1117,6 +1145,7 @@ export const TOOLS: McpTool[] = [
         title: { type: "string" },
         useWorktree: { type: "boolean", description: "Defaults to true; pass false to run the child in place in the workspace directory" },
         model: { type: "string" },
+        effort: { type: "string", minLength: 1, description: "Reasoning effort supported by the selected model and agent installation" },
         permissionMode: { type: "string", enum: [...WORKER_PERMISSION_MODES] },
         costBudgetUsd: { type: "number" },
         maxToolCalls: { type: "number" },
@@ -1135,13 +1164,21 @@ export const TOOLS: McpTool[] = [
       if (!args.workspaceId && !args.workspacePath) {
         return errorResult("workspaceId or workspacePath is required — pick one from list_runners");
       }
+      if (args.effort !== undefined && (typeof args.effort !== "string" || !args.effort.trim())) {
+        return errorResult("effort must be a non-empty reasoning effort supported by the selected model and agent installation");
+      }
       if (args.permissionMode !== undefined && !WORKER_PERMISSION_MODES.includes(args.permissionMode)) {
         return errorResult(
           `permissionMode must be one of ${WORKER_PERMISSION_MODES.join(", ")} — bypassPermissions is never allowed`,
         );
       }
+      if (typeof args.effort === "string") {
+        const compatibilityError = await explicitEffortCompatibilityError(deps);
+        if (compatibilityError) return compatibilityError;
+      }
       const config: Json = {};
       if (typeof args.model === "string") config.model = args.model;
+      if (typeof args.effort === "string") config.effort = args.effort;
       if (typeof args.permissionMode === "string") config.permissionMode = args.permissionMode;
       if (typeof args.costBudgetUsd === "number") config.costBudgetUsd = args.costBudgetUsd;
       if (typeof args.maxToolCalls === "number") config.maxToolCalls = args.maxToolCalls;
@@ -1161,7 +1198,13 @@ export const TOOLS: McpTool[] = [
       const created = await createWithSpawnApproval(deps, "/api/sessions", body);
       if (!created.ok) return errorResult(created.message);
       const view = created.data;
-      return textResult({ session: mapSession(view) });
+      return textResult({
+        session: {
+          ...mapSession(view),
+          model: view?.model ?? null,
+          effort: view?.effort ?? null,
+        },
+      });
     },
   },
   {

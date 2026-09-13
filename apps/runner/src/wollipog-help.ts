@@ -54,7 +54,7 @@ export function sessionHelp(): string {
     "  session get <session-id> [--json]",
     "  session events <session-id> [--after <seq>] [--limit <count>] [--json]",
     "  session create --runner <runner-id> --agent <agent-id> [--workspace <workspace-id> | --path <path>]",
-    "                 [--prompt <text>] [--title <title>] [--model <model>] [--permission-mode <mode>] [--worktree]",
+    "                 [--prompt <text>] [--title <title>] [--model <model>] [--effort <effort>] [--permission-mode <mode>] [--worktree]",
     "                 [--cost-budget <usd>] [--max-tool-calls <count>] [--max-child-sessions <count>] [--json]",
     "  session prompt <session-id> <text> [--json]",
     "  session wait <session-id> [--for <state,...>] [--timeout <ms>] [--interval <ms>] [--json]",
