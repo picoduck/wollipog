@@ -2127,13 +2127,40 @@ test("re-entrant cancellation while resolving a replacement cannot strand the ne
   assert.equal((h.driver as any).pendingApprovals.size, 0);
 });
 
-test("buildCodexTurnParams: orchestrator cannot request sandbox escalation", () => {
+test("buildCodexTurnParams: orchestrator uses constrained Guardian review without sandbox expansion", () => {
   const params = buildCodexTurnParams(cfg("orchestrator"), "t1", "/w", []);
-  assert.equal(params.approvalPolicy, "never");
+  assert.deepEqual(params.approvalPolicy, { granular: {
+    mcp_elicitations: true,
+    request_permissions: false,
+    rules: false,
+    sandbox_approval: false,
+    skill_approval: false,
+  } });
+  assert.equal(params.approvalsReviewer, "auto_review");
   assert.deepEqual(params.sandboxPolicy, {
     type: "workspaceWrite", writableRoots: ["/w"], networkAccess: true,
     excludeTmpdirEnvVar: true, excludeSlashTmp: true,
   });
+});
+
+test("orchestrator surfaces Guardian escalations instead of declining them at the driver boundary", async () => {
+  const h = makeHarness({ config: cfg("orchestrator") });
+  const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any, requestId: number | string) => Promise<any>) =>
+      requests.set(method, handler),
+    onNotification: () => {},
+  });
+  const pending = requests.get("item/commandExecution/requestApproval")!({
+    command: "wollipog session create",
+  }, "orchestrator-escalation");
+  const event = h.events.at(-1);
+  assert.equal(event?.kind, "permission_request");
+  if (event?.kind === "permission_request") {
+    assert.deepEqual(event.context?.escalatedBy, { kind: "agent", id: "codex-guardian" });
+  }
+  assert.equal(h.driver.resolvePermission("orchestrator-escalation", "accept"), true);
+  assert.deepEqual(await pending, { decision: "accept" });
 });
 
 test("buildCodexTurnParams: default and 'auto-review' use Guardian with an escapable workspace sandbox", () => {

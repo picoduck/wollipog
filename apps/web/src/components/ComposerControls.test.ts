@@ -81,6 +81,16 @@ test("permission outcomes distinguish available, blocked, unrestricted, and unkn
   assert.deepEqual(permissionModeOutcome("auto", "unknown"), {
     label: "Support Unknown", description: "Wollipog has not verified approval delivery for this mode.", warning: true,
   });
+  assert.deepEqual(permissionModeOutcome("orchestrator", "unknown", "codex-app-server"), {
+    label: "Approve for Me",
+    description: "Guardian reviews eligible actions automatically; Wollipog still governs child management and human-only requests.",
+    warning: false,
+  });
+  assert.deepEqual(permissionModeOutcome("orchestrator", "unknown", "claude-code"), {
+    label: "Harness-Enforced",
+    description: "The harness keeps implementation approvals blocked; Wollipog still governs child management and human-only requests.",
+    warning: false,
+  });
   assert.equal(
     permissionModeOptionDescription(
       "acceptEdits",

@@ -150,11 +150,17 @@ export function withOrchestratorPreset(
       agent.wslAgentControl.safeLauncherProtocolVersion === 1 &&
       (host.isolationMode ?? host.wslIsolationMode) === "bwrap" &&
       ["claude-code", "codex", "codex-app-server"].includes(agent.driver ?? "acp");
+    const codexApprovalSupported = agent.driver !== "codex" && agent.driver !== "codex-app-server" ||
+      agent.codexAppServer?.orchestratorApproval?.status === "supported";
+    if (!codexApprovalSupported && agent.capabilities?.permissionModes?.includes(ORCHESTRATOR_PRESET)) {
+      return { ...agent, capabilities: { ...agent.capabilities,
+        permissionModes: agent.capabilities.permissionModes.filter((mode) => mode !== ORCHESTRATOR_PRESET) } };
+    }
     if (contextKind === "wsl" && !wslSupported && agent.capabilities?.permissionModes?.includes(ORCHESTRATOR_PRESET)) {
       return { ...agent, capabilities: { ...agent.capabilities,
         permissionModes: agent.capabilities.permissionModes.filter((mode) => mode !== ORCHESTRATOR_PRESET) } };
     }
-    if ((contextKind !== "native" && !wslSupported) ||
+    if (!codexApprovalSupported || (contextKind !== "native" && !wslSupported) ||
         (!acpSupported && !["claude-code", "codex", "codex-app-server"].includes(agent.driver ?? "acp"))) return agent;
     if (contextKind === "native" && !supportsNativeOrchestratorBoundary(
       agent.driver ?? "acp", host.platform ?? process.platform, host.isolationMode ?? host.wslIsolationMode,
@@ -214,10 +220,21 @@ export function orchestratorLaunchArgs(
     "-c", "sandbox_workspace_write.writable_roots=[]",
     "-c", "sandbox_workspace_write.network_access=true",
     "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
-    "-c", 'approval_policy="never"',
+    "-c", 'approvals_reviewer="auto_review"',
+    "-c", `approval_policy=${toml({ granular: {
+      mcp_elicitations: true,
+      request_permissions: false,
+      rules: false,
+      sandbox_approval: false,
+      skill_approval: false,
+    } })}`,
     "-c", 'web_search="live"',
     "-c", `developer_instructions=${toml(instructions)}`,
-    "-c", `mcp_servers=${toml({ wollipog: { ...mcp, enabled: true } })}`,
+    "-c", `mcp_servers=${toml({ wollipog: {
+      ...mcp,
+      enabled: true,
+      default_tools_approval_mode: "approve",
+    } })}`,
   ];
 }
 
@@ -246,7 +263,7 @@ export function stripOrchestratorLaunchArgs(args: string[], driver: SessionLaunc
     }
     if (driver !== "claude-code" && (flag === "-c" || flag === "--config")) {
       const setting = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : args[i + 1] ?? "";
-      if (/^(?:features\.|mcp_servers[.=]|sandbox_mode=|sandbox_workspace_write\.|approval_policy=|web_search=|developer_instructions=)/.test(setting)) {
+      if (/^(?:features\.|mcp_servers[.=]|sandbox_mode=|sandbox_workspace_write\.|approval_policy=|approvals_reviewer=|web_search=|developer_instructions=)/.test(setting)) {
         if (!arg.includes("=")) i++;
         continue;
       }

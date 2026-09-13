@@ -73,8 +73,12 @@ The initial implementation supports native host Codex and Claude Code where thei
 verified. Native Windows harnesses are withheld because Windows Job Objects do not attest filesystem
 confinement and Claude Bash-prefix rules cannot prevent output redirection. Codex disables native
 extensions, hooks, ambient MCP servers, multi-agent tools, and browser/computer/image tools. It
-keeps shell and live web search available under a no-approval workspace-write sandbox whose sole
-project-independent writable root is a session-private scratch directory. Claude Code receives
+keeps shell and live web search available under a workspace-write sandbox whose sole
+project-independent writable root is a session-private scratch directory. Codex turns use a
+constrained Guardian-backed automatic-review policy: the isolated runner-owned Wollipog MCP server
+is pre-approved, other eligible actions can be reviewed, and sandbox or permission expansion stays
+disabled. Discovery advertises the preset for Codex only after verifying a CLI version with that
+contract. Claude Code receives
 Read, Grep, Glob, WebFetch, WebSearch, and an explicit Bash allowlist for read-only Git and bounded
 GitHub issue coordination; Write, Edit, Agent, and Task remain disabled, hooks and settings sources
 remain empty, and permission mode is `dontAsk`, which must be advertised by the installed CLI.
@@ -82,7 +86,10 @@ Configured Project Locations in the agent's execution namespace are supplied as 
 Both harnesses start in scratch, use it for temporary files, may read user skills and project files,
 and may use the reduced runner-owned Wollipog MCP server; the control plane independently permits
 mutations only on trusted descendants. Unsupported or unverifiable configurations fail closed.
-Neither the user nor a child can switch this preset on an existing session.
+Neither the user nor a child can switch this preset on an existing session. New human-created
+Orchestrator sessions default Parent Control to **Questions and Approvals**; the user remains the
+only authority that can change that setting, and secret, authentication, identity, policy-gate,
+and persistent-grant requests remain non-delegable.
 
 On native Linux and macOS, Claude Code and the exact Claude Agent ACP adapter advertise this preset
 only with the runner's `bwrap` or `seatbelt` boundary respectively. Native Codex can rely on its

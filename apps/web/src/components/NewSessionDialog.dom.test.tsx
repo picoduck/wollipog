@@ -631,7 +631,7 @@ test("retired Conductor stays hidden and native orchestrator selection is sent a
   } finally { await unmountFixture(fixture); }
 });
 
-test("Parent Control is Orchestrator-only, defaults Off, and submits an explicit opt-in", async () => {
+test("Parent Control is Orchestrator-only and defaults human-created sessions to Questions and Approvals", async () => {
   const enabledRunner: RunnerView = {
     ...runner, protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.delegatedParentControl,
     agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
@@ -643,11 +643,10 @@ test("Parent Control is Orchestrator-only, defaults Off, and submits an explicit
   try {
     await act(async () => { selectProject(fixture.container, project.id); });
     assert.equal(parentControlCard(fixture.container, "Off"), undefined);
+    assert.match(fixture.container.textContent ?? "", /Approval-required implementation actions stay blocked/);
+    assert.doesNotMatch(fixture.container.textContent ?? "", /Guardian reviews eligible actions/);
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    assert.equal(parentControlCard(fixture.container, "Off")?.getAttribute("aria-checked"), "true");
-    const optIn = parentControlCard(fixture.container, "Questions and Approvals");
-    assert.ok(optIn);
-    await act(async () => { optIn.click(); });
+    assert.equal(parentControlCard(fixture.container, "Questions and Approvals")?.getAttribute("aria-checked"), "true");
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests[0]?.parentControl, "questions_and_approvals");
     assert.equal(fixture.requests[0]?.config?.permissionMode, "orchestrator");

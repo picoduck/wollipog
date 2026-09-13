@@ -37,13 +37,16 @@ export function savedSessionPermissionMode(
 export function orchestratorUnavailableReason(input: {
   runnerSupportsOrchestration: boolean;
   agentOffersOrchestrator: boolean;
+  agentOrchestratorRequirement?: string;
   /** The agent's execution context. `"wsl"` needs the verified safe launcher; `"native"` does not. */
   contextKind: string;
   directWslVerified: boolean;
   hostExecutionTarget: boolean;
 }): string | undefined {
   if (!input.runnerSupportsOrchestration) return "This runner is too old to orchestrate child sessions.";
-  if (!input.agentOffersOrchestrator) return "This agent does not offer the Orchestrator permission mode.";
+  if (!input.agentOffersOrchestrator) {
+    return input.agentOrchestratorRequirement ?? "This agent does not offer the Orchestrator permission mode.";
+  }
   if (input.contextKind === "wsl" && !input.directWslVerified) {
     return "WSL agents need the verified Direct WSL bridge and a bubblewrap-isolated runner.";
   }

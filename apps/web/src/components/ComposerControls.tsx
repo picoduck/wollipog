@@ -383,6 +383,7 @@ export function ServiceTierControl({
 export function permissionModeOutcome(
   permissionMode: string | undefined,
   status: ElicitationAvailability,
+  driver?: AgentDriverKind,
 ): { label: string; description: string; warning: boolean } {
   // A question or MCP elicitation channel can stay live while these policies deliberately disable
   // command/file approval checks. Mode semantics win over transport availability: calling that
@@ -398,6 +399,19 @@ export function permissionModeOutcome(
   }
   if (permissionMode === "plan") {
     return { label: "Read-Only", description: "The agent researches and plans without editing files.", warning: false };
+  }
+  if (permissionMode === "orchestrator") {
+    return driver === "codex" || driver === "codex-app-server"
+      ? {
+          label: "Approve for Me",
+          description: "Guardian reviews eligible actions automatically; Wollipog still governs child management and human-only requests.",
+          warning: false,
+        }
+      : {
+          label: "Harness-Enforced",
+          description: "The harness keeps implementation approvals blocked; Wollipog still governs child management and human-only requests.",
+          warning: false,
+        };
   }
   if (status === "available") {
     return { label: "Approvals Available", description: "Approval requests raised through this mode reach you in Wollipog.", warning: false };
@@ -557,7 +571,7 @@ export function ApprovalsMenuChoices({
 }) {
   const defaultStatus = elicitationAvailability(capabilities, defaultPermissionMode(driver));
   const defaultMode = defaultPermissionMode(driver);
-  const defaultOutcome = permissionModeOutcome(defaultMode, defaultStatus);
+  const defaultOutcome = permissionModeOutcome(defaultMode, defaultStatus, driver);
   const defaultDescription = permissionModeOptionDescription(
     defaultMode,
     driver,
@@ -584,7 +598,7 @@ export function ApprovalsMenuChoices({
       />
       {displayedModes.map((p) => {
         const status = elicitationAvailability(capabilities, p);
-        const outcome = permissionModeOutcome(p, status);
+        const outcome = permissionModeOutcome(p, status, driver);
         const description = permissionModeOptionDescription(
           p,
           driver,
@@ -618,7 +632,11 @@ export function ApprovalsControl({ session, apply }: { session: SessionView; app
   const { caps, permModes, permVal } = useSessionConfig(session);
   if (permModes.length === 0) return null;
   const currentStatus = elicitationAvailability(caps, permVal || defaultPermissionMode(session.driver));
-  const currentOutcome = permissionModeOutcome(permVal || defaultPermissionMode(session.driver), currentStatus);
+  const currentOutcome = permissionModeOutcome(
+    permVal || defaultPermissionMode(session.driver),
+    currentStatus,
+    session.driver,
+  );
   return (
     <>
       <BarMenu

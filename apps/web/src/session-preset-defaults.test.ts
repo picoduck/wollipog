@@ -72,6 +72,8 @@ test("each cause names ITSELF rather than the union of the four", () => {
 
   assert.match(reason({ runnerSupportsOrchestration: false }) ?? "", /runner is too old/);
   assert.match(reason({ agentOffersOrchestrator: false }) ?? "", /agent does not offer/);
+  assert.match(reason({ agentOffersOrchestrator: false,
+    agentOrchestratorRequirement: "Upgrade Codex to 0.154.0 or newer." }) ?? "", /0\.154\.0/);
   assert.match(reason({ contextKind: "wsl" }) ?? "", /verified Direct WSL bridge/);
   assert.match(reason({ hostExecutionTarget: false }) ?? "", /host execution target/);
 });

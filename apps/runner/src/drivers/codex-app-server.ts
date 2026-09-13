@@ -194,6 +194,7 @@ export function approvalResponse(method: string, params: Json, choice: string | 
 /**
  * Build the turn/start params for a permission mode. Exported for tests.
  * - default / "auto-review": on-request + approvalsReviewer=auto_review (Guardian model review).
+ * - orchestrator: granular Guardian review, with sandbox and permission expansion disabled.
  * - "on-request": Codex's standard Ask for approval preset (workspace sandbox + escalation).
  * - "read-only": read-only sandbox, with escalation available for edits/network access.
  * - "danger-full-access": never-ask with no sandbox.
@@ -211,7 +212,13 @@ export function buildCodexTurnParams(
 ): Json {
   const mode = cfg.permissionMode || AUTO_REVIEW_MODE;
   if (mode === "orchestrator") {
-    return { threadId, input, approvalPolicy: "never", sandboxPolicy: {
+    return { threadId, input, approvalPolicy: { granular: {
+      mcp_elicitations: true,
+      request_permissions: false,
+      rules: false,
+      sandbox_approval: false,
+      skill_approval: false,
+    } }, approvalsReviewer: "auto_review", sandboxPolicy: {
       type: "workspaceWrite", writableRoots: [cwd], networkAccess: true,
       excludeTmpdirEnvVar: true, excludeSlashTmp: true,
     }, cwd,
@@ -1045,7 +1052,7 @@ export class CodexAppServerDriver implements Driver {
     // (command/file -> {decision}; permissions -> {permissions, scope}).
     const makeApprover = (method: string) => (params: Json, rpcRequestId: number | string) =>
       new Promise<Json>((resolve) => {
-        if (this.disposed || this.cancelled || this.config.permissionMode === "orchestrator") {
+        if (this.disposed || this.cancelled) {
           return resolve(approvalResponse(method, params, null));
         }
         const id = String(rpcRequestId ?? params?.approvalId ?? params?.itemId ?? `${params?.turnId}:${++this.approvalSeq}`);
@@ -1074,7 +1081,7 @@ export class CodexAppServerDriver implements Driver {
           context: approvalContext(
             method,
             params,
-            (this.config.permissionMode || AUTO_REVIEW_MODE) === AUTO_REVIEW_MODE,
+            [AUTO_REVIEW_MODE, "orchestrator"].includes(this.config.permissionMode || AUTO_REVIEW_MODE),
           ),
         });
       });
