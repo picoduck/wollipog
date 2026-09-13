@@ -1,6 +1,11 @@
-import type { ChildSessionDefaults, SessionConfig, SessionView } from "@wollipog/protocol";
+import {
+  DEFAULT_LIVE_CHILD_LIMIT,
+  type ChildSessionDefaults,
+  type SessionConfig,
+  type SessionView,
+} from "@wollipog/protocol";
 
-export const DEFAULT_CHILD_SPAWN_CAP = 4;
+export const DEFAULT_CHILD_SPAWN_CAP = DEFAULT_LIVE_CHILD_LIMIT;
 
 export function childSessionDefaultsError(value: unknown): string | null {
   if (value === null) return null;

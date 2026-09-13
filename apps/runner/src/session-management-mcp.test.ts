@@ -394,6 +394,8 @@ test("list_sessions -> GET /api/sessions (+?archived=true), mapped with pendingA
           workspaceId: "ws",
           agentId: "claude-code",
           runId: null,
+          maxChildSessions: 7,
+          liveChildCapacity: { limit: 7, occupied: 5, remaining: 2 },
           costUsd: 1.5,
           costBudgetUsd: 5,
           maxToolCalls: null,
@@ -411,6 +413,8 @@ test("list_sessions -> GET /api/sessions (+?archived=true), mapped with pendingA
   const s = resultJson(result).sessions[0];
   assert.equal(s.pendingApproval, "Bash: rm -rf", "title only — no requestId to replay");
   assert.equal(s.costBudgetUsd, 5);
+  assert.equal(s.maxChildSessions, 7);
+  assert.deepEqual(s.liveChildCapacity, { limit: 7, occupied: 5, remaining: 2 });
   assert.equal(s.preview, undefined);
 
   result = await callTool(deps, "list_sessions", { archived: true });

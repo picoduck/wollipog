@@ -3347,6 +3347,7 @@ export class SessionsService {
         if (cleanupUndelivered) {
           this.db.deleteSession(id);
           this.hub.sessionRemoved(id);
+          if (session.parentSessionId) this.hub.sessionChangedById(session.parentSessionId);
           return fail("runner disconnected while launching the session", 409);
         }
         this.db.updateSessionStatus(id, "stopped", Date.now());
@@ -5762,6 +5763,7 @@ export class SessionsService {
     }
     this.db.deleteSession(session.id);
     this.hub.sessionRemoved(session.id);
+    if (session.parentSessionId) this.hub.sessionChangedById(session.parentSessionId);
     for (const pod of pods) {
       const updatedPod = this.db.reconcilePodAfterMembershipLoss(pod.id, Date.now());
       if (updatedPod) this.hub.podChanged(updatedPod);

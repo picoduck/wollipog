@@ -1052,6 +1052,7 @@ test("terminal or archived children free live slots while lifetime spend reserva
       return created.data!;
     });
     assert.equal(db.childSessionAllocations(parent.id).liveCount, 4);
+    assert.deepEqual(db.getSession(parent.id)?.liveChildCapacity, { limit: 4, occupied: 4, remaining: 0 });
     assert.match(
       svc.createSession(request, undefined, undefined, false, false, false, {
         parentSessionId: parent.id,
@@ -1069,6 +1070,12 @@ test("terminal or archived children free live slots while lifetime spend reserva
       costBudgetUsd: 0,
       maxToolCalls: 0,
     });
+    assert.deepEqual(db.getSession(parent.id)?.liveChildCapacity, { limit: 4, occupied: 0, remaining: 4 });
+    assert.deepEqual(
+      db.listSessions({ includeArchived: true }).find((session) => session.id === parent.id)?.liveChildCapacity,
+      { limit: 4, occupied: 0, remaining: 4 },
+      "list and exact-read projections release the same slots",
+    );
 
     const fifth = svc.createSession(request, undefined, undefined, false, false, false, {
       parentSessionId: parent.id,
@@ -1082,6 +1089,12 @@ test("terminal or archived children free live slots while lifetime spend reserva
       costBudgetUsd: 0,
       maxToolCalls: 0,
     });
+    assert.deepEqual(db.getSession(parent.id)?.liveChildCapacity, { limit: 4, occupied: 1, remaining: 3 });
+    assert.deepEqual(
+      db.listSessions({ includeArchived: true }).find((session) => session.id === parent.id)?.liveChildCapacity,
+      { limit: 4, occupied: 1, remaining: 3 },
+      "list and exact-read projections count the same live child",
+    );
   } finally { db.close(); }
 });
 

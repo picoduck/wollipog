@@ -194,6 +194,7 @@ function mapSession(s: Json): Json {
     runId: s?.runId ?? null,
     parentSessionId: s?.parentSessionId ?? null,
     maxChildSessions: s?.maxChildSessions ?? null,
+    liveChildCapacity: s?.liveChildCapacity ?? null,
     parentControl: s?.parentControl ?? "off",
     costUsd: s?.costUsd,
     costBudgetUsd: s?.costBudgetUsd ?? null,
@@ -421,7 +422,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "list_sessions",
-    description: "List sessions with status, title, cost, budget, tool-call count, and any pending approval.",
+    description: "List sessions with status, title, guardrails, live-child capacity, and any pending approval.",
     inputSchema: {
       type: "object",
       properties: { archived: { type: "boolean", description: "Include archived sessions" } },

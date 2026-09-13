@@ -253,6 +253,7 @@ test("CLI emits stable JSON and authenticates list requests as the exact session
         archived: false,
         parentSessionId: null,
         maxChildSessions: null,
+        liveChildCapacity: null,
         parentControl: "off",
       }],
     });

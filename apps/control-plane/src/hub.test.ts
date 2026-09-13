@@ -388,6 +388,64 @@ test("moving a session between Locations in one Project refreshes exact Location
   db.close();
 });
 
+test("child lifecycle upserts refresh the parent's live capacity projection", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner({
+    runnerId: "runner-child-capacity",
+    hostname: "child-capacity-host",
+    os: "linux",
+    version: "1",
+    agents: [],
+    workspaces: [],
+  }, 1);
+  const parent = db.createSession({
+    id: "session-parent-capacity",
+    runnerId: "runner-child-capacity",
+    workspaceId: null,
+    agentId: null,
+    title: "Parent Capacity",
+    useWorktree: false,
+    driver: "acp",
+    config: { maxChildSessions: 6 },
+    now: 2,
+  });
+  const messages: Array<{ type: string; session?: SessionView }> = [];
+  const hub = new Hub(db);
+  hub.addUiClient({
+    send: (data) => messages.push(JSON.parse(data) as { type: string; session?: SessionView }),
+  });
+  messages.length = 0;
+
+  const child = db.createSession({
+    id: "session-child-capacity",
+    parentSessionId: parent.id,
+    runnerId: "runner-child-capacity",
+    workspaceId: null,
+    agentId: null,
+    title: "Child Capacity",
+    useWorktree: false,
+    driver: "acp",
+    config: {},
+    now: 3,
+  });
+  hub.sessionChanged(child);
+  assert.deepEqual(
+    messages.findLast((message) => message.session?.id === parent.id)?.session?.liveChildCapacity,
+    { limit: 6, occupied: 1, remaining: 5 },
+    "child creation refreshes the open parent view",
+  );
+
+  messages.length = 0;
+  db.updateSessionStatus(child.id, "completed", 4);
+  hub.sessionChangedById(child.id);
+  assert.deepEqual(
+    messages.findLast((message) => message.session?.id === parent.id)?.session?.liveChildCapacity,
+    { limit: 6, occupied: 0, remaining: 6 },
+    "a terminal child promptly releases the slot in the open parent view",
+  );
+  db.close();
+});
+
 test("runner queue updates fan out to every dashboard and clear hold state authoritatively", () => {
   const db = ControlPlaneDb.open(":memory:");
   db.registerRunner({
