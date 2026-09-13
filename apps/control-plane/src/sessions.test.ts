@@ -584,7 +584,10 @@ test("orchestrator is creation-only and requires the negotiated native harness b
       permissionModes: ["default", "orchestrator"] };
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
-    const created = svc.createSession({ ...request, config: { permissionMode: "orchestrator" } });
+    const created = svc.createSession(
+      { ...request, config: { permissionMode: "orchestrator" } },
+      undefined, undefined, false, false, false, { defaultOwnerUserId: "human" },
+    );
     assert.equal(created.ok, true, created.error);
     assert.equal(created.data!.permissionMode, "orchestrator");
     assert.equal(created.data!.parentControl, "questions_and_approvals",
@@ -593,6 +596,17 @@ test("orchestrator is creation-only and requires the negotiated native harness b
       ...request, config: { permissionMode: "orchestrator" }, parentControl: "off",
     });
     assert.equal(explicitOff.data!.parentControl, "off", "an explicit human choice remains authoritative");
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.delegatedParentControl - 1);
+    const olderRunner = svc.createSession(
+      { ...request, config: { permissionMode: "orchestrator" } },
+      undefined, undefined, false, false, false, { defaultOwnerUserId: "human" },
+    );
+    assert.equal(olderRunner.ok, true, olderRunner.error);
+    assert.equal(olderRunner.data!.parentControl, "off",
+      "a human default cannot require a capability that the runner has not negotiated");
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const automated = svc.createSession({ ...request, config: { permissionMode: "orchestrator" } });
+    assert.equal(automated.data!.parentControl, "off", "non-human creation does not gain delegated authority");
     assert.equal(svc.createSession({ ...request, launchSurface: "native_tui",
       config: { permissionMode: "orchestrator" } }).ok, true);
     db.registerRunner(meta, Date.now(), 111);

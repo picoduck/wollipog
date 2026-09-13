@@ -2127,9 +2127,15 @@ test("re-entrant cancellation while resolving a replacement cannot strand the ne
   assert.equal((h.driver as any).pendingApprovals.size, 0);
 });
 
-test("buildCodexTurnParams: orchestrator routes approval-required management calls through Guardian", () => {
+test("buildCodexTurnParams: orchestrator uses constrained Guardian review without sandbox expansion", () => {
   const params = buildCodexTurnParams(cfg("orchestrator"), "t1", "/w", []);
-  assert.equal(params.approvalPolicy, "on-request");
+  assert.deepEqual(params.approvalPolicy, { granular: {
+    mcp_elicitations: true,
+    request_permissions: false,
+    rules: true,
+    sandbox_approval: false,
+    skill_approval: false,
+  } });
   assert.equal(params.approvalsReviewer, "auto_review");
   assert.deepEqual(params.sandboxPolicy, {
     type: "workspaceWrite", writableRoots: ["/w"], networkAccess: true,

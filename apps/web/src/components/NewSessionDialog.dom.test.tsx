@@ -643,6 +643,8 @@ test("Parent Control is Orchestrator-only and defaults human-created sessions to
   try {
     await act(async () => { selectProject(fixture.container, project.id); });
     assert.equal(parentControlCard(fixture.container, "Off"), undefined);
+    assert.match(fixture.container.textContent ?? "", /Approval-required implementation actions stay blocked/);
+    assert.doesNotMatch(fixture.container.textContent ?? "", /Guardian reviews eligible actions/);
     await choosePermissionPreset(fixture.container, "Orchestrator");
     assert.equal(parentControlCard(fixture.container, "Questions and Approvals")?.getAttribute("aria-checked"), "true");
     await act(async () => { createButton(fixture.container).click(); });

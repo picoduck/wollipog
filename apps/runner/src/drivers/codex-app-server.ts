@@ -193,8 +193,8 @@ export function approvalResponse(method: string, params: Json, choice: string | 
 
 /**
  * Build the turn/start params for a permission mode. Exported for tests.
- * - default / "auto-review" / orchestrator: on-request + approvalsReviewer=auto_review
- *   (Guardian model review).
+ * - default / "auto-review": on-request + approvalsReviewer=auto_review (Guardian model review).
+ * - orchestrator: granular Guardian review, with sandbox and permission expansion disabled.
  * - "on-request": Codex's standard Ask for approval preset (workspace sandbox + escalation).
  * - "read-only": read-only sandbox, with escalation available for edits/network access.
  * - "danger-full-access": never-ask with no sandbox.
@@ -212,7 +212,13 @@ export function buildCodexTurnParams(
 ): Json {
   const mode = cfg.permissionMode || AUTO_REVIEW_MODE;
   if (mode === "orchestrator") {
-    return { threadId, input, approvalPolicy: "on-request", approvalsReviewer: "auto_review", sandboxPolicy: {
+    return { threadId, input, approvalPolicy: { granular: {
+      mcp_elicitations: true,
+      request_permissions: false,
+      rules: true,
+      sandbox_approval: false,
+      skill_approval: false,
+    } }, approvalsReviewer: "auto_review", sandboxPolicy: {
       type: "workspaceWrite", writableRoots: [cwd], networkAccess: true,
       excludeTmpdirEnvVar: true, excludeSlashTmp: true,
     }, cwd,

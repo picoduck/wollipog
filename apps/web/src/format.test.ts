@@ -69,6 +69,8 @@ test("Codex permission labels match the CLI/Desktop presets", () => {
   assert.equal(permissionModeLabel("auto-review"), "Approve for Me");
   assert.equal(permissionModeLabel("danger-full-access"), "Full Access (No Sandbox)");
   assert.match(permissionModeDescription("on-request") ?? "", /network access require approval/);
+  assert.match(permissionModeDescription("orchestrator", "codex-app-server") ?? "", /Guardian reviews eligible actions/);
+  assert.doesNotMatch(permissionModeDescription("orchestrator", "claude-code") ?? "", /Guardian/);
 });
 
 test("Claude permission labels cover every installed fixed-rule mode", () => {

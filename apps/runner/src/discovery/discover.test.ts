@@ -192,6 +192,20 @@ test("configured agents cannot self-attest Native TUI accounting", () => {
   assert.equal(mergeAgents([claimed], [])[0]!.nativeTuiAccounting, undefined);
 });
 
+test("configured agents cannot self-attest Codex Orchestrator automatic review", () => {
+  const claimed = cfg({
+    id: "claimed-codex",
+    driver: "codex-app-server",
+    command: "/opt/custom/codex",
+    codexAppServer: {
+      status: "supported",
+      appServerAvailable: true,
+      orchestratorApproval: { status: "supported" },
+    },
+  });
+  assert.equal(mergeAgents([claimed], [])[0]!.codexAppServer?.orchestratorApproval, undefined);
+});
+
 test("fresh discovery replaces a configured Native TUI accounting diagnostic", () => {
   const configured = cfg({
     id: "configured-codex",

@@ -3101,7 +3101,11 @@ export class SessionsService {
     if (serviceTier) requestedConfig.serviceTier = serviceTier;
     else delete requestedConfig.serviceTier;
     const validationConfig = claudeModelConfigForValidation(requestedConfig, agentCapabilities, launch.driver);
-    if (!parentSessionId && req.parentControl === undefined && requestedConfig.permissionMode === "orchestrator") {
+    if (creationContext?.defaultOwnerUserId && !parentSessionId && req.parentControl === undefined &&
+        requestedConfig.permissionMode === "orchestrator" && runnerSupportsProtocol(
+          runner.protocolVersion,
+          "delegatedParentControl",
+        )) {
       parentControl = "questions_and_approvals";
     }
     if (requestedConfig.permissionMode === "orchestrator") {

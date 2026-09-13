@@ -119,11 +119,16 @@ function withoutConfiguredProviderAttestations(agent: AgentDefinition): AgentDef
   // Native TUI accounting is a live provider-contract attestation, never configuration. A stale
   // persisted value must not survive when a v121 runner cannot rediscover the same launch.
   const { nativeTuiAccounting: _unverifiedAccounting, ...withoutAccounting } = agent;
+  const codexAppServer = withoutAccounting.codexAppServer;
+  const { orchestratorApproval: _unverifiedOrchestratorApproval, ...verifiedCodexAppServer } = codexAppServer ?? {};
+  const withoutCodexOrchestratorApproval = codexAppServer
+    ? { ...withoutAccounting, codexAppServer: verifiedCodexAppServer as typeof codexAppServer }
+    : withoutAccounting;
   if ((agent.driver !== "codex-app-server" && agent.driver !== "claude-code") || !agent.capabilities?.supportsSteering) {
-    return withoutAccounting;
+    return withoutCodexOrchestratorApproval;
   }
   const { supportsSteering: _unverified, ...capabilities } = agent.capabilities;
-  return { ...withoutAccounting, capabilities };
+  return { ...withoutCodexOrchestratorApproval, capabilities };
 }
 
 /** `driver|context` key so agents sharing an execution context read the same model source once. */

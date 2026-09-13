@@ -224,7 +224,6 @@ const PERMISSION_LABELS: Record<string, string> = {
 
 /** One-line explanation of each approval mode, used as the option's hover tooltip. */
 const PERMISSION_DESCRIPTIONS: Record<string, string> = {
-  orchestrator: "Manages child sessions without its own shell or file-write tools. Guardian reviews eligible actions automatically; Wollipog keeps child management and human-only requests under its own controls. Selected at session creation and fixed for that session.",
   default: "You approve every tool call (Allow / Reject).",
   untrusted: "You approve every tool call (Allow / Reject).",
   auto: "A classifier model reviews each action: safe ones run automatically; risky ones are blocked and the agent is steered to a safer path.",
@@ -251,6 +250,12 @@ export function permissionModeLabel(id: string, driver?: AgentDriverKind): strin
 }
 
 export function permissionModeDescription(id: string, driver?: AgentDriverKind): string | undefined {
+  if (id === "orchestrator") {
+    const approvalBoundary = driver === "codex" || driver === "codex-app-server"
+      ? "Guardian reviews eligible actions automatically"
+      : "The harness keeps implementation approvals blocked";
+    return `Manages child sessions without its own shell or file-write tools. ${approvalBoundary}; Wollipog keeps child management and human-only requests under its own controls. Selected at session creation and fixed for that session.`;
+  }
   if (driver === "codex" && id === "workspace-write") {
     return "Reads and writes inside the workspace run automatically; external files and network access are blocked (no prompt).";
   }

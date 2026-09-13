@@ -244,8 +244,13 @@ test("native orchestrator flags enable bounded planning while disabling implemen
   for (const setting of ['sandbox_mode="workspace-write"', "sandbox_workspace_write.writable_roots=[]",
     "sandbox_workspace_write.network_access=true", "sandbox_workspace_write.exclude_slash_tmp=true",
     'web_search="live"']) assert.ok(codex.includes(setting));
-  assert.ok(codex.includes("--approve-for-me"));
+  assert.equal(codex.includes("--approve-for-me"), false,
+    "the broad shortcut must not let Guardian approve a project-filesystem sandbox escape");
+  assert.ok(codex.includes('approvals_reviewer="auto_review"'));
+  assert.ok(codex.includes('approval_policy={ "granular" = { "mcp_elicitations" = true, "request_permissions" = false, "rules" = true, "sandbox_approval" = false, "skill_approval" = false } }'));
   assert.equal(codex.includes('approval_policy="never"'), false);
+  assert.ok(codex.some((arg) => arg.includes('"default_tools_approval_mode" = "approve"')),
+    "only the isolated runner-owned Wollipog MCP server is pre-approved");
   assert.equal(codex.some((arg) => arg.includes("exclude_tmpdir_env_var")), false,
     "TMPDIR names scratch and must remain writable through the explicit workspace root");
   for (const feature of ["hooks", "multi_agent", "plugins", "apps"]) {

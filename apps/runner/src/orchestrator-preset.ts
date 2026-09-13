@@ -214,16 +214,27 @@ export function orchestratorLaunchArgs(
   }
   return [
     "--strict-config",
-    "--approve-for-me",
     ...["apps", "plugins", "hooks",
       "multi_agent", "browser_use", "computer_use", "image_generation"].flatMap((feature) => ["--disable", feature]),
     "-c", 'sandbox_mode="workspace-write"',
     "-c", "sandbox_workspace_write.writable_roots=[]",
     "-c", "sandbox_workspace_write.network_access=true",
     "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
+    "-c", 'approvals_reviewer="auto_review"',
+    "-c", `approval_policy=${toml({ granular: {
+      mcp_elicitations: true,
+      request_permissions: false,
+      rules: true,
+      sandbox_approval: false,
+      skill_approval: false,
+    } })}`,
     "-c", 'web_search="live"',
     "-c", `developer_instructions=${toml(instructions)}`,
-    "-c", `mcp_servers=${toml({ wollipog: { ...mcp, enabled: true } })}`,
+    "-c", `mcp_servers=${toml({ wollipog: {
+      ...mcp,
+      enabled: true,
+      default_tools_approval_mode: "approve",
+    } })}`,
   ];
 }
 
@@ -252,7 +263,7 @@ export function stripOrchestratorLaunchArgs(args: string[], driver: SessionLaunc
     }
     if (driver !== "claude-code" && (flag === "-c" || flag === "--config")) {
       const setting = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : args[i + 1] ?? "";
-      if (/^(?:features\.|mcp_servers[.=]|sandbox_mode=|sandbox_workspace_write\.|approval_policy=|web_search=|developer_instructions=)/.test(setting)) {
+      if (/^(?:features\.|mcp_servers[.=]|sandbox_mode=|sandbox_workspace_write\.|approval_policy=|approvals_reviewer=|web_search=|developer_instructions=)/.test(setting)) {
         if (!arg.includes("=")) i++;
         continue;
       }

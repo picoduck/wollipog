@@ -74,10 +74,11 @@ verified. Native Windows harnesses are withheld because Windows Job Objects do n
 confinement and Claude Bash-prefix rules cannot prevent output redirection. Codex disables native
 extensions, hooks, ambient MCP servers, multi-agent tools, and browser/computer/image tools. It
 keeps shell and live web search available under a workspace-write sandbox whose sole
-project-independent writable root is a session-private scratch directory. Codex App Server turns
-use Guardian-backed automatic review: eligible actions run after review, while genuinely risky
-actions escalate to the user instead of becoming terminal denials. Discovery advertises the preset
-for Codex only after verifying a CLI version with that contract. Claude Code receives
+project-independent writable root is a session-private scratch directory. Codex turns use a
+constrained Guardian-backed automatic-review policy: the isolated runner-owned Wollipog MCP server
+is pre-approved, other eligible actions can be reviewed, and sandbox or permission expansion stays
+disabled. Discovery advertises the preset for Codex only after verifying a CLI version with that
+contract. Claude Code receives
 Read, Grep, Glob, WebFetch, WebSearch, and an explicit Bash allowlist for read-only Git and bounded
 GitHub issue coordination; Write, Edit, Agent, and Task remain disabled, hooks and settings sources
 remain empty, and permission mode is `dontAsk`, which must be advertised by the installed CLI.

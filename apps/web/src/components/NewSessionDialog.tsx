@@ -976,7 +976,9 @@ export function NewSessionDialog({
                 {
                   value: "orchestrator",
                   title: "Orchestrator",
-                  description: "Manage child sessions without shell or file-write tools. Guardian reviews eligible actions automatically, and Parent Control defaults to Questions and Approvals. Cannot change after creation.",
+                  description: agent?.driver === "codex" || agent?.driver === "codex-app-server"
+                    ? "Manage child sessions without shell or file-write tools. Guardian reviews eligible actions automatically, and Parent Control defaults to Questions and Approvals. Cannot change after creation."
+                    : "Manage child sessions without shell or file-write tools. Approval-required implementation actions stay blocked, and Parent Control defaults to Questions and Approvals. Cannot change after creation.",
                   // Rendered disabled rather than omitted. The list used to drop this option
                   // entirely when unsupported, leaving a one-option control that could not say
                   // whether the runner, the agent, the context or the target was the reason.
