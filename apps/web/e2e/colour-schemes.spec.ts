@@ -74,7 +74,7 @@ async function measure(page: Page) {
       if (/^rgba?\(/.test(value)) {
         return { r: parts[0] ?? 0, g: parts[1] ?? 0, b: parts[2] ?? 0, a: parts[3] ?? 1 };
       }
-      if (/^color\(\s*srgb/.test(value)) {
+      if (/^color\(\s*srgb\s/i.test(value)) {
         return {
           r: (parts[0] ?? 0) * 255,
           g: (parts[1] ?? 0) * 255,
@@ -214,34 +214,51 @@ async function measure(page: Page) {
     const groundsOf = (element: Element):
       { grounds: ReturnType<typeof parse>[]; error?: never }
       | { grounds?: never; error: string } => {
-      const layers: ReturnType<typeof parse>[] = [];
+      const layersAboveGradient: ReturnType<typeof parse>[] = [];
       let node: Element | null = element;
-      let stops: ReturnType<typeof parse>[] = [];
       while (node) {
         const style = getComputedStyle(node);
         const image = style.backgroundImage;
         if (image && image !== "none") {
           const found = gradientStops(image);
           if (found.error) return { error: found.error };
-          stops = found.stops.filter((colour) => colour.a > 0);
-          if (stops.length === 0) return { error: `gradient has no visible colour stops: ${image}` };
-          // A background image is painted over the background colour on the same element.
-          const fill = parse(style.backgroundColor);
-          if (fill.a > 0) layers.push(fill);
-          break;
+          // Build the opaque base behind this gradient. Its own background colour is below the
+          // image, then ancestor colours continue underneath until one closes the stack.
+          const layersBelowGradient: ReturnType<typeof parse>[] = [];
+          let beneath: Element | null = node;
+          while (beneath) {
+            const beneathStyle = getComputedStyle(beneath);
+            if (beneath !== node && beneathStyle.backgroundImage !== "none") {
+              return { error: `nested background image is not modelled: ${beneathStyle.backgroundImage}` };
+            }
+            const fill = parse(beneathStyle.backgroundColor);
+            if (fill.a > 0) layersBelowGradient.push(fill);
+            if (fill.a >= 1) break;
+            beneath = beneath.parentElement;
+          }
+          const base = layersBelowGradient.reduceRight(
+            (below, above) => over(above, below),
+            { r: 255, g: 255, b: 255, a: 1 },
+          );
+          // Descendant fills collected before the gradient are painted above it, not below it.
+          return {
+            grounds: found.stops.map((stop) => layersAboveGradient.reduceRight(
+              (below, above) => over(above, below),
+              over(stop, base),
+            )),
+          };
         }
         const fill = parse(style.backgroundColor);
-        if (fill.a > 0) layers.push(fill);
+        if (fill.a > 0) layersAboveGradient.push(fill);
         if (fill.a >= 1) break;
         node = node.parentElement;
       }
-      const beneath = layers.length === 0
-        ? { r: 255, g: 255, b: 255, a: 1 }
-        : layers.reduceRight((below, above) => over(above, below));
-      if (stops.length === 0) return { grounds: [beneath] };
-      // The stops sit ON whatever was already accumulated, so a translucent gradient is composited
-      // rather than assumed opaque.
-      return { grounds: stops.map((stop) => over(stop, beneath)) };
+      return {
+        grounds: [layersAboveGradient.reduceRight(
+          (below, above) => over(above, below),
+          { r: 255, g: 255, b: 255, a: 1 },
+        )],
+      };
     };
 
     const selectorOf = (element: Element) => {
@@ -392,6 +409,67 @@ test("RGB gradient stops retain alpha while compositing over their fallback", as
   const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
   expect(entries).toHaveLength(2);
   expect(entries.every((entry) => entry.background.startsWith("rgb(127.50 127.50 127.50"))).toBe(true);
+});
+
+test("translucent gradient fallbacks retain the ancestor background", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=light", {
+    scheme: "wollipog",
+    theme: "light",
+  });
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    html.style.transition = "none";
+    html.style.color = "rgb(255 255 255)";
+    html.style.backgroundColor = "rgb(0 0 0 / 20%)";
+    html.style.backgroundImage = "linear-gradient(rgb(255 255 255 / 10%), rgb(255 255 255 / 10%))";
+    (html.parentElement as HTMLElement).style.backgroundColor = "rgb(255 255 255)";
+    (html.parentElement as HTMLElement).style.backgroundImage = "none";
+  });
+
+  const { results: measured, unsupported } = await measure(page);
+  expect(unsupported).toEqual([]);
+  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  expect(entries).toHaveLength(2);
+  expect(entries.every((entry) => entry.background.startsWith("rgb(209.10 209.10 209.10"))).toBe(true);
+  expect(entries.every((entry) => entry.ratio < AA)).toBe(true);
+});
+
+test("transparent gradient stops measure the background showing through", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    html.style.transition = "none";
+    html.style.color = "rgb(0 0 0)";
+    html.style.backgroundColor = "rgb(0 0 0)";
+    html.style.backgroundImage = "linear-gradient(rgb(255 255 255), transparent)";
+  });
+
+  const { results: measured, unsupported } = await measure(page);
+  expect(unsupported).toEqual([]);
+  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  expect(entries).toHaveLength(2);
+  expect(entries.some((entry) => entry.ratio > 20)).toBe(true);
+  expect(entries.some((entry) => entry.ratio === 1)).toBe(true);
+});
+
+test("linear-sRGB gradient stops use browser colour conversion", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    html.style.transition = "none";
+    html.style.backgroundImage = [
+      "linear-gradient(color(srgb-linear 0.2 0.2 0.2), color(srgb-linear 0.2 0.2 0.2))",
+    ].join("");
+  });
+
+  const { results: measured, unsupported } = await measure(page);
+  expect(unsupported).toEqual([]);
+  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  expect(entries).toHaveLength(2);
+  expect(entries.every((entry) => entry.background.startsWith("rgb(124.00 124.00 124.00"))).toBe(true);
 });
 
 test("unsupported rendered gradient syntax fails with an actionable diagnostic", async ({ page }) => {
