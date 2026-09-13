@@ -11008,7 +11008,7 @@ body.shell-dock-dragging * {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 .approval-evidence p { color: var(--text-dim); }
 .approval-evidence-item {

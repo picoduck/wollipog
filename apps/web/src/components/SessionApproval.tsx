@@ -21,6 +21,7 @@ import {
 import { useQuestionResponseStyle } from "../question-response-style.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
 import { StructuredQuestionText } from "./StructuredQuestionText.js";
+import { Checkbox } from "./ui/ChoiceControls.js";
 
 const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
@@ -427,11 +428,10 @@ export function SessionApprovalBanner({
             <div className="approval-evidence-item" key={item.evidenceId}>
               <a href={item.uri} target="_blank" rel="noreferrer">Open Evidence: {item.evidenceId}</a>
               <label>
-                <input
-                  type="checkbox"
+                <Checkbox
+                  label={`Mark ${item.evidenceId} as Reviewed`}
                   checked={reviewedEvidence.includes(item.evidenceId)}
-                  onChange={(event) => {
-                    const checked = event.currentTarget.checked;
+                  onChange={(checked) => {
                     setReviewedEvidence((current) => checked
                       ? [...current, item.evidenceId]
                       : current.filter((evidenceId) => evidenceId !== item.evidenceId));
