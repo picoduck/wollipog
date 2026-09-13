@@ -168,9 +168,30 @@ async function measure(page: Page) {
       return null;
     };
 
-    const gradientStops = (image: string):
-      { stops: ReturnType<typeof parse>[]; error?: never }
-      | { stops?: never; error: string } => {
+    /** How many points to sample between consecutive gradient stops, including both ends. */
+    const GRADIENT_SAMPLES = 257;
+
+    const sampleGradient = (stops: ReturnType<typeof parse>[]) => {
+      const samples: ReturnType<typeof parse>[] = [];
+      for (let index = 0; index + 1 < stops.length; index++) {
+        const from = stops[index]!;
+        const to = stops[index + 1]!;
+        for (let step = 0; step < GRADIENT_SAMPLES; step++) {
+          const t = step / (GRADIENT_SAMPLES - 1);
+          const a = from.a * (1 - t) + to.a * t;
+          const channel = (key: "r" | "g" | "b") => {
+            const premultiplied = from.a * from[key] * (1 - t) + to.a * to[key] * t;
+            return a === 0 ? 0 : premultiplied / a;
+          };
+          samples.push({ r: channel("r"), g: channel("g"), b: channel("b"), a });
+        }
+      }
+      return samples;
+    };
+
+    const gradientSamples = (image: string):
+      { samples: ReturnType<typeof parse>[]; error?: never }
+      | { samples?: never; error: string } => {
       const layers = splitTopLevel(image);
       if (!layers) return { error: `unbalanced CSS syntax in ${image}` };
       if (layers.length !== 1) {
@@ -187,18 +208,54 @@ async function measure(page: Page) {
       const components = splitTopLevel(gradient.body);
       if (!components) return { error: `unbalanced ${gradient.name} arguments in ${image}` };
       const stops: ReturnType<typeof parse>[] = [];
+      const stopSyntax: string[] = [];
+      let interpolation: string | undefined;
       for (const [index, component] of components.entries()) {
         const candidate = functionCall(component);
         if (candidate && CSS.supports("color", candidate.full)) {
           stops.push(parse(candidate.full));
+          stopSyntax.push(candidate.full);
           continue;
         }
         // The first component may be a direction, shape, position, or colour-interpolation method.
-        if (index === 0) continue;
+        if (index === 0) {
+          interpolation = component.match(/\bin\s+([\w-]+)/i)?.[1]?.toLowerCase();
+          if (interpolation && interpolation !== "srgb") {
+            return { error: `gradient interpolation method ${interpolation} is not modelled: ${image}` };
+          }
+          continue;
+        }
         return { error: `gradient component ${index + 1} is not a supported colour stop: ${component}` };
       }
       if (stops.length < 2) return { error: `fewer than two supported colour stops in ${image}` };
-      return { stops };
+      if (stopSyntax.some((stop) => /\bnone\b/i.test(stop))) {
+        return { error: `gradient stops with missing colour components are not modelled: ${image}` };
+      }
+
+      const first = stops[0]!;
+      const isConstant = stops.every((stop) =>
+        stop.r === first.r && stop.g === first.g && stop.b === first.b && stop.a === first.a);
+      const legacyStops = stopSyntax.every((stop) => /^rgba?\(/i.test(stop));
+      const explicitSrgbStops = stopSyntax.every((stop) => {
+        if (/^rgba?\(/i.test(stop)) return !/\bnone\b/i.test(stop);
+        if (!/^color\(\s*srgb\s/i.test(stop) || /\bnone\b/i.test(stop)) return false;
+        const components = stop.match(/-?(?:\d+(?:\.\d*)?|\.\d+)/g)?.map(Number) ?? [];
+        return components.slice(0, 3).length === 3
+          && components.slice(0, 3).every((component) => component >= 0 && component <= 1);
+      });
+      // Chromium changes the default interpolation space to Oklab when a gradient contains a
+      // non-legacy colour. Once interpolation matters, sampling those converted sRGB endpoints
+      // would measure colours the browser never paints.
+      if (!isConstant && !interpolation && !legacyStops) {
+        return { error: `implicit Oklab interpolation for non-legacy stops is not modelled: ${image}` };
+      }
+      // Explicit sRGB is exact for computed rgb()/rgba() and in-range color(srgb) stops. Other
+      // spaces require an unclamped conversion before interpolation; the 8-bit canvas normalizer
+      // cannot provide that without changing out-of-gamut interiors.
+      if (!isConstant && interpolation === "srgb" && !explicitSrgbStops) {
+        return { error: `gradient stops cannot be modelled accurately with sRGB interpolation: ${image}` };
+      }
+      return { samples: sampleGradient(stops) };
     };
 
     /**
@@ -208,8 +265,9 @@ async function measure(page: Page) {
      * walk ignored it: the primary button's label was measured against the page behind its
      * gradient, at 1.14:1, which is not what anyone sees. Chromium may preserve the colour space of
      * computed gradient stops, so each stop is extracted structurally and normalized through the
-     * same browser-backed path as a solid colour. Every stop is a real ground and the label has to
-     * clear all of them — a gradient is only as readable as its worst point.
+     * same browser-backed path as a solid colour. Each adjacent pair is sampled densely because
+     * relative luminance can have an interior minimum even when both endpoints pass. A gradient is
+     * only as readable as its worst sampled point.
      */
     const groundsOf = (element: Element):
       { grounds: ReturnType<typeof parse>[]; error?: never }
@@ -220,7 +278,7 @@ async function measure(page: Page) {
         const style = getComputedStyle(node);
         const image = style.backgroundImage;
         if (image && image !== "none") {
-          const found = gradientStops(image);
+          const found = gradientSamples(image);
           if (found.error) return { error: found.error };
           // Build the opaque base behind this gradient. Its own background colour is below the
           // image, then ancestor colours continue underneath until one closes the stack.
@@ -242,9 +300,9 @@ async function measure(page: Page) {
           );
           // Descendant fills collected before the gradient are painted above it, not below it.
           return {
-            grounds: found.stops.map((stop) => layersAboveGradient.reduceRight(
+            grounds: found.samples.map((sample) => layersAboveGradient.reduceRight(
               (below, above) => over(above, below),
-              over(stop, base),
+              over(sample, base),
             )),
           };
         }
@@ -388,9 +446,84 @@ test("non-RGB gradient stops cannot false-pass against their fallback", async ({
   const { results: measured, unsupported } = await measure(page);
   expect(unsupported).toEqual([]);
   const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
-  expect(entries).toHaveLength(2);
+  expect(entries).toHaveLength(257);
   expect(entries.every((entry) => entry.ratio < AA)).toBe(true);
   expect(entries.every((entry) => entry.background.startsWith("rgb(255.00 255.00 255.00"))).toBe(true);
+});
+
+test("implicit non-legacy gradient interpolation fails closed", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    html.style.transition = "none";
+    html.style.backgroundImage = [
+      "linear-gradient(color(srgb 0 0 0), color(srgb 1 1 1))",
+    ].join("");
+  });
+
+  const { unsupported } = await measure(page);
+  expect(unsupported).toContainEqual(expect.stringMatching(
+    /^p\.slash-detail-disabled: implicit Oklab interpolation for non-legacy stops is not modelled:/,
+  ));
+});
+
+test("gradient interiors cannot false-pass when both endpoints clear AA", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    html.style.transition = "none";
+    html.style.color = "rgb(31 31 31)";
+    html.style.backgroundColor = "rgb(255 255 255)";
+    html.style.backgroundImage = "linear-gradient(rgb(255 0 255), rgb(0 255 0))";
+  });
+
+  const { results: measured, unsupported } = await measure(page);
+  expect(unsupported).toEqual([]);
+  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  expect(entries).toHaveLength(257);
+  expect(entries[0]?.ratio).toBeGreaterThan(AA);
+  expect(entries.at(-1)?.ratio).toBeGreaterThan(AA);
+  const midpoint = entries.find((entry) => entry.background.startsWith("rgb(127.50 127.50 127.50"));
+  expect(midpoint?.ratio).toBeLessThan(AA);
+});
+
+test("explicit sRGB gradients use sRGB interpolation", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    html.style.transition = "none";
+    html.style.backgroundColor = "rgb(0 0 0)";
+    html.style.backgroundImage = [
+      "linear-gradient(in srgb, color(srgb 1 0 0), color(srgb 0 1 0), color(srgb 0 0 1))",
+    ].join("");
+  });
+
+  const { results: measured, unsupported } = await measure(page);
+  expect(unsupported).toEqual([]);
+  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  expect(entries).toHaveLength(514);
+  expect(entries[128]?.background).toBe("rgb(127.50 127.50 0.00 / 1.000)");
+  expect(entries[385]?.background).toBe("rgb(0.00 127.50 127.50 / 1.000)");
+});
+
+test("gradient alpha interpolation is premultiplied before compositing", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    html.style.transition = "none";
+    html.style.backgroundColor = "rgb(0 0 0)";
+    html.style.backgroundImage = "linear-gradient(rgb(255 0 0 / 0%), rgb(0 0 255))";
+  });
+
+  const { results: measured, unsupported } = await measure(page);
+  expect(unsupported).toEqual([]);
+  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  expect(entries).toHaveLength(257);
+  expect(entries[128]?.background).toBe("rgb(0.00 0.00 127.50 / 1.000)");
 });
 
 test("RGB gradient stops retain alpha while compositing over their fallback", async ({ page }) => {
@@ -407,7 +540,7 @@ test("RGB gradient stops retain alpha while compositing over their fallback", as
   const { results: measured, unsupported } = await measure(page);
   expect(unsupported).toEqual([]);
   const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
-  expect(entries).toHaveLength(2);
+  expect(entries).toHaveLength(257);
   expect(entries.every((entry) => entry.background.startsWith("rgb(127.50 127.50 127.50"))).toBe(true);
 });
 
@@ -432,7 +565,7 @@ test("translucent gradient fallbacks retain the ancestor background", async ({ p
   const { results: measured, unsupported } = await measure(page);
   expect(unsupported).toEqual([]);
   const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
-  expect(entries).toHaveLength(2);
+  expect(entries).toHaveLength(257);
   for (const entry of entries) {
     const channel = Number(entry.background.match(/^rgb\(([\d.]+)/)?.[1]);
     expect(channel).toBeCloseTo(169.5, 0);
@@ -458,7 +591,7 @@ test("descendant fills are painted above an ancestor gradient", async ({ page })
   const { results: measured, unsupported } = await measure(page);
   expect(unsupported).toEqual([]);
   const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
-  expect(entries).toHaveLength(2);
+  expect(entries).toHaveLength(257);
   expect(entries.every((entry) => entry.background.startsWith("rgb(127.50 127.50 127.50"))).toBe(true);
 });
 
@@ -476,7 +609,7 @@ test("transparent gradient stops measure the background showing through", async 
   const { results: measured, unsupported } = await measure(page);
   expect(unsupported).toEqual([]);
   const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
-  expect(entries).toHaveLength(2);
+  expect(entries).toHaveLength(257);
   expect(entries.some((entry) => entry.ratio > 20)).toBe(true);
   expect(entries.some((entry) => entry.ratio === 1)).toBe(true);
 });
@@ -495,8 +628,40 @@ test("linear-sRGB gradient stops use browser colour conversion", async ({ page }
   const { results: measured, unsupported } = await measure(page);
   expect(unsupported).toEqual([]);
   const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
-  expect(entries).toHaveLength(2);
+  expect(entries).toHaveLength(257);
   expect(entries.every((entry) => entry.background.startsWith("rgb(124.00 124.00 124.00"))).toBe(true);
+});
+
+test("unmodelled gradient interpolation methods fail with an actionable diagnostic", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    html.style.transition = "none";
+    html.style.backgroundImage = "linear-gradient(in oklab, rgb(0 0 0), rgb(255 255 255))";
+  });
+
+  const { unsupported } = await measure(page);
+  expect(unsupported).toContainEqual(expect.stringMatching(
+    /^p\.slash-detail-disabled: gradient interpolation method oklab is not modelled:/,
+  ));
+});
+
+test("sRGB interpolation rejects gradient stops that require unclamped conversion", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    const html = element as HTMLElement;
+    html.style.transition = "none";
+    html.style.backgroundImage = [
+      "linear-gradient(in srgb, color(display-p3 1 0 0), color(display-p3 0 1 0))",
+    ].join("");
+  });
+
+  const { unsupported } = await measure(page);
+  expect(unsupported).toContainEqual(expect.stringMatching(
+    /^p\.slash-detail-disabled: gradient stops cannot be modelled accurately with sRGB interpolation:/,
+  ));
 });
 
 test("unsupported rendered gradient syntax fails with an actionable diagnostic", async ({ page }) => {
