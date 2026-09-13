@@ -234,6 +234,14 @@ function createButton(container: HTMLDivElement): HTMLButtonElement {
   return button;
 }
 
+function labelledNumberInput(container: HTMLDivElement, label: string): HTMLInputElement | null {
+  const candidate = [...container.querySelectorAll<HTMLLabelElement>("label")]
+    .find((item) => item.textContent?.trim() === label);
+  return candidate?.htmlFor
+    ? container.querySelector<HTMLInputElement>(`[id="${candidate.htmlFor}"]`)
+    : null;
+}
+
 /**
  * No trigger to open any more, which is the point of #832: both presets are on screen, so choosing
  * one is a single click and there is no popup whose height could disagree with its touch targets.
@@ -625,9 +633,55 @@ test("retired Conductor stays hidden and native orchestrator selection is sent a
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     assert.equal(fixture.container.textContent?.includes("Conductor-Led Work"), false);
+    assert.equal(labelledNumberInput(fixture.container, "Live Child Limit"), null,
+      "ordinary creation does not show an orchestration-only guardrail");
     await choosePermissionPreset(fixture.container, "Orchestrator");
+    const limit = labelledNumberInput(fixture.container, "Live Child Limit");
+    assert.ok(limit);
+    assert.equal(limit.value, "4", "the compatible effective default is visible rather than implicit");
+    assert.equal(limit.min, "0");
+    assert.equal(limit.max, "64");
+    assert.equal(limit.step, "1");
+    await act(async () => { fireDomEvent.change(limit, { target: { value: "9" } }); });
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests[0]?.config?.permissionMode, "orchestrator");
+    assert.equal(fixture.requests[0]?.config?.maxChildSessions, 9);
+  } finally { await unmountFixture(fixture); }
+});
+
+test("Live Child Limit rejects fractional and out-of-range creation values accessibly", async () => {
+  const enabledRunner: RunnerView = {
+    ...runner, protocolVersion: 109,
+    agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    } })),
+  };
+  const fixture = await mountFixture({ runners: [enabledRunner] });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    const limit = labelledNumberInput(fixture.container, "Live Child Limit");
+    assert.ok(limit);
+
+    for (const invalid of ["4.5", "-1", "65", ""]) {
+      await act(async () => { fireDomEvent.change(limit, { target: { value: invalid } }); });
+      assert.equal(limit.getAttribute("aria-invalid"), "true", invalid);
+      assert.equal(createButton(fixture.container).disabled, true, invalid);
+      assert.equal(fixture.container.querySelector(
+        `[id="${limit.getAttribute("aria-describedby")}"]`,
+      )?.getAttribute("role"), "alert");
+      await act(async () => { submitWithEnter(fixture.container); });
+      assert.equal(fixture.requests.length, 0, invalid);
+      assert.equal((domWindow.document.activeElement as unknown) === limit, true, invalid);
+    }
+
+    await act(async () => { fireDomEvent.change(limit, { target: { value: "0" } }); });
+    assert.equal(limit.getAttribute("aria-invalid"), "false");
+    assert.equal(createButton(fixture.container).disabled, false);
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests[0]?.config?.maxChildSessions, 0,
+      "zero is persisted as a deliberate pause rather than treated as empty");
   } finally { await unmountFixture(fixture); }
 });
 
@@ -650,6 +704,7 @@ test("Parent Control is Orchestrator-only and defaults human-created sessions to
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests[0]?.parentControl, "questions_and_approvals");
     assert.equal(fixture.requests[0]?.config?.permissionMode, "orchestrator");
+    assert.equal(fixture.requests[0]?.config?.maxChildSessions, 4);
   } finally {
     await unmountFixture(fixture);
   }
@@ -842,6 +897,8 @@ test("saved Orchestrator default is visible and gates Native TUI without requiri
       await act(async () => { createButton(fixture.container).click(); });
       assert.equal(fixture.requests.length, 1);
       assert.equal(fixture.requests[0]?.config?.permissionMode, undefined, "Default still delegates to the server");
+      assert.equal(fixture.requests[0]?.config?.maxChildSessions, 4,
+        "a saved Orchestrator default still persists its visible initial limit");
       assert.equal(fixture.requests[0]?.launchSurface, protocolVersion === 112 ? "native_tui" : undefined);
     } finally { await unmountFixture(fixture); }
   }

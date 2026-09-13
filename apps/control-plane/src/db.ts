@@ -25,6 +25,7 @@ import {
 import {
   EVENT_PAYLOAD_CHUNK_BYTES,
   EVENT_PAYLOAD_PREVIEW_BYTES,
+  DEFAULT_LIVE_CHILD_LIMIT,
   columnForStatus,
   isPolicyApproval,
   isTerminal,
@@ -14492,7 +14493,9 @@ export class ControlPlaneDb {
     const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(id) as unknown as
       | SessionRow
       | undefined;
-    return row ? this.sessionView(row, undefined, this.sessionStopIntent(id), true) : null;
+    return row
+      ? this.sessionView(row, undefined, this.sessionStopIntent(id), true, this.childSessionAllocations(id).liveCount)
+      : null;
   }
 
   recordSideChat(parentSessionId: string, childSessionId: string, now: number): void {
@@ -14561,7 +14564,21 @@ export class ControlPlaneDb {
       .all() as unknown as SessionRow[];
     const legacyTargets = new Map<string, ExecutionTargetDefinition[] | undefined>();
     const stopIntents = this.sessionStopIntents();
-    return rows.map((r) => this.sessionView(r, legacyTargets, stopIntents.get(r.id), false));
+    const liveChildren = new Map((this.stmt(
+      `SELECT parent_session_id AS parentSessionId, COUNT(*) AS occupied
+       FROM sessions
+       WHERE parent_session_id IS NOT NULL AND archived=0
+         AND status NOT IN ('completed','failed','stopped')
+       GROUP BY parent_session_id`,
+    ).all() as unknown as Array<{ parentSessionId: string; occupied: number }>).map((entry) =>
+      [entry.parentSessionId, entry.occupied] as const));
+    return rows.map((r) => this.sessionView(
+      r,
+      legacyTargets,
+      stopIntents.get(r.id),
+      false,
+      liveChildren.get(r.id) ?? 0,
+    ));
   }
 
   private legacyExecutionTargets(runnerId: string): ExecutionTargetDefinition[] | undefined {
@@ -14586,6 +14603,7 @@ export class ControlPlaneDb {
     legacyTargetCache?: Map<string, ExecutionTargetDefinition[] | undefined>,
     stopIntent?: SessionStopIntentRecord,
     includeBackgroundJobs = true,
+    liveChildSessions = 0,
   ): SessionView {
     const agentName = row.agent_id
       ? ((this.stmt("SELECT name FROM agent_definitions WHERE id=?").get(row.agent_id) as
@@ -14682,6 +14700,11 @@ export class ControlPlaneDb {
       runId: row.run_id,
       parentSessionId: row.parent_session_id ?? null,
       maxChildSessions: row.max_child_sessions ?? undefined,
+      liveChildCapacity: {
+        limit: row.max_child_sessions ?? DEFAULT_LIVE_CHILD_LIMIT,
+        occupied: liveChildSessions,
+        remaining: Math.max(0, (row.max_child_sessions ?? DEFAULT_LIVE_CHILD_LIMIT) - liveChildSessions),
+      },
       parentControl: row.parent_control === "questions" || row.parent_control === "questions_and_approvals"
         ? row.parent_control
         : "off",

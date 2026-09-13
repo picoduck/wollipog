@@ -70,12 +70,15 @@ for (const theme of ["light", "dark"] as const) {
       await dialog.getByRole("radio", { name: /^Native TUI/ }).click();
       await expect(dialog.getByText(/Usage Accounting: Unavailable/)).toBeVisible();
       await expect(dialog.getByText(/Native TUI spending and tool calls are not included/)).toBeVisible();
+      await dialog.getByRole("spinbutton", { name: "Live Child Limit" }).fill("8");
       await page.screenshot({ path: testInfo.outputPath("native-tui-unmetered.png") });
       await dialog.getByRole("button", { name: "Create Session" }).click();
       await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
         .toMatchObject({ launchSurface: "native_tui" });
       expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()?.config?.permissionMode))
         .toBeUndefined();
+      expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()?.config?.maxChildSessions))
+        .toBe(8);
     });
     for (const surface of ["direct", "native_tui"] as const) {
     test(`orchestrator creation preset ${surface} ${theme} ${viewport.width}`, async ({ page }, testInfo) => {
@@ -98,6 +101,9 @@ for (const theme of ["light", "dark"] as const) {
       await expect(orchestratorCard).toHaveAttribute("aria-checked", "false");
       await orchestratorCard.click();
       await expect(orchestratorCard).toHaveAttribute("aria-checked", "true");
+      const liveChildLimit = dialog.getByRole("spinbutton", { name: "Live Child Limit" });
+      await expect(liveChildLimit).toHaveValue("4");
+      await liveChildLimit.fill("7");
       const delegatedControl = dialog.getByRole("radio", { name: /^Questions and Approvals/ });
       await expect(delegatedControl).toHaveAttribute("aria-checked", "true");
       await expect(orchestratorCard).toContainText(/Guardian reviews eligible actions automatically/);
@@ -108,7 +114,7 @@ for (const theme of ["light", "dark"] as const) {
       await page.screenshot({ path: testInfo.outputPath("preset-selected.png") });
       await dialog.getByRole("button", { name: "Create Session" }).click();
       await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
-        .toMatchObject({ config: { permissionMode: "orchestrator" },
+        .toMatchObject({ config: { permissionMode: "orchestrator", maxChildSessions: 7 },
           parentControl: "questions_and_approvals",
           ...(surface === "native_tui" ? { launchSurface: "native_tui" } : {}) });
     });

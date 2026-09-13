@@ -1268,6 +1268,17 @@ export interface NativeTuiAccountingBoundary {
   missingRequirements: NativeTuiAccountingRequirement[];
 }
 
+/** Compatible fallback and supported upper bound for a parent's concurrent live children. */
+export const DEFAULT_LIVE_CHILD_LIMIT = 4;
+export const MAX_LIVE_CHILD_LIMIT = 64;
+
+/** Effective concurrent child admission state. Terminal and archived children release slots. */
+export interface LiveChildCapacity {
+  limit: number;
+  occupied: number;
+  remaining: number;
+}
+
 /** Resolved per-session knobs (model / reasoning effort / service tier / approval preset). */
 export interface SessionConfig {
   /** Control-plane-owned concurrent live-child cap. Terminal or archived children do not occupy
@@ -3989,6 +4000,8 @@ export interface SessionView {
   /** Control-plane-attributed creator session. Never accepted from a client or runner snapshot. */
   parentSessionId?: string | null;
   maxChildSessions?: number;
+  /** Present on current control planes. Older servers omit it and retain the four-child fallback. */
+  liveChildCapacity?: LiveChildCapacity;
   /** Explicit human-owned descendant request delegation. Omitted by older control planes. */
   parentControl?: ParentControlMode;
   runnerId: string;

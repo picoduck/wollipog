@@ -115,7 +115,9 @@ take precedence over the parent Project's child defaults, and a finite parent's 
 still bounds every child at creation. If none of those sources supplies a limit, the child remains
 unlimited for that dimension; explicit zero also requests no limit when the parent is unbounded.
 Creation results report the effective limits, including `null` for none. `maxChildSessions` defaults to four
-concurrent live children and accepts zero through 64. Completed, failed, stopped, and archived
+concurrent live children and accepts zero through 64. New Orchestrator sessions expose and persist
+that initial limit before their first turn. Session views report the effective limit, occupied live
+slots, and remaining capacity. Completed, failed, stopped, and archived
 children release live slots, while their lifetime usage reservations remain charged to a finite
 parent. Live cost/tool edits require delivery to an online current runner and fail closed rather
 than leaving control-plane and runner thresholds out of sync.

@@ -13,6 +13,8 @@ import {
 } from "react";
 import {
   CODEX_APP_SERVER_IMAGE_MIME_TYPES,
+  DEFAULT_LIVE_CHILD_LIMIT,
+  MAX_LIVE_CHILD_LIMIT,
   MAX_PROMPT_IMAGES,
   PROMPT_IMAGE_MIME_TYPES,
   validatePromptImageInputs,
@@ -6052,10 +6054,12 @@ export function ComposerPlusMenu({
               step="1"
               integer
               value={session.maxChildSessions}
-              placeholder="4"
-              max="64"
+              placeholder={String(DEFAULT_LIVE_CHILD_LIMIT)}
+              max={String(MAX_LIVE_CHILD_LIMIT)}
               emptyMeansNoop
-              hint="A session can run four live children by default. Set 0 to pause new child admission. Terminal and archived children release their slots."
+              hint={session.liveChildCapacity
+                ? `${session.liveChildCapacity.limit} limit · ${session.liveChildCapacity.occupied} occupied · ${session.liveChildCapacity.remaining} remaining. Set 0 to pause new child admission. Terminal and archived children release their slots.`
+                : "A session can run four live children by default. Set 0 to pause new child admission. Terminal and archived children release their slots."}
               onCommit={(v) => onApply({ maxChildSessions: v })}
             />
             {session.permissionMode === "orchestrator" && (

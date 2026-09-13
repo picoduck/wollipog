@@ -1,5 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
+  DEFAULT_LIVE_CHILD_LIMIT,
+  MAX_LIVE_CHILD_LIMIT,
   type ProjectLocationView,
   type ProjectView,
   runnerCapabilityRequirement,
@@ -7,6 +9,7 @@ import {
   type BoxView,
   type AgentHarnessDefaultsView,
   type ParentControlMode,
+  type SessionConfig,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { ApiError } from "../api.js";
@@ -184,6 +187,7 @@ export function NewSessionDialog({
   const [agentId, setAgentId] = useState(initialAgentSelection.agentId);
   const [presetOverride, setPresetOverride] = useState<"default" | "orchestrator">("default");
   const [parentControl, setParentControl] = useState<ParentControlMode>("off");
+  const [liveChildLimitDraft, setLiveChildLimitDraft] = useState(String(DEFAULT_LIVE_CHILD_LIMIT));
   const [harnessDefaults, setHarnessDefaults] = useState<{
     api: typeof api; scope: typeof instanceScope; view: AgentHarnessDefaultsView | null; error: boolean;
   } | null>(null);
@@ -226,6 +230,8 @@ export function NewSessionDialog({
   const touchAgentPicker = useTouchTargetMode();
   const projectLocationOptionsId = `${generatedFormId}-project-locations`;
   const permissionOptionsId = `${generatedFormId}-permission-presets`;
+  const liveChildLimitInputId = `${generatedFormId}-live-child-limit`;
+  const liveChildLimitHelpId = `${generatedFormId}-live-child-limit-help`;
   const harnessOptionsId = `${generatedFormId}-harnesses`;
   const selectedProjectId = projectSelection && projectSelection !== NO_PROJECT_SELECTION ? projectSelection : null;
   const selectedProject = selectedProjectId ? projects.get(selectedProjectId) ?? null : null;
@@ -497,6 +503,11 @@ export function NewSessionDialog({
   const cloudBudgetValid = executionTarget?.adapter !== "cloud" || Boolean(executionTarget.policy &&
     Number.isFinite(cloudBudget) && cloudBudget >= executionTarget.policy.cost.minimumBudgetUsd &&
     cloudBudget <= executionTarget.policy.cost.maximumBudgetUsd);
+  const liveChildLimit = Number(liveChildLimitDraft);
+  const liveChildLimitValid = !orchestrator || (
+    liveChildLimitDraft.trim() !== "" && Number.isSafeInteger(liveChildLimit) &&
+    liveChildLimit >= 0 && liveChildLimit <= MAX_LIVE_CHILD_LIMIT
+  );
   const projectPlacementValid = !projectsSupported
     ? !!runnerId && (!!workspaceId || !!browsedPath)
     : projectSelection === NO_PROJECT_SELECTION
@@ -507,6 +518,7 @@ export function NewSessionDialog({
     (launchSurface !== "native_tui" || nativeTuiSupported) &&
     (defaultsReady || presetOverride === "orchestrator") &&
     (!orchestrator || orchestratorSupported) &&
+    liveChildLimitValid &&
     (!directWslRequiresSafeOrchestrator || (orchestrator && orchestratorSupported)) && !retainedSessionId;
 
   // Validation feedback describes the state that produced it. Once any value participating in
@@ -520,6 +532,7 @@ export function NewSessionDialog({
     directWslRequiresSafeOrchestrator, launchSurface, nativeTuiSupported,
     executionTargetId, executionTarget?.id, executionTarget?.available,
     cloudBudgetUsd, cloudBudgetValid, retainedSessionId,
+    liveChildLimitDraft, liveChildLimitValid,
   ]);
 
   // Keep the secondary shortcut local to this dialog. Unmodified Enter is native form behavior: an
@@ -601,6 +614,9 @@ export function NewSessionDialog({
       } else if (orchestrator && !orchestratorSupported) {
         setValidationError("Choose an available Permission Preset.");
         focusValidationProblem(`[id="${permissionOptionsId}"] .ui-choice-card:not([aria-disabled="true"])`);
+      } else if (!liveChildLimitValid) {
+        setValidationError(`Enter a Live Child Limit from 0 to ${MAX_LIVE_CHILD_LIMIT}.`);
+        focusValidationProblem(`[id="${liveChildLimitInputId}"]`);
       } else if (directWslRequiresSafeOrchestrator && !orchestrator) {
         setValidationError("Choose Orchestrator or another execution context.");
         focusValidationProblem(`[id="${permissionOptionsId}"] .ui-choice-card:not([aria-disabled="true"])`);
@@ -627,13 +643,17 @@ export function NewSessionDialog({
         projectSelection === NO_PROJECT_SELECTION ? null : selectedProjectLocation,
         { runnerId, workspaceId },
       );
+      const config: SessionConfig = {
+        ...(presetOverride === "orchestrator" ? { permissionMode: "orchestrator" } : {}),
+        ...(executionTarget?.adapter === "cloud" ? { costBudgetUsd: cloudBudget } : {}),
+        ...(orchestrator ? { maxChildSessions: liveChildLimit } : {}),
+      };
       const session = await api.createSession({
         ...placement,
         agentId,
         useWorktree,
         executionTargetId: executionTarget?.id,
-        config: presetOverride === "orchestrator" ? { permissionMode: "orchestrator" }
-          : executionTarget?.adapter === "cloud" ? { costBudgetUsd: cloudBudget } : undefined,
+        config: Object.keys(config).length ? config : undefined,
         ...(orchestrator ? { parentControl } : {}),
         workspacePath: (!projectsSupported || projectSelection === NO_PROJECT_SELECTION) ? browsedPath ?? undefined : undefined,
         acpSessionContext: additionalDirectories.length ? { additionalDirectories } : undefined,
@@ -1016,6 +1036,35 @@ export function NewSessionDialog({
               {presetOverride === "default" && <span className="muted">Orchestrator is your saved Agent Harness default. Change it in Settings to use another default.</span>}
               {!orchestratorSupported && <span className="form-error">The saved Orchestrator preset is unavailable here. {orchestratorUnavailable} Choose a compatible target or change the saved default in Settings.</span>}
             </>}
+            {orchestrator && (
+              <div className="field">
+                <label className="new-session-field-label" htmlFor={liveChildLimitInputId}>
+                  Live Child Limit
+                </label>
+                <input
+                  id={liveChildLimitInputId}
+                  type="number"
+                  inputMode="numeric"
+                  min="0"
+                  max={String(MAX_LIVE_CHILD_LIMIT)}
+                  step="1"
+                  required
+                  value={liveChildLimitDraft}
+                  aria-invalid={!liveChildLimitValid}
+                  aria-describedby={liveChildLimitHelpId}
+                  onChange={(event) => setLiveChildLimitDraft(event.currentTarget.value)}
+                />
+                <span
+                  id={liveChildLimitHelpId}
+                  className={liveChildLimitValid ? "muted" : "form-error"}
+                  role={liveChildLimitValid ? undefined : "alert"}
+                >
+                  {liveChildLimitValid
+                    ? "Choose 0 to pause new child admission, or up to 64 concurrent live children."
+                    : "Enter a whole number from 0 to 64."}
+                </span>
+              </div>
+            )}
             {orchestrator && (
               <ChoiceCards<ParentControlMode>
                 label="Parent Control"

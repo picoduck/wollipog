@@ -56,7 +56,8 @@ test("the Composer guardrails expose and persist the concurrent live-child limit
   await act(async () => {
     root.render(<ComposerPlusMenu
       session={{ costBudgetUsd: null, costCheckpointsUsd: null, maxToolCalls: null,
-        maxChildSessions: undefined } as SessionView}
+        maxChildSessions: undefined,
+        liveChildCapacity: { limit: 4, occupied: 3, remaining: 1 } } as SessionView}
       planActive={false}
       planSupported={false}
       onTogglePlan={() => {}}
@@ -105,6 +106,12 @@ test("the Composer guardrails expose and persist the concurrent live-child limit
     await act(async () => fireDomEvent.keyDown(toolHelp, { key: "Escape" }));
     assert.equal(toolHelp.getAttribute("aria-expanded"), "false");
     assert.equal(container.querySelectorAll(".plus-budget-help-popover").length, 0);
+    const childHelp = container.querySelector<HTMLButtonElement>('[aria-label="About Live Child Limit"]');
+    assert.ok(childHelp);
+    await act(async () => fireDomEvent.click(childHelp));
+    assert.match(container.textContent ?? "", /4 limit · 3 occupied · 1 remaining/,
+      "the running session exposes its effective capacity, not only the configured override");
+    await act(async () => fireDomEvent.keyDown(childHelp, { key: "Escape" }));
     await act(async () => {
       input.focus();
     });
