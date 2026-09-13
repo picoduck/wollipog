@@ -2,6 +2,7 @@
 
 import type { Readable, Writable } from "node:stream";
 import {
+  isOrchestratorOnlyCapabilities,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
@@ -16,6 +17,7 @@ const MCP_PROTOCOL_VERSION = "2025-06-18";
  * conductor's context window (the MVP mitigation for hundreds of sessions). */
 const MAX_ITEMS = 100;
 const MAX_LINE = 400;
+const DEFAULT_MODEL_PAGE_SIZE = 50;
 
 /** Worker sessions the conductor creates may use any interactive/fixed mode EXCEPT
  * bypassPermissions (and codex danger-full-access) — the human still sees the create card. */
@@ -94,6 +96,34 @@ function truncate(s: string, n: number): string {
 
 function capArray(v: unknown, limit = MAX_ITEMS): Json[] {
   return Array.isArray(v) ? v.slice(0, limit) : [];
+}
+
+function advertisedStrings(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+/** Project one installation's model catalog without exposing runner-local launch configuration.
+ * Per-model effort arrays use the same fallback rule as session creation and the UI: a non-empty
+ * model list wins, otherwise the harness list applies, otherwise the model has no effort knob. */
+function mapAgentModel(model: Json, harnessEfforts: string[]): Json {
+  const modelEfforts = advertisedStrings(model?.efforts);
+  const efforts = modelEfforts.length ? modelEfforts : harnessEfforts;
+  const effortSource = modelEfforts.length ? "model" : harnessEfforts.length ? "harness" : "none";
+  return {
+    id: model.id,
+    ...(typeof model.displayName === "string" ? { displayName: model.displayName } : {}),
+    ...(typeof model.default === "boolean" ? { default: model.default } : {}),
+    hidden: model.hidden === true,
+    ...(typeof model.description === "string" ? { description: model.description } : {}),
+    ...(typeof model.contextWindow === "number" ? { contextWindow: model.contextWindow } : {}),
+    ...(Array.isArray(model.inputModalities)
+      ? { inputModalities: advertisedStrings(model.inputModalities) }
+      : {}),
+    ...(typeof model.defaultEffort === "string" ? { defaultEffort: model.defaultEffort } : {}),
+    efforts,
+    effortSource,
+    configurableEffort: efforts.length > 0,
+  };
 }
 
 /** One REST round-trip. A non-2xx reply (or network failure) comes back as a message the
@@ -411,7 +441,7 @@ const GOVERNANCE_POLICY_PROPERTIES: Json = {
 /* Tool table (tool ids as claude sees them: mcp__manager__<name>)             */
 /* -------------------------------------------------------------------------- */
 
-const ORCHESTRATOR_TOOLS = new Set(["list_runners", "list_sessions", "get_session", "get_session_events",
+const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "list_sessions", "get_session", "get_session_events",
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question", "resolve_descendant_approval",
   "wait_session", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "stop_session", "restart_session", "archive_session", "set_guardrails", "create_worktree", "attach_worktree",
@@ -425,7 +455,7 @@ export const TOOLS: McpTool[] = [
   /* ------------------------------- READS --------------------------------- */
   {
     name: "list_runners",
-    description: "List runner machines with their agents and workspaces (source of runnerId/agentId/workspaceId).",
+    description: "List runner machines with their agents and workspaces (source of runnerId/agentId/workspaceId). Use get_agent_capabilities before choosing a child model or effort.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     handler: async (_args, deps) => {
       const r = await cpFetch(deps, "GET", "/api/runners");
@@ -446,6 +476,118 @@ export const TOOLS: McpTool[] = [
         workspaces: capArray(run?.workspaces).map((w) => ({ id: w?.id, name: w?.name, path: w?.path })),
       }));
       return textResult({ runners });
+    },
+  },
+  {
+    name: "get_agent_capabilities",
+    description:
+      "Read the advertised model and reasoning-effort capabilities for one visible runner and agent installation without launching a child. Hidden models are excluded by default; exact modelId lookup remains available for persisted hidden selections. Results are bounded and creation revalidates every selected pair.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        runnerId: { type: "string" },
+        agentId: { type: "string" },
+        offset: { type: "integer", minimum: 0, description: "Zero-based model offset; defaults to 0" },
+        limit: { type: "integer", minimum: 1, maximum: MAX_ITEMS, description: `Models per page; defaults to ${DEFAULT_MODEL_PAGE_SIZE}` },
+        includeHidden: { type: "boolean", description: "Include hidden models in paginated results" },
+        modelId: { type: "string", description: "Return one exact model, including a hidden persisted model" },
+      },
+      required: ["runnerId", "agentId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.runnerId !== "string" || !args.runnerId ||
+          typeof args?.agentId !== "string" || !args.agentId) {
+        return errorResult("runnerId and agentId are required");
+      }
+      if (args.offset !== undefined && (!Number.isInteger(args.offset) || args.offset < 0)) {
+        return errorResult("offset must be a non-negative integer");
+      }
+      if (args.limit !== undefined && (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > MAX_ITEMS)) {
+        return errorResult(`limit must be an integer from 1 to ${MAX_ITEMS}`);
+      }
+      if (args.modelId !== undefined && (typeof args.modelId !== "string" || !args.modelId)) {
+        return errorResult("modelId must be a non-empty string");
+      }
+      if (args.modelId !== undefined &&
+          (args.offset !== undefined || args.limit !== undefined || args.includeHidden === true)) {
+        return errorResult("modelId cannot be combined with offset, limit, or includeHidden");
+      }
+      const r = await cpFetch(deps, "GET", "/api/runners");
+      if (!r.ok) return errorResult(r.message);
+      // This is a targeted lookup, so search the complete authorized response before bounding the
+      // model projection. Applying list_runners' display cap here would make later installations
+      // unreachable even when the caller already knows their exact ids.
+      const runners = Array.isArray(r.data?.runners) ? r.data.runners : [];
+      const runner = runners.find((candidate: Json) => candidate?.runnerId === args.runnerId);
+      const agents = Array.isArray(runner?.agents) ? runner.agents : [];
+      const agent = agents.find((candidate: Json) => candidate?.id === args.agentId);
+      if (!runner || !agent) return errorResult("runner or agent installation not found or not visible to this session");
+
+      const capabilities = agent.capabilities;
+      const agentView = {
+        runnerId: runner.runnerId,
+        agentId: agent.id,
+        name: agent.name,
+        driver: agent.driver ?? "acp",
+        context: agent.context ?? { kind: "native" },
+        available: agent.available ?? null,
+        authStatus: agent.authStatus ?? null,
+      };
+      const discoveryUnavailable = !capabilities || typeof capabilities !== "object" ||
+        isOrchestratorOnlyCapabilities(capabilities);
+      if (discoveryUnavailable) {
+        return textResult({
+          agent: agentView,
+          discovery: {
+            status: "unavailable",
+            reason: capabilities && typeof capabilities === "object" ? "session_negotiated" : "not_advertised",
+            modelSource: null,
+          },
+          harnessEfforts: [],
+          models: [],
+          page: { offset: 0, limit: args.limit ?? DEFAULT_MODEL_PAGE_SIZE, returned: 0, total: 0, nextOffset: null, truncated: false },
+        });
+      }
+
+      const harnessEfforts = advertisedStrings(capabilities.effortLevels);
+      const allModels = Array.isArray(capabilities.models)
+        ? capabilities.models.filter((model: Json) => typeof model?.id === "string" && model.id)
+        : [];
+      const modelId = typeof args.modelId === "string" ? args.modelId : undefined;
+      if (modelId) {
+        const model = allModels.find((candidate: Json) => candidate.id === modelId);
+        if (!model) return errorResult("modelId is not advertised by the selected runner and agent installation");
+        return textResult({
+          agent: agentView,
+          discovery: { status: "available", modelSource: capabilities.modelSource ?? null },
+          harnessEfforts,
+          models: [mapAgentModel(model, harnessEfforts)],
+          page: { offset: 0, limit: 1, returned: 1, total: 1, nextOffset: null, truncated: false, targeted: true },
+        });
+      }
+
+      const includeHidden = args.includeHidden === true;
+      const visibleModels = includeHidden ? allModels : allModels.filter((model: Json) => model.hidden !== true);
+      const offset = args.offset ?? 0;
+      const limit = args.limit ?? DEFAULT_MODEL_PAGE_SIZE;
+      const models = visibleModels.slice(offset, offset + limit).map((model: Json) => mapAgentModel(model, harnessEfforts));
+      const nextOffset = offset + models.length < visibleModels.length ? offset + models.length : null;
+      return textResult({
+        agent: agentView,
+        discovery: { status: "available", modelSource: capabilities.modelSource ?? null },
+        harnessEfforts,
+        models,
+        hiddenModelsExcluded: includeHidden ? 0 : allModels.length - visibleModels.length,
+        page: {
+          offset,
+          limit,
+          returned: models.length,
+          total: visibleModels.length,
+          nextOffset,
+          truncated: nextOffset !== null,
+        },
+      });
     },
   },
   {

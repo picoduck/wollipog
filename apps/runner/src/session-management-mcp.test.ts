@@ -173,6 +173,7 @@ test("tools/list returns the curated session and workflow tools with schemas", a
     tools.map((t) => t.name),
     [
       "list_runners",
+      "get_agent_capabilities",
       "list_sessions",
       "get_session",
       "get_session_events",
@@ -381,6 +382,203 @@ test("list_runners -> GET /api/runners, field-mapped", async () => {
   assert.deepEqual(data.runners[0].workspaces, [{ id: "ws", name: "ws", path: "/repo" }]);
   assert.equal(data.runners[0].agents[0].id, "claude-code");
   assert.equal(data.runners[0].agents[0].command, undefined, "launch params are not the conductor's business");
+});
+
+test("get_agent_capabilities projects advertised metadata and exact effort fallback semantics", async () => {
+  const { deps, calls } = makeDeps(() => ({
+    status: 200,
+    body: {
+      runners: [{
+        runnerId: "r1", hostname: "box", agents: [{
+          id: "codex", name: "Codex", driver: "codex-app-server", available: true,
+          authStatus: "authenticated", command: "/secret/codex", env: { SECRET: "nope" },
+          capabilities: {
+            modelSource: "cached",
+            effortLevels: ["low", "high"],
+            models: [
+              {
+                id: "model-own", displayName: "Model Own", default: true,
+                description: "Provider description", contextWindow: 200_000,
+                inputModalities: ["text", "image"], efforts: ["medium", "xhigh"], defaultEffort: "medium",
+              },
+              { id: "model-fallback", displayName: "Model Fallback" },
+              { id: "model-hidden", displayName: "Model Hidden", hidden: true, efforts: ["ultra"] },
+            ],
+          },
+        }],
+      }],
+    },
+  }));
+  deps.orchestrator = true;
+
+  const result = resultJson(await callTool(deps, "get_agent_capabilities", {
+    runnerId: "r1", agentId: "codex", limit: 1,
+  }));
+  assert.equal(calls[0]!.url, `${CP_URL}/api/runners`);
+  assert.equal(result.agent.command, undefined);
+  assert.equal(result.discovery.modelSource, "cached");
+  assert.deepEqual(result.harnessEfforts, ["low", "high"]);
+  assert.deepEqual(result.models, [{
+    id: "model-own", displayName: "Model Own", default: true, hidden: false,
+    description: "Provider description", contextWindow: 200_000, inputModalities: ["text", "image"],
+    defaultEffort: "medium", efforts: ["medium", "xhigh"], effortSource: "model", configurableEffort: true,
+  }]);
+  assert.deepEqual(result.page, { offset: 0, limit: 1, returned: 1, total: 2, nextOffset: 1, truncated: true });
+  assert.equal(result.hiddenModelsExcluded, 1);
+
+  const continued = resultJson(await callTool(deps, "get_agent_capabilities", {
+    runnerId: "r1", agentId: "codex", offset: result.page.nextOffset, limit: 1,
+  }));
+  assert.deepEqual(continued.models[0], {
+    id: "model-fallback", displayName: "Model Fallback", hidden: false,
+    efforts: ["low", "high"], effortSource: "harness", configurableEffort: true,
+  });
+  assert.equal(continued.page.truncated, false);
+
+  const hidden = resultJson(await callTool(deps, "get_agent_capabilities", {
+    runnerId: "r1", agentId: "codex", modelId: "model-hidden",
+  }));
+  assert.equal(hidden.models[0].hidden, true);
+  assert.equal(hidden.models[0].effortSource, "model");
+  assert.equal(hidden.page.targeted, true);
+});
+
+test("get_agent_capabilities distinguishes missing discovery from supported no-effort models", async () => {
+  const { deps } = makeDeps(() => ({
+    status: 200,
+    body: { runners: [{ runnerId: "r1", agents: [
+      { id: "legacy", name: "Legacy" },
+      {
+        id: "fixed", name: "Fixed", capabilities: {
+          models: [{ id: "fixed-model" }], effortLevels: [], slashCommands: [],
+          supportsImages: false, supportsApprovals: false,
+        },
+      },
+    ] }] },
+  }));
+  const missing = resultJson(await callTool(deps, "get_agent_capabilities", {
+    runnerId: "r1", agentId: "legacy",
+  }));
+  assert.deepEqual(missing.discovery, { status: "unavailable", reason: "not_advertised", modelSource: null });
+  assert.deepEqual(missing.models, []);
+
+  const fixed = resultJson(await callTool(deps, "get_agent_capabilities", {
+    runnerId: "r1", agentId: "fixed",
+  }));
+  assert.deepEqual(fixed.discovery, { status: "available", modelSource: null });
+  assert.deepEqual(fixed.models[0], {
+    id: "fixed-model", hidden: false, efforts: [], effortSource: "none", configurableEffort: false,
+  });
+});
+
+test("get_agent_capabilities treats the orchestrator-only ACP marker as session-negotiated discovery", async () => {
+  const { deps } = makeDeps(() => ({
+    status: 200,
+    body: { runners: [{ runnerId: "r1", agents: [{
+      id: "claude-acp",
+      capabilities: {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+        permissionModes: ["orchestrator"], elicitation: { orchestrator: ["none"] },
+      },
+    }] }] },
+  }));
+  const result = resultJson(await callTool(deps, "get_agent_capabilities", {
+    runnerId: "r1", agentId: "claude-acp",
+  }));
+  assert.deepEqual(result.discovery, {
+    status: "unavailable", reason: "session_negotiated", modelSource: null,
+  });
+  assert.deepEqual(result.models, []);
+});
+
+test("get_agent_capabilities fails closed for invisible installations and invalid bounds", async () => {
+  const { deps, calls } = makeDeps(() => ({ status: 200, body: { runners: [] } }));
+  const invisible = await callTool(deps, "get_agent_capabilities", { runnerId: "foreign", agentId: "codex" });
+  assert.equal(invisible.isError, true);
+  assert.match(resultText(invisible), /not found or not visible/u);
+  assert.equal(calls.length, 1);
+
+  for (const input of [{ offset: -1 }, { limit: 0 }, { limit: 101 }]) {
+    const invalid = await callTool(deps, "get_agent_capabilities", {
+      runnerId: "r1", agentId: "codex", ...input,
+    });
+    assert.equal(invalid.isError, true);
+  }
+  for (const input of [{ modelId: "gpt", offset: 1 }, { modelId: "gpt", limit: 1 }, { modelId: "gpt", includeHidden: true }]) {
+    const invalid = await callTool(deps, "get_agent_capabilities", {
+      runnerId: "r1", agentId: "codex", ...input,
+    });
+    assert.equal(invalid.isError, true);
+    assert.match(resultText(invalid), /cannot be combined/u);
+  }
+  assert.equal(calls.length, 1, "invalid bounds are rejected before requesting visible runner metadata");
+});
+
+test("get_agent_capabilities reaches an exact installation beyond list display caps", async () => {
+  const fillers = Array.from({ length: 100 }, (_, index) => ({
+    runnerId: `filler-${index}`,
+    agents: Array.from({ length: 100 }, (_unused, agentIndex) => ({ id: `agent-${agentIndex}` })),
+  }));
+  const { deps } = makeDeps(() => ({
+    status: 200,
+    body: { runners: [...fillers, {
+      runnerId: "target-runner",
+      agents: [...fillers[0]!.agents, {
+        id: "target-agent",
+        capabilities: { models: [{ id: "target-model" }], effortLevels: [] },
+      }],
+    }] },
+  }));
+  const result = resultJson(await callTool(deps, "get_agent_capabilities", {
+    runnerId: "target-runner", agentId: "target-agent",
+  }));
+  assert.equal(result.models[0].id, "target-model");
+});
+
+test("get_agent_capabilities retrieves a large catalog completely through bounded pages", async () => {
+  const catalog = Array.from({ length: 205 }, (_, index) => ({ id: `model-${String(index).padStart(3, "0")}` }));
+  const { deps } = makeDeps(() => ({
+    status: 200,
+    body: { runners: [{
+      runnerId: "r1",
+      agents: [{ id: "codex", capabilities: { models: catalog, effortLevels: ["medium"] } }],
+    }] },
+  }));
+  const ids: string[] = [];
+  let offset = 0;
+  for (;;) {
+    const result = resultJson(await callTool(deps, "get_agent_capabilities", {
+      runnerId: "r1", agentId: "codex", offset, limit: 100,
+    }));
+    assert.ok(result.models.length <= 100);
+    ids.push(...result.models.map((model: { id: string }) => model.id));
+    if (!result.page.truncated) break;
+    assert.equal(typeof result.page.nextOffset, "number");
+    offset = result.page.nextOffset;
+  }
+  assert.deepEqual(ids, catalog.map((model) => model.id));
+});
+
+test("child creation revalidates a pair after advisory capability discovery", async () => {
+  const { deps, calls } = makeDeps((call) => call.url.endsWith("/api/runners")
+    ? {
+        status: 200,
+        body: { runners: [{ runnerId: "r1", agents: [{
+          id: "codex", capabilities: { models: [{ id: "gpt" }], effortLevels: ["high"] },
+        }] }] },
+      }
+    : { status: 409, body: { error: "selected model and effort are no longer supported" } });
+  deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  await callTool(deps, "get_agent_capabilities", { runnerId: "r1", agentId: "codex" });
+  const created = await callTool(deps, "create_session", {
+    runnerId: "r1", agentId: "codex", workspaceId: "ws", model: "gpt", effort: "high",
+  });
+  assert.equal(created.isError, true);
+  assert.match(resultText(created), /no longer supported/u);
+  assert.deepEqual(calls.map((call) => [call.method, call.url]), [
+    ["GET", `${CP_URL}/api/runners`],
+    ["POST", `${CP_URL}/api/sessions`],
+  ]);
 });
 
 test("list_sessions -> GET /api/sessions (+?archived=true), mapped with pendingApproval title only", async () => {

@@ -2784,6 +2784,47 @@ test("createSession persists and launches the resolved concrete model and effort
   assert.equal(hub.sentOfType("start_session").at(-1)?.spec.config.effort, "high");
 });
 
+test("createSession revalidates an explicit model and effort against current installation capabilities", () => {
+  const { db, hub, svc } = makeHarness();
+  db.updateRunnerAgents(
+    RUNNER_ID,
+    runnerMeta().agents.map((agent) => agent.id === AGENT_ID ? {
+      ...agent,
+      capabilities: {
+        models: [{ id: "current", efforts: ["low"] }],
+        effortLevels: ["low"], slashCommands: [], supportsImages: true,
+        supportsApprovals: true, permissionModes: ["acceptEdits"],
+      },
+    } : agent),
+    Date.now(),
+  );
+
+  const staleModel = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID,
+    config: { model: "retired", effort: "low" },
+  });
+  assert.equal(staleModel.status, 409);
+  assert.match(staleModel.error ?? "", /model .* is not supported/u);
+
+  const staleEffort = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID,
+    config: { model: "current", effort: "high" },
+  });
+  assert.equal(staleEffort.status, 409);
+  assert.match(staleEffort.error ?? "", /effort .* is not supported/u);
+  assert.equal(db.listSessions().length, 0);
+  assert.equal(hub.sentOfType("start_session").length, 0);
+
+  const current = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID,
+    config: { model: "current", effort: "low" },
+  });
+  assert.ok(current.ok, current.error);
+  assert.deepEqual(hub.sentOfType("start_session").at(-1)?.spec.config, {
+    model: "current", effort: "low", permissionMode: "acceptEdits",
+  });
+});
+
 test("ordinary createSession applies one capability-valid per-user Agent Harness default after explicit config", () => {
   const { db, hub, svc } = makeHarness();
   const capabilities = {

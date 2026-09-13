@@ -55,13 +55,17 @@ function flag(args: string[], name: string): boolean {
   return args.includes(name);
 }
 
+function optionPresent(args: string[], name: string): boolean {
+  return args.some((arg) => arg === name || arg.startsWith(`${name}=`));
+}
+
 function positional(args: string[]): string[] {
   const values: string[] = [];
   const valueOptions = new Set([
     "--url", "--token-file", "--runner", "--agent", "--workspace", "--path", "--prompt",
     "--title", "--model", "--effort", "--permission-mode", "--after", "--limit", "--for", "--timeout",
     "--interval", "--cost-budget", "--max-tool-calls", "--session", "--branch", "--base", "--base-ref",
-    "--max-child-sessions",
+    "--max-child-sessions", "--offset",
   ]);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -134,6 +138,39 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       return words[2]
         ? { tool: "get_session_events", input: { sessionId: words[2], after: numeric(option(args, "--after")), limit: numeric(option(args, "--limit")) } }
         : { error: "session events requires an id" };
+    case "capabilities": {
+      const runnerId = option(args, "--runner");
+      const agentId = option(args, "--agent");
+      if (!runnerId || !agentId) return { error: "session capabilities requires --runner and --agent" };
+      const offset = option(args, "--offset");
+      const limit = option(args, "--limit");
+      for (const [name, value] of [["--offset", offset], ["--limit", limit]] as const) {
+        if (optionPresent(args, name) &&
+            (value === undefined || !value.trim() || value.startsWith("--") || !Number.isFinite(Number(value)))) {
+          return { error: `session capabilities ${name} requires a number` };
+        }
+      }
+      const modelId = option(args, "--model");
+      if (optionPresent(args, "--model") &&
+          (modelId === undefined || !modelId.trim() || modelId.startsWith("--"))) {
+        return { error: "session capabilities --model requires a non-empty value" };
+      }
+      if (modelId !== undefined &&
+          (optionPresent(args, "--offset") || optionPresent(args, "--limit") || flag(args, "--include-hidden"))) {
+        return { error: "session capabilities --model cannot be combined with --offset, --limit, or --include-hidden" };
+      }
+      return {
+        tool: "get_agent_capabilities",
+        input: {
+          runnerId,
+          agentId,
+          offset: numeric(offset),
+          limit: numeric(limit),
+          includeHidden: flag(args, "--include-hidden"),
+          modelId,
+        },
+      };
+    }
     case "create": {
       const runnerId = option(args, "--runner");
       const agentId = option(args, "--agent");

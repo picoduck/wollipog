@@ -49,7 +49,7 @@ test("CLI topic help is complete, successful, and side-effect free", async () =>
     ["pair", ["pair create", "pair list", "pair revoke", "pair url", "one-time", "bootstrap"]],
     ["service", ["service install", "service status", "service restart", "service logs", "service upgrade", "service uninstall"]],
     ["admin", ["admin pairing-url", "admin status", "admin doctor", "admin device create", "admin runner-credential"]],
-    ["session", ["session list", "session create", "session wait", "session guardrails", "--effort"]],
+    ["session", ["session list", "session capabilities", "session create", "session wait", "session guardrails", "--effort"]],
     ["worktree", ["worktree create", "worktree attach", "worktree select", "worktree discard"]],
   ];
   for (const [topic, expected] of topics) {
@@ -265,6 +265,53 @@ test("CLI emits stable JSON and authenticates list requests as the exact session
     assert.equal(calls[1]!.init?.headers?.[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER], "s_parent");
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("CLI exposes bounded agent capability discovery with exact targeting", async () => {
+  const requests: Array<{ url: string; method?: string }> = [];
+  const fetch: McpFetch = async (url, init) => {
+    requests.push({ url, method: init?.method });
+    const body = url.endsWith("/api/compatibility")
+      ? { protocolVersion: PROTOCOL_VERSION }
+      : { runners: [{ runnerId: "r1", agents: [{
+          id: "codex", name: "Codex", capabilities: {
+            modelSource: "live", effortLevels: ["high"], models: [{ id: "gpt", hidden: true }],
+          },
+        }] }] };
+    return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+  };
+  let stdout = "";
+  const code = await runWollipogCli(
+    ["node", "cli.js", "--wollipog-cli", "session", "capabilities", "--runner", "r1", "--agent", "codex", "--model", "gpt", "--json"],
+    { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" },
+    { stdout: (text) => { stdout += text; }, stderr: () => assert.fail("unexpected CLI error") },
+    fetch,
+  );
+  assert.equal(code, 0);
+  assert.equal(JSON.parse(stdout).models[0].id, "gpt");
+  assert.equal(JSON.parse(stdout).models[0].hidden, true);
+  assert.deepEqual(requests, [
+    { url: "http://cp/api/compatibility", method: "GET" },
+    { url: "http://cp/api/runners", method: "GET" },
+  ]);
+});
+
+test("CLI capability discovery rejects malformed numbers and conflicting exact lookup options", async () => {
+  for (const suffix of [
+    ["--offset", "abc"],
+    ["--offset="],
+    ["--limit", "--json"],
+    ["--model", "gpt", "--include-hidden"],
+    ["--model", "gpt", "--offset", "1"],
+    ["--model", "gpt", "--limit", "1"],
+  ]) {
+    const result = await captureCli([
+      "session", "capabilities", "--runner", "r1", "--agent", "codex", ...suffix, "--json",
+    ]);
+    assert.equal(result.code, 2, suffix.join(" "));
+    assert.equal(result.stderr, "", suffix.join(" "));
+    assert.match(JSON.parse(result.stdout).error, /requires a number|cannot be combined/u, suffix.join(" "));
   }
 });
 
