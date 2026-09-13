@@ -1127,8 +1127,13 @@ export class SessionManager {
       const previous = grouped.get(key);
       grouped.set(key, { ...normalized, waitingSessions: (previous?.waitingSessions ?? 0) + 1 });
     };
-    for (const entry of this.admissionQueue) {
-      addBlocker(this.capacityBlocker(entry.request, observation));
+    for (let index = 0; index < this.admissionQueue.length; index++) {
+      const entry = this.admissionQueue[index]!;
+      addBlocker(this.capacityBlocker(
+        entry.request,
+        observation,
+        index > 0 && this.admissionQueue[0]!.bypasses >= 8,
+      ));
     }
     for (const request of this.activeTurnWaiters.values()) {
       addBlocker(this.activeTurnBlocker(request, activeTurnObservation));
@@ -3629,7 +3634,7 @@ export class SessionManager {
     launchGeneration: number,
   ): Promise<boolean> {
     if (!this.launchIsCurrent(sessionId, launchGeneration)) return Promise.resolve(false);
-    const key = `${this.runnerId}:${process.pid}:${sessionId}:${launchGeneration}`;
+    const key = this.worktreePreparationKey(sessionId, launchGeneration);
     if (
       this.worktreePreparations.size < this.worktreePreparationLimit &&
       ![...this.worktreePreparationSessions.values()].includes(sessionId) &&
@@ -3652,12 +3657,19 @@ export class SessionManager {
     return waiting;
   }
 
+  private worktreePreparationKey(sessionId: string, launchGeneration: number): string {
+    return `${this.runnerId}:${process.pid}:${sessionId}:${launchGeneration}`;
+  }
+
   private cancelWorktreePreparationWait(sessionId: string): boolean {
     let cancelled = false;
     for (let index = this.worktreePreparationQueue.length - 1; index >= 0; index--) {
       const queued = this.worktreePreparationQueue[index]!;
       if (queued.sessionId !== sessionId) continue;
       this.worktreePreparationQueue.splice(index, 1);
+      this.worktreePreparationAdmission.clearFailure(
+        this.worktreePreparationKey(queued.sessionId, queued.launchGeneration),
+      );
       queued.resolve(false);
       cancelled = true;
     }
@@ -3679,7 +3691,12 @@ export class SessionManager {
 
   private drainWorktreePreparationQueue(): void {
     if (this.shuttingDown) {
-      for (const queued of this.worktreePreparationQueue.splice(0)) queued.resolve(false);
+      for (const queued of this.worktreePreparationQueue.splice(0)) {
+        this.worktreePreparationAdmission.clearFailure(
+          this.worktreePreparationKey(queued.sessionId, queued.launchGeneration),
+        );
+        queued.resolve(false);
+      }
       return;
     }
     for (
@@ -3690,6 +3707,9 @@ export class SessionManager {
       const queued = this.worktreePreparationQueue[index]!;
       if (!this.launchIsCurrent(queued.sessionId, queued.launchGeneration)) {
         this.worktreePreparationQueue.splice(index, 1);
+        this.worktreePreparationAdmission.clearFailure(
+          this.worktreePreparationKey(queued.sessionId, queued.launchGeneration),
+        );
         queued.resolve(false);
         continue;
       }
@@ -3697,7 +3717,7 @@ export class SessionManager {
         index++;
         continue;
       }
-      const key = `${this.runnerId}:${process.pid}:${queued.sessionId}:${queued.launchGeneration}`;
+      const key = this.worktreePreparationKey(queued.sessionId, queued.launchGeneration);
       if (!this.worktreePreparationAdmission.acquire({
         sessionId: key,
         agentId: "worktree-preparation",
@@ -3783,10 +3803,49 @@ export class SessionManager {
     this.emitStatus(request.sessionId, "queued", blocker.description, undefined, blocker);
   }
 
-  private capacityBlocker(request: AdmissionRequest, observation?: AdmissionObservation): RunnerCapacityBlocker {
-    return this.boxAdmission.blocker(request, observation) ?? {
+  private capacityBlocker(
+    request: AdmissionRequest,
+    observation?: AdmissionObservation,
+    queueOrder = this.admissionQueue.findIndex((entry) => entry.request.sessionId === request.sessionId) > 0 &&
+      this.admissionQueue[0]!.bypasses >= 8,
+  ): RunnerCapacityBlocker {
+    const blocker = this.boxAdmission.blocker(request, observation);
+    if (queueOrder && blocker?.kind === "capacity_lock") {
+      this.boxAdmission.clearFailure(request.sessionId);
+      return {
+        kind: "queue_order",
+        description: "Waiting behind older capacity requests",
+        usedUnits: observation?.usedCapacity ?? this.boxAdmission.usedCapacity(),
+        limitUnits: this.maxConcurrentSessions,
+        requiredUnits: request.weight,
+        agentId: request.agentId,
+      };
+    }
+    if (blocker?.kind === "capacity_lock" &&
+        !runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "capacityLockDiagnostics")) {
+      return {
+        kind: "runner_capacity",
+        description: "Waiting to recheck Runner Capacity after a concurrent update",
+        usedUnits: observation?.usedCapacity ?? this.boxAdmission.usedCapacity(),
+        limitUnits: this.maxConcurrentSessions,
+        requiredUnits: request.weight,
+        agentId: request.agentId,
+      };
+    }
+    if (blocker) return blocker;
+    if (queueOrder) return {
       kind: "queue_order",
       description: "Waiting behind older capacity requests",
+      usedUnits: observation?.usedCapacity ?? this.boxAdmission.usedCapacity(),
+      limitUnits: this.maxConcurrentSessions,
+      requiredUnits: request.weight,
+      agentId: request.agentId,
+    };
+    return {
+      kind: runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "capacityLockDiagnostics")
+        ? "capacity_lock"
+        : "runner_capacity",
+      description: "Waiting to recheck Runner Capacity after a concurrent update",
       usedUnits: observation?.usedCapacity ?? this.boxAdmission.usedCapacity(),
       limitUnits: this.maxConcurrentSessions,
       requiredUnits: request.weight,
@@ -3808,6 +3867,7 @@ export class SessionManager {
       "exclusive_group",
       "request_weight",
       "queue_order",
+      "capacity_lock",
       "active_turn_capacity",
     ];
     const selected = new Set<RunnerCapacityBlocker>();
@@ -3892,6 +3952,7 @@ export class SessionManager {
 
   private cancelActiveTurnWait(sessionId: string): boolean {
     if (!this.activeTurnWaiters.delete(sessionId)) return false;
+    this.activeTurnAdmission.clearFailure(sessionId);
     if (this.activeTurnWaiters.size === 0 && this.activeTurnRetryTimer) {
       clearTimeout(this.activeTurnRetryTimer);
       this.activeTurnRetryTimer = null;
@@ -4052,6 +4113,7 @@ export class SessionManager {
     const [entry] = this.admissionQueue.splice(index, 1);
     entry?.resolve(false);
     this.admissionWaitReasons.delete(sessionId);
+    this.boxAdmission.clearFailure(sessionId);
     if (this.admissionQueue.length === 0 && this.admissionRetryTimer) {
       clearTimeout(this.admissionRetryTimer);
       this.admissionRetryTimer = null;
@@ -4080,6 +4142,7 @@ export class SessionManager {
         if (!meta || meta.status === "stopped") {
           this.admissionQueue.splice(index, 1);
           this.admissionWaitReasons.delete(sessionId);
+          this.boxAdmission.clearFailure(sessionId);
           next.resolve(false);
           continue;
         }
@@ -4101,7 +4164,7 @@ export class SessionManager {
     if (this.admissionQueue.length > 0) {
       const observation = this.boxAdmission.observe();
       if (this.admissionQueue.some((entry) =>
-        this.capacityBlocker(entry.request, observation).kind === "runner_capacity")) {
+        this.boxAdmission.blocker(entry.request, observation)?.kind === "runner_capacity")) {
         this.parkOneIdleProvider();
       }
     }
@@ -9986,8 +10049,16 @@ export class SessionManager {
     this.activeTurnWaiters.clear();
     this.activeTurnAdmitted.clear();
     this.activeTurnAdmission.releaseAll();
-    for (const waiter of this.admissionQueue.splice(0)) waiter.resolve(false);
-    for (const waiter of this.worktreePreparationQueue.splice(0)) waiter.resolve(false);
+    for (const waiter of this.admissionQueue.splice(0)) {
+      this.boxAdmission.clearFailure(waiter.request.sessionId);
+      waiter.resolve(false);
+    }
+    for (const waiter of this.worktreePreparationQueue.splice(0)) {
+      this.worktreePreparationAdmission.clearFailure(
+        this.worktreePreparationKey(waiter.sessionId, waiter.launchGeneration),
+      );
+      waiter.resolve(false);
+    }
     if (this.worktreePreparationRetryTimer) clearTimeout(this.worktreePreparationRetryTimer);
     this.worktreePreparationRetryTimer = null;
     // Active git subprocesses cannot be synchronously cancelled. Retain their box-wide leases and
