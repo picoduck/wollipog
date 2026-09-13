@@ -6,6 +6,7 @@ import { Window } from "happy-dom";
 import type { SessionConfig } from "@wollipog/protocol";
 import {
   ApprovalsMenuChoices,
+  BarMenu,
   ModelEffortMenuChoices,
   type PermissionModeDetails,
 } from "./ComposerControls.js";
@@ -106,6 +107,50 @@ test("permission details are keyboard reachable and do not select the mode", asy
     await act(async () => { modeButton.click(); });
     assert.deepEqual(applied, [{ permissionMode: "danger-full-access" }]);
     assert.equal(closeCount, 1);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+test("Model Settings close control dismisses without selecting and restores trigger focus", async () => {
+  let selectionCount = 0;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <BarMenu
+        modelSettings
+        menuTitle="Model Settings"
+        label="Current Model"
+        ariaLabel="Model Settings: Current Model"
+      >
+        {() => (
+          <button type="button" role="menuitemradio" aria-checked="true" onClick={() => { selectionCount += 1; }}>
+            Current Model
+          </button>
+        )}
+      </BarMenu>,
+    );
+  });
+
+  try {
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Model Settings: Current Model"]');
+    assert.ok(trigger);
+    await act(async () => { trigger.click(); });
+
+    const close = container.querySelector<HTMLButtonElement>('[aria-label="Close Model Settings"]');
+    assert.ok(close, "the open surface exposes an explicitly labelled close control");
+    assert.equal(close.getAttribute("role"), "menuitem");
+    await act(async () => {
+      close.click();
+      await new Promise((resolve) => domWindow.setTimeout(resolve, 0));
+    });
+
+    assert.equal(selectionCount, 0, "closing does not activate the selected setting");
+    assert.equal(container.querySelector('[role="menu"]'), null);
+    assert.equal(domWindow.document.activeElement, trigger, "focus returns to the Model Settings trigger");
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

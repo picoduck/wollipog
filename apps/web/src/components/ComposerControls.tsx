@@ -32,7 +32,7 @@ import { useStoreSelector } from "../store.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { Modal } from "./common.js";
-import { InfoIcon, ServiceTierIcon, ShieldIcon } from "./Icons.js";
+import { CloseIcon, InfoIcon, ServiceTierIcon, ShieldIcon } from "./Icons.js";
 
 type Apply = (patch: Partial<SessionConfig>) => void;
 
@@ -73,7 +73,7 @@ function useSessionConfig(session: SessionView) {
 }
 
 /** Shared popover shell for the composer-bar dropdowns (bottom-anchored, click-away backdrop). */
-function BarMenu({
+export function BarMenu({
   align = "left",
   label,
   title,
@@ -116,7 +116,24 @@ function BarMenu({
         <>
           <div className={`plus-backdrop${modelSettings ? " model-settings-backdrop" : ""}`} onClick={() => menu.close(true)} />
           <div className={`cbar-pop${permissionMode ? " permission-mode-pop" : ""}${modelSettings ? " model-settings-pop" : ""}`} role="menu" id={menu.menuId} ref={menu.menuRef} onKeyDown={menu.onMenuKeyDown}>
-            {menuTitle && <div className="cbar-settings-title" role="presentation">{menuTitle}</div>}
+            {menuTitle && (modelSettings
+              ? (
+                  <div className="cbar-settings-header" role="presentation">
+                    <div className="cbar-settings-title">{menuTitle}</div>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="icon-btn cbar-settings-close"
+                      aria-label="Close Model Settings"
+                      data-menu-label="Close Model Settings"
+                      title="Close Model Settings"
+                      onClick={() => menu.close(true)}
+                    >
+                      <CloseIcon size={18} />
+                    </button>
+                  </div>
+                )
+              : <div className="cbar-settings-title" role="presentation">{menuTitle}</div>)}
             {children(() => menu.close(true))}
           </div>
         </>

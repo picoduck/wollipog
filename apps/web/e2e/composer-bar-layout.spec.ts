@@ -99,6 +99,17 @@ test("393px Orchestrator Model Settings is a focus-safe bottom sheet with every 
   const sheet = page.locator(".model-settings-pop");
   await expect(sheet).toBeVisible();
   await expect(sheet).toContainText("Model Settings");
+  const close = sheet.getByRole("menuitem", { name: "Close Model Settings" });
+  await expect(close).toBeVisible();
+  const [closeBox, titleBox] = await Promise.all([
+    close.boundingBox(),
+    sheet.getByText("Model Settings", { exact: true }).boundingBox(),
+  ]);
+  expect(closeBox).not.toBeNull();
+  expect(titleBox).not.toBeNull();
+  expect(closeBox!.width).toBeGreaterThanOrEqual(44);
+  expect(closeBox!.height).toBeGreaterThanOrEqual(44);
+  expect(closeBox!.x).toBeGreaterThanOrEqual(titleBox!.x + titleBox!.width);
   for (const group of ["Model", "Context Window", "Reasoning Effort", "Service Tier"]) {
     await expect(sheet.getByRole("group", { name: group })).toBeVisible();
   }
@@ -110,6 +121,21 @@ test("393px Orchestrator Model Settings is a focus-safe bottom sheet with every 
   }
   await expect(sheet.getByRole("group", { name: "Model" })).toContainText("with a 1M context window");
   await page.screenshot({ path: `${EVIDENCE}/after-mobile-model-settings.png` });
+  await sheet.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect(close).toBeVisible();
+  const scrolledCloseBox = await close.boundingBox();
+  expect(scrolledCloseBox).not.toBeNull();
+  expect(scrolledCloseBox!.y).toBeCloseTo(closeBox!.y, 0);
+  await close.click();
+  await expect(sheet).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+
+  await trigger.click();
+  await page.locator(".model-settings-backdrop").click({ position: { x: 1, y: 1 } });
+  await expect(sheet).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+
+  await trigger.click();
   await page.keyboard.press("Escape");
   await expect(sheet).toHaveCount(0);
   await expect(trigger).toBeFocused();
@@ -126,17 +152,22 @@ for (const { frameWidth, plan } of [
     const trigger = page.getByRole("button", { name: /^Model Settings:/ });
     await trigger.click();
     const popover = page.locator(".model-settings-pop");
-    const [frameBox, triggerBox, popoverBox] = await Promise.all([
+    const close = popover.getByRole("menuitem", { name: "Close Model Settings" });
+    const [frameBox, triggerBox, popoverBox, closeBox] = await Promise.all([
       page.locator("#frame").boundingBox(),
       trigger.boundingBox(),
       popover.boundingBox(),
+      close.boundingBox(),
     ]);
     expect(frameBox).not.toBeNull();
     expect(triggerBox).not.toBeNull();
     expect(popoverBox).not.toBeNull();
+    expect(closeBox).not.toBeNull();
     expect(popoverBox!.y + popoverBox!.height).toBeLessThanOrEqual(triggerBox!.y + 0.5);
     expect(popoverBox!.x).toBeGreaterThanOrEqual(frameBox!.x);
     expect(popoverBox!.x + popoverBox!.width).toBeLessThanOrEqual(frameBox!.x + frameBox!.width);
+    expect(closeBox!.x + closeBox!.width).toBeLessThanOrEqual(popoverBox!.x + popoverBox!.width);
+    expect(closeBox!.y).toBeGreaterThanOrEqual(popoverBox!.y);
     await expect(popover).toContainText("Model Settings");
     if (!plan) await page.screenshot({ path: `${EVIDENCE}/after-desktop-model-settings.png` });
   });
