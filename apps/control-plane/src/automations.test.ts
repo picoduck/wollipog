@@ -264,6 +264,25 @@ test("signed webhook triggers are one-time-secret, idempotent, cron-independent,
     /delivery-old|(?:mam|wollipog)whsec_/);
 });
 
+test("a trigger preserves delivery when an upgrade no longer parses the stored cron", () => {
+  const { db, service, created } = harness();
+  const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+  const credential = service.createTrigger(automation.automationId,
+    { kind: "webhook", name: "Legacy schedule" }, { kind: "human", id: "device" }, 1_000).data!;
+  db.raw().prepare("UPDATE automations SET cron_expression='stored legacy syntax' WHERE automation_id=?")
+    .run(automation.automationId);
+
+  const invoked = receiveSignedTrigger(service, credential.trigger.triggerId, credential.secret,
+    Buffer.from('{"eventId":"legacy-cron-delivery"}'), 2_000);
+
+  assert.equal(invoked.status, 200);
+  assert.equal(invoked.data?.invocation.state, "dispatched");
+  assert.equal(created.length, 1, "a parser upgrade must not turn a trigger into a delivery failure");
+  const execution = db.getAutomationExecution(invoked.data!.invocation.executionId!)!;
+  assert.equal(db.listAutomationCommands(execution.executionId)[0]?.deliveryDeadlineAt,
+    2_000 + 12 * 60 * 60_000, "the fallback still persists a finite delivery bound");
+});
+
 test("persisted legacy trigger secrets remain valid until rotation", () => {
   const { db, service } = harness();
   const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
@@ -1416,6 +1435,7 @@ test("registration-time capability loss drains more than one staged-command batc
         kind: "start_session",
         payloadJson: JSON.stringify({ type: "start_session", spec: { sessionId } }),
         payloadSha256: "0".repeat(64),
+        deliveryDeadlineAt: expected + 30 * 60_000,
       }],
       now: expected,
     });
@@ -1507,6 +1527,7 @@ test("workflow members receive stable distinct command and session ids", () => {
     `s_auto_${execution.executionId}_001`,
   ]);
   assert.equal(new Set(commands.map((command) => command.commandId)).size, 2);
+  assert.deepEqual(commands.map((command) => command.deliveryDeadlineAt), [31 * 60_000, 31 * 60_000]);
 });
 
 test("a command that never reaches its runner settles the execution and releases the wait policy", () => {
@@ -1546,7 +1567,7 @@ test("a flush outside the tick cannot transmit a command past its delivery bound
   const neighbour = service.create(baseSpec({ name: "Neighbour" }), { kind: "human", id: "device" }, 0).data!;
   service.tick(60_000);
   const execution = db.listAutomationExecutions(stalled.automationId)[0]!;
-  const command = execution.commands![0]!;
+  const command = db.listAutomationCommands(execution.executionId)[0]!;
   const first = delivered.find((message) =>
     (message as { commandId?: string }).commandId === command.commandId) as { requestId: string };
   service.onDurableCommandReceipt("runner-1", {
@@ -1561,6 +1582,10 @@ test("a flush outside the tick cannot transmit a command past its delivery bound
   }, 60_200);
   const replacement = db.listAutomationCommands(execution.executionId)[1]!;
   assert.equal(replacement.state, "pending");
+  assert.equal(replacement.deliveryDeadlineAt, replacement.createdAt + 30 * 60_000,
+    "the replacement receives a full delivery window");
+  assert.ok(replacement.deliveryDeadlineAt! > command.deliveryDeadlineAt!,
+    "the replacement does not inherit its predecessor's remaining deadline");
 
   const other = db.listAutomationExecutions(neighbour.automationId)[0]!;
   const otherCommand = other.commands![0]!;
@@ -1575,8 +1600,31 @@ test("a flush outside the tick cannot transmit a command past its delivery bound
   const sent = delivered.slice(before).filter((message) =>
     (message as { commandId?: string }).commandId === replacement.commandId);
   assert.deepEqual(sent, [], "a direct flush must not transmit a command past its delivery bound");
+  assert.deepEqual(db.dueAutomationCommands(60_200 + 31 * 60_000, "runner-1")
+    .map((candidate) => candidate.commandId), [], "the database query enforces the bound");
   assert.equal(db.listAutomationCommands(execution.executionId)[1]?.state, "pending",
     "and it must not be expired mid-flush either — the sweep owns that decision");
+});
+
+test("an acknowledged command remains resendable for runner-journal recovery after the delivery bound", () => {
+  const { db, service, delivered } = harness();
+  const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+  service.tick(60_000);
+  const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+  const command = db.listAutomationCommands(execution.executionId)[0]!;
+  const acceptedAt = command.deliveryDeadlineAt! - 30_000;
+
+  service.onDurableCommandReceipt("runner-1", {
+    type: "durable_session_command_update", commandId: command.commandId,
+    sessionId: command.sessionId, state: "accepted", revision: 1,
+  }, acceptedAt);
+  const before = delivered.length;
+
+  service.commandOutbox.flush(command.deliveryDeadlineAt! + 1, "runner-1");
+
+  assert.equal(delivered.length, before + 1,
+    "delivery acknowledgement satisfies the bound without disabling journal recovery resends");
+  assert.equal(db.getAutomationCommand(command.commandId)?.state, "accepted");
 });
 
 test("the delivery bound is decided before the outbox can transmit anything", () => {

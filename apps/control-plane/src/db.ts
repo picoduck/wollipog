@@ -1273,6 +1273,7 @@ CREATE TABLE IF NOT EXISTS automation_commands (
   payload_json          TEXT NOT NULL,
   payload_sha256        TEXT NOT NULL,
   expires_at            INTEGER,
+  delivery_deadline_at  INTEGER,
   dependency_command_id TEXT,
   state                 TEXT NOT NULL CHECK (state IN
     ('staged','pending','sent','accepted','started','completed','rejected','uncertain')),
@@ -2695,6 +2696,7 @@ interface AutomationExecutionRow {
 interface AutomationCommandRow {
   command_id: string; execution_id: string; ordinal: number; runner_id: string; session_id: string;
   kind: AutomationCommandView["kind"]; payload_json: string; payload_sha256: string; expires_at: number | null;
+  delivery_deadline_at: number | null;
   dependency_command_id: string | null; state: AutomationCommandState; revision: number; attempt_count: number;
   next_attempt_at: number | null; last_error: string | null; error_code: string | null;
   superseded_by: string | null; duplicate: number | null;
@@ -3025,6 +3027,7 @@ export interface AutomationCommandRecord extends AutomationCommandView {
   payloadJson: string;
   payloadSha256: string;
   expiresAt: number;
+  deliveryDeadlineAt?: number;
   dependencyCommandId?: string;
   nextAttemptAt?: number;
   errorCode?: DurableSessionCommandErrorCode;
@@ -3245,6 +3248,7 @@ export interface StageAutomationDeliveryPlanInput {
     payloadJson: string;
     payloadSha256: string;
     expiresAt?: number;
+    deliveryDeadlineAt: number | null;
     dependencyCommandId?: string;
   }>;
   now: number;
@@ -3715,6 +3719,7 @@ export class ControlPlaneDb {
       ["automation_executions", "delivery_mode TEXT NOT NULL DEFAULT 'legacy_at_most_once'"],
       ["automation_executions", "delivery_plan_json TEXT"],
       ["automation_commands", "superseded_by TEXT"],
+      ["automation_commands", "delivery_deadline_at INTEGER"],
     ] as const) {
       try {
         db.exec(`ALTER TABLE ${table} ADD COLUMN ${column}`);
@@ -18485,7 +18490,9 @@ export class ControlPlaneDb {
     for (const command of input.commands) {
       if (!command.commandId || !command.runnerId || !command.sessionId ||
           !Number.isInteger(command.ordinal) || command.ordinal < 0 || ordinals.has(command.ordinal) ||
-          !/^[a-f0-9]{64}$/i.test(command.payloadSha256)) {
+          !/^[a-f0-9]{64}$/i.test(command.payloadSha256) ||
+          (command.deliveryDeadlineAt !== null &&
+            (!Number.isSafeInteger(command.deliveryDeadlineAt) || command.deliveryDeadlineAt <= input.now))) {
         throw new Error("automation delivery command is malformed");
       }
       JSON.parse(command.payloadJson);
@@ -18520,11 +18527,15 @@ export class ControlPlaneDb {
               row.runner_id === command.runnerId && row.session_id === command.sessionId && row.kind === command.kind &&
               row.payload_json === command.payloadJson && row.payload_sha256 === command.payloadSha256 &&
               row.expires_at === (command.expiresAt ?? null) &&
+              row.delivery_deadline_at === command.deliveryDeadlineAt &&
               row.dependency_command_id === (command.dependencyCommandId ?? null);
           });
         if (!samePlan) throw new Error("automation execution already has a different delivery plan");
         this.db.exec("COMMIT");
         return existing.map((row) => this.automationCommand(row));
+      }
+      if (input.commands.some((command) => command.deliveryDeadlineAt === null)) {
+        throw new Error("new automation delivery commands require a delivery deadline");
       }
       const changed = this.stmt(
         `UPDATE automation_executions SET delivery_mode='receipted_v53', delivery_plan_json=?, runner_id=?,
@@ -18535,13 +18546,13 @@ export class ControlPlaneDb {
       const insert = this.stmt(
         `INSERT INTO automation_commands
          (command_id, execution_id, ordinal, runner_id, session_id, kind, payload_json, payload_sha256,
-          expires_at, dependency_command_id, state, revision, attempt_count, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,'staged',0,0,?,?)`,
+          expires_at, delivery_deadline_at, dependency_command_id, state, revision, attempt_count, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,'staged',0,0,?,?)`,
       );
       for (const command of [...input.commands].sort((a, b) => a.ordinal - b.ordinal)) {
         insert.run(command.commandId, input.executionId, command.ordinal, command.runnerId, command.sessionId,
           command.kind, command.payloadJson, command.payloadSha256, command.expiresAt ?? null,
-          command.dependencyCommandId ?? null, input.now, input.now);
+          command.deliveryDeadlineAt, command.dependencyCommandId ?? null, input.now, input.now);
         this.insertAutomationEvent({
           automationId: execution.automation_id, executionId: input.executionId, kind: "command_status_changed",
           actor: { kind: "system", id: "automation-outbox" },
@@ -18586,13 +18597,18 @@ export class ControlPlaneDb {
   dueAutomationCommands(now: number, runnerId?: string, limit = 100): AutomationCommandRecord[] {
     const bounded = Math.max(1, Math.min(100, Math.floor(limit)));
     const runner = runnerId ? "AND command.runner_id=?" : "";
-    const params = runnerId ? [now, now, runnerId, bounded] : [now, now, bounded];
+    const params = runnerId ? [now, now, now, runnerId, bounded] : [now, now, now, bounded];
     const rows = this.stmt(
       `SELECT command.* FROM automation_commands command
        JOIN automation_executions execution ON execution.execution_id=command.execution_id
        WHERE execution.status IN ('dispatching','running')
          AND command.state IN ('pending','sent','accepted','started') AND command.next_attempt_at IS NOT NULL
-         AND command.next_attempt_at<=? AND (command.expires_at IS NULL OR command.expires_at>?) ${runner}
+         AND command.next_attempt_at<=? AND (command.expires_at IS NULL OR command.expires_at>?)
+         AND (command.delivery_deadline_at IS NULL OR command.delivery_deadline_at>? OR EXISTS (
+           SELECT 1 FROM automation_commands acknowledged
+           WHERE acknowledged.execution_id=command.execution_id
+             AND acknowledged.state IN ('accepted','started','completed')
+         )) ${runner}
          AND (command.dependency_command_id IS NULL OR EXISTS (
            SELECT 1 FROM automation_commands dependency
            WHERE dependency.command_id=command.dependency_command_id AND dependency.state='completed'
@@ -18845,6 +18861,8 @@ export class ControlPlaneDb {
       const attempt = superseded.length + 1;
       const replacementId = `${row.command_id.replace(/_r\d+$/u, "")}_r${attempt}`;
       const replacementOrdinal = Math.max(...siblings.map((sibling) => sibling.ordinal)) + 1;
+      const deliveryWindowMs = row.delivery_deadline_at === null ? null : row.delivery_deadline_at - row.created_at;
+      const replacementDeadlineAt = deliveryWindowMs === null ? null : input.now + deliveryWindowMs;
       this.stmt(
         `UPDATE automation_commands SET state='rejected', revision=?, next_attempt_at=NULL, last_error=?,
          error_code=?, superseded_by=?, payload_json='null', updated_at=?, completed_at=COALESCE(completed_at,?)
@@ -18853,10 +18871,11 @@ export class ControlPlaneDb {
       this.stmt(
         `INSERT INTO automation_commands
          (command_id, execution_id, ordinal, runner_id, session_id, kind, payload_json, payload_sha256,
-          expires_at, dependency_command_id, state, revision, attempt_count, next_attempt_at, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,'pending',0,0,?,?,?)`,
+          expires_at, delivery_deadline_at, dependency_command_id, state, revision, attempt_count,
+          next_attempt_at, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,'pending',0,0,?,?,?)`,
       ).run(replacementId, row.execution_id, replacementOrdinal, row.runner_id, row.session_id, row.kind,
-        row.payload_json, row.payload_sha256, row.expires_at, row.dependency_command_id,
+        row.payload_json, row.payload_sha256, row.expires_at, replacementDeadlineAt, row.dependency_command_id,
         input.nextAttemptAt, input.now, input.now);
       this.insertAutomationEvent({
         automationId: row.automation_id, executionId: row.execution_id, kind: "command_status_changed",
@@ -19165,6 +19184,7 @@ export class ControlPlaneDb {
       payloadJson: row.payload_json,
       payloadSha256: row.payload_sha256,
       expiresAt: row.expires_at ?? Number.MAX_SAFE_INTEGER,
+      ...(row.delivery_deadline_at === null ? {} : { deliveryDeadlineAt: row.delivery_deadline_at }),
       ...(row.dependency_command_id ? { dependencyCommandId: row.dependency_command_id } : {}),
       ...(row.next_attempt_at === null ? {} : { nextAttemptAt: row.next_attempt_at }),
       ...(row.last_error ? { lastError: row.last_error } : {}),
