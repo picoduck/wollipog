@@ -517,7 +517,10 @@ export class CodexAppServerDriver implements Driver {
     this.registerHandlers(peer);
     let initialized: Json;
     try {
-      initialized = await peer.request<Json>("initialize", { clientInfo: { name: "wollipog", version: "0.4.0" } });
+      initialized = await peer.request<Json>("initialize", {
+        clientInfo: { name: "wollipog", version: "0.4.0" },
+        capabilities: { experimentalApi: true },
+      });
     } catch (error) {
       if (this.opts.isolation?.backend === "wsl-bwrap") {
         await waitForWslProviderAttemptTeardown(child, this.kill);
