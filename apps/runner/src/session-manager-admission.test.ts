@@ -3333,13 +3333,24 @@ test("shared-root capacity lock contention reports synchronization and retries w
       "session details and search snapshots share the exact transient reason");
     assert.deepEqual(manager.capacityState().blockers?.map((blocker) => blocker.kind), ["capacity_lock"],
       "Machine capacity diagnostics use the same reason as the queued session");
-    assert.equal(parkingAttempts, 0, "transient synchronization cannot trigger capacity-pressure parking");
+
+    gate.admissionQueue.unshift({
+      request: { sessionId: "older-heavy", agentId: "older", weight: 2 },
+      bypasses: 8,
+      resolve: () => {},
+    });
+    assert.deepEqual(manager.capacityState().blockers?.map((blocker) => blocker.kind).sort(),
+      ["queue_order", "request_weight"],
+      "a later bounded-fairness reservation supersedes a stale transient lock diagnostic");
+    gate.admissionQueue.shift();
 
     gate.controlPlaneProtocolVersion = () => 136;
-    gate.emitAdmissionWait(gate.admissionQueue[0].request);
+    gate.drainAdmissionQueue();
     assert.equal(store.readMeta("waiting")?.capacityWait?.kind, "runner_capacity",
       "pre-v137 peers receive a valid neutral recheck reason instead of new vocabulary");
     assert.notEqual(store.readMeta("waiting")?.capacityWait?.kind, "queue_order");
+    assert.equal(parkingAttempts, 0,
+      "legacy down-conversion of synchronization cannot trigger capacity-pressure parking");
     gate.controlPlaneProtocolVersion = () => 137;
 
     siblingInternals.releaseSlots(mutation);
@@ -3350,6 +3361,44 @@ test("shared-root capacity lock contention reports synchronization and retries w
     ]), true);
     assert.deepEqual([...gate.admitted], ["waiting"]);
     gate.releaseAdmission("waiting");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("admission queue exits clear retained capacity-lock diagnostics", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-admission-lock-cleanup-"));
+  try {
+    const store = new SessionStore(root);
+    store.create(meta("stopped"));
+    const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, root, 1);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const gate = manager as any;
+    gate.admissionQueue.push({
+      request: { sessionId: "stopped", agentId: "claude", weight: 1 },
+      bypasses: 0,
+      resolve: () => {},
+    });
+    gate.boxAdmission.capacityLockWaiters.add("stopped");
+    store.patchMeta("stopped", { status: "stopped" });
+    gate.drainAdmissionQueue();
+    assert.equal(gate.boxAdmission.capacityLockWaiters.has("stopped"), false,
+      "terminal session dequeue drops its retained failed-attempt state");
+
+    const generation = gate.beginLaunchGeneration("worktree") as number;
+    const key = gate.worktreePreparationKey("worktree", generation) as string;
+    let resolved: boolean | undefined;
+    gate.worktreePreparationQueue.push({
+      sessionId: "worktree",
+      launchGeneration: generation,
+      resolve: (value: boolean) => { resolved = value; },
+    });
+    gate.worktreePreparationAdmission.capacityLockWaiters.add(key);
+    assert.equal(gate.cancelWorktreePreparationWait("worktree"), true);
+    assert.equal(resolved, false);
+    assert.equal(gate.worktreePreparationAdmission.capacityLockWaiters.has(key), false,
+      "cancelled generation dequeue drops its unique retained failed-attempt state");
     manager.shutdownAll();
   } finally {
     rmSync(root, { recursive: true, force: true });

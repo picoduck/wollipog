@@ -3634,7 +3634,7 @@ export class SessionManager {
     launchGeneration: number,
   ): Promise<boolean> {
     if (!this.launchIsCurrent(sessionId, launchGeneration)) return Promise.resolve(false);
-    const key = `${this.runnerId}:${process.pid}:${sessionId}:${launchGeneration}`;
+    const key = this.worktreePreparationKey(sessionId, launchGeneration);
     if (
       this.worktreePreparations.size < this.worktreePreparationLimit &&
       ![...this.worktreePreparationSessions.values()].includes(sessionId) &&
@@ -3657,12 +3657,19 @@ export class SessionManager {
     return waiting;
   }
 
+  private worktreePreparationKey(sessionId: string, launchGeneration: number): string {
+    return `${this.runnerId}:${process.pid}:${sessionId}:${launchGeneration}`;
+  }
+
   private cancelWorktreePreparationWait(sessionId: string): boolean {
     let cancelled = false;
     for (let index = this.worktreePreparationQueue.length - 1; index >= 0; index--) {
       const queued = this.worktreePreparationQueue[index]!;
       if (queued.sessionId !== sessionId) continue;
       this.worktreePreparationQueue.splice(index, 1);
+      this.worktreePreparationAdmission.clearFailure(
+        this.worktreePreparationKey(queued.sessionId, queued.launchGeneration),
+      );
       queued.resolve(false);
       cancelled = true;
     }
@@ -3684,7 +3691,12 @@ export class SessionManager {
 
   private drainWorktreePreparationQueue(): void {
     if (this.shuttingDown) {
-      for (const queued of this.worktreePreparationQueue.splice(0)) queued.resolve(false);
+      for (const queued of this.worktreePreparationQueue.splice(0)) {
+        this.worktreePreparationAdmission.clearFailure(
+          this.worktreePreparationKey(queued.sessionId, queued.launchGeneration),
+        );
+        queued.resolve(false);
+      }
       return;
     }
     for (
@@ -3695,6 +3707,9 @@ export class SessionManager {
       const queued = this.worktreePreparationQueue[index]!;
       if (!this.launchIsCurrent(queued.sessionId, queued.launchGeneration)) {
         this.worktreePreparationQueue.splice(index, 1);
+        this.worktreePreparationAdmission.clearFailure(
+          this.worktreePreparationKey(queued.sessionId, queued.launchGeneration),
+        );
         queued.resolve(false);
         continue;
       }
@@ -3702,7 +3717,7 @@ export class SessionManager {
         index++;
         continue;
       }
-      const key = `${this.runnerId}:${process.pid}:${queued.sessionId}:${queued.launchGeneration}`;
+      const key = this.worktreePreparationKey(queued.sessionId, queued.launchGeneration);
       if (!this.worktreePreparationAdmission.acquire({
         sessionId: key,
         agentId: "worktree-preparation",
@@ -3795,6 +3810,17 @@ export class SessionManager {
       this.admissionQueue[0]!.bypasses >= 8,
   ): RunnerCapacityBlocker {
     const blocker = this.boxAdmission.blocker(request, observation);
+    if (queueOrder && blocker?.kind === "capacity_lock") {
+      this.boxAdmission.clearFailure(request.sessionId);
+      return {
+        kind: "queue_order",
+        description: "Waiting behind older capacity requests",
+        usedUnits: observation?.usedCapacity ?? this.boxAdmission.usedCapacity(),
+        limitUnits: this.maxConcurrentSessions,
+        requiredUnits: request.weight,
+        agentId: request.agentId,
+      };
+    }
     if (blocker?.kind === "capacity_lock" &&
         !runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "capacityLockDiagnostics")) {
       return {
@@ -4115,6 +4141,7 @@ export class SessionManager {
         if (!meta || meta.status === "stopped") {
           this.admissionQueue.splice(index, 1);
           this.admissionWaitReasons.delete(sessionId);
+          this.boxAdmission.clearFailure(sessionId);
           next.resolve(false);
           continue;
         }
@@ -10021,8 +10048,16 @@ export class SessionManager {
     this.activeTurnWaiters.clear();
     this.activeTurnAdmitted.clear();
     this.activeTurnAdmission.releaseAll();
-    for (const waiter of this.admissionQueue.splice(0)) waiter.resolve(false);
-    for (const waiter of this.worktreePreparationQueue.splice(0)) waiter.resolve(false);
+    for (const waiter of this.admissionQueue.splice(0)) {
+      this.boxAdmission.clearFailure(waiter.request.sessionId);
+      waiter.resolve(false);
+    }
+    for (const waiter of this.worktreePreparationQueue.splice(0)) {
+      this.worktreePreparationAdmission.clearFailure(
+        this.worktreePreparationKey(waiter.sessionId, waiter.launchGeneration),
+      );
+      waiter.resolve(false);
+    }
     if (this.worktreePreparationRetryTimer) clearTimeout(this.worktreePreparationRetryTimer);
     this.worktreePreparationRetryTimer = null;
     // Active git subprocesses cannot be synchronously cancelled. Retain their box-wide leases and

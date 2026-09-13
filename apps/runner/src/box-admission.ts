@@ -196,6 +196,7 @@ export class BoxAdmission {
 
   releaseAll(): void {
     for (const sessionId of [...this.held.keys()]) this.release(sessionId);
+    this.capacityLockWaiters.clear();
   }
 
   usedCapacity(): number {
