@@ -1346,12 +1346,57 @@ test("an unsupported Orchestrator is disabled and says why, rather than vanishin
     assert.ok(orchestrator, "Orchestrator is rendered even where it cannot be chosen");
     assert.equal(orchestrator.getAttribute("aria-disabled"), "true");
     assert.match(orchestrator.textContent ?? "", /runner is too old to orchestrate child sessions/);
+    assert.doesNotMatch(orchestrator.textContent ?? "", /agent does not offer/,
+      "an old runner cannot establish whether its missing capability is agent-specific");
 
     // Disabled, not merely styled: clicking must not select it, and the reason must be readable
     // rather than living in a `title` a touch user cannot reach.
     await act(async () => { orchestrator.click(); });
     assert.equal(orchestrator.getAttribute("aria-checked"), "false");
     assert.ok(orchestrator.querySelector(".ui-choice-card-reason"));
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an old Codex on unverified WSL reports both independent Orchestrator blockers", async () => {
+  const mixedConstraintRunner: RunnerView = {
+    ...runner,
+    os: "windows",
+    protocolVersion: 124,
+    agents: [{
+      id: "codex",
+      name: "Codex",
+      command: "codex",
+      args: [],
+      env: {},
+      driver: "codex-app-server",
+      context: { kind: "wsl", distro: "Ubuntu-24.04" },
+      available: true,
+      capabilities: {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+        permissionModes: ["default"],
+      },
+      codexAppServer: {
+        status: "supported",
+        appServerAvailable: true,
+        orchestratorApproval: {
+          status: "unsupported",
+          failure: "Upgrade Codex to 0.154.0 or newer.",
+        },
+      },
+    }],
+  };
+  const fixture = await mountFixture({ runners: [mixedConstraintRunner] });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    const orchestrator = permissionPresetCard(fixture.container, "Orchestrator");
+    assert.ok(orchestrator);
+    assert.equal(orchestrator.getAttribute("aria-disabled"), "true");
+    assert.match(orchestrator.textContent ?? "", /Upgrade Codex to 0\.154\.0 or newer/);
+    assert.match(orchestrator.textContent ?? "", /verified Direct WSL bridge and a bubblewrap-isolated runner/);
+    await act(async () => { orchestrator.click(); });
+    assert.equal(orchestrator.getAttribute("aria-checked"), "false", "mixed constraints remain fail closed");
   } finally {
     await unmountFixture(fixture);
   }

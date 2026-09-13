@@ -22,6 +22,34 @@ test.beforeEach(async ({ page }) => {
   await expect(page.getByRole("tab", { name: /Alpha/ })).toBeVisible();
 });
 
+for (const scenario of [
+  { name: "desktop light", viewport: { width: 1280, height: 1000 }, theme: "light" },
+  { name: "mobile dark", viewport: { width: 390, height: 844 }, theme: "dark" },
+] as const) {
+  test(`mixed Orchestrator blockers ${scenario.name}`, async ({ page }, testInfo) => {
+    await page.setViewportSize(scenario.viewport);
+    await page.evaluate((theme) => {
+      document.documentElement.dataset.theme = theme;
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(124);
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.setOrchestratorAgentFixture({
+        context: "wsl",
+        permissionModes: ["default"],
+        requirement: "Upgrade Codex to 0.154.0 or newer.",
+      });
+    }, scenario.theme);
+    await page.getByRole("tab", { name: /Alpha/ }).click();
+    await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+    await page.getByRole("menuitem", { name: "New Session Here" }).click();
+    const dialog = page.getByRole("dialog", { name: "New Session" });
+    const orchestratorCard = presetCard(dialog, /^Orchestrator/);
+    await expect(orchestratorCard).toHaveAttribute("aria-disabled", "true");
+    await expect(orchestratorCard).toContainText("Upgrade Codex to 0.154.0 or newer.");
+    await expect(orchestratorCard).toContainText("verified Direct WSL bridge and a bubblewrap-isolated runner");
+    await orchestratorCard.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath("mixed-blockers.png"), fullPage: true });
+  });
+}
+
 for (const theme of ["light", "dark"] as const) {
   for (const viewport of [{ width: 1280, height: 1000 }, { width: 390, height: 844 }]) {
     test(`saved orchestrator default and TUI accounting ${theme} ${viewport.width}`, async ({ page }, testInfo) => {

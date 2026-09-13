@@ -1505,6 +1505,11 @@ declare global {
       settleDeferredCancelTurn(): void;
       setRunnerProtocolVersion(version: number): void;
       setRunnerStatus(status: RunnerView["status"]): void;
+      setOrchestratorAgentFixture(options: {
+        context: "native" | "wsl";
+        permissionModes: string[];
+        requirement?: string;
+      }): void;
       pushSnapshot(): void;
       deferNextGit(id: string, action: GitFixtureAction): void;
       settleDeferredGit(id: string, action: GitFixtureAction): void;
@@ -1705,6 +1710,30 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
   },
   setRunnerStatus(status) {
     runner.status = status;
+    socket?.push(snapshot());
+  },
+  setOrchestratorAgentFixture(options) {
+    const agent = runner.agents[0]!;
+    const capabilities = agent.capabilities;
+    agent.context = options.context === "wsl"
+      ? { kind: "wsl", distro: "Ubuntu-24.04" }
+      : { kind: "native" };
+    agent.capabilities = {
+      ...capabilities,
+      models: capabilities?.models ?? [],
+      effortLevels: capabilities?.effortLevels ?? [],
+      slashCommands: capabilities?.slashCommands ?? [],
+      supportsImages: capabilities?.supportsImages ?? false,
+      supportsApprovals: capabilities?.supportsApprovals ?? true,
+      permissionModes: [...options.permissionModes],
+    };
+    agent.codexAppServer = {
+      status: "supported",
+      appServerAvailable: true,
+      orchestratorApproval: options.requirement
+        ? { status: "unsupported", failure: options.requirement }
+        : { status: "supported" },
+    };
     socket?.push(snapshot());
   },
   pushSnapshot() {

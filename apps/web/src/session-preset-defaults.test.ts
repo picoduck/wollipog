@@ -66,7 +66,7 @@ test("a fully supported host says nothing, because there is nothing to explain",
   assert.equal(orchestratorUnavailableReason(AVAILABLE), undefined);
 });
 
-test("each cause names ITSELF rather than the union of the four", () => {
+test("each individual cause names itself", () => {
   const reason = (overrides: Partial<typeof AVAILABLE>) =>
     orchestratorUnavailableReason({ ...AVAILABLE, ...overrides });
 
@@ -98,20 +98,32 @@ test("a context with no rule is refused BY NAME rather than allowed by omission"
   assert.doesNotMatch(reason, /WSL bridge and a bubblewrap/);
 });
 
-test("the runner is reported before the agent, and the agent before the target", () => {
-  // Several causes can hold at once. The order is the order a user can act in, and asserting it
-  // keeps a later edit from surfacing "host execution target" to someone whose runner cannot
-  // orchestrate at all.
-  assert.match(orchestratorUnavailableReason({
+test("independent blockers are all reported in actionable order", () => {
+  // Several causes can hold at once. Omitting any one can recommend a change that still leaves the
+  // configuration unavailable, while stable ordering keeps the explanation predictable.
+  assert.equal(orchestratorUnavailableReason({
     runnerSupportsOrchestration: false,
     agentOffersOrchestrator: false,
+    agentOrchestratorRequirement: "Upgrade Codex to 0.154.0 or newer.",
     contextKind: "wsl",
     directWslVerified: false,
     hostExecutionTarget: false,
-  }) ?? "", /runner is too old/);
-  assert.match(orchestratorUnavailableReason({
+  }), "This runner is too old to orchestrate child sessions. " +
+    "Upgrade Codex to 0.154.0 or newer. " +
+    "WSL agents need the verified Direct WSL bridge and a bubblewrap-isolated runner. " +
+    "Orchestrator runs only on the host execution target.");
+});
+
+test("an old runner suppresses only an unverified generic agent claim", () => {
+  assert.equal(orchestratorUnavailableReason({
     ...AVAILABLE,
+    runnerSupportsOrchestration: false,
     agentOffersOrchestrator: false,
-    hostExecutionTarget: false,
-  }) ?? "", /agent does not offer/);
+  }), "This runner is too old to orchestrate child sessions.");
+  assert.equal(orchestratorUnavailableReason({
+    ...AVAILABLE,
+    runnerSupportsOrchestration: false,
+    agentOffersOrchestrator: false,
+    agentOrchestratorRequirement: "Upgrade Codex to 0.154.0 or newer.",
+  }), "This runner is too old to orchestrate child sessions. Upgrade Codex to 0.154.0 or newer.");
 });
