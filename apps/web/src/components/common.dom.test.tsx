@@ -428,3 +428,51 @@ test("session indicators preserve simultaneous lifecycle, attention, and change 
     container.remove();
   }
 });
+
+test("active-turn capacity and queue ordering keep distinct labels, accessible names, and tooltips", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<>
+        <SessionStatusIndicators session={{
+          status: "queued",
+          pendingApproval: null,
+          capacityWait: {
+            kind: "active_turn_capacity",
+            description: "Active Turn Capacity is 2 of 2 turns used",
+            usedUnits: 2,
+            limitUnits: 2,
+            requiredUnits: 1,
+          },
+        }} />
+        <SessionStatusIndicators session={{
+          status: "queued",
+          pendingApproval: null,
+          capacityWait: {
+            kind: "queue_order",
+            description: "Waiting behind an older capacity request",
+            usedUnits: 1,
+            limitUnits: 2,
+            requiredUnits: 1,
+          },
+        }} />
+      </>);
+    });
+    const activeTurnCapacityBadge = container.querySelector(
+      '[aria-label="Queue Reason: Active Turn Capacity is 2 of 2 turns used"]',
+    );
+    assert.equal(activeTurnCapacityBadge?.textContent?.trim(), "Active Turn Capacity");
+    assert.equal(activeTurnCapacityBadge?.getAttribute("title"), "Active Turn Capacity is 2 of 2 turns used");
+    assert.equal(
+      container.querySelector('[aria-label="Queue Reason: Waiting behind an older capacity request"]')
+        ?.textContent?.trim(),
+      "Queue Order",
+    );
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});

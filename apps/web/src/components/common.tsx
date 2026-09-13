@@ -335,9 +335,11 @@ export function SessionStatusIndicators({ session, disconnected = false, onOpenA
                   ? "Provider Slot"
                   : session.capacityWait.kind === "request_weight"
                     ? "Agent Weight"
-                    : session.capacityWait.kind === "capacity_lock"
-                      ? "Capacity Sync"
-                      : "Queue Order"}
+                    : session.capacityWait.kind === "active_turn_capacity"
+                      ? "Active Turn Capacity"
+                      : session.capacityWait.kind === "capacity_lock"
+                        ? "Capacity Sync"
+                        : "Queue Order"}
         </span>
       )}
       {attention === "pills"
