@@ -1357,6 +1357,49 @@ test("an unsupported Orchestrator is disabled and says why, rather than vanishin
   }
 });
 
+test("an old Codex on unverified WSL reports both independent Orchestrator blockers", async () => {
+  const mixedConstraintRunner: RunnerView = {
+    ...runner,
+    os: "windows",
+    protocolVersion: 124,
+    agents: [{
+      id: "codex",
+      name: "Codex",
+      command: "codex",
+      args: [],
+      env: {},
+      driver: "codex-app-server",
+      context: { kind: "wsl", distro: "Ubuntu-24.04" },
+      available: true,
+      capabilities: {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+        permissionModes: ["default"],
+      },
+      codexAppServer: {
+        status: "supported",
+        appServerAvailable: true,
+        orchestratorApproval: {
+          status: "unsupported",
+          failure: "Upgrade Codex to 0.154.0 or newer.",
+        },
+      },
+    }],
+  };
+  const fixture = await mountFixture({ runners: [mixedConstraintRunner] });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    const orchestrator = permissionPresetCard(fixture.container, "Orchestrator");
+    assert.ok(orchestrator);
+    assert.equal(orchestrator.getAttribute("aria-disabled"), "true");
+    assert.match(orchestrator.textContent ?? "", /Upgrade Codex to 0\.154\.0 or newer/);
+    assert.match(orchestrator.textContent ?? "", /verified Direct WSL bridge and a bubblewrap-isolated runner/);
+    await act(async () => { orchestrator.click(); });
+    assert.equal(orchestrator.getAttribute("aria-checked"), "false", "mixed constraints remain fail closed");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("an unavailable Project Location is refused with the availability as its reason", async () => {
   // The bespoke `.loc-pick` button used the DOM `disabled` property, which took the option out of
   // the tab order — so the availability badge explaining WHY it could not be chosen was reachable

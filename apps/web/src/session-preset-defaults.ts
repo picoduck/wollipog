@@ -27,12 +27,13 @@ export function savedSessionPermissionMode(
  * §11.3 forbids: a user who had read about Orchestrator met a control with a single option and no
  * way to learn whether the reason was their runner, their agent, or their execution target.
  *
- * Rendering it disabled instead needs a sentence per cause, so the causes are separated here rather
+ * Rendering it disabled instead needs a sentence per cause, so the causes are collected here rather
  * than collapsed into the single "requires a supported native host harness or verified Direct WSL
  * bridge and runner" message — which named four possibilities and confirmed none of them.
  *
- * Ordered most-actionable first. Where several apply the user has to clear them all, and the runner
- * and the agent are the two they can change without changing what they are launching.
+ * Ordered most-actionable first. Where several apply they are all returned because the user has to
+ * clear them all, and the runner and the agent are the two they can change without changing what
+ * they are launching.
  */
 export function orchestratorUnavailableReason(input: {
   runnerSupportsOrchestration: boolean;
@@ -43,19 +44,20 @@ export function orchestratorUnavailableReason(input: {
   directWslVerified: boolean;
   hostExecutionTarget: boolean;
 }): string | undefined {
-  if (!input.runnerSupportsOrchestration) return "This runner is too old to orchestrate child sessions.";
+  const reasons: string[] = [];
+  if (!input.runnerSupportsOrchestration) reasons.push("This runner is too old to orchestrate child sessions.");
   if (!input.agentOffersOrchestrator) {
-    return input.agentOrchestratorRequirement ?? "This agent does not offer the Orchestrator permission mode.";
+    reasons.push(input.agentOrchestratorRequirement ?? "This agent does not offer the Orchestrator permission mode.");
   }
   if (input.contextKind === "wsl" && !input.directWslVerified) {
-    return "WSL agents need the verified Direct WSL bridge and a bubblewrap-isolated runner.";
+    reasons.push("WSL agents need the verified Direct WSL bridge and a bubblewrap-isolated runner.");
   }
   // Neither native nor WSL: a context this dialog has no rule for is unavailable rather than
   // silently allowed, and it says which context it refused so a new one is reported rather than
   // merely broken.
   if (input.contextKind !== "native" && input.contextKind !== "wsl") {
-    return `Orchestrator runs on a native host or a verified WSL bridge, not a ${input.contextKind} context.`;
+    reasons.push(`Orchestrator runs on a native host or a verified WSL bridge, not a ${input.contextKind} context.`);
   }
-  if (!input.hostExecutionTarget) return "Orchestrator runs only on the host execution target.";
-  return undefined;
+  if (!input.hostExecutionTarget) reasons.push("Orchestrator runs only on the host execution target.");
+  return reasons.length > 0 ? reasons.join(" ") : undefined;
 }
