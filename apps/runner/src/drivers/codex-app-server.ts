@@ -336,6 +336,8 @@ export class CodexAppServerDriver implements Driver {
   /** Complete usage for the current turn. Cumulative thread totals make repeated notifications
    * idempotent; `last` is accumulated only as a compatibility fallback for older App Servers. */
   private pendingTurnUsage: FlatUsage | null = null;
+  /** Portion of pendingTurnUsage already published through the additive token_usage pipeline. */
+  private emittedTurnUsage: FlatUsage | null = null;
   private turnUsageBaseline: FlatUsage | null = null;
   /** Once a turn settles, ignore late usage/completion notifications from its interrupt race. */
   private turnUsageClosed = false;
@@ -363,8 +365,10 @@ export class CodexAppServerDriver implements Driver {
   private readonly attentionOwners = new Map<string, string>();
   private readonly subagentParentByTool = new Map<string, string | undefined>();
   private readonly subagentLifecycleByThread = new Map<string, AuthoritativeSubagentLifecycle>();
-  /** Per-child turn usage, emitted once when that child turn settles. */
+  /** Complete usage observed for each active child turn. */
   private readonly pendingSubagentUsage = new Map<string, FlatUsage>();
+  /** Per-subagent portion already published through the additive token_usage pipeline. */
+  private readonly emittedSubagentUsage = new Map<string, FlatUsage>();
   /** Last authoritative cumulative total observed for each admitted provider thread. Retaining it
    * across turns and reconnect replay prevents an old notification from reopening billable usage. */
   private readonly threadUsageTotals = new Map<string, FlatUsage>();
@@ -949,19 +953,27 @@ export class CodexAppServerDriver implements Driver {
   }
 
   private flushSubagentUsage(threadId: string): void {
+    this.emitPendingSubagentUsage(threadId);
+    this.pendingSubagentUsage.delete(threadId);
+    this.emittedSubagentUsage.delete(threadId);
+    this.subagentUsageBaselines.delete(threadId);
+    this.lastOnlyUsageFingerprints.delete(threadId);
+  }
+
+  private emitPendingSubagentUsage(threadId: string): void {
     const usage = this.pendingSubagentUsage.get(threadId);
     const parentToolUseId = this.subagentToolByThread.get(threadId);
     if (!usage || !parentToolUseId) return;
-    this.pendingSubagentUsage.delete(threadId);
-    this.subagentUsageBaselines.delete(threadId);
-    this.lastOnlyUsageFingerprints.delete(threadId);
+    const delta = subtractUsage(usage, this.emittedSubagentUsage.get(threadId) ?? {});
+    this.emittedSubagentUsage.set(threadId, usage);
+    if (!hasUsage(delta)) return;
     this.cb.onEvent({
       kind: "token_usage",
-      inputTokens: usage.input,
-      outputTokens: usage.output,
-      cachedInputTokens: usage.cached,
-      ...(typeof usage.cacheCreation === "number" ? { cacheCreationInputTokens: usage.cacheCreation } : {}),
-      ...(typeof usage.reasoning === "number" ? { reasoningOutputTokens: usage.reasoning } : {}),
+      inputTokens: delta.input,
+      outputTokens: delta.output,
+      cachedInputTokens: delta.cached,
+      ...(typeof delta.cacheCreation === "number" ? { cacheCreationInputTokens: delta.cacheCreation } : {}),
+      ...(typeof delta.reasoning === "number" ? { reasoningOutputTokens: delta.reasoning } : {}),
       ...(this.eventModel()),
       parentToolUseId,
     });
@@ -1229,6 +1241,7 @@ export class CodexAppServerDriver implements Driver {
       if (p?.threadId && p.threadId !== this.threadId) {
         if (this.subagentToolByThread.has(p.threadId)) {
           this.pendingSubagentUsage.delete(p.threadId);
+          this.emittedSubagentUsage.delete(p.threadId);
           const known = this.threadUsageTotals.get(p.threadId);
           if (known) this.subagentUsageBaselines.set(p.threadId, known);
           else this.subagentUsageBaselines.delete(p.threadId);
@@ -1308,6 +1321,7 @@ export class CodexAppServerDriver implements Driver {
             );
           }
         }
+        this.emitPendingSubagentUsage(usageThreadId);
       } else if (!this.turnUsageClosed) {
         if (usableTotal) {
           const baseline = this.turnUsageBaseline
@@ -1336,6 +1350,7 @@ export class CodexAppServerDriver implements Driver {
             this.pendingTurnUsage = addUsage(this.pendingTurnUsage, last);
           }
         }
+        this.emitPendingTurnUsage();
         // App-server reports the model's context window beside the usage. The last request's
         // input (cache included) plus its output is what sits in the window now, which is the
         // same figure the Codex CLI's own "context left" reads from.
@@ -1449,15 +1464,17 @@ export class CodexAppServerDriver implements Driver {
 
   private emitPendingTurnUsage(): void {
     const u = this.pendingTurnUsage;
-    this.pendingTurnUsage = null;
     if (u) {
+      const delta = subtractUsage(u, this.emittedTurnUsage ?? {});
+      this.emittedTurnUsage = u;
+      if (!hasUsage(delta)) return;
       this.cb.onEvent({
         kind: "token_usage",
-        inputTokens: u.input,
-        outputTokens: u.output,
-        cachedInputTokens: u.cached,
-        ...(typeof u.cacheCreation === "number" ? { cacheCreationInputTokens: u.cacheCreation } : {}),
-        ...(typeof u.reasoning === "number" ? { reasoningOutputTokens: u.reasoning } : {}),
+        inputTokens: delta.input,
+        outputTokens: delta.output,
+        cachedInputTokens: delta.cached,
+        ...(typeof delta.cacheCreation === "number" ? { cacheCreationInputTokens: delta.cacheCreation } : {}),
+        ...(typeof delta.reasoning === "number" ? { reasoningOutputTokens: delta.reasoning } : {}),
         ...(this.eventModel()),
       });
     }
@@ -1472,10 +1489,13 @@ export class CodexAppServerDriver implements Driver {
     if (this.turnUsageClosed) return;
     this.turnUsageClosed = true;
     this.emitPendingTurnUsage();
+    this.pendingTurnUsage = null;
+    this.emittedTurnUsage = null;
   }
 
   private beginRootTurnUsage(): void {
     this.pendingTurnUsage = null;
+    this.emittedTurnUsage = null;
     this.turnUsageBaseline = this.threadId ? this.threadUsageTotals.get(this.threadId) ?? null : null;
     this.lastOnlyUsageFingerprints.delete(this.threadId ?? "root");
     this.turnUsageClosed = false;

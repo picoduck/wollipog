@@ -14,6 +14,7 @@ declare global {
   interface Window {
     resolveSessionUsageQuestion(): void;
     setSessionUsageRunnerOnline(online: boolean): void;
+    publishLiveSessionUsage(): void;
   }
 }
 
@@ -58,6 +59,7 @@ const unpricedCost = costParam === "none";
 const unavailableCost = costParam === "unavailable";
 const freeCost = costParam === "free";
 const absentUsage = params.get("usage") === "absent";
+const activeUsage = params.get("active-usage") === "1";
 const usageDetail = params.get("usage-detail");
 const parsedCost = Number(costParam);
 const sessionCostUsd = unpricedCost || freeCost || costParam === null || !Number.isFinite(parsedCost)
@@ -100,7 +102,7 @@ const session: SessionView = {
   agentId: "codex",
   agentName: "Codex",
   title: "Session Usage Fixture",
-  status: "idle",
+  status: activeUsage ? "running" : "idle",
   column: "review",
   runId: null,
   useWorktree: true,
@@ -117,9 +119,9 @@ const session: SessionView = {
   model: "codex-large",
   effort: null,
   permissionMode: null,
-  tokensIn: absentUsage ? 0 : 184_000,
-  tokensOut: absentUsage ? 0 : 21_000,
-  costUsd: absentUsage || unpricedCost || unavailableCost || freeCost ? 0 : sessionCostUsd,
+  tokensIn: absentUsage ? 0 : activeUsage ? 18_714 : 184_000,
+  tokensOut: absentUsage ? 0 : activeUsage ? 21 : 21_000,
+  costUsd: absentUsage || unpricedCost || unavailableCost || freeCost ? 0 : activeUsage ? 0.075276 : sessionCostUsd,
   ...(freeCost ? { costSource: "providerReported" as const }
     : unpricedCost ? { costSource: "unpriced" as const } : {}),
   contextTokensUsed: unknownContextWindow ? undefined : Number(params.get("used") ?? "72000"),
@@ -379,6 +381,18 @@ window.setSessionUsageRunnerOnline = (online) => {
   } satisfies ControlPlaneToUi) });
 };
 
+window.publishLiveSessionUsage = () => {
+  if (!activeUsage) return;
+  session.tokensIn = 50_000;
+  session.tokensOut = 4_500;
+  session.costUsd = 0.30;
+  session.updatedAt += 1;
+  fixtureSocket?.onmessage?.({ data: JSON.stringify({
+    type: "session_upsert",
+    session: { ...session },
+  } satisfies ControlPlaneToUi) });
+};
+
 const connection: UiConnectionRuntime = {
   instanceId: "recovery-e2e",
   runtimeKey: "recovery-e2e:1",
@@ -414,6 +428,26 @@ const client = {
   sessionUsage: async () => {
     if (usageDetail === "pending") return new Promise<never>(() => {});
     if (usageDetail === "failed") throw new Error("Usage detail unavailable");
+    if (activeUsage) {
+      const live = session.tokensOut > 21;
+      return {
+        sessionId: SESSION_ID,
+        totals: {
+          inputTokens: session.tokensIn,
+          outputTokens: session.tokensOut,
+          costUsd: session.costUsd,
+          uncachedInputTokens: live ? 10_000 : 4_714,
+          cachedInputTokens: live ? 40_000 : 14_000,
+          cacheCreationTokens: 0,
+          reasoningTokens: live ? 1_200 : 0,
+          cacheSavingsUsd: live ? 0.12 : 0.04,
+          costSource: "modelPriced" as const,
+          unpricedRecords: 0,
+          processedTokens: session.tokensIn + session.tokensOut,
+        },
+        byModel: [],
+      };
+    }
     return {
       sessionId: SESSION_ID,
       totals: unpricedCost

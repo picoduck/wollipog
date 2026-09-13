@@ -90,6 +90,32 @@ test("desktop: the cost control opens Session Usage with cumulative tokens and t
   await expect(cost).toHaveAttribute("aria-expanded", "false");
 });
 
+test("desktop: an active Codex turn replaces a misleading small settled total before completion", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 820 });
+  await page.goto("/session-usage-e2e.html?width=1180&height=780&active-usage=1");
+
+  const settledCost = page.getByRole("button", { name: "Session Usage: $0.08" });
+  await expect(settledCost).toBeVisible();
+  await settledCost.click();
+  const settledUsage = page.locator(".session-usage-popover").first();
+  await expect(settledUsage.locator('dl > div:has(> dt:text-is("Output")) > dd')).toHaveText("21");
+  await page.screenshot({ path: `${SHOT}/active-turn-before.png` });
+  await page.keyboard.press("Escape");
+  await expect(settledUsage).toHaveCount(0);
+  await page.evaluate(() => window.publishLiveSessionUsage());
+
+  const liveCost = page.getByRole("button", { name: "Session Usage: $0.30" });
+  await expect(liveCost).toBeVisible();
+  await liveCost.click();
+  const usage = page.locator(".session-usage-popover").first();
+  await expect(usage).toContainText("10k");
+  await expect(usage).toContainText("40k");
+  await expect(usage).toContainText("4.5k");
+  await expect(usage).toContainText("55k");
+  await expect(usage).not.toContainText("21");
+  await page.screenshot({ path: `${SHOT}/active-turn-after.png` });
+});
+
 test("desktop: the two controls have distinct accessible names and open independently", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 820 });
   await page.goto("/session-usage-e2e.html?width=1180&height=780");

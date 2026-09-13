@@ -1420,6 +1420,27 @@ test("structured Codex collaboration items expose recursive live subagent output
       total: { inputTokens: 20, outputTokens: 9, cachedInputTokens: 5, cacheCreationInputTokens: 3, reasoningOutputTokens: 5 },
     },
   });
+  const liveGrandchildUsage = h.events.filter((event) => event.kind === "token_usage");
+  assert.deepEqual(liveGrandchildUsage, [
+    {
+      kind: "token_usage",
+      inputTokens: 9,
+      outputTokens: 4,
+      cachedInputTokens: 2,
+      cacheCreationInputTokens: 1,
+      reasoningOutputTokens: 2,
+      parentToolUseId: childItemId("child-thread", "spawn-inner"),
+    },
+    {
+      kind: "token_usage",
+      inputTokens: 11,
+      outputTokens: 5,
+      cachedInputTokens: 3,
+      cacheCreationInputTokens: 2,
+      reasoningOutputTokens: 3,
+      parentToolUseId: childItemId("child-thread", "spawn-inner"),
+    },
+  ], "subagent usage is attributed and visible before the child turn settles");
   // App Server can replay the same cumulative update around transport recovery. The cumulative
   // counter makes this exact duplicate idempotent without mistaking two equal-sized responses.
   notifications.get("thread/tokenUsage/updated")!({
@@ -1487,19 +1508,10 @@ test("structured Codex collaboration items expose recursive live subagent output
     text: "passed",
     parentToolUseId: innerSpawnId,
   });
-  assert.deepEqual(h.events.find((event) => event.kind === "token_usage"), {
-    kind: "token_usage",
-    inputTokens: 20,
-    outputTokens: 9,
-    cachedInputTokens: 5,
-    cacheCreationInputTokens: 3,
-    reasoningOutputTokens: 5,
-    parentToolUseId: innerSpawnId,
-  });
   assert.ok(h.events.some((event) => event.kind === "tool_call_update" &&
     event.toolCallId === "spawn-outer" && event.subagentLifecycle === "completed"));
-  assert.equal(h.events.filter((event) => event.kind === "token_usage").length, 1,
-    "repeated child updates emit one complete settled turn total");
+  assert.equal(h.events.filter((event) => event.kind === "token_usage").length, 2,
+    "replayed and settled child updates add no duplicate usage");
   assert.equal(h.events.some((event) => event.kind === "agent_message" && event.text.includes("must not cross")), false);
 });
 
@@ -2502,7 +2514,7 @@ test("diagnosticValue bounds every provider-controlled shape", () => {
   assert.equal(diagnosticValue("a".repeat(500)), `${"a".repeat(120)}…`);
 });
 
-test("multi-response usage uses the cumulative turn delta while context uses only the final request", () => {
+test("multi-response usage publishes replay-safe live deltas while context uses only the final request", () => {
   const h = makeHarness({ config: { model: "gpt-5.5-codex" } as DriverOptions["config"] });
   const gauges: Array<{ contextTokensUsed: number; contextWindow: number }> = [];
   (h.driver as any).cb.onAcpUsage = (usage: { contextTokensUsed: number; contextWindow: number }) => gauges.push(usage);
@@ -2520,6 +2532,15 @@ test("multi-response usage uses the cumulative turn delta while context uses onl
       modelContextWindow: 258_400,
     },
   });
+  assert.deepEqual(h.events, [{
+    kind: "token_usage",
+    inputTokens: 11_000,
+    outputTokens: 600,
+    cachedInputTokens: 9_000,
+    cacheCreationInputTokens: 100,
+    reasoningOutputTokens: 200,
+    model: "gpt-5.5-codex",
+  }], "the first response is observable before turn completion");
   notifications.get("thread/tokenUsage/updated")!({
     threadId: "t1",
     tokenUsage: {
@@ -2533,15 +2554,26 @@ test("multi-response usage uses the cumulative turn delta while context uses onl
     { contextTokensUsed: 12_700, contextWindow: 258_400 },
   ], "each gauge uses one request, never the cumulative billable total");
   (h.driver as any).emitPendingTurnUsage();
-  assert.deepEqual(h.events, [{
-    kind: "token_usage",
-    inputTokens: 23_000,
-    outputTokens: 1_300,
-    cachedInputTokens: 17_000,
-    cacheCreationInputTokens: 150,
-    reasoningOutputTokens: 500,
-    model: "gpt-5.5-codex",
-  }]);
+  assert.deepEqual(h.events, [
+    {
+      kind: "token_usage",
+      inputTokens: 11_000,
+      outputTokens: 600,
+      cachedInputTokens: 9_000,
+      cacheCreationInputTokens: 100,
+      reasoningOutputTokens: 200,
+      model: "gpt-5.5-codex",
+    },
+    {
+      kind: "token_usage",
+      inputTokens: 12_000,
+      outputTokens: 700,
+      cachedInputTokens: 8_000,
+      cacheCreationInputTokens: 50,
+      reasoningOutputTokens: 300,
+      model: "gpt-5.5-codex",
+    },
+  ], "a repeated flush cannot double-count already published live usage");
 
   const unpinned = makeHarness({ config: { model: "default" } as DriverOptions["config"] });
   (unpinned.driver as any).pendingTurnUsage = { input: 1, output: 1 };
@@ -2604,14 +2636,17 @@ test("failed and interrupted turns emit the complete cumulative usage exactly on
         total: { inputTokens: 110, outputTokens: 15, cachedInputTokens: 87, reasoningOutputTokens: 7 },
       },
     });
+    assert.equal(h.events.filter((event) => event.kind === "token_usage").length, 2,
+      `${status} usage must be live before settlement`);
     notifications.get("turn/completed")!({
       threadId: `root-${status}`,
       turn: { id: `turn-${status}`, status, ...(status === "failed" ? { error: "provider failed" } : {}) },
     });
     assert.equal(await stopped, expectedStop);
-    assert.deepEqual(h.events.filter((event) => event.kind === "token_usage"), [{
-      kind: "token_usage", inputTokens: 10, outputTokens: 5, cachedInputTokens: 7, reasoningOutputTokens: 3,
-    }]);
+    assert.deepEqual(h.events.filter((event) => event.kind === "token_usage"), [
+      { kind: "token_usage", inputTokens: 4, outputTokens: 2, cachedInputTokens: 3, reasoningOutputTokens: 1 },
+      { kind: "token_usage", inputTokens: 6, outputTokens: 3, cachedInputTokens: 4, reasoningOutputTokens: 2 },
+    ], "settlement adds no duplicate usage");
   }
 });
 
@@ -2630,9 +2665,10 @@ test("legacy last-only usage accumulates distinct responses and ignores exact no
     tokenUsage: { last: { inputTokens: 5, outputTokens: 2, cachedInputTokens: 1, reasoningOutputTokens: 9 } },
   });
   (h.driver as any).emitPendingTurnUsage();
-  assert.deepEqual(h.events, [{
-    kind: "token_usage", inputTokens: 12, outputTokens: 5, cachedInputTokens: 3, reasoningOutputTokens: 4,
-  }], "reasoning is clamped per response and remains a subset of aggregate output");
+  assert.deepEqual(h.events, [
+    { kind: "token_usage", inputTokens: 7, outputTokens: 3, cachedInputTokens: 2, reasoningOutputTokens: 2 },
+    { kind: "token_usage", inputTokens: 5, outputTokens: 2, cachedInputTokens: 1, reasoningOutputTokens: 2 },
+  ], "distinct responses publish live while exact notification replay stays idempotent");
 });
 
 test("legacy lastTurn snapshots replace rather than add their running turn total", () => {
@@ -2648,9 +2684,10 @@ test("legacy lastTurn snapshots replace rather than add their running turn total
     tokenUsage: { lastTurn: { inputTokens: 12, outputTokens: 5, cachedInputTokens: 4 } },
   });
   (h.driver as any).emitPendingTurnUsage();
-  assert.deepEqual(h.events, [{
-    kind: "token_usage", inputTokens: 12, outputTokens: 5, cachedInputTokens: 4,
-  }]);
+  assert.deepEqual(h.events, [
+    { kind: "token_usage", inputTokens: 7, outputTokens: 3, cachedInputTokens: 2 },
+    { kind: "token_usage", inputTokens: 5, outputTokens: 2, cachedInputTokens: 2 },
+  ]);
 });
 
 test("fields omitted from cumulative totals accumulate from distinct per-response usage", () => {
@@ -2674,8 +2711,14 @@ test("fields omitted from cumulative totals accumulate from distinct per-respons
     },
   });
   (h.driver as any).emitPendingTurnUsage();
-  assert.deepEqual(h.events, [{
-    kind: "token_usage", inputTokens: 12, outputTokens: 5, cachedInputTokens: undefined,
-    cacheCreationInputTokens: 3,
-  }]);
+  assert.deepEqual(h.events, [
+    {
+      kind: "token_usage", inputTokens: 7, outputTokens: 3, cachedInputTokens: undefined,
+      cacheCreationInputTokens: 2,
+    },
+    {
+      kind: "token_usage", inputTokens: 5, outputTokens: 2, cachedInputTokens: undefined,
+      cacheCreationInputTokens: 1,
+    },
+  ]);
 });

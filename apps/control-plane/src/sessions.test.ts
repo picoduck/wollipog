@@ -6455,6 +6455,55 @@ test("Codex usage sends its control-plane-priced cumulative cost to a current ru
   assert.deepEqual(Object.keys(priced).sort(), ["costUsd", "sessionId", "type"]);
 });
 
+test("live Codex usage updates session and model totals and can trip a budget before settlement", () => {
+  const { db, hub, svc } = makeHarness();
+  db.setUsageRateTable(parseRateTable({
+    "gpt-5.5-codex": { input_cost_per_token: 0.001, output_cost_per_token: 0.002 },
+  }));
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  svc.onSessionEvent(id, {
+    kind: "token_usage", inputTokens: 10, outputTokens: 1, model: "gpt-5.5-codex",
+  });
+  svc.setConfig(id, { costBudgetUsd: 0.25 });
+  db.updateSessionStatus(id, "running", Date.now());
+
+  svc.onSessionEvent(id, {
+    kind: "token_usage", inputTokens: 100, outputTokens: 10, model: "gpt-5.5-codex",
+  });
+  let session = db.getSession(id)!;
+  assert.equal(session.status, "running");
+  assert.equal(session.tokensIn, 110);
+  assert.equal(session.tokensOut, 11);
+  assert.equal(session.costUsd, 0.132);
+
+  svc.onSessionEvent(id, {
+    kind: "token_usage", inputTokens: 100, outputTokens: 10, model: "gpt-5.5-codex",
+  });
+  session = db.getSession(id)!;
+  assert.equal(session.tokensIn, 210);
+  assert.equal(session.tokensOut, 21);
+  assert.equal(session.costUsd, 0.252);
+  assert.equal(session.status, "input_required", "the active turn crosses the budget before idle");
+  assert.equal(session.pendingApproval?.kind, "cost_budget");
+  assert.deepEqual(db.sessionUsageByModel(id).totals, {
+    inputTokens: 210,
+    outputTokens: 21,
+    costUsd: 0.252,
+    uncachedInputTokens: 210,
+    cachedInputTokens: 0,
+    cacheCreationTokens: 0,
+    reasoningTokens: 0,
+    processedTokens: 231,
+    cacheSavingsUsd: 0,
+    costSource: "modelPriced",
+    unpricedRecords: 0,
+  });
+  assert.equal(hub.sentOfType("priced_session_cost").at(-1)?.costUsd, 0.252);
+
+  svc.onSessionStatus(id, "idle");
+  assert.equal(db.getSession(id)!.costUsd, 0.252, "turn settlement adds no usage by itself");
+});
+
 test("priced cost acknowledgements are not sent to pre-v106 runners", () => {
   const { db, hub, svc } = makeHarness();
   db.registerRunner(runnerMeta(), Date.now(), 105);
