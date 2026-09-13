@@ -623,8 +623,9 @@ export function useDescendantRequestPolling({
         setRequests((current) => current.length ? [] : current);
       },
     ).finally(() => {
+      if (inFlightRef.current?.controller !== controller) return;
+      inFlightRef.current = null;
       window.clearTimeout(timeout);
-      if (inFlightRef.current?.controller === controller) inFlightRef.current = null;
     });
   }, [abortInFlight, api]);
   const refreshAfterResolution = useCallback(() => refresh(true), [refresh]);

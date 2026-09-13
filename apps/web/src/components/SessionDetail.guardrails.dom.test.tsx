@@ -333,7 +333,7 @@ test("descendant polling coalesces intervals and rejects superseded responses", 
   }
 });
 
-test("descendant polling recovers from timed-out requests and ignores late settlements", async () => {
+test("descendant polling keeps replacement deadlines when expired timer ids are reused", async () => {
   const requests: Array<Deferred<{ requests: DescendantRequestView[] }> & {
     signal?: AbortSignal;
   }> = [];
@@ -346,9 +346,8 @@ test("descendant polling recovers from timed-out requests and ignores late settl
     },
   } as ApiClient;
   let intervalHandler: (() => void) | undefined;
-  let nextTimeoutId = 1;
+  const reusedTimeoutId = 1;
   const timeouts = new Map<number, { handler: () => void; delay: number }>();
-  const clearedTimeouts: number[] = [];
   const originalSetInterval = domWindow.setInterval;
   const originalClearInterval = domWindow.clearInterval;
   const originalSetTimeout = domWindow.setTimeout;
@@ -367,23 +366,22 @@ test("descendant polling recovers from timed-out requests and ignores late settl
   Object.defineProperty(domWindow, "setTimeout", {
     configurable: true,
     value: ((handler: () => void, delay = 0) => {
-      const id = nextTimeoutId++;
-      timeouts.set(id, { handler, delay });
-      return id as unknown as ReturnType<typeof domWindow.setTimeout>;
+      assert.equal(timeouts.has(reusedTimeoutId), false, "polls have at most one active deadline");
+      timeouts.set(reusedTimeoutId, { handler, delay });
+      return reusedTimeoutId as unknown as ReturnType<typeof domWindow.setTimeout>;
     }) as unknown as typeof domWindow.setTimeout,
   });
   Object.defineProperty(domWindow, "clearTimeout", {
     configurable: true,
     value: ((id: number) => {
-      clearedTimeouts.push(id);
       timeouts.delete(id);
     }) as unknown as typeof domWindow.clearTimeout,
   });
-  const fireNextTimeout = () => {
-    const next = timeouts.entries().next().value as [number, { handler: () => void; delay: number }] | undefined;
-    assert.ok(next);
-    timeouts.delete(next[0]);
-    next[1].handler();
+  const fireActiveTimeout = () => {
+    const active = timeouts.get(reusedTimeoutId);
+    assert.ok(active);
+    timeouts.delete(reusedTimeoutId);
+    active.handler();
   };
   function Harness() {
     const polling = useDescendantRequestPolling({ sessionId: "parent", enabled: true });
@@ -396,46 +394,66 @@ test("descendant polling recovers from timed-out requests and ignores late settl
     await act(async () => root.render(<ApiProvider client={client}><Harness /></ApiProvider>));
     assert.equal(requests.length, 1);
     assert.deepEqual([...timeouts.values()].map(({ delay }) => delay), [DESCENDANT_REQUEST_POLL_TIMEOUT_MS]);
-    await act(async () => intervalHandler?.());
-    assert.equal(requests.length, 1, "intervals still coalesce before the deadline");
-
-    await act(async () => fireNextTimeout());
-    assert.equal(requests[0]!.signal?.aborted, true, "the deadline aborts the hung request");
-    await act(async () => intervalHandler?.());
-    assert.equal(requests.length, 2, "the next interval starts a replacement poll");
     await act(async () => {
-      requests[1]!.resolve({ requests: [descendantRequest("current")] });
-      await requests[1]!.promise;
+      requests[0]!.resolve({ requests: [descendantRequest("current")] });
+      await requests[0]!.promise;
     });
     assert.equal(container.querySelector("span")?.textContent, "current");
     assert.equal(timeouts.size, 0, "successful settlement clears its deadline");
-    assert.ok(clearedTimeouts.length > 0);
-    await act(async () => {
-      requests[0]!.resolve({ requests: [descendantRequest("late-success")] });
-      await requests[0]!.promise;
-    });
-    assert.equal(container.querySelector("span")?.textContent, "current",
-      "a timed-out success cannot replace current state");
 
     await act(async () => intervalHandler?.());
-    await act(async () => fireNextTimeout());
-    assert.equal(requests[2]!.signal?.aborted, true);
+    assert.equal(requests.length, 2);
     await act(async () => intervalHandler?.());
+    assert.equal(requests.length, 2, "intervals still coalesce before the deadline");
+
+    await act(async () => fireActiveTimeout());
+    assert.equal(requests[1]!.signal?.aborted, true, "the deadline aborts the hung request");
     await act(async () => {
-      requests[3]!.resolve({ requests: [descendantRequest("newer")] });
-      await requests[3]!.promise;
+      requests[1]!.resolve({ requests: [descendantRequest("late-success")] });
+      await requests[1]!.promise;
     });
+    assert.equal(container.querySelector("span")?.textContent, "current");
+    assert.equal(requests.length, 2,
+      "a timed-out success remains harmless before the next interval starts");
+
+    await act(async () => intervalHandler?.());
+    assert.equal(requests.length, 3, "the next interval starts a replacement poll");
+    await act(async () => fireActiveTimeout());
+    assert.equal(requests[2]!.signal?.aborted, true);
     await act(async () => {
       requests[2]!.reject(new Error("late timeout failure"));
       await requests[2]!.promise.catch(() => {});
     });
-    assert.equal(container.querySelector("span")?.textContent, "newer",
-      "a timed-out failure cannot clear current state");
+    assert.equal(container.querySelector("span")?.textContent, "current");
+    assert.equal(requests.length, 3,
+      "a timed-out failure remains harmless before the next interval starts");
 
     await act(async () => intervalHandler?.());
-    assert.equal(timeouts.size, 1);
+    await act(async () => fireActiveTimeout());
+    assert.equal(requests[3]!.signal?.aborted, true);
+    await act(async () => intervalHandler?.());
+    assert.equal(requests.length, 5);
+    assert.equal(timeouts.has(reusedTimeoutId), true,
+      "the replacement owns a deadline that reuses the expired request's timer id");
+    await act(async () => {
+      requests[3]!.resolve({ requests: [descendantRequest("stale")] });
+      await requests[3]!.promise;
+    });
+    assert.equal(timeouts.has(reusedTimeoutId), true,
+      "late cleanup from the timed-out request cannot clear the replacement deadline");
+    await act(async () => fireActiveTimeout());
+    assert.equal(requests[4]!.signal?.aborted, true,
+      "the replacement deadline remains active after the old request settles");
+
+    await act(async () => intervalHandler?.());
+    await act(async () => {
+      requests[5]!.resolve({ requests: [descendantRequest("newer")] });
+      await requests[5]!.promise;
+    });
+    assert.equal(container.querySelector("span")?.textContent, "newer");
+    await act(async () => intervalHandler?.());
     await act(async () => root.unmount());
-    assert.equal(requests[4]!.signal?.aborted, true, "unmounting aborts the active request");
+    assert.equal(requests[6]!.signal?.aborted, true, "unmounting aborts the active request");
     assert.equal(timeouts.size, 0, "unmounting clears the active deadline");
   } finally {
     if (container.isConnected) await act(async () => root.unmount());
