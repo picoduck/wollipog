@@ -560,7 +560,10 @@ for (const scheme of SCHEMES) {
       );
 
       const { results: measured, unsupported } = await measure(page);
-      expect(unsupported, "group opacity is not modelled; no measured path may contain it").toEqual([]);
+      expect(
+        unsupported,
+        "every rendered path must use modelled opacity and background syntax; see each diagnostic",
+      ).toEqual([]);
       // A vacuous version of the static check once passed while measuring nothing, so the count is
       // asserted before the ratios are.
       expect(measured.length, "the harness must render text to measure").toBeGreaterThan(15);
