@@ -147,7 +147,8 @@ The response returns a bounded page of exact model identifiers and advertised di
 defaults, descriptions, context windows, input modalities, and effective reasoning efforts.
 `effortSource` says whether each model uses its own efforts, the harness-level fallback, or has no
 configurable effort. Discovery is separately labeled available or unavailable, and known model
-sources are labeled `live` or `cached`. Hidden models are excluded by default; use
+sources are labeled `live` or `cached`. An unavailable result identifies whether discovery was not
+advertised or is negotiated only after starting an ACP session. Hidden models are excluded by default; use
 `--include-hidden` to page through them or `--model <exact-model-id>` to inspect one persisted
 hidden selection. Continue a truncated page with its `page.nextOffset`. The lookup is advisory:
 `session create` revalidates the requested model and effort against the installation's current

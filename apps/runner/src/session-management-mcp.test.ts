@@ -459,7 +459,7 @@ test("get_agent_capabilities distinguishes missing discovery from supported no-e
   const missing = resultJson(await callTool(deps, "get_agent_capabilities", {
     runnerId: "r1", agentId: "legacy",
   }));
-  assert.deepEqual(missing.discovery, { status: "unavailable", modelSource: null });
+  assert.deepEqual(missing.discovery, { status: "unavailable", reason: "not_advertised", modelSource: null });
   assert.deepEqual(missing.models, []);
 
   const fixed = resultJson(await callTool(deps, "get_agent_capabilities", {
@@ -469,6 +469,26 @@ test("get_agent_capabilities distinguishes missing discovery from supported no-e
   assert.deepEqual(fixed.models[0], {
     id: "fixed-model", hidden: false, efforts: [], effortSource: "none", configurableEffort: false,
   });
+});
+
+test("get_agent_capabilities treats the orchestrator-only ACP marker as session-negotiated discovery", async () => {
+  const { deps } = makeDeps(() => ({
+    status: 200,
+    body: { runners: [{ runnerId: "r1", agents: [{
+      id: "claude-acp",
+      capabilities: {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+        permissionModes: ["orchestrator"], elicitation: { orchestrator: ["none"] },
+      },
+    }] }] },
+  }));
+  const result = resultJson(await callTool(deps, "get_agent_capabilities", {
+    runnerId: "r1", agentId: "claude-acp",
+  }));
+  assert.deepEqual(result.discovery, {
+    status: "unavailable", reason: "session_negotiated", modelSource: null,
+  });
+  assert.deepEqual(result.models, []);
 });
 
 test("get_agent_capabilities fails closed for invisible installations and invalid bounds", async () => {
@@ -483,6 +503,13 @@ test("get_agent_capabilities fails closed for invisible installations and invali
       runnerId: "r1", agentId: "codex", ...input,
     });
     assert.equal(invalid.isError, true);
+  }
+  for (const input of [{ modelId: "gpt", offset: 1 }, { modelId: "gpt", limit: 1 }, { modelId: "gpt", includeHidden: true }]) {
+    const invalid = await callTool(deps, "get_agent_capabilities", {
+      runnerId: "r1", agentId: "codex", ...input,
+    });
+    assert.equal(invalid.isError, true);
+    assert.match(resultText(invalid), /cannot be combined/u);
   }
   assert.equal(calls.length, 1, "invalid bounds are rejected before requesting visible runner metadata");
 });

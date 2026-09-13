@@ -2,6 +2,7 @@
 
 import type { Readable, Writable } from "node:stream";
 import {
+  isOrchestratorOnlyCapabilities,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
@@ -508,6 +509,10 @@ export const TOOLS: McpTool[] = [
       if (args.modelId !== undefined && (typeof args.modelId !== "string" || !args.modelId)) {
         return errorResult("modelId must be a non-empty string");
       }
+      if (args.modelId !== undefined &&
+          (args.offset !== undefined || args.limit !== undefined || args.includeHidden === true)) {
+        return errorResult("modelId cannot be combined with offset, limit, or includeHidden");
+      }
       const r = await cpFetch(deps, "GET", "/api/runners");
       if (!r.ok) return errorResult(r.message);
       // This is a targeted lookup, so search the complete authorized response before bounding the
@@ -529,10 +534,16 @@ export const TOOLS: McpTool[] = [
         available: agent.available ?? null,
         authStatus: agent.authStatus ?? null,
       };
-      if (!capabilities || typeof capabilities !== "object") {
+      const discoveryUnavailable = !capabilities || typeof capabilities !== "object" ||
+        isOrchestratorOnlyCapabilities(capabilities);
+      if (discoveryUnavailable) {
         return textResult({
           agent: agentView,
-          discovery: { status: "unavailable", modelSource: null },
+          discovery: {
+            status: "unavailable",
+            reason: capabilities && typeof capabilities === "object" ? "session_negotiated" : "not_advertised",
+            modelSource: null,
+          },
           harnessEfforts: [],
           models: [],
           page: { offset: 0, limit: args.limit ?? DEFAULT_MODEL_PAGE_SIZE, returned: 0, total: 0, nextOffset: null, truncated: false },

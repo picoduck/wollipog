@@ -55,6 +55,10 @@ function flag(args: string[], name: string): boolean {
   return args.includes(name);
 }
 
+function optionPresent(args: string[], name: string): boolean {
+  return args.some((arg) => arg === name || arg.startsWith(`${name}=`));
+}
+
 function positional(args: string[]): string[] {
   const values: string[] = [];
   const valueOptions = new Set([
@@ -138,15 +142,32 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       const runnerId = option(args, "--runner");
       const agentId = option(args, "--agent");
       if (!runnerId || !agentId) return { error: "session capabilities requires --runner and --agent" };
+      const offset = option(args, "--offset");
+      const limit = option(args, "--limit");
+      for (const [name, value] of [["--offset", offset], ["--limit", limit]] as const) {
+        if (optionPresent(args, name) &&
+            (value === undefined || !value.trim() || value.startsWith("--") || !Number.isFinite(Number(value)))) {
+          return { error: `session capabilities ${name} requires a number` };
+        }
+      }
+      const modelId = option(args, "--model");
+      if (optionPresent(args, "--model") &&
+          (modelId === undefined || !modelId.trim() || modelId.startsWith("--"))) {
+        return { error: "session capabilities --model requires a non-empty value" };
+      }
+      if (modelId !== undefined &&
+          (optionPresent(args, "--offset") || optionPresent(args, "--limit") || flag(args, "--include-hidden"))) {
+        return { error: "session capabilities --model cannot be combined with --offset, --limit, or --include-hidden" };
+      }
       return {
         tool: "get_agent_capabilities",
         input: {
           runnerId,
           agentId,
-          offset: numeric(option(args, "--offset")),
-          limit: numeric(option(args, "--limit")),
+          offset: numeric(offset),
+          limit: numeric(limit),
           includeHidden: flag(args, "--include-hidden"),
-          modelId: option(args, "--model"),
+          modelId,
         },
       };
     }

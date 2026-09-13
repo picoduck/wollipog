@@ -283,7 +283,7 @@ test("CLI exposes bounded agent capability discovery with exact targeting", asyn
   };
   let stdout = "";
   const code = await runWollipogCli(
-    ["node", "cli.js", "--wollipog-cli", "session", "capabilities", "--runner", "r1", "--agent", "codex", "--model", "gpt", "--offset", "4", "--limit", "7", "--json"],
+    ["node", "cli.js", "--wollipog-cli", "session", "capabilities", "--runner", "r1", "--agent", "codex", "--model", "gpt", "--json"],
     { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" },
     { stdout: (text) => { stdout += text; }, stderr: () => assert.fail("unexpected CLI error") },
     fetch,
@@ -295,6 +295,24 @@ test("CLI exposes bounded agent capability discovery with exact targeting", asyn
     { url: "http://cp/api/compatibility", method: "GET" },
     { url: "http://cp/api/runners", method: "GET" },
   ]);
+});
+
+test("CLI capability discovery rejects malformed numbers and conflicting exact lookup options", async () => {
+  for (const suffix of [
+    ["--offset", "abc"],
+    ["--offset="],
+    ["--limit", "--json"],
+    ["--model", "gpt", "--include-hidden"],
+    ["--model", "gpt", "--offset", "1"],
+    ["--model", "gpt", "--limit", "1"],
+  ]) {
+    const result = await captureCli([
+      "session", "capabilities", "--runner", "r1", "--agent", "codex", ...suffix, "--json",
+    ]);
+    assert.equal(result.code, 2, suffix.join(" "));
+    assert.equal(result.stderr, "", suffix.join(" "));
+    assert.match(JSON.parse(result.stdout).error, /requires a number|cannot be combined/u, suffix.join(" "));
+  }
 });
 
 test("CLI JSON create and prompt commands reuse the manager routes and reject incompatible control planes", async () => {

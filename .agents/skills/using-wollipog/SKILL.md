@@ -15,7 +15,8 @@ Core commands:
 wollipog session list --json
 wollipog session get <session-id> --json
 wollipog session events <session-id> --after <seq> --json
-wollipog session capabilities --runner <id> --agent <id> [--offset <n>] [--limit <n>] [--include-hidden | --model <id>] --json
+wollipog session capabilities --runner <id> --agent <id> [--offset <n>] [--limit <n>] [--include-hidden] --json
+wollipog session capabilities --runner <id> --agent <id> --model <id> --json
 wollipog session create --runner <id> --agent <id> --workspace <id> --prompt <task> [--model <id>] [--effort <level>] --json
 wollipog session prompt <session-id> <message> --json
 wollipog session wait <session-id> --for input_required,completed,failed,stopped --json
