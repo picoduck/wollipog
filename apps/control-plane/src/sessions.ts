@@ -5118,19 +5118,22 @@ export class SessionsService {
       if (created.decision.status === "pending") this.restorePendingWorkflowDecisionCards(sessionId);
       return ok(created.decision);
     }
+    const decision = created.decision;
+    const approval = this.workflowDecisionApproval(decision);
+    if (child.status === "idle") this.db.notePolicyResumeStatus(sessionId, "idle");
+    // Project the replacement before settling older occurrences. Otherwise a supersession after
+    // swallowed Idle briefly restores Ready, clears the resume proof, and strands the new card.
+    this.db.setPendingApproval(
+      sessionId,
+      appendPendingApproval(this.db.getSession(sessionId)?.pendingApproval, approval),
+    );
+    this.db.updateSessionStatus(sessionId, "input_required", now);
     for (const occurrenceId of created.supersededOccurrenceIds) {
       const superseded = this.db.workflowDecisionByOccurrence(occurrenceId);
       if (!superseded) continue;
       this.settleWorkflowDecisionPause(superseded.sessionId, occurrenceId, now);
       this.recordWorkflowDecisionAudit(superseded, "superseded", { kind: "agent", id: sessionId }, now);
     }
-    const decision = created.decision;
-    const approval = this.workflowDecisionApproval(decision);
-    this.db.setPendingApproval(
-      sessionId,
-      appendPendingApproval(this.db.getSession(sessionId)?.pendingApproval, approval),
-    );
-    this.db.updateSessionStatus(sessionId, "input_required", now);
     this.recordWorkflowDecisionAudit(decision, "pending", { kind: "agent", id: sessionId }, now);
     if (decision.authority === "human") this.notifyTransition(child, sessionId);
     this.hub.sessionChangedById(sessionId);
@@ -8464,7 +8467,8 @@ export class SessionsService {
         });
         if (sent) {
           const current = this.db.getSession(sessionId)?.pendingApproval;
-          const remaining = pendingRequests(current).some((request) => request.ownerToolUseId)
+          const remaining = pendingRequests(current).some((request) =>
+            request.ownerToolUseId || request.kind === "workflow_decision")
             ? removePendingRequest(current, approval.requestId) : null;
           this.db.setPendingApproval(sessionId, remaining);
           // A deny (including null-option cancellation) returns control to the still-active agent

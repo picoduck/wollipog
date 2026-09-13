@@ -1940,6 +1940,26 @@ test("typed workflow decisions preserve provider settlement and cannot be replac
     svc.onSessionStatus(child.data.id, "running");
     assert.equal(db.getSession(child.data.id)?.pendingApproval?.requestId, durable.data.occurrenceId,
       "running frames preserve a typed decision projection");
+    assert.ok(svc.upsertGovernancePolicy({
+      policyId: "auto-read-beside-typed",
+      name: "Auto Read Beside Typed",
+      effect: "allow",
+      priority: 50,
+      enabled: true,
+      scope: { toolName: "AutoRead" },
+    }).ok);
+    svc.onSessionEvent(child.data.id, {
+      kind: "permission_request", requestId: "auto-permission-beside-typed",
+      title: "Allow Auto Read", options: [
+        { optionId: "allow", name: "Allow", kind: "allow_once" },
+        { optionId: "deny", name: "Deny", kind: "reject_once" },
+      ],
+      context: { toolName: "AutoRead" },
+    });
+    assert.equal(hub.sentOfType("resolve_permission").at(-1)?.requestId, "auto-permission-beside-typed");
+    assert.equal(db.getSession(child.data.id)?.pendingApproval?.requestId, durable.data.occurrenceId,
+      "an auto-resolved provider permission cannot clear the typed decision projection");
+    assert.equal(db.getSession(child.data.id)?.status, "input_required");
     svc.onSessionEvent(child.data.id, {
       kind: "permission_request", requestId: "generic-permission", ownerToolUseId: "tool-use",
       title: "Allow Read", options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
@@ -1989,6 +2009,40 @@ test("typed workflow decisions preserve provider settlement and cannot be replac
     assert.equal(db.getSession(child.data.id)?.status, "idle",
       "revocation also restores the provider's swallowed idle");
     assert.equal(db.policyResumeStatus(child.data.id), null);
+
+    const idleDecision = svc.createWorkflowDecision(child.data.id, {
+      requestId: "created-from-idle", resourceKey: "implementation:created-from-idle",
+      resourceSnapshot: implementationSnapshot,
+    });
+    assert.ok(idleDecision.ok && idleDecision.data);
+    assert.equal(db.policyResumeStatus(child.data.id), "idle");
+    assert.ok(svc.approve(child.data.id, idleDecision.data.occurrenceId, "approve",
+      { kind: "human", id: "owner" }, undefined, () => true).ok);
+    assert.equal(db.getSession(child.data.id)?.status, "idle",
+      "a decision created from provider Idle restores Idle when settled");
+    assert.ok(svc.consumeWorkflowDecision(child.data.id, idleDecision.data.occurrenceId, {
+      resourceSnapshot: implementationSnapshot,
+    }).ok);
+
+    db.updateSessionStatus(child.data.id, "running", Date.now());
+    const supersededIdle = svc.createWorkflowDecision(child.data.id, {
+      requestId: "superseded-after-idle", resourceKey: "implementation:supersede-idle",
+      resourceSnapshot: implementationSnapshot,
+    });
+    assert.ok(supersededIdle.ok && supersededIdle.data);
+    svc.onSessionStatus(child.data.id, "idle");
+    const replacementIdle = svc.createWorkflowDecision(child.data.id, {
+      requestId: "replacement-after-idle", resourceKey: "implementation:supersede-idle",
+      resourceSnapshot: implementationSnapshot,
+    });
+    assert.ok(replacementIdle.ok && replacementIdle.data);
+    assert.equal(db.workflowDecisionByOccurrence(supersededIdle.data.occurrenceId)?.status, "superseded");
+    assert.equal(db.getSession(child.data.id)?.pendingApproval?.requestId, replacementIdle.data.occurrenceId);
+    assert.equal(db.policyResumeStatus(child.data.id), "idle",
+      "supersession preserves the swallowed Idle proof for the replacement occurrence");
+    assert.ok(svc.approve(child.data.id, replacementIdle.data.occurrenceId, "approve",
+      { kind: "human", id: "owner" }, undefined, () => true).ok);
+    assert.equal(db.getSession(child.data.id)?.status, "idle");
 
     const terminalApproval = svc.createWorkflowDecision(child.data.id, {
       requestId: "approved-before-terminal", resourceKey: "implementation:terminal-consume",
