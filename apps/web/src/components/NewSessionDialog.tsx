@@ -51,6 +51,7 @@ import {
   SegmentedControl,
   Select,
   type SearchableComboboxOption,
+  useTouchTargetMode,
 } from "./ui/ChoiceControls.js";
 
 /**
@@ -222,6 +223,7 @@ export function NewSessionDialog({
   const formId = `${generatedFormId}-new-session`;
   const projectInputId = `${generatedFormId}-project`;
   const agentInputId = `${generatedFormId}-agent`;
+  const touchAgentPicker = useTouchTargetMode();
   const projectLocationOptionsId = `${generatedFormId}-project-locations`;
   const permissionOptionsId = `${generatedFormId}-permission-presets`;
   const harnessOptionsId = `${generatedFormId}-harnesses`;
@@ -589,7 +591,7 @@ export function NewSessionDialog({
         focusValidationProblem('button[aria-label^="Workspace:"]');
       } else if (!agentId || !selectedAgentOption || selectedAgentOption.disabled) {
         setValidationError("Pick a runner, workspace, and agent.");
-        focusValidationProblem('[role="combobox"][aria-label="Agent"]');
+        focusValidationProblem('.agent-select [aria-haspopup="listbox"]');
       } else if (!defaultsReady && presetOverride !== "orchestrator") {
         setValidationError(harnessDefaults?.error
           ? "Retry loading saved permission defaults before creating a session."
@@ -920,19 +922,31 @@ export function NewSessionDialog({
           )}
 
           <div className="field">
-            <label className="new-session-field-label" htmlFor={agentInputId}>Agent</label>
+            <label className="new-session-field-label" htmlFor={touchAgentPicker ? undefined : agentInputId}>Agent</label>
             <div className="agent-select">
               <AgentIcon driver={agent?.driver ?? "acp"} agentName={agent?.name} size={15} />
-              <SearchableCombobox<string>
-                inputId={agentInputId}
-                className="new-session-choice-control"
-                label="Agent"
-                value={agentId || null}
-                onChange={selectAgent}
-                options={agentComboboxOptions}
-                placeholder="Choose an Agent…"
-                emptyLabel="No Matching Agents"
-              />
+              {touchAgentPicker ? (
+                <Select<string>
+                  className="new-session-choice-control"
+                  label="Agent"
+                  value={agentId || null}
+                  onChange={selectAgent}
+                  options={agentComboboxOptions}
+                  placeholder="Choose an Agent…"
+                  emptyLabel="No Agents Available"
+                />
+              ) : (
+                <SearchableCombobox<string>
+                  inputId={agentInputId}
+                  className="new-session-choice-control"
+                  label="Agent"
+                  value={agentId || null}
+                  onChange={selectAgent}
+                  options={agentComboboxOptions}
+                  placeholder="Choose an Agent…"
+                  emptyLabel="No Matching Agents"
+                />
+              )}
             </div>
             {agent && <span className="muted agent-meta">{agentMeta(agent)}</span>}
             {selectionIssue && (

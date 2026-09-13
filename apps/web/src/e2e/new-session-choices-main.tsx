@@ -68,7 +68,8 @@ const runner: RunnerView = {
       args: [],
       env: {},
       driver: "codex-app-server",
-      available: true,
+      available: fixtureParams.get("agentUnavailable") !== "1",
+      authStatus: fixtureParams.get("agentUnavailable") === "1" ? "unauthenticated" : undefined,
     },
     {
       id: "codex-exec",

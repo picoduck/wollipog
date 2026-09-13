@@ -139,8 +139,8 @@ for (const viewport of VIEWPORTS) {
       // the browser job has roughly 18 seconds of headroom against its 30-minute cap (#842).
       const form = page.locator(".form");
       const formBox = (await form.boundingBox())!;
-      // `.loc-pick` and the native Project/Agent selects are gone. Include the editable combobox
-      // owner explicitly so the two controls #218 migrated cannot overflow unnoticed.
+      // `.loc-pick` and the native Project/Agent selects are gone. Include both responsive owners
+      // so the two controls #218 migrated cannot overflow unnoticed.
       for (const selector of [".ui-choice-card", ".ui-seg", ".ui-select-trigger", ".ui-searchable-combobox-input"]) {
         for (const control of await page.locator(selector).all()) {
           if (!(await control.isVisible())) continue;
@@ -149,6 +149,13 @@ for (const viewport of VIEWPORTS) {
           expect(box.x + box.width, `${selector} overflows the form`)
             .toBeLessThanOrEqual(formBox.x + formBox.width + 1);
         }
+      }
+
+      if (viewport.floor) {
+        await expect(page.locator('.agent-select input[type="text"]')).toHaveCount(0);
+        await expect(page.getByRole("button", { name: /^Agent:/ })).toBeVisible();
+      } else {
+        await expect(page.getByRole("combobox", { name: "Agent" })).toBeVisible();
       }
 
       // A short segmented choice should wrap its options, not inherit `.field`'s stretch and draw
@@ -223,25 +230,29 @@ for (const viewport of VIEWPORTS) {
   });
 }
 
-test.describe("searchable Project and Agent controls", () => {
+test.describe("responsive Project and Agent controls", () => {
   test.use({ viewport: { width: 390, height: 780 }, hasTouch: true, isMobile: true });
 
-  test("Advanced Agents share the searchable Agent list at phone width", async ({ page }) => {
-    await openDialog(page);
-    await expect(page.locator('select[aria-label="Project"], select[aria-label="Agent"]')).toHaveCount(0);
+  test("Agents share one tap-only list at phone width", async ({ page }) => {
+    await openDialog(page, "?agentUnavailable=1");
     await expect(page.getByText("Advanced Agents", { exact: true })).toHaveCount(0);
+    await expect(page.locator('.agent-select input[type="text"]')).toHaveCount(0);
 
-    const agent = page.getByRole("combobox", { name: "Agent" });
+    const agent = page.getByRole("button", { name: /^Agent:/ });
+    await expect(agent).toHaveAccessibleName(/Agent: Claude Code/);
     await agent.click();
-    const options = page.getByRole("listbox", { name: "Agent Options" }).getByRole("option");
+    expect(await page.evaluate(() => document.activeElement instanceof HTMLInputElement)).toBe(false);
+
+    const options = page.getByRole("listbox", { name: "Agent" }).getByRole("option");
     await expect(options).toHaveCount(3);
     await expect(options.filter({ hasText: "Advanced Agent" })).toHaveCount(1);
+    const unavailable = options.filter({ hasText: "Codex App Server" });
+    await expect(unavailable).toHaveAttribute("aria-disabled", "true");
+    await expect(unavailable).toContainText("Needs setup");
 
-    await agent.fill("non-interactive");
-    await expect(options).toHaveCount(1);
-    await expect(options.first()).toContainText("Codex — Non-Interactive");
-    await page.keyboard.press("Enter");
-    await expect(agent).toHaveValue(/Codex — Non-Interactive/);
+    await options.filter({ hasText: "Codex — Non-Interactive" }).click();
+    await expect(agent).toHaveAccessibleName(/Agent: Codex — Non-Interactive/);
+    await expect(page.locator(".agent-meta")).toContainText("Non-interactive via codex exec");
   });
 });
 
@@ -268,23 +279,58 @@ for (const viewport of [VIEWPORTS[0], VIEWPORTS[2]]) {
       await expect(page.getByRole("button", { name: "Add Location…" })).toBeFocused();
       await page.keyboard.press("Tab");
 
-      const agent = page.getByRole("combobox", { name: "Agent" });
-      await expect(agent).toBeFocused();
-      await page.keyboard.type("codex app server");
-      await page.keyboard.press("ArrowDown");
-      await page.keyboard.press("Enter");
-      await expect(agent).toHaveValue(/Codex App Server/);
+      if (viewport.touch) {
+        const agent = page.getByRole("button", { name: /^Agent:/ });
+        await expect(agent).toBeFocused();
+        await page.keyboard.press("Enter");
+        const list = page.getByRole("listbox", { name: "Agent" });
+        await expect(list).toBeFocused();
+        await page.keyboard.press("ArrowDown");
+        await page.keyboard.press("Enter");
+        await expect(agent).toHaveAccessibleName(/Agent: Codex App Server/);
+        await agent.press("ControlOrMeta+Enter");
+      } else {
+        const agent = page.getByRole("combobox", { name: "Agent" });
+        await expect(agent).toBeFocused();
+        await page.keyboard.type("codex app server");
+        await page.keyboard.press("ArrowDown");
+        await page.keyboard.press("Enter");
+        await expect(agent).toHaveValue(/Codex App Server/);
 
-      // The first Enter belonged to the open combobox. Only the next Enter, after it closed,
-      // reaches the native form's default submit action.
-      await expect(page.getByRole("dialog", { name: "New Session" })).toBeVisible();
-      await page.keyboard.press("Enter");
+        // The first Enter belonged to the open combobox. Only the next Enter, after it closed,
+        // reaches the native form's default submit action.
+        await page.keyboard.press("Enter");
+      }
+
       await expect(page.getByRole("dialog", { name: "New Session" })).toHaveCount(0);
       await expect.poll(async () => page.locator("html").getAttribute("data-create-session-count"))
         .toBe("1");
     });
   });
 }
+
+test.describe("responsive Agent presentation", () => {
+  test.use({ viewport: { width: 1280, height: 900 } });
+
+  test("keeps the selection while switching between searchable and tap-only controls", async ({ page }) => {
+    await openDialog(page);
+    const desktopAgent = page.getByRole("combobox", { name: "Agent" });
+    await desktopAgent.fill("non-interactive");
+    await page.keyboard.press("Enter");
+    await expect(desktopAgent).toHaveValue(/Codex — Non-Interactive/);
+
+    await page.setViewportSize({ width: 390, height: 780 });
+    const touchAgent = page.getByRole("button", { name: /^Agent:/ });
+    await expect(touchAgent).toHaveAccessibleName(/Agent: Codex — Non-Interactive/);
+    await expect(page.locator(".agent-meta")).toContainText("Non-interactive via codex exec");
+
+    await touchAgent.click();
+    await page.getByRole("listbox", { name: "Agent" }).getByRole("option", { name: /Claude Code/ }).click();
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await expect(page.getByRole("combobox", { name: "Agent" })).toHaveValue("Claude Code");
+    await expect(page.locator(".agent-meta")).toContainText("Runs on native host");
+  });
+});
 
 test.describe("New Session dialog keyboard contract", () => {
   test.use({ viewport: { width: 1280, height: 900 } });
@@ -406,5 +452,18 @@ test.describe("increased text size", () => {
       expect(clipped.vertical).toBeLessThanOrEqual(1);
     }
     expect((await overflow(group)).vertical).toBeLessThanOrEqual(1);
+
+    const agent = page.getByRole("button", { name: /^Agent:/ });
+    await agent.click();
+    const list = page.getByRole("listbox", { name: "Agent" });
+    const listBox = (await list.boundingBox())!;
+    expect(listBox.x).toBeGreaterThanOrEqual(0);
+    expect(listBox.y).toBeGreaterThanOrEqual(0);
+    expect(listBox.x + listBox.width).toBeLessThanOrEqual(390);
+    expect(listBox.y + listBox.height).toBeLessThanOrEqual(780);
+    const lastOption = list.getByRole("option").last();
+    await lastOption.scrollIntoViewIfNeeded();
+    await lastOption.click();
+    await expect(agent).toHaveAccessibleName(/Agent: Codex — Non-Interactive/);
   });
 });
