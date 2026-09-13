@@ -4604,20 +4604,19 @@ function SessionDetailLoaded({
                 panes CSS collapses the slot and surfaces the echo inside the status strip. */}
             <TranscriptRecoveryNotice active={transcript.notice === "refreshing"} />
             <div className="transcript-status-strip" aria-label="Transcript Status">
-              {/* Without a context meter, compact recovery uses the leading grid seat while the
-                  visible live-output/cost group itself remains centered. */}
-              {(mode === "preview" || !hasContextWindow) && (
-                <div className="transcript-status-context transcript-status-context-standalone">
-                  <TranscriptRecoveryStripEcho active={transcript.notice === "refreshing"} />
-                </div>
-              )}
               {/* The live-output control owns the invariant center track. Context and cost use
                   equal-width tracks on either side, so either indicator can appear, disappear, or
                   change width without moving the control. */}
               <div className="transcript-status-cluster">
-                {mode === "expanded" && hasContextWindow && (
+                {mode === "expanded" && hasContextWindow ? (
                   <div className="transcript-status-context">
                     <ContextWindowMeter session={session} resolution={contextWindow} />
+                    <TranscriptRecoveryStripEcho active={transcript.notice === "refreshing"} />
+                  </div>
+                ) : (
+                  /* Without a context meter, compact recovery uses the cluster's leading track.
+                     Sharing this grid keeps its right edge outside the centered control. */
+                  <div className="transcript-status-context transcript-status-context-standalone">
                     <TranscriptRecoveryStripEcho active={transcript.notice === "refreshing"} />
                   </div>
                 )}

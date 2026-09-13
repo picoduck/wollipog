@@ -80,8 +80,8 @@ test("live-follow status owns a reserved transcript strip with a compact centere
   assert.match(detail, /className="composer"[\s\S]*onFocusCapture=\{\(\) => setActivePane\("composer"\)\}/);
   assert.match(detail, /className="transcript-status-cluster"[\s\S]*className="transcript-status-context"[\s\S]*className="follow-tail-control"[\s\S]*className="transcript-status-trailing"[\s\S]*mode === "expanded" && \(\s*<SessionUsageControl session=\{session\} className="transcript-status-usage" \/>[\s\S]*className="transcript-status-actions"[\s\S]*label="Reply"/,
     "context, live output, and the cost/actions track occupy independent symmetric grid seats");
-  assert.match(detail, /\(mode === "preview" \|\| !hasContextWindow\) && \([\s\S]*className="transcript-status-context transcript-status-context-standalone"[\s\S]*<TranscriptRecoveryStripEcho[\s\S]*className="transcript-status-cluster"/,
-    "recovery without a context meter uses the leading grid seat without shifting visible controls");
+  assert.match(detail, /className="transcript-status-cluster"[\s\S]*mode === "expanded" && hasContextWindow \? \([\s\S]*className="transcript-status-context"[\s\S]*<ContextWindowMeter[\s\S]*className="transcript-status-context transcript-status-context-standalone"[\s\S]*<TranscriptRecoveryStripEcho[\s\S]*className="follow-tail-control"/,
+    "recovery without a context meter uses the cluster's leading grid seat without overlapping the centered control");
   assert.match(detail, /const contextWindow = resolveContextWindowCapacity\(session, agentCaps\?\.models \?\? \[\]\);[\s\S]*const hasContextWindow = contextWindow\.known;/,
     "seat allocation consumes the shared capacity result");
   assert.equal(detail.match(/<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} \/>/g)?.length, 2,

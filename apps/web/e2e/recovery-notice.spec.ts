@@ -257,8 +257,10 @@ test("a 320px-wide compact pane keeps the echo inside the viewport, truncating i
     const r = el.getBoundingClientRect();
     return { left: r.left, right: r.right };
   });
+  const followBox = (await page.locator(".follow-tail-chip").boundingBox())!;
   expect(echoBox.left).toBeGreaterThanOrEqual(-0.5);
   expect(echoBox.right).toBeLessThanOrEqual(320.5);
+  expect(echoBox.right).toBeLessThanOrEqual(followBox.x + 0.5);
 
   // And it truncates in place: the label is genuinely wider than its clipped box.
   const truncated = await echo.locator("span").last()
