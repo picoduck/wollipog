@@ -3758,11 +3758,30 @@ textarea {
 .cbar-pop.model-settings-pop {
   width: min(380px, 100%);
 }
+.cbar-settings-header {
+  position: sticky;
+  top: -6px;
+  z-index: var(--z-popover);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: -6px -6px 0;
+  padding: 6px 6px 0;
+  background: var(--bg-elev-2);
+}
 .cbar-settings-title {
+  min-width: 0;
   padding: 8px 9px 7px;
   color: var(--text);
   font-size: var(--text-base);
   font-weight: var(--weight-semibold);
+}
+.cbar-settings-close {
+  width: 32px;
+  height: 32px;
+  flex: none;
+  padding: 0;
 }
 .cbar-model-option {
   display: flex;
@@ -3804,6 +3823,15 @@ textarea {
     max-height: min(72dvh, 560px);
     padding: 8px 8px max(8px, env(safe-area-inset-bottom));
     border-radius: var(--radius) var(--radius) var(--radius-xs) var(--radius-xs);
+  }
+  .model-settings-pop .cbar-settings-header {
+    top: -8px;
+    margin: -8px -8px 0;
+    padding: 8px 8px 0;
+  }
+  .model-settings-pop .cbar-settings-close {
+    width: 44px;
+    height: 44px;
   }
   .model-settings-pop .cbar-opt { min-height: 44px; }
 }
