@@ -452,13 +452,14 @@ test("short panes keep the status strip, and the pinned summary is bounded by th
     `the summary hides at ${readerThreshold}px of reader or less, but the first non-compact ` +
     `pane leaves only ${readerAtModeSwitch}px — growing the pane would re-hide the card`);
 
-  // The compact echo overlays toward free space from the context seat. Its fixed width leaves the
-  // adjacent Live Output gap unchanged while the inner label still ellipsizes.
+  // The compact echo overlays toward free space from the context seat. Its preferred width leaves
+  // the adjacent Live Output gap unchanged, while the side-track bound keeps the inner label
+  // ellipsizing inside the strip when the widest centered label narrows that track.
   assert.match(soleRuleBody(".transcript-status-context"), /position:\s*relative;[\s\S]*flex:\s*none;[\s\S]*min-width:\s*44px;/,
     "the strip reserves a stable context seat beside Live Output");
   assert.match(soleRuleBody(".transcript-status-context .transcript-recovery-strip-echo"),
-    /position:\s*absolute;[\s\S]*right:\s*0;[\s\S]*width:\s*min\(80px,\s*calc\(25cqw - 11px\)\);[\s\S]*max-width:\s*none;/,
-    "the compact echo has a readable width that extends away from Live Output without changing cluster spacing");
+    /position:\s*absolute;[\s\S]*right:\s*0;[\s\S]*width:\s*min\(80px,\s*calc\(25cqw - 11px\),\s*100%\);[\s\S]*max-width:\s*none;/,
+    "the compact echo uses available side-track width without changing cluster spacing");
   assert.match(soleRuleBody(".transcript-recovery-strip-echo > span:last-child"), /text-overflow:\s*ellipsis;/);
 });
 

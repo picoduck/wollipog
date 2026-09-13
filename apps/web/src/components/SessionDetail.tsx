@@ -4611,9 +4611,9 @@ function SessionDetailLoaded({
                   <TranscriptRecoveryStripEcho active={transcript.notice === "refreshing"} />
                 </div>
               )}
-              {/* Keep the two usage indicators beside the live-output control as one centered
-                  status cluster on every viewport. The recovery echo may temporarily replace the
-                  context meter in compact panes, but it owns the same leading seat. */}
+              {/* The live-output control owns the invariant center track. Context and cost use
+                  equal-width tracks on either side, so either indicator can appear, disappear, or
+                  change width without moving the control. */}
               <div className="transcript-status-cluster">
                 {mode === "expanded" && hasContextWindow && (
                   <div className="transcript-status-context">
@@ -4654,25 +4654,27 @@ function SessionDetailLoaded({
                     <ShortcutHint label="Page Down" shortcut={shortcutDisplay("inbox-page-down")} shortcutFirst />
                   )}
                 </div>
-                {/* Cost only (#781): the neighboring context meter owns occupancy, while this
-                    control owns cumulative session spend. Both stay adjacent to live output. */}
-                {mode === "expanded" && (
-                  <SessionUsageControl session={session} className="transcript-status-usage" />
-                )}
-              </div>
-              {/* Contextual actions remain in the strip's trailing slack so appearing and
-                  disappearing Reply guidance cannot move the centered status cluster. */}
-              <div className="transcript-status-actions">
-                {mode === "expanded" && !isMobile && canPrompt && activePane === "reader" && (
-                  <ShortcutHint
-                    label="Reply"
-                    shortcut={shortcutDisplay("session-reading-reply")}
-                    title={`Reply (${shortcutDisplay("session-reading-reply")})`}
-                    ariaLabel="Reply"
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={focusComposerAtDraftEnd}
-                  />
-                )}
+                <div className="transcript-status-trailing">
+                  {/* Cost only (#781): the neighboring context meter owns occupancy, while this
+                      control owns cumulative session spend. Both stay adjacent to live output. */}
+                  {mode === "expanded" && (
+                    <SessionUsageControl session={session} className="transcript-status-usage" />
+                  )}
+                  {/* Contextual actions use the far end of the trailing track. Their presence is
+                      independent of the centered control and they yield in cramped panes. */}
+                  <div className="transcript-status-actions">
+                    {mode === "expanded" && !isMobile && canPrompt && activePane === "reader" && (
+                      <ShortcutHint
+                        label="Reply"
+                        shortcut={shortcutDisplay("session-reading-reply")}
+                        title={`Reply (${shortcutDisplay("session-reading-reply")})`}
+                        ariaLabel="Reply"
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={focusComposerAtDraftEnd}
+                      />
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
           </div>

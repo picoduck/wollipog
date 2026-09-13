@@ -47,14 +47,17 @@ const composerDraftImages: PromptImageInput[] = params.get("attachment") === "1"
   : [];
 const servedWindow = Number(params.get("served") ?? "0");
 // `?window=none` drops the context window (an agent that advertises no capacity); `?cost=none`
-// marks the session unpriced, while `?cost=free` carries provider-reported zero provenance,
+// marks the session unpriced, `?cost=unavailable` has no pricing provenance, and `?cost=free`
+// carries provider-reported zero provenance. `?usage=absent` removes all processed usage,
 // `?usage-detail=pending|failed` holds or rejects the model breakdown, and `?cost=<amount>`
 // sets the total so layout specs can stress the strip with a figure much wider than the default
-// (#893). Every variant keeps the token counts.
+// (#893). Cost variants keep the token counts unless usage is explicitly absent.
 const unknownContextWindow = params.get("window") === "none";
 const costParam = params.get("cost");
 const unpricedCost = costParam === "none";
+const unavailableCost = costParam === "unavailable";
 const freeCost = costParam === "free";
+const absentUsage = params.get("usage") === "absent";
 const usageDetail = params.get("usage-detail");
 const parsedCost = Number(costParam);
 const sessionCostUsd = unpricedCost || freeCost || costParam === null || !Number.isFinite(parsedCost)
@@ -114,9 +117,9 @@ const session: SessionView = {
   model: "codex-large",
   effort: null,
   permissionMode: null,
-  tokensIn: 184_000,
-  tokensOut: 21_000,
-  costUsd: unpricedCost || freeCost ? 0 : sessionCostUsd,
+  tokensIn: absentUsage ? 0 : 184_000,
+  tokensOut: absentUsage ? 0 : 21_000,
+  costUsd: absentUsage || unpricedCost || unavailableCost || freeCost ? 0 : sessionCostUsd,
   ...(freeCost ? { costSource: "providerReported" as const }
     : unpricedCost ? { costSource: "unpriced" as const } : {}),
   contextTokensUsed: unknownContextWindow ? undefined : Number(params.get("used") ?? "72000"),

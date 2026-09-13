@@ -175,16 +175,15 @@ test("desktop: an unknown context window hides the ring and keeps the cost contr
   await expect(page.locator(".context-ring-button")).toHaveCount(0);
   const cost = page.getByRole("button", { name: "Session Usage: $1.37" });
   await expect(cost).toBeVisible();
-  const visibleCentering = await page.locator(".transcript-status-strip").evaluate((strip) => {
+  const centering = await page.locator(".transcript-status-strip").evaluate((strip) => {
     const stripBox = strip.getBoundingClientRect();
     const follow = strip.querySelector(".follow-tail-chip")!.getBoundingClientRect();
-    const costBox = strip.querySelector(".transcript-status-usage")!.getBoundingClientRect();
     return {
       stripCenter: stripBox.left + stripBox.width / 2,
-      visibleCenter: (follow.left + costBox.right) / 2,
+      followCenter: follow.left + follow.width / 2,
     };
   });
-  expect(Math.abs(visibleCentering.visibleCenter - visibleCentering.stripCenter)).toBeLessThanOrEqual(1);
+  expect(Math.abs(centering.followCenter - centering.stripCenter)).toBeLessThanOrEqual(1);
   await cost.click();
   await expect(page.locator(".session-usage-popover").first()).toContainText("Total Processed");
   await page.screenshot({ path: `${SHOT}/desktop-unknown-context.png` });
@@ -241,7 +240,8 @@ test.describe("Answer Mode ownership", () => {
 
 /**
  * Session accounting stays out of the message composer and joins context usage directly beside
- * the live-output control. These cases pin that centered cluster across every cost label.
+ * the live-output control. These cases pin the independently centered control across every cost
+ * label while the context and action tracks consume only their own side.
  */
 test.describe("desktop: context and cost flank the live-output control", () => {
   /** Every shape `sessionCostLabel` can produce, widest to narrowest. */
@@ -295,10 +295,10 @@ test.describe("desktop: context and cost flank the live-output control", () => {
       expect(geometry.follow.left - geometry.meter!.right).toBeLessThanOrEqual(8.5);
       expect(geometry.follow.right).toBeLessThanOrEqual(geometry.cost!.left + 0.5);
       expect(geometry.cost!.left - geometry.follow.right).toBeLessThanOrEqual(8.5);
-      expect(geometry.cluster!.right).toBeLessThanOrEqual(geometry.actions!.left + 0.5);
+      expect(geometry.cost!.right).toBeLessThanOrEqual(geometry.actions!.left + 0.5);
       expect(geometry.cost!.width).toBeGreaterThan(0);
       expect(geometry.overflows).toBe(false);
-      expect(Math.abs((geometry.cluster!.left + geometry.cluster!.right) / 2 - geometry.strip.center)).toBeLessThanOrEqual(1);
+      expect(Math.abs(geometry.follow.center - geometry.strip.center)).toBeLessThanOrEqual(1);
 
       await page.screenshot({ path: `${SHOT}/desktop-status-strip-${label.name.replace(/[^a-z]+/g, "-")}.png` });
     });
@@ -331,7 +331,7 @@ test.describe("desktop: context and cost flank the live-output control", () => {
   test("a cramped desktop pane keeps the cost readable by retiring the Reply hint", async ({ page }) => {
     // A desktop session beside an open side panel: the viewport is well above the mobile
     // breakpoint, but the transcript pane itself is narrow. With follow paused the follow-state
-    // control roughly doubles while the centered cluster also holds both usage indicators.
+    // control roughly doubles while the symmetric side tracks still hold both usage indicators.
     await page.setViewportSize({ width: 900, height: 820 });
     await page.goto("/session-usage-e2e.html?width=440&height=780&cost=12345.67");
     await expect(page.locator(".follow-tail-chip")).toBeVisible();
@@ -352,7 +352,7 @@ test.describe("desktop: context and cost flank the live-output control", () => {
     expect(geometry.meter!.right).toBeLessThanOrEqual(geometry.follow.left + 0.5);
     expect(geometry.follow.right).toBeLessThanOrEqual(geometry.cost!.left + 0.5);
     expect(geometry.overflows).toBe(false);
-    expect(Math.abs((geometry.cluster!.left + geometry.cluster!.right) / 2 - geometry.strip.center)).toBeLessThanOrEqual(1);
+    expect(Math.abs(geometry.follow.center - geometry.strip.center)).toBeLessThanOrEqual(1);
     await page.screenshot({ path: `${SHOT}/desktop-status-strip-cramped-pane.png` });
   });
 
@@ -415,7 +415,7 @@ test.describe("desktop: context and cost flank the live-output control", () => {
     await expect(page.locator(".transcript-status-actions")).toBeHidden();
   });
 
-  test("the centered cluster cannot overlap Reply where the container-query cutoff cannot run", async ({ page }) => {
+  test("the trailing usage track protects cost from Reply where the cutoff cannot run", async ({ page }) => {
     // Defence in depth, not a supported-engine requirement. When this was written the declared
     // browser floor was below the first version with size container queries, so the cutoff was
     // genuinely inert on a targeted engine; #914 has since raised the floor above it, and every
@@ -436,21 +436,21 @@ test.describe("desktop: context and cost flank the live-output control", () => {
     const geometry = await page.locator(".transcript-status-strip").evaluate((strip) => {
       const button = strip.querySelector(".transcript-status-usage .session-cost-button") as HTMLElement;
       const actions = strip.querySelector(".transcript-status-actions") as HTMLElement;
-      const cluster = strip.querySelector(".transcript-status-cluster") as HTMLElement;
+      const follow = strip.querySelector(".follow-tail-chip") as HTMLElement;
       return {
-        clusterRight: cluster.getBoundingClientRect().right,
+        costRight: button.getBoundingClientRect().right,
         actionsLeft: actions.getBoundingClientRect().left,
         costVisible: button.getBoundingClientRect().width,
         costNeeded: button.scrollWidth,
-        clusterVisible: cluster.getBoundingClientRect().width,
-        clusterNeeded: cluster.scrollWidth,
+        followCenter: follow.getBoundingClientRect().left + follow.getBoundingClientRect().width / 2,
+        stripCenter: strip.getBoundingClientRect().left + strip.getBoundingClientRect().width / 2,
         overflows: strip.scrollWidth > strip.clientWidth,
       };
     });
     const costFraction = geometry.costVisible / geometry.costNeeded;
     expect(costFraction).toBeGreaterThan(0.9);
-    expect(geometry.clusterVisible).toBeGreaterThanOrEqual(geometry.clusterNeeded - 0.5);
-    expect(geometry.clusterRight).toBeLessThanOrEqual(geometry.actionsLeft + 0.5);
+    expect(geometry.costRight).toBeLessThanOrEqual(geometry.actionsLeft + 0.5);
+    expect(Math.abs(geometry.followCenter - geometry.stripCenter)).toBeLessThanOrEqual(1);
     expect(geometry.overflows).toBe(false);
   });
 
@@ -463,11 +463,11 @@ test.describe("desktop: context and cost flank the live-output control", () => {
     const usage = page.locator(".session-usage-popover").first();
     await expect(usage).toContainText("Not Priced");
     // The ledger has now answered "unpriced": the strip still refuses to invent a $0.00, and the
-    // control remains inside the centered cluster when the panel opens.
+    // control remains in the centered track when the panel opens.
     await expect(cost).toHaveText("$\u2014");
     const geometry = await readStrip(page);
     expect(geometry.follow.right).toBeLessThanOrEqual(geometry.cost!.left + 0.5);
-    expect(geometry.cluster!.right).toBeLessThanOrEqual(geometry.actions!.left + 0.5);
+    expect(geometry.cost!.right).toBeLessThanOrEqual(geometry.actions!.left + 0.5);
     expect(geometry.overflows).toBe(false);
 
     // The popover opens from the strip's right edge and still fits the viewport.
@@ -481,6 +481,88 @@ test.describe("desktop: context and cost flank the live-output control", () => {
     await expect(cost).toHaveAttribute("aria-expanded", "false");
   });
 });
+
+for (const viewport of [
+  { name: "desktop", width: 1200, pane: 1180, height: 820 },
+  { name: "mobile", width: 390, pane: 390, height: 844 },
+] as const) {
+  test(`${viewport.name}: usage presence and width never move the live-output control`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    const contexts = [
+      { name: "known", query: "", present: true },
+      { name: "unknown", query: "&window=none", present: false },
+    ] as const;
+    const costs = [
+      { name: "priced", query: "", present: true },
+      { name: "wide priced", query: "&cost=12345.67", present: true },
+      { name: "unpriced", query: "&cost=none", present: true },
+      { name: "unavailable", query: "&cost=unavailable", present: true },
+      { name: "absent", query: "&usage=absent", present: false },
+    ] as const;
+
+    let invariantCenter: number | null = null;
+    for (const context of contexts) {
+      for (const cost of costs) {
+        await page.goto(
+          `/session-usage-e2e.html?width=${viewport.pane}&height=780${context.query}${cost.query}`,
+        );
+        const strip = page.locator(".transcript-status-strip");
+        const meter = strip.locator(".context-ring-button");
+        const usage = strip.locator(".transcript-status-usage");
+        await expect(meter, `${context.name} context capacity`).toHaveCount(context.present ? 1 : 0);
+        await expect(usage, `${cost.name} session cost`).toHaveCount(cost.present ? 1 : 0);
+
+        const geometry = await strip.evaluate((element) => {
+          const stripBox = element.getBoundingClientRect();
+          const followBox = element.querySelector(".follow-tail-chip")!.getBoundingClientRect();
+          const meterBox = element.querySelector(".context-ring-button")?.getBoundingClientRect();
+          const costBox = element.querySelector(".transcript-status-usage")?.getBoundingClientRect();
+          return {
+            stripCenter: stripBox.left + stripBox.width / 2,
+            followCenter: followBox.left + followBox.width / 2,
+            followLeft: followBox.left,
+            followRight: followBox.right,
+            meterRight: meterBox?.right ?? null,
+            costLeft: costBox?.left ?? null,
+            overflows: element.scrollWidth > element.clientWidth,
+          };
+        });
+
+        invariantCenter ??= geometry.followCenter;
+        expect(
+          Math.abs(geometry.followCenter - geometry.stripCenter),
+          `${context.name} context with ${cost.name} cost`,
+        ).toBeLessThanOrEqual(1);
+        expect(geometry.followCenter).toBeCloseTo(invariantCenter, 1);
+        if (geometry.meterRight !== null) {
+          expect(geometry.meterRight).toBeLessThanOrEqual(geometry.followLeft + 0.5);
+          expect(geometry.followLeft - geometry.meterRight).toBeLessThanOrEqual(8.5);
+        }
+        if (geometry.costLeft !== null) {
+          expect(geometry.followRight).toBeLessThanOrEqual(geometry.costLeft + 0.5);
+          expect(geometry.costLeft - geometry.followRight).toBeLessThanOrEqual(8.5);
+        }
+        expect(geometry.overflows).toBe(false);
+      }
+    }
+
+    // Exercise the short following label, paused resume affordance, and widest previewing shape.
+    await page.goto(`/session-usage-e2e.html?width=${viewport.pane}&height=780`);
+    const follow = page.locator(".follow-tail-chip");
+    const readOffset = () => page.locator(".transcript-status-strip").evaluate((strip) => {
+      const stripBox = strip.getBoundingClientRect();
+      const followBox = strip.querySelector(".follow-tail-chip")!.getBoundingClientRect();
+      return followBox.left + followBox.width / 2 - (stripBox.left + stripBox.width / 2);
+    });
+    expect(Math.abs(await readOffset())).toBeLessThanOrEqual(1);
+    await page.locator(".detail-scroll").hover();
+    await page.mouse.wheel(0, -900);
+    await expect(follow).toHaveAttribute("data-follow-tail-state", "paused");
+    expect(Math.abs(await readOffset())).toBeLessThanOrEqual(1);
+    await follow.locator("span").first().evaluate((label) => { label.textContent = "Previewing"; });
+    expect(Math.abs(await readOffset())).toBeLessThanOrEqual(1);
+  });
+}
 
 test("mobile: the ring and per-turn usage stay reachable", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
@@ -502,7 +584,7 @@ test("mobile: context and cost sit beside Live Output, and cost opens Session Us
   await expect(strip.locator(".context-ring-button")).toBeVisible();
   await page.screenshot({ path: `${SHOT}/mobile-status-strip.png` });
 
-  // Context and cost directly flank the follow-output control as one centered cluster.
+  // Context and cost directly flank the independently centered follow-output control.
   const cluster = strip.locator(".transcript-status-cluster");
   const clusterBox = (await cluster.boundingBox())!;
   const follow = strip.locator(".follow-tail-chip");
@@ -514,6 +596,7 @@ test("mobile: context and cost sit beside Live Output, and cost opens Session Us
   expect(followBox.x + followBox.width).toBeLessThanOrEqual(costBox.x + 1);
   expect(costBox.x - (followBox.x + followBox.width)).toBeLessThanOrEqual(9);
   expect(Math.abs(clusterBox.x + clusterBox.width / 2 - 195)).toBeLessThanOrEqual(1);
+  expect(Math.abs(followBox.x + followBox.width / 2 - 195)).toBeLessThanOrEqual(1);
   expect(ringBox.x).toBeGreaterThan(8);
   expect(costBox.x + costBox.width).toBeLessThan(382);
 
@@ -558,14 +641,17 @@ test("mobile: widest status labels stay inside a 320px strip", async ({ page }) 
       strip: { left: box.left, right: box.right },
       cluster: { left: cluster.left, right: cluster.right },
       meter: { left: meter.left },
-      cost: { width: costBox.width, needed: cost.scrollWidth },
+      cost: { right: costBox.right, width: costBox.width, needed: cost.scrollWidth },
       overflows: strip.scrollWidth > strip.clientWidth,
     };
   });
 
   expect(geometry.cluster.left).toBeGreaterThanOrEqual(geometry.strip.left - 0.5);
   expect(geometry.cluster.right).toBeLessThanOrEqual(geometry.strip.right + 0.5);
-  expect(geometry.meter.left).toBeGreaterThanOrEqual(geometry.cluster.left - 0.5);
+  // The independently centered widest label may consume some decorative strip padding, but every
+  // control remains fully inside the strip and the page still has no horizontal overflow.
+  expect(geometry.meter.left).toBeGreaterThanOrEqual(geometry.strip.left - 0.5);
+  expect(geometry.cost.right).toBeLessThanOrEqual(geometry.strip.right + 0.5);
   expect(geometry.cost.width).toBeGreaterThan(0);
   expect(geometry.overflows).toBe(false);
 });

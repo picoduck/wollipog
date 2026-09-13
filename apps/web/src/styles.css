@@ -10727,20 +10727,23 @@ body.shell-dock-dragging * {
   background: var(--bg);
 }
 .transcript-status-cluster {
-  display: inline-flex;
-  grid-column: 2;
+  display: grid;
+  grid-column: 1 / -1;
+  grid-row: 1;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
-  justify-self: center;
-  gap: 8px;
-  max-width: 100%;
+  column-gap: 8px;
+  width: 100%;
   min-width: 0;
 }
 .transcript-status-context {
   display: flex;
   position: relative;
+  grid-column: 1;
   flex: none;
   align-items: center;
   justify-content: flex-end;
+  justify-self: stretch;
   width: auto;
   min-width: 44px;
   overflow: visible;
@@ -10760,12 +10763,13 @@ body.shell-dock-dragging * {
   right: 0;
   /* Use the intended readable width at ordinary phone sizes, but yield enough of the 320px
      pane's leading quarter when the follow-state label consumes its widest compact shape. */
-  width: min(80px, calc(25cqw - 11px));
+  width: min(80px, calc(25cqw - 11px), 100%);
   max-width: none;
   transform: translateY(-50%);
 }
 .transcript-status-context-standalone {
   grid-column: 1;
+  grid-row: 1;
   justify-self: stretch;
   width: 100%;
   min-width: 0;
@@ -10786,14 +10790,25 @@ body.shell-dock-dragging * {
   white-space: nowrap;
 }
 .transcript-status-usage .session-cost-button { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-/* Contextual actions use only the trailing slack; they never participate in the centered cluster. */
-.transcript-status-actions {
+.follow-tail-control {
+  grid-column: 2;
+  justify-self: center;
+}
+.transcript-status-trailing {
   display: flex;
   grid-column: 3;
   align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+}
+/* Contextual actions use only the far end of the trailing track. */
+.transcript-status-actions {
+  display: flex;
+  flex: 1 1000 auto;
+  align-items: center;
   justify-content: flex-end;
-  justify-self: end;
-  width: 100%;
   max-width: 100%;
   min-width: 0;
   overflow: hidden;
@@ -10829,6 +10844,12 @@ body.shell-dock-dragging * {
 }
 @container transcript-pane (max-width: calc(330px + 16rem)) {
   .transcript-status-actions { display: none; }
+}
+/* At the narrowest supported phone width, the widest follow-state label needs four pixels back
+   from each side gap so the context ring and a useful cost sliver both remain inside their equal
+   tracks. The tracks stay symmetric, so this compression cannot move the centered control. */
+@container transcript-pane (max-width: 340px) {
+  .transcript-status-cluster { column-gap: 4px; }
 }
 /* Pager hints remain an inner group inside the centered status cluster. */
 .follow-tail-control {
