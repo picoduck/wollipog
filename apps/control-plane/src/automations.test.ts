@@ -1416,6 +1416,7 @@ test("registration-time capability loss drains more than one staged-command batc
         kind: "start_session",
         payloadJson: JSON.stringify({ type: "start_session", spec: { sessionId } }),
         payloadSha256: "0".repeat(64),
+        deliveryDeadlineAt: expected + 30 * 60_000,
       }],
       now: expected,
     });
@@ -1507,6 +1508,7 @@ test("workflow members receive stable distinct command and session ids", () => {
     `s_auto_${execution.executionId}_001`,
   ]);
   assert.equal(new Set(commands.map((command) => command.commandId)).size, 2);
+  assert.deepEqual(commands.map((command) => command.deliveryDeadlineAt), [31 * 60_000, 31 * 60_000]);
 });
 
 test("a command that never reaches its runner settles the execution and releases the wait policy", () => {
@@ -1546,7 +1548,7 @@ test("a flush outside the tick cannot transmit a command past its delivery bound
   const neighbour = service.create(baseSpec({ name: "Neighbour" }), { kind: "human", id: "device" }, 0).data!;
   service.tick(60_000);
   const execution = db.listAutomationExecutions(stalled.automationId)[0]!;
-  const command = execution.commands![0]!;
+  const command = db.listAutomationCommands(execution.executionId)[0]!;
   const first = delivered.find((message) =>
     (message as { commandId?: string }).commandId === command.commandId) as { requestId: string };
   service.onDurableCommandReceipt("runner-1", {
@@ -1561,6 +1563,10 @@ test("a flush outside the tick cannot transmit a command past its delivery bound
   }, 60_200);
   const replacement = db.listAutomationCommands(execution.executionId)[1]!;
   assert.equal(replacement.state, "pending");
+  assert.equal(replacement.deliveryDeadlineAt, replacement.createdAt + 30 * 60_000,
+    "the replacement receives a full delivery window");
+  assert.ok(replacement.deliveryDeadlineAt! > command.deliveryDeadlineAt!,
+    "the replacement does not inherit its predecessor's remaining deadline");
 
   const other = db.listAutomationExecutions(neighbour.automationId)[0]!;
   const otherCommand = other.commands![0]!;
@@ -1575,6 +1581,8 @@ test("a flush outside the tick cannot transmit a command past its delivery bound
   const sent = delivered.slice(before).filter((message) =>
     (message as { commandId?: string }).commandId === replacement.commandId);
   assert.deepEqual(sent, [], "a direct flush must not transmit a command past its delivery bound");
+  assert.deepEqual(db.dueAutomationCommands(60_200 + 31 * 60_000, "runner-1")
+    .map((candidate) => candidate.commandId), [], "the database query enforces the bound");
   assert.equal(db.listAutomationCommands(execution.executionId)[1]?.state, "pending",
     "and it must not be expired mid-flush either — the sweep owns that decision");
 });

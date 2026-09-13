@@ -54,6 +54,11 @@ const COMMAND_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 const MIN_DELIVERY_BOUND_MS = 30 * 60_000;
 const MAX_DELIVERY_BOUND_MS = 12 * 60 * 60_000;
 
+function automationDeliveryWindowMs(schedule: AutomationSchedule, scheduledFor: number): number {
+  const cadence = nextCronFire(schedule.cron, schedule.timezone, scheduledFor) - scheduledFor;
+  return Math.min(MAX_DELIVERY_BOUND_MS, Math.max(MIN_DELIVERY_BOUND_MS, cadence));
+}
+
 type Logger = { info: (message: string) => void; warn: (message: string) => void };
 type AutomationNotifier = (
   automation: AutomationSchedule,
@@ -343,7 +348,6 @@ export class AutomationsService {
       hub,
       log,
       (executionId, now) => this.reconcileExecution(executionId, now),
-      (row, now) => this.commandStillDeliverable(row, now),
     );
   }
 
@@ -571,47 +575,15 @@ export class AutomationsService {
       commands.some((command) => !["completed", "rejected", "uncertain"].includes(command.state));
   }
 
-  /** True once nothing of the execution's plan has reached its runner within the delivery bound.
-   * A command the runner acknowledged means the work is under way and only its own receipts may
-   * end it; the bound is measured from the newest command so a replacement issued for a
-   * transiently refused launch gets the full window rather than the remains of its predecessor's. */
-  private undeliverable(
-    execution: AutomationExecution,
-    schedule: AutomationSchedule,
-    commands: AutomationCommandRecord[],
-    now: number,
-  ): boolean {
+  /** True once nothing of the execution's plan has reached its runner before every active
+   * command's persisted delivery deadline. A command the runner acknowledged means the work is
+   * under way and only its own receipts may end it. A null deadline belongs to a pre-migration row
+   * and deliberately remains deliverable. */
+  private undeliverable(commands: AutomationCommandRecord[], now: number): boolean {
     if (commands.some((command) => ["accepted", "started", "completed"].includes(command.state))) return false;
-    if (!commands.some((command) => ["staged", "pending", "sent"].includes(command.state))) return false;
-    // No bound is shorter than the floor, so a plan younger than it is deliverable whatever the
-    // cadence — and answering from the age alone keeps `nextCronFire` off the five-second sweep,
-    // where a per-minute cron costs ~7ms per execution (~15ms outside UTC).
-    const age = now - Math.max(...commands.map((command) => command.createdAt));
-    if (age < MIN_DELIVERY_BOUND_MS) return false;
-    const cadence = nextCronFire(schedule.cron, schedule.timezone, execution.scheduledFor) - execution.scheduledFor;
-    return age >= Math.min(MAX_DELIVERY_BOUND_MS, Math.max(MIN_DELIVERY_BOUND_MS, cadence));
-  }
-
-  /** The bound as the outbox sees it, for one command about to be sent. A command past it is left
-   * alone rather than expired here: mutating inside the flush loop would reorder the very decision
-   * this exists to sequence, and the sweep settles it on the next pass. */
-  private commandStillDeliverable(row: AutomationCommandRecord, now: number): boolean {
-    // Settle the ordinary case without touching the database or the cron parser. The bound is
-    // measured from the execution's newest command, which is at least as new as this row, so a row
-    // younger than the floor cannot be past any bound. Every healthy flush takes this exit, which
-    // matters: `nextCronFire` costs ~7ms for `* * * * *` (~15ms outside UTC), and a hundred of
-    // those inside a synchronous flush would stall the control plane for over a second.
-    if (now - row.createdAt < MIN_DELIVERY_BOUND_MS) return true;
-    const execution = this.db.getAutomationExecution(row.executionId);
-    if (!execution || execution.deliveryMode !== "receipted_v53") return true;
-    const schedule = this.executionSchedule(execution);
-    if (!schedule) return true;
-    try {
-      return !this.undeliverable(execution, schedule, this.db.listAutomationCommands(row.executionId), now);
-    } catch {
-      // An unparseable stored cron must not stop ordinary delivery; the sweep logs it.
-      return true;
-    }
+    const active = commands.filter((command) => ["staged", "pending", "sent"].includes(command.state));
+    return active.length > 0 && active.every((command) =>
+      command.deliveryDeadlineAt !== undefined && command.deliveryDeadlineAt <= now);
   }
 
   /**
@@ -628,17 +600,7 @@ export class AutomationsService {
       if (candidate.deliveryMode !== "receipted_v53") continue;
       const commands = this.db.listAutomationCommands(candidate.executionId);
       if (!commands.length) continue;
-      const schedule = this.executionSchedule(candidate);
-      if (!schedule) continue;
-      let overdue: boolean;
-      try {
-        overdue = this.undeliverable(candidate, schedule, commands, now);
-      } catch (error) {
-        // A stored cron this build can no longer parse must not take the scheduler down with it.
-        this.log.warn(`automation '${candidate.automationId}' delivery bound skipped: ${(error as Error).message}`);
-        continue;
-      }
-      if (!overdue) continue;
+      if (!this.undeliverable(commands, now)) continue;
       this.db.expireUndeliveredAutomationCommands(candidate.executionId, now);
       this.reconcileExecution(candidate.executionId, now);
     }
@@ -1090,6 +1052,7 @@ export class AutomationsService {
   }
 
   private deliveryOptions(
+    automation: AutomationSchedule,
     execution: AutomationExecution,
     ids: Pick<PreStagedDeliveryOptions,
       "sessionId" | "runId" | "workflowInstanceId" | "memberSessionIds" | "memberSessionId">,
@@ -1097,12 +1060,16 @@ export class AutomationsService {
     target: AutomationRunnerTarget,
     commandSnapshots?: DurableSessionCommand[],
   ): PreStagedDeliveryOptions {
+    const deliveryDeadlineAt = now + automationDeliveryWindowMs(automation, execution.scheduledFor);
+    const persistedCommands = commandSnapshots ? this.db.listAutomationCommands(execution.executionId) : [];
     const stage = (plan: PreStagedDeliveryPlan): void => {
       const commands = plan.commands.map((command, ordinal) => {
         if (command.type === "answer_recovered_question") {
           throw new Error("automation delivery plans cannot contain recovered question answers");
         }
         const sessionId = command.type === "start_session" ? command.spec.sessionId : command.sessionId;
+        const persistedDeadline = persistedCommands.find((candidate) => candidate.ordinal === ordinal)
+          ?.deliveryDeadlineAt ?? null;
         return {
           commandId: `ac_${execution.executionId}_${String(ordinal).padStart(3, "0")}`,
           ordinal,
@@ -1112,6 +1079,7 @@ export class AutomationsService {
           payloadJson: JSON.stringify(command),
           payloadSha256: automationCommandDigest(command),
           expiresAt: execution.createdAt + COMMAND_RETENTION_MS,
+          deliveryDeadlineAt: commandSnapshots ? persistedDeadline : deliveryDeadlineAt,
         };
       });
       this.db.stageAutomationDeliveryPlan({
@@ -1163,7 +1131,7 @@ export class AutomationsService {
           ...(request.config ?? {}), costBudgetUsd: automation.limits.maxCostUsd,
           maxToolCalls: automation.limits.maxToolCalls,
         },
-      }, this.deliveryOptions(execution, { sessionId: `s_auto_${execution.executionId}` }, now, target, commandSnapshots));
+      }, this.deliveryOptions(automation, execution, { sessionId: `s_auto_${execution.executionId}` }, now, target, commandSnapshots));
       result = created;
     } else if (automation.action.kind === "prompt_session") {
       const session = this.db.getSession(automation.action.sessionId)!;
@@ -1184,7 +1152,7 @@ export class AutomationsService {
         result = this.sessions.prompt(
           session.id, request.text, [], request.slashCommand,
           { ...(request.config ?? {}), costBudgetUsd, maxToolCalls },
-          this.deliveryOptions(execution, {}, now, target, commandSnapshots),
+          this.deliveryOptions(automation, execution, {}, now, target, commandSnapshots),
         );
       }
     } else {
@@ -1197,7 +1165,7 @@ export class AutomationsService {
         ...(Object.keys(agentBindings).length ? { agentBindings } : {}),
         ...(target.orchestratorAgentId ? { orchestratorAgentId: target.orchestratorAgentId } : {}),
         costBudgetUsd: automation.limits.maxCostUsd, maxToolCalls: automation.limits.maxToolCalls,
-      }, { kind: "system", id: `automation:${automation.automationId}` }, this.deliveryOptions(execution, {
+      }, { kind: "system", id: `automation:${automation.automationId}` }, this.deliveryOptions(automation, execution, {
         runId: `r_auto_${execution.executionId}`,
         workflowInstanceId: `wfi_auto_${execution.executionId}`,
         memberSessionId: (index) => `s_auto_${execution.executionId}_${String(index).padStart(3, "0")}`,

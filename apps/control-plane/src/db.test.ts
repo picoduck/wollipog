@@ -5015,15 +5015,18 @@ test("automation delivery plans stage atomically, gate dependencies, and apply r
     planJson: JSON.stringify({ kind: "workflow_run", runId: "run-1" }), now: 1_001,
     commands: [
       { commandId: "cmd-worker", ordinal: 0, runnerId: "runner-1", sessionId: "worker",
-        kind: "start_session", payloadJson: firstPayload, payloadSha256: "a".repeat(64), expiresAt: 9_000 },
+        kind: "start_session", payloadJson: firstPayload, payloadSha256: "a".repeat(64), expiresAt: 9_000,
+        deliveryDeadlineAt: 2_000 },
       { commandId: "cmd-orchestrator", ordinal: 1, runnerId: "runner-1", sessionId: "orchestrator",
         kind: "start_session", payloadJson: secondPayload, payloadSha256: "b".repeat(64), expiresAt: 9_000,
+        deliveryDeadlineAt: 2_000,
         dependencyCommandId: "cmd-worker" },
     ],
   });
   assert.deepEqual(staged.map((command) => [command.commandId, command.state]), [
     ["cmd-worker", "staged"], ["cmd-orchestrator", "staged"],
   ]);
+  assert.deepEqual(staged.map((command) => command.deliveryDeadlineAt), [2_000, 2_000]);
   assert.equal(db.hasActiveAutomationCommandForSession("worker"), true);
   assert.equal(db.hasActiveAutomationCommandForSession("orchestrator"), true);
   assert.equal(db.hasActiveAutomationCommandForSession("unowned"), false);
@@ -5032,6 +5035,7 @@ test("automation delivery plans stage atomically, gate dependencies, and apply r
 
   db.activateAutomationCommands("exec-receipt", 1_010);
   assert.deepEqual(db.dueAutomationCommands(1_010).map((command) => command.commandId), ["cmd-worker"]);
+  assert.equal(db.dueAutomationCommands(2_000).length, 0, "the due query excludes a command at its deadline");
   assert.equal(db.markAutomationCommandSent("cmd-worker", "req-worker-1", 1_011, 1_100)?.attemptCount, 1);
   assert.equal(db.dueAutomationCommands(1_050).length, 0);
   const accepted = db.recordAutomationCommandReceipt({
@@ -5072,7 +5076,7 @@ test("automation delivery plans stage atomically, gate dependencies, and apply r
   assert.equal("nextAttemptAt" in publicCommand, false, "public execution views must not expose retry metadata");
 });
 
-test("prerelease automation tables migrate revision provenance columns additively", () => {
+test("prerelease automation tables migrate provenance and nullable delivery deadlines additively", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-automation-migration-"));
   const path = join(root, "control-plane.db");
   try {
@@ -5106,6 +5110,16 @@ test("prerelease automation tables migrate revision provenance columns additivel
         execution_id TEXT, received_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
         UNIQUE (trigger_id, event_id)
       );
+      CREATE TABLE automation_commands (
+        command_id TEXT PRIMARY KEY, execution_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
+        runner_id TEXT NOT NULL, session_id TEXT NOT NULL, kind TEXT NOT NULL,
+        payload_json TEXT NOT NULL, payload_sha256 TEXT NOT NULL, expires_at INTEGER,
+        dependency_command_id TEXT, state TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0,
+        attempt_count INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER, last_error TEXT,
+        error_code TEXT, duplicate INTEGER, user_event_seq INTEGER, created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL, last_sent_at INTEGER, accepted_at INTEGER,
+        started_at INTEGER, completed_at INTEGER
+      );
     `);
     raw.prepare(`INSERT INTO automations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       "legacy-auto", "Legacy", "* * * * *", "UTC", 1, 1_000, null,
@@ -5115,8 +5129,18 @@ test("prerelease automation tables migrate revision provenance columns additivel
       "human", "local", 1, 1, null,
     );
     raw.prepare(`INSERT INTO automation_executions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-      "legacy-execution", "legacy-auto", "legacy-auto:1000", 1_000, "create_session", "failed",
-      "system", "legacy", null, null, null, null, "legacy", 1_000, null, 1_001,
+      "legacy-execution", "legacy-auto", "legacy-auto:1000", 1_000, "create_session", "dispatching",
+      "system", "legacy", "legacy-runner", "legacy-session", null, null, null, 1_000, null, null,
+    );
+    raw.prepare(
+      `INSERT INTO automation_commands
+       (command_id,execution_id,ordinal,runner_id,session_id,kind,payload_json,payload_sha256,
+        expires_at,dependency_command_id,state,revision,attempt_count,next_attempt_at,last_error,
+        error_code,duplicate,user_event_seq,created_at,updated_at,last_sent_at,accepted_at,started_at,completed_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ).run(
+      "legacy-command", "legacy-execution", 0, "legacy-runner", "legacy-session", "start_session",
+      "{}", "a".repeat(64), null, null, "pending", 0, 0, 1, null, null, null, null, 1, 1, null, null, null, null,
     );
     raw.prepare(`INSERT INTO automation_triggers VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(
       "legacy-trigger", "legacy-auto", "webhook", "Legacy hook", "legacy-secret", 1,
@@ -5140,6 +5164,10 @@ test("prerelease automation tables migrate revision provenance columns additivel
     const execution = db.getAutomationExecution("legacy-execution");
     assert.equal(execution?.automationRevision, 1);
     assert.equal(execution?.specSnapshot, undefined, "legacy history stays readable without invented provenance");
+    assert.equal(db.getAutomationCommand("legacy-command")?.deliveryDeadlineAt, undefined,
+      "a pre-migration command remains explicitly unbounded");
+    assert.deepEqual(db.dueAutomationCommands(10).map((command) => command.commandId), ["legacy-command"],
+      "a null migrated deadline remains deliverable");
     const trigger = db.listAutomationTriggers("legacy-auto")[0]!;
     assert.equal(trigger.invocationCount, 2);
     assert.equal(trigger.lastInvokedAt, 20);
