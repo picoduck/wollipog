@@ -11,6 +11,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
+import { flushSync } from "react-dom";
 import {
   CODEX_APP_SERVER_IMAGE_MIME_TYPES,
   DEFAULT_LIVE_CHILD_LIMIT,
@@ -216,6 +217,10 @@ import { materializePromptImages } from "../prompt-image-materialization.js";
 
 const NO_IMAGE_MIME_TYPES: readonly string[] = [];
 const STOP_TURN_RETRY_MS = 8_000;
+/** WebKit may synthesize a touch click in a later task. Keep the pointer transfer alive long
+ * enough for that click; if no click arrives, finish the collapse instead of leaving a blurred
+ * composer expanded. Pointer cancellation (the usual scroll path) finishes immediately. */
+const COMPOSER_POINTER_CLICK_FALLBACK_MS = 500;
 const EARLIER_ACTIVITY_TRIGGER_PX = 160;
 const EARLIER_ACTIVITY_REARM_DISTANCE_PX = 32;
 const EARLIER_ACTIVITY_REARM_FRAMES = 8;
@@ -677,6 +682,8 @@ function SessionDetailLoaded({
 }: SessionDetailProps & { session: SessionView }) {
   const api = useApi();
   const isMobile = useIsMobile();
+  const isMobileRef = useRef(isMobile);
+  isMobileRef.current = isMobile;
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
   const projects = useStoreSelector((state) => state.projects);
   const instanceScope = useInstanceScope();
@@ -754,6 +761,8 @@ function SessionDetailLoaded({
   const stalled = useStoreSelector((s) => s.stalledSessionIds.has(sessionId));
   const lastActivityAt = Math.max(session.lastEventAt ?? 0, activity?.lastEventAt ?? 0) || session.updatedAt;
   const [text, setText] = useState("");
+  const [composerExpanded, setComposerExpanded] = useState(false);
+  const composerExpansionSessionRef = useRef(sessionId);
   const draftDirty = useRef(false);
   const [busy, setBusy] = useState(false);
   const [handoffTurn, setHandoffTurn] = useState<number | null>(null);
@@ -963,7 +972,9 @@ function SessionDetailLoaded({
   const composerComposingRef = useRef(false);
   const pendingComposerFocusRestoreRef = useRef<ReturnType<typeof captureComposerFocus> | null>(null);
   const composerExplicitFocusTransferRef = useRef(false);
+  const composerPointerTransferRef = useRef<"inside" | "outside" | null>(null);
   const composerFocusRestoreFrameRef = useRef<number | null>(null);
+  const pendingRequestFallbackFocusRef = useRef<string | null>(null);
   const composerWindowTransferVersionRef = useRef(0);
   const composerInteractionVersionRef = useRef(0);
   const composerDraftVersionRef = useRef(0);
@@ -1010,10 +1021,16 @@ function SessionDetailLoaded({
         pendingComposerFocusRestoreRef.current = null;
       } else {
         pendingComposerFocusRestoreRef.current = remembered;
-        element.focus({ preventScroll: true });
-        if (restoreComposerFocus(element, remembered)) {
-          pendingComposerFocusRestoreRef.current = null;
-          reportComposerFocus(sessionId, "restore", element, false);
+        if (isMobileRef.current) {
+          // The idle phone capsule removes the textarea from layout. Reveal it in a commit before
+          // restoring focus, otherwise browsers correctly reject focus on the hidden control.
+          setComposerExpanded(true);
+        } else {
+          element.focus({ preventScroll: true });
+          if (restoreComposerFocus(element, remembered)) {
+            pendingComposerFocusRestoreRef.current = null;
+            reportComposerFocus(sessionId, "restore", element, false);
+          }
         }
       }
     }
@@ -1037,13 +1054,23 @@ function SessionDetailLoaded({
     const pending = pendingComposerFocusRestoreRef.current;
     const element = inputRef.current;
     if (!pending || !element || composerComposingRef.current) return;
+    if (isMobile && !composerExpanded) return;
+    const active = element.ownerDocument.activeElement;
+    if (active && active !== element.ownerDocument.body && active !== element) {
+      pendingComposerFocusRestoreRef.current = null;
+      return;
+    }
+    // Preserve focus throughout asynchronous hydration even when the empty replacement textarea
+    // cannot restore the remembered selection geometry until its stored draft arrives.
+    element.focus({ preventScroll: true });
     if (!restoreComposerFocus(element, pending)) return;
     pendingComposerFocusRestoreRef.current = null;
     reportComposerFocus(sessionId, "restore", element, false);
-  }, [sessionId, text]);
+  }, [composerExpanded, isMobile, sessionId, text]);
 
   useEffect(() => {
     let clearExplicitTransferTimer: ReturnType<typeof setTimeout> | null = null;
+    let clearPointerTransferTimer: ReturnType<typeof setTimeout> | null = null;
     const markExplicitTransfer = () => {
       composerExplicitFocusTransferRef.current = true;
       if (clearExplicitTransferTimer) clearTimeout(clearExplicitTransferTimer);
@@ -1059,7 +1086,35 @@ function SessionDetailLoaded({
     };
     const markExplicitPointerTransfer = (event: PointerEvent) => {
       const composer = inputRef.current;
-      if (composer && event.target instanceof Node && !composer.contains(event.target)) markExplicitTransfer();
+      if (clearPointerTransferTimer) clearTimeout(clearPointerTransferTimer);
+      clearPointerTransferTimer = null;
+      composerPointerTransferRef.current = null;
+      if (!composer || !(event.target instanceof Node) || composer.contains(event.target)) return;
+      markExplicitTransfer();
+      // Safari and Firefox on macOS need the inside marker because clicking a button may blur the
+      // textarea without focusing the button. The control must survive until its click completes.
+      composerPointerTransferRef.current = composer.closest(".composer-box")?.contains(event.target)
+        ? "inside"
+        : "outside";
+    };
+    const finishExplicitPointerTransfer = () => {
+      const transfer = composerPointerTransferRef.current;
+      if (transfer === null) return;
+      composerPointerTransferRef.current = null;
+      if (clearPointerTransferTimer) clearTimeout(clearPointerTransferTimer);
+      clearPointerTransferTimer = null;
+      const composer = inputRef.current;
+      const composerBox = composer?.closest(".composer-box");
+      const activeElement = composer?.ownerDocument.activeElement;
+      if (transfer === "outside" &&
+          (!composerBox || !activeElement || !composerBox.contains(activeElement))) {
+        setComposerExpanded(false);
+      }
+    };
+    const schedulePointerTransferFallback = () => {
+      if (composerPointerTransferRef.current === null) return;
+      if (clearPointerTransferTimer) clearTimeout(clearPointerTransferTimer);
+      clearPointerTransferTimer = setTimeout(finishExplicitPointerTransfer, COMPOSER_POINTER_CLICK_FALLBACK_MS);
     };
     const markExplicitKeyboardTransfer = (event: globalThis.KeyboardEvent) => {
       const plainEscape = event.key === "Escape"
@@ -1074,6 +1129,9 @@ function SessionDetailLoaded({
       markExplicitTransfer();
     };
     document.addEventListener("pointerdown", markExplicitPointerTransfer, true);
+    document.addEventListener("click", finishExplicitPointerTransfer);
+    document.addEventListener("pointerup", schedulePointerTransferFallback);
+    document.addEventListener("pointercancel", finishExplicitPointerTransfer);
     document.addEventListener("keydown", markExplicitKeyboardTransfer, true);
     window.addEventListener("blur", markWindowTransfer);
     window.addEventListener("focus", clearExplicitTransfer);
@@ -1084,11 +1142,15 @@ function SessionDetailLoaded({
     window.addEventListener(KEYBOARD_DISMISS_BLUR_EVENT, markExplicitTransfer);
     return () => {
       document.removeEventListener("pointerdown", markExplicitPointerTransfer, true);
+      document.removeEventListener("click", finishExplicitPointerTransfer);
+      document.removeEventListener("pointerup", schedulePointerTransferFallback);
+      document.removeEventListener("pointercancel", finishExplicitPointerTransfer);
       document.removeEventListener("keydown", markExplicitKeyboardTransfer, true);
       window.removeEventListener("blur", markWindowTransfer);
       window.removeEventListener("focus", clearExplicitTransfer);
       window.removeEventListener(KEYBOARD_DISMISS_BLUR_EVENT, markExplicitTransfer);
       if (clearExplicitTransferTimer) clearTimeout(clearExplicitTransferTimer);
+      if (clearPointerTransferTimer) clearTimeout(clearPointerTransferTimer);
     };
   }, []);
 
@@ -1108,6 +1170,10 @@ function SessionDetailLoaded({
     const explicit = composerExplicitFocusTransferRef.current;
     composerExplicitFocusTransferRef.current = false;
     if (explicit || composerComposingRef.current || !backgroundTarget) {
+      if (explicit && composerPointerTransferRef.current === null &&
+          !element.closest(".composer-box")?.contains(relatedElement)) {
+        setComposerExpanded(false);
+      }
       pendingComposerFocusRestoreRef.current = null;
       return;
     }
@@ -1121,6 +1187,8 @@ function SessionDetailLoaded({
   }, [sessionId]);
 
   useEffect(() => {
+    const sessionChanged = composerExpansionSessionRef.current !== sessionId;
+    composerExpansionSessionRef.current = sessionId;
     queueSteeringInFlightRef.current.clear();
     steeringResolutionInFlightRef.current.clear();
     composerInteractionVersionRef.current += 1;
@@ -1131,31 +1199,79 @@ function SessionDetailLoaded({
     setSteeringBusy(false);
     setQueueSteeringPending(new Set());
     setSteeringResolutionPending(new Map());
+    if (sessionChanged) setComposerExpanded(false);
   }, [sessionId]);
 
   const focusComposerAtDraftEnd = useCallback(() => {
     const element = inputRef.current;
     if (!element) return;
-    const moved = focusComposerAtEnd(element, composerComposingRef.current);
-    if (moved && draftHydratedSessionRef.current !== sessionId) {
-      pendingHydrationCaretRef.current = {
-        sessionId,
-        interactionVersion: composerInteractionVersionRef.current,
-      };
+    setComposerExpanded(true);
+    const focus = () => {
+      const moved = focusComposerAtEnd(element, composerComposingRef.current);
+      const focused = element.ownerDocument.activeElement === element;
+      if (moved && focused && draftHydratedSessionRef.current !== sessionId) {
+        pendingHydrationCaretRef.current = {
+          sessionId,
+          interactionVersion: composerInteractionVersionRef.current,
+        };
+      }
+      return focused;
+    };
+    // A collapsed phone composer hides its textarea. Retry after React commits the expanded
+    // state; desktop and already-expanded composers retain the immediate focus path.
+    if (!focus() && isMobile) window.requestAnimationFrame(focus);
+  }, [isMobile, sessionId]);
+
+  const focusComposerAfterRequestResolution = useCallback(() => {
+    const element = inputRef.current;
+    if (!element) return false;
+    if (element.disabled) return false;
+    if (!isMobile || composerExpanded) {
+      element.focus({ preventScroll: true });
+      return element.ownerDocument.activeElement === element;
     }
-  }, [sessionId]);
+    // The request coordinator runs after the resolving commit has hidden an idle phone textarea.
+    // Own the fallback now, reveal in the next synchronous layout commit, then focus before paint.
+    pendingRequestFallbackFocusRef.current = sessionId;
+    setComposerExpanded(true);
+    return true;
+  }, [composerExpanded, isMobile, sessionId]);
+
+  useLayoutEffect(() => {
+    if (pendingRequestFallbackFocusRef.current !== sessionId) return;
+    if (isMobile && !composerExpanded) return;
+    pendingRequestFallbackFocusRef.current = null;
+    inputRef.current?.focus({ preventScroll: true });
+  }, [composerExpanded, isMobile, sessionId]);
+
+  const expandIdleComposer = useCallback(() => {
+    // Keep expansion and focus inside the activating gesture so iOS is allowed to open its
+    // software keyboard. A requestAnimationFrame retry occurs too late for that permission.
+    flushSync(() => setComposerExpanded(true));
+    focusComposerAtDraftEnd();
+  }, [focusComposerAtDraftEnd]);
 
   useLayoutEffect(() => {
     const pending = retitleFocusRestoreRef.current;
-    retitleFocusRestoreRef.current = null;
     if (retitleFeedback !== null || pending === null) return;
-    if (pending.sessionId !== sessionId || viewGenerationRef.current !== pending.generation) return;
+    if (pending.sessionId !== sessionId || viewGenerationRef.current !== pending.generation) {
+      retitleFocusRestoreRef.current = null;
+      return;
+    }
     const input = inputRef.current;
-    if (!input || input.ownerDocument.activeElement !== input.ownerDocument.body) return;
+    if (!input || input.ownerDocument.activeElement !== input.ownerDocument.body) {
+      retitleFocusRestoreRef.current = null;
+      return;
+    }
+    if (isMobile && !composerExpanded) {
+      setComposerExpanded(true);
+      return;
+    }
+    retitleFocusRestoreRef.current = null;
     if (restoreComposerFocus(input, pending.composer)) {
       reportComposerFocus(sessionId, "restore", input, false);
     }
-  }, [retitleFeedback, sessionId]);
+  }, [composerExpanded, isMobile, retitleFeedback, sessionId]);
 
   useLayoutEffect(() => {
     if (mode !== "expanded" || focusComposerRequestedRef.current || attentionTarget) return;
@@ -3327,6 +3443,11 @@ function SessionDetailLoaded({
   const composerCommandResolution = resolveComposerCommandInvocation(text, composerCommands);
   const commandPreservesAttachedImages = composerCommandResolution.kind === "command" &&
     durableCommandPreservesAttachments(composerCommandResolution.command, images.length > 0);
+  const composerIdleCollapsed = isMobile && !composerExpanded && !/[\r\n]/u.test(text) &&
+    images.length === 0 && session.pendingApproval == null &&
+    !historyQuarantine && !queuedEdit && !error && !retitleFeedback && !dictation.recording &&
+    !dragActive && !paletteOpen && !workspacePickerOpen;
+  const composerIdlePreview = text.trim() ? text : composerPlaceholder;
   useEffect(() => {
     setActiveSlashCommandId((current) => retainActiveComposerCommandId(current, slashMatches));
   }, [slashMatches]);
@@ -4243,6 +4364,7 @@ function SessionDetailLoaded({
             runnerOnline={runnerOnline}
             fallbackFocusRef={mode === "expanded" ? inputRef : scrollRef}
             alternateFallbackFocusRef={mode === "expanded" ? scrollRef : undefined}
+            onFallbackFocus={mode === "expanded" ? focusComposerAfterRequestResolution : undefined}
             onSessionUpdate={loadSession}
             showKeyHints={!isMobile}
             // The fallback owns the request only until the matching pinned row is mounted and the
@@ -4807,7 +4929,16 @@ function SessionDetailLoaded({
               </div>
             )}
             <div
-              className={`composer-box${dragActive ? " drag-over" : ""}${composerAnswerActive ? " answer-mode" : ""}`}
+              className={`composer-box${dragActive ? " drag-over" : ""}${composerAnswerActive ? " answer-mode" : ""}${composerIdleCollapsed ? " idle-collapsed" : ""}`}
+              onBlur={(event) => {
+                const blurredTarget = event.target as HTMLElement;
+                if (blurredTarget === inputRef.current || blurredTarget.classList.contains("composer-idle-preview")) {
+                  return;
+                }
+                if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                  if (composerPointerTransferRef.current === null) setComposerExpanded(false);
+                }
+              }}
               onDragEnter={(e) => {
                 if (!canPrompt || composerAnswerActive) return;
                 e.preventDefault();
@@ -4893,6 +5024,7 @@ function SessionDetailLoaded({
                     : undefined}
                 value={text}
                 onFocus={(event) => {
+                  setComposerExpanded(true);
                   composerExplicitFocusTransferRef.current = false;
                   reportComposerFocus(sessionId, "focus", event.currentTarget, composerComposingRef.current);
                 }}
@@ -4939,6 +5071,7 @@ function SessionDetailLoaded({
                 placeholder={composerPlaceholder}
                 rows={2}
                 disabled={!canPrompt}
+                tabIndex={composerIdleCollapsed ? -1 : undefined}
               />
               <div className="composer-bar">
                 <div className="cbar-left">
@@ -4957,6 +5090,16 @@ function SessionDetailLoaded({
                     imageMimeTypes={allowedImageMimeTypes}
                     onAttachImages={addFiles}
                   />
+                  <button
+                    type="button"
+                    className="composer-idle-preview"
+                    aria-label={`Edit Message: ${composerIdlePreview}`}
+                    title="Edit Message"
+                    onPointerDown={(event) => event.preventDefault()}
+                    onClick={expandIdleComposer}
+                  >
+                    {composerIdlePreview}
+                  </button>
                   <ApprovalsControl session={session} apply={applyConfig} />
                   {planActive && (
                     <button

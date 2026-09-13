@@ -28,10 +28,17 @@ async function openFixture(page: Page, width: number, kind: "claude" | "codex" |
   await expect(page.locator(".composer-box")).toBeVisible();
 }
 
+async function expandComposer(page: Page) {
+  await page.getByRole("button", { name: "Edit Message" }).click();
+  await expect(page.locator(".composer-input")).toBeVisible();
+  await expect(page.locator(".composer-input")).toBeFocused();
+}
+
 for (const width of [320, 360, 393, 430]) {
   for (const kind of ["claude", "codex", "orchestrator"] as const) {
     test(`${width}px ${kind}: Send stays inside one-line composer controls`, async ({ page }) => {
       await openFixture(page, width, kind);
+      await expandComposer(page);
 
       const geometry = await page.locator(".composer-box").evaluate((composer) => {
         const composerBounds = composer.getBoundingClientRect();
@@ -85,6 +92,7 @@ for (const width of [320, 360, 393, 430]) {
 
 test("393px Orchestrator Model Settings is a focus-safe bottom sheet with every setting", async ({ page }) => {
   await openFixture(page, 393, "orchestrator");
+  await expandComposer(page);
   await page.screenshot({ path: `${EVIDENCE}/after-mobile-orchestrator.png` });
   const trigger = page.getByRole("button", { name: /^Model Settings:/ });
   await trigger.click();
@@ -139,6 +147,7 @@ for (const kind of ["claude", "codex"] as const) {
     test(`${theme} ${kind}: unrestricted permission icon has warning treatment with 3:1 contrast`, async ({ page }) => {
       await openFixture(page, 393, kind, "&unsafe=1");
       await page.evaluate((nextTheme) => { document.documentElement.dataset.theme = nextTheme; }, theme);
+      await expandComposer(page);
       const warning = page.locator(".cbar-approvals.unrestricted");
       await expect(warning).toBeVisible();
       const ratio = await warning.evaluate((element) => {

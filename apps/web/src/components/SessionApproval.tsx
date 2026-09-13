@@ -80,6 +80,7 @@ export function SessionApprovalRegion({
   runnerOnline,
   fallbackFocusRef,
   alternateFallbackFocusRef,
+  onFallbackFocus,
   onSessionUpdate,
   showKeyHints = true,
   questionInTimeline = false,
@@ -88,6 +89,7 @@ export function SessionApprovalRegion({
   runnerOnline: boolean;
   fallbackFocusRef: RefObject<HTMLElement | null>;
   alternateFallbackFocusRef?: RefObject<HTMLElement | null>;
+  onFallbackFocus?: () => boolean;
   onSessionUpdate?: (session: SessionView) => void;
   showKeyHints?: boolean;
   /** Whether the pending question already has an authoritative transcript row. */
@@ -108,6 +110,7 @@ export function SessionApprovalRegion({
         runnerOnline={runnerOnline}
         fallbackFocusRef={fallbackFocusRef}
         alternateFallbackFocusRef={alternateFallbackFocusRef}
+        onFallbackFocus={onFallbackFocus}
       />
       {standaloneApproval && (
         <div data-session-request-id={standaloneApproval.requestId} data-session-request-session={session.id}>
@@ -230,6 +233,7 @@ function SessionRequestCoordinator({
   runnerOnline,
   fallbackFocusRef,
   alternateFallbackFocusRef,
+  onFallbackFocus,
 }: {
   sessionId: string;
   requestId: string | null;
@@ -238,6 +242,7 @@ function SessionRequestCoordinator({
   runnerOnline: boolean;
   fallbackFocusRef: RefObject<HTMLElement | null>;
   alternateFallbackFocusRef?: RefObject<HTMLElement | null>;
+  onFallbackFocus?: () => boolean;
 }) {
   const previousRequestRef = useRef<string | null>(null);
   const previousRequestWasQuestionRef = useRef(false);
@@ -253,6 +258,7 @@ function SessionRequestCoordinator({
   const ownedFocusBeforeRender = previousRequestRef.current !== null &&
     focusedRequestBeforeRender === previousRequestRef.current && focusedRequestSessionBeforeRender === sessionId;
   const focusFallback = () => {
+    if (onFallbackFocus?.()) return;
     const primary = fallbackFocusRef.current;
     const target = primary && !primary.matches(":disabled") ? primary : alternateFallbackFocusRef?.current;
     target?.focus();
@@ -280,8 +286,8 @@ function SessionRequestCoordinator({
       return;
     }
     if (focusDestination === "fallback") focusFallback();
-  }, [alternateFallbackFocusRef, fallbackFocusRef, ownedFocusBeforeRender, requestId, requestIsQuestion,
-    requestPresentation, sessionId]);
+  }, [alternateFallbackFocusRef, fallbackFocusRef, onFallbackFocus, ownedFocusBeforeRender, requestId,
+    requestIsQuestion, requestPresentation, sessionId]);
 
   useEffect(() => {
     if (announcedRequestRef.current === requestId) return;
@@ -298,8 +304,8 @@ function SessionRequestCoordinator({
     if (!focusedElementBeforeRender.matches(":disabled")
       && focusedElementBeforeRender.getAttribute("aria-disabled") !== "true") return;
     focusFallback();
-  }, [alternateFallbackFocusRef, fallbackFocusRef, focusedElementBeforeRender, ownedFocusBeforeRender,
-    requestId, requestWasUnchangedBeforeRender, runnerOnline]);
+  }, [alternateFallbackFocusRef, fallbackFocusRef, focusedElementBeforeRender, onFallbackFocus,
+    ownedFocusBeforeRender, requestId, requestWasUnchangedBeforeRender, runnerOnline]);
 
   return <span className="sr-only" role="status" aria-live="polite">{announcement}</span>;
 }

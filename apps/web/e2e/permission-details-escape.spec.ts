@@ -8,6 +8,8 @@ for (const width of [390, 1440]) {
     const expand = page.getByRole("button", { name: "Expand Session" });
     if (await expand.isVisible()) await expand.click();
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([], ["default", "acceptEdits", "bypassPermissions"]));
+    const idlePreview = page.getByRole("button", { name: /^Edit Message:/ });
+    if (await idlePreview.isVisible()) await idlePreview.click();
     const trigger = page.locator(".cbar-trigger").filter({ has: page.locator(".cbar-approvals") });
     await trigger.click();
     const menu = page.locator(".permission-mode-pop");

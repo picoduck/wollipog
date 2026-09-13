@@ -1,6 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import type { ControlPlaneToUi, RunnerView, SessionEvent, SessionView } from "@wollipog/protocol";
+import type { ControlPlaneToUi, PromptImageInput, RunnerView, SessionEvent, SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
@@ -13,6 +13,7 @@ import "../styles.css";
 declare global {
   interface Window {
     resolveSessionUsageQuestion(): void;
+    setSessionUsageRunnerOnline(online: boolean): void;
   }
 }
 
@@ -40,6 +41,10 @@ const contextChoice = params.get("context") === "choice";
 const serviceTierFixture = params.has("tiers");
 const serviceTierChoice = params.get("tiers") === "1";
 const composerFixture = params.get("composer");
+const composerDraftText = (params.get("draft") ?? "").replaceAll("\\n", "\n");
+const composerDraftImages: PromptImageInput[] = params.get("attachment") === "1"
+  ? [{ mimeType: "image/png", data: "iVBORw0KGgo=" }]
+  : [];
 const servedWindow = Number(params.get("served") ?? "0");
 // `?window=none` drops the context window (an agent that advertises no capacity); `?cost=none`
 // marks the session unpriced, while `?cost=free` carries provider-reported zero provenance,
@@ -258,6 +263,20 @@ if (composerFixture) {
   session.contextWindow = 1_000_000;
 }
 if (params.get("plan") === "1") session.permissionMode = "plan";
+if (params.get("action") === "stop") {
+  session.status = "running";
+  session.activeTurnId = "turn-1";
+} else if (params.get("action") === "restart") {
+  session.status = "stopped";
+}
+if (params.get("quarantine") === "1") {
+  session.historyQuarantine = {
+    reason: "oversized_tool_call",
+    detectedAt: 1,
+    recoveryTurn: 2,
+    recovery: "handoff",
+  };
+}
 if (params.get("approval") === "checkpoint") {
   session.status = "input_required";
   session.costCheckpointsUsd = [1, 2.5];
@@ -269,6 +288,17 @@ if (params.get("approval") === "checkpoint") {
     options: [
       { optionId: "continue", name: "Continue", kind: "allow_once" },
       { optionId: "cancel", name: "Stop", kind: "reject_once" },
+    ],
+  };
+} else if (params.get("approval") === "permission") {
+  session.status = "input_required";
+  session.pendingApproval = {
+    requestId: "permission:session-usage-e2e:1",
+    kind: "permission",
+    title: "Run the requested tool?",
+    options: [
+      { optionId: "allow", name: "Allow Once", kind: "allow_once" },
+      { optionId: "deny", name: "Deny", kind: "deny" },
     ],
   };
 } else if (params.get("approval") === "question") {
@@ -338,6 +368,14 @@ window.resolveSessionUsageQuestion = () => {
   } satisfies ControlPlaneToUi) });
 };
 
+window.setSessionUsageRunnerOnline = (online) => {
+  runner.status = online ? "online" : "offline";
+  fixtureSocket?.onmessage?.({ data: JSON.stringify({
+    type: "runner_upsert",
+    runner: { ...runner },
+  } satisfies ControlPlaneToUi) });
+};
+
 const connection: UiConnectionRuntime = {
   instanceId: "recovery-e2e",
   runtimeKey: "recovery-e2e:1",
@@ -358,6 +396,18 @@ let tailRequestCount = 0;
 const settledUsage = params.get("settled") !== "0";
 const client = {
   ...api,
+  prompt: async () => {
+    document.body.dataset.composerAction = "send";
+    return { ...session, status: "running" as const };
+  },
+  cancelTurn: async () => {
+    document.body.dataset.composerAction = "stop";
+    return { ...session, status: "idle" as const, activeTurnId: undefined };
+  },
+  restart: async () => {
+    document.body.dataset.composerAction = "restart";
+    return { ...session, status: "starting" as const };
+  },
   sessionUsage: async () => {
     if (usageDetail === "pending") return new Promise<never>(() => {});
     if (usageDetail === "failed") throw new Error("Usage detail unavailable");
@@ -535,7 +585,11 @@ createRoot(document.getElementById("root")!).render(
           rightPanel={rightPanel}
           onOpenTerminal={() => {}}
           pinnedOpen={pinnedOpen}
-          composerDraftLoader={async () => null}
+          composerDraftLoader={async () => ({
+            text: composerDraftText,
+            images: composerDraftImages,
+            updatedAt: 1,
+          })}
         />
       </div>
     </StoreProvider>

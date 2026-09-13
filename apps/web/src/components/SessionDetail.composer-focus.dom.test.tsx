@@ -77,6 +77,7 @@ for (const [name, value] of Object.entries({
   MouseEvent: domWindow.MouseEvent,
   KeyboardEvent: domWindow.KeyboardEvent,
   MutationObserver: domWindow.MutationObserver,
+  getComputedStyle: domWindow.getComputedStyle.bind(domWindow),
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
   ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
@@ -2968,6 +2969,82 @@ test("focus recovery distinguishes background loss from explicit transfer and IM
   }
 });
 
+test("phone composer controls survive a pointer click when the browser does not focus buttons", async () => {
+  const priorMatchMedia = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: query.includes("max-width: 760px"),
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveComposerDraft(draft, { text: "", images: [], updatedAt: 1 });
+    await focusRequestedComposer(fixture);
+    const plusTrigger = fixture.container.querySelector(
+      'button[aria-label="Add and Modes"]',
+    ) as HTMLButtonElement | null;
+    assert.ok(plusTrigger);
+
+    await act(async () => {
+      fireDomEvent.pointerDown(plusTrigger, { pointerType: "mouse" });
+      // Safari and Firefox on macOS blur the textarea without focusing the button.
+      fixture.composer.blur();
+      fireDomEvent.click(plusTrigger);
+    });
+
+    assert.equal(fixture.container.querySelector(".composer-box")?.classList.contains("idle-collapsed"), false);
+    assert.ok(fixture.container.querySelector(".plus-pop"),
+      "the original pointer activation must still open the composer menu");
+  } finally {
+    domWindow.matchMedia = priorMatchMedia;
+    await unmountFixture(fixture);
+  }
+});
+
+test("a phone queue tap cannot collapse while WebKit retains textarea focus", async () => {
+  const priorMatchMedia = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: query.includes("max-width: 760px"),
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveComposerDraft(draft, { text: "preserved mobile draft", images: [], updatedAt: 1 });
+    await fixture.pushSession({
+      queued: [{ id: "queued-1", text: "Queued message", hasImages: false, steerable: true }],
+    });
+    await focusRequestedComposer(fixture);
+    const queuedText = fixture.container.querySelector(".queued-text") as HTMLElement | null;
+    assert.ok(queuedText);
+
+    await act(async () => {
+      fireDomEvent.pointerDown(queuedText, { pointerType: "touch" });
+      // iOS WebKit can retain textarea focus when the tapped target is non-focusable.
+      fireDomEvent.click(queuedText);
+    });
+
+    assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
+    assert.equal(fixture.container.querySelector(".composer-box")?.classList.contains("idle-collapsed"), false,
+      "the composer must stay expanded while its textarea still owns focus");
+  } finally {
+    domWindow.matchMedia = priorMatchMedia;
+    await unmountFixture(fixture);
+  }
+});
+
 test("a delayed mobile transcript gesture relinquishes composer focus through selection and copy", async () => {
   const draft = deferred<ComposerDraft | null>();
   const fixture = await mountFixture(draft);
@@ -3378,6 +3455,8 @@ test("an immediate same-session remount restores exact selection direction and t
 
     const persisted = deferred<ComposerDraft | null>();
     const remounted = await fixture.remountWithDraftLoader(() => persisted.promise);
+    assert.equal(remounted.ownerDocument.activeElement, remounted,
+      "the replacement textarea must own focus while its persisted draft is still loading");
     await resolveComposerDraft(persisted, {
       text: "multiline remount draft",
       images: [],
@@ -3393,6 +3472,55 @@ test("an immediate same-session remount restores exact selection direction and t
     );
     assert.equal(remounted.scrollTop, 61);
   } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an immediate phone remount reveals the idle textarea before restoring its focus", async () => {
+  const priorMatchMedia = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: query.includes("max-width: 760px"),
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  const textareaPrototype = domWindow.HTMLTextAreaElement.prototype;
+  const originalFocus = textareaPrototype.focus;
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveComposerDraft(draft, { text: "phone remount draft", images: [], updatedAt: 1 });
+    await act(async () => {
+      fixture.composer.focus();
+      fixture.composer.setSelectionRange(2, 8, "backward");
+      fireDomEvent.select(fixture.composer);
+    });
+    textareaPrototype.focus = function() {
+      if (this.closest(".composer-box.idle-collapsed")) return;
+      originalFocus.call(this);
+    };
+
+    const persisted = deferred<ComposerDraft | null>();
+    const remounted = await fixture.remountWithDraftLoader(() => persisted.promise);
+    assert.equal(fixture.container.querySelector(".composer-box")?.classList.contains("idle-collapsed"), false,
+      "the remount must commit its expanded state before attempting to restore the hidden textarea");
+    assert.equal(remounted.ownerDocument.activeElement, remounted,
+      "the revealed phone textarea must own focus while its persisted draft is still loading");
+    await resolveComposerDraft(persisted, { text: "phone remount draft", images: [], updatedAt: 2 });
+    await flushAsyncWork();
+
+    assert.equal(remounted.ownerDocument.activeElement, remounted);
+    assert.deepEqual(
+      [remounted.selectionStart, remounted.selectionEnd, remounted.selectionDirection],
+      [2, 8, "backward"],
+    );
+  } finally {
+    textareaPrototype.focus = originalFocus;
+    domWindow.matchMedia = priorMatchMedia;
     await unmountFixture(fixture);
   }
 });
