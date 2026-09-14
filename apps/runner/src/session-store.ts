@@ -2808,7 +2808,9 @@ export function metaToSnapshot(
     driver: m.driver,
     useWorktree: m.worktreePath != null,
     worktreePath: m.worktreePath,
-    worktrees: m.worktrees,
+    worktrees: runnerSupportsProtocol(controlPlaneProtocolVersion, "worktreeSetup")
+      ? m.worktrees
+      : m.worktrees?.map(({ setup: _setup, ...worktree }) => worktree),
     executionTarget: m.executionTarget,
     executionHandoff: m.executionHandoff,
     workspacePath: m.repoPath, // the box's launch dir — lets the CP restart ad-hoc/box-owned sessions

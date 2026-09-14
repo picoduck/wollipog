@@ -343,6 +343,26 @@ test("linked worktree metadata is projected only to protocol v101 peers", () => 
   }
 });
 
+test("worktree setup state is omitted for pre-v141 control planes", () => {
+  const worktree = {
+    id: "wt-one",
+    path: "/home/me/repo/.agent-worktrees/s_abc",
+    branch: "fix/setup",
+    source: "created" as const,
+    setup: {
+      status: "failed" as const,
+      configHash: "a".repeat(64),
+      attemptId: "attempt-one",
+      environmentKeys: ["PROJECT_ROOT"],
+      copies: [],
+      steps: [],
+      error: "required setup failed",
+    },
+  };
+  assert.equal(metaToSnapshot(meta({ worktrees: [worktree] }), 140).worktrees?.[0]?.setup, undefined);
+  assert.equal(metaToSnapshot(meta({ worktrees: [worktree] }), 141).worktrees?.[0]?.setup?.status, "failed");
+});
+
 test("a failed incremental projection scan commits no duplicate omissions on retry", () => {
   const { store, root } = tmpStore();
   try {

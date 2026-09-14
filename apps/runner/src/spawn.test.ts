@@ -238,13 +238,18 @@ test("Docker and Podman argv emit exact dual labels for rollback and mount only 
     hostAgentCommand: "agent", hostAgentArgs: [], agentCommand: "agent", agentArgs: [],
   }), /mount character/);
   assert.deepEqual(buildContainerArgs(
-    { command: "C:\\host-tools\\git.exe", args: ["status"], cwd: "C:\\worktrees\\session-1" },
+    {
+      command: "C:\\host-tools\\git.exe",
+      args: ["status"],
+      cwd: "C:\\worktrees\\session-1",
+      containerEnvironmentKeys: ["PROJECT_ROOT"],
+    },
     {
       backend: "container", command: "docker", args: [], image: `x@sha256:${"c".repeat(64)}`,
       network: "bridge", templateId: "x", runnerKey: "runnerkey", containerName: "wollipog-x",
       hostAgentCommand: "agent", hostAgentArgs: [], agentCommand: "agent", agentArgs: ["host-only"],
     },
-  ).slice(-3), [`x@sha256:${"c".repeat(64)}`, "git", "status"]);
+  ).slice(-5), ["--env", "PROJECT_ROOT", `x@sha256:${"c".repeat(64)}`, "git", "status"]);
   assert.throws(() => buildContainerArgs(
     { command: "agent", args: ["--unexpected"], cwd: "C:\\worktrees\\session-1", containerAgentLaunch: true },
     {
@@ -255,10 +260,10 @@ test("Docker and Podman argv emit exact dual labels for rollback and mount only 
   ), /arguments do not match/);
 });
 
-test("container launches exclude explicit and inherited product-prefixed values from the runtime client", async () => {
+test("container launches exclude provider values while forwarding trust-gated setup environment by name", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "wollipog-container-env-"));
   const script = path.join(root, "runtime-probe.js");
-  await fs.writeFile(script, "process.stdout.write(JSON.stringify({explicit:process.env.WOLLIPOG_CONTAINER_EXPLICIT??null,current:process.env.WOLLIPOG_PLAIN??null,legacy:process.env.MAM_PLAIN??null}));", "utf8");
+  await fs.writeFile(script, "process.stdout.write(JSON.stringify({explicit:process.env.WOLLIPOG_CONTAINER_EXPLICIT??null,project:process.env.PROJECT_ROOT??null,current:process.env.WOLLIPOG_PLAIN??null,legacy:process.env.MAM_PLAIN??null,args:process.argv.slice(2)}));", "utf8");
   const oldCurrent = process.env.WOLLIPOG_PLAIN;
   const oldLegacy = process.env.MAM_PLAIN;
   process.env.WOLLIPOG_PLAIN = "current-daemon-value";
@@ -266,8 +271,9 @@ test("container launches exclude explicit and inherited product-prefixed values 
   try {
     const child = spawnAgent({
       command: "agent", args: [], cwd: root,
-      env: { WOLLIPOG_CONTAINER_EXPLICIT: "configured-secret" },
+      env: { WOLLIPOG_CONTAINER_EXPLICIT: "configured-secret", PROJECT_ROOT: "trusted-root" },
       containerAgentLaunch: true,
+      containerEnvironmentKeys: ["PROJECT_ROOT"],
       isolation: {
         backend: "container", command: process.execPath, args: [script],
         image: `x@sha256:${"d".repeat(64)}`, network: "deny", templateId: "x",
@@ -285,7 +291,10 @@ test("container launches exclude explicit and inherited product-prefixed values 
       child.on("close", () => resolve());
     });
     assert.equal(child.closeObserved, true);
-    assert.deepEqual(JSON.parse(out), { explicit: null, current: null, legacy: null });
+    const observed = JSON.parse(out) as { explicit: string | null; project: string | null; current: string | null; legacy: string | null; args: string[] };
+    assert.deepEqual({ explicit: observed.explicit, project: observed.project, current: observed.current, legacy: observed.legacy },
+      { explicit: null, project: "trusted-root", current: null, legacy: null });
+    assert.deepEqual(observed.args.slice(-4), ["--env", "PROJECT_ROOT", `x@sha256:${"d".repeat(64)}`, "agent"]);
   } finally {
     if (oldCurrent === undefined) delete process.env.WOLLIPOG_PLAIN;
     else process.env.WOLLIPOG_PLAIN = oldCurrent;
@@ -316,15 +325,18 @@ test("cloud argv uses the accepted handoff and keeps provider and helper command
     "--handoff", "handoff-1", "--session", "session-1", "--", "codex", "app-server", "--json",
   ]);
   assert.deepEqual(buildCloudArgs({ command: "C:\\tools\\git.exe", args: ["status"] }, isolation).slice(-3), ["--", "git", "status"]);
+  assert.deepEqual(buildCloudArgs({
+    command: "C:\\tools\\git.exe", args: ["status"], cloudEnvironmentKeys: ["PROJECT_ROOT"],
+  }, isolation).slice(-5), ["--env", "PROJECT_ROOT", "--", "git", "status"]);
   assert.throws(() => buildCloudArgs({
     command: "C:\\host\\codex.cmd", args: ["--wrong"], cloudAgentLaunch: true,
   }, isolation), /arguments do not match/);
 });
 
-test("cloud launches expose only adapter references, not provider or inherited product-prefixed values", async () => {
+test("cloud launches expose adapter references and trust-gated setup environment, not provider values", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "wollipog-cloud-env-"));
   const script = path.join(root, "proxy-probe.js");
-  await fs.writeFile(script, "process.stdout.write(JSON.stringify({adapter:process.env.CLOUD_ADAPTER_TOKEN??null,provider:process.env.OPENAI_API_KEY??null,current:process.env.WOLLIPOG_PLAIN??null,legacy:process.env.MAM_PLAIN??null,args:process.argv.slice(2)}));", "utf8");
+  await fs.writeFile(script, "process.stdout.write(JSON.stringify({adapter:process.env.CLOUD_ADAPTER_TOKEN??null,provider:process.env.OPENAI_API_KEY??null,project:process.env.PROJECT_ROOT??null,current:process.env.WOLLIPOG_PLAIN??null,legacy:process.env.MAM_PLAIN??null,args:process.argv.slice(2)}));", "utf8");
   const oldCurrent = process.env.WOLLIPOG_PLAIN;
   const oldLegacy = process.env.MAM_PLAIN;
   process.env.WOLLIPOG_PLAIN = "current-daemon-value";
@@ -332,7 +344,8 @@ test("cloud launches expose only adapter references, not provider or inherited p
   try {
     const child = spawnAgent({
       command: "codex", args: ["--host-only"], cwd: root,
-      env: { OPENAI_API_KEY: "provider-secret" }, cloudAgentLaunch: true,
+      env: { OPENAI_API_KEY: "provider-secret", PROJECT_ROOT: "trusted-root" }, cloudAgentLaunch: true,
+      cloudEnvironmentKeys: ["PROJECT_ROOT"],
       isolation: {
         backend: "cloud", command: process.execPath, args: [script], env: { CLOUD_ADAPTER_TOKEN: "adapter-secret" },
         targetId: "metered-tools", handoffId: "handoff-1", sessionId: "session-1",
@@ -347,12 +360,13 @@ test("cloud launches expose only adapter references, not provider or inherited p
       child.on("error", reject);
       child.on("close", () => resolve());
     });
-    const observed = JSON.parse(out) as { adapter: string | null; provider: string | null; current: string | null; legacy: string | null; args: string[] };
+    const observed = JSON.parse(out) as { adapter: string | null; provider: string | null; project: string | null; current: string | null; legacy: string | null; args: string[] };
     assert.equal(observed.adapter, "adapter-secret");
     assert.equal(observed.provider, null);
+    assert.equal(observed.project, "trusted-root");
     assert.equal(observed.current, null);
     assert.equal(observed.legacy, null);
-    assert.deepEqual(observed.args.slice(-2), ["codex", "app-server"]);
+    assert.deepEqual(observed.args.slice(-5), ["--env", "PROJECT_ROOT", "--", "codex", "app-server"]);
   } finally {
     if (oldCurrent === undefined) delete process.env.WOLLIPOG_PLAIN;
     else process.env.WOLLIPOG_PLAIN = oldCurrent;

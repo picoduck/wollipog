@@ -58,7 +58,7 @@ v1 operations:
 ```text
 inspect --protocol 1 --target ID --revision N --image DIGEST --setup-check-digest SHA256
 prepare --protocol 1 --target ID --source ABSOLUTE_PATH --idempotency-key SHA256 --manifest BASE64URL_JSON
-connect --protocol 1 --target ID --handoff PRIVATE_ID --session SESSION_ID -- COMMAND [ARGS...]
+connect --protocol 1 --target ID --handoff PRIVATE_ID --session SESSION_ID [--env NAME]... -- COMMAND [ARGS...]
 cancel  --protocol 1 --target ID --handoff PRIVATE_ID
 ```
 
@@ -71,7 +71,10 @@ allocation for repeated calls with that key, closing the crash window between pr
 runner-local receipt persistence. A mismatched or over-budget result fails closed; if it included a
 syntactically valid handoff id, the runner calls `cancel` before rejecting it.
 
-After acceptance, `connect` is the long-lived stdio proxy for the configured remote command. The raw
+After acceptance, `connect` is the long-lived stdio proxy for the configured remote command. A
+trust-approved repository worktree setup may add repeated `--env NAME` options; the adapter reads
+each value from its native environment and forwards it to that command without placing values in
+argv. Adapter credential names cannot be reused by repository setup. The raw
 handoff id stays only in runner-local session state and adapter argv. The control-plane receipt stores
 only its SHA-256. An operator adapter must make `connect` idempotent for the accepted handoff and make
 `cancel` safe to repeat.

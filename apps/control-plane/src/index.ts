@@ -3819,15 +3819,15 @@ async function runSessionWorktreeRequest(
   sessionId: string,
   request:
     | { operation: "create"; baseRef?: string; branch: string; progress?: boolean }
-    | { operation: "attach" | "select" | "discard"; path: string },
+    | { operation: "attach" | "select" | "discard" | "retry_setup"; path: string },
   reply: FastifyReply,
 ) {
   const session = db.getSession(sessionId);
   if (!session) return reply.code(404).send({ error: "session not found" });
   const unsupported = runnerCapabilityError(
     session.runnerId,
-    request.operation === "discard" ? "sessionWorktreeDiscard" : "sessionWorktrees",
-    request.operation === "discard" ? "Session worktree discard" : "Session worktrees",
+    request.operation === "discard" ? "sessionWorktreeDiscard" : request.operation === "retry_setup" ? "worktreeSetup" : "sessionWorktrees",
+    request.operation === "discard" ? "Session worktree discard" : request.operation === "retry_setup" ? "Worktree setup" : "Session worktrees",
   );
   if (unsupported) return reply.code(409).send({ error: unsupported });
   const reconciliationBlock = svc.podReconciliationMutationError(sessionId);
@@ -3876,7 +3876,9 @@ async function runSessionWorktreeRequest(
       session.runnerId,
       requestId,
       { ...request, type: "session_worktree", requestId, sessionId },
-      request.operation === "create" ? SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS : 150_000,
+      request.operation === "create"
+        ? SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS
+        : request.operation === "retry_setup" ? 65 * 60_000 : 150_000,
     );
     if (res.type !== "session_worktree_result") return reply.code(502).send({ error: "unexpected runner reply" });
     if (!res.ok || !res.snapshot) return reply.code(409).send({ error: res.error ?? "worktree operation failed" });
@@ -3935,6 +3937,15 @@ app.post("/api/sessions/:id/worktrees/discard", async (req, reply) => {
     return reply.code(400).send({ error: "path must be a non-empty string of at most 4096 characters" });
   }
   return runSessionWorktreeRequest(id, { operation: "discard", path }, reply);
+});
+
+app.post("/api/sessions/:id/worktrees/retry-setup", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const path = (req.body as { path?: unknown })?.path;
+  if (typeof path !== "string" || !path || path.length > 4096) {
+    return reply.code(400).send({ error: "path must be a non-empty string of at most 4096 characters" });
+  }
+  return runSessionWorktreeRequest(id, { operation: "retry_setup", path }, reply);
 });
 
 // Per-turn checkpoint rewind (T3-style, files only — the conversation continues). The runner
@@ -4048,7 +4059,7 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
         ...(recovery ? { recovery: true as const } : {}),
         ...(deferHistory ? { deferHistory: true } : {}),
       },
-      150_000,
+      65 * 60_000,
     );
     if (res.type !== "fork_result") return reply.code(502).send({ error: "unexpected runner reply" });
     if (!res.ok || !res.snapshot) return reply.code(409).send({ error: res.error ?? "conversation fork failed" });

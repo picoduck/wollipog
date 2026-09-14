@@ -722,6 +722,12 @@ export function createApiClient(transport: ApiTransport) {
 
   restart: (id: string) => req<SessionView>(`/api/sessions/${id}/restart`, { method: "POST" }),
 
+  retryWorktreeSetup: (id: string, path: string) =>
+    req<{ session: SessionView }>(`/api/sessions/${encodeURIComponent(id)}/worktrees/retry-setup`, {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    }),
+
   approve: (id: string, body: ApproveRequest) =>
     req<SessionView>(`/api/sessions/${id}/approve`, {
       method: "POST",
