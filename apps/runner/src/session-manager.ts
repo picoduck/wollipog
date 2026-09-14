@@ -4409,6 +4409,7 @@ export class SessionManager {
             // first checkpoint. Unwind only a worktree this launch actually materialized.
             if (worktreeOwnedByLaunch) {
               const cleanup = launchWorktreeCleanup();
+              cleanup.checkpointGenerationDisposable = true;
               this.cleanupJournal.add(cleanup);
               await this.reapWorktree(cleanup, true);
             }
@@ -4435,8 +4436,10 @@ export class SessionManager {
               const superseded = this.launchWasSuperseded(spec.sessionId, launchGeneration);
               if (worktreeOwnedByLaunch || (deleted && worktreeIdentity?.source !== "attached")) {
                 const cleanup = launchWorktreeCleanup();
+                const cleanupCurrentGeneration = worktreeOwnedByLaunch && !superseded;
+                if (cleanupCurrentGeneration) cleanup.checkpointGenerationDisposable = true;
                 this.cleanupJournal.add(cleanup);
-                await this.reapWorktree(cleanup, worktreeOwnedByLaunch && !superseded);
+                await this.reapWorktree(cleanup, cleanupCurrentGeneration);
                 if (!deleted && !superseded) {
                   this.forgetTransientWorktreeSetupState(spec.sessionId, worktreeIdentity);
                 }
@@ -4504,8 +4507,10 @@ export class SessionManager {
       const superseded = this.launchWasSuperseded(spec.sessionId, launchGeneration);
       if (worktree && (worktreeOwnedByLaunch || (deleted && worktreeIdentity?.source !== "attached"))) {
         const cleanup = launchWorktreeCleanup();
+        const cleanupCurrentGeneration = worktreeOwnedByLaunch && !superseded;
+        if (cleanupCurrentGeneration) cleanup.checkpointGenerationDisposable = true;
         this.cleanupJournal.add(cleanup);
-        await this.reapWorktree(cleanup, worktreeOwnedByLaunch && !superseded);
+        await this.reapWorktree(cleanup, cleanupCurrentGeneration);
       }
       if (priorResumeId && !superseded) this.store.releaseLock(spec.sessionId, this.lockOwner);
       durable?.failed(
@@ -4578,8 +4583,10 @@ export class SessionManager {
         this.store.isDeleted(spec.sessionId);
       if (worktree && (worktreeOwnedByLaunch || (deleted && worktreeIdentity?.source !== "attached"))) {
         const cleanup = launchWorktreeCleanup();
+        const cleanupCurrentGeneration = worktreeOwnedByLaunch && !superseded;
+        if (cleanupCurrentGeneration) cleanup.checkpointGenerationDisposable = true;
         this.cleanupJournal.add(cleanup);
-        await this.reapWorktree(cleanup, worktreeOwnedByLaunch && !superseded);
+        await this.reapWorktree(cleanup, cleanupCurrentGeneration);
       }
       if (priorResumeId && !superseded) this.store.releaseLock(spec.sessionId, this.lockOwner);
       durable?.failed(
@@ -4688,6 +4695,7 @@ export class SessionManager {
       // The session never started; if WE just created its worktree, it's garbage — reap it.
       if (worktree && worktreeOwnedByLaunch && !deleted && !unverified) {
         const cleanup = launchWorktreeCleanup();
+        cleanup.checkpointGenerationDisposable = true;
         this.cleanupJournal.add(cleanup);
         this.store.patchMeta(spec.sessionId, { worktreePath: null });
         await this.reapWorktree(cleanup, true);
@@ -9950,6 +9958,7 @@ export class SessionManager {
           };
         }
         try {
+          cleanup.checkpointGenerationDisposable = true;
           this.cleanupJournal.add(cleanup);
         } catch (cleanupErr) {
           this.log(`failed to journal orphaned worktree cleanup for ${targetSessionId}: ${errText(cleanupErr)}`);
@@ -10577,7 +10586,8 @@ export class SessionManager {
     cleanupCurrentGeneration = false,
     isolationMeta?: SessionMeta,
   ): Promise<void> {
-    if (record.trigger === "creation_rollback" && this.store.has(record.sessionId)) {
+    cleanupCurrentGeneration ||= record.checkpointGenerationDisposable === true;
+    if (record.trigger === "creation_rollback" && this.store.has(record.sessionId) && !cleanupCurrentGeneration) {
       await this.runWorktreeOperation(record.sessionId, async () => {
         await this.reapCreationRollback(record, this.store.readMeta(record.sessionId) ?? undefined);
       });

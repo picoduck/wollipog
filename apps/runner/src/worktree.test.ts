@@ -919,6 +919,56 @@ test("failed requested-worktree creation preserves the live session's checkpoint
   }
 });
 
+test("startup replay reclaims a disposable failed-fork checkpoint generation", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-fork-rollback-replay-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const sessionId = "s_fork_rollback_replay";
+    const handle = await createWorktree(repo, sessionId, { dataDir });
+    const checkpointRef = `refs/wollipog/${sessionId}/worktrees/legacy/fork-1`;
+    execFileSync("git", ["-C", repo, "update-ref", checkpointRef, "HEAD"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId, agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: handle.path, worktreeBranch: handle.branch,
+      driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "failed", title: "fork rollback",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    new WorktreeCleanupJournal(dataDir).add({
+      sessionId,
+      worktreeId: "legacy",
+      repoPath: repo,
+      worktreePath: handle.path,
+      context: { kind: "native" },
+      branch: handle.branch,
+      source: "legacy",
+      trigger: "creation_rollback",
+      removalMode: "force",
+      checkpointGenerationDisposable: true,
+      createdAt: Date.now(),
+    });
+
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    manager.reconcileStore();
+    await waitForCondition(() => !existsSync(handle.path), "startup replay did not remove the failed fork worktree");
+    await waitForCondition(
+      () => new WorktreeCleanupJournal(dataDir).list().length === 0,
+      "startup replay did not complete the failed fork cleanup receipt",
+    );
+    assert.equal(execFileSync(
+      "git", ["-C", repo, "for-each-ref", "--format=%(refname)", `refs/wollipog/${sessionId}/`],
+      { encoding: "utf8" },
+    ).trim(), "");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("safe cleanup retains unreadable live metadata without deadlocking its worktree lane", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-safe-cleanup-corrupt-meta-"));
   const dataDir = join(root, "data");
