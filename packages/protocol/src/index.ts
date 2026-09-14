@@ -2987,6 +2987,12 @@ export interface DescendantRequestView {
   sessionTitle: string;
   runnerId: string;
   runnerOnline: boolean;
+  /** Stable transcript generation used by the canonical child-session deep link. */
+  eventEpoch: number;
+  /** Best available time at which this exact request occurrence became pending. */
+  createdAt: number;
+  /** The actor assigned to answer this request; the dashboard itself is a human surface. */
+  responseOwner: WorkflowDecisionAuthority;
   occurrenceId: string;
   request: PendingApproval;
 }

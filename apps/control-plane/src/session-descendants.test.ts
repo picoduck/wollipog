@@ -17,7 +17,11 @@ test("descendant checks use persisted ancestry and terminate on malformed cycles
     });
     const child = db.listSessionDescendantRequestCandidates("root").find((session) => session.id === "child");
     assert.ok(child);
-    assert.deepEqual(Object.keys(child).sort(), ["id", "pendingApproval", "runnerId", "title"]);
+    assert.deepEqual(Object.keys(child).sort(), [
+      "eventEpoch", "id", "pendingApproval", "runnerId", "title", "updatedAt",
+    ]);
+    assert.equal(child.eventEpoch, 0);
+    assert.equal(child.updatedAt, 2);
     assert.equal(child.runnerId, "r");
     assert.equal(child.pendingApproval?.requestId, "question");
     assert.deepEqual(db.listSessionDescendantRequestCandidates("root").map((session) => session.id).sort(),

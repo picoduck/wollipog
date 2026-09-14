@@ -5808,6 +5808,9 @@ export class SessionsService {
           sessionTitle: session.title,
           runnerId: session.runnerId,
           runnerOnline: this.hub.isRunnerOnline(session.runnerId),
+          eventEpoch: session.eventEpoch ?? 0,
+          createdAt: decision.createdAt,
+          responseOwner: decision.authority,
           occurrenceId: decision.occurrenceId,
           request: this.workflowDecisionApproval(decision),
         }];
@@ -5827,6 +5830,9 @@ export class SessionsService {
           sessionTitle: session.title,
           runnerId: session.runnerId,
           runnerOnline: this.hub.isRunnerOnline(session.runnerId),
+          eventEpoch: session.eventEpoch,
+          createdAt: session.updatedAt,
+          responseOwner: "human",
           occurrenceId: request.occurrenceId,
           request,
         }];

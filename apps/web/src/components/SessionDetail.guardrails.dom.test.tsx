@@ -295,6 +295,9 @@ function descendantRequest(title: string): DescendantRequestView {
     sessionTitle: title,
     runnerId: "runner",
     runnerOnline: true,
+    eventEpoch: 1,
+    createdAt: 1,
+    responseOwner: "human",
     occurrenceId: `request-${title}`,
     request: {
       requestId: `provider-${title}`,
@@ -409,21 +412,31 @@ test("descendant polling coalesces intervals and rejects superseded responses", 
       "a current request failure clears stale request controls");
 
     await act(async () => fireDomEvent.click(container.querySelector("button")!));
+    await act(async () => {
+      requests[6]!.resolve({
+        requests: [{ ...descendantRequest("old-control-plane"), eventEpoch: undefined as unknown as number }],
+      });
+      await requests[6]!.promise;
+    });
+    assert.equal(container.querySelector("span")?.textContent, "",
+      "mixed-version rows without exact routing metadata fail closed");
+
+    await act(async () => fireDomEvent.click(container.querySelector("button")!));
     await act(async () => render("parent-b", true));
-    assert.equal(requests[6]!.signal?.aborted, true, "changing sessions aborts the old request");
-    assert.equal(requests.length, 8);
-    assert.equal(requests[7]!.sessionId, "parent-b");
+    assert.equal(requests[7]!.signal?.aborted, true, "changing sessions aborts the old request");
+    assert.equal(requests.length, 9);
+    assert.equal(requests[8]!.sessionId, "parent-b");
     assert.equal(container.querySelector("span")?.textContent, "");
     const enabledRefresh = exposedRefreshAfterResolution;
     await act(async () => render("parent-b", false));
-    assert.equal(requests[7]!.signal?.aborted, true, "disabling Parent Control aborts the request");
+    assert.equal(requests[8]!.signal?.aborted, true, "disabling Parent Control aborts the request");
     assert.equal(container.querySelector("span")?.textContent, "");
     await act(async () => enabledRefresh?.());
-    assert.equal(requests.length, 8, "a stale resolution callback cannot restart disabled polling");
+    assert.equal(requests.length, 9, "a stale resolution callback cannot restart disabled polling");
     await act(async () => render("parent-b", true));
-    assert.equal(requests.length, 9);
+    assert.equal(requests.length, 10);
     await act(async () => root.unmount());
-    assert.equal(requests[8]!.signal?.aborted, true, "unmounting aborts the active request");
+    assert.equal(requests[9]!.signal?.aborted, true, "unmounting aborts the active request");
   } finally {
     if (container.isConnected) await act(async () => root.unmount());
     container.remove();

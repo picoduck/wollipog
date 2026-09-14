@@ -118,7 +118,8 @@ import {
   subscribeSessionForks,
   type ConversationForkAvailability,
 } from "../session-actions.js";
-import { SessionApprovalBanner, SessionApprovalRegion, SessionQuestionBanner } from "./SessionApproval.js";
+import { SessionApprovalRegion } from "./SessionApproval.js";
+import { sessionRequestPanelKey } from "./SessionRequestPanel.js";
 import { ComposerQuestionResponse } from "./ComposerQuestionResponse.js";
 import { useGovernanceAudit, useGovernanceTimeline } from "./useGovernanceAudit.js";
 import { SessionHeader } from "./SessionHeader.js";
@@ -625,7 +626,14 @@ export function useDescendantRequestPolling({
     void api.descendantRequests(sessionIdRef.current, controller.signal).then(
       ({ requests: next }) => {
         if (controller.signal.aborted || generation !== generationRef.current) return;
-        setRequests((current) => JSON.stringify(current) === JSON.stringify(next) ? current : next);
+        // A newer web client can briefly talk to an older control plane during a rolling update.
+        // Rows without exact routing/ownership metadata are not safe to render or answer.
+        const compatible = next.every((request) =>
+          Number.isSafeInteger(request.eventEpoch) && request.eventEpoch >= 0 &&
+          Number.isFinite(request.createdAt) && request.createdAt > 0 &&
+          (request.responseOwner === "human" || request.responseOwner === "orchestrator"))
+          ? next : [];
+        setRequests((current) => JSON.stringify(current) === JSON.stringify(compatible) ? current : compatible);
       },
       () => {
         if (controller.signal.aborted || generation !== generationRef.current) return;
@@ -757,6 +765,21 @@ function SessionDetailLoaded({
       Object.values(session.parentControlPolicy?.decisions ?? {}).includes("orchestrator")
     ),
   });
+  const ownWorkflowDecision = session.pendingApproval?.kind === "workflow_decision"
+    ? session.pendingApproval.workflowDecision : undefined;
+  const ownEvidenceSnapshot = ownWorkflowDecision?.resourceSnapshot.category === "ui_evidence_approval"
+    ? ownWorkflowDecision.resourceSnapshot : null;
+  const ownEvidenceDecision = ownEvidenceSnapshot ? ownWorkflowDecision! : null;
+  const [selectedRequestKey, setSelectedRequestKey] = useState<string | null>(null);
+  const requestPanelOpen = mode === "expanded" && rightPanel.open && rightPanel.mode === "requests";
+  const openRequestPanel = useCallback((key: string | null = null) => {
+    setSelectedRequestKey(key);
+    rightPanel.show("requests");
+    if (mode === "preview") onExpand?.();
+  }, [mode, onExpand, rightPanel]);
+  useEffect(() => {
+    if (requestPanelOpen && !ownEvidenceDecision && descendantRequests.length === 0) rightPanel.close();
+  }, [descendantRequests.length, ownEvidenceDecision, requestPanelOpen, rightPanel]);
   const anchorRecoveryPending = eventHistory?.refreshing === true ||
     (conn === "online" && eventHistory?.everComplete !== true && eventHistory?.error == null);
   const recoveryRevision = useStoreSelector((s) =>
@@ -4286,9 +4309,19 @@ function SessionDetailLoaded({
             workers: true,
             onOpen: () => rightPanel.show("subagents"),
           } : undefined}
+          descendantRequests={descendantRequests.length > 0 ? {
+            count: descendantRequests.length,
+            onOpen: () => openRequestPanel(
+              sessionRequestPanelKey(descendantRequests[0]!.sessionId, descendantRequests[0]!.occurrenceId),
+            ),
+          } : undefined}
           onOpenBackgroundWork={() => rightPanel.show("background")}
           onOpenAttention={() => {
             const requests = pendingRequests(session.pendingApproval);
+            if (ownEvidenceDecision) {
+              openRequestPanel(sessionRequestPanelKey(session.id, ownEvidenceDecision.occurrenceId));
+              return;
+            }
             // Navigation makes the target reload-safe; the direct state transition also makes a
             // repeat press reopen a panel that was closed while the route stayed unchanged.
             rightPanel.show("subagents");
@@ -4375,41 +4408,8 @@ function SessionDetailLoaded({
             // The fallback owns the request only until the matching pinned row is mounted and the
             // virtual list can keep it reachable at its canonical transcript position.
             questionInTimeline={questionInTimeline}
+            evidenceInReviewSurface={Boolean(ownEvidenceDecision)}
           />
-          {descendantRequests.length > 0 && (
-            <section className="descendant-request-region" aria-label="Descendant Requests">
-              {descendantRequests.map((item) => (
-                <div className="descendant-request" key={item.occurrenceId}>
-                  <div className="plus-section">Request from {item.sessionTitle}</div>
-                  {item.request.kind === "question" ? (
-                    <SessionQuestionBanner
-                      sessionId={item.sessionId}
-                      requestId={item.request.requestId}
-                      questions={item.request.questions ?? []}
-                      recoveryReason={item.request.recoveryReason}
-                      recoveryAction={item.request.recoveryAction}
-                      runnerOnline={item.runnerOnline}
-                      onSessionUpdate={refreshDescendantRequestsAfterResolution}
-                      showKeyHints={false}
-                    />
-                  ) : (
-                    <SessionApprovalBanner
-                      session={{
-                        ...session,
-                        id: item.sessionId,
-                        title: item.sessionTitle,
-                        runnerId: item.runnerId,
-                        pendingApproval: item.request,
-                      }}
-                      runnerOnline={item.runnerOnline}
-                      onSessionUpdate={refreshDescendantRequestsAfterResolution}
-                      showKeyHints={false}
-                    />
-                  )}
-                </div>
-              ))}
-            </section>
-          )}
           <div
             className="detail-main"
             data-active-pane={activePane}
@@ -4596,6 +4596,34 @@ function SessionDetailLoaded({
                       onRevealCurrentOperation={revealCurrentOperation}
                       onOpenSubagent={mode === "expanded" ? openSubagent : undefined}
                     />
+                  )}
+                  {ownEvidenceDecision && ownEvidenceSnapshot && session.pendingApproval && (
+                    <section
+                      className="tl-request-card"
+                      aria-label="Pending UI Evidence Request"
+                      data-session-request-id={session.pendingApproval.requestId}
+                      data-session-request-session={session.id}
+                    >
+                      <span className="tl-request-icon" aria-hidden="true">🖼️</span>
+                      <span className="tl-request-copy">
+                        <strong>UI Evidence Review Required</strong>
+                        <span>
+                          {ownEvidenceSnapshot.evidence.length} evidence{" "}
+                          {ownEvidenceSnapshot.evidence.length === 1 ? "item" : "items"}
+                        </span>
+                      </span>
+                      <button
+                        className="btn primary sm"
+                        type="button"
+                        data-session-request-control="review"
+                        aria-controls="right-panel"
+                        onClick={() => openRequestPanel(
+                          sessionRequestPanelKey(session.id, ownEvidenceDecision.occurrenceId),
+                        )}
+                      >
+                        Review Evidence
+                      </button>
+                    </section>
                   )}
                 </>
               )}
@@ -5242,6 +5270,22 @@ function SessionDetailLoaded({
           governanceHasMore={governanceAudit.hasMore}
           governanceLoadingOlder={governanceAudit.loadingOlder}
           onLoadOlderGovernance={governanceAudit.loadOlder}
+          descendantRequests={descendantRequests}
+          selectedRequestKey={selectedRequestKey}
+          onSelectedRequestKeyChange={setSelectedRequestKey}
+          onSessionUpdate={loadSession}
+          onDescendantsUpdate={refreshDescendantRequestsAfterResolution}
+          onOpenChildRequest={(request) => {
+            rightPanel.close();
+            navigate({
+              name: "session",
+              id: request.sessionId,
+              attention: {
+                eventEpoch: request.eventEpoch,
+                requestId: request.request.requestId,
+              },
+            });
+          }}
           parentTurnEventIds={backgroundParentTurnEventIds}
           onOpenParentTurn={revealBackgroundParentTurn}
           backgroundInventoryError={backgroundInventoryError}

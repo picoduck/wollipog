@@ -10273,6 +10273,8 @@ export class ControlPlaneDb {
     id: string;
     title: string;
     runnerId: string;
+    eventEpoch: number;
+    updatedAt: number;
     pendingApproval: PendingApproval | null;
   }> {
     const rows = this.stmt(`
@@ -10280,19 +10282,23 @@ export class ControlPlaneDb {
         SELECT id FROM sessions WHERE parent_session_id=?
         UNION
         SELECT s.id FROM sessions s JOIN descendants d ON s.parent_session_id=d.id
-      ) SELECT s.id, s.title, s.runner_id, s.pending_approval
+      ) SELECT s.id, s.title, s.runner_id, s.event_epoch, s.updated_at, s.pending_approval
         FROM descendants d JOIN sessions s ON s.id=d.id
         WHERE s.id<>? ORDER BY s.created_at DESC, s.id ASC
     `).all(ancestorId, ancestorId) as unknown as Array<{
       id: string;
       title: string;
       runner_id: string;
+      event_epoch: number;
+      updated_at: number;
       pending_approval: string | null;
     }>;
     return rows.map((row) => ({
       id: row.id,
       title: row.title,
       runnerId: row.runner_id,
+      eventEpoch: row.event_epoch,
+      updatedAt: row.updated_at,
       pendingApproval: parseJson<PendingApproval>(row.pending_approval),
     }));
   }

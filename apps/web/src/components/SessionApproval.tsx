@@ -19,6 +19,12 @@ import {
   type QuestionResponseDraft,
 } from "../question-response.js";
 import { useQuestionResponseStyle } from "../question-response-style.js";
+import { useInstanceScope } from "../instance-scope.js";
+import {
+  clearEvidenceReviewDraft,
+  loadEvidenceReviewDraft,
+  saveEvidenceReviewDraft,
+} from "../evidence-review-drafts.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
 import { StructuredQuestionText } from "./StructuredQuestionText.js";
 import { Checkbox } from "./ui/ChoiceControls.js";
@@ -85,6 +91,7 @@ export function SessionApprovalRegion({
   onSessionUpdate,
   showKeyHints = true,
   questionInTimeline = false,
+  evidenceInReviewSurface = false,
 }: {
   session: SessionView;
   runnerOnline: boolean;
@@ -95,12 +102,16 @@ export function SessionApprovalRegion({
   showKeyHints?: boolean;
   /** Whether the pending question already has an authoritative transcript row. */
   questionInTimeline?: boolean;
+  /** Whether a UI-evidence decision is represented by the transcript trigger + request panel. */
+  evidenceInReviewSurface?: boolean;
 }) {
   const approval = session.pendingApproval;
   const questionFallback = approval?.kind === "question" && !questionInTimeline;
   const standaloneApproval = approval?.kind === "question" ? null : approval;
+  const reviewApproval = evidenceInReviewSurface && standaloneApproval?.kind === "workflow_decision" &&
+    standaloneApproval.workflowDecision?.resourceSnapshot.category === "ui_evidence_approval";
   const requestPresentation = questionFallback ? "fallback" : approval?.kind === "question"
-    ? "timeline" : standaloneApproval ? "standalone" : "none";
+    ? "timeline" : reviewApproval ? "timeline" : standaloneApproval ? "standalone" : "none";
   return (
     <>
       <SessionRequestCoordinator
@@ -113,7 +124,7 @@ export function SessionApprovalRegion({
         alternateFallbackFocusRef={alternateFallbackFocusRef}
         onFallbackFocus={onFallbackFocus}
       />
-      {standaloneApproval && (
+      {standaloneApproval && !reviewApproval && (
         <div data-session-request-id={standaloneApproval.requestId} data-session-request-session={session.id}>
           <SessionApprovalBanner
             key={standaloneApproval.requestId}
@@ -316,29 +327,73 @@ export function SessionApprovalBanner({
   runnerOnline,
   onSessionUpdate,
   showKeyHints = true,
+  presentation = "banner",
 }: {
   session: SessionView;
   runnerOnline: boolean;
   onSessionUpdate?: (session: SessionView) => void;
   showKeyHints?: boolean;
+  presentation?: "banner" | "review";
 }) {
   const api = useApi();
-  const [busy, setBusy] = useState(false);
-  const [showContext, setShowContext] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [reviewedEvidence, setReviewedEvidence] = useState<string[]>([]);
+  const instanceScope = useInstanceScope();
   const approval = session.pendingApproval!;
+  const workflowDecision = approval.kind === "workflow_decision" ? approval.workflowDecision : undefined;
+  const evidenceSnapshot = workflowDecision?.resourceSnapshot.category === "ui_evidence_approval"
+    ? workflowDecision.resourceSnapshot : null;
+  const evidenceDecision = evidenceSnapshot ? workflowDecision! : null;
+  const evidence = evidenceSnapshot?.evidence ?? [];
+  const evidenceIds = evidence.map((item) => item.evidenceId);
+  const [busy, setBusy] = useState(false);
+  const [showContext, setShowContext] = useState(evidence.length === 0);
+  const [error, setError] = useState<string | null>(null);
+  const [reviewedEvidence, setReviewedEvidence] = useState<string[]>(() => evidenceDecision
+    ? loadEvidenceReviewDraft(
+        instanceScope,
+        session.id,
+        approval.requestId,
+        evidenceDecision.resourceDigest,
+        evidenceIds,
+      )
+    : []);
   const contextId = useId();
   const isPolicy = isPolicyApproval(approval);
   const decisionNeedsRunner = approval.kind !== "policy_hook" && approval.kind !== "workflow_decision";
-  const evidence = approval.kind === "workflow_decision" &&
-    approval.workflowDecision?.resourceSnapshot.category === "ui_evidence_approval"
-    ? approval.workflowDecision.resourceSnapshot.evidence : [];
   const evidenceComplete = evidence.every((item) => reviewedEvidence.includes(item.evidenceId));
 
   useEffect(() => {
-    setReviewedEvidence([]);
-  }, [approval.requestId]);
+    setReviewedEvidence(evidenceDecision
+      ? loadEvidenceReviewDraft(
+          instanceScope,
+          session.id,
+          approval.requestId,
+          evidenceDecision.resourceDigest,
+          evidenceIds,
+        )
+      : []);
+    setShowContext(evidence.length === 0);
+    setError(null);
+    setBusy(false);
+  // The ids and digest are the immutable identity of this exact review occurrence.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [approval.requestId, evidenceDecision?.resourceDigest, instanceScope, session.id]);
+
+  const updateEvidence = (evidenceId: string, checked: boolean) => {
+    if (!evidenceDecision) return;
+    setReviewedEvidence((current) => {
+      const next = checked
+        ? [...new Set([...current, evidenceId])]
+        : current.filter((candidate) => candidate !== evidenceId);
+      saveEvidenceReviewDraft(
+        instanceScope,
+        session.id,
+        approval.requestId,
+        evidenceDecision.resourceDigest,
+        next,
+      );
+      return next;
+    });
+  };
 
   const decide = async (optionId: string | null) => {
     setBusy(true);
@@ -349,6 +404,14 @@ export function SessionApprovalBanner({
         optionId,
         ...(evidence.length && optionId === "approve" ? { evidenceReviewed: reviewedEvidence } : {}),
       });
+      if (evidenceDecision) {
+        clearEvidenceReviewDraft(
+          instanceScope,
+          session.id,
+          approval.requestId,
+          evidenceDecision.resourceDigest,
+        );
+      }
       onSessionUpdate?.(updated);
     } catch (cause) {
       setError((cause as Error).message);
@@ -369,6 +432,75 @@ export function SessionApprovalBanner({
         onSessionUpdate={onSessionUpdate}
         showKeyHints={showKeyHints}
       />
+    );
+  }
+
+  if (presentation === "review" && evidenceDecision) {
+    return (
+      <section className="evidence-review-surface" aria-label="UI Evidence Review" aria-busy={busy}>
+        <div className="evidence-review-summary">
+          <div>
+            <h3>{approval.title}</h3>
+            <p>Review every artifact before approving this request.</p>
+          </div>
+          <strong role="status" aria-live="polite">
+            {reviewedEvidence.length} of {evidence.length} Reviewed
+          </strong>
+        </div>
+        <div className="evidence-review-list" aria-label="Evidence Items">
+          {evidence.map((item, index) => (
+            <article className="evidence-review-item" key={item.evidenceId}>
+              <div className="evidence-review-item-main">
+                <span className="evidence-review-index" aria-hidden="true">{index + 1}</span>
+                <div>
+                  <strong>{item.evidenceId}</strong>
+                  <a
+                    className="btn ghost sm"
+                    href={item.uri}
+                    target="_blank"
+                    rel="noreferrer"
+                    aria-label={`View Evidence: ${item.evidenceId}`}
+                  >
+                    View Evidence
+                  </a>
+                </div>
+              </div>
+              <label className="evidence-reviewed-control">
+                <Checkbox
+                  label={`Mark ${item.evidenceId} as Reviewed`}
+                  checked={reviewedEvidence.includes(item.evidenceId)}
+                  onChange={(checked) => updateEvidence(item.evidenceId, checked)}
+                />
+                Reviewed
+              </label>
+            </article>
+          ))}
+          <details className="evidence-review-details">
+            <summary>Advanced Details</summary>
+            <dl>
+              <div><dt>Resource Key</dt><dd>{evidenceDecision.resourceKey}</dd></div>
+              <div><dt>Resource Digest</dt><dd>{evidenceDecision.resourceDigest}</dd></div>
+            </dl>
+          </details>
+        </div>
+        {error && <div className="form-error" role="alert">Approval failed: {error}</div>}
+        <div className="evidence-review-actions">
+          {approval.options.map((option) => {
+            const blocksApproval = option.optionId === "approve" && !evidenceComplete;
+            return (
+              <button
+                key={option.optionId}
+                type="button"
+                className={`btn ${option.kind?.startsWith("allow") ? "primary" : "danger"}`}
+                disabled={busy || blocksApproval}
+                onClick={() => void decide(option.optionId)}
+              >
+                {busy ? "Submitting…" : option.name}
+              </button>
+            );
+          })}
+        </div>
+      </section>
     );
   }
 
@@ -431,11 +563,7 @@ export function SessionApprovalBanner({
                 <Checkbox
                   label={`Mark ${item.evidenceId} as Reviewed`}
                   checked={reviewedEvidence.includes(item.evidenceId)}
-                  onChange={(checked) => {
-                    setReviewedEvidence((current) => checked
-                      ? [...current, item.evidenceId]
-                      : current.filter((evidenceId) => evidenceId !== item.evidenceId));
-                  }}
+                  onChange={(checked) => updateEvidence(item.evidenceId, checked)}
                 />
                 I reviewed this evidence.
               </label>
