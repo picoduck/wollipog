@@ -410,7 +410,7 @@ test("session indicators preserve simultaneous lifecycle, attention, and change 
     assert.ok(container.querySelector('[role="group"][aria-label="Session Status"]'));
     assert.equal(container.querySelector('[aria-label="Activity: Running"]')?.textContent?.trim(), "Running");
     assert.equal(container.querySelector('[aria-label="Attention: Answer Required"]')?.textContent?.trim(), "Answer Required");
-    assert.equal(container.querySelector('[aria-label="Attention: Needs Your Input"]')?.textContent?.trim(), "Needs Your Input");
+    assert.match(container.querySelector('[aria-label="Needs Your Input: 2 Requests"]')?.textContent ?? "", /Needs Your Input\s*2/u);
     assert.match(container.querySelector('[aria-label="Orchestrator Action: 3 Requests"]')?.textContent ?? "", /Orchestrator Action\s*3/u);
     assert.equal(container.querySelector('[aria-label="Health: Disconnected"]')?.textContent?.trim(), "Disconnected");
     assert.equal(
@@ -436,6 +436,48 @@ test("session indicators preserve simultaneous lifecycle, attention, and change 
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
+  }
+});
+
+test("direct attention and campaign request badges keep distinct destinations", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  let directOpens = 0;
+  let campaignOpens = 0;
+  try {
+    await act(async () => {
+      root.render(<SessionStatusIndicators
+        session={{
+          status: "input_required",
+          pendingApproval: {
+            requestId: "root-question",
+            title: "Choose a database",
+            options: [],
+            kind: "question",
+          },
+          orchestratorCampaign: {
+            pendingRequests: { human: 2, orchestrator: 3 },
+          } as SessionView["orchestratorCampaign"],
+        }}
+        onOpenAttention={() => { directOpens += 1; }}
+        onOpenCampaignRequests={() => { campaignOpens += 1; }}
+      />);
+    });
+    const direct = container.querySelector('[aria-label="Attention: Answer Required"]') as HTMLButtonElement;
+    const humanCampaign = container.querySelector('[aria-label="Needs Your Input: 2 Requests"]') as HTMLButtonElement;
+    const orchestratorCampaign = container.querySelector('[aria-label="Orchestrator Action: 3 Requests"]') as HTMLButtonElement;
+    await act(async () => {
+      direct.click();
+      humanCampaign.click();
+      orchestratorCampaign.click();
+    });
+    assert.equal(directOpens, 1);
+    assert.equal(campaignOpens, 2);
+  } finally {
+    await act(async () => root.unmount());
+    happyContainer.remove();
   }
 });
 

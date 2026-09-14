@@ -2011,9 +2011,13 @@ test("opt-in Parent Control resolves exact nested request occurrences with agent
     assert.equal(parent.data.parentControl, "questions");
     db.updateSessionStatus(parent.data.id, "running", Date.now());
 
-    const createChild = (parentSessionId: string, title: string) => {
+    const createChild = (parentSessionId: string, title: string, nestedOrchestrator = false) => {
       const request = {
-        runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, title,
+        runnerId: RUNNER_ID,
+        workspaceId: WORKSPACE_ID,
+        agentId: nestedOrchestrator ? "test-orchestrator" : AGENT_ID,
+        title,
+        ...(nestedOrchestrator ? { config: { permissionMode: "orchestrator" as const } } : {}),
       };
       let created = svc.createSession(
         request, undefined, undefined, false, false, false, { parentSessionId },
@@ -2032,12 +2036,78 @@ test("opt-in Parent Control resolves exact nested request occurrences with agent
     const child = createChild(parent.data.id, "Child");
     assert.equal(child.parentControl, "off", "agent-created children never inherit delegated Parent Control");
     const grandchild = createChild(child.id, "Grandchild");
+    const nestedOrchestrator = createChild(parent.data.id, "Nested Orchestrator", true);
+    const nestedGrandchild = createChild(nestedOrchestrator.id, "Nested Grandchild");
+    const campaignOutboundCalls: Array<{ campaignSessionId: string; childSessionId: string; occurrenceId: string }> = [];
+    const recordCampaignOutbound = db.recordOutboundCampaignInputRequired.bind(db);
+    db.recordOutboundCampaignInputRequired = ((input) => {
+      campaignOutboundCalls.push(input);
+      return recordCampaignOutbound(input);
+    }) as typeof db.recordOutboundCampaignInputRequired;
+    svc.onSessionEvent(nestedGrandchild.id, {
+      kind: "question_request",
+      requestId: "human-nested-question",
+      occurrenceId: "request_human_nested",
+      questions: [{
+        id: "secret",
+        header: "Credential",
+        question: "Enter the one-time credential",
+        secret: true,
+        allowOther: true,
+        options: [],
+      }],
+    });
+    assert.equal(db.campaignProjection(parent.data.id)?.pendingRequests?.human, 1);
+    assert.deepEqual(campaignOutboundCalls.map(({ campaignSessionId, childSessionId, occurrenceId }) => ({
+      campaignSessionId, childSessionId, occurrenceId,
+    })), [{
+      campaignSessionId: parent.data.id,
+      childSessionId: nestedGrandchild.id,
+      occurrenceId: "request_human_nested",
+    }], "a provider question reaches the parent outbound-event producer through service wiring");
+    assert.equal(db.getSession(nestedOrchestrator.id)?.orchestratorCampaign?.pendingRequests, undefined,
+      "a nested Orchestrator retains campaign context without duplicating root attention counts");
+    assert.deepEqual(svc.descendantRequests(parent.data.id, () => true, "human").data?.requests
+      .filter((request) => request.occurrenceId === "request_human_nested")
+      .map((request) => request.responseOwner), ["human"]);
+    assert.ok(svc.answerQuestion(
+      nestedGrandchild.id,
+      "human-nested-question",
+      { secret: "one-time-value" },
+    ).ok);
+    assert.equal(db.campaignProjection(parent.data.id)?.pendingRequests?.human, 0);
+    svc.onSessionEvent(nestedGrandchild.id, {
+      kind: "question_request",
+      requestId: "restart-cancelled-question",
+      occurrenceId: "request_restart_cancelled",
+      questions: [{
+        id: "secret",
+        header: "Credential",
+        question: "Enter another one-time credential",
+        secret: true,
+        allowOther: true,
+        options: [],
+      }],
+    });
+    hub.sessionChangedByIdCalls.length = 0;
+    assert.ok(svc.restart(nestedGrandchild.id).ok);
+    assert.ok(hub.sessionChangedByIdCalls.includes(parent.data.id),
+      "cancelling a descendant request through restart refreshes the outermost campaign");
+    assert.equal(db.campaignProjection(parent.data.id)?.pendingRequests?.human, 0);
     const questionOccurrence = "request_question_occurrence";
     svc.onSessionEvent(grandchild.id, {
       kind: "question_request", requestId: "provider-reused-id", occurrenceId: questionOccurrence,
       questions: [{ id: "q", header: "Next", question: "What next?", options: [{ label: "Continue" }] }],
     });
-    assert.deepEqual(db.getSession(grandchild.id)?.pendingRequestOwners, { human: 0, orchestrator: 1 });
+    assert.deepEqual(db.getSession(grandchild.id)?.pendingRequestOwners, {
+      human: 0,
+      orchestrator: 1,
+      requests: [{
+        requestId: "provider-reused-id",
+        occurrenceId: questionOccurrence,
+        owner: "orchestrator",
+      }],
+    });
     assert.equal(hub.suppressedReminderEvents.at(-1)?.payload.kind, "question_request",
       "an Orchestrator-owned child request does not wake a human reminder");
 
@@ -2073,6 +2143,34 @@ test("opt-in Parent Control resolves exact nested request occurrences with agent
       entry.stage === "resolution" && entry.actor.kind === "agent" && entry.actor.id === parent.data!.id));
 
     assert.ok(svc.setParentControl(parent.data.id, "questions_and_approvals").ok);
+    assert.ok(svc.upsertGovernancePolicy({
+      policyId: "human-review-reminder",
+      name: "Human Review Reminder",
+      effect: "ask",
+      priority: 100,
+      enabled: true,
+      scope: { toolName: "ReviewTool" },
+    }).ok);
+    const suppressedBeforePolicyAsk = hub.suppressedReminderEvents.length;
+    svc.onSessionEvent(child.id, {
+      kind: "permission_request",
+      requestId: "policy-human",
+      occurrenceId: "request_policy_human",
+      title: "Review Operation",
+      context: { toolName: "ReviewTool" },
+      options: [
+        { optionId: "once", name: "Allow Once", kind: "allow_once" },
+        { optionId: "deny", name: "Deny", kind: "reject_once" },
+      ],
+    });
+    assert.equal(hub.suppressedReminderEvents.length, suppressedBeforePolicyAsk,
+      "a governance-policy ask remains human-owned before the reminder event is routed");
+    assert.deepEqual(db.getSession(child.id)?.pendingRequestOwners, {
+      human: 1,
+      orchestrator: 0,
+      requests: [{ requestId: "policy-human", occurrenceId: "request_policy_human", owner: "human" }],
+    });
+    assert.ok(svc.approve(child.id, "policy-human", "deny").ok);
     const approvalOccurrence = "request_approval_occurrence";
     svc.onSessionEvent(child.id, {
       kind: "permission_request", requestId: "permission", occurrenceId: approvalOccurrence,
@@ -2082,7 +2180,11 @@ test("opt-in Parent Control resolves exact nested request occurrences with agent
         { optionId: "deny", name: "Deny", kind: "reject_once" },
       ],
     });
-    assert.deepEqual(db.getSession(child.id)?.pendingRequestOwners, { human: 0, orchestrator: 1 });
+    assert.deepEqual(db.getSession(child.id)?.pendingRequestOwners, {
+      human: 0,
+      orchestrator: 1,
+      requests: [{ requestId: "permission", occurrenceId: approvalOccurrence, owner: "orchestrator" }],
+    });
     assert.equal(svc.resolveDescendantRequest(parent.data.id, child.id, approvalOccurrence, {
       action: "approve", optionId: "always",
     }, () => true).status, 400, "delegation never grants persistent permission");

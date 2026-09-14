@@ -12458,9 +12458,11 @@ export class ControlPlaneDb {
     }>) : [];
     const verified = this.validCampaignChildReportIds(resolvedCampaignId);
     const pending = this.stmt(
-      `SELECT session_id, authority FROM workflow_decisions
+      `SELECT session_id, occurrence_id, authority FROM workflow_decisions
        WHERE controlling_session_id=? AND status='pending'`,
-    ).all(resolvedCampaignId) as unknown as Array<{ session_id: string; authority: WorkflowDecisionAuthority }>;
+    ).all(resolvedCampaignId) as unknown as Array<{
+      session_id: string; occurrence_id: string; authority: WorkflowDecisionAuthority;
+    }>;
     const pendingHuman = pending.filter((decision) => decision.authority === "human");
     const pendingOrchestrator = pending.filter((decision) => decision.authority === "orchestrator");
     const parentControl = campaign.parent_control === "questions" || campaign.parent_control === "questions_and_approvals"
@@ -12468,6 +12470,8 @@ export class ControlPlaneDb {
       : "off";
     let pendingGenericHuman = 0;
     let pendingGenericOrchestrator = 0;
+    const humanRequestKeys = pendingHuman.map((decision) =>
+      `typed:${decision.session_id}:${decision.occurrence_id}`);
     let waitingHuman = 0;
     let active = 0;
     let blocked = 0;
@@ -12487,6 +12491,7 @@ export class ControlPlaneDb {
           pendingGenericOrchestrator += 1;
         } else {
           pendingGenericHuman += 1;
+          humanRequestKeys.push(`generic:${child.id}:${request.occurrenceId ?? request.requestId}`);
           childHasHumanRequest = true;
         }
       }
@@ -12536,10 +12541,11 @@ export class ControlPlaneDb {
       },
       children: { total, active, waitingHuman, blocked, verified: fullyVerified, cleanupPending },
       pendingDecisions: { human: pendingHuman.length, orchestrator: pendingOrchestrator.length },
-      pendingRequests: {
+      ...(resolvedCampaignId === campaignSessionId ? { pendingRequests: {
         human: pendingHuman.length + pendingGenericHuman,
         orchestrator: pendingOrchestrator.length + pendingGenericOrchestrator,
-      },
+        humanRevision: createHash("sha256").update(humanRequestKeys.sort().join("\n")).digest("hex").slice(0, 16),
+      } } : {}),
       followUps: {
         unique: Number(followUps.unique_count ?? 0),
         duplicates: Number(followUps.duplicate_count ?? 0),
@@ -15984,18 +15990,24 @@ export class ControlPlaneDb {
   private pendingRequestOwners(
     row: SessionRow,
     pending: PendingApproval | null,
-  ): { human: number; orchestrator: number } | undefined {
+  ): NonNullable<SessionView["pendingRequestOwners"]> | undefined {
     const requests = pendingRequests(pending);
     if (!row.parent_session_id || requests.length === 0) return undefined;
     let human = 0;
     let orchestrator = 0;
+    const owners: NonNullable<NonNullable<SessionView["pendingRequestOwners"]>["requests"]> = [];
     for (const request of requests) {
       const owner = this.parentedRequestOwner(row, request);
       if (!owner) return undefined;
       if (owner === "orchestrator") orchestrator += 1;
       else human += 1;
+      owners.push({
+        requestId: request.requestId,
+        ...(request.occurrenceId ? { occurrenceId: request.occurrenceId } : {}),
+        owner,
+      });
     }
-    return { human, orchestrator };
+    return { human, orchestrator, requests: owners };
   }
 
   private childAttentionOwners(sessionId: string, pending: PendingApproval | null): ChildSessionAttentionOwner[] {

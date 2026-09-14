@@ -31,6 +31,16 @@ test("idle Orchestrator campaigns notify when a new human-owned request appears"
   assert.equal(notifyDecision(next, next), null);
 });
 
+test("idle Orchestrator campaigns notify when a human request is replaced at the same count", () => {
+  const campaign = (humanRevision: string) => ({
+    pendingRequests: { human: 1, orchestrator: 0, humanRevision },
+  }) as SessionView["orchestratorCampaign"];
+  const previous = session({ status: "idle", orchestratorCampaign: campaign("request-a") });
+  const next = session({ status: "idle", orchestratorCampaign: campaign("request-b") });
+  assert.match(notifyDecision(previous, next)?.title ?? "", /needs your input/);
+  assert.equal(notifyDecision(next, next), null);
+});
+
 test("running -> input_required notifies with the approval title", () => {
   const next = session({ status: "input_required", pendingApproval: { requestId: "r", title: "Run: rm -rf build", options: [] } });
   const p = notifyDecision(session({ status: "running" }), next);

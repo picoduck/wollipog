@@ -35,8 +35,13 @@ function newlySettledBackgroundDelivery(prev: PushDecisionPrev, next: SessionVie
 
 export function pushDecision(prev: PushDecisionPrev, next: SessionView): PushMessage | null {
   const name = clamp(next.title?.trim() || "Session", 60);
-  const campaignAttentionAdded = (next.orchestratorCampaign?.pendingRequests?.human ?? 0) >
-    (prev.orchestratorCampaign?.pendingRequests?.human ?? 0);
+  const previousCampaignRequests = prev.orchestratorCampaign?.pendingRequests;
+  const nextCampaignRequests = next.orchestratorCampaign?.pendingRequests;
+  const campaignAttentionAdded = (nextCampaignRequests?.human ?? 0) > 0 && (
+    previousCampaignRequests?.humanRevision && nextCampaignRequests?.humanRevision
+      ? previousCampaignRequests.humanRevision !== nextCampaignRequests.humanRevision
+      : (nextCampaignRequests?.human ?? 0) > (previousCampaignRequests?.human ?? 0)
+  );
   if (campaignAttentionAdded) {
     return {
       title: `${name} needs your input`,

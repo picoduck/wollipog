@@ -4337,13 +4337,12 @@ function SessionDetailLoaded({
           onOpenBackgroundWork={() => rightPanel.show("background")}
           onOpenAttention={() => {
             const requests = pendingRequests(session.pendingApproval);
-            if ((session.orchestratorCampaign?.pendingRequests?.human ?? 0) > 0 ||
-                (session.orchestratorCampaign?.pendingRequests?.orchestrator ?? 0) > 0) {
-              rightPanel.show("requests");
-              return;
-            }
             if (ownEvidenceDecision) {
               openRequestPanel(sessionRequestPanelKey(session.id, ownEvidenceDecision.occurrenceId));
+              return;
+            }
+            if (requests.length === 0 && (session.orchestratorCampaign?.pendingRequests?.human ?? 0) > 0) {
+              rightPanel.show("requests");
               return;
             }
             // Navigation makes the target reload-safe; the direct state transition also makes a
@@ -4354,6 +4353,7 @@ function SessionDetailLoaded({
               ...(requests.length === 1 ? { requestId: requests[0]!.requestId } : {}),
             } });
           }}
+          onOpenCampaignRequests={() => rightPanel.show("requests")}
           // The unified bar replaces the app-level top bar on desktop, so it owns the page-title
           // focus-rescue anchor there; the mobile layout keeps the app bar and its own anchor.
           titleId={!isMobile ? "page-title" : undefined}

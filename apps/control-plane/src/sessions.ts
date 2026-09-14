@@ -4926,6 +4926,7 @@ export class SessionsService {
   }
 
   private requestStop(session: SessionView, now: number, archiveAfterStop = false, refreshProject = true): SessionView {
+    const campaignBefore = this.campaignAttentionController(session);
     // Persist before touching the socket: ws.send acceptance is not delivery proof on a half-open
     // connection. Reconnect inventory/status reconciliation owns retry and final clearance.
     const existing = this.db.sessionStopIntent(session.id);
@@ -4944,6 +4945,7 @@ export class SessionsService {
     const stopped = this.db.getSession(session.id)!;
     if (refreshProject) this.hub.sessionChangedById(session.id);
     else this.hub.sessionChanged(stopped, false);
+    this.publishCampaignAttentionTransition(campaignBefore);
     return stopped;
   }
 
@@ -5049,6 +5051,7 @@ export class SessionsService {
   restart(sessionId: string): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    const campaignBefore = this.campaignAttentionController(session);
     if (session.stopOperation?.status === "stop_failed") {
       return fail("retry the failed Stop before restarting the session", 409);
     }
@@ -5155,6 +5158,7 @@ export class SessionsService {
     // The runner replaces any existing process for this sessionId (no separate
     // stop_session, which would emit a terminal 'stopped' that blocks the restart).
     this.hub.sessionChangedById(sessionId);
+    this.publishCampaignAttentionTransition(campaignBefore);
     this.log.info(`session restarted ${sessionId}`);
     return ok(this.db.getSession(sessionId)!);
   }
@@ -5348,6 +5352,12 @@ export class SessionsService {
       current = current.parentSessionId ? this.db.getSession(current.parentSessionId) : null;
     }
     return controller;
+  }
+
+  private campaignAttentionController(session: SessionView | null): SessionView | null {
+    return session?.parentSessionId
+      ? this.orchestratorCampaignController(this.db.getSession(session.parentSessionId))
+      : null;
   }
 
   private publishCampaignAttentionTransition(before: SessionView | null): void {
@@ -6913,6 +6923,7 @@ export class SessionsService {
   }
 
   private deleteMaterializedSession(session: SessionView): void {
+    const campaignBefore = this.campaignAttentionController(session);
     this.cancelTitleGeneration(session.id);
     const pods = this.db.podsForSession(session.id);
     const now = Date.now();
@@ -6923,7 +6934,7 @@ export class SessionsService {
     }
     this.db.deleteSession(session.id);
     this.hub.sessionRemoved(session.id);
-    if (session.parentSessionId) this.hub.sessionChangedById(session.parentSessionId);
+    this.publishCampaignAttentionTransition(campaignBefore);
     for (const pod of pods) {
       const updatedPod = this.db.reconcilePodAfterMembershipLoss(pod.id, Date.now());
       if (updatedPod) this.hub.podChanged(updatedPod);
@@ -8308,6 +8319,7 @@ export class SessionsService {
       this.log.warn(`ignoring session_status for ${sessionId} from ${fromRunnerId} (owned by ${session.runnerId})`);
       return;
     }
+    const campaignBefore = this.campaignAttentionController(session);
     let admittedReplacement = false;
     if (this.db.hasSessionStopIntent(sessionId)) {
       const restartLaunchId = this.db.sessionStopRestartLaunchId(sessionId);
@@ -8323,6 +8335,7 @@ export class SessionsService {
           this.sendStopCommand(session.runnerId, sessionId);
         }
         this.hub.sessionChangedById(sessionId);
+        this.publishCampaignAttentionTransition(campaignBefore);
         return;
       }
     }
@@ -8378,6 +8391,7 @@ export class SessionsService {
     // the notification carries the ask instead of a misleading "ready".
     this.notifyTransition(session, sessionId);
     this.hub.sessionChangedById(sessionId);
+    this.publishCampaignAttentionTransition(campaignBefore);
   }
 
   /** Materialize the decision for a runner-owned cancellation even when the control-plane rule
@@ -8705,6 +8719,33 @@ export class SessionsService {
       kind: "question",
       questions: payload.questions,
     } : null;
+    const permissionDecision = payload.kind === "permission_request" ? (() => {
+      const approval = incomingRequest!;
+      const escalatedBy = reviewerForAudit(payload.context?.escalatedBy);
+      const policyDecision = approval.kind === "authentication"
+        ? { effect: "ask" as const, policy: null, matchedPolicyIds: [] }
+        : evaluateApprovalPolicies(
+            {
+              scope: approvalScope(session, approval),
+              status: session.status,
+              costUsd: session.costUsd,
+              toolCallCount: this.db.countToolCalls(sessionId),
+              escalated: Boolean(escalatedBy),
+            },
+            this.governancePolicies(),
+          );
+      const policyOption = policyDecision.effect === "ask"
+        ? undefined
+        : optionForPolicy(approval, policyDecision.effect);
+      const effectiveEffect = policyDecision.effect === "allow" && !policyOption
+        ? "ask" as const
+        : policyDecision.effect;
+      // Ownership and reminder routing must see the same policy-enriched request that is stored.
+      if (effectiveEffect === "ask" && policyDecision.policy) {
+        approval.governancePolicyId = policyDecision.policy.policyId;
+      }
+      return { escalatedBy, policyDecision, policyOption, effectiveEffect };
+    })() : null;
     const suppressRequestReminder = Boolean(
       incomingRequest && this.orchestratorOwnsGenericRequest(session, incomingRequest),
     );
@@ -8859,7 +8900,7 @@ export class SessionsService {
 
     if (payload.kind === "permission_request") {
       const approval = incomingRequest!;
-      const escalatedBy = reviewerForAudit(payload.context?.escalatedBy);
+      const { escalatedBy, policyDecision, policyOption, effectiveEffect } = permissionDecision!;
       if (escalatedBy) {
         this.recordGovernanceAudit(
           session,
@@ -8901,25 +8942,6 @@ export class SessionsService {
         return;
       }
 
-      const policyDecision = approval.kind === "authentication"
-        ? { effect: "ask" as const, policy: null, matchedPolicyIds: [] }
-        : evaluateApprovalPolicies(
-            {
-              scope: approvalScope(session, approval),
-              status: session.status,
-              costUsd: session.costUsd,
-              toolCallCount: this.db.countToolCalls(sessionId),
-              escalated: Boolean(escalatedBy),
-            },
-            this.governancePolicies(),
-          );
-      const policyOption = policyDecision.effect === "ask" ? undefined : optionForPolicy(approval, policyDecision.effect);
-      // Auto-allow is strictly single-shot. A hard deny may cancel the provider request with null
-      // when it offers no reject_once option; it must never weaken into a human-overridable ask.
-      const effectiveEffect = policyDecision.effect === "allow" && !policyOption ? "ask" : policyDecision.effect;
-      if (effectiveEffect === "ask" && policyDecision.policy) {
-        approval.governancePolicyId = policyDecision.policy.policyId;
-      }
       if (policyDecision.policy) {
         this.recordGovernanceAudit(
           session,
@@ -9161,6 +9183,7 @@ export class SessionsService {
     const now = Date.now();
     for (const s of this.db.listSessions({ includeArchived: true })) {
       if (s.runnerId === runnerId && !isTerminal(s.status)) {
+        const campaignBefore = this.campaignAttentionController(s);
         this.automaticQuestions.delete(s.id);
         this.abortPolicyHookApprovals(s, now, "runner-disconnected");
         // A disconnect stop is provisional — reconnect hydration can restore this exact run, and
@@ -9173,6 +9196,7 @@ export class SessionsService {
         );
         this.hub.sessionEvent(ev);
         this.hub.sessionChangedById(s.id);
+        this.publishCampaignAttentionTransition(campaignBefore);
       }
     }
   }
@@ -9200,6 +9224,7 @@ export class SessionsService {
         continue;
       }
       if (liveSet.has(s.id) && s.status === "stopped") {
+        const campaignBefore = this.campaignAttentionController(s);
         this.db.updateSessionStatus(s.id, "idle", now);
         // Same flap-recovery rule as hydrateRunnerSessions: re-derive a policy pause the
         // disconnect wiped (pre-snapshot runners restore through this path).
@@ -9208,7 +9233,9 @@ export class SessionsService {
         const ev = this.db.appendEvent(s.id, { kind: "stderr", text: "runner reconnected — session restored" }, now);
         this.hub.sessionEvent(ev);
         this.hub.sessionChangedById(s.id);
+        this.publishCampaignAttentionTransition(campaignBefore);
       } else if (!liveSet.has(s.id)) {
+        const campaignBefore = this.campaignAttentionController(s);
         const hadOpenHookApproval = this.db.listOpenPolicyHookApprovals(s.id).length > 0;
         if (hadOpenHookApproval) {
           this.abortPolicyHookApprovals(s, now, "provider-session-absent");
@@ -9217,7 +9244,10 @@ export class SessionsService {
           this.revokeUnconsumedWorkflowDecisionsForSession(s.id, "provider-session-absent");
           this.db.updateSessionStatus(s.id, "stopped", now);
         }
-        if (hadOpenHookApproval || !isTerminal(s.status)) this.hub.sessionChangedById(s.id);
+        if (hadOpenHookApproval || !isTerminal(s.status)) {
+          this.hub.sessionChangedById(s.id);
+          this.publishCampaignAttentionTransition(campaignBefore);
+        }
       }
     }
   }
@@ -9240,6 +9270,7 @@ export class SessionsService {
         continue;
       }
       const existing = this.db.getSession(snap.id);
+      const campaignBefore = this.campaignAttentionController(existing);
       if (existing?.archived && !isTerminal(snap.status) && !stopIntentIds.has(snap.id)) {
         this.requestStop(existing, now, true);
         continue;
@@ -9258,6 +9289,7 @@ export class SessionsService {
             this.sendStopCommand(runnerId, snap.id);
           }
           this.hub.sessionChangedById(snap.id);
+          this.publishCampaignAttentionTransition(campaignBefore);
           continue;
         }
       }
@@ -9301,9 +9333,11 @@ export class SessionsService {
       this.gateOnPolicy(snap.id, now);
       this.restorePendingWorkflowDecisionCards(snap.id);
       this.hub.sessionChangedById(snap.id);
+      this.publishCampaignAttentionTransition(campaignBefore);
     }
     for (const s of this.db.listSessions({ includeArchived: true })) {
       if (s.runnerId === runnerId && !byId.has(s.id)) {
+        const campaignBefore = this.campaignAttentionController(s);
         if (stopIntentIds.has(s.id)) this.settleStopIntent(s.id, now);
         const hadOpenHookApproval = this.db.listOpenPolicyHookApprovals(s.id).length > 0;
         if (hadOpenHookApproval) {
@@ -9313,7 +9347,10 @@ export class SessionsService {
           this.revokeUnconsumedWorkflowDecisionsForSession(s.id, "provider-session-absent");
           this.db.updateSessionStatus(s.id, "stopped", now);
         }
-        if (hadOpenHookApproval || !isTerminal(s.status)) this.hub.sessionChangedById(s.id);
+        if (hadOpenHookApproval || !isTerminal(s.status)) {
+          this.hub.sessionChangedById(s.id);
+          this.publishCampaignAttentionTransition(campaignBefore);
+        }
       }
     }
     // The box no longer reports these ordinary user-delete tombstones -> the delete took. Fork
@@ -9348,6 +9385,7 @@ export class SessionsService {
   applySessionRuntimeUpdate(runnerId: string, snapshot: SessionSnapshot): void {
     const existing = this.db.getSession(snapshot.id);
     if (!existing || existing.runnerId !== runnerId || this.db.isTombstoned(snapshot.id)) return;
+    const campaignBefore = this.campaignAttentionController(existing);
     if (existing.archived && !isTerminal(snapshot.status) && !this.db.hasSessionStopIntent(snapshot.id)) {
       this.requestStop(existing, Date.now(), true);
       return;
@@ -9364,6 +9402,7 @@ export class SessionsService {
           this.sendStopCommand(runnerId, snapshot.id);
         }
         this.hub.sessionChangedById(snapshot.id);
+        this.publishCampaignAttentionTransition(campaignBefore);
         return;
       }
     }
@@ -9397,6 +9436,7 @@ export class SessionsService {
     }
     this.restorePendingWorkflowDecisionCards(snapshot.id);
     this.hub.sessionChangedById(snapshot.id);
+    this.publishCampaignAttentionTransition(campaignBefore);
   }
 
   /** Lazy-hydrate a session's event timeline from the runner (the box owns the log). Called when a

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  sessionAttentionBreakdown,
   sessionAttentionStatus,
   type GitStatusInfo,
   type GitSummaryInfo,
@@ -108,6 +109,38 @@ test("idle Orchestrator campaigns surface human-owned descendant attention witho
     Partial<Pick<SessionView, "pendingRequestOwners">>;
   assert.equal(sessionAttentionStatus(orchestratorOwnedChild), null,
     "Orchestrator-owned child work does not become human attention");
+});
+
+test("mixed-owner child requests exclude Orchestrator work from human attention", () => {
+  const mixed = {
+    status: "input_required",
+    pendingApproval: {
+      requestId: "human-auth",
+      title: "Sign in",
+      options: [],
+      kind: "authentication",
+      additionalRequests: [{
+        requestId: "orchestrator-question",
+        title: "Choose implementation",
+        options: [],
+        kind: "question",
+        questions: [],
+      }],
+    },
+    pendingRequestOwners: {
+      human: 1,
+      orchestrator: 1,
+      requests: [
+        { requestId: "human-auth", owner: "human" },
+        { requestId: "orchestrator-question", owner: "orchestrator" },
+      ],
+    },
+  } as Pick<SessionView, "status" | "pendingApproval"> &
+    Partial<Pick<SessionView, "pendingRequestOwners">>;
+  assert.equal(sessionAttentionStatus(mixed)?.label, "Authentication Required");
+  assert.deepEqual(sessionAttentionBreakdown(mixed).map(({ label, count }) => ({ label, count })), [
+    { label: "Authentication Required", count: 1 },
+  ]);
 });
 
 function gitStatus(overrides: Partial<GitStatusInfo> = {}): GitStatusInfo {

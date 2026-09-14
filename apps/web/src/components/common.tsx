@@ -218,14 +218,22 @@ export function AttentionBadge({ session, ariaLabel, onOpen }: {
 }) {
   const attention = sessionAttentionStatus(session);
   if (!attention) return null;
+  const campaignCount = !session.pendingApproval && attention.label === "Needs Your Input"
+    ? session.orchestratorCampaign?.pendingRequests?.human ?? 0
+    : 0;
+  const count = campaignCount > 0
+    ? <span className="inbox-status-pill-count" aria-hidden="true">{campaignCount}</span>
+    : null;
   if (onOpen) return <button type="button" className="status-badge st-input" title={attention.description}
     aria-label={ariaLabel ?? attention.label} onClick={onOpen}>
     <span className="status-dot2" aria-hidden="true" />{attention.label}
+    {count}
   </button>;
   return (
     <span className="status-badge st-input" title={attention.description} aria-label={ariaLabel ?? attention.label}>
       <span className="status-dot2" aria-hidden="true" />
       {attention.label}
+      {count}
     </span>
   );
 }
@@ -294,12 +302,19 @@ export function AttentionPills({ session, compact = false }: {
   })}</>;
 }
 
-export function SessionStatusIndicators({ session, disconnected = false, onOpenAttention, attention = "badge" }: {
+export function SessionStatusIndicators({
+  session,
+  disconnected = false,
+  onOpenAttention,
+  onOpenCampaignRequests,
+  attention = "badge",
+}: {
   session: Pick<SessionView, "status" | "pendingApproval" | "archiveStatus" | "archiveOperation" |
     "stopOperation" | "historyQuarantine" | "attentionOwners" | "capacityWait" |
     "orchestratorCampaign" | "pendingRequestOwners">;
   disconnected?: boolean;
   onOpenAttention?: () => void;
+  onOpenCampaignRequests?: () => void;
   /** Board cards show the per-kind pills; headers keep the single badge that opens the panel. */
   attention?: "badge" | "pills";
 }) {
@@ -311,7 +326,9 @@ export function SessionStatusIndicators({ session, disconnected = false, onOpenA
     session.historyQuarantine,
   );
   const attentionStatus = sessionAttentionStatus(session);
+  const humanCampaignRequests = session.orchestratorCampaign?.pendingRequests?.human ?? 0;
   const orchestratorActions = session.orchestratorCampaign?.pendingRequests?.orchestrator ?? 0;
+  const openCampaignRequests = onOpenCampaignRequests ?? onOpenAttention;
   return (
     <span className="session-status-indicators" role="group" aria-label="Session Status">
       <StatusBadge
@@ -348,9 +365,28 @@ export function SessionStatusIndicators({ session, disconnected = false, onOpenA
       )}
       {attention === "pills"
         ? <AttentionPills session={session} />
-        : <AttentionBadge session={session} ariaLabel={attentionStatus ? `Attention: ${attentionStatus.label}` : undefined} onOpen={onOpenAttention} />}
-      {orchestratorActions > 0 && (onOpenAttention ? (
-        <button type="button" className="status-badge st-idle" onClick={onOpenAttention}
+        : <AttentionBadge session={session} ariaLabel={attentionStatus
+          ? humanCampaignRequests > 0 && !session.pendingApproval
+            ? `Needs Your Input: ${humanCampaignRequests} Requests`
+            : `Attention: ${attentionStatus.label}`
+          : undefined} onOpen={onOpenAttention} />}
+      {humanCampaignRequests > 0 && session.pendingApproval && (openCampaignRequests ? (
+        <button type="button" className="status-badge st-input" onClick={openCampaignRequests}
+          title={`${humanCampaignRequests} human-owned campaign requests need your input.`}
+          aria-label={`Needs Your Input: ${humanCampaignRequests} Requests`}>
+          <span className="status-dot2" aria-hidden="true" />Needs Your Input
+          <span className="inbox-status-pill-count" aria-hidden="true">{humanCampaignRequests}</span>
+        </button>
+      ) : (
+        <span className="inbox-status-pill blocked"
+          title={`${humanCampaignRequests} human-owned campaign requests need your input.`}
+          aria-label={`Needs Your Input: ${humanCampaignRequests} Requests`}>
+          Needs Your Input
+          <span className="inbox-status-pill-count" aria-hidden="true">{humanCampaignRequests}</span>
+        </span>
+      ))}
+      {orchestratorActions > 0 && (openCampaignRequests ? (
+        <button type="button" className="status-badge st-idle" onClick={openCampaignRequests}
           title="The Orchestrator has descendant requests assigned to it."
           aria-label={`Orchestrator Action: ${orchestratorActions} Requests`}>
           <span className="status-dot2" aria-hidden="true" />Orchestrator Action

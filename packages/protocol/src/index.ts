@@ -1446,7 +1446,12 @@ export interface OrchestratorCampaignProjection {
   };
   pendingDecisions: { human: number; orchestrator: number };
   /** All unresolved descendant requests, including provider questions/approvals and typed gates. */
-  pendingRequests?: { human: number; orchestrator: number };
+  pendingRequests?: {
+    human: number;
+    orchestrator: number;
+    /** Content-free identity for detecting same-count human request replacement. */
+    humanRevision?: string;
+  };
   followUps: { unique: number; duplicates: number };
 }
 
@@ -2414,6 +2419,20 @@ export interface SessionAttentionGroup extends SessionAttentionStatus {
   owners: string[];
 }
 
+function humanOwnsPendingRequest(
+  ownership: SessionView["pendingRequestOwners"] | undefined,
+  request: PendingApproval,
+): boolean {
+  if (!ownership) return true;
+  const exact = ownership.requests?.find((candidate) =>
+    candidate.requestId === request.requestId &&
+    (!candidate.occurrenceId || !request.occurrenceId || candidate.occurrenceId === request.occurrenceId));
+  if (exact) return exact.owner === "human";
+  // Missing exact metadata is a compatibility gap, never evidence that a human request is safe
+  // to hide. The zero-human aggregate is the only count-only projection that can suppress all.
+  return ownership.human !== 0;
+}
+
 /**
  * The per-kind breakdown a list card shows instead of the rolled-up "N Actions Required": one group
  * per attention label, in priority order, each with its count. A session with one request yields
@@ -2423,8 +2442,9 @@ export function sessionAttentionBreakdown(
   session: Pick<SessionView, "status" | "pendingApproval" | "attentionOwners"> &
     Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners">>,
 ): SessionAttentionGroup[] {
-  const requests = prioritizedPendingRequests(session.pendingApproval);
-  if (requests.length > 0 && session.pendingRequestOwners?.human === 0) {
+  const requests = prioritizedPendingRequests(session.pendingApproval)
+    .filter((request) => humanOwnsPendingRequest(session.pendingRequestOwners, request));
+  if (requests.length === 0 && pendingRequests(session.pendingApproval).length > 0) {
     const fallback = singleSessionAttentionStatus({
       status: session.status,
       pendingApproval: null,
@@ -2463,7 +2483,9 @@ function singleSessionAttentionStatus(
     Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners">>,
 ): SessionAttentionStatus | null {
   const humanCampaignRequests = session.orchestratorCampaign?.pendingRequests?.human ?? 0;
-  if (session.pendingRequestOwners?.human === 0) {
+  const requests = pendingRequests(session.pendingApproval)
+    .filter((request) => humanOwnsPendingRequest(session.pendingRequestOwners, request));
+  if (requests.length === 0 && session.pendingApproval) {
     return humanCampaignRequests > 0 ? {
       kind: "input_required",
       label: "Needs Your Input",
@@ -2472,8 +2494,7 @@ function singleSessionAttentionStatus(
         : `${humanCampaignRequests} human-owned campaign requests need your input.`,
     } : null;
   }
-  const pending = session.pendingApproval;
-  const requests = pendingRequests(pending);
+  const pending = requests[0] ?? session.pendingApproval;
   if (requests.length > 1) {
     const children = requests.filter((request) => request.ownerToolUseId).length;
     const questions = requests.filter((request) => request.kind === "question").length;
@@ -4507,7 +4528,16 @@ export interface SessionView {
   preview: string | null;
   pendingApproval: PendingApproval | null;
   /** Effective owners of this session's unresolved requests. Omitted for direct and legacy sessions. */
-  pendingRequestOwners?: { human: number; orchestrator: number };
+  pendingRequestOwners?: {
+    human: number;
+    orchestrator: number;
+    /** Exact current ownership keyed by provider request identity. Missing entries fail human-safe. */
+    requests?: Array<{
+      requestId: string;
+      occurrenceId?: string;
+      owner: WorkflowDecisionAuthority;
+    }>;
+  };
   /** Compact exact-owner joins for current pending requests. The full child registry remains
    * paginated; unresolved ids stay present with `resolved: false`. */
   attentionOwners?: ChildSessionAttentionOwner[];
