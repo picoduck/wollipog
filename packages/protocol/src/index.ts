@@ -403,7 +403,10 @@
 // 146: worktree setup configuration discovery distinguishes absent, valid, and invalid input;
 //      older peers omit the status and clients preserve that case as unknown. Starter generation
 //      is a narrow runner-owned mutation that cannot name an arbitrary destination.
-export const PROTOCOL_VERSION = 146;
+// 147: Guardian-direct action approval carries a provider-structured pre-execution receipt bound
+//      to the exact App Server invocation and command digest. PR-merge action admission now
+//      requires this version so mixed deployments fail closed instead of retaining a used grant.
+export const PROTOCOL_VERSION = 147;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -586,7 +589,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   backgroundMissingResultRecovery: 134,
   delegatedParentControl: 136,
   typedWorkflowDecisionDelegation: 139,
-  workflowDecisionActionAdmission: 142,
+  workflowDecisionActionAdmission: 147,
   orchestratorCampaignManagement: 140,
   orchestratorExecutionPolicy: 144,
   worktreeSetup: 141,
@@ -3070,6 +3073,21 @@ export type GovernanceAuditOutcome =
 export type ReviewDecisionOutcome = "allowed" | "denied" | "escalated" | "timed_out" | "aborted";
 export type ReviewRiskLevel = "low" | "medium" | "high";
 
+/** Provider-structured proof that one exact Guardian-reviewed App Server command was allowed.
+ * This is emitted from the approval-review completion notification before command execution, not
+ * reconstructed from transcript prose or the truncated tool display title. */
+export interface ReviewDecisionApprovalDelivery {
+  transport: "codex-app-server";
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  toolName: "commandExecution";
+  input: string;
+  /** SHA-256 of the exact UTF-8 input above, computed at the provider bridge. */
+  inputSha256: string;
+  optionKind: "allow_once";
+}
+
 /** Provider-neutral terminal decision from an automated reviewer. Rationale is bounded by the
  * emitter for the visible transcript; the governance audit stores only its SHA-256 digest. */
 export interface ReviewDecision {
@@ -3080,6 +3098,8 @@ export interface ReviewDecision {
   rationale?: string;
   /** Provider approval/request id when the review can be correlated to one. */
   requestId?: string;
+  /** Exact one-shot delivery proof when the provider exposes a trusted invocation envelope. */
+  approvalDelivery?: ReviewDecisionApprovalDelivery;
 }
 
 /** Durable content-safe approval provenance. Raw tool input and question answers are never stored. */

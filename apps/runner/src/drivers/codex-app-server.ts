@@ -22,6 +22,7 @@ import {
   type ReviewDecision,
   type SessionConfig,
 } from "@wollipog/protocol";
+import { createHash } from "node:crypto";
 import { JsonRpcPeer } from "../jsonrpc.js";
 import {
   killTree,
@@ -1668,6 +1669,7 @@ export function parseReviewDecision(p: Json): ReviewDecision | null {
     ? truncate(r.rationale.trim(), 200)
     : undefined;
   const requestId = r?.requestId ?? r?.approvalId ?? p?.requestId ?? p?.approvalId;
+  const approvalDelivery = guardianApprovalDelivery(p);
   return {
     reviewId,
     reviewer: { kind: "agent", id: "codex-guardian" },
@@ -1675,6 +1677,32 @@ export function parseReviewDecision(p: Json): ReviewDecision | null {
     ...(riskLevel ? { riskLevel } : {}),
     ...(rationale ? { rationale } : {}),
     ...(typeof requestId === "string" && requestId ? { requestId } : {}),
+    ...(approvalDelivery ? { approvalDelivery } : {}),
+  };
+}
+
+/** Extract only the current typed App Server approval envelope. The surrounding review parser is
+ * deliberately liberal for display compatibility, but action admission must fail closed unless
+ * every correlation field and the exact command are present on the documented top-level shape. */
+function guardianApprovalDelivery(p: Json): ReviewDecision["approvalDelivery"] {
+  const review = p?.review;
+  const action = p?.action;
+  const boundedId = (value: unknown) => typeof value === "string" && value.length > 0 &&
+    value.length <= 512 && !/[\x00-\x1f\x7f]/u.test(value);
+  if (p?.decisionSource !== "agent" || review?.status !== "approved" ||
+      action?.type !== "command" || !["shell", "unifiedExec"].includes(action?.source) ||
+      !boundedId(p?.threadId) || !boundedId(p?.turnId) || !boundedId(p?.targetItemId) ||
+      !boundedId(p?.reviewId) || typeof action?.command !== "string" ||
+      action.command.length < 1 || action.command.length > 2000) return undefined;
+  return {
+    transport: "codex-app-server",
+    threadId: p.threadId,
+    turnId: p.turnId,
+    itemId: p.targetItemId,
+    toolName: "commandExecution",
+    input: action.command,
+    inputSha256: createHash("sha256").update(action.command, "utf8").digest("hex"),
+    optionKind: "allow_once",
   };
 }
 

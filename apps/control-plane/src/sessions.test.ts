@@ -17,6 +17,7 @@ import type {
   SessionNamingRunnerErrorCode,
   SessionReminderView,
   SessionConfig,
+  SessionEventPayload,
   OrchestratorSettingsView,
   SetSessionReminderRequest,
   SessionSnapshot,
@@ -2777,6 +2778,204 @@ test("typed workflow decisions isolate categories and fail closed across stale p
     assert.equal(db.workflowDecisionByOccurrence(terminal.data.occurrenceId)?.status, "revoked",
       "an authoritative terminal transition revokes approvals the action never consumed");
   } finally { db.close(); }
+});
+
+test("Guardian-direct merge receipts consume once and fail closed across every correlation boundary", async (t) => {
+  const setup = (agentId = CODEX_APP_AGENT_ID) => {
+    const { db, hub, svc } = makeHarness();
+    const meta = runnerMeta();
+    const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+    orchestrator.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const parent = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" },
+    });
+    assert.ok(parent.ok && parent.data, parent.error);
+    db.updateSessionStatus(parent.data.id, "running", Date.now());
+    const createChild = (selectedAgentId: string) => {
+      const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: selectedAgentId };
+      let child = svc.createSession(request, undefined, undefined, false, false, false,
+        { parentSessionId: parent.data!.id });
+      if (child.status === 428) {
+        const spawn = db.getSession(parent.data!.id)!.pendingApproval!;
+        assert.ok(svc.approve(parent.data!.id, spawn.requestId, "allow").ok);
+        child = svc.createSession(request, undefined, undefined, false, false, false,
+          { parentSessionId: parent.data!.id });
+      }
+      assert.ok(child.ok && child.data, child.error);
+      db.updateSessionStatus(child.data.id, "running", Date.now());
+      return child.data;
+    };
+    const child = createChild(agentId);
+    assert.ok(svc.setParentControlPolicy(parent.data.id, {
+      implementation_question: "human",
+      pr_merge: "orchestrator",
+      merged_branch_deletion: "human",
+      follow_up_issue_publication: "human",
+      ui_evidence_approval: "human",
+    }, 0).ok);
+    let sequence = 0;
+    const arm = (pullRequest = 1140) => {
+      const headSha = String(pullRequest).padStart(40, "a").slice(-40);
+      const snapshot = {
+        category: "pr_merge" as const,
+        repository: "picoduck/wollipog",
+        pullRequest,
+        headSha,
+        reviewResult: "merge" as const,
+        requiredChecks: {
+          headSha, status: "passed" as const, checkedAt: 10,
+          checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }],
+        },
+      };
+      const decision = svc.createWorkflowDecision(child.id, {
+        requestId: `guardian-${pullRequest}-${++sequence}`,
+        resourceKey: `picoduck/wollipog#${pullRequest}`,
+        resourceSnapshot: snapshot,
+      });
+      assert.ok(decision.ok && decision.data, decision.error);
+      assert.ok(svc.resolveDescendantRequest(parent.data!.id, child.id, decision.data.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+      const command = canonicalPrMergeEnqueueCommand(snapshot);
+      const armed = svc.consumeWorkflowDecision(child.id, decision.data.occurrenceId, {
+        resourceSnapshot: snapshot,
+        action: { kind: "pr_merge_enqueue", command },
+      });
+      assert.equal(armed.data?.status, "approved", armed.error);
+      return { decision: decision.data, snapshot, command };
+    };
+    const receipt = (command: string): Extract<SessionEventPayload, { kind: "review_decision" }> => ({
+      kind: "review_decision",
+      reviewId: `review-${++sequence}`,
+      reviewer: { kind: "agent", id: "codex-guardian" },
+      outcome: "allowed",
+      approvalDelivery: {
+        transport: "codex-app-server",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: `command-${sequence}`,
+        toolName: "commandExecution",
+        input: command,
+        inputSha256: createHash("sha256").update(command, "utf8").digest("hex"),
+        optionKind: "allow_once",
+      },
+    });
+    return { db, hub, svc, parent: parent.data, child, createChild, arm, receipt };
+  };
+
+  await t.test("exact Guardian and existing permission paths each consume only once", () => {
+    const { db, svc, child, arm, receipt } = setup();
+    try {
+      const guardian = arm(1140);
+      const guardianReceipt = receipt(guardian.command);
+      svc.onSessionEvent(child.id, guardianReceipt);
+      svc.onSessionEvent(child.id, guardianReceipt);
+      assert.equal(db.workflowDecisionByOccurrence(guardian.decision.occurrenceId)?.status, "consumed");
+      assert.equal(svc.governanceAudit(child.id).filter((entry) =>
+        entry.requestId === guardian.decision.occurrenceId && entry.outcome === "consumed").length, 1,
+      "duplicate provider events cannot consume or audit consumption twice");
+
+      const requested = arm(1141);
+      svc.onSessionEvent(child.id, {
+        kind: "permission_request",
+        requestId: "provider-request-1141",
+        title: "Enqueue PR",
+        options: [{ optionId: "accept", name: "Allow Once", kind: "allow_once" }],
+        context: { toolName: "commandExecution", input: requested.command },
+      });
+      assert.equal(db.workflowDecisionByOccurrence(requested.decision.occurrenceId)?.status, "consumed");
+      svc.onSessionEvent(child.id, receipt(requested.command));
+      assert.equal(svc.governanceAudit(child.id).filter((entry) =>
+        entry.requestId === requested.decision.occurrenceId && entry.outcome === "consumed").length, 1,
+      "a later Guardian event cannot double-consume the existing requestApproval path");
+    } finally { db.close(); }
+  });
+
+  await t.test("command, tool, digest, child, and cancelled-delivery mismatches retain the grant", () => {
+    const { db, svc, child, createChild, arm, receipt } = setup();
+    try {
+      const armed = arm(1142);
+      svc.onSessionEvent(child.id, receipt(`${armed.command} --delete-branch`));
+      const wrongTool = receipt(armed.command);
+      wrongTool.approvalDelivery = { ...wrongTool.approvalDelivery!, toolName: "Bash" as "commandExecution" };
+      svc.onSessionEvent(child.id, wrongTool);
+      const wrongDigest = receipt(armed.command);
+      wrongDigest.approvalDelivery = { ...wrongDigest.approvalDelivery!, inputSha256: "0".repeat(64) };
+      svc.onSessionEvent(child.id, wrongDigest);
+      const otherChild = createChild(CODEX_APP_AGENT_ID);
+      svc.onSessionEvent(otherChild.id, receipt(armed.command));
+      const cancelled = receipt(armed.command);
+      cancelled.outcome = "aborted";
+      svc.onSessionEvent(child.id, cancelled);
+      assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "approved");
+    } finally { db.close(); }
+  });
+
+  for (const mismatch of ["parent", "revision", "authority", "head", "capability"] as const) {
+    await t.test(`${mismatch} mismatch revokes rather than consumes`, () => {
+      const { db, svc, parent, child, arm, receipt } = setup();
+      try {
+        const armed = arm(1150 + ["parent", "revision", "authority", "head", "capability"].indexOf(mismatch));
+        if (mismatch === "parent") {
+          const unrelated = svc.createSession({
+            runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+            config: { permissionMode: "orchestrator" },
+          });
+          assert.ok(unrelated.ok && unrelated.data);
+          db.raw().prepare("UPDATE workflow_decisions SET controlling_session_id=? WHERE occurrence_id=?")
+            .run(unrelated.data.id, armed.decision.occurrenceId);
+        } else if (mismatch === "revision") {
+          db.raw().prepare("UPDATE workflow_decisions SET policy_revision=policy_revision+1 WHERE occurrence_id=?")
+            .run(armed.decision.occurrenceId);
+        } else if (mismatch === "authority") {
+          db.raw().prepare("UPDATE workflow_decisions SET authority='human' WHERE occurrence_id=?")
+            .run(armed.decision.occurrenceId);
+        } else if (mismatch === "head") {
+          db.raw().prepare("UPDATE workflow_decisions SET resource_snapshot=? WHERE occurrence_id=?")
+            .run(JSON.stringify({ ...armed.snapshot, headSha: "f".repeat(40) }), armed.decision.occurrenceId);
+        } else {
+          db.registerRunner(runnerMeta(), Date.now(),
+            RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionAdmission - 1);
+        }
+        svc.onSessionEvent(child.id, receipt(armed.command));
+        assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "revoked");
+        assert.equal(svc.governanceAudit(child.id).some((entry) =>
+          entry.requestId === armed.decision.occurrenceId && entry.outcome === "consumed"), false);
+        assert.equal(db.getSession(parent.id)?.id, parent.id);
+      } finally { db.close(); }
+    });
+  }
+
+  await t.test("native Codex fails closed before arming because it has no approval receipt", () => {
+    const { db, svc, child } = setup(CODEX_AGENT_ID);
+    try {
+      const headSha = "d".repeat(40);
+      const snapshot = {
+        category: "pr_merge" as const, repository: "picoduck/wollipog", pullRequest: 1160,
+        headSha, reviewResult: "merge" as const,
+        requiredChecks: { headSha, status: "passed" as const, checkedAt: 10,
+          checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }] },
+      };
+      const decision = svc.createWorkflowDecision(child.id, {
+        requestId: "native-unsupported", resourceKey: "picoduck/wollipog#1160", resourceSnapshot: snapshot,
+      });
+      assert.ok(decision.ok && decision.data);
+      const parentId = decision.data.controllingSessionId;
+      assert.ok(svc.resolveDescendantRequest(parentId, child.id, decision.data.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+      const result = svc.consumeWorkflowDecision(child.id, decision.data.occurrenceId, {
+        resourceSnapshot: snapshot,
+        action: { kind: "pr_merge_enqueue", command: canonicalPrMergeEnqueueCommand(snapshot) },
+      });
+      assert.equal(result.status, 409);
+      assert.match(result.error ?? "", /does not expose a trusted one-shot command approval boundary/u);
+      assert.equal(db.workflowDecisionByOccurrence(decision.data.occurrenceId)?.status, "revoked");
+    } finally { db.close(); }
+  });
 });
 
 test("typed workflow decisions preserve provider settlement and cannot be replaced by generic approvals", () => {

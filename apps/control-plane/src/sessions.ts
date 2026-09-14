@@ -5643,6 +5643,10 @@ export class SessionsService {
     const action = normalizeWorkflowDecisionAction(normalized.data, request?.action);
     if (!action.ok) return fail(action.error!, action.status);
     if (action.data) {
+      if (child.driver !== "claude-code" && child.driver !== "codex-app-server") {
+        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        return fail(`${child.driver} does not expose a trusted one-shot command approval boundary`, 409);
+      }
       for (const owner of [child, parent]) {
         const unsupported = this.capabilityFailure(
           owner.runnerId,
@@ -5679,13 +5683,22 @@ export class SessionsService {
     session: SessionView,
     approval: PendingApproval,
   ): { decision: WorkflowDecisionView; commandDigest: string; optionId: string } | null {
+    const command = approval.context?.input;
+    const optionId = approval.options.find((option) => option.kind === "allow_once")?.optionId;
+    if (approval.kind === "authentication" || typeof command !== "string" || !command || !optionId) return null;
+    const action = this.workflowDecisionActionForCommand(session, approval.context?.toolName, command);
+    return action ? { ...action, optionId } : null;
+  }
+
+  private workflowDecisionActionForCommand(
+    session: SessionView,
+    toolName: string | undefined,
+    command: string,
+  ): { decision: WorkflowDecisionView; commandDigest: string } | null {
     const expectedTool = session.driver === "codex-app-server"
       ? "commandExecution"
       : session.driver === "claude-code" ? "Bash" : null;
-    const command = approval.context?.input;
-    const optionId = approval.options.find((option) => option.kind === "allow_once")?.optionId;
-    if (!expectedTool || approval.kind === "authentication" || approval.context?.toolName !== expectedTool ||
-        typeof command !== "string" || !command || !optionId) return null;
+    if (!expectedTool || toolName !== expectedTool) return null;
     const action: WorkflowDecisionAction = { kind: "pr_merge_enqueue", command };
     const commandDigest = auditDigest(action)!;
     const matches = this.db.approvedWorkflowDecisionsForAction(session.id, commandDigest)
@@ -5712,7 +5725,7 @@ export class SessionsService {
       this.revokeWorkflowDecision(decision, { kind: "system", id: "workflow-decision-action-admission" });
       return null;
     }
-    return { decision, commandDigest, optionId };
+    return { decision, commandDigest };
   }
 
   private workflowDecisionController(child: SessionView): {
@@ -9126,6 +9139,53 @@ export class SessionsService {
           now,
           { content: payload.rationale },
         );
+      }
+      const delivery = payload.approvalDelivery;
+      const deliveryDigest = delivery && createHash("sha256").update(delivery.input, "utf8").digest("hex");
+      if (delivery && reviewer?.kind === "agent" && reviewer.id === "codex-guardian" &&
+          payload.outcome === "allowed" && session.driver === delivery.transport &&
+          delivery.optionKind === "allow_once" && delivery.inputSha256 === deliveryDigest) {
+        const actionAdmission = this.workflowDecisionActionForCommand(
+          session,
+          delivery.toolName,
+          delivery.input,
+        );
+        if (actionAdmission) {
+          const actor: GovernanceActor = { kind: "system", id: "workflow-decision-action-admission" };
+          const consumed = this.db.consumeWorkflowDecisionAction(
+            actionAdmission.decision.occurrenceId,
+            actionAdmission.commandDigest,
+            now,
+          );
+          if (consumed) {
+            this.recordWorkflowDecisionAudit(consumed, "consumed", actor, now);
+            this.recordGovernanceAudit(
+              session,
+              {
+                requestId: delivery.itemId,
+                kind: "permission",
+                context: { toolName: delivery.toolName, input: delivery.input },
+              },
+              "resolution",
+              "allowed",
+              reviewer,
+              now,
+              {
+                optionId: delivery.optionKind,
+                workflowDecision: {
+                  occurrenceId: consumed.occurrenceId,
+                  parentSessionId: consumed.controllingSessionId,
+                  childSessionId: consumed.sessionId,
+                  category: consumed.category,
+                  policyRevision: consumed.policyRevision,
+                  resourceDigest: consumed.resourceDigest,
+                },
+              },
+            );
+            this.hub.sessionChangedById(sessionId);
+            this.hub.sessionChangedById(consumed.controllingSessionId);
+          }
+        }
       }
     }
 

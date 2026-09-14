@@ -154,8 +154,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 146", () => {
-  assert.equal(PROTOCOL_VERSION, 146);
+test("PROTOCOL_VERSION is 147", () => {
+  assert.equal(PROTOCOL_VERSION, 147);
   assert.equal(runnerSupportsProtocol(136, "capacityLockDiagnostics"), false);
   assert.equal(runnerSupportsProtocol(137, "capacityLockDiagnostics"), true);
   assert.equal(runnerSupportsProtocol(137, "sessionAgentControlReasoningEffort"), false);
@@ -164,8 +164,8 @@ test("PROTOCOL_VERSION is 146", () => {
   assert.equal(runnerSupportsProtocol(139, "typedWorkflowDecisionDelegation"), true);
   assert.equal(runnerSupportsProtocol(139, "orchestratorCampaignManagement"), false);
   assert.equal(runnerSupportsProtocol(140, "orchestratorCampaignManagement"), true);
-  assert.equal(runnerSupportsProtocol(141, "workflowDecisionActionAdmission"), false);
-  assert.equal(runnerSupportsProtocol(142, "workflowDecisionActionAdmission"), true);
+  assert.equal(runnerSupportsProtocol(146, "workflowDecisionActionAdmission"), false);
+  assert.equal(runnerSupportsProtocol(147, "workflowDecisionActionAdmission"), true);
   assert.equal(runnerSupportsProtocol(143, "orchestratorExecutionPolicy"), false);
   assert.equal(runnerSupportsProtocol(144, "orchestratorExecutionPolicy"), true);
   assert.equal(runnerSupportsProtocol(145, "worktreeSetupConfig"), false);

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -2337,6 +2338,43 @@ test("Guardian notification emits a structured review_decision instead of untype
     riskLevel: "low",
     rationale: "read only",
   }]);
+});
+
+test("Guardian command approval carries one exact provider-correlated delivery receipt", () => {
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1140 --squash --match-head-commit ${"a".repeat(40)}`;
+  const notification = {
+    threadId: "thread-1",
+    turnId: "turn-1",
+    reviewId: "review-1",
+    targetItemId: "command-1",
+    decisionSource: "agent",
+    review: { status: "approved", riskLevel: "high", userAuthorization: "high", rationale: "approved" },
+    action: { type: "command", source: "unifiedExec", command, cwd: "/repo" },
+  };
+  assert.deepEqual(parseReviewDecision(notification)?.approvalDelivery, {
+    transport: "codex-app-server",
+    threadId: "thread-1",
+    turnId: "turn-1",
+    itemId: "command-1",
+    toolName: "commandExecution",
+    input: command,
+    inputSha256: createHash("sha256").update(command, "utf8").digest("hex"),
+    optionKind: "allow_once",
+  });
+
+  for (const malformed of [
+    { ...notification, targetItemId: null },
+    { ...notification, decisionSource: "policy" },
+    { ...notification, review: { ...notification.review, status: "denied" } },
+    { ...notification, review: { ...notification.review, status: "timedOut" } },
+    { ...notification, review: { ...notification.review, status: "aborted" } },
+    { ...notification, action: { ...notification.action, type: "execve" } },
+    { ...notification, action: { ...notification.action, source: "unknown" } },
+    { ...notification, action: { ...notification.action, command: "x".repeat(2001) } },
+  ]) {
+    assert.equal(parseReviewDecision(malformed)?.approvalDelivery, undefined,
+      "missing, denied, cancelled, or unsupported provider envelopes fail closed");
+  }
 });
 
 test("only auto-review approval requests carry Guardian escalation provenance", () => {
