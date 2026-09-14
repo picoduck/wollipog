@@ -6,7 +6,9 @@ import type {
   AutomationSchedule,
   AutomationSpec,
   AutomationTriggerCredential,
+  AutomationTriggerDeliveryMetadata,
   AutomationTriggerKind,
+  AutomationTriggerSessionSelector,
   AutomationTriggerView,
   WorkflowDefinition,
 } from "@wollipog/protocol";
@@ -20,7 +22,7 @@ import { useFeedback } from "./FeedbackProvider.js";
 import { machineOptionLabels } from "../runners.js";
 import { useExperiments } from "../use-experiments.js";
 import { agentDisplayName } from "../agent-presentation.js";
-import { Select } from "./ui/ChoiceControls.js";
+import { Checkbox, Select } from "./ui/ChoiceControls.js";
 import {
   buildSpec,
   defaults,
@@ -32,6 +34,32 @@ import {
 } from "../automation-form.js";
 
 type ActionKind = AutomationAction["kind"];
+
+interface TriggerDraft {
+  automationId: string;
+  kind: AutomationTriggerKind;
+  name: string;
+  configurable: boolean;
+  allowPrompt: boolean;
+  parameterNames: string;
+  missingReferences: "reject" | "use_stored";
+  sessionSelectors: AutomationTriggerSessionSelector[];
+}
+
+function deliverySummary(delivery: AutomationTriggerDeliveryMetadata): string {
+  const parts = delivery.fields.map((field) => titleCaseLabel(field));
+  if (delivery.parameterNames.length) parts.push(`Parameters ${delivery.parameterNames.join(", ")}`);
+  if (delivery.targetSelector) parts.push(`Target ${titleCaseLabel(delivery.targetSelector)}`);
+  return parts.join(" · ") || "No Optional Fields";
+}
+
+function toggleSelector(
+  current: AutomationTriggerSessionSelector[],
+  selector: AutomationTriggerSessionSelector,
+  checked: boolean,
+): AutomationTriggerSessionSelector[] {
+  return checked ? [...current, selector] : current.filter((candidate) => candidate !== selector);
+}
 
 function formatTime(value: number | undefined): string {
   return value === undefined ? "—" : new Date(value).toLocaleString();
@@ -131,6 +159,7 @@ export function AutomationsView() {
   const [details, setDetails] = useState<Record<string, AutomationExecution[]>>({});
   const [triggers, setTriggers] = useState<Record<string, AutomationTriggerView[]>>({});
   const [credential, setCredential] = useState<AutomationTriggerCredential | null>(null);
+  const [triggerDraft, setTriggerDraft] = useState<TriggerDraft | null>(null);
   const [workflows, setWorkflows] = useState<WorkflowDefinition[]>([]);
   const [form, setForm] = useState<FormState>(defaults);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -319,15 +348,38 @@ export function AutomationsView() {
     }
   };
 
-  const createTrigger = async (automation: AutomationSchedule, kind: AutomationTriggerKind) => {
+  const openTriggerCreator = (automation: AutomationSchedule, kind: AutomationTriggerKind) => {
+    setTriggerDraft({
+      automationId: automation.automationId,
+      kind,
+      name: `${automation.name} ${kind === "chatops" ? "chat-ops" : "webhook"}`.slice(0, 80),
+      configurable: false,
+      allowPrompt: false,
+      parameterNames: "",
+      missingReferences: "reject",
+      sessionSelectors: [],
+    });
+  };
+
+  const createTrigger = async () => {
+    if (!triggerDraft) return;
     setBusy(true);
     setError(null);
     try {
-      const created = await api.createAutomationTrigger(automation.automationId, {
-        kind,
-        name: `${automation.name} ${kind === "chatops" ? "chat-ops" : "webhook"}`.slice(0, 80),
+      const parameterNames = [...new Set(triggerDraft.parameterNames.split(",")
+        .map((name) => name.trim()).filter(Boolean))];
+      const created = await api.createAutomationTrigger(triggerDraft.automationId, {
+        kind: triggerDraft.kind,
+        name: triggerDraft.name,
+        ...(triggerDraft.configurable ? { deliveryPolicy: {
+          allowPrompt: triggerDraft.allowPrompt,
+          parameterNames,
+          missingReferences: triggerDraft.missingReferences,
+          ...(triggerDraft.sessionSelectors.length ? { sessionSelectors: triggerDraft.sessionSelectors } : {}),
+        } } : {}),
       });
       setCredential(created);
+      setTriggerDraft(null);
       await refresh();
     } catch (cause) {
       setError((cause as Error).message);
@@ -508,16 +560,47 @@ export function AutomationsView() {
           return <AutomationCard key={item.automationId} id={item.automationId} name={item.name} action={actionSummary(item.action)} enabled={item.enabled}>
             <dl className="automation-facts"><div><dt>Schedule</dt><dd><code>{item.cron}</code> · {item.timezone}</dd></div><div><dt>Next Fire</dt><dd>{formatTime(item.nextFireAt)}</dd></div><div><dt>Last Result</dt><dd>{latest ? `${titleCaseLabel(latest.status)} · ${formatTime(latest.completedAt ?? latest.startedAt ?? latest.createdAt)}` : "Never"}</dd></div><div><dt>Policies</dt><dd>{titleCaseLabel(item.misfirePolicy.kind)} · {titleCaseLabel(item.runnerPolicy.kind)} · {titleCaseLabel(item.concurrencyPolicy)}</dd></div><div><dt>Ceilings</dt><dd>${item.limits.maxCostUsd} · {item.limits.maxToolCalls} Tools</dd></div></dl>
             {latest?.error && <p className="automation-execution-error">{latest.error}</p>}
-            <div className="automation-card-actions automation-trigger-create"><button className="btn ghost sm" disabled={busy} onClick={() => void createTrigger(item, "webhook")}>Add Webhook</button><button className="btn ghost sm" disabled={busy} onClick={() => void createTrigger(item, "chatops")}>Add Chat-Ops</button><small>Pausing blocks cron and signed triggers, but credentials can be configured while paused.</small></div>
+            <div className="automation-card-actions automation-trigger-create"><button className="btn ghost sm" disabled={busy} onClick={() => openTriggerCreator(item, "webhook")}>Add Webhook</button><button className="btn ghost sm" disabled={busy} onClick={() => openTriggerCreator(item, "chatops")}>Add Chat-Ops</button><small>Pausing blocks cron and signed triggers, but credentials can be configured while paused.</small></div>
+            {triggerDraft?.automationId === item.automationId && <div className="automation-trigger-editor" aria-label="New Signed Trigger">
+              <h4>New Signed Trigger</h4>
+              <div className="automation-form-grid">
+                <label>Name<input value={triggerDraft.name} maxLength={80} onChange={(event) => setTriggerDraft((current) => current ? { ...current, name: event.target.value } : current)} /></label>
+                <label>Kind<input value={titleCaseLabel(triggerDraft.kind)} readOnly /></label>
+                {item.action.kind !== "workflow_run" && <label className="automation-enable automation-span"><Checkbox checked={triggerDraft.configurable} label="Accept Delivery Fields" onChange={(checked) => setTriggerDraft((current) => current ? { ...current, configurable: checked } : current)} />Accept Delivery Fields</label>}
+                {item.action.kind !== "workflow_run" && triggerDraft.configurable && <>
+                  <label className="automation-enable"><Checkbox checked={triggerDraft.allowPrompt} label="Delivered Prompt" onChange={(checked) => setTriggerDraft((current) => current ? { ...current, allowPrompt: checked } : current)} />Delivered Prompt</label>
+                  <div className="automation-field"><span className="field-label">Missing References</span><Select label="Missing References" value={triggerDraft.missingReferences} onChange={(missingReferences) => setTriggerDraft((current) => current ? { ...current, missingReferences } : current)} options={[
+                    { value: "reject", label: "Reject Delivery" },
+                    { value: "use_stored", label: "Use Stored Text" },
+                  ]} /></div>
+                  <label className="automation-span">Parameter Names<input value={triggerDraft.parameterNames} placeholder="issue, run_id" onInput={(event) => {
+                    const parameterNames = event.currentTarget.value;
+                    setTriggerDraft((current) => current ? { ...current, parameterNames } : current);
+                  }} /><small>Comma-separated names. Reference them as <code>{"{{delivery.parameters.issue}}"}</code>.</small></label>
+                  {item.action.kind === "prompt_session" && <fieldset className="automation-span"><legend>Session Selectors</legend><div className="automation-checks">{([
+                    ["session_id", "Session ID"], ["branch", "Branch"], ["pull_request", "Pull Request"],
+                  ] as const).map(([selector, label]) => <label key={selector}><Checkbox checked={triggerDraft.sessionSelectors.includes(selector)} label={label} onChange={(checked) => setTriggerDraft((current) => current ? { ...current, sessionSelectors: toggleSelector(current.sessionSelectors, selector, checked) } : current)} />{label}</label>)}</div></fieldset>}
+                  <p className="automation-hint automation-span">Use <code>{"{{delivery.prompt}}"}</code> to place delivered text. Allowed parameters are also included in the signed-delivery context preamble.</p>
+                </>}
+              </div>
+              <div className="automation-editor-actions"><button className="btn ghost sm" type="button" onClick={() => setTriggerDraft(null)}>Cancel</button><button className="btn primary sm" type="button" disabled={busy} onClick={() => void createTrigger()}>{busy ? "Creating…" : "Create Trigger"}</button></div>
+            </div>}
             {triggerItems.length > 0 && <div className="automation-triggers" aria-label="Signed Out-of-Band Triggers"><h4>Signed Triggers</h4>{triggerItems.map((trigger) => {
               const endpoint = publicOrigin
                 ? `${publicOrigin}/hooks/v1/automation-triggers/${trigger.triggerId}`
                 : "Unavailable until This Machine has a reachable dashboard address";
               const revealed = credential?.trigger.triggerId === trigger.triggerId ? credential : null;
-              return <div className="automation-trigger" key={trigger.triggerId}><div><strong>{trigger.name}</strong><span>{titleCaseLabel(trigger.kind)} · Key Generation {trigger.generation} · {trigger.invocationCount === 1 ? "1 Delivery" : `${trigger.invocationCount} Deliveries`}</span>{trigger.lastInvokedAt && <small>Last Signed Delivery {formatTime(trigger.lastInvokedAt)}</small>}</div><code>{endpoint}</code>{revealed && <div className="automation-trigger-secret" role="status"><strong>Copy this signing secret now. It will not be shown again.</strong><code>{revealed.secret}</code><button className="btn ghost sm" type="button" onClick={() => void navigator.clipboard.writeText(revealed.secret)}>Copy Secret</button><button className="btn ghost sm" type="button" onClick={() => setCredential(null)}>Hide</button></div>}<p>{trigger.kind === "chatops" ? 'Signed body: {"eventId":"...","command":"run","sender":"opaque actor"}' : 'Signed body: {"eventId":"..."}'}</p><div className="automation-trigger-actions"><button className="btn ghost sm" disabled={busy} onClick={() => void (async () => { if (await confirm({ title: "Rotate signing secret?", message: "The previous secret stops working immediately.", confirmLabel: "Rotate Secret", tone: "danger" })) await rotateTrigger(item.automationId, trigger.triggerId); })()}>Rotate Secret</button><button className="btn danger sm" disabled={busy} onClick={() => void (async () => { if (await confirm({ title: "Revoke signed trigger?", message: "Pending unclaimed deliveries will be rejected.", confirmLabel: "Revoke Trigger", tone: "danger" })) await revokeTrigger(item.automationId, trigger.triggerId); })()}>Revoke</button></div></div>;
-            })}<p className="automation-hint">Send <code>application/vnd.wollipog.automation-trigger+json</code> with X-Wollipog-Timestamp, X-Wollipog-Nonce, and X-Wollipog-Signature. Signed deliveries only select this fixed automation; they cannot override prompts, runners, paths, or ceilings.</p></div>}
+              const policy = trigger.deliveryPolicy;
+              return <div className="automation-trigger" key={trigger.triggerId}><div><strong>{trigger.name}</strong><span>{titleCaseLabel(trigger.kind)} · Key Generation {trigger.generation} · {trigger.invocationCount === 1 ? "1 Delivery" : `${trigger.invocationCount} Deliveries`}</span>{policy && <small>Accepts {[
+                ...(policy.allowPrompt ? ["Prompt"] : []),
+                ...(policy.parameterNames.length ? [`Parameters ${policy.parameterNames.join(", ")}`] : []),
+                ...(policy.sessionSelectors?.length ? [`Selectors ${policy.sessionSelectors.map(titleCaseLabel).join(", ")}`] : []),
+              ].join(" · ")}</small>}{trigger.lastInvokedAt && <small>Last Signed Delivery {formatTime(trigger.lastInvokedAt)}</small>}</div><code>{endpoint}</code>{revealed && <div className="automation-trigger-secret" role="status"><strong>Copy this signing secret now. It will not be shown again.</strong><code>{revealed.secret}</code><button className="btn ghost sm" type="button" onClick={() => void navigator.clipboard.writeText(revealed.secret)}>Copy Secret</button><button className="btn ghost sm" type="button" onClick={() => setCredential(null)}>Hide</button></div>}<p>{policy
+                ? `Signed body may add: ${[policy.allowPrompt ? "prompt" : "", policy.parameterNames.length ? "parameters" : "", policy.sessionSelectors?.length ? "target" : ""].filter(Boolean).join(", ")}.`
+                : trigger.kind === "chatops" ? 'Signed body: {"eventId":"...","command":"run","sender":"opaque actor"}' : 'Signed body: {"eventId":"..."}'}</p><div className="automation-trigger-actions"><button className="btn ghost sm" disabled={busy} onClick={() => void (async () => { if (await confirm({ title: "Rotate signing secret?", message: "The previous secret stops working immediately.", confirmLabel: "Rotate Secret", tone: "danger" })) await rotateTrigger(item.automationId, trigger.triggerId); })()}>Rotate Secret</button><button className="btn danger sm" disabled={busy} onClick={() => void (async () => { if (await confirm({ title: "Revoke signed trigger?", message: "Pending unclaimed deliveries will be rejected.", confirmLabel: "Revoke Trigger", tone: "danger" })) await revokeTrigger(item.automationId, trigger.triggerId); })()}>Revoke</button></div></div>;
+            })}<p className="automation-hint">Send <code>application/vnd.wollipog.automation-trigger+json</code> with X-Wollipog-Timestamp, X-Wollipog-Nonce, and X-Wollipog-Signature. Every optional field must be explicitly allowed by this fixed automation trigger; deliveries cannot change agents, runners, policies, or ceilings.</p></div>}
             <div className="automation-card-actions"><button className="btn ghost sm" disabled={busy} onClick={() => void mutate(() => api.updateAutomation(item.automationId, { ...specOf(item), enabled: !item.enabled }))}>{item.enabled ? "Pause" : "Enable"}</button><button className="btn ghost sm" onClick={() => { setEditingId(item.automationId); setEditingSpec(specOf(item)); setForm(formFrom(specOf(item))); setShowForm(true); }}>Edit</button><button className="btn danger sm" disabled={busy} onClick={() => void (async () => { if (await confirm({ title: `Delete “${item.name}”?`, message: "The automation is removed permanently. Execution history remains in the audit database.", confirmLabel: "Delete Automation", tone: "danger" })) { if (editingId === item.automationId) closeEditor(); await mutate(() => api.deleteAutomation(item.automationId)); } })()}>Delete</button></div>
-            {executions.length > 0 && <details className="automation-history"><summary>Execution History ({executions.length})</summary><div className="automation-history-list">{executions.map((execution) => <div className="automation-execution" key={execution.executionId}><div><strong>{titleCaseLabel(execution.status)}</strong><span>{formatTime(execution.scheduledFor)}</span></div><code>{execution.idempotencyKey}</code>{execution.commands?.length ? <ul className="automation-command-list" aria-label="Durable Runner Command Receipts">{execution.commands.map((command) => <li key={command.commandId}><span>{titleCaseLabel(command.kind.replace("_", " "))} · {titleCaseLabel(command.state)}</span><small>{command.attemptCount} delivery attempt{command.attemptCount === 1 ? "" : "s"}</small>{command.lastError && <em>{command.lastError}</em>}</li>)}</ul> : execution.deliveryMode === "legacy_at_most_once" ? <small className="automation-legacy-delivery">Legacy At-Most-Once Delivery</small> : null}{execution.error && <p>{execution.error}</p>}{execution.sessionId && <button className="link-button" type="button" onClick={() => navigate({ name: "session", id: execution.sessionId! })}>Open Session</button>}</div>)}</div></details>}
+            {executions.length > 0 && <details className="automation-history"><summary>Execution History ({executions.length})</summary><div className="automation-history-list">{executions.map((execution) => <div className="automation-execution" key={execution.executionId}><div><strong>{titleCaseLabel(execution.status)}</strong><span>{formatTime(execution.scheduledFor)}</span></div><code>{execution.idempotencyKey}</code>{execution.triggerDelivery && <small>Delivered Fields: {deliverySummary(execution.triggerDelivery)}{execution.triggerDelivery.promptSha256 ? ` · Prompt Digest ${execution.triggerDelivery.promptSha256.slice(0, 12)}…` : ""}</small>}{execution.commands?.length ? <ul className="automation-command-list" aria-label="Durable Runner Command Receipts">{execution.commands.map((command) => <li key={command.commandId}><span>{titleCaseLabel(command.kind.replace("_", " "))} · {titleCaseLabel(command.state)}</span><small>{command.attemptCount} delivery attempt{command.attemptCount === 1 ? "" : "s"}</small>{command.lastError && <em>{command.lastError}</em>}</li>)}</ul> : execution.deliveryMode === "legacy_at_most_once" ? <small className="automation-legacy-delivery">Legacy At-Most-Once Delivery</small> : null}{execution.error && <p>{execution.error}</p>}{execution.sessionId && <button className="link-button" type="button" onClick={() => navigate({ name: "session", id: execution.sessionId! })}>Open Session</button>}</div>)}</div></details>}
           </AutomationCard>;
         })}
       </div>

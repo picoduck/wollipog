@@ -48,6 +48,8 @@ import {
   type AutomationExecutionStatus,
   type AutomationSchedule,
   type AutomationSpec,
+  type AutomationTriggerDeliveryMetadata,
+  type AutomationTriggerDeliveryPolicy,
   type AutomationTriggerInvocationState,
   type AutomationTriggerInvocationView,
   type AutomationTriggerKind,
@@ -1323,6 +1325,7 @@ CREATE TABLE IF NOT EXISTS automation_executions (
   spec_json          TEXT,
   delivery_mode      TEXT NOT NULL DEFAULT 'legacy_at_most_once',
   delivery_plan_json TEXT,
+  trigger_delivery_json TEXT,
   action_kind        TEXT NOT NULL CHECK (action_kind IN ('create_session','prompt_session','workflow_run')),
   status             TEXT NOT NULL CHECK (status IN ('dispatching','running','succeeded','failed','skipped','expired')),
   actor_kind         TEXT NOT NULL,
@@ -1419,6 +1422,7 @@ CREATE TABLE IF NOT EXISTS automation_triggers (
   generation       INTEGER NOT NULL DEFAULT 1,
   invocation_count INTEGER NOT NULL DEFAULT 0,
   last_invoked_at  INTEGER,
+  delivery_policy_json TEXT,
   created_by_kind  TEXT NOT NULL,
   created_by_id    TEXT,
   created_at       INTEGER NOT NULL,
@@ -1438,6 +1442,7 @@ CREATE TABLE IF NOT EXISTS automation_trigger_invocations (
   sender_hash   TEXT,
   automation_revision INTEGER NOT NULL,
   spec_json     TEXT NOT NULL,
+  delivery_metadata_json TEXT,
   state         TEXT NOT NULL CHECK (state IN ('pending','dispatched','skipped','expired','rejected')),
   execution_id  TEXT,
   received_at   INTEGER NOT NULL,
@@ -2786,6 +2791,7 @@ interface AutomationRow {
 interface AutomationExecutionRow {
   execution_id: string; automation_id: string; idempotency_key: string; scheduled_for: number;
   automation_revision: number; spec_json: string | null; delivery_mode: string; delivery_plan_json: string | null;
+  trigger_delivery_json: string | null;
   action_kind: AutomationExecution["actionKind"]; status: AutomationExecutionStatus;
   actor_kind: AutomationExecution["actor"]["kind"]; actor_id: string | null; runner_id: string | null;
   session_id: string | null; run_id: string | null; workflow_instance_id: string | null; error: string | null;
@@ -2811,13 +2817,14 @@ interface AutomationEventRow {
 interface AutomationTriggerRow {
   trigger_id: string; automation_id: string; kind: AutomationTriggerKind; name: string; secret_key: string;
   generation: number; invocation_count: number; last_invoked_at: number | null;
+  delivery_policy_json: string | null;
   created_by_kind: GovernanceActor["kind"]; created_by_id: string | null;
   created_at: number; updated_at: number; deleted_at: number | null;
 }
 
 interface AutomationTriggerInvocationRow {
   invocation_id: string; trigger_id: string; automation_id: string; event_id: string; body_sha256: string;
-  sender_hash: string | null; automation_revision: number; spec_json: string;
+  sender_hash: string | null; automation_revision: number; spec_json: string; delivery_metadata_json: string | null;
   state: AutomationTriggerInvocationState; execution_id: string | null; received_at: number; updated_at: number;
 }
 
@@ -3826,8 +3833,11 @@ export class ControlPlaneDb {
       ["automation_executions", "spec_json TEXT"],
       ["automation_executions", "delivery_mode TEXT NOT NULL DEFAULT 'legacy_at_most_once'"],
       ["automation_executions", "delivery_plan_json TEXT"],
+      ["automation_executions", "trigger_delivery_json TEXT"],
       ["automation_commands", "superseded_by TEXT"],
       ["automation_commands", "delivery_deadline_at INTEGER"],
+      ["automation_triggers", "delivery_policy_json TEXT"],
+      ["automation_trigger_invocations", "delivery_metadata_json TEXT"],
     ] as const) {
       try {
         db.exec(`ALTER TABLE ${table} ADD COLUMN ${column}`);
@@ -18800,7 +18810,7 @@ export class ControlPlaneDb {
       if (!spec.enabled) {
         this.stmt(
           `UPDATE automation_trigger_invocations
-           SET state='rejected', spec_json='{}', sender_hash=NULL, updated_at=?
+           SET state='rejected', spec_json='{}', sender_hash=NULL, delivery_metadata_json=NULL, updated_at=?
            WHERE state='pending' AND trigger_id IN
              (SELECT trigger_id FROM automation_triggers WHERE automation_id=? AND deleted_at IS NULL)`,
         ).run(input.now, input.automationId);
@@ -18832,7 +18842,7 @@ export class ControlPlaneDb {
       ).run(now, now, automationId);
       this.stmt(
         `UPDATE automation_trigger_invocations
-         SET state='rejected', spec_json='{}', sender_hash=NULL, updated_at=?
+         SET state='rejected', spec_json='{}', sender_hash=NULL, delivery_metadata_json=NULL, updated_at=?
          WHERE state='pending' AND trigger_id IN (SELECT trigger_id FROM automation_triggers WHERE automation_id=?)`,
       ).run(now, automationId);
       this.insertAutomationEvent({ automationId, kind: "deleted", actor, now });
@@ -18863,6 +18873,7 @@ export class ControlPlaneDb {
     kind: AutomationTriggerKind;
     name: string;
     secret: string;
+    deliveryPolicy?: AutomationTriggerDeliveryPolicy;
     actor: GovernanceActor;
     now: number;
   }): AutomationTriggerView | null {
@@ -18876,13 +18887,28 @@ export class ControlPlaneDb {
       }
       this.stmt(
         `INSERT INTO automation_triggers
-         (trigger_id,automation_id,kind,name,secret_key,generation,created_by_kind,created_by_id,created_at,updated_at)
-         VALUES (?,?,?,?,?,1,?,?,?,?)`,
+         (trigger_id,automation_id,kind,name,secret_key,generation,delivery_policy_json,
+          created_by_kind,created_by_id,created_at,updated_at)
+         VALUES (?,?,?,?,?,1,?,?,?,?,?)`,
       ).run(input.triggerId, input.automationId, input.kind, input.name, input.secret,
+        input.deliveryPolicy ? JSON.stringify(input.deliveryPolicy) : null,
         input.actor.kind, input.actor.id ?? null, input.now, input.now);
       this.insertAutomationEvent({
         automationId: input.automationId, kind: "trigger_created", actor: input.actor,
-        detail: { triggerId: input.triggerId, triggerKind: input.kind, name: input.name }, now: input.now,
+        detail: {
+          triggerId: input.triggerId,
+          triggerKind: input.kind,
+          name: input.name,
+          ...(input.deliveryPolicy ? {
+            acceptedFields: [
+              ...(input.deliveryPolicy.allowPrompt ? ["prompt"] : []),
+              ...(input.deliveryPolicy.parameterNames.length ? ["parameters"] : []),
+              ...(input.deliveryPolicy.sessionSelectors?.length ? ["target"] : []),
+            ].join(","),
+            parameterNames: input.deliveryPolicy.parameterNames.join(","),
+            sessionSelectors: input.deliveryPolicy.sessionSelectors?.join(",") ?? "",
+          } : {}),
+        }, now: input.now,
       });
       this.db.exec("COMMIT");
     } catch (error) {
@@ -18963,7 +18989,7 @@ export class ControlPlaneDb {
       }
       this.stmt(
         `UPDATE automation_trigger_invocations
-         SET state='rejected', spec_json='{}', sender_hash=NULL, updated_at=?
+         SET state='rejected', spec_json='{}', sender_hash=NULL, delivery_metadata_json=NULL, updated_at=?
          WHERE trigger_id=? AND state='pending'`,
       ).run(input.now, input.triggerId);
       this.insertAutomationEvent({
@@ -18984,9 +19010,12 @@ export class ControlPlaneDb {
     eventId: string;
     bodySha256: string;
     senderHash?: string;
+    expectedAutomationRevision: number;
+    specSnapshot: AutomationSpec;
+    delivery?: AutomationTriggerDeliveryMetadata;
     now: number;
   }): { invocation?: AutomationTriggerInvocationRecord; duplicate: boolean; conflict: boolean; limited: boolean;
-    retired?: boolean; unavailable?: boolean } | null {
+    retired?: boolean; unavailable?: boolean; stale?: boolean } | null {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const trigger = this.stmt(
@@ -19016,9 +19045,14 @@ export class ControlPlaneDb {
         this.db.exec("COMMIT");
         return { duplicate: false, conflict: false, limited: false, retired: true };
       }
-      if (!this.automation(trigger).enabled) {
+      const schedule = this.automation(trigger);
+      if (!schedule.enabled) {
         this.db.exec("COMMIT");
         return { duplicate: false, conflict: false, limited: false, unavailable: true };
+      }
+      if (schedule.revision !== input.expectedAutomationRevision) {
+        this.db.exec("COMMIT");
+        return { duplicate: false, conflict: false, limited: false, stale: true };
       }
       const recent = this.stmt(
         "SELECT COUNT(*) AS value FROM automation_trigger_invocations WHERE trigger_id=? AND received_at>?",
@@ -19033,17 +19067,14 @@ export class ControlPlaneDb {
         this.db.exec("ROLLBACK");
         return { duplicate: false, conflict: false, limited: true };
       }
-      const schedule = this.automation(trigger);
-      const { automationId: _automationId, revision: _revision, nextFireAt: _nextFireAt,
-        lastFiredAt: _lastFiredAt, createdBy: _createdBy, createdAt: _createdAt,
-        updatedAt: _updatedAt, ...specSnapshot } = schedule;
       this.stmt(
         `INSERT INTO automation_trigger_invocations
          (invocation_id,trigger_id,automation_id,event_id,body_sha256,sender_hash,automation_revision,spec_json,
-          state,received_at,updated_at)
-         VALUES (?,?,?,?,?,?,?,?,'pending',?,?)`,
+          delivery_metadata_json,state,received_at,updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?)`,
       ).run(input.invocationId, input.triggerId, schedule.automationId, input.eventId, input.bodySha256,
-        input.senderHash ?? null, schedule.revision, JSON.stringify(specSnapshot), input.now, input.now);
+        input.senderHash ?? null, schedule.revision, JSON.stringify(input.specSnapshot),
+        input.delivery ? JSON.stringify(input.delivery) : null, input.now, input.now);
       this.stmt(
         `UPDATE automation_triggers SET invocation_count=invocation_count+1,
          last_invoked_at=MAX(COALESCE(last_invoked_at,?),?) WHERE trigger_id=?`,
@@ -19063,8 +19094,10 @@ export class ControlPlaneDb {
 
   compactAutomationTriggerInvocations(now: number): number {
     const compacted = this.stmt(
-      `UPDATE automation_trigger_invocations SET spec_json='{}', sender_hash=NULL
-       WHERE state<>'pending' AND updated_at<? AND (spec_json<>'{}' OR sender_hash IS NOT NULL)`,
+      `UPDATE automation_trigger_invocations
+       SET spec_json='{}', sender_hash=NULL, delivery_metadata_json=NULL
+       WHERE state<>'pending' AND updated_at<?
+         AND (spec_json<>'{}' OR sender_hash IS NOT NULL OR delivery_metadata_json IS NOT NULL)`,
     ).run(now - 30 * 24 * 60 * 60 * 1_000);
     return Number(compacted.changes);
   }
@@ -19072,6 +19105,16 @@ export class ControlPlaneDb {
   getAutomationTriggerInvocation(invocationId: string): AutomationTriggerInvocationRecord | null {
     const row = this.stmt("SELECT * FROM automation_trigger_invocations WHERE invocation_id=?")
       .get(invocationId) as unknown as AutomationTriggerInvocationRow | undefined;
+    return row ? this.automationTriggerInvocation(row) : null;
+  }
+
+  getAutomationTriggerInvocationByEvent(
+    triggerId: string,
+    eventId: string,
+  ): AutomationTriggerInvocationRecord | null {
+    const row = this.stmt(
+      "SELECT * FROM automation_trigger_invocations WHERE trigger_id=? AND event_id=?",
+    ).get(triggerId, eventId) as unknown as AutomationTriggerInvocationRow | undefined;
     return row ? this.automationTriggerInvocation(row) : null;
   }
 
@@ -19109,8 +19152,9 @@ export class ControlPlaneDb {
       `UPDATE automation_trigger_invocations SET state=?,
        spec_json=CASE WHEN ?='rejected' THEN '{}' ELSE spec_json END,
        sender_hash=CASE WHEN ?='rejected' THEN NULL ELSE sender_hash END,
+       delivery_metadata_json=CASE WHEN ?='rejected' THEN NULL ELSE delivery_metadata_json END,
        updated_at=? WHERE invocation_id=? AND state='pending'`,
-    ).run(state, state, state, now, invocationId);
+    ).run(state, state, state, state, now, invocationId);
     return this.getAutomationTriggerInvocation(invocationId);
   }
 
@@ -19237,10 +19281,11 @@ export class ControlPlaneDb {
         this.stmt(
           `INSERT INTO automation_executions
            (execution_id,automation_id,idempotency_key,scheduled_for,automation_revision,spec_json,
-            delivery_mode,action_kind,status,actor_kind,actor_id,error,created_at,completed_at)
-           VALUES (?,?,?,?,?,?,'receipted_v53',?,?,?,?,?,?,?)`,
+            trigger_delivery_json,delivery_mode,action_kind,status,actor_kind,actor_id,error,created_at,completed_at)
+           VALUES (?,?,?,?,?,?,?,'receipted_v53',?,?,?,?,?,?,?)`,
         ).run(input.executionId, row.automation_id, idempotencyKey, scheduledFor, row.automation_revision,
-          row.spec_json, specSnapshot.action.kind, input.status, input.actor.kind,
+          input.status === "dispatching" ? row.spec_json : null, row.delivery_metadata_json,
+          specSnapshot.action.kind, input.status, input.actor.kind,
           input.actor.id ?? null, input.error ?? null, input.now, terminal);
         const invocationState: AutomationTriggerInvocationState = input.status === "dispatching"
           ? "dispatched" : input.status;
@@ -19255,6 +19300,15 @@ export class ControlPlaneDb {
             triggerKind: row.trigger_kind,
             invocationId: row.invocation_id,
             status: input.status,
+            ...(row.delivery_metadata_json ? (() => {
+              const delivery = JSON.parse(row.delivery_metadata_json) as AutomationTriggerDeliveryMetadata;
+              return {
+                deliveredFields: delivery.fields.join(","),
+                promptSha256: delivery.promptSha256 ?? "",
+                parameterNames: delivery.parameterNames.join(","),
+                targetSelector: delivery.targetSelector ?? "",
+              };
+            })() : {}),
           },
           now: input.now,
         });
@@ -19781,10 +19835,12 @@ export class ControlPlaneDb {
         `UPDATE automation_executions SET status=?, runner_id=COALESCE(?,runner_id),
           session_id=COALESCE(?,session_id), run_id=COALESCE(?,run_id),
           workflow_instance_id=COALESCE(?,workflow_instance_id), error=?,
-          started_at=COALESCE(started_at,?), completed_at=? WHERE execution_id=? AND ${allowed}`,
+          started_at=COALESCE(started_at,?), completed_at=?,
+          spec_json=CASE WHEN ? IS NOT NULL AND trigger_delivery_json IS NOT NULL THEN NULL ELSE spec_json END
+          WHERE execution_id=? AND ${allowed}`,
       ).run(
         input.status, input.runnerId ?? null, input.sessionId ?? null, input.runId ?? null,
-        input.workflowInstanceId ?? null, input.error ?? null, started, terminal, input.executionId,
+        input.workflowInstanceId ?? null, input.error ?? null, started, terminal, terminal, input.executionId,
       );
       if (Number(changed.changes) !== 1) {
         this.db.exec("ROLLBACK");
@@ -19895,6 +19951,9 @@ export class ControlPlaneDb {
       ...(row.session_id ? { sessionId: row.session_id } : {}),
       ...(row.run_id ? { runId: row.run_id } : {}),
       ...(row.workflow_instance_id ? { workflowInstanceId: row.workflow_instance_id } : {}),
+      ...(row.trigger_delivery_json ? {
+        triggerDelivery: JSON.parse(row.trigger_delivery_json) as AutomationTriggerDeliveryMetadata,
+      } : {}),
       ...(row.error ? { error: row.error } : {}), createdAt: row.created_at,
       ...(row.started_at === null ? {} : { startedAt: row.started_at }),
       ...(row.completed_at === null ? {} : { completedAt: row.completed_at }),
@@ -19914,6 +19973,9 @@ export class ControlPlaneDb {
       updatedAt: row.updated_at,
       ...(row.last_invoked_at == null ? {} : { lastInvokedAt: row.last_invoked_at }),
       invocationCount: Number(row.invocation_count ?? 0),
+      ...(row.delivery_policy_json ? {
+        deliveryPolicy: JSON.parse(row.delivery_policy_json) as AutomationTriggerDeliveryPolicy,
+      } : {}),
     };
   }
 
@@ -19928,6 +19990,9 @@ export class ControlPlaneDb {
       specJson: row.spec_json,
       bodySha256: row.body_sha256,
       ...(row.sender_hash ? { senderHash: row.sender_hash } : {}),
+      ...(row.delivery_metadata_json ? {
+        delivery: JSON.parse(row.delivery_metadata_json) as AutomationTriggerDeliveryMetadata,
+      } : {}),
       receivedAt: row.received_at,
       updatedAt: row.updated_at,
       ...(row.execution_id ? { executionId: row.execution_id } : {}),

@@ -113,7 +113,7 @@ function harness(
     sessionChangedById() {},
   } as unknown as Hub;
   const created: CreateSessionRequest[] = [];
-  const prompted: Array<{ id: string; config: unknown }> = [];
+  const prompted: Array<{ id: string; text: string; config: unknown }> = [];
   const workflows: CreateWorkflowRunRequest[] = [];
   const failures = { create: false, throwCreate: false, throwAfterStage: false };
   const recoveredSnapshots: DurableSessionCommand[][] = [];
@@ -143,7 +143,7 @@ function harness(
     },
     prompt(id: string, text: string, _images: unknown[], slashCommand: string | undefined, config: unknown,
       delivery?: PreStagedDeliveryOptions) {
-      prompted.push({ id, config });
+      prompted.push({ id, text, config });
       const session = db.getSession(id)!;
       const plan = delivery ? {
         runnerId: session.runnerId,
@@ -262,6 +262,215 @@ test("signed webhook triggers are one-time-secret, idempotent, cron-independent,
   assert.doesNotMatch(JSON.stringify(db.listAutomationEvents(automation.automationId)), new RegExp(credential.secret));
   assert.doesNotMatch(JSON.stringify(db.raw().prepare("SELECT * FROM automation_trigger_invocations").all()),
     /delivery-old|(?:mam|wollipog)whsec_/);
+});
+
+test("allowlisted deliveries materialize prompt templates, parameter context, and content-free audit metadata", () => {
+  const { db, service, created } = harness();
+  const automation = service.create(baseSpec({
+    action: { kind: "create_session", request: {
+      runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
+      prompt: "Work issue {{delivery.parameters.issue}}.\n{{delivery.prompt}}",
+    } },
+  }), { kind: "human", id: "device" }, 0).data!;
+  const credential = service.createTrigger(automation.automationId, {
+    kind: "webhook",
+    name: "Issue intake",
+    deliveryPolicy: {
+      allowPrompt: true,
+      parameterNames: ["issue", "priority"],
+      missingReferences: "reject",
+    },
+  }, { kind: "human", id: "device" }, 1_000).data!;
+  assert.deepEqual(credential.trigger.deliveryPolicy, {
+    allowPrompt: true,
+    parameterNames: ["issue", "priority"],
+    missingReferences: "reject",
+  });
+
+  const body = Buffer.from(JSON.stringify({
+    eventId: "github-1099",
+    prompt: "Use the issue-workflow skill.",
+    parameters: { issue: "1099", priority: "high" },
+  }));
+  const invoked = receiveSignedTrigger(service, credential.trigger.triggerId, credential.secret, body, 2_000);
+  assert.equal(invoked.status, 200);
+  assert.equal(created.length, 1);
+  assert.match(created[0]?.prompt ?? "", /<automation-trigger-delivery>/);
+  assert.match(created[0]?.prompt ?? "", /"triggerId":"atr_/);
+  assert.match(created[0]?.prompt ?? "", /"eventId":"github-1099"/);
+  assert.match(created[0]?.prompt ?? "", /"parameters":\{"issue":"1099","priority":"high"\}/);
+  assert.match(created[0]?.prompt ?? "", /Work issue 1099\.\nUse the issue-workflow skill\./);
+
+  const delivery = invoked.data?.invocation.delivery;
+  assert.deepEqual(delivery?.fields, ["prompt", "parameters"]);
+  assert.deepEqual(delivery?.parameterNames, ["issue", "priority"]);
+  assert.match(delivery?.promptSha256 ?? "", /^[a-f0-9]{64}$/);
+  const execution = db.getAutomationExecution(invoked.data!.invocation.executionId!)!;
+  assert.deepEqual(execution.triggerDelivery, delivery);
+  const publicExecution = service.get(automation.automationId).data!.executions[0]!;
+  assert.equal(publicExecution.specSnapshot, undefined,
+    "a materialized delivery snapshot is private execution state, not audit output");
+  const publicAudit = JSON.stringify({ invocation: invoked.data?.invocation, execution: publicExecution,
+    events: db.listAutomationEvents(automation.automationId) });
+  assert.doesNotMatch(publicAudit, /Use the issue-workflow skill|"priority":"high"/,
+    "audit projections must expose presence and digest, never delivered values");
+  assert.match(publicAudit, /promptSha256/);
+  assert.match(publicAudit, /parameterNames/);
+
+  const replay = receiveSignedTrigger(service, credential.trigger.triggerId, credential.secret, body, 2_100);
+  assert.equal(replay.data?.duplicate, true);
+  assert.equal(created.length, 1);
+  const conflict = receiveSignedTrigger(service, credential.trigger.triggerId, credential.secret,
+    Buffer.from(JSON.stringify({
+      eventId: "github-1099", prompt: "Different prompt", parameters: { issue: "1099", priority: "high" },
+    })), 2_200);
+  assert.equal(conflict.status, 409);
+});
+
+test("unallowlisted delivery fields are rejected without consuming the event id or changing guardrails", () => {
+  const { db, service, created } = harness();
+  const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+  const credential = service.createTrigger(automation.automationId, {
+    kind: "webhook",
+    name: "Bounded intake",
+    deliveryPolicy: { allowPrompt: true, parameterNames: [], missingReferences: "use_stored" },
+  }, { kind: "human", id: "device" }, 1_000).data!;
+  const rejected = receiveSignedTrigger(service, credential.trigger.triggerId, credential.secret,
+    Buffer.from(JSON.stringify({
+      eventId: "same-event", prompt: "Allowed text", agentId: "other-agent",
+      maxCostUsd: 9_999, maxToolCalls: 99_999, runnerPolicy: "alternate", concurrencyPolicy: "parallel",
+    })), 2_000);
+  assert.equal(rejected.status, 400);
+  assert.equal(db.getAutomationTriggerInvocationByEvent(credential.trigger.triggerId, "same-event"), null);
+
+  const accepted = receiveSignedTrigger(service, credential.trigger.triggerId, credential.secret,
+    Buffer.from(JSON.stringify({ eventId: "same-event", prompt: "Allowed text" })), 2_100);
+  assert.equal(accepted.status, 200);
+  assert.equal(accepted.data?.duplicate, false);
+  assert.equal(created[0]?.runnerId, "runner-1");
+  assert.equal(created[0]?.agentId, "agent-1");
+  assert.equal(created[0]?.config?.costBudgetUsd, 1.5);
+  assert.equal(created[0]?.config?.maxToolCalls, 12);
+});
+
+test("missing template references either reject without consumption or use the stored surrounding text", () => {
+  for (const missingReferences of ["reject", "use_stored"] as const) {
+    const { db, service, created } = harness();
+    const automation = service.create(baseSpec({
+      action: { kind: "create_session", request: {
+        runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
+        prompt: "Stored prefix {{delivery.parameters.issue}} stored suffix",
+      } },
+    }), { kind: "human", id: "device" }, 0).data!;
+    const credential = service.createTrigger(automation.automationId, {
+      kind: "webhook", name: "Missing input",
+      deliveryPolicy: { allowPrompt: false, parameterNames: ["issue"], missingReferences },
+    }, { kind: "human", id: "device" }, 1_000).data!;
+    const body = Buffer.from('{"eventId":"missing-input"}');
+    const result = receiveSignedTrigger(service, credential.trigger.triggerId, credential.secret, body, 2_000);
+    if (missingReferences === "reject") {
+      assert.equal(result.status, 400);
+      assert.equal(db.getAutomationTriggerInvocationByEvent(credential.trigger.triggerId, "missing-input"), null);
+      assert.equal(created.length, 0);
+    } else {
+      assert.equal(result.status, 200);
+      assert.match(created[0]?.prompt ?? "", /Stored prefix  stored suffix/);
+    }
+  }
+});
+
+test("delivery revalidates the trigger allowlist after an automation prompt edit", () => {
+  const { db, service, created } = harness();
+  const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+  const credential = service.createTrigger(automation.automationId, {
+    kind: "webhook",
+    name: "Stable allowlist",
+    deliveryPolicy: { allowPrompt: true, parameterNames: [], missingReferences: "use_stored" },
+  }, { kind: "human", id: "device" }, 1_000).data!;
+  const updated = service.update(automation.automationId, baseSpec({
+    action: { kind: "create_session", request: {
+      runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
+      prompt: "Unexpected {{delivery.parameters.secret}}",
+    } },
+  }), { kind: "human", id: "device" }, 1_500);
+  assert.equal(updated.status, 200);
+
+  const result = receiveSignedTrigger(service, credential.trigger.triggerId, credential.secret,
+    Buffer.from(JSON.stringify({ eventId: "edited-template", prompt: "Allowed" })), 2_000);
+  assert.equal(result.status, 409);
+  assert.match(result.error ?? "", /outside the trigger allowlist/);
+  assert.equal(db.getAutomationTriggerInvocationByEvent(credential.trigger.triggerId, "edited-template"), null);
+  assert.equal(created.length, 0);
+});
+
+test("prompt-session deliveries select the unique idle session owning an allowlisted branch or pull request", () => {
+  for (const [selectorBody, selectorKind] of [
+    [{ branch: "fix/issue-1099" }, "branch"],
+    [{ pullRequest: "https://github.com/picoduck/wollipog/pull/1111/" }, "pull_request"],
+  ] as const) {
+    const { db, service, prompted } = harness();
+    db.createSession({
+      id: "fallback", runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
+      title: "Fallback", useWorktree: true, driver: "acp", config: {}, now: 10,
+    });
+    db.updateSessionStatus("fallback", "idle", 11);
+    db.createSession({
+      id: "owner", runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
+      title: "Owner", useWorktree: true, driver: "acp", config: {}, now: 20,
+    });
+    db.updateSessionStatus("owner", "idle", 21);
+    db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id='owner'").run(JSON.stringify([{
+      id: "wt-owner", path: "/worktrees/owner", branch: "fix/issue-1099", source: "created",
+      pullRequest: { url: "https://github.com/picoduck/wollipog/pull/1111", state: "open" },
+    }]));
+    const automation = service.create(baseSpec({
+      action: { kind: "prompt_session", sessionId: "fallback", request: { text: "Stored {{delivery.prompt}}" } },
+    }), { kind: "human", id: "device" }, 0).data!;
+    const credential = service.createTrigger(automation.automationId, {
+      kind: "webhook", name: "Session intake",
+      deliveryPolicy: {
+        allowPrompt: true, parameterNames: [], missingReferences: "reject",
+        sessionSelectors: ["branch", "pull_request"],
+      },
+    }, { kind: "human", id: "device" }, 1_000).data!;
+    const result = receiveSignedTrigger(service, credential.trigger.triggerId, credential.secret,
+      Buffer.from(JSON.stringify({ eventId: `selector-${selectorKind}`, prompt: "Continue", target: selectorBody })), 2_000);
+    assert.equal(result.status, 200);
+    assert.equal(prompted[0]?.id, "owner");
+    assert.match(prompted[0]?.text ?? "", /Stored Continue/);
+    assert.equal(result.data?.invocation.delivery?.targetSelector, selectorKind);
+  }
+});
+
+test("a prompt-session selector returns 409 until an owning session is idle without consuming the event id", () => {
+  const { db, service, prompted } = harness();
+  db.createSession({
+    id: "busy-owner", runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
+    title: "Busy Owner", useWorktree: true, driver: "acp", config: {}, now: 10,
+  });
+  db.updateSessionStatus("busy-owner", "running", 11);
+  db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id='busy-owner'").run(JSON.stringify([{
+    id: "wt-busy", path: "/worktrees/busy", branch: "fix/busy", source: "created",
+  }]));
+  const automation = service.create(baseSpec({
+    action: { kind: "prompt_session", sessionId: "busy-owner", request: { text: "{{delivery.prompt}}" } },
+  }), { kind: "human", id: "device" }, 0).data!;
+  const credential = service.createTrigger(automation.automationId, {
+    kind: "webhook", name: "Busy intake",
+    deliveryPolicy: {
+      allowPrompt: true, parameterNames: [], missingReferences: "reject", sessionSelectors: ["branch"],
+    },
+  }, { kind: "human", id: "device" }, 1_000).data!;
+  const body = Buffer.from(JSON.stringify({
+    eventId: "busy-event", prompt: "Continue", target: { branch: "fix/busy" },
+  }));
+  assert.equal(receiveSignedTrigger(service, credential.trigger.triggerId, credential.secret, body, 2_000).status, 409);
+  assert.equal(db.getAutomationTriggerInvocationByEvent(credential.trigger.triggerId, "busy-event"), null);
+  db.updateSessionStatus("busy-owner", "idle", 2_100);
+  const accepted = receiveSignedTrigger(service, credential.trigger.triggerId, credential.secret, body, 2_200);
+  assert.equal(accepted.status, 200);
+  assert.equal(accepted.data?.duplicate, false);
+  assert.equal(prompted[0]?.id, "busy-owner");
 });
 
 test("a trigger preserves delivery when an upgrade no longer parses the stored cron", () => {

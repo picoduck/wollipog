@@ -3,6 +3,8 @@ import { test } from "node:test";
 import Fastify from "fastify";
 import {
   AUTOMATION_TRIGGER_MAX_BODY_BYTES,
+  AUTOMATION_TRIGGER_MAX_PARAMETER_BYTES,
+  AUTOMATION_TRIGGER_MAX_PROMPT_BYTES,
   AUTOMATION_TRIGGER_MEDIA_TYPE,
   LEGACY_AUTOMATION_TRIGGER_MEDIA_TYPE,
   automationTriggerBodySha256,
@@ -66,6 +68,60 @@ test("trigger bodies are provider-neutral, strict, bounded, and retain only send
   null, "malformed UTF-8 must not collapse into a replacement-character identity");
   assert.match(parseAutomationTriggerBody("chatops",
     Buffer.from('{"eventId":"x","command":"run","sender":"actor 🚀"}'))?.senderHash ?? "", /^[a-f0-9]{64}$/);
+});
+
+test("configured trigger bodies accept only explicitly allowlisted prompt, parameters, and selectors", () => {
+  const policy = {
+    allowPrompt: true,
+    parameterNames: ["issue", "run_id"],
+    missingReferences: "reject" as const,
+    sessionSelectors: ["branch", "pull_request"] as const,
+  };
+  assert.deepEqual(parseAutomationTriggerBody("webhook", Buffer.from(JSON.stringify({
+    eventId: "github:1099",
+    prompt: "Work the labeled issue",
+    parameters: { issue: "1099", run_id: "ci-42" },
+    target: { branch: "fix/issue-1099" },
+  })), policy), {
+    eventId: "github:1099",
+    prompt: "Work the labeled issue",
+    parameters: { issue: "1099", run_id: "ci-42" },
+    target: { selector: "branch", value: "fix/issue-1099" },
+  });
+  assert.equal(parseAutomationTriggerBody("webhook",
+    Buffer.from('{"eventId":"x","prompt":"not allowed"}')), null,
+  "legacy triggers retain the exact event-id-only contract");
+  assert.equal(parseAutomationTriggerBody("webhook", Buffer.from(JSON.stringify({
+    eventId: "x", parameters: { secret: "no" },
+  })), policy), null);
+  assert.equal(parseAutomationTriggerBody("webhook", Buffer.from(JSON.stringify({
+    eventId: "x", target: { sessionId: "s_1" },
+  })), policy), null);
+  assert.equal(parseAutomationTriggerBody("webhook", Buffer.from(JSON.stringify({
+    eventId: "x", prompt: "x".repeat(AUTOMATION_TRIGGER_MAX_PROMPT_BYTES + 1),
+  })), policy), null);
+  assert.equal(parseAutomationTriggerBody("webhook", Buffer.from(JSON.stringify({
+    eventId: "x", parameters: { issue: "x".repeat(AUTOMATION_TRIGGER_MAX_PARAMETER_BYTES + 1) },
+  })), policy), null);
+  assert.equal(parseAutomationTriggerBody("webhook",
+    Buffer.from('{"eventId":"x","parameters":{"issue":"1","issue":"2"}}'), policy), null,
+  "duplicate nested members are ambiguous too");
+});
+
+test("allowlisted parameter parsing round-trips generated short Unicode string maps", () => {
+  const names = ["a", "Issue_1", "z9"];
+  const values = ["", "plain", "line\nbreak", "rocket 🚀", "\\quoted\""];
+  const policy = { allowPrompt: false, parameterNames: names, missingReferences: "use_stored" as const };
+  let sequence = 0;
+  for (const name of names) {
+    for (const value of values) {
+      const eventId = `generated-${sequence++}`;
+      const parsed = parseAutomationTriggerBody("webhook", Buffer.from(JSON.stringify({
+        eventId, parameters: { [name]: value },
+      })), policy);
+      assert.deepEqual(parsed, { eventId, parameters: { [name]: value } });
+    }
+  }
 });
 
 test("trigger body parser rejects malformed JSON-subset syntax and strings", () => {

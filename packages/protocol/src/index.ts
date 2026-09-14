@@ -5113,6 +5113,28 @@ export interface AutomationSchedule extends AutomationSpec {
 
 export type AutomationTriggerKind = "webhook" | "chatops";
 
+export type AutomationTriggerSessionSelector = "session_id" | "branch" | "pull_request";
+
+/** Explicit capabilities granted to one signed ingress credential. Absence preserves the legacy
+ * event-id-only body contract. Parameter names are identities, not values, and are safe to expose
+ * in management/audit views. */
+export interface AutomationTriggerDeliveryPolicy {
+  allowPrompt: boolean;
+  parameterNames: string[];
+  missingReferences: "reject" | "use_stored";
+  /** Available only when the stored action prompts an existing session. */
+  sessionSelectors?: AutomationTriggerSessionSelector[];
+}
+
+/** Content-free delivery provenance shared by invocation and execution audit projections. */
+export interface AutomationTriggerDeliveryMetadata {
+  fields: Array<"prompt" | "parameters" | "target">;
+  /** SHA-256 of the delivered prompt bytes. The prompt itself is never projected here. */
+  promptSha256?: string;
+  parameterNames: string[];
+  targetSelector?: AutomationTriggerSessionSelector;
+}
+
 export interface AutomationTriggerView {
   triggerId: string;
   automationId: string;
@@ -5124,11 +5146,13 @@ export interface AutomationTriggerView {
   updatedAt: number;
   lastInvokedAt?: number;
   invocationCount: number;
+  deliveryPolicy?: AutomationTriggerDeliveryPolicy;
 }
 
 export interface CreateAutomationTriggerRequest {
   kind: AutomationTriggerKind;
   name: string;
+  deliveryPolicy?: AutomationTriggerDeliveryPolicy;
 }
 
 /** The signing secret is returned only on create/rotate and is never included in trigger views. */
@@ -5152,6 +5176,7 @@ export interface AutomationTriggerInvocationView {
   receivedAt: number;
   updatedAt: number;
   executionId?: string;
+  delivery?: AutomationTriggerDeliveryMetadata;
 }
 
 export interface AutomationTriggerInvocationResult {
@@ -5223,6 +5248,8 @@ export interface AutomationExecution {
   startedAt?: number;
   completedAt?: number;
   commands?: AutomationCommandView[];
+  /** Present only for signed-trigger executions and deliberately excludes delivered content. */
+  triggerDelivery?: AutomationTriggerDeliveryMetadata;
 }
 
 export type AutomationAuditEventKind =
