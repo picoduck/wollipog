@@ -47,8 +47,9 @@ interface TriggerDraft {
 }
 
 function deliverySummary(delivery: AutomationTriggerDeliveryMetadata): string {
-  const parts = delivery.fields.map((field) => titleCaseLabel(field));
-  if (delivery.parameterNames.length) parts.push(`Parameters ${delivery.parameterNames.join(", ")}`);
+  const parts = delivery.fields.map((field) => field === "parameters" && delivery.parameterNames.length
+    ? `Parameters ${delivery.parameterNames.join(", ")}`
+    : titleCaseLabel(field));
   if (delivery.targetSelector) parts.push(`Target ${titleCaseLabel(delivery.targetSelector)}`);
   return parts.join(" · ") || "No Optional Fields";
 }

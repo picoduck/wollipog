@@ -115,7 +115,7 @@ test("configured trigger controls and content-free delivery provenance are visib
 
   await expect(page.getByText("Accepts Prompt · Parameters issue, priority", { exact: true })).toBeVisible();
   await page.getByText("Execution History (1)", { exact: true }).click();
-  await expect(page.getByText(/Delivered Fields: Prompt · Parameters · Parameters issue, priority/)).toBeVisible();
+  await expect(page.getByText(/Delivered Fields: Prompt · Parameters issue, priority/)).toBeVisible();
   await expect(page.getByText(/Prompt Digest 95a911a82fc5…/)).toBeVisible();
 
   await page.getByRole("button", { name: "Add Webhook", exact: true }).click();

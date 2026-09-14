@@ -678,7 +678,7 @@ test("execution history shows content-free signed delivery provenance", async ()
     await expandCard(fixture, "Alpha");
     const history = fixture.container.querySelector<HTMLDetailsElement>("details.automation-history")!;
     history.open = true;
-    assert.match(history.textContent ?? "", /Delivered Fields: Prompt · Parameters · Parameters issue/);
+    assert.match(history.textContent ?? "", /Delivered Fields: Prompt · Parameters issue/);
     assert.match(history.textContent ?? "", /Prompt Digest aaaaaaaaaaaa…/);
     assert.doesNotMatch(history.textContent ?? "", /delivered prompt text|parameter value/);
   } finally {

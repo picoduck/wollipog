@@ -19284,7 +19284,8 @@ export class ControlPlaneDb {
             trigger_delivery_json,delivery_mode,action_kind,status,actor_kind,actor_id,error,created_at,completed_at)
            VALUES (?,?,?,?,?,?,?,'receipted_v53',?,?,?,?,?,?,?)`,
         ).run(input.executionId, row.automation_id, idempotencyKey, scheduledFor, row.automation_revision,
-          input.status === "dispatching" ? row.spec_json : null, row.delivery_metadata_json,
+          input.status === "dispatching" || !row.delivery_metadata_json ? row.spec_json : null,
+          row.delivery_metadata_json,
           specSnapshot.action.kind, input.status, input.actor.kind,
           input.actor.id ?? null, input.error ?? null, input.now, terminal);
         const invocationState: AutomationTriggerInvocationState = input.status === "dispatching"

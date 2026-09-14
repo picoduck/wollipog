@@ -327,6 +327,34 @@ test("allowlisted deliveries materialize prompt templates, parameter context, an
   assert.equal(conflict.status, 409);
 });
 
+test("template substitution preserves dollar sequences and template-like delivered values verbatim", () => {
+  const { service, created } = harness();
+  const automation = service.create(baseSpec({
+    action: { kind: "create_session", request: {
+      runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
+      prompt: "Parameter {{delivery.parameters.issue}}; prompt {{delivery.prompt}}; done",
+    } },
+  }), { kind: "human", id: "device" }, 0).data!;
+  const credential = service.createTrigger(automation.automationId, {
+    kind: "webhook",
+    name: "Literal delivery",
+    deliveryPolicy: { allowPrompt: true, parameterNames: ["issue"], missingReferences: "reject" },
+  }, { kind: "human", id: "device" }, 1_000).data!;
+  const deliveredPrompt = "literal {{delivery.parameters.nope}} a $$ b $' c $& d";
+  const deliveredParameter = "literal {{delivery.prompt}}";
+  const result = receiveSignedTrigger(service, credential.trigger.triggerId, credential.secret,
+    Buffer.from(JSON.stringify({
+      eventId: "literal-delivery",
+      prompt: deliveredPrompt,
+      parameters: { issue: deliveredParameter },
+    })), 2_000);
+
+  assert.equal(result.status, 200);
+  assert.ok(created[0]?.prompt?.includes(
+    `Parameter ${deliveredParameter}; prompt ${deliveredPrompt}; done`,
+  ));
+});
+
 test("unallowlisted delivery fields are rejected without consuming the event id or changing guardrails", () => {
   const { db, service, created } = harness();
   const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
@@ -621,7 +649,10 @@ test("trigger concurrency wait drains after settlement while skip records one te
     const skipped = receiveSignedTrigger(service, credential.trigger.triggerId, credential.secret,
       Buffer.from('{"eventId":"skip-2"}'), 3_000);
     assert.equal(skipped.data?.invocation.state, "skipped");
-    assert.equal(db.getAutomationExecution(skipped.data!.invocation.executionId!)?.status, "skipped");
+    const skippedExecution = db.getAutomationExecution(skipped.data!.invocation.executionId!)!;
+    assert.equal(skippedExecution.status, "skipped");
+    assert.ok(skippedExecution.specSnapshot,
+      "legacy trigger executions retain their pre-existing audit snapshot behavior");
     assert.equal(created.length, 1);
   }
 });

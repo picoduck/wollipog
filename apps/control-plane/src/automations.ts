@@ -109,9 +109,9 @@ function automationExecutionView(execution: AutomationExecution): AutomationExec
   return view;
 }
 
-const DELIVERY_PROMPT_REFERENCE = /\{\{delivery\.prompt\}\}/g;
 const DELIVERY_PARAMETER_REFERENCE = /\{\{delivery\.parameters\.([A-Za-z][A-Za-z0-9_]{0,63})\}\}/g;
 const DELIVERY_REFERENCE = /\{\{delivery\.[^{}]+\}\}/g;
+const DELIVERY_TEMPLATE_REFERENCE = /\{\{delivery\.(prompt|parameters\.([A-Za-z][A-Za-z0-9_]{0,63}))\}\}/g;
 const DELIVERY_PARAMETER_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 const DELIVERY_SELECTORS = ["session_id", "branch", "pull_request"] as const;
 
@@ -606,21 +606,20 @@ export class AutomationsService {
       return fail(`automation no longer satisfies its trigger delivery policy: ${currentPolicy.error}`, 409);
     }
 
-    let prompt = actionPrompt(storedSpec.action);
-    const referencesPrompt = prompt.includes("{{delivery.prompt}}");
+    const template = actionPrompt(storedSpec.action);
+    const referencesPrompt = template.includes("{{delivery.prompt}}");
     if (referencesPrompt && body.prompt === undefined && policy.missingReferences === "reject") {
       return fail("automation trigger delivery omitted referenced prompt");
     }
-    prompt = prompt.replace(DELIVERY_PROMPT_REFERENCE, body.prompt ?? "");
-    if (body.prompt !== undefined && !referencesPrompt) prompt = `${prompt}${prompt ? "\n\n" : ""}${body.prompt}`;
-
     let missingParameter: string | undefined;
-    prompt = prompt.replace(DELIVERY_PARAMETER_REFERENCE, (_reference, name: string) => {
-      const value = body.parameters?.[name];
-      if (value === undefined && policy.missingReferences === "reject") missingParameter ??= name;
+    let prompt = template.replace(DELIVERY_TEMPLATE_REFERENCE, (_reference, kind: string, name?: string) => {
+      if (kind === "prompt") return body.prompt ?? "";
+      const value = name ? body.parameters?.[name] : undefined;
+      if (value === undefined && name && policy.missingReferences === "reject") missingParameter ??= name;
       return value ?? "";
     });
     if (missingParameter) return fail(`automation trigger delivery omitted referenced parameter '${missingParameter}'`);
+    if (body.prompt !== undefined && !referencesPrompt) prompt = `${prompt}${prompt ? "\n\n" : ""}${body.prompt}`;
 
     let action = storedSpec.action;
     if (body.target) {
