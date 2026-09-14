@@ -12201,6 +12201,14 @@ body.shell-dock-dragging * {
 .automation-legacy-delivery { display: block; margin-top: 7px; font-size: 12px; }
 .automation-trigger-create { margin: 10px 0; }
 .automation-trigger-create small { color: var(--text-dim); }
+.automation-trigger-editor {
+  margin-top: 10px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--bg-elev-2);
+}
+.automation-trigger-editor h4 { margin: 0; }
+.automation-trigger-editor .automation-form-grid { margin-top: 10px; }
+.automation-trigger-editor label small { color: var(--text-dim); font-weight: 400; line-height: 1.4; }
+.automation-trigger-editor .automation-editor-actions { margin-top: 12px; }
 .automation-triggers { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 12px; }
 .automation-triggers h4 { margin: 0 0 8px; }
 .automation-trigger { display: grid; gap: 8px; padding: 10px; border-radius: 8px; background: var(--bg-elev-2); margin-top: 8px; min-width: 0; }
@@ -12211,6 +12219,7 @@ body.shell-dock-dragging * {
 .automation-trigger-actions, .automation-trigger-secret { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .automation-trigger-secret { border: 1px solid color-mix(in srgb, var(--yellow) 45%, var(--border)); border-radius: 7px; padding: 9px; }
 .automation-trigger-secret strong { width: 100%; color: var(--yellow); }
+.automation-execution > small { display: block; margin-top: 6px; color: var(--text-dim); }
 
 .transcript-load-notice {
   position: sticky; top: 8px; z-index: 3; display: flex; align-items: center;

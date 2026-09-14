@@ -1,9 +1,12 @@
 # Signed automation triggers
 
 Webhook and chat-ops triggers are authenticated, out-of-band ways to invoke an existing durable
-automation. They select no action and accept no prompt, runner, workflow, approval, callback URL,
-or limit overrides: the control plane executes the automation revision that was current when it
-accepted the delivery. Cron scheduling remains independent.
+automation. Every trigger selects one fixed automation revision and, unless configured with an
+explicit delivery policy, accepts no prompt, parameters, target, runner, workflow, approval,
+callback URL, or limit overrides. A configured policy can admit bounded prompt text, named string
+parameters, and (for `prompt_session`) a session selector. It can never change the automation's
+agent, runner policy, concurrency policy, cost ceiling, or tool-call ceiling. Cron scheduling
+remains independent.
 
 Create a trigger from the Automations view or through the paired-device-authenticated management
 API. Creation and rotation return a 256-bit HMAC secret once. Copy it immediately; normal reads
@@ -16,7 +19,8 @@ characters. Existing `mamwhsec_` secrets remain valid until they are rotated or 
 Management routes are:
 
 - `GET /api/automations/:id/triggers`
-- `POST /api/automations/:id/triggers` with `{"kind":"webhook|chatops","name":"..."}`
+- `POST /api/automations/:id/triggers` with `{"kind":"webhook|chatops","name":"..."}` and an
+  optional `deliveryPolicy`
 - `POST /api/automations/:id/triggers/:triggerId/rotate`
 - `DELETE /api/automations/:id/triggers/:triggerId`
 
@@ -43,13 +47,13 @@ send conflicting dual values.
 
 ## Body and signature contract
 
-A webhook body has exactly one field:
+A legacy webhook body has exactly one field:
 
 ```json
 {"eventId":"provider-stable-delivery-id"}
 ```
 
-A chat-ops body has exactly these fields:
+A legacy chat-ops body has exactly these fields:
 
 ```json
 {"eventId":"provider-stable-event-id","command":"run","sender":"provider actor identity"}
@@ -59,6 +63,116 @@ The command is deliberately restricted to `run`. The sender is never retained ve
 control plane stores only its SHA-256 digest for audit attribution. Event IDs are 1-128 characters
 from `A-Z a-z 0-9 . _ : -`. They appear in durable invocation/execution history, so never put
 credentials, message content, or personal data in an event ID.
+
+### Delivery policy and optional fields
+
+Omitting `deliveryPolicy` at trigger creation preserves the legacy contracts above exactly. A
+delivery policy has this shape:
+
+```json
+{
+  "allowPrompt": true,
+  "parameterNames": ["issue", "run_id"],
+  "missingReferences": "reject",
+  "sessionSelectors": ["session_id", "branch", "pull_request"]
+}
+```
+
+`allowPrompt` admits a non-empty `prompt` of at most 8 KiB UTF-8. `parameterNames` contains at most
+16 unique names matching `A-Z a-z 0-9 _` and beginning with a letter. A delivery's `parameters`
+object may contain only those names; every value is a string of at most 512 UTF-8 bytes. The 16 KiB
+whole-body limit still applies. Empty parameter values are valid. Any field or parameter not named
+by the policy rejects the delivery with `400` before the event ID is consumed.
+
+`sessionSelectors` is valid only when the stored action is `prompt_session`. A delivery may carry
+exactly one selector:
+
+```json
+{"target":{"sessionId":"s_abc123"}}
+{"target":{"branch":"fix/issue-1099"}}
+{"target":{"pullRequest":"https://github.com/acme/widget/pull/42"}}
+```
+
+Branch names match the runner-authoritative branch of a session-linked worktree. Pull requests
+match their canonical forge URL (an optional trailing slash is ignored). Selection succeeds only
+when exactly one non-archived owning session is idle; no idle owner or multiple idle owners returns
+`409`. A selector changes only the target session ID inside the accepted action snapshot. The
+selected session's runner and existing guardrails still govern delivery.
+
+### Prompt templates and session parameter context
+
+The stored `create_session` prompt or `prompt_session` text is the template. Configurable delivery
+fields are not available for workflow actions. A session-action template may place delivered
+content with these references:
+
+```text
+Work issue {{delivery.parameters.issue}}.
+{{delivery.prompt}}
+```
+
+If delivered prompt text is allowed but the template has no `{{delivery.prompt}}` reference, the
+text is appended to the stored template. Every delivered parameter is also visible to the launched
+or prompted session in a machine-readable preamble, so a skill does not need to parse prose:
+
+```text
+<automation-trigger-delivery>
+{"triggerId":"atr_...","eventId":"github-42","parameters":{"issue":"42"}}
+</automation-trigger-delivery>
+```
+
+The preamble is followed by a blank line and the rendered stored template. For a target override it
+also contains `"targetSelector":"branch|pull_request|session_id"`, never the selector value. The
+single JSON line escapes less-than characters as `\u003c`, so delivered values cannot imitate the
+closing-tag delimiter; JSON decoding restores the original parameter string. The
+`triggerId` and `eventId` are the inbound correlation pair; the accepted invocation adds an
+`invocationId`, and dispatch adds an `executionId`. These four identities let downstream work and
+audit history correlate one signed delivery without repeating its content.
+
+#### Outbound event integration boundary
+
+Issue #1099 provides the following reusable guarantees for outbound-event work:
+
+- `automation_trigger_invocations.invocation_id` is generated once when a signed delivery is
+  accepted, returned as `invocationId`, and retained as the stable invocation identity. The row's
+  `execution_id` links it to the claimed automation execution.
+- Delivery parameters have already passed the trigger policy's name allowlist, string-only shape,
+  count, and UTF-8 byte bounds before acceptance. The exact signed body is not stored; only its
+  SHA-256 digest is retained. Accepted values are currently materialized into the private action
+  snapshot and machine preamble, while public invocation and execution views expose only parameter
+  names and other content-free provenance.
+- For a `create_session` action, the deterministic session ID is staged durably on the execution
+  and its start command before the session row is created or the command is activated. Existing
+  session prompts retain the same invocation-to-execution-to-command correlation without changing
+  the target session's origin.
+
+This is a delivery boundary, not yet a session-origin or outbound-event schema. Issue #1100 must
+add a first-class accepted-parameter map from the already validated values; it must not parse the
+rendered prompt or retain the raw signed request. For created sessions it must also copy
+`invocationId` and that map into durable session-origin metadata. The origin write must be in the
+same transaction as session creation, or otherwise complete before `session.created` becomes
+observable, so an outbound event cannot see a trigger-created session without its origin. #1100
+owns the outbound retention and privacy projection of that metadata; #1099's private action
+snapshot on an execution is cleared at terminal state, and its invocation snapshot is compacted
+after 30 days. Neither is an outbound-event payload store.
+
+`missingReferences: "reject"` returns `400` when the delivery omits a prompt or parameter referenced
+by the template, without consuming its event ID. `"use_stored"` substitutes an empty string for the
+missing reference, preserving the surrounding stored text. Unsupported reference forms are rejected
+when the trigger is created.
+
+A configured webhook body can therefore be:
+
+```json
+{
+  "eventId": "gh-issues-labeled-42-8f61",
+  "prompt": "Work issue #42 using the issue-workflow skill and open a pull request.",
+  "parameters": {"issue": "42"},
+  "target": {"branch": "fix/issue-42"}
+}
+```
+
+A configured chat-ops body carries the same optional fields alongside its required `command` and
+`sender` fields.
 
 Compute the signature over this UTF-8 string, where `body_sha256` is lowercase hex:
 
@@ -89,7 +203,11 @@ Node.js signing example:
 ```js
 import { createHash, createHmac, randomBytes } from "node:crypto";
 
-const body = Buffer.from(JSON.stringify({ eventId: "deploy:123" }), "utf8");
+const body = Buffer.from(JSON.stringify({
+  eventId: "deploy:123",
+  prompt: "Investigate deployment 123.",
+  parameters: { deployment: "123" },
+}), "utf8");
 const timestamp = String(Math.floor(Date.now() / 1000));
 const nonce = randomBytes(18).toString("base64url");
 const bodySha256 = createHash("sha256").update(body).digest("hex");
@@ -101,7 +219,8 @@ Send `body` without reserializing it after signing.
 
 ## Delivery semantics and bounds
 
-The pair `(triggerId, eventId)` is the durable idempotency key. Replaying the same exact delivery
+The pair `(triggerId, eventId)` is the durable idempotency key. The prompt, parameters, and target
+are part of the signed raw bytes and body digest. Replaying the same exact delivery
 returns the original public receipt and never launches a second action, including while the
 automation is paused or after retention compaction. Reusing an event ID with different raw bytes
 returns `409`. A newly accepted delivery returns `200` when it can be dispatched immediately or
@@ -115,9 +234,10 @@ resurrect them. Trigger executions have their own idempotency key and do not adv
 
 Each trigger accepts at most 30 new verified event IDs per rolling minute and retains at most 100
 pending invocations; the control plane retains at most 1,000 pending trigger invocations globally.
-Verified exact duplicates bypass the new-delivery rate bound. A bounded response is `429` with
-`Retry-After: 60`. After 30 days, terminal inbox rows discard the accepted action snapshot and
-chat-ops sender hash. A compact tombstone retains only the event/body fingerprint and public receipt
+Verified exact duplicates bypass the new-delivery rate bound. Changing a prompt, parameter, or
+target while reusing an accepted event ID returns `409`. A bounded response is `429` with
+`Retry-After: 60`. After 30 days, terminal inbox rows discard the accepted action snapshot,
+content-free delivery metadata, and chat-ops sender hash. A compact tombstone retains only the event/body fingerprint and public receipt
 fields needed to return exact duplicates and reject conflicts permanently. The trigger's lifetime
 accepted-delivery count, last-accepted timestamp, execution idempotency keys, and normal automation
 audit history remain subject to their own retention rules.
@@ -139,7 +259,11 @@ Trigger signing secrets are symmetric credentials stored in the control-plane SQ
 the server can verify HMACs. Database files, WAL files, online backups, crash dumps, and operators
 with database access are therefore credential-bearing. Encrypt and access-control backups, avoid
 copying them into tickets or source control, rotate affected trigger secrets after suspected
-exposure, and revoke unused triggers. The public trigger list, invocation response, audit detail,
-and runner receipt journal never expose the secret, raw request body, body digest, accepted spec
-snapshot, or sender identity. Broader secret-reference and external secret-store work belongs to
+exposure, and revoke unused triggers. The public trigger list, invocation response, execution audit
+view, audit detail, and runner receipt journal never expose the secret, raw request body, accepted
+content-bearing spec snapshot, parameter values, prompt text, selector value, or sender identity.
+Invocation and execution audit views expose only which optional fields were carried, sorted
+parameter names, selector kind, and the delivered prompt's SHA-256 digest. Anyone who can sign a
+delivery can put text in front of the agent, but the session still runs under the stored action's
+governance and finite ceilings. Broader secret-reference and external secret-store work belongs to
 roadmap item 11.

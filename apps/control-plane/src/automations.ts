@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { runnerSupportsProtocol } from "@wollipog/protocol";
 import type {
   AutomationAction,
@@ -9,8 +9,11 @@ import type {
   AutomationSchedule,
   AutomationSpec,
   AutomationTriggerCredential,
+  AutomationTriggerDeliveryMetadata,
+  AutomationTriggerDeliveryPolicy,
   AutomationTriggerInvocationView,
   AutomationTriggerInvocationResult,
+  AutomationTriggerSessionSelector,
   AutomationTriggerView,
   CreateAutomationTriggerRequest,
   CreateAutomationRequest,
@@ -38,6 +41,7 @@ import {
   parseAutomationTriggerBody,
   verifyAutomationTriggerSignature,
   type AutomationTriggerHeaders,
+  type ParsedAutomationTriggerBody,
 } from "./automation-trigger-ingress.js";
 
 const MAX_STORED_ACTION_BYTES = 64 * 1024;
@@ -95,7 +99,68 @@ function triggerInvocationView(invocation: AutomationTriggerInvocationRecord): A
     receivedAt: invocation.receivedAt,
     updatedAt: invocation.updatedAt,
     ...(invocation.executionId ? { executionId: invocation.executionId } : {}),
+    ...(invocation.delivery ? { delivery: invocation.delivery } : {}),
   };
+}
+
+function automationExecutionView(execution: AutomationExecution): AutomationExecution {
+  if (!execution.triggerDelivery) return execution;
+  const { specSnapshot: _secretBearingAcceptedSnapshot, ...view } = execution;
+  return view;
+}
+
+const DELIVERY_PARAMETER_REFERENCE = /\{\{delivery\.parameters\.([A-Za-z][A-Za-z0-9_]{0,63})\}\}/g;
+const DELIVERY_REFERENCE = /\{\{delivery\.[^{}]+\}\}/g;
+const DELIVERY_TEMPLATE_REFERENCE = /\{\{delivery\.(prompt|parameters\.([A-Za-z][A-Za-z0-9_]{0,63}))\}\}/g;
+const DELIVERY_PARAMETER_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+const DELIVERY_SELECTORS = ["session_id", "branch", "pull_request"] as const;
+
+function actionPrompt(action: AutomationAction): string {
+  if (action.kind === "create_session") return action.request.prompt ?? "";
+  if (action.kind === "prompt_session") return action.request.text ?? "";
+  return action.request.task;
+}
+
+function validateTriggerDeliveryPolicy(
+  value: unknown,
+  action: AutomationAction,
+): ServiceResult<AutomationTriggerDeliveryPolicy | undefined> {
+  if (value === undefined) return ok(undefined);
+  if (!object(value) || !keysOnly(value, ["allowPrompt", "parameterNames", "missingReferences", "sessionSelectors"]) ||
+      typeof value.allowPrompt !== "boolean" || !Array.isArray(value.parameterNames) ||
+      value.parameterNames.length > 16 || new Set(value.parameterNames).size !== value.parameterNames.length ||
+      value.parameterNames.some((name) => typeof name !== "string" || !DELIVERY_PARAMETER_NAME.test(name)) ||
+      !["reject", "use_stored"].includes(String(value.missingReferences)) ||
+      (value.sessionSelectors !== undefined && (!Array.isArray(value.sessionSelectors) ||
+        value.sessionSelectors.length > DELIVERY_SELECTORS.length ||
+        new Set(value.sessionSelectors).size !== value.sessionSelectors.length ||
+        value.sessionSelectors.some((selector) => !DELIVERY_SELECTORS.includes(selector as AutomationTriggerSessionSelector))))) {
+    return fail("automation trigger delivery policy is malformed");
+  }
+  const policy = value as unknown as AutomationTriggerDeliveryPolicy;
+  if (!policy.allowPrompt && !policy.parameterNames.length && !policy.sessionSelectors?.length) {
+    return fail("automation trigger delivery policy must allow at least one delivery field");
+  }
+  if (action.kind === "workflow_run") {
+    return fail("automation trigger delivery fields are available only for session actions");
+  }
+  if (policy.sessionSelectors?.length && action.kind !== "prompt_session") {
+    return fail("session selectors are available only for prompt-session automations");
+  }
+  const template = actionPrompt(action);
+  const parameterReferences = [...template.matchAll(DELIVERY_PARAMETER_REFERENCE)].map((match) => match[1]!);
+  const unknownReferences = template.match(DELIVERY_REFERENCE)?.filter((reference) =>
+    reference !== "{{delivery.prompt}}" && !/^\{\{delivery\.parameters\.[A-Za-z][A-Za-z0-9_]{0,63}\}\}$/.test(reference)) ?? [];
+  if (unknownReferences.length) return fail(`unsupported delivery template reference ${unknownReferences[0]}`);
+  if (template.includes("{{delivery.prompt}}") && !policy.allowPrompt) {
+    return fail("the automation prompt references delivery.prompt but the trigger does not allow prompt");
+  }
+  const allowedParameters = new Set(policy.parameterNames);
+  const unavailable = parameterReferences.find((name) => !allowedParameters.has(name));
+  if (unavailable) {
+    return fail(`the automation prompt references delivery parameter '${unavailable}' outside the trigger allowlist`);
+  }
+  return ok(policy);
 }
 
 function validateTarget(value: unknown, kind: AutomationAction["kind"]): value is AutomationRunnerTarget {
@@ -382,7 +447,7 @@ export class AutomationsService {
     if (!automation) return fail("automation not found", 404);
     return ok({
       automation,
-      executions: this.db.listAutomationExecutions(automationId),
+      executions: this.db.listAutomationExecutions(automationId).map(automationExecutionView),
       events: this.db.listAutomationEvents(automationId),
     });
   }
@@ -440,12 +505,17 @@ export class AutomationsService {
     actor: GovernanceActor,
     now = Date.now(),
   ): ServiceResult<AutomationTriggerCredential> {
-    if (!object(input) || !keysOnly(input, ["kind", "name"]) ||
+    if (!object(input) || !keysOnly(input, ["kind", "name", "deliveryPolicy"]) ||
         !["webhook", "chatops"].includes(String(input.kind)) || !boundedString(input.name, 80) ||
         /[\u0000-\u001f\u007f]/.test(input.name)) return fail("automation trigger is malformed");
+    const automation = this.db.getAutomation(automationId);
+    if (!automation) return fail("automation not found", 404);
+    const parsedPolicy = validateTriggerDeliveryPolicy(input.deliveryPolicy, automation.action);
+    if (!parsedPolicy.ok) return fail(parsedPolicy.error ?? "automation trigger delivery policy is malformed", parsedPolicy.status);
     const secret = newAutomationTriggerSecret();
     const trigger = this.db.createAutomationTrigger({
-      triggerId: shortId("atr_"), automationId, kind: input.kind, name: input.name.trim(), secret, actor, now,
+      triggerId: shortId("atr_"), automationId, kind: input.kind, name: input.name.trim(), secret,
+      ...(parsedPolicy.data ? { deliveryPolicy: parsedPolicy.data } : {}), actor, now,
     });
     return trigger ? ok({ trigger, secret }, 201) : fail("automation not found", 404);
   }
@@ -481,13 +551,36 @@ export class AutomationsService {
     if (!trigger || !verifyAutomationTriggerSignature(trigger.secret, triggerId, headers, rawBody, now)) {
       return fail("invalid automation trigger signature", 401);
     }
-    const body = parseAutomationTriggerBody(trigger.kind, rawBody);
+    const body = parseAutomationTriggerBody(trigger.kind, rawBody, trigger.deliveryPolicy);
     if (!body) return fail("automation trigger body is malformed");
-    const recorded = this.db.recordAutomationTriggerInvocation({
-      invocationId: shortId("ati_"), triggerId, eventId: body.eventId,
-      bodySha256: automationTriggerBodySha256(rawBody), ...(body.senderHash ? { senderHash: body.senderHash } : {}), now,
-    });
+    const bodySha256 = automationTriggerBodySha256(rawBody);
+    const existing = this.db.getAutomationTriggerInvocationByEvent(triggerId, body.eventId);
+    if (existing) {
+      if (existing.bodySha256 !== bodySha256) {
+        return fail("automation trigger event id was reused with different content", 409);
+      }
+      const invocation = existing.state === "pending" ? this.processTriggerInvocation(existing, now) : existing;
+      return ok({ invocation: triggerInvocationView(invocation), duplicate: true },
+        invocation.state === "pending" ? 202 : 200);
+    }
+    let recorded: ReturnType<ControlPlaneDb["recordAutomationTriggerInvocation"]> = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const current = this.db.getAutomation(trigger.automationId);
+      if (!current) return fail("invalid automation trigger signature", 401);
+      const materialized = this.materializeTriggerDelivery(trigger, body, current);
+      if (!materialized.ok) return fail(materialized.error ?? "automation trigger delivery is invalid", materialized.status);
+      recorded = this.db.recordAutomationTriggerInvocation({
+        invocationId: shortId("ati_"), triggerId, eventId: body.eventId, bodySha256,
+        ...(body.senderHash ? { senderHash: body.senderHash } : {}),
+        expectedAutomationRevision: current.revision,
+        specSnapshot: materialized.data!.spec,
+        ...(materialized.data!.delivery ? { delivery: materialized.data!.delivery } : {}),
+        now,
+      });
+      if (!recorded?.stale) break;
+    }
     if (!recorded) return fail("invalid automation trigger signature", 401);
+    if (recorded.stale) return fail("automation changed while accepting the trigger delivery", 409);
     if (recorded.unavailable) return fail("automation trigger is unavailable", 409);
     if (recorded.retired) return fail("automation trigger event id is retired", 409);
     if (recorded.limited) return fail("automation trigger rate or pending limit exceeded", 429);
@@ -496,6 +589,94 @@ export class AutomationsService {
     const invocation = stored.state === "pending" ? this.processTriggerInvocation(stored, now) : stored;
     return ok({ invocation: triggerInvocationView(invocation), duplicate: recorded.duplicate },
       invocation.state === "pending" ? 202 : 200);
+  }
+
+  private materializeTriggerDelivery(
+    trigger: AutomationTriggerView,
+    body: ParsedAutomationTriggerBody,
+    schedule: AutomationSchedule,
+  ): ServiceResult<{ spec: AutomationSpec; delivery?: AutomationTriggerDeliveryMetadata }> {
+    const { automationId: _automationId, revision: _revision, nextFireAt: _nextFireAt,
+      lastFiredAt: _lastFiredAt, createdBy: _createdBy, createdAt: _createdAt,
+      updatedAt: _updatedAt, ...storedSpec } = schedule;
+    const policy = trigger.deliveryPolicy;
+    if (!policy) return ok({ spec: storedSpec });
+    const currentPolicy = validateTriggerDeliveryPolicy(policy, storedSpec.action);
+    if (!currentPolicy.ok) {
+      return fail(`automation no longer satisfies its trigger delivery policy: ${currentPolicy.error}`, 409);
+    }
+
+    const template = actionPrompt(storedSpec.action);
+    const referencesPrompt = template.includes("{{delivery.prompt}}");
+    if (referencesPrompt && body.prompt === undefined && policy.missingReferences === "reject") {
+      return fail("automation trigger delivery omitted referenced prompt");
+    }
+    let missingParameter: string | undefined;
+    let prompt = template.replace(DELIVERY_TEMPLATE_REFERENCE, (_reference, kind: string, name?: string) => {
+      if (kind === "prompt") return body.prompt ?? "";
+      const value = name ? body.parameters?.[name] : undefined;
+      if (value === undefined && name && policy.missingReferences === "reject") missingParameter ??= name;
+      return value ?? "";
+    });
+    if (missingParameter) return fail(`automation trigger delivery omitted referenced parameter '${missingParameter}'`);
+    if (body.prompt !== undefined && !referencesPrompt) prompt = `${prompt}${prompt ? "\n\n" : ""}${body.prompt}`;
+
+    let action = storedSpec.action;
+    if (body.target) {
+      if (action.kind !== "prompt_session") return fail("automation trigger target override is incompatible", 400);
+      const selected = this.resolveTriggerSession(body.target);
+      if (!selected.ok) return fail(selected.error ?? "automation trigger target is unavailable", selected.status);
+      action = { ...action, sessionId: selected.data!.sessionId };
+    }
+
+    const context = {
+      triggerId: trigger.triggerId,
+      eventId: body.eventId,
+      parameters: body.parameters ?? {},
+      ...(body.target ? { targetSelector: body.target.selector } : {}),
+    };
+    const contextJson = JSON.stringify(context).replace(/</g, () => "\\u003c");
+    const materializedPrompt = `<automation-trigger-delivery>\n${contextJson}\n</automation-trigger-delivery>` +
+      `${prompt ? `\n\n${prompt}` : ""}`;
+    if (action.kind === "create_session") {
+      action = { ...action, request: { ...action.request, prompt: materializedPrompt } };
+    } else if (action.kind === "prompt_session") {
+      action = { ...action, request: { ...action.request, text: materializedPrompt } };
+    } else {
+      action = { ...action, request: { ...action.request, task: materializedPrompt } };
+    }
+
+    const fields: AutomationTriggerDeliveryMetadata["fields"] = [
+      ...(body.prompt === undefined ? [] : ["prompt" as const]),
+      ...(body.parameters === undefined ? [] : ["parameters" as const]),
+      ...(body.target === undefined ? [] : ["target" as const]),
+    ];
+    const delivery: AutomationTriggerDeliveryMetadata = {
+      fields,
+      ...(body.prompt === undefined ? {} : {
+        promptSha256: createHash("sha256").update(body.prompt, "utf8").digest("hex"),
+      }),
+      parameterNames: Object.keys(body.parameters ?? {}).sort(),
+      ...(body.target ? { targetSelector: body.target.selector } : {}),
+    };
+    return ok({ spec: { ...storedSpec, action }, delivery });
+  }
+
+  private resolveTriggerSession(
+    target: NonNullable<ParsedAutomationTriggerBody["target"]>,
+  ): ServiceResult<{ sessionId: string }> {
+    const normalizedPullRequest = (value: string) => value.replace(/\/$/, "");
+    const owners = this.db.listSessions().filter((session) => {
+      if (target.selector === "session_id") return session.id === target.value;
+      const worktrees = session.worktrees ?? [];
+      if (target.selector === "branch") return worktrees.some((worktree) => worktree.branch === target.value);
+      return worktrees.some((worktree) => worktree.pullRequest &&
+        normalizedPullRequest(worktree.pullRequest.url) === normalizedPullRequest(target.value));
+    });
+    const idle = owners.filter((session) => session.status === "idle");
+    if (idle.length === 0) return fail("no idle session owns the requested trigger target", 409);
+    if (idle.length > 1) return fail("more than one idle session owns the requested trigger target", 409);
+    return ok({ sessionId: idle[0]!.id });
   }
 
   tick(now = Date.now()): number {

@@ -7,6 +7,8 @@ import type {
   AutomationExecution,
   AutomationSchedule,
   AutomationSpec,
+  AutomationTriggerView,
+  CreateAutomationTriggerRequest,
   RunnerView,
   UiSnapshotMessage,
 } from "@wollipog/protocol";
@@ -32,6 +34,7 @@ for (const [name, value] of Object.entries({
   HTMLTextAreaElement: domWindow.HTMLTextAreaElement,
   Node: domWindow.Node,
   Event: domWindow.Event,
+  InputEvent: domWindow.InputEvent,
   MouseEvent: domWindow.MouseEvent,
   KeyboardEvent: domWindow.KeyboardEvent,
   requestAnimationFrame: domWindow.requestAnimationFrame.bind(domWindow),
@@ -150,6 +153,7 @@ interface Fixture {
   container: HTMLDivElement;
   root: Root;
   updates: Array<{ id: string; spec: AutomationSpec }>;
+  triggerCreates: Array<{ id: string; request: CreateAutomationTriggerRequest }>;
 }
 
 let fixtureSequence = 0;
@@ -162,12 +166,14 @@ async function settle(): Promise<void> {
 async function mountFixture(
   items: AutomationSchedule[] = [],
   executions: Record<string, AutomationExecution[]> = {},
+  triggerViews: Record<string, AutomationTriggerView[]> = {},
 ): Promise<Fixture> {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   const socket = new FakeSocket();
   const updates: Array<{ id: string; spec: AutomationSpec }> = [];
+  const triggerCreates: Array<{ id: string; request: CreateAutomationTriggerRequest }> = [];
   fixtureSequence += 1;
   const connection: UiConnectionRuntime = {
     instanceId: `automations-${fixtureSequence}`,
@@ -186,7 +192,17 @@ async function mountFixture(
       executions: executions[id] ?? [],
       events: [],
     }),
-    automationTriggers: async () => ({ triggers: [] }),
+    automationTriggers: async (id: string) => ({ triggers: triggerViews[id] ?? [] }),
+    createAutomationTrigger: async (id: string, request: CreateAutomationTriggerRequest) => {
+      triggerCreates.push({ id, request: structuredClone(request) });
+      const trigger: AutomationTriggerView = {
+        triggerId: "atr_created", automationId: id, kind: request.kind, name: request.name,
+        generation: 1, createdBy: { kind: "human", id: "test" }, createdAt: 1, updatedAt: 1,
+        invocationCount: 0, ...(request.deliveryPolicy ? { deliveryPolicy: request.deliveryPolicy } : {}),
+      };
+      triggerViews[id] = [...(triggerViews[id] ?? []), trigger];
+      return { trigger, secret: `wollipogwhsec_${"A".repeat(43)}` };
+    },
     workflowDefinitions: async () => [],
     updateAutomation: async (id: string, spec: AutomationSpec) => {
       updates.push({ id, spec: structuredClone(spec) });
@@ -205,7 +221,7 @@ async function mountFixture(
   });
   await act(async () => { socket.push(snapshot()); });
   await act(settle);
-  return { container, root, updates };
+  return { container, root, updates, triggerCreates };
 }
 
 async function unmountFixture(fixture: Fixture): Promise<void> {
@@ -586,6 +602,85 @@ test("Execution History defaults to collapsed inside an expanded card", async ()
     assert.ok(history, "execution history is rendered inside the expanded card");
     assert.equal(history.open, false);
     assert.match(history.querySelector("summary")?.textContent ?? "", /Execution History \(1\)/);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("signed trigger editor sends an explicit prompt, parameter, and selector allowlist", async () => {
+  const item = schedule("automation-a", "Alpha");
+  item.action = { kind: "prompt_session", sessionId: "s_default", request: { text: "{{delivery.prompt}}" } };
+  const fixture = await mountFixture([item]);
+  try {
+    await expandCard(fixture, "Alpha");
+    await act(async () => { button(fixture.container, "Add Webhook").click(); });
+    const editor = fixture.container.querySelector<HTMLElement>('[aria-label="New Signed Trigger"]');
+    assert.ok(editor);
+    const checkbox = (label: string) => {
+      const wrapper = [...editor.querySelectorAll<HTMLLabelElement>("label")]
+        .find((candidate) => candidate.textContent?.trim() === label);
+      const input = wrapper?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+      assert.ok(input, `${label} checkbox is rendered`);
+      return input;
+    };
+    await act(async () => { checkbox("Accept Delivery Fields").click(); });
+    await act(async () => { checkbox("Delivered Prompt").click(); });
+    await act(async () => { checkbox("Branch").click(); });
+    const parameterInput = [...editor.querySelectorAll<HTMLInputElement>("input")]
+      .find((candidate) => candidate.closest("label")?.textContent?.includes("Parameter Names"));
+    assert.ok(parameterInput);
+    const inputSetter = Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")?.set;
+    assert.ok(inputSetter);
+    await act(async () => {
+      inputSetter.call(parameterInput, "issue, run_id");
+      parameterInput.dispatchEvent(new domWindow.InputEvent("input", { bubbles: true, data: "issue, run_id" }) as never);
+      parameterInput.dispatchEvent(new domWindow.Event("change", { bubbles: true }) as never);
+    });
+    await act(settle);
+    await act(async () => { button(fixture.container, "Create Trigger").click(); });
+    await act(settle);
+    assert.deepEqual(fixture.triggerCreates, [{
+      id: "automation-a",
+      request: {
+        kind: "webhook", name: "Alpha webhook",
+        deliveryPolicy: {
+          allowPrompt: true, parameterNames: ["issue", "run_id"], missingReferences: "reject",
+          sessionSelectors: ["branch"],
+        },
+      },
+    }]);
+    assert.match(fixture.container.textContent ?? "", /Accepts Prompt · Parameters issue, run_id · Selectors Branch/);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("execution history shows content-free signed delivery provenance", async () => {
+  const execution: AutomationExecution = {
+    executionId: "execution-trigger",
+    automationId: "automation-a",
+    idempotencyKey: "trigger:atr_1:delivery-1",
+    scheduledFor: 1,
+    automationRevision: 1,
+    actionKind: "create_session",
+    status: "succeeded",
+    actor: { kind: "policy", id: "webhook:atr_1" },
+    createdAt: 1,
+    completedAt: 2,
+    triggerDelivery: {
+      fields: ["prompt", "parameters"],
+      promptSha256: "a".repeat(64),
+      parameterNames: ["issue"],
+    },
+  };
+  const fixture = await mountFixture([schedule("automation-a", "Alpha")], { "automation-a": [execution] });
+  try {
+    await expandCard(fixture, "Alpha");
+    const history = fixture.container.querySelector<HTMLDetailsElement>("details.automation-history")!;
+    history.open = true;
+    assert.match(history.textContent ?? "", /Delivered Fields: Prompt · Parameters issue/);
+    assert.match(history.textContent ?? "", /Prompt Digest aaaaaaaaaaaa…/);
+    assert.doesNotMatch(history.textContent ?? "", /delivered prompt text|parameter value/);
   } finally {
     await unmountFixture(fixture);
   }
