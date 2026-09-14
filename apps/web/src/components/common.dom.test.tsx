@@ -3,6 +3,7 @@ import { test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
+import type { SessionView } from "@wollipog/protocol";
 import {
   BackgroundDeliveryBadge,
   BackgroundNotificationBadge,
@@ -372,6 +373,13 @@ test("session indicators preserve simultaneous lifecycle, attention, and change 
           },
         }} />
         <SessionStatusIndicators session={{
+          status: "idle",
+          pendingApproval: null,
+          orchestratorCampaign: {
+            pendingRequests: { human: 2, orchestrator: 3 },
+          } as SessionView["orchestratorCampaign"],
+        }} />
+        <SessionStatusIndicators session={{
           status: "queued",
           pendingApproval: null,
           capacityWait: {
@@ -402,6 +410,8 @@ test("session indicators preserve simultaneous lifecycle, attention, and change 
     assert.ok(container.querySelector('[role="group"][aria-label="Session Status"]'));
     assert.equal(container.querySelector('[aria-label="Activity: Running"]')?.textContent?.trim(), "Running");
     assert.equal(container.querySelector('[aria-label="Attention: Answer Required"]')?.textContent?.trim(), "Answer Required");
+    assert.equal(container.querySelector('[aria-label="Attention: Needs Your Input"]')?.textContent?.trim(), "Needs Your Input");
+    assert.match(container.querySelector('[aria-label="Orchestrator Action: 3 Requests"]')?.textContent ?? "", /Orchestrator Action\s*3/u);
     assert.equal(container.querySelector('[aria-label="Health: Disconnected"]')?.textContent?.trim(), "Disconnected");
     assert.equal(
       container.querySelector('[aria-label="Queue Reason: Execution target cloud-a is using 2 of 2 slots"]')

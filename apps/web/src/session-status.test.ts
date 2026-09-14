@@ -79,6 +79,37 @@ test("attention labels distinguish questions, authentication, approvals, and leg
   assert.equal(sessionAttentionStatus(session("input_required"))?.label, "Input Required");
 });
 
+test("idle Orchestrator campaigns surface human-owned descendant attention without changing lifecycle", () => {
+  const idleCampaign = {
+    status: "idle",
+    pendingApproval: null,
+    orchestratorCampaign: {
+      status: "waiting_human",
+      pendingRequests: { human: 2, orchestrator: 1 },
+    },
+  } as unknown as Pick<SessionView, "status" | "pendingApproval">;
+  assert.deepEqual(sessionAttentionStatus(idleCampaign), {
+    kind: "input_required",
+    label: "Needs Your Input",
+    description: "2 human-owned campaign requests need your input.",
+  });
+
+  const orchestratorOwnedChild = {
+    status: "input_required",
+    pendingApproval: {
+      requestId: "child-question",
+      title: "Pick an implementation",
+      options: [],
+      kind: "question",
+      questions: [],
+    },
+    pendingRequestOwners: { human: 0, orchestrator: 1 },
+  } as Pick<SessionView, "status" | "pendingApproval"> &
+    Partial<Pick<SessionView, "pendingRequestOwners">>;
+  assert.equal(sessionAttentionStatus(orchestratorOwnedChild), null,
+    "Orchestrator-owned child work does not become human attention");
+});
+
 function gitStatus(overrides: Partial<GitStatusInfo> = {}): GitStatusInfo {
   return {
     branch: "feature",

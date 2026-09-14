@@ -148,6 +148,20 @@ spawn gate without a protocol fallback or broadened resource access.
 
 ## Typed Parent Control Decisions
 
+An Orchestrator that cannot continue without a human response must create a structured blocking
+request: `request_user_input` in Codex or `AskUserQuestion` in Claude. Writing the question only in
+prose does not create attention and must not be treated as a fallback. A provider that cannot expose
+its structured question action reports a visible compatibility failure and stops. The campaign
+projection derives ownership from durable request and policy records; it never parses transcripts.
+
+The root campaign surfaces human-owned descendant requests as **Needs Your Input** in its parent
+status and request panel, even while its lifecycle remains **Awaiting Prompt**. Those requests use
+the parent's ordinary Inbox, reminder, push, and browser-notification paths. Requests assigned to
+the Orchestrator appear separately as **Orchestrator Action** and do not notify the human. Human
+clients can inspect both groups. A session-scoped credential can list and resolve only its own
+Orchestrator-assigned group; human-owned questions and approvals remain unavailable through agent
+credentials.
+
 Protocol v139 lets a human assign five workflow decisions independently to the human or the
 controlling Orchestrator: implementation questions, pull-request merge approval, deletion of an
 already-merged branch, publication of a sanitized follow-up issue, and UI-evidence approval. The

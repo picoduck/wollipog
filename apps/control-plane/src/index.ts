@@ -3201,7 +3201,11 @@ app.get("/api/sessions/:id/descendant-requests", async (req, reply) => {
   if (principal.kind === "agent" && principal.credentialSessionId !== id) {
     return reply.code(404).send({ error: "session not found" });
   }
-  return respond(reply, svc.descendantRequests(id, (sessionId) => db.canAccessSession(principal, sessionId)));
+  return respond(reply, svc.descendantRequests(
+    id,
+    (sessionId) => db.canAccessSession(principal, sessionId),
+    principal.kind === "agent" ? "orchestrator" : "human",
+  ));
 });
 
 app.post("/api/sessions/:id/descendant-requests/resolve", async (req, reply) => {

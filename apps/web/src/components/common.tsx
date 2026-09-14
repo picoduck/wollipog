@@ -211,7 +211,8 @@ export function quarantinedStatusMeta(
 }
 
 export function AttentionBadge({ session, ariaLabel, onOpen }: {
-  session: Pick<SessionView, "status" | "pendingApproval">;
+  session: Pick<SessionView, "status" | "pendingApproval"> &
+    Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners">>;
   ariaLabel?: string;
   onOpen?: () => void;
 }) {
@@ -251,7 +252,8 @@ export function ThreadDot({ state, title }: { state: "blocked" | "stalled" | "ru
  * request's owner and title, bounded so a runaway provider cannot grow a card's title attribute.
  */
 export function AttentionPills({ session, compact = false }: {
-  session: Pick<SessionView, "status" | "pendingApproval" | "attentionOwners">;
+  session: Pick<SessionView, "status" | "pendingApproval" | "attentionOwners"> &
+    Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners">>;
   /** A phone card has one line for the sender AND the signals: show the top-priority kind with a
    * "+N" for the rest instead of one pill per kind, so three kinds cannot push the sender off the card. */
   compact?: boolean;
@@ -294,7 +296,8 @@ export function AttentionPills({ session, compact = false }: {
 
 export function SessionStatusIndicators({ session, disconnected = false, onOpenAttention, attention = "badge" }: {
   session: Pick<SessionView, "status" | "pendingApproval" | "archiveStatus" | "archiveOperation" |
-    "stopOperation" | "historyQuarantine" | "attentionOwners" | "capacityWait">;
+    "stopOperation" | "historyQuarantine" | "attentionOwners" | "capacityWait" |
+    "orchestratorCampaign" | "pendingRequestOwners">;
   disconnected?: boolean;
   onOpenAttention?: () => void;
   /** Board cards show the per-kind pills; headers keep the single badge that opens the panel. */
@@ -308,6 +311,7 @@ export function SessionStatusIndicators({ session, disconnected = false, onOpenA
     session.historyQuarantine,
   );
   const attentionStatus = sessionAttentionStatus(session);
+  const orchestratorActions = session.orchestratorCampaign?.pendingRequests?.orchestrator ?? 0;
   return (
     <span className="session-status-indicators" role="group" aria-label="Session Status">
       <StatusBadge
@@ -345,6 +349,20 @@ export function SessionStatusIndicators({ session, disconnected = false, onOpenA
       {attention === "pills"
         ? <AttentionPills session={session} />
         : <AttentionBadge session={session} ariaLabel={attentionStatus ? `Attention: ${attentionStatus.label}` : undefined} onOpen={onOpenAttention} />}
+      {orchestratorActions > 0 && (onOpenAttention ? (
+        <button type="button" className="status-badge st-idle" onClick={onOpenAttention}
+          title="The Orchestrator has descendant requests assigned to it."
+          aria-label={`Orchestrator Action: ${orchestratorActions} Requests`}>
+          <span className="status-dot2" aria-hidden="true" />Orchestrator Action
+          <span className="inbox-status-pill-count" aria-hidden="true">{orchestratorActions}</span>
+        </button>
+      ) : (
+        <span className="inbox-status-pill" title="The Orchestrator has descendant requests assigned to it."
+          aria-label={`Orchestrator Action: ${orchestratorActions} Requests`}>
+          Orchestrator Action
+          <span className="inbox-status-pill-count" aria-hidden="true">{orchestratorActions}</span>
+        </span>
+      ))}
       {disconnected && (
         <span className="status-badge st-failed" title="The session runner is disconnected." aria-label="Health: Disconnected">
           <span className="status-dot2" aria-hidden="true" />

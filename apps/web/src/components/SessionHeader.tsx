@@ -178,6 +178,7 @@ export function SessionHeader({
   const statusLayoutKey = JSON.stringify([
     session.status,
     session.pendingApproval,
+    session.orchestratorCampaign?.pendingRequests,
     session.archiveStatus,
     session.archiveOperation,
     session.stopOperation,
@@ -215,7 +216,7 @@ export function SessionHeader({
         closeStatusPopover(false);
         onOpenAttention();
       } : undefined} />
-      {descendantRequests && descendantRequests.count > 0 && (
+      {descendantRequests && descendantRequests.count > 0 && !session.orchestratorCampaign?.pendingRequests && (
         <button
           type="button"
           className="status-badge st-input descendant-request-badge"

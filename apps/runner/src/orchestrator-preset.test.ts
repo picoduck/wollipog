@@ -203,7 +203,7 @@ test("Claude ACP orchestrator metadata grants planning tools while preserving th
   const meta = orchestratorAcpSessionMeta(["/repo"]) as {
     claudeCode: { options: Record<string, unknown> };
   };
-  assert.deepEqual(meta.claudeCode.options.tools, ["Read", "Grep", "Glob", "WebFetch", "WebSearch", "Bash"]);
+  assert.deepEqual(meta.claudeCode.options.tools, ["Read", "Grep", "Glob", "WebFetch", "WebSearch", "Bash", "AskUserQuestion"]);
   const allowed = meta.claudeCode.options.allowedTools as string[];
   for (const tool of ["Read", "Grep", "Glob", "WebFetch", "WebSearch", "mcp__wollipog__*",
     "Bash(git diff:*)", "Bash(gh issue comment:*)"]) assert.ok(allowed.includes(tool));
@@ -230,6 +230,7 @@ test("Claude ACP orchestrator metadata grants planning tools while preserving th
 test("native orchestrator flags enable bounded planning while disabling implementation and ambient tool sources", () => {
   const claude = orchestratorLaunchArgs("claude-code", mcp, ["/repo"]);
   assert.match(claude[claude.indexOf("--tools") + 1] ?? "", /Read/);
+  assert.match(claude[claude.indexOf("--tools") + 1] ?? "", /AskUserQuestion/);
   assert.equal(claude[claude.indexOf("--permission-mode") + 1], "dontAsk");
   assert.equal(claude[claude.indexOf("--add-dir") + 1], "/repo");
   assert.match(claude[claude.indexOf("--allowedTools") + 1] ?? "", /Bash\(git log:\*\)/);
@@ -262,6 +263,9 @@ test("native orchestrator flags enable bounded planning while disabling implemen
   assert.match(codex.find((arg) => arg.startsWith("developer_instructions=")) ?? "", /Project locations are read-only/);
   assert.match(codex.find((arg) => arg.startsWith("developer_instructions=")) ?? "", /call get_campaign/);
   assert.match(codex.find((arg) => arg.startsWith("developer_instructions=")) ?? "", /created directly by an authenticated human/);
+  for (const args of [claude, codex]) {
+    assert.match(args.join(" "), /blocking question.*structured/iu);
+  }
   assert.throws(() => orchestratorLaunchArgs("acp", mcp), /native harness/);
 });
 

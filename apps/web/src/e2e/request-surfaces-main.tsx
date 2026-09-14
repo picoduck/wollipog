@@ -174,16 +174,28 @@ function Fixture() {
           <header className="detail-head" style={{ justifyContent: "space-between" }}>
             <h1 className="detail-title">Request Review</h1>
             {scenario === "descendants" ? (
-              <button
-                className="status-badge st-input descendant-request-badge"
-                type="button"
-                aria-label={`Descendant Requests: ${descendants.length} Unresolved`}
-                aria-controls="right-panel"
-                onClick={() => setOpen(true)}
-              >
-                Descendant Requests
-                <span className="inbox-status-pill-count">{descendants.length}</span>
-              </button>
+              <div className="session-status-indicators" role="group" aria-label="Campaign Requests">
+                <button
+                  className="status-badge st-input descendant-request-badge"
+                  type="button"
+                  aria-label="Needs Your Input: 8 Requests"
+                  aria-controls="right-panel"
+                  onClick={() => setOpen(true)}
+                >
+                  Needs Your Input
+                  <span className="inbox-status-pill-count">8</span>
+                </button>
+                <button
+                  className="status-badge st-idle descendant-request-badge"
+                  type="button"
+                  aria-label="Orchestrator Action: 4 Requests"
+                  aria-controls="right-panel"
+                  onClick={() => setOpen(true)}
+                >
+                  Orchestrator Action
+                  <span className="inbox-status-pill-count">4</span>
+                </button>
+              </div>
             ) : <span />}
           </header>
           <div className="detail-columns">

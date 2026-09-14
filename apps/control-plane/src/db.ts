@@ -33,6 +33,7 @@ import {
   isPolicyApproval,
   isTerminal,
   pendingRequests,
+  parentControlRequestEligible,
   runnerSupportsProtocol,
   scopeAudienceContained,
   validatePromptImageInputs,
@@ -12449,10 +12450,10 @@ export class ControlPlaneDb {
     const resolvedCampaignId = campaign.id;
     const childIds = this.campaignDescendantIds(resolvedCampaignId);
     const rows = childIds.length ? (this.stmt(
-      `SELECT id, status, archived, worktree_path, worktrees, pending_approval
+      `SELECT id, runner_id, status, archived, worktree_path, worktrees, pending_approval
        FROM sessions WHERE id IN (${childIds.map(() => "?").join(",")})`,
     ).all(...childIds) as unknown as Array<{
-      id: string; status: SessionStatus; archived: number; worktree_path: string | null;
+      id: string; runner_id: string; status: SessionStatus; archived: number; worktree_path: string | null;
       worktrees: string | null; pending_approval: string | null;
     }>) : [];
     const verified = this.validCampaignChildReportIds(resolvedCampaignId);
@@ -12462,6 +12463,11 @@ export class ControlPlaneDb {
     ).all(resolvedCampaignId) as unknown as Array<{ session_id: string; authority: WorkflowDecisionAuthority }>;
     const pendingHuman = pending.filter((decision) => decision.authority === "human");
     const pendingOrchestrator = pending.filter((decision) => decision.authority === "orchestrator");
+    const parentControl = campaign.parent_control === "questions" || campaign.parent_control === "questions_and_approvals"
+      ? campaign.parent_control
+      : "off";
+    let pendingGenericHuman = 0;
+    let pendingGenericOrchestrator = 0;
     let waitingHuman = 0;
     let active = 0;
     let blocked = 0;
@@ -12470,8 +12476,21 @@ export class ControlPlaneDb {
     for (const child of rows) {
       const childPending = pending.filter((decision) => decision.session_id === child.id);
       const approval = parseJson<PendingApproval>(child.pending_approval);
-      const genericPending = pendingRequests(approval).some((request) => request.kind !== "workflow_decision");
-      if (childPending.some((decision) => decision.authority === "human") || genericPending) waitingHuman += 1;
+      const delegatedGenericSupported = runnerSupportsProtocol(
+        this.getRunner(child.runner_id)?.protocolVersion,
+        "delegatedParentControl",
+      );
+      const generic = pendingRequests(approval).filter((request) => request.kind !== "workflow_decision");
+      let childHasHumanRequest = childPending.some((decision) => decision.authority === "human");
+      for (const request of generic) {
+        if (delegatedGenericSupported && parentControlRequestEligible(parentControl, request)) {
+          pendingGenericOrchestrator += 1;
+        } else {
+          pendingGenericHuman += 1;
+          childHasHumanRequest = true;
+        }
+      }
+      if (childHasHumanRequest) waitingHuman += 1;
       // A retained child may receive more work after verification. Re-check both the exact
       // latest report and terminal-for-review state instead of trusting a durable row forever.
       const reportVerified = verified.has(child.id);
@@ -12480,7 +12499,7 @@ export class ControlPlaneDb {
       if (reportVerified && (policy.behavior.completion === "retain" || cleanlyRetired)) fullyVerified += 1;
       else if (reportVerified && policy.behavior.completion === "stop_and_archive") cleanupPending += 1;
       if (!reportVerified && (child.status === "failed" || child.status === "stopped")) blocked += 1;
-      else if (!reportVerified && !childPending.some((decision) => decision.authority === "human") && !genericPending) active += 1;
+      else if (!reportVerified && !childHasHumanRequest) active += 1;
     }
     const followUps = this.stmt(
       `SELECT SUM(CASE WHEN duplicate_of IS NULL THEN 1 ELSE 0 END) AS unique_count,
@@ -12517,6 +12536,10 @@ export class ControlPlaneDb {
       },
       children: { total, active, waitingHuman, blocked, verified: fullyVerified, cleanupPending },
       pendingDecisions: { human: pendingHuman.length, orchestrator: pendingOrchestrator.length },
+      pendingRequests: {
+        human: pendingHuman.length + pendingGenericHuman,
+        orchestrator: pendingOrchestrator.length + pendingGenericOrchestrator,
+      },
       followUps: {
         unique: Number(followUps.unique_count ?? 0),
         duplicates: Number(followUps.duplicate_count ?? 0),
@@ -15771,6 +15794,7 @@ export class ControlPlaneDb {
     }
 
     const attentionOwners = this.childAttentionOwners(row.id, pending);
+    const pendingRequestOwners = this.pendingRequestOwners(row, pending);
 
     const durablePromptQueue = this.pendingSessionPromptQueue(row.id);
     const pendingPrompts = this.pendingSessionPrompts(row.id);
@@ -15881,6 +15905,7 @@ export class ControlPlaneDb {
       eventEpoch: row.event_epoch ?? 0,
       preview: row.preview,
       pendingApproval: pending,
+      ...(pendingRequestOwners ? { pendingRequestOwners } : {}),
       ...(attentionOwners.length ? { attentionOwners } : {}),
       ...(durablePromptQueue.length ? { queued: durablePromptQueue } : {}),
       ...(pendingPrompts.length ? { pendingPrompts } : {}),
@@ -15916,6 +15941,61 @@ export class ControlPlaneDb {
       // Lazy: sessions without the guardrail never pay the COUNT (same class as messageCount).
       toolCallCount: row.max_tool_calls != null ? this.countToolCalls(row.id) : undefined,
     };
+  }
+
+  /** Resolve descendant request ownership from durable ancestry and the current root policy.
+   * This keeps list counts, reminders, and notifications aligned after policy changes or reloads
+   * without trusting a stale owner copied into a provider request. */
+  private parentedRequestOwner(
+    row: SessionRow,
+    request: PendingApproval,
+  ): WorkflowDecisionAuthority | undefined {
+    if (!row.parent_session_id) return undefined;
+    const seen = new Set<string>([row.id]);
+    let parentId: string | null = row.parent_session_id;
+    let controller: Pick<SessionRow,
+      "id" | "parent_session_id" | "permission_mode" | "orchestrator_policy" | "parent_control"
+    > | null = null;
+    for (let depth = 0; parentId && depth < 64 && !seen.has(parentId); depth += 1) {
+      seen.add(parentId);
+      const parent = this.stmt(
+        `SELECT id, parent_session_id, permission_mode, orchestrator_policy, parent_control
+         FROM sessions WHERE id=?`,
+      ).get(parentId) as unknown as Pick<SessionRow,
+        "id" | "parent_session_id" | "permission_mode" | "orchestrator_policy" | "parent_control"
+      > | undefined;
+      if (!parent) return undefined;
+      if (parent.permission_mode === "orchestrator" &&
+          orchestratorCampaignPolicyFromJson(parent.orchestrator_policy)) controller = parent;
+      parentId = parent.parent_session_id;
+    }
+    // Broken or excessively deep ancestry cannot delegate authority.
+    if (parentId || !controller) return undefined;
+    if (request.kind === "workflow_decision") return request.workflowDecision?.authority ?? "human";
+    const mode = controller.parent_control === "questions" || controller.parent_control === "questions_and_approvals"
+      ? controller.parent_control
+      : "off";
+    return runnerSupportsProtocol(
+      this.getRunner(row.runner_id)?.protocolVersion,
+      "delegatedParentControl",
+    ) && parentControlRequestEligible(mode, request) ? "orchestrator" : "human";
+  }
+
+  private pendingRequestOwners(
+    row: SessionRow,
+    pending: PendingApproval | null,
+  ): { human: number; orchestrator: number } | undefined {
+    const requests = pendingRequests(pending);
+    if (!row.parent_session_id || requests.length === 0) return undefined;
+    let human = 0;
+    let orchestrator = 0;
+    for (const request of requests) {
+      const owner = this.parentedRequestOwner(row, request);
+      if (!owner) return undefined;
+      if (owner === "orchestrator") orchestrator += 1;
+      else human += 1;
+    }
+    return { human, orchestrator };
   }
 
   private childAttentionOwners(sessionId: string, pending: PendingApproval | null): ChildSessionAttentionOwner[] {
@@ -20806,7 +20886,10 @@ export class ControlPlaneDb {
       }
     }
     if (input.status !== "input_required") return;
+    const sessionRow = this.stmt("SELECT * FROM sessions WHERE id=?")
+      .get(input.sessionId) as unknown as SessionRow | undefined;
     for (const request of pendingRequests(input.pending)) {
+      if (sessionRow && this.parentedRequestOwner(sessionRow, request) === "orchestrator") continue;
       const occurrenceId = request.occurrenceId ?? request.requestId;
       const auditRuleRow = this.stmt(
         `SELECT policy_rule FROM governance_audit
@@ -20857,6 +20940,23 @@ export class ControlPlaneDb {
         });
       }
     }
+  }
+
+  /** Mirror a human-owned descendant ask onto its campaign parent's outbound attention stream. */
+  recordOutboundCampaignInputRequired(input: {
+    campaignSessionId: string;
+    childSessionId: string;
+    occurrenceId: string;
+    questionTitle?: string;
+    now: number;
+  }): boolean {
+    return this.atomic(() => this.enqueueOutboundSessionEventInTransaction({
+      sourceKey: `campaign-input-required:${input.campaignSessionId}:${input.childSessionId}:${input.occurrenceId}`,
+      kind: "session.input_required",
+      sessionId: input.campaignSessionId,
+      occurredAt: input.now,
+      ...(input.questionTitle ? { questionTitle: input.questionTitle } : {}),
+    }) > 0);
   }
 
   /** Insert the immutable event and every matching delivery while the caller's session mutation

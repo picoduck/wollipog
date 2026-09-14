@@ -29,10 +29,22 @@ function newlySettledBackgroundDelivery(prev: SessionView, next: SessionView): b
  */
 export function notifyDecision(prev: SessionView | undefined, next: SessionView): NotifyPayload | null {
   if (!prev) return null;
+  const previousCampaignRequests = prev.orchestratorCampaign?.pendingRequests?.human ?? 0;
+  const campaignAttentionAdded = (next.orchestratorCampaign?.pendingRequests?.human ?? 0) > previousCampaignRequests;
   const replacedAttention = next.status === "input_required" && prev.status === "input_required" &&
     prev.pendingApproval?.requestId !== next.pendingApproval?.requestId;
-  if (prev.status === next.status && !replacedAttention) return null;
+  if (prev.status === next.status && !replacedAttention && !campaignAttentionAdded) return null;
   const name = next.title?.trim() || "Session";
+  if (campaignAttentionAdded) {
+    return {
+      title: `${name} needs your input`,
+      body: sessionAttentionStatus(next)?.description ?? "A campaign request needs your input.",
+      sessionId: next.id,
+      attention: { eventEpoch: next.eventEpoch ?? 0 },
+    };
+  }
+  if (next.status === "input_required" && next.pendingRequestOwners?.human === 0 &&
+      next.pendingRequestOwners.orchestrator > 0) return null;
   switch (next.status) {
     case "input_required": {
       const what = next.pendingApproval?.title ? `: ${next.pendingApproval.title}` : "";

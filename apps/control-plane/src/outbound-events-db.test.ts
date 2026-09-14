@@ -131,6 +131,47 @@ test("project subscriptions atomically queue created and input events without de
   db.close();
 });
 
+test("campaign descendant attention emits one parent-scoped outbound input event", () => {
+  const db = database();
+  const project = db.createProject({ name: "Campaign Outbound", now: 2 });
+  const location = db.addProjectLocation(project.id, { runnerId: "runner-1", workspaceId: "ws-1" }, 3);
+  db.createOutboundEventSubscription({
+    subscriptionId: "oes_campaign",
+    callbackUrl: "https://events.example.test/campaign",
+    secret: "secret-not-readable",
+    scope: { kind: "project", projectId: project.id },
+    eventKinds: ["session.input_required"],
+    includeSessionName: true,
+    includeQuestionTitle: true,
+    actor: { kind: "human", id: "user-1" },
+    now: 4,
+  });
+  db.createSession({
+    id: "campaign-parent", runnerId: "runner-1", workspaceId: "ws-1",
+    projectId: project.id, projectLocationId: location.id, agentId: "agent-1",
+    title: "Campaign Parent", useWorktree: true, driver: "acp", config: {}, now: 5,
+  });
+  const input = {
+    campaignSessionId: "campaign-parent",
+    childSessionId: "child-1",
+    occurrenceId: "human-question-1",
+    questionTitle: "Choose the rollout window",
+    now: 6,
+  };
+  assert.equal(db.recordOutboundCampaignInputRequired(input), true);
+  assert.equal(db.recordOutboundCampaignInputRequired({ ...input, now: 7 }), false,
+    "the durable occurrence suppresses duplicate parent attention delivery");
+  const deliveries = db.listOutboundEventDeliveries("oes_campaign")!;
+  assert.equal(deliveries.length, 1);
+  const payload = JSON.parse((db.raw().prepare(
+    "SELECT payload_json FROM outbound_event_deliveries WHERE subscription_id='oes_campaign'",
+  ).get() as { payload_json: string }).payload_json);
+  assert.equal(payload.sessionId, "campaign-parent");
+  assert.equal(payload.sessionName, "Campaign Parent");
+  assert.equal(payload.questionTitle, "Choose the rollout window");
+  db.close();
+});
+
 test("accepted trigger parameters and stable linkage become session origin in the creation transaction", () => {
   const db = database();
   const automationSpec = spec();

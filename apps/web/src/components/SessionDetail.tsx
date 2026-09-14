@@ -761,6 +761,7 @@ function SessionDetailLoaded({
   } = useDescendantRequestPolling({
     sessionId,
     enabled: mode === "expanded" && conn === "online" && (
+      session.orchestratorCampaign != null ||
       (session.parentControl ?? "off") !== "off" ||
       Object.values(session.parentControlPolicy?.decisions ?? {}).includes("orchestrator")
     ),
@@ -4336,6 +4337,11 @@ function SessionDetailLoaded({
           onOpenBackgroundWork={() => rightPanel.show("background")}
           onOpenAttention={() => {
             const requests = pendingRequests(session.pendingApproval);
+            if ((session.orchestratorCampaign?.pendingRequests?.human ?? 0) > 0 ||
+                (session.orchestratorCampaign?.pendingRequests?.orchestrator ?? 0) > 0) {
+              rightPanel.show("requests");
+              return;
+            }
             if (ownEvidenceDecision) {
               openRequestPanel(sessionRequestPanelKey(session.id, ownEvidenceDecision.occurrenceId));
               return;

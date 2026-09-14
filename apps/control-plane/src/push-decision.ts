@@ -23,7 +23,8 @@ const TITLE_MAX = 120;
 const BODY_MAX = 400;
 const ATTENTION_REQUEST_ID_MAX = 256;
 
-export type PushDecisionPrev = Pick<SessionView, "status" | "pendingApproval" | "backgroundDeliveries">;
+export type PushDecisionPrev = Pick<SessionView, "status" | "pendingApproval" | "backgroundDeliveries"> &
+  Partial<Pick<SessionView, "orchestratorCampaign">>;
 
 function newlySettledBackgroundDelivery(prev: PushDecisionPrev, next: SessionView): boolean {
   const settled = new Set((prev.backgroundDeliveries ?? []).flatMap((delivery) =>
@@ -34,6 +35,19 @@ function newlySettledBackgroundDelivery(prev: PushDecisionPrev, next: SessionVie
 
 export function pushDecision(prev: PushDecisionPrev, next: SessionView): PushMessage | null {
   const name = clamp(next.title?.trim() || "Session", 60);
+  const campaignAttentionAdded = (next.orchestratorCampaign?.pendingRequests?.human ?? 0) >
+    (prev.orchestratorCampaign?.pendingRequests?.human ?? 0);
+  if (campaignAttentionAdded) {
+    return {
+      title: `${name} needs your input`,
+      body: clamp(sessionAttentionStatus(next)?.description ?? "A campaign request needs your input.", BODY_MAX),
+      sessionId: next.id,
+      eventEpoch: next.eventEpoch ?? 0,
+      urgency: "high",
+    };
+  }
+  if (next.status === "input_required" && next.pendingRequestOwners?.human === 0 &&
+      next.pendingRequestOwners.orchestrator > 0) return null;
   if (next.status === "input_required") {
     // Same status AND same ask → the trailing duplicate; anything else is a fresh ask.
     if (prev.status === "input_required" && prev.pendingApproval?.requestId === next.pendingApproval?.requestId) {

@@ -457,6 +457,15 @@ test("status predicates distinguish active, running, and blocked states", () => 
   assert.equal(isInboxBlocked(session("approval", {
     pendingApproval: { requestId: "request-1", title: "Allow command?", options: [] },
   })), true);
+  assert.equal(isInboxBlocked(session("orchestrator-action", {
+    status: "input_required",
+    pendingApproval: { requestId: "request-agent", title: "Pick an implementation", options: [] },
+    pendingRequestOwners: { human: 0, orchestrator: 1 },
+  })), false, "Orchestrator-owned child work is not a human-blocked Inbox session");
+  assert.equal(isInboxBlocked(session("campaign-human", {
+    status: "idle",
+    orchestratorCampaign: { pendingRequests: { human: 1, orchestrator: 2 } } as never,
+  })), true, "an idle campaign with human-owned descendant work is blocked in the Inbox");
   assert.equal(isInboxBlocked(session("legacy-idle", { pendingApproval: undefined as never })), false,
     "an omitted legacy pendingApproval does not invent a blocked state");
 });

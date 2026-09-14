@@ -394,7 +394,9 @@
 // 142: an approved PR-merge workflow decision can arm one exact canonical enqueue command. The
 //      matching runner permission consumes it only after delivery succeeds; older peers fail
 //      closed instead of silently treating action arming as the v139 immediate-consume contract.
-export const PROTOCOL_VERSION = 142;
+// 143: Orchestrator campaign projections separate human-owned requests from agent-actionable
+//      requests so current clients can surface parent attention without conflating lifecycle.
+export const PROTOCOL_VERSION = 143;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -1443,6 +1445,8 @@ export interface OrchestratorCampaignProjection {
     cleanupPending: number;
   };
   pendingDecisions: { human: number; orchestrator: number };
+  /** All unresolved descendant requests, including provider questions/approvals and typed gates. */
+  pendingRequests?: { human: number; orchestrator: number };
   followUps: { unique: number; duplicates: number };
 }
 
@@ -2383,7 +2387,8 @@ export interface ChildSessionRegistryPage {
 
 /** Canonical, compatibility-safe projection of the concrete action a person must take. */
 export function sessionAttentionStatus(
-  session: Pick<SessionView, "status" | "pendingApproval" | "attentionOwners">,
+  session: Pick<SessionView, "status" | "pendingApproval" | "attentionOwners"> &
+    Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners">>,
 ): SessionAttentionStatus | null {
   const result = singleSessionAttentionStatus(session);
   if (!result || !session.pendingApproval?.ownerToolUseId || session.pendingApproval.additionalRequests?.length) return result;
@@ -2415,9 +2420,18 @@ export interface SessionAttentionGroup extends SessionAttentionStatus {
  * one group of one, so a surface can use this for every card and never special-case the rollup.
  */
 export function sessionAttentionBreakdown(
-  session: Pick<SessionView, "status" | "pendingApproval" | "attentionOwners">,
+  session: Pick<SessionView, "status" | "pendingApproval" | "attentionOwners"> &
+    Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners">>,
 ): SessionAttentionGroup[] {
   const requests = prioritizedPendingRequests(session.pendingApproval);
+  if (requests.length > 0 && session.pendingRequestOwners?.human === 0) {
+    const fallback = singleSessionAttentionStatus({
+      status: session.status,
+      pendingApproval: null,
+      orchestratorCampaign: session.orchestratorCampaign,
+    });
+    return fallback ? [{ ...fallback, count: 0, requests: [], owners: [] }] : [];
+  }
   if (requests.length === 0) {
     const fallback = singleSessionAttentionStatus(session);
     return fallback ? [{ ...fallback, count: 0, requests: [], owners: [] }] : [];
@@ -2445,8 +2459,19 @@ export function sessionAttentionBreakdown(
 }
 
 function singleSessionAttentionStatus(
-  session: Pick<SessionView, "status" | "pendingApproval">,
+  session: Pick<SessionView, "status" | "pendingApproval"> &
+    Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners">>,
 ): SessionAttentionStatus | null {
+  const humanCampaignRequests = session.orchestratorCampaign?.pendingRequests?.human ?? 0;
+  if (session.pendingRequestOwners?.human === 0) {
+    return humanCampaignRequests > 0 ? {
+      kind: "input_required",
+      label: "Needs Your Input",
+      description: humanCampaignRequests === 1
+        ? "1 human-owned campaign request needs your input."
+        : `${humanCampaignRequests} human-owned campaign requests need your input.`,
+    } : null;
+  }
   const pending = session.pendingApproval;
   const requests = pendingRequests(pending);
   if (requests.length > 1) {
@@ -2488,6 +2513,15 @@ function singleSessionAttentionStatus(
       kind: "approval_required",
       label: "Approval Required",
       description: "The agent is waiting for an approval decision.",
+    };
+  }
+  if (humanCampaignRequests > 0) {
+    return {
+      kind: "input_required",
+      label: "Needs Your Input",
+      description: humanCampaignRequests === 1
+        ? "1 human-owned campaign request needs your input."
+        : `${humanCampaignRequests} human-owned campaign requests need your input.`,
     };
   }
   if (session.status === "input_required") {
@@ -2828,6 +2862,55 @@ export interface PendingApproval {
   };
   /** Present only for a control-plane-owned typed workflow gate. */
   workflowDecision?: WorkflowDecisionView;
+}
+
+const HUMAN_ONLY_PARENT_CONTROL_REQUEST =
+  /(?:^|[^a-z0-9])(?:account|api[\s_-]*keys?|auth(?:enticate|entication)?|authorization(?:[\s_-]*headers?)?|bearer|cookies?|credentials?|device|identity|login|logout|mfa|oauth2?|passphrases?|password|secrets?|ssh[\s_-]*keys?|tokens?|2[\s_-]*fa)(?:[^a-z0-9]|$)/iu;
+const EMAIL_IDENTITY_PARENT_CONTROL_REQUEST =
+  /(?:^|[^a-z0-9.!#$%&'*+/=?^_`{|}~-])[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?:[^a-z0-9.-]|$)/iu;
+
+function containsHumanOnlyParentControlText(values: Array<string | undefined>): boolean {
+  return values.some((value) => {
+    const text = value ?? "";
+    const camelSeparated = text
+      .replace(/([A-Z])([A-Z][a-z])/gu, "$1 $2")
+      .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
+      .replace(/([a-z])([0-9])/giu, "$1 $2")
+      .replace(/([0-9])([a-z])/giu, "$1 $2");
+    return HUMAN_ONLY_PARENT_CONTROL_REQUEST.test(text) ||
+      HUMAN_ONLY_PARENT_CONTROL_REQUEST.test(camelSeparated) ||
+      EMAIL_IDENTITY_PARENT_CONTROL_REQUEST.test(text);
+  });
+}
+
+/** Classify a generic provider request against the campaign's durable Parent Control mode. */
+export function parentControlRequestEligible(mode: ParentControlMode, request: PendingApproval): boolean {
+  if (mode === "off" || request.kind === "authentication" || request.kind === "policy_hook") return false;
+  if (request.kind === "question") {
+    return !(request.questions ?? []).some((question) =>
+      question.secret === true || question.inputFormat === "email" ||
+      containsHumanOnlyParentControlText([
+        question.id,
+        question.header,
+        question.question,
+        question.context,
+        ...question.options.flatMap((option) => [option.label, option.description]),
+      ]));
+  }
+  if (mode !== "questions_and_approvals" || (request.kind && request.kind !== "permission")) return false;
+  if (request.governancePolicyId || request.context?.escalatedBy ||
+      containsHumanOnlyParentControlText([
+        request.title,
+        request.context?.toolName,
+        request.context?.input,
+        request.context?.path,
+        request.context?.network,
+        request.context?.branch,
+        ...request.options.flatMap((option) => [option.optionId, option.name, option.description]),
+      ])) return false;
+  return request.options.some((option) =>
+    option.kind === "allow_once" || option.kind === "reject_once" ||
+    (option.kind == null && (option.optionId === "allow" || option.optionId === "deny")));
 }
 
 export type GovernanceActorKind = "human" | "agent" | "policy" | "system";
@@ -4423,6 +4506,8 @@ export interface SessionView {
   /** Short snippet of the latest agent message, for the card preview. */
   preview: string | null;
   pendingApproval: PendingApproval | null;
+  /** Effective owners of this session's unresolved requests. Omitted for direct and legacy sessions. */
+  pendingRequestOwners?: { human: number; orchestrator: number };
   /** Compact exact-owner joins for current pending requests. The full child registry remains
    * paginated; unresolved ids stay present with `resolved: false`. */
   attentionOwners?: ChildSessionAttentionOwner[];

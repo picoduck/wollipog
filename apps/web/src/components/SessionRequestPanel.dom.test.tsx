@@ -246,7 +246,8 @@ test("descendant inbox exposes count, ownership, keyboard selection, and canonic
   );
   try {
     await act(async () => render());
-    assert.match(container.querySelector(".request-panel-count")?.textContent ?? "", /2 Descendant Requests/);
+    assert.match(container.querySelector(".request-panel-count")?.textContent ?? "", /Needs Your Input 1/);
+    assert.match(container.querySelector(".request-panel-count")?.textContent ?? "", /Orchestrator Action 1/);
     const list = container.querySelector<HTMLElement>('.request-panel-list')!;
     const rows = [...container.querySelectorAll<HTMLButtonElement>('.request-panel-row')];
     assert.equal(rows.length, 2);
