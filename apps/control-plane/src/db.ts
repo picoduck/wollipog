@@ -11370,6 +11370,12 @@ export class ControlPlaneDb {
     const effectiveStatus: SessionStatus = keepWorkflowPause ? "input_required" : status;
     this.stmt("UPDATE sessions SET status=?, capacity_wait=NULL, updated_at=? WHERE id=?")
       .run(effectiveStatus, now, id);
+    if (status === "queued" || status === "starting" || status === "running") {
+      // A verification attests to one finished assignment, not the lifetime of a retained
+      // session. Delete it as soon as any new execution is admitted so a later Stop/Idle without
+      // a fresh final report cannot resurrect the old campaign-completion proof.
+      this.invalidateCampaignChildReports(id);
+    }
     if (status === "completed" || status === "failed" || status === "stopped") {
       // Session terminality is the retry fence, regardless of which service path observed it.
       // A never-sent prompt is definitely failed; anything marked before send may have reached
@@ -11925,6 +11931,11 @@ export class ControlPlaneDb {
     return this.validCampaignChildReportIds(campaignSessionId, childSessionId).has(childSessionId);
   }
 
+  invalidateCampaignChildReports(childSessionId: string): void {
+    this.stmt("DELETE FROM orchestrator_campaign_child_reports WHERE child_session_id=?")
+      .run(childSessionId);
+  }
+
   private validCampaignChildReportIds(campaignSessionId: string, childSessionId?: string): Set<string> {
     const childFilter = childSessionId === undefined ? "" : " AND verification.child_session_id=?";
     const params = childSessionId === undefined ? [campaignSessionId] : [campaignSessionId, childSessionId];
@@ -11950,6 +11961,11 @@ export class ControlPlaneDb {
               AND trim(json_extract(later.payload, '$.text'))!=''
               AND json_type(later.payload, '$.parentToolUseId') IS NULL)
            )
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM session_events assignment
+           WHERE assignment.session_id=target.session_id AND assignment.seq>target.seq
+             AND assignment.kind='user_message'
          )`,
     ).all(...params) as unknown as Array<{ id: string }>;
     return new Set(rows.map((row) => row.id));

@@ -3319,13 +3319,26 @@ export class SessionsService {
       if (req.parentControlPolicy) {
         overrides.delegation!.decisions = { ...req.parentControlPolicy.decisions };
       }
-      // Agent-created nested Orchestrators receive no inherited authority. Their own behavior is
-      // explicit and conservative; the parent policy only supplies model/effort for this launch.
+      if (parentSessionId && campaignController?.orchestratorPolicy &&
+          req.config?.maxChildSessions !== undefined &&
+          req.config.maxChildSessions !== campaignController.orchestratorPolicy.behavior.maximumConcurrentChildren) {
+        return fail("nested Orchestrator concurrency is fixed by the controlling campaign policy", 409);
+      }
+      // A nested Orchestrator starts a subordinate campaign with the exact controlling snapshot.
+      // This preserves fixed behavior and decision ownership through every descendant without
+      // letting an agent inject overrides or fall back to broader account/system defaults.
       const fallbackParentControl = creationContext?.defaultOwnerUserId && runnerSupportsProtocol(
         runner.protocolVersion,
         "delegatedParentControl",
       ) ? DEFAULT_ORCHESTRATOR_DEFAULTS.delegation.parentControl : "off";
-      const campaignBase = parentSessionId || !configured ? {
+      const inheritedCampaign = parentSessionId ? campaignController?.orchestratorPolicy : undefined;
+      const campaignBase = inheritedCampaign ? {
+        behavior: { ...inheritedCampaign.behavior },
+        delegation: {
+          parentControl: inheritedCampaign.delegation.parentControl,
+          decisions: { ...inheritedCampaign.delegation.decisions },
+        },
+      } : parentSessionId || !configured ? {
         ...structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS),
         delegation: {
           parentControl: parentSessionId ? "off" as const : fallbackParentControl,
@@ -3334,8 +3347,8 @@ export class SessionsService {
       } : baseDefaults;
       orchestratorPolicy = resolveOrchestratorCampaignPolicy(
         campaignBase,
-        parentSessionId ? "system_default" : configured?.source ?? "system_default",
-        overrides,
+        inheritedCampaign ? "active_campaign" : parentSessionId ? "system_default" : configured?.source ?? "system_default",
+        inheritedCampaign ? {} : overrides,
       );
       // A saved account default must remain portable across a mixed runner fleet. Capabilities
       // that predate the selected runner fail closed without turning an otherwise supported
@@ -3419,7 +3432,7 @@ export class SessionsService {
       ? (snapshotCommand.initialPrompt ?? "")
       : (req.prompt?.trim() ?? "");
     let text = requestedText;
-    if (!snapshotCommand && campaignController?.orchestratorPolicy) {
+    if (!snapshotCommand && campaignController?.orchestratorPolicy && (requestedText || images.length > 0)) {
       const campaign = this.db.campaignProjection(campaignController.id);
       if (campaign) text = this.campaignAssignment(campaignController, campaign, text);
     }
@@ -3681,6 +3694,10 @@ export class SessionsService {
     const requestedConfig = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config : config;
     const configInputError = sessionGuardrailConfigError(requestedConfig);
     if (configInputError) return fail(configInputError, 400);
+    if (!snapshotCommand) {
+      const campaignBehaviorError = this.campaignChildBehaviorError(session, requestedConfig);
+      if (campaignBehaviorError) return fail(campaignBehaviorError, 409);
+    }
     const tuiGuardrailError = this.activeAgentTuiGuardrailError(session, requestedConfig);
     if (tuiGuardrailError) return fail(tuiGuardrailError, 409);
     const pendingInputBarrier = session.status === "input_required" || session.pendingApproval != null;
@@ -3723,7 +3740,16 @@ export class SessionsService {
       );
       if (unsupported) return unsupported;
     }
-    const effectiveText = snapshotCommand?.type === "prompt_session" ? snapshotCommand.text : text;
+    let effectiveText = snapshotCommand?.type === "prompt_session" ? snapshotCommand.text : text;
+    if (!snapshotCommand && effectiveText.trim()) {
+      const campaignController = this.orchestratorCampaignController(
+        session.parentSessionId ? this.db.getSession(session.parentSessionId) : null,
+      );
+      const campaign = campaignController ? this.db.campaignProjection(campaignController.id) : null;
+      if (campaignController && campaign) {
+        effectiveText = this.campaignAssignment(campaignController, campaign, effectiveText);
+      }
+    }
     const effectiveImages = snapshotCommand?.type === "prompt_session" ? (snapshotCommand.images ?? []) : images;
     const effectiveSlashCommand = snapshotCommand?.type === "prompt_session" ? snapshotCommand.slashCommand : slashCommand;
     const effectiveConfig = requestedConfig;
@@ -3917,6 +3943,7 @@ export class SessionsService {
         return fail("runner did not receive the prompt", 409);
       }
     }
+    this.db.invalidateCampaignChildReports(sessionId);
     this.hub.sessionChangedById(sessionId);
     return ok(this.db.getSession(sessionId)!);
   }
@@ -3983,6 +4010,8 @@ export class SessionsService {
     if (!session) return fail("session not found", 404);
     const configInputError = sessionGuardrailConfigError(config);
     if (configInputError) return fail(configInputError, 400);
+    const campaignBehaviorError = this.campaignChildBehaviorError(session, config);
+    if (campaignBehaviorError) return fail(campaignBehaviorError, 409);
     if (actor.kind === "agent" && actor.id === sessionId &&
         (config.maxChildSessions === undefined ||
           Object.keys(config).some((key) => key !== "maxChildSessions"))) {
@@ -5285,15 +5314,30 @@ export class SessionsService {
     return task ? `${obligation}\n\n${task}` : obligation;
   }
 
-  /** Resolve the nearest campaign controller while including the immediate parent. Child agents
-   * cannot escape fixed campaign behavior or lose their policy briefing by adding another level. */
+  /** Resolve the outermost controlling campaign while including the immediate parent. A nested
+   * Orchestrator has an inspectable inherited policy but cannot shadow a root campaign update or
+   * let descendants escape fixed behavior by adding another level. */
   private orchestratorCampaignController(start: SessionView | null): SessionView | null {
     const seen = new Set<string>();
     let current = start;
+    let controller: SessionView | null = null;
     for (let depth = 0; current && depth < 64 && !seen.has(current.id); depth += 1) {
       seen.add(current.id);
-      if (current.permissionMode === "orchestrator" && current.orchestratorPolicy) return current;
+      if (current.permissionMode === "orchestrator" && current.orchestratorPolicy) controller = current;
       current = current.parentSessionId ? this.db.getSession(current.parentSessionId) : null;
+    }
+    return controller;
+  }
+
+  private campaignChildBehaviorError(session: SessionView, config: SessionConfig | undefined): string | null {
+    if (!session.parentSessionId || !config) return null;
+    const controller = this.orchestratorCampaignController(this.db.getSession(session.parentSessionId));
+    const behavior = controller?.orchestratorPolicy?.behavior;
+    if (behavior && behavior.childModel !== null && config.model !== undefined && config.model !== behavior.childModel) {
+      return `child model is fixed by campaign policy at ${behavior.childModel}`;
+    }
+    if (behavior && behavior.childEffort !== null && config.effort !== undefined && config.effort !== behavior.childEffort) {
+      return `child effort is fixed by campaign policy at ${behavior.childEffort}`;
     }
     return null;
   }

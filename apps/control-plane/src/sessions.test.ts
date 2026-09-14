@@ -727,6 +727,8 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
       permissionModes: ["orchestrator"],
     };
+    const codex = meta.agents.find((agent) => agent.id === CODEX_APP_AGENT_ID)!;
+    codex.capabilities!.permissionModes = ["default", "orchestrator"];
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     const settings: OrchestratorSettingsView = {
       source: "user_default",
@@ -796,7 +798,11 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
     assert.equal(denied.status, 403, "agents cannot set or broaden campaign policy");
 
-    const childRequest = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID };
+    const childRequest = {
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
+      prompt: "Coordinate the bounded child campaign",
+      config: { permissionMode: "orchestrator" },
+    };
     let child = svc.createSession(childRequest, undefined, undefined, false, false, false, { parentSessionId: parent.id });
     if (child.status === 428) {
       const approval = db.getSession(parent.id)!.pendingApproval!;
@@ -806,6 +812,10 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.ok(child.ok && child.data, child.error);
     assert.equal(child.data.model, "text-model");
     assert.equal(child.data.effort, "high");
+    assert.equal(child.data.orchestratorPolicy?.behavior.childModel, "text-model");
+    assert.equal(child.data.orchestratorPolicy?.behavior.childEffort, "high");
+    assert.equal(child.data.orchestratorPolicy?.delegation.decisions.pr_merge, "orchestrator");
+    assert.equal(child.data.orchestratorPolicy?.sources.behavior.childModel, "active_campaign");
     const assignment = hub.sentOfType("start_session").find((message) => message.spec.sessionId === child.data!.id)?.initialPrompt ?? "";
     assert.match(assignment, /Wollipog Campaign Policy — server-derived, revision 1/);
     assert.match(assignment, /This is not blanket approval/);
@@ -813,13 +823,27 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.match(assignment, /UI evidence remains human-owned/);
 
     db.updateSessionStatus(child.data.id, "running", Date.now());
-    let grandchild = svc.createSession(childRequest, undefined, undefined, false, false, false, {
+    assert.equal(svc.setConfig(child.data.id, { model: "image-model", effort: "low" }).status, 409,
+      "mid-session config cannot escape the root campaign model and effort");
+    assert.equal(svc.prompt(child.data.id, "Attempt a turn escape", [], undefined, {
+      model: "image-model", effort: "low",
+    }).status, 409, "an atomic prompt config cannot escape the root campaign model and effort");
+    assert.equal(svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
+      prompt: "Attempt to escape fixed behavior", config: { model: "image-model", effort: "low" },
+    }, undefined, undefined, false, false, false, { parentSessionId: child.data.id }).status, 409,
+    "a nested Orchestrator cannot let descendants escape the root campaign model and effort");
+    const grandchildRequest = {
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
+      prompt: "Implement the bounded nested task",
+    };
+    let grandchild = svc.createSession(grandchildRequest, undefined, undefined, false, false, false, {
       parentSessionId: child.data.id,
     });
     if (grandchild.status === 428) {
       const approval = db.getSession(child.data.id)!.pendingApproval!;
       assert.ok(svc.approve(child.data.id, approval.requestId, "allow").ok);
-      grandchild = svc.createSession(childRequest, undefined, undefined, false, false, false, {
+      grandchild = svc.createSession(grandchildRequest, undefined, undefined, false, false, false, {
         parentSessionId: child.data.id,
       });
     }
@@ -900,6 +924,30 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     svc.onSessionStatus(failedChild.data.id, "failed");
     assert.equal(db.campaignProjection(parent.id)?.status, "blocked",
       "an unverified failed child blocks campaign completion without stalling unrelated work");
+    const emptyChildRequest = {
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
+    };
+    let emptyChild = svc.createSession(emptyChildRequest, undefined, undefined, false, false, false, {
+      parentSessionId: parent.id,
+    });
+    if (emptyChild.status === 428) {
+      const approval = db.getSession(parent.id)!.pendingApproval!;
+      assert.ok(svc.approve(parent.id, approval.requestId, "allow").ok);
+      emptyChild = svc.createSession(emptyChildRequest, undefined, undefined, false, false, false, {
+        parentSessionId: parent.id,
+      });
+    }
+    assert.ok(emptyChild.ok && emptyChild.data, emptyChild.error);
+    const emptyStart = hub.sentOfType("start_session")
+      .find((message) => message.spec.sessionId === emptyChild.data!.id);
+    assert.equal(emptyStart?.initialPrompt, undefined,
+      "creating a campaign child without a task does not start a policy-only billed turn");
+    svc.onSessionStatus(emptyChild.data.id, "idle");
+    assert.ok(svc.prompt(emptyChild.data.id, "First real task").ok);
+    const firstPrompt = hub.sentOfType("prompt_session")
+      .find((message) => message.sessionId === emptyChild.data!.id)?.text ?? "";
+    assert.match(firstPrompt, /Wollipog Campaign Policy — server-derived/);
+    assert.match(firstPrompt, /First real task/);
     assert.ok(hub.sentOfType("start_session").length >= 4);
   } finally {
     db.close();

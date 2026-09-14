@@ -2281,15 +2281,22 @@ test("campaign report verification and normalized follow-up deduplication surviv
     assert.equal(reopened.campaignChildReportVerified("campaign", "child"), false,
       "a retained child starting more work invalidates its prior verification");
     assert.equal(reopened.campaignProjection("campaign")?.status, "active");
-    reopened.updateSessionStatus("child", "idle", 2_001);
+    reopened.updateSessionStatus("child", "stopped", 2_001);
+    assert.equal(reopened.campaignChildReportVerified("campaign", "child"), false,
+      "ending resumed work without a new report cannot resurrect an old verification");
+    assert.equal(reopened.campaignProjection("campaign")?.status, "blocked");
+    reopened.updateSessionStatus("child", "idle", 2_002);
     const newerReport = reopened.appendEvent("child", {
       kind: "agent_message", text: "New final report", final: true,
-    }, 2_002);
+    }, 2_003);
     assert.equal(reopened.campaignChildReportVerified("campaign", "child"), false,
       "a newer final response invalidates the stored exact report sequence");
-    reopened.verifyCampaignChildReport("campaign", "child", newerReport.seq, 2_003);
+    reopened.verifyCampaignChildReport("campaign", "child", newerReport.seq, 2_004);
     assert.equal(reopened.campaignChildReportVerified("campaign", "child"), true);
     assert.equal(reopened.campaignProjection("campaign")?.status, "verified_complete");
+    reopened.appendEvent("child", { kind: "user_message", text: "Another assignment" }, 2_005);
+    assert.equal(reopened.campaignChildReportVerified("campaign", "child"), false,
+      "a later assignment invalidates verification even before lifecycle evidence arrives");
     reopened.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
