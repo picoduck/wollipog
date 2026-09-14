@@ -305,7 +305,14 @@ export class OutboundEventsService {
 
   async close(): Promise<void> {
     for (const subscriptionId of [...this.active.keys()]) this.abortSubscription(subscriptionId, "shutdown");
-    await this.activeTick;
+    try {
+      await this.activeTick;
+    } catch (error) {
+      this.logger.warn({
+        event: "outbound_event_shutdown_settlement",
+        error: error instanceof Error ? error.message : String(error),
+      }, "Outbound event shutdown settlement failed");
+    }
   }
 
   recordChecksFromSummary(

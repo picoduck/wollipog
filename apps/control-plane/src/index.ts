@@ -5074,8 +5074,11 @@ app.addHook("onClose", async () => {
   clearInterval(policyHookApprovalTimer);
   clearInterval(artifactMaintenanceTimer);
   clearInterval(runnerLivenessTimer);
-  await outboundEvents.close();
-  orchestrator.shutdown();
+  try {
+    await outboundEvents.close();
+  } finally {
+    orchestrator.shutdown();
+  }
 });
 // Re-entrancy guard: a second signal (or an uncaughtException raised WHILE app.close() drains)
 // must not kick off a second shutdown and race two process.exit() calls.

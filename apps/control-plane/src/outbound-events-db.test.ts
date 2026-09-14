@@ -397,6 +397,48 @@ test("check candidates exclude closed pull requests and rotate every attempted o
   db.close();
 });
 
+test("malformed open-PR worktrees do not consume the bounded candidate cohort", () => {
+  const db = database();
+  const project = db.createProject({ name: "Malformed Candidate Bound", now: 2 });
+  const location = db.addProjectLocation(project.id, { runnerId: "runner-1", workspaceId: "ws-1" }, 3);
+  db.createOutboundEventSubscription({
+    subscriptionId: "oes_malformed_candidates",
+    callbackUrl: "https://events.example.test/hook",
+    secret: "secret",
+    scope: { kind: "project", projectId: project.id },
+    eventKinds: ["checks.failed"],
+    includeSessionName: false,
+    includeQuestionTitle: false,
+    actor: { kind: "human", id: "user-1" },
+    now: 4,
+  });
+  for (let index = 0; index < 25; index += 1) {
+    const id = `s_malformed_${index}`;
+    db.createSession({
+      id, runnerId: "runner-1", workspaceId: "ws-1", projectId: project.id,
+      projectLocationId: location.id, agentId: "agent-1", title: id, useWorktree: true,
+      driver: "acp", config: {}, now: 10 + index,
+    });
+    db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?").run(JSON.stringify([{
+      id: `wt_${index}`, path: "", branch: `branch-${index}`, source: "created",
+      pullRequest: { url: `https://github.com/example/repo/pull/${index}`, state: "open" },
+    }]), id);
+  }
+  db.createSession({
+    id: "s_valid_after_malformed", runnerId: "runner-1", workspaceId: "ws-1", projectId: project.id,
+    projectLocationId: location.id, agentId: "agent-1", title: "Valid", useWorktree: true,
+    driver: "acp", config: {}, now: 100,
+  });
+  db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?").run(JSON.stringify([{
+    id: "wt_valid", path: "/repos/valid", branch: "branch-valid", source: "created",
+    pullRequest: { url: "https://github.com/example/repo/pull/valid", state: "open" },
+  }]), "s_valid_after_malformed");
+
+  assert.deepEqual(db.outboundCheckObservationCandidates().map((candidate) => candidate.sessionId),
+    ["s_valid_after_malformed"]);
+  db.close();
+});
+
 test("check sweep queries the open PR's linked worktree and rejects stale attribution", async () => {
   const db = database();
   const project = db.createProject({ name: "Matched Worktree", now: 2 });

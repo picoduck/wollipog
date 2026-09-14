@@ -31,12 +31,14 @@ function delivery(overrides: Partial<ClaimedOutboundEventDelivery> = {}): Claime
 function fakeDb(input: {
   claims?: ClaimedOutboundEventDelivery[];
   settled?: Array<Record<string, unknown>>;
+  settleError?: Error;
   revoked?: boolean;
 } = {}): ControlPlaneDb {
   let claimed = false;
   return {
     claimOutboundEventDeliveries: () => claimed ? [] : (claimed = true, input.claims ?? []),
     settleOutboundEventDelivery: (receipt: Record<string, unknown>) => {
+      if (input.settleError) throw input.settleError;
       input.settled?.push(receipt);
       return true;
     },
@@ -169,6 +171,27 @@ test("graceful shutdown durably defers and refunds an in-flight sixth attempt", 
   await ticking;
   assert.equal(settled[0]?.disposition, "deferred");
   assert.equal("pauseReason" in settled[0]!, false);
+});
+
+test("graceful shutdown contains settlement failure after aborting active requests", async () => {
+  const logs: Array<Record<string, unknown>> = [];
+  let started!: () => void;
+  const begun = new Promise<void>((resolve) => { started = resolve; });
+  const service = new OutboundEventsService(fakeDb({
+    claims: [delivery()], settleError: new Error("database unavailable"),
+  }), { info: () => {}, warn: (fields) => logs.push(fields) },
+  (async () => [{ address: "93.184.216.34", family: 4 }]) as never,
+  async (_target, _delivery, signal) => {
+    started();
+    return await new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")),
+      { once: true }));
+  });
+  const ticking = service.tick(20_000);
+  const failedTick = assert.rejects(ticking, /database unavailable/);
+  await begun;
+  await assert.doesNotReject(() => service.close());
+  await failedTick;
+  assert.equal(logs.some((fields) => fields.event === "outbound_event_shutdown_settlement"), true);
 });
 
 test("a genuine timeout still exhausts the in-flight sixth attempt", async () => {

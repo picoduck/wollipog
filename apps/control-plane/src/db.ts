@@ -19690,6 +19690,10 @@ export class ControlPlaneDb {
        WHERE session.archived=0 AND session.worktrees IS NOT NULL AND EXISTS (
          SELECT 1 FROM json_each(session.worktrees) worktree
          WHERE lower(json_extract(worktree.value,'$.pullRequest.state'))='open'
+           AND json_type(worktree.value,'$.path')='text'
+           AND length(json_extract(worktree.value,'$.path'))>0
+           AND json_type(worktree.value,'$.pullRequest.url')='text'
+           AND length(json_extract(worktree.value,'$.pullRequest.url'))>0
        )
        ORDER BY COALESCE(observation.updated_at,0),session.updated_at,session.id LIMIT ?`,
     ).all(Math.max(1, Math.min(100, Math.floor(limit)))) as unknown as Array<{ id: string }>;
