@@ -108,3 +108,19 @@ for (const { label, viewport } of [
     });
   });
 }
+
+test("configured trigger controls and content-free delivery provenance are visible", async ({ page }) => {
+  await open(page);
+  await page.getByRole("button", { name: /Nightly Dependency Sweep/ }).click();
+
+  await expect(page.getByText("Accepts Prompt · Parameters issue, priority", { exact: true })).toBeVisible();
+  await page.getByText("Execution History (1)", { exact: true }).click();
+  await expect(page.getByText(/Delivered Fields: Prompt · Parameters · Parameters issue, priority/)).toBeVisible();
+  await expect(page.getByText(/Prompt Digest 95a911a82fc5…/)).toBeVisible();
+
+  await page.getByRole("button", { name: "Add Webhook", exact: true }).click();
+  await page.getByRole("checkbox", { name: "Accept Delivery Fields" }).check();
+  await expect(page.getByRole("checkbox", { name: "Delivered Prompt" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Missing References" })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Parameter Names" })).toBeVisible();
+});
