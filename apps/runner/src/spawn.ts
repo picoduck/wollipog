@@ -115,8 +115,13 @@ export interface SpawnAgentOptions {
   /** Marks the provider process whose checked in-image command replaces the host launch. Helpers
    * such as ACP terminals deliberately omit this even when their command text happens to match. */
   containerAgentLaunch?: boolean;
+  /** Explicit environment names a reviewed container helper may receive. Values stay in the
+   * native client environment and Docker/Podman receives only `--env NAME`, never `NAME=value`. */
+  containerEnvironmentKeys?: string[];
   /** Cloud equivalent: marks the provider launch whose checked remote command replaces host argv. */
   cloudAgentLaunch?: boolean;
+  /** Explicit environment names a reviewed cloud helper may ask the proxy to forward. */
+  cloudEnvironmentKeys?: string[];
   /** Stable owner for native POSIX descendants that may intentionally outlive one provider turn.
    * The boundary is retained after normal provider exit and terminated when that session disposes. */
   descendantOwner?: object;
@@ -183,6 +188,8 @@ export interface ContainerSpawnIsolation {
   agentArgs: string[];
   /** Host-only configured args replaced by agentArgs at the container boundary. */
   hostAgentArgs: string[];
+  /** Trust-gated repository setup names forwarded without putting values in argv. */
+  sessionEnvironmentKeys?: string[];
 }
 
 export interface CloudSpawnIsolation {
@@ -199,12 +206,14 @@ export interface CloudSpawnIsolation {
   hostAgentArgs: string[];
   agentCommand: string;
   agentArgs: string[];
+  /** Trust-gated repository setup names the proxy must forward to the remote command. */
+  sessionEnvironmentKeys?: string[];
 }
 
 export type SpawnIsolation = BwrapSpawnIsolation | WslBwrapSpawnIsolation | SeatbeltSpawnIsolation | WindowsJobSpawnIsolation | ContainerSpawnIsolation | CloudSpawnIsolation;
 
 export function buildContainerArgs(
-  opts: Pick<SpawnAgentOptions, "command" | "args" | "cwd" | "containerAgentLaunch">,
+  opts: Pick<SpawnAgentOptions, "command" | "args" | "cwd" | "containerAgentLaunch" | "containerEnvironmentKeys">,
   isolation: ContainerSpawnIsolation,
 ): string[] {
   if (/[\0,\r\n]/.test(opts.cwd)) {
@@ -236,6 +245,7 @@ export function buildContainerArgs(
     "--tmpfs", "/tmp:rw,nosuid,nodev",
     "--mount", `type=bind,src=${opts.cwd},dst=/workspace`,
     "--workdir", "/workspace",
+    ...(opts.containerEnvironmentKeys ?? isolation.sessionEnvironmentKeys ?? []).flatMap((key) => ["--env", key]),
     isolation.image,
     command,
     ...(agentLaunch ? isolation.agentArgs : []),
@@ -244,7 +254,7 @@ export function buildContainerArgs(
 }
 
 export function buildCloudArgs(
-  opts: Pick<SpawnAgentOptions, "command" | "args" | "cloudAgentLaunch">,
+  opts: Pick<SpawnAgentOptions, "command" | "args" | "cloudAgentLaunch" | "cloudEnvironmentKeys">,
   isolation: CloudSpawnIsolation,
 ): string[] {
   const agentLaunch = opts.cloudAgentLaunch === true;
@@ -266,6 +276,7 @@ export function buildCloudArgs(
     "--target", isolation.targetId,
     "--handoff", isolation.handoffId,
     "--session", isolation.sessionId,
+    ...(opts.cloudEnvironmentKeys ?? isolation.sessionEnvironmentKeys ?? []).flatMap((key) => ["--env", key]),
     "--",
     command,
     ...(agentLaunch ? isolation.agentArgs : []),
@@ -443,21 +454,38 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
         ...opts.isolation,
         containerName: `${opts.isolation.containerName}-${randomUUID().replace(/-/g, "").slice(0, 12)}`,
       };
-      args = buildContainerArgs({ command: file, args, cwd: opts.cwd, containerAgentLaunch: opts.containerAgentLaunch }, uniqueIsolation);
+      args = buildContainerArgs({
+        command: file,
+        args,
+        cwd: opts.cwd,
+        containerAgentLaunch: opts.containerAgentLaunch,
+        containerEnvironmentKeys: opts.containerEnvironmentKeys,
+      }, uniqueIsolation);
       file = opts.isolation.command;
       shell = false;
       cwd = undefined;
       // Container targets explicitly claim `secrets: none`. Agent/terminal environment values
-      // therefore must not reach either the container or the native runtime client process.
-      explicitEnv = {};
+      // therefore must not reach either the container or the native runtime client process. The
+      // setup runner is the sole reviewed exception and allowlists names explicitly; values stay
+      // out of argv and are forwarded by the container runtime from its own environment.
+      const allowedEnvironment = new Set(opts.containerEnvironmentKeys ?? opts.isolation.sessionEnvironmentKeys ?? []);
+      explicitEnv = Object.fromEntries(Object.entries(explicitEnv).filter(([key]) => allowedEnvironment.has(key)));
     } else if (opts.isolation.backend === "cloud") {
-      args = buildCloudArgs({ command: file, args, cloudAgentLaunch: opts.cloudAgentLaunch }, opts.isolation);
+      const allowedEnvironment = new Set(opts.cloudEnvironmentKeys ?? opts.isolation.sessionEnvironmentKeys ?? []);
+      const forwardedEnvironment = Object.fromEntries(Object.entries(explicitEnv).filter(([key]) => allowedEnvironment.has(key)));
+      args = buildCloudArgs({
+        command: file,
+        args,
+        cloudAgentLaunch: opts.cloudAgentLaunch,
+        cloudEnvironmentKeys: opts.cloudEnvironmentKeys,
+      }, opts.isolation);
       file = opts.isolation.command;
       shell = false;
       cwd = undefined;
-      // Provider env never crosses the cloud boundary. Only the runner-owned adapter's resolved,
-      // explicit references reach the native proxy client.
-      explicitEnv = opts.isolation.env;
+      // Provider env never crosses the cloud boundary. Only runner-owned adapter references and
+      // trust-gated repository setup names reach the proxy; the proxy receives forwarding names
+      // in argv and values only in its native environment.
+      explicitEnv = { ...forwardedEnvironment, ...opts.isolation.env };
     } else {
       let targetCommand = file;
       let targetArgs = args;

@@ -894,7 +894,7 @@ test("concurrent requests retain every created branch and deletion leaves attach
       manager.requestWorktree("s_multi", { baseRef: "HEAD", branch: "fix/second" }),
     ]);
     assert.equal(firstPhases[0], "validating");
-    assert.deepEqual(firstPhases.slice(-2), ["materializing", "activating"]);
+    assert.deepEqual(firstPhases.slice(-3), ["materializing", "reading_setup_config", "activating"]);
     assert.deepEqual(retryPhases, firstPhases, "joined callers observe the same bounded phases");
     assert.equal(repeated.worktree.id, first.worktree.id,
       "an in-flight idempotent retry keeps original ownership metadata");

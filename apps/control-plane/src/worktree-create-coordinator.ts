@@ -35,6 +35,10 @@ const WORKTREE_PROGRESS_PHASES = new Set<SessionWorktreeProgressPhase>([
   "fetching_remote",
   "validating",
   "materializing",
+  "reading_setup_config",
+  "awaiting_setup_trust",
+  "copying_setup_files",
+  "running_setup",
   "activating",
 ]);
 

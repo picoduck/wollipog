@@ -389,7 +389,9 @@
 // 140: Orchestrator campaigns expose a credential-free effective-policy/status projection,
 //      deduplicate follow-up recommendations, and verify child reports before policy-driven
 //      stop-and-archive completion.
-export const PROTOCOL_VERSION = 140;
+// 141: repository-owned worktree setup exposes content-safe lifecycle state and bounded progress;
+//      environment values and copied file contents remain runner-private.
+export const PROTOCOL_VERSION = 141;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -572,6 +574,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   delegatedParentControl: 136,
   typedWorkflowDecisionDelegation: 139,
   orchestratorCampaignManagement: 140,
+  worktreeSetup: 141,
   workerAttention: 108,
   backgroundWorkTracking: 83,
   correlatedRestartEcho: 84,
@@ -4571,6 +4574,9 @@ export interface SessionWorktreeView {
   /** Commit resolved from baseRef when this worktree was created. */
   baseCommit?: string;
   source: "legacy" | "created" | "attached";
+  /** Protocol v141: repository-owned setup lifecycle. Environment values and copied contents are
+   * deliberately runner-private; only names, timing, and bounded outcomes cross the wire. */
+  setup?: WorktreeSetupState;
   /** Forge change-request linkage. The historic field name is retained on the wire for rolling
    * compatibility; `kind` and `provider` distinguish pull requests from merge requests. */
   pullRequest?: {
@@ -4581,6 +4587,39 @@ export interface SessionWorktreeView {
     provider?: ForgeProvider;
     kind?: ForgeChangeRequestKind;
   };
+}
+
+export type WorktreeSetupStatus = "awaiting_trust" | "declined" | "running" | "completed" | "failed";
+
+export interface WorktreeSetupCopyResult {
+  source: string;
+  destination: string;
+  status: "pending" | "completed" | "failed";
+  durationMs?: number;
+  error?: string;
+}
+
+export interface WorktreeSetupStepResult {
+  name: string;
+  status: "running" | "completed" | "failed";
+  optional: boolean;
+  startedAt: number;
+  durationMs?: number;
+  exitCode?: number;
+  signal?: string;
+  error?: string;
+}
+
+export interface WorktreeSetupState {
+  status: WorktreeSetupStatus;
+  configHash: string;
+  attemptId: string;
+  startedAt?: number;
+  completedAt?: number;
+  environmentKeys: string[];
+  copies: WorktreeSetupCopyResult[];
+  steps: WorktreeSetupStepResult[];
+  error?: string;
 }
 
 /* ========================================================================== */
@@ -6167,13 +6206,17 @@ export type SessionWorktreeRequestMessage =
       /** Protocol v113+: ask the runner for bounded, content-free phase heartbeats. */
       progress?: boolean;
     }
-  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "attach" | "select" | "discard"; path: string };
+  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "attach" | "select" | "discard" | "retry_setup"; path: string };
 
 export type SessionWorktreeProgressPhase =
   | "resolving_remote"
   | "fetching_remote"
   | "validating"
   | "materializing"
+  | "reading_setup_config"
+  | "awaiting_setup_trust"
+  | "copying_setup_files"
+  | "running_setup"
   | "activating";
 
 /** Content-free phase heartbeat for one exact runner request. */
@@ -6205,7 +6248,7 @@ export interface SessionWorktreeResultMessage {
   requestId: string;
   /** Protocol v113+: exact request coordinates echoed for cross-operation correlation. */
   sessionId?: string;
-  operation?: "create" | "attach" | "select" | "discard";
+  operation?: "create" | "attach" | "select" | "discard" | "retry_setup";
   ok: boolean;
   error?: string;
   worktree?: SessionWorktreeView;

@@ -772,6 +772,7 @@ function SessionDetailLoaded({
   const [busy, setBusy] = useState(false);
   const [handoffTurn, setHandoffTurn] = useState<number | null>(null);
   const [restartPending, setRestartPending] = useState(false);
+  const [setupRetryPending, setSetupRetryPending] = useState(false);
   const [steeringBusy, setSteeringBusy] = useState(false);
   const [queuedEditBusy, setQueuedEditBusy] = useState(false);
   const [queuedEdit, setQueuedEdit] = useState<QueuedPromptEditState | null>(null);
@@ -3128,6 +3129,24 @@ function SessionDetailLoaded({
     }
   }, [api, busy, loadSession, restartPending, runnerOnline, session.id, session.status,
     session.stopOperation?.status]);
+  const failedSetupWorktree = session.worktrees?.find((worktree) => worktree.setup?.status === "failed");
+  const retryWorktreeSetup = useCallback(async () => {
+    if (!failedSetupWorktree || setupRetryPending || !runnerOnline) return;
+    const generation = viewGenerationRef.current;
+    setSetupRetryPending(true);
+    setError(null);
+    try {
+      const result = await api.retryWorktreeSetup(session.id, failedSetupWorktree.path);
+      loadSession(result.session);
+      // Initial launch failures need a fresh start after setup succeeds. Provider forks and
+      // handoffs are restored to idle by the runner so Retry never discards their continuation.
+      if (result.session.status === "failed") loadSession(await api.restart(session.id));
+    } catch (cause) {
+      if (viewGenerationRef.current === generation) setError((cause as Error).message);
+    } finally {
+      if (viewGenerationRef.current === generation) setSetupRetryPending(false);
+    }
+  }, [api, failedSetupWorktree, loadSession, runnerOnline, session.id, session.status, setupRetryPending]);
   const primaryComposerAction = composerPrimaryAction({
     canStopTurn,
     hasContent: text.length > 0 || images.length > 0,
@@ -4697,6 +4716,28 @@ function SessionDetailLoaded({
                   : ""}
             </span>
             {error && <div className="composer-error" role="alert">{error}</div>}
+            {failedSetupWorktree && (
+              <div className="quarantine-banner" role="status" aria-label="Worktree Setup Failed">
+                <div className="quarantine-copy">
+                  <span className="quarantine-title">Worktree Setup Failed</span>
+                  <p>
+                    {failedSetupWorktree.setup?.error ?? "A required setup step failed."}
+                    {" "}The worktree was retained. Retry resumes at the failed required step.
+                  </p>
+                </div>
+                <div className="quarantine-actions">
+                  <button
+                    type="button"
+                    className="btn primary sm"
+                    disabled={setupRetryPending || !runnerOnline}
+                    title={runnerOnline ? undefined : "Runner is offline."}
+                    onClick={() => void retryWorktreeSetup()}
+                  >
+                    {setupRetryPending ? "Retrying Setup…" : "Retry Setup"}
+                  </button>
+                </div>
+              </div>
+            )}
             {historyQuarantine && (
               <div className="quarantine-banner" role="status" aria-label="Conversation Quarantined">
                 <div className="quarantine-copy">

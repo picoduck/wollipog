@@ -1682,7 +1682,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               snapshot,
               worktree: snapshot.worktrees?.find((item) => item.path === snapshot.worktreePath),
             }))
-            : sessions.discardWorktree(msg.sessionId, msg.path).then((snapshot) => ({ snapshot }));
+            : msg.operation === "retry_setup"
+              ? sessions.retryWorktreeSetup(msg.sessionId, msg.path)
+              : sessions.discardWorktree(msg.sessionId, msg.path).then((snapshot) => ({ snapshot }));
       void operation.then((result) => sendUp({
         type: "session_worktree_result",
         requestId: msg.requestId,
