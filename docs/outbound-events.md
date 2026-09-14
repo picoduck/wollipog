@@ -126,6 +126,9 @@ Bounds are fixed:
 - each attempt has a 10-second timeout and each JSON body is at most 16 KiB;
 - network failures and 5xx responses retry at 5 seconds, 30 seconds, 2 minutes, 10 minutes, and
   30 minutes after attempts one through five. Failure on attempt six pauses the subscription;
+- secret rotation and graceful control-plane shutdown abort in-flight requests without consuming
+  a delivery attempt. Rotation retries with the current secret, while shutdown leaves the retry
+  durably queued for recovery;
 - `410 Gone` never retries and pauses immediately. Redirects are never followed. Other permanent
   HTTP failures do not retry; three consecutive permanent delivery failures pause the subscription;
 - terminal receipts are retained for 30 days. Terminal delivery rows discard their request body,

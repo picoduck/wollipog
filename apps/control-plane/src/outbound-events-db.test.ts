@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AutomationSpec, RunnerMetadata } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
+import { OutboundEventsService } from "./outbound-events.js";
 
 function runner(): RunnerMetadata {
   return {
@@ -255,6 +256,56 @@ test("a subscription pauses at the fixed 100-delivery pending bound", () => {
   db.close();
 });
 
+test("administrative deferral refunds a claimed attempt and preserves durable retry state", () => {
+  const db = database();
+  const project = db.createProject({ name: "Deferred Delivery", now: 2 });
+  const location = db.addProjectLocation(project.id, { runnerId: "runner-1", workspaceId: "ws-1" }, 3);
+  db.createOutboundEventSubscription({
+    subscriptionId: "oes_deferred",
+    callbackUrl: "https://events.example.test/hook",
+    secret: "secret",
+    scope: { kind: "project", projectId: project.id },
+    eventKinds: ["session.created"],
+    includeSessionName: false,
+    includeQuestionTitle: false,
+    actor: { kind: "human", id: "user-1" },
+    now: 4,
+  });
+  db.createSession({
+    id: "s_deferred", runnerId: "runner-1", workspaceId: "ws-1", projectId: project.id,
+    projectLocationId: location.id, agentId: "agent-1", title: "Deferred", useWorktree: true,
+    driver: "acp", config: {}, now: 5,
+  });
+  db.raw().prepare(
+    "UPDATE outbound_event_deliveries SET status='retrying',attempt_count=5,next_attempt_at=10",
+  ).run();
+  const claimed = db.claimOutboundEventDeliveries(10, 1, 30_000);
+  assert.equal(claimed[0]?.attempt, 6);
+  assert.equal(db.settleOutboundEventDelivery({
+    deliveryId: claimed[0]!.deliveryId,
+    subscriptionId: claimed[0]!.subscriptionId,
+    leaseId: claimed[0]!.leaseId,
+    disposition: "deferred",
+    nextAttemptAt: 11,
+    error: "Delivery deferred during control-plane shutdown",
+    now: 11,
+  }), true);
+  const receipt = db.listOutboundEventDeliveries("oes_deferred")![0]!;
+  assert.equal(receipt.status, "retrying");
+  assert.equal(receipt.attemptCount, 5);
+  assert.equal(receipt.nextRetryAt, 11);
+  assert.equal(db.getOutboundEventSubscriptionRecord("oes_deferred")?.consecutiveFailures, 0);
+  const payload = db.raw().prepare("SELECT payload_json FROM outbound_event_deliveries").get() as {
+    payload_json: string | null;
+  };
+  assert.ok(payload.payload_json, "administrative deferral retains the payload for recovery");
+  db.rotateOutboundEventSubscription({ subscriptionId: "oes_deferred", secret: "current-secret", now: 12 });
+  const retry = db.claimOutboundEventDeliveries(12, 1, 30_000)[0]!;
+  assert.equal(retry.attempt, 6, "the administrative abort did not consume the sixth attempt");
+  assert.equal(retry.secret, "current-secret", "the preserved delivery is signed with the rotated secret");
+  db.close();
+});
+
 test("check failure observations deduplicate the bounded public receipt shape", () => {
   const db = database();
   const project = db.createProject({ name: "Checks", now: 2 });
@@ -336,14 +387,91 @@ test("check candidates exclude closed pull requests and rotate every attempted o
 
   const first = db.outboundCheckObservationCandidates();
   assert.equal(first.length, 25);
-  assert.equal(first.every((session) => session.id.includes("_open_")), true);
-  for (const session of first) {
-    const pullRequest = session.worktrees?.[0]?.pullRequest;
-    assert.ok(pullRequest);
-    db.markOutboundCheckObservationAttempt(session.id, pullRequest.url, 1_000);
+  assert.equal(first.every((candidate) => candidate.sessionId.includes("_open_")), true);
+  for (const candidate of first) {
+    db.markOutboundCheckObservationAttempt(candidate.sessionId, candidate.pullRequestUrl, 1_000);
   }
   const second = db.outboundCheckObservationCandidates();
-  assert.equal(second.some((session) => session.id === "s_candidate_open_125"), true,
+  assert.equal(second.some((candidate) => candidate.sessionId === "s_candidate_open_125"), true,
     "the first unattempted open pull request is not starved by the bounded first cohort");
+  db.close();
+});
+
+test("check sweep queries the open PR's linked worktree and rejects stale attribution", async () => {
+  const db = database();
+  const project = db.createProject({ name: "Matched Worktree", now: 2 });
+  const location = db.addProjectLocation(project.id, { runnerId: "runner-1", workspaceId: "ws-1" }, 3);
+  db.createOutboundEventSubscription({
+    subscriptionId: "oes_matched_worktree",
+    callbackUrl: "https://events.example.test/hook",
+    secret: "secret",
+    scope: { kind: "project", projectId: project.id },
+    eventKinds: ["checks.failed"],
+    includeSessionName: false,
+    includeQuestionTitle: false,
+    actor: { kind: "human", id: "user-1" },
+    now: 4,
+  });
+  db.createSession({
+    id: "s_matched", runnerId: "runner-1", workspaceId: "ws-1", projectId: project.id,
+    projectLocationId: location.id, agentId: "agent-1", title: "Matched", useWorktree: true,
+    driver: "acp", config: {}, now: 5,
+  });
+  const worktrees = [{
+    id: "wt_a", path: "/repos/a", branch: "branch-a", source: "created",
+  }, {
+    id: "wt_b", path: "/repos/b", branch: "branch-b", source: "created",
+    pullRequest: { url: "https://github.com/example/repo/pull/2", state: "open" },
+  }];
+  db.raw().prepare("UPDATE sessions SET worktree_path=?,worktrees=? WHERE id=?")
+    .run("/repos/a", JSON.stringify(worktrees), "s_matched");
+
+  const requestedPaths: string[] = [];
+  let summaryPullRequestUrl = "https://github.com/example/repo/pull/2";
+  let replaceAssociationDuringRequest: typeof worktrees | undefined;
+  const hub = {
+    isRunnerOnline: () => true,
+    requestFromRunner: async (_runnerId: string, requestId: string, message: { worktreePath?: string }) => {
+      requestedPaths.push(message.worktreePath ?? "");
+      if (replaceAssociationDuringRequest) {
+        db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?")
+          .run(JSON.stringify(replaceAssociationDuringRequest), "s_matched");
+      }
+      return {
+        type: "git_result", requestId, ok: true,
+        data: { summary: {
+          branch: "branch-b", ahead: 1, behind: 0, hasChanges: false, addedLines: 1, deletedLines: 0,
+          remoteUrl: "https://github.com/example/repo.git",
+          pr: { number: 2, title: "PR", url: summaryPullRequestUrl, state: "OPEN" },
+          checks: { failing: 1, pending: 0, passing: 1, failingNames: ["CI"], url: null },
+        } },
+      };
+    },
+  };
+  const service = new OutboundEventsService(db, { info: () => {}, warn: () => {} });
+  await service.sweepCheckObservations(hub as never, 10);
+  assert.deepEqual(requestedPaths, ["/repos/b"]);
+  assert.equal(db.listOutboundEventDeliveries("oes_matched_worktree")!.length, 1);
+
+  worktrees[1] = {
+    ...worktrees[1]!, path: "/repos/c", branch: "branch-c",
+    pullRequest: { url: "https://github.com/example/repo/pull/3", state: "open" },
+  };
+  db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?").run(JSON.stringify(worktrees), "s_matched");
+  summaryPullRequestUrl = "https://github.com/example/repo/pull/3";
+  replaceAssociationDuringRequest = [{ ...worktrees[0]! }, {
+    ...worktrees[1]!, path: "/repos/d", branch: "branch-d",
+  }];
+  await service.sweepCheckObservations(hub as never, 11);
+  assert.deepEqual(requestedPaths, ["/repos/b", "/repos/c"]);
+  assert.equal(db.listOutboundEventDeliveries("oes_matched_worktree")!.length, 1,
+    "a summary from an association that changed in flight is not attributed to the selected candidate");
+
+  replaceAssociationDuringRequest = undefined;
+  worktrees[1] = { ...worktrees[1]!, path: "" };
+  db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?").run(JSON.stringify(worktrees), "s_matched");
+  await service.sweepCheckObservations(hub as never, 12);
+  assert.deepEqual(requestedPaths, ["/repos/b", "/repos/c"],
+    "a missing linked-worktree path fails closed before querying the runner");
   db.close();
 });
