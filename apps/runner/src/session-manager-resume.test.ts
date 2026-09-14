@@ -100,6 +100,23 @@ const identityEvidence = (fields: Partial<Record<"email" | "orgId" | "authMethod
   fields,
 });
 const git = (cwd: string, args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+function competingProcessLockState(root: string): { driver: AgentDriverKind | undefined; acquired: boolean } {
+  const storeUrl = new URL("./session-store.ts", import.meta.url).href;
+  const result = execFileSync(process.execPath, [
+    "--import",
+    "tsx",
+    "--input-type=module",
+    "--eval",
+    `import { SessionStore } from ${JSON.stringify(storeUrl)};
+const store = new SessionStore(process.argv[1]);
+const driver = store.readMeta("resume-session")?.driver;
+const acquired = store.acquireLock("resume-session", "competing-runner");
+if (acquired) store.releaseLock("resume-session", "competing-runner");
+process.stdout.write(JSON.stringify({ driver, acquired }));`,
+    root,
+  ], { encoding: "utf8" });
+  return JSON.parse(result) as { driver: AgentDriverKind | undefined; acquired: boolean };
+}
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => { resolve = res; });
@@ -2483,6 +2500,67 @@ test("a capacity-queued app-server Restart transfers its lock to a superseding R
     internals.releaseAdmission("capacity-blocker");
     assert.equal(await replacement, true);
     assert.deepEqual([...internals.admitted], ["resume-session"]);
+  } finally {
+    internals.releaseAdmission("capacity-blocker");
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("a different-driver Restart releases a superseded app-server Restart lock", async () => {
+  const failures: Array<[string, string | undefined]> = [];
+  const durable: DurableCommandLifecycle = {
+    commandId: "superseded-app-server-restart",
+    queued: () => {},
+    started: () => {},
+    completed: () => {},
+    failed: (error, code) => failures.push([error, code]),
+    uncertain: () => {},
+  };
+  const h = harness({}, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 1);
+  const internals = h.manager as any;
+  try {
+    h.store.create(stored(h.root, {
+      sessionId: "capacity-blocker",
+      agentSessionId: null,
+      status: "running",
+    }));
+    assert.equal(await internals.acquireAdmission("capacity-blocker"), true);
+
+    const staleRestart = h.manager.start(launchSpec(h.root), undefined, undefined, durable);
+    await tick();
+    assert.deepEqual(
+      internals.admissionQueue.map((entry: { request: { sessionId: string } }) => entry.request.sessionId),
+      ["resume-session"],
+    );
+
+    const replacement = h.manager.start({
+      ...launchSpec(h.root),
+      agentId: "codex-native",
+      driver: "codex",
+      command: "codex",
+    });
+    await tick();
+    await tick();
+
+    assert.equal(await staleRestart, false);
+    assert.deepEqual(
+      failures,
+      [["session launch was superseded by a replacement", "COMMAND_CANCELLED"]],
+    );
+    assert.deepEqual(
+      internals.admissionQueue.map((entry: { request: { sessionId: string } }) => entry.request.sessionId),
+      ["resume-session"],
+      "the different-driver replacement retains runner admission",
+    );
+    assert.deepEqual(
+      competingProcessLockState(h.root),
+      { driver: "codex", acquired: true },
+      "a competing runner observes the replacement row and acquires promptly without stale recovery",
+    );
+
+    internals.releaseAdmission("capacity-blocker");
+    assert.equal(await replacement, true);
   } finally {
     internals.releaseAdmission("capacity-blocker");
     h.manager.shutdownAll();

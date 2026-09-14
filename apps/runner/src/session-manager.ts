@@ -805,6 +805,10 @@ export class SessionManager {
   /** Lock owner unique to THIS process — two runner processes that share a runnerId must not be
    * treated as the same lock holder (else they'd re-enter each other's locks). */
   private readonly lockOwner: string;
+  /** Pre-provider resume locks are process-owned on disk, but generation-owned in memory. A
+   * replacement app-server generation inherits that ownership; a different-driver replacement
+   * releases it. Stale continuations may only release the generation they originally acquired. */
+  private readonly resumeLockGenerations = new Map<string, number>();
   /** Lock-refresh timers, keyed by session, running while a turn is draining. */
   private readonly lockTimers = new Map<string, ReturnType<typeof setInterval>>();
   /** Prompts known not to have reached turn/start when app-server crashed. A recovery launch
@@ -4174,6 +4178,7 @@ export class SessionManager {
       );
     } finally {
       reportMaterialized(false);
+      this.releaseResumeLock(spec.sessionId, launchGeneration);
       if (this.launchGenerations.get(spec.sessionId) === launchGeneration) {
         this.rejectPreLaunchQueue(spec.sessionId, "session launch failed before runner admission");
       }
@@ -4342,7 +4347,7 @@ export class SessionManager {
     // thread must survive desktop/runner restarts. Preserve the existing fresh-start behavior
     // for Claude and exec Codex; their ordinary prompt-after-process-loss resume path is unchanged.
     const priorResumeId = prior?.driver === driver && driver === "codex-app-server" ? prior.agentSessionId : null;
-    if (priorResumeId && !this.store.acquireLock(spec.sessionId, this.lockOwner)) {
+    if (priorResumeId && !this.acquireResumeLock(spec.sessionId, launchGeneration)) {
       this.emitEvent(spec.sessionId, { kind: "error", message: "this session is being restarted by another runner — retry shortly" });
       this.emitStatus(spec.sessionId, "idle");
       durable?.failed("session is owned by another runner process", "COMMAND_CANCELLED");
@@ -4451,11 +4456,14 @@ export class SessionManager {
         meta.worktreePending = shouldUseWorktree;
       }
       this.store.create(meta);
+      // Publish the replacement driver before releasing its predecessor's app-server lock. A
+      // sibling process must never observe the old resumable row and an unlocked store together.
+      if (!priorResumeId) this.releaseSupersededResumeLock(spec.sessionId, launchGeneration);
       this.refreshCapacityInventorySession(spec.sessionId);
     });
     if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) {
       const superseded = this.launchWasSuperseded(spec.sessionId, launchGeneration);
-      if (priorResumeId && !superseded) this.store.releaseLock(spec.sessionId, this.lockOwner);
+      if (priorResumeId) this.releaseResumeLock(spec.sessionId, launchGeneration);
       durable?.failed(
         superseded
           ? "session launch was superseded by a replacement"
@@ -4465,7 +4473,7 @@ export class SessionManager {
       return false;
     }
     if (remapBlocked) {
-      if (priorResumeId) this.store.releaseLock(spec.sessionId, this.lockOwner);
+      if (priorResumeId) this.releaseResumeLock(spec.sessionId, launchGeneration);
       const message = "session workspace or execution context changed while runner-owned worktrees remain; discard those worktrees before restarting this session";
       this.emitEvent(spec.sessionId, { kind: "error", message });
       durable?.failed(message, "INVALID_COMMAND");
@@ -4689,7 +4697,7 @@ export class SessionManager {
         });
         meta.worktreePending = false;
         this.store.patchMeta(spec.sessionId, { worktreePending: false });
-        if (priorResumeId) this.store.releaseLock(spec.sessionId, this.lockOwner);
+        if (priorResumeId) this.releaseResumeLock(spec.sessionId, launchGeneration);
         this.releaseAdmissionIfInactive(spec.sessionId);
         this.emitStatus(spec.sessionId, "failed", "Worktree isolation could not be established");
         durable?.failed("worktree isolation could not be established", "INVALID_COMMAND");
@@ -4715,7 +4723,7 @@ export class SessionManager {
         this.cleanupJournal.add(cleanup);
         await this.reapWorktree(cleanup, cleanupCurrentGeneration);
       }
-      if (priorResumeId && !superseded) this.store.releaseLock(spec.sessionId, this.lockOwner);
+      if (priorResumeId) this.releaseResumeLock(spec.sessionId, launchGeneration);
       durable?.failed(
         superseded
           ? "session launch was superseded by a replacement"
@@ -4791,7 +4799,7 @@ export class SessionManager {
         this.cleanupJournal.add(cleanup);
         await this.reapWorktree(cleanup, cleanupCurrentGeneration);
       }
-      if (priorResumeId && !superseded) this.store.releaseLock(spec.sessionId, this.lockOwner);
+      if (priorResumeId) this.releaseResumeLock(spec.sessionId, launchGeneration);
       durable?.failed(
         superseded
           ? "session launch was superseded by a replacement"
@@ -4815,7 +4823,7 @@ export class SessionManager {
       });
       if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) {
         const superseded = this.launchWasSuperseded(spec.sessionId, launchGeneration);
-        if (priorResumeId && !superseded) this.store.releaseLock(spec.sessionId, this.lockOwner);
+        if (priorResumeId) this.releaseResumeLock(spec.sessionId, launchGeneration);
         durable?.failed(
           superseded
             ? "session launch was superseded by a replacement"
@@ -4840,9 +4848,9 @@ export class SessionManager {
     if (!(await admission)) {
       const superseded = this.launchWasSuperseded(spec.sessionId, launchGeneration);
       // App-server Restart takes the resumable-thread lock before capacity admission. A newer
-      // same-session generation reuses that same-owner lock, while cancellation with no replacement
-      // must release it after its waiter settles.
-      if (priorResumeId && !superseded) this.store.releaseLock(spec.sessionId, this.lockOwner);
+      // same-session generation inherits that lock, while cancellation with no replacement must
+      // release it after its waiter settles.
+      if (priorResumeId) this.releaseResumeLock(spec.sessionId, launchGeneration);
       durable?.failed(
         superseded
           ? "session launch was superseded by a replacement"
@@ -4853,7 +4861,7 @@ export class SessionManager {
     }
     if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) {
       const superseded = this.launchWasSuperseded(spec.sessionId, launchGeneration);
-      if (priorResumeId && !superseded) this.store.releaseLock(spec.sessionId, this.lockOwner);
+      if (priorResumeId) this.releaseResumeLock(spec.sessionId, launchGeneration);
       durable?.failed(
         superseded
           ? "session launch was superseded by a replacement"
@@ -4877,7 +4885,7 @@ export class SessionManager {
         return false;
       }
       this.releaseAdmissionIfInactive(spec.sessionId);
-      if (priorResumeId) this.store.releaseLock(spec.sessionId, this.lockOwner);
+      if (priorResumeId) this.releaseResumeLock(spec.sessionId, launchGeneration);
       const authenticationBlocked = this.store.readMeta(spec.sessionId)?.providerAuthBlock;
       if (authenticationBlocked) {
         // Authentication is a recoverable launch state, not failed session construction. Preserve
@@ -4919,11 +4927,12 @@ export class SessionManager {
     }
     if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) return false;
     if (initialPrompt || (initialImages && initialImages.length)) {
+      if (priorResumeId) this.handoffResumeLockToTurn(spec.sessionId, launchGeneration);
       if (!this.prompt(spec.sessionId, initialPrompt ?? "", initialImages ?? [], undefined, undefined, durable)) {
         return false;
       }
     } else {
-      if (priorResumeId) this.store.releaseLock(spec.sessionId, this.lockOwner);
+      if (priorResumeId) this.releaseResumeLock(spec.sessionId, launchGeneration);
       this.emitStatus(spec.sessionId, "idle");
       durable?.completed();
     }
@@ -4942,6 +4951,44 @@ export class SessionManager {
   private launchWasSuperseded(sessionId: string, generation: number): boolean {
     const replacementGeneration = this.latestLaunchGenerations.get(sessionId);
     return replacementGeneration !== undefined && replacementGeneration !== generation;
+  }
+
+  /** Acquire or inherit this process's pre-provider resume lock for one launch generation. */
+  private acquireResumeLock(sessionId: string, generation: number): boolean {
+    const priorGeneration = this.resumeLockGenerations.get(sessionId);
+    if (priorGeneration !== undefined) {
+      if (this.store.ownsLock(sessionId, this.lockOwner)) {
+        this.resumeLockGenerations.set(sessionId, generation);
+        return true;
+      }
+      this.resumeLockGenerations.delete(sessionId);
+    }
+    if (!this.store.acquireLock(sessionId, this.lockOwner)) return false;
+    this.resumeLockGenerations.set(sessionId, generation);
+    return true;
+  }
+
+  /** Release only when this launch generation still owns the pre-provider resume lock. */
+  private releaseResumeLock(sessionId: string, generation: number): void {
+    if (this.resumeLockGenerations.get(sessionId) !== generation) return;
+    this.resumeLockGenerations.delete(sessionId);
+    this.store.releaseLock(sessionId, this.lockOwner);
+  }
+
+  /** Convert a successful launch's generation claim into the ordinary active-turn lock. */
+  private handoffResumeLockToTurn(sessionId: string, generation: number): void {
+    if (this.resumeLockGenerations.get(sessionId) === generation) {
+      this.resumeLockGenerations.delete(sessionId);
+    }
+  }
+
+  /** A replacement that cannot resume the app-server thread has no use for its predecessor's
+   * pre-provider lock. Release it now, before the stale generation gets another continuation. */
+  private releaseSupersededResumeLock(sessionId: string, generation: number): void {
+    const ownerGeneration = this.resumeLockGenerations.get(sessionId);
+    if (ownerGeneration === undefined || ownerGeneration === generation) return;
+    this.resumeLockGenerations.delete(sessionId);
+    this.store.releaseLock(sessionId, this.lockOwner);
   }
 
   private beginLaunchGeneration(sessionId: string): number {
@@ -8327,13 +8374,14 @@ export class SessionManager {
     // Resume only when established AND the driver supports it; a never-established session (e.g. the
     // runner restarted before its first turn finished) re-launches fresh so it stays promptable.
     const resumeId = established && canResumeSession(fresh) ? (fresh.agentSessionId ?? undefined) : undefined;
-    if (resumeId && !this.store.acquireLock(sessionId, this.lockOwner)) {
+    const launchGeneration = this.beginLaunchGeneration(sessionId);
+    if (resumeId && !this.acquireResumeLock(sessionId, launchGeneration)) {
+      this.finishLaunchGeneration(sessionId, launchGeneration);
       this.emitEvent(sessionId, { kind: "error", message: "this session is being resumed by another runner — retry shortly" });
       this.emitStatus(sessionId, "idle");
       durable?.failed("session is owned by another runner process", "COMMAND_CANCELLED");
       return;
     }
-    const launchGeneration = this.beginLaunchGeneration(sessionId);
     if (queueBeforeLaunch) {
       this.preLaunchAdmissionGenerations.set(sessionId, launchGeneration);
       const queue = this.preLaunchQueues.get(sessionId) ?? [];
@@ -8368,7 +8416,7 @@ export class SessionManager {
         durable?.failed("session resume was superseded by a replacement", "COMMAND_CANCELLED");
         return;
       }
-      if (resumeId) this.store.releaseLock(sessionId, this.lockOwner);
+      if (resumeId) this.releaseResumeLock(sessionId, launchGeneration);
       finishPreLaunch(false);
       durable?.failed("session resume was cancelled before runner admission", "COMMAND_CANCELLED");
       return;
@@ -8376,7 +8424,7 @@ export class SessionManager {
     if (!this.launchIsCurrent(sessionId, launchGeneration)) {
       const superseded = this.launchWasSuperseded(sessionId, launchGeneration);
       this.finishLaunchGeneration(sessionId, launchGeneration);
-      if (resumeId && !superseded) this.store.releaseLock(sessionId, this.lockOwner);
+      if (resumeId) this.releaseResumeLock(sessionId, launchGeneration);
       finishPreLaunch(false);
       durable?.failed(
         superseded
@@ -8400,7 +8448,7 @@ export class SessionManager {
     // before finishLaunchGeneration removes our marker: the replacement can be waiting in its own
     // preparation with no active entry yet, while already owning this same admission and lock.
     if (!stillOwnsLaunch) {
-      if (resumeId && !superseded) this.store.releaseLock(sessionId, this.lockOwner);
+      if (resumeId) this.releaseResumeLock(sessionId, launchGeneration);
       finishPreLaunch(false);
       durable?.failed(
         superseded
@@ -8412,7 +8460,7 @@ export class SessionManager {
     }
     if (!ok) {
       this.releaseAdmissionIfInactive(sessionId);
-      if (resumeId) this.store.releaseLock(sessionId, this.lockOwner);
+      if (resumeId) this.releaseResumeLock(sessionId, launchGeneration);
       const blocked = this.store.readMeta(sessionId);
       if (blocked?.providerAuthBlock?.delivery === "not_delivered" &&
           blocked.providerAuthRetryAttemptedRecoveryId !== blocked.providerAuthBlock.recoveryId &&
@@ -8440,6 +8488,7 @@ export class SessionManager {
       finishPreLaunch(false);
       return;
     }
+    if (resumeId) this.handoffResumeLockToTurn(sessionId, launchGeneration);
     if (queueBeforeLaunch) {
       this.activatePreLaunchQueue(sessionId);
       finishPreLaunch(true);
@@ -11261,6 +11310,7 @@ export class SessionManager {
 
   /** Stop refreshing and release a session's lock (idempotent). */
   private clearLock(sessionId: string): void {
+    this.resumeLockGenerations.delete(sessionId);
     const timer = this.lockTimers.get(sessionId);
     if (timer) {
       clearInterval(timer);
@@ -11458,6 +11508,7 @@ export class SessionManager {
       return;
     }
     this.recoveryLaunching.add(sessionId);
+    let launchGeneration: number | undefined;
     try {
       const meta = this.store.readMeta(sessionId);
       const resumeId = meta?.driver === "codex-app-server" ? meta.agentSessionId : null;
@@ -11467,44 +11518,41 @@ export class SessionManager {
         this.emitEvent(sessionId, { kind: "error", message: "queued prompts could not recover because the Codex thread id is unavailable" });
         return;
       }
-      if (!this.store.acquireLock(sessionId, this.lockOwner)) {
+      launchGeneration = this.beginLaunchGeneration(sessionId);
+      if (!this.acquireResumeLock(sessionId, launchGeneration)) {
+        this.finishLaunchGeneration(sessionId, launchGeneration);
         this.emitEvent(sessionId, { kind: "error", message: `${queued.length} queued prompt(s) are still held because another runner owns the session; send another prompt to retry` });
         this.emitStatus(sessionId, "idle");
         return;
       }
-      const launchGeneration = this.beginLaunchGeneration(sessionId);
       if (!(await this.acquireAdmission(sessionId))) {
-        const superseded = this.launchWasSuperseded(sessionId, launchGeneration);
         this.finishLaunchGeneration(sessionId, launchGeneration);
-        if (!superseded) this.store.releaseLock(sessionId, this.lockOwner);
+        this.releaseResumeLock(sessionId, launchGeneration);
         return;
       }
       if (!this.launchIsCurrent(sessionId, launchGeneration)) {
-        const superseded = this.launchWasSuperseded(sessionId, launchGeneration);
         this.finishLaunchGeneration(sessionId, launchGeneration);
-        if (!superseded) this.store.releaseLock(sessionId, this.lockOwner);
+        this.releaseResumeLock(sessionId, launchGeneration);
         return;
       }
       let ok: boolean;
       let stillOwnsLaunch = false;
-      let superseded = false;
       try {
         ok = await this.launch(meta, resumeId, launchGeneration);
         stillOwnsLaunch = this.launchIsCurrent(sessionId, launchGeneration);
-        superseded = this.launchWasSuperseded(sessionId, launchGeneration);
       } finally {
         this.finishLaunchGeneration(sessionId, launchGeneration);
       }
       // A superseding launch can be awaiting preparation before it installs an active entry. It
-      // already owns the session's admission and same-owner lock, so this stale continuation must
+      // already owns the session's admission and inherited lock, so this stale continuation must
       // not release either or publish a recovery error.
       if (!stillOwnsLaunch) {
-        if (!superseded) this.store.releaseLock(sessionId, this.lockOwner);
+        this.releaseResumeLock(sessionId, launchGeneration);
         return;
       }
       if (!ok) {
         this.releaseAdmissionIfInactive(sessionId);
-        if (!this.active.has(sessionId)) this.store.releaseLock(sessionId, this.lockOwner);
+        if (!this.active.has(sessionId)) this.releaseResumeLock(sessionId, launchGeneration);
         if (this.recoveryQueues.get(sessionId) !== queued || this.store.readMeta(sessionId)?.status === "stopped") return;
         this.emitEvent(sessionId, { kind: "error", message: `${queued.length} queued prompt(s) remain held; send another prompt after the resume error is resolved` });
         return;
@@ -11522,7 +11570,7 @@ export class SessionManager {
           recoveryEntry.client.dispose({ forceImmediate: true });
           this.deleteActiveSession(sessionId, recoveryEntry);
           this.releaseAdmission(sessionId);
-          this.store.releaseLock(sessionId, this.lockOwner);
+          this.releaseResumeLock(sessionId, launchGeneration);
         }
         return;
       }
@@ -11530,14 +11578,16 @@ export class SessionManager {
       if (!entry) {
         this.rejectQueued(queued, "session recovery completed without an active agent process");
         this.recoveryQueues.delete(sessionId);
-        this.store.releaseLock(sessionId, this.lockOwner);
+        this.releaseResumeLock(sessionId, launchGeneration);
         return;
       }
+      this.handoffResumeLockToTurn(sessionId, launchGeneration);
       for (const prompt of queued) this.insertQueuedPrompt(sessionId, entry.queue, prompt);
       this.recoveryQueues.delete(sessionId);
       this.emitQueue(sessionId);
       this.scheduleDrain(sessionId);
     } finally {
+      if (launchGeneration !== undefined) this.releaseResumeLock(sessionId, launchGeneration);
       this.recoveryLaunching.delete(sessionId);
     }
   }
