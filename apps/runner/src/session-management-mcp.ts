@@ -255,6 +255,7 @@ function mapSession(s: Json): Json {
     liveChildCapacity: s?.liveChildCapacity ?? null,
     parentControl: s?.parentControl ?? "off",
     ...(s?.orchestratorPolicy ? { orchestratorPolicy: s.orchestratorPolicy } : {}),
+    ...(s?.orchestratorCampaign ? { orchestratorCampaign: s.orchestratorCampaign } : {}),
     costUsd: s?.costUsd,
     costBudgetUsd: s?.costBudgetUsd ?? null,
     costCheckpointsUsd: s?.costCheckpointsUsd ?? null,
@@ -511,12 +512,14 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
 /* -------------------------------------------------------------------------- */
 
 const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "list_sessions", "get_session", "get_session_events",
+  "get_campaign", "record_campaign_follow_up", "verify_campaign_child",
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question", "resolve_descendant_approval",
   "resolve_descendant_workflow_decision", "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
   "wait_session", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "stop_session", "restart_session", "archive_session", "set_guardrails", "create_worktree", "attach_worktree",
   "select_worktree", "discard_worktree"]);
 const PARENT_CONTROL_TOOLS = new Set([
+  "get_campaign", "record_campaign_follow_up", "verify_campaign_child",
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
   "resolve_descendant_approval", "resolve_descendant_workflow_decision",
 ]);
@@ -714,6 +717,78 @@ export const TOOLS: McpTool[] = [
                 preview: typeof s.preview === "string" ? truncate(s.preview, MAX_LINE) : null,
               },
       });
+    },
+  },
+  {
+    name: "get_campaign",
+    description: "Read this Orchestrator's effective campaign behavior, current typed-decision owners and policy revision, applicable limits, follow-up counts, child completion state, and credential-free compatibility information.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    handler: async (_args, deps) => {
+      if (!deps.selfSessionId || !deps.orchestrator) return errorResult("this tool requires an Orchestrator session identity");
+      const r = await cpFetch(
+        deps,
+        "GET",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign`,
+      );
+      return r.ok ? textResult({ campaign: r.data }) : errorResult(r.message);
+    },
+  },
+  {
+    name: "record_campaign_follow_up",
+    description: "Record and deduplicate one child recommendation before any follow-up execution. The disposition either stops or says typed gates are still required; it never grants blanket execution approval.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        originSessionId: { type: "string" },
+        repository: { type: "string" },
+        title: { type: "string" },
+        recommendationKey: { type: "string" },
+      },
+      required: ["originSessionId", "repository", "title"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId || !deps.orchestrator) return errorResult("this tool requires an Orchestrator session identity");
+      const r = await cpFetch(
+        deps,
+        "POST",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/follow-ups`,
+        {
+          originSessionId: args?.originSessionId,
+          repository: args?.repository,
+          title: args?.title,
+          ...(typeof args?.recommendationKey === "string" ? { recommendationKey: args.recommendationKey } : {}),
+        },
+      );
+      return r.ok ? textResult({ followUp: r.data }) : errorResult(r.message);
+    },
+  },
+  {
+    name: "verify_campaign_child",
+    description: "Verify one campaign child's exact completed report after all reported follow-ups are recorded. Retain leaves it inspectable; Stop and Archive starts the existing durable stop/archive lifecycle. Campaign status becomes verified complete only after required worktree cleanup is also observed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        childSessionId: { type: "string" },
+        reportEventSeq: { type: "integer", minimum: 1 },
+        followUpsAccounted: { const: true },
+      },
+      required: ["childSessionId", "reportEventSeq", "followUpsAccounted"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId || !deps.orchestrator) return errorResult("this tool requires an Orchestrator session identity");
+      const r = await cpFetch(
+        deps,
+        "POST",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/verify-child`,
+        {
+          childSessionId: args?.childSessionId,
+          reportEventSeq: args?.reportEventSeq,
+          followUpsAccounted: args?.followUpsAccounted,
+        },
+      );
+      return r.ok ? textResult(r.data) : errorResult(r.message);
     },
   },
   {

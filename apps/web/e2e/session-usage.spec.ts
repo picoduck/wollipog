@@ -26,6 +26,42 @@ test("desktop: Parent Control exposes five independent typed workflow authoritie
   await page.locator(".composer-plus-pop").screenshot({ path: `${SHOT}/desktop-typed-parent-control.png` });
 });
 
+for (const viewport of [
+  { name: "desktop", width: 1200, height: 900, fixtureWidth: 1180, fixtureHeight: 860 },
+  { name: "mobile", width: 393, height: 844, fixtureWidth: 393, fixtureHeight: 844 },
+] as const) {
+  test(`${viewport.name}: active campaign summary exposes status, revision, progress, and compatibility`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto(`/session-usage-e2e.html?width=${viewport.fixtureWidth}&height=${viewport.fixtureHeight}&composer=orchestrator&campaign-state=off`);
+    await page.getByRole("button", { name: "Add and Modes" }).click();
+    const beforeSummary = page.locator(".composer-plus-pop .active-campaign-policy");
+    await expect(beforeSummary).toBeVisible();
+    await expect(beforeSummary.getByText("Campaign Status", { exact: true })).toHaveCount(0);
+    await beforeSummary.getByText("Child Model", { exact: true }).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `${SHOT}/${viewport.name}-campaign-before.png` });
+
+    await page.goto(`/session-usage-e2e.html?width=${viewport.fixtureWidth}&height=${viewport.fixtureHeight}&composer=orchestrator`);
+    await page.getByRole("button", { name: "Add and Modes" }).click();
+
+    const menu = page.locator(".composer-plus-pop");
+    const summary = menu.locator(".active-campaign-policy");
+    await expect(summary.getByText("Campaign Behavior", { exact: true })).toBeVisible();
+    await expect(summary).toContainText("Waiting for Human");
+    await expect(summary).toContainText("Policy Revision 4");
+    await expect(summary).toContainText("4");
+    await expect(summary).toContainText("1 Verified · 2 Active · 1 Waiting for Human · 0 Blocked");
+    await expect(summary).toContainText("2");
+    await expect(summary).toContainText("1 Duplicates Skipped");
+    const compatibility = summary.getByRole("status");
+    await expect(compatibility).toContainText("UI evidence is routed to a human");
+    await summary.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `${SHOT}/${viewport.name}-campaign-summary.png` });
+    await compatibility.scrollIntoViewIfNeeded();
+    await expect(compatibility).toBeVisible();
+    await page.screenshot({ path: `${SHOT}/${viewport.name}-campaign-progress.png` });
+  });
+}
+
 test("desktop: per-turn usage, the ring popover with totals and the per-model split", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 820 });
   await page.goto("/session-usage-e2e.html?width=1180&height=780");

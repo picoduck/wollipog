@@ -2247,6 +2247,41 @@ test("typed workflow decisions preserve their exact approval snapshot across a d
   }
 });
 
+test("campaign report verification and normalized follow-up deduplication survive a database restart", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-campaign-restart-"));
+  const file = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(file);
+    initial.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    initial.createSession(newSession({ id: "campaign", config: { permissionMode: "orchestrator" } }));
+    initial.createSession(newSession({ id: "child", parentSessionId: "campaign" }));
+    const report = initial.appendEvent("child", {
+      kind: "agent_message", text: "Final report", final: true,
+    }, 1_000);
+    initial.verifyCampaignChildReport("campaign", "child", report.seq, 1_001);
+    const first = initial.recordCampaignFollowUp({
+      campaignSessionId: "campaign", originSessionId: "child", repository: "picoduck/wollipog",
+      title: "Persist Campaign State", followUpsMode: "recommend_only", now: 1_002,
+    });
+    const duplicate = initial.recordCampaignFollowUp({
+      campaignSessionId: "campaign", originSessionId: "child", repository: "PICODUCK/WOLLIPOG",
+      title: " persist   campaign state ", followUpsMode: "recommend_only", now: 1_003,
+    });
+    assert.equal(first.duplicate, false);
+    assert.equal(duplicate.duplicate, true);
+    initial.close();
+
+    const reopened = ControlPlaneDb.open(file);
+    assert.equal(reopened.campaignChildReportVerified("campaign", "child"), true);
+    assert.equal(reopened.hasCompletedAgentReportAt("child", report.seq), true);
+    assert.equal(reopened.campaignProjection("campaign")?.status, "verified_complete");
+    assert.deepEqual(reopened.campaignProjection("campaign")?.followUps, { unique: 1, duplicates: 1 });
+    reopened.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("createSession persists driver + config and sessionView reflects them", () => {
   const db = withRunner();
   const config: SessionConfig = {

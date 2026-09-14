@@ -27,6 +27,9 @@ test("orchestrator credentials expose only session management and governance rea
     ["POST", "/api/sessions/:id/workflow-decisions"],
     ["GET", "/api/sessions/:id/workflow-decisions/:occurrenceId"],
     ["POST", "/api/sessions/:id/workflow-decisions/:occurrenceId/consume"],
+    ["GET", "/api/sessions/:id/orchestrator-campaign"],
+    ["POST", "/api/sessions/:id/orchestrator-campaign/follow-ups"],
+    ["POST", "/api/sessions/:id/orchestrator-campaign/verify-child"],
   ]) assert.equal(isAgentControlApiRouteAllowed(method!, route!, "orchestrator"), true, route);
   for (const [method, route] of [
     ["POST", "/api/runs"], ["POST", "/api/sessions/:id/approve"],

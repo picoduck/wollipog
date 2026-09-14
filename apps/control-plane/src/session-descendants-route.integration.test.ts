@@ -21,6 +21,8 @@ test("HTTP agent management scopes descendants and composes governance policy vi
   const port = address.port;
   await new Promise<void>((done) => listener.close(() => done()));
   const seed = ControlPlaneDb.open(database);
+  let childReportSeq = 0;
+  let grandchildReportSeq = 0;
   try {
     const local = seed.localIdentityContext();
     seed.createIdentityMember({ userId: "other-user", displayName: "Other", organizationId: local.organizationId, role: "operator", now: 1 });
@@ -59,8 +61,15 @@ test("HTTP agent management scopes descendants and composes governance policy vi
         seed.updateSessionStatus(mode + suffix, "idle", 3);
       }
     }
+    childReportSeq = seed.appendEvent("orchestrator-child", {
+      kind: "agent_message", text: "Campaign route report", final: true,
+    }, 4).seq;
+    grandchildReportSeq = seed.appendEvent("orchestrator-grandchild", {
+      kind: "agent_message", text: "Nested campaign route report", final: true,
+    }, 4).seq;
   } finally { seed.close(); }
   let logs = "";
+  let liveDb: ControlPlaneDb | null = null;
   const child = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
     cwd: resolve(fileURLToPath(new URL("../../..", import.meta.url))),
     env: { ...process.env, CONTROL_PLANE_HOST: "127.0.0.1", CONTROL_PLANE_PORT: String(port),
@@ -77,13 +86,22 @@ test("HTTP agent management scopes descendants and composes governance policy vi
       await delay(50);
     }
     assert.ok(healthy, logs);
-    const live = ControlPlaneDb.open(database);
-    try {
-      for (const mode of ["normal", "orchestrator", "orchestrator-child", "policy-agent"]) {
-        live.updateSessionStatus(mode, "running", Date.now());
-        assert.equal(live.setAgentControlCredential(mode, "r", hashToken(`token-${mode}`), Date.now()), true);
+    liveDb = ControlPlaneDb.open(database);
+    for (const mode of ["normal", "orchestrator", "orchestrator-child", "policy-agent"]) {
+      liveDb.updateSessionStatus(mode, "running", Date.now());
+      assert.equal(liveDb.setAgentControlCredential(mode, "r", hashToken(`token-${mode}`), Date.now()), true);
+    }
+    const settleStatus = async (sessionId: string, status: "idle") => {
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        try {
+          liveDb!.updateSessionStatus(sessionId, status, Date.now());
+          return;
+        } catch (error) {
+          if (!(error instanceof Error) || !error.message.includes("database is locked") || attempt === 49) throw error;
+          await delay(20);
+        }
       }
-    } finally { live.close(); }
+    };
     const policies = async (token: string, agent?: string) => fetch(`http://127.0.0.1:${port}/api/governance/policies`, {
       signal: AbortSignal.timeout(3000), headers: { authorization: `Bearer ${token}`,
         ...(agent ? { [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: agent } : {}) },
@@ -116,7 +134,23 @@ test("HTTP agent management scopes descendants and composes governance policy vi
       if (mode === "normal") {
         assert.equal((await request(mode, "descendant-requests", undefined, "GET")).status, 401,
           "ordinary agent credentials never gain Parent Control routes");
+        assert.equal((await request(mode, "orchestrator-campaign", undefined, "GET")).status, 401,
+          "ordinary agent credentials never gain campaign management routes");
       } else {
+        const campaignResponse = await request(mode, "orchestrator-campaign", undefined, "GET");
+        assert.equal(campaignResponse.status, 200, "the exact Orchestrator credential can inspect its campaign");
+        assert.equal((await request(`${mode}-child`, "orchestrator-campaign", undefined, "GET")).status, 403,
+          "an Orchestrator credential cannot inspect a campaign under a descendant identity");
+        const followUp = await request(mode, "orchestrator-campaign/follow-ups", {
+          originSessionId: `${mode}-child`, repository: "picoduck/wollipog", title: "Bounded Follow-Up",
+        });
+        assert.equal(followUp.status, 201);
+        const duplicateFollowUp = await request(mode, "orchestrator-campaign/follow-ups", {
+          originSessionId: `${mode}-grandchild`, repository: "PICODUCK/WOLLIPOG", title: " bounded   follow-up ",
+        });
+        assert.equal(duplicateFollowUp.status, 201);
+        assert.equal((await duplicateFollowUp.json() as { duplicate: boolean }).duplicate, true,
+          "campaign follow-up deduplication is enforced at the authenticated HTTP boundary");
         assert.equal((await request(mode, "parent-control", { mode: "questions" })).status, 401,
           "agent credentials cannot enable their own Parent Control");
         const humanRequest = (operation: string, body: unknown) => fetch(
@@ -176,6 +210,14 @@ test("HTTP agent management scopes descendants and composes governance policy vi
         assert.equal((await childRequest(`workflow-decisions/${created.occurrenceId}/consume`, {
           resourceSnapshot: snapshot,
         })).status, 409, "the grant cannot be replayed");
+        await settleStatus(`${mode}-grandchild`, "idle");
+        await settleStatus(`${mode}-child`, "idle");
+        assert.equal((await request(mode, "orchestrator-campaign/verify-child", {
+          childSessionId: `${mode}-grandchild`, reportEventSeq: grandchildReportSeq, followUpsAccounted: true,
+        })).status, 200, "a nested child can be verified before its parent report");
+        assert.equal((await request(mode, "orchestrator-campaign/verify-child", {
+          childSessionId: `${mode}-child`, reportEventSeq: childReportSeq, followUpsAccounted: true,
+        })).status, 200, "a verified retained descendant permits its parent report to be verified");
         assert.equal((await humanRequest("descendant-requests/resolve", {
           sessionId: `${mode}-child`, occurrenceId: "request", resolution: { action: "dismiss" },
         })).status, 403, "human credentials cannot use the parent-agent resolution route");
@@ -217,6 +259,7 @@ test("HTTP agent management scopes descendants and composes governance policy vi
       assert.equal(childWorktree.status, mode === "normal" ? 404 : 400);
     }
   } finally {
+    liveDb?.close();
     if (child.exitCode === null && child.signalCode === null) {
       const exited = new Promise<void>((done) => child.once("exit", () => done()));
       child.kill("SIGTERM");

@@ -216,7 +216,7 @@ if (composerFixture) {
     name: "Fast",
     description: "Faster responses that use more ChatGPT credits.",
   }];
-  runner.protocolVersion = isOrchestrator ? 139 : 136;
+  runner.protocolVersion = isOrchestrator ? 140 : 136;
   runner.agents = [{
     id: isClaude ? "claude" : "codex",
     name: agentName,
@@ -276,6 +276,61 @@ if (composerFixture) {
         ui_evidence_approval: "human",
       },
     };
+    session.orchestratorPolicy = {
+      version: 1,
+      behavior: {
+        childModel: "long-model[1m]",
+        childEffort: "high",
+        maximumConcurrentChildren: 3,
+        followUps: "recommend_only",
+        completion: "stop_and_archive",
+      },
+      delegation: {
+        parentControl: "questions_and_approvals",
+        decisions: { ...session.parentControlPolicy.decisions },
+      },
+      sources: {
+        behavior: {
+          childModel: "user_default",
+          childEffort: "user_default",
+          maximumConcurrentChildren: "session_override",
+          followUps: "user_default",
+          completion: "session_override",
+        },
+        delegation: {
+          parentControl: "user_default",
+          decisions: {
+            implementation_question: "session_override",
+            pr_merge: "user_default",
+            merged_branch_deletion: "user_default",
+            follow_up_issue_publication: "session_override",
+            ui_evidence_approval: "user_default",
+          },
+        },
+      },
+    };
+    if (params.get("campaign-state") !== "off") {
+      session.orchestratorCampaign = {
+        status: "waiting_human",
+        policyRevision: 4,
+        decisionOwners: { ...session.parentControlPolicy.decisions },
+        limits: {
+          maximumConcurrentChildren: 3,
+          occupied: 2,
+          remaining: 1,
+          costBudgetUsd: null,
+          maxToolCalls: null,
+        },
+        uiEvidenceReview: {
+          status: "unavailable",
+          effectiveOwner: "human",
+          reason: "This Orchestrator client cannot inspect the evidence bytes.",
+        },
+        children: { total: 4, active: 2, waitingHuman: 1, blocked: 0, verified: 1, cleanupPending: 0 },
+        pendingDecisions: { human: 1, orchestrator: 0 },
+        followUps: { unique: 2, duplicates: 1 },
+      };
+    }
   }
   session.serviceTier = serviceTiers ? "fast" : null;
   session.contextWindow = 1_000_000;

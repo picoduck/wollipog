@@ -386,7 +386,10 @@
 // 139: typed workflow decisions bind Parent Control delegation to an explicit category, exact
 //      resource snapshot, controlling session, and human-owned policy revision. Resolution and
 //      one-shot consumption are separate server-authoritative boundaries.
-export const PROTOCOL_VERSION = 139;
+// 140: Orchestrator campaigns expose a credential-free effective-policy/status projection,
+//      deduplicate follow-up recommendations, and verify child reports before policy-driven
+//      stop-and-archive completion.
+export const PROTOCOL_VERSION = 140;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -568,6 +571,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   backgroundMissingResultRecovery: 134,
   delegatedParentControl: 136,
   typedWorkflowDecisionDelegation: 139,
+  orchestratorCampaignManagement: 140,
   workerAttention: 108,
   backgroundWorkTracking: 83,
   correlatedRestartEcho: 84,
@@ -1396,6 +1400,71 @@ export interface OrchestratorPolicySources {
 export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   version: 1;
   sources: OrchestratorPolicySources;
+}
+
+export type OrchestratorCampaignStatus =
+  | "waiting_human"
+  | "active"
+  | "blocked"
+  | "verified_complete";
+
+/** Credential-free, server-derived campaign state. The stored policy remains the source of truth;
+ * this projection applies runtime compatibility fallbacks without mutating or broadening it. */
+export interface OrchestratorCampaignProjection {
+  status: OrchestratorCampaignStatus;
+  policyRevision: number;
+  decisionOwners: ParentControlDecisionPolicy;
+  limits: {
+    maximumConcurrentChildren: number;
+    occupied: number;
+    remaining: number;
+    costBudgetUsd: number | null;
+    maxToolCalls: number | null;
+  };
+  uiEvidenceReview: {
+    status: "available" | "unavailable";
+    effectiveOwner: WorkflowDecisionAuthority;
+    reason?: string;
+  };
+  children: {
+    total: number;
+    active: number;
+    waitingHuman: number;
+    blocked: number;
+    verified: number;
+    cleanupPending: number;
+  };
+  pendingDecisions: { human: number; orchestrator: number };
+  followUps: { unique: number; duplicates: number };
+}
+
+export interface RecordOrchestratorFollowUpRequest {
+  originSessionId: string;
+  repository: string;
+  title: string;
+  /** Optional stable caller identity. Server-side normalized repository/title deduplication is
+   * authoritative, so distinct callers cannot bypass it with different keys. */
+  recommendationKey?: string;
+}
+
+export interface OrchestratorFollowUpRecord {
+  id: string;
+  campaignSessionId: string;
+  originSessionId: string;
+  repository: string;
+  title: string;
+  recommendationKey?: string;
+  duplicate: boolean;
+  executionDisposition: "recommend_only_stop" | "duplicate_stop" | "requires_typed_gates";
+  createdAt: number;
+}
+
+export interface VerifyOrchestratorChildRequest {
+  childSessionId: string;
+  /** Exact completed top-level agent response used as the child report. */
+  reportEventSeq: number;
+  /** The Orchestrator attests that every reported follow-up was recorded and deduplicated. */
+  followUpsAccounted: true;
 }
 
 /** Omission inherits the latest authenticated-user default. Explicit `null` selects Automatic. */
@@ -4252,6 +4321,8 @@ export interface SessionView {
   /** Resolved campaign behavior and authority snapshot. Present only for Orchestrator sessions
    * created or migrated by a supporting control plane. */
   orchestratorPolicy?: OrchestratorCampaignPolicy;
+  /** Current effective campaign state. Omitted by older control planes and non-Orchestrators. */
+  orchestratorCampaign?: OrchestratorCampaignProjection;
   runnerId: string;
   workspaceId: string | null;
   workspaceName: string | null;

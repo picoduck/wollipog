@@ -27,6 +27,35 @@ wollipog worktree select --path <absolute-path> --json
 wollipog worktree discard --path <absolute-path> --json
 ```
 
+An Orchestrator campaign must use the management tools as the policy boundary, not infer authority
+from its prompt. Call `get_campaign` at campaign start and after a human changes policy. It returns
+the effective behavior, typed decision owners, revision, admission and guardrail limits, child and
+follow-up counts, UI-review compatibility, and one of `waiting_human`, `active`, `blocked`, or
+`verified_complete`, without returning credentials.
+
+Every child creation receives a server-derived campaign-policy block in its initial assignment.
+For Automatic model or effort, use `get_agent_capabilities` and send the selected pair in the same
+`create_session` call; fixed values are server-enforced. The block is not blanket approval. Children
+must use `request_workflow_decision`, `get_workflow_decision`, and `consume_workflow_decision` for
+implementation questions, PR merge, merged-branch deletion, follow-up publication, and UI evidence.
+Only the current owner may resolve the exact pending occurrence. Authentication, secrets,
+persistent grants, governance, budgets, and tool guardrails remain human-only.
+
+Record each proposed follow-up with `record_campaign_follow_up` before starting it. Server-side
+repository/title normalization deduplicates recommendations across children. `Recommend Only`
+returns `recommend_only_stop` and ends at reporting. `Execute Approved` returns
+`requires_typed_gates` only for a unique recommendation; that disposition is not approval, and
+publication, UI evidence, merge, and deletion still require their separate
+typed decisions plus sanitization, dependency checks, cross-model review, and exact-head CI. An
+enqueued pull request remains unfinished until merge-group CI passes and the forge reports actual
+`MERGED` state; continue supervising unrelated children while any one child waits for a human gate.
+
+Once a child is Idle or Completed, use its exact completed report event sequence with
+`verify_campaign_child` and attest that follow-ups were recorded. `Retain` keeps it visible.
+`Stop and Archive` starts the existing durable stop/archive operation; verify the archived state and
+retire its runner-owned worktree through Wollipog. Campaign completion is not verified until every
+campaign child has a verified report and required worktree cleanup has finished.
+
 Worktree commands default to `WOLLIPOG_SESSION_ID`; paired-device callers add `--session <id>`.
 Creation without `--base` fetches the repository's remote default branch. Use the returned path
 for file and Git commands in the current turn; a later provider launch resumes in the selection.

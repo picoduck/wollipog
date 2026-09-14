@@ -117,6 +117,8 @@ import {
   type ParentControlMode,
   type ParentControlPolicy,
   type OrchestratorCampaignPolicy,
+  type OrchestratorCampaignProjection,
+  type OrchestratorFollowUpRecord,
   type OrchestratorDefaults,
   type WorkflowDecisionAuthority,
   type WorkflowDecisionStatus,
@@ -548,6 +550,40 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_decisions_session_request
   ON workflow_decisions(session_id, request_id);
 CREATE INDEX IF NOT EXISTS idx_workflow_decisions_resource
   ON workflow_decisions(session_id, category, resource_key, created_at);
+
+-- Orchestrator completion is an explicit verification boundary. A child merely becoming Idle or
+-- terminal does not prove that its report and follow-ups were accounted for.
+CREATE TABLE IF NOT EXISTS orchestrator_campaign_child_reports (
+  campaign_session_id TEXT NOT NULL,
+  child_session_id    TEXT NOT NULL,
+  report_event_seq    INTEGER NOT NULL,
+  verified_at         INTEGER NOT NULL,
+  PRIMARY KEY (campaign_session_id, child_session_id),
+  FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY (child_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+-- Recommendation content is bounded and credential-free. The normalized repository/title key is
+-- authoritative across children so caller-supplied ids cannot defeat campaign deduplication.
+CREATE TABLE IF NOT EXISTS orchestrator_campaign_follow_ups (
+  id                  TEXT PRIMARY KEY,
+  campaign_session_id TEXT NOT NULL,
+  origin_session_id   TEXT NOT NULL,
+  repository          TEXT NOT NULL,
+  title               TEXT NOT NULL,
+  recommendation_key  TEXT,
+  normalized_key      TEXT NOT NULL,
+  duplicate_of        TEXT,
+  created_at          INTEGER NOT NULL,
+  FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY (origin_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY (duplicate_of) REFERENCES orchestrator_campaign_follow_ups(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestrator_follow_up_unique
+  ON orchestrator_campaign_follow_ups(campaign_session_id, normalized_key)
+  WHERE duplicate_of IS NULL;
+CREATE INDEX IF NOT EXISTS idx_orchestrator_follow_up_campaign
+  ON orchestrator_campaign_follow_ups(campaign_session_id, created_at, id);
 
 -- A reminder belongs to one human even when the underlying session is shared. The single row per
 -- (session,user) makes replacement atomic, while state+revision make firing and multi-client edits
@@ -11839,6 +11875,181 @@ export class ControlPlaneDb {
     return orchestratorCampaignPolicyFromJson(row?.orchestrator_policy ?? null);
   }
 
+  campaignDescendantIds(campaignSessionId: string): string[] {
+    return (this.stmt(`
+      WITH RECURSIVE descendants(id) AS (
+        SELECT id FROM sessions WHERE parent_session_id=?
+        UNION
+        SELECT child.id FROM sessions child JOIN descendants parent ON child.parent_session_id=parent.id
+      ) SELECT id FROM descendants ORDER BY id
+    `).all(campaignSessionId) as unknown as Array<{ id: string }>).map((row) => row.id);
+  }
+
+  hasCompletedAgentReportAt(sessionId: string, eventSeq: number): boolean {
+    if (!Number.isSafeInteger(eventSeq) || eventSeq < 1) return false;
+    return Boolean(this.stmt(
+      `SELECT 1 FROM session_events target
+       WHERE target.session_id=? AND target.seq=? AND (
+         target.kind='agent_response_completed' OR
+         (target.kind='agent_message' AND json_extract(target.payload, '$.final')=1
+          AND trim(json_extract(target.payload, '$.text'))!=''
+          AND json_type(target.payload, '$.parentToolUseId') IS NULL)
+       ) AND NOT EXISTS (
+         SELECT 1 FROM session_events later
+         WHERE later.session_id=target.session_id AND later.seq>target.seq AND (
+           later.kind='agent_response_completed' OR
+           (later.kind='agent_message' AND json_extract(later.payload, '$.final')=1
+            AND trim(json_extract(later.payload, '$.text'))!=''
+            AND json_type(later.payload, '$.parentToolUseId') IS NULL)
+         )
+       ) LIMIT 1`,
+    ).get(sessionId, eventSeq));
+  }
+
+  verifyCampaignChildReport(
+    campaignSessionId: string,
+    childSessionId: string,
+    reportEventSeq: number,
+    now: number,
+  ): void {
+    this.stmt(
+      `INSERT INTO orchestrator_campaign_child_reports
+       (campaign_session_id, child_session_id, report_event_seq, verified_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(campaign_session_id, child_session_id) DO UPDATE SET
+         report_event_seq=excluded.report_event_seq, verified_at=excluded.verified_at`,
+    ).run(campaignSessionId, childSessionId, reportEventSeq, now);
+  }
+
+  campaignChildReportVerified(campaignSessionId: string, childSessionId: string): boolean {
+    return Boolean(this.stmt(
+      `SELECT 1 FROM orchestrator_campaign_child_reports
+       WHERE campaign_session_id=? AND child_session_id=?`,
+    ).get(campaignSessionId, childSessionId));
+  }
+
+  recordCampaignFollowUp(input: {
+    campaignSessionId: string;
+    originSessionId: string;
+    repository: string;
+    title: string;
+    recommendationKey?: string;
+    followUpsMode: OrchestratorCampaignPolicy["behavior"]["followUps"];
+    now: number;
+  }): OrchestratorFollowUpRecord {
+    const normalizedKey = `${input.repository.trim().toLowerCase()}\n${input.title.trim().replace(/\s+/gu, " ").toLowerCase()}`;
+    const existing = this.stmt(
+      `SELECT id FROM orchestrator_campaign_follow_ups
+       WHERE campaign_session_id=? AND normalized_key=? AND duplicate_of IS NULL`,
+    ).get(input.campaignSessionId, normalizedKey) as { id: string } | undefined;
+    const id = `followup_${randomUUID().replace(/-/gu, "")}`;
+    this.stmt(
+      `INSERT INTO orchestrator_campaign_follow_ups
+       (id, campaign_session_id, origin_session_id, repository, title, recommendation_key,
+        normalized_key, duplicate_of, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      id, input.campaignSessionId, input.originSessionId, input.repository.trim(), input.title.trim(),
+      input.recommendationKey ?? null, normalizedKey, existing?.id ?? null, input.now,
+    );
+    return {
+      id,
+      campaignSessionId: input.campaignSessionId,
+      originSessionId: input.originSessionId,
+      repository: input.repository.trim(),
+      title: input.title.trim(),
+      ...(input.recommendationKey ? { recommendationKey: input.recommendationKey } : {}),
+      duplicate: Boolean(existing),
+      executionDisposition: existing ? "duplicate_stop"
+        : input.followUpsMode === "recommend_only" ? "recommend_only_stop"
+        : "requires_typed_gates",
+      createdAt: input.now,
+    };
+  }
+
+  campaignProjection(campaignSessionId: string): OrchestratorCampaignProjection | null {
+    const campaign = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignSessionId) as unknown as
+      | SessionRow
+      | undefined;
+    const policy = orchestratorCampaignPolicyFromJson(campaign?.orchestrator_policy ?? null);
+    if (!campaign || !policy) return null;
+    const childIds = this.campaignDescendantIds(campaignSessionId);
+    const rows = childIds.length ? (this.stmt(
+      `SELECT id, status, archived, worktree_path, worktrees, pending_approval
+       FROM sessions WHERE id IN (${childIds.map(() => "?").join(",")})`,
+    ).all(...childIds) as unknown as Array<{
+      id: string; status: SessionStatus; archived: number; worktree_path: string | null;
+      worktrees: string | null; pending_approval: string | null;
+    }>) : [];
+    const verified = new Set((this.stmt(
+      "SELECT child_session_id AS id FROM orchestrator_campaign_child_reports WHERE campaign_session_id=?",
+    ).all(campaignSessionId) as unknown as Array<{ id: string }>).map((row) => row.id));
+    const pending = this.stmt(
+      `SELECT session_id, authority FROM workflow_decisions
+       WHERE controlling_session_id=? AND status='pending'`,
+    ).all(campaignSessionId) as unknown as Array<{ session_id: string; authority: WorkflowDecisionAuthority }>;
+    const pendingHuman = pending.filter((decision) => decision.authority === "human");
+    const pendingOrchestrator = pending.filter((decision) => decision.authority === "orchestrator");
+    let waitingHuman = 0;
+    let active = 0;
+    let blocked = 0;
+    let fullyVerified = 0;
+    let cleanupPending = 0;
+    for (const child of rows) {
+      const childPending = pending.filter((decision) => decision.session_id === child.id);
+      const approval = parseJson<PendingApproval>(child.pending_approval);
+      const genericPending = pendingRequests(approval).some((request) => request.kind !== "workflow_decision");
+      if (childPending.some((decision) => decision.authority === "human") || genericPending) waitingHuman += 1;
+      const reportVerified = verified.has(child.id);
+      const worktrees = parseJson<SessionWorktreeView[]>(child.worktrees) ?? [];
+      const cleanlyRetired = child.archived === 1 && child.worktree_path === null && worktrees.length === 0;
+      if (reportVerified && (policy.behavior.completion === "retain" || cleanlyRetired)) fullyVerified += 1;
+      else if (reportVerified && policy.behavior.completion === "stop_and_archive") cleanupPending += 1;
+      if (!reportVerified && (child.status === "failed" || child.status === "stopped")) blocked += 1;
+      else if (!reportVerified && !childPending.some((decision) => decision.authority === "human") && !genericPending) active += 1;
+    }
+    const followUps = this.stmt(
+      `SELECT SUM(CASE WHEN duplicate_of IS NULL THEN 1 ELSE 0 END) AS unique_count,
+              SUM(CASE WHEN duplicate_of IS NOT NULL THEN 1 ELSE 0 END) AS duplicate_count
+       FROM orchestrator_campaign_follow_ups WHERE campaign_session_id=?`,
+    ).get(campaignSessionId) as { unique_count: number | null; duplicate_count: number | null };
+    const effectiveOwners = { ...policy.delegation.decisions };
+    // Current managed clients expose links and digests but no binary evidence reader to the
+    // isolated Orchestrator. Preserve the saved choice while routing the effective gate to human.
+    effectiveOwners.ui_evidence_approval = "human";
+    const total = rows.length;
+    const status = waitingHuman > 0 ? "waiting_human" as const
+      : active > 0 || pendingOrchestrator.length > 0 || cleanupPending > 0 || total === 0 ? "active" as const
+      : blocked > 0 ? "blocked" as const
+      : fullyVerified === total ? "verified_complete" as const
+      : "active" as const;
+    const limit = campaign.max_child_sessions ?? DEFAULT_LIVE_CHILD_LIMIT;
+    const occupied = this.childSessionAllocations(campaignSessionId).liveCount;
+    return {
+      status,
+      policyRevision: campaign.parent_control_policy_revision,
+      decisionOwners: effectiveOwners,
+      limits: {
+        maximumConcurrentChildren: limit,
+        occupied,
+        remaining: Math.max(0, limit - occupied),
+        costBudgetUsd: campaign.cost_budget_usd ?? null,
+        maxToolCalls: campaign.max_tool_calls ?? null,
+      },
+      uiEvidenceReview: {
+        status: "unavailable",
+        effectiveOwner: "human",
+        reason: "This Orchestrator client cannot inspect the evidence bytes. Route the exact UI evidence decision to a human.",
+      },
+      children: { total, active, waitingHuman, blocked, verified: fullyVerified, cleanupPending },
+      pendingDecisions: { human: pendingHuman.length, orchestrator: pendingOrchestrator.length },
+      followUps: {
+        unique: Number(followUps.unique_count ?? 0),
+        duplicates: Number(followUps.duplicate_count ?? 0),
+      },
+    };
+  }
+
   updateSessionOrchestratorBehavior(
     id: string,
     patch: Partial<OrchestratorCampaignPolicy["behavior"]>,
@@ -15111,6 +15322,12 @@ export class ControlPlaneDb {
       ...(() => {
         const policy = orchestratorCampaignPolicyFromJson(row.orchestrator_policy);
         return policy ? { orchestratorPolicy: policy } : {};
+      })(),
+      ...(() => {
+        const campaign = orchestratorCampaignPolicyFromJson(row.orchestrator_policy)
+          ? this.campaignProjection(row.id)
+          : null;
+        return campaign ? { orchestratorCampaign: campaign } : {};
       })(),
       useWorktree: row.use_worktree === 1,
       worktreePath: row.worktree_path,

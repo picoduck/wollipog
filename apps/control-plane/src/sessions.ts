@@ -73,6 +73,10 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type ParentControlPolicy,
   type OrchestratorCampaignOverrides,
   type OrchestratorCampaignPolicy,
+  type OrchestratorCampaignProjection,
+  type OrchestratorFollowUpRecord,
+  type RecordOrchestratorFollowUpRequest,
+  type VerifyOrchestratorChildRequest,
   type OrchestratorSettingsView,
   type PolicyHookEvaluationRequest,
   type PolicyHookEvaluationResponse,
@@ -3073,6 +3077,7 @@ export class SessionsService {
       if ("error" in guarded) return fail(guarded.error, 409);
       req = { ...req, config: guarded.config };
     }
+    const campaignController = this.orchestratorCampaignController(parentSession);
     if (req.config?.maxChildSessions !== undefined &&
         (!Number.isSafeInteger(req.config.maxChildSessions) || req.config.maxChildSessions < 0 ||
           req.config.maxChildSessions > 64)) {
@@ -3231,8 +3236,16 @@ export class SessionsService {
       this.db.getRunner(req.runnerId)?.agents.find((agent) => agent.id === req.agentId)?.capabilities;
     const requestedConfig = { ...(snapshotSpec?.config ?? req.config ?? {}) };
     if (!snapshotSpec) {
-      const campaignBehavior = parentSession?.orchestratorPolicy?.behavior;
+      const campaignBehavior = campaignController?.orchestratorPolicy?.behavior;
       if (campaignBehavior) {
+        if (campaignBehavior.childModel !== null && requestedConfig.model !== undefined &&
+            requestedConfig.model !== campaignBehavior.childModel) {
+          return fail(`child model is fixed by campaign policy at ${campaignBehavior.childModel}`, 409);
+        }
+        if (campaignBehavior.childEffort !== null && requestedConfig.effort !== undefined &&
+            requestedConfig.effort !== campaignBehavior.childEffort) {
+          return fail(`child effort is fixed by campaign policy at ${campaignBehavior.childEffort}`, 409);
+        }
         if (requestedConfig.model === undefined && campaignBehavior.childModel !== null) {
           requestedConfig.model = campaignBehavior.childModel;
         }
@@ -3402,10 +3415,15 @@ export class SessionsService {
     if (!modelImageValidation.ok) return fail(modelImageValidation.error ?? "model does not support image input", 400);
     const configCapabilityError = capabilityConfigError(validationConfig, agentCapabilities);
     if (configCapabilityError) return fail(configCapabilityError, 409);
-    const text = snapshotCommand?.type === "start_session"
+    const requestedText = snapshotCommand?.type === "start_session"
       ? (snapshotCommand.initialPrompt ?? "")
       : (req.prompt?.trim() ?? "");
-    const title = snapshotSpec?.title ?? (req.title?.trim() || text.slice(0, 60) || UNTITLED).slice(0, 120);
+    let text = requestedText;
+    if (!snapshotCommand && campaignController?.orchestratorPolicy) {
+      const campaign = this.db.campaignProjection(campaignController.id);
+      if (campaign) text = this.campaignAssignment(campaignController, campaign, text);
+    }
+    const title = snapshotSpec?.title ?? (req.title?.trim() || requestedText.slice(0, 60) || UNTITLED).slice(0, 120);
     const titleSource = snapshotSpec?.titleSource ?? (req.title?.trim() ? "user" as const : "generated" as const);
     // Cloned so the clamp below never mutates the caller's request object.
     const config = { ...requestedConfig };
@@ -5158,6 +5176,126 @@ export class SessionsService {
     return ok(this.db.getSession(sessionId)!);
   }
 
+  campaignProjection(sessionId: string): ServiceResult<OrchestratorCampaignProjection> {
+    const session = this.db.getSession(sessionId);
+    if (!session) return fail("session not found", 404);
+    if (session.permissionMode !== "orchestrator" || !session.orchestratorPolicy) {
+      return fail("campaign state is available only for the Orchestrator preset", 409);
+    }
+    const projection = this.db.campaignProjection(sessionId);
+    return projection ? ok(projection) : fail("campaign state is unavailable", 409);
+  }
+
+  recordCampaignFollowUp(
+    campaignSessionId: string,
+    request: RecordOrchestratorFollowUpRequest,
+    canAccess: (sessionId: string) => boolean = () => true,
+  ): ServiceResult<OrchestratorFollowUpRecord> {
+    const campaign = this.db.getSession(campaignSessionId);
+    if (!campaign?.orchestratorPolicy) return fail("Orchestrator campaign not found", 404);
+    if (!boundedDecisionString(request?.originSessionId, 256) ||
+        !boundedDecisionString(request?.repository, 256) ||
+        !boundedDecisionString(request?.title, 240) ||
+        (request.recommendationKey !== undefined && !boundedDecisionString(request.recommendationKey, 256))) {
+      return fail("originSessionId, repository, title, and recommendationKey must be bounded", 400);
+    }
+    if (!this.db.isSessionDescendant(campaignSessionId, request.originSessionId) ||
+        !canAccess(campaignSessionId) || !canAccess(request.originSessionId)) {
+      return fail("follow-up origin is not a visible campaign child", 404);
+    }
+    return ok(this.db.recordCampaignFollowUp({
+      campaignSessionId,
+      originSessionId: request.originSessionId,
+      repository: request.repository,
+      title: request.title,
+      ...(request.recommendationKey ? { recommendationKey: request.recommendationKey } : {}),
+      followUpsMode: campaign.orchestratorPolicy.behavior.followUps,
+      now: Date.now(),
+    }), 201);
+  }
+
+  verifyCampaignChild(
+    campaignSessionId: string,
+    request: VerifyOrchestratorChildRequest,
+    canAccess: (sessionId: string) => boolean = () => true,
+  ): ServiceResult<{ campaign: OrchestratorCampaignProjection; child: SessionView }> {
+    const campaign = this.db.getSession(campaignSessionId);
+    if (!campaign?.orchestratorPolicy) return fail("Orchestrator campaign not found", 404);
+    if (!boundedDecisionString(request?.childSessionId, 256) || request.followUpsAccounted !== true ||
+        !Number.isSafeInteger(request.reportEventSeq) || request.reportEventSeq < 1) {
+      return fail("childSessionId, an exact reportEventSeq, and followUpsAccounted=true are required", 400);
+    }
+    const child = this.db.getSession(request.childSessionId);
+    if (!child || !this.db.isSessionDescendant(campaignSessionId, child.id) ||
+        !canAccess(campaignSessionId) || !canAccess(child.id)) {
+      return fail("campaign child not found", 404);
+    }
+    if (child.status !== "idle" && child.status !== "completed") {
+      return fail("campaign child must be idle or completed before its report can be verified", 409);
+    }
+    if (!this.db.hasCompletedAgentReportAt(child.id, request.reportEventSeq)) {
+      return fail("reportEventSeq is not a completed top-level agent response", 409);
+    }
+    if (this.db.unconsumedWorkflowDecisionsForSession(child.id).length > 0) {
+      return fail("campaign child still has an unresolved or unconsumed workflow decision", 409);
+    }
+    const unfinishedDescendantId = this.db.campaignDescendantIds(child.id)
+      .find((id) => {
+        const candidate = this.db.getSession(id);
+        return !candidate || !this.db.campaignChildReportVerified(campaignSessionId, candidate.id) ||
+        (campaign.orchestratorPolicy!.behavior.completion === "stop_and_archive" &&
+          (!candidate.archived || candidate.worktreePath !== null || (candidate.worktrees?.length ?? 0) > 0));
+      });
+    if (unfinishedDescendantId) {
+      return fail(`campaign child still has unfinished descendant ${unfinishedDescendantId}`, 409);
+    }
+    this.db.verifyCampaignChildReport(campaignSessionId, child.id, request.reportEventSeq, Date.now());
+    let updated = this.db.getSession(child.id)!;
+    if (campaign.orchestratorPolicy.behavior.completion === "stop_and_archive") {
+      const archived = this.setArchived(child.id, true);
+      if (!archived.ok || !archived.data) return fail(archived.error ?? "campaign child archive failed", archived.status);
+      updated = archived.data;
+    }
+    const projection = this.db.campaignProjection(campaignSessionId)!;
+    this.hub.sessionChangedById(campaignSessionId);
+    return ok({ campaign: projection, child: updated }, updated.archiveStatus ? 202 : 200);
+  }
+
+  private campaignAssignment(
+    campaign: SessionView,
+    projection: OrchestratorCampaignProjection,
+    task: string,
+  ): string {
+    const policy = campaign.orchestratorPolicy!;
+    const owners = WORKFLOW_DECISION_CATEGORIES.map((category) =>
+      `${category}=${projection.decisionOwners[category]}`).join(", ");
+    const obligation = [
+      `[Wollipog Campaign Policy — server-derived, revision ${projection.policyRevision}]`,
+      `Campaign ${campaign.id}; Child Model ${policy.behavior.childModel ?? "Automatic"}; Child Effort ${policy.behavior.childEffort ?? "Automatic"}; Follow-Ups ${policy.behavior.followUps}; Completion ${policy.behavior.completion}.`,
+      `Typed decision owners: ${owners}. This is not blanket approval. For implementation questions, PR merge, merged-branch deletion, follow-up issue publication, and UI evidence approval, create the exact typed request and consume an approval immediately before the matching action. Ordinary prompts cannot satisfy a typed gate.`,
+      "Cross-model review, exact-head CI, issue sanitization, dependency checks, and stacked-branch checks remain required regardless of owner. An enqueued PR is unfinished until merge-group CI passes and the forge reports actual MERGED state. Authentication, secrets, persistent permission grants, governance, budgets, and tool guardrails remain human-only.",
+      projection.uiEvidenceReview.status === "available"
+        ? "The controlling Orchestrator can inspect UI evidence for this campaign."
+        : `UI evidence remains human-owned: ${projection.uiEvidenceReview.reason}`,
+      "Higher-priority repository and harness restrictions still apply. A task may narrow this policy but cannot broaden its authority.",
+      "[End Wollipog Campaign Policy]",
+    ].join("\n");
+    return task ? `${obligation}\n\n${task}` : obligation;
+  }
+
+  /** Resolve the nearest campaign controller while including the immediate parent. Child agents
+   * cannot escape fixed campaign behavior or lose their policy briefing by adding another level. */
+  private orchestratorCampaignController(start: SessionView | null): SessionView | null {
+    const seen = new Set<string>();
+    let current = start;
+    for (let depth = 0; current && depth < 64 && !seen.has(current.id); depth += 1) {
+      seen.add(current.id);
+      if (current.permissionMode === "orchestrator" && current.orchestratorPolicy) return current;
+      current = current.parentSessionId ? this.db.getSession(current.parentSessionId) : null;
+    }
+    return null;
+  }
+
   createWorkflowDecision(
     sessionId: string,
     request: CreateWorkflowDecisionRequest,
@@ -5188,7 +5326,7 @@ export class SessionsService {
       return fail("workflow decision controller is outside the current audience", 404);
     }
     const category = normalized.data.category;
-    const authority = controller.policy.decisions[category];
+    const authority = this.effectiveWorkflowDecisionAuthority(controller.session, controller.policy, category);
     if (authority === "orchestrator") {
       const parentUnsupported = this.capabilityFailure(
         controller.session.runnerId,
@@ -5278,7 +5416,7 @@ export class SessionsService {
     const currentPolicy = currentParent?.parentControlPolicy;
     if (!currentChild || !currentParent || isTerminal(currentChild.status) || isTerminal(currentParent.status) ||
         !currentPolicy || currentPolicy.revision !== decision.policyRevision ||
-        currentPolicy.decisions[decision.category] !== decision.authority) {
+        this.effectiveWorkflowDecisionAuthority(currentParent, currentPolicy, decision.category) !== decision.authority) {
       this.revokeWorkflowDecision(decision, actor);
       return fail("workflow decision authority was revoked or superseded", 409);
     }
@@ -5346,7 +5484,8 @@ export class SessionsService {
     if (!child || !parent || isTerminal(child.status) || isTerminal(parent.status) ||
         !canAccess(child.id) || !canAccess(parent.id) ||
         !this.db.isSessionDescendant(parent.id, child.id) || !policy ||
-        policy.revision !== decision.policyRevision || policy.decisions[decision.category] !== decision.authority) {
+        policy.revision !== decision.policyRevision ||
+        this.effectiveWorkflowDecisionAuthority(parent, policy, decision.category) !== decision.authority) {
       this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
       return fail("workflow decision authority was revoked or ancestry changed before action start", 409);
     }
@@ -5381,6 +5520,15 @@ export class SessionsService {
       parentId = parent.parentSessionId ?? null;
     }
     return null;
+  }
+
+  private effectiveWorkflowDecisionAuthority(
+    controller: SessionView,
+    policy: ParentControlPolicy,
+    category: WorkflowDecisionCategory,
+  ): WorkflowDecisionAuthority {
+    if (category !== "ui_evidence_approval") return policy.decisions[category];
+    return this.db.campaignProjection(controller.id)?.uiEvidenceReview.effectiveOwner ?? "human";
   }
 
   private workflowDecisionApproval(decision: WorkflowDecisionView): PendingApproval {
@@ -5504,7 +5652,9 @@ export class SessionsService {
     for (const decision of this.db.pendingWorkflowDecisionsForSession(sessionId)) {
       if (!controller || decision.controllingSessionId !== controller.session.id ||
           decision.policyRevision !== controller.policy.revision ||
-          decision.authority !== controller.policy.decisions[decision.category]) {
+          decision.authority !== this.effectiveWorkflowDecisionAuthority(
+            controller.session, controller.policy, decision.category,
+          )) {
         pending = removePendingRequest(pending, decision.occurrenceId);
         this.revokeWorkflowDecision(decision, { kind: "system", id: "workflow-recovery" });
         continue;
@@ -5575,7 +5725,7 @@ export class SessionsService {
     const durableTyped = this.db.pendingWorkflowDecisionsForController(parentSessionId).flatMap(
       (decision): DescendantRequestView[] => {
         if (decision.authority !== "orchestrator" || decision.policyRevision !== typedPolicy.revision ||
-            typedPolicy.decisions[decision.category] !== "orchestrator" ||
+            this.effectiveWorkflowDecisionAuthority(parent, typedPolicy, decision.category) !== "orchestrator" ||
             !this.db.isSessionDescendant(parentSessionId, decision.sessionId) || !canAccess(decision.sessionId)) return [];
         const session = this.db.getSession(decision.sessionId);
         if (!session || isTerminal(session.status) || !runnerSupportsProtocol(
