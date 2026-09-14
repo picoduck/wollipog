@@ -1967,6 +1967,12 @@ test("PR merge action admission accepts only the canonical enqueue command", () 
   assert.deepEqual(normalizeWorkflowDecisionAction(snapshot, {
     kind: "pr_merge_enqueue", command: canonical,
   }).data, { kind: "pr_merge_enqueue", command: canonical });
+  const changedHead = { ...snapshot, headSha: "b".repeat(40) };
+  assert.notEqual(canonicalPrMergeEnqueueCommand(changedHead), canonical,
+    "the canonical command pins the approved head SHA at execution time");
+  assert.equal(normalizeWorkflowDecisionAction(changedHead, {
+    kind: "pr_merge_enqueue", command: canonical,
+  }).status, 409, "a command armed for the previous head cannot admit the changed head");
 
   const singleCharacterMutations = [...canonical].map((character, index) =>
     canonical.slice(0, index) + (character === "x" ? "y" : "x") + canonical.slice(index + 1));
@@ -1975,7 +1981,7 @@ test("PR merge action admission accepts only the canonical enqueue command", () 
     `${canonical} --delete-branch`,
     canonical.replace("/pull/42", "/pull/420"),
     canonical.replace("picoduck/wollipog", "picoduck/other"),
-    `${canonical}; gh pr merge https://github.com/picoduck/wollipog/pull/43 --squash`,
+    `${canonical}; gh pr merge https://github.com/picoduck/wollipog/pull/43 --squash --match-head-commit ${snapshot.headSha}`,
   ];
   for (const command of [...singleCharacterMutations, ...pinnedMutations]) {
     assert.equal(normalizeWorkflowDecisionAction(snapshot, {

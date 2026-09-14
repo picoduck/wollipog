@@ -966,7 +966,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "consume_workflow_decision",
-    description: "Immediately before the approved external action begins, consume its one-shot authorization using the exact current resource snapshot. PR merge approvals instead arm one canonical enqueue command and are consumed only when its matching runner permission is delivered. Revoked, changed, replayed, stale, or superseded grants fail closed.",
+    description: "Immediately before the approved external action begins, consume its one-shot authorization using the exact current resource snapshot. PR merge approvals instead arm one canonical enqueue command pinned with --match-head-commit and are consumed only when its matching runner permission is delivered. Revoked, changed, replayed, stale, or superseded grants fail closed.",
     inputSchema: {
       type: "object",
       properties: {

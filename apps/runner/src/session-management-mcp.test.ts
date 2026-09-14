@@ -168,7 +168,7 @@ test("typed workflow decision tools preserve exact request, resolution, and cons
 
   const action = {
     kind: "pr_merge_enqueue",
-    command: "gh pr merge https://github.com/picoduck/wollipog/pull/42 --squash",
+    command: `gh pr merge https://github.com/picoduck/wollipog/pull/42 --squash --match-head-commit ${snapshot.headSha}`,
   };
   await callTool(deps, "consume_workflow_decision", {
     occurrenceId: "workflow_1", resourceSnapshot: snapshot, action,
@@ -203,7 +203,7 @@ test("PR merge action admission fails closed against mixed-version control plane
     },
     action: {
       kind: "pr_merge_enqueue",
-      command: "gh pr merge https://github.com/picoduck/wollipog/pull/42 --squash",
+      command: `gh pr merge https://github.com/picoduck/wollipog/pull/42 --squash --match-head-commit ${"a".repeat(40)}`,
     },
   });
   assert.equal(result.isError, true);

@@ -157,7 +157,7 @@ ancestry change, audience loss, changed resource snapshot, duplicate response, o
 request fails closed. Approval is one-shot: the child must consume it against the same snapshot
 immediately before starting the action. Protocol v142 gives PR merge consumption a narrower
 two-step boundary. The child supplies the canonical command
-`gh pr merge https://github.com/<owner>/<repository>/pull/<number> --squash`; the control plane
+`gh pr merge https://github.com/<owner>/<repository>/pull/<number> --squash --match-head-commit <approved-head-sha>`; the control plane
 arms that exact command while the decision remains approved. The matching one-shot Bash or Codex
 command permission is then admitted and the decision is marked consumed only after the allow
 response is delivered to the runner. A changed command, failed delivery, stale policy, changed
@@ -180,7 +180,8 @@ intercept a separate shell, forge client, browser, or other credential that can 
 perform the action. Orchestrator instructions must therefore require `request_workflow_decision`,
 the assigned authority's exact resolution, and `consume_workflow_decision` immediately before
 using a supported mutation path. For PR merge, the command returned in the durable action admission
-must be executed byte-for-byte; a generic or altered forge command deliberately falls back to its
+must be executed byte-for-byte. The GitHub CLI rejects enqueue if the PR head changed after review;
+a generic or altered forge command deliberately falls back to its
 ordinary human-only permission boundary. Audit entries correlate the typed decision occurrence and
 matching permission through content-safe digests and outcomes without retaining raw rationale or
 credentials or recording a second user decision.

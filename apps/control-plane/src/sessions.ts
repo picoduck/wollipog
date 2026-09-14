@@ -584,7 +584,7 @@ export function normalizeWorkflowDecisionSnapshot(
 export function canonicalPrMergeEnqueueCommand(
   snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
 ): string {
-  return `gh pr merge https://github.com/${snapshot.repository}/pull/${snapshot.pullRequest} --squash`;
+  return `gh pr merge https://github.com/${snapshot.repository}/pull/${snapshot.pullRequest} --squash --match-head-commit ${snapshot.headSha}`;
 }
 
 export function normalizeWorkflowDecisionAction(
@@ -5359,7 +5359,7 @@ export class SessionsService {
     const obligation = [
       `[Wollipog Campaign Policy — server-derived, revision ${projection.policyRevision}]`,
       `Campaign ${campaign.id}; Child Model ${policy.behavior.childModel ?? "Automatic"}; Child Effort ${policy.behavior.childEffort ?? "Automatic"}; Follow-Ups ${policy.behavior.followUps}; Completion ${policy.behavior.completion}.`,
-      `Typed decision owners: ${owners}. This is not blanket approval. For implementation questions, PR merge, merged-branch deletion, follow-up issue publication, and UI evidence approval, create the exact typed request and consume an approval immediately before the matching action. For PR merge, pass and then execute the exact canonical gh pr merge URL --squash command; its matching one-shot runner permission completes consumption. Ordinary prompts cannot satisfy a typed gate.`,
+      `Typed decision owners: ${owners}. This is not blanket approval. For implementation questions, PR merge, merged-branch deletion, follow-up issue publication, and UI evidence approval, create the exact typed request and consume an approval immediately before the matching action. For PR merge, pass and then execute the exact canonical gh pr merge URL --squash --match-head-commit SHA command; its matching one-shot runner permission completes consumption. Ordinary prompts cannot satisfy a typed gate.`,
       "Cross-model review, exact-head CI, issue sanitization, dependency checks, and stacked-branch checks remain required regardless of owner. An enqueued PR is unfinished until merge-group CI passes and the forge reports actual MERGED state. Authentication, secrets, persistent permission grants, governance, budgets, and tool guardrails remain human-only.",
       projection.uiEvidenceReview.status === "available"
         ? "The controlling Orchestrator can inspect UI evidence for this campaign."

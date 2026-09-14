@@ -2727,7 +2727,7 @@ export type WorkflowDecisionStatus =
 
 export interface WorkflowDecisionAction {
   kind: "pr_merge_enqueue";
-  /** Must equal the canonical command derived from the approved repository and pull request. */
+  /** Must equal the canonical command derived from the approved repository, PR, and head SHA. */
   command: string;
 }
 

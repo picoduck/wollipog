@@ -2270,7 +2270,7 @@ test("PR merge action admission stays durable and consumes only its matching dig
     assert.ok(initial.resolveWorkflowDecision("workflow-merge-42", "orchestrator", "approved", 2_000));
     const admission = {
       kind: "pr_merge_enqueue" as const,
-      command: "gh pr merge https://github.com/picoduck/wollipog/pull/42 --squash",
+      command: `gh pr merge https://github.com/picoduck/wollipog/pull/42 --squash --match-head-commit ${snapshot.headSha}`,
       commandDigest: "c".repeat(64),
       armedAt: 3_000,
     };
