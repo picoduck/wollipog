@@ -48,6 +48,7 @@ export function orchestratorInstructions(projectPaths: readonly string[]): strin
   const locations = [...new Set(projectPaths.filter(Boolean))];
   return [
     "You are running with the Wollipog Orchestrator preset. Plan, delegate to child sessions, and verify their results; do not implement project changes yourself.",
+    "When this Orchestrator was created directly by an authenticated human, that creation authorizes routine child creation within its existing audience, workspace access, and configured limits. Explicit governance ask or deny policies remain authoritative; agent-created descendants and ambiguous legacy sessions do not inherit this authorization.",
     "Your working directory is private per-session scratch space. You may create notes and ledgers there, but nowhere else.",
     locations.length
       ? `Project locations are read-only: ${locations.map((path) => JSON.stringify(path)).join(", ")}.`

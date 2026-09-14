@@ -261,6 +261,7 @@ test("native orchestrator flags enable bounded planning while disabling implemen
   }
   assert.match(codex.find((arg) => arg.startsWith("developer_instructions=")) ?? "", /Project locations are read-only/);
   assert.match(codex.find((arg) => arg.startsWith("developer_instructions=")) ?? "", /call get_campaign/);
+  assert.match(codex.find((arg) => arg.startsWith("developer_instructions=")) ?? "", /created directly by an authenticated human/);
   assert.throws(() => orchestratorLaunchArgs("acp", mcp), /native harness/);
 });
 

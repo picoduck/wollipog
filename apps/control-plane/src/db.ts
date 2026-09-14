@@ -491,6 +491,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   archived       INTEGER NOT NULL DEFAULT 0,
   preview        TEXT,
   pending_approval TEXT,
+  creation_actor TEXT CHECK (creation_actor IS NULL OR creation_actor IN ('human','agent','system')),
   parent_control TEXT NOT NULL DEFAULT 'off',
   parent_control_policy TEXT,
   parent_control_policy_revision INTEGER NOT NULL DEFAULT 0,
@@ -2190,6 +2191,7 @@ interface SessionRow {
   archived: number;
   preview: string | null;
   pending_approval: string | null;
+  creation_actor: "human" | "agent" | "system" | null;
   parent_control: string;
   parent_control_policy: string | null;
   parent_control_policy_revision: number;
@@ -3059,6 +3061,8 @@ export interface NewSessionInput {
   id: string;
   /** Trusted creator attribution, derived from the authenticated session credential. */
   parentSessionId?: string;
+  /** Server-derived creation provenance. Omitted internal and legacy callers remain untrusted. */
+  creationActor?: "human" | "agent" | "system";
   runnerId: string;
   workspaceId: string | null;
   /** CP-owned grouping. Omitted callers are inferred from the exact active runner/workspace link. */
@@ -4122,6 +4126,10 @@ export class ControlPlaneDb {
         /* column already present */
       }
     }
+    const sessionColumnsBeforeMigration = db.prepare("PRAGMA table_info(sessions)")
+      .all() as unknown as Array<{ name: string }>;
+    const needsCreationActorBackfill = !sessionColumnsBeforeMigration.some((column) =>
+      column.name === "creation_actor");
     for (const col of [
       // PROTOCOL_VERSION the runner registered with (version-skew badge). NULL ⇒ unknown — a
       // pre-v15 runner that never reported one.
@@ -4241,6 +4249,7 @@ export class ControlPlaneDb {
       // Runner-authoritative multi-worktree inventory; worktree_path stays the active legacy
       // projection for rolling peers and existing queries.
       "worktrees TEXT",
+      "creation_actor TEXT CHECK (creation_actor IS NULL OR creation_actor IN ('human','agent','system'))",
       "parent_control TEXT NOT NULL DEFAULT 'off' CHECK (parent_control IN ('off','questions','questions_and_approvals'))",
       "parent_control_policy TEXT",
       "parent_control_policy_revision INTEGER NOT NULL DEFAULT 0",
@@ -4252,6 +4261,46 @@ export class ControlPlaneDb {
         /* column already present */
       }
     }
+    if (needsCreationActorBackfill) {
+      // Parent attribution is durable CP-owned proof of agent creation. Existing top-level
+      // Orchestrators qualify only when their already-persisted campaign snapshot establishes a
+      // human-only configuration path. Run this inference exactly once: later parent deletion can
+      // erase relational provenance, and must never cause a NULL row to acquire human authority.
+      // Legacy, imported, workflow, auxiliary, and otherwise ambiguous rows deliberately remain
+      // NULL and preserve the approval gate.
+      db.exec("UPDATE sessions SET creation_actor='agent' WHERE creation_actor IS NULL AND parent_session_id IS NOT NULL");
+      const existingOrchestrators = db.prepare(
+        `SELECT session.id, session.parent_control, session.orchestrator_policy
+         FROM sessions session
+         WHERE session.creation_actor IS NULL AND session.permission_mode='orchestrator'
+           AND session.parent_session_id IS NULL AND session.adopted=0 AND session.run_id IS NULL
+           AND session.orchestrator_policy IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM session_side_chats side_chat WHERE side_chat.child_session_id=session.id)`,
+      ).all() as unknown as Array<{
+        id: string;
+        parent_control: string;
+        orchestrator_policy: string;
+      }>;
+      const saveCreationActor = db.prepare("UPDATE sessions SET creation_actor='human' WHERE id=? AND creation_actor IS NULL");
+      for (const row of existingOrchestrators) {
+        const policy = orchestratorCampaignPolicyFromJson(row.orchestrator_policy);
+        if (!policy) continue;
+        const allSources = [
+          ...Object.values(policy.sources.behavior),
+          policy.sources.delegation.parentControl,
+          ...Object.values(policy.sources.delegation.decisions),
+        ];
+        const humanOnlyOverride = policy.sources.delegation.parentControl === "session_override" ||
+          Object.values(policy.sources.delegation.decisions).includes("session_override");
+        const explicitHumanConfiguration = allSources.includes("user_default") || humanOnlyOverride;
+        const humanSystemDefault = row.parent_control !== "off" &&
+          allSources.includes("system_default") &&
+          !allSources.includes("active_campaign") &&
+          !allSources.includes("legacy_session");
+        if (explicitHumanConfiguration || humanSystemDefault) saveCreationActor.run(row.id);
+      }
+    }
+
     // Existing Orchestrator sessions become explicitly inspectable without gaining authority.
     // Their current Parent Control fields are preserved and all typed categories remain fail-closed
     // when the legacy JSON is absent or malformed.
@@ -10268,6 +10317,18 @@ export class ControlPlaneDb {
       .get(scope.organizationId, scope.owner.userId));
   }
 
+  sessionWasHumanCreatedOrchestrator(sessionId: string): boolean {
+    const row = this.stmt(
+      "SELECT creation_actor, permission_mode, orchestrator_policy FROM sessions WHERE id=?",
+    ).get(sessionId) as unknown as {
+      creation_actor: string | null;
+      permission_mode: string | null;
+      orchestrator_policy: string | null;
+    } | undefined;
+    return row?.creation_actor === "human" && row.permission_mode === "orchestrator" &&
+      orchestratorCampaignPolicyFromJson(row.orchestrator_policy) !== null;
+  }
+
   createSession(input: NewSessionInput): SessionView {
     const scope = input.scope ?? this.inheritedSessionScope(input.runnerId, input.workspaceId);
     const inferredLocation = input.workspaceId ? this.findProjectLocation(input.runnerId, input.workspaceId) : null;
@@ -10303,10 +10364,10 @@ export class ControlPlaneDb {
     try {
       this.stmt(
          `INSERT INTO sessions
-           (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, status, run_id, use_worktree, archived,
+           (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, status, run_id, use_worktree, archived, creation_actor,
              driver, model, effort, service_tier, permission_mode, parent_control, parent_control_policy,
              parent_control_policy_revision, orchestrator_policy, workspace_path, acp_session_context, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.id,
@@ -10320,6 +10381,7 @@ export class ControlPlaneDb {
         input.runId ?? null,
         input.useWorktree ? 1 : 0,
         input.archived ? 1 : 0,
+        input.creationActor ?? (input.parentSessionId ? "agent" : null),
         input.driver,
         input.config.model ?? null,
         input.config.effort ?? null,

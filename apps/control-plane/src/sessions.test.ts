@@ -1138,6 +1138,162 @@ test("session spawn policy parks the exact child request and creates only after 
   }
 });
 
+function enableOrchestratorFixture(db: ControlPlaneDb): void {
+  const meta = runnerMeta();
+  const agent = meta.agents.find((candidate) => candidate.id === AGENT_ID)!;
+  agent.capabilities = {
+    models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+    permissionModes: ["default", "orchestrator"],
+  };
+  db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+}
+
+test("human-created Orchestrators authorize direct and batched children for every ownership audience", () => {
+  for (const audience of ["organization", "user"] as const) {
+    const { db, svc } = makeHarness();
+    try {
+      enableOrchestratorFixture(db);
+      const owner = db.localIdentityContext();
+      const scope: ResourceScope = audience === "organization"
+        ? { organizationId: owner.organizationId, owner: { kind: "organization", organizationId: owner.organizationId } }
+        : { organizationId: owner.organizationId, owner: { kind: "user", userId: owner.userId } };
+      const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+      const parent = svc.createSession(
+        { ...request, config: { permissionMode: "orchestrator" } },
+        undefined, scope, false, false, false, { defaultOwnerUserId: owner.userId },
+      ).data!;
+      assert.equal(db.sessionWasHumanCreatedOrchestrator(parent.id), true);
+      db.updateSessionStatus(parent.id, "running", Date.now());
+
+      const child = svc.createSession(request, undefined, undefined, false, false, false, {
+        parentSessionId: parent.id,
+      });
+      assert.equal(child.ok, true, child.error);
+      assert.equal(child.data!.parentSessionId, parent.id);
+      const run = svc.createRun({
+        runnerId: RUNNER_ID,
+        workspaceId: WORKSPACE_ID,
+        agentIds: [AGENT_ID],
+        task: "Inspect policy consistency",
+      }, { parentSessionId: parent.id });
+      assert.equal(run.ok, true, run.error);
+      assert.equal(run.data!.sessions[0]!.parentSessionId, parent.id);
+      const decisions = svc.governanceAudit(parent.id).filter((entry) => entry.stage === "policy_decision");
+      assert.equal(decisions.length, 2);
+      assert.ok(decisions.every((entry) =>
+        entry.outcome === "allowed" &&
+        entry.governancePolicyId === "builtin:human-created-orchestrator-spawn-authorization"));
+    } finally { db.close(); }
+  }
+});
+
+test("explicit spawn ask and deny policies override human-created Orchestrator authorization", () => {
+  for (const effect of ["ask", "deny"] as const) {
+    const { db, svc } = makeHarness();
+    try {
+      enableOrchestratorFixture(db);
+      const owner = db.localIdentityContext();
+      const scope: ResourceScope = {
+        organizationId: owner.organizationId,
+        owner: { kind: "organization", organizationId: owner.organizationId },
+      };
+      const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+      const parent = svc.createSession(
+        { ...request, config: { permissionMode: "orchestrator" } },
+        undefined, scope, false, false, false, { defaultOwnerUserId: owner.userId },
+      ).data!;
+      db.updateSessionStatus(parent.id, "running", Date.now());
+      assert.ok(svc.upsertGovernancePolicy({
+        policyId: `explicit-spawn-${effect}`,
+        name: `Explicit Spawn ${effect}`,
+        effect,
+        priority: 100,
+        enabled: true,
+        scope: { toolName: "wollipog.create_session" },
+      }).ok);
+      const child = svc.createSession(request, undefined, undefined, false, false, false, {
+        parentSessionId: parent.id,
+      });
+      assert.equal(child.status, effect === "ask" ? 428 : 403);
+      const decision = svc.governanceAudit(parent.id).find((entry) => entry.stage === "policy_decision");
+      assert.equal(decision?.outcome, effect === "ask" ? "asked" : "denied");
+      assert.equal(decision?.governancePolicyId, `explicit-spawn-${effect}`);
+    } finally { db.close(); }
+  }
+});
+
+test("ordinary, system-created, descendant, and ambiguous sessions retain shared-audience spawn review", () => {
+  const { db, svc } = makeHarness();
+  try {
+    enableOrchestratorFixture(db);
+    const owner = db.localIdentityContext();
+    const scope: ResourceScope = {
+      organizationId: owner.organizationId,
+      owner: { kind: "organization", organizationId: owner.organizationId },
+    };
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+    const attemptChild = (parentId: string) => {
+      db.updateSessionStatus(parentId, "running", Date.now());
+      return svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parentId });
+    };
+
+    const ordinary = svc.createSession(
+      request, undefined, scope, false, false, false, { defaultOwnerUserId: owner.userId },
+    ).data!;
+    assert.equal(attemptChild(ordinary.id).status, 428, "ordinary human sessions keep the shared-audience default");
+
+    const systemOrchestrator = svc.createSession(
+      { ...request, config: { permissionMode: "orchestrator" } }, undefined, scope,
+    ).data!;
+    assert.equal(db.sessionWasHumanCreatedOrchestrator(systemOrchestrator.id), false);
+    assert.equal(attemptChild(systemOrchestrator.id).status, 428, "system creation does not imply human authorization");
+
+    const root = svc.createSession(
+      { ...request, config: { permissionMode: "orchestrator" } },
+      undefined, scope, false, false, false, { defaultOwnerUserId: owner.userId },
+    ).data!;
+    db.updateSessionStatus(root.id, "running", Date.now());
+    const nested = svc.createSession(
+      { ...request, config: { permissionMode: "orchestrator" } },
+      undefined, undefined, false, false, false, { parentSessionId: root.id },
+    ).data!;
+    assert.equal(db.sessionWasHumanCreatedOrchestrator(nested.id), false);
+    assert.equal(attemptChild(nested.id).status, 428, "agent-created Orchestrators do not inherit the exemption");
+
+    const ambiguous = svc.createSession(
+      { ...request, config: { permissionMode: "orchestrator" } },
+      undefined, scope, false, false, false, { defaultOwnerUserId: owner.userId },
+    ).data!;
+    db.raw().prepare("UPDATE sessions SET creation_actor=NULL WHERE id=?").run(ambiguous.id);
+    assert.equal(attemptChild(ambiguous.id).status, 428, "missing provenance fails closed");
+  } finally { db.close(); }
+});
+
+test("human-created Orchestrator authorization does not bypass child resource admission", () => {
+  const { db, svc } = makeHarness();
+  try {
+    enableOrchestratorFixture(db);
+    const owner = db.localIdentityContext();
+    const scope: ResourceScope = {
+      organizationId: owner.organizationId,
+      owner: { kind: "organization", organizationId: owner.organizationId },
+    };
+    const parent = svc.createSession({
+      runnerId: RUNNER_ID,
+      workspaceId: WORKSPACE_ID,
+      agentId: AGENT_ID,
+      config: { permissionMode: "orchestrator", maxChildSessions: 0 },
+    }, undefined, scope, false, false, false, { defaultOwnerUserId: owner.userId }).data!;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    const child = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID,
+    }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    assert.equal(child.status, 409);
+    assert.match(child.error ?? "", /0 remaining live child slots/);
+    assert.equal(svc.governanceAudit(parent.id).length, 0, "resource admission fails before policy authorization");
+  } finally { db.close(); }
+});
+
 test("agent-created children inherit their parent Project assignment", () => {
   const { db, svc } = makeHarness();
   try {

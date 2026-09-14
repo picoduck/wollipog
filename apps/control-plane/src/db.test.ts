@@ -4134,6 +4134,141 @@ test("legacy Orchestrator sessions gain an inspectable fail-closed campaign snap
     assert.deepEqual(Object.values(policy.delegation.decisions), ["human", "human", "human", "human", "human"]);
     assert.deepEqual(new Set(Object.values(policy.sources.behavior)), new Set(["legacy_session"]));
     assert.deepEqual(new Set(Object.values(policy.sources.delegation.decisions)), new Set(["legacy_session"]));
+    assert.equal(upgraded.sessionWasHumanCreatedOrchestrator("sess-1"), false,
+      "ambiguous legacy configuration does not acquire spawn authority");
+    upgraded.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("established human Orchestrator provenance survives the creation-actor migration", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-orchestrator-creator-migration-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    initial.registerRunner(meta(), 500);
+    const decisions = {
+      implementation_question: "human" as const,
+      pr_merge: "human" as const,
+      merged_branch_deletion: "human" as const,
+      follow_up_issue_publication: "human" as const,
+      ui_evidence_approval: "human" as const,
+    };
+    initial.createSession({
+      ...newSession(),
+      creationActor: "human",
+      config: { permissionMode: "orchestrator", maxChildSessions: 4 },
+      parentControl: "questions_and_approvals",
+      orchestratorPolicy: {
+        version: 1,
+        behavior: {
+          childModel: null,
+          childEffort: null,
+          maximumConcurrentChildren: 4,
+          followUps: "recommend_only",
+          completion: "retain",
+        },
+        delegation: { parentControl: "questions_and_approvals", decisions },
+        sources: {
+          behavior: {
+            childModel: "system_default",
+            childEffort: "system_default",
+            maximumConcurrentChildren: "system_default",
+            followUps: "system_default",
+            completion: "system_default",
+          },
+          delegation: {
+            parentControl: "system_default",
+            decisions: {
+              implementation_question: "system_default",
+              pr_merge: "system_default",
+              merged_branch_deletion: "system_default",
+              follow_up_issue_publication: "system_default",
+              ui_evidence_approval: "system_default",
+            },
+          },
+        },
+      },
+    });
+    initial.close();
+
+    const old = new DatabaseSync(path);
+    old.exec("ALTER TABLE sessions DROP COLUMN creation_actor");
+    old.close();
+
+    const upgraded = ControlPlaneDb.open(path);
+    assert.equal(upgraded.sessionWasHumanCreatedOrchestrator("sess-1"), true);
+    upgraded.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("creation-actor migration does not promote a detached agent-created Orchestrator", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-orchestrator-detached-child-migration-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    initial.registerRunner(meta(), 500);
+    initial.createSession(newSession({ id: "parent", creationActor: "human" }));
+    initial.createSession(newSession({
+      id: "child",
+      parentSessionId: "parent",
+      creationActor: "agent",
+      config: { permissionMode: "orchestrator", maxChildSessions: 2 },
+      orchestratorPolicy: {
+        version: 1,
+        behavior: {
+          childModel: null,
+          childEffort: null,
+          maximumConcurrentChildren: 2,
+          followUps: "recommend_only",
+          completion: "retain",
+        },
+        delegation: {
+          parentControl: "off",
+          decisions: {
+            implementation_question: "human",
+            pr_merge: "human",
+            merged_branch_deletion: "human",
+            follow_up_issue_publication: "human",
+            ui_evidence_approval: "human",
+          },
+        },
+        sources: {
+          behavior: {
+            childModel: "system_default",
+            childEffort: "system_default",
+            maximumConcurrentChildren: "session_override",
+            followUps: "system_default",
+            completion: "system_default",
+          },
+          delegation: {
+            parentControl: "system_default",
+            decisions: {
+              implementation_question: "system_default",
+              pr_merge: "system_default",
+              merged_branch_deletion: "system_default",
+              follow_up_issue_publication: "system_default",
+              ui_evidence_approval: "system_default",
+            },
+          },
+        },
+      },
+    }));
+    initial.deleteSession("parent");
+    assert.equal(initial.getSession("child")?.parentSessionId, null,
+      "deleting a parent retains its child and clears the relationship");
+    initial.close();
+
+    const old = new DatabaseSync(path);
+    old.exec("ALTER TABLE sessions DROP COLUMN creation_actor");
+    old.close();
+
+    const upgraded = ControlPlaneDb.open(path);
+    assert.equal(upgraded.sessionWasHumanCreatedOrchestrator("child"), false,
+      "an agent-set behavior override is not proof of human creation");
     upgraded.close();
   } finally {
     rmSync(root, { recursive: true, force: true });

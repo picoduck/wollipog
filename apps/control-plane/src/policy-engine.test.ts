@@ -264,6 +264,20 @@ test("the default spawn policy asks for shared audiences and allows an individua
   assert.equal(decision.effect, "ask", "an owner can opt in through an explicit policy");
 });
 
+test("human-created Orchestrator spawn authorization is identifiable and remains below stored policy", () => {
+  const input = approvalInput({ scope: { ...approvalInput().scope, toolName: "wollipog.create_session" } });
+  const builtin = sessionSpawnSafetyPolicy(false, 10, true);
+  const allowed = evaluateApprovalPolicies(input, [builtin]);
+  assert.equal(allowed.effect, "allow");
+  assert.equal(allowed.policy?.policyId, "builtin:human-created-orchestrator-spawn-authorization");
+  for (const effect of ["ask", "deny"] as const) {
+    const explicit = storedPolicy({ policyId: `explicit-${effect}`, effect, priority: 100 });
+    const decision = evaluateApprovalPolicies(input, [builtin, explicit]);
+    assert.equal(decision.effect, effect);
+    assert.equal(decision.policy?.policyId, explicit.policyId);
+  }
+});
+
 test("scope matching is exact unless '*' is explicit; missing context fails closed", () => {
   assert.equal(scopePatternMatches("/repo-safe/file", "/repo-safe/*"), true);
   assert.equal(scopePatternMatches("/repo-safe-evil/file", "/repo-safe/*"), false);
