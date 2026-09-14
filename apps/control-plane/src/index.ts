@@ -204,6 +204,7 @@ import {
 import { ShellRegistry } from "./shell-registry.js";
 import { CORS_METHODS, registerAuthGate } from "./http-auth.js";
 import { pushDecision } from "./push-decision.js";
+import { automationPushMessage } from "./automation-push-decision.js";
 import { validateSubscription, WebPushSender } from "./web-push.js";
 import {
   appShellSecurityHeaders,
@@ -907,20 +908,10 @@ const automations = new AutomationsService(
     warn: (message) => app.log.warn(message),
   },
   (automation, execution, event) => {
-    const label = event === "started" ? "started"
-      : event === "succeeded" ? "completed"
-        : event === "expired" ? "expired waiting for a runner" : "failed";
-    pushSender.send({
-      title: `${automation.name} ${label}`.slice(0, 120),
-      body: event === "succeeded"
-        ? "The scheduled action completed successfully."
-        : event === "started"
-          ? "The scheduled action was accepted and is running."
-          : (execution.error ?? "Open Automations to inspect the execution.").slice(0, 240),
-      notificationKey: `automation:${automation.automationId}`,
-      view: "automations",
-      urgency: event === "failed" || event === "expired" ? "high" : "normal",
-    }, { kind: "organization_admin", organizationId: db.localIdentityContext().organizationId });
+    pushSender.send(
+      automationPushMessage(automation, execution, event),
+      { kind: "organization_admin", organizationId: db.localIdentityContext().organizationId },
+    );
   },
 );
 automations.recover(Date.now());
