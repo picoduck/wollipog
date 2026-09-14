@@ -729,6 +729,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     };
     const codex = meta.agents.find((agent) => agent.id === CODEX_APP_AGENT_ID)!;
     codex.capabilities!.permissionModes = ["default", "orchestrator"];
+    codex.capabilities!.models.find((model) => model.id === "text-model")!.inputModalities = ["text", "image"];
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     const settings: OrchestratorSettingsView = {
       source: "user_default",
@@ -891,6 +892,13 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.ok(humanMerge.ok && humanMerge.data, humanMerge.error);
     assert.equal(humanMerge.data.controllingSessionId, parent.id);
     assert.equal(humanMerge.data.authority, "human");
+    const nestedProjection = db.campaignProjection(child.data.id);
+    assert.equal(nestedProjection?.policyRevision, db.getSession(parent.id)?.parentControlPolicy?.revision,
+      "a nested Orchestrator projects the root campaign's current revision");
+    assert.equal(nestedProjection?.decisionOwners.pr_merge, "human",
+      "a nested Orchestrator cannot project its stale copied decision owner");
+    assert.equal(nestedProjection?.status, "waiting_human",
+      "a root-owned pending grandchild decision is visible from a nested Orchestrator");
     assert.ok(svc.resolveWorkflowDecision(
       parent.id, grandchild.data.id, humanMerge.data.occurrenceId,
       { outcome: "approve" }, "human", { kind: "human", id: "owner" }, () => true,
@@ -982,11 +990,16 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.equal(emptyStart?.initialPrompt, undefined,
       "creating a campaign child without a task does not start a policy-only billed turn");
     svc.onSessionStatus(emptyChild.data.id, "idle");
-    assert.ok(svc.prompt(emptyChild.data.id, "First real task").ok);
+    assert.ok(svc.prompt(emptyChild.data.id, "", [{
+      mimeType: "image/png",
+      data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    }]).ok);
     const firstPrompt = hub.sentOfType("prompt_session")
       .find((message) => message.sessionId === emptyChild.data!.id)?.text ?? "";
     assert.match(firstPrompt, /Wollipog Campaign Policy — server-derived/);
-    assert.match(firstPrompt, /First real task/);
+    assert.equal(hub.sentOfType("prompt_session")
+      .find((message) => message.sessionId === emptyChild.data!.id)?.images?.length, 1,
+    "an image-only first assignment retains its attachment alongside the campaign policy");
     svc.onSessionStatus(emptyChild.data.id, "idle");
     const retainedReport = db.appendEvent(emptyChild.data.id,
       { kind: "agent_message", text: "Retained report", final: true }, Date.now());

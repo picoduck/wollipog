@@ -12017,12 +12017,33 @@ export class ControlPlaneDb {
   }
 
   campaignProjection(campaignSessionId: string): OrchestratorCampaignProjection | null {
-    const campaign = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignSessionId) as unknown as
+    let campaign = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignSessionId) as unknown as
       | SessionRow
       | undefined;
-    const policy = orchestratorCampaignPolicyFromJson(campaign?.orchestrator_policy ?? null);
-    if (!campaign || !policy) return null;
-    const childIds = this.campaignDescendantIds(campaignSessionId);
+    if (!campaign || !orchestratorCampaignPolicyFromJson(campaign.orchestrator_policy)) return null;
+    // Nested Orchestrators carry a creation-time policy snapshot for assignment continuity, but
+    // the outermost campaign remains the live authority. Resolve the projection to that root so a
+    // root revision or newly human-owned descendant decision cannot be hidden by the copied child
+    // snapshot. The bounded/seen walk also fails closed for malformed legacy ancestry.
+    const seen = new Set<string>([campaign.id]);
+    for (let depth = 0; campaign.parent_session_id && depth < 64; depth += 1) {
+      if (seen.has(campaign.parent_session_id)) return null;
+      seen.add(campaign.parent_session_id);
+      const parent = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaign.parent_session_id) as unknown as
+        | SessionRow
+        | undefined;
+      if (!parent) return null;
+      if (orchestratorCampaignPolicyFromJson(parent.orchestrator_policy)) campaign = parent;
+      else if (parent.parent_session_id) {
+        campaign = parent;
+        continue;
+      }
+      if (!parent.parent_session_id) break;
+    }
+    const policy = orchestratorCampaignPolicyFromJson(campaign.orchestrator_policy);
+    if (!policy) return null;
+    const resolvedCampaignId = campaign.id;
+    const childIds = this.campaignDescendantIds(resolvedCampaignId);
     const rows = childIds.length ? (this.stmt(
       `SELECT id, status, archived, worktree_path, worktrees, pending_approval
        FROM sessions WHERE id IN (${childIds.map(() => "?").join(",")})`,
@@ -12030,11 +12051,11 @@ export class ControlPlaneDb {
       id: string; status: SessionStatus; archived: number; worktree_path: string | null;
       worktrees: string | null; pending_approval: string | null;
     }>) : [];
-    const verified = this.validCampaignChildReportIds(campaignSessionId);
+    const verified = this.validCampaignChildReportIds(resolvedCampaignId);
     const pending = this.stmt(
       `SELECT session_id, authority FROM workflow_decisions
        WHERE controlling_session_id=? AND status='pending'`,
-    ).all(campaignSessionId) as unknown as Array<{ session_id: string; authority: WorkflowDecisionAuthority }>;
+    ).all(resolvedCampaignId) as unknown as Array<{ session_id: string; authority: WorkflowDecisionAuthority }>;
     const pendingHuman = pending.filter((decision) => decision.authority === "human");
     const pendingOrchestrator = pending.filter((decision) => decision.authority === "orchestrator");
     let waitingHuman = 0;
@@ -12061,7 +12082,7 @@ export class ControlPlaneDb {
       `SELECT SUM(CASE WHEN duplicate_of IS NULL THEN 1 ELSE 0 END) AS unique_count,
               SUM(CASE WHEN duplicate_of IS NOT NULL THEN 1 ELSE 0 END) AS duplicate_count
        FROM orchestrator_campaign_follow_ups WHERE campaign_session_id=?`,
-    ).get(campaignSessionId) as { unique_count: number | null; duplicate_count: number | null };
+    ).get(resolvedCampaignId) as { unique_count: number | null; duplicate_count: number | null };
     const effectiveOwners = { ...policy.delegation.decisions };
     // Current managed clients expose links and digests but no binary evidence reader to the
     // isolated Orchestrator. Preserve the saved choice while routing the effective gate to human.
@@ -12073,7 +12094,7 @@ export class ControlPlaneDb {
       : fullyVerified === total ? "verified_complete" as const
       : "active" as const;
     const limit = campaign.max_child_sessions ?? DEFAULT_LIVE_CHILD_LIMIT;
-    const occupied = this.childSessionAllocations(campaignSessionId).liveCount;
+    const occupied = this.childSessionAllocations(resolvedCampaignId).liveCount;
     return {
       status,
       policyRevision: campaign.parent_control_policy_revision,

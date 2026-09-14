@@ -3741,7 +3741,8 @@ export class SessionsService {
       if (unsupported) return unsupported;
     }
     let effectiveText = snapshotCommand?.type === "prompt_session" ? snapshotCommand.text : text;
-    if (!snapshotCommand && effectiveText.trim()) {
+    const effectiveImages = snapshotCommand?.type === "prompt_session" ? (snapshotCommand.images ?? []) : images;
+    if (!snapshotCommand && (effectiveText.trim() || effectiveImages.length > 0)) {
       const campaignController = this.orchestratorCampaignController(
         session.parentSessionId ? this.db.getSession(session.parentSessionId) : null,
       );
@@ -3750,7 +3751,6 @@ export class SessionsService {
         effectiveText = this.campaignAssignment(campaignController, campaign, effectiveText);
       }
     }
-    const effectiveImages = snapshotCommand?.type === "prompt_session" ? (snapshotCommand.images ?? []) : images;
     const effectiveSlashCommand = snapshotCommand?.type === "prompt_session" ? snapshotCommand.slashCommand : slashCommand;
     const effectiveConfig = requestedConfig;
     const imageValidation = validateImagesForDriver(effectiveImages, session.driver);
