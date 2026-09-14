@@ -165,6 +165,11 @@ test("HTTP agent management scopes descendants and composes governance policy vi
             headers: { authorization: `Bearer device-${ownerId}`, "content-type": "application/json" },
             body: JSON.stringify(body),
           });
+        const humanGet = (operation: string) => fetch(
+          `http://127.0.0.1:${port}/api/sessions/${mode}/${operation}`, {
+            signal: AbortSignal.timeout(3000),
+            headers: { authorization: `Bearer device-${ownerId}` },
+          });
         assert.equal((await humanRequest("parent-control", { mode: "questions" })).status, 200,
           "the owning human can enable Parent Control");
         assert.equal((await humanRequest("parent-control-policy", { expectedRevision: 0, decisions: {
@@ -220,6 +225,42 @@ test("HTTP agent management scopes descendants and composes governance policy vi
         assert.equal((await childRequest(`workflow-decisions/${created.occurrenceId}/consume`, {
           resourceSnapshot: snapshot,
         })).status, 409, "the grant cannot be replayed");
+
+        assert.equal((await humanRequest("parent-control-policy", { expectedRevision: 1, decisions: {
+          implementation_question: "human",
+          pr_merge: "human",
+          merged_branch_deletion: "human",
+          follow_up_issue_publication: "human",
+          ui_evidence_approval: "human",
+        } })).status, 200, "the owning human can take back a typed category");
+        const humanCreatedResponse = await childRequest("workflow-decisions", {
+          requestId: "implementation-human", resourceKey: "implementation:human", resourceSnapshot: snapshot,
+        });
+        assert.equal(humanCreatedResponse.status, 201);
+        const humanCreated = await humanCreatedResponse.json() as { occurrenceId: string };
+        const agentOwnedOnly = await request(mode, "descendant-requests", undefined, "GET");
+        assert.equal(((await agentOwnedOnly.json() as { requests: Array<{ occurrenceId: string }> }).requests)
+          .some((candidate) => candidate.occurrenceId === humanCreated.occurrenceId), false,
+        "agent credentials cannot inspect human-owned typed requests");
+        const humanInbox = await humanGet("descendant-requests");
+        assert.equal(humanInbox.status, 200);
+        assert.deepEqual((await humanInbox.json() as {
+          requests: Array<{ occurrenceId: string; responseOwner: string }>;
+        }).requests.filter((candidate) => candidate.occurrenceId === humanCreated.occurrenceId)
+          .map(({ occurrenceId, responseOwner }) => ({ occurrenceId, responseOwner })), [{
+          occurrenceId: humanCreated.occurrenceId,
+          responseOwner: "human",
+        }], "the authorized human sees the exact human-owned typed request in the parent inbox");
+        const humanResolution = await fetch(
+          `http://127.0.0.1:${port}/api/sessions/${mode}-child/approve`, {
+            method: "POST", signal: AbortSignal.timeout(3000),
+            headers: { authorization: `Bearer device-${ownerId}`, "content-type": "application/json" },
+            body: JSON.stringify({ requestId: humanCreated.occurrenceId, optionId: "safe" }),
+          });
+        assert.equal(humanResolution.status, 200);
+        assert.equal((await childRequest(`workflow-decisions/${humanCreated.occurrenceId}/consume`, {
+          resourceSnapshot: snapshot,
+        })).status, 200, "the child consumes the human-owned approval through the same exact snapshot");
         await settleStatus(`${mode}-grandchild`, "idle");
         await settleStatus(`${mode}-child`, "idle");
         assert.equal((await request(mode, "orchestrator-campaign/verify-child", {

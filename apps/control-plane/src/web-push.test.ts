@@ -666,6 +666,49 @@ test("pushDecision fires on the attention transitions and stays quiet otherwise"
   assert.equal(pushDecision(prev("running"), view("stopped")), null);
 });
 
+test("pushDecision wakes an idle campaign only for newly added human-owned requests", () => {
+  const campaign = (human: number, orchestrator: number) => ({
+    pendingRequests: { human, orchestrator },
+  }) as SessionView["orchestratorCampaign"];
+  const previous = view("idle", { orchestratorCampaign: campaign(0, 1) });
+  const humanAdded = view("idle", { orchestratorCampaign: campaign(1, 1) });
+  assert.equal(pushDecision(previous, humanAdded)?.urgency, "high");
+  assert.match(pushDecision(previous, humanAdded)?.body ?? "", /human-owned campaign request/);
+  assert.equal(pushDecision(previous, view("idle", { orchestratorCampaign: campaign(0, 2) })), null,
+    "Orchestrator-owned action does not notify the human");
+  assert.equal(pushDecision(humanAdded, humanAdded), null);
+});
+
+test("pushDecision wakes an idle campaign when a human request is replaced at the same count", () => {
+  const campaign = (humanRequestTokens: string[]) => ({
+    pendingRequests: { human: humanRequestTokens.length, orchestrator: 0, humanRequestTokens },
+  }) as SessionView["orchestratorCampaign"];
+  const previous = view("idle", { orchestratorCampaign: campaign(["request-a"]) });
+  const next = view("idle", { orchestratorCampaign: campaign(["request-b"]) });
+  assert.equal(pushDecision(previous, next)?.urgency, "high");
+  assert.equal(pushDecision(next, next), null);
+  assert.equal(pushDecision(campaignView(["request-a", "request-b"]), campaignView(["request-b"])), null,
+    "partially clearing human work does not create a new alert");
+});
+
+function campaignView(humanRequestTokens: string[]): SessionView {
+  return view("idle", { orchestratorCampaign: {
+    pendingRequests: { human: humanRequestTokens.length, orchestrator: 0, humanRequestTokens },
+  } as SessionView["orchestratorCampaign"] });
+}
+
+test("pushDecision does not notify for an Orchestrator-owned child request", () => {
+  const previous = view("running");
+  const child = view("input_required", {
+    pendingApproval: {
+      requestId: "orchestrator-question", title: "Pick an implementation", options: [],
+      kind: "question", questions: [],
+    },
+    pendingRequestOwners: { human: 0, orchestrator: 1 },
+  });
+  assert.equal(pushDecision(previous, child), null);
+});
+
 // REGRESSION (review): input_required→input_required with a DIFFERENT ask is a new attention
 // moment (a permission/question displacing a guardrail card, or vice versa) — only the exact
 // same requestId (the runner's trailing status frame) stays silent.

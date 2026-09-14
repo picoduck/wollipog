@@ -35,6 +35,8 @@ export function snoozedSessionAttentionReason(session: SessionView): SnoozedAtte
   const attention = sessionAttentionStatus({
     status: session.status,
     pendingApproval: session.pendingApproval ?? null,
+    pendingRequestOwners: session.pendingRequestOwners,
+    orchestratorCampaign: session.orchestratorCampaign,
   });
   if (attention) {
     return {

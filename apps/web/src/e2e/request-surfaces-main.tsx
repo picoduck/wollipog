@@ -6,6 +6,7 @@ import { ApiProvider } from "../api-context.js";
 import { RightPanel, type RightPanelState } from "../components/RightPanel.js";
 import { SessionApprovalRegion } from "../components/SessionApproval.js";
 import { sessionRequestPanelKey } from "../components/SessionRequestPanel.js";
+import { SessionStatusIndicators } from "../components/common.js";
 import type { RightPanelMode } from "../right-panel.js";
 import "../styles.css";
 
@@ -125,7 +126,14 @@ function descendantRequests(): DescendantRequestView[] {
 
 function Fixture() {
   const [session, setSession] = useState(() => scenario === "descendants"
-    ? { ...evidenceSession(), status: "running", pendingApproval: null } as SessionView
+    ? {
+        ...evidenceSession(),
+        status: "running",
+        pendingApproval: null,
+        orchestratorCampaign: {
+          pendingRequests: { human: 8, orchestrator: 4 },
+        } as SessionView["orchestratorCampaign"],
+      } as SessionView
     : evidenceSession());
   const descendants = useMemo(() => scenario === "descendants" ? descendantRequests() : [], []);
   const [open, setOpen] = useState(false);
@@ -174,16 +182,11 @@ function Fixture() {
           <header className="detail-head" style={{ justifyContent: "space-between" }}>
             <h1 className="detail-title">Request Review</h1>
             {scenario === "descendants" ? (
-              <button
-                className="status-badge st-input descendant-request-badge"
-                type="button"
-                aria-label={`Descendant Requests: ${descendants.length} Unresolved`}
-                aria-controls="right-panel"
-                onClick={() => setOpen(true)}
-              >
-                Descendant Requests
-                <span className="inbox-status-pill-count">{descendants.length}</span>
-              </button>
+              <SessionStatusIndicators
+                session={session}
+                onOpenAttention={() => setOpen(true)}
+                onOpenCampaignRequests={() => setOpen(true)}
+              />
             ) : <span />}
           </header>
           <div className="detail-columns">

@@ -6,7 +6,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { posix, win32 } from "node:path";
 import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
-  addPendingRequest, removePendingRequest, pendingRequests,
+  addPendingRequest, removePendingRequest, pendingRequests, parentControlRequestEligible,
   CODEX_APP_SERVER_IMAGE_MIME_TYPES,
   MAX_PROMPT_IMAGE_BYTES,
   PROMPT_IMAGE_MIME_TYPES,
@@ -239,53 +239,7 @@ const SESSION_COMMAND_RECEIPT_CODES = new Set([
   "COMMAND_UNAVAILABLE", "COMMAND_MODE_UNSUPPORTED",
 ]);
 
-const HUMAN_ONLY_PARENT_CONTROL_REQUEST =
-  /(?:^|[^a-z0-9])(?:account|api[\s_-]*keys?|auth(?:enticate|entication)?|authorization(?:[\s_-]*headers?)?|bearer|cookies?|credentials?|device|identity|login|logout|mfa|oauth2?|passphrases?|password|secrets?|ssh[\s_-]*keys?|tokens?|2[\s_-]*fa)(?:[^a-z0-9]|$)/iu;
-const EMAIL_IDENTITY_PARENT_CONTROL_REQUEST =
-  /(?:^|[^a-z0-9.!#$%&'*+/=?^_`{|}~-])[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?:[^a-z0-9.-]|$)/iu;
-
-function containsHumanOnlyParentControlText(values: Array<string | undefined>): boolean {
-  return values.some((value) => {
-    const text = value ?? "";
-    const camelSeparated = text
-      .replace(/([A-Z])([A-Z][a-z])/gu, "$1 $2")
-      .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
-      .replace(/([a-z])([0-9])/giu, "$1 $2")
-      .replace(/([0-9])([a-z])/giu, "$1 $2");
-    return HUMAN_ONLY_PARENT_CONTROL_REQUEST.test(text) ||
-      HUMAN_ONLY_PARENT_CONTROL_REQUEST.test(camelSeparated) ||
-      EMAIL_IDENTITY_PARENT_CONTROL_REQUEST.test(text);
-  });
-}
-
-export function parentControlRequestEligible(mode: ParentControlMode, request: PendingApproval): boolean {
-  if (mode === "off" || request.kind === "authentication" || request.kind === "policy_hook") return false;
-  if (request.kind === "question") {
-    return !(request.questions ?? []).some((question) =>
-      question.secret === true || question.inputFormat === "email" ||
-      containsHumanOnlyParentControlText([
-        question.id,
-        question.header,
-        question.question,
-        question.context,
-        ...question.options.flatMap((option) => [option.label, option.description]),
-      ]));
-  }
-  if (mode !== "questions_and_approvals" || (request.kind && request.kind !== "permission")) return false;
-  if (request.governancePolicyId || request.context?.escalatedBy ||
-      containsHumanOnlyParentControlText([
-        request.title,
-        request.context?.toolName,
-        request.context?.input,
-        request.context?.path,
-        request.context?.network,
-        request.context?.branch,
-        ...request.options.flatMap((option) => [option.optionId, option.name, option.description]),
-      ])) return false;
-  return request.options.some((option) =>
-    option.kind === "allow_once" || option.kind === "reject_once" ||
-    (option.kind == null && (option.optionId === "allow" || option.optionId === "deny")));
-}
+export { parentControlRequestEligible } from "@wollipog/protocol";
 
 function delegatedOptionMatchesAction(
   request: PendingApproval,
@@ -2297,9 +2251,17 @@ export class SessionsService {
   reconcilePolicyHookTimeouts(now = Date.now(), sessionId?: string): number {
     const affected = new Set<string>();
     const changed = new Map<string, SessionView>();
+    const campaignBefore = new Map<string, SessionView>();
+    const rememberCampaign = (session: SessionView | null): void => {
+      const controller = session?.parentSessionId
+        ? this.orchestratorCampaignController(this.db.getSession(session.parentSessionId))
+        : null;
+      if (controller && !campaignBefore.has(controller.id)) campaignBefore.set(controller.id, controller);
+    };
     let resolvedCount = 0;
     for (const expired of this.db.listExpiredPolicyHookApprovals(now, sessionId)) {
       const before = this.db.getSession(expired.sessionId);
+      rememberCampaign(before);
       const resolved = this.db.resolvePolicyHookApproval(
         expired.sessionId,
         expired.requestId,
@@ -2330,6 +2292,7 @@ export class SessionsService {
       sessionId,
     )) {
       const before = this.db.getSession(abandoned.sessionId);
+      rememberCampaign(before);
       const resolved = this.db.resolvePolicyHookApproval(
         abandoned.sessionId,
         abandoned.requestId,
@@ -2370,6 +2333,7 @@ export class SessionsService {
         this.hub.sessionChangedById(id);
       }
     }
+    for (const before of campaignBefore.values()) this.publishCampaignAttentionTransition(before);
     return resolvedCount;
   }
 
@@ -4962,6 +4926,7 @@ export class SessionsService {
   }
 
   private requestStop(session: SessionView, now: number, archiveAfterStop = false, refreshProject = true): SessionView {
+    const campaignBefore = this.campaignAttentionController(session);
     // Persist before touching the socket: ws.send acceptance is not delivery proof on a half-open
     // connection. Reconnect inventory/status reconciliation owns retry and final clearance.
     const existing = this.db.sessionStopIntent(session.id);
@@ -4980,6 +4945,7 @@ export class SessionsService {
     const stopped = this.db.getSession(session.id)!;
     if (refreshProject) this.hub.sessionChangedById(session.id);
     else this.hub.sessionChanged(stopped, false);
+    this.publishCampaignAttentionTransition(campaignBefore);
     return stopped;
   }
 
@@ -5085,6 +5051,7 @@ export class SessionsService {
   restart(sessionId: string): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    const campaignBefore = this.campaignAttentionController(session);
     if (session.stopOperation?.status === "stop_failed") {
       return fail("retry the failed Stop before restarting the session", 409);
     }
@@ -5191,6 +5158,7 @@ export class SessionsService {
     // The runner replaces any existing process for this sessionId (no separate
     // stop_session, which would emit a terminal 'stopped' that blocks the restart).
     this.hub.sessionChangedById(sessionId);
+    this.publishCampaignAttentionTransition(campaignBefore);
     this.log.info(`session restarted ${sessionId}`);
     return ok(this.db.getSession(sessionId)!);
   }
@@ -5213,7 +5181,8 @@ export class SessionsService {
       if (unsupported) return unsupported;
     }
     this.db.updateSessionParentControl(sessionId, mode, Date.now());
-    this.hub.sessionChangedById(sessionId);
+    for (const childId of this.db.campaignDescendantIds(sessionId)) this.hub.sessionChangedById(childId);
+    this.publishCampaignAttentionTransition(session);
     return ok(this.db.getSession(sessionId)!);
   }
 
@@ -5257,7 +5226,7 @@ export class SessionsService {
         this.hub.sessionChangedById(child.id);
       }
     }
-    this.hub.sessionChangedById(sessionId);
+    this.publishCampaignAttentionTransition(session);
     return ok(this.db.getSession(sessionId)!);
   }
 
@@ -5385,6 +5354,41 @@ export class SessionsService {
     return controller;
   }
 
+  private campaignAttentionController(session: SessionView | null): SessionView | null {
+    return session?.parentSessionId
+      ? this.orchestratorCampaignController(this.db.getSession(session.parentSessionId))
+      : null;
+  }
+
+  private publishCampaignAttentionTransition(before: SessionView | null): void {
+    if (!before) return;
+    const now = Date.now();
+    const requests = this.descendantRequests(before.id, () => true, "human");
+    if (requests.ok) {
+      for (const item of requests.data!.requests) {
+        if (item.responseOwner !== "human") continue;
+        this.db.recordOutboundCampaignInputRequired({
+          campaignSessionId: before.id,
+          childSessionId: item.sessionId,
+          occurrenceId: item.occurrenceId,
+          ...(item.request.kind === "question" ? { questionTitle: item.request.title } : {}),
+          now,
+        });
+      }
+    }
+    this.notifyTransition(before, before.id);
+    this.hub.sessionChangedById(before.id);
+  }
+
+  private orchestratorOwnsGenericRequest(session: SessionView, request: PendingApproval): boolean {
+    if (!session.parentSessionId || !runnerSupportsProtocol(
+      this.db.getRunner(session.runnerId)?.protocolVersion,
+      "delegatedParentControl",
+    )) return false;
+    const controller = this.orchestratorCampaignController(this.db.getSession(session.parentSessionId));
+    return Boolean(controller && parentControlRequestEligible(controller.parentControl ?? "off", request));
+  }
+
   private campaignChildBehaviorError(session: SessionView, config: SessionConfig | undefined): string | null {
     if (!session.parentSessionId || !config) return null;
     const controller = this.orchestratorCampaignController(this.db.getSession(session.parentSessionId));
@@ -5474,9 +5478,13 @@ export class SessionsService {
       this.recordWorkflowDecisionAudit(superseded, "superseded", { kind: "agent", id: sessionId }, now);
     }
     this.recordWorkflowDecisionAudit(decision, "pending", { kind: "agent", id: sessionId }, now);
-    if (decision.authority === "human") this.notifyTransition(child, sessionId);
+    if (decision.authority === "human") {
+      this.notifyTransition(child, sessionId);
+      this.publishCampaignAttentionTransition(controller.session);
+    } else {
+      this.hub.sessionChangedById(controller.session.id);
+    }
     this.hub.sessionChangedById(sessionId);
-    this.hub.sessionChangedById(controller.session.id);
     return ok(decision, 201);
   }
 
@@ -5548,7 +5556,8 @@ export class SessionsService {
       checked.data.rationale,
     );
     this.hub.sessionChangedById(childSessionId);
-    this.hub.sessionChangedById(parentSessionId);
+    if (decision.authority === "human") this.publishCampaignAttentionTransition(currentParent);
+    else this.hub.sessionChangedById(parentSessionId);
     return ok(resolved);
   }
 
@@ -5780,11 +5789,13 @@ export class SessionsService {
 
   private revokeWorkflowDecision(decision: WorkflowDecisionView, actor: GovernanceActor): void {
     const now = Date.now();
+    const controllerBefore = this.db.getSession(decision.controllingSessionId);
     this.db.markWorkflowDecisionRevoked(decision.occurrenceId, now);
     this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
     this.recordWorkflowDecisionAudit(decision, "revoked", actor, now);
     this.hub.sessionChangedById(decision.sessionId);
-    this.hub.sessionChangedById(decision.controllingSessionId);
+    if (decision.authority === "human") this.publishCampaignAttentionTransition(controllerBefore);
+    else this.hub.sessionChangedById(decision.controllingSessionId);
   }
 
   /** Settle a server-owned workflow card against the provider state it temporarily covered. */
@@ -5884,6 +5895,7 @@ export class SessionsService {
   descendantRequests(
     parentSessionId: string,
     canAccess: (sessionId: string) => boolean,
+    viewer: WorkflowDecisionAuthority = "orchestrator",
   ): ServiceResult<{ requests: DescendantRequestView[] }> {
     const parent = this.db.getSession(parentSessionId);
     if (!parent) return fail("session not found", 404);
@@ -5895,13 +5907,17 @@ export class SessionsService {
     const typedPolicy = parent.parentControlPolicy ?? {
       revision: 0, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY },
     };
-    if (mode === "off" && !Object.values(typedPolicy.decisions).includes("orchestrator")) {
+    if (viewer === "human" && !rootCampaign) {
+      return fail("descendant request supervision is available only for an Orchestrator campaign", 403);
+    }
+    if (viewer === "orchestrator" && mode === "off" && !Object.values(typedPolicy.decisions).includes("orchestrator")) {
       return fail("Parent Control is off", 403);
     }
     const durableTyped = this.db.pendingWorkflowDecisionsForController(parentSessionId).flatMap(
       (decision): DescendantRequestView[] => {
-        if (decision.authority !== "orchestrator" || decision.policyRevision !== typedPolicy.revision ||
-            this.effectiveWorkflowDecisionAuthority(parent, typedPolicy, decision.category) !== "orchestrator" ||
+        if ((viewer === "orchestrator" && decision.authority !== "orchestrator") ||
+            decision.policyRevision !== typedPolicy.revision ||
+            this.effectiveWorkflowDecisionAuthority(parent, typedPolicy, decision.category) !== decision.authority ||
             !this.db.isSessionDescendant(parentSessionId, decision.sessionId) || !canAccess(decision.sessionId)) return [];
         const session = this.db.getSession(decision.sessionId);
         if (!session || isTerminal(session.status) || !runnerSupportsProtocol(
@@ -5926,10 +5942,12 @@ export class SessionsService {
       return pendingRequests(session.pendingApproval).flatMap((request): DescendantRequestView[] => {
         if (!request.occurrenceId) return [];
         if (request.kind === "workflow_decision") return [];
-        if (!runnerSupportsProtocol(
+        const orchestratorOwned = runnerSupportsProtocol(
           this.db.getRunner(session.runnerId)?.protocolVersion,
           "delegatedParentControl",
-        ) || !parentControlRequestEligible(mode, request)) return [];
+        ) && parentControlRequestEligible(mode, request);
+        const responseOwner = orchestratorOwned ? "orchestrator" as const : "human" as const;
+        if (viewer === "orchestrator" && responseOwner !== "orchestrator") return [];
         return [{
           sessionId: session.id,
           sessionTitle: session.title,
@@ -5937,7 +5955,7 @@ export class SessionsService {
           runnerOnline: this.hub.isRunnerOnline(session.runnerId),
           eventEpoch: session.eventEpoch,
           createdAt: session.requestCreatedAtById[request.requestId] ?? session.updatedAt,
-          responseOwner: "human",
+          responseOwner,
           occurrenceId: request.occurrenceId,
           request,
         }];
@@ -6033,6 +6051,9 @@ export class SessionsService {
   ): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    const campaignBefore = session.parentSessionId
+      ? this.orchestratorCampaignController(this.db.getSession(session.parentSessionId))
+      : null;
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
     const pending = pendingRequests(session.pendingApproval).find((request) => request.requestId === requestId) ?? session.pendingApproval;
     if (!pending) return fail("no pending question for this session", 409);
@@ -6114,6 +6135,7 @@ export class SessionsService {
         this.log.warn(`recovered question answer flush deferred for ${sessionId}: ${(error as Error).message}`);
       }
       this.hub.sessionChangedById(sessionId);
+      this.publishCampaignAttentionTransition(campaignBefore);
       return ok(this.db.getSession(sessionId)!);
     }
 
@@ -6152,6 +6174,7 @@ export class SessionsService {
     this.gateOnPolicy(sessionId, now);
     this.reconcilePolicyHookTimeouts(now, sessionId);
     this.hub.sessionChangedById(sessionId);
+    this.publishCampaignAttentionTransition(campaignBefore);
     return ok(this.db.getSession(sessionId)!);
   }
 
@@ -6168,6 +6191,9 @@ export class SessionsService {
     this.reconcilePolicyHookTimeouts(now, sessionId);
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    const campaignBefore = session.parentSessionId
+      ? this.orchestratorCampaignController(this.db.getSession(session.parentSessionId))
+      : null;
     // Only resolve the approval the session is actually waiting on. A stale click,
     // duplicate POST, or wrong id must not clear pendingApproval / unblock the column
     // while the runner ignores the unknown id and the agent stays parked.
@@ -6249,6 +6275,7 @@ export class SessionsService {
         if (settled?.status === "idle") this.replayRestoredPolicyIdle(session, sessionId, now);
       }
       this.hub.sessionChangedById(sessionId);
+      this.publishCampaignAttentionTransition(campaignBefore);
       return ok(this.db.getSession(sessionId)!);
     }
 
@@ -6317,6 +6344,7 @@ export class SessionsService {
         this.recordGovernanceAudit(session, pending, "resolution", "denied", actor, now, { optionId });
       }
       this.hub.sessionChangedById(sessionId);
+      this.publishCampaignAttentionTransition(campaignBefore);
       return ok(this.db.getSession(sessionId)!);
     }
 
@@ -6403,6 +6431,7 @@ export class SessionsService {
         { optionId },
       );
       this.hub.sessionChangedById(sessionId);
+      this.publishCampaignAttentionTransition(campaignBefore);
       return ok(this.db.getSession(sessionId)!);
     }
 
@@ -6460,6 +6489,7 @@ export class SessionsService {
     this.gateOnPolicy(sessionId, now);
     this.reconcilePolicyHookTimeouts(now, sessionId);
     this.hub.sessionChangedById(sessionId);
+    this.publishCampaignAttentionTransition(campaignBefore);
     return ok(this.db.getSession(sessionId)!);
   }
 
@@ -6893,6 +6923,7 @@ export class SessionsService {
   }
 
   private deleteMaterializedSession(session: SessionView): void {
+    const campaignBefore = this.campaignAttentionController(session);
     this.cancelTitleGeneration(session.id);
     const pods = this.db.podsForSession(session.id);
     const now = Date.now();
@@ -6903,7 +6934,10 @@ export class SessionsService {
     }
     this.db.deleteSession(session.id);
     this.hub.sessionRemoved(session.id);
-    if (session.parentSessionId) this.hub.sessionChangedById(session.parentSessionId);
+    this.publishCampaignAttentionTransition(campaignBefore);
+    if (session.parentSessionId && session.parentSessionId !== campaignBefore?.id) {
+      this.hub.sessionChangedById(session.parentSessionId);
+    }
     for (const pod of pods) {
       const updatedPod = this.db.reconcilePodAfterMembershipLoss(pod.id, Date.now());
       if (updatedPod) this.hub.podChanged(updatedPod);
@@ -8288,6 +8322,7 @@ export class SessionsService {
       this.log.warn(`ignoring session_status for ${sessionId} from ${fromRunnerId} (owned by ${session.runnerId})`);
       return;
     }
+    const campaignBefore = this.campaignAttentionController(session);
     let admittedReplacement = false;
     if (this.db.hasSessionStopIntent(sessionId)) {
       const restartLaunchId = this.db.sessionStopRestartLaunchId(sessionId);
@@ -8303,6 +8338,7 @@ export class SessionsService {
           this.sendStopCommand(session.runnerId, sessionId);
         }
         this.hub.sessionChangedById(sessionId);
+        this.publishCampaignAttentionTransition(campaignBefore);
         return;
       }
     }
@@ -8358,6 +8394,7 @@ export class SessionsService {
     // the notification carries the ask instead of a misleading "ready".
     this.notifyTransition(session, sessionId);
     this.hub.sessionChangedById(sessionId);
+    this.publishCampaignAttentionTransition(campaignBefore);
   }
 
   /** Materialize the decision for a runner-owned cancellation even when the control-plane rule
@@ -8662,6 +8699,59 @@ export class SessionsService {
       this.onSessionStatus(sessionId, payload.status);
       return;
     }
+    const campaignBefore = (
+      payload.kind === "permission_request" || payload.kind === "question_request" ||
+      payload.kind === "permission_resolved" || payload.kind === "question_resolved"
+    ) && session.parentSessionId
+      ? this.orchestratorCampaignController(this.db.getSession(session.parentSessionId))
+      : null;
+    const incomingRequest: PendingApproval | null = payload.kind === "permission_request" ? {
+      ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
+      requestId: payload.requestId,
+      ...(payload.occurrenceId ? { occurrenceId: payload.occurrenceId } : {}),
+      title: payload.title,
+      options: payload.options,
+      ...(payload.purpose === "authentication" ? { kind: "authentication" as const } : {}),
+      ...(payload.context ? { context: payload.context } : {}),
+    } : payload.kind === "question_request" ? {
+      ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
+      requestId: payload.requestId,
+      ...(payload.occurrenceId ? { occurrenceId: payload.occurrenceId } : {}),
+      title: payload.questions[0]?.question ?? "The agent has a question",
+      options: [],
+      kind: "question",
+      questions: payload.questions,
+    } : null;
+    const permissionDecision = payload.kind === "permission_request" ? (() => {
+      const approval = incomingRequest!;
+      const escalatedBy = reviewerForAudit(payload.context?.escalatedBy);
+      const policyDecision = approval.kind === "authentication"
+        ? { effect: "ask" as const, policy: null, matchedPolicyIds: [] }
+        : evaluateApprovalPolicies(
+            {
+              scope: approvalScope(session, approval),
+              status: session.status,
+              costUsd: session.costUsd,
+              toolCallCount: this.db.countToolCalls(sessionId),
+              escalated: Boolean(escalatedBy),
+            },
+            this.governancePolicies(),
+          );
+      const policyOption = policyDecision.effect === "ask"
+        ? undefined
+        : optionForPolicy(approval, policyDecision.effect);
+      const effectiveEffect = policyDecision.effect === "allow" && !policyOption
+        ? "ask" as const
+        : policyDecision.effect;
+      // Ownership and reminder routing must see the same policy-enriched request that is stored.
+      if (effectiveEffect === "ask" && policyDecision.policy) {
+        approval.governancePolicyId = policyDecision.policy.policyId;
+      }
+      return { escalatedBy, policyDecision, policyOption, effectiveEffect };
+    })() : null;
+    const suppressRequestReminder = Boolean(
+      incomingRequest && this.orchestratorOwnsGenericRequest(session, incomingRequest),
+    );
     const isCompletedUserMessage = payload.kind === "user_message" &&
       payload.final !== false && !payload.commandInvocation;
     const generatedOwnership = (session.titleSource ?? "generated") === "generated";
@@ -8751,7 +8841,9 @@ export class SessionsService {
           now,
         )
       : false;
-    if (payload.kind !== "question_request") this.hub.sessionEvent(ev);
+    if (payload.kind !== "question_request") {
+      this.hub.sessionEvent(ev, suppressRequestReminder ? { suppressReminderWake: true } : undefined);
+    }
     if (reconciledSteering || reconciledCommand ||
         payload.kind === "background_continuation_delivered") {
       this.hub.sessionChangedById(sessionId);
@@ -8810,16 +8902,8 @@ export class SessionsService {
     }
 
     if (payload.kind === "permission_request") {
-      const approval: PendingApproval = {
-        ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
-        requestId: payload.requestId,
-        ...(payload.occurrenceId ? { occurrenceId: payload.occurrenceId } : {}),
-        title: payload.title,
-        options: payload.options,
-        ...(payload.purpose === "authentication" ? { kind: "authentication" as const } : {}),
-        ...(payload.context ? { context: payload.context } : {}),
-      };
-      const escalatedBy = reviewerForAudit(payload.context?.escalatedBy);
+      const approval = incomingRequest!;
+      const { escalatedBy, policyDecision, policyOption, effectiveEffect } = permissionDecision!;
       if (escalatedBy) {
         this.recordGovernanceAudit(
           session,
@@ -8861,25 +8945,6 @@ export class SessionsService {
         return;
       }
 
-      const policyDecision = approval.kind === "authentication"
-        ? { effect: "ask" as const, policy: null, matchedPolicyIds: [] }
-        : evaluateApprovalPolicies(
-            {
-              scope: approvalScope(session, approval),
-              status: session.status,
-              costUsd: session.costUsd,
-              toolCallCount: this.db.countToolCalls(sessionId),
-              escalated: Boolean(escalatedBy),
-            },
-            this.governancePolicies(),
-          );
-      const policyOption = policyDecision.effect === "ask" ? undefined : optionForPolicy(approval, policyDecision.effect);
-      // Auto-allow is strictly single-shot. A hard deny may cancel the provider request with null
-      // when it offers no reject_once option; it must never weaken into a human-overridable ask.
-      const effectiveEffect = policyDecision.effect === "allow" && !policyOption ? "ask" : policyDecision.effect;
-      if (effectiveEffect === "ask" && policyDecision.policy) {
-        approval.governancePolicyId = policyDecision.policy.policyId;
-      }
       if (policyDecision.policy) {
         this.recordGovernanceAudit(
           session,
@@ -8957,6 +9022,7 @@ export class SessionsService {
         );
         this.db.updateSessionStatus(sessionId, "input_required", now);
         this.notifyTransition(session, sessionId);
+        this.publishCampaignAttentionTransition(campaignBefore);
         return;
       }
 
@@ -9026,15 +9092,7 @@ export class SessionsService {
     if (payload.kind === "question_request") {
       // Structured agent question — same approval slot, kind "question"; the web renders a
       // question card and answers via POST /api/sessions/:id/answer.
-      const approval: PendingApproval = {
-        ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
-        requestId: payload.requestId,
-        ...(payload.occurrenceId ? { occurrenceId: payload.occurrenceId } : {}),
-        title: payload.questions[0]?.question ?? "The agent has a question",
-        options: [],
-        kind: "question",
-        questions: payload.questions,
-      };
+      const approval = incomingRequest!;
       this.recordGovernanceAudit(
         session,
         approval,
@@ -9092,7 +9150,7 @@ export class SessionsService {
           return;
         }
       }
-      this.hub.sessionEvent(ev);
+      this.hub.sessionEvent(ev, suppressRequestReminder ? { suppressReminderWake: true } : undefined);
       this.db.setPendingApproval(
         sessionId,
         addPendingRequestPreservingRunnerGuardrails(this.db.getSession(sessionId)?.pendingApproval, approval),
@@ -9120,6 +9178,7 @@ export class SessionsService {
     }
 
     this.hub.sessionChangedById(sessionId);
+    this.publishCampaignAttentionTransition(campaignBefore);
   }
 
   /** A runner went offline — interrupt its still-active sessions. */
@@ -9127,6 +9186,7 @@ export class SessionsService {
     const now = Date.now();
     for (const s of this.db.listSessions({ includeArchived: true })) {
       if (s.runnerId === runnerId && !isTerminal(s.status)) {
+        const campaignBefore = this.campaignAttentionController(s);
         this.automaticQuestions.delete(s.id);
         this.abortPolicyHookApprovals(s, now, "runner-disconnected");
         // A disconnect stop is provisional — reconnect hydration can restore this exact run, and
@@ -9139,6 +9199,7 @@ export class SessionsService {
         );
         this.hub.sessionEvent(ev);
         this.hub.sessionChangedById(s.id);
+        this.publishCampaignAttentionTransition(campaignBefore);
       }
     }
   }
@@ -9166,6 +9227,7 @@ export class SessionsService {
         continue;
       }
       if (liveSet.has(s.id) && s.status === "stopped") {
+        const campaignBefore = this.campaignAttentionController(s);
         this.db.updateSessionStatus(s.id, "idle", now);
         // Same flap-recovery rule as hydrateRunnerSessions: re-derive a policy pause the
         // disconnect wiped (pre-snapshot runners restore through this path).
@@ -9174,7 +9236,9 @@ export class SessionsService {
         const ev = this.db.appendEvent(s.id, { kind: "stderr", text: "runner reconnected — session restored" }, now);
         this.hub.sessionEvent(ev);
         this.hub.sessionChangedById(s.id);
+        this.publishCampaignAttentionTransition(campaignBefore);
       } else if (!liveSet.has(s.id)) {
+        const campaignBefore = this.campaignAttentionController(s);
         const hadOpenHookApproval = this.db.listOpenPolicyHookApprovals(s.id).length > 0;
         if (hadOpenHookApproval) {
           this.abortPolicyHookApprovals(s, now, "provider-session-absent");
@@ -9183,7 +9247,10 @@ export class SessionsService {
           this.revokeUnconsumedWorkflowDecisionsForSession(s.id, "provider-session-absent");
           this.db.updateSessionStatus(s.id, "stopped", now);
         }
-        if (hadOpenHookApproval || !isTerminal(s.status)) this.hub.sessionChangedById(s.id);
+        if (hadOpenHookApproval || !isTerminal(s.status)) {
+          this.hub.sessionChangedById(s.id);
+          this.publishCampaignAttentionTransition(campaignBefore);
+        }
       }
     }
   }
@@ -9206,6 +9273,7 @@ export class SessionsService {
         continue;
       }
       const existing = this.db.getSession(snap.id);
+      const campaignBefore = this.campaignAttentionController(existing);
       if (existing?.archived && !isTerminal(snap.status) && !stopIntentIds.has(snap.id)) {
         this.requestStop(existing, now, true);
         continue;
@@ -9224,6 +9292,7 @@ export class SessionsService {
             this.sendStopCommand(runnerId, snap.id);
           }
           this.hub.sessionChangedById(snap.id);
+          this.publishCampaignAttentionTransition(campaignBefore);
           continue;
         }
       }
@@ -9267,9 +9336,11 @@ export class SessionsService {
       this.gateOnPolicy(snap.id, now);
       this.restorePendingWorkflowDecisionCards(snap.id);
       this.hub.sessionChangedById(snap.id);
+      this.publishCampaignAttentionTransition(campaignBefore);
     }
     for (const s of this.db.listSessions({ includeArchived: true })) {
       if (s.runnerId === runnerId && !byId.has(s.id)) {
+        const campaignBefore = this.campaignAttentionController(s);
         if (stopIntentIds.has(s.id)) this.settleStopIntent(s.id, now);
         const hadOpenHookApproval = this.db.listOpenPolicyHookApprovals(s.id).length > 0;
         if (hadOpenHookApproval) {
@@ -9279,7 +9350,10 @@ export class SessionsService {
           this.revokeUnconsumedWorkflowDecisionsForSession(s.id, "provider-session-absent");
           this.db.updateSessionStatus(s.id, "stopped", now);
         }
-        if (hadOpenHookApproval || !isTerminal(s.status)) this.hub.sessionChangedById(s.id);
+        if (hadOpenHookApproval || !isTerminal(s.status)) {
+          this.hub.sessionChangedById(s.id);
+          this.publishCampaignAttentionTransition(campaignBefore);
+        }
       }
     }
     // The box no longer reports these ordinary user-delete tombstones -> the delete took. Fork
@@ -9314,6 +9388,7 @@ export class SessionsService {
   applySessionRuntimeUpdate(runnerId: string, snapshot: SessionSnapshot): void {
     const existing = this.db.getSession(snapshot.id);
     if (!existing || existing.runnerId !== runnerId || this.db.isTombstoned(snapshot.id)) return;
+    const campaignBefore = this.campaignAttentionController(existing);
     if (existing.archived && !isTerminal(snapshot.status) && !this.db.hasSessionStopIntent(snapshot.id)) {
       this.requestStop(existing, Date.now(), true);
       return;
@@ -9330,6 +9405,7 @@ export class SessionsService {
           this.sendStopCommand(runnerId, snapshot.id);
         }
         this.hub.sessionChangedById(snapshot.id);
+        this.publishCampaignAttentionTransition(campaignBefore);
         return;
       }
     }
@@ -9363,6 +9439,7 @@ export class SessionsService {
     }
     this.restorePendingWorkflowDecisionCards(snapshot.id);
     this.hub.sessionChangedById(snapshot.id);
+    this.publishCampaignAttentionTransition(campaignBefore);
   }
 
   /** Lazy-hydrate a session's event timeline from the runner (the box owns the log). Called when a

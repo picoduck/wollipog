@@ -98,6 +98,24 @@ persistent grants, policy hooks, unsupported providers, and mixed-version peers 
 ordinary human-only or fail-closed behavior. The control plane does not claim to intercept
 independently available external credentials.
 
+Protocol v143 projects exact human-owned and Orchestrator-owned descendant request counts onto the
+root campaign. Human clients may inspect both groups in the parent request surface; session-scoped
+agent credentials continue to list and resolve only requests assigned to that Orchestrator. A
+human-owned request makes the parent show **Needs Your Input** and enter the same Inbox, reminder,
+push, and browser-notification paths as direct human attention without changing its lifecycle.
+Orchestrator-owned work has a separate **Orchestrator Action** indicator and never contributes to
+human attention counts or notifications. Resolution, cancellation, expiry, supersession, and a
+revisioned ownership change recompute the projection from durable state. Nested campaigns resolve
+to the outermost controller. Older peers omit the optional count projection, and generic requests
+from runners without delegated Parent Control remain human-owned, so mixed versions fail closed.
+
+Every Orchestrator preset must expose the provider's structured question action and instruct the
+agent to use it whenever progress depends on a human response (`request_user_input` for Codex and
+`AskUserQuestion` for Claude). A prose-only blocking question is not an escalation contract. If a
+provider cannot expose its structured action, the preset must report a visible compatibility
+failure and stop rather than silently returning to idle. No control-plane or client path infers
+requests by parsing transcript prose.
+
 On native Linux and macOS, Claude Code and the exact Claude Agent ACP adapter advertise this preset
 only with the runner's `bwrap` or `seatbelt` boundary respectively. Native Codex can rely on its
 audited provider sandbox there and is withheld on other native operating systems. Catalog filtering, structured launch, and Native TUI preparation all

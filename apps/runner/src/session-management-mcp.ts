@@ -812,7 +812,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "list_descendant_requests",
-    description: "List exact unresolved descendant questions and eligible approvals authorized by this session's human-controlled Parent Control setting.",
+    description: "List exact unresolved descendant questions and approvals currently assigned to this Orchestrator. Human-owned requests remain visible only in the parent campaign UI.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     handler: async (_args, deps) => {
       if (!deps.selfSessionId) return errorResult("this tool requires a session identity");

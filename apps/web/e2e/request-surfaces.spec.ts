@@ -89,36 +89,43 @@ for (const viewport of [
   });
 }
 
-test("high-count descendant requests use one inbox without duplicating transcript banners", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/request-surfaces-e2e.html?scenario=descendants");
-  await expect(page.locator(".descendant-request-region")).toHaveCount(0);
-  const trigger = page.getByRole("button", { name: "Descendant Requests: 12 Unresolved" });
-  await expect(trigger).toBeVisible();
-  await trigger.click();
-  await expect(page.locator(".request-panel-row")).toHaveCount(12);
-  await expect(page.locator(".request-panel-count")).toContainText("12 Descendant Requests");
-  await assertNoHorizontalOverflow(page, ".request-panel");
+for (const viewport of [
+  { name: "mobile", width: 390, height: 844 },
+  { name: "desktop", width: 1280, height: 800 },
+]) {
+  test(`high-count descendant requests use one inbox on ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/request-surfaces-e2e.html?scenario=descendants");
+    await expect(page.locator(".descendant-request-region")).toHaveCount(0);
+    const trigger = page.getByRole("button", { name: "Needs Your Input: 8 Requests" });
+    await expect(trigger).toBeVisible();
+    await expect(page.getByRole("button", { name: "Orchestrator Action: 4 Requests" })).toBeVisible();
+    await trigger.click();
+    await expect(page.locator(".request-panel-row")).toHaveCount(12);
+    await expect(page.locator(".request-panel-count")).toContainText("Needs Your Input 8");
+    await expect(page.locator(".request-panel-count")).toContainText("Orchestrator Action 4");
+    await assertNoHorizontalOverflow(page, ".request-panel");
 
-  const rows = page.locator(".request-panel-row");
-  await rows.nth(2).scrollIntoViewIfNeeded();
-  await rows.nth(2).click();
-  await expect(page.locator(".request-owner")).toHaveText("Assigned to Orchestrator");
-  await expect(page.locator(".request-readonly")).toContainText(
-    "must respond through its session-management tools",
-  );
-  await expect(page.locator(".request-readonly .approval-actions")).toHaveCount(0);
-  await page.getByRole("button", { name: "Open Child Session" }).click();
-  await expect.poll(() => page.evaluate(() =>
-    window.__WOLLIPOG_REQUEST_SURFACES_E2E__.openedChild()?.sessionId)).toBe("child-3");
+    const rows = page.locator(".request-panel-row");
+    await rows.nth(8).scrollIntoViewIfNeeded();
+    await rows.nth(8).click();
+    await expect(page.locator(".request-owner")).toHaveText("Assigned to Orchestrator");
+    await expect(page.locator(".request-readonly")).toContainText(
+      "must respond through its session-management tools",
+    );
+    await expect(page.locator(".request-readonly .approval-actions")).toHaveCount(0);
+    await page.getByRole("button", { name: "Open Child Session" }).click();
+    await expect.poll(() => page.evaluate(() =>
+      window.__WOLLIPOG_REQUEST_SURFACES_E2E__.openedChild()?.sessionId)).toBe("child-3");
 
-  await rows.nth(11).scrollIntoViewIfNeeded();
-  await expect(rows.nth(11)).toBeVisible();
-  await page.getByRole("button", { name: "Close Panel" }).click();
-  await expect(trigger).toBeFocused();
-  await trigger.click();
-  await expect(rows.nth(2)).toHaveAttribute("aria-current", "true");
-  await page.keyboard.press("Escape");
-  await expect(page.getByRole("complementary", { name: "Requests" })).toHaveCount(0);
-  await expect(trigger).toBeFocused();
-});
+    await rows.nth(11).scrollIntoViewIfNeeded();
+    await expect(rows.nth(11)).toBeVisible();
+    await page.getByRole("button", { name: "Close Panel" }).click();
+    await expect(trigger).toBeFocused();
+    await trigger.click();
+    await expect(rows.nth(8)).toHaveAttribute("aria-current", "true");
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("complementary", { name: "Requests" })).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+  });
+}

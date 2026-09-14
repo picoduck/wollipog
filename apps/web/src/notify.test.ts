@@ -20,6 +20,30 @@ test("no notification when the status did not change", () => {
   assert.equal(notifyDecision(session({ status: "running" }), session({ status: "running" })), null);
 });
 
+test("idle Orchestrator campaigns notify when a new human-owned request appears", () => {
+  const campaign = (human: number) => ({ pendingRequests: { human, orchestrator: 1 } }) as SessionView["orchestratorCampaign"];
+  const previous = session({ status: "idle", orchestratorCampaign: campaign(0) });
+  const next = session({ status: "idle", orchestratorCampaign: campaign(1) });
+  const notification = notifyDecision(previous, next);
+  assert.match(notification?.title ?? "", /needs your input/);
+  assert.match(notification?.body ?? "", /human-owned campaign request/);
+  assert.deepEqual(notification?.attention, { eventEpoch: 0 });
+  assert.equal(notifyDecision(next, next), null);
+});
+
+test("idle Orchestrator campaigns notify when a human request is replaced at the same count", () => {
+  const campaign = (humanRequestTokens: string[]) => ({
+    pendingRequests: { human: humanRequestTokens.length, orchestrator: 0, humanRequestTokens },
+  }) as SessionView["orchestratorCampaign"];
+  const previous = session({ status: "idle", orchestratorCampaign: campaign(["request-a"]) });
+  const next = session({ status: "idle", orchestratorCampaign: campaign(["request-b"]) });
+  assert.match(notifyDecision(previous, next)?.title ?? "", /needs your input/);
+  assert.equal(notifyDecision(next, next), null);
+  const two = session({ status: "idle", orchestratorCampaign: campaign(["request-a", "request-b"]) });
+  assert.equal(notifyDecision(two, next), null,
+    "partially clearing human work does not create a new browser notification");
+});
+
 test("running -> input_required notifies with the approval title", () => {
   const next = session({ status: "input_required", pendingApproval: { requestId: "r", title: "Run: rm -rf build", options: [] } });
   const p = notifyDecision(session({ status: "running" }), next);
@@ -28,6 +52,15 @@ test("running -> input_required notifies with the approval title", () => {
   assert.match(p!.body, /Run: rm -rf build/);
   assert.equal(p!.sessionId, "s1");
   assert.deepEqual(p!.attention, { eventEpoch: 0, requestId: "r" });
+});
+
+test("Orchestrator-owned child input does not notify the human", () => {
+  const next = session({
+    status: "input_required",
+    pendingApproval: { requestId: "agent", title: "Pick an implementation", options: [] },
+    pendingRequestOwners: { human: 0, orchestrator: 1 },
+  });
+  assert.equal(notifyDecision(session({ status: "running" }), next), null);
 });
 
 test("multiple input requests route notifications to the bounded aggregate", () => {

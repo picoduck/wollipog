@@ -86,7 +86,12 @@ export function isInboxActiveStatus(status: SessionStatus): boolean {
   return ACTIVE_STATUSES.has(status);
 }
 
-export function isInboxBlocked(session: Pick<SessionView, "status" | "pendingApproval">): boolean {
+export function isInboxBlocked(
+  session: Pick<SessionView, "status" | "pendingApproval"> &
+    Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners">>,
+): boolean {
+  if ((session.orchestratorCampaign?.pendingRequests?.human ?? 0) > 0) return true;
+  if (session.pendingRequestOwners && session.pendingRequestOwners.human === 0) return false;
   return session.status === "input_required" || session.pendingApproval != null;
 }
 
@@ -103,7 +108,8 @@ export const INBOX_COLLAPSED_THREADS_KEY = "wollipog.inbox.collapsedThreads";
  * blocked rises with that child instead of sinking under whatever ran most recently.
  */
 export function inboxUrgency(
-  session: Pick<SessionView, "id" | "status" | "pendingApproval">,
+  session: Pick<SessionView, "id" | "status" | "pendingApproval"> &
+    Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners">>,
   stalledSessionIds: ReadonlySet<string> = new Set(),
 ): number {
   if (isInboxBlocked(session)) return stalledSessionIds.has(session.id) ? 3 : 2;
@@ -266,7 +272,8 @@ export function inboxPinnedAncestorIds(
 }
 
 export function inboxThreadChildState(
-  session: Pick<SessionView, "status" | "pendingApproval">,
+  session: Pick<SessionView, "status" | "pendingApproval"> &
+    Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners">>,
   stalled: boolean,
 ): InboxThreadChildState {
   if (isInboxBlocked(session)) return stalled ? "stalled" : "blocked";

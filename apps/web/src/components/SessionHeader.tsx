@@ -100,6 +100,7 @@ export function SessionHeader({
   descendantRequests,
   onOpenBackgroundWork,
   onOpenAttention,
+  onOpenCampaignRequests,
   titleId,
 }: {
   session: SessionView;
@@ -137,6 +138,7 @@ export function SessionHeader({
   /** Opens the inspectable managed-job inventory. */
   onOpenBackgroundWork?: () => void;
   onOpenAttention?: () => void;
+  onOpenCampaignRequests?: () => void;
   /** Set when this bar owns the page heading (`page-title` focus-rescue anchor). */
   titleId?: string;
 }) {
@@ -178,6 +180,7 @@ export function SessionHeader({
   const statusLayoutKey = JSON.stringify([
     session.status,
     session.pendingApproval,
+    session.orchestratorCampaign?.pendingRequests,
     session.archiveStatus,
     session.archiveOperation,
     session.stopOperation,
@@ -211,11 +214,19 @@ export function SessionHeader({
   );
   const renderNoninteractiveStatuses = () => (
     <>
-      <SessionStatusIndicators session={session} disconnected={!runnerOnline} onOpenAttention={onOpenAttention ? () => {
-        closeStatusPopover(false);
-        onOpenAttention();
-      } : undefined} />
-      {descendantRequests && descendantRequests.count > 0 && (
+      <SessionStatusIndicators
+        session={session}
+        disconnected={!runnerOnline}
+        onOpenAttention={onOpenAttention ? () => {
+          closeStatusPopover(false);
+          onOpenAttention();
+        } : undefined}
+        onOpenCampaignRequests={onOpenCampaignRequests ? () => {
+          closeStatusPopover(false);
+          onOpenCampaignRequests();
+        } : undefined}
+      />
+      {descendantRequests && descendantRequests.count > 0 && !session.orchestratorCampaign?.pendingRequests && (
         <button
           type="button"
           className="status-badge st-input descendant-request-badge"

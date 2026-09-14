@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  sessionAttentionBreakdown,
   sessionAttentionStatus,
   type GitStatusInfo,
   type GitSummaryInfo,
@@ -77,6 +78,69 @@ test("attention labels distinguish questions, authentication, approvals, and leg
     "Approval Required",
   );
   assert.equal(sessionAttentionStatus(session("input_required"))?.label, "Input Required");
+});
+
+test("idle Orchestrator campaigns surface human-owned descendant attention without changing lifecycle", () => {
+  const idleCampaign = {
+    status: "idle",
+    pendingApproval: null,
+    orchestratorCampaign: {
+      status: "waiting_human",
+      pendingRequests: { human: 2, orchestrator: 1 },
+    },
+  } as unknown as Pick<SessionView, "status" | "pendingApproval">;
+  assert.deepEqual(sessionAttentionStatus(idleCampaign), {
+    kind: "input_required",
+    label: "Needs Your Input",
+    description: "2 human-owned campaign requests need your input.",
+  });
+
+  const orchestratorOwnedChild = {
+    status: "input_required",
+    pendingApproval: {
+      requestId: "child-question",
+      title: "Pick an implementation",
+      options: [],
+      kind: "question",
+      questions: [],
+    },
+    pendingRequestOwners: { human: 0, orchestrator: 1 },
+  } as Pick<SessionView, "status" | "pendingApproval"> &
+    Partial<Pick<SessionView, "pendingRequestOwners">>;
+  assert.equal(sessionAttentionStatus(orchestratorOwnedChild), null,
+    "Orchestrator-owned child work does not become human attention");
+});
+
+test("mixed-owner child requests exclude Orchestrator work from human attention", () => {
+  const mixed = {
+    status: "input_required",
+    pendingApproval: {
+      requestId: "human-auth",
+      title: "Sign in",
+      options: [],
+      kind: "authentication",
+      additionalRequests: [{
+        requestId: "orchestrator-question",
+        title: "Choose implementation",
+        options: [],
+        kind: "question",
+        questions: [],
+      }],
+    },
+    pendingRequestOwners: {
+      human: 1,
+      orchestrator: 1,
+      requests: [
+        { requestId: "human-auth", owner: "human" },
+        { requestId: "orchestrator-question", owner: "orchestrator" },
+      ],
+    },
+  } as Pick<SessionView, "status" | "pendingApproval"> &
+    Partial<Pick<SessionView, "pendingRequestOwners">>;
+  assert.equal(sessionAttentionStatus(mixed)?.label, "Authentication Required");
+  assert.deepEqual(sessionAttentionBreakdown(mixed).map(({ label, count }) => ({ label, count })), [
+    { label: "Authentication Required", count: 1 },
+  ]);
 });
 
 function gitStatus(overrides: Partial<GitStatusInfo> = {}): GitStatusInfo {

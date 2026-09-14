@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useEffect,
   useId,
   useLayoutEffect,
@@ -31,6 +32,16 @@ type RequestPanelItem = {
 };
 
 const listScrollPositions = new Map<string, number>();
+
+export function descendantRequestCounts(requests: readonly Pick<DescendantRequestView, "responseOwner">[]) {
+  let human = 0;
+  let orchestrator = 0;
+  for (const request of requests) {
+    if (request.responseOwner === "human") human += 1;
+    else orchestrator += 1;
+  }
+  return { human, orchestrator };
+}
 
 function itemKey(sessionId: string, occurrenceId: string): string {
   return JSON.stringify([sessionId, occurrenceId]);
@@ -130,7 +141,9 @@ export function SessionRequestPanel({
       request: item.request,
       descendant: true,
     })),
-  ], [descendants, ownDecision, runnerOnline, session]);
+  ].sort((left, right) => left.responseOwner === right.responseOwner
+    ? 0
+    : left.responseOwner === "human" ? -1 : 1), [descendants, ownDecision, runnerOnline, session]);
   const activeKey = items.some((item) => item.key === selectedKey) ? selectedKey : items[0]?.key ?? null;
   const selected = items.find((item) => item.key === activeKey) ?? null;
   const listId = useId();
@@ -178,6 +191,7 @@ export function SessionRequestPanel({
   const workflowDecision = selected.request.kind === "workflow_decision"
     ? selected.request.workflowDecision : null;
   const showList = items.length > 1 || descendants.length > 0;
+  const counts = descendantRequestCounts(items);
 
   return (
     <div className={`request-panel${showList ? "" : " request-panel-single"}`}>
@@ -189,23 +203,30 @@ export function SessionRequestPanel({
         onKeyDown={onListKeyDown}
       >
         <div className="request-panel-count">
-          {descendants.length} Descendant {descendants.length === 1 ? "Request" : "Requests"}
+          <span>Needs Your Input <strong>{counts.human}</strong></span>
+          <span>Orchestrator Action <strong>{counts.orchestrator}</strong></span>
         </div>
-        {items.map((item) => (
-          <button
-            key={item.key}
-            ref={(node) => { rowRefs.current.set(item.key, node); }}
-            type="button"
-            className={`request-panel-row${item.key === activeKey ? " selected" : ""}`}
-            aria-current={item.key === activeKey ? "true" : undefined}
-            tabIndex={item.key === activeKey ? 0 : -1}
-            onClick={() => selectItem(item.key)}
-            onDoubleClick={() => selectItem(item.key, true)}
-          >
-            <span className="request-panel-row-title">{item.sessionTitle}</span>
-            <span>{requestTypeLabel(item.request)} · Pending</span>
-            <span>{relativeTime(item.createdAt)} · {item.responseOwner === "human" ? "Human" : "Orchestrator"}</span>
-          </button>
+        {items.map((item, index) => (
+          <Fragment key={item.key}>
+            {(index === 0 || items[index - 1]?.responseOwner !== item.responseOwner) && (
+              <div className="request-panel-owner-group" aria-hidden="true">
+                {item.responseOwner === "human" ? "Needs Your Input" : "Orchestrator Action"}
+              </div>
+            )}
+            <button
+              ref={(node) => { rowRefs.current.set(item.key, node); }}
+              type="button"
+              className={`request-panel-row${item.key === activeKey ? " selected" : ""}`}
+              aria-current={item.key === activeKey ? "true" : undefined}
+              tabIndex={item.key === activeKey ? 0 : -1}
+              onClick={() => selectItem(item.key)}
+              onDoubleClick={() => selectItem(item.key, true)}
+            >
+              <span className="request-panel-row-title">{item.sessionTitle}</span>
+              <span>{requestTypeLabel(item.request)} · Pending</span>
+              <span>{relativeTime(item.createdAt)} · {item.responseOwner === "human" ? "Human" : "Orchestrator"}</span>
+            </button>
+          </Fragment>
         ))}
       </div>}
       <section className="request-panel-detail" aria-label="Selected Request">

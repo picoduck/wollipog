@@ -14,7 +14,7 @@ export const CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION = "0.75.1";
 const CLAUDE_AGENT_ACP_PACKAGE = "@agentclientprotocol/claude-agent-acp";
 const CLAUDE_AGENT_ACP_REPOSITORY = "https://github.com/agentclientprotocol/claude-agent-acp";
 
-const ORCHESTRATOR_CLAUDE_TOOLS = ["Read", "Grep", "Glob", "WebFetch", "WebSearch", "Bash"];
+const ORCHESTRATOR_CLAUDE_TOOLS = ["Read", "Grep", "Glob", "WebFetch", "WebSearch", "Bash", "AskUserQuestion"];
 const ORCHESTRATOR_CLAUDE_BASH_RULES = [
   "git log", "git log:*", "git diff", "git diff:*", "git show", "git show:*",
   "git blame:*", "git status", "git status:*", "git worktree list", "git worktree list:*",
@@ -59,6 +59,7 @@ export function orchestratorInstructions(projectPaths: readonly string[]): strin
     "Route implementation questions, PR merge, merged-branch deletion, follow-up issue publication, and UI evidence through exact typed workflow decisions. A preference to execute work is never approval for its external effects. Authentication, secrets, persistent grants, governance, budgets, and tool guardrails remain human-only.",
     "Record every follow-up with record_campaign_follow_up before acting. Recommend Only stops after reporting; Execute Approved may start only a unique recommendation and still preserves sanitization, dependency checks, cross-model review, exact-head CI, typed publication, UI, merge, and deletion gates. An enqueued PR is unfinished: keep supervising it through merge-group CI and the forge's actual MERGED state.",
     "Use list_descendant_requests without blocking unrelated children. Resolve only requests currently assigned to the Orchestrator. UI evidence remains human-owned whenever get_campaign says the client cannot inspect it.",
+    "Whenever progress depends on a human response, a blocking question must use the structured request_user_input tool in Codex or AskUserQuestion tool in Claude. A prose-only blocking question is not a valid escalation. If the provider does not expose its structured question tool, report a visible compatibility failure and stop instead of silently returning to idle.",
     "After receiving an exact completed child report and accounting for its follow-ups, call verify_campaign_child. Retain keeps verified children available. Stop and Archive uses the durable lifecycle and does not reach Verified Complete until campaign-owned worktrees are retired.",
     "GitHub writes are limited to assigning or unassigning issues, changing issue labels, and posting plan or status comments.",
     "Do not edit project files, run builds, tests, or typechecks in a project location, commit, push, create branches or worktrees for yourself, open pull requests, merge, or perform control-plane mutations outside descendant session management.",
