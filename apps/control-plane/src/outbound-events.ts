@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import {
   WOLLIPOG_OUTBOUND_EVENT_MEDIA_TYPE,
   type CreateOutboundEventSubscriptionRequest,
+  type GitSummaryInfo,
   type GovernanceActor,
   type OutboundEventKind,
   type OutboundEventSubscriptionCredential,
@@ -13,6 +14,7 @@ import {
 } from "@wollipog/protocol";
 import { newAutomationTriggerSecret, signAutomationTrigger } from "./automation-trigger-ingress.js";
 import type { ClaimedOutboundEventDelivery, ControlPlaneDb } from "./db.js";
+import type { Hub } from "./hub.js";
 import type { ServiceResult } from "./sessions.js";
 
 export const OUTBOUND_EVENT_MAX_CONCURRENCY = 16;
@@ -34,6 +36,8 @@ type Logger = {
   info: (fields: Record<string, unknown>, message?: string) => void;
   warn: (fields: Record<string, unknown>, message?: string) => void;
 };
+type DeliveryAbortReason = "timeout" | "rotation" | "revocation" | "shutdown";
+type OutboundCheckHub = Pick<Hub, "isRunnerOnline" | "requestFromRunner">;
 
 function ok<T>(data: T, status = 200): ServiceResult<T> {
   return { ok: true, status, data };
@@ -205,13 +209,14 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 
 export class OutboundEventsService {
   private readonly active = new Map<string, Set<AbortController>>();
-  private ticking = false;
+  private activeTick?: Promise<void>;
 
   constructor(
     private readonly db: ControlPlaneDb,
     private readonly logger: Logger,
     private readonly lookup: Lookup = dnsLookup,
     private readonly transport: Transport = defaultTransport,
+    private readonly requestTimeoutMs = OUTBOUND_EVENT_REQUEST_TIMEOUT_MS,
   ) {}
 
   async create(
@@ -259,7 +264,7 @@ export class OutboundEventsService {
   }
 
   rotate(subscriptionId: string, now = Date.now()): ServiceResult<OutboundEventSubscriptionCredential> {
-    this.abortSubscription(subscriptionId);
+    this.abortSubscription(subscriptionId, "rotation");
     const secret = newAutomationTriggerSecret();
     const subscription = this.db.rotateOutboundEventSubscription({ subscriptionId, secret, now });
     return subscription ? ok({ subscription, secret }) : fail("outbound event subscription not found", 404);
@@ -271,7 +276,7 @@ export class OutboundEventsService {
   }
 
   revoke(subscriptionId: string, now = Date.now()): ServiceResult<{ revoked: true }> {
-    this.abortSubscription(subscriptionId);
+    this.abortSubscription(subscriptionId, "revocation");
     return this.db.revokeOutboundEventSubscription(subscriptionId, now)
       ? ok({ revoked: true })
       : fail("outbound event subscription not found", 404);
@@ -283,22 +288,83 @@ export class OutboundEventsService {
   }
 
   async tick(now = Date.now()): Promise<void> {
-    if (this.ticking) return;
-    this.ticking = true;
-    try {
+    if (this.activeTick) return this.activeTick;
+    const operation = (async () => {
       const activeCount = [...this.active.values()].reduce((sum, controllers) => sum + controllers.size, 0);
       const capacity = OUTBOUND_EVENT_MAX_CONCURRENCY - activeCount;
       if (capacity <= 0) return;
       const deliveries = this.db.claimOutboundEventDeliveries(now, capacity, OUTBOUND_EVENT_LEASE_MS);
       await Promise.all(deliveries.map((delivery) => this.deliver(delivery, now)));
       this.db.compactOutboundEventDeliveries(now);
-    } finally {
-      this.ticking = false;
+    })();
+    this.activeTick = operation;
+    try { await operation; } finally {
+      if (this.activeTick === operation) this.activeTick = undefined;
     }
   }
 
-  close(): void {
-    for (const subscriptionId of this.active.keys()) this.abortSubscription(subscriptionId);
+  async close(): Promise<void> {
+    for (const subscriptionId of [...this.active.keys()]) this.abortSubscription(subscriptionId, "shutdown");
+    try {
+      await this.activeTick;
+    } catch (error) {
+      this.logger.warn({
+        event: "outbound_event_shutdown_settlement",
+        error: error instanceof Error ? error.message : String(error),
+      }, "Outbound event shutdown settlement failed");
+    }
+  }
+
+  recordChecksFromSummary(
+    sessionId: string,
+    summary: GitSummaryInfo,
+    now = Date.now(),
+    expectedPullRequestUrl?: string,
+  ): boolean {
+    if (!summary.pr || summary.pr.state.toUpperCase() !== "OPEN" ||
+        (expectedPullRequestUrl !== undefined && summary.pr.url !== expectedPullRequestUrl) ||
+        !summary.checks || !Number.isSafeInteger(summary.checks.failing) || summary.checks.failing < 0 ||
+        !Array.isArray(summary.checks.failingNames) ||
+        summary.checks.failingNames.some((name) => typeof name !== "string")) return false;
+    return this.db.recordOutboundCheckObservation({
+      sessionId,
+      branch: summary.branch,
+      pullRequestUrl: summary.pr.url,
+      failing: summary.checks.failing,
+      failingNames: summary.checks.failingNames,
+      ...(summary.checks.url ? { checksUrl: summary.checks.url } : {}),
+      now,
+    });
+  }
+
+  async sweepCheckObservations(hub: OutboundCheckHub, now = Date.now()): Promise<void> {
+    for (const candidate of this.db.outboundCheckObservationCandidates()) {
+      // Advance every selected candidate, including offline and temporarily failing runners, so
+      // one cohort cannot occupy the bounded scan forever and starve newer open pull requests.
+      this.db.markOutboundCheckObservationAttempt(candidate.sessionId, candidate.pullRequestUrl, now);
+      if (!hub.isRunnerOnline(candidate.runnerId)) continue;
+      const requestId = randomUUID();
+      try {
+        const result = await hub.requestFromRunner(candidate.runnerId, requestId, {
+          type: "git_action",
+          requestId,
+          sessionId: candidate.sessionId,
+          worktreePath: candidate.worktreePath,
+          action: { kind: "summary" },
+          timeoutMs: 30_000,
+        }, 30_000);
+        if (result.type === "git_result" && result.ok && result.data?.summary) {
+          if (!this.db.outboundCheckObservationCandidateIsCurrent(candidate)) continue;
+          this.recordChecksFromSummary(candidate.sessionId, result.data.summary, Date.now(), candidate.pullRequestUrl);
+        }
+      } catch (error) {
+        this.logger.warn({
+          event: "outbound_check_observation",
+          sessionId: candidate.sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        }, "Outbound check observation deferred");
+      }
+    }
   }
 
   private async deliver(delivery: ClaimedOutboundEventDelivery, claimedAt: number): Promise<void> {
@@ -306,7 +372,7 @@ export class OutboundEventsService {
     const controllers = this.active.get(delivery.subscriptionId) ?? new Set<AbortController>();
     controllers.add(controller);
     this.active.set(delivery.subscriptionId, controllers);
-    const timeout = setTimeout(() => controller.abort(), OUTBOUND_EVENT_REQUEST_TIMEOUT_MS);
+    const timeout = setTimeout(() => controller.abort("timeout" satisfies DeliveryAbortReason), this.requestTimeoutMs);
     timeout.unref?.();
     let statusCode: number | undefined;
     let error: string | undefined;
@@ -317,8 +383,10 @@ export class OutboundEventsService {
       const response = await this.transport(target.data, delivery, controller.signal);
       statusCode = response.statusCode;
     } catch (caught) {
-      error = controller.signal.aborted
-        ? "Delivery was aborted or timed out"
+      error = controller.signal.reason === "timeout"
+        ? "Delivery timed out"
+        : controller.signal.aborted
+          ? "Delivery was aborted"
         : caught instanceof Error ? caught.message.slice(0, 500) : "Delivery transport failed";
     } finally {
       clearTimeout(timeout);
@@ -326,10 +394,18 @@ export class OutboundEventsService {
       if (controllers.size === 0) this.active.delete(delivery.subscriptionId);
     }
     const now = Date.now();
-    let disposition: "delivered" | "retry" | "failed";
+    const abortReason = controller.signal.reason as DeliveryAbortReason | undefined;
+    if (abortReason === "revocation") return;
+    let disposition: "delivered" | "retry" | "failed" | "deferred";
     let nextAttemptAt: number | undefined;
     let pauseReason: string | undefined;
-    if (statusCode !== undefined && statusCode >= 200 && statusCode < 300) {
+    if (abortReason === "rotation" || abortReason === "shutdown") {
+      disposition = "deferred";
+      nextAttemptAt = now;
+      error = abortReason === "rotation"
+        ? "Delivery deferred after subscription secret rotation"
+        : "Delivery deferred during control-plane shutdown";
+    } else if (statusCode !== undefined && statusCode >= 200 && statusCode < 300) {
       disposition = "delivered";
       error = undefined;
     } else if (statusCode === 410) {
@@ -363,7 +439,9 @@ export class OutboundEventsService {
       ...(error ? { error } : {}),
       ...(pauseReason ? { pauseReason } : {}),
     });
-    const log = disposition === "delivered" ? this.logger.info.bind(this.logger) : this.logger.warn.bind(this.logger);
+    const log = disposition === "delivered" || disposition === "deferred"
+      ? this.logger.info.bind(this.logger)
+      : this.logger.warn.bind(this.logger);
     log({
       event: "outbound_event_delivery",
       deliveryId: delivery.deliveryId,
@@ -378,10 +456,10 @@ export class OutboundEventsService {
     }, "Outbound event delivery settled");
   }
 
-  private abortSubscription(subscriptionId: string): void {
+  private abortSubscription(subscriptionId: string, reason: DeliveryAbortReason): void {
     const controllers = this.active.get(subscriptionId);
     if (!controllers) return;
-    for (const controller of controllers) controller.abort();
+    for (const controller of controllers) controller.abort(reason);
     this.active.delete(subscriptionId);
   }
 }

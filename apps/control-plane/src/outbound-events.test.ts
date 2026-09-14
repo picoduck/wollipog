@@ -31,16 +31,19 @@ function delivery(overrides: Partial<ClaimedOutboundEventDelivery> = {}): Claime
 function fakeDb(input: {
   claims?: ClaimedOutboundEventDelivery[];
   settled?: Array<Record<string, unknown>>;
+  settleError?: Error;
   revoked?: boolean;
 } = {}): ControlPlaneDb {
   let claimed = false;
   return {
     claimOutboundEventDeliveries: () => claimed ? [] : (claimed = true, input.claims ?? []),
     settleOutboundEventDelivery: (receipt: Record<string, unknown>) => {
+      if (input.settleError) throw input.settleError;
       input.settled?.push(receipt);
       return true;
     },
     compactOutboundEventDeliveries: () => 0,
+    rotateOutboundEventSubscription: () => ({}),
     revokeOutboundEventSubscription: () => input.revoked ?? true,
   } as unknown as ControlPlaneDb;
 }
@@ -127,6 +130,83 @@ test("the sixth retryable failure exhausts the bounded chain and records a visib
   assert.equal("nextAttemptAt" in settled[0]!, false);
 });
 
+test("secret rotation aborts and refunds an in-flight sixth attempt for retry under the new key", async () => {
+  const settled: Array<Record<string, unknown>> = [];
+  let started!: () => void;
+  const begun = new Promise<void>((resolve) => { started = resolve; });
+  const service = new OutboundEventsService(fakeDb({
+    claims: [delivery({ attempt: OUTBOUND_EVENT_RETRY_DELAYS_MS.length + 1 })],
+    settled,
+  }), quietLogger, (async () => [{ address: "93.184.216.34", family: 4 }]) as never,
+  async (_target, _delivery, signal) => {
+    started();
+    return await new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")),
+      { once: true }));
+  });
+  const ticking = service.tick(10_000);
+  await begun;
+  assert.equal(service.rotate("oes_1", 10_001).ok, true);
+  await ticking;
+  assert.equal(settled[0]?.disposition, "deferred");
+  assert.equal(typeof settled[0]?.nextAttemptAt, "number");
+  assert.equal("pauseReason" in settled[0]!, false);
+});
+
+test("graceful shutdown durably defers and refunds an in-flight sixth attempt", async () => {
+  const settled: Array<Record<string, unknown>> = [];
+  let started!: () => void;
+  const begun = new Promise<void>((resolve) => { started = resolve; });
+  const service = new OutboundEventsService(fakeDb({
+    claims: [delivery({ attempt: OUTBOUND_EVENT_RETRY_DELAYS_MS.length + 1 })],
+    settled,
+  }), quietLogger, (async () => [{ address: "93.184.216.34", family: 4 }]) as never,
+  async (_target, _delivery, signal) => {
+    started();
+    return await new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")),
+      { once: true }));
+  });
+  const ticking = service.tick(20_000);
+  await begun;
+  await service.close();
+  await ticking;
+  assert.equal(settled[0]?.disposition, "deferred");
+  assert.equal("pauseReason" in settled[0]!, false);
+});
+
+test("graceful shutdown contains settlement failure after aborting active requests", async () => {
+  const logs: Array<Record<string, unknown>> = [];
+  let started!: () => void;
+  const begun = new Promise<void>((resolve) => { started = resolve; });
+  const service = new OutboundEventsService(fakeDb({
+    claims: [delivery()], settleError: new Error("database unavailable"),
+  }), { info: () => {}, warn: (fields) => logs.push(fields) },
+  (async () => [{ address: "93.184.216.34", family: 4 }]) as never,
+  async (_target, _delivery, signal) => {
+    started();
+    return await new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")),
+      { once: true }));
+  });
+  const ticking = service.tick(20_000);
+  const failedTick = assert.rejects(ticking, /database unavailable/);
+  await begun;
+  await assert.doesNotReject(() => service.close());
+  await failedTick;
+  assert.equal(logs.some((fields) => fields.event === "outbound_event_shutdown_settlement"), true);
+});
+
+test("a genuine timeout still exhausts the in-flight sixth attempt", async () => {
+  const settled: Array<Record<string, unknown>> = [];
+  const service = new OutboundEventsService(fakeDb({
+    claims: [delivery({ attempt: OUTBOUND_EVENT_RETRY_DELAYS_MS.length + 1 })],
+    settled,
+  }), quietLogger, (async () => [{ address: "93.184.216.34", family: 4 }]) as never,
+  async (_target, _delivery, signal) => await new Promise((_, reject) =>
+    signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true })), 0);
+  await service.tick(30_000);
+  assert.equal(settled[0]?.disposition, "failed");
+  assert.match(String(settled[0]?.pauseReason), /6 bounded delivery attempts/);
+});
+
 test("a loopback delivery is signed over its exact bytes and carries stable correlation headers", async (t) => {
   let received: { headers: Record<string, string | string[] | undefined>; body: Buffer } | undefined;
   const server = createServer((request, response) => {
@@ -197,5 +277,5 @@ test("revocation aborts an in-flight request before recording any successful rec
   assert.equal(service.revoke("oes_1").ok, true);
   await ticking;
   assert.equal(observedAbort, true);
-  assert.notEqual(settled[0]?.disposition, "delivered");
+  assert.equal(settled.length, 0, "revocation owns the durable drop and transport settlement stops");
 });

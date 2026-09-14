@@ -78,7 +78,6 @@ import {
   type CreateProjectLocationRequest,
   type MoveProjectLocationRequest,
   type GitActionRequest,
-  type GitSummaryInfo,
   type GovernancePolicy,
   type OnboardingInfo,
   type OrganizationRole,
@@ -931,56 +930,12 @@ const outboundEvents = new OutboundEventsService(db, {
   warn: (fields, message) => app.log.warn(fields, message),
 });
 
-function recordOutboundChecksFromSummary(sessionId: string, summary: GitSummaryInfo, now = Date.now()): void {
-  if (!summary.pr || summary.pr.state.toUpperCase() !== "OPEN" || !summary.checks ||
-      !Number.isSafeInteger(summary.checks.failing) || summary.checks.failing < 0 ||
-      !Array.isArray(summary.checks.failingNames) ||
-      summary.checks.failingNames.some((name) => typeof name !== "string")) return;
-  db.recordOutboundCheckObservation({
-    sessionId,
-    branch: summary.branch,
-    pullRequestUrl: summary.pr.url,
-    failing: summary.checks.failing,
-    failingNames: summary.checks.failingNames,
-    ...(summary.checks.url ? { checksUrl: summary.checks.url } : {}),
-    now,
-  });
-}
-
 let outboundCheckSweepActive = false;
 async function sweepOutboundChecks(): Promise<void> {
   if (outboundCheckSweepActive) return;
   outboundCheckSweepActive = true;
   try {
-    for (const session of db.outboundCheckObservationCandidates()) {
-      const pullRequest = session.worktrees?.find((worktree) => worktree.pullRequest?.state === "open")
-        ?.pullRequest;
-      if (!pullRequest) continue;
-      // Advance every selected candidate, including offline and temporarily failing runners, so
-      // one cohort cannot occupy the bounded scan forever and starve newer open pull requests.
-      db.markOutboundCheckObservationAttempt(session.id, pullRequest.url, Date.now());
-      if (!hub.isRunnerOnline(session.runnerId)) continue;
-      const requestId = randomUUID();
-      try {
-        const result = await hub.requestFromRunner(session.runnerId, requestId, {
-          type: "git_action",
-          requestId,
-          sessionId: session.id,
-          ...(session.worktreePath ? { worktreePath: session.worktreePath } : {}),
-          action: { kind: "summary" },
-          timeoutMs: 30_000,
-        }, 30_000);
-        if (result.type === "git_result" && result.ok && result.data?.summary) {
-          recordOutboundChecksFromSummary(session.id, result.data.summary);
-        }
-      } catch (error) {
-        app.log.warn({
-          event: "outbound_check_observation",
-          sessionId: session.id,
-          error: error instanceof Error ? error.message : String(error),
-        }, "outbound check observation deferred");
-      }
-    }
+    await outboundEvents.sweepCheckObservations(hub);
   } finally {
     outboundCheckSweepActive = false;
   }
@@ -4322,7 +4277,7 @@ app.post("/api/sessions/:id/git", async (req, reply) => {
       };
     }
     if (action.kind === "summary" && result.data?.summary) {
-      recordOutboundChecksFromSummary(id, result.data.summary);
+      outboundEvents.recordChecksFromSummary(id, result.data.summary);
     }
     if (action.kind === "open_pr" && result.data?.pr &&
         (result.data.pr.createdWithGh || result.data.pr.created === true)) {
@@ -5119,8 +5074,11 @@ app.addHook("onClose", async () => {
   clearInterval(policyHookApprovalTimer);
   clearInterval(artifactMaintenanceTimer);
   clearInterval(runnerLivenessTimer);
-  outboundEvents.close();
-  orchestrator.shutdown();
+  try {
+    await outboundEvents.close();
+  } finally {
+    orchestrator.shutdown();
+  }
 });
 // Re-entrancy guard: a second signal (or an uncaughtException raised WHILE app.close() drains)
 // must not kick off a second shutdown and race two process.exit() calls.

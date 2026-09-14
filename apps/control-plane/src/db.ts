@@ -3363,6 +3363,14 @@ export interface ClaimedOutboundEventDelivery {
   leaseId: string;
 }
 
+export interface OutboundCheckObservationCandidate {
+  sessionId: string;
+  runnerId: string;
+  worktreeId: string;
+  worktreePath: string;
+  pullRequestUrl: string;
+}
+
 interface LegacyProjectLocationCandidate {
   runnerId: string;
   workspaceId: string;
@@ -19668,7 +19676,7 @@ export class ControlPlaneDb {
     deliveryId: string;
     subscriptionId: string;
     leaseId: string;
-    disposition: "delivered" | "retry" | "failed";
+    disposition: "delivered" | "retry" | "failed" | "deferred";
     now: number;
     statusCode?: number;
     nextAttemptAt?: number;
@@ -19676,12 +19684,15 @@ export class ControlPlaneDb {
     pauseReason?: string;
   }): boolean {
     return this.atomic(() => {
-      const status = input.disposition === "retry" ? "retrying" : input.disposition;
+      const status = input.disposition === "retry" || input.disposition === "deferred"
+        ? "retrying"
+        : input.disposition;
       const changed = this.stmt(
         `UPDATE outbound_event_deliveries SET status=?,payload_json=CASE WHEN ?='retrying' THEN payload_json ELSE NULL END,
+             attempt_count=CASE WHEN ?='deferred' AND attempt_count>0 THEN attempt_count-1 ELSE attempt_count END,
              next_attempt_at=?,lease_id=NULL,lease_expires_at=NULL,status_code=?,error=?,updated_at=?
          WHERE delivery_id=? AND subscription_id=? AND status='delivering' AND lease_id=?`,
-      ).run(status, status, input.nextAttemptAt ?? null, input.statusCode ?? null,
+      ).run(status, status, input.disposition, input.nextAttemptAt ?? null, input.statusCode ?? null,
         input.error?.slice(0, 500) ?? null, input.now, input.deliveryId, input.subscriptionId, input.leaseId);
       if (Number(changed.changes) !== 1) return false;
       if (input.disposition === "delivered") {
@@ -19719,7 +19730,7 @@ export class ControlPlaneDb {
     });
   }
 
-  outboundCheckObservationCandidates(limit = 25): SessionView[] {
+  outboundCheckObservationCandidates(limit = 25): OutboundCheckObservationCandidate[] {
     const rows = this.stmt(
       `SELECT DISTINCT session.id
        FROM sessions session
@@ -19735,13 +19746,34 @@ export class ControlPlaneDb {
        WHERE session.archived=0 AND session.worktrees IS NOT NULL AND EXISTS (
          SELECT 1 FROM json_each(session.worktrees) worktree
          WHERE lower(json_extract(worktree.value,'$.pullRequest.state'))='open'
+           AND json_type(worktree.value,'$.path')='text'
+           AND length(json_extract(worktree.value,'$.path'))>0
+           AND json_type(worktree.value,'$.pullRequest.url')='text'
+           AND length(json_extract(worktree.value,'$.pullRequest.url'))>0
        )
        ORDER BY COALESCE(observation.updated_at,0),session.updated_at,session.id LIMIT ?`,
     ).all(Math.max(1, Math.min(100, Math.floor(limit)))) as unknown as Array<{ id: string }>;
     return rows.flatMap((row) => {
       const session = this.getSession(row.id);
-      return session?.worktrees?.some((worktree) => worktree.pullRequest?.state === "open") ? [session] : [];
+      const worktree = session?.worktrees?.find((candidate) =>
+        typeof candidate.path === "string" && candidate.path.length > 0 &&
+        candidate.pullRequest?.state === "open" &&
+        typeof candidate.pullRequest.url === "string" && candidate.pullRequest.url.length > 0);
+      return session && worktree?.pullRequest ? [{
+        sessionId: session.id,
+        runnerId: session.runnerId,
+        worktreeId: worktree.id,
+        worktreePath: worktree.path,
+        pullRequestUrl: worktree.pullRequest.url,
+      }] : [];
     });
+  }
+
+  outboundCheckObservationCandidateIsCurrent(candidate: OutboundCheckObservationCandidate): boolean {
+    return this.getSession(candidate.sessionId)?.worktrees?.some((worktree) =>
+      worktree.id === candidate.worktreeId && worktree.path === candidate.worktreePath &&
+      worktree.pullRequest?.state === "open" &&
+      worktree.pullRequest.url === candidate.pullRequestUrl) === true;
   }
 
   markOutboundCheckObservationAttempt(sessionId: string, pullRequestUrl: string, now: number): void {
