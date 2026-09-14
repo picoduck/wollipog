@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
+import type { RunnerToControlPlane } from "@wollipog/protocol";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -10,6 +11,7 @@ import { runContextCommand } from "./context-command.js";
 import { SessionStore } from "./session-store.js";
 import { SessionManager } from "./session-manager.js";
 import { anchorTurnRef, captureWorktreeTree, setGitRunnerForTests, type GitRunOpts } from "./git-ops.js";
+import { branchStateLabel, sessionBranchState } from "../../web/src/worktree-identity.js";
 
 function haveGit(): boolean {
   try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; }
@@ -1759,6 +1761,100 @@ test("restarting a worktree session reuses isolation instead of failing or orpha
     manager.stop("s_restart");
     await manager.delete("s_restart");
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an automatic worktree reaches snapshots and renders its verified branch", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-automatic-worktree-snapshot-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const factory = () => ({
+      pid: 1, initialize: async () => {}, newSession: async () => {},
+      prompt: async () => ({ stopReason: "end_turn" as const }), cancel: () => {}, dispose: () => {},
+      setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => null,
+    });
+    manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1,
+    );
+    const sessionId = "s_automatic_snapshot";
+    assert.equal(await manager.start({
+      sessionId, workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: true, driver: "claude-code",
+      context: { kind: "native" },
+    }), true);
+
+    const snapshot = store.snapshots().find((candidate) => candidate.id === sessionId);
+    assert.ok(snapshot?.worktreePath, "the automatic worktree is selected in the snapshot");
+    assert.equal(
+      branchStateLabel(sessionBranchState(snapshot)),
+      `agent/${sessionId}`,
+      "the session card renders the verified current branch instead of Branch Unavailable",
+    );
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cancelling automatic identity verification cannot publish or claim capacity", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-automatic-worktree-cancel-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  let releaseProof!: () => void;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const messages: RunnerToControlPlane[] = [];
+    let constructed = false;
+    manager = new SessionManager(
+      (message) => messages.push(message), () => {}, store, "runner", undefined,
+      (() => {
+        constructed = true;
+        throw new Error("a cancelled launch must not construct a provider");
+      }) as never,
+      dataDir, 1,
+    );
+    const internals = manager as unknown as {
+      proveRegisteredWorktree: (...args: unknown[]) => Promise<{ branch: string }>;
+      admitted: Set<string>;
+    };
+    const originalProof = internals.proveRegisteredWorktree.bind(manager);
+    let proofEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { proofEntered = resolve; });
+    const gate = new Promise<void>((resolve) => { releaseProof = resolve; });
+    internals.proveRegisteredWorktree = async (...args) => {
+      const verified = await originalProof(...args);
+      proofEntered();
+      await gate;
+      return verified;
+    };
+
+    const sessionId = "s_automatic_cancel";
+    const started = manager.start({
+      sessionId, workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: true, driver: "claude-code",
+      context: { kind: "native" },
+    });
+    await entered;
+    const startingBeforeCancel = messages.filter((message) =>
+      message.type === "session_status" && message.status === "starting").length;
+    manager.cancel(sessionId);
+    releaseProof();
+
+    assert.equal(await started, false);
+    assert.equal(constructed, false);
+    assert.deepEqual([...internals.admitted], [], "the stale continuation never claims a capacity slot");
+    assert.equal(messages.filter((message) =>
+      message.type === "session_status" && message.status === "starting").length, startingBeforeCancel,
+      "the stale continuation emits no later starting status");
+    await manager.delete(sessionId);
+  } finally {
+    releaseProof?.();
+    manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -3868,6 +3964,8 @@ test("a launch refused by worktree verification retains the tree it could not id
     assert.equal(existsSync(join(worktreePath, "uncommitted.txt")), true, "so the user's uncommitted work survives");
     assert.equal(store.readMeta("s_refused_retain")?.worktreePath, worktreePath,
       "and the selection still names the tree the error is about");
+    assert.deepEqual(store.readMeta("s_refused_retain")?.worktrees ?? [], [],
+      "the drifted branch is not published to the session card as a verified identity");
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
@@ -4169,6 +4267,7 @@ test("worktree reconciliation records the identity a legacy row implied, and onl
   try {
     const { repo } = initRepoWithOrigin(root);
     const store = new SessionStore(join(dataDir, "sessions"));
+    const messages: RunnerToControlPlane[] = [];
     const legacyRow = (sessionId: string, worktreePath: string) => ({
       sessionId, agentId: "claude", workspaceId: "repo", repoPath: repo,
       worktreePath, driver: "claude-code" as const, command: "claude", args: [], env: {},
@@ -4178,9 +4277,15 @@ test("worktree reconciliation records the identity a legacy row implied, and onl
     });
 
     const converges = await createWorktree(repo, "s_converges", { dataDir });
+    const missingInventory = await createWorktree(repo, "s_missing_inventory", { dataDir });
     const switched = await createWorktree(repo, "s_switched", { dataDir });
     const gone = await createWorktree(repo, "s_gone", { dataDir });
     store.create(legacyRow("s_converges", converges.path));
+    store.create({
+      ...legacyRow("s_missing_inventory", missingInventory.path),
+      worktreeBranch: missingInventory.branch,
+      worktrees: [],
+    });
     store.create(legacyRow("s_switched", switched.path));
     store.create(legacyRow("s_gone", gone.path));
     // A row written since the field existed must not be touched, even if it disagrees with Git.
@@ -4190,17 +4295,53 @@ test("worktree reconciliation records the identity a legacy row implied, and onl
     execFileSync("git", ["-C", switched.path, "switch", "-c", "operator/elsewhere"]);
     execFileSync("git", ["-C", repo, "worktree", "remove", "--force", gone.path]);
 
-    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    manager = new SessionManager(
+      (message) => messages.push(message), () => {}, store, "runner", undefined, undefined, dataDir,
+    );
     await manager.reconcileWorktreePullRequests();
 
     assert.equal(store.readMeta("s_converges")?.worktreeBranch, "agent/s_converges",
       "a legacy row whose worktree still matches its layout records that identity");
+    assert.deepEqual(store.readMeta("s_converges")?.worktrees, [{
+      id: "legacy",
+      path: converges.path,
+      branch: "agent/s_converges",
+      source: "legacy",
+    }], "a healthy legacy selection recovers the inventory entry consumed by snapshots");
+    assert.deepEqual(store.readMeta("s_missing_inventory")?.worktrees, [{
+      id: "legacy",
+      path: missingInventory.path,
+      branch: missingInventory.branch,
+      source: "legacy",
+    }], "a current row with an empty inventory is reconciled without recreating its worktree");
+    const recoveredSnapshot = store.snapshots()
+      .find((snapshot) => snapshot.id === "s_missing_inventory");
+    assert.ok(recoveredSnapshot);
+    assert.equal(
+      branchStateLabel(sessionBranchState(recoveredSnapshot)),
+      missingInventory.branch,
+      "the recovered identity propagates through the snapshot to the branch renderer",
+    );
+    const recoveredUpdate = messages.find((message) =>
+      message.type === "session_runtime_updated" && message.snapshot.id === "s_missing_inventory");
+    assert.ok(recoveredUpdate && recoveredUpdate.type === "session_runtime_updated");
+    assert.equal(
+      branchStateLabel(sessionBranchState(recoveredUpdate.snapshot)),
+      missingInventory.branch,
+      "the recovery is pushed to the control plane instead of waiting for another snapshot",
+    );
     assert.equal(store.readMeta("s_switched")?.worktreeBranch, undefined,
       "a switched worktree is never blessed by the backfill");
+    assert.deepEqual(store.readMeta("s_switched")?.worktrees ?? [], [],
+      "a switched worktree is not published as a verified identity");
     assert.equal(store.readMeta("s_gone")?.worktreeBranch, undefined,
       "an unreachable worktree simply does not converge this pass");
+    assert.deepEqual(store.readMeta("s_gone")?.worktrees ?? [], [],
+      "an unreachable worktree is not published as a verified identity");
     assert.equal(store.readMeta("s_recorded")?.worktreeBranch, "fix/recorded-by-hand",
       "an already recorded identity is left exactly as it was");
+    assert.deepEqual(store.readMeta("s_recorded")?.worktrees ?? [], [],
+      "a stored branch that disagrees with Git is not promoted into inventory");
 
     // The switched row must still fail closed at launch: the backfill did not retire that check.
     const failure = await manager.sessionWorktreeRootFailure(store.readMeta("s_switched")!);

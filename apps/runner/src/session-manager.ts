@@ -1920,8 +1920,9 @@ export class SessionManager {
     });
   }
 
-  /** Give a row that predates `worktreeBranch` the identity it always implied, so the field is read
-   * rather than reconstructed. Rides the worktree reconciliation sweep because that pass already
+  /** Give a legacy row the complete identity its active worktree proves, so snapshots do not have
+   * to reconstruct either its branch or its inventory entry. Rides the worktree reconciliation
+   * sweep because that pass already
    * holds this session's worktree lane — `patchMeta` replaces the whole document, so writing from
    * outside the lane could drop a concurrent launch's `worktreePath` — and already pays for git per
    * session, making one porcelain listing marginal.
@@ -1930,13 +1931,17 @@ export class SessionManager {
    * a worktree someone switched to another branch and permanently retire the fail-closed check that
    * catches exactly that, so a divergence is left unrecorded and keeps failing at launch. The guard
    * is the first line, so the pass costs nothing once a row has converged and nothing at all for
-   * rows written since the field existed. */
-  private async recordLegacyWorktreeBranch(meta: SessionMeta): Promise<void> {
-    if (!meta.worktreePath || meta.worktreeBranch !== undefined) return;
+   * rows whose complete identity has converged. */
+  private async recordLegacyWorktreeIdentity(meta: SessionMeta): Promise<SessionMeta | null> {
+    if (!meta.worktreePath) return null;
     const path = meta.worktreePath;
+    const recordedWorktree = meta.worktrees?.find((worktree) =>
+      sameWorktreePath(meta.context, worktree.path, path));
+    if (meta.worktreeBranch !== undefined && recordedWorktree?.path === path &&
+        recordedWorktree.branch === meta.worktreeBranch) return null;
     let actual: string;
     try {
-      actual = (await registeredSessionWorktree(meta.repoPath, path, {
+      actual = (await this.proveRegisteredWorktree(meta.repoPath, path, {
         context: meta.context,
         dataDir: this.dataDir,
         ownerHash: this.runnerOwnerHash,
@@ -1944,18 +1949,41 @@ export class SessionManager {
     } catch {
       // Unreachable distro, unmounted volume, pruned worktree: the row simply does not converge
       // this pass. Leaving the field absent keeps the derivation answering for it.
-      return;
+      return null;
     }
-    if (actual !== this.expectedWorktreeBranch(meta, path, undefined)) {
+    if (actual !== this.expectedWorktreeBranch(meta, path, meta.worktreeBranch)) {
       this.log(`session ${boundedSessionIdForLog(meta.sessionId)} worktree is not on the branch its layout implies; leaving its identity underived`);
-      return;
+      return null;
     }
     // Re-read after the git round trip: this lane excludes worktree mutations, but a prompt or
     // status write from elsewhere can still have replaced the document underneath.
     const latest = this.store.readMeta(meta.sessionId);
-    if (!latest || latest.worktreeBranch !== undefined ||
-        !latest.worktreePath || !sameWorktreePath(latest.context, latest.worktreePath, path)) return;
-    this.store.patchMeta(meta.sessionId, { worktreeBranch: actual });
+    if (!latest || !latest.worktreePath ||
+        !sameWorktreePath(latest.context, latest.worktreePath, path) ||
+        actual !== this.expectedWorktreeBranch(
+          latest, latest.worktreePath, latest.worktreeBranch,
+        )) return null;
+    const latestIndex = latest.worktrees?.findIndex((worktree) =>
+      sameWorktreePath(latest.context, worktree.path, latest.worktreePath!)) ?? -1;
+    const worktrees = [...(latest.worktrees ?? [])];
+    if (latestIndex === -1) {
+      worktrees.push({
+        id: "legacy",
+        path: latest.worktreePath,
+        branch: actual,
+        source: "legacy",
+      });
+    } else {
+      worktrees[latestIndex] = {
+        ...worktrees[latestIndex]!,
+        path: latest.worktreePath,
+        branch: actual,
+      };
+    }
+    return this.store.patchMeta(meta.sessionId, {
+      worktreeBranch: actual,
+      worktrees,
+    });
   }
 
   /** Conservative startup/periodic reconciliation. Forge failures retain state, while a durable
@@ -1978,7 +2006,13 @@ export class SessionManager {
           await this.runWorktreeOperation(candidate.sessionId, async () => {
             let meta = this.store.readMeta(candidate.sessionId);
             if (!meta || !this.sessionCanOpen(candidate.sessionId)) return;
-            await this.recordLegacyWorktreeBranch(meta);
+            const recoveredIdentity = await this.recordLegacyWorktreeIdentity(meta);
+            if (recoveredIdentity) {
+              this.send({
+                type: "session_runtime_updated",
+                snapshot: this.snapshot(recoveredIdentity),
+              });
+            }
             meta = this.store.readMeta(candidate.sessionId) ?? meta;
             const candidatePaths = this.attributedWorktrees(meta)
               .filter((worktree) => worktree.pullRequest)
@@ -3135,10 +3169,11 @@ export class SessionManager {
     let prior = this.store.readMeta(spec.sessionId);
     const driver = spec.driver ?? "acp";
     const executionTarget = spec.executionTarget ?? prior?.executionTarget;
-    const priorWorktreePath = prior?.worktreePath;
-    const priorContext = prior?.context;
+    const priorMatchesWorkspace = prior?.repoPath === repoPath &&
+      agentContextKey(prior.context) === agentContextKey(context);
+    const priorWorktreePath = priorMatchesWorkspace ? prior?.worktreePath ?? null : null;
     let shouldUseWorktree = spec.useWorktree || !!priorWorktreePath &&
-      !!priorContext && !!prior?.worktrees?.some((item) => sameWorktreePath(priorContext, item.path, priorWorktreePath));
+      !!prior?.worktrees?.some((item) => sameWorktreePath(context, item.path, priorWorktreePath));
     const carrySlashCommandCatalog = !shouldUseWorktree && canCarrySlashCommandCatalog(prior ?? undefined, {
       driver,
       context,
@@ -3170,8 +3205,8 @@ export class SessionManager {
       workspaceId: spec.workspaceId,
       repoPath,
       worktreePath: null,
-      worktreeBranch: prior?.worktreeBranch,
-      worktrees: prior?.worktrees,
+      worktreeBranch: priorMatchesWorkspace ? prior?.worktreeBranch : undefined,
+      worktrees: priorMatchesWorkspace ? prior?.worktrees : undefined,
       executionTarget,
       executionHandoffRequest: spec.executionHandoff ?? prior?.executionHandoffRequest,
       executionHandoff: spec.executionTarget?.id === prior?.executionTarget?.id ? prior?.executionHandoff : undefined,
@@ -3236,10 +3271,12 @@ export class SessionManager {
       const latest = this.store.readMeta(spec.sessionId);
       if (latest) {
         prior = latest;
-        shouldUseWorktree = spec.useWorktree || !!latest.worktreePath &&
+        const latestMatchesWorkspace = latest.repoPath === repoPath &&
+          agentContextKey(latest.context) === agentContextKey(context);
+        shouldUseWorktree = spec.useWorktree || latestMatchesWorkspace && !!latest.worktreePath &&
           !!latest.worktrees?.some((item) => sameWorktreePath(latest.context, item.path, latest.worktreePath!));
-        meta.worktreeBranch = latest.worktreeBranch;
-        meta.worktrees = latest.worktrees;
+        meta.worktreeBranch = latestMatchesWorkspace ? latest.worktreeBranch : undefined;
+        meta.worktrees = latestMatchesWorkspace ? latest.worktrees : undefined;
         meta.lastTurnBaseTree = latest.lastTurnBaseTree;
         meta.turnCount = latest.turnCount ?? 0;
         meta.forkPoints = latest.forkPoints ?? {};
@@ -3310,8 +3347,10 @@ export class SessionManager {
         if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) return false;
         if (gitRepo) {
           const activePrior = prior;
-          const priorActiveWorktree = activePrior?.worktreePath
+          const priorActiveWorktree = activePrior?.repoPath === repoPath &&
+            agentContextKey(activePrior.context) === agentContextKey(context) && activePrior.worktreePath
             ? activePrior.worktrees?.find((item) =>
+              item.source !== "legacy" &&
               sameWorktreePath(activePrior.context, item.path, activePrior.worktreePath!))
             : undefined;
           if (priorActiveWorktree) {
@@ -3493,6 +3532,28 @@ export class SessionManager {
         "COMMAND_CANCELLED",
       );
       return false;
+    }
+    if (worktreeIdentity?.source === "legacy") {
+      await this.runWorktreeOperation(spec.sessionId, async () => {
+        const latest = this.store.readMeta(spec.sessionId);
+        if (latest) await this.recordLegacyWorktreeIdentity(latest);
+      });
+      if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) {
+        const superseded = this.launchWasSuperseded(spec.sessionId, launchGeneration);
+        if (priorResumeId && !superseded) this.store.releaseLock(spec.sessionId, this.lockOwner);
+        durable?.failed(
+          superseded
+            ? "session launch was superseded by a replacement"
+            : "session launch was cancelled before runner admission",
+          "COMMAND_CANCELLED",
+        );
+        return false;
+      }
+      const reconciled = this.store.readMeta(spec.sessionId);
+      if (reconciled) {
+        meta.worktreeBranch = reconciled.worktreeBranch;
+        meta.worktrees = reconciled.worktrees;
+      }
     }
     if (worktree) this.emitStatus(spec.sessionId, "starting", undefined, worktree.path);
 
