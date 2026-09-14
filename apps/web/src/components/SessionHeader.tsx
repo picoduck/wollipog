@@ -97,6 +97,7 @@ export function SessionHeader({
   topbarControls,
   changeStatus,
   activeSubagents,
+  descendantRequests,
   onOpenBackgroundWork,
   onOpenAttention,
   titleId,
@@ -131,6 +132,8 @@ export function SessionHeader({
   changeStatus?: SessionChangeStatus | null;
   /** Live structured subagents remain visible even while the parent awaits its next prompt. */
   activeSubagents?: { count: number; onOpen: () => void; workers?: boolean };
+  /** Consolidated unresolved descendant requests owned by the dedicated request panel. */
+  descendantRequests?: { count: number; onOpen: () => void };
   /** Opens the inspectable managed-job inventory. */
   onOpenBackgroundWork?: () => void;
   onOpenAttention?: () => void;
@@ -184,6 +187,7 @@ export function SessionHeader({
     changeStatus,
     runnerOnline,
     activeSubagents?.count,
+    descendantRequests?.count,
   ]);
   const terminal = isTerminal(session.status);
   const visibleBackgroundWorkState = session.backgroundWorkState === "resumed"
@@ -211,6 +215,22 @@ export function SessionHeader({
         closeStatusPopover(false);
         onOpenAttention();
       } : undefined} />
+      {descendantRequests && descendantRequests.count > 0 && (
+        <button
+          type="button"
+          className="status-badge st-input descendant-request-badge"
+          aria-label={`Descendant Requests: ${descendantRequests.count} Unresolved`}
+          aria-controls="right-panel"
+          title="Open Descendant Requests"
+          onClick={() => {
+            closeStatusPopover(false);
+            descendantRequests.onOpen();
+          }}
+        >
+          Descendant Requests
+          <span className="inbox-status-pill-count" aria-hidden="true">{descendantRequests.count}</span>
+        </button>
+      )}
       {renderBackgroundWork()}
       {backgroundDeliveryState && (
         <BackgroundDeliveryBadge state={backgroundDeliveryState} onOpen={onOpenBackgroundWork ? () => {

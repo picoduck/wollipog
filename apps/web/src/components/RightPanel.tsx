@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import { ChevronLeftIcon, CommandLineIcon, FolderIcon, GlobeIcon, HelpIcon, LockIcon, TeamIcon, TerminalIcon } from "./Icons.js";
+import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { ChevronLeftIcon, CommandLineIcon, FolderIcon, GlobeIcon, HelpIcon, InboxIcon, LockIcon, TeamIcon, TerminalIcon } from "./Icons.js";
 import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
@@ -7,6 +7,7 @@ import {
   type SessionView,
   type SourceLocation,
   type CreateWorkspaceReferenceRequest,
+  type DescendantRequestView,
 } from "@wollipog/protocol";
 import {
   RIGHT_PANEL_DEFAULT_WIDTH,
@@ -32,6 +33,7 @@ import { AgentsPanel } from "./AgentsPanel.js";
 import { focusSessionRequest } from "./SessionApproval.js";
 import { BackgroundWorkPanel } from "./BackgroundWorkPanel.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
+import { SessionRequestPanel } from "./SessionRequestPanel.js";
 
 /** Viewport-aware width ceiling: the panel may take at most ~40% of the window, so the
  * transcript + composer always keep a usable share on narrow/split-screen windows. */
@@ -155,6 +157,7 @@ export function useRightPanelState(): RightPanelState {
 
 const MODE_TITLES: Record<RightPanelMode, string> = {
   launcher: "Panel",
+  requests: "Requests",
   review: "Review",
   files: "Files",
   terminal: "Terminal",
@@ -196,6 +199,12 @@ export function RightPanel({
   onOpenParentTurn = () => undefined,
   backgroundInventoryError = null,
   onRetryBackgroundInventory,
+  descendantRequests = [],
+  selectedRequestKey = null,
+  onSelectedRequestKeyChange = () => undefined,
+  onSessionUpdate,
+  onDescendantsUpdate = () => undefined,
+  onOpenChildRequest = () => undefined,
 }: {
   state: RightPanelState;
   session: SessionView;
@@ -226,12 +235,35 @@ export function RightPanel({
   onOpenParentTurn?: (eventId: number) => void;
   backgroundInventoryError?: string | null;
   onRetryBackgroundInventory?: () => void;
+  descendantRequests?: readonly DescendantRequestView[];
+  selectedRequestKey?: string | null;
+  onSelectedRequestKeyChange?: (key: string | null) => void;
+  onSessionUpdate?: (session: SessionView) => void;
+  onDescendantsUpdate?: () => void;
+  onOpenChildRequest?: (request: DescendantRequestView) => void;
 }) {
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  const previouslyOpenRef = useRef(false);
   const filesSupported = runnerSupportsProtocol(runnerProtocolVersion, "sessionFiles");
   const terminalSupported = runnerSupportsProtocol(runnerProtocolVersion, "sessionShells");
   const filesHint = runnerCapabilityRequirement(runnerProtocolVersion, "sessionFiles", "Session file browsing");
   const terminalHint = runnerCapabilityRequirement(runnerProtocolVersion, "sessionShells", "Session terminal access");
+
+  useLayoutEffect(() => {
+    const wasOpen = previouslyOpenRef.current;
+    previouslyOpenRef.current = state.open;
+    if (!wasOpen && state.open) {
+      returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      return;
+    }
+    if (!wasOpen || state.open) return;
+    const target = returnFocusRef.current;
+    returnFocusRef.current = null;
+    window.requestAnimationFrame(() => {
+      if (target?.isConnected) target.focus();
+    });
+  }, [state.open]);
 
   // Viewport-aware ceiling as STATE (the rendered width and the separator's ARIA range both
   // re-derive from it) — the stored width PREFERENCE is left untouched, so a temporary window
@@ -252,6 +284,17 @@ export function RightPanel({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.open]);
+
+  useEffect(() => {
+    if (!state.open || state.mode !== "requests") return;
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.defaultPrevented || event.key !== "Escape" || event.metaKey || event.ctrlKey || event.altKey) return;
+      event.preventDefault();
+      state.close();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [state]);
 
   const sessionEventEpoch = session.eventEpoch ?? 0;
   useEffect(() => {
@@ -365,7 +408,7 @@ export function RightPanel({
             )}
           </span>
           <button type="button" className="icon-btn rp-close" onClick={state.close} title="Close Panel" aria-label="Close Panel">
-            ×
+            {state.mode === "requests" ? "Close" : "×"}
           </button>
         </div>
         {state.mode === "launcher" ? (
@@ -380,6 +423,10 @@ export function RightPanel({
               session.backgroundJobsAvailable === true ||
               session.backgroundWorkTracking != null || session.backgroundWorkState != null}
             governanceAvailable={governanceAvailable}
+            requestsAvailable={descendantRequests.length > 0 || (
+              session.pendingApproval?.kind === "workflow_decision" &&
+              session.pendingApproval.workflowDecision?.resourceSnapshot.category === "ui_evidence_approval"
+            )}
           />
         ) : (
           <div className="rp-body">
@@ -397,6 +444,18 @@ export function RightPanel({
               ) : (
                 <div className="hint warn">{filesHint}</div>
               ))}
+            {state.mode === "requests" && onSessionUpdate && (
+              <SessionRequestPanel
+                session={session}
+                runnerOnline={runnerOnline}
+                descendants={descendantRequests}
+                selectedKey={selectedRequestKey}
+                onSelectedKeyChange={onSelectedRequestKeyChange}
+                onSessionUpdate={onSessionUpdate}
+                onDescendantsUpdate={onDescendantsUpdate}
+                onOpenChild={onOpenChildRequest}
+              />
+            )}
             {state.mode === "review" && (
               <ReviewPanel
                 session={session}
@@ -462,7 +521,7 @@ export function RightPanel({
                 onRetryInventory={onRetryBackgroundInventory}
               />
             )}
-            {state.mode !== "files" && state.mode !== "review" && state.mode !== "browser" &&
+            {state.mode !== "requests" && state.mode !== "files" && state.mode !== "review" && state.mode !== "browser" &&
               state.mode !== "sidechat" && state.mode !== "subagents" && state.mode !== "background" &&
               <div className="hint">Coming soon.</div>}
           </div>
@@ -506,6 +565,7 @@ function Launcher({
   terminalHint,
   backgroundAvailable,
   governanceAvailable,
+  requestsAvailable,
 }: {
   onPick: (mode: RightPanelMode) => void;
   onOpenTerminal: () => void;
@@ -515,6 +575,7 @@ function Launcher({
   terminalHint: string;
   backgroundAvailable: boolean;
   governanceAvailable: boolean;
+  requestsAvailable: boolean;
 }) {
   return (
     <div className="rp-launcher">
@@ -524,6 +585,13 @@ function Launcher({
           {!terminalSupported && <div>{terminalHint}</div>}
         </div>
       )}
+      <LauncherRow
+        label="Requests"
+        disabled={!requestsAvailable}
+        hint="No requests are pending for this session or its descendants."
+        onClick={() => onPick("requests")}
+        icon={<InboxIcon size={14} />}
+      />
       <LauncherRow
         label="Background Work"
         disabled={!backgroundAvailable}
