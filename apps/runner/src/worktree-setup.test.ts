@@ -71,8 +71,18 @@ test("worktree setup parser rejects shell strings, traversal, unsafe env, placeh
   assert.throws(() => parseWorktreeSetupConfig('{"version":1,"setup":[{"name":"Bad","command":"echo hi"}]}'), /command/u);
   assert.throws(() => parseWorktreeSetupConfig('{"version":1,"copyFiles":[{"source":"..\/secret","destination":"x"}]}'), /relative path/u);
   assert.throws(() => parseWorktreeSetupConfig('{"version":1,"environment":{"WOLLIPOG_FAKE":"x"}}'), /reserved/u);
-  assert.throws(() => parseWorktreeSetupConfig('{"version":1,"environment":{"OPENAI_API_KEY":"redirect"}}'), /reserved/u);
-  assert.throws(() => parseWorktreeSetupConfig('{"version":1,"environment":{"PATH":"\/repo\/bin"}}'), /reserved/u);
+  for (const name of [
+    "OPENAI_API_KEY", "google_application_credentials", "MAM_PLAIN",
+    "PATH", "https_proxy", "ALL_PROXY", "NODE_EXTRA_CA_CERTS", "ssl_cert_file",
+    "ANTHROPIC_BEDROCK_BASE_URL", "GOOGLE_GEMINI_BASE_URL", "OPENROUTER_ENDPOINT",
+    "LD_AUDIT", "dyld_fallback_library_path", "PYTHONPATH", "BASH_ENV",
+  ]) {
+    assert.throws(
+      () => parseWorktreeSetupConfig(JSON.stringify({ version: 1, environment: { [name]: "redirect" } })),
+      /reserved/u,
+      name,
+    );
+  }
   assert.throws(() => parseWorktreeSetupConfig('{"version":1,"environment":{"ROOT":"${SECRET_TOKEN}"}}'), /unknown placeholder/u);
   assert.throws(() => parseWorktreeSetupConfig('{"version":1,"teardown":[]}'), /not supported/u);
 });

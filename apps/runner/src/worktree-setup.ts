@@ -4,6 +4,7 @@ import { copyFile, lstat, mkdir, readFile, realpath, rename, stat, writeFile } f
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { AgentContext, WorktreeSetupState } from "@wollipog/protocol";
 import { runContextCommand } from "./context-command.js";
+import { sensitiveEnvironmentName } from "./env-security.js";
 import { killTree, spawnAgent, type SpawnIsolation } from "./spawn.js";
 
 export const WORKTREE_SETUP_CONFIG = ".wollipog.json";
@@ -98,6 +99,17 @@ const RESERVED_PROCESS_ENV = new Set([
   "TMPDIR", "TMP", "TEMP", "PATH", "PATHEXT", "NODE_OPTIONS",
   "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
 ]);
+const RESERVED_NETWORK_ENV = /^(?:(?:HTTP|HTTPS|ALL|NO)_PROXY|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR|SSLKEYLOGFILE|CODEX_CA_CERTIFICATE|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|GIT_SSL_CAINFO)$/iu;
+const RESERVED_PROVIDER_ENDPOINT_ENV = /^(?:ANTHROPIC|CLAUDE|OPENAI|AZURE_OPENAI|GOOGLE|GEMINI|OPENROUTER|CODEX).*_(?:BASE_URL|ENDPOINT)$/iu;
+const RESERVED_LOADER_ENV = /^(?:LD|DYLD)_/iu;
+const RESERVED_RUNTIME_INJECTION_ENV = /^(?:PYTHONPATH|PYTHONHOME|PYTHONSTARTUP|RUBYOPT|RUBYLIB|PERL5OPT|PERL5LIB|BASH_ENV|ENV|SHELLOPTS|GIT_CONFIG_COUNT|GIT_CONFIG_KEY_[0-9]+|GIT_CONFIG_VALUE_[0-9]+)$/iu;
+
+function reservedSetupEnvironmentName(name: string): boolean {
+  return RESERVED_ENV.test(name) || sensitiveEnvironmentName(name) ||
+    RESERVED_PROCESS_ENV.has(name.toUpperCase()) || RESERVED_NETWORK_ENV.test(name) ||
+    RESERVED_PROVIDER_ENDPOINT_ENV.test(name) || RESERVED_LOADER_ENV.test(name) ||
+    RESERVED_RUNTIME_INJECTION_ENV.test(name);
+}
 
 interface WorktreeSetupTrustFile {
   version: 1;
@@ -226,7 +238,7 @@ export function parseWorktreeSetupConfig(source: string): WorktreeSetupConfig {
   const environmentNames = new Set<string>();
   for (const key of Object.keys(environmentRecord).sort()) {
     if (!ENV_NAME.test(key)) throw new Error(`${WORKTREE_SETUP_CONFIG}.environment key ${JSON.stringify(key)} is invalid`);
-    if (RESERVED_ENV.test(key) || RESERVED_PROCESS_ENV.has(key.toUpperCase())) {
+    if (reservedSetupEnvironmentName(key)) {
       throw new Error(`${WORKTREE_SETUP_CONFIG}.environment.${key} is reserved by Wollipog`);
     }
     if (environmentNames.has(key.toLowerCase())) throw new Error(`${WORKTREE_SETUP_CONFIG}.environment contains a case-insensitive duplicate key`);
