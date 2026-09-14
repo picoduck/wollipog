@@ -76,6 +76,8 @@ test("worktree setup parser rejects shell strings, traversal, unsafe env, placeh
     "PATH", "https_proxy", "ALL_PROXY", "NODE_EXTRA_CA_CERTS", "ssl_cert_file",
     "ANTHROPIC_BEDROCK_BASE_URL", "GOOGLE_GEMINI_BASE_URL", "OPENROUTER_ENDPOINT",
     "LD_AUDIT", "dyld_fallback_library_path", "PYTHONPATH", "BASH_ENV",
+    "GIT_CONFIG_PARAMETERS", "git_config_global", "GIT_SSH_COMMAND", "SSH_ASKPASS",
+    "NODE_PATH", "JAVA_TOOL_OPTIONS", "DOTNET_STARTUP_HOOKS", "RUSTC_WRAPPER",
   ]) {
     assert.throws(
       () => parseWorktreeSetupConfig(JSON.stringify({ version: 1, environment: { [name]: "redirect" } })),
