@@ -57,7 +57,7 @@ for (const theme of ["light", "dark"] as const) {
       await page.goto("/command-inbox-projects-e2e.html?orchestratorDefault=1");
       await page.evaluate((theme) => {
         document.documentElement.dataset.theme = theme;
-        window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(112);
+        window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(139);
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([], ["default", "orchestrator"]);
       }, theme);
       await page.getByRole("tab", { name: /Alpha/ }).click();
@@ -70,14 +70,14 @@ for (const theme of ["light", "dark"] as const) {
       await dialog.getByRole("radio", { name: /^Native TUI/ }).click();
       await expect(dialog.getByText(/Usage Accounting: Unavailable/)).toBeVisible();
       await expect(dialog.getByText(/Native TUI spending and tool calls are not included/)).toBeVisible();
-      await dialog.getByRole("spinbutton", { name: "Live Child Limit" }).fill("8");
+      await dialog.getByRole("spinbutton", { name: "Maximum Concurrent Children" }).fill("8");
       await page.screenshot({ path: testInfo.outputPath("native-tui-unmetered.png") });
       await dialog.getByRole("button", { name: "Create Session" }).click();
       await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
         .toMatchObject({ launchSurface: "native_tui" });
       expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()?.config?.permissionMode))
         .toBeUndefined();
-      expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()?.config?.maxChildSessions))
+      expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()?.orchestrator?.behavior?.maximumConcurrentChildren))
         .toBe(8);
     });
     for (const surface of ["direct", "native_tui"] as const) {
@@ -101,11 +101,11 @@ for (const theme of ["light", "dark"] as const) {
       await expect(orchestratorCard).toHaveAttribute("aria-checked", "false");
       await orchestratorCard.click();
       await expect(orchestratorCard).toHaveAttribute("aria-checked", "true");
-      const liveChildLimit = dialog.getByRole("spinbutton", { name: "Live Child Limit" });
+      const liveChildLimit = dialog.getByRole("spinbutton", { name: "Maximum Concurrent Children" });
       await expect(liveChildLimit).toHaveValue("4");
       await liveChildLimit.fill("7");
-      const delegatedControl = dialog.getByRole("radio", { name: /^Questions and Approvals/ });
-      await expect(delegatedControl).toHaveAttribute("aria-checked", "true");
+      const delegatedControl = dialog.getByRole("button", { name: /Descendant Requests: Questions and Approvals/ });
+      await expect(delegatedControl).toBeVisible();
       await expect(orchestratorCard).toContainText(/Guardian reviews eligible actions automatically/);
       const tui = dialog.getByRole("radio", { name: /^Native TUI/ });
       await expect(tui).toBeEnabled();
@@ -114,8 +114,8 @@ for (const theme of ["light", "dark"] as const) {
       await page.screenshot({ path: testInfo.outputPath("preset-selected.png") });
       await dialog.getByRole("button", { name: "Create Session" }).click();
       await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
-        .toMatchObject({ config: { permissionMode: "orchestrator", maxChildSessions: 7 },
-          parentControl: "questions_and_approvals",
+        .toMatchObject({ config: { permissionMode: "orchestrator" },
+          orchestrator: { behavior: { maximumConcurrentChildren: 7 } },
           ...(surface === "native_tui" ? { launchSurface: "native_tui" } : {}) });
     });
     }

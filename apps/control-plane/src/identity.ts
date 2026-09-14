@@ -78,7 +78,7 @@ export function mutationAuthorizationError(
   }
   // Agent Harness defaults are private per-user preferences, not mutations of shared organization
   // resources. The route still requires an authenticated human and can only address that user.
-  if (routePath === "/api/agent-harness-defaults") {
+  if (routePath === "/api/agent-harness-defaults" || routePath === "/api/orchestrator-settings") {
     return null;
   }
   if (!canOperate(principal.role)) return "read-only members cannot mutate organization resources";

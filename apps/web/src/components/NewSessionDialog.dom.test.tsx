@@ -12,8 +12,9 @@ import type {
   RunnerView,
   UiSnapshotMessage,
   AgentHarnessDefaultsView,
+  OrchestratorSettingsView,
 } from "@wollipog/protocol";
-import { RUNNER_CAPABILITY_MIN_PROTOCOL } from "@wollipog/protocol";
+import { DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { loadAgentDefaults, saveAgentDefault } from "../agent-defaults.js";
@@ -140,6 +141,14 @@ async function mountFixture(
   createError?: string | Error,
   defaults: () => Promise<AgentHarnessDefaultsView> = async () => ({ defaults: [] }),
   createSession?: (request: CreateSessionRequest) => Promise<{ id: string }>,
+  orchestratorDefaults: () => Promise<OrchestratorSettingsView> = async () => ({
+    defaults: structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS),
+    source: "system_default",
+    capabilities: {
+      models: [{ id: "test-model", efforts: ["high"] }], effortLevels: ["high"],
+      installations: 1, compatibleInstallations: 1, status: "available",
+    },
+  }),
 ): Promise<Fixture> {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
@@ -157,6 +166,7 @@ async function mountFixture(
   const client = {
     ...api,
     agentHarnessDefaults: defaults,
+    orchestratorSettings: orchestratorDefaults,
     createSession: async (request: CreateSessionRequest) => {
       requests.push(structuredClone(request));
       if (createError) throw typeof createError === "string" ? new Error(createError) : createError;
@@ -236,7 +246,7 @@ function createButton(container: HTMLDivElement): HTMLButtonElement {
 
 function labelledNumberInput(container: HTMLDivElement, label: string): HTMLInputElement | null {
   const candidate = [...container.querySelectorAll<HTMLLabelElement>("label")]
-    .find((item) => item.textContent?.trim() === label);
+    .find((item) => item.textContent?.trim().startsWith(label));
   return candidate?.htmlFor
     ? container.querySelector<HTMLInputElement>(`[id="${candidate.htmlFor}"]`)
     : null;
@@ -252,6 +262,16 @@ async function choosePermissionPreset(container: HTMLDivElement, label: string) 
   await act(async () => { option.click(); });
 }
 
+async function chooseSelectOption(container: HTMLDivElement, label: string, optionLabel: string): Promise<void> {
+  const trigger = container.querySelector<HTMLButtonElement>(`[aria-label^="${label}:"]`);
+  assert.ok(trigger, `${label} select is rendered`);
+  await act(async () => { trigger.click(); });
+  const option = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+    .find((candidate) => candidate.textContent?.includes(optionLabel));
+  assert.ok(option, `${label} offers ${optionLabel}`);
+  await act(async () => { option.click(); });
+}
+
 function permissionPresetGroup(container: HTMLDivElement): Element {
   const group = container.querySelector('[role="radiogroup"][aria-label="Permission Preset"]');
   assert.ok(group, "Permission Preset renders an always-visible choice group");
@@ -260,13 +280,6 @@ function permissionPresetGroup(container: HTMLDivElement): Element {
 
 function permissionPresetCard(container: HTMLDivElement, title: string): HTMLButtonElement | undefined {
   return [...permissionPresetGroup(container).querySelectorAll<HTMLButtonElement>('[role="radio"]')]
-    .find((button) => button.querySelector(".ui-choice-card-title")?.textContent?.trim() === title);
-}
-
-function parentControlCard(container: HTMLDivElement, title: string): HTMLButtonElement | undefined {
-  const group = container.querySelector('[role="radiogroup"][aria-label="Parent Control"]');
-  if (!group) return undefined;
-  return [...group.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
     .find((button) => button.querySelector(".ui-choice-card-title")?.textContent?.trim() === title);
 }
 
@@ -633,10 +646,10 @@ test("retired Conductor stays hidden and native orchestrator selection is sent a
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     assert.equal(fixture.container.textContent?.includes("Conductor-Led Work"), false);
-    assert.equal(labelledNumberInput(fixture.container, "Live Child Limit"), null,
+    assert.equal(labelledNumberInput(fixture.container, "Maximum Concurrent Children"), null,
       "ordinary creation does not show an orchestration-only guardrail");
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    const limit = labelledNumberInput(fixture.container, "Live Child Limit");
+    const limit = labelledNumberInput(fixture.container, "Maximum Concurrent Children");
     assert.ok(limit);
     assert.equal(limit.value, "4", "the compatible effective default is visible rather than implicit");
     assert.equal(limit.min, "0");
@@ -645,11 +658,11 @@ test("retired Conductor stays hidden and native orchestrator selection is sent a
     await act(async () => { fireDomEvent.change(limit, { target: { value: "9" } }); });
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests[0]?.config?.permissionMode, "orchestrator");
-    assert.equal(fixture.requests[0]?.config?.maxChildSessions, 9);
+    assert.equal(fixture.requests[0]?.orchestrator?.behavior?.maximumConcurrentChildren, 9);
   } finally { await unmountFixture(fixture); }
 });
 
-test("Live Child Limit rejects fractional and out-of-range creation values accessibly", async () => {
+test("Maximum Concurrent Children rejects fractional and out-of-range creation values accessibly", async () => {
   const enabledRunner: RunnerView = {
     ...runner, protocolVersion: 109,
     agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
@@ -661,7 +674,7 @@ test("Live Child Limit rejects fractional and out-of-range creation values acces
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    const limit = labelledNumberInput(fixture.container, "Live Child Limit");
+    const limit = labelledNumberInput(fixture.container, "Maximum Concurrent Children");
     assert.ok(limit);
 
     for (const invalid of ["4.5", "-1", "65", ""]) {
@@ -680,12 +693,12 @@ test("Live Child Limit rejects fractional and out-of-range creation values acces
     assert.equal(limit.getAttribute("aria-invalid"), "false");
     assert.equal(createButton(fixture.container).disabled, false);
     await act(async () => { createButton(fixture.container).click(); });
-    assert.equal(fixture.requests[0]?.config?.maxChildSessions, 0,
+    assert.equal(fixture.requests[0]?.orchestrator?.behavior?.maximumConcurrentChildren, 0,
       "zero is persisted as a deliberate pause rather than treated as empty");
   } finally { await unmountFixture(fixture); }
 });
 
-test("Parent Control is Orchestrator-only and defaults human-created sessions to Questions and Approvals", async () => {
+test("Decision Delegation is Orchestrator-only and shows effective sources", async () => {
   const enabledRunner: RunnerView = {
     ...runner, protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.delegatedParentControl,
     agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
@@ -693,18 +706,128 @@ test("Parent Control is Orchestrator-only and defaults human-created sessions to
       permissionModes: ["default", "orchestrator"],
     } })),
   };
-  const fixture = await mountFixture({ runners: [enabledRunner] });
+  const fixture = await mountFixture({ runners: [enabledRunner] }, undefined, undefined, undefined, undefined, async () => ({
+    defaults: structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS),
+    source: "user_default",
+    capabilities: { models: [{ id: "test-model" }], effortLevels: ["high"], installations: 1, compatibleInstallations: 1, status: "available" },
+  }));
   try {
     await act(async () => { selectProject(fixture.container, project.id); });
-    assert.equal(parentControlCard(fixture.container, "Off"), undefined);
+    assert.equal(fixture.container.querySelector('[aria-label^="Descendant Requests:"]'), null);
     assert.match(fixture.container.textContent ?? "", /Approval-required implementation actions stay blocked/);
     assert.doesNotMatch(fixture.container.textContent ?? "", /Guardian reviews eligible actions/);
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    assert.equal(parentControlCard(fixture.container, "Questions and Approvals")?.getAttribute("aria-checked"), "true");
+    const descendant = fixture.container.querySelector<HTMLButtonElement>('[aria-label^="Descendant Requests:"]');
+    assert.match(descendant?.getAttribute("aria-label") ?? "", /Questions and Approvals/);
+    assert.match(fixture.container.textContent ?? "", /User Default/);
+    assert.ok(fixture.container.querySelector('[aria-label^="PR Merge Approval:"]'));
     await act(async () => { createButton(fixture.container).click(); });
-    assert.equal(fixture.requests[0]?.parentControl, "questions_and_approvals");
+    assert.equal(fixture.requests[0]?.orchestrator?.delegation?.parentControl, undefined,
+      "an inherited effective value is not mislabeled or sent as an explicit override");
     assert.equal(fixture.requests[0]?.config?.permissionMode, "orchestrator");
-    assert.equal(fixture.requests[0]?.config?.maxChildSessions, 4);
+    assert.equal(fixture.requests[0]?.orchestrator?.behavior?.maximumConcurrentChildren, undefined);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("new Orchestrator sessions send only explicit overrides after showing effective defaults", async () => {
+  const enabledRunner: RunnerView = {
+    ...runner,
+    protocolVersion: PROTOCOL_VERSION,
+    agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    } })),
+  };
+  const effective = structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
+  effective.behavior.childModel = "test-model";
+  effective.behavior.childEffort = "high";
+  effective.behavior.maximumConcurrentChildren = 5;
+  const fixture = await mountFixture({ runners: [enabledRunner] }, undefined, undefined, undefined, undefined, async () => ({
+    defaults: effective,
+    source: "user_default",
+    capabilities: {
+      models: [{ id: "test-model", displayName: "Test Model", efforts: ["high"] }, { id: "sol", displayName: "Sol", efforts: ["high"] }],
+      effortLevels: ["high"], installations: 1, compatibleInstallations: 1, status: "available",
+    },
+  }));
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    assert.match(fixture.container.querySelector('[aria-label^="Child Model:"]')?.getAttribute("aria-label") ?? "", /Test Model/);
+    assert.equal(labelledNumberInput(fixture.container, "Maximum Concurrent Children")?.value, "5");
+    assert.match(fixture.container.textContent ?? "", /These effective values are resolved and stored before the campaign's first turn/);
+    await chooseSelectOption(fixture.container, "Child Model", "Sol");
+    await chooseSelectOption(fixture.container, "PR Merge Approval", "Orchestrator");
+    assert.match(fixture.container.textContent ?? "", /Session Override/);
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.deepEqual(fixture.requests[0]?.orchestrator, {
+      behavior: { childModel: "sol" },
+      delegation: { decisions: { pr_merge: "orchestrator" } },
+    });
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("unsupported control-plane combinations explain the upgrade and block Orchestrator creation", async () => {
+  const enabledRunner: RunnerView = {
+    ...runner,
+    protocolVersion: PROTOCOL_VERSION,
+    agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    } })),
+  };
+  const fixture = await mountFixture(
+    { runners: [enabledRunner] }, undefined, undefined, undefined, undefined,
+    async () => { throw new ApiError("Missing", 404); },
+  );
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    assert.match(fixture.container.textContent ?? "", /does not support campaign policy.*Update or restart/s);
+    assert.equal(createButton(fixture.container).disabled, true);
+    await act(async () => { submitWithEnter(fixture.container); });
+    assert.equal(fixture.requests.length, 0);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a session override can repair drifted defaults without rewriting the account", async () => {
+  const enabledRunner: RunnerView = {
+    ...runner,
+    protocolVersion: PROTOCOL_VERSION,
+    agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    } })),
+  };
+  const drifted = structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
+  drifted.behavior.childModel = "retired-model";
+  const fixture = await mountFixture({ runners: [enabledRunner] }, undefined, undefined, undefined, undefined, async () => ({
+    defaults: drifted,
+    source: "user_default",
+    capabilities: {
+      models: [{ id: "sol", displayName: "Sol", efforts: ["high"] }],
+      effortLevels: ["high"], supportedPairs: [{ modelId: "sol", effortLevels: ["high"] }],
+      installations: 1, compatibleInstallations: 0, status: "unavailable",
+      reason: "The saved Child Model is no longer advertised. Choose Automatic.",
+    },
+  }));
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    assert.equal(createButton(fixture.container).disabled, true);
+    await chooseSelectOption(fixture.container, "Child Model", "Automatic");
+    assert.equal(createButton(fixture.container).disabled, false,
+      "a compatible explicit override repairs only this new campaign");
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.deepEqual(fixture.requests[0]?.orchestrator, {
+      behavior: { childModel: null }, delegation: {},
+    });
   } finally {
     await unmountFixture(fixture);
   }
@@ -722,8 +845,15 @@ test("Parent Control opt-ins stay disabled on an older runner", async () => {
   try {
     await act(async () => { selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    assert.equal(parentControlCard(fixture.container, "Off")?.getAttribute("aria-checked"), "true");
-    assert.equal(parentControlCard(fixture.container, "Questions")?.getAttribute("aria-disabled"), "true");
+    const descendant = fixture.container.querySelector<HTMLButtonElement>('[aria-label^="Descendant Requests:"]')!;
+    assert.match(descendant.getAttribute("aria-label") ?? "", /Human/);
+    assert.match(descendant.parentElement?.parentElement?.textContent ?? "", /Compatibility Fallback/);
+    assert.equal(createButton(fixture.container).disabled, false,
+      "an inherited authority default safely downgrades without blocking an older supported runner");
+    await act(async () => { descendant.click(); });
+    const questions = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+      .find((option) => option.textContent?.includes("Questions"));
+    assert.equal(questions?.getAttribute("aria-disabled"), "true");
   } finally {
     await unmountFixture(fixture);
   }
@@ -897,8 +1027,8 @@ test("saved Orchestrator default is visible and gates Native TUI without requiri
       await act(async () => { createButton(fixture.container).click(); });
       assert.equal(fixture.requests.length, 1);
       assert.equal(fixture.requests[0]?.config?.permissionMode, undefined, "Default still delegates to the server");
-      assert.equal(fixture.requests[0]?.config?.maxChildSessions, 4,
-        "a saved Orchestrator default still persists its visible initial limit");
+      assert.equal(fixture.requests[0]?.orchestrator?.behavior?.maximumConcurrentChildren, undefined,
+        "a visible inherited default is resolved by the server rather than mislabeled as an override");
       assert.equal(fixture.requests[0]?.launchSurface, protocolVersion === 112 ? "native_tui" : undefined);
     } finally { await unmountFixture(fixture); }
   }

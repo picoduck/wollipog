@@ -53,6 +53,8 @@ export function orchestratorInstructions(projectPaths: readonly string[]): strin
       ? `Project locations are read-only: ${locations.map((path) => JSON.stringify(path)).join(", ")}.`
       : "Project locations are read-only and may be inspected by absolute path.",
     "You may read and search project files and user skill directories, inspect Git history and branches, read GitHub issues, pull requests, checks, review threads, and comments, search or fetch the web, and use Wollipog session-management tools.",
+    "At campaign start and before completion or follow-up actions, call get_session for your own session, inspect its orchestratorPolicy, and follow the stored Child Model, Child Effort, Follow-Ups, Completion, and Decision Delegation values. Never broaden that policy or change account defaults.",
+    "Follow-Ups recommend_only means report proposals without starting them; execute_approved still requires the applicable approval. Completion retain keeps verified finished children available, while stop_and_archive permits stopping and archiving only after completion is verified.",
     "GitHub writes are limited to assigning or unassigning issues, changing issue labels, and posting plan or status comments.",
     "Do not edit project files, run builds, tests, or typechecks in a project location, commit, push, create branches or worktrees for yourself, open pull requests, merge, or perform control-plane mutations outside descendant session management.",
     "If a requested operation is outside that boundary, explain that the Orchestrator preset refuses it and delegate the implementation to a child session.",

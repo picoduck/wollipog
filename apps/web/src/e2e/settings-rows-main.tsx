@@ -13,7 +13,8 @@ import {
   SettingsGroup,
   SettingsView,
 } from "../components/SettingsView.js";
-import type { AgentHarnessDefaultsView } from "@wollipog/protocol";
+import { DEFAULT_ORCHESTRATOR_DEFAULTS, type AgentHarnessDefaultsView } from "@wollipog/protocol";
+import { OrchestratorSettingsPanel } from "../components/OrchestratorSettingsPanel.js";
 import { createApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ApiTransport } from "../api-transport.js";
@@ -122,7 +123,24 @@ const harnessDefaultsTransport: ApiTransport = {
   instanceId: "settings-fixture",
   publicOrigin: window.location.origin,
   close() {},
-  async request() {
+  async request(path) {
+    if (path === "/api/orchestrator-settings") {
+      const drifted = new URLSearchParams(window.location.search).get("defaults") === "agent-repair";
+      const defaults = structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
+      if (drifted) defaults.behavior.childModel = "retired-model";
+      return new Response(JSON.stringify({
+        defaults,
+        source: "user_default",
+        capabilities: {
+          models: [{ id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol", efforts: ["low", "high"] }],
+          effortLevels: ["low", "high"],
+          installations: 1,
+          compatibleInstallations: drifted ? 0 : 1,
+          status: drifted ? "unavailable" : "available",
+          ...(drifted ? { reason: "The saved fixed Child Model is unavailable. Choose Automatic or update a runner." } : {}),
+        },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
     const mode = new URLSearchParams(window.location.search).get("defaults");
     if (mode === "agent-missing") {
       return new Response(JSON.stringify({ error: "Not Found" }), {
@@ -250,6 +268,7 @@ function Harness() {
                   )}
                 />
               ),
+              orchestrator: <ApiProvider client={harnessDefaultsApi}><OrchestratorSettingsPanel /></ApiProvider>,
               network: (
                 <NetworkPanel
                   tailnet={{

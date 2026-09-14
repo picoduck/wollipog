@@ -254,6 +254,7 @@ function mapSession(s: Json): Json {
     maxChildSessions: s?.maxChildSessions ?? null,
     liveChildCapacity: s?.liveChildCapacity ?? null,
     parentControl: s?.parentControl ?? "off",
+    ...(s?.orchestratorPolicy ? { orchestratorPolicy: s.orchestratorPolicy } : {}),
     costUsd: s?.costUsd,
     costBudgetUsd: s?.costBudgetUsd ?? null,
     costCheckpointsUsd: s?.costCheckpointsUsd ?? null,

@@ -164,6 +164,44 @@ test("the Composer exposes human-controlled Parent Control only for Orchestrator
         follow_up_issue_publication: "human",
         ui_evidence_approval: "human",
       },
+    }, orchestratorPolicy: {
+      version: 1,
+      behavior: {
+        childModel: "claude-opus-5",
+        childEffort: "high",
+        maximumConcurrentChildren: 6,
+        followUps: "recommend_only",
+        completion: "retain",
+      },
+      delegation: {
+        parentControl: "off",
+        decisions: {
+          implementation_question: "human",
+          pr_merge: "human",
+          merged_branch_deletion: "human",
+          follow_up_issue_publication: "human",
+          ui_evidence_approval: "human",
+        },
+      },
+      sources: {
+        behavior: {
+          childModel: "session_override",
+          childEffort: "user_default",
+          maximumConcurrentChildren: "user_default",
+          followUps: "system_default",
+          completion: "system_default",
+        },
+        delegation: {
+          parentControl: "active_campaign",
+          decisions: {
+            implementation_question: "legacy_session",
+            pr_merge: "legacy_session",
+            merged_branch_deletion: "legacy_session",
+            follow_up_issue_publication: "legacy_session",
+            ui_evidence_approval: "legacy_session",
+          },
+        },
+      },
     }, costBudgetUsd: null,
       costCheckpointsUsd: null, maxToolCalls: null } as SessionView}
     planActive={false}
@@ -184,8 +222,12 @@ test("the Composer exposes human-controlled Parent Control only for Orchestrator
     assert.equal(container.querySelector('[aria-label^="Parent Control:"]'), null);
 
     await act(async () => render("orchestrator"));
-    const select = container.querySelector<HTMLButtonElement>('[aria-label="Parent Control: Off"]');
+    const select = container.querySelector<HTMLButtonElement>('[aria-label="Parent Control: Human"]');
     assert.ok(select);
+    assert.match(container.textContent ?? "", /Campaign Behavior/);
+    assert.match(container.textContent ?? "", /claude-opus-5/);
+    assert.match(container.textContent ?? "", /Session Override/);
+    assert.match(container.textContent ?? "", /keeps its stored policy when account defaults change/);
     await act(async () => fireDomEvent.click(select));
     const questions = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
       .find((option) => option.textContent?.includes("Questions") && !option.textContent?.includes("Approvals"));

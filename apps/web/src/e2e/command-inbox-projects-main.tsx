@@ -1,6 +1,7 @@
 import React, { useCallback, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  DEFAULT_ORCHESTRATOR_DEFAULTS,
   PROTOCOL_VERSION,
   buildConversationHandoff,
   type AgentSlashCommand,
@@ -867,6 +868,17 @@ const client = {
     name: "Codex", installations: [], compatibleInstallations: 1,
     preference: { permissionMode: "orchestrator" },
   }] : [] }),
+  orchestratorSettings: async () => ({
+    defaults: structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS),
+    source: "user_default" as const,
+    capabilities: {
+      models: [{ id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol", efforts: ["low", "high"] }],
+      effortLevels: ["low", "high"],
+      installations: 1,
+      compatibleInstallations: 1,
+      status: "available" as const,
+    },
+  }),
   runWorkflowArtifacts: async () => ({ artifacts: [], nextCursor: undefined }),
   createSession: async (request: CreateSessionRequest) => {
     lastCreateSessionRequest = structuredClone(request);
