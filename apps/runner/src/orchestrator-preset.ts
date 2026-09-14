@@ -229,17 +229,20 @@ export function projectOrchestratorPresetForPeer(
     return agents;
   }
   return agents.map((agent) => {
+    const permissionModes = agent.capabilities?.permissionModes;
     if ((agent.context?.kind ?? "native") !== "native" || agent.driver !== "claude-code" ||
-        supportsNativeOrchestratorBoundary(
-          agent.driver,
-          host.platform ?? process.platform,
-          host.isolationMode,
-        ) || !agent.capabilities?.permissionModes?.includes(ORCHESTRATOR_PRESET)) return agent;
+        !permissionModes?.includes(ORCHESTRATOR_PRESET)) return agent;
+    const legacyStrictSupported = supportsNativeOrchestratorBoundary(
+      agent.driver,
+      host.platform ?? process.platform,
+      host.isolationMode,
+    ) && permissionModes.includes("dontAsk");
+    if (legacyStrictSupported) return agent;
     return {
       ...agent,
       capabilities: {
-        ...agent.capabilities,
-        permissionModes: agent.capabilities.permissionModes.filter(
+        ...agent.capabilities!,
+        permissionModes: permissionModes.filter(
           (mode) => mode !== ORCHESTRATOR_PRESET,
         ),
       },
