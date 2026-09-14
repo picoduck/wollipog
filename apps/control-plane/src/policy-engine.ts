@@ -139,13 +139,22 @@ export function parsePolicyHookRequest(input: unknown): ParsedPolicyHookRequest 
   };
 }
 
-/** Shared audiences require a spawn approval by default; an individual owner may opt in with a
- * higher-priority stored policy scoped to this same operation. */
-export function sessionSpawnSafetyPolicy(individualOwner = false, now = 0): GovernancePolicy {
+/** Shared audiences require a spawn approval by default. Individual owners and verified
+ * human-created Orchestrators carry narrow built-in authorization for this operation; explicit
+ * stored policies retain their higher priority and can still ask or deny. */
+export function sessionSpawnSafetyPolicy(
+  individualOwner = false,
+  now = 0,
+  humanCreatedOrchestrator = false,
+): GovernancePolicy {
   return {
-    policyId: "builtin:session-spawn-human-gate",
-    name: "Review Agent-Created Sessions",
-    effect: individualOwner ? "allow" : "ask",
+    policyId: humanCreatedOrchestrator
+      ? "builtin:human-created-orchestrator-spawn-authorization"
+      : "builtin:session-spawn-human-gate",
+    name: humanCreatedOrchestrator
+      ? "Authorize Human-Created Orchestrator Children"
+      : "Review Agent-Created Sessions",
+    effect: individualOwner || humanCreatedOrchestrator ? "allow" : "ask",
     priority: -1_000_000,
     enabled: true,
     builtin: true,

@@ -136,6 +136,16 @@ update Wollipog or omit effort; it never retries without the value. Older client
 this option and must be upgraded before a caller can request it. Calls that omit effort remain
 compatible with the protocol-v100 Agent Control creation contract.
 
+Creating an Orchestrator as an authenticated human authorizes its ordinary child-session creation
+within the audience, workspace access, runner capacity, concurrency, cost, tool-call, and
+child-admission limits already attached to the session. Explicit applicable governance policies
+retain precedence and may still ask or deny. The control plane derives eligibility from the
+persisted Orchestrator configuration and its own creation-actor record; children, imported sessions,
+and ambiguous legacy rows do not inherit or infer it from prompts, titles, or client claims. Existing
+rows are upgraded only when their stored campaign-policy provenance establishes human creation.
+This decision is control-plane-local, so mixed-version runners and clients continue through the same
+spawn gate without a protocol fallback or broadened resource access.
+
 ## Typed Parent Control Decisions
 
 Protocol v139 lets a human assign five workflow decisions independently to the human or the

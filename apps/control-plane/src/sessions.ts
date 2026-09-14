@@ -2894,7 +2894,11 @@ export class SessionsService {
       escalated: false,
     }, [
       ...this.db.listGovernancePolicies(),
-      sessionSpawnSafetyPolicy(this.db.sessionHasIndividualOwner(parent.id)),
+      sessionSpawnSafetyPolicy(
+        this.db.sessionHasIndividualOwner(parent.id),
+        now,
+        this.db.sessionWasHumanCreatedOrchestrator(parent.id),
+      ),
     ]);
     const fingerprint = createHash("sha256").update(JSON.stringify({
       request,
@@ -2928,10 +2932,19 @@ export class SessionsService {
       ...(decision.policy?.askTimeout ? { expiresAt: now + decision.policy.askTimeout * 1000 } : {}),
     };
     const audits = [
-      this.governanceAuditRecord(parent, approval, "request", "pending", { kind: "agent", id: parentSessionId }, now),
+      this.governanceAuditRecord(
+        parent,
+        approval,
+        "request",
+        "pending",
+        { kind: "agent", id: parentSessionId },
+        now,
+        { governancePolicyId: decision.policy!.policyId },
+      ),
       this.governanceAuditRecord(parent, approval, "policy_decision",
         decision.effect === "ask" ? "asked" : decision.effect === "allow" ? "allowed" : "denied",
-        { kind: "policy", id: decision.policy!.policyId }, now),
+        { kind: "policy", id: decision.policy!.policyId }, now,
+        { governancePolicyId: decision.policy!.policyId }),
     ];
     if (decision.effect === "ask") {
       const begun = this.db.beginPolicyHookApproval({
@@ -3558,6 +3571,9 @@ export class SessionsService {
     const session = existing ?? this.db.createSession({
       id,
       parentSessionId,
+      creationActor: creationContext?.defaultOwnerUserId
+        ? "human"
+        : parentSessionId ? "agent" : "system",
       runnerId: req.runnerId,
       workspaceId,
       ...requestedProject.data,
