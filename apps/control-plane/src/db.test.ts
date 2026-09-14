@@ -2247,6 +2247,51 @@ test("typed workflow decisions preserve their exact approval snapshot across a d
   }
 });
 
+test("PR merge action admission stays durable and consumes only its matching digest", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-workflow-action-restart-"));
+  const file = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(file);
+    initial.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    initial.createSession(newSession({ id: "parent" }));
+    initial.createSession(newSession({ id: "child", parentSessionId: "parent" }));
+    const snapshot = {
+      category: "pr_merge" as const, repository: "picoduck/wollipog", pullRequest: 42,
+      headSha: "a".repeat(40), reviewResult: "merge" as const,
+      requiredChecks: { headSha: "a".repeat(40), status: "passed" as const, checkedAt: 1,
+        checks: [{ name: "Required", state: "passed" as const }] },
+    };
+    assert.ok(initial.createWorkflowDecision({
+      requestId: "merge-42", occurrenceId: "workflow-merge-42", sessionId: "child",
+      controllingSessionId: "parent", category: "pr_merge", resourceKey: "picoduck/wollipog#42",
+      resourceSnapshot: snapshot, resourceDigest: "b".repeat(64), policyRevision: 3,
+      authority: "orchestrator", createdAt: 1_000,
+    }));
+    assert.ok(initial.resolveWorkflowDecision("workflow-merge-42", "orchestrator", "approved", 2_000));
+    const admission = {
+      kind: "pr_merge_enqueue" as const,
+      command: "gh pr merge https://github.com/picoduck/wollipog/pull/42 --squash",
+      commandDigest: "c".repeat(64),
+      armedAt: 3_000,
+    };
+    assert.equal(initial.armWorkflowDecisionAction("workflow-merge-42", admission)?.status, "approved");
+    initial.close();
+
+    const reopened = ControlPlaneDb.open(file);
+    assert.deepEqual(reopened.workflowDecisionByOccurrence("workflow-merge-42")?.actionAdmission, admission);
+    assert.equal(reopened.consumeWorkflowDecisionAction(
+      "workflow-merge-42", "d".repeat(64), 4_000,
+    ), null, "a mismatched command digest cannot consume the grant");
+    assert.equal(reopened.workflowDecisionByOccurrence("workflow-merge-42")?.status, "approved");
+    assert.equal(reopened.consumeWorkflowDecisionAction(
+      "workflow-merge-42", admission.commandDigest, 5_000,
+    )?.status, "consumed");
+    reopened.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("campaign report verification and normalized follow-up deduplication survive a database restart", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-campaign-restart-"));
   const file = join(root, "control-plane.db");

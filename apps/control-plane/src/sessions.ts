@@ -133,6 +133,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type WorkflowNodeDefinition,
   type WorkflowNodeOutcome,
   type WorkflowDecisionAuthority,
+  type WorkflowDecisionAction,
   type WorkflowDecisionCategory,
   type WorkflowDecisionResourceSnapshot,
   type WorkflowDecisionView,
@@ -578,6 +579,36 @@ export function normalizeWorkflowDecisionSnapshot(
     return fail("UI evidence references must be unique HTTPS resources with SHA-256 integrity");
   }
   return ok({ category: "ui_evidence_approval", evidence });
+}
+
+export function canonicalPrMergeEnqueueCommand(
+  snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
+): string {
+  return `gh pr merge https://github.com/${snapshot.repository}/pull/${snapshot.pullRequest} --squash`;
+}
+
+export function normalizeWorkflowDecisionAction(
+  snapshot: WorkflowDecisionResourceSnapshot,
+  input: unknown,
+): ServiceResult<WorkflowDecisionAction | null> {
+  if (snapshot.category !== "pr_merge") {
+    return input === undefined
+      ? ok(null)
+      : fail("this workflow decision category does not support action admission");
+  }
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return fail("PR merge decisions require an exact enqueue action");
+  }
+  const action = input as Record<string, unknown>;
+  if (Object.keys(action).length !== 2 || action.kind !== "pr_merge_enqueue" ||
+      !boundedDecisionString(action.command, 2000)) {
+    return fail("PR merge decisions require one bounded pr_merge_enqueue command");
+  }
+  const canonical = canonicalPrMergeEnqueueCommand(snapshot);
+  if (action.command !== canonical) {
+    return fail("enqueue command does not match the approved repository and pull request", 409);
+  }
+  return ok({ kind: "pr_merge_enqueue", command: canonical });
 }
 
 /** HTTP bodies are structurally cast at the route boundary. Validate the guardrail values before
@@ -2597,6 +2628,7 @@ export class SessionsService {
       policyRule?: GovernanceAuditEntry["policyRule"];
       governancePolicyId?: string;
       optionId?: string | null;
+      workflowDecision?: GovernanceAuditEntry["workflowDecision"];
     } = {},
   ): GovernanceAuditEntry {
     return this.db.appendGovernanceAudit(this.governanceAuditRecord(
@@ -2648,6 +2680,7 @@ export class SessionsService {
       policyRule?: GovernanceAuditEntry["policyRule"];
       governancePolicyId?: string;
       optionId?: string | null;
+      workflowDecision?: GovernanceAuditEntry["workflowDecision"];
     } = {},
   ): Omit<GovernanceAuditEntry, "auditId"> {
     const contentDigest = auditDigest(options.content ?? request.context);
@@ -2662,6 +2695,7 @@ export class SessionsService {
       ...(options.policyRule ? { policyRule: options.policyRule } : {}),
       ...(options.governancePolicyId ? { governancePolicyId: options.governancePolicyId } : {}),
       ...(options.optionId != null ? { optionId: options.optionId } : {}),
+      ...(options.workflowDecision ? { workflowDecision: options.workflowDecision } : {}),
       timestamp: now,
     };
   }
@@ -5325,7 +5359,7 @@ export class SessionsService {
     const obligation = [
       `[Wollipog Campaign Policy — server-derived, revision ${projection.policyRevision}]`,
       `Campaign ${campaign.id}; Child Model ${policy.behavior.childModel ?? "Automatic"}; Child Effort ${policy.behavior.childEffort ?? "Automatic"}; Follow-Ups ${policy.behavior.followUps}; Completion ${policy.behavior.completion}.`,
-      `Typed decision owners: ${owners}. This is not blanket approval. For implementation questions, PR merge, merged-branch deletion, follow-up issue publication, and UI evidence approval, create the exact typed request and consume an approval immediately before the matching action. Ordinary prompts cannot satisfy a typed gate.`,
+      `Typed decision owners: ${owners}. This is not blanket approval. For implementation questions, PR merge, merged-branch deletion, follow-up issue publication, and UI evidence approval, create the exact typed request and consume an approval immediately before the matching action. For PR merge, pass and then execute the exact canonical gh pr merge URL --squash command; its matching one-shot runner permission completes consumption. Ordinary prompts cannot satisfy a typed gate.`,
       "Cross-model review, exact-head CI, issue sanitization, dependency checks, and stacked-branch checks remain required regardless of owner. An enqueued PR is unfinished until merge-group CI passes and the forge reports actual MERGED state. Authentication, secrets, persistent permission grants, governance, budgets, and tool guardrails remain human-only.",
       projection.uiEvidenceReview.status === "available"
         ? "The controlling Orchestrator can inspect UI evidence for this campaign."
@@ -5557,13 +5591,79 @@ export class SessionsService {
       this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
       return fail("workflow decision authority was revoked or ancestry changed before action start", 409);
     }
+    const action = normalizeWorkflowDecisionAction(normalized.data, request?.action);
+    if (!action.ok) return fail(action.error!, action.status);
+    if (action.data) {
+      for (const owner of [child, parent]) {
+        const unsupported = this.capabilityFailure(
+          owner.runnerId,
+          "workflowDecisionActionAdmission",
+          "Workflow decision action admission",
+        );
+        if (unsupported) {
+          this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+          return fail(unsupported.error!, unsupported.status);
+        }
+      }
+    }
     const now = Date.now();
+    if (action.data) {
+      const armed = this.db.armWorkflowDecisionAction(occurrenceId, {
+        ...action.data,
+        commandDigest: auditDigest(action.data)!,
+        armedAt: now,
+      });
+      if (!armed) return fail("workflow decision action admission changed concurrently", 409);
+      this.hub.sessionChangedById(sessionId);
+      this.hub.sessionChangedById(parent.id);
+      return ok(armed);
+    }
     const consumed = this.db.consumeWorkflowDecision(occurrenceId, now);
     if (!consumed) return fail("workflow decision was already consumed", 409);
     this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "agent", id: sessionId }, now);
     this.hub.sessionChangedById(sessionId);
     this.hub.sessionChangedById(parent.id);
     return ok(consumed);
+  }
+
+  private workflowDecisionActionForPermission(
+    session: SessionView,
+    approval: PendingApproval,
+  ): { decision: WorkflowDecisionView; commandDigest: string; optionId: string } | null {
+    const expectedTool = session.driver === "codex-app-server"
+      ? "commandExecution"
+      : session.driver === "claude-code" ? "Bash" : null;
+    const command = approval.context?.input;
+    const optionId = approval.options.find((option) => option.kind === "allow_once")?.optionId;
+    if (!expectedTool || approval.kind === "authentication" || approval.context?.toolName !== expectedTool ||
+        typeof command !== "string" || !command || !optionId) return null;
+    const action: WorkflowDecisionAction = { kind: "pr_merge_enqueue", command };
+    const commandDigest = auditDigest(action)!;
+    const matches = this.db.approvedWorkflowDecisionsForAction(session.id, commandDigest)
+      .filter((decision) => decision.category === "pr_merge" &&
+        decision.actionAdmission?.kind === action.kind &&
+        decision.actionAdmission.command === command);
+    if (matches.length !== 1) return null;
+    const decision = matches[0]!;
+    const parent = this.db.getSession(decision.controllingSessionId);
+    const child = this.db.getSession(decision.sessionId);
+    const policy = parent?.parentControlPolicy;
+    const unsupported = [child, parent].some((owner) => owner && this.capabilityFailure(
+      owner.runnerId,
+      "workflowDecisionActionAdmission",
+      "Workflow decision action admission",
+    ));
+    if (!child || child.id !== session.id || !parent || isTerminal(child.status) || isTerminal(parent.status) ||
+        unsupported || !this.db.isSessionDescendant(parent.id, child.id) || !policy ||
+        policy.revision !== decision.policyRevision ||
+        this.effectiveWorkflowDecisionAuthority(parent, policy, "pr_merge") !== decision.authority ||
+        canonicalPrMergeEnqueueCommand(decision.resourceSnapshot as Extract<
+          WorkflowDecisionResourceSnapshot, { category: "pr_merge" }
+        >) !== command) {
+      this.revokeWorkflowDecision(decision, { kind: "system", id: "workflow-decision-action-admission" });
+      return null;
+    }
+    return { decision, commandDigest, optionId };
   }
 
   private workflowDecisionController(child: SessionView): {
@@ -5768,6 +5868,7 @@ export class SessionsService {
       contentDigest: decision.resourceDigest,
       optionId: decision.selectedOptionId,
       workflowDecision: {
+        occurrenceId: decision.occurrenceId,
         parentSessionId: decision.controllingSessionId,
         childSessionId: decision.sessionId,
         category: decision.category,
@@ -8789,6 +8890,74 @@ export class SessionsService {
           now,
           { governancePolicyId: policyDecision.policy.policyId },
         );
+      }
+
+      const actionAdmission = effectiveEffect === "deny"
+        ? null
+        : this.workflowDecisionActionForPermission(session, approval);
+      if (actionAdmission) {
+        const actor: GovernanceActor = { kind: "system", id: "workflow-decision-action-admission" };
+        const sent = this.hub.sendToRunner(session.runnerId, {
+          type: "resolve_permission",
+          sessionId,
+          requestId: approval.requestId,
+          optionId: actionAdmission.optionId,
+        });
+        if (sent) {
+          const consumed = this.db.consumeWorkflowDecisionAction(
+            actionAdmission.decision.occurrenceId,
+            actionAdmission.commandDigest,
+            now,
+          );
+          if (!consumed) {
+            throw new Error("delivered workflow decision action admission could not be consumed");
+          }
+          const current = this.db.getSession(sessionId)?.pendingApproval;
+          const remaining = pendingRequests(current).some((request) =>
+            request.ownerToolUseId || request.kind === "workflow_decision")
+            ? removePendingRequest(current, approval.requestId) : null;
+          this.db.setPendingApproval(sessionId, remaining);
+          this.db.updateSessionStatus(sessionId, remaining ? "input_required" : "running", now);
+          this.recordWorkflowDecisionAudit(consumed, "consumed", actor, now);
+          this.recordGovernanceAudit(session, approval, "resolution", "allowed", actor, now, {
+            optionId: actionAdmission.optionId,
+            ...(policyDecision.policy ? { governancePolicyId: policyDecision.policy.policyId } : {}),
+            workflowDecision: {
+              occurrenceId: consumed.occurrenceId,
+              parentSessionId: consumed.controllingSessionId,
+              childSessionId: consumed.sessionId,
+              category: consumed.category,
+              policyRevision: consumed.policyRevision,
+              resourceDigest: consumed.resourceDigest,
+            },
+          });
+          this.gateOnPolicy(sessionId, now);
+          this.hub.sessionChangedById(sessionId);
+          this.hub.sessionChangedById(consumed.controllingSessionId);
+          return;
+        }
+        this.recordGovernanceAudit(session, approval, "resolution", "delivery_failed", actor, now, {
+          optionId: actionAdmission.optionId,
+          ...(policyDecision.policy ? { governancePolicyId: policyDecision.policy.policyId } : {}),
+          workflowDecision: {
+            occurrenceId: actionAdmission.decision.occurrenceId,
+            parentSessionId: actionAdmission.decision.controllingSessionId,
+            childSessionId: actionAdmission.decision.sessionId,
+            category: actionAdmission.decision.category,
+            policyRevision: actionAdmission.decision.policyRevision,
+            resourceDigest: actionAdmission.decision.resourceDigest,
+          },
+        });
+        // A failed one-shot delivery is itself the admission outcome for this event. Do not fall
+        // through to an ordinary allow policy and send the same request a second time: retain both
+        // the armed decision and the human-visible card so a fresh runner request can retry it.
+        this.db.setPendingApproval(
+          sessionId,
+          addPendingRequestPreservingRunnerGuardrails(this.db.getSession(sessionId)?.pendingApproval, approval),
+        );
+        this.db.updateSessionStatus(sessionId, "input_required", now);
+        this.notifyTransition(session, sessionId);
+        return;
       }
 
       if (effectiveEffect !== "ask") {

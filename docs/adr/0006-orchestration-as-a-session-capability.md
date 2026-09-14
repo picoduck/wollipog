@@ -91,8 +91,12 @@ Orchestrator sessions default Parent Control to **Questions and Approvals**; the
 only authority that can change that setting, and secret, authentication, identity, policy-gate,
 and persistent-grant requests remain non-delegable. Protocol v139 supplements the legacy broad
 setting with revisioned, per-category workflow-decision authority. It binds approval to exact
-resource evidence and requires one-shot consumption immediately before supported mutations; the
-control plane does not claim to intercept independently available external credentials.
+resource evidence and requires one-shot consumption immediately before supported mutations.
+Protocol v142 arms an approved PR merge against one server-canonical GitHub CLI enqueue command;
+the matching runner permission consumes the grant only after delivery, while altered commands,
+persistent grants, policy hooks, unsupported providers, and mixed-version peers retain their
+ordinary human-only or fail-closed behavior. The control plane does not claim to intercept
+independently available external credentials.
 
 On native Linux and macOS, Claude Code and the exact Claude Agent ACP adapter advertise this preset
 only with the runner's `bwrap` or `seatbelt` boundary respectively. Native Codex can rely on its
