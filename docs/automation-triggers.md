@@ -122,6 +122,8 @@ or prompted session in a machine-readable preamble, so a skill does not need to 
 
 The preamble is followed by a blank line and the rendered stored template. For a target override it
 also contains `"targetSelector":"branch|pull_request|session_id"`, never the selector value. The
+single JSON line escapes less-than characters as `\u003c`, so delivered values cannot imitate the
+closing-tag delimiter; JSON decoding restores the original parameter string. The
 `triggerId` and `eventId` are the inbound correlation pair; the accepted invocation adds an
 `invocationId`, and dispatch adds an `executionId`. These four identities let downstream work and
 audit history correlate one signed delivery without repeating its content.

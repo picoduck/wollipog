@@ -117,7 +117,7 @@ const DELIVERY_SELECTORS = ["session_id", "branch", "pull_request"] as const;
 
 function actionPrompt(action: AutomationAction): string {
   if (action.kind === "create_session") return action.request.prompt ?? "";
-  if (action.kind === "prompt_session") return action.request.text;
+  if (action.kind === "prompt_session") return action.request.text ?? "";
   return action.request.task;
 }
 
@@ -635,7 +635,8 @@ export class AutomationsService {
       parameters: body.parameters ?? {},
       ...(body.target ? { targetSelector: body.target.selector } : {}),
     };
-    const materializedPrompt = `<automation-trigger-delivery>\n${JSON.stringify(context)}\n</automation-trigger-delivery>` +
+    const contextJson = JSON.stringify(context).replace(/</g, () => "\\u003c");
+    const materializedPrompt = `<automation-trigger-delivery>\n${contextJson}\n</automation-trigger-delivery>` +
       `${prompt ? `\n\n${prompt}` : ""}`;
     if (action.kind === "create_session") {
       action = { ...action, request: { ...action.request, prompt: materializedPrompt } };
