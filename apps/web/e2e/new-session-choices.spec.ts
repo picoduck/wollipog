@@ -61,16 +61,26 @@ async function openDialogWithoutPointer(page: Page, query = "") {
   return { dialog, opener };
 }
 
-async function selectCommonProjectWithoutPointer(page: Page) {
-  const project = page.getByRole("combobox", { name: "Project" });
+async function selectCommonProjectWithoutPointer(page: Page, touch = false) {
+  const project = touch
+    ? page.getByRole("button", { name: /^Project:/ })
+    : page.getByRole("combobox", { name: "Project" });
   await page.keyboard.press("Tab");
   await expect(page.getByRole("button", { name: "Close" })).toBeFocused();
   await page.keyboard.press("Tab");
   await expect(project).toBeFocused();
-  await page.keyboard.type("Wollipog");
-  await page.keyboard.press("ArrowDown");
-  await page.keyboard.press("Enter");
-  await expect(project).toHaveValue(/Wollipog/);
+  if (touch) {
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("listbox", { name: "Project" })).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(project).toHaveAccessibleName(/Project: Wollipog/);
+  } else {
+    await page.keyboard.type("Wollipog");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+    await expect(project).toHaveValue(/Wollipog/);
+  }
+  await expect(project).toBeFocused();
   return project;
 }
 
@@ -233,8 +243,20 @@ for (const viewport of VIEWPORTS) {
 test.describe("responsive Project and Agent controls", () => {
   test.use({ viewport: { width: 390, height: 780 }, hasTouch: true, isMobile: true });
 
-  test("Agents share one tap-only list at phone width", async ({ page }) => {
+  test("Projects and Agents use tap-only lists at phone width", async ({ page }) => {
     await openDialog(page, "?agentUnavailable=1");
+    await expect(page.locator('input[aria-label="Project"]')).toHaveCount(0);
+    const project = page.getByRole("button", { name: /^Project:/ });
+    await expect(project).toHaveAccessibleName(/Project: Wollipog/);
+    await project.click();
+    expect(await page.evaluate(() => document.activeElement instanceof HTMLInputElement)).toBe(false);
+
+    const projects = page.getByRole("listbox", { name: "Project" }).getByRole("option");
+    await expect(projects).toHaveCount(2);
+    await expect(projects.filter({ hasText: "Wollipog" })).toHaveCount(1);
+    await projects.filter({ hasText: "No Project" }).click();
+    await expect(project).toHaveAccessibleName("Project: No Project");
+
     await expect(page.getByText("Advanced Agents", { exact: true })).toHaveCount(0);
     await expect(page.locator('.agent-select input[type="text"]')).toHaveCount(0);
 
@@ -266,7 +288,7 @@ for (const viewport of [VIEWPORTS[0], VIEWPORTS[2]]) {
 
     test("selects Project and Agent, then submits with the popup safely closed", async ({ page }) => {
       await openDialogWithoutPointer(page);
-      await selectCommonProjectWithoutPointer(page);
+      await selectCommonProjectWithoutPointer(page, viewport.touch);
 
       // Every step between the two data-backed selectors remains keyboard-reachable and ordered:
       // Project management, the required Location, then Agent.
@@ -309,17 +331,27 @@ for (const viewport of [VIEWPORTS[0], VIEWPORTS[2]]) {
   });
 }
 
-test.describe("responsive Agent presentation", () => {
+test.describe("responsive Project and Agent presentation", () => {
   test.use({ viewport: { width: 1280, height: 900 } });
 
-  test("keeps the selection while switching between searchable and tap-only controls", async ({ page }) => {
+  test("keeps both selections while switching between searchable and tap-only controls", async ({ page }) => {
     await openDialog(page);
+    const desktopProject = page.getByRole("combobox", { name: "Project" });
+    await desktopProject.fill("No Project");
+    await page.keyboard.press("Enter");
+    await expect(desktopProject).toHaveValue("No Project");
+
     const desktopAgent = page.getByRole("combobox", { name: "Agent" });
     await desktopAgent.fill("non-interactive");
     await page.keyboard.press("Enter");
     await expect(desktopAgent).toHaveValue(/Codex — Non-Interactive/);
 
     await page.setViewportSize({ width: 390, height: 780 });
+    const touchProject = page.getByRole("button", { name: /^Project:/ });
+    await expect(touchProject).toHaveAccessibleName("Project: No Project");
+    await touchProject.click();
+    await page.getByRole("listbox", { name: "Project" }).getByRole("option", { name: /Wollipog/ }).click();
+
     const touchAgent = page.getByRole("button", { name: /^Agent:/ });
     await expect(touchAgent).toHaveAccessibleName(/Agent: Codex — Non-Interactive/);
     await expect(page.locator(".agent-meta")).toContainText("Non-interactive via codex exec");
@@ -327,6 +359,7 @@ test.describe("responsive Agent presentation", () => {
     await touchAgent.click();
     await page.getByRole("listbox", { name: "Agent" }).getByRole("option", { name: /Claude Code/ }).click();
     await page.setViewportSize({ width: 1280, height: 900 });
+    await expect(page.getByRole("combobox", { name: "Project" })).toHaveValue("Wollipog");
     await expect(page.getByRole("combobox", { name: "Agent" })).toHaveValue("Claude Code");
     await expect(page.locator(".agent-meta")).toContainText("Runs on native host");
   });
