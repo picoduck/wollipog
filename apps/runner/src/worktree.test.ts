@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
+import type { RunnerToControlPlane } from "@wollipog/protocol";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -1794,6 +1795,65 @@ test("an automatic worktree reaches snapshots and renders its verified branch", 
       "the session card renders the verified current branch instead of Branch Unavailable",
     );
   } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cancelling automatic identity verification cannot publish or claim capacity", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-automatic-worktree-cancel-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  let releaseProof!: () => void;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const messages: RunnerToControlPlane[] = [];
+    let constructed = false;
+    manager = new SessionManager(
+      (message) => messages.push(message), () => {}, store, "runner", undefined,
+      (() => {
+        constructed = true;
+        throw new Error("a cancelled launch must not construct a provider");
+      }) as never,
+      dataDir, 1,
+    );
+    const internals = manager as unknown as {
+      proveRegisteredWorktree: (...args: unknown[]) => Promise<{ branch: string }>;
+      admitted: Set<string>;
+    };
+    const originalProof = internals.proveRegisteredWorktree.bind(manager);
+    let proofEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { proofEntered = resolve; });
+    const gate = new Promise<void>((resolve) => { releaseProof = resolve; });
+    internals.proveRegisteredWorktree = async (...args) => {
+      const verified = await originalProof(...args);
+      proofEntered();
+      await gate;
+      return verified;
+    };
+
+    const sessionId = "s_automatic_cancel";
+    const started = manager.start({
+      sessionId, workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: true, driver: "claude-code",
+      context: { kind: "native" },
+    });
+    await entered;
+    const startingBeforeCancel = messages.filter((message) =>
+      message.type === "session_status" && message.status === "starting").length;
+    manager.cancel(sessionId);
+    releaseProof();
+
+    assert.equal(await started, false);
+    assert.equal(constructed, false);
+    assert.deepEqual([...internals.admitted], [], "the stale continuation never claims a capacity slot");
+    assert.equal(messages.filter((message) =>
+      message.type === "session_status" && message.status === "starting").length, startingBeforeCancel,
+      "the stale continuation emits no later starting status");
+    await manager.delete(sessionId);
+  } finally {
+    releaseProof?.();
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
@@ -4207,6 +4267,7 @@ test("worktree reconciliation records the identity a legacy row implied, and onl
   try {
     const { repo } = initRepoWithOrigin(root);
     const store = new SessionStore(join(dataDir, "sessions"));
+    const messages: RunnerToControlPlane[] = [];
     const legacyRow = (sessionId: string, worktreePath: string) => ({
       sessionId, agentId: "claude", workspaceId: "repo", repoPath: repo,
       worktreePath, driver: "claude-code" as const, command: "claude", args: [], env: {},
@@ -4234,7 +4295,9 @@ test("worktree reconciliation records the identity a legacy row implied, and onl
     execFileSync("git", ["-C", switched.path, "switch", "-c", "operator/elsewhere"]);
     execFileSync("git", ["-C", repo, "worktree", "remove", "--force", gone.path]);
 
-    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    manager = new SessionManager(
+      (message) => messages.push(message), () => {}, store, "runner", undefined, undefined, dataDir,
+    );
     await manager.reconcileWorktreePullRequests();
 
     assert.equal(store.readMeta("s_converges")?.worktreeBranch, "agent/s_converges",
@@ -4258,6 +4321,14 @@ test("worktree reconciliation records the identity a legacy row implied, and onl
       branchStateLabel(sessionBranchState(recoveredSnapshot)),
       missingInventory.branch,
       "the recovered identity propagates through the snapshot to the branch renderer",
+    );
+    const recoveredUpdate = messages.find((message) =>
+      message.type === "session_runtime_updated" && message.snapshot.id === "s_missing_inventory");
+    assert.ok(recoveredUpdate && recoveredUpdate.type === "session_runtime_updated");
+    assert.equal(
+      branchStateLabel(sessionBranchState(recoveredUpdate.snapshot)),
+      missingInventory.branch,
+      "the recovery is pushed to the control plane instead of waiting for another snapshot",
     );
     assert.equal(store.readMeta("s_switched")?.worktreeBranch, undefined,
       "a switched worktree is never blessed by the backfill");

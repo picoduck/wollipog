@@ -1932,16 +1932,16 @@ export class SessionManager {
    * catches exactly that, so a divergence is left unrecorded and keeps failing at launch. The guard
    * is the first line, so the pass costs nothing once a row has converged and nothing at all for
    * rows whose complete identity has converged. */
-  private async recordLegacyWorktreeIdentity(meta: SessionMeta): Promise<void> {
-    if (!meta.worktreePath) return;
+  private async recordLegacyWorktreeIdentity(meta: SessionMeta): Promise<SessionMeta | null> {
+    if (!meta.worktreePath) return null;
     const path = meta.worktreePath;
     const recordedWorktree = meta.worktrees?.find((worktree) =>
       sameWorktreePath(meta.context, worktree.path, path));
     if (meta.worktreeBranch !== undefined && recordedWorktree?.path === path &&
-        recordedWorktree.branch === meta.worktreeBranch) return;
+        recordedWorktree.branch === meta.worktreeBranch) return null;
     let actual: string;
     try {
-      actual = (await registeredSessionWorktree(meta.repoPath, path, {
+      actual = (await this.proveRegisteredWorktree(meta.repoPath, path, {
         context: meta.context,
         dataDir: this.dataDir,
         ownerHash: this.runnerOwnerHash,
@@ -1949,11 +1949,11 @@ export class SessionManager {
     } catch {
       // Unreachable distro, unmounted volume, pruned worktree: the row simply does not converge
       // this pass. Leaving the field absent keeps the derivation answering for it.
-      return;
+      return null;
     }
     if (actual !== this.expectedWorktreeBranch(meta, path, meta.worktreeBranch)) {
       this.log(`session ${boundedSessionIdForLog(meta.sessionId)} worktree is not on the branch its layout implies; leaving its identity underived`);
-      return;
+      return null;
     }
     // Re-read after the git round trip: this lane excludes worktree mutations, but a prompt or
     // status write from elsewhere can still have replaced the document underneath.
@@ -1962,7 +1962,7 @@ export class SessionManager {
         !sameWorktreePath(latest.context, latest.worktreePath, path) ||
         actual !== this.expectedWorktreeBranch(
           latest, latest.worktreePath, latest.worktreeBranch,
-        )) return;
+        )) return null;
     const latestIndex = latest.worktrees?.findIndex((worktree) =>
       sameWorktreePath(latest.context, worktree.path, latest.worktreePath!)) ?? -1;
     const worktrees = [...(latest.worktrees ?? [])];
@@ -1980,7 +1980,7 @@ export class SessionManager {
         branch: actual,
       };
     }
-    this.store.patchMeta(meta.sessionId, {
+    return this.store.patchMeta(meta.sessionId, {
       worktreeBranch: actual,
       worktrees,
     });
@@ -2006,7 +2006,13 @@ export class SessionManager {
           await this.runWorktreeOperation(candidate.sessionId, async () => {
             let meta = this.store.readMeta(candidate.sessionId);
             if (!meta || !this.sessionCanOpen(candidate.sessionId)) return;
-            await this.recordLegacyWorktreeIdentity(meta);
+            const recoveredIdentity = await this.recordLegacyWorktreeIdentity(meta);
+            if (recoveredIdentity) {
+              this.send({
+                type: "session_runtime_updated",
+                snapshot: this.snapshot(recoveredIdentity),
+              });
+            }
             meta = this.store.readMeta(candidate.sessionId) ?? meta;
             const candidatePaths = this.attributedWorktrees(meta)
               .filter((worktree) => worktree.pullRequest)
@@ -3532,6 +3538,17 @@ export class SessionManager {
         const latest = this.store.readMeta(spec.sessionId);
         if (latest) await this.recordLegacyWorktreeIdentity(latest);
       });
+      if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) {
+        const superseded = this.launchWasSuperseded(spec.sessionId, launchGeneration);
+        if (priorResumeId && !superseded) this.store.releaseLock(spec.sessionId, this.lockOwner);
+        durable?.failed(
+          superseded
+            ? "session launch was superseded by a replacement"
+            : "session launch was cancelled before runner admission",
+          "COMMAND_CANCELLED",
+        );
+        return false;
+      }
       const reconciled = this.store.readMeta(spec.sessionId);
       if (reconciled) {
         meta.worktreeBranch = reconciled.worktreeBranch;
