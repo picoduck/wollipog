@@ -1614,13 +1614,13 @@ export class SessionManager {
     const processMarker = this.ensureWorktreeProcessMarker(meta, worktree);
     if (!priorPortBlock) this.persistWorktreeView(meta.sessionId, worktree);
     const portEnvironment = this.protectedWorktreeEnvironment(meta, worktree);
-    if (!worktree.baseCommit) {
-      this.setWorktreeSetupEnvironment(meta.sessionId, worktree.path, portEnvironment);
-      return "none";
-    }
     if (!discoverConfig && !worktree.setup && worktree.setupConfig?.status === "invalid") {
       this.setWorktreeSetupEnvironment(meta.sessionId, worktree.path, portEnvironment);
       return "invalid";
+    }
+    if (!worktree.baseCommit) {
+      this.setWorktreeSetupEnvironment(meta.sessionId, worktree.path, portEnvironment);
+      return "none";
     }
     // Only creation paths discover a new config. A durable setup record proves a v141-created
     // worktree; older worktrees with the pre-existing baseCommit field must never run hooks later.
@@ -2084,11 +2084,13 @@ export class SessionManager {
       const meta = this.store.readMeta(sessionId);
       if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
       if (!meta.worktreePath) throw new Error("worktree setup generation requires an active worktree");
-      const worktree = this.attributedWorktrees(meta)
+      const worktree = (meta.worktrees ?? [])
         .find((item) => sameWorktreePath(meta.context, item.path, meta.worktreePath!));
-      if (!worktree) throw new Error("active worktree is not linked to this session");
+      if (!worktree) throw new Error("active worktree identity is not verified for setup generation");
       const generated = await writeStarterWorktreeSetupConfig(meta.context, worktree.path, meta.repoPath);
-      this.persistWorktreeSetupConfigStatus(sessionId, worktree, generated.status);
+      this.persistWorktreeSetupConfigStatus(
+        sessionId, worktree, generated.status, worktree.source === "legacy",
+      );
       const latest = this.store.readMeta(sessionId)!;
       return {
         worktree,
@@ -4562,11 +4564,11 @@ export class SessionManager {
             worktreeIdentity = priorActiveWorktree;
           } else {
             worktree = await this.createSessionWorktree(repoPath, spec.sessionId, worktreeOptions);
-            worktreeIdentity = {
-              id: "legacy",
-              path: worktree.path,
-              branch: worktree.branch,
-              source: "legacy",
+            const recordedLegacy = activePrior?.worktrees?.find((item) =>
+              item.source === "legacy" && sameWorktreePath(activePrior.context, item.path, worktree!.path) &&
+              item.branch === worktree!.branch);
+            worktreeIdentity = recordedLegacy ?? {
+              id: "legacy", path: worktree.path, branch: worktree.branch, source: "legacy",
             };
           }
           // createWorktree deliberately returns an already-registered healthy session worktree.
@@ -4630,6 +4632,7 @@ export class SessionManager {
             if (setup === "failed" || setup === "invalid") {
               // A failed setup remains an attributed, retryable worktree. It is not garbage owned
               // by this launch anymore, even when this launch materialized it moments ago.
+              const createdForThisLaunch = worktreeOwnedByLaunch;
               worktreeOwnedByLaunch = false;
               meta.worktreePending = false;
               meta.worktreePath = worktree.path;
@@ -4642,6 +4645,22 @@ export class SessionManager {
                 worktrees: retainedWorktrees,
                 worktreePending: false,
               });
+              if (setup === "invalid" && worktreeIdentity.source === "legacy" && createdForThisLaunch) {
+                // An automatic worktree has not passed durable branch-identity proof yet. Invalid
+                // config has no retryable setup record, so retaining this tree would let a later
+                // launch reconstruct a status-less legacy stand-in and skip validation. Remove it;
+                // the next launch safely re-reads the immutable invalid base and fails again.
+                const cleanup = launchWorktreeCleanup();
+                this.cleanupJournal.add(cleanup);
+                await this.reapWorktree(cleanup, true);
+                this.store.patchMeta(spec.sessionId, {
+                  worktreePath: null,
+                  worktreeBranch: undefined,
+                  worktrees: retainedWorktrees.filter((item) =>
+                    !sameWorktreePath(meta.context, item.path, worktreeIdentity!.path)),
+                  worktreePending: false,
+                });
+              }
               const invalidMessage = setup === "invalid" && worktreeIdentity.setupConfig?.status === "invalid"
                 ? `Invalid worktree setup configuration: ${worktreeIdentity.setupConfig.error}`
                 : null;

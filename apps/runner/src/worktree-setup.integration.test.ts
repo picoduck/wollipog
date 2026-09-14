@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
-import type { RunnerToControlPlane } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, type RunnerToControlPlane } from "@wollipog/protocol";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore } from "./session-store.js";
 import { WorktreeCleanupJournal } from "./worktree.js";
@@ -517,7 +517,8 @@ test("deleting during setup waits for the child to close before reclaiming the w
   const repo = await repository(root);
   const dataDir = join(root, "data");
   const lateMarker = join(repo, ".deleted-setup-write");
-  const delayedWrite = `console.log('delete-setup-running');setTimeout(()=>require('fs').writeFileSync(${JSON.stringify(lateMarker)},'late'),300)`;
+  const writeTrigger = join(repo, ".allow-deleted-setup-write");
+  const delayedWrite = `const fs=require('fs');console.log('delete-setup-running');setInterval(()=>{if(fs.existsSync(${JSON.stringify(writeTrigger)}))fs.writeFileSync(${JSON.stringify(lateMarker)},'late')},25)`;
   writeFileSync(join(repo, ".wollipog.json"), JSON.stringify({
     version: 1,
     setup: [{ name: "Long Setup", command: [process.execPath, "-e", delayedWrite], timeoutSeconds: 60 }],
@@ -547,7 +548,8 @@ test("deleting during setup waits for the child to close before reclaiming the w
   }), false);
   assert.ok(deletion);
   await deletion;
-  await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+  writeFileSync(writeTrigger, "write if still alive", "utf8");
+  await new Promise((resolveWait) => setTimeout(resolveWait, 250));
   assert.equal(existsSync(lateMarker), false, "the deleted setup process cannot write after cleanup");
   assert.equal(store.has("s_delete_running"), false);
 });
@@ -777,6 +779,49 @@ test("malformed setup is projected with its exact key and never reaches trust or
   );
 });
 
+test("an automatic malformed setup remains invalid across later launches", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-worktree-setup-invalid-launch-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const repo = await repository(root);
+  writeFileSync(join(repo, ".wollipog.json"), JSON.stringify({
+    version: 1,
+    setup: [{ name: "Must Not Run", command: "touch .invalid-ran" }],
+  }), "utf8");
+  await exec("git", ["-C", repo, "add", ".wollipog.json"]);
+  await exec("git", ["-C", repo, "commit", "-qm", "malformed automatic setup config"]);
+
+  const dataDir = join(root, "data");
+  const store = new SessionStore(join(dataDir, "sessions"));
+  let providerLaunches = 0;
+  const factory = () => {
+    providerLaunches++;
+    return {
+      pid: 1,
+      initialize: async () => {}, newSession: async () => {}, prompt: async () => "end_turn" as const,
+      cancel: () => {}, close: async () => {}, dispose: () => {}, setConfig: () => {},
+      resolvePermission: () => false, agentSessionId: () => "provider-session",
+    };
+  };
+  const manager = new SessionManager(
+    () => {}, () => {}, store, "runner", undefined, factory as never, dataDir,
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, [], undefined, undefined, undefined, undefined, () => PROTOCOL_VERSION, "a".repeat(64),
+  );
+  t.after(() => manager.shutdownAll());
+  const spec = {
+    sessionId: "s_invalid_launch", workspaceId: "repo", workspacePath: repo, agentId: "codex",
+    command: process.execPath, args: [] as string[], env: {}, useWorktree: true, driver: "codex" as const,
+    context: { kind: "native" as const },
+  };
+
+  assert.equal(await manager.start(spec), false);
+  const first = store.readMeta(spec.sessionId)!;
+  assert.equal(first.worktreePath, null, "an unverified automatic identity is not retained");
+  assert.equal(first.worktrees?.length ?? 0, 0);
+  assert.equal(await manager.start(spec), false, "a later launch must rediscover the invalid base instead of bypassing it");
+  assert.equal(providerLaunches, 0);
+});
+
 test("session generation targets only its active worktree and refreshes absent to valid", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-worktree-setup-generate-session-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -799,4 +844,30 @@ test("session generation targets only its active worktree and refreshes absent t
   assert.equal(existsSync(join(repo, ".wollipog.json")), false, "the primary checkout stays untouched");
   assert.equal((await exec("git", ["-C", generated.worktree.path, "status", "--short", "--", ".wollipog.json"]))
     .stdout.trim(), "?? .wollipog.json");
+});
+
+test("session generation refreshes a verified automatic legacy identity", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-worktree-setup-generate-legacy-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const repo = await repository(root);
+  const baseCommit = (await exec("git", ["-C", repo, "rev-parse", "HEAD"])).stdout.trim();
+  const worktreePath = join(root, "legacy-generated-worktree");
+  await exec("git", ["-C", repo, "worktree", "add", "-qb", "agent/generated-legacy", worktreePath, baseCommit]);
+  const dataDir = join(root, "data");
+  const store = new SessionStore(join(dataDir, "sessions"));
+  meta(store, "s_generate_legacy", repo);
+  store.patchMeta("s_generate_legacy", {
+    worktreePath,
+    worktreeBranch: "agent/generated-legacy",
+    worktrees: [{
+      id: "legacy", path: worktreePath, branch: "agent/generated-legacy", source: "legacy",
+      setupConfig: { status: "absent" },
+    }],
+  });
+  const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+  t.after(() => manager.shutdownAll());
+
+  const generated = await manager.generateWorktreeSetupConfig("s_generate_legacy");
+  assert.equal(generated.worktree.setupConfig?.status, "valid");
+  assert.equal(store.readMeta("s_generate_legacy")?.worktrees?.[0]?.setupConfig?.status, "valid");
 });
