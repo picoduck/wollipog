@@ -87,7 +87,10 @@ remain for deduplication evidence.
 
 Each schedule selects any of `started`, `succeeded`, `failed`, and `expired`. Selected events use the
 existing encrypted Web Push channel with a per-automation coalescing key and open the Automations
-view. Push endpoints and credentials stay in the device subscription tables, never in a schedule.
+view. Started and succeeded cards retain the automation name, while failure and expiry cards use
+fixed, content-free status text. Authenticated execution history retains diagnostic details for
+inspection in the Automations view. Push endpoints and credentials stay in the device subscription
+tables, never in a schedule.
 
 Authenticated routes are:
 
