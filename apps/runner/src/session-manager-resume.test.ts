@@ -2519,6 +2519,14 @@ test("a different-driver Restart releases a superseded app-server Restart lock",
   };
   const h = harness({}, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 1);
   const internals = h.manager as any;
+  const releasedDrivers: Array<AgentDriverKind | undefined> = [];
+  const releaseLock = h.store.releaseLock.bind(h.store);
+  h.store.releaseLock = (sessionId, owner) => {
+    if (sessionId === "resume-session") {
+      releasedDrivers.push(h.store.readMeta(sessionId)?.driver);
+    }
+    releaseLock(sessionId, owner);
+  };
   try {
     h.store.create(stored(h.root, {
       sessionId: "capacity-blocker",
@@ -2552,6 +2560,11 @@ test("a different-driver Restart releases a superseded app-server Restart lock",
       internals.admissionQueue.map((entry: { request: { sessionId: string } }) => entry.request.sessionId),
       ["resume-session"],
       "the different-driver replacement retains runner admission",
+    );
+    assert.deepEqual(
+      releasedDrivers,
+      ["codex"],
+      "the replacement row is durable before the obsolete app-server lock is released",
     );
     assert.deepEqual(
       competingProcessLockState(h.root),

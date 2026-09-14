@@ -8374,14 +8374,14 @@ export class SessionManager {
     // Resume only when established AND the driver supports it; a never-established session (e.g. the
     // runner restarted before its first turn finished) re-launches fresh so it stays promptable.
     const resumeId = established && canResumeSession(fresh) ? (fresh.agentSessionId ?? undefined) : undefined;
-    const launchGeneration = this.beginLaunchGeneration(sessionId);
-    if (resumeId && !this.acquireResumeLock(sessionId, launchGeneration)) {
-      this.finishLaunchGeneration(sessionId, launchGeneration);
+    if (resumeId && !this.store.acquireLock(sessionId, this.lockOwner)) {
       this.emitEvent(sessionId, { kind: "error", message: "this session is being resumed by another runner — retry shortly" });
       this.emitStatus(sessionId, "idle");
       durable?.failed("session is owned by another runner process", "COMMAND_CANCELLED");
       return;
     }
+    const launchGeneration = this.beginLaunchGeneration(sessionId);
+    if (resumeId) this.resumeLockGenerations.set(sessionId, launchGeneration);
     if (queueBeforeLaunch) {
       this.preLaunchAdmissionGenerations.set(sessionId, launchGeneration);
       const queue = this.preLaunchQueues.get(sessionId) ?? [];
@@ -11518,13 +11518,13 @@ export class SessionManager {
         this.emitEvent(sessionId, { kind: "error", message: "queued prompts could not recover because the Codex thread id is unavailable" });
         return;
       }
-      launchGeneration = this.beginLaunchGeneration(sessionId);
-      if (!this.acquireResumeLock(sessionId, launchGeneration)) {
-        this.finishLaunchGeneration(sessionId, launchGeneration);
+      if (!this.store.acquireLock(sessionId, this.lockOwner)) {
         this.emitEvent(sessionId, { kind: "error", message: `${queued.length} queued prompt(s) are still held because another runner owns the session; send another prompt to retry` });
         this.emitStatus(sessionId, "idle");
         return;
       }
+      launchGeneration = this.beginLaunchGeneration(sessionId);
+      this.resumeLockGenerations.set(sessionId, launchGeneration);
       if (!(await this.acquireAdmission(sessionId))) {
         this.finishLaunchGeneration(sessionId, launchGeneration);
         this.releaseResumeLock(sessionId, launchGeneration);
