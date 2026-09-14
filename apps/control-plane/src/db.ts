@@ -567,6 +567,10 @@ CREATE TABLE IF NOT EXISTS workflow_decisions (
   created_at            INTEGER NOT NULL,
   resolved_at           INTEGER,
   consumed_at           INTEGER,
+  action_kind           TEXT,
+  action_command        TEXT,
+  action_command_digest TEXT,
+  action_armed_at       INTEGER,
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
   FOREIGN KEY (controlling_session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
@@ -4269,6 +4273,14 @@ export class ControlPlaneDb {
       db.exec("ALTER TABLE governance_audit ADD COLUMN workflow_decision TEXT");
     } catch {
       /* column already present */
+    }
+    for (const column of [
+      "action_kind TEXT",
+      "action_command TEXT",
+      "action_command_digest TEXT",
+      "action_armed_at INTEGER",
+    ]) {
+      try { db.exec(`ALTER TABLE workflow_decisions ADD COLUMN ${column}`); } catch { /* already present */ }
     }
     try {
       db.exec("ALTER TABLE governance_policies ADD COLUMN ask_timeout INTEGER");
@@ -12651,6 +12663,50 @@ export class ControlPlaneDb {
       `UPDATE workflow_decisions SET status='consumed', consumed_at=?
        WHERE occurrence_id=? AND status='approved'`,
     ).run(now, occurrenceId);
+    return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
+  }
+
+  armWorkflowDecisionAction(
+    occurrenceId: string,
+    action: NonNullable<WorkflowDecisionView["actionAdmission"]>,
+  ): WorkflowDecisionView | null {
+    const result = this.stmt(
+      `UPDATE workflow_decisions
+       SET action_kind=?, action_command=?, action_command_digest=?, action_armed_at=?
+       WHERE occurrence_id=? AND status='approved' AND (
+         action_command_digest IS NULL OR (
+           action_kind=? AND action_command=? AND action_command_digest=?
+         )
+       )`,
+    ).run(
+      action.kind, action.command, action.commandDigest, action.armedAt, occurrenceId,
+      action.kind, action.command, action.commandDigest,
+    );
+    return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
+  }
+
+  approvedWorkflowDecisionsForAction(
+    sessionId: string,
+    commandDigest: string,
+  ): WorkflowDecisionView[] {
+    return (this.stmt(
+      `SELECT * FROM workflow_decisions
+       WHERE session_id=? AND status='approved' AND action_command_digest=?
+       ORDER BY action_armed_at ASC, occurrence_id ASC`,
+    ).all(sessionId, commandDigest) as unknown[]).map(workflowDecisionFromRow).filter(
+      (decision): decision is WorkflowDecisionView => decision !== null,
+    );
+  }
+
+  consumeWorkflowDecisionAction(
+    occurrenceId: string,
+    commandDigest: string,
+    now: number,
+  ): WorkflowDecisionView | null {
+    const result = this.stmt(
+      `UPDATE workflow_decisions SET status='consumed', consumed_at=?
+       WHERE occurrence_id=? AND status='approved' AND action_command_digest=?`,
+    ).run(now, occurrenceId, commandDigest);
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
   }
 
@@ -21100,6 +21156,10 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     created_at?: number;
     resolved_at?: number | null;
     consumed_at?: number | null;
+    action_kind?: string | null;
+    action_command?: string | null;
+    action_command_digest?: string | null;
+    action_armed_at?: number | null;
   } | undefined;
   if (!row?.request_id || !row.occurrence_id || !row.session_id || !row.controlling_session_id ||
       !row.category || !row.resource_key || !row.resource_snapshot || !row.resource_digest ||
@@ -21125,6 +21185,15 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     createdAt: row.created_at!,
     ...(row.resolved_at != null ? { resolvedAt: row.resolved_at } : {}),
     ...(row.consumed_at != null ? { consumedAt: row.consumed_at } : {}),
+    ...(row.action_kind === "pr_merge_enqueue" && row.action_command && row.action_command_digest &&
+      row.action_armed_at != null
+      ? { actionAdmission: {
+          kind: row.action_kind,
+          command: row.action_command,
+          commandDigest: row.action_command_digest,
+          armedAt: row.action_armed_at,
+        } }
+      : {}),
   };
 }
 

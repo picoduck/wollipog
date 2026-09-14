@@ -53,9 +53,11 @@ import {
   SESSION_STOP_RETRY_INTERVAL_MS,
   SESSION_STOP_TIMEOUT_MS,
   capabilityConfigError,
+  canonicalPrMergeEnqueueCommand,
   claudeModelConfigForValidation,
   defaultPermissionModeForNewSession,
   normalizeClaudePersistedConfig,
+  normalizeWorkflowDecisionAction,
   parentControlRequestEligible,
   resolveEffectiveModelEffort,
   resolveEffectiveServiceTier,
@@ -903,10 +905,19 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       parent.id, grandchild.data.id, humanMerge.data.occurrenceId,
       { outcome: "approve" }, "human", { kind: "human", id: "owner" }, () => true,
     ).ok);
+    const humanMergeSnapshot = { ...mergeSnapshot, headSha: "b".repeat(40),
+      requiredChecks: { ...mergeSnapshot.requiredChecks, headSha: "b".repeat(40) } };
+    const humanMergeCommand = canonicalPrMergeEnqueueCommand(humanMergeSnapshot);
     assert.ok(svc.consumeWorkflowDecision(grandchild.data.id, humanMerge.data.occurrenceId, {
-      resourceSnapshot: { ...mergeSnapshot, headSha: "b".repeat(40),
-        requiredChecks: { ...mergeSnapshot.requiredChecks, headSha: "b".repeat(40) } },
+      resourceSnapshot: humanMergeSnapshot,
+      action: { kind: "pr_merge_enqueue", command: humanMergeCommand },
     }).ok);
+    svc.onSessionEvent(grandchild.data.id, {
+      kind: "permission_request", requestId: "nested-human-enqueue", title: "Enqueue PR",
+      options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }],
+      context: { toolName: "commandExecution", input: humanMergeCommand },
+    });
+    assert.equal(db.workflowDecisionByOccurrence(humanMerge.data.occurrenceId)?.status, "consumed");
     svc.onSessionStatus(grandchild.data.id, "idle");
     const nestedReport = db.appendEvent(grandchild.data.id,
       { kind: "agent_message", text: "Nested verified report", final: true }, Date.now());
@@ -1940,6 +1951,48 @@ test("Parent Control eligibility excludes secrets, authentication, policy gates,
   }), false);
 });
 
+test("PR merge action admission accepts only the canonical enqueue command", () => {
+  const snapshot = {
+    category: "pr_merge" as const,
+    repository: "picoduck/wollipog",
+    pullRequest: 42,
+    headSha: "a".repeat(40),
+    reviewResult: "merge" as const,
+    requiredChecks: {
+      headSha: "a".repeat(40), status: "passed" as const, checkedAt: 1,
+      checks: [{ name: "Required", state: "passed" as const }],
+    },
+  };
+  const canonical = canonicalPrMergeEnqueueCommand(snapshot);
+  assert.deepEqual(normalizeWorkflowDecisionAction(snapshot, {
+    kind: "pr_merge_enqueue", command: canonical,
+  }).data, { kind: "pr_merge_enqueue", command: canonical });
+  const changedHead = { ...snapshot, headSha: "b".repeat(40) };
+  assert.notEqual(canonicalPrMergeEnqueueCommand(changedHead), canonical,
+    "the canonical command pins the approved head SHA at execution time");
+  assert.equal(normalizeWorkflowDecisionAction(changedHead, {
+    kind: "pr_merge_enqueue", command: canonical,
+  }).status, 409, "a command armed for the previous head cannot admit the changed head");
+
+  const singleCharacterMutations = [...canonical].map((character, index) =>
+    canonical.slice(0, index) + (character === "x" ? "y" : "x") + canonical.slice(index + 1));
+  const pinnedMutations = [
+    `cd /tmp && ${canonical}`,
+    `${canonical} --delete-branch`,
+    canonical.replace("/pull/42", "/pull/420"),
+    canonical.replace("picoduck/wollipog", "picoduck/other"),
+    `${canonical}; gh pr merge https://github.com/picoduck/wollipog/pull/43 --squash --match-head-commit ${snapshot.headSha}`,
+  ];
+  for (const command of [...singleCharacterMutations, ...pinnedMutations]) {
+    assert.equal(normalizeWorkflowDecisionAction(snapshot, {
+      kind: "pr_merge_enqueue", command,
+    }).status, 409, command);
+  }
+  assert.equal(normalizeWorkflowDecisionAction(snapshot, {
+    kind: "pr_merge_enqueue", command: canonical, extra: true,
+  }).status, 400, "extra action fields fail closed");
+});
+
 test("opt-in Parent Control resolves exact nested request occurrences with agent provenance", () => {
   const { db, svc, hub } = makeHarness();
   try {
@@ -2171,18 +2224,135 @@ test("typed workflow decisions isolate categories and fail closed across stale p
     }).status, 409, "a changed resource snapshot revokes the approval before action start");
     assert.equal(db.workflowDecisionByOccurrence(merge.data.occurrenceId)?.status, "revoked");
 
+    const changedCommand = svc.createWorkflowDecision(child.id, {
+      requestId: "merge-changed-command", resourceKey: "picoduck/wollipog#124",
+      resourceSnapshot: { ...mergeSnapshot, pullRequest: 124 },
+    });
+    assert.ok(changedCommand.ok && changedCommand.data);
+    assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, changedCommand.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+    const mismatchedAdmission = {
+      resourceSnapshot: { ...mergeSnapshot, pullRequest: 124 },
+      action: {
+        kind: "pr_merge_enqueue",
+        command: "gh pr merge 999 --squash",
+      },
+    } as unknown as Parameters<typeof svc.consumeWorkflowDecision>[2];
+    assert.equal(svc.consumeWorkflowDecision(
+      child.id, changedCommand.data.occurrenceId, mismatchedAdmission,
+    ).status, 409, "a changed enqueue command fails admission");
+    assert.equal(db.workflowDecisionByOccurrence(changedCommand.data.occurrenceId)?.status, "approved",
+      "failed command admission does not consume the typed authorization");
+
     const exact = svc.createWorkflowDecision(child.id, {
       requestId: "merge-2", resourceKey: "picoduck/wollipog#124", resourceSnapshot: { ...mergeSnapshot, pullRequest: 124 },
     });
     assert.ok(exact.ok && exact.data);
     assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, exact.data.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+    const exactSnapshot = { ...mergeSnapshot, pullRequest: 124 };
+    const exactCommand = canonicalPrMergeEnqueueCommand(exactSnapshot);
+    const armed = svc.consumeWorkflowDecision(child.id, exact.data.occurrenceId, {
+      resourceSnapshot: exactSnapshot,
+      action: { kind: "pr_merge_enqueue", command: exactCommand },
+    });
+    assert.equal(armed.data?.status, "approved",
+      "arming the exact enqueue leaves authorization available until runner admission");
+    assert.equal(armed.data?.actionAdmission?.command, exactCommand);
+    assert.ok(svc.upsertGovernancePolicy({
+      policyId: "human-enqueue-review", name: "Human Enqueue Review", effect: "ask", priority: 100,
+      enabled: true, scope: { toolName: "Bash" },
+    }).ok);
+    svc.onSessionEvent(child.id, {
+      kind: "permission_request", requestId: "enqueue-pr-124", title: "Enqueue PR",
+      options: [
+        { optionId: "once", name: "Allow Once", kind: "allow_once" },
+        { optionId: "deny", name: "Deny", kind: "reject_once" },
+      ],
+      context: {
+        toolName: "Bash", input: exactCommand,
+        escalatedBy: { kind: "agent", id: "codex-guardian" },
+      },
+    });
+    assert.deepEqual(hub.sentOfType("resolve_permission").at(-1), {
+      type: "resolve_permission", sessionId: child.id, requestId: "enqueue-pr-124", optionId: "once",
+    });
+    assert.equal(db.workflowDecisionByOccurrence(exact.data.occurrenceId)?.status, "consumed");
+    assert.equal(pendingRequests(db.getSession(child.id)?.pendingApproval).some(
+      (request) => request.requestId === "enqueue-pr-124"), false,
+    "the matching action does not become a second human approval");
     assert.equal(svc.consumeWorkflowDecision(child.id, exact.data.occurrenceId, {
-      resourceSnapshot: { ...mergeSnapshot, pullRequest: 124 },
-    }).data?.status, "consumed");
-    assert.equal(svc.consumeWorkflowDecision(child.id, exact.data.occurrenceId, {
-      resourceSnapshot: { ...mergeSnapshot, pullRequest: 124 },
+      resourceSnapshot: exactSnapshot,
+      action: { kind: "pr_merge_enqueue", command: exactCommand },
     }).status, 409, "authorization is one-shot");
+    const sendsBeforeReplay = hub.sentOfType("resolve_permission").length;
+    svc.onSessionEvent(child.id, {
+      kind: "permission_request", requestId: "enqueue-pr-124-replay", title: "Enqueue PR",
+      options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }],
+      context: { toolName: "Bash", input: exactCommand },
+    });
+    assert.equal(hub.sentOfType("resolve_permission").length, sendsBeforeReplay,
+      "a consumed action admission cannot authorize a second command");
+    assert.equal(db.getSession(child.id)?.pendingApproval?.requestId, "enqueue-pr-124-replay");
+    db.setPendingApproval(child.id, null);
+    db.updateSessionStatus(child.id, "running", Date.now());
+
+    const retrySnapshot = { ...mergeSnapshot, pullRequest: 222 };
+    const retryCommand = canonicalPrMergeEnqueueCommand(retrySnapshot);
+    const retry = svc.createWorkflowDecision(child.id, {
+      requestId: "merge-retry", resourceKey: "picoduck/wollipog#222", resourceSnapshot: retrySnapshot,
+    });
+    assert.ok(retry.ok && retry.data);
+    assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, retry.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+    assert.equal(svc.consumeWorkflowDecision(child.id, retry.data.occurrenceId, {
+      resourceSnapshot: retrySnapshot,
+      action: { kind: "pr_merge_enqueue", command: retryCommand },
+    }).data?.status, "approved");
+    const sendsBeforeMismatch = hub.sentOfType("resolve_permission").length;
+    svc.onSessionEvent(child.id, {
+      kind: "permission_request", requestId: "enqueue-mismatch", title: "Enqueue PR",
+      options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }],
+      context: { toolName: "Bash", input: `${retryCommand} --delete-branch` },
+    });
+    assert.equal(hub.sentOfType("resolve_permission").length, sendsBeforeMismatch,
+      "a changed command never receives the typed allow response");
+    assert.equal(db.workflowDecisionByOccurrence(retry.data.occurrenceId)?.status, "approved");
+    assert.equal(db.getSession(child.id)?.pendingApproval?.requestId, "enqueue-mismatch",
+      "a mismatched command keeps the ordinary human-only approval boundary");
+    db.setPendingApproval(child.id, null);
+    db.updateSessionStatus(child.id, "running", Date.now());
+
+    hub.deliver = false;
+    svc.onSessionEvent(child.id, {
+      kind: "permission_request", requestId: "enqueue-retry", title: "Enqueue PR",
+      options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }],
+      context: { toolName: "Bash", input: retryCommand },
+    });
+    assert.equal(db.workflowDecisionByOccurrence(retry.data.occurrenceId)?.status, "approved",
+      "failed runner delivery retains the one-shot authorization for retry");
+    hub.deliver = true;
+    svc.onSessionEvent(child.id, {
+      kind: "permission_request", requestId: "enqueue-retry", title: "Enqueue PR",
+      options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }],
+      context: { toolName: "Bash", input: retryCommand },
+    });
+    assert.equal(db.workflowDecisionByOccurrence(retry.data.occurrenceId)?.status, "consumed",
+      "the retry consumes authorization only after runner delivery succeeds");
+    const actionAudits = svc.governanceAudit(child.id).filter((entry) =>
+      entry.requestId === "enqueue-retry" || entry.requestId === retry.data!.occurrenceId);
+    assert.ok(actionAudits.some((entry) => entry.requestId === "enqueue-retry" &&
+      entry.stage === "resolution" && entry.outcome === "delivery_failed" &&
+      entry.actor.kind === "system" && entry.actor.id === "workflow-decision-action-admission" &&
+      entry.workflowDecision?.occurrenceId === retry.data!.occurrenceId));
+    assert.ok(actionAudits.some((entry) => entry.requestId === "enqueue-retry" &&
+      entry.stage === "resolution" && entry.outcome === "allowed" &&
+      entry.actor.kind === "system" && entry.actor.id === "workflow-decision-action-admission" &&
+      entry.workflowDecision?.occurrenceId === retry.data!.occurrenceId));
+    assert.ok(actionAudits.some((entry) => entry.requestId === retry.data!.occurrenceId &&
+      entry.approvalKind === "workflow_decision" && entry.outcome === "consumed"));
+    assert.equal(actionAudits.some((entry) => entry.requestId === "enqueue-retry" &&
+      entry.actor.kind === "human"), false, "the matching action is not duplicated as a human decision");
 
     const publicationSnapshot = {
       category: "follow_up_issue_publication" as const,
@@ -2236,6 +2406,14 @@ test("typed workflow decisions isolate categories and fail closed across stale p
     assert.ok(pending.ok && pending.data);
     assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, pending.data.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+    const pendingSnapshot = { ...mergeSnapshot, pullRequest: 125 };
+    assert.equal(svc.consumeWorkflowDecision(child.id, pending.data.occurrenceId, {
+      resourceSnapshot: pendingSnapshot,
+      action: {
+        kind: "pr_merge_enqueue",
+        command: canonicalPrMergeEnqueueCommand(pendingSnapshot),
+      },
+    }).data?.status, "approved");
     assert.ok(svc.setParentControlPolicy(
       parent.data.id,
       { ...decisions, implementation_question: "orchestrator" },
@@ -2243,7 +2421,7 @@ test("typed workflow decisions isolate categories and fail closed across stale p
       { kind: "human", id: "policy-owner" },
     ).ok);
     assert.equal(db.workflowDecisionByOccurrence(pending.data.occurrenceId)?.status, "revoked",
-      "any policy revision revokes unconsumed approval bound to the old revision");
+      "any policy revision revokes an armed approval bound to the old revision");
 
     const first = svc.createWorkflowDecision(child.id, {
       requestId: "supersede-1", resourceKey: "picoduck/wollipog#126",
@@ -2295,6 +2473,71 @@ test("typed workflow decisions isolate categories and fail closed across stale p
       { action: "resolve_workflow_decision", outcome: "approve" }, () => true).status, 409);
     assert.equal(db.workflowDecisionByOccurrence(downgrade.data.occurrenceId)?.status, "revoked");
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+
+    const mixedVersionSnapshot = { ...mergeSnapshot, pullRequest: 228 };
+    const mixedVersion = svc.createWorkflowDecision(child.id, {
+      requestId: "merge-action-mixed-version", resourceKey: "picoduck/wollipog#228",
+      resourceSnapshot: mixedVersionSnapshot,
+    });
+    assert.ok(mixedVersion.ok && mixedVersion.data);
+    assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, mixedVersion.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+    db.registerRunner(
+      meta,
+      Date.now(),
+      RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionAdmission - 1,
+    );
+    assert.equal(svc.consumeWorkflowDecision(child.id, mixedVersion.data.occurrenceId, {
+      resourceSnapshot: mixedVersionSnapshot,
+      action: {
+        kind: "pr_merge_enqueue",
+        command: canonicalPrMergeEnqueueCommand(mixedVersionSnapshot),
+      },
+    }).status, 409, "a mixed-version runner cannot arm an action that it may admit unsafely");
+    assert.equal(db.workflowDecisionByOccurrence(mixedVersion.data.occurrenceId)?.status, "revoked");
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+
+    const deniedSnapshot = { ...mergeSnapshot, pullRequest: 229 };
+    const denied = svc.createWorkflowDecision(child.id, {
+      requestId: "merge-action-denied", resourceKey: "picoduck/wollipog#229",
+      resourceSnapshot: deniedSnapshot,
+    });
+    assert.ok(denied.ok && denied.data);
+    assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, denied.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "deny" }, () => true).ok);
+    assert.equal(svc.consumeWorkflowDecision(child.id, denied.data.occurrenceId, {
+      resourceSnapshot: deniedSnapshot,
+      action: {
+        kind: "pr_merge_enqueue",
+        command: canonicalPrMergeEnqueueCommand(deniedSnapshot),
+      },
+    }).status, 409, "a denied merge cannot arm its enqueue action");
+
+    const ancestryChild = createChild(parent.data.id, "Changed Ancestry Child");
+    const ancestrySnapshot = { ...mergeSnapshot, pullRequest: 230 };
+    const ancestry = svc.createWorkflowDecision(ancestryChild.id, {
+      requestId: "merge-action-ancestry", resourceKey: "picoduck/wollipog#230",
+      resourceSnapshot: ancestrySnapshot,
+    });
+    assert.ok(ancestry.ok && ancestry.data);
+    assert.ok(svc.resolveDescendantRequest(parent.data.id, ancestryChild.id, ancestry.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+    const ancestryCommand = canonicalPrMergeEnqueueCommand(ancestrySnapshot);
+    assert.equal(svc.consumeWorkflowDecision(ancestryChild.id, ancestry.data.occurrenceId, {
+      resourceSnapshot: ancestrySnapshot,
+      action: { kind: "pr_merge_enqueue", command: ancestryCommand },
+    }).data?.status, "approved");
+    db.raw().prepare("UPDATE sessions SET parent_session_id=? WHERE id=?")
+      .run(siblingParent.data.id, ancestryChild.id);
+    const sendsBeforeAncestryChange = hub.sentOfType("resolve_permission").length;
+    svc.onSessionEvent(ancestryChild.id, {
+      kind: "permission_request", requestId: "enqueue-changed-ancestry", title: "Enqueue PR",
+      options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }],
+      context: { toolName: "Bash", input: ancestryCommand },
+    });
+    assert.equal(hub.sentOfType("resolve_permission").length, sendsBeforeAncestryChange,
+      "changed controlling ancestry cannot receive the typed allow response");
+    assert.equal(db.workflowDecisionByOccurrence(ancestry.data.occurrenceId)?.status, "revoked");
 
     const stoppedChild = createChild(parent.data.id, "Guardrail Stop Child");
     db.setUsageRateTable(parseRateTable({

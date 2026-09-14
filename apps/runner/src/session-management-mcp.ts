@@ -197,6 +197,25 @@ async function explicitEffortCompatibilityError(deps: McpDeps): Promise<ToolResu
   return null;
 }
 
+async function workflowDecisionActionCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionAdmission;
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const result = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!result.ok) {
+      return errorResult(
+        `PR merge action admission requires control plane protocol v${required}, but compatibility could not be verified: ${result.message}`,
+      );
+    }
+    actual = result.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= required
+    ? null
+    : errorResult(
+        `PR merge action admission requires control plane protocol v${required}; connected control plane reports v${String(actual ?? "unknown")}. Update Wollipog before consuming this approval.`,
+      );
+}
+
 /** Keep the exact invocation alive while its CP-owned child approval is pending, including
  * run fan-out. Retrying maintains the durable approval's abandonment fence. */
 async function createWithSpawnApproval(deps: McpDeps, path: string, body: unknown) {
@@ -947,12 +966,21 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "consume_workflow_decision",
-    description: "Immediately before the approved external action begins, consume its one-shot authorization using the exact current resource snapshot. Revoked, changed, replayed, stale, or superseded grants fail closed.",
+    description: "Immediately before the approved external action begins, consume its one-shot authorization using the exact current resource snapshot. PR merge approvals instead arm one canonical enqueue command pinned with --match-head-commit and are consumed only when its matching runner permission is delivered. Revoked, changed, replayed, stale, or superseded grants fail closed.",
     inputSchema: {
       type: "object",
       properties: {
         occurrenceId: { type: "string" },
         resourceSnapshot: WORKFLOW_DECISION_RESOURCE_SCHEMA,
+        action: {
+          type: "object",
+          properties: {
+            kind: { const: "pr_merge_enqueue" },
+            command: { type: "string", minLength: 1, maxLength: 2000 },
+          },
+          required: ["kind", "command"],
+          additionalProperties: false,
+        },
       },
       required: ["occurrenceId", "resourceSnapshot"],
       additionalProperties: false,
@@ -961,11 +989,18 @@ export const TOOLS: McpTool[] = [
       if (!deps.selfSessionId || typeof args?.occurrenceId !== "string" || !args.occurrenceId) {
         return errorResult("occurrenceId and a session identity are required");
       }
+      if (args?.resourceSnapshot?.category === "pr_merge") {
+        if (args?.action?.kind !== "pr_merge_enqueue" || typeof args.action.command !== "string") {
+          return errorResult("PR merge decisions require an exact pr_merge_enqueue action");
+        }
+        const compatibilityError = await workflowDecisionActionCompatibilityError(deps);
+        if (compatibilityError) return compatibilityError;
+      }
       const r = await cpFetch(
         deps,
         "POST",
         `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/workflow-decisions/${encodeURIComponent(args.occurrenceId)}/consume`,
-        { resourceSnapshot: args?.resourceSnapshot },
+        { resourceSnapshot: args?.resourceSnapshot, ...(args?.action ? { action: args.action } : {}) },
       );
       return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
     },

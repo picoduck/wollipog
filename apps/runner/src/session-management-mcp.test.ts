@@ -144,6 +144,7 @@ test("Parent Control tools are orchestrator-only and bind resolutions to exact o
 
 test("typed workflow decision tools preserve exact request, resolution, and consume snapshots", async () => {
   const { deps, calls } = makeDeps(() => ({ status: 200, body: { occurrenceId: "workflow_1", status: "pending" } }));
+  deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
   const snapshot = {
     category: "pr_merge",
     repository: "picoduck/wollipog",
@@ -165,8 +166,14 @@ test("typed workflow decision tools preserve exact request, resolution, and cons
   assert.equal(calls.at(-1)?.method, "GET");
   assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/workflow-decisions/workflow_1`);
 
-  await callTool(deps, "consume_workflow_decision", { occurrenceId: "workflow_1", resourceSnapshot: snapshot });
-  assert.deepEqual(calls.at(-1)?.body, { resourceSnapshot: snapshot });
+  const action = {
+    kind: "pr_merge_enqueue",
+    command: `gh pr merge https://github.com/picoduck/wollipog/pull/42 --squash --match-head-commit ${snapshot.headSha}`,
+  };
+  await callTool(deps, "consume_workflow_decision", {
+    occurrenceId: "workflow_1", resourceSnapshot: snapshot, action,
+  });
+  assert.deepEqual(calls.at(-1)?.body, { resourceSnapshot: snapshot, action });
   assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/workflow-decisions/workflow_1/consume`);
 
   deps.orchestrator = true;
@@ -181,6 +188,27 @@ test("typed workflow decision tools preserve exact request, resolution, and cons
       evidenceReviewed: ["desktop"], rationale: "Inspected the exact evidence." },
   });
   assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/descendant-requests/resolve`);
+});
+
+test("PR merge action admission fails closed against mixed-version control planes", async () => {
+  const { deps, calls } = makeDeps();
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionAdmission - 1;
+  const result = await callTool(deps, "consume_workflow_decision", {
+    occurrenceId: "workflow_old",
+    resourceSnapshot: {
+      category: "pr_merge", repository: "picoduck/wollipog", pullRequest: 42,
+      headSha: "a".repeat(40), reviewResult: "merge",
+      requiredChecks: { headSha: "a".repeat(40), status: "passed", checkedAt: 1,
+        checks: [{ name: "Required", state: "passed" }] },
+    },
+    action: {
+      kind: "pr_merge_enqueue",
+      command: `gh pr merge https://github.com/picoduck/wollipog/pull/42 --squash --match-head-commit ${"a".repeat(40)}`,
+    },
+  });
+  assert.equal(result.isError, true);
+  assert.match(resultText(result), /protocol v142/u);
+  assert.equal(calls.length, 0, "an old peer never receives an action-bearing consume request");
 });
 
 /* -------------------------------------------------------------------------- */

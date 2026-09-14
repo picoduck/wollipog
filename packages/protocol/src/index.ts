@@ -391,7 +391,10 @@
 //      stop-and-archive completion.
 // 141: repository-owned worktree setup exposes content-safe lifecycle state and bounded progress;
 //      environment values and copied file contents remain runner-private.
-export const PROTOCOL_VERSION = 141;
+// 142: an approved PR-merge workflow decision can arm one exact canonical enqueue command. The
+//      matching runner permission consumes it only after delivery succeeds; older peers fail
+//      closed instead of silently treating action arming as the v139 immediate-consume contract.
+export const PROTOCOL_VERSION = 142;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -574,6 +577,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   backgroundMissingResultRecovery: 134,
   delegatedParentControl: 136,
   typedWorkflowDecisionDelegation: 139,
+  workflowDecisionActionAdmission: 142,
   orchestratorCampaignManagement: 140,
   worktreeSetup: 141,
   workerAttention: 108,
@@ -2721,6 +2725,18 @@ export type WorkflowDecisionStatus =
   | "revoked"
   | "superseded";
 
+export interface WorkflowDecisionAction {
+  kind: "pr_merge_enqueue";
+  /** Must equal the canonical command derived from the approved repository, PR, and head SHA. */
+  command: string;
+}
+
+/** Durable, content-safe proof that one exact action is waiting for its matching runner ask. */
+export interface WorkflowDecisionActionAdmission extends WorkflowDecisionAction {
+  commandDigest: string;
+  armedAt: number;
+}
+
 /** One exact workflow gate. Raw rationale is never retained; only its digest reaches audit. */
 export interface WorkflowDecisionView {
   requestId: string;
@@ -2739,6 +2755,7 @@ export interface WorkflowDecisionView {
   createdAt: number;
   resolvedAt?: number;
   consumedAt?: number;
+  actionAdmission?: WorkflowDecisionActionAdmission;
 }
 
 export interface CreateWorkflowDecisionRequest {
@@ -2760,6 +2777,9 @@ export interface ResolveWorkflowDecisionRequest {
 export interface ConsumeWorkflowDecisionRequest {
   /** The action supplies the exact snapshot it is about to use, not only a remembered digest. */
   resourceSnapshot: WorkflowDecisionResourceSnapshot;
+  /** Required for PR merge. The approved grant remains unconsumed until this exact command's
+   * one-shot runner permission is delivered; other decision categories still consume directly. */
+  action?: WorkflowDecisionAction;
 }
 
 export interface PendingApproval {
@@ -2936,6 +2956,8 @@ export interface GovernanceAuditEntry {
   optionId?: string;
   /** Typed workflow provenance. Resource content and rationale are represented only by digests. */
   workflowDecision?: {
+    /** Additive in v142 so a matching action audit identifies the exact authorizing occurrence. */
+    occurrenceId?: string;
     parentSessionId: string;
     childSessionId: string;
     category: WorkflowDecisionCategory;
