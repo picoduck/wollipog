@@ -481,6 +481,7 @@ export const LEGACY_POLICY_HOOK_SESSION_HEADER = "x-mam-hook-session" as const;
 export const WOLLIPOG_POLICY_HOOK_SESSION_HEADER = "x-wollipog-hook-session" as const;
 export const LEGACY_AUTOMATION_TRIGGER_MEDIA_TYPE = "application/vnd.mam.automation-trigger+json" as const;
 export const WOLLIPOG_AUTOMATION_TRIGGER_MEDIA_TYPE = "application/vnd.wollipog.automation-trigger+json" as const;
+export const WOLLIPOG_OUTBOUND_EVENT_MEDIA_TYPE = "application/vnd.wollipog.outbound-event+json" as const;
 export const LEGACY_AUTOMATION_TRIGGER_HEADERS = {
   timestamp: "x-mam-timestamp",
   nonce: "x-mam-nonce",
@@ -5221,6 +5222,112 @@ export interface AutomationTriggerInvocationView {
 export interface AutomationTriggerInvocationResult {
   invocation: AutomationTriggerInvocationView;
   duplicate: boolean;
+}
+
+export type OutboundEventKind =
+  | "session.created"
+  | "session.input_required"
+  | "session.idle"
+  | "session.completed"
+  | "session.failed"
+  | "session.stopped"
+  | "pull_request.opened"
+  | "pull_request.merged"
+  | "checks.failed"
+  | "cost.checkpoint"
+  | "cost.budget_exhausted";
+
+export type OutboundEventSubscriptionScope =
+  | { kind: "project"; projectId: string }
+  | { kind: "automation"; automationId: string };
+
+export type OutboundEventSubscriptionState = "active" | "paused";
+
+export interface OutboundEventSubscriptionView {
+  subscriptionId: string;
+  callbackUrl: string;
+  scope: OutboundEventSubscriptionScope;
+  eventKinds: OutboundEventKind[];
+  includeSessionName: boolean;
+  includeQuestionTitle: boolean;
+  state: OutboundEventSubscriptionState;
+  pauseReason?: string;
+  generation: number;
+  createdBy: GovernanceActor;
+  createdAt: number;
+  updatedAt: number;
+  lastDeliveredAt?: number;
+}
+
+export interface CreateOutboundEventSubscriptionRequest {
+  callbackUrl: string;
+  scope: OutboundEventSubscriptionScope;
+  eventKinds: OutboundEventKind[];
+  includeSessionName?: boolean;
+  includeQuestionTitle?: boolean;
+}
+
+/** The signing secret is returned once on creation or rotation and never appears in read views. */
+export interface OutboundEventSubscriptionCredential {
+  subscription: OutboundEventSubscriptionView;
+  secret: string;
+}
+
+export type OutboundEventDeliveryStatus =
+  | "pending"
+  | "delivering"
+  | "retrying"
+  | "delivered"
+  | "failed"
+  | "dropped";
+
+/** Content-free operator receipt. The signed request body and secret are never projected. */
+export interface OutboundEventDeliveryView {
+  deliveryId: string;
+  subscriptionId: string;
+  eventId: string;
+  kind: OutboundEventKind;
+  status: OutboundEventDeliveryStatus;
+  attemptCount: number;
+  createdAt: number;
+  updatedAt: number;
+  lastAttemptAt?: number;
+  statusCode?: number;
+  nextRetryAt?: number;
+  error?: string;
+}
+
+export interface OutboundEventEnvelope {
+  version: "v1";
+  eventId: string;
+  kind: OutboundEventKind;
+  occurredAt: number;
+  sessionId: string;
+  /** Omitted for deliberately unassigned “No Project” sessions. */
+  projectId?: string;
+  automationId?: string;
+  automationExecutionId?: string;
+  triggerId?: string;
+  triggerInvocationId?: string;
+  parameters?: Record<string, string>;
+  branch?: string;
+  pullRequest?: {
+    url: string;
+    state: "open" | "merged";
+    headOid?: string;
+  };
+  checks?: {
+    failing: number;
+    failingNames: string[];
+    url?: string;
+  };
+  cost?: {
+    costUsd: number;
+    checkpointUsd?: number;
+    budgetUsd?: number;
+  };
+  sessionName?: string;
+  questionTitle?: string;
 }
 
 export type AutomationExecutionStatus =

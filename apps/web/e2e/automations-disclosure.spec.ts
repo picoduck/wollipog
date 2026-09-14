@@ -124,3 +124,18 @@ test("configured trigger controls and content-free delivery provenance are visib
   await expect(page.getByRole("button", { name: "Missing References" })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Parameter Names" })).toBeVisible();
 });
+
+test("outbound subscription state, privacy defaults, pause reason, and journal are visible", async ({ page }) => {
+  await open(page);
+  const outbound = page.locator(".outbound-event-subscription");
+  await expect(page.getByRole("heading", { name: "Outbound Events" })).toBeVisible();
+  await expect(outbound.getByText("Paused", { exact: true })).toBeVisible();
+  await expect(outbound.getByText("Session Name Excluded", { exact: true })).toBeVisible();
+  await expect(outbound.getByText("Question Title Excluded", { exact: true })).toBeVisible();
+  await expect(outbound.getByText("Paused after 6 bounded delivery attempts", { exact: true })).toBeVisible();
+  await outbound.getByText("Delivery Journal (2)", { exact: true }).click();
+  await expect(outbound.getByText("Session Created · Failed", { exact: true })).toBeVisible();
+  await expect(outbound.getByText("Checks Failed · Retrying", { exact: true })).toBeVisible();
+  await expect(outbound.getByText("HTTP 503", { exact: true })).toHaveCount(2);
+  await expect(outbound.getByText(/Next Retry/)).toBeVisible();
+});

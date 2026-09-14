@@ -575,6 +575,9 @@ export class AutomationsService {
         expectedAutomationRevision: current.revision,
         specSnapshot: materialized.data!.spec,
         ...(materialized.data!.delivery ? { delivery: materialized.data!.delivery } : {}),
+        ...(materialized.data!.acceptedParameters
+          ? { acceptedParameters: materialized.data!.acceptedParameters }
+          : {}),
         now,
       });
       if (!recorded?.stale) break;
@@ -595,7 +598,11 @@ export class AutomationsService {
     trigger: AutomationTriggerView,
     body: ParsedAutomationTriggerBody,
     schedule: AutomationSchedule,
-  ): ServiceResult<{ spec: AutomationSpec; delivery?: AutomationTriggerDeliveryMetadata }> {
+  ): ServiceResult<{
+    spec: AutomationSpec;
+    delivery?: AutomationTriggerDeliveryMetadata;
+    acceptedParameters?: Record<string, string>;
+  }> {
     const { automationId: _automationId, revision: _revision, nextFireAt: _nextFireAt,
       lastFiredAt: _lastFiredAt, createdBy: _createdBy, createdAt: _createdAt,
       updatedAt: _updatedAt, ...storedSpec } = schedule;
@@ -659,7 +666,11 @@ export class AutomationsService {
       parameterNames: Object.keys(body.parameters ?? {}).sort(),
       ...(body.target ? { targetSelector: body.target.selector } : {}),
     };
-    return ok({ spec: { ...storedSpec, action }, delivery });
+    return ok({
+      spec: { ...storedSpec, action },
+      delivery,
+      ...(body.parameters ? { acceptedParameters: { ...body.parameters } } : {}),
+    });
   }
 
   private resolveTriggerSession(
@@ -1294,8 +1305,10 @@ export class AutomationsService {
         now,
       });
     };
+    const automationOrigin = this.db.automationOriginForExecution(execution.executionId);
     return {
       ...ids,
+      ...(automationOrigin ? { automationOrigin } : {}),
       ...(commandSnapshots ? { commandSnapshots } : {}),
       stage,
       activate: (plan) => {
