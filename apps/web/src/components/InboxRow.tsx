@@ -367,8 +367,10 @@ function InboxRowInner({
         </button>
       </div>
       {showWorktreeSetupNotice && session.projectId && (
-        <ConnectedWorktreeSetupNotice session={session as SessionView & { projectId: string }}
-          onGenerated={onWorktreeSetupGenerated ?? onExpand} />
+        <div role="gridcell" className="inbox-row-setup-cell">
+          <ConnectedWorktreeSetupNotice session={session as SessionView & { projectId: string }}
+            onGenerated={onWorktreeSetupGenerated ?? onExpand} />
+        </div>
       )}
     </div>
   );

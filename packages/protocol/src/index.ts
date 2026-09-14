@@ -4766,7 +4766,9 @@ export interface SessionWorktreeView {
   portBlock?: WorktreePortBlock;
   /** Protocol v145: content-safe teardown outcome. Exact argv and environment stay runner-local. */
   teardown?: WorktreeTeardownState;
-  /** Protocol v146: parser status for the exact checkout/base. Absent means unknown, never absent. */
+  /** Protocol v146: parser status from the runner's last authoritative checkout inspection.
+   * Creation inspects the immutable base; generation inspects the new uncommitted checkout file.
+   * Wire absence means unknown, never absent. This status does not mean setup executed. */
   setupConfig?: WorktreeSetupConfigStatus;
   /** Forge change-request linkage. The historic field name is retained on the wire for rolling
    * compatibility; `kind` and `provider` distinguish pull requests from merge requests. */

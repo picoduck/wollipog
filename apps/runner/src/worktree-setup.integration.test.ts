@@ -706,6 +706,33 @@ test("session deletion retires provider and terminals before frozen teardown, th
   assert.deepEqual(allocations.allocations, []);
 });
 
+test("an activation failure after absent-config discovery leaves no ghost worktree identity", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-worktree-setup-activation-failure-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const repo = await repository(root);
+  const dataDir = join(root, "data");
+  const store = new SessionStore(join(dataDir, "sessions"));
+  meta(store, "s_activation_failure", repo);
+  store.patchMeta("s_activation_failure", {
+    providerHistoryBlock: {
+      version: 1,
+      reason: "oversized_tool_call",
+      detectedAt: 1,
+      detail: { field: "arguments" },
+    },
+  });
+  const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+  t.after(() => manager.shutdownAll());
+
+  await assert.rejects(
+    manager.requestWorktree("s_activation_failure", { baseRef: "HEAD", branch: "fix/activation-failure" }),
+    /quarantined/u,
+  );
+   assert.equal(store.readMeta("s_activation_failure")?.worktrees?.some((worktree) =>
+     worktree.branch === "fix/activation-failure") ?? false, false,
+   "status discovery cannot publish an identity for a worktree that cleanup removed");
+ });
+
 test("malformed setup is projected with its exact key and never reaches trust or execution", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-worktree-setup-invalid-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -738,6 +765,16 @@ test("malformed setup is projected with its exact key and never reaches trust or
     /\.wollipog\.json\.setup\[0\]\.command/u);
   assert.equal(trustRequests, 0);
   assert.equal(retained ? existsSync(join(retained.path, ".invalid-ran")) : false, false);
+  await assert.rejects(
+    manager.requestWorktree("s_invalid_setup", { baseRef: "HEAD", branch: "fix/invalid-setup" }),
+    /\.wollipog\.json\.setup\[0\]\.command/u,
+    "an idempotent create cannot bypass retained invalid configuration",
+  );
+  await assert.rejects(
+    manager.selectWorktree("s_invalid_setup", retained!.path),
+    /\.wollipog\.json\.setup\[0\]\.command/u,
+    "selection cannot activate a retained invalid worktree",
+  );
 });
 
 test("session generation targets only its active worktree and refreshes absent to valid", async (t) => {
@@ -756,6 +793,8 @@ test("session generation targets only its active worktree and refreshes absent t
   assert.deepEqual(created.worktree.setupConfig, { status: "absent" });
   const generated = await manager.generateWorktreeSetupConfig("s_generate_setup");
   assert.equal(generated.worktree.setupConfig?.status, "valid");
+  assert.equal(generated.worktree.setup, undefined,
+    "valid means the generated checkout file parses, not that setup ran retroactively");
   assert.equal(existsSync(join(generated.worktree.path, ".wollipog.json")), true);
   assert.equal(existsSync(join(repo, ".wollipog.json")), false, "the primary checkout stays untouched");
   assert.equal((await exec("git", ["-C", generated.worktree.path, "status", "--short", "--", ".wollipog.json"]))

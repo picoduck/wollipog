@@ -9689,6 +9689,7 @@ body.shell-dock-dragging * {
   pointer-events: none;
 }
 .inbox-row-primary-cell { display: block; min-width: 0; }
+.inbox-row-setup-cell { display: block; min-width: 0; }
 /* ---- Threads (#896): a parent and its children as one unit, the children indented under a spine.
    Every row is still ONE card: a collapsed parent's children leave the row list rather than hiding
    inside a taller row, so the virtualizer's per-shape estimate still holds for every row. ---- */

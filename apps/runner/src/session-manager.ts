@@ -1423,6 +1423,7 @@ export class SessionManager {
     worktree: SessionWorktreeView,
     status: WorktreeSetupConfigStatus,
     verifiedLegacy = false,
+    retainNewWorktree = false,
   ): void {
     worktree.setupConfig = status;
     // Legacy/test materializers have not yet passed the branch-identity proof below. Keep their
@@ -1431,9 +1432,18 @@ export class SessionManager {
     if (worktree.source === "legacy" && !verifiedLegacy) return;
     const latest = this.store.readMeta(sessionId);
     if (!latest) return;
-    const worktrees = this.attributedWorktrees(latest)
-      .filter((item) => !sameWorktreePath(latest.context, item.path, worktree.path));
-    worktrees.push({ ...worktree, setupConfig: structuredClone(status) });
+    const attributed = this.attributedWorktrees(latest);
+    const alreadyAttributed = attributed.some((item) =>
+      sameWorktreePath(latest.context, item.path, worktree.path));
+    if (!alreadyAttributed && !retainNewWorktree) {
+      // Discovery precedes activation for a newly created worktree. Publishing here would make a
+      // later activation failure leave a durable identity for a directory cleanup just removed.
+      return;
+    }
+    const retained = { ...worktree, setupConfig: structuredClone(status) };
+    const worktrees = alreadyAttributed
+      ? attributed.map((item) => sameWorktreePath(latest.context, item.path, worktree.path) ? retained : item)
+      : [...attributed, retained];
     const updated = this.store.patchMeta(sessionId, { worktrees });
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
   }
@@ -1607,6 +1617,10 @@ export class SessionManager {
     if (!worktree.baseCommit) {
       this.setWorktreeSetupEnvironment(meta.sessionId, worktree.path, portEnvironment);
       return "none";
+    }
+    if (!discoverConfig && !worktree.setup && worktree.setupConfig?.status === "invalid") {
+      this.setWorktreeSetupEnvironment(meta.sessionId, worktree.path, portEnvironment);
+      return "invalid";
     }
     // Only creation paths discover a new config. A durable setup record proves a v141-created
     // worktree; older worktrees with the pre-existing baseCommit field must never run hooks later.
@@ -1984,6 +1998,11 @@ export class SessionManager {
         const setup = await this.prepareWorktreeSetup(meta, worktree, report, meta.sessionId, true);
         if (setup === "cancelled") throw new Error("worktree setup was cancelled");
         if (setup === "invalid") {
+          if (worktree.setupConfig?.status === "invalid") {
+            this.persistWorktreeSetupConfigStatus(
+              sessionId, worktree, worktree.setupConfig, false, true,
+            );
+          }
           throw Object.assign(new Error(worktree.setupConfig?.status === "invalid"
             ? `invalid worktree setup configuration: ${worktree.setupConfig.error}`
             : "invalid worktree setup configuration"), { retainWorktree: true });

@@ -14,6 +14,8 @@ wollipog init
 
 The generator reads bounded file names such as lockfiles and known ignored local configuration names. It never invokes a detected tool, reads secret file contents, executes setup, stages the generated file, or commits it. It creates only the repository-root `.wollipog.json` and refuses to overwrite an existing file, directory, or symbolic link. Review and commit the result like any other repository change.
 
+Generating a valid file does not apply it retroactively to the current worktree. Wollipog reads setup from the immutable base commit when it creates a future worktree, then presents the exact configuration hash for trust approval.
+
 ## Version 1 Schema
 
 ```json wollipog
