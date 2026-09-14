@@ -3138,7 +3138,9 @@ function SessionDetailLoaded({
     try {
       const result = await api.retryWorktreeSetup(session.id, failedSetupWorktree.path);
       loadSession(result.session);
-      if (session.status === "failed") loadSession(await api.restart(session.id));
+      // Initial launch failures need a fresh start after setup succeeds. Provider forks and
+      // handoffs are restored to idle by the runner so Retry never discards their continuation.
+      if (result.session.status === "failed") loadSession(await api.restart(session.id));
     } catch (cause) {
       if (viewGenerationRef.current === generation) setError((cause as Error).message);
     } finally {

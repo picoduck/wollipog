@@ -68,7 +68,7 @@ class FakeSocket implements UiSocket {
   push(message: ControlPlaneToUi) { this.onmessage?.({ data: JSON.stringify(message) }); }
 }
 
-test("failed worktree setup is visible and Retry Setup resumes before restarting", async () => {
+async function clickSetupRetry(resultStatus: "failed" | "idle"): Promise<string[]> {
   const current = failedSession();
   const socket = new FakeSocket();
   const calls: string[] = [];
@@ -79,7 +79,7 @@ test("failed worktree setup is visible and Retry Setup resumes before restarting
     getSessionEventTailPage: () => new Promise<never>(() => {}),
     retryWorktreeSetup: async (id: string, path: string) => {
       calls.push(`retry:${id}:${path}`);
-      return { session: { ...current, worktrees: current.worktrees!.map((item) => ({ ...item, setup: { ...item.setup!, status: "completed" as const } })) } };
+      return { session: { ...current, status: resultStatus, worktrees: current.worktrees!.map((item) => ({ ...item, setup: { ...item.setup!, status: "completed" as const } })) } };
     },
     restart: async (id: string) => {
       calls.push(`restart:${id}`);
@@ -124,12 +124,22 @@ test("failed worktree setup is visible and Retry Setup resumes before restarting
     const button = banner.querySelector("button") as HTMLButtonElement;
     assert.equal(button.textContent, "Retry Setup");
     await act(async () => { button.click(); await new Promise((resolve) => setTimeout(resolve, 5)); });
-    assert.deepEqual(calls, [
-      "retry:setup-failed:/repos/demo/worktree",
-      "restart:setup-failed",
-    ]);
+    return calls;
   } finally {
     await act(async () => root.unmount());
     container.remove();
   }
+}
+
+test("failed initial worktree setup is visible and Retry Setup resumes before restarting", async () => {
+  assert.deepEqual(await clickSetupRetry("failed"), [
+    "retry:setup-failed:/repos/demo/worktree",
+    "restart:setup-failed",
+  ]);
+});
+
+test("Retry Setup does not restart a restored fork or handoff continuation", async () => {
+  assert.deepEqual(await clickSetupRetry("idle"), [
+    "retry:setup-failed:/repos/demo/worktree",
+  ]);
 });

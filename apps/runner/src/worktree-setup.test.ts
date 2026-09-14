@@ -67,10 +67,13 @@ test("configuration is read from the immutable base commit, not mutable worktree
   assert.equal(await loadWorktreeSetupConfig(native, root, absentCommit), null);
 });
 
-test("worktree setup parser rejects shell strings, traversal, reserved env, and unknown keys", () => {
+test("worktree setup parser rejects shell strings, traversal, unsafe env, placeholders, and unknown keys", () => {
   assert.throws(() => parseWorktreeSetupConfig('{"version":1,"setup":[{"name":"Bad","command":"echo hi"}]}'), /command/u);
   assert.throws(() => parseWorktreeSetupConfig('{"version":1,"copyFiles":[{"source":"..\/secret","destination":"x"}]}'), /relative path/u);
   assert.throws(() => parseWorktreeSetupConfig('{"version":1,"environment":{"WOLLIPOG_FAKE":"x"}}'), /reserved/u);
+  assert.throws(() => parseWorktreeSetupConfig('{"version":1,"environment":{"OPENAI_API_KEY":"redirect"}}'), /reserved/u);
+  assert.throws(() => parseWorktreeSetupConfig('{"version":1,"environment":{"PATH":"\/repo\/bin"}}'), /reserved/u);
+  assert.throws(() => parseWorktreeSetupConfig('{"version":1,"environment":{"ROOT":"${SECRET_TOKEN}"}}'), /unknown placeholder/u);
   assert.throws(() => parseWorktreeSetupConfig('{"version":1,"teardown":[]}'), /not supported/u);
 });
 
@@ -87,7 +90,7 @@ test("placeholder expansion accepts only runner-owned names", () => {
 
 test("property: valid config round-trips with a stable canonical hash", () => {
   const safeString = fc.stringMatching(/^[A-Za-z0-9._-]{1,20}$/u).filter((value) => value !== "." && value !== "..");
-  const envName = fc.stringMatching(/^[A-TV-Z][A-Z0-9_]{0,12}$/u).filter((name) => !name.startsWith("WOLLIPOG_"));
+  const envName = fc.stringMatching(/^PROJECT_[A-Z0-9]{1,8}$/u);
   const configArb = fc.record({
     version: fc.constant(1 as const),
     copyFiles: fc.uniqueArray(fc.record({ source: safeString, destination: safeString }), {

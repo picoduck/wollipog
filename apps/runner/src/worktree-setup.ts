@@ -78,6 +78,26 @@ const MAX_COPY_FILE_BYTES = 64 * 1024 * 1024;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 const PLACEHOLDER = /\$\{([A-Z][A-Z0-9_]*)\}/gu;
 const RESERVED_ENV = /^WOLLIPOG_/iu;
+const WORKTREE_SETUP_VARIABLES = new Set([
+  "WOLLIPOG_WORKTREE_PATH",
+  "WOLLIPOG_WORKTREE_BRANCH",
+  "WOLLIPOG_WORKTREE_BASE_REF",
+  "WOLLIPOG_PRIMARY_CHECKOUT",
+]);
+// Repository setup values are deliberately omitted from durable trust events. Prevent unseen
+// values from redirecting provider authentication, executable loading, or runner-owned state.
+const RESERVED_PROCESS_ENV = new Set([
+  "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+  "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+  "CLAUDE_CONFIG_DIR", "CODEX_HOME", "OPENAI_API_KEY", "OPENAI_BASE_URL",
+  "OPENAI_ORGANIZATION", "OPENAI_ORG_ID", "OPENAI_PROJECT",
+  "GEMINI_API_KEY", "GOOGLE_API_KEY", "GITHUB_TOKEN", "GH_TOKEN",
+  "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+  "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+  "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
+  "TMPDIR", "TMP", "TEMP", "PATH", "PATHEXT", "NODE_OPTIONS",
+  "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
+]);
 
 interface WorktreeSetupTrustFile {
   version: 1;
@@ -206,10 +226,18 @@ export function parseWorktreeSetupConfig(source: string): WorktreeSetupConfig {
   const environmentNames = new Set<string>();
   for (const key of Object.keys(environmentRecord).sort()) {
     if (!ENV_NAME.test(key)) throw new Error(`${WORKTREE_SETUP_CONFIG}.environment key ${JSON.stringify(key)} is invalid`);
-    if (RESERVED_ENV.test(key)) throw new Error(`${WORKTREE_SETUP_CONFIG}.environment.${key} is reserved by Wollipog`);
+    if (RESERVED_ENV.test(key) || RESERVED_PROCESS_ENV.has(key.toUpperCase())) {
+      throw new Error(`${WORKTREE_SETUP_CONFIG}.environment.${key} is reserved by Wollipog`);
+    }
     if (environmentNames.has(key.toLowerCase())) throw new Error(`${WORKTREE_SETUP_CONFIG}.environment contains a case-insensitive duplicate key`);
     environmentNames.add(key.toLowerCase());
-    environment[key] = boundedString(environmentRecord[key], `${WORKTREE_SETUP_CONFIG}.environment.${key}`);
+    const value = boundedString(environmentRecord[key], `${WORKTREE_SETUP_CONFIG}.environment.${key}`);
+    for (const match of value.matchAll(/\$\{([A-Z][A-Z0-9_]*)\}/gu)) {
+      if (!WORKTREE_SETUP_VARIABLES.has(match[1]!)) {
+        throw new Error(`${WORKTREE_SETUP_CONFIG}.environment.${key} uses unknown placeholder \${${match[1]}}`);
+      }
+    }
+    environment[key] = value;
   }
 
   const setupRaw = root.setup ?? [];

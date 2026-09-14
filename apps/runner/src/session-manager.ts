@@ -858,7 +858,10 @@ export class SessionManager {
   private readonly approvalStarted = new Map<string, number>();
   private readonly cleanupJournal: WorktreeCleanupJournal;
   private readonly worktreeSetupTrust: WorktreeSetupTrustStore;
-  private readonly worktreeSetupEnvironments = new Map<string, Record<string, string>>();
+  private readonly worktreeSetupEnvironments = new Map<string, {
+    worktreePath: string;
+    environment: Record<string, string>;
+  }>();
   private readonly worktreeSetupApprovals = new Map<string, (decision: "trusted" | "declined" | "dismissed" | "cancelled") => void>();
   private readonly worktreeSetupRuns = new Map<string, { controller: AbortController; done: Promise<void> }>();
   private readonly providerStateCleanupJournal: ProviderStateCleanupJournal;
@@ -1263,6 +1266,21 @@ export class SessionManager {
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
   }
 
+  private setWorktreeSetupEnvironment(
+    sessionId: string,
+    worktreePath: string,
+    environment: Record<string, string>,
+  ): void {
+    this.worktreeSetupEnvironments.set(sessionId, { worktreePath, environment });
+  }
+
+  private worktreeSetupEnvironmentFor(meta: SessionMeta, worktreePath: string | null): Record<string, string> {
+    const stored = this.worktreeSetupEnvironments.get(meta.sessionId);
+    return stored && worktreePath && sameWorktreePath(meta.context, stored.worktreePath, worktreePath)
+      ? stored.environment
+      : {};
+  }
+
   private forgetTransientWorktreeSetupState(sessionId: string, worktree: SessionWorktreeView): void {
     const attemptId = worktree.setup?.attemptId;
     if (!attemptId) return;
@@ -1349,9 +1367,26 @@ export class SessionManager {
     const run = { controller, done };
     this.worktreeSetupRuns.set(meta.sessionId, run);
     try {
-      return await this.prepareWorktreeSetupAttempt(
+      const result = await this.prepareWorktreeSetupAttempt(
         meta, worktree, onProgress, approvalSessionId, discoverConfig, controller.signal,
       );
+      if (result === "cancelled" && worktree.setup &&
+          (worktree.setup.status === "awaiting_trust" || worktree.setup.status === "running")) {
+        const completedAt = Date.now();
+        this.persistWorktreeSetupState(meta.sessionId, worktree, {
+          ...worktree.setup,
+          status: "failed",
+          steps: worktree.setup.steps.map((step) => step.status === "running" ? {
+            ...step,
+            status: "failed",
+            durationMs: completedAt - step.startedAt,
+            error: "Worktree setup was cancelled. Retry Setup to continue.",
+          } : step),
+          completedAt,
+          error: "Worktree setup was cancelled. Retry Setup to continue.",
+        });
+      }
+      return result;
     } finally {
       if (this.worktreeSetupRuns.get(meta.sessionId) === run) this.worktreeSetupRuns.delete(meta.sessionId);
       finish();
@@ -1367,10 +1402,16 @@ export class SessionManager {
     discoverConfig: boolean,
     signal: AbortSignal,
   ): Promise<"none" | "declined" | "cancelled" | "completed" | "failed"> {
-    if (!worktree.baseCommit) return "none";
+    if (!worktree.baseCommit) {
+      this.worktreeSetupEnvironments.delete(meta.sessionId);
+      return "none";
+    }
     // Only creation paths discover a new config. A durable setup record proves a v141-created
     // worktree; older worktrees with the pre-existing baseCommit field must never run hooks later.
-    if (!discoverConfig && !worktree.setup) return "none";
+    if (!discoverConfig && !worktree.setup) {
+      this.worktreeSetupEnvironments.delete(meta.sessionId);
+      return "none";
+    }
     if (worktree.source === "attached" && !worktree.setup) {
       this.worktreeSetupEnvironments.delete(meta.sessionId);
       return "none"; // Attaching an operator-owned tree is not a Wollipog worktree creation path.
@@ -1384,7 +1425,7 @@ export class SessionManager {
     }
     const existing = worktree.setup;
     if (existing?.configHash === loaded.hash && existing.status === "completed") {
-      this.worktreeSetupEnvironments.set(meta.sessionId, resolvedWorktreeSetupEnvironment(loaded.config, {
+      this.setWorktreeSetupEnvironment(meta.sessionId, worktree.path, resolvedWorktreeSetupEnvironment(loaded.config, {
         primaryCheckout: meta.repoPath,
         worktreePath: worktree.path,
         branch: worktree.branch,
@@ -1493,47 +1534,58 @@ export class SessionManager {
     const progressHeartbeat = onProgress ? setInterval(() => onProgress("running_setup"), 15_000) : undefined;
     progressHeartbeat?.unref?.();
     const setupStartedAt = Date.now();
-    const state = await runWorktreeSetup({
-      context: meta.context,
-      primaryCheckout: meta.repoPath,
-      worktreePath: worktree.path,
-      branch: worktree.branch,
-      baseRef: worktree.baseRef,
-      config: loaded.config,
-      configHash: loaded.hash,
-      environment: hostSetupEnvironment,
-      signal,
-      ...(existing?.configHash === loaded.hash && existing.status === "failed" ? { prior: existing } : {}),
-      prepareExecution: async () => {
-        // Cloud isolation preparation snapshots the source worktree. Delaying this boundary until
-        // runWorktreeSetup has copied all declared files makes the snapshot and remote cwd exact.
-        const resolvedIsolation = await this.resolveLaunchIsolation(meta, worktree.path);
-        setupEnvironment = this.worktreeSetupRuntimeEnvironment(resolvedIsolation, hostSetupEnvironment);
-        return {
-          environment: setupEnvironment,
-          isolation: this.worktreeSetupIsolationEnvironment(resolvedIsolation, setupEnvironment),
-        };
-      },
-      onState: (next) => {
-        if (next.copies.some((copy) => copy.status === "pending")) onProgress?.("copying_setup_files");
-        else onProgress?.("running_setup");
-        this.persistWorktreeSetupState(meta.sessionId, worktree, next);
-        next.steps.forEach((step, index) => {
-          if (step.status === "running" || reportedStepResults.get(index) === step.status) return;
-          reportedStepResults.set(index, step.status);
-          const exit = step.exitCode != null ? ` (Exit ${step.exitCode})` : step.signal ? ` (${step.signal})` : "";
-          this.emitEvent(meta.sessionId, {
-            kind: "command_output",
-            text: `[Worktree Setup — ${step.name}]\n${step.status === "completed" ? "Completed" : step.optional ? "Failed (Optional)" : "Failed"}` +
-              `${exit}${step.durationMs == null ? "" : ` in ${step.durationMs} ms`}${step.error ? `: ${step.error}` : ""}`,
+    let state: WorktreeSetupState;
+    try {
+      state = await runWorktreeSetup({
+        context: meta.context,
+        primaryCheckout: meta.repoPath,
+        worktreePath: worktree.path,
+        branch: worktree.branch,
+        baseRef: worktree.baseRef,
+        config: loaded.config,
+        configHash: loaded.hash,
+        environment: hostSetupEnvironment,
+        signal,
+        ...(existing?.configHash === loaded.hash && existing.status === "failed" ? { prior: existing } : {}),
+        prepareExecution: async () => {
+          // Cloud isolation preparation snapshots the source worktree. Delaying this boundary until
+          // runWorktreeSetup has copied all declared files makes the snapshot and remote cwd exact.
+          const resolvedIsolation = await this.resolveLaunchIsolation(meta, worktree.path);
+          setupEnvironment = this.worktreeSetupRuntimeEnvironment(resolvedIsolation, hostSetupEnvironment);
+          return {
+            environment: setupEnvironment,
+            isolation: this.worktreeSetupIsolationEnvironment(resolvedIsolation, setupEnvironment),
+          };
+        },
+        onState: (next) => {
+          if (next.copies.some((copy) => copy.status === "pending")) onProgress?.("copying_setup_files");
+          else onProgress?.("running_setup");
+          this.persistWorktreeSetupState(meta.sessionId, worktree, next);
+          next.steps.forEach((step, index) => {
+            if (step.status === "running" || reportedStepResults.get(index) === step.status) return;
+            reportedStepResults.set(index, step.status);
+            const exit = step.exitCode != null ? ` (Exit ${step.exitCode})` : step.signal ? ` (${step.signal})` : "";
+            this.emitEvent(meta.sessionId, {
+              kind: "command_output",
+              text: `[Worktree Setup — ${step.name}]\n${step.status === "completed" ? "Completed" : step.optional ? "Failed (Optional)" : "Failed"}` +
+                `${exit}${step.durationMs == null ? "" : ` in ${step.durationMs} ms`}${step.error ? `: ${step.error}` : ""}`,
+            });
           });
-        });
-      },
-      onOutput: (stepIndex, text) => this.emitEvent(meta.sessionId, {
-        kind: "command_output",
-        text: `[Worktree Setup — ${loaded.config.setup[stepIndex]?.name ?? `Step ${stepIndex + 1}`}]\n${text}`,
-      }),
-    }).finally(() => { if (progressHeartbeat) clearInterval(progressHeartbeat); });
+        },
+        onOutput: (stepIndex, text) => this.emitEvent(meta.sessionId, {
+          kind: "command_output",
+          text: `[Worktree Setup — ${loaded.config.setup[stepIndex]?.name ?? `Step ${stepIndex + 1}`}]\n${text}`,
+        }),
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        this.worktreeSetupEnvironments.delete(meta.sessionId);
+        return "cancelled";
+      }
+      throw error;
+    } finally {
+      if (progressHeartbeat) clearInterval(progressHeartbeat);
+    }
     this.log(`worktree setup ${state.status} for ${meta.sessionId} ` +
       `(config ${loaded.hash.slice(0, 12)}, attempt ${state.attemptId}, ${Date.now() - setupStartedAt} ms)`);
     if (state.status === "failed") {
@@ -1541,7 +1593,7 @@ export class SessionManager {
       this.emitEvent(meta.sessionId, { kind: "error", message: `worktree setup failed: ${state.error ?? "required step failed"}` });
       return "failed";
     }
-    this.worktreeSetupEnvironments.set(meta.sessionId, setupEnvironment);
+    this.setWorktreeSetupEnvironment(meta.sessionId, worktree.path, setupEnvironment);
     return "completed";
   }
 
@@ -1747,8 +1799,13 @@ export class SessionManager {
       });
       if (verified.branch !== worktree.branch) throw new Error("worktree branch changed before setup retry");
       const setup = await this.prepareWorktreeSetup(meta, worktree);
+      if (setup === "cancelled") throw new Error("worktree setup was cancelled");
       if (setup === "failed") throw new Error("required worktree setup failed again");
-      const snapshot = await this.activateWorktree(meta, worktree);
+      await this.activateWorktree(meta, worktree);
+      if (meta.status === "failed" && (meta.agentSessionId || meta.handoffPending)) {
+        this.emitStatus(sessionId, "idle");
+      }
+      const snapshot = this.snapshot(this.store.readMeta(sessionId)!);
       return { worktree, snapshot };
     });
   }
@@ -1875,7 +1932,14 @@ export class SessionManager {
         throw new Error("worktree branch changed since it was linked to this session");
       }
       const selected = { ...worktree, path: verified.path };
+      if (selected.setup?.status === "failed") {
+        throw new Error("required worktree setup must be retried before selection");
+      }
+      if (selected.setup?.status === "awaiting_trust" || selected.setup?.status === "running") {
+        throw new Error("worktree setup is incomplete; retry it before selection");
+      }
       const setup = await this.prepareWorktreeSetup(meta, selected);
+      if (setup === "cancelled") throw new Error("worktree setup was cancelled");
       if (setup === "failed") throw new Error("required worktree setup must succeed before selection");
       return this.activateWorktree(meta, selected);
     });
@@ -4854,7 +4918,8 @@ export class SessionManager {
       // Repository setup values are resolved runner-side from the immutable base-commit config.
       // Apply them after agent-config refresh so they reach hooks and the provider without ever
       // being persisted in meta.json or projected to the control plane.
-      meta.env = { ...meta.env, ...(this.worktreeSetupEnvironments.get(sessionId) ?? {}) };
+      const setupEnvironment = this.worktreeSetupEnvironmentFor(meta, worktree?.path ?? null);
+      meta.env = { ...meta.env, ...setupEnvironment };
       if (meta.config.permissionMode === "orchestrator") {
         meta.env = {
           ...meta.env,
@@ -4886,7 +4951,7 @@ export class SessionManager {
       isolation = await this.resolveLaunchIsolation(meta, cwd, launchGeneration);
       const runtimeSetupEnvironment = this.worktreeSetupRuntimeEnvironment(
         isolation,
-        this.worktreeSetupEnvironments.get(sessionId) ?? {},
+        setupEnvironment,
       );
       meta.env = { ...meta.env, ...runtimeSetupEnvironment };
       isolation = this.worktreeSetupIsolationEnvironment(
