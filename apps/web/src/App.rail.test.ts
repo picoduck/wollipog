@@ -296,7 +296,7 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
   assert.match(projectLocationDialog, /"Add to Project"/);
   assert.doesNotMatch(projectLocationDialog, /Move (?:Here|to|Location)/,
     "adding a shared Location does not imply moving it from another Project");
-  assert.match(projectsView, /onCreate=\{async \(location\)[\s\S]*api\.createProjectLocation/,
+  assert.match(projectsView, /onCreate=\{async \(location, generateSetup\)[\s\S]*api\.createProjectLocation/,
     "Project management uses the atomic Project-scoped Location creation API");
   assert.match(css, /\.project-location-create-toggle\s*\{[^}]*width:\s*100%;[^}]*text-align:\s*left;/,
     "the collapsed creation disclosure remains a full-width readable target");

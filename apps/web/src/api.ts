@@ -116,6 +116,7 @@ import type {
   UserCostWindows,
   UserStatus,
   WorkspaceInfo,
+  WorktreeSetupConfigStatus,
   WorkspaceReference,
   WorkspaceReferenceCandidate,
   WorkflowArtifact,
@@ -436,6 +437,22 @@ export function createApiClient(transport: ApiTransport) {
       `/api/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(locationId)}/default`,
       { method: "POST" },
     ),
+
+  projectLocationWorktreeSetup: (projectId: string, locationId: string) =>
+    req<{ locationId: string; status: WorktreeSetupConfigStatus }>(
+      `/api/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(locationId)}/worktree-setup`,
+    ),
+
+  generateProjectLocationWorktreeSetup: (projectId: string, locationId: string) =>
+    req<{ locationId: string; status: WorktreeSetupConfigStatus; path: ".wollipog.json"; detected: string[] }>(
+      `/api/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(locationId)}/worktree-setup`,
+      { method: "POST" },
+    ),
+
+  dismissWorktreeSetupNotice: (projectId: string) =>
+    req<{ dismissed: true }>(`/api/projects/${encodeURIComponent(projectId)}/worktree-setup-notice/dismiss`, {
+      method: "PUT",
+    }),
 
   archiveProjectSessions: (projectId: string) =>
     req<ArchiveProjectSessionsResponse>(`/api/projects/${encodeURIComponent(projectId)}/archive-sessions`, {
@@ -763,6 +780,12 @@ export function createApiClient(transport: ApiTransport) {
       method: "POST",
       body: JSON.stringify({ path }),
     }),
+
+  generateWorktreeSetup: (id: string) =>
+    req<{ session: SessionView; generatedSetup: { path: ".wollipog.json"; detected: string[] } }>(
+      `/api/sessions/${encodeURIComponent(id)}/worktrees/generate-setup`,
+      { method: "POST" },
+    ),
 
   approve: (id: string, body: ApproveRequest) =>
     req<SessionView>(`/api/sessions/${id}/approve`, {

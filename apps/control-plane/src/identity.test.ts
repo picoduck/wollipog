@@ -35,6 +35,7 @@ test("organization roles centrally gate mutations while reads remain available",
   assert.match(mutationAuthorizationError("POST", "/api/sessions", human("viewer"))!, /read-only/);
   assert.equal(mutationAuthorizationError("PUT", "/api/sessions/:id/reminder", human("viewer")), null);
   assert.equal(mutationAuthorizationError("DELETE", "/api/sessions/:id/reminder", human("viewer")), null);
+  assert.equal(mutationAuthorizationError("PUT", "/api/projects/:id/worktree-setup-notice/dismiss", human("viewer")), null);
   assert.equal(mutationAuthorizationError("PUT", "/api/agent-harness-defaults", human("viewer")), null);
   assert.equal(mutationAuthorizationError("DELETE", "/api/agent-harness-defaults", human("viewer")), null);
   assert.match(mutationAuthorizationError("PUT", "/api/sessions/:id/title", human("viewer"))!, /read-only/);

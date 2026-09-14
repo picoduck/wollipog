@@ -210,7 +210,40 @@ const snapshotDb = {
   listRuns: () => [],
   listPods: () => [],
   listSessionReminders: () => [],
+  worktreeSetupNoticeDismissals: () => [],
 } as unknown as ControlPlaneDb;
+
+test("worktree setup notice dismissals snapshot and fan out only to the owning user", () => {
+  const db = {
+    ...snapshotDb,
+    worktreeSetupNoticeDismissals: (userId: string) => userId === "u1" ? ["project-a"] : [],
+    canAccessProject: () => true,
+  } as unknown as ControlPlaneDb;
+  const hub = new Hub(db);
+  const messages = new Map<string, Array<Record<string, unknown>>>();
+  const add = (userId: string) => {
+    const received: Array<Record<string, unknown>> = [];
+    messages.set(userId, received);
+    hub.addUiClient({ send: (data) => received.push(JSON.parse(data) as Record<string, unknown>) }, {
+      deviceId: `device-${userId}`,
+      principal: {
+        kind: "human", actorId: userId, userId, userName: userId,
+        organizationId: "org", organizationName: "Org", role: "viewer",
+        deviceId: `device-${userId}`, localBootstrap: false,
+      },
+      close: () => {},
+    });
+  };
+  add("u1");
+  add("u2");
+  assert.deepEqual(messages.get("u1")?.[0]?.worktreeSetupNoticeDismissals, ["project-a"]);
+  assert.deepEqual(messages.get("u2")?.[0]?.worktreeSetupNoticeDismissals, []);
+  messages.get("u1")!.length = 0;
+  messages.get("u2")!.length = 0;
+  hub.worktreeSetupNoticeDismissed("u1", "project-a");
+  assert.equal(messages.get("u1")?.[0]?.type, "worktree_setup_notice_dismissed");
+  assert.deepEqual(messages.get("u2"), []);
+});
 
 test("dashboard background delivery acknowledgements are session-authorized and idempotent", () => {
   const acknowledged: string[] = [];
@@ -1045,6 +1078,7 @@ test("unsubscribed high-volume events skip authorization database reads", () => 
     listRuns: () => [],
     listPods: () => [],
     listSessionReminders: () => [],
+    worktreeSetupNoticeDismissals: () => [],
     canAccessSession: () => { authorizationReads++; return true; },
   } as unknown as ControlPlaneDb;
   const hub = new Hub(scopedDb);

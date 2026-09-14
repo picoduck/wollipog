@@ -17,7 +17,8 @@ import {
 import { VERSION } from "./version.js";
 import { defaultHostAdminIo, hostAdminUsage, runHostAdminCli, type HostAdminIo } from "./host-admin-cli.js";
 import { defaultServiceHost, defaultServiceIo, runServiceCli, serviceUsage } from "./service-cli.js";
-import { expandCommandAlias, pairHelp, resolveHelp, rootHelp, sessionHelp, worktreeHelp } from "./wollipog-help.js";
+import { expandCommandAlias, initHelp, pairHelp, resolveHelp, rootHelp, sessionHelp, worktreeHelp } from "./wollipog-help.js";
+import { resolveWorktreeSetupRepositoryRoot, writeStarterWorktreeSetupConfig } from "./worktree-setup-generator.js";
 
 type Write = (text: string) => void;
 
@@ -85,6 +86,35 @@ function numeric(value: string | undefined): number | undefined {
 
 function usage(): string {
   return rootHelp();
+}
+
+export async function runWollipogInit(
+  directory: string,
+  json: boolean,
+  io: { stdout: Write; stderr: Write },
+): Promise<number> {
+  try {
+    const repository = await resolveWorktreeSetupRepositoryRoot({ kind: "native" }, directory);
+    const generated = await writeStarterWorktreeSetupConfig({ kind: "native" }, repository);
+    const result = {
+      status: "created",
+      path: generated.path,
+      detected: generated.detected,
+      executed: false,
+      staged: false,
+      committed: false,
+    };
+    io.stdout(json
+      ? `${JSON.stringify(result)}\n`
+      : `Created ${generated.path} for review. No tools were run, and nothing was staged or committed.\n`);
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: message })}\n` : `${message}\n`);
+    if (message.startsWith("not a Git repository:")) return 3;
+    if (message.includes("already exists") || message.includes("regular file")) return 4;
+    return 1;
+  }
 }
 
 function invocationArgs(argv: string[]): string[] {
@@ -325,6 +355,15 @@ export async function runWollipogCli(
       return 2;
     }
     return runServiceCli(args, defaultServiceHost(fetchImpl), { ...defaultServiceIo(), stdout: io.stdout, stderr: io.stderr });
+  }
+  // Repository initialization is deliberately local and credential-free. It branches before
+  // control-plane discovery and can only create the canonical file in the current Git checkout.
+  if (positional(args)[0] === "init") {
+    if (positional(args).length !== 1) {
+      (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: initHelp() })}\n` : `${initHelp()}\n`);
+      return 2;
+    }
+    return runWollipogInit(process.cwd(), json, io);
   }
   const parsed = command(args);
   if ("error" in parsed) {

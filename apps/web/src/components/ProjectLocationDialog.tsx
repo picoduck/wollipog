@@ -28,6 +28,7 @@ import {
   useAccessScopeIdentity,
 } from "./AccessScopeControls.js";
 import { Modal } from "./common.js";
+import { Checkbox } from "./ui/ChoiceControls.js";
 
 interface NewProjectLocation {
   runnerId: string;
@@ -61,6 +62,7 @@ export function ProjectLocationDialog({
   onAdd,
   onCreate,
   onManageConnections,
+  onboarding = false,
 }: {
   project: ProjectView;
   projects: readonly ProjectView[];
@@ -69,9 +71,10 @@ export function ProjectLocationDialog({
   canCreateLocation: boolean;
   accessScopeManagementSupported: boolean;
   onClose: () => void;
-  onAdd: (candidate: ProjectLocationCandidate) => Promise<void>;
-  onCreate: (location: NewProjectLocation) => Promise<void>;
+  onAdd: (candidate: ProjectLocationCandidate, generateSetup: boolean) => Promise<void>;
+  onCreate: (location: NewProjectLocation, generateSetup: boolean) => Promise<void>;
   onManageConnections: () => void;
+  onboarding?: boolean;
 }) {
   const [query, setQuery] = useState("");
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -83,6 +86,7 @@ export function ProjectLocationDialog({
   const [createExpanded, setCreateExpanded] = useState(false);
   const [browsing, setBrowsing] = useState(false);
   const [scopeKey, setScopeKey] = useState("");
+  const [generateSetup, setGenerateSetup] = useState(false);
   const [scopeCorrection, setScopeCorrection] = useState<{
     resource: { kind: "project"; projectId: string; name: string } |
       { kind: "workspace"; runnerId: string; workspaceId: string; name: string };
@@ -181,7 +185,7 @@ export function ProjectLocationDialog({
         name,
         path: selectedFolder,
         ...(selectedScope ? { owner: selectedScope.owner } : {}),
-      });
+      }, generateSetup);
       onClose();
     } catch (cause) {
       setError(projectLocationCreationError(cause));
@@ -197,7 +201,7 @@ export function ProjectLocationDialog({
     setError(null);
     setBusyKey(candidate.key);
     try {
-      await onAdd(candidate);
+      await onAdd(candidate, generateSetup);
       onClose();
     } catch (cause) {
       setError((cause as Error).message);
@@ -210,6 +214,13 @@ export function ProjectLocationDialog({
     <Modal title={`Add Location to ${project.name}`} onClose={close} wide className="project-location-dialog">
       <div className="project-location-picker">
         <p className="muted">Add an existing Location to this Project. Its other Project memberships and sessions will not change. If the folder is not registered yet, create a new Location from a connected machine.</p>
+        {onboarding && (
+          <label className="project-location-generate-option">
+            <Checkbox checked={generateSetup} disabled={busyKey !== null} label="Generate Starter Config"
+              onChange={setGenerateSetup} />
+            <span><strong>Generate Starter Config</strong><small>After adding the Location, create .wollipog.json for review. No tools run, and nothing is staged or committed.</small></span>
+          </label>
+        )}
         <div className="project-location-create-disclosure">
           <button
             type="button"

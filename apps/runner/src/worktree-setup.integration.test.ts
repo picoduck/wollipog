@@ -705,3 +705,59 @@ test("session deletion retires provider and terminals before frozen teardown, th
   const allocations = JSON.parse(readFileSync(join(dataDir, "worktree-port-allocations.json"), "utf8")) as { allocations: unknown[] };
   assert.deepEqual(allocations.allocations, []);
 });
+
+test("malformed setup is projected with its exact key and never reaches trust or execution", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-worktree-setup-invalid-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const repo = await repository(root);
+  writeFileSync(join(repo, ".wollipog.json"), JSON.stringify({
+    version: 1,
+    setup: [{ name: "Must Not Run", command: "touch .invalid-ran" }],
+  }), "utf8");
+  await exec("git", ["-C", repo, "add", ".wollipog.json"]);
+  await exec("git", ["-C", repo, "commit", "-qm", "malformed setup config"]);
+
+  const dataDir = join(root, "data");
+  const store = new SessionStore(join(dataDir, "sessions"));
+  meta(store, "s_invalid_setup", repo);
+  let trustRequests = 0;
+  const manager = new SessionManager((message) => {
+    if (message.type === "session_event" && message.payload.kind === "permission_request" &&
+        message.payload.context?.toolName === "wollipog.worktree_setup") trustRequests++;
+  }, () => {}, store, "runner", undefined, undefined, dataDir);
+  t.after(() => manager.shutdownAll());
+
+  await assert.rejects(
+    manager.requestWorktree("s_invalid_setup", { baseRef: "HEAD", branch: "fix/invalid-setup" }),
+    /\.wollipog\.json\.setup\[0\]\.command/u,
+  );
+  const retained = store.readMeta("s_invalid_setup")?.worktrees?.find((worktree) =>
+    worktree.branch === "fix/invalid-setup");
+  assert.equal(retained?.setupConfig?.status, "invalid");
+  assert.match(retained?.setupConfig?.status === "invalid" ? retained.setupConfig.error : "",
+    /\.wollipog\.json\.setup\[0\]\.command/u);
+  assert.equal(trustRequests, 0);
+  assert.equal(retained ? existsSync(join(retained.path, ".invalid-ran")) : false, false);
+});
+
+test("session generation targets only its active worktree and refreshes absent to valid", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-worktree-setup-generate-session-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const repo = await repository(root);
+  const dataDir = join(root, "data");
+  const store = new SessionStore(join(dataDir, "sessions"));
+  meta(store, "s_generate_setup", repo);
+  const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+  t.after(() => manager.shutdownAll());
+
+  const created = await manager.requestWorktree(
+    "s_generate_setup", { baseRef: "HEAD", branch: "fix/generate-setup" },
+  );
+  assert.deepEqual(created.worktree.setupConfig, { status: "absent" });
+  const generated = await manager.generateWorktreeSetupConfig("s_generate_setup");
+  assert.equal(generated.worktree.setupConfig?.status, "valid");
+  assert.equal(existsSync(join(generated.worktree.path, ".wollipog.json")), true);
+  assert.equal(existsSync(join(repo, ".wollipog.json")), false, "the primary checkout stays untouched");
+  assert.equal((await exec("git", ["-C", generated.worktree.path, "status", "--short", "--", ".wollipog.json"]))
+    .stdout.trim(), "?? .wollipog.json");
+});

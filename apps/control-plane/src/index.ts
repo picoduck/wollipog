@@ -1386,6 +1386,7 @@ app.register(async (instance) => {
       case "rewind_result":
       case "fork_result":
       case "session_worktree_result":
+      case "workspace_worktree_setup_result":
       case "logout_agent_result":
       case "acp_registry_approval_result":
       case "host_action_result":
@@ -2011,6 +2012,69 @@ app.post("/api/projects/:id/locations/:locationId/default", async (req, reply) =
   } catch (error) {
     return reply.code(409).send({ error: (error as Error).message });
   }
+});
+
+async function projectLocationWorktreeSetup(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  operation: "inspect" | "generate",
+) {
+  const { id, locationId } = req.params as { id: string; locationId: string };
+  const principal = requestHuman(req);
+  if (!principal) return reply.code(403).send({ error: "human identity is required" });
+  const project = accessibleProject(req, id);
+  const location = db.projectLocation(locationId);
+  if (!project || !location || location.projectId !== id) {
+    return reply.code(404).send({ error: "project location not found" });
+  }
+  if (operation === "generate" && !db.canManageProject(principal, id)) {
+    return reply.code(404).send({ error: "project not found" });
+  }
+  if (location.availability !== "available" || !hub.isRunnerOnline(location.runnerId)) {
+    return reply.code(409).send({ error: "project location is unavailable" });
+  }
+  const unsupported = runnerCapabilityError(location.runnerId, "worktreeSetupConfig", "Worktree setup configuration");
+  if (unsupported) return reply.code(409).send({ error: unsupported });
+  const requestId = `workspace_setup_${randomUUID().slice(0, 8)}`;
+  try {
+    const result = await hub.requestFromRunner(location.runnerId, requestId, {
+      type: "workspace_worktree_setup",
+      requestId,
+      workspaceId: location.workspaceId,
+      workspacePath: location.path,
+      operation,
+    }, 150_000);
+    if (result.type !== "workspace_worktree_setup_result") {
+      return reply.code(502).send({ error: "unexpected runner reply" });
+    }
+    if (!result.ok || !result.status) {
+      return reply.code(409).send({ error: result.error ?? "worktree setup operation failed" });
+    }
+    return {
+      locationId,
+      status: result.status,
+      ...(result.path ? { path: result.path } : {}),
+      ...(result.detected ? { detected: result.detected } : {}),
+    };
+  } catch (error) {
+    return reply.code(502).send({ error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+app.get("/api/projects/:id/locations/:locationId/worktree-setup", async (req, reply) =>
+  projectLocationWorktreeSetup(req, reply, "inspect"));
+
+app.post("/api/projects/:id/locations/:locationId/worktree-setup", async (req, reply) =>
+  projectLocationWorktreeSetup(req, reply, "generate"));
+
+app.put("/api/projects/:id/worktree-setup-notice/dismiss", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestHuman(req);
+  if (!principal) return reply.code(403).send({ error: "human identity is required" });
+  if (!accessibleProject(req, id)) return reply.code(404).send({ error: "project not found" });
+  db.dismissWorktreeSetupNotice(principal.userId, id);
+  hub.worktreeSetupNoticeDismissed(principal.userId, id);
+  return { dismissed: true };
 });
 
 app.post("/api/projects/:id/archive-sessions", async (req, reply) => {
@@ -3833,7 +3897,8 @@ async function runSessionWorktreeRequest(
   sessionId: string,
   request:
     | { operation: "create"; baseRef?: string; branch: string; progress?: boolean }
-    | { operation: "attach" | "select" | "discard" | "retry_setup"; path: string },
+    | { operation: "attach" | "select" | "discard" | "retry_setup"; path: string }
+    | { operation: "generate_setup" },
   principal: AuthPrincipal | null,
   reply: FastifyReply,
 ) {
@@ -3847,8 +3912,12 @@ async function runSessionWorktreeRequest(
   if (authorizationError) return reply.code(403).send({ error: authorizationError });
   const unsupported = runnerCapabilityError(
     session.runnerId,
-    request.operation === "discard" ? "sessionWorktreeDiscard" : request.operation === "retry_setup" ? "worktreeSetup" : "sessionWorktrees",
-    request.operation === "discard" ? "Session worktree discard" : request.operation === "retry_setup" ? "Worktree setup" : "Session worktrees",
+    request.operation === "discard" ? "sessionWorktreeDiscard"
+      : request.operation === "retry_setup" ? "worktreeSetup"
+      : request.operation === "generate_setup" ? "worktreeSetupConfig" : "sessionWorktrees",
+    request.operation === "discard" ? "Session worktree discard"
+      : request.operation === "retry_setup" ? "Worktree setup"
+      : request.operation === "generate_setup" ? "Worktree setup generation" : "Session worktrees",
   );
   if (unsupported) return reply.code(409).send({ error: unsupported });
   const reconciliationBlock = svc.podReconciliationMutationError(sessionId);
@@ -3907,7 +3976,9 @@ async function runSessionWorktreeRequest(
     if (request.operation !== "create") worktreeCreates.invalidateSession(sessionId);
     // v133+ runners say whether a live platform sandbox can already write to an attached path.
     // A pre-v133 runner omits it, and the field stays absent rather than being guessed here.
-    return { worktree: res.worktree, session: db.getSession(sessionId), ...(res.isolation ? { isolation: res.isolation } : {}) };
+    return { worktree: res.worktree, session: db.getSession(sessionId),
+      ...(res.isolation ? { isolation: res.isolation } : {}),
+      ...(res.generatedSetup ? { generatedSetup: res.generatedSetup } : {}) };
   } catch (error) {
     return reply.code(502).send({ error: (error as Error).message });
   }
@@ -3967,6 +4038,11 @@ app.post("/api/sessions/:id/worktrees/retry-setup", async (req, reply) => {
     return reply.code(400).send({ error: "path must be a non-empty string of at most 4096 characters" });
   }
   return runSessionWorktreeRequest(id, { operation: "retry_setup", path }, requestPrincipal(req), reply);
+});
+
+app.post("/api/sessions/:id/worktrees/generate-setup", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  return runSessionWorktreeRequest(id, { operation: "generate_setup" }, reply);
 });
 
 // Per-turn checkpoint rewind (T3-style, files only — the conversation continues). The runner

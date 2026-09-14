@@ -3774,6 +3774,18 @@ test("legacy execution-target projection is bounded per runner when listing sess
   assert.ok(sessions.every((session) => session.executionTarget?.runnerId === "runner-1"));
 });
 
+test("worktree setup notice dismissals are durable and isolated per user and project", () => {
+  const db = withRunner();
+  const first = db.createProject({ name: "First" });
+  const second = db.createProject({ name: "Second" });
+  assert.deepEqual(db.worktreeSetupNoticeDismissals("user-a"), []);
+  db.dismissWorktreeSetupNotice("user-a", first.id, 100);
+  db.dismissWorktreeSetupNotice("user-a", first.id, 200);
+  db.dismissWorktreeSetupNotice("user-b", second.id, 300);
+  assert.deepEqual(db.worktreeSetupNoticeDismissals("user-a"), [first.id]);
+  assert.deepEqual(db.worktreeSetupNoticeDismissals("user-b"), [second.id]);
+});
+
 test("snapshot context gauges round-trip while a user title resists provider replacement", () => {
   const db = withRunner();
   db.createSessionFromSnapshot(snapshot({

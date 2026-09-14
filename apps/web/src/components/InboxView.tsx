@@ -58,6 +58,7 @@ import { dispatchVirtualViewportIntent } from "../viewport-intent.js";
 import { virtualTargetScrollAdjustment } from "./MeasuredVirtualList.js";
 import type { PreviewNavigationControls } from "./usePreviewNavigationRegistration.js";
 import { SegmentedControl } from "./ui/ChoiceControls.js";
+import { worktreeSetupNoticeSessionIds } from "../worktree-setup-notice.js";
 
 const PROJECT_PIN_KEY = "wollipog.projects.pinned";
 const SEEN_DWELL_MS = 1_500;
@@ -194,6 +195,7 @@ export function InboxView({
   const stalledIndex = useStoreSelector((state) => state.stalledSessionIds);
   const stalledRevision = useStoreSelector((state) => state.stalledRevision);
   const runners = useStoreSelector((state) => state.runners);
+  const worktreeSetupNoticeDismissals = useStoreSelector((state) => state.worktreeSetupNoticeDismissals);
   const snapshotLoaded = useStoreSelector((state) => state.snapshotLoaded);
   const inbox = useStoreSelector((state) => state.inbox);
   const {
@@ -1183,6 +1185,14 @@ export function InboxView({
   // row; only the shared toolbar (tabs, search, toggle) stays keyboard-reachable there.
   useInboxKeys(!isMobile && !expanded && !boardMode, keyActions);
   const boardSessions = useMemo(() => liveEntries.map((entry) => entry.session), [liveEntries]);
+  const setupNoticeSessionIds = useMemo(
+    () => worktreeSetupNoticeSessionIds(sessions.values(), runners, worktreeSetupNoticeDismissals),
+    [sessions, runners, worktreeSetupNoticeDismissals],
+  );
+  const openGeneratedWorktreeSetup = useCallback((sessionId: string) => {
+    selectSession(sessionId, activeSplit?.key ?? null);
+    navigate({ name: "session", id: sessionId, location: { path: ".wollipog.json" } });
+  }, [activeSplit?.key, navigate, selectSession]);
 
   const ratio = dragRatio ?? inbox.splitRatio;
   const activeProjectId = activeSplit?.project?.kind === "durable" ? activeSplit.project.project.id : undefined;
@@ -1388,6 +1398,7 @@ export function InboxView({
           pinnedSessionIds={pinnedSessions}
           pinnedAncestorSessionIds={pinnedAncestorSessionIds}
           stalledSessionIds={stalledSessionIds}
+          worktreeSetupNoticeSessionIds={setupNoticeSessionIds}
           runningCount={activityCounts.running}
           queuedCount={activityCounts.queued}
           startingCount={activityCounts.starting}
@@ -1435,6 +1446,7 @@ export function InboxView({
           onNewSession={() => onNewSession?.(activeNewSessionPreset)}
           onSelect={handleSelect}
           onExpand={expand}
+          onWorktreeSetupGenerated={openGeneratedWorktreeSetup}
           onToggleThread={toggleThread}
           onScrollPosition={(scrollTop) => inboxScrollPositions.set(instanceScope, scrollTop)}
           onPointerTargetChange={handlePointerTargetChange}

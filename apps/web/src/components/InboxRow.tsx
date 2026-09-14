@@ -1,5 +1,5 @@
 import type { SessionReminderView, SessionView } from "@wollipog/protocol";
-import { memo } from "react";
+import { memo, useState } from "react";
 import { useLongPress } from "./interactions.js";
 import { isHeartbeatBusy, type SessionActivity } from "../activity.js";
 import { relativeTime, statusMeta } from "../format.js";
@@ -14,6 +14,8 @@ import { ActivityStrip } from "./ActivityStrip.js";
 import { AttentionPills, BackgroundWorkBadge, SessionPinIndicator, ThreadDot, quarantinedStatusMeta } from "./common.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { inboxThreadChildrenLabel, type InboxThreadChildren } from "../inbox.js";
+import { useApi } from "../api-context.js";
+import { WorktreeSetupNotice } from "./WorktreeSetupNotice.js";
 
 export interface InboxRowProps {
   optionId: string;
@@ -62,6 +64,32 @@ export interface InboxRowProps {
   onToggleThread?: (sessionId: string) => void;
   /** Right-click, long-press, or keyboard context menu for this row's session (#154). */
   onSessionMenu: (sessionId: string, anchor: { x: number; y: number }) => void;
+  showWorktreeSetupNotice?: boolean;
+  onWorktreeSetupGenerated?: (sessionId: string) => void;
+}
+
+function ConnectedWorktreeSetupNotice({ session, onGenerated }: {
+  session: SessionView & { projectId: string };
+  onGenerated: (sessionId: string) => void;
+}) {
+  const api = useApi();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  return <WorktreeSetupNotice compact busy={busy} error={error} onDismiss={() => {
+    setBusy(true);
+    setError(null);
+    void api.dismissWorktreeSetupNotice(session.projectId).catch((cause) => {
+      setError((cause as Error).message);
+    }).finally(() => setBusy(false));
+  }} onGenerate={() => {
+    setBusy(true);
+    setError(null);
+    void api.generateWorktreeSetup(session.id)
+      .then(() => api.dismissWorktreeSetupNotice(session.projectId))
+      .then(() => onGenerated(session.id))
+      .catch((cause) => setError((cause as Error).message))
+      .finally(() => setBusy(false));
+  }} />;
 }
 
 function InboxRowInner({
@@ -86,6 +114,8 @@ function InboxRowInner({
   onExpand,
   onToggleThread,
   onSessionMenu,
+  showWorktreeSetupNotice = false,
+  onWorktreeSetupGenerated,
 }: InboxRowProps) {
   const longPress = useLongPress(({ x, y }) => onSessionMenu(session.id, { x, y }));
   const stopStatus = session.stopOperation?.status ?? session.archiveStatus;
@@ -336,6 +366,10 @@ function InboxRowInner({
           </span>
         </button>
       </div>
+      {showWorktreeSetupNotice && session.projectId && (
+        <ConnectedWorktreeSetupNotice session={session as SessionView & { projectId: string }}
+          onGenerated={onWorktreeSetupGenerated ?? onExpand} />
+      )}
     </div>
   );
 }

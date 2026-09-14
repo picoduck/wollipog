@@ -76,6 +76,9 @@ export function mutationAuthorizationError(
   if (routePath === "/api/sessions/:id/reminder") {
     return null;
   }
+  if (routePath === "/api/projects/:id/worktree-setup-notice/dismiss") {
+    return null;
+  }
   // Agent Harness defaults are private per-user preferences, not mutations of shared organization
   // resources. The route still requires an authenticated human and can only address that user.
   if (routePath === "/api/agent-harness-defaults" || routePath === "/api/orchestrator-settings") {

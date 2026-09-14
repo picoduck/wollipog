@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "copyFiles": [],
+  "environment": {},
+  "setup": [
+    {
+      "name": "Install Node Dependencies",
+      "command": [
+        "pnpm",
+        "install",
+        "--frozen-lockfile"
+      ],
+      "timeoutSeconds": 600,
+      "optional": false
+    }
+  ]
+}

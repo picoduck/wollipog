@@ -123,6 +123,8 @@ import { sessionRequestPanelKey } from "./SessionRequestPanel.js";
 import { ComposerQuestionResponse } from "./ComposerQuestionResponse.js";
 import { useGovernanceAudit, useGovernanceTimeline } from "./useGovernanceAudit.js";
 import { SessionHeader } from "./SessionHeader.js";
+import { WorktreeSetupNotice } from "./WorktreeSetupNotice.js";
+import { worktreeSetupNoticeSessionIds } from "../worktree-setup-notice.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { useAccessibleMenu, useDismissiblePopover } from "./interactions.js";
 import { useFeedback } from "./FeedbackProvider.js";
@@ -749,6 +751,15 @@ function SessionDetailLoaded({
     return window?.eventEpoch === (s.sessions.get(sessionId)?.eventEpoch ?? 0) ? window : undefined;
   });
   const runner = useStoreSelector((s) => s.runners.get(session.runnerId));
+  const allSessions = useStoreSelector((s) => s.sessions);
+  const allRunners = useStoreSelector((s) => s.runners);
+  const setupDismissals = useStoreSelector((s) => s.worktreeSetupNoticeDismissals);
+  const showWorktreeSetupNotice = useMemo(() => worktreeSetupNoticeSessionIds(
+    allSessions.values(), allRunners, setupDismissals,
+  ).has(sessionId), [allRunners, allSessions, sessionId, setupDismissals]);
+  const activeWorktreeSetupConfig = session.worktreePath
+    ? session.worktrees?.find((worktree) => worktree.path === session.worktreePath)?.setupConfig
+    : undefined;
   const runnerOnline = runner?.status === "online";
   const snapshotLoaded = useStoreSelector((s) => s.snapshotLoaded);
   const stopBeforeArchiveSupported = useStoreSelector((s) => s.stopBeforeArchiveSupported);
@@ -797,6 +808,8 @@ function SessionDetailLoaded({
   const [handoffTurn, setHandoffTurn] = useState<number | null>(null);
   const [restartPending, setRestartPending] = useState(false);
   const [setupRetryPending, setSetupRetryPending] = useState(false);
+  const [setupGeneratePending, setSetupGeneratePending] = useState(false);
+  const [setupGenerateError, setSetupGenerateError] = useState<string | null>(null);
   const [steeringBusy, setSteeringBusy] = useState(false);
   const [queuedEditBusy, setQueuedEditBusy] = useState(false);
   const [queuedEdit, setQueuedEdit] = useState<QueuedPromptEditState | null>(null);
@@ -4295,6 +4308,7 @@ function SessionDetailLoaded({
   return (
     <div className={`session-detail ${mode}`} data-session-surface-id={session.id}>
       {mode === "expanded" ? (
+        <>
         <SessionHeader
           session={session}
           runnerOnline={runnerOnline}
@@ -4358,6 +4372,30 @@ function SessionDetailLoaded({
           // focus-rescue anchor there; the mobile layout keeps the app bar and its own anchor.
           titleId={!isMobile ? "page-title" : undefined}
         />
+        {showWorktreeSetupNotice && session.projectId && (
+          <WorktreeSetupNotice busy={setupGeneratePending} error={setupGenerateError} onDismiss={() => {
+            setSetupGeneratePending(true);
+            setSetupGenerateError(null);
+            void api.dismissWorktreeSetupNotice(session.projectId!).catch((error) => {
+              setSetupGenerateError((error as Error).message);
+            }).finally(() => setSetupGeneratePending(false));
+          }} onGenerate={() => {
+            setSetupGeneratePending(true);
+            setSetupGenerateError(null);
+            void api.generateWorktreeSetup(session.id)
+              .then(() => api.dismissWorktreeSetupNotice(session.projectId!))
+              .then(() => openSourceLocation({ path: ".wollipog.json" }))
+              .catch((error) => setSetupGenerateError((error as Error).message))
+              .finally(() => setSetupGeneratePending(false));
+          }} />
+        )}
+        {activeWorktreeSetupConfig?.status === "invalid" && (
+          <div className="worktree-setup-config-error" role="alert">
+            <strong>Invalid Worktree Setup Configuration</strong>
+            <code>{activeWorktreeSetupConfig.error}</code>
+          </div>
+        )}
+        </>
       ) : (
         <header className="session-preview-head">
           <div className="session-preview-heading">

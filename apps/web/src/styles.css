@@ -7069,6 +7069,99 @@ button.file-head.source-path-link {
   color: var(--red);
   border-color: color-mix(in srgb, var(--red) 40%, transparent);
 }
+.worktree-setup-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 8px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elev);
+}
+
+.worktree-setup-notice.compact {
+  margin: 4px 8px 8px;
+  padding: 8px 10px;
+}
+
+.worktree-setup-notice-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+
+.worktree-setup-notice-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.worktree-setup-notice-error,
+.worktree-setup-config-error {
+  color: var(--red);
+}
+
+.worktree-setup-config-error {
+  display: grid;
+  gap: 6px;
+  margin: 8px 12px;
+  padding: 10px 12px;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-md);
+}
+
+.worktree-setup-config-error code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.project-location-setup-status {
+  display: grid;
+  justify-items: start;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.project-location-setup-status code {
+  color: var(--red);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.project-location-generate-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+}
+
+.project-location-generate-option > span {
+  display: grid;
+  gap: 3px;
+}
+
+.project-location-generate-option small {
+  color: var(--text-dim);
+}
+
+@media (max-width: 680px) {
+  .worktree-setup-notice {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .worktree-setup-notice-actions {
+    flex-wrap: wrap;
+  }
+}
+
 /* Version-skew: the runner registered with an older PROTOCOL_VERSION than this dashboard. */
 .outdated-badge {
   display: inline-block;

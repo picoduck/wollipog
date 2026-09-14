@@ -99,6 +99,11 @@ import {
 } from "./git-ops.js";
 import { flushProjectedOutbox, Outbox } from "./outbox.js";
 import { SessionManager } from "./session-manager.js";
+import {
+  inspectCheckoutWorktreeSetupConfig,
+  resolveWorktreeSetupRepositoryRoot,
+  writeStarterWorktreeSetupConfig,
+} from "./worktree-setup-generator.js";
 import { NativeProviderAuthRecovery } from "./provider-auth-recovery.js";
 import { handleResolveSteeringAttemptMessage, handleSteerSessionMessage } from "./steering-handler.js";
 import {
@@ -1689,6 +1694,8 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         snapshot: SessionSnapshot;
         worktree?: SessionWorktreeView;
         isolation?: import("@wollipog/protocol").SessionWorktreeIsolationNotice;
+        path?: ".wollipog.json";
+        detected?: string[];
       }> = msg.operation === "create"
         ? sessions.requestWorktree(msg.sessionId, { branch: msg.branch, baseRef: msg.baseRef }, reportProgress)
         : msg.operation === "attach"
@@ -1700,7 +1707,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             }))
             : msg.operation === "retry_setup"
               ? sessions.retryWorktreeSetup(msg.sessionId, msg.path)
-              : sessions.discardWorktree(msg.sessionId, msg.path).then((snapshot) => ({ snapshot }));
+              : msg.operation === "generate_setup"
+                ? sessions.generateWorktreeSetupConfig(msg.sessionId)
+                : sessions.discardWorktree(msg.sessionId, msg.path).then((snapshot) => ({ snapshot }));
       void operation.then((result) => sendUp({
         type: "session_worktree_result",
         requestId: msg.requestId,
@@ -1710,6 +1719,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         snapshot: result.snapshot,
         ...(result.worktree ? { worktree: result.worktree } : {}),
         ...(result.isolation ? { isolation: result.isolation } : {}),
+        ...(result.path && result.detected ? { generatedSetup: { path: result.path, detected: result.detected } } : {}),
       })).catch((error) => sendUp({
         type: "session_worktree_result",
         requestId: msg.requestId,
@@ -1717,6 +1727,34 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         operation: msg.operation,
         ok: false,
         error: errText(error),
+      }));
+      break;
+    }
+    case "workspace_worktree_setup": {
+      // workspacePath is resolved from the authorized Project Location by the control plane; the
+      // browser never supplies it. Resolve Git's root again here so generation cannot target an
+      // arbitrary descendant filename and also works for CP-owned, dynamically created Locations.
+      const operation = (async () => {
+        const repository = await resolveWorktreeSetupRepositoryRoot({ kind: "native" }, msg.workspacePath);
+        if (msg.operation === "generate") {
+          const generated = await writeStarterWorktreeSetupConfig({ kind: "native" }, repository);
+          return { status: generated.status, path: generated.path, detected: generated.detected };
+        }
+        return { status: await inspectCheckoutWorktreeSetupConfig({ kind: "native" }, repository) };
+      })();
+      void operation.then((result) => sendUp({
+        type: "workspace_worktree_setup_result",
+        requestId: msg.requestId,
+        workspaceId: msg.workspaceId,
+        operation: msg.operation,
+        ok: true,
+        status: result.status,
+        ...("path" in result
+          ? { path: result.path, detected: result.detected }
+          : {}),
+      })).catch((error) => sendUp({
+        type: "workspace_worktree_setup_result", requestId: msg.requestId,
+        workspaceId: msg.workspaceId, operation: msg.operation, ok: false, error: errText(error),
       }));
       break;
     }
