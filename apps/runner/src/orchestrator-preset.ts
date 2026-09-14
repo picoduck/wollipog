@@ -1,5 +1,10 @@
 import type { AcpImplementationDiagnostics } from "./acp-contract.js";
-import type { AgentDefinition, AgentCapabilities, SessionLaunchSpec } from "@wollipog/protocol";
+import {
+  runnerSupportsProtocol,
+  type AgentDefinition,
+  type AgentCapabilities,
+  type SessionLaunchSpec,
+} from "@wollipog/protocol";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { windowsCommandSpec } from "./windows-cmd.js";
@@ -206,6 +211,39 @@ export function withOrchestratorPreset(
       ...agent.capabilities,
       permissionModes: [...new Set([...(agent.capabilities.permissionModes ?? []), ORCHESTRATOR_PRESET])],
     } };
+  });
+}
+
+/** An older control plane cannot request the provider-mode policy, so do not advertise a native
+ * Claude Orchestrator that could only run without Strict Project Isolation. Strict-capable Claude,
+ * native Codex, ACP, and verified Direct WSL peers retain their legacy-safe advertisement. */
+export function projectOrchestratorPresetForPeer(
+  agents: AgentDefinition[],
+  host: {
+    controlPlaneProtocolVersion: number | null;
+    platform?: NodeJS.Platform;
+    isolationMode?: OrchestratorIsolationMode;
+  },
+): AgentDefinition[] {
+  if (runnerSupportsProtocol(host.controlPlaneProtocolVersion, "orchestratorExecutionPolicy")) {
+    return agents;
+  }
+  return agents.map((agent) => {
+    if ((agent.context?.kind ?? "native") !== "native" || agent.driver !== "claude-code" ||
+        supportsNativeOrchestratorBoundary(
+          agent.driver,
+          host.platform ?? process.platform,
+          host.isolationMode,
+        ) || !agent.capabilities?.permissionModes?.includes(ORCHESTRATOR_PRESET)) return agent;
+    return {
+      ...agent,
+      capabilities: {
+        ...agent.capabilities,
+        permissionModes: agent.capabilities.permissionModes.filter(
+          (mode) => mode !== ORCHESTRATOR_PRESET,
+        ),
+      },
+    };
   });
 }
 

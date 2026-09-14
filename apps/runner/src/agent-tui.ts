@@ -34,7 +34,8 @@ export async function prepareAgentTuiLaunch(
       !TUI_DRIVERS.has(meta.driver)) {
     throw new Error("Orchestrator Native TUI requires a current native host harness and control plane.");
   }
-  if (!supportsNativeOrchestratorBoundary(
+  const strictProjectIsolation = meta.orchestrator?.strictProjectIsolation !== false;
+  if (strictProjectIsolation && !supportsNativeOrchestratorBoundary(
     meta.driver, platform, dependencies.executionIsolationMode,
   )) {
     throw new Error("Orchestrator Native TUI requires an attested native filesystem boundary for this harness.");
@@ -45,10 +46,12 @@ export async function prepareAgentTuiLaunch(
   const cwd = await dependencies.prepareScratch(meta);
   const prepared = { ...meta, args: [...meta.args], env: { ...meta.env } };
   await dependencies.provision(prepared);
-  prepared.env = {
-    ...prepared.env,
-    ...(platform === "win32" ? { TEMP: cwd, TMP: cwd } : { TMPDIR: cwd }),
-  };
+  if (strictProjectIsolation) {
+    prepared.env = {
+      ...prepared.env,
+      ...(platform === "win32" ? { TEMP: cwd, TMP: cwd } : { TMPDIR: cwd }),
+    };
+  }
   if (prepared.driver !== "claude-code") {
     prepared.args.push(...await (dependencies.probe ?? codexOrchestratorMcpArgs)(
       prepared, cwd,

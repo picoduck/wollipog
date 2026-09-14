@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { AgentDefinition } from "@wollipog/protocol";
+import {
+  PROTOCOL_VERSION,
+  RUNNER_CAPABILITY_MIN_PROTOCOL,
+  type AgentDefinition,
+} from "@wollipog/protocol";
 import {
   assertClaudeAgentAcpOrchestratorIdentity,
   CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION,
@@ -10,6 +14,7 @@ import {
   orchestratorAcpSessionMeta,
   orchestratorInstructions,
   orchestratorLaunchArgs,
+  projectOrchestratorPresetForPeer,
   stripOrchestratorLaunchArgs,
   supportsClaudeAgentAcpOrchestrator,
   withOrchestratorPreset,
@@ -111,6 +116,42 @@ test("Codex orchestrator capability requires the discovery-verified automatic-re
     },
   }], { platform: "linux" })[0]!;
   assert.equal(supported.capabilities!.permissionModes!.includes("orchestrator"), true);
+});
+
+test("provider-only native Claude Orchestrator is hidden from control planes that cannot request it", () => {
+  const claude: AgentDefinition = {
+    id: "claude-code",
+    name: "Claude Code",
+    command: "claude",
+    args: [],
+    env: {},
+    driver: "claude-code",
+    context: { kind: "native" },
+    capabilities: {
+      models: [],
+      effortLevels: [],
+      slashCommands: [],
+      supportsImages: true,
+      supportsApprovals: true,
+      permissionModes: ["default", "dontAsk", "orchestrator"],
+    },
+  };
+  assert.equal(projectOrchestratorPresetForPeer([claude], {
+    controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorExecutionPolicy - 1,
+    platform: "linux",
+    isolationMode: "provider",
+  })[0]!.capabilities!.permissionModes!.includes("orchestrator"), false);
+  assert.equal(projectOrchestratorPresetForPeer([claude], {
+    controlPlaneProtocolVersion: PROTOCOL_VERSION,
+    platform: "linux",
+    isolationMode: "provider",
+  })[0]!.capabilities!.permissionModes!.includes("orchestrator"), true);
+  assert.equal(projectOrchestratorPresetForPeer([claude], {
+    controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorExecutionPolicy - 1,
+    platform: "linux",
+    isolationMode: "bwrap",
+  })[0]!.capabilities!.permissionModes!.includes("orchestrator"), true,
+  "old peers may still launch the legacy strict Claude configuration when its boundary exists");
 });
 
 test("Codex MCP isolation probes an in-distro WSL binary through exact argv", () => {
