@@ -1,4 +1,12 @@
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import {
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   DEFAULT_LIVE_CHILD_LIMIT,
@@ -279,11 +287,35 @@ export function NewSessionDialog({
   const [retainedSessionId, setRetainedSessionId] = useState<string | null>(null);
   const retainedSessionButtonRef = useRef<HTMLButtonElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
+  const projectChoiceRef = useRef<HTMLDivElement>(null);
+  const agentChoiceRef = useRef<HTMLDivElement>(null);
   const generatedFormId = useId();
   const formId = `${generatedFormId}-new-session`;
   const projectInputId = `${generatedFormId}-project`;
   const agentInputId = `${generatedFormId}-agent`;
   const touchChoicePicker = useTouchTargetMode();
+  const previousTouchChoicePickerRef = useRef(touchChoicePicker);
+  // Capture ownership DURING render, while the old control is still mounted. By the time a layout
+  // effect runs after the media-query change, React has replaced the focused input or listbox and
+  // the browser has already fallen back to <body>. This is the same boundary used for request and
+  // rail focus handoffs elsewhere in the app.
+  const focusedElementBeforeRender = typeof document !== "undefined" && document.activeElement instanceof HTMLElement
+    ? document.activeElement : null;
+  const responsiveChoiceFocusBeforeRender = previousTouchChoicePickerRef.current !== touchChoicePicker
+    ? projectChoiceRef.current?.contains(focusedElementBeforeRender) ? "project"
+      : agentChoiceRef.current?.contains(focusedElementBeforeRender) ? "agent"
+        : null
+    : null;
+  useLayoutEffect(() => {
+    const presentationChanged = previousTouchChoicePickerRef.current !== touchChoicePicker;
+    previousTouchChoicePickerRef.current = touchChoicePicker;
+    if (!presentationChanged || !responsiveChoiceFocusBeforeRender) return;
+    const region = responsiveChoiceFocusBeforeRender === "project" ? projectChoiceRef.current : agentChoiceRef.current;
+    const replacement = touchChoicePicker
+      ? region?.querySelector<HTMLButtonElement>(".ui-select-trigger")
+      : region?.querySelector<HTMLInputElement>(".ui-searchable-combobox-input");
+    replacement?.focus();
+  }, [responsiveChoiceFocusBeforeRender, touchChoicePicker]);
   const projectLocationOptionsId = `${generatedFormId}-project-locations`;
   const permissionOptionsId = `${generatedFormId}-permission-presets`;
   const liveChildLimitInputId = `${generatedFormId}-live-child-limit`;
@@ -934,7 +966,7 @@ export function NewSessionDialog({
         {online.length === 0 && <p className="muted">No runners online. Start a runner first.</p>}
         {projectsSupported && (
             <>
-              <div className="field">
+              <div className="field" ref={projectChoiceRef}>
                 <label className="new-session-field-label" htmlFor={touchChoicePicker ? undefined : projectInputId}>Project</label>
                 {touchChoicePicker ? (
                   <Select<string>
@@ -1171,7 +1203,7 @@ export function NewSessionDialog({
 
           <div className="field">
             <label className="new-session-field-label" htmlFor={touchChoicePicker ? undefined : agentInputId}>Agent</label>
-            <div className="agent-select">
+            <div className="agent-select" ref={agentChoiceRef}>
               <AgentIcon driver={agent?.driver ?? "acp"} agentName={agent?.name} size={15} />
               {touchChoicePicker ? (
                 <Select<string>

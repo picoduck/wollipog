@@ -334,6 +334,57 @@ for (const viewport of [VIEWPORTS[0], VIEWPORTS[2]]) {
 test.describe("responsive Project and Agent presentation", () => {
   test.use({ viewport: { width: 1280, height: 900 } });
 
+  test("keeps focus on each logical selector while its responsive control changes", async ({ page }) => {
+    await openDialog(page);
+
+    const desktopProject = page.getByRole("combobox", { name: "Project" });
+    await desktopProject.focus();
+    await expect(desktopProject).toBeFocused();
+    const desktopProjectOptions = page.getByRole("listbox", { name: "Project Options" });
+    await expect(desktopProjectOptions).toBeVisible();
+
+    await page.setViewportSize({ width: 390, height: 780 });
+    const touchProject = page.getByRole("button", { name: /^Project:/ });
+    await expect(touchProject).toBeFocused();
+    await expect(desktopProjectOptions).toHaveCount(0);
+
+    await touchProject.press("Enter");
+    const touchProjectOptions = page.getByRole("listbox", { name: "Project", exact: true });
+    await expect(touchProjectOptions).toBeFocused();
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await expect(page.getByRole("combobox", { name: "Project" })).toBeFocused();
+    await expect(touchProjectOptions).toHaveCount(0);
+
+    const desktopAgent = page.getByRole("combobox", { name: "Agent" });
+    await desktopAgent.focus();
+    await expect(desktopAgent).toBeFocused();
+    const desktopAgentOptions = page.getByRole("listbox", { name: "Agent Options" });
+    await expect(desktopAgentOptions).toBeVisible();
+
+    await page.setViewportSize({ width: 390, height: 780 });
+    const touchAgent = page.getByRole("button", { name: /^Agent:/ });
+    await expect(touchAgent).toBeFocused();
+    await expect(desktopAgentOptions).toHaveCount(0);
+
+    await touchAgent.press("Enter");
+    const touchAgentOptions = page.getByRole("listbox", { name: "Agent", exact: true });
+    await expect(touchAgentOptions).toBeFocused();
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await expect(page.getByRole("combobox", { name: "Agent" })).toBeFocused();
+    await expect(touchAgentOptions).toHaveCount(0);
+  });
+
+  test("does not move unrelated focus when the responsive controls change", async ({ page }) => {
+    await openDialog(page);
+    const close = page.getByRole("button", { name: "Close" });
+    await close.focus();
+
+    await page.setViewportSize({ width: 390, height: 780 });
+    await expect(close).toBeFocused();
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await expect(close).toBeFocused();
+  });
+
   test("keeps both selections while switching between searchable and tap-only controls", async ({ page }) => {
     await openDialog(page);
     const desktopProject = page.getByRole("combobox", { name: "Project" });
