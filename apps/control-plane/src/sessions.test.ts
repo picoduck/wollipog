@@ -854,6 +854,51 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       .find((message) => message.spec.sessionId === grandchild.data!.id)?.initialPrompt ?? "";
     assert.match(nestedAssignment, new RegExp(`Campaign ${parent.id}`));
     assert.match(nestedAssignment, /Wollipog Campaign Policy — server-derived, revision 1/);
+    const mergeSnapshot = {
+      category: "pr_merge" as const,
+      repository: "picoduck/wollipog", pullRequest: 1091, headSha: "a".repeat(40),
+      reviewResult: "merge" as const,
+      requiredChecks: { headSha: "a".repeat(40), status: "passed" as const, checkedAt: 10,
+        checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }] },
+    };
+    const delegatedMerge = svc.createWorkflowDecision(grandchild.data.id, {
+      requestId: "nested-merge-before-revocation", resourceKey: "picoduck/wollipog#1091",
+      resourceSnapshot: mergeSnapshot,
+    });
+    assert.ok(delegatedMerge.ok && delegatedMerge.data, delegatedMerge.error);
+    assert.equal(delegatedMerge.data.controllingSessionId, parent.id,
+      "nested typed decisions bind to the outermost campaign policy revision");
+    assert.equal(delegatedMerge.data.authority, "orchestrator");
+
+    assert.ok(svc.setConfig(parent.id, { maxChildSessions: 5 }).ok);
+    assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.behavior.maximumConcurrentChildren, 5);
+    assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.sources.behavior.maximumConcurrentChildren, "active_campaign");
+    const currentRevision = db.getSession(parent.id)!.parentControlPolicy!.revision;
+    const decisions = { ...db.getSession(parent.id)!.parentControlPolicy!.decisions, pr_merge: "human" as const };
+    assert.ok(svc.setParentControlPolicy(parent.id, decisions, currentRevision).ok);
+    assert.equal(db.workflowDecisionByOccurrence(delegatedMerge.data.occurrenceId)?.status, "revoked",
+      "a root policy change revokes a nested child's decision bound to the prior revision");
+    assert.equal(svc.descendantRequests(child.data.id, () => true).status, 403,
+      "a nested Orchestrator cannot retain its copied Parent Control authority");
+    assert.ok(svc.setParentControl(parent.id, "off").ok);
+    assert.equal(svc.descendantRequests(child.data.id, () => true).status, 403,
+      "turning root Parent Control off cannot be bypassed through a nested Orchestrator");
+    const humanMerge = svc.createWorkflowDecision(grandchild.data.id, {
+      requestId: "nested-merge-after-revocation", resourceKey: "picoduck/wollipog#1091-new-head",
+      resourceSnapshot: { ...mergeSnapshot, headSha: "b".repeat(40),
+        requiredChecks: { ...mergeSnapshot.requiredChecks, headSha: "b".repeat(40) } },
+    });
+    assert.ok(humanMerge.ok && humanMerge.data, humanMerge.error);
+    assert.equal(humanMerge.data.controllingSessionId, parent.id);
+    assert.equal(humanMerge.data.authority, "human");
+    assert.ok(svc.resolveWorkflowDecision(
+      parent.id, grandchild.data.id, humanMerge.data.occurrenceId,
+      { outcome: "approve" }, "human", { kind: "human", id: "owner" }, () => true,
+    ).ok);
+    assert.ok(svc.consumeWorkflowDecision(grandchild.data.id, humanMerge.data.occurrenceId, {
+      resourceSnapshot: { ...mergeSnapshot, headSha: "b".repeat(40),
+        requiredChecks: { ...mergeSnapshot.requiredChecks, headSha: "b".repeat(40) } },
+    }).ok);
     svc.onSessionStatus(grandchild.data.id, "idle");
     const nestedReport = db.appendEvent(grandchild.data.id,
       { kind: "agent_message", text: "Nested verified report", final: true }, Date.now());
@@ -867,12 +912,6 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     }).ok);
     svc.onSessionStatus(grandchild.data.id, "stopped");
 
-    assert.ok(svc.setConfig(parent.id, { maxChildSessions: 5 }).ok);
-    assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.behavior.maximumConcurrentChildren, 5);
-    assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.sources.behavior.maximumConcurrentChildren, "active_campaign");
-    const currentRevision = db.getSession(parent.id)!.parentControlPolicy!.revision;
-    const decisions = { ...db.getSession(parent.id)!.parentControlPolicy!.decisions, pr_merge: "human" as const };
-    assert.ok(svc.setParentControlPolicy(parent.id, decisions, currentRevision).ok);
     assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.delegation.decisions.pr_merge, "human");
     assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.sources.delegation.decisions.pr_merge, "active_campaign");
     assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.sources.delegation.decisions.implementation_question, "user_default");
@@ -948,6 +987,14 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       .find((message) => message.sessionId === emptyChild.data!.id)?.text ?? "";
     assert.match(firstPrompt, /Wollipog Campaign Policy — server-derived/);
     assert.match(firstPrompt, /First real task/);
+    svc.onSessionStatus(emptyChild.data.id, "idle");
+    const retainedReport = db.appendEvent(emptyChild.data.id,
+      { kind: "agent_message", text: "Retained report", final: true }, Date.now());
+    db.verifyCampaignChildReport(parent.id, emptyChild.data.id, retainedReport.seq, Date.now());
+    hub.deliver = false;
+    assert.equal(svc.prompt(emptyChild.data.id, "Undelivered follow-on task").status, 409);
+    assert.equal(db.campaignChildReportVerified(parent.id, emptyChild.data.id), true,
+      "a prompt rejected at the socket boundary does not erase a valid report attestation");
     assert.ok(hub.sentOfType("start_session").length >= 4);
   } finally {
     db.close();

@@ -11357,7 +11357,13 @@ export class ControlPlaneDb {
     }
   }
 
-  updateSessionStatus(id: string, status: SessionStatus, now: number, provisionalStop = false): void {
+  updateSessionStatus(
+    id: string,
+    status: SessionStatus,
+    now: number,
+    provisionalStop = false,
+    invalidateCampaignReports = true,
+  ): void {
     // Terminality couples the status write to its fences below; commit them together so a crash
     // between statements cannot persist a terminal status with a stale armed marker.
     this.atomic(() => {
@@ -11370,7 +11376,7 @@ export class ControlPlaneDb {
     const effectiveStatus: SessionStatus = keepWorkflowPause ? "input_required" : status;
     this.stmt("UPDATE sessions SET status=?, capacity_wait=NULL, updated_at=? WHERE id=?")
       .run(effectiveStatus, now, id);
-    if (status === "queued" || status === "starting" || status === "running") {
+    if (invalidateCampaignReports && (status === "queued" || status === "starting" || status === "running")) {
       // A verification attests to one finished assignment, not the lifetime of a retained
       // session. Delete it as soon as any new execution is admitted so a later Stop/Idle without
       // a fresh final report cannot resurrect the old campaign-completion proof.

@@ -3922,7 +3922,9 @@ export class SessionsService {
     // input card intact; the runner advances status only after the input resolves and this dequeues.
     // Otherwise preserve runner-authoritative admission state while its provider slot is queued.
     if (!pendingInputBarrier && (!durablePrompt || (session.status !== "queued" && session.status !== "starting"))) {
-      this.db.updateSessionStatus(sessionId, "running", now);
+      // The socket send below can still reject synchronously. Defer campaign-attestation
+      // invalidation until its success boundary so an undelivered prompt is a true no-op.
+      this.db.updateSessionStatus(sessionId, "running", now, false, false);
     }
     if (delivery) {
       delivery.activate(plan!);
@@ -5550,12 +5552,13 @@ export class SessionsService {
   } | null {
     const seen = new Set<string>([child.id]);
     let parentId = child.parentSessionId ?? null;
+    let controller: { session: SessionView; policy: ParentControlPolicy } | null = null;
     for (let depth = 0; parentId && depth < 64 && !seen.has(parentId); depth += 1) {
       seen.add(parentId);
       const parent = this.db.getSession(parentId);
       if (!parent) return null;
       if (parent.permissionMode === "orchestrator") {
-        return {
+        controller = {
           session: parent,
           policy: parent.parentControlPolicy ?? {
             revision: 0,
@@ -5565,7 +5568,7 @@ export class SessionsService {
       }
       parentId = parent.parentSessionId ?? null;
     }
-    return null;
+    return controller;
   }
 
   private effectiveWorkflowDecisionAuthority(
@@ -5763,6 +5766,10 @@ export class SessionsService {
   ): ServiceResult<{ requests: DescendantRequestView[] }> {
     const parent = this.db.getSession(parentSessionId);
     if (!parent) return fail("session not found", 404);
+    const rootCampaign = this.orchestratorCampaignController(parent);
+    if (rootCampaign && rootCampaign.id !== parent.id) {
+      return fail("Parent Control for this descendant belongs to the root campaign Orchestrator", 403);
+    }
     const mode = parent.parentControl ?? "off";
     const typedPolicy = parent.parentControlPolicy ?? {
       revision: 0, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY },
@@ -5821,6 +5828,10 @@ export class SessionsService {
   ): ServiceResult<SessionView> {
     const parent = this.db.getSession(parentSessionId);
     if (!parent) return fail("session not found", 404);
+    const rootCampaign = this.orchestratorCampaignController(parent);
+    if (rootCampaign && rootCampaign.id !== parent.id) {
+      return fail("Parent Control for this descendant belongs to the root campaign Orchestrator", 403);
+    }
     const mode = parent.parentControl ?? "off";
     const typedPolicy = parent.parentControlPolicy ?? {
       revision: 0, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY },
