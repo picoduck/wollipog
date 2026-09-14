@@ -969,6 +969,52 @@ test("startup replay reclaims a disposable failed-fork checkpoint generation", {
   }
 });
 
+test("superseded launch rollback preserves a replacement generation reusing the worktree", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-superseded-launch-rollback-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const sessionId = "s_superseded_launch_rollback";
+    const handle = await createWorktree(repo, sessionId, { dataDir });
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId, agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: handle.path, worktreeBranch: handle.branch,
+      driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "replacement",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    const cleanup: WorktreeCleanupRecord = {
+      sessionId,
+      worktreeId: "legacy",
+      repoPath: repo,
+      worktreePath: handle.path,
+      context: { kind: "native" },
+      branch: handle.branch,
+      source: "legacy",
+      trigger: "creation_rollback",
+      removalMode: "force",
+      createdAt: Date.now(),
+    };
+    new WorktreeCleanupJournal(dataDir).add(cleanup);
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const internals = manager as unknown as {
+      reapWorktree(record: WorktreeCleanupRecord, cleanupCurrentGeneration?: boolean): Promise<void>;
+    };
+
+    await internals.reapWorktree(cleanup, false);
+
+    assert.equal(existsSync(handle.path), true, "the replacement generation keeps its reused worktree");
+    assert.equal(store.readMeta(sessionId)?.worktreePath, handle.path);
+    assert.deepEqual(new WorktreeCleanupJournal(dataDir).list(), []);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("safe cleanup retains unreadable live metadata without deadlocking its worktree lane", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-safe-cleanup-corrupt-meta-"));
   const dataDir = join(root, "data");

@@ -129,6 +129,9 @@ export interface WorktreeCleanupRecord {
   /** Durable proof that rollback owns the session's current checkpoint generation, not merely an
    * auxiliary worktree created for an otherwise-live session. */
   checkpointGenerationDisposable?: boolean;
+  /** Durable proof that creation rollback targets only an auxiliary requested worktree while the
+   * session and its checkpoint generation remain live. */
+  auxiliaryWorktreeRollback?: boolean;
   /** Exact initiating lifecycle. Startup replay preserves rather than replaces this value. */
   trigger?: "explicit_discard" | "pull_request_reconciliation" | "session_delete" | "creation_rollback";
   /** Explicit discard/reconciliation retains Git safety checks; deletion/rollback keeps legacy force cleanup. */

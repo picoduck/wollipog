@@ -1936,6 +1936,7 @@ export class SessionManager {
               "creation_rollback",
               "force",
             );
+            cleanup.auxiliaryWorktreeRollback = true;
             this.cleanupJournal.add(cleanup);
             await this.reapCreationRollback(cleanup, cleanupMeta);
             this.forgetTransientWorktreeSetupState(sessionId, worktree);
@@ -10587,7 +10588,8 @@ export class SessionManager {
     isolationMeta?: SessionMeta,
   ): Promise<void> {
     cleanupCurrentGeneration ||= record.checkpointGenerationDisposable === true;
-    if (record.trigger === "creation_rollback" && this.store.has(record.sessionId) && !cleanupCurrentGeneration) {
+    if (record.trigger === "creation_rollback" && record.auxiliaryWorktreeRollback === true &&
+        this.store.has(record.sessionId) && !cleanupCurrentGeneration) {
       await this.runWorktreeOperation(record.sessionId, async () => {
         await this.reapCreationRollback(record, this.store.readMeta(record.sessionId) ?? undefined);
       });
