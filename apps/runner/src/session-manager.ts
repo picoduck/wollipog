@@ -1265,11 +1265,25 @@ export class SessionManager {
     return marker;
   }
 
-  worktreeProcessMarker(sessionId: string, worktreePath: string | null): string | undefined {
-    if (!worktreePath) return undefined;
+  worktreeShellCleanupBoundary(
+    sessionId: string,
+    worktreePath: string | null,
+  ): { cleanupOwnsDescendants: boolean; cleanupDescendantMarker?: string } {
+    if (!worktreePath) return { cleanupOwnsDescendants: false };
     const meta = this.store.readMeta(sessionId);
     const worktree = meta && this.attributedWorktreeForPath(meta, worktreePath);
-    return meta && worktree ? this.ensureWorktreeProcessMarker(meta, worktree) : undefined;
+    if (!meta || !worktree || worktree.source === "attached") {
+      return { cleanupOwnsDescendants: false };
+    }
+    const cleanupDescendantMarker = this.ensureWorktreeProcessMarker(meta, worktree);
+    return {
+      cleanupOwnsDescendants: true,
+      ...(cleanupDescendantMarker ? { cleanupDescendantMarker } : {}),
+    };
+  }
+
+  worktreeProcessMarker(sessionId: string, worktreePath: string | null): string | undefined {
+    return this.worktreeShellCleanupBoundary(sessionId, worktreePath).cleanupDescendantMarker;
   }
 
   private persistWorktreeHookSnapshot(
@@ -2814,7 +2828,7 @@ export class SessionManager {
         // No destructive phase began: discard the intent rather than surprising the user with a
         // later automatic retry after they merely clean the tree. Once process/teardown work began,
         // retain the journal so startup can finish the interrupted explicit operation.
-        if (!cleanup.processTerminationStartedAt && !cleanup.teardown) {
+        if (!cleanup.processTerminationStartedAt) {
           this.removeWorktreeCleanupRecord(cleanup);
         }
         const reasons = {
@@ -4027,6 +4041,20 @@ export class SessionManager {
       // the live provider or overwrite its known-good launch metadata.
       this.emitEvent(spec.sessionId, { kind: "error", message: authorization.error });
       durable?.failed(authorization.error, "INVALID_COMMAND");
+      reportMaterialized(false);
+      return false;
+    }
+    const requestedContext = spec.context ?? { kind: "native" as const };
+    const requestedRepoPath = requestedContext.kind === "wsl"
+      ? spec.workspacePath
+      : resolve(spec.workspacePath);
+    const prior = this.store.readMeta(spec.sessionId);
+    if (prior && (prior.repoPath !== requestedRepoPath ||
+        agentContextKey(prior.context) !== agentContextKey(requestedContext)) &&
+        this.attributedWorktrees(prior).some((worktree) => worktree.source !== "attached")) {
+      const message = "session workspace or execution context changed while runner-owned worktrees remain; discard those worktrees before restarting this session";
+      this.emitEvent(spec.sessionId, { kind: "error", message });
+      durable?.failed(message, "INVALID_COMMAND");
       reportMaterialized(false);
       return false;
     }

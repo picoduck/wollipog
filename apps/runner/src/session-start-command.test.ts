@@ -72,6 +72,7 @@ test("ordinary start_session exposes materialization before admission and provid
     targetError: (target) => target === "pending"
       ? "the session's worktree is still being prepared — try again in a moment"
       : !target ? "unknown session" : "invalid" in target ? target.invalid : null,
+    resolveCleanupBoundary: () => ({ cleanupOwnsDescendants: false }),
     resolveAgentTuiLaunch: () => ({ command: "codex", args: [] }),
     open: () => {
       tuiOpened = true;

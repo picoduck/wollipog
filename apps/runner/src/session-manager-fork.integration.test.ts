@@ -9,10 +9,28 @@ import type { Driver, DriverCallbacks, DriverOptions } from "./drivers/driver.js
 import { anchorForkRef, captureWorktreeTree } from "./git-ops.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
+import { ShellManager } from "./shell-manager.js";
 import { createWorktree } from "./worktree.js";
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+async function waitFor(predicate: () => boolean, message: string): Promise<void> {
+  for (let attempt = 0; attempt < 500; attempt++) {
+    if (predicate()) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(message);
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 for (const sourceDriver of ["codex-app-server", "claude-code"] as const) {
@@ -262,6 +280,44 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
       source.worktreeProcessMarkers?.legacy,
       "a fork never inherits the source process boundary",
     );
+    assert.equal(target.worktrees, undefined, "a no-config fork keeps its canonical legacy attribution implicit");
+    if (process.platform !== "win32") {
+      const shellManager = new ShellManager({ onOutput: () => {}, onExit: () => {} });
+      const pidFile = join(storeRoot, "fork-shell-descendant.pid");
+      let detachedPid = 0;
+      try {
+        const childSource = [
+          "const { spawn } = require('node:child_process');",
+          "const { writeFileSync } = require('node:fs');",
+          "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });",
+          "writeFileSync(process.argv[1], String(child.pid));",
+          "child.unref();",
+        ].join(" ");
+        const cleanupBoundary = manager.worktreeShellCleanupBoundary(target.sessionId, target.worktreePath);
+        assert.equal(cleanupBoundary.cleanupOwnsDescendants, true,
+          "implicit legacy attribution owns shell descendants");
+        assert.ok(cleanupBoundary.cleanupDescendantMarker);
+        shellManager.open("fork-shell", target.sessionId, target.worktreePath!, { kind: "native" }, undefined, {
+          kind: "shell",
+          launch: { command: process.execPath, args: ["-e", childSource, pidFile] },
+          ...cleanupBoundary,
+        });
+        await waitFor(() => existsSync(pidFile), "fork shell did not record its detached descendant");
+        detachedPid = Number(readFileSync(pidFile, "utf8"));
+        assert.ok(Number.isSafeInteger(detachedPid) && detachedPid > 1);
+        await waitFor(() => shellManager.snapshots().find((shell) => shell.shellId === "fork-shell")?.status === "exited",
+          "fork shell parent did not exit");
+        assert.equal(processExists(detachedPid), true, "the detached descendant initially outlives its shell parent");
+        await shellManager.closeForWorktree(target.sessionId, { kind: "native" }, target.worktreePath!);
+        await waitFor(() => !processExists(detachedPid),
+          "worktree cleanup did not terminate the no-config fork shell descendant");
+      } finally {
+        shellManager.dispose();
+        if (detachedPid > 1 && processExists(detachedPid)) {
+          try { process.kill(detachedPid, "SIGKILL"); } catch { /* already exited */ }
+        }
+      }
+    }
     assert.equal(target.forkPoints?.["1"]?.eventSeq, 2, "fork point is re-based to the child's event seq space");
     assert.equal(racedPrompts, 0, "a prompt arriving during fork setup is fenced");
     assert.match(

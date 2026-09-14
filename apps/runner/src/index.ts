@@ -1986,6 +1986,8 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         sessionCanOpen: (sessionId) => sessions.sessionCanOpen(sessionId),
         resolveTarget: (sessionId) => sessionFilesTarget(sessionId),
         targetError: (target) => sessionFilesTargetError(target),
+        resolveCleanupBoundary: (sessionId, worktreePath) =>
+          sessions.worktreeShellCleanupBoundary(sessionId, worktreePath),
         launchEpoch: (sessionId) => sessions.agentTuiLaunchEpoch(sessionId),
         resolveAgentTuiLaunch: (meta) => prepareAgentTuiLaunch(meta, {
           controlPlaneProtocolVersion,
@@ -2003,11 +2005,8 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             sessions.acquireAgentTuiProviderHome(prepared);
           },
         }),
-        open: (message, target, launch) => {
+        open: (message, target, launch, cleanupBoundary) => {
           if (launch) sessions.acquireAgentTuiProviderHome({ ...target.meta, env: launch.env ?? {} });
-          const selectedWorktree = target.meta.worktreePath
-            ? target.meta.worktrees?.find((worktree) => worktree.path === target.meta.worktreePath)
-            : undefined;
           return shells.open(
             message.shellId,
             message.sessionId,
@@ -2019,11 +2018,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               createdAt: message.createdAt,
               kind: message.kind,
               launch,
-              cleanupOwnsDescendants: selectedWorktree?.source !== "attached" && !!selectedWorktree,
-              cleanupDescendantMarker: sessions.worktreeProcessMarker(
-                message.sessionId,
-                target.meta.worktreePath ?? null,
-              ),
+              ...cleanupBoundary,
             },
           );
         },
