@@ -8,6 +8,7 @@ import test from "node:test";
 import type { RunnerToControlPlane } from "@wollipog/protocol";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore } from "./session-store.js";
+import { WorktreeCleanupJournal } from "./worktree.js";
 
 const exec = promisify(execFile);
 
@@ -159,8 +160,11 @@ test("new session setup finishes before provider launch and injects runner-owned
   assert.equal(launch.env.PROJECT_MODE, "isolated");
   assert.equal(launch.env.PROJECT_ROOT, launch.cwd);
   assert.equal(launch.env.WOLLIPOG_WORKTREE_PATH, launch.cwd);
-  assert.equal(JSON.stringify(store.readMeta("s_start_setup")).includes('"isolated"'), false,
-    "setup environment values never persist in session metadata");
+  const durable = store.readMeta("s_start_setup");
+  assert.equal(durable?.worktreeHooks?.[durable.worktrees?.[0]?.id ?? ""]?.environment.PROJECT_MODE, "isolated",
+    "runner-private exact config survives deletion for teardown");
+  assert.equal(JSON.stringify(manager.snapshot(durable!)).includes('"isolated"'), false,
+    "approved environment literals are never projected to the control plane");
 
   manager.stop("s_start_setup");
   await new Promise((resolveStop) => setImmediate(resolveStop));
@@ -195,6 +199,11 @@ test("declining setup retains the worktree while applying no copies, environment
     copyFiles: [{ source: ".env.local", destination: ".env.local" }],
     environment: { DECLINED_VALUE: "must-not-inject" },
     setup: [{ name: "Must Not Run", command: [process.execPath, "-e", "require('fs').writeFileSync('.ran','bad')"], timeoutSeconds: 10 }],
+    teardown: [{
+      name: "Must Not Teardown",
+      command: [process.execPath, "-e", "require('fs').writeFileSync(process.env.WOLLIPOG_PRIMARY_CHECKOUT+'/.declined-teardown','bad')"],
+      timeoutSeconds: 10,
+    }],
   }), "utf8");
   await exec("git", ["-C", repo, "add", ".wollipog.json"]);
   await exec("git", ["-C", repo, "commit", "-qm", "setup config"]);
@@ -202,6 +211,16 @@ test("declining setup retains the worktree while applying no copies, environment
   const store = new SessionStore(join(dataDir, "sessions"));
   meta(store, "s_decline_setup", repo);
   const sent: RunnerToControlPlane[] = [];
+  let launchEnvironment: Record<string, string> | undefined;
+  const factory = (_driver: unknown, options: { env: Record<string, string> }) => {
+    launchEnvironment = options.env;
+    return {
+      pid: 1,
+      initialize: async () => {}, newSession: async () => {}, prompt: async () => "end_turn" as const,
+      cancel: () => {}, close: async () => {}, dispose: () => {}, setConfig: () => {},
+      resolvePermission: () => false, agentSessionId: () => "provider-session",
+    };
+  };
   let manager!: SessionManager;
   manager = new SessionManager((message) => {
     sent.push(message);
@@ -209,7 +228,7 @@ test("declining setup retains the worktree while applying no copies, environment
         message.payload.context?.toolName === "wollipog.worktree_setup") {
       setImmediate(() => manager.resolvePermission("s_decline_setup", message.payload.requestId, "skip"));
     }
-  }, () => {}, store, "runner", undefined, undefined, dataDir);
+  }, () => {}, store, "runner", undefined, factory as never, dataDir);
   t.after(() => manager.shutdownAll());
 
   const created = await manager.requestWorktree("s_decline_setup", { baseRef: "HEAD", branch: "fix/setup-declined" });
@@ -218,6 +237,16 @@ test("declining setup retains the worktree while applying no copies, environment
   assert.equal(existsSync(join(created.worktree.path, ".ran")), false);
   assert.ok(sent.some((message) => message.type === "session_event" && message.payload.kind === "stderr" &&
     message.payload.text.includes("created without copy, environment, or setup hooks")));
+  assert.equal(await manager.start({
+    sessionId: "s_decline_setup", workspaceId: "repo", workspacePath: repo, agentId: "codex",
+    command: process.execPath, args: [], env: {}, useWorktree: true, driver: "codex",
+    context: { kind: "native" },
+  }), true);
+  assert.equal(launchEnvironment?.DECLINED_VALUE, undefined);
+  assert.equal(launchEnvironment?.WOLLIPOG_PORT_BLOCK_START, "42000",
+    "declining repo hooks does not suppress the runner-owned port identity");
+  await manager.delete("s_decline_setup");
+  assert.equal(existsSync(join(repo, ".declined-teardown")), false, "declined hooks never run during cleanup");
 });
 
 test("dismissed trust stays retryable and never becomes a durable decline", async (t) => {
@@ -301,7 +330,9 @@ test("setup environment is bound to the exact selected worktree", async (t) => {
   }), true);
   assert.equal(launch?.cwd, legacy.worktree.path);
   assert.equal(launch?.env.CONFIGURED_PATH, undefined);
-  assert.equal(launch?.env.WOLLIPOG_WORKTREE_PATH, undefined);
+  assert.equal(launch?.env.WOLLIPOG_WORKTREE_PATH, legacy.worktree.path,
+    "runner-owned port/path variables apply even without repository hooks");
+  assert.equal(launch?.env.WOLLIPOG_PORT_BLOCK_START, String(legacy.worktree.portBlock?.start));
 });
 
 test("successful setup retry preserves a forked provider thread and restores idle", async (t) => {
@@ -570,4 +601,107 @@ test("a pre-v141 worktree with baseCommit never discovers setup retroactively", 
   assert.equal(trustRequests, 0);
   assert.equal(launchEnvironment?.RETROACTIVE_VALUE, undefined);
   assert.equal(existsSync(join(worktreePath, ".retroactive")), false);
+});
+
+test("session deletion retires provider and terminals before frozen teardown, then releases ports", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-worktree-teardown-integration-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const repo = await repository(root);
+  const dataDir = join(root, "data");
+  const orderFile = join(repo, "teardown-order.txt");
+  const first = [
+    "const fs=require('fs')",
+    "const f=process.env.ORDER_FILE",
+    "const prior=fs.readFileSync(f,'utf8')",
+    "if(prior!=='provider\\nshell\\n')throw new Error('processes still live: '+JSON.stringify(prior))",
+    "fs.appendFileSync(f,'first\\n')",
+    "process.stdout.write('first stdout')",
+    "process.stderr.write('first stderr')",
+    "process.exit(7)",
+  ].join(";");
+  const last = [
+    "const fs=require('fs')",
+    "fs.appendFileSync(process.env.ORDER_FILE,'last:'+process.env.WOLLIPOG_PORT_BLOCK_START+'-'+process.env.WOLLIPOG_PORT_BLOCK_END+'\\n')",
+    "process.stdout.write('last stdout')",
+  ].join(";");
+  writeFileSync(join(repo, ".wollipog.json"), JSON.stringify({
+    version: 1,
+    environment: { ORDER_FILE: "${WOLLIPOG_PRIMARY_CHECKOUT}/teardown-order.txt" },
+    setup: [],
+    teardown: [
+      { name: "Fail After Proof", command: [process.execPath, "-e", first], timeoutSeconds: 10 },
+      { name: "Release Last", command: [process.execPath, "-e", last], timeoutSeconds: 10 },
+    ],
+  }), "utf8");
+  await exec("git", ["-C", repo, "add", ".wollipog.json"]);
+  await exec("git", ["-C", repo, "commit", "-qm", "teardown config"]);
+
+  const store = new SessionStore(join(dataDir, "sessions"));
+  meta(store, "s_teardown", repo);
+  let manager!: SessionManager;
+  let launchEnvironment: Record<string, string> | undefined;
+  const factory = (_driver: unknown, options: { env: Record<string, string> }) => {
+    launchEnvironment = options.env;
+    return {
+      pid: 1,
+      initialize: async () => {}, newSession: async () => {}, prompt: async () => "end_turn" as const,
+      cancel: () => {},
+      close: async () => { writeFileSync(orderFile, "provider\n", "utf8"); },
+      dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+      agentSessionId: () => "provider-session",
+    };
+  };
+  manager = new SessionManager((message) => {
+    if (message.type === "session_event" && message.payload.kind === "permission_request" &&
+        message.payload.context?.toolName === "wollipog.worktree_setup") {
+      const review = JSON.parse(String(message.payload.context.input)) as { teardown: Array<{ name: string }> };
+      assert.deepEqual(review.teardown.map((step) => step.name), ["Fail After Proof", "Release Last"]);
+      setImmediate(() => manager.resolvePermission("s_teardown", message.payload.requestId, "trust"));
+    }
+  }, () => {}, store, "runner", undefined, factory as never, dataDir);
+  manager.setWorktreeShellRetirement(async () => {
+    assert.equal(readFileSync(orderFile, "utf8"), "provider\n");
+    writeFileSync(orderFile, "provider\nshell\n", "utf8");
+  });
+  t.after(() => manager.shutdownAll());
+
+  const created = await manager.requestWorktree("s_teardown", { baseRef: "HEAD", branch: "fix/teardown" });
+  assert.deepEqual(created.worktree.portBlock, { start: 42_000, end: 42_019, size: 20 });
+  assert.equal(store.readMeta("s_teardown")?.worktreeHooks?.[created.worktree.id]?.teardown.length, 2,
+    "exact trusted teardown is durable before cleanup");
+  const processMarker = store.readMeta("s_teardown")?.worktreeProcessMarkers?.[created.worktree.id];
+  assert.match(processMarker ?? "", /^[0-9a-f-]{36}$/u,
+    "runner-private descendant ownership is durable before provider launch");
+  assert.equal(await manager.start({
+    sessionId: "s_teardown", workspaceId: "repo", workspacePath: repo, agentId: "codex",
+    command: process.execPath, args: [], env: {}, useWorktree: true, driver: "codex",
+    context: { kind: "native" },
+  }), true);
+  assert.equal(store.readMeta("s_teardown")?.worktreeProcessMarkers?.[created.worktree.id], processMarker,
+    "provider launch reuses the worktree's durable process marker");
+  assert.equal(launchEnvironment?.WOLLIPOG_PORT_BLOCK_START, "42000");
+  assert.equal(launchEnvironment?.WOLLIPOG_PORT_BLOCK_END, "42019");
+
+  writeFileSync(join(created.worktree.path, ".wollipog.json"), JSON.stringify({
+    version: 1,
+    teardown: [{
+      name: "Mutable Evil",
+      command: [process.execPath, "-e", `require('fs').writeFileSync(${JSON.stringify(join(repo, "evil.txt"))},'bad')`],
+    }],
+  }), "utf8");
+  await manager.delete("s_teardown");
+
+  assert.equal(existsSync(created.worktree.path), false, "teardown failure does not block force removal");
+  assert.equal(existsSync(join(repo, "evil.txt")), false, "mutable worktree config is never reread");
+  assert.equal(readFileSync(orderFile, "utf8"), "provider\nshell\nfirst\nlast:42000-42019\n");
+  const receipt = new WorktreeCleanupJournal(dataDir).history()
+    .find((entry) => entry.sessionId === "s_teardown" && entry.worktreeId === created.worktree.id);
+  assert.equal(receipt?.processMarker, processMarker);
+  assert.equal(receipt?.trigger, "session_delete");
+  assert.equal(receipt?.teardown?.status, "completed_with_failures");
+  assert.deepEqual(receipt?.teardown?.steps.map((step) => step.status), ["failed", "completed"]);
+  assert.equal(receipt?.teardown?.steps[0]?.stdout, "first stdout");
+  assert.equal(receipt?.teardown?.steps[0]?.stderr, "first stderr");
+  const allocations = JSON.parse(readFileSync(join(dataDir, "worktree-port-allocations.json"), "utf8")) as { allocations: unknown[] };
+  assert.deepEqual(allocations.allocations, []);
 });

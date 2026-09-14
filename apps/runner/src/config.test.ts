@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   DEFAULT_MAX_CONCURRENT_SESSIONS,
+  DEFAULT_WORKTREE_PORTS,
   loadConfig,
   parseArgs,
   parseEnv,
@@ -279,6 +280,26 @@ test("resolveConfig defaults and validates the box process ceiling", () => {
     () => resolveConfig({ runnerId: "x", controlPlaneUrl: "ws://x", maxConcurrentSessions: 0 }, {}),
     /maxConcurrentSessions/,
   );
+});
+
+test("resolveConfig defaults and validates the stable worktree port pool", () => {
+  const defaults = resolveConfig({}, { runnerId: "x", controlPlaneUrl: "ws://127.0.0.1:4317/runner" });
+  assert.deepEqual(defaults.worktreePorts, DEFAULT_WORKTREE_PORTS);
+  assert.deepEqual(resolveConfig({
+    runnerId: "x",
+    controlPlaneUrl: "wss://control.example/runner",
+    worktreePorts: { start: 30_000, end: 30_999, blockSize: 25 },
+  }).worktreePorts, { start: 30_000, end: 30_999, blockSize: 25 });
+  for (const worktreePorts of [
+    { start: 1023, end: 2000, blockSize: 10 },
+    { start: 3000, end: 2000, blockSize: 10 },
+    { start: 2000, end: 3000, blockSize: 0 },
+    { start: 2000, end: 3000, blockSize: 1002 },
+  ]) {
+    assert.throws(() => resolveConfig({
+      runnerId: "x", controlPlaneUrl: "ws://127.0.0.1:4317/runner", worktreePorts,
+    }), /worktreePorts/u);
+  }
 });
 
 test("resolveConfig defaults and validates skill-store retention", () => {

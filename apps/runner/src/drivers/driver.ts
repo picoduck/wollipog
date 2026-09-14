@@ -170,6 +170,8 @@ export interface DriverOptions {
   initialBackgroundTaskIds?: string[];
   acpSessionContext?: AcpSessionContextConfig;
   isolation?: SpawnIsolation;
+  /** Runner-private durable descendant marker for one managed worktree. */
+  descendantMarker?: string;
 }
 
 export interface Driver {

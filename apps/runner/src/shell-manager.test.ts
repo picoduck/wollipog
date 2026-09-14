@@ -170,6 +170,34 @@ test("closeForSession kills only that session's shells", async () => {
   await waitFor(() => mgr.count("sess-b") === 0);
 });
 
+test("worktree cleanup owns escaped terminal descendants and closes only the exact root", {
+  skip: process.platform === "win32",
+}, async () => {
+  const firstRoot = mkdtempSync(join(tmpdir(), "wollipog-shell-worktree-a-"));
+  const secondRoot = mkdtempSync(join(tmpdir(), "wollipog-shell-worktree-b-"));
+  const { exits, cb } = collector();
+  const mgr = new ShellManager(cb);
+  try {
+    mgr.open("owned-a", "session", firstRoot, NATIVE, undefined, { cleanupOwnsDescendants: true });
+    mgr.open("owned-b", "session", secondRoot, NATIVE, undefined, { cleanupOwnsDescendants: true });
+    mgr.open("other-session", "other", firstRoot, NATIVE, undefined, { cleanupOwnsDescendants: true });
+    const child = (mgr as unknown as { shells: Map<string, { child: { posixBoundary?: unknown } }> })
+      .shells.get("owned-a")!.child;
+    assert.ok(child.posixBoundary, "runner-owned terminal has a retained descendant boundary");
+
+    await mgr.closeForWorktree("session", NATIVE, firstRoot);
+    await waitFor(() => exits.some((exit) => exit.shellId === "owned-a"));
+    assert.equal(mgr.snapshots().some((shell) => shell.shellId === "owned-a"), false);
+    assert.equal(mgr.snapshots().find((shell) => shell.shellId === "owned-b")?.status, "running");
+    assert.equal(mgr.snapshots().find((shell) => shell.shellId === "other-session")?.status, "running");
+  } finally {
+    mgr.dispose();
+    await waitFor(() => mgr.count("session") === 0 && mgr.count("other") === 0);
+    rmSync(firstRoot, { recursive: true, force: true });
+    rmSync(secondRoot, { recursive: true, force: true });
+  }
+});
+
 test("orchestrator Stop can close its TUI without closing human shells", {
   skip: !agentTuiPlatformSupported(process.platform, NATIVE),
 }, async () => {

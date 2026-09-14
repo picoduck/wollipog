@@ -34,6 +34,7 @@ export class AcpDriver implements Driver {
         containerAgentLaunch: true,
         cloudAgentLaunch: true,
         orchestrator: this.orchestrator,
+        descendantMarker: opts.descendantMarker,
       },
       cb,
     );

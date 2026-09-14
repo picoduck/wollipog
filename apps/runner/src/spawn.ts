@@ -19,7 +19,12 @@ import { containerLabelArgs } from "./container-identity.js";
 import { sensitiveEnvironmentName } from "./env-security.js";
 import { WSL_BWRAP_UNAVAILABLE_ERROR } from "./execution-isolation-policy.js";
 import { encodeWindowsJobSpec, materializeWindowsJobLauncher } from "./windows-job.js";
-import { DESCENDANT_MARKER_ENV, PosixProcessBoundary, terminatePosixProcessBoundaries } from "./posix-process-tree.js";
+import {
+  DESCENDANT_MARKER_ENV,
+  PosixProcessBoundary,
+  terminatePosixProcessBoundaries,
+  WORKTREE_DESCENDANT_MARKER_ENV,
+} from "./posix-process-tree.js";
 import { quoteWindowsCmdToken } from "./windows-cmd.js";
 import {
   attachWslAgentControlBroker,
@@ -49,6 +54,7 @@ const RUNNER_ONLY_ENV = [
   "WOLLIPOG_WINDOWS_JOB_SPEC",
   "MAM_WINDOWS_JOB_SPEC",
   DESCENDANT_MARKER_ENV,
+  WORKTREE_DESCENDANT_MARKER_ENV,
   "MANAGER_TOKEN_FILE",
 ];
 
@@ -125,6 +131,8 @@ export interface SpawnAgentOptions {
   /** Stable owner for native POSIX descendants that may intentionally outlive one provider turn.
    * The boundary is retained after normal provider exit and terminated when that session disposes. */
   descendantOwner?: object;
+  /** Runner-private durable marker shared by processes owned by one managed worktree. */
+  descendantMarker?: string;
   /** False for user-owned interactive shells whose daemonized children are not provider-owned. */
   trackDescendants?: boolean;
 }
@@ -586,9 +594,9 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
     inherited.WSLENV = [...existing, ...additions].join(":");
   }
 
-  const descendantMarker = !isWindows && !wslReap && !remoteBoundary && opts.trackDescendants !== false
-    ? randomUUID()
-    : undefined;
+  const ownsNativePosixDescendants = !isWindows && !wslReap && !remoteBoundary && opts.trackDescendants !== false;
+  const descendantMarker = ownsNativePosixDescendants ? randomUUID() : undefined;
+  const worktreeDescendantMarker = ownsNativePosixDescendants ? opts.descendantMarker : undefined;
   let bridgeRelay: ChildProcessWithoutNullStreams | undefined;
   let disposeBridge: (() => void) | undefined;
   let bridgeStderr = "";
@@ -618,6 +626,9 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
         ...explicitEnv,
         ...isolationEnv,
         ...(descendantMarker ? { [DESCENDANT_MARKER_ENV]: descendantMarker } : {}),
+        ...(worktreeDescendantMarker
+          ? { [WORKTREE_DESCENDANT_MARKER_ENV]: worktreeDescendantMarker }
+          : {}),
       },
       // Resolve .cmd/.bat shims on Windows; harmless on POSIX for our commands.
       shell,
@@ -747,31 +758,38 @@ export function terminateDescendantBoundariesAfterPendingKills(): void {
   }));
 }
 
-/** Kill a process and all of its children, cross-platform. */
-export function killTree(child: AgentProcess): void {
+/** Kill a process and all of its children, returning exact completion for callers that own one
+ * cleanup boundary. Global shutdown still registers the same promise through killTree(). */
+export function killTreeAndWait(child: AgentProcess): Promise<boolean> {
   if (child.posixBoundary) {
-    trackPendingKill(child.posixBoundary.terminate());
-    return;
+    return child.posixBoundary.terminate();
   }
-  if (child.closeObserved) return;
+  if (child.closeObserved) return Promise.resolve(true);
   if (!child.pid) {
     // Not spawned yet: wait so we tree-kill the REAL agent rather than the shell
     // wrapper (or no-op). Bail if the spawn fails outright.
-    const onSpawn = () => killTree(child);
-    child.once("spawn", onSpawn);
-    child.once("error", () => child.removeListener("spawn", onSpawn));
-    return;
+    return new Promise<boolean>((resolve) => {
+      const onSpawn = () => {
+        child.removeListener("error", onError);
+        void killTreeAndWait(child).then(resolve, () => resolve(false));
+      };
+      const onError = () => {
+        child.removeListener("spawn", onSpawn);
+        resolve(true);
+      };
+      child.once("spawn", onSpawn);
+      child.once("error", onError);
+    });
   }
   if (child.wslReap) {
     // WSL bridge: child.pid is only the wsl.exe relay; the agent is a Linux process
     // group inside the distro, outside the Win32 tree. taskkill alone can't reap it.
     child.wslReapCompletion = reapWslGroup(child.wslReap, child.pid);
-    return;
+    return child.wslReapCompletion;
   }
   if (isWindows) {
     // /T = tree, /F = force.
-    trackPendingKill(
-      new Promise<boolean>((resolve) => {
+    return new Promise<boolean>((resolve) => {
         let taskkillComplete = false;
         let closeObserved = child.closeObserved === true;
         const finish = () => {
@@ -793,8 +811,7 @@ export function killTree(child: AgentProcess): void {
           if (code === 128) closeObserved = true;
           finish();
         });
-      }),
-    );
+      });
   } else {
     // The child was spawned detached (its own process group, PGID == its pid), so a
     // negative-pid kill signals the agent AND everything it spawned. Fall back to a
@@ -815,8 +832,7 @@ export function killTree(child: AgentProcess): void {
     signalGroup("SIGTERM");
     // Escalate if it lingers; resolve early when the process exits so shutdown
     // doesn't wait the full window for well-behaved agents.
-    trackPendingKill(
-      new Promise<void>((resolve) => {
+    return new Promise<boolean>((resolve) => {
         const t = setTimeout(() => {
           signalGroup("SIGKILL");
         }, 2000);
@@ -826,11 +842,15 @@ export function killTree(child: AgentProcess): void {
         t.unref?.();
         child.once("close", () => {
           clearTimeout(t);
-          resolve();
+          resolve(true);
         });
-      }),
-    );
+      });
   }
+}
+
+/** Kill a process tree in the global runner shutdown lane. */
+export function killTree(child: AgentProcess): void {
+  trackPendingKill(killTreeAndWait(child));
 }
 
 /**

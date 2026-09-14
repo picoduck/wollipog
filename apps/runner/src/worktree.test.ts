@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import type { RunnerToControlPlane } from "@wollipog/protocol";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -696,6 +696,98 @@ test("cleanup journal survives restart and removes records atomically", () => {
   }
 });
 
+test("cleanup journal retains a bounded completed teardown receipt", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "wollipog-cleanup-history-"));
+  try {
+    const record = {
+      sessionId: "s1",
+      worktreeId: "one",
+      repoPath: "/repo",
+      worktreePath: "/data/wt",
+      context: { kind: "native" as const },
+      trigger: "session_delete" as const,
+      removalMode: "force" as const,
+      teardown: {
+        status: "completed_with_failures" as const,
+        configHash: "hash",
+        attemptId: "attempt",
+        startedAt: 1,
+        completedAt: 2,
+        steps: [{
+          name: "Stop",
+          status: "failed" as const,
+          optional: false,
+          startedAt: 1,
+          durationMs: 1,
+          error: "failed",
+          stdout: "out",
+          stderr: "err",
+        }],
+      },
+    };
+    const journal = new WorktreeCleanupJournal(dataDir);
+    journal.add(record);
+    journal.complete(record);
+    const restarted = new WorktreeCleanupJournal(dataDir);
+    assert.deepEqual(restarted.list(), []);
+    assert.equal(restarted.history()[0]?.trigger, "session_delete");
+    assert.equal(restarted.history()[0]?.teardown?.steps[0]?.stderr, "err");
+    assert.equal(typeof restarted.history()[0]?.completedAt, "number");
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("startup cleanup replays frozen teardown before removing an orphaned worktree", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-startup-teardown-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const handle = await createWorktree(repo, "s_startup_cleanup", { dataDir });
+    const marker = join(repo, "startup-teardown.txt");
+    const record = {
+      sessionId: "s_startup_cleanup",
+      worktreeId: "legacy",
+      repoPath: repo,
+      worktreePath: handle.path,
+      context: { kind: "native" as const },
+      branch: handle.branch,
+      source: "legacy" as const,
+      trigger: "session_delete" as const,
+      removalMode: "force" as const,
+      hooks: {
+        configHash: "trusted-config",
+        environment: { MARKER: "${WOLLIPOG_PRIMARY_CHECKOUT}/startup-teardown.txt" },
+        teardown: [{
+          name: "Startup Teardown",
+          command: [process.execPath, "-e", "require('fs').writeFileSync(process.env.MARKER,'done')"] as [string, ...string[]],
+          timeoutSeconds: 10,
+          optional: false,
+        }],
+      },
+      createdAt: Date.now(),
+    };
+    new WorktreeCleanupJournal(dataDir).add(record);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    manager.setWorktreeShellRetirement(async () => {});
+    manager.reconcileStore();
+    await waitForCondition(() => !existsSync(handle.path), "startup cleanup did not remove the orphaned worktree");
+    await waitForCondition(
+      () => new WorktreeCleanupJournal(dataDir).list().length === 0,
+      "startup cleanup did not complete its durable receipt",
+    );
+    assert.equal(readFileSync(marker, "utf8"), "done");
+    const receipt = new WorktreeCleanupJournal(dataDir).history()[0];
+    assert.equal(receipt?.teardown?.status, "completed");
+    assert.equal(receipt?.teardown?.steps[0]?.status, "completed");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("session deletion removes its external worktree and durable store row", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-delete-wt-"));
   const repo = join(root, "repo");
@@ -998,12 +1090,16 @@ test("PR reconciliation and explicit discard retain every unsafe worktree", { sk
     assert.equal(retained.find((item) => item.path === dirty.worktree.path)?.pullRequest?.state, "closed");
     assert.equal(retained.find((item) => item.path === unverifiable.worktree.path)?.pullRequest?.state, "open");
     assert.equal(retained.find((item) => item.path === attachedPath)?.pullRequest?.state, "merged");
+    assert.equal(new WorktreeCleanupJournal(dataDir).history()
+      .find((entry) => entry.worktreeId === clean.worktree.id)?.trigger, "pull_request_reconciliation");
 
     await assert.rejects(manager.discardWorktree("s_pr_cleanup", dirty.worktree.path), /uncommitted changes/);
     await assert.rejects(manager.discardWorktree("s_pr_cleanup", attachedPath), /operator-owned/);
     execFileSync("git", ["-C", dirty.worktree.path, "clean", "-fd"]);
     await manager.discardWorktree("s_pr_cleanup", dirty.worktree.path);
     assert.equal(existsSync(dirty.worktree.path), false, "explicit discard uses the same safe removal checks");
+    assert.equal(new WorktreeCleanupJournal(dataDir).history()
+      .find((entry) => entry.worktreeId === dirty.worktree.id)?.trigger, "explicit_discard");
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
@@ -1185,10 +1281,10 @@ test("merged PR worktrees remain discardable after their remote branches are del
     });
     await assert.rejects(
       manager.discardWorktree("s_merged_no_upstream", discoveredExplicit.worktree.path),
-      /still active in a provider process/,
+      /branch has no upstream/,
     );
-    assert.equal(discoveryCalls.get(discoveredExplicit.worktree.path) ?? 0, discoveryCallsBeforeActiveDiscard,
-      "explicit discard rejects an active unlinked worktree before forge discovery");
+    assert.equal(discoveryCalls.get(discoveredExplicit.worktree.path) ?? 0, discoveryCallsBeforeActiveDiscard + 1,
+      "safe-discard eligibility is checked before an active provider is retired");
     activeEntries.delete("s_merged_no_upstream");
     store.patchMeta("s_merged_no_upstream", {
       status: "starting",
@@ -1200,8 +1296,8 @@ test("merged PR worktrees remain discardable after their remote branches are del
       manager.discardWorktree("s_merged_no_upstream", discoveredExplicit.worktree.path),
       /still being launched by a provider process/,
     );
-    assert.equal(discoveryCalls.get(discoveredExplicit.worktree.path) ?? 0, discoveryCallsBeforeActiveDiscard,
-      "explicit discard rejects a launching unlinked worktree before forge discovery");
+    assert.equal(discoveryCalls.get(discoveredExplicit.worktree.path) ?? 0, discoveryCallsBeforeActiveDiscard + 1,
+      "explicit discard rejects a launching worktree before another forge discovery");
     store.patchMeta("s_merged_no_upstream", {
       status: "idle",
       worktreePath: null,
@@ -1819,14 +1915,14 @@ test("cancelling automatic identity verification cannot publish or claim capacit
       dataDir, 1,
     );
     const internals = manager as unknown as {
-      proveRegisteredWorktree: (...args: unknown[]) => Promise<{ branch: string }>;
+      persistedWorktreeFailure: (...args: unknown[]) => Promise<string | null>;
       admitted: Set<string>;
     };
-    const originalProof = internals.proveRegisteredWorktree.bind(manager);
+    const originalProof = internals.persistedWorktreeFailure.bind(manager);
     let proofEntered!: () => void;
     const entered = new Promise<void>((resolve) => { proofEntered = resolve; });
     const gate = new Promise<void>((resolve) => { releaseProof = resolve; });
-    internals.proveRegisteredWorktree = async (...args) => {
+    internals.persistedWorktreeFailure = async (...args) => {
       const verified = await originalProof(...args);
       proofEntered();
       await gate;
@@ -3724,9 +3820,14 @@ test("a running session discards its own finished worktrees despite the per-sess
       cwd: current.worktree.path,
       worktree: { path: current.worktree.path, branch: current.worktree.branch },
       worktreeLeaseOwner: providerOwner,
+      queue: [],
+      client: { dispose: () => {} },
     });
-    await assert.rejects(manager.discardWorktree("s_own_lease", current.worktree.path), /still active in a provider process/,
-      "the worktree the provider runs in is still protected");
+    await manager.discardWorktree("s_own_lease", current.worktree.path);
+    assert.equal(existsSync(current.worktree.path), false,
+      "cleanup retires the provider before removing its selected worktree");
+    assert.equal(activeEntries.has("s_own_lease"), false);
+    assert.equal(store.readWorktreeLease("s_own_lease"), null);
 
     // A launch that holds the lease but has not published its active entry yet still blocks.
     store.releaseWorktreeLease("s_own_lease", providerOwner);
@@ -3745,7 +3846,7 @@ test("a running session discards its own finished worktrees despite the per-sess
   }
 });
 
-test("post-merge cleanup keeps the worktree the running session still selects", { skip: !haveGit() }, async () => {
+test("post-merge cleanup retires the provider before removing its selected worktree", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-selected-cleanup-"));
   const dataDir = join(root, "data");
   let manager: SessionManager | undefined;
@@ -3774,25 +3875,14 @@ test("post-merge cleanup keeps the worktree the running session still selects", 
       cwd: merged.worktree.path,
       worktree: { path: merged.worktree.path, branch: merged.worktree.branch },
       worktreeLeaseOwner: providerOwner,
+      queue: [],
+      client: { dispose: () => {} },
     });
 
-    // The agent performing its own post-merge cleanup asks for the worktree it is running in.
-    await assert.rejects(
-      manager.discardWorktree("s_selected_cleanup", merged.worktree.path),
-      /worktree retained: the worktree is still active in a provider process/,
-      "the managed API reports the deferral instead of removing the session's own worktree",
-    );
-    assert.equal(existsSync(merged.worktree.path), true, "the directory survives the refused cleanup");
-    const retained = store.readMeta("s_selected_cleanup");
-    assert.equal(retained?.worktreePath, merged.worktree.path, "the durable selection is left intact");
-    assert.equal(retained?.worktrees?.some((item) => item.path === merged.worktree.path), true,
-      "and so is the worktree's attribution record");
-
-    // Once the provider that selected it is gone, the same inactive clean pushed tree discards.
-    activeEntries.delete("s_selected_cleanup");
-    store.releaseWorktreeLease("s_selected_cleanup", providerOwner);
     await manager.discardWorktree("s_selected_cleanup", merged.worktree.path);
     assert.equal(existsSync(merged.worktree.path), false);
+    assert.equal(activeEntries.has("s_selected_cleanup"), false, "the selected provider is retired first");
+    assert.equal(store.readWorktreeLease("s_selected_cleanup"), null);
     assert.equal(store.readMeta("s_selected_cleanup")?.worktreePath, null,
       "the managed path clears the selection with the directory, leaving no dangling reference");
   } finally {

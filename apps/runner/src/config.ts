@@ -50,6 +50,21 @@ export interface RunnerSkillRetention {
   previousVersionMinutes: number;
 }
 
+export interface RunnerWorktreePorts {
+  /** Inclusive first port available for managed worktree blocks. */
+  start: number;
+  /** Inclusive last port available for managed worktree blocks. */
+  end: number;
+  /** Number of contiguous ports assigned to one worktree. */
+  blockSize: number;
+}
+
+export const DEFAULT_WORKTREE_PORTS: RunnerWorktreePorts = {
+  start: 42_000,
+  end: 51_999,
+  blockSize: 20,
+};
+
 export interface RunnerExecutionIsolation {
   /** Strict platform adapter. Job Objects are process-only; Seatbelt/bwrap also gate writes. */
   mode: "provider" | "bwrap" | "seatbelt" | "windows-job";
@@ -114,6 +129,8 @@ export interface RunnerConfig {
   admission: RunnerAdmissionPolicy;
   /** Bounded retention for verified content in the runner-local skill store. */
   skillRetention: RunnerSkillRetention;
+  /** Stable per-worktree port allocations. */
+  worktreePorts: RunnerWorktreePorts;
   /** Runner-owned process/filesystem/network boundary. Defaults to provider-owned sandboxing. */
   executionIsolation: RunnerExecutionIsolation;
   /** Reproducible container placements checked before runner registration. */
@@ -335,6 +352,23 @@ export function resolveConfig(file: Partial<RunnerConfig>, overrides: Partial<Ru
       "runner config: skillRetention.previousVersionMinutes must be an integer from 0 to 525600",
     );
   }
+  const rawWorktreePorts: Partial<RunnerWorktreePorts> =
+    overrides.worktreePorts ?? file.worktreePorts ?? DEFAULT_WORKTREE_PORTS;
+  const worktreePorts: RunnerWorktreePorts = {
+    start: rawWorktreePorts.start ?? DEFAULT_WORKTREE_PORTS.start,
+    end: rawWorktreePorts.end ?? DEFAULT_WORKTREE_PORTS.end,
+    blockSize: rawWorktreePorts.blockSize ?? DEFAULT_WORKTREE_PORTS.blockSize,
+  };
+  if (!Number.isInteger(worktreePorts.start) || !Number.isInteger(worktreePorts.end) ||
+      worktreePorts.start < 1024 || worktreePorts.end > 65_535 ||
+      worktreePorts.start > worktreePorts.end) {
+    throw new Error("runner config: worktreePorts.start/end must be an inclusive range from 1024 to 65535");
+  }
+  const availablePorts = worktreePorts.end - worktreePorts.start + 1;
+  if (!Number.isInteger(worktreePorts.blockSize) || worktreePorts.blockSize < 1 ||
+      worktreePorts.blockSize > availablePorts) {
+    throw new Error("runner config: worktreePorts.blockSize must be a positive integer no larger than the configured range");
+  }
   const rawIsolation = overrides.executionIsolation ?? file.executionIsolation ?? { mode: "provider", network: "inherit" };
   if (!["provider", "bwrap", "seatbelt", "windows-job"].includes(rawIsolation.mode)) {
     throw new Error("runner config: executionIsolation.mode must be 'provider', 'bwrap', 'seatbelt', or 'windows-job'");
@@ -420,6 +454,7 @@ export function resolveConfig(file: Partial<RunnerConfig>, overrides: Partial<Ru
       ...(idleProcessPolicy === undefined ? {} : { idleProcessPolicy }),
     },
     skillRetention: { removedSkillDays, previousVersionMinutes },
+    worktreePorts,
     executionIsolation: {
       mode: rawIsolation.mode,
       network: rawIsolation.network,

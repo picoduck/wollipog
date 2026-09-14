@@ -398,7 +398,9 @@
 //      requests so current clients can surface parent attention without conflating lifecycle.
 // 144: Orchestrator coordination behavior is independent from optional strict project isolation.
 //      Launch specs carry the immutable effective restriction so older peers retain strict mode.
-export const PROTOCOL_VERSION = 144;
+// 145: runner-owned worktree port blocks and repository teardown lifecycle state are additive;
+//      exact teardown commands and environment values remain runner-private.
+export const PROTOCOL_VERSION = 145;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -585,6 +587,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   orchestratorCampaignManagement: 140,
   orchestratorExecutionPolicy: 144,
   worktreeSetup: 141,
+  worktreeTeardownPorts: 145,
   workerAttention: 108,
   backgroundWorkTracking: 83,
   correlatedRestartEcho: 84,
@@ -1854,6 +1857,13 @@ export interface RunnerRuntimeInfo {
   dataDir: string;
   worktreeRoot: string;
   maxConcurrentSessions: number;
+  /** Protocol v145: runner-owned range used to allocate one stable block per managed worktree. */
+  worktreePorts?: {
+    start: number;
+    end: number;
+    blockSize: number;
+    capacity: number;
+  };
   /** Exact agent-id policy. Missing maps preserve the v32 behavior: no provider quota, weight 1. */
   admission?: {
     agentLimits: Record<string, number>;
@@ -4748,6 +4758,10 @@ export interface SessionWorktreeView {
   /** Protocol v141: repository-owned setup lifecycle. Environment values and copied contents are
    * deliberately runner-private; only names, timing, and bounded outcomes cross the wire. */
   setup?: WorktreeSetupState;
+  /** Protocol v145: stable runner-owned allocation. Repository configuration cannot override it. */
+  portBlock?: WorktreePortBlock;
+  /** Protocol v145: content-safe teardown outcome. Exact argv and environment stay runner-local. */
+  teardown?: WorktreeTeardownState;
   /** Forge change-request linkage. The historic field name is retained on the wire for rolling
    * compatibility; `kind` and `provider` distinguish pull requests from merge requests. */
   pullRequest?: {
@@ -4791,6 +4805,38 @@ export interface WorktreeSetupState {
   copies: WorktreeSetupCopyResult[];
   steps: WorktreeSetupStepResult[];
   error?: string;
+}
+
+export interface WorktreePortBlock {
+  start: number;
+  end: number;
+  size: number;
+}
+
+export type WorktreeTeardownStatus = "running" | "completed" | "completed_with_failures";
+
+export interface WorktreeTeardownStepResult {
+  name: string;
+  status: "running" | "completed" | "failed" | "uncertain";
+  optional: boolean;
+  startedAt: number;
+  durationMs?: number;
+  exitCode?: number;
+  signal?: string;
+  error?: string;
+  /** Bounded command output retained on the durable cleanup record/receipt. */
+  stdout: string;
+  stderr: string;
+  outputTruncated?: boolean;
+}
+
+export interface WorktreeTeardownState {
+  status: WorktreeTeardownStatus;
+  configHash: string;
+  attemptId: string;
+  startedAt: number;
+  completedAt?: number;
+  steps: WorktreeTeardownStepResult[];
 }
 
 /* ========================================================================== */

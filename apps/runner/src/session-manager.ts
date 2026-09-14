@@ -53,7 +53,9 @@ import type {
   SessionWorktreeIsolationNotice,
   SessionWorktreeProgressPhase,
   SessionWorktreeView,
+  WorktreePortBlock,
   WorktreeSetupState,
+  WorktreeTeardownState,
   ResolveSteeringAttemptMessage,
   ResolveSteeringAttemptResultMessage,
   SteerResultReason,
@@ -84,8 +86,8 @@ import type {
 import { CodexAppServerResumeError } from "./drivers/codex-app-server.js";
 import { BoxAdmission, type AdmissionObservation, type AdmissionRequest } from "./box-admission.js";
 import { discoverIncompleteClaudeTasks, discoverIncompleteClaudeTasksInContext, inspectClaudeBackgroundWorkInContext } from "./claude-background-work.js";
-import { DEFAULT_MAX_CONCURRENT_SESSIONS } from "./config.js";
-import type { RunnerAdmissionPolicy, RunnerExecutionIsolation } from "./config.js";
+import { DEFAULT_MAX_CONCURRENT_SESSIONS, DEFAULT_WORKTREE_PORTS } from "./config.js";
+import type { RunnerAdmissionPolicy, RunnerExecutionIsolation, RunnerWorktreePorts } from "./config.js";
 import { executionTargetLaunchError } from "./execution-target.js";
 import type { ContainerTargetRegistry } from "./container-target.js";
 import type { CloudTargetRegistry } from "./cloud-target.js";
@@ -169,13 +171,18 @@ import {
   type WorktreeHandle,
   type DiscoveredMergedPullRequest,
   type MissingUpstreamPullRequestIdentity,
+  type SafeWorktreeDiscardResult,
 } from "./worktree.js";
 import {
   loadWorktreeSetupConfig,
   resolvedWorktreeSetupEnvironment,
+  runWorktreeTeardown,
   runWorktreeSetup,
   WorktreeSetupTrustStore,
+  type WorktreeHookSnapshot,
 } from "./worktree-setup.js";
+import { WorktreePortAllocator } from "./worktree-port-allocator.js";
+import { terminatePosixProcessesByMarker } from "./posix-process-tree.js";
 
 export interface SessionNamingExecutionAuthorization {
   isolation?: SpawnIsolation;
@@ -858,6 +865,8 @@ export class SessionManager {
   private readonly approvalStarted = new Map<string, number>();
   private readonly cleanupJournal: WorktreeCleanupJournal;
   private readonly worktreeSetupTrust: WorktreeSetupTrustStore;
+  private readonly worktreePortAllocator: WorktreePortAllocator;
+  private retireWorktreeShells?: (sessionId: string, context: AgentContext, path: string) => Promise<void>;
   private readonly worktreeSetupEnvironments = new Map<string, {
     worktreePath: string;
     environment: Record<string, string>;
@@ -1020,12 +1029,14 @@ export class SessionManager {
     private readonly configuredProjectPaths: string[] = [],
     /** Fresh runner-local catalog authorization for the one target-local WSL launcher path. */
     private readonly authorizeSafeWslLaunch?: SafeWslLaunchAuthorizer,
+    private readonly worktreePorts: RunnerWorktreePorts = DEFAULT_WORKTREE_PORTS,
   ) {
     this.lockOwner = `${runnerId}#${randomUUID()}`;
     this.providerHomeLeases = runnerOwnerHash ? new ProviderHomeLeaseRegistry(runnerOwnerHash) : undefined;
     this.stateDir = dataDir ?? join(store.rootPath(), ".runner-data");
     this.cleanupJournal = new WorktreeCleanupJournal(this.stateDir);
     this.worktreeSetupTrust = new WorktreeSetupTrustStore(this.stateDir);
+    this.worktreePortAllocator = new WorktreePortAllocator(this.stateDir, this.worktreePorts);
     this.unclassifiedRejections = new UnclassifiedRejectionJournal(this.stateDir);
     this.providerStateCleanupJournal = new ProviderStateCleanupJournal(this.stateDir);
     this.checkpointRefOwnership = new CheckpointRefOwnershipLedger(this.stateDir);
@@ -1218,6 +1229,108 @@ export class SessionManager {
     this.send = send;
   }
 
+  worktreePortRuntime(): RunnerWorktreePorts & { capacity: number } {
+    return this.worktreePortAllocator.runtime();
+  }
+
+  setWorktreeShellRetirement(
+    retire: (sessionId: string, context: AgentContext, path: string) => Promise<void>,
+  ): void {
+    this.retireWorktreeShells = retire;
+  }
+
+  private worktreePortOwner(sessionId: string, worktreeId: string): string {
+    return `${sessionId}\0${worktreeId}`;
+  }
+
+  private ensureWorktreePortBlock(meta: SessionMeta, worktree: SessionWorktreeView): WorktreePortBlock | undefined {
+    if (worktree.source === "attached") return undefined;
+    const owner = this.worktreePortOwner(meta.sessionId, worktree.id);
+    const block = this.worktreePortAllocator.allocate(owner, worktree.portBlock);
+    worktree.portBlock = block;
+    return block;
+  }
+
+  private ensureWorktreeProcessMarker(meta: SessionMeta, worktree: SessionWorktreeView): string | undefined {
+    if (worktree.source === "attached") return undefined;
+    const existing = meta.worktreeProcessMarkers?.[worktree.id];
+    if (existing) return existing;
+    const marker = randomUUID();
+    const worktreeProcessMarkers = { ...(meta.worktreeProcessMarkers ?? {}), [worktree.id]: marker };
+    meta.worktreeProcessMarkers = worktreeProcessMarkers;
+    this.store.patchMeta(meta.sessionId, { worktreeProcessMarkers });
+    return marker;
+  }
+
+  worktreeProcessMarker(sessionId: string, worktreePath: string | null): string | undefined {
+    if (!worktreePath) return undefined;
+    const meta = this.store.readMeta(sessionId);
+    const worktree = meta && this.attributedWorktreeForPath(meta, worktreePath);
+    return meta && worktree ? this.ensureWorktreeProcessMarker(meta, worktree) : undefined;
+  }
+
+  private persistWorktreeHookSnapshot(
+    sessionId: string,
+    worktree: SessionWorktreeView,
+    snapshot: WorktreeHookSnapshot,
+  ): void {
+    const latest = this.store.readMeta(sessionId);
+    if (!latest) return;
+    this.store.patchMeta(sessionId, {
+      worktreeHooks: { ...(latest.worktreeHooks ?? {}), [worktree.id]: structuredClone(snapshot) },
+    });
+  }
+
+  private worktreeHookSnapshot(meta: SessionMeta, worktree: SessionWorktreeView): WorktreeHookSnapshot | undefined {
+    return meta.worktreeHooks?.[worktree.id];
+  }
+
+  /** Upgrade a #637-era identity from its immutable base commit. The live worktree config is never
+   * consulted: deletion can race startup, and a branch edit must not change the trusted teardown. */
+  private async ensureDurableWorktreeHookSnapshot(
+    meta: SessionMeta,
+    worktree: SessionWorktreeView,
+  ): Promise<WorktreeHookSnapshot | undefined> {
+    const existing = this.worktreeHookSnapshot(meta, worktree);
+    if (existing) return structuredClone(existing);
+    if (!worktree.baseCommit || !worktree.setup ||
+        worktree.setup.status === "awaiting_trust" || worktree.setup.status === "declined") return undefined;
+    if (!(await this.worktreeSetupTrust.isApproved(meta.repoPath, worktree.setup.configHash))) {
+      return undefined;
+    }
+    const loaded = await loadWorktreeSetupConfig(meta.context, meta.repoPath, worktree.baseCommit);
+    if (!loaded || loaded.hash !== worktree.setup.configHash) {
+      throw new Error("approved worktree configuration no longer matches its immutable identity");
+    }
+    const snapshot: WorktreeHookSnapshot = {
+      configHash: loaded.hash,
+      environment: structuredClone(loaded.config.environment),
+      teardown: structuredClone(loaded.config.teardown ?? []),
+    };
+    this.persistWorktreeHookSnapshot(meta.sessionId, worktree, snapshot);
+    return snapshot;
+  }
+
+  private protectedWorktreeEnvironment(
+    meta: SessionMeta,
+    worktree: SessionWorktreeView,
+    environment: Record<string, string> = {},
+  ): Record<string, string> {
+    return resolvedWorktreeSetupEnvironment({
+      version: 1,
+      copyFiles: [],
+      environment,
+      setup: [],
+      teardown: [],
+    }, {
+      primaryCheckout: meta.repoPath,
+      worktreePath: worktree.path,
+      branch: worktree.branch,
+      baseRef: worktree.baseRef,
+      portBlock: worktree.portBlock,
+    });
+  }
+
   private attributedWorktrees(meta: SessionMeta): SessionWorktreeView[] {
     const worktrees = [...(meta.worktrees ?? [])];
     if (meta.worktreePath && !worktrees.some((worktree) => sameWorktreePath(meta.context, worktree.path, meta.worktreePath!))) {
@@ -1262,6 +1375,31 @@ export class SessionManager {
     const worktrees = this.attributedWorktrees(latest)
       .filter((item) => !sameWorktreePath(latest.context, item.path, worktree.path));
     worktrees.push({ ...worktree, setup: structuredClone(state) });
+    const updated = this.store.patchMeta(sessionId, { worktrees });
+    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+  }
+
+  private persistWorktreeView(sessionId: string, worktree: SessionWorktreeView): void {
+    const latest = this.store.readMeta(sessionId);
+    if (!latest) return;
+    const worktrees = this.attributedWorktrees(latest)
+      .filter((item) => !sameWorktreePath(latest.context, item.path, worktree.path));
+    worktrees.push(structuredClone(worktree));
+    const updated = this.store.patchMeta(sessionId, { worktrees });
+    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+  }
+
+  private persistWorktreeTeardownState(
+    sessionId: string,
+    worktreePath: string,
+    state: WorktreeTeardownState,
+  ): void {
+    const latest = this.store.readMeta(sessionId);
+    if (!latest) return;
+    const worktrees = this.attributedWorktrees(latest).map((item) =>
+      sameWorktreePath(latest.context, item.path, worktreePath)
+        ? { ...item, teardown: structuredClone(state) }
+        : item);
     const updated = this.store.patchMeta(sessionId, { worktrees });
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
   }
@@ -1311,6 +1449,12 @@ export class SessionManager {
       configHash: hash,
       copyFiles: config.copyFiles,
       setup: config.setup.map((step) => ({
+        name: step.name,
+        command: step.command,
+        timeoutSeconds: step.timeoutSeconds,
+        optional: step.optional,
+      })),
+      teardown: (config.teardown ?? []).map((step) => ({
         name: step.name,
         command: step.command,
         timeoutSeconds: step.timeoutSeconds,
@@ -1402,39 +1546,50 @@ export class SessionManager {
     discoverConfig: boolean,
     signal: AbortSignal,
   ): Promise<"none" | "declined" | "cancelled" | "completed" | "failed"> {
-    if (!worktree.baseCommit) {
+    if (worktree.source === "attached") {
       this.worktreeSetupEnvironments.delete(meta.sessionId);
+      return "none";
+    }
+    const priorPortBlock = worktree.portBlock;
+    this.ensureWorktreePortBlock(meta, worktree);
+    const processMarker = this.ensureWorktreeProcessMarker(meta, worktree);
+    if (!priorPortBlock) this.persistWorktreeView(meta.sessionId, worktree);
+    const portEnvironment = this.protectedWorktreeEnvironment(meta, worktree);
+    if (!worktree.baseCommit) {
+      this.setWorktreeSetupEnvironment(meta.sessionId, worktree.path, portEnvironment);
       return "none";
     }
     // Only creation paths discover a new config. A durable setup record proves a v141-created
     // worktree; older worktrees with the pre-existing baseCommit field must never run hooks later.
     if (!discoverConfig && !worktree.setup) {
-      this.worktreeSetupEnvironments.delete(meta.sessionId);
+      this.setWorktreeSetupEnvironment(meta.sessionId, worktree.path, portEnvironment);
       return "none";
-    }
-    if (worktree.source === "attached" && !worktree.setup) {
-      this.worktreeSetupEnvironments.delete(meta.sessionId);
-      return "none"; // Attaching an operator-owned tree is not a Wollipog worktree creation path.
     }
     onProgress?.("reading_setup_config");
     const loaded = await loadWorktreeSetupConfig(meta.context, meta.repoPath, worktree.baseCommit);
     if (signal.aborted) return "cancelled";
     if (!loaded) {
-      this.worktreeSetupEnvironments.delete(meta.sessionId);
+      this.setWorktreeSetupEnvironment(meta.sessionId, worktree.path, portEnvironment);
       return "none";
     }
     const existing = worktree.setup;
     if (existing?.configHash === loaded.hash && existing.status === "completed") {
+      this.persistWorktreeHookSnapshot(meta.sessionId, worktree, {
+        configHash: loaded.hash,
+        environment: structuredClone(loaded.config.environment),
+        teardown: structuredClone(loaded.config.teardown ?? []),
+      });
       this.setWorktreeSetupEnvironment(meta.sessionId, worktree.path, resolvedWorktreeSetupEnvironment(loaded.config, {
         primaryCheckout: meta.repoPath,
         worktreePath: worktree.path,
         branch: worktree.branch,
         baseRef: worktree.baseRef,
+        portBlock: worktree.portBlock,
       }));
       return "completed";
     }
     if (existing?.configHash === loaded.hash && existing.status === "declined") {
-      this.worktreeSetupEnvironments.delete(meta.sessionId);
+      this.setWorktreeSetupEnvironment(meta.sessionId, worktree.path, portEnvironment);
       return "declined";
     }
 
@@ -1449,7 +1604,9 @@ export class SessionManager {
         attemptId: randomUUID(),
         environmentKeys: [...Object.keys(loaded.config.environment),
           "WOLLIPOG_WORKTREE_BASE_REF", "WOLLIPOG_WORKTREE_BRANCH",
-          "WOLLIPOG_WORKTREE_PATH", "WOLLIPOG_PRIMARY_CHECKOUT"].sort(),
+          "WOLLIPOG_WORKTREE_PATH", "WOLLIPOG_PRIMARY_CHECKOUT",
+          "WOLLIPOG_PORT_BLOCK_START", "WOLLIPOG_PORT_BLOCK_END",
+          "WOLLIPOG_PORT_BLOCK_SIZE"].sort(),
         copies: loaded.config.copyFiles.map((copy) => ({ ...copy, status: "pending" })),
         steps: [],
       };
@@ -1504,14 +1661,16 @@ export class SessionManager {
       if (decision === "dismissed") {
         const failed = { ...awaiting, status: "failed" as const, completedAt: Date.now(), error: "setup trust decision was dismissed" };
         this.persistWorktreeSetupState(meta.sessionId, worktree, failed);
-        this.worktreeSetupEnvironments.delete(meta.sessionId);
+        this.setWorktreeSetupEnvironment(meta.sessionId, worktree.path, portEnvironment);
         return "failed";
       }
       trusted = decision === "trusted";
       if (decision === "declined") {
         const declined = { ...awaiting, status: "declined" as const, completedAt: Date.now() };
         this.persistWorktreeSetupState(meta.sessionId, worktree, declined);
-        this.worktreeSetupEnvironments.delete(meta.sessionId);
+        // Declining repository-controlled setup suppresses only that configuration. The stable
+        // runner-owned port identity is independent and must still reach the agent process.
+        this.setWorktreeSetupEnvironment(meta.sessionId, worktree.path, portEnvironment);
         this.emitEvent(meta.sessionId, {
           kind: "stderr",
           text: "Worktree setup was declined. The worktree was created without copy, environment, or setup hooks.",
@@ -1522,12 +1681,19 @@ export class SessionManager {
       await this.worktreeSetupTrust.approve(meta.repoPath, loaded.hash);
     }
 
+    this.persistWorktreeHookSnapshot(meta.sessionId, worktree, {
+      configHash: loaded.hash,
+      environment: structuredClone(loaded.config.environment),
+      teardown: structuredClone(loaded.config.teardown ?? []),
+    });
+
     onProgress?.("running_setup");
     const hostSetupEnvironment = resolvedWorktreeSetupEnvironment(loaded.config, {
       primaryCheckout: meta.repoPath,
       worktreePath: worktree.path,
       branch: worktree.branch,
       baseRef: worktree.baseRef,
+      portBlock: worktree.portBlock,
     });
     let setupEnvironment = hostSetupEnvironment;
     const reportedStepResults = new Map<number, string>();
@@ -1546,6 +1712,7 @@ export class SessionManager {
         configHash: loaded.hash,
         environment: hostSetupEnvironment,
         signal,
+        descendantMarker: processMarker,
         ...(existing?.configHash === loaded.hash && existing.status === "failed" ? { prior: existing } : {}),
         prepareExecution: async () => {
           // Cloud isolation preparation snapshots the source worktree. Delaying this boundary until
@@ -1762,7 +1929,15 @@ export class SessionManager {
       } catch (error) {
         if (created.created && !(error as { retainWorktree?: boolean }).retainWorktree) {
           try {
-            await removeWorktree(meta.repoPath, created, options);
+            const cleanupMeta = this.store.readMeta(sessionId) ?? meta;
+            const cleanup = this.cleanupRecordForWorktree(
+              cleanupMeta,
+              worktree,
+              "creation_rollback",
+              "force",
+            );
+            this.cleanupJournal.add(cleanup);
+            await this.reapWorktree(cleanup, true, cleanupMeta);
             this.forgetTransientWorktreeSetupState(sessionId, worktree);
           } catch {
             this.log(`requested worktree cleanup for ${boundedSessionIdForLog(sessionId)} needs operator attention`);
@@ -1982,6 +2157,23 @@ export class SessionManager {
       this.closing.has(sessionId);
   }
 
+  /** A worktree captured by an unfinished provider transition cannot yet be retired with an exact
+   * process boundary. A provider already running in the target cwd is different: cleanup owns and
+   * retires that process below. */
+  private transitioningProviderUsesPath(sessionId: string, context: AgentContext, path: string): boolean {
+    const active = this.active.get(sessionId);
+    if (active?.pendingWorktreeRebind &&
+        sameWorktreePath(active.context, active.pendingWorktreeRebind, path) &&
+        !sameWorktreePath(active.context, active.cwd, path)) return true;
+    const rebinding = this.worktreeRebindings.get(sessionId);
+    if (!rebinding) return false;
+    return (!!rebinding.launchingWorktreePath &&
+      sameWorktreePath(context, rebinding.launchingWorktreePath, path)) ||
+      sameWorktreePath(rebinding.entry.context, rebinding.entry.cwd, path) ||
+      (!!rebinding.entry.worktree &&
+        sameWorktreePath(rebinding.entry.context, rebinding.entry.worktree.path, path));
+  }
+
   private releaseActiveWorktreeLease(entry: ActiveSession): void {
     if (!entry.worktreeLeaseOwner) return;
     this.store.releaseWorktreeLease(entry.sessionId, entry.worktreeLeaseOwner);
@@ -2135,10 +2327,319 @@ export class SessionManager {
     });
   }
 
+  private cleanupRecordForWorktree(
+    meta: SessionMeta,
+    worktree: SessionWorktreeView,
+    trigger: NonNullable<WorktreeCleanupRecord["trigger"]>,
+    removalMode: NonNullable<WorktreeCleanupRecord["removalMode"]>,
+  ): WorktreeCleanupRecord {
+    const checkpointOwnerHash = this.checkpointOwnerHash(meta);
+    const verifiedMergedHead = worktree.pullRequest?.state === "merged" &&
+      /^[a-f0-9]{40,64}$/u.test(worktree.pullRequest.headOid ?? "")
+      ? worktree.pullRequest.headOid
+      : undefined;
+    return {
+      sessionId: meta.sessionId,
+      worktreeId: worktree.id,
+      repoPath: meta.repoPath,
+      worktreePath: worktree.path,
+      context: meta.context,
+      branch: worktree.branch,
+      source: worktree.source === "created" ? "created" : "legacy",
+      ...(worktree.baseRef ? { baseRef: worktree.baseRef } : {}),
+      trigger,
+      removalMode,
+      createdAt: Date.now(),
+      ...(this.worktreeHookSnapshot(meta, worktree)
+        ? { hooks: structuredClone(this.worktreeHookSnapshot(meta, worktree)!) }
+        : {}),
+      execution: {
+        agentId: meta.agentId,
+        driver: meta.driver,
+        command: meta.command,
+        args: [...meta.args],
+        ...(meta.config.permissionMode ? { permissionMode: meta.config.permissionMode } : {}),
+        ...(meta.executionTarget ? { executionTarget: structuredClone(meta.executionTarget) } : {}),
+        ...(meta.executionHandoff ? { executionHandoff: structuredClone(meta.executionHandoff) } : {}),
+        ...(meta.cloudAdapterHandoffKey ? { cloudAdapterHandoffKey: meta.cloudAdapterHandoffKey } : {}),
+      },
+      ...(worktree.portBlock ? { portBlock: { ...worktree.portBlock } } : {}),
+      ...(worktree.teardown ? { teardown: structuredClone(worktree.teardown) } : {}),
+      ...(meta.worktreeProcessMarkers?.[worktree.id]
+        ? { processMarker: meta.worktreeProcessMarkers[worktree.id] }
+        : {}),
+      ...(checkpointOwnerHash ? { checkpointOwnerHash } : {}),
+      ...(verifiedMergedHead ? { verifiedMergedHead } : {}),
+    };
+  }
+
+  private async retireWorktreeProcesses(
+    sessionId: string,
+    context: AgentContext,
+    path: string,
+    processMarker?: string,
+  ): Promise<void> {
+    const entry = this.active.get(sessionId);
+    if (entry && sameWorktreePath(entry.context, entry.cwd, path)) {
+      this.stop(sessionId);
+      const retirement = this.closing.get(sessionId);
+      if (retirement) {
+        await retirement.promise;
+        if (this.closing.get(sessionId) === retirement) {
+          throw new Error("provider process retirement is unconfirmed");
+        }
+      }
+    }
+    const rebinding = this.worktreeRebindings.get(sessionId);
+    if (rebinding && (sameWorktreePath(rebinding.entry.context, rebinding.entry.cwd, path) ||
+        !!rebinding.launchingWorktreePath && sameWorktreePath(context, rebinding.launchingWorktreePath, path))) {
+      this.stop(sessionId);
+      await rebinding.promise;
+    }
+    await this.retireWorktreeShells?.(sessionId, context, path);
+    if (processMarker && !await terminatePosixProcessesByMarker(processMarker)) {
+      throw new Error("worktree descendant process retirement is unconfirmed");
+    }
+    if (this.liveWorktreeUsesPath(sessionId, path)) {
+      throw new Error("runner-started processes still use the worktree after retirement");
+    }
+  }
+
+  private persistCleanupTeardownState(record: WorktreeCleanupRecord, state: WorktreeTeardownState): void {
+    record.teardown = structuredClone(state);
+    this.cleanupJournal.add(record);
+    this.persistWorktreeTeardownState(record.sessionId, record.worktreePath, state);
+  }
+
+  private async runCleanupTeardown(record: WorktreeCleanupRecord, meta?: SessionMeta): Promise<void> {
+    const hooks = record.hooks;
+    if (!hooks || hooks.teardown.length === 0 || record.teardown?.completedAt) return;
+    const portBlock = record.portBlock;
+    const config = {
+      version: 1 as const,
+      copyFiles: [],
+      environment: hooks.environment,
+      setup: [],
+      teardown: hooks.teardown,
+    };
+    const hostEnvironment = resolvedWorktreeSetupEnvironment(config, {
+      primaryCheckout: record.repoPath,
+      worktreePath: record.worktreePath,
+      branch: record.branch ?? `agent/${record.sessionId}`,
+      baseRef: record.baseRef,
+      portBlock,
+    });
+    let isolation: SpawnIsolation | undefined;
+    let environment = hostEnvironment;
+    try {
+      isolation = await this.resolveCleanupIsolation(record, meta);
+      environment = this.worktreeSetupRuntimeEnvironment(isolation, hostEnvironment);
+      isolation = this.worktreeSetupIsolationEnvironment(isolation, environment);
+    } catch (error) {
+      const now = Date.now();
+      this.persistCleanupTeardownState(record, {
+        status: "completed_with_failures",
+        configHash: hooks.configHash,
+        attemptId: record.teardown?.attemptId ?? randomUUID(),
+        startedAt: record.teardown?.startedAt ?? now,
+        completedAt: now,
+        steps: hooks.teardown.map((step) => ({
+          name: step.name,
+          status: "failed",
+          optional: step.optional,
+          startedAt: now,
+          durationMs: 0,
+          error: `teardown isolation unavailable: ${errText(error)}`,
+          stdout: "",
+          stderr: "",
+        })),
+      });
+      return;
+    }
+
+    const reported = new Map<number, string>();
+    const state = await runWorktreeTeardown({
+      context: record.context,
+      worktreePath: record.worktreePath,
+      configHash: hooks.configHash,
+      steps: hooks.teardown,
+      environment,
+      isolation,
+      descendantMarker: record.processMarker,
+      prior: record.teardown,
+      onState: (next) => {
+        this.persistCleanupTeardownState(record, next);
+        next.steps.forEach((step, index) => {
+          if (step.status === "running" || reported.get(index) === step.status) return;
+          reported.set(index, step.status);
+          if (!this.store.has(record.sessionId)) return;
+          const exit = step.exitCode != null ? ` (Exit ${step.exitCode})` : step.signal ? ` (${step.signal})` : "";
+          this.emitEvent(record.sessionId, {
+            kind: "command_output",
+            text: `[Worktree Teardown — ${step.name}]\n${step.status === "completed" ? "Completed" :
+              step.status === "uncertain" ? "Uncertain (Not Replayed)" : step.optional ? "Failed (Optional)" : "Failed"}` +
+              `${exit}${step.durationMs == null ? "" : ` in ${step.durationMs} ms`}${step.error ? `: ${step.error}` : ""}`,
+          });
+        });
+      },
+      onOutput: (stepIndex, text) => {
+        if (!this.store.has(record.sessionId)) return;
+        this.emitEvent(record.sessionId, {
+          kind: "command_output",
+          text: `[Worktree Teardown — ${hooks.teardown[stepIndex]?.name ?? `Step ${stepIndex + 1}`}]\n${text}`,
+        });
+      },
+    });
+    record.teardown = state;
+  }
+
+  private async resolveCleanupIsolation(
+    record: WorktreeCleanupRecord,
+    meta?: SessionMeta,
+  ): Promise<SpawnIsolation | undefined> {
+    if (meta) return this.resolveLaunchIsolation(meta, record.worktreePath);
+    const execution = record.execution;
+    // Compatibility for cleanup records written before durable execution identity existed. Such
+    // records cannot name a remote target and retain the former host-only replay behavior.
+    if (!execution) {
+      return this.resolveIsolation(this.executionIsolation, record.context, {}, {
+        driver: "acp",
+        dataDir: this.stateDir,
+        env: {},
+        sessionId: record.sessionId,
+        cwd: record.worktreePath,
+        ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
+      });
+    }
+    const target = execution.executionTarget;
+    if (target?.adapter === "container") {
+      if (!this.containerTargets || !execution.agentId) {
+        throw new Error("container execution target is not configured for this cleanup");
+      }
+      return this.containerTargets.isolation(
+        target,
+        execution.agentId,
+        execution.command,
+        execution.args,
+        record.sessionId,
+      );
+    }
+    if (target?.adapter === "cloud") {
+      const handoffKey = execution.cloudAdapterHandoffKey;
+      if (!this.cloudTargets || !execution.agentId || !handoffKey ||
+          execution.executionHandoff?.targetId !== target.id) {
+        throw new Error("cloud execution handoff is not available for this cleanup");
+      }
+      return this.cloudTargets.isolation(
+        target,
+        execution.agentId,
+        execution.command,
+        execution.args,
+        record.sessionId,
+        handoffKey,
+      );
+    }
+    const isolationMeta = {
+      agentId: execution.agentId,
+      command: execution.command,
+      args: execution.args,
+      driver: execution.driver,
+      context: record.context,
+      config: { permissionMode: execution.permissionMode },
+      executionTarget: target,
+      repoPath: record.repoPath,
+      sessionId: record.sessionId,
+      worktreePath: record.worktreePath,
+    };
+    this.assertHostIsolationContextSupported(isolationMeta);
+    const additionalWritableRoots = await this.requestedWorktreeIsolation(isolationMeta);
+    return this.resolveIsolation(this.executionIsolation, record.context, {}, {
+      driver: execution.driver,
+      dataDir: this.stateDir,
+      env: {},
+      sessionId: record.sessionId,
+      cwd: record.worktreePath,
+      ...(execution.permissionMode === "orchestrator" ? { orchestratorScratchOnly: true } : {}),
+      ...(additionalWritableRoots.length ? { additionalWritableRoots } : {}),
+      ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
+    });
+  }
+
+  private async removeRecordedWorktree(record: WorktreeCleanupRecord, meta?: SessionMeta): Promise<SafeWorktreeDiscardResult> {
+    const beforeRemove = async () => {
+      record.processTerminationStartedAt ??= Date.now();
+      this.cleanupJournal.add(record);
+      await this.retireWorktreeProcesses(
+        record.sessionId,
+        record.context,
+        record.worktreePath,
+        record.processMarker,
+      );
+      record.processesTerminatedAt = Date.now();
+      this.cleanupJournal.add(record);
+      await this.runCleanupTeardown(record, meta);
+    };
+    if (record.removalMode === "safe") {
+      return this.discardSessionWorktreeIfSafe(
+        record.repoPath,
+        record.sessionId,
+        {
+          path: record.worktreePath,
+          branch: record.branch ?? `agent/${record.sessionId}`,
+          source: record.source ?? "legacy",
+        },
+        {
+          context: record.context,
+          dataDir: this.dataDir,
+          ownerHash: this.runnerOwnerHash,
+          ...(record.verifiedMergedHead ? { verifiedMergedHead: record.verifiedMergedHead } : {}),
+          beforeRemove,
+        },
+      );
+    }
+    try {
+      await beforeRemove();
+      const ownedWslPath = record.context.kind === "wsl" && this.runnerOwnerHash &&
+        record.worktreePath.includes(`/runner-instances/${this.runnerOwnerHash}/worktrees/`);
+      await removeWorktree(
+        record.repoPath,
+        {
+          path: record.worktreePath,
+          branch: record.branch ?? (ownedWslPath
+            ? `agent/${this.runnerOwnerHash.slice(0, 16)}/${record.sessionId}`
+            : `agent/${record.sessionId}`),
+        },
+        {
+          context: record.context,
+          dataDir: this.dataDir,
+          ownerHash: this.runnerOwnerHash,
+          legacyWslRoot: record.context.kind === "wsl" && !ownedWslPath,
+        },
+      );
+      return { removed: true };
+    } catch {
+      return { removed: false, reason: "unavailable" };
+    }
+  }
+
+  private finishWorktreeCleanup(record: WorktreeCleanupRecord): boolean {
+    try {
+      if (record.worktreeId) {
+        this.worktreePortAllocator.release(this.worktreePortOwner(record.sessionId, record.worktreeId));
+      }
+      record.completedAt = Date.now();
+      this.cleanupJournal.complete(record);
+      return true;
+    } catch (error) {
+      this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after cleanup journal update or port release: ${errText(error)}`);
+      return false;
+    }
+  }
+
   private async discardWorktreeLocked(
     sessionId: string,
     path: string,
-    options: { refreshMergedHead?: boolean } = {},
+    options: { refreshMergedHead?: boolean; trigger?: "explicit_discard" | "pull_request_reconciliation" } = {},
   ): Promise<{ removed: boolean; reason?: string; snapshot?: SessionSnapshot }> {
     const initialMeta = this.store.readMeta(sessionId);
     if (!initialMeta || !this.sessionCanOpen(sessionId)) {
@@ -2157,7 +2658,7 @@ export class SessionManager {
     if (initiallySelectedIsLaunching) {
       return { removed: false, reason: "the worktree is still being launched by a provider process" };
     }
-    if (this.liveWorktreeUsesPath(sessionId, worktree.path)) {
+    if (this.transitioningProviderUsesPath(sessionId, meta.context, worktree.path)) {
       return { removed: false, reason: "the worktree is still active in a provider process" };
     }
     if (options.refreshMergedHead !== false && !worktree.pullRequest) {
@@ -2213,8 +2714,7 @@ export class SessionManager {
         this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
       }
     }
-    const source = worktree.source;
-    if (source === "attached") {
+    if (worktree.source === "attached") {
       return { removed: false, reason: "attached operator-owned worktrees must be removed by their owner" };
     }
     const selectedIsLaunching = !!meta.worktreePath &&
@@ -2223,13 +2723,21 @@ export class SessionManager {
     if (selectedIsLaunching) {
       return { removed: false, reason: "the worktree is still being launched by a provider process" };
     }
-    if (this.liveWorktreeUsesPath(sessionId, worktree.path)) {
+    if (this.transitioningProviderUsesPath(sessionId, meta.context, worktree.path)) {
       return { removed: false, reason: "the worktree is still active in a provider process" };
+    }
+    let teardownIdentityError: string | undefined;
+    try {
+      await this.ensureDurableWorktreeHookSnapshot(meta, worktree);
+      meta = this.store.readMeta(sessionId) ?? meta;
+    } catch (error) {
+      teardownIdentityError = errText(error);
+      this.log(`worktree cleanup configuration recovery failed for ${boundedSessionIdForLog(sessionId)}: ${teardownIdentityError}`);
     }
     const cleanupLeaseOwner = `${this.lockOwner}:cleanup:${randomUUID()}`;
     // The lease is per session, not per worktree. While this session's own provider runs it holds
-    // the lease for the worktree it is using; that must not stop the session from discarding a
-    // finished sibling worktree, which liveWorktreeUsesPath() above already proved unused here.
+    // the lease for the worktree it is using; cleanup may transfer that exact local lease so it can
+    // retire the provider, while a provider using a finished sibling remains untouched.
     // Only the exact owner recorded on this process's active entry qualifies: a lease held by
     // another process, or by a launch that has not published its active entry yet, still blocks.
     // The lease is transferred to the cleanup owner (never left unheld), so a provider that exits
@@ -2251,25 +2759,43 @@ export class SessionManager {
       transferredFrom = ownProvider;
     }
     try {
-      // Close the local race with a provider launch that acquired its durable lease while this
-      // cleanup was waiting. The cross-process lease closes the equivalent race on sibling runners.
-      if (this.liveWorktreeUsesPath(sessionId, worktree.path)) {
-        return { removed: false, reason: "the worktree is still active in a provider process" };
-      }
-      const result = await this.discardSessionWorktreeIfSafe(
-        meta.repoPath,
-        sessionId,
-        { ...worktree, source },
-        {
-          context: meta.context,
-          dataDir: this.dataDir,
-          ownerHash: this.runnerOwnerHash,
-          ...(worktree.pullRequest?.state === "merged" && worktree.pullRequest.headOid
-            ? { verifiedMergedHead: worktree.pullRequest.headOid }
-            : {}),
-        },
+      // The durable record precedes process retirement/teardown/removal. Safe Git preflight still
+      // runs first inside discardWorktreeIfSafe, so a dirty or unpushed tree is untouched.
+      const cleanup = this.cleanupRecordForWorktree(
+        meta,
+        worktree,
+        options.trigger ?? "explicit_discard",
+        "safe",
       );
+      if (teardownIdentityError) {
+        const now = Date.now();
+        cleanup.teardown = {
+          status: "completed_with_failures",
+          configHash: worktree.setup?.configHash ?? "unavailable",
+          attemptId: randomUUID(),
+          startedAt: now,
+          completedAt: now,
+          steps: [{
+            name: "Configuration Recovery",
+            status: "failed",
+            optional: false,
+            startedAt: now,
+            durationMs: 0,
+            error: teardownIdentityError,
+            stdout: "",
+            stderr: "",
+          }],
+        };
+      }
+      this.cleanupJournal.add(cleanup);
+      const result = await this.removeRecordedWorktree(cleanup, meta);
       if (!result.removed) {
+        // No destructive phase began: discard the intent rather than surprising the user with a
+        // later automatic retry after they merely clean the tree. Once process/teardown work began,
+        // retain the journal so startup can finish the interrupted explicit operation.
+        if (!cleanup.processTerminationStartedAt && !cleanup.teardown) {
+          this.removeWorktreeCleanupRecord(cleanup);
+        }
         const reasons = {
           not_runner_owned: "runner ownership could not be proven",
           branch_changed: "the registered worktree branch changed",
@@ -2280,6 +2806,7 @@ export class SessionManager {
         } as const;
         return { removed: false, reason: reasons[result.reason] };
       }
+      this.finishWorktreeCleanup(cleanup);
 
       // The session lane excludes create/attach/select/link/discard races. Re-read after Git I/O so
       // an out-of-process store removal cannot be accidentally recreated by this patch.
@@ -2287,15 +2814,22 @@ export class SessionManager {
       if (!latest) return { removed: true };
       const worktrees = this.attributedWorktrees(latest)
         .filter((item) => !sameWorktreePath(latest.context, item.path, worktree.path));
+      const worktreeHooks = { ...(latest.worktreeHooks ?? {}) };
+      delete worktreeHooks[worktree.id];
+      const worktreeProcessMarkers = { ...(latest.worktreeProcessMarkers ?? {}) };
+      delete worktreeProcessMarkers[worktree.id];
       const removedActiveSelection = !!latest.worktreePath &&
         sameWorktreePath(latest.context, latest.worktreePath, worktree.path);
       const updated = this.store.patchMeta(sessionId, {
         worktrees,
+        worktreeHooks: Object.keys(worktreeHooks).length ? worktreeHooks : undefined,
+        worktreeProcessMarkers: Object.keys(worktreeProcessMarkers).length ? worktreeProcessMarkers : undefined,
         ...(removedActiveSelection
           ? { worktreePath: null, worktreeBranch: undefined, lastTurnBaseTree: undefined }
           : {}),
       });
       if (!updated) return { removed: true };
+      this.worktreeSetupEnvironments.delete(sessionId);
       await removeRequestedWorktreeBoundary(meta.repoPath, sessionId, {
         context: meta.context,
         dataDir: this.dataDir,
@@ -2474,7 +3008,10 @@ export class SessionManager {
                 }
               }
               if (state === "merged" || state === "closed") {
-                await this.discardWorktreeLocked(candidate.sessionId, path, { refreshMergedHead: false });
+                await this.discardWorktreeLocked(candidate.sessionId, path, {
+                  refreshMergedHead: false,
+                  trigger: "pull_request_reconciliation",
+                });
               }
             }
           });
@@ -2863,6 +3400,27 @@ export class SessionManager {
         this.log(`checkpoint ref ownership claim failed for ${m.sessionId}: ${errText(error)}`);
       }
       let reconciled = m;
+      const migratedWorktrees = this.attributedWorktrees(reconciled).map((worktree) => ({ ...worktree }));
+      let portsChanged = false;
+      for (const worktree of migratedWorktrees) {
+        if (worktree.source === "attached") continue;
+        try {
+          const previous = worktree.portBlock;
+          this.ensureWorktreePortBlock(reconciled, worktree);
+          portsChanged ||= !previous;
+        } catch (error) {
+          this.log(`worktree port allocation failed for ${boundedSessionIdForLog(m.sessionId)}: ${errText(error)}`);
+        }
+      }
+      if (portsChanged) {
+        reconciled = this.store.patchMeta(m.sessionId, { worktrees: migratedWorktrees }) ?? reconciled;
+      }
+      for (const worktree of migratedWorktrees) {
+        if (worktree.source === "attached") continue;
+        void this.ensureDurableWorktreeHookSnapshot(reconciled, worktree).catch((error) => {
+          this.log(`worktree teardown identity migration failed for ${boundedSessionIdForLog(m.sessionId)}: ${errText(error)}`);
+        });
+      }
       if (m.driver === "claude-code" && m.status === "stopped") {
         reconciled = this.store.patchMeta(m.sessionId, {
           backgroundWorkState: undefined,
@@ -3621,6 +4179,8 @@ export class SessionManager {
       worktreePath: null,
       worktreeBranch: priorMatchesWorkspace ? prior?.worktreeBranch : undefined,
       worktrees: priorMatchesWorkspace ? prior?.worktrees : undefined,
+      worktreeHooks: priorMatchesWorkspace ? prior?.worktreeHooks : undefined,
+      worktreeProcessMarkers: priorMatchesWorkspace ? prior?.worktreeProcessMarkers : undefined,
       executionTarget,
       executionHandoffRequest: spec.executionHandoff ?? prior?.executionHandoffRequest,
       executionHandoff: spec.executionTarget?.id === prior?.executionTarget?.id ? prior?.executionHandoff : undefined,
@@ -3692,6 +4252,8 @@ export class SessionManager {
           !!latest.worktrees?.some((item) => sameWorktreePath(latest.context, item.path, latest.worktreePath!));
         meta.worktreeBranch = latestMatchesWorkspace ? latest.worktreeBranch : undefined;
         meta.worktrees = latestMatchesWorkspace ? latest.worktrees : undefined;
+        meta.worktreeHooks = latestMatchesWorkspace ? latest.worktreeHooks : undefined;
+        meta.worktreeProcessMarkers = latestMatchesWorkspace ? latest.worktreeProcessMarkers : undefined;
         meta.lastTurnBaseTree = latest.lastTurnBaseTree;
         meta.turnCount = latest.turnCount ?? 0;
         meta.forkPoints = latest.forkPoints ?? {};
@@ -3724,14 +4286,27 @@ export class SessionManager {
     let worktreeOwnedByLaunch = false;
     const launchWorktreeCleanup = (): WorktreeCleanupRecord => {
       if (!worktree) throw new Error("worktree cleanup requested before materialization");
+      const latest = this.store.readMeta(spec.sessionId) ?? meta;
+      if (worktreeIdentity) {
+        return this.cleanupRecordForWorktree(
+          latest,
+          { ...worktreeIdentity, path: worktree.path, branch: worktree.branch },
+          "creation_rollback",
+          "force",
+        );
+      }
       const checkpointOwnerHash = this.checkpointOwnerHash(meta);
       return {
         sessionId: spec.sessionId,
-        worktreeId: worktreeIdentity?.id ?? "legacy",
+        worktreeId: "legacy",
         repoPath,
         worktreePath: worktree.path,
         context,
-        branch: worktreeIdentity?.branch ?? worktree.branch,
+        branch: worktree.branch,
+        source: "legacy",
+        trigger: "creation_rollback",
+        removalMode: "force",
+        createdAt: Date.now(),
         ...(checkpointOwnerHash ? { checkpointOwnerHash } : {}),
       };
     };
@@ -3765,7 +4340,7 @@ export class SessionManager {
           const priorActiveWorktree = activePrior?.repoPath === repoPath &&
             agentContextKey(activePrior.context) === agentContextKey(context) && activePrior.worktreePath
             ? activePrior.worktrees?.find((item) =>
-              item.source !== "legacy" &&
+              (item.source !== "legacy" || !!item.baseCommit || !!item.setup || !!item.portBlock) &&
               sameWorktreePath(activePrior.context, item.path, activePrior.worktreePath!))
             : undefined;
           if (priorActiveWorktree) {
@@ -4919,6 +5494,17 @@ export class SessionManager {
     // initial-start cleanup must not force-remove it. Record the refusal before reporting: a stop
     // arriving in the window below still has to reach the retention decision.
     this.worktreeVerificationRefusals.set(meta.sessionId, launchGeneration);
+    // Port/setup preparation may have enriched the derived legacy view before this final identity
+    // proof. Do not publish that expected branch as verified after Git reports a different tree;
+    // the selected path stays retained and the allocator journal keeps its stable port ownership.
+    const current = this.store.readMeta(meta.sessionId);
+    if (current?.worktrees?.some((item) => item.id === "legacy" &&
+        sameWorktreePath(current.context, item.path, worktree.path))) {
+      this.store.patchMeta(meta.sessionId, {
+        worktrees: current.worktrees.filter((item) => !(item.id === "legacy" &&
+          sameWorktreePath(current.context, item.path, worktree.path))),
+      });
+    }
     // Verification awaits Git. A restart or stop can take the session over inside that window, and
     // the replacement may legitimately own this same worktree — report only while this launch is
     // still the live one, exactly as the rest of the launch path does after every await.
@@ -5059,7 +5645,7 @@ export class SessionManager {
       });
       client = this.createDriver(
         meta.driver,
-        { command: meta.command, args: meta.args, cwd, env: meta.env, config: meta.config, orchestrator: meta.orchestrator, context: meta.context, capabilities: meta.capabilities, resumeId, acpSessionContext: meta.acpSessionContext, isolation, sessionStateDir: this.store.sessionPath(sessionId), initialBackgroundTaskIds: meta.orphanedWork?.pendingTaskIds ?? meta.pendingBackgroundTaskIds },
+        { command: meta.command, args: meta.args, cwd, env: meta.env, config: meta.config, orchestrator: meta.orchestrator, context: meta.context, capabilities: meta.capabilities, resumeId, acpSessionContext: meta.acpSessionContext, isolation, sessionStateDir: this.store.sessionPath(sessionId), initialBackgroundTaskIds: meta.orphanedWork?.pendingTaskIds ?? meta.pendingBackgroundTaskIds, descendantMarker: worktree ? this.worktreeProcessMarker(sessionId, cwd) : undefined },
         {
         supportsWorkerAttention: () => runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "workerAttention"),
         onEvent: (p) => this.onDriverEvent(sessionId, p),
@@ -9147,6 +9733,7 @@ export class SessionManager {
             capabilities: source.capabilities,
             resumeId: source.agentSessionId,
             isolation,
+            descendantMarker: this.worktreeProcessMarker(source.sessionId, source.worktreePath),
           },
           { onEvent: () => {}, onStderr: (text) => this.log(`provider fork: ${text}`), onExit: () => {} },
         );
@@ -9302,13 +9889,40 @@ export class SessionManager {
         }
       }
       if (worktree) {
-        const cleanup = {
-          sessionId: targetSessionId,
-          repoPath: source.repoPath,
-          worktreePath: worktree.path,
-          context: source.context,
-          ...(this.runnerOwnerHash ? { checkpointOwnerHash: this.runnerOwnerHash } : {}),
-        };
+        let cleanup: WorktreeCleanupRecord;
+        const cleanupMeta = this.store.readMeta(targetSessionId);
+        const cleanupWorktree = cleanupMeta && this.attributedWorktrees(cleanupMeta)
+          .find((item) => sameWorktreePath(cleanupMeta.context, item.path, worktree!.path));
+        if (cleanupMeta && cleanupWorktree) {
+          try {
+            await this.ensureDurableWorktreeHookSnapshot(cleanupMeta, cleanupWorktree);
+          } catch (snapshotError) {
+            this.log(`failed to preserve fork teardown identity for ${targetSessionId}: ${errText(snapshotError)}`);
+          }
+          cleanup = this.cleanupRecordForWorktree(
+            this.store.readMeta(targetSessionId) ?? cleanupMeta,
+            cleanupWorktree,
+            "creation_rollback",
+            "force",
+          );
+        } else {
+          cleanup = {
+            sessionId: targetSessionId,
+            worktreeId: "legacy",
+            repoPath: source.repoPath,
+            worktreePath: worktree.path,
+            context: source.context,
+            branch: worktree.branch,
+            source: "legacy",
+            trigger: "creation_rollback",
+            removalMode: "force",
+            createdAt: Date.now(),
+            ...(this.worktreePortAllocator.get(this.worktreePortOwner(targetSessionId, "legacy"))
+              ? { portBlock: this.worktreePortAllocator.get(this.worktreePortOwner(targetSessionId, "legacy")) }
+              : {}),
+            ...(this.runnerOwnerHash ? { checkpointOwnerHash: this.runnerOwnerHash } : {}),
+          };
+        }
         try {
           this.cleanupJournal.add(cleanup);
         } catch (cleanupErr) {
@@ -9744,19 +10358,42 @@ export class SessionManager {
       // either journal write fails, a retry still has the complete session state to converge from.
       const worktreeCleanups: WorktreeCleanupRecord[] = [];
       if (meta) {
+        const teardownIdentityErrors = new Map<string, string>();
+        for (const worktree of this.attributedWorktrees(meta).filter((item) => item.source !== "attached")) {
+          try {
+            await this.ensureDurableWorktreeHookSnapshot(meta, worktree);
+          } catch (error) {
+            teardownIdentityErrors.set(worktree.id, errText(error));
+          }
+        }
+        const cleanupMeta = this.store.readMeta(sessionId) ?? meta;
         const checkpointOwnerHash = this.checkpointOwnerHash(meta);
         // Attached worktrees remain operator-owned: session deletion only forgets their
         // attribution. Runner-created/legacy worktrees carry destructive ownership proof.
-        for (const worktree of this.attributedWorktrees(meta).filter((item) => item.source !== "attached")) {
-          const cleanup: WorktreeCleanupRecord = {
-            sessionId,
-            worktreeId: worktree.id,
-            repoPath: meta.repoPath,
-            worktreePath: worktree.path,
-            context: meta.context,
-            branch: worktree.branch,
-            ...(checkpointOwnerHash ? { checkpointOwnerHash } : {}),
-          };
+        for (const worktree of this.attributedWorktrees(cleanupMeta).filter((item) => item.source !== "attached")) {
+          const cleanup = this.cleanupRecordForWorktree(cleanupMeta, worktree, "session_delete", "force");
+          const teardownIdentityError = teardownIdentityErrors.get(worktree.id);
+          if (teardownIdentityError) {
+            const now = Date.now();
+            cleanup.teardown = {
+              status: "completed_with_failures",
+              configHash: worktree.setup?.configHash ?? "unavailable",
+              attemptId: randomUUID(),
+              startedAt: now,
+              completedAt: now,
+              steps: [{
+                name: "Configuration Recovery",
+                status: "failed",
+                optional: false,
+                startedAt: now,
+                durationMs: 0,
+                error: teardownIdentityError,
+                stdout: "",
+                stderr: "",
+              }],
+            };
+          }
+          if (checkpointOwnerHash) cleanup.checkpointOwnerHash = checkpointOwnerHash;
           this.cleanupJournal.add(cleanup);
           worktreeCleanups.push(cleanup);
         }
@@ -9868,7 +10505,7 @@ export class SessionManager {
       if (meta) {
         await this.cleanupProviderState(sessionId, meta.driver, meta.context, true);
       }
-      for (const cleanup of worktreeCleanups) await this.reapWorktree(cleanup);
+      for (const cleanup of worktreeCleanups) await this.reapWorktree(cleanup, false, meta ?? undefined);
       if (meta) {
         await removeRequestedWorktreeBoundary(meta.repoPath, sessionId, {
           context: meta.context,
@@ -9909,7 +10546,11 @@ export class SessionManager {
     }
   }
 
-  private async reapWorktree(record: WorktreeCleanupRecord, cleanupCurrentGeneration = false): Promise<void> {
+  private async reapWorktree(
+    record: WorktreeCleanupRecord,
+    cleanupCurrentGeneration = false,
+    isolationMeta?: SessionMeta,
+  ): Promise<void> {
     let checkpointRefsCleaned = true;
     let worktreeRemoved = true;
     const cleanupOwnership: CheckpointRefOwnershipClaim = {
@@ -9963,29 +10604,10 @@ export class SessionManager {
         checkpointRefsCleaned = false;
       }
     }
-    try {
-      const ownedWslPath = record.context.kind === "wsl" && this.runnerOwnerHash &&
-        record.worktreePath.includes(`/runner-instances/${this.runnerOwnerHash}/worktrees/`);
-      await removeWorktree(
-        record.repoPath,
-        {
-          path: record.worktreePath,
-          branch: record.branch ?? (ownedWslPath
-            ? `agent/${this.runnerOwnerHash.slice(0, 16)}/${record.sessionId}`
-            : `agent/${record.sessionId}`),
-        },
-        {
-          context: record.context,
-          dataDir: this.dataDir,
-          ownerHash: this.runnerOwnerHash,
-          legacyWslRoot: record.context.kind === "wsl" && !ownedWslPath,
-        },
-      );
-    } catch {
-      worktreeRemoved = false;
-    }
+    const removal = await this.removeRecordedWorktree(record, isolationMeta);
+    worktreeRemoved = removal.removed;
     if (checkpointRefsCleaned && worktreeRemoved) {
-      this.removeWorktreeCleanupRecord(record);
+      this.finishWorktreeCleanup(record);
       return;
     }
     // Keep cleanup diagnostics bounded and free of repository paths, ref values, and provider

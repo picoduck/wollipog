@@ -158,7 +158,7 @@ For a WSL installation, set an explicit execution context:
 }
 ```
 
-The checked-in [runner.config.example.json](runner.config.example.json) contains additional examples. Keep credentials out of that file; use the agent's own host-side login or protected secret files and environment injection. Detailed lifecycle and capability behavior is documented in [Drivers](docs/DRIVERS.md).
+The checked-in [runner.config.example.json](runner.config.example.json) contains additional examples. Keep credentials out of that file; use the agent's own host-side login or protected secret files and environment injection. Detailed lifecycle and capability behavior is documented in [Drivers](docs/DRIVERS.md), and repository hooks plus stable worktree port blocks are documented in [Worktree Hooks and Ports](docs/worktree-hooks-and-ports.md).
 
 ## Security Model
 

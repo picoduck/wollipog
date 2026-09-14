@@ -2,7 +2,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { copyFile, lstat, mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import type { AgentContext, WorktreeSetupState } from "@wollipog/protocol";
+import type {
+  AgentContext,
+  WorktreePortBlock,
+  WorktreeSetupState,
+  WorktreeTeardownState,
+  WorktreeTeardownStepResult,
+} from "@wollipog/protocol";
 import { runContextCommand } from "./context-command.js";
 import { sensitiveEnvironmentName } from "./env-security.js";
 import { killTree, spawnAgent, type SpawnIsolation } from "./spawn.js";
@@ -27,6 +33,14 @@ export interface WorktreeSetupConfig {
   copyFiles: WorktreeSetupCopy[];
   environment: Record<string, string>;
   setup: WorktreeSetupStep[];
+  teardown?: WorktreeSetupStep[];
+}
+
+/** Exact approved runner-private material retained for cleanup after the session row is deleted. */
+export interface WorktreeHookSnapshot {
+  configHash: string;
+  environment: Record<string, string>;
+  teardown: WorktreeSetupStep[];
 }
 
 export interface WorktreeSetupVariables {
@@ -34,6 +48,9 @@ export interface WorktreeSetupVariables {
   WOLLIPOG_WORKTREE_BRANCH: string;
   WOLLIPOG_WORKTREE_BASE_REF: string;
   WOLLIPOG_PRIMARY_CHECKOUT: string;
+  WOLLIPOG_PORT_BLOCK_START: string;
+  WOLLIPOG_PORT_BLOCK_END: string;
+  WOLLIPOG_PORT_BLOCK_SIZE: string;
 }
 
 export interface WorktreeSetupRunOptions {
@@ -53,9 +70,24 @@ export interface WorktreeSetupRunOptions {
   onOutput?: (stepIndex: number, text: string) => void;
   isolation?: SpawnIsolation;
   signal?: AbortSignal;
+  descendantMarker?: string;
   /** Resolve a launch boundary only after local copies finish. Cloud preparation snapshots the
    * worktree, so resolving it earlier would omit copied files from setup and the later agent. */
   prepareExecution?: () => Promise<{ environment: Record<string, string>; isolation?: SpawnIsolation }>;
+}
+
+export interface WorktreeTeardownRunOptions {
+  context: AgentContext;
+  worktreePath: string;
+  configHash: string;
+  steps: WorktreeSetupStep[];
+  environment: Record<string, string>;
+  prior?: WorktreeTeardownState;
+  onState?: (state: WorktreeTeardownState) => void;
+  onOutput?: (stepIndex: number, text: string) => void;
+  isolation?: SpawnIsolation;
+  signal?: AbortSignal;
+  descendantMarker?: string;
 }
 
 function setupCancelled(): Error {
@@ -84,6 +116,9 @@ const WORKTREE_SETUP_VARIABLES = new Set([
   "WOLLIPOG_WORKTREE_BRANCH",
   "WOLLIPOG_WORKTREE_BASE_REF",
   "WOLLIPOG_PRIMARY_CHECKOUT",
+  "WOLLIPOG_PORT_BLOCK_START",
+  "WOLLIPOG_PORT_BLOCK_END",
+  "WOLLIPOG_PORT_BLOCK_SIZE",
 ]);
 // Repository setup values are deliberately omitted from durable trust events. Prevent unseen
 // values from redirecting provider authentication, executable loading, or runner-owned state.
@@ -210,7 +245,7 @@ export function parseWorktreeSetupConfig(source: string): WorktreeSetupConfig {
     throw new Error(`${WORKTREE_SETUP_CONFIG} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
   const root = record(raw, WORKTREE_SETUP_CONFIG);
-  onlyKeys(root, ["version", "copyFiles", "environment", "setup"], WORKTREE_SETUP_CONFIG);
+  onlyKeys(root, ["version", "copyFiles", "environment", "setup", "teardown"], WORKTREE_SETUP_CONFIG);
   if (root.version !== WORKTREE_SETUP_VERSION) throw new Error(`${WORKTREE_SETUP_CONFIG}.version must be 1`);
 
   const copiesRaw = root.copyFiles ?? [];
@@ -253,35 +288,40 @@ export function parseWorktreeSetupConfig(source: string): WorktreeSetupConfig {
     environment[key] = value;
   }
 
-  const setupRaw = root.setup ?? [];
-  if (!Array.isArray(setupRaw) || setupRaw.length > MAX_STEPS) {
-    throw new Error(`${WORKTREE_SETUP_CONFIG}.setup must contain at most ${MAX_STEPS} entries`);
-  }
-  const setup = setupRaw.map((item, index): WorktreeSetupStep => {
-    const path = `${WORKTREE_SETUP_CONFIG}.setup[${index}]`;
-    const entry = record(item, path);
-    onlyKeys(entry, ["name", "command", "timeoutSeconds", "optional"], path);
-    if (!Array.isArray(entry.command) || entry.command.length < 1 || entry.command.length > MAX_ARGS) {
-      throw new Error(`${path}.command must contain between 1 and ${MAX_ARGS} argv entries`);
+  const parseSteps = (key: "setup" | "teardown"): WorktreeSetupStep[] => {
+    const stepsRaw = root[key] ?? [];
+    if (!Array.isArray(stepsRaw) || stepsRaw.length > MAX_STEPS) {
+      throw new Error(`${WORKTREE_SETUP_CONFIG}.${key} must contain at most ${MAX_STEPS} entries`);
     }
-    const command = entry.command.map((arg, argIndex) => boundedString(arg, `${path}.command[${argIndex}]`)) as [string, ...string[]];
-    const timeoutSeconds = entry.timeoutSeconds ?? 600;
-    if (!Number.isInteger(timeoutSeconds) || (timeoutSeconds as number) < MIN_TIMEOUT_SECONDS || (timeoutSeconds as number) > MAX_TIMEOUT_SECONDS) {
-      throw new Error(`${path}.timeoutSeconds must be an integer from ${MIN_TIMEOUT_SECONDS} to ${MAX_TIMEOUT_SECONDS}`);
+    const steps = stepsRaw.map((item, index): WorktreeSetupStep => {
+      const path = `${WORKTREE_SETUP_CONFIG}.${key}[${index}]`;
+      const entry = record(item, path);
+      onlyKeys(entry, ["name", "command", "timeoutSeconds", "optional"], path);
+      if (!Array.isArray(entry.command) || entry.command.length < 1 || entry.command.length > MAX_ARGS) {
+        throw new Error(`${path}.command must contain between 1 and ${MAX_ARGS} argv entries`);
+      }
+      const command = entry.command.map((arg, argIndex) => boundedString(arg, `${path}.command[${argIndex}]`)) as [string, ...string[]];
+      const timeoutSeconds = entry.timeoutSeconds ?? 600;
+      if (!Number.isInteger(timeoutSeconds) || (timeoutSeconds as number) < MIN_TIMEOUT_SECONDS || (timeoutSeconds as number) > MAX_TIMEOUT_SECONDS) {
+        throw new Error(`${path}.timeoutSeconds must be an integer from ${MIN_TIMEOUT_SECONDS} to ${MAX_TIMEOUT_SECONDS}`);
+      }
+      if (entry.optional !== undefined && typeof entry.optional !== "boolean") throw new Error(`${path}.optional must be a boolean`);
+      return { name: boundedString(entry.name, `${path}.name`), command, timeoutSeconds: timeoutSeconds as number, optional: entry.optional === true };
+    });
+    const names = new Set<string>();
+    for (const step of steps) {
+      if (names.has(step.name)) throw new Error(`${WORKTREE_SETUP_CONFIG}.${key} step names must be unique`);
+      names.add(step.name);
     }
-    if (entry.optional !== undefined && typeof entry.optional !== "boolean") throw new Error(`${path}.optional must be a boolean`);
-    return { name: boundedString(entry.name, `${path}.name`), command, timeoutSeconds: timeoutSeconds as number, optional: entry.optional === true };
-  });
-  const stepNames = new Set<string>();
-  for (const step of setup) {
-    if (stepNames.has(step.name)) throw new Error(`${WORKTREE_SETUP_CONFIG}.setup step names must be unique`);
-    stepNames.add(step.name);
-  }
-  if (setup.reduce((total, step) => total + step.timeoutSeconds, 0) > MAX_TIMEOUT_SECONDS) {
-    throw new Error(`${WORKTREE_SETUP_CONFIG}.setup total timeout must not exceed ${MAX_TIMEOUT_SECONDS} seconds`);
-  }
-  const config: WorktreeSetupConfig = { version: 1, copyFiles, environment, setup };
-  const trustProjection = JSON.stringify({ copyFiles, setup, environmentKeys: Object.keys(environment) });
+    if (steps.reduce((total, step) => total + step.timeoutSeconds, 0) > MAX_TIMEOUT_SECONDS) {
+      throw new Error(`${WORKTREE_SETUP_CONFIG}.${key} total timeout must not exceed ${MAX_TIMEOUT_SECONDS} seconds`);
+    }
+    return steps;
+  };
+  const setup = parseSteps("setup");
+  const teardown = parseSteps("teardown");
+  const config: WorktreeSetupConfig = { version: 1, copyFiles, environment, setup, teardown };
+  const trustProjection = JSON.stringify({ copyFiles, setup, teardown, environmentKeys: Object.keys(environment) });
   if (Buffer.byteLength(trustProjection) > MAX_TRUST_PROJECTION_BYTES) {
     throw new Error(`${WORKTREE_SETUP_CONFIG} commands and copies are too large to review exactly`);
   }
@@ -289,7 +329,7 @@ export function parseWorktreeSetupConfig(source: string): WorktreeSetupConfig {
 }
 
 export function worktreeSetupHash(config: WorktreeSetupConfig): string {
-  return createHash("sha256").update(JSON.stringify(config)).digest("hex");
+  return createHash("sha256").update(JSON.stringify({ ...config, teardown: config.teardown ?? [] })).digest("hex");
 }
 
 export function worktreeSetupSourceHash(source: string): string {
@@ -308,13 +348,22 @@ export function expandWorktreeSetupEnvironment(
 
 export function resolvedWorktreeSetupEnvironment(
   config: WorktreeSetupConfig,
-  values: { primaryCheckout: string; worktreePath: string; branch: string; baseRef?: string },
+  values: {
+    primaryCheckout: string;
+    worktreePath: string;
+    branch: string;
+    baseRef?: string;
+    portBlock?: WorktreePortBlock;
+  },
 ): Record<string, string> {
   const variables: WorktreeSetupVariables = {
     WOLLIPOG_WORKTREE_PATH: values.worktreePath,
     WOLLIPOG_WORKTREE_BRANCH: values.branch,
     WOLLIPOG_WORKTREE_BASE_REF: values.baseRef ?? "",
     WOLLIPOG_PRIMARY_CHECKOUT: values.primaryCheckout,
+    WOLLIPOG_PORT_BLOCK_START: values.portBlock ? String(values.portBlock.start) : "",
+    WOLLIPOG_PORT_BLOCK_END: values.portBlock ? String(values.portBlock.end) : "",
+    WOLLIPOG_PORT_BLOCK_SIZE: values.portBlock ? String(values.portBlock.size) : "",
   };
   return { ...expandWorktreeSetupEnvironment(config.environment, variables), ...variables };
 }
@@ -390,8 +439,8 @@ export async function loadWorktreeSetupConfig(
   return { config, hash: worktreeSetupSourceHash(stdout) };
 }
 
-async function runSetupCommand(
-  options: WorktreeSetupRunOptions,
+async function runWorktreeHookCommand(
+  options: Pick<WorktreeSetupRunOptions, "context" | "worktreePath" | "onOutput" | "signal" | "descendantMarker">,
   step: WorktreeSetupStep,
   environment: Record<string, string>,
   stepIndex: number,
@@ -406,7 +455,7 @@ async function runSetupCommand(
       const adapterNames = new Set(Object.keys(isolation.env).map((key) => key.toLowerCase()));
       const collision = Object.keys(environment).find((key) => adapterNames.has(key.toLowerCase()));
       if (collision) {
-        rejectCommand(new Error(`setup environment ${collision} conflicts with a cloud adapter environment name`));
+        rejectCommand(new Error(`worktree hook environment ${collision} conflicts with a cloud adapter environment name`));
         return;
       }
     }
@@ -420,6 +469,7 @@ async function runSetupCommand(
         ? { cloudEnvironmentKeys: Object.keys(environment) }
         : {}),
       trackDescendants: true,
+      descendantMarker: options.descendantMarker,
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
@@ -428,9 +478,10 @@ async function runSetupCommand(
     let cancelled = false;
     let outputLimitExceeded = false;
     let settled = false;
-    const outputError = (error: Error): Error & { stdout: string; stderr: string } => Object.assign(error, {
+    const outputError = (error: Error): Error & { stdout: string; stderr: string; outputTruncated?: boolean } => Object.assign(error, {
       stdout: Buffer.concat(stdout).toString("utf8"),
       stderr: Buffer.concat(stderr).toString("utf8"),
+      ...(outputLimitExceeded ? { outputTruncated: true } : {}),
     });
     const collect = (target: Buffer[]) => (chunk: Buffer | string) => {
       if (settled || cancelled || outputLimitExceeded) return;
@@ -549,7 +600,7 @@ export async function runWorktreeSetup(options: WorktreeSetupRunOptions): Promis
       state.steps[index] = result;
       options.onState?.(structuredClone(state));
       try {
-        await runSetupCommand(options, step, environment, index, isolation);
+        await runWorktreeHookCommand(options, step, environment, index, isolation);
         state.steps[index] = { ...result, status: "completed", durationMs: Date.now() - startedAt, exitCode: 0 };
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") throw error;
@@ -578,6 +629,95 @@ export async function runWorktreeSetup(options: WorktreeSetupRunOptions): Promis
     state.completedAt = Date.now();
     state.error = error instanceof Error ? error.message : String(error);
   }
+  options.onState?.(structuredClone(state));
+  return state;
+}
+
+/** Execute the frozen trusted teardown plan at most once per declared step. A runner crash after
+ * the durable running marker is inherently ambiguous, so recovery records that step as uncertain
+ * and continues only steps that were never started. Command failures are outcomes, not control
+ * flow: every later step still runs and clean worktree removal remains allowed. */
+export async function runWorktreeTeardown(
+  options: WorktreeTeardownRunOptions,
+): Promise<WorktreeTeardownState> {
+  throwIfSetupCancelled(options.signal);
+  const prior = options.prior;
+  const state: WorktreeTeardownState = prior
+    ? {
+        ...structuredClone(prior),
+        status: "running",
+        completedAt: undefined,
+        steps: prior.steps.map((step) => step.status === "running"
+          ? {
+              ...step,
+              status: "uncertain" as const,
+              durationMs: Date.now() - step.startedAt,
+              error: "Runner stopped before this teardown step recorded completion; it was not replayed.",
+            }
+          : step),
+      }
+    : {
+        status: "running",
+        configHash: options.configHash,
+        attemptId: randomUUID(),
+        startedAt: Date.now(),
+        steps: [],
+      };
+  if (state.configHash !== options.configHash) {
+    throw new Error("durable teardown state does not match the approved configuration");
+  }
+  options.onState?.(structuredClone(state));
+  for (let index = state.steps.length; index < options.steps.length; index++) {
+    throwIfSetupCancelled(options.signal);
+    const step = options.steps[index]!;
+    const startedAt = Date.now();
+    const running: WorktreeTeardownStepResult = {
+      name: step.name,
+      status: "running",
+      optional: step.optional,
+      startedAt,
+      stdout: "",
+      stderr: "",
+    };
+    state.steps[index] = running;
+    options.onState?.(structuredClone(state));
+    try {
+      const result = await runWorktreeHookCommand(options, step, options.environment, index, options.isolation);
+      state.steps[index] = {
+        ...running,
+        status: "completed",
+        durationMs: Date.now() - startedAt,
+        exitCode: 0,
+        stdout: result.stdout,
+        stderr: result.stderr,
+      };
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") throw error;
+      const commandError = error as NodeJS.ErrnoException & {
+        signal?: string;
+        exitCode?: number;
+        stdout?: string;
+        stderr?: string;
+        outputTruncated?: boolean;
+      };
+      state.steps[index] = {
+        ...running,
+        status: "failed",
+        durationMs: Date.now() - startedAt,
+        ...(typeof commandError.exitCode === "number" ? { exitCode: commandError.exitCode } : {}),
+        ...(commandError.signal ? { signal: commandError.signal } : {}),
+        error: error instanceof Error ? error.message : String(error),
+        stdout: commandError.stdout ?? "",
+        stderr: commandError.stderr ?? "",
+        ...(commandError.outputTruncated ? { outputTruncated: true } : {}),
+      };
+    }
+    options.onState?.(structuredClone(state));
+  }
+  state.status = state.steps.some((step) => step.status === "failed" || step.status === "uncertain")
+    ? "completed_with_failures"
+    : "completed";
+  state.completedAt = Date.now();
   options.onState?.(structuredClone(state));
   return state;
 }

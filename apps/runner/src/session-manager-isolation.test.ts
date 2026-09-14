@@ -711,7 +711,18 @@ test("cloud launch persists a content-safe receipt, keeps the reconnect key runn
     internals.cloudTargets = { prepareLaunch: async () => ({ isolation, receipt, adapterHandoffKey: "private-handoff" }) };
     assert.equal(await internals.acquireAdmission("s1"), true);
     assert.equal(await internals.launch(store.readMeta("s1")), true);
-    assert.deepEqual(captured?.isolation, isolation);
+    assert.deepEqual(captured?.isolation, {
+      ...isolation,
+      sessionEnvironmentKeys: [
+        "WOLLIPOG_WORKTREE_PATH",
+        "WOLLIPOG_WORKTREE_BRANCH",
+        "WOLLIPOG_WORKTREE_BASE_REF",
+        "WOLLIPOG_PRIMARY_CHECKOUT",
+        "WOLLIPOG_PORT_BLOCK_START",
+        "WOLLIPOG_PORT_BLOCK_END",
+        "WOLLIPOG_PORT_BLOCK_SIZE",
+      ],
+    });
     assert.deepEqual(store.readMeta("s1")?.executionHandoff, receipt);
     assert.equal(store.readMeta("s1")?.cloudAdapterHandoffKey, "private-handoff");
     const runtimeUpdate = messages.find((message) => (message as { type?: string }).type === "session_runtime_updated");
@@ -1108,6 +1119,58 @@ test("a persisted cloud reconnect key is reused without preparing a second alloc
     };
     assert.deepEqual(await internals.prepareCloudIsolation(store.readMeta("s1"), "/repo-worktree"), isolation);
     assert.equal(prepares, 0);
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("startup teardown reconstructs cloud isolation from runner-private cleanup identity", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-cleanup-cloud-reconnect-"));
+  try {
+    const store = new SessionStore(root);
+    const target = cloudTarget();
+    const isolation = {
+      backend: "cloud" as const, command: "cloud-proxy", args: [], env: { CLOUD_TOKEN: "secret" },
+      targetId: target.id, handoffId: "private-handoff", sessionId: "deleted-session",
+      hostAgentCommand: "claude", hostAgentArgs: [], agentCommand: "claude", agentArgs: [],
+    };
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, undefined, 1,
+      undefined, undefined, { agentLimits: {}, agentWeights: {} },
+    );
+    let reconnectKey: string | undefined;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    internals.cloudTargets = {
+      isolation: (_target: unknown, _agent: string, _command: string, _args: string[],
+        _sessionId: string, key: string) => {
+        reconnectKey = key;
+        return isolation;
+      },
+      prepareLaunch: async () => { throw new Error("cleanup must not allocate a new cloud handoff"); },
+    };
+    const receipt = {
+      targetId: target.id, manifestDigest: "e".repeat(64), adapterHandoffIdHash: "f".repeat(64),
+      git: { headCommit: "1".repeat(40), headTree: "2".repeat(40), workingTreeDigest: "3".repeat(64), dirty: false, untrackedFiles: 0 },
+      artifacts: [], budgetUsd: 5, quotedCostUsd: 1, acceptedAt: 1_720_000_000_000,
+    };
+    assert.deepEqual(await internals.resolveCleanupIsolation({
+      sessionId: "deleted-session",
+      repoPath: "/repo",
+      worktreePath: "/repo-worktree",
+      context: { kind: "native" },
+      execution: {
+        agentId: "claude",
+        driver: "claude-code",
+        command: "claude",
+        args: [],
+        executionTarget: target,
+        executionHandoff: receipt,
+        cloudAdapterHandoffKey: "private-handoff",
+      },
+    }), isolation);
+    assert.equal(reconnectKey, "private-handoff");
     manager.shutdownAll();
   } finally {
     rmSync(root, { recursive: true, force: true });

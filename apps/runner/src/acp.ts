@@ -138,6 +138,7 @@ export class AcpClient {
       containerAgentLaunch?: boolean;
       cloudAgentLaunch?: boolean;
       orchestrator?: boolean;
+      descendantMarker?: string;
     },
     private readonly ev: AcpEvents,
     deps: Partial<AcpClientDeps> = {},

@@ -154,8 +154,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 144", () => {
-  assert.equal(PROTOCOL_VERSION, 144);
+test("PROTOCOL_VERSION is 145", () => {
+  assert.equal(PROTOCOL_VERSION, 145);
   assert.equal(runnerSupportsProtocol(136, "capacityLockDiagnostics"), false);
   assert.equal(runnerSupportsProtocol(137, "capacityLockDiagnostics"), true);
   assert.equal(runnerSupportsProtocol(137, "sessionAgentControlReasoningEffort"), false);
@@ -248,6 +248,9 @@ test("PROTOCOL_VERSION is 144", () => {
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.worktreeSetup, 141);
   assert.equal(runnerSupportsProtocol(140, "worktreeSetup"), false);
   assert.equal(runnerSupportsProtocol(141, "worktreeSetup"), true);
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.worktreeTeardownPorts, 145);
+  assert.equal(runnerSupportsProtocol(144, "worktreeTeardownPorts"), false);
+  assert.equal(runnerSupportsProtocol(145, "worktreeTeardownPorts"), true);
 });
 
 test("worktree create deadlines preserve transport and error-reporting order", () => {

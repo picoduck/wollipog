@@ -68,6 +68,7 @@ import type {
   SessionTitleSource,
   SessionWorktreeView,
 } from "@wollipog/protocol";
+import type { WorktreeHookSnapshot } from "./worktree-setup.js";
 
 /** A session's persisted metadata (superset of the protocol SessionSnapshot with runner-only fields). */
 export interface SessionMeta {
@@ -94,6 +95,10 @@ export interface SessionMeta {
   worktreeBranch?: string;
   /** Every attributed worktree; worktreePath/worktreeBranch select the active member. */
   worktrees?: SessionWorktreeView[];
+  /** Runner-private exact approved teardown/environment snapshots keyed by stable worktree id. */
+  worktreeHooks?: Record<string, WorktreeHookSnapshot>;
+  /** Runner-private durable POSIX descendant markers keyed by stable worktree id. */
+  worktreeProcessMarkers?: Record<string, string>;
   /** Provider-neutral placement captured at launch. Optional for pre-v60 session metadata. */
   executionTarget?: ExecutionTargetRef;
   executionHandoffRequest?: ExecutionHandoffRequest;
@@ -2810,9 +2815,11 @@ export function metaToSnapshot(
     driver: m.driver,
     useWorktree: m.worktreePath != null,
     worktreePath: m.worktreePath,
-    worktrees: runnerSupportsProtocol(controlPlaneProtocolVersion, "worktreeSetup")
+    worktrees: runnerSupportsProtocol(controlPlaneProtocolVersion, "worktreeTeardownPorts")
       ? m.worktrees
-      : m.worktrees?.map(({ setup: _setup, ...worktree }) => worktree),
+      : runnerSupportsProtocol(controlPlaneProtocolVersion, "worktreeSetup")
+        ? m.worktrees?.map(({ teardown: _teardown, portBlock: _portBlock, ...worktree }) => worktree)
+        : m.worktrees?.map(({ setup: _setup, teardown: _teardown, portBlock: _portBlock, ...worktree }) => worktree),
     executionTarget: m.executionTarget,
     executionHandoff: m.executionHandoff,
     workspacePath: m.repoPath, // the box's launch dir — lets the CP restart ad-hoc/box-owned sessions

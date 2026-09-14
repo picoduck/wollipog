@@ -2876,21 +2876,19 @@ test("delete awaiting a reused worktree return still removes the explicitly dele
     const dirtyPath = join(reusedPath, "delete-me.txt");
     writeFileSync(dirtyPath, "session-owned work\n");
 
-    // Gate after createWorktree has identified and returned the healthy registered root, but
+    // Gate after the persisted identity has been reattached and reaches hook preparation, but
     // before startGeneration can republish it to the row that Restart reset to worktreePath=null.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const internals = manager as any;
-    const createSessionWorktree = internals.createSessionWorktree;
+    const prepareWorktreeSetup = internals.prepareWorktreeSetup.bind(manager);
     let reusedReturned!: () => void;
     const returned = new Promise<void>((resolve) => { reusedReturned = resolve; });
     let releaseReturn!: () => void;
     const release = new Promise<void>((resolve) => { releaseReturn = resolve; });
-    internals.createSessionWorktree = async (...args: unknown[]) => {
-      const handle = await createSessionWorktree(...args);
-      assert.equal(handle.created, false);
+    internals.prepareWorktreeSetup = async (...args: unknown[]) => {
       reusedReturned();
       await release;
-      return handle;
+      return prepareWorktreeSetup(...args);
     };
 
     const restart = manager.start(spec);

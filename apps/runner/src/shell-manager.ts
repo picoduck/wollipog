@@ -9,8 +9,9 @@
 import { StringDecoder } from "node:string_decoder";
 import type { AgentContext, ShellKind, ShellOutputChunk, ShellSnapshotMessage } from "@wollipog/protocol";
 import { run } from "./discovery/resolve.js";
-import { killTree, spawnAgent, type AgentProcess } from "./spawn.js";
+import { killTree, killTreeAndWait, spawnAgent, type AgentProcess } from "./spawn.js";
 import { openWindowsConpty, WindowsConptyProcess } from "./windows-conpty.js";
+import { sameWorktreePath } from "./worktree.js";
 
 /** Upper bound on live shells per session — a forgotten tab shouldn't accumulate processes. */
 export const MAX_SHELLS_PER_SESSION = 5;
@@ -29,6 +30,8 @@ export interface ShellCallbacks {
 
 interface LiveShell {
   sessionId: string;
+  /** Exact session root used to attribute this process to a worktree cleanup. */
+  root: string;
   child: AgentProcess | WindowsConptyProcess;
   context: AgentContext;
   /** In-context path holding the PTY slave device name (`/dev/pts/N`), for external resize. */
@@ -166,7 +169,14 @@ export class ShellManager {
     cwd: string,
     context: AgentContext,
     size?: { cols?: number; rows?: number },
-    meta?: { name?: string; createdAt?: number; kind?: ShellKind; launch?: ShellProcessLaunch },
+    meta?: {
+      name?: string;
+      createdAt?: number;
+      kind?: ShellKind;
+      launch?: ShellProcessLaunch;
+      cleanupOwnsDescendants?: boolean;
+      cleanupDescendantMarker?: string;
+    },
   ): { pty: boolean } {
     if (this.shells.has(shellId)) throw new Error("shell already exists");
     if (this.count(sessionId) >= MAX_SHELLS_PER_SESSION) {
@@ -208,12 +218,15 @@ export class ShellManager {
           context,
           env: meta?.launch?.env,
           scrubInheritedEnv: meta?.launch?.scrubInheritedEnv,
-          // Ordinary terminal jobs are user-owned and may intentionally daemonize. Agent TUIs are
-          // providers, so only those receive escaped-descendant ownership tracking.
-          trackDescendants: meta?.kind === "agent_tui",
+          // Runner-owned worktrees own escaped descendants during cleanup (for example detached
+          // dev servers holding the worktree's port block). In-place/attached roots preserve the
+          // historical user-owned daemon behavior.
+          trackDescendants: meta?.kind === "agent_tui" || meta?.cleanupOwnsDescendants === true,
+          descendantMarker: meta?.cleanupDescendantMarker,
         });
     const live: LiveShell = {
       sessionId,
+      root: cwd,
       child,
       context,
       ttyFile,
@@ -362,6 +375,39 @@ export class ShellManager {
         this.shells.delete(shellId);
         this.cb.onExit(shellId, s.sessionId, s.exitCode, s.outputSeq);
       } else this.kill(s);
+    }
+  }
+
+  /** Retire only shells attributed to one exact worktree and await their process-tree boundary.
+   * Teardown must not begin from a parent-process close event while a detached descendant lives. */
+  async closeForWorktree(sessionId: string, context: AgentContext, path: string): Promise<void> {
+    const closing: Promise<boolean>[] = [];
+    for (const [shellId, shell] of this.shells) {
+      if (shell.sessionId !== sessionId || !sameWorktreePath(context, shell.root, path)) continue;
+      shell.forgetAfterExit = true;
+      if (shell.exited) {
+        this.shells.delete(shellId);
+        this.cb.onExit(shellId, shell.sessionId, shell.exitCode, shell.outputSeq);
+        continue;
+      }
+      if (shell.child instanceof WindowsConptyProcess) {
+        const child = shell.child;
+        closing.push(new Promise<boolean>((resolve) => {
+          const timeout = setTimeout(() => resolve(false), 5_000);
+          timeout.unref?.();
+          child.once("close", () => {
+            clearTimeout(timeout);
+            resolve(true);
+          });
+          child.kill();
+        }));
+      } else {
+        closing.push(killTreeAndWait(shell.child));
+      }
+    }
+    const results = await Promise.all(closing);
+    if (results.some((complete) => !complete)) {
+      throw new Error("one or more worktree terminal process trees could not be confirmed stopped");
     }
   }
 
