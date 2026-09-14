@@ -1,6 +1,5 @@
 import type { AgentDefinition, WorkflowDefinition } from "@wollipog/protocol";
 
-export type SessionWorkMode = "agent" | "conductor";
 export type RunWorkMode = "parallel" | "workflow";
 
 export function conductorAgentId(agents: AgentDefinition[]): string | undefined {
