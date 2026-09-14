@@ -83,7 +83,11 @@ import {
   removeAgentControlFiles,
   sweepAgentControlFiles,
 } from "./agent-control.js";
-import { stripOrchestratorLaunchArgs, withOrchestratorPreset } from "./orchestrator-preset.js";
+import {
+  projectOrchestratorPresetForPeer,
+  stripOrchestratorLaunchArgs,
+  withOrchestratorPreset,
+} from "./orchestrator-preset.js";
 import {
   GitOpError,
   gitDiff,
@@ -399,7 +403,10 @@ function safeWslLaunchKey(value: Pick<AgentDefinition, "command" | "args" | "dri
 /** Never advertise secret environment data, retired identities, or an orchestration preset
  * to a control plane that cannot enforce its credential boundary. */
 function agentsForControlPlane() {
-  return metadata.agents.filter((agent) => agent.id !== "conductor")
+  return projectOrchestratorPresetForPeer(metadata.agents, {
+    controlPlaneProtocolVersion,
+    isolationMode: config.executionIsolation.mode,
+  }).filter((agent) => agent.id !== "conductor")
     .map((agent) => ({ ...agent, env: {},
       ...((!runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionOrchestration") ||
           ((agent.context?.kind ?? "native") === "wsl" &&

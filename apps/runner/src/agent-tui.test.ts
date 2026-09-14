@@ -202,6 +202,31 @@ test("orchestrator TUIs rebuild credentials and restrictions without mutating du
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("provider-mode Claude Orchestrator TUI keeps the project cwd and provider temp policy", async () => {
+  for (const platform of ["linux", "win32"] as const) {
+    const source = meta({
+      driver: "claude-code",
+      args: [],
+      env: { PROVIDER_TEMP_POLICY: "inherited" },
+      config: { permissionMode: "orchestrator" },
+      orchestrator: { strictProjectIsolation: false },
+    });
+    const launch = await prepareAgentTuiLaunch(source, {
+      controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      executionIsolationMode: "provider",
+      platform,
+      prepareScratch: async () => "/repo-wt",
+      provision: () => {},
+    });
+    assert.ok(launch);
+    assert.equal(launch.cwd, "/repo-wt");
+    assert.equal(launch.env?.PROVIDER_TEMP_POLICY, "inherited");
+    assert.equal(launch.env?.TMPDIR, undefined);
+    assert.equal(launch.env?.TEMP, undefined);
+    assert.equal(launch.env?.TMP, undefined);
+  }
+});
+
 test("orchestrator TUI preparation fails closed for old peers, unsupported targets, terminal sessions and probes", async () => {
   const source = meta({ driver: "codex", config: { permissionMode: "orchestrator" } });
   const dependencies = {

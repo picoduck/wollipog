@@ -21,11 +21,13 @@ function identifier(value: unknown, maximum = 256): value is string {
 export function parseOrchestratorDefaults(value: unknown): OrchestratorDefaults | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const input = value as Partial<OrchestratorDefaults>;
-  if (Object.keys(input).some((key) => !["behavior", "delegation"].includes(key))) return null;
+  if (Object.keys(input).some((key) => !["behavior", "delegation", "execution"].includes(key))) return null;
   const behavior = input.behavior;
   const delegation = input.delegation;
+  const execution = input.execution;
   if (!behavior || typeof behavior !== "object" || Array.isArray(behavior) ||
-      !delegation || typeof delegation !== "object" || Array.isArray(delegation)) return null;
+      !delegation || typeof delegation !== "object" || Array.isArray(delegation) ||
+      !execution || typeof execution !== "object" || Array.isArray(execution)) return null;
   if (Object.keys(behavior).some((key) => ![
     "childModel", "childEffort", "maximumConcurrentChildren", "followUps", "completion",
   ].includes(key)) || Object.keys(delegation).some((key) => !["parentControl", "decisions"].includes(key))) return null;
@@ -37,7 +39,9 @@ export function parseOrchestratorDefaults(value: unknown): OrchestratorDefaults 
       (behavior.followUps !== "recommend_only" && behavior.followUps !== "execute_approved") ||
       (behavior.completion !== "retain" && behavior.completion !== "stop_and_archive") ||
       (delegation.parentControl !== "off" && delegation.parentControl !== "questions" &&
-        delegation.parentControl !== "questions_and_approvals")) return null;
+        delegation.parentControl !== "questions_and_approvals") ||
+      Object.keys(execution).length !== 1 ||
+      typeof execution.strictProjectIsolation !== "boolean") return null;
   const decisions = delegation.decisions as Record<string, unknown> | undefined;
   if (!decisions || Array.isArray(decisions) || Object.keys(decisions).length !== WORKFLOW_DECISION_CATEGORIES.length ||
       !WORKFLOW_DECISION_CATEGORIES.every((category) =>
@@ -54,6 +58,7 @@ export function parseOrchestratorDefaults(value: unknown): OrchestratorDefaults 
       parentControl: delegation.parentControl,
       decisions: decisions as OrchestratorDefaults["delegation"]["decisions"],
     },
+    execution: { strictProjectIsolation: execution.strictProjectIsolation },
   };
 }
 
@@ -61,13 +66,15 @@ export function parseOrchestratorOverrides(value: unknown): OrchestratorCampaign
   if (value === undefined) return {};
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const input = value as OrchestratorCampaignOverrides;
-  if (Object.keys(input).some((key) => !["behavior", "delegation"].includes(key))) return null;
+  if (Object.keys(input).some((key) => !["behavior", "delegation", "execution"].includes(key))) return null;
   if (input.behavior !== undefined && (!input.behavior || typeof input.behavior !== "object" || Array.isArray(input.behavior))) {
     return null;
   }
   if (input.delegation !== undefined && (!input.delegation || typeof input.delegation !== "object" || Array.isArray(input.delegation))) {
     return null;
   }
+  if (input.execution !== undefined && (!input.execution || typeof input.execution !== "object" ||
+      Array.isArray(input.execution))) return null;
   if (input.delegation?.decisions !== undefined &&
       (!input.delegation.decisions || typeof input.delegation.decisions !== "object" || Array.isArray(input.delegation.decisions))) {
     return null;
@@ -78,6 +85,7 @@ export function parseOrchestratorOverrides(value: unknown): OrchestratorCampaign
       parentControl: input.delegation?.parentControl ?? DEFAULT_ORCHESTRATOR_DEFAULTS.delegation.parentControl,
       decisions: { ...DEFAULT_ORCHESTRATOR_DEFAULTS.delegation.decisions, ...(input.delegation?.decisions ?? {}) },
     },
+    execution: { ...DEFAULT_ORCHESTRATOR_DEFAULTS.execution, ...(input.execution ?? {}) },
   };
   if (!parseOrchestratorDefaults(complete)) return null;
   if (input.behavior && Object.keys(input.behavior).some((key) => ![
@@ -86,6 +94,7 @@ export function parseOrchestratorOverrides(value: unknown): OrchestratorCampaign
   if (input.delegation && Object.keys(input.delegation).some((key) => !["parentControl", "decisions"].includes(key))) return null;
   if (input.delegation?.decisions && Object.keys(input.delegation.decisions).some((key) =>
     !WORKFLOW_DECISION_CATEGORIES.includes(key as (typeof WORKFLOW_DECISION_CATEGORIES)[number]))) return null;
+  if (input.execution && Object.keys(input.execution).some((key) => key !== "strictProjectIsolation")) return null;
   return input;
 }
 
@@ -124,6 +133,7 @@ export function resolveOrchestratorCampaignPolicy(
 ): OrchestratorCampaignPolicy {
   const behavior = { ...defaults.behavior, ...(overrides.behavior ?? {}) };
   const decisions = { ...defaults.delegation.decisions, ...(overrides.delegation?.decisions ?? {}) };
+  const execution = { ...defaults.execution, ...(overrides.execution ?? {}) };
   const behaviorSources = Object.fromEntries(
     (Object.keys(defaults.behavior) as Array<keyof OrchestratorDefaults["behavior"]>).map((key) => [
       key,
@@ -137,6 +147,7 @@ export function resolveOrchestratorCampaignPolicy(
       parentControl: overrides.delegation?.parentControl ?? defaults.delegation.parentControl,
       decisions,
     },
+    execution,
     sources: {
       behavior: behaviorSources,
       delegation: {
@@ -147,6 +158,11 @@ export function resolveOrchestratorCampaignPolicy(
           category,
           Object.hasOwn(overrides.delegation?.decisions ?? {}, category) ? "session_override" : baseSource,
         ])) as OrchestratorCampaignPolicy["sources"]["delegation"]["decisions"],
+      },
+      execution: {
+        strictProjectIsolation: Object.hasOwn(overrides.execution ?? {}, "strictProjectIsolation")
+          ? "session_override"
+          : baseSource,
       },
     },
   };

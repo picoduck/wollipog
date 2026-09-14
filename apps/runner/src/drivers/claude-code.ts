@@ -273,12 +273,13 @@ export function claudeCapabilityError(
   config: SessionConfig,
   images: PromptImage[],
   capabilities: DriverOptions["capabilities"],
+  strictProjectIsolation = true,
 ): string | null {
   if (!capabilities) return null;
   if (config.effort && !capabilities.effortLevels.includes(config.effort)) {
     return `Claude Code effort ${JSON.stringify(config.effort)} was not verified for this installation.`;
   }
-  const mode = effectiveClaudePermissionMode(config);
+  const mode = effectiveClaudePermissionMode(config, strictProjectIsolation);
   if (!(capabilities.permissionModes ?? []).includes(mode)) {
     return `Claude Code permission mode ${JSON.stringify(mode)} was not verified for this installation.`;
   }
@@ -708,7 +709,12 @@ export class ClaudeCodeDriver implements Driver {
     // against an awaited pre-turn step would otherwise launch an invisible rogue turn).
     if (this.disposed) return Promise.resolve("cancelled");
     this.settledRunnerTurnErrorText = null;
-    const capabilityError = claudeCapabilityError(this.config, images ?? [], this.opts.capabilities);
+    const capabilityError = claudeCapabilityError(
+      this.config,
+      images ?? [],
+      this.opts.capabilities,
+      this.opts.orchestrator?.strictProjectIsolation !== false,
+    );
     if (capabilityError) {
       this.settledRunnerTurnErrorText = capabilityError;
       this.cb.onEvent({ kind: "error", message: capabilityError });
@@ -855,7 +861,10 @@ export class ClaudeCodeDriver implements Driver {
       // control protocol (which the runner already owns, so it works through the WSL bridge
       // — no MCP, no side channel). Non-interactive modes pass --permission-mode and pipe
       // the plain-text prompt over stdin so Windows cmd.exe never has to parse user content.
-      const perm = claudePermissionArgs(effectiveClaudePermissionMode(cfg), imgs.length > 0);
+      const perm = claudePermissionArgs(
+        effectiveClaudePermissionMode(cfg, this.opts.orchestrator?.strictProjectIsolation !== false),
+        imgs.length > 0,
+      );
       this.interactive = perm.interactive;
       args.push(...perm.args);
 
@@ -1081,14 +1090,20 @@ export class ClaudeCodeDriver implements Driver {
       return;
     }
     const cfg = this.config;
-    const perm = claudePermissionArgs(effectiveClaudePermissionMode(cfg), true);
+    const perm = claudePermissionArgs(
+      effectiveClaudePermissionMode(cfg, this.opts.orchestrator?.strictProjectIsolation !== false),
+      true,
+    );
     const preparedArgs = this.preparedBaseArgs();
     this.interactive = perm.interactive;
     const fingerprint = JSON.stringify({
       cwd: this.cwd,
       model: cfg.model ?? null,
       effort: cfg.effort ?? null,
-      permissionMode: effectiveClaudePermissionMode(cfg),
+      permissionMode: effectiveClaudePermissionMode(
+        cfg,
+        this.opts.orchestrator?.strictProjectIsolation !== false,
+      ),
       args: preparedArgs,
     });
 

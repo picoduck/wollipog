@@ -7,9 +7,15 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { PROTOCOL_VERSION, WOLLIPOG_AGENT_ACTOR_SESSION_HEADER, type GovernancePolicy } from "@wollipog/protocol";
+import {
+  DEFAULT_ORCHESTRATOR_DEFAULTS,
+  PROTOCOL_VERSION,
+  WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
+  type GovernancePolicy,
+} from "@wollipog/protocol";
 import { hashToken } from "./auth.js";
 import { ControlPlaneDb } from "./db.js";
+import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 
 test("HTTP agent management scopes descendants and composes governance policy visibility", { timeout: 30_000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "descendant-route-"));
@@ -61,6 +67,26 @@ test("HTTP agent management scopes descendants and composes governance policy vi
         seed.updateSessionStatus(mode + suffix, "idle", 3);
       }
     }
+    seed.createSession({
+      id: "orchestrator-provider",
+      runnerId: "r",
+      workspaceId: null,
+      agentId: null,
+      title: "orchestrator-provider",
+      useWorktree: false,
+      driver: "codex",
+      config: { permissionMode: "orchestrator" },
+      orchestratorPolicy: resolveOrchestratorCampaignPolicy(
+        DEFAULT_ORCHESTRATOR_DEFAULTS,
+        "system_default",
+        { execution: { strictProjectIsolation: false } },
+      ),
+      scope: {
+        organizationId: local.organizationId,
+        owner: { kind: "user", userId: local.userId },
+      },
+      now: 2,
+    });
     childReportSeq = seed.appendEvent("orchestrator-child", {
       kind: "agent_message", text: "Campaign route report", final: true,
     }, 4).seq;
@@ -87,7 +113,7 @@ test("HTTP agent management scopes descendants and composes governance policy vi
     }
     assert.ok(healthy, logs);
     liveDb = ControlPlaneDb.open(database);
-    for (const mode of ["normal", "orchestrator", "orchestrator-child", "policy-agent"]) {
+    for (const mode of ["normal", "orchestrator", "orchestrator-provider", "orchestrator-child", "policy-agent"]) {
       liveDb.updateSessionStatus(mode, "running", Date.now());
       assert.equal(liveDb.setAgentControlCredential(mode, "r", hashToken(`token-${mode}`), Date.now()), true);
     }
@@ -123,6 +149,21 @@ test("HTTP agent management scopes descendants and composes governance policy vi
     assert.equal((await policies("token-normal", "normal")).status, 403, "user-scoped ordinary agents do not gain global routes");
     await assertPolicies("token-policy-agent", ordinary, "policy-agent");
     await assertPolicies("token-orchestrator", ["fixture-global", "fixture-same-org"], "orchestrator");
+    const providerOwnWorktree = await fetch(
+      `http://127.0.0.1:${port}/api/sessions/orchestrator-provider/worktrees`,
+      {
+        method: "POST",
+        signal: AbortSignal.timeout(3000),
+        headers: {
+          authorization: "Bearer token-orchestrator-provider",
+          [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: "orchestrator-provider",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ branch: "fix/provider-self" }),
+      },
+    );
+    assert.equal(providerOwnWorktree.status, 409,
+      "provider-mode Orchestrator self-worktrees pass immutable policy and reach runner admission");
     for (const mode of ["normal", "orchestrator"]) {
       const request = (target: string, operation: string, body: unknown, method = "POST") => fetch(
         `http://127.0.0.1:${port}/api/sessions/${target}${operation ? `/${operation}` : ""}`, {
@@ -307,8 +348,9 @@ test("HTTP agent management scopes descendants and composes governance policy vi
       const idleArchive = await request(`${mode}-child`, "archive", { archived: true });
       assert.equal(idleArchive.status, mode === "orchestrator" ? 202 : 200);
       assert.equal((await idleArchive.json() as { archived: boolean }).archived, mode !== "orchestrator");
-      const ownWorktree = await request(mode, "worktrees", {});
-      assert.equal(ownWorktree.status, mode === "orchestrator" ? 404 : 400);
+      const ownWorktree = await request(mode, "worktrees", { branch: "fix/self" });
+      assert.equal(ownWorktree.status, mode === "orchestrator" ? 403 : 409,
+        "strict Orchestrators are refused by immutable policy while ordinary self-worktrees reach runner admission");
       const childWorktree = await request(`${mode}-child`, "worktrees", {});
       assert.equal(childWorktree.status, mode === "normal" ? 404 : 400);
     }

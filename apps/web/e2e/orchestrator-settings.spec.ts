@@ -8,9 +8,13 @@ for (const viewport of [{ width: 1280, height: 1000 }, { width: 390, height: 844
     await page.goto("/settings-rows-e2e.html?theme=dark&section=orchestrator");
     await expect(page.locator("#settings-panel-heading")).toHaveText("Orchestrator");
     await expect(page.getByRole("heading", { name: "Behavior", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Execution Permissions", exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Decision Delegation", exact: true })).toBeVisible();
     await expect(page.getByText("Human-Only Decisions", { exact: true })).toBeVisible();
     await expect(page.getByRole("spinbutton", { name: "Maximum Concurrent Children" })).toHaveValue("4");
+    await expect(page.getByRole("radiogroup", { name: "Strict Project Isolation" })
+      .getByRole("radio", { name: "Disabled" })).toBeChecked();
+    await expect(page.getByText(/does not claim operating-system read-only enforcement/)).toBeVisible();
 
     const childModel = page.getByRole("button", { name: /Child Model: Automatic/ });
     await childModel.focus();

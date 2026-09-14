@@ -63,6 +63,7 @@ function settings(drifted = false): OrchestratorSettingsView {
           ui_evidence_approval: "human",
         },
       },
+      execution: { strictProjectIsolation: false },
     },
     capabilities: {
       models: [{ id: "sol", displayName: "Sol", efforts: ["high"] }],
@@ -101,7 +102,8 @@ test("Orchestrator settings separate policy areas, validate accessibly, and pers
   try {
     await act(async () => root.render(<ApiProvider client={createApiClient(transport)}><OrchestratorSettingsPanel /></ApiProvider>));
     await settle();
-    assert.deepEqual([...container.querySelectorAll("h3")].map((node) => node.textContent), ["Behavior", "Decision Delegation"]);
+    assert.deepEqual([...container.querySelectorAll("h3")].map((node) => node.textContent),
+      ["Behavior", "Execution Permissions", "Decision Delegation"]);
     assert.match(container.textContent ?? "", /Human-Only Decisions/);
     assert.equal(container.querySelectorAll('[aria-label*="Approval"]').length > 0, true);
 
@@ -117,6 +119,7 @@ test("Orchestrator settings separate policy areas, validate accessibly, and pers
     await settle();
     assert.equal((writes[0] as { defaults: OrchestratorSettingsView["defaults"] }).defaults.behavior.maximumConcurrentChildren, 8);
     assert.equal(Object.keys((writes[0] as { defaults: OrchestratorSettingsView["defaults"] }).defaults.delegation.decisions).length, 5);
+    assert.equal((writes[0] as { defaults: OrchestratorSettingsView["defaults"] }).defaults.execution.strictProjectIsolation, false);
   } finally {
     await act(async () => root.unmount());
     container.remove();

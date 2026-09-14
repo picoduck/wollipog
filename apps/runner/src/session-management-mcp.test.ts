@@ -74,7 +74,7 @@ function resultText(result: any): string {
   return result.content.map((c: { text: string }) => c.text).join("\n");
 }
 
-test("orchestrator MCP lists only management tools and rejects hidden mutations before HTTP", async () => {
+test("orchestrator MCP lists only management tools and leaves self-worktree policy to the control plane", async () => {
   const { deps, calls } = makeDeps();
   deps.orchestrator = true;
   const response = await dispatch({ jsonrpc: "2.0", id: 3, method: "tools/list" }, deps);
@@ -91,8 +91,9 @@ test("orchestrator MCP lists only management tools and rejects hidden mutations 
     assert.equal((await callTool(deps, name)).isError, true);
   }
   assert.equal(calls.length, 0);
-  assert.equal((await callTool(deps, "create_worktree", { sessionId: SELF_ID, branch: "fix/self" })).isError, true);
-  assert.equal(calls.length, 0);
+  assert.equal((await callTool(deps, "create_worktree", { sessionId: SELF_ID, branch: "fix/self" })).isError, undefined);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/${SELF_ID}/worktrees`);
 });
 
 test("Parent Control tools are orchestrator-only and bind resolutions to exact occurrences", async () => {

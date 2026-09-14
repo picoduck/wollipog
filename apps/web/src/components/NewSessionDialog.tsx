@@ -75,6 +75,7 @@ function cloneOrchestratorDefaults(defaults: OrchestratorDefaults): Orchestrator
   return {
     behavior: { ...defaults.behavior },
     delegation: { ...defaults.delegation, decisions: { ...defaults.delegation.decisions } },
+    execution: { ...defaults.execution },
   };
 }
 
@@ -352,6 +353,10 @@ export function NewSessionDialog({
     }));
     setOrchestratorOverrides((current) => new Set(current).add(`delegation.decisions.${category}`));
   };
+  const setStrictProjectIsolation = (strictProjectIsolation: boolean) => {
+    setOrchestratorDraft((current) => ({ ...current, execution: { strictProjectIsolation } }));
+    setOrchestratorOverrides((current) => new Set(current).add("execution.strictProjectIsolation"));
+  };
   const effectiveParentControl = !parentControlSupported &&
       !orchestratorOverrides.has("delegation.parentControl")
     ? "off" as const
@@ -409,6 +414,34 @@ export function NewSessionDialog({
     (effectiveParentControl === "off" || parentControlSupported) &&
     (!WORKFLOW_DECISION_CATEGORIES.some((category) => effectiveDecision(category) === "orchestrator") ||
       typedDelegationSupported);
+  const executionPolicySupported = runnerSupportsProtocol(runner?.protocolVersion, "orchestratorExecutionPolicy");
+  const strictProjectBoundaryAvailable = directWslOrchestrator || (orchestratorContext === "native" && (
+    agent?.driver === "codex" || agent?.driver === "codex-app-server"
+      ? runner?.os === "linux" || runner?.os === "macos"
+      : agent?.driver === "claude-code"
+        ? ((runner?.os === "linux" && runner?.runtime?.executionIsolation?.mode === "bwrap") ||
+          (runner?.os === "macos" && runner?.runtime?.executionIsolation?.mode === "seatbelt")) &&
+          agent.capabilities?.permissionModes?.includes("dontAsk") === true
+        : agent?.driver === "acp"
+          ? (runner?.os === "linux" && runner?.runtime?.executionIsolation?.mode === "bwrap") ||
+            (runner?.os === "macos" && runner?.runtime?.executionIsolation?.mode === "seatbelt")
+          : false
+  ));
+  const providerExecutionAvailable = executionPolicySupported && orchestratorContext === "native" &&
+    ["codex", "codex-app-server", "claude-code"].includes(agent?.driver ?? "acp") &&
+    (agent?.driver !== "codex" && agent?.driver !== "codex-app-server" ||
+      runner?.os === "linux" || runner?.os === "macos") &&
+    (agent?.driver !== "claude-code" ||
+      (agent.capabilities?.supportsApprovals === true &&
+        agent.capabilities.permissionModes?.includes("default") === true));
+  const orchestratorExecutionValid = orchestratorDraft.execution.strictProjectIsolation
+    ? strictProjectBoundaryAvailable
+    : providerExecutionAvailable;
+  const orchestratorExecutionUnavailable = orchestratorDraft.execution.strictProjectIsolation
+    ? "Strict Project Isolation needs an audited Codex sandbox, Direct WSL bubblewrap, or runner bubblewrap/Seatbelt isolation with the required Claude mode."
+    : !executionPolicySupported
+      ? "Delegate Implementation without Strict Project Isolation requires a protocol-v144 runner. Update the runner or enable Strict Project Isolation."
+      : "Provider-mode orchestration requires a native Codex or approval-capable Claude Code harness.";
   const childModelOptions = [
     { value: AUTOMATIC_ORCHESTRATOR_VALUE, label: "Automatic", description: "Resolve from live child capabilities." },
     ...(orchestratorCapabilities?.models ?? []).map((model) => ({
@@ -661,7 +694,7 @@ export function NewSessionDialog({
     (launchSurface !== "native_tui" || nativeTuiSupported) &&
     (defaultsReady || presetOverride === "orchestrator") &&
     (!orchestrator || (orchestratorSupported && orchestratorSettingsReady &&
-      orchestratorCapabilitiesValid && orchestratorDelegationValid)) &&
+      orchestratorCapabilitiesValid && orchestratorDelegationValid && orchestratorExecutionValid)) &&
     liveChildLimitValid &&
     (!directWslRequiresSafeOrchestrator || (orchestrator && orchestratorSupported)) && !retainedSessionId;
 
@@ -678,6 +711,7 @@ export function NewSessionDialog({
     cloudBudgetUsd, cloudBudgetValid, retainedSessionId,
     liveChildLimitDraft, liveChildLimitValid,
     orchestratorSettingsReady, orchestratorSettings?.error, orchestratorOverrides,
+    orchestratorExecutionValid,
   ]);
 
   // Keep the secondary shortcut local to this dialog. Unmodified Enter is native form behavior: an
@@ -771,6 +805,9 @@ export function NewSessionDialog({
           ? parentControlUnavailable ?? "Choose Human for Descendant Requests on this runner."
           : typedDelegationUnavailable ?? "Choose Human for typed decisions on this runner.");
         focusValidationProblem('[data-validation-target="orchestrator-defaults"]');
+      } else if (orchestrator && !orchestratorExecutionValid) {
+        setValidationError(orchestratorExecutionUnavailable);
+        focusValidationProblem('[data-validation-target="orchestrator-defaults"]');
       } else if (!liveChildLimitValid) {
         setValidationError(`Enter a Live Child Limit from 0 to ${MAX_LIVE_CHILD_LIMIT}.`);
         focusValidationProblem(`[id="${liveChildLimitInputId}"]`);
@@ -809,6 +846,7 @@ export function NewSessionDialog({
           ? [[category, orchestratorDraft.delegation.decisions[category]]]
           : [],
       ));
+      const executionOverridden = orchestratorOverrides.has("execution.strictProjectIsolation");
       const orchestratorRequest = orchestrator ? {
         behavior: {
           ...(orchestratorOverrides.has("behavior.childModel") ? { childModel: orchestratorDraft.behavior.childModel } : {}),
@@ -821,6 +859,9 @@ export function NewSessionDialog({
           ...(orchestratorOverrides.has("delegation.parentControl") ? { parentControl: orchestratorDraft.delegation.parentControl } : {}),
           ...(Object.keys(decisionOverrides).length ? { decisions: decisionOverrides } : {}),
         },
+        ...(executionOverridden ? { execution: {
+          strictProjectIsolation: orchestratorDraft.execution.strictProjectIsolation,
+        } } : {}),
       } : undefined;
       const session = await api.createSession({
         ...placement,
@@ -1184,9 +1225,7 @@ export function NewSessionDialog({
                 {
                   value: "orchestrator",
                   title: "Orchestrator",
-                  description: agent?.driver === "codex" || agent?.driver === "codex-app-server"
-                    ? "Manage child sessions without shell or file-write tools. Guardian reviews eligible actions automatically. Effective campaign policy appears below. Cannot change after creation."
-                    : "Manage child sessions without shell or file-write tools. Approval-required implementation actions stay blocked. Effective campaign policy appears below. Cannot change after creation.",
+                  description: "Delegate implementation by default. Provider permissions and optional Strict Project Isolation are configured separately below and cannot change after creation.",
                   // Rendered disabled rather than omitted. The list used to drop this option
                   // entirely when unsupported, leaving a one-option control that could not say
                   // whether the runner, the agent, the context or the target was the reason.
@@ -1290,6 +1329,35 @@ export function NewSessionDialog({
                     onChange={(value) => setOrchestratorBehavior("completion", value)}
                   />
                 </div>
+              </fieldset>
+              <fieldset className="orchestrator-policy-area">
+                <legend>Execution Permissions</legend>
+                <div className="orchestrator-policy-control">
+                  <span>Strict Project Isolation <small aria-hidden="true">{orchestratorSource("execution.strictProjectIsolation")}</small></span>
+                  <Select<"disabled" | "enabled">
+                    label="Strict Project Isolation"
+                    value={orchestratorDraft.execution.strictProjectIsolation ? "enabled" : "disabled"}
+                    options={[
+                      {
+                        value: "disabled",
+                        label: "Disabled",
+                        description: "Use provider permissions. Explicit parent implementation must use a dedicated worktree.",
+                      },
+                      {
+                        value: "enabled",
+                        label: "Enabled",
+                        description: "Enforce a scratch-only project boundary with a compatible isolation backend.",
+                      },
+                    ]}
+                    onChange={(value) => setStrictProjectIsolation(value === "enabled")}
+                  />
+                </div>
+                <p className="muted">
+                  {orchestratorDraft.execution.strictProjectIsolation
+                    ? "Operating-system or audited provider sandbox enforcement blocks Project writes."
+                    : "Provider approval controls and governance still apply; no read-only operating-system boundary is claimed."}
+                </p>
+                {!orchestratorExecutionValid && <p className="form-error" role="alert">{orchestratorExecutionUnavailable}</p>}
               </fieldset>
               <fieldset className="orchestrator-policy-area">
                 <legend>Decision Delegation</legend>

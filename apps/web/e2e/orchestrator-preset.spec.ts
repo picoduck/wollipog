@@ -1,4 +1,5 @@
 import { expect, test, type Locator } from "@playwright/test";
+import { PROTOCOL_VERSION } from "@wollipog/protocol";
 
 test.use({ video: "on" });
 
@@ -55,11 +56,11 @@ for (const theme of ["light", "dark"] as const) {
     test(`saved orchestrator default and TUI accounting ${theme} ${viewport.width}`, async ({ page }, testInfo) => {
       await page.setViewportSize(viewport);
       await page.goto("/command-inbox-projects-e2e.html?orchestratorDefault=1");
-      await page.evaluate((theme) => {
-        document.documentElement.dataset.theme = theme;
-        window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(139);
+      await page.evaluate(({ selectedTheme, protocolVersion }) => {
+        document.documentElement.dataset.theme = selectedTheme;
+        window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(protocolVersion);
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([], ["default", "orchestrator"]);
-      }, theme);
+      }, { selectedTheme: theme, protocolVersion: PROTOCOL_VERSION });
       await page.getByRole("tab", { name: /Alpha/ }).click();
       await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
       await page.getByRole("menuitem", { name: "New Session Here" }).click();
@@ -106,7 +107,9 @@ for (const theme of ["light", "dark"] as const) {
       await liveChildLimit.fill("7");
       const delegatedControl = dialog.getByRole("button", { name: /Descendant Requests: Questions and Approvals/ });
       await expect(delegatedControl).toBeVisible();
-      await expect(orchestratorCard).toContainText(/Guardian reviews eligible actions automatically/);
+      await expect(orchestratorCard).toContainText(/Delegate implementation by default/);
+      await expect(dialog.getByRole("button", { name: /Strict Project Isolation: Disabled/ })).toBeVisible();
+      await expect(dialog.getByText(/no read-only operating-system boundary is claimed/)).toBeVisible();
       const tui = dialog.getByRole("radio", { name: /^Native TUI/ });
       await expect(tui).toBeEnabled();
       if (surface === "native_tui") await tui.click();

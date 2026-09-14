@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-06
 - Supersedes: [ADR 0004](0004-conductor-disabled-pending-acp-v2.md)
+- Amended by: [ADR 0007](0007-separate-orchestrator-role-from-project-isolation.md)
 
 ## Context
 

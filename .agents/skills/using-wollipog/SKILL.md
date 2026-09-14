@@ -33,6 +33,21 @@ the effective behavior, typed decision owners, revision, admission and guardrail
 follow-up counts, UI-review compatibility, and one of `waiting_human`, `active`, `blocked`, or
 `verified_complete`, without returning credentials.
 
+The Orchestrator role defaults to **Delegate Implementation**: plan, delegate, monitor, and review.
+An ordinary request covering several issues does not authorize a campaign or child creation unless
+the human explicitly asks for orchestration or delegation. A parent may maintain permitted planning
+artifacts directly. If the human explicitly asks the parent to implement, first inspect open child
+assignments and pull requests for overlap, then create and select a dedicated Wollipog worktree for
+the parent and follow the repository's normal testing, cross-model review, UI evidence, merge, and
+cleanup workflow. Provider permissions and governance still apply throughout.
+
+**Strict Project Isolation** is a separate human-controlled execution setting. New sessions default
+to it being disabled. When enabled, project locations are OS-enforced read-only, the parent works
+only in session-private scratch, and parent implementation and self-worktree operations are refused.
+The required `bwrap`, Seatbelt, or audited provider boundary is checked before launch. Existing
+Orchestrator sessions without an execution-policy field are treated as strict and cannot relax
+themselves.
+
 Every child creation receives a server-derived campaign-policy block in its initial assignment.
 For Automatic model or effort, use `get_agent_capabilities` and send the selected pair in the same
 `create_session` call; fixed values are server-enforced. The block is not blanket approval. Children
