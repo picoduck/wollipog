@@ -64,6 +64,8 @@ export const InboxList = forwardRef<HTMLDivElement, {
   /** Test/story override. Production rows subscribe to their own activity entry. */
   activityBySession?: ReadonlyMap<string, SessionActivity>;
   stalledSessionIds: ReadonlySet<string>;
+  /** Sessions eligible for the one-time setup notice. Computed by the connected parent. */
+  worktreeSetupNoticeSessionIds?: ReadonlySet<string>;
   /** Test/story override paired with `activityBySession`. */
   activityNow?: number;
   runningCount: number;
@@ -74,6 +76,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
   onNewSession: () => void;
   onSelect: (sessionId: string) => void;
   onExpand: (sessionId: string) => void;
+  onWorktreeSetupGenerated?: (sessionId: string) => void;
   onToggleThread?: (sessionId: string) => void;
   onScrollPosition: (scrollTop: number) => void;
   onPointerTargetChange?: (pointerId: number, targeting: boolean, pointerType: string) => void;
@@ -87,6 +90,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
   pinnedAncestorSessionIds = new Set(),
   activityBySession,
   stalledSessionIds,
+  worktreeSetupNoticeSessionIds = new Set(),
   activityNow,
   runningCount,
   queuedCount,
@@ -96,6 +100,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
   onNewSession,
   onSelect,
   onExpand,
+  onWorktreeSetupGenerated,
   onToggleThread,
   onScrollPosition,
   onPointerTargetChange,
@@ -217,8 +222,10 @@ export const InboxList = forwardRef<HTMLDivElement, {
             threadCollapsed: thread?.collapsed ?? false,
             onSelect,
             onExpand,
+            onWorktreeSetupGenerated,
             onToggleThread,
             onSessionMenu,
+            showWorktreeSetupNotice: worktreeSetupNoticeSessionIds.has(session.id),
           } satisfies Omit<InboxRowProps, "activity" | "activityNow">;
           return activityBySession && activityNow !== undefined
             ? <InboxRow {...rowProps} activity={activityBySession.get(session.id)} activityNow={activityNow} />

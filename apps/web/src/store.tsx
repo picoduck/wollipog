@@ -288,6 +288,7 @@ export interface State {
   stopFailureRecoverySupported: boolean;
   /** True when the control plane provides durable, user-scoped reminder snapshots and deltas. */
   sessionRemindersSupported: boolean;
+  worktreeSetupConfigSupported: boolean;
   runners: Map<string, RunnerView>;
   boxes: Map<string, BoxView>;
   /** Authoritative when the snapshot advertises Project support; empty against legacy control
@@ -295,6 +296,7 @@ export interface State {
   projects: Map<string, ProjectView>;
   sessions: Map<string, SessionView>;
   reminders: Map<string, SessionReminderView>;
+  worktreeSetupNoticeDismissals: Set<string>;
   runs: Map<string, RunView>;
   pods: Map<string, PodView>;
   podContext: Map<string, PodContextEntry[]>;
@@ -1081,6 +1083,7 @@ function reducer(state: State, action: Action): State {
             stopBeforeArchiveSupported: msg.capabilities?.stopBeforeArchive === true,
             stopFailureRecoverySupported: msg.capabilities?.stopFailureRecovery === true,
             sessionRemindersSupported: msg.capabilities?.sessionReminders === true,
+            worktreeSetupConfigSupported: msg.capabilities?.worktreeSetupConfig === true,
             runners: new Map(msg.runners.map((r) => [r.runnerId, r])),
             // `boxes` may be absent from an older control plane's snapshot — tolerate it.
             boxes: new Map((msg.boxes ?? []).map((b) => [b.boxId, b])),
@@ -1088,6 +1091,7 @@ function reducer(state: State, action: Action): State {
             projects: new Map((msg.projects ?? []).map((project) => [project.id, project])),
             sessions,
             reminders: new Map((msg.reminders ?? []).map((reminder) => [reminder.sessionId, reminder])),
+            worktreeSetupNoticeDismissals: new Set(msg.worktreeSetupNoticeDismissals ?? []),
             runs: new Map(msg.runs.map((r) => [r.id, r])),
             pods,
             events,
@@ -1206,6 +1210,12 @@ function reducer(state: State, action: Action): State {
           const reminders = new Map(state.reminders);
           reminders.delete(msg.sessionId);
           return { ...state, reminders };
+        }
+        case "worktree_setup_notice_dismissed": {
+          if (state.worktreeSetupNoticeDismissals.has(msg.projectId)) return state;
+          const worktreeSetupNoticeDismissals = new Set(state.worktreeSetupNoticeDismissals);
+          worktreeSetupNoticeDismissals.add(msg.projectId);
+          return { ...state, worktreeSetupNoticeDismissals };
         }
         case "session_removed": {
           const sessions = new Map(state.sessions);
@@ -1452,11 +1462,13 @@ function initialState(
     stopBeforeArchiveSupported: false,
     stopFailureRecoverySupported: false,
     sessionRemindersSupported: false,
+    worktreeSetupConfigSupported: false,
     runners: new Map(),
     boxes: new Map(),
     projects: new Map(),
     sessions: new Map(),
     reminders: new Map(),
+    worktreeSetupNoticeDismissals: new Set(),
     runs: new Map(),
     pods: new Map(),
     podContext: new Map(),

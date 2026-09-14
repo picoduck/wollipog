@@ -400,7 +400,10 @@
 //      Launch specs carry the immutable effective restriction so older peers retain strict mode.
 // 145: runner-owned worktree port blocks and repository teardown lifecycle state are additive;
 //      exact teardown commands and environment values remain runner-private.
-export const PROTOCOL_VERSION = 145;
+// 146: worktree setup configuration discovery distinguishes absent, valid, and invalid input;
+//      older peers omit the status and clients preserve that case as unknown. Starter generation
+//      is a narrow runner-owned mutation that cannot name an arbitrary destination.
+export const PROTOCOL_VERSION = 146;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -588,6 +591,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   orchestratorExecutionPolicy: 144,
   worktreeSetup: 141,
   worktreeTeardownPorts: 145,
+  worktreeSetupConfig: 146,
   workerAttention: 108,
   backgroundWorkTracking: 83,
   correlatedRestartEcho: 84,
@@ -4762,6 +4766,10 @@ export interface SessionWorktreeView {
   portBlock?: WorktreePortBlock;
   /** Protocol v145: content-safe teardown outcome. Exact argv and environment stay runner-local. */
   teardown?: WorktreeTeardownState;
+  /** Protocol v146: parser status from the runner's last authoritative checkout inspection.
+   * Creation inspects the immutable base; generation inspects the new uncommitted checkout file.
+   * Wire absence means unknown, never absent. This status does not mean setup executed. */
+  setupConfig?: WorktreeSetupConfigStatus;
   /** Forge change-request linkage. The historic field name is retained on the wire for rolling
    * compatibility; `kind` and `provider` distinguish pull requests from merge requests. */
   pullRequest?: {
@@ -4773,6 +4781,11 @@ export interface SessionWorktreeView {
     kind?: ForgeChangeRequestKind;
   };
 }
+
+export type WorktreeSetupConfigStatus =
+  | { status: "absent" }
+  | { status: "valid"; hash: string }
+  | { status: "invalid"; error: string };
 
 export type WorktreeSetupStatus = "awaiting_trust" | "declined" | "running" | "completed" | "failed";
 
@@ -6112,6 +6125,7 @@ export type RunnerToControlPlane =
   | ForkResultMessage
   | SessionWorktreeProgressMessage
   | SessionWorktreeResultMessage
+  | WorkspaceWorktreeSetupResultMessage
   | LogoutAgentResultMessage
   | AcpRegistryApprovalResultMessage
   | SkillsStateMessage
@@ -6531,7 +6545,31 @@ export type SessionWorktreeRequestMessage =
       /** Protocol v113+: ask the runner for bounded, content-free phase heartbeats. */
       progress?: boolean;
     }
-  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "attach" | "select" | "discard" | "retry_setup"; path: string };
+  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "attach" | "select" | "discard" | "retry_setup"; path: string }
+  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "generate_setup" };
+
+/** Protocol v146. Inspect or generate the canonical config for one runner-owned workspace. The workspace id is
+ * resolved by the runner; callers cannot supply a filesystem destination. */
+export interface WorkspaceWorktreeSetupRequestMessage {
+  type: "workspace_worktree_setup";
+  requestId: string;
+  workspaceId: string;
+  /** Server-authoritative Project Location path. It is never accepted from the browser request. */
+  workspacePath: string;
+  operation: "inspect" | "generate";
+}
+
+export interface WorkspaceWorktreeSetupResultMessage {
+  type: "workspace_worktree_setup_result";
+  requestId: string;
+  workspaceId: string;
+  operation: "inspect" | "generate";
+  ok: boolean;
+  status?: WorktreeSetupConfigStatus;
+  path?: ".wollipog.json";
+  detected?: string[];
+  error?: string;
+}
 
 export type SessionWorktreeProgressPhase =
   | "resolving_remote"
@@ -6573,11 +6611,13 @@ export interface SessionWorktreeResultMessage {
   requestId: string;
   /** Protocol v113+: exact request coordinates echoed for cross-operation correlation. */
   sessionId?: string;
-  operation?: "create" | "attach" | "select" | "discard" | "retry_setup";
+  operation?: "create" | "attach" | "select" | "discard" | "retry_setup" | "generate_setup";
   ok: boolean;
   error?: string;
   worktree?: SessionWorktreeView;
   snapshot?: SessionSnapshot;
+  /** Protocol v146, generate_setup only. No file contents cross the wire. */
+  generatedSetup?: { path: ".wollipog.json"; detected: string[] };
   /** Protocol v133+, attach only. */
   isolation?: SessionWorktreeIsolationNotice;
 }
@@ -7534,6 +7574,7 @@ export type ControlPlaneToRunner =
   | RewindSessionMessage
   | ForkSessionMessage
   | SessionWorktreeRequestMessage
+  | WorkspaceWorktreeSetupRequestMessage
   | RediscoverMessage
   | ConfigureRunnerCapacityMessage
   | RefreshSubscriptionUsageMessage
@@ -7593,6 +7634,8 @@ export interface UiSnapshotMessage {
     stopFailureRecovery?: boolean;
     /** Per-user durable session reminders and scoped live reminder events are available. */
     sessionReminders?: boolean;
+    /** Per-user worktree setup notices and runner-owned generation are available. */
+    worktreeSetupConfig?: boolean;
   };
   runners: RunnerView[];
   boxes: BoxView[];
@@ -7601,6 +7644,8 @@ export interface UiSnapshotMessage {
   projects?: ProjectView[];
   /** Current user's pending and recently fired reminders. Absent on older control planes. */
   reminders?: SessionReminderView[];
+  /** Project ids whose one-time setup notice this user dismissed. */
+  worktreeSetupNoticeDismissals?: string[];
   runs: RunView[];
   /** Optional only for compatibility with pre-pod control planes. */
   pods?: PodView[];
@@ -7648,6 +7693,12 @@ export interface UiSessionReminderRemovedMessage {
   /** Exact reminder owner used by the control plane's fail-closed fan-out boundary. */
   userId: string;
   sessionId: string;
+}
+
+export interface UiWorktreeSetupNoticeDismissedMessage {
+  type: "worktree_setup_notice_dismissed";
+  userId: string;
+  projectId: string;
 }
 
 export interface UiProjectUpsertMessage {
@@ -7747,6 +7798,7 @@ export type ControlPlaneToUi =
   | UiSessionRemovedMessage
   | UiSessionReminderUpsertMessage
   | UiSessionReminderRemovedMessage
+  | UiWorktreeSetupNoticeDismissedMessage
   | UiProjectUpsertMessage
   | UiProjectRemovedMessage
   | UiSessionEventMessage

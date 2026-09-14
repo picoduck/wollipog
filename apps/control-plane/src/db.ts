@@ -641,6 +641,13 @@ CREATE TABLE IF NOT EXISTS session_reminders (
 CREATE INDEX IF NOT EXISTS idx_session_reminders_due
   ON session_reminders(state, scheduled_for, session_id, user_id);
 
+CREATE TABLE IF NOT EXISTS worktree_setup_notice_dismissals (
+  user_id TEXT NOT NULL,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  dismissed_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, project_id)
+);
+
 -- User-submitted prompts and recovered question answers use the runner's durable receipt lane.
 -- Unlike scheduler-owned automation commands these rows belong directly to a session and remain
 -- recoverable across a control-plane restart without manufacturing an automation execution.
@@ -5409,6 +5416,21 @@ export class ControlPlaneDb {
       "SELECT id, name, name_source, hidden_at, default_location_id, created_at, updated_at FROM projects WHERE id=?",
     ).get(projectId) as unknown as ProjectRow | undefined;
     return row ? this.projectView(row) : null;
+  }
+
+  worktreeSetupNoticeDismissals(userId: string): string[] {
+    const rows = this.stmt(
+      "SELECT project_id FROM worktree_setup_notice_dismissals WHERE user_id=? ORDER BY project_id",
+    ).all(userId) as Array<{ project_id: string }>;
+    return rows.map((row) => row.project_id);
+  }
+
+  dismissWorktreeSetupNotice(userId: string, projectId: string, now = Date.now()): void {
+    this.stmt(
+      `INSERT INTO worktree_setup_notice_dismissals (user_id, project_id, dismissed_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(user_id, project_id) DO UPDATE SET dismissed_at=excluded.dismissed_at`,
+    ).run(userId, projectId, now);
   }
 
   getProjectForPrincipal(principal: AuthPrincipal, projectId: string): ProjectView | null {

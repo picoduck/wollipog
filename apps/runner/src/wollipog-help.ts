@@ -14,6 +14,7 @@ export function rootHelp(): string {
     "       wollipog help [topic]",
     "",
     "Common Workflows:",
+    "  init                Generate .wollipog.json for the current repository without running tools",
     "  doctor              Check service and host health (alias for admin doctor)",
     "  update              Safely update services with verification and rollback (alias for service upgrade)",
     "  pair <command>      Create, list, revoke, or recover pairing credentials (aliases for admin commands)",
@@ -33,6 +34,7 @@ export function rootHelp(): string {
     "  wollipog service install",
     "  wollipog service status",
     "  wollipog doctor",
+    "  wollipog init",
     "  wollipog update",
     "  wollipog pair create --name laptop --output ./laptop.pairing-url",
     "  wollipog pair list",
@@ -42,8 +44,17 @@ export function rootHelp(): string {
     "  wollipog admin runner-credential rotate --runner RUNNER_ID --output ./runner.token",
     "  wollipog service uninstall  # preserves data by default",
     "",
-    "Topics: doctor, update, pair, service, admin, session, worktree",
+    "Topics: init, doctor, update, pair, service, admin, session, worktree",
     "Run `wollipog help <topic>` for complete commands and options. Help is always text; operational commands use --json for stable machine-readable output.",
+  ].join("\n");
+}
+
+export function initHelp(): string {
+  return [
+    "Usage: wollipog init [--json]",
+    "Generate .wollipog.json at the root of the current Git checkout.",
+    "Detection reads bounded repository metadata only. It does not run detected tools, execute setup, stage files, or commit.",
+    "An existing file, directory, or symbolic link is never overwritten.",
   ].join("\n");
 }
 
@@ -117,6 +128,8 @@ function helpForTopic(topic: string): string | null {
       return rootHelp();
     case "update":
       return updateHelp();
+    case "init":
+      return initHelp();
     case "pair":
       return pairHelp();
     case "doctor":
@@ -141,7 +154,7 @@ export function resolveHelp(args: string[]): HelpResponse | null {
   const helpCommand = args[0] === "help";
   const rootHelpFlag = args[0] === "--help" || args[0] === "-h";
   const helpAt = (index: number) => args[index] === "--help" || args[index] === "-h";
-  const aliasHelpFlag = (["update", "doctor"].includes(args[0] ?? "") && helpAt(1))
+  const aliasHelpFlag = (["init", "update", "doctor"].includes(args[0] ?? "") && helpAt(1))
     || (args[0] === "pair" && (helpAt(1) || (["create", "list", "revoke", "url"].includes(args[1] ?? "") && helpAt(2))));
   if (!helpCommand && !rootHelpFlag && !aliasHelpFlag) return null;
 

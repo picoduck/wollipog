@@ -196,6 +196,7 @@ scripts/          Development, installation, and release helpers
 - [Drivers](docs/DRIVERS.md)
 - [Admission Policy](docs/admission-policy.md)
 - [Execution Targets](docs/execution-targets.md)
+- [Worktree Setup Configuration](docs/worktree-setup.md)
 - [Runner Credentials and Secrets](docs/runner-credentials-and-secrets.md)
 - [Automations](docs/automations.md)
 - [Transcript Exports](docs/transcript-exports.md)

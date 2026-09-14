@@ -101,3 +101,41 @@ test("Add Location surfaces identity failures without leaving compatibility chec
     container.remove();
   }
 });
+
+test("New Project onboarding offers setup generation as an unchecked explicit choice", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <ApiProvider client={{ ...api, getIdentity: async () => { throw new Error("offline"); } } as ApiClient}>
+          <ProjectLocationDialog
+            project={project}
+            projects={[project]}
+            runners={new Map([[runner.runnerId, runner]])}
+            boxes={new Map()}
+            canCreateLocation
+            accessScopeManagementSupported
+            onboarding
+            onClose={() => {}}
+            onAdd={async () => {}}
+            onCreate={async () => {}}
+            onManageConnections={() => {}}
+          />
+        </ApiProvider>,
+      );
+      await new Promise((resolve) => domWindow.setTimeout(resolve, 0));
+    });
+    const checkbox = container.querySelector<HTMLInputElement>("input[type=checkbox]");
+    assert.ok(checkbox);
+    assert.equal(checkbox.checked, false);
+    assert.match(container.textContent ?? "", /Generate Starter Config/u);
+    assert.match(container.textContent ?? "", /No tools run, and nothing is staged or committed/u);
+    await act(async () => checkbox.click());
+    assert.equal(checkbox.checked, true);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});

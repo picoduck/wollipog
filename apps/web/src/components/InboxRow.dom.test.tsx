@@ -6,6 +6,7 @@ import { Window } from "happy-dom";
 import type { SessionReminderView, SessionView } from "@wollipog/protocol";
 import { InboxRow } from "./InboxRow.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { ApiProvider } from "../api-context.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -113,6 +114,32 @@ test("a parent row carries the chevron and family chip, and a child row its thre
     assert.match(container.querySelector(".inbox-row-shell")!.className, /thread-child thread-last/);
     assert.equal(container.querySelector(".inbox-thread-toggle"), null);
     assert.equal(container.querySelector(".inbox-thread-family"), null);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("a setup notice remains inside its own grid cell", async () => {
+  const session = {
+    id: "session-setup", runnerId: "runner", title: "Setup Session", status: "idle",
+    driver: "codex-app-server", pendingApproval: null, projectId: "project",
+  } as unknown as SessionView;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(
+      <ApiProvider client={{} as never}>
+        <InboxRow optionId="row" session={session} projectName="Project"
+          selected={false} unread={false} pinned={false} rowIndex={1} stalled={false} activityNow={0}
+          threeRow={false} showWorktreeSetupNotice onSelect={() => {}} onExpand={() => {}}
+          onSessionMenu={() => {}} />
+      </ApiProvider>,
+    ));
+    const row = container.querySelector<HTMLElement>('[role="row"]')!;
+    assert.deepEqual([...row.children].map((child) => child.getAttribute("role")), ["gridcell", "gridcell"]);
+    assert.ok(row.querySelector('[role="gridcell"] aside[aria-label="Set up This Project"]'));
   } finally {
     await act(async () => root.unmount());
     container.remove();

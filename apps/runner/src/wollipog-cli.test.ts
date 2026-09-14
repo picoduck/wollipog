@@ -1,16 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import {
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
 } from "@wollipog/protocol";
 import type { McpFetch } from "./session-management-mcp.js";
-import { runWollipogCli } from "./wollipog-cli.js";
+import { runWollipogCli, runWollipogInit } from "./wollipog-cli.js";
 import { expandCommandAlias, resolveHelp } from "./wollipog-help.js";
 
 async function captureCli(argv: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -36,7 +37,7 @@ test("CLI root help is identical through help, --help, and -h and covers common 
   assert.match(outputs[0]!.stdout, /Help is always text/u);
   assert.doesNotMatch(outputs[0]!.stdout, /Global Options:.*--help/u);
   for (const expected of [
-    "session", "worktree", "admin", "service", "help [topic]", "doctor", "update", "pair <command>",
+    "session", "worktree", "admin", "service", "help [topic]", "init", "doctor", "update", "pair <command>",
     "service install", "service status", "pair create", "pair list", "pair revoke", "service logs",
     "service restart", "runner-credential rotate", "service uninstall", "--version",
   ]) assert.match(outputs[0]!.stdout, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
@@ -51,6 +52,7 @@ test("CLI topic help is complete, successful, and side-effect free", async () =>
     ["admin", ["admin pairing-url", "admin status", "admin doctor", "admin device create", "admin runner-credential"]],
     ["session", ["session list", "session capabilities", "session create", "session wait", "session guardrails", "--effort"]],
     ["worktree", ["worktree create", "worktree attach", "worktree select", "worktree discard"]],
+    ["init", ["wollipog init", ".wollipog.json", "does not run", "never overwritten"]],
   ];
   for (const [topic, expected] of topics) {
     const result = await captureCli(["help", topic]);
@@ -63,6 +65,39 @@ test("CLI topic help is complete, successful, and side-effect free", async () =>
   const textWithJsonFlag = await captureCli(["help", "pair", "--json"]);
   assert.equal(textWithJsonFlag.code, 0);
   assert.match(textWithJsonFlag.stdout, /^Usage: wollipog pair/u);
+});
+
+test("local init succeeds without control-plane credentials and emits stable content-safe JSON", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-cli-init-"));
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    writeFileSync(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    let stdout = "";
+    let stderr = "";
+    const code = await runWollipogInit(root, true, {
+      stdout: (text) => { stdout += text; },
+      stderr: (text) => { stderr += text; },
+    });
+    assert.equal(code, 0);
+    assert.equal(stderr, "");
+    assert.deepEqual(JSON.parse(stdout), {
+      status: "created",
+      path: ".wollipog.json",
+      detected: ["pnpm-lock.yaml"],
+      executed: false,
+      staged: false,
+      committed: false,
+    });
+    const original = readFileSync(join(root, ".wollipog.json"), "utf8");
+    stdout = "";
+    assert.equal(await runWollipogInit(root, true, {
+      stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; },
+    }), 4);
+    assert.match(JSON.parse(stdout).error, /already exists/u);
+    assert.equal(readFileSync(join(root, ".wollipog.json"), "utf8"), original);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("new aliases accept --help without changing established canonical group help behavior", async () => {

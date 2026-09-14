@@ -5,10 +5,12 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type {
   AgentContext,
   WorktreePortBlock,
+  WorktreeSetupConfigStatus,
   WorktreeSetupState,
   WorktreeTeardownState,
   WorktreeTeardownStepResult,
 } from "@wollipog/protocol";
+export type { WorktreeSetupConfigStatus } from "@wollipog/protocol";
 import { runContextCommand } from "./context-command.js";
 import { sensitiveEnvironmentName } from "./env-security.js";
 import { killTree, spawnAgent, type SpawnIsolation } from "./spawn.js";
@@ -437,6 +439,20 @@ export async function loadWorktreeSetupConfig(
   });
   const config = parseWorktreeSetupConfig(stdout);
   return { config, hash: worktreeSetupSourceHash(stdout) };
+}
+
+/** Reuse the one production loader/parser while making absence and malformed input explicit. */
+export async function inspectWorktreeSetupConfig(
+  context: AgentContext,
+  repository: string,
+  baseCommit: string,
+): Promise<WorktreeSetupConfigStatus> {
+  try {
+    const loaded = await loadWorktreeSetupConfig(context, repository, baseCommit);
+    return loaded ? { status: "valid", hash: loaded.hash } : { status: "absent" };
+  } catch (error) {
+    return { status: "invalid", error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 async function runWorktreeHookCommand(

@@ -54,6 +54,7 @@ import type {
   SessionWorktreeProgressPhase,
   SessionWorktreeView,
   WorktreePortBlock,
+  WorktreeSetupConfigStatus,
   WorktreeSetupState,
   WorktreeTeardownState,
   ResolveSteeringAttemptMessage,
@@ -183,6 +184,7 @@ import {
 } from "./worktree-setup.js";
 import { WorktreePortAllocator } from "./worktree-port-allocator.js";
 import { terminatePosixProcessesByMarker } from "./posix-process-tree.js";
+import { writeStarterWorktreeSetupConfig } from "./worktree-setup-generator.js";
 
 export interface SessionNamingExecutionAuthorization {
   isolation?: SpawnIsolation;
@@ -1416,6 +1418,36 @@ export class SessionManager {
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
   }
 
+  private persistWorktreeSetupConfigStatus(
+    sessionId: string,
+    worktree: SessionWorktreeView,
+    status: WorktreeSetupConfigStatus,
+    verifiedLegacy = false,
+    retainNewWorktree = false,
+  ): void {
+    worktree.setupConfig = status;
+    // Legacy/test materializers have not yet passed the branch-identity proof below. Keep their
+    // parser result on the transient object only; publishing it here would also publish an
+    // unverified worktree identity. Real newly created worktrees carry `source: created`.
+    if (worktree.source === "legacy" && !verifiedLegacy) return;
+    const latest = this.store.readMeta(sessionId);
+    if (!latest) return;
+    const attributed = this.attributedWorktrees(latest);
+    const alreadyAttributed = attributed.some((item) =>
+      sameWorktreePath(latest.context, item.path, worktree.path));
+    if (!alreadyAttributed && !retainNewWorktree) {
+      // Discovery precedes activation for a newly created worktree. Publishing here would make a
+      // later activation failure leave a durable identity for a directory cleanup just removed.
+      return;
+    }
+    const retained = { ...worktree, setupConfig: structuredClone(status) };
+    const worktrees = alreadyAttributed
+      ? attributed.map((item) => sameWorktreePath(latest.context, item.path, worktree.path) ? retained : item)
+      : [...attributed, retained];
+    const updated = this.store.patchMeta(sessionId, { worktrees });
+    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+  }
+
   private persistWorktreeTeardownState(
     sessionId: string,
     worktreePath: string,
@@ -1526,7 +1558,7 @@ export class SessionManager {
     onProgress?: (phase: SessionWorktreeProgressPhase) => void,
     approvalSessionId = meta.sessionId,
     discoverConfig = false,
-  ): Promise<"none" | "declined" | "cancelled" | "completed" | "failed"> {
+  ): Promise<"none" | "invalid" | "declined" | "cancelled" | "completed" | "failed"> {
     const active = this.worktreeSetupRuns.get(meta.sessionId);
     if (active) {
       await active.done;
@@ -1572,7 +1604,7 @@ export class SessionManager {
     approvalSessionId: string,
     discoverConfig: boolean,
     signal: AbortSignal,
-  ): Promise<"none" | "declined" | "cancelled" | "completed" | "failed"> {
+  ): Promise<"none" | "invalid" | "declined" | "cancelled" | "completed" | "failed"> {
     if (worktree.source === "attached") {
       this.worktreeSetupEnvironments.delete(meta.sessionId);
       return "none";
@@ -1582,6 +1614,10 @@ export class SessionManager {
     const processMarker = this.ensureWorktreeProcessMarker(meta, worktree);
     if (!priorPortBlock) this.persistWorktreeView(meta.sessionId, worktree);
     const portEnvironment = this.protectedWorktreeEnvironment(meta, worktree);
+    if (!discoverConfig && !worktree.setup && worktree.setupConfig?.status === "invalid") {
+      this.setWorktreeSetupEnvironment(meta.sessionId, worktree.path, portEnvironment);
+      return "invalid";
+    }
     if (!worktree.baseCommit) {
       this.setWorktreeSetupEnvironment(meta.sessionId, worktree.path, portEnvironment);
       return "none";
@@ -1593,12 +1629,24 @@ export class SessionManager {
       return "none";
     }
     onProgress?.("reading_setup_config");
-    const loaded = await loadWorktreeSetupConfig(meta.context, meta.repoPath, worktree.baseCommit);
+    let loaded: Awaited<ReturnType<typeof loadWorktreeSetupConfig>>;
+    try {
+      loaded = await loadWorktreeSetupConfig(meta.context, meta.repoPath, worktree.baseCommit);
+    } catch (error) {
+      this.setWorktreeSetupEnvironment(meta.sessionId, worktree.path, portEnvironment);
+      this.persistWorktreeSetupConfigStatus(meta.sessionId, worktree, {
+        status: "invalid",
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return "invalid";
+    }
     if (signal.aborted) return "cancelled";
     if (!loaded) {
       this.setWorktreeSetupEnvironment(meta.sessionId, worktree.path, portEnvironment);
+      this.persistWorktreeSetupConfigStatus(meta.sessionId, worktree, { status: "absent" });
       return "none";
     }
+    this.persistWorktreeSetupConfigStatus(meta.sessionId, worktree, { status: "valid", hash: loaded.hash });
     const existing = worktree.setup;
     if (existing?.configHash === loaded.hash && existing.status === "completed") {
       this.persistWorktreeHookSnapshot(meta.sessionId, worktree, {
@@ -1925,6 +1973,9 @@ export class SessionManager {
         if (advertised) canonical.defaultBranch = advertised.branch;
         const setup = await this.prepareWorktreeSetup(meta, canonical, report);
         if (setup === "cancelled") throw new Error("worktree setup was cancelled");
+        if (setup === "invalid") throw new Error(canonical.setupConfig?.status === "invalid"
+          ? `invalid worktree setup configuration: ${canonical.setupConfig.error}`
+          : "invalid worktree setup configuration");
         if (setup === "failed") throw new Error("required worktree setup failed; retry the retained worktree setup");
         report("activating");
         return { worktree: canonical, snapshot: await this.activateWorktree(meta, canonical) };
@@ -1946,6 +1997,16 @@ export class SessionManager {
       try {
         const setup = await this.prepareWorktreeSetup(meta, worktree, report, meta.sessionId, true);
         if (setup === "cancelled") throw new Error("worktree setup was cancelled");
+        if (setup === "invalid") {
+          if (worktree.setupConfig?.status === "invalid") {
+            this.persistWorktreeSetupConfigStatus(
+              sessionId, worktree, worktree.setupConfig, false, true,
+            );
+          }
+          throw Object.assign(new Error(worktree.setupConfig?.status === "invalid"
+            ? `invalid worktree setup configuration: ${worktree.setupConfig.error}`
+            : "invalid worktree setup configuration"), { retainWorktree: true });
+        }
         if (setup === "failed") {
           throw Object.assign(new Error("required worktree setup failed; retry the retained worktree setup"), {
             retainWorktree: true,
@@ -2003,6 +2064,9 @@ export class SessionManager {
       if (verified.branch !== worktree.branch) throw new Error("worktree branch changed before setup retry");
       const setup = await this.prepareWorktreeSetup(meta, worktree);
       if (setup === "cancelled") throw new Error("worktree setup was cancelled");
+      if (setup === "invalid") throw new Error(worktree.setupConfig?.status === "invalid"
+        ? `invalid worktree setup configuration: ${worktree.setupConfig.error}`
+        : "invalid worktree setup configuration");
       if (setup === "failed") throw new Error("required worktree setup failed again");
       await this.activateWorktree(meta, worktree);
       if (meta.status === "failed" && (meta.agentSessionId || meta.handoffPending)) {
@@ -2010,6 +2074,30 @@ export class SessionManager {
       }
       const snapshot = this.snapshot(this.store.readMeta(sessionId)!);
       return { worktree, snapshot };
+    });
+  }
+
+  generateWorktreeSetupConfig(
+    sessionId: string,
+  ): Promise<{ worktree: SessionWorktreeView; snapshot: SessionSnapshot; path: ".wollipog.json"; detected: string[] }> {
+    return this.runWorktreeOperation(sessionId, async () => {
+      const meta = this.store.readMeta(sessionId);
+      if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
+      if (!meta.worktreePath) throw new Error("worktree setup generation requires an active worktree");
+      const worktree = (meta.worktrees ?? [])
+        .find((item) => sameWorktreePath(meta.context, item.path, meta.worktreePath!));
+      if (!worktree) throw new Error("active worktree identity is not verified for setup generation");
+      const generated = await writeStarterWorktreeSetupConfig(meta.context, worktree.path, meta.repoPath);
+      this.persistWorktreeSetupConfigStatus(
+        sessionId, worktree, generated.status, worktree.source === "legacy",
+      );
+      const latest = this.store.readMeta(sessionId)!;
+      return {
+        worktree,
+        snapshot: this.snapshot(latest),
+        path: generated.path,
+        detected: generated.detected,
+      };
     });
   }
 
@@ -2143,6 +2231,9 @@ export class SessionManager {
       }
       const setup = await this.prepareWorktreeSetup(meta, selected);
       if (setup === "cancelled") throw new Error("worktree setup was cancelled");
+      if (setup === "invalid") throw new Error(selected.setupConfig?.status === "invalid"
+        ? `invalid worktree setup configuration: ${selected.setupConfig.error}`
+        : "invalid worktree setup configuration");
       if (setup === "failed") throw new Error("required worktree setup must succeed before selection");
       return this.activateWorktree(meta, selected);
     });
@@ -4473,11 +4564,11 @@ export class SessionManager {
             worktreeIdentity = priorActiveWorktree;
           } else {
             worktree = await this.createSessionWorktree(repoPath, spec.sessionId, worktreeOptions);
-            worktreeIdentity = {
-              id: "legacy",
-              path: worktree.path,
-              branch: worktree.branch,
-              source: "legacy",
+            const recordedLegacy = activePrior?.worktrees?.find((item) =>
+              item.source === "legacy" && sameWorktreePath(activePrior.context, item.path, worktree!.path) &&
+              item.branch === worktree!.branch);
+            worktreeIdentity = recordedLegacy ?? {
+              id: "legacy", path: worktree.path, branch: worktree.branch, source: "legacy",
             };
           }
           // createWorktree deliberately returns an already-registered healthy session worktree.
@@ -4538,9 +4629,10 @@ export class SessionManager {
               return false;
             }
             if (setup === "cancelled") return false;
-            if (setup === "failed") {
+            if (setup === "failed" || setup === "invalid") {
               // A failed setup remains an attributed, retryable worktree. It is not garbage owned
               // by this launch anymore, even when this launch materialized it moments ago.
+              const createdForThisLaunch = worktreeOwnedByLaunch;
               worktreeOwnedByLaunch = false;
               meta.worktreePending = false;
               meta.worktreePath = worktree.path;
@@ -4553,8 +4645,28 @@ export class SessionManager {
                 worktrees: retainedWorktrees,
                 worktreePending: false,
               });
-              this.emitStatus(spec.sessionId, "failed", "Required worktree setup failed. Retry Setup to continue.");
-              durable?.failed("required worktree setup failed", "INVALID_COMMAND");
+              if (setup === "invalid" && worktreeIdentity.source === "legacy" && createdForThisLaunch) {
+                // An automatic worktree has not passed durable branch-identity proof yet. Invalid
+                // config has no retryable setup record, so retaining this tree would let a later
+                // launch reconstruct a status-less legacy stand-in and skip validation. Remove it;
+                // the next launch safely re-reads the immutable invalid base and fails again.
+                const cleanup = launchWorktreeCleanup();
+                this.cleanupJournal.add(cleanup);
+                await this.reapWorktree(cleanup, true);
+                this.store.patchMeta(spec.sessionId, {
+                  worktreePath: null,
+                  worktreeBranch: undefined,
+                  worktrees: retainedWorktrees.filter((item) =>
+                    !sameWorktreePath(meta.context, item.path, worktreeIdentity!.path)),
+                  worktreePending: false,
+                });
+              }
+              const invalidMessage = setup === "invalid" && worktreeIdentity.setupConfig?.status === "invalid"
+                ? `Invalid worktree setup configuration: ${worktreeIdentity.setupConfig.error}`
+                : null;
+              this.emitStatus(spec.sessionId, "failed",
+                invalidMessage ?? "Required worktree setup failed. Retry Setup to continue.");
+              durable?.failed(invalidMessage ?? "required worktree setup failed", "INVALID_COMMAND");
               return false;
             }
           }
@@ -4691,7 +4803,15 @@ export class SessionManager {
     if (worktreeIdentity?.source === "legacy") {
       await this.runWorktreeOperation(spec.sessionId, async () => {
         const latest = this.store.readMeta(spec.sessionId);
-        if (latest) await this.recordLegacyWorktreeIdentity(latest);
+        const verified = latest ? await this.recordLegacyWorktreeIdentity(latest) : null;
+        if (verified && worktreeIdentity?.setupConfig) {
+          const recorded = this.attributedWorktreeForPath(verified, worktreeIdentity.path);
+          if (recorded) {
+            this.persistWorktreeSetupConfigStatus(
+              spec.sessionId, recorded, worktreeIdentity.setupConfig, true,
+            );
+          }
+        }
       });
       if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) {
         const superseded = this.launchWasSuperseded(spec.sessionId, launchGeneration);
@@ -5673,6 +5793,12 @@ export class SessionManager {
         const attributed = this.attributedWorktreeForPath(meta, worktree.path);
         if (attributed) {
           const setup = await this.prepareWorktreeSetup(meta, attributed);
+          if (setup === "invalid") {
+            this.emitStatus(sessionId, "failed", attributed.setupConfig?.status === "invalid"
+              ? `Invalid worktree setup configuration: ${attributed.setupConfig.error}`
+              : "Invalid worktree setup configuration.");
+            return false;
+          }
           if (setup === "failed") {
             this.emitStatus(sessionId, "failed", "Required worktree setup failed. Retry Setup to continue.");
             return false;
@@ -9799,9 +9925,11 @@ export class SessionManager {
           target.worktrees = undefined;
           this.store.patchMeta(targetSessionId, { worktrees: undefined });
         }
-        if (setup === "failed") {
+        if (setup === "failed" || setup === "invalid") {
           this.store.patchMeta(targetSessionId, { status: "failed" });
-          this.emitStatus(targetSessionId, "failed", "Required worktree setup failed. Retry Setup to continue.");
+          this.emitStatus(targetSessionId, "failed", setup === "invalid" && targetWorktree.setupConfig?.status === "invalid"
+            ? `Invalid worktree setup configuration: ${targetWorktree.setupConfig.error}`
+            : "Required worktree setup failed. Retry Setup to continue.");
         }
         this.store.flush(targetSessionId);
         return { ok: true, snapshot: this.snapshot(this.store.readMeta(targetSessionId)!), events: this.store.readEvents(targetSessionId), handoffDraft, ...(retainedPrompt ? { retainedPrompt } : {}) };
@@ -9998,9 +10126,11 @@ export class SessionManager {
         target.worktrees = undefined;
         this.store.patchMeta(targetSessionId, { worktrees: undefined });
       }
-      if (setup === "failed") {
+      if (setup === "failed" || setup === "invalid") {
         this.store.patchMeta(targetSessionId, { status: "failed" });
-        this.emitStatus(targetSessionId, "failed", "Required worktree setup failed. Retry Setup to continue.");
+        this.emitStatus(targetSessionId, "failed", setup === "invalid" && targetWorktree.setupConfig?.status === "invalid"
+          ? `Invalid worktree setup configuration: ${targetWorktree.setupConfig.error}`
+          : "Required worktree setup failed. Retry Setup to continue.");
       }
       this.store.flush(targetSessionId);
       if (providerStateJournaled) this.providerStateCleanupJournal.remove(targetSessionId);
@@ -10781,6 +10911,7 @@ export class SessionManager {
       record.worktreeRemovedAt = Date.now();
       this.cleanupJournal.add(record);
     }
+    await this.forgetRemovedWorktree(record);
     this.finishWorktreeCleanup(record);
   }
 

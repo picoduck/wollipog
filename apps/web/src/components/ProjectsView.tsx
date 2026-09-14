@@ -5,6 +5,7 @@ import {
   type BoxView,
   type ProjectLocationView,
   type ProjectView,
+  type WorktreeSetupConfigStatus,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { archiveProjectWithFeedback } from "../project-actions.js";
@@ -32,8 +33,58 @@ import { SegmentedControl } from "./ui/ChoiceControls.js";
 
 type DialogState =
   | { kind: "create" }
-  | { kind: "add-location" }
+  | { kind: "add-location"; onboarding?: boolean }
   | { kind: "delete" };
+
+function ProjectLocationWorktreeSetup({ project, location, runnerProtocolVersion }: {
+  project: ProjectView;
+  location: ProjectLocationView;
+  runnerProtocolVersion?: number | null;
+}) {
+  const api = useApi();
+  const supported = runnerSupportsProtocol(runnerProtocolVersion, "worktreeSetupConfig");
+  const [status, setStatus] = useState<WorktreeSetupConfigStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!supported || location.availability !== "available") return;
+    let active = true;
+    setStatus(null);
+    setError(null);
+    void api.projectLocationWorktreeSetup(project.id, location.id).then((result) => {
+      if (active) setStatus(result.status);
+    }).catch((cause) => {
+      if (active) setError((cause as Error).message);
+    });
+    return () => { active = false; };
+  }, [api, location.availability, location.id, project.id, supported]);
+  if (!supported) return <span className="project-location-reason">Setup Status: Update this Machine to validate configuration.</span>;
+  if (location.availability !== "available") return <span className="project-location-reason">Setup Status: Unavailable while this Location is offline.</span>;
+  return (
+    <div className="project-location-setup-status">
+      <span>
+        <strong>Setup Status: </strong>
+        {status?.status === "valid" ? "Valid" : status?.status === "absent" ? "Not Configured"
+          : status?.status === "invalid" ? "Invalid" : error ? "Unavailable" : "Checking…"}
+      </span>
+      {status?.status === "invalid" && <code role="alert">{status.error}</code>}
+      {error && <span className="project-location-reason" role="alert">{error}</span>}
+      {status?.status === "absent" && project.canManage !== false && (
+        <button type="button" className="btn sm" disabled={busy} onClick={() => {
+          setBusy(true);
+          setError(null);
+          void api.generateProjectLocationWorktreeSetup(project.id, location.id)
+            .then((result) => {
+              setStatus(result.status);
+              return api.dismissWorktreeSetupNotice(project.id);
+            })
+            .catch((cause) => setError((cause as Error).message))
+            .finally(() => setBusy(false));
+        }}>{busy ? "Generating…" : "Generate Starter Config"}</button>
+      )}
+    </div>
+  );
+}
 
 function DeleteProjectDialog({ project, busy, error, onClose, onDelete }: {
   project: ProjectView;
@@ -89,6 +140,7 @@ export function ProjectsView({
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
   const projectLocationCreationSupported = useStoreSelector((state) => state.projectLocationCreationSupported);
   const accessScopeManagementSupported = useStoreSelector((state) => state.accessScopeManagementSupported);
+  const worktreeSetupConfigSupported = useStoreSelector((state) => state.worktreeSetupConfigSupported);
   const stopBeforeArchiveSupported = useStoreSelector((state) => state.stopBeforeArchiveSupported);
   const snapshotLoaded = useStoreSelector((state) => state.snapshotLoaded);
   const runners = useStoreSelector((state) => state.runners);
@@ -492,6 +544,10 @@ export function ProjectsView({
                               />
                             )}
                             {revealReason && <span className="project-location-reason">{revealReason}</span>}
+                            {worktreeSetupConfigSupported && (
+                              <ProjectLocationWorktreeSetup project={selected} location={location}
+                                runnerProtocolVersion={runner?.protocolVersion} />
+                            )}
                           </div>
                           <div className="project-location-actions">
                             <button
@@ -537,8 +593,8 @@ export function ProjectsView({
           onClose={() => setDialog(null)}
           onCreated={(project) => {
             applyProject(project);
-            setDialog(null);
             navigate({ name: "projects", id: project.id });
+            setDialog({ kind: "add-location", onboarding: true });
           }}
         />
       )}
@@ -550,15 +606,38 @@ export function ProjectsView({
           boxes={boxes}
           canCreateLocation={projectLocationCreationSupported}
           accessScopeManagementSupported={accessScopeManagementSupported}
+          onboarding={dialog.onboarding && worktreeSetupConfigSupported}
           onClose={() => setDialog(null)}
           onManageConnections={manageConnections}
-          onAdd={async (candidate: ProjectLocationCandidate) => {
+          onAdd={async (candidate: ProjectLocationCandidate, generateSetup) => {
             const { project } = await api.addProjectLocation(selected.id, { runnerId: candidate.runnerId, workspaceId: candidate.workspaceId });
             applyProject(project);
+            if (generateSetup) {
+              const added = project.locations.find((location) =>
+                location.runnerId === candidate.runnerId && location.workspaceId === candidate.workspaceId);
+              if (!added) throw new Error("Location was added, but its setup configuration could not be generated. Retry from Project Settings.");
+              try {
+                await api.generateProjectLocationWorktreeSetup(project.id, added.id);
+                await api.dismissWorktreeSetupNotice(project.id);
+              } catch (cause) {
+                throw new Error(`Location was added, but setup generation failed: ${(cause as Error).message}. Retry from Project Settings.`);
+              }
+            }
           }}
-          onCreate={async (location) => {
+          onCreate={async (location, generateSetup) => {
             const { project } = await api.createProjectLocation(selected.id, location);
             applyProject(project);
+            if (generateSetup) {
+              const added = project.locations.find((candidate) =>
+                candidate.runnerId === location.runnerId && candidate.path === location.path);
+              if (!added) throw new Error("Location was added, but its setup configuration could not be generated. Retry from Project Settings.");
+              try {
+                await api.generateProjectLocationWorktreeSetup(project.id, added.id);
+                await api.dismissWorktreeSetupNotice(project.id);
+              } catch (cause) {
+                throw new Error(`Location was added, but setup generation failed: ${(cause as Error).message}. Retry from Project Settings.`);
+              }
+            }
           }}
         />
       )}

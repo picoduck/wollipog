@@ -18,6 +18,7 @@ import type {
   EditQueuedPromptResultMessage,
   SessionNamingCustomModelResultMessage,
   SessionWorktreeResultMessage,
+  WorkspaceWorktreeSetupResultMessage,
   ForkResultMessage,
   HostActionResultMessage,
   InterruptTurnResultMessage,
@@ -203,6 +204,7 @@ export type RunnerRequestResult =
   | GenerateSessionTitleResultMessage
   | SessionNamingCustomModelResultMessage
   | SessionWorktreeResultMessage
+  | WorkspaceWorktreeSetupResultMessage
   | PolicyHookDecisionRecordedMessage;
 
 interface PendingRequest {
@@ -513,6 +515,8 @@ export class Hub {
       : info.principal.kind === "human" ? info.principal.userId : null;
     const reminders = reminderUserId === null ? [] : this.db.listSessionReminders(reminderUserId)
       .filter((reminder) => info.principal === undefined || this.db.canAccessSession(info.principal, reminder.sessionId));
+    const worktreeSetupNoticeDismissals = reminderUserId === null
+      ? [] : this.db.worktreeSetupNoticeDismissals(reminderUserId);
     info.visibleRunnerIds = new Set(runners.map((runner) => runner.runnerId));
     info.visibleSessionIds = new Set(sessions.map((session) => session.id));
     info.visibleProjectIds = new Set(projects.map((project) => project.id));
@@ -530,12 +534,14 @@ export class Hub {
         stopBeforeArchive: true,
         stopFailureRecovery: true,
         sessionReminders: true,
+        worktreeSetupConfig: true,
       },
       runners,
       boxes: globalAdmin ? this.db.listBoxes() : [],
       sessions: sessions.map((s) => this.withQueue(s)),
       projects,
       reminders,
+      worktreeSetupNoticeDismissals,
       runs: globalAdmin ? this.db.listRuns() : [],
       pods: globalAdmin ? this.db.listPods() : [],
     };
@@ -954,6 +960,10 @@ export class Hub {
     this.broadcast({ type: "session_reminder_removed", userId, sessionId });
   }
 
+  worktreeSetupNoticeDismissed(userId: string, projectId: string): void {
+    this.broadcast({ type: "worktree_setup_notice_dismissed", userId, projectId });
+  }
+
   fireDueSessionReminders(now = Date.now()): number {
     const fired = this.db.fireDueSessionReminders(now);
     for (const item of fired) this.sessionReminderChanged(item.userId, item.reminder);
@@ -1023,6 +1033,10 @@ export class Hub {
       const sessionId = msg.type === "session_reminder_upsert" ? msg.reminder.sessionId : msg.sessionId;
       return this.reminderPrincipalMatches(msg.userId, principal) &&
         (principal === undefined || this.db.canAccessSession(principal, sessionId));
+    }
+    if (msg.type === "worktree_setup_notice_dismissed") {
+      return this.reminderPrincipalMatches(msg.userId, principal) &&
+        (principal === undefined || this.db.canAccessProject(principal, msg.projectId));
     }
     if (principal === undefined) return true;
     switch (msg.type) {
@@ -1120,6 +1134,7 @@ export class Hub {
       case "session_upsert": return `session:${msg.session.id}`;
       case "session_reminder_upsert": return `reminder:${msg.reminder.sessionId}`;
       case "session_reminder_removed": return `reminder:${msg.sessionId}`;
+      case "worktree_setup_notice_dismissed": return `worktree-setup-notice:${msg.projectId}`;
       case "project_upsert": return `project:${msg.project.id}`;
       case "run_upsert": return `run:${msg.run.id}`;
       case "pod_upsert": return `pod:${msg.pod.id}`;
