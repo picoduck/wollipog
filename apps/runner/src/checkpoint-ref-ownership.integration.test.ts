@@ -296,7 +296,7 @@ test("a failed canonical reclaim retains ownership proof and the next startup re
   }
 });
 
-test("one session transfers repositories and deletion reclaims every exact owned tuple", {
+test("repository remap retains the live owned tuple and deletion reclaims every exact tuple", {
   skip: !haveGit(),
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-checkpoint-ownership-transfer-"));
@@ -331,11 +331,14 @@ test("one session transfers repositories and deletion reclaims every exact owned
       context: { kind: "native" as const },
     });
     assert.equal(await manager.start(spec(repoA)), true);
-    assert.equal(await manager.start(spec(repoB)), true, "a new exact tuple must not conflict with the old repository claim");
-    assert.equal(store.readMeta("s_transfer")?.repoPath, repoB);
-    await waitFor(
-      () => new CheckpointRefOwnershipLedger(dataDir).listSession("s_transfer").every((record) => record.repoPath !== repoA),
-      "the stale repository-A tuple was not independently reclaimed",
+    assert.equal(await manager.start(spec(repoB)), false,
+      "a repository remap fails closed while the old runner-owned worktree remains");
+    assert.equal(store.readMeta("s_transfer")?.repoPath, repoA);
+    assert.equal(
+      new CheckpointRefOwnershipLedger(dataDir).listSession("s_transfer")
+        .some((record) => record.repoPath === repoA),
+      true,
+      "the refused remap preserves the old repository's checkpoint ownership",
     );
 
     // Simulate another durable tuple surviving a prior transfer. Deletion must enumerate every

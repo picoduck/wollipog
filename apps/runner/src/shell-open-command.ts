@@ -11,6 +11,11 @@ export type ShellOpenTarget =
 
 export type ShellOpenLaunchTarget = Exclude<ShellOpenTarget, "pending" | { invalid: string } | null>;
 
+export interface ShellCleanupBoundary {
+  cleanupOwnsDescendants: boolean;
+  cleanupDescendantMarker?: string;
+}
+
 export interface ShellOpenCommandDependencies {
   waitForSessionStart(sessionId: string): Promise<boolean | null>;
   registerPending(shellId: string): void;
@@ -20,12 +25,14 @@ export interface ShellOpenCommandDependencies {
   resolveTarget(sessionId: string): ShellOpenTarget | Promise<ShellOpenTarget>;
   /** The reason a target is unusable, or null when it can be opened. */
   targetError(target: ShellOpenTarget): string | null;
+  resolveCleanupBoundary(sessionId: string, worktreePath: string | null): ShellCleanupBoundary;
   launchEpoch(sessionId: string): number;
   resolveAgentTuiLaunch(meta: SessionMeta): ShellProcessLaunch | null | Promise<ShellProcessLaunch | null>;
   open(
     message: ShellOpenMessage,
     target: ShellOpenLaunchTarget,
     launch: ShellProcessLaunch | undefined,
+    cleanupBoundary: ShellCleanupBoundary,
   ): { pty: boolean };
   send(result: ShellOpenResultMessage): void;
   errorText(error: unknown): string;
@@ -113,7 +120,11 @@ export async function handleShellOpenCommand(
           throw new Error("session launch or workspace changed while preparing Agent TUI; try again");
         }
       }
-      const { pty } = dependencies.open(message, target, launch);
+      const cleanupBoundary = dependencies.resolveCleanupBoundary(
+        message.sessionId,
+        target.meta.worktreePath ?? null,
+      );
+      const { pty } = dependencies.open(message, target, launch, cleanupBoundary);
       dependencies.send({ type: "shell_open_result", requestId: message.requestId, ok: true, pty });
     } catch (error) {
       fail(dependencies.errorText(error));

@@ -10,6 +10,11 @@
     "removedSkillDays": 7,
     "previousVersionMinutes": 60
   },
+  "worktreePorts": {
+    "start": 42000,
+    "end": 51999,
+    "blockSize": 20
+  },
   "executionIsolation": {
     "mode": "provider",
     "network": "inherit",

@@ -209,6 +209,7 @@ export class CodexDriver implements Driver {
           containerAgentLaunch: true,
           cloudAgentLaunch: true,
           descendantOwner: this.descendantOwner,
+          descendantMarker: this.opts.descendantMarker,
         });
       } catch (err) {
         this.cleanupImages();

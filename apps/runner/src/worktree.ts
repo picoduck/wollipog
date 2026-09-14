@@ -18,7 +18,17 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import type { AgentContext, ForgeProvider, SessionWorktreeProgressPhase } from "@wollipog/protocol";
+import type {
+  AgentContext,
+  AgentDriverKind,
+  ExecutionHandoffReceipt,
+  ExecutionTargetRef,
+  ForgeProvider,
+  SessionWorktreeProgressPhase,
+  WorktreePortBlock,
+  WorktreeTeardownState,
+} from "@wollipog/protocol";
+import type { WorktreeHookSnapshot } from "./worktree-setup.js";
 import { runContextCommand } from "./context-command.js";
 import {
   captureWorktreeTree,
@@ -112,19 +122,64 @@ export interface WorktreeCleanupRecord {
   /** Exact branch recorded when this generation was created or attached. Legacy records derive
    * `agent/<sessionId>` during cleanup. */
   branch?: string;
+  source?: "legacy" | "created";
+  baseRef?: string;
   /** Exact checkpoint namespace owned by this worktree generation. Absent means legacy refs. */
   checkpointOwnerHash?: string;
+  /** Durable proof that rollback owns the session's current checkpoint generation, not merely an
+   * auxiliary worktree created for an otherwise-live session. */
+  checkpointGenerationDisposable?: boolean;
+  /** Durable proof that creation rollback targets only an auxiliary requested worktree while the
+   * session and its checkpoint generation remain live. */
+  auxiliaryWorktreeRollback?: boolean;
+  /** Exact initiating lifecycle. Startup replay preserves rather than replaces this value. */
+  trigger?: "explicit_discard" | "pull_request_reconciliation" | "session_delete" | "creation_rollback";
+  /** Explicit discard/reconciliation retains Git safety checks; deletion/rollback keeps legacy force cleanup. */
+  removalMode?: "safe" | "force";
+  /** Exact approved teardown material. Runner-private and never projected to the control plane. */
+  hooks?: WorktreeHookSnapshot;
+  /** Minimal runner-private launch identity needed to recreate the approved execution boundary
+   * after the session row has been deleted. Adapter secret values are never stored here. */
+  execution?: {
+    agentId: string | null;
+    driver: AgentDriverKind;
+    command: string;
+    args: string[];
+    permissionMode?: string;
+    executionTarget?: ExecutionTargetRef;
+    executionHandoff?: ExecutionHandoffReceipt;
+    /** Opaque runner-local reconnect identity, not an adapter credential or environment value. */
+    cloudAdapterHandoffKey?: string;
+  };
+  /** Stable allocation retained until worktree removal succeeds. */
+  portBlock?: WorktreePortBlock;
+  /** Durable bounded teardown progress/output, including crash-uncertain steps. */
+  teardown?: WorktreeTeardownState;
+  /** Set before termination begins so an interrupted attempt remains replayable. */
+  processTerminationStartedAt?: number;
+  /** Runner-private random marker inherited by worktree-owned native POSIX descendants. */
+  processMarker?: string;
+  processesTerminatedAt?: number;
+  /** Durable proof that removal completed even if port/history finalization must retry. */
+  worktreeRemovedAt?: number;
+  createdAt?: number;
+  completedAt?: number;
+  /** Forge-verified head used only for safe cleanup when the branch upstream disappeared. */
+  verifiedMergedHead?: string;
 }
 
 /** Native-host cleanup journal. Session rows can be deleted immediately while failed context
  * cleanup remains durable and is retried on the next runner start. */
 export class WorktreeCleanupJournal {
   private readonly path: string;
+  private readonly historyPath: string;
   private records = new Map<string, WorktreeCleanupRecord>();
+  private completedRecords = new Map<string, WorktreeCleanupRecord>();
 
   constructor(dataDir = join(homedir(), ".agent-manager")) {
     mkdirSync(dataDir, { recursive: true });
     this.path = join(dataDir, "worktree-cleanup.json");
+    this.historyPath = join(dataDir, "worktree-cleanup-history.json");
     try {
       const parsed = JSON.parse(readFileSync(this.path, "utf8")) as WorktreeCleanupRecord[];
       if (Array.isArray(parsed)) for (const record of parsed) this.records.set(this.key(record), record);
@@ -133,9 +188,19 @@ export class WorktreeCleanupJournal {
         throw new Error(`could not read worktree cleanup journal ${this.path}: ${(error as Error).message}`);
       }
     }
+    try {
+      const parsed = JSON.parse(readFileSync(this.historyPath, "utf8")) as WorktreeCleanupRecord[];
+      if (Array.isArray(parsed)) for (const record of parsed) this.completedRecords.set(this.key(record), record);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new Error(`could not read worktree cleanup history ${this.historyPath}: ${(error as Error).message}`);
+      }
+    }
   }
 
   list(): WorktreeCleanupRecord[] { return [...this.records.values()]; }
+
+  history(): WorktreeCleanupRecord[] { return [...this.completedRecords.values()]; }
 
   add(record: WorktreeCleanupRecord): void {
     this.records.set(this.key(record), record);
@@ -157,20 +222,38 @@ export class WorktreeCleanupJournal {
     this.flush();
   }
 
+  /** Persist a bounded durable receipt before removing the retry record. A crash between the two
+   * writes is idempotent: replay replaces the same receipt key before retry-state removal. */
+  complete(record: WorktreeCleanupRecord): void {
+    const completed = { ...structuredClone(record), completedAt: record.completedAt ?? Date.now() };
+    this.completedRecords.set(this.key(completed), completed);
+    while (this.completedRecords.size > 256) {
+      const oldest = this.completedRecords.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.completedRecords.delete(oldest);
+    }
+    this.flushFile(this.historyPath, this.history());
+    this.remove(record.sessionId, record.worktreeId ?? "legacy");
+  }
+
   private key(record: WorktreeCleanupRecord): string {
     return `${record.sessionId}\0${record.worktreeId ?? "legacy"}`;
   }
 
   private flush(): void {
-    const temp = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
+    this.flushFile(this.path, this.list());
+  }
+
+  private flushFile(path: string, records: WorktreeCleanupRecord[]): void {
+    const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
     let fd: number | undefined;
     try {
       fd = openSync(temp, "wx", 0o600);
-      writeFileSync(fd, JSON.stringify(this.list(), null, 2));
+      writeFileSync(fd, JSON.stringify(records, null, 2));
       fsyncSync(fd);
       closeSync(fd);
       fd = undefined;
-      renameSync(temp, this.path);
+      renameSync(temp, path);
       let directoryFd: number | undefined;
       try {
         directoryFd = openSync(dirname(this.path), constants.O_RDONLY);
@@ -992,7 +1075,7 @@ export async function discardWorktreeIfSafe(
   repoPath: string,
   sessionId: string,
   handle: WorktreeHandle & { source: "legacy" | "created" },
-  options: WorktreeOptions & { verifiedMergedHead?: string } = {},
+  options: WorktreeOptions & { verifiedMergedHead?: string; beforeRemove?: () => Promise<void> } = {},
 ): Promise<SafeWorktreeDiscardResult> {
   const context = options.context ?? nativeContext;
   const branch = await validateBranch(context, repoPath, handle.branch);
@@ -1067,6 +1150,10 @@ export async function discardWorktreeIfSafe(
       }
       if (mergedHead !== head) return { removed: false, reason: "unpushed" };
     }
+
+    // Hooks/process retirement are intentionally after the first complete safety proof and before
+    // the final race-closing status/head checks. A failure here retains the worktree.
+    await options.beforeRemove?.();
 
     if (registered) {
       // Close the widest observable race before the non-force removal. Git independently rejects

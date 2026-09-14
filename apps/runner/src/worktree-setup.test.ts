@@ -11,6 +11,7 @@ import {
   loadWorktreeSetupConfig,
   parseWorktreeSetupConfig,
   runWorktreeSetup,
+  runWorktreeTeardown,
   WorktreeSetupTrustStore,
   worktreeSetupHash,
   type WorktreeSetupConfig,
@@ -24,6 +25,7 @@ const validConfig: WorktreeSetupConfig = {
   copyFiles: [{ source: ".env.local", destination: ".env.local" }],
   environment: { APP_ROOT: "${WOLLIPOG_WORKTREE_PATH}" },
   setup: [{ name: "Prepare", command: [process.execPath, "-e", "process.exit(0)"], timeoutSeconds: 10, optional: false }],
+  teardown: [],
 };
 
 test("worktree setup parser normalizes defaults and hashes deterministically", () => {
@@ -37,6 +39,7 @@ test("worktree setup parser normalizes defaults and hashes deterministically", (
     copyFiles: [],
     environment: { ALPHA: "a", ZED: "z" },
     setup: [{ name: "Install", command: ["pnpm", "install"], timeoutSeconds: 600, optional: false }],
+    teardown: [],
   });
   assert.equal(worktreeSetupHash(parsed), worktreeSetupHash(parseWorktreeSetupConfig(JSON.stringify(parsed))));
 });
@@ -86,7 +89,8 @@ test("worktree setup parser rejects shell strings, traversal, unsafe env, placeh
     );
   }
   assert.throws(() => parseWorktreeSetupConfig('{"version":1,"environment":{"ROOT":"${SECRET_TOKEN}"}}'), /unknown placeholder/u);
-  assert.throws(() => parseWorktreeSetupConfig('{"version":1,"teardown":[]}'), /not supported/u);
+  assert.throws(() => parseWorktreeSetupConfig('{"version":1,"teardown":[{"name":"Bad","command":"echo bye"}]}'), /command/u);
+  assert.throws(() => parseWorktreeSetupConfig('{"version":1,"teardown":[{"name":"Same","command":["a"]},{"name":"Same","command":["b"]}]}'), /unique/u);
 });
 
 test("placeholder expansion accepts only runner-owned names", () => {
@@ -95,6 +99,9 @@ test("placeholder expansion accepts only runner-owned names", () => {
     WOLLIPOG_WORKTREE_BRANCH: "agent/test",
     WOLLIPOG_WORKTREE_BASE_REF: "main",
     WOLLIPOG_PRIMARY_CHECKOUT: "/repo",
+    WOLLIPOG_PORT_BLOCK_START: "42000",
+    WOLLIPOG_PORT_BLOCK_END: "42019",
+    WOLLIPOG_PORT_BLOCK_SIZE: "20",
   };
   assert.deepEqual(expandWorktreeSetupEnvironment({ ROOT: "${WOLLIPOG_WORKTREE_PATH}/app" }, variables), { ROOT: "/worktree/app" });
   assert.throws(() => expandWorktreeSetupEnvironment({ TOKEN: "${SECRET_TOKEN}" }, variables), /unknown placeholder/u);
@@ -116,6 +123,12 @@ test("property: valid config round-trips with a stable canonical hash", () => {
       timeoutSeconds: fc.integer({ min: 1, max: 720 }),
       optional: fc.boolean(),
     }), { maxLength: 5, selector: (step) => step.name }),
+    teardown: fc.uniqueArray(fc.record({
+      name: safeString,
+      command: fc.tuple(safeString, fc.array(safeString, { maxLength: 4 })).map(([head, tail]) => [head, ...tail]),
+      timeoutSeconds: fc.integer({ min: 1, max: 720 }),
+      optional: fc.boolean(),
+    }), { maxLength: 5, selector: (step) => step.name }),
   });
   fc.assert(fc.property(configArb, (value) => {
     const first = parseWorktreeSetupConfig(JSON.stringify(value));
@@ -132,6 +145,7 @@ test("property: arbitrary JSON values fail safely or produce a bounded v1 config
       assert.equal(config.version, 1);
       assert.ok(config.copyFiles.length <= 128);
       assert.ok(config.setup.length <= 64);
+      assert.ok((config.teardown ?? []).length <= 64);
     } catch (error) {
       assert.ok(error instanceof Error);
     }
@@ -357,4 +371,66 @@ test("trust is durable per project and exact config hash without storing project
   assert.equal(await second.isApproved("/project/alpha", "hash-a"), true);
   const persisted = await readFile(join(root, "worktree-setup-trust.json"), "utf8");
   assert.equal(persisted.includes("/project/alpha"), false);
+});
+
+test("teardown runs every step in order and retains bounded output despite failures", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "wollipog-teardown-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const order = join(root, "order.txt");
+  const append = "require('fs').appendFileSync(process.argv[1],process.argv[2]+'\\n');process.stdout.write(process.argv[2]);process.stderr.write(' err')";
+  const steps = [
+    { name: "First", command: [process.execPath, "-e", append, order, "first"] as [string, ...string[]], timeoutSeconds: 10, optional: false },
+    { name: "Fails", command: [process.execPath, "-e", "process.stdout.write('failed out');process.stderr.write('failed err');process.exit(7)"] as [string, ...string[]], timeoutSeconds: 10, optional: false },
+    { name: "Last", command: [process.execPath, "-e", append, order, "last"] as [string, ...string[]], timeoutSeconds: 10, optional: false },
+  ];
+  const snapshots: string[][] = [];
+  const state = await runWorktreeTeardown({
+    context: native,
+    worktreePath: root,
+    configHash: "trusted-hash",
+    steps,
+    environment: {},
+    onState: (next) => snapshots.push(next.steps.map((step) => step.status)),
+  });
+  assert.equal(state.status, "completed_with_failures");
+  assert.deepEqual(state.steps.map((step) => step.status), ["completed", "failed", "completed"]);
+  assert.deepEqual(state.steps.map((step) => step.exitCode), [0, 7, 0]);
+  assert.equal(state.steps[0]?.stdout, "first");
+  assert.equal(state.steps[1]?.stdout, "failed out");
+  assert.equal(state.steps[1]?.stderr, "failed err");
+  assert.equal(await readFile(order, "utf8"), "first\nlast\n");
+  assert.ok(snapshots.some((statuses) => statuses.at(-1) === "running"), "running markers must be durable before spawn");
+});
+
+test("teardown recovery marks a crash-mid-step uncertain and never replays it", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "wollipog-teardown-recovery-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const marker = join(root, "marker.txt");
+  const steps = [
+    { name: "Completed", command: [process.execPath, "-e", "process.exit(99)"] as [string, ...string[]], timeoutSeconds: 10, optional: false },
+    { name: "Ambiguous", command: [process.execPath, "-e", "process.exit(99)"] as [string, ...string[]], timeoutSeconds: 10, optional: false },
+    { name: "Never Started", command: [process.execPath, "-e", "require('fs').writeFileSync(process.argv[1],'ran')", marker] as [string, ...string[]], timeoutSeconds: 10, optional: false },
+  ];
+  const now = Date.now();
+  const state = await runWorktreeTeardown({
+    context: native,
+    worktreePath: root,
+    configHash: "trusted-hash",
+    steps,
+    environment: {},
+    prior: {
+      status: "running",
+      configHash: "trusted-hash",
+      attemptId: "attempt-1",
+      startedAt: now - 100,
+      steps: [
+        { name: "Completed", status: "completed", optional: false, startedAt: now - 100, durationMs: 1, exitCode: 0, stdout: "", stderr: "" },
+        { name: "Ambiguous", status: "running", optional: false, startedAt: now - 50, stdout: "partial", stderr: "" },
+      ],
+    },
+  });
+  assert.equal(state.attemptId, "attempt-1");
+  assert.deepEqual(state.steps.map((step) => step.status), ["completed", "uncertain", "completed"]);
+  assert.match(state.steps[1]?.error ?? "", /not replayed/iu);
+  assert.equal(await readFile(marker, "utf8"), "ran");
 });

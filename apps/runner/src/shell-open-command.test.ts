@@ -40,6 +40,7 @@ function harness(overrides: Partial<ShellOpenCommandDependencies> = {}) {
     targetError: (target) => target === "pending"
       ? "the session's worktree is still being prepared — try again in a moment"
       : !target ? "unknown session" : "invalid" in target ? target.invalid : null,
+    resolveCleanupBoundary: () => ({ cleanupOwnsDescendants: false }),
     resolveAgentTuiLaunch: () => ({ command: "codex", args: [] }),
     open: () => {
       opens++;
@@ -65,6 +66,31 @@ test("ordinary shells bypass the initial-session fence", async () => {
   });
   await handleShellOpenCommand(command("shell"), state.dependencies);
   assert.equal(state.opens, 1);
+  assert.equal(state.replies[0]?.ok, true);
+});
+
+test("shell open forwards the canonical worktree cleanup boundary at the spawn edge", async () => {
+  const legacyMeta = { ...meta, worktreePath: "/worktree", worktrees: undefined };
+  let openedWith: { cleanupOwnsDescendants: boolean; cleanupDescendantMarker?: string } | undefined;
+  const state = harness({
+    resolveTarget: () => ({ root: "/worktree", context: { kind: "native" }, meta: legacyMeta }),
+    resolveCleanupBoundary: (sessionId, worktreePath) => {
+      assert.equal(sessionId, "session-1");
+      assert.equal(worktreePath, "/worktree");
+      return { cleanupOwnsDescendants: true, cleanupDescendantMarker: "canonical-legacy-marker" };
+    },
+    open: (_message, _target, _launch, cleanupBoundary) => {
+      openedWith = cleanupBoundary;
+      return { pty: true };
+    },
+  });
+
+  await handleShellOpenCommand(command("shell"), state.dependencies);
+
+  assert.deepEqual(openedWith, {
+    cleanupOwnsDescendants: true,
+    cleanupDescendantMarker: "canonical-legacy-marker",
+  });
   assert.equal(state.replies[0]?.ok, true);
 });
 

@@ -363,6 +363,39 @@ test("worktree setup state is omitted for pre-v141 control planes", () => {
   assert.equal(metaToSnapshot(meta({ worktrees: [worktree] }), 141).worktrees?.[0]?.setup?.status, "failed");
 });
 
+test("worktree ports and teardown state are omitted for pre-v145 control planes", () => {
+  const worktree = {
+    id: "wt-one",
+    path: "/home/me/repo/.agent-worktrees/s_abc",
+    branch: "fix/teardown",
+    source: "created" as const,
+    portBlock: { start: 42_000, end: 42_019, size: 20 },
+    teardown: {
+      status: "completed_with_failures" as const,
+      configHash: "a".repeat(64),
+      attemptId: "attempt-one",
+      startedAt: 1,
+      completedAt: 2,
+      steps: [{
+        name: "Stop Server",
+        status: "failed" as const,
+        optional: false,
+        startedAt: 1,
+        durationMs: 1,
+        error: "exit 1",
+        stdout: "out",
+        stderr: "err",
+      }],
+    },
+  };
+  const legacy = metaToSnapshot(meta({ worktrees: [worktree] }), 144).worktrees?.[0];
+  assert.equal(legacy?.portBlock, undefined);
+  assert.equal(legacy?.teardown, undefined);
+  const current = metaToSnapshot(meta({ worktrees: [worktree] }), 145).worktrees?.[0];
+  assert.deepEqual(current?.portBlock, worktree.portBlock);
+  assert.equal(current?.teardown?.steps[0]?.stderr, "err");
+});
+
 test("a failed incremental projection scan commits no duplicate omissions on retry", () => {
   const { store, root } = tmpStore();
   try {

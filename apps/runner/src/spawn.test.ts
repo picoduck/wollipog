@@ -6,11 +6,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import net from "node:net";
+import { randomUUID } from "node:crypto";
 import { after, test } from "node:test";
 import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslAgentControlRelayArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, winQuoteArg, wslProviderPidfile, type AgentProcess } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { encodeWindowsJobSpec, materializeWindowsJobLauncher, WINDOWS_JOB_CACHE_HELPERS, WINDOWS_JOB_LAUNCHER, windowsJobCacheRoot } from "./windows-job.js";
-import { extendOwnedProcessTree, ownsPosixRootProcessGroup, parsePosixProcessTable } from "./posix-process-tree.js";
+import { extendOwnedProcessTree, ownsPosixRootProcessGroup, parsePosixProcessTable, terminatePosixProcessesByMarker } from "./posix-process-tree.js";
 
 const windowsJobTestCacheRoot = mkdtempSync(path.join(os.tmpdir(), "wollipog-windows-job-suite-"));
 const windowsJobLauncherPath = materializeWindowsJobLauncher(windowsJobTestCacheRoot);
@@ -843,6 +844,54 @@ test("normal provider exit preserves owned background work until session disposa
   finishGracefulStop();
   assert.equal(await waitForPendingKills(8_000), true);
   assert.equal(await waitForProcessGone(escapedPid!), true, "session disposal reaps retained work");
+});
+
+test("a durable worktree marker reclaims an escaped descendant after its provider exits", {
+  skip: process.platform === "win32",
+  timeout: 15_000,
+}, async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "wollipog-durable-worktree-boundary-"));
+  const ready = path.join(dir, "ready.json");
+  const escapedScript = path.join(dir, "escaped.cjs");
+  const providerScript = path.join(dir, "provider.cjs");
+  const marker = randomUUID();
+  let escapedPid: number | undefined;
+  t.after(async () => {
+    if (escapedPid) {
+      try { process.kill(escapedPid, "SIGKILL"); } catch { /* already reaped */ }
+    }
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+  await fs.writeFile(escapedScript, [
+    'const fs = require("node:fs");',
+    `fs.writeFileSync(${JSON.stringify(ready)}, JSON.stringify({ pid: process.pid }));`,
+    "setInterval(() => {}, 1000);",
+  ].join("\n"), "utf8");
+  await fs.writeFile(providerScript, [
+    'const { spawn } = require("node:child_process");',
+    `spawn(process.execPath, [${JSON.stringify(escapedScript)}], { detached: true, stdio: "ignore" }).unref();`,
+    "process.exit(0);",
+  ].join("\n"), "utf8");
+
+  const child = spawnAgent({
+    command: process.execPath,
+    args: [providerScript],
+    cwd: dir,
+    windowsShell: false,
+    descendantOwner: {},
+    descendantMarker: marker,
+  });
+  child.stdin.end();
+  for (let attempt = 0; attempt < 100 && !escapedPid; attempt++) {
+    try { escapedPid = (JSON.parse(await fs.readFile(ready, "utf8")) as { pid: number }).pid; }
+    catch { await new Promise((resolve) => setTimeout(resolve, 25)); }
+  }
+  assert.ok(escapedPid, "background process became ready");
+  if (!child.closeObserved) await new Promise<void>((resolve) => child.once("close", () => resolve()));
+  assert.doesNotThrow(() => process.kill(escapedPid!, 0), "escaped process survives provider exit");
+
+  assert.equal(await terminatePosixProcessesByMarker(marker), true);
+  assert.equal(await waitForProcessGone(escapedPid!), true, "startup-style marker recovery reaps it");
 });
 
 test("session disposal reaps a grandchild that creates a new POSIX session and its descendant", {

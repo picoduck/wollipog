@@ -37,6 +37,7 @@ export function listPosixProcesses(): Promise<PosixProcessTable> {
 }
 
 export const DESCENDANT_MARKER_ENV = "WOLLIPOG_DESCENDANT_BOUNDARY";
+export const WORKTREE_DESCENDANT_MARKER_ENV = "WOLLIPOG_WORKTREE_DESCENDANT_BOUNDARY";
 
 export type PosixMarkedProcessIds = Map<string, Set<number>>;
 
@@ -47,10 +48,13 @@ function addMarkedProcess(result: PosixMarkedProcessIds, marker: string, pid: nu
   result.set(marker, matches);
 }
 
-export async function listMarkedProcessIds(table: PosixProcessTable): Promise<PosixMarkedProcessIds> {
+async function listEnvironmentMarkedProcessIds(
+  table: PosixProcessTable,
+  environmentName: string,
+): Promise<PosixMarkedProcessIds> {
   const result: PosixMarkedProcessIds = new Map();
   if (process.platform === "linux") {
-    const prefix = Buffer.from(`${DESCENDANT_MARKER_ENV}=`);
+    const prefix = Buffer.from(`${environmentName}=`);
     const pids = [...table.keys()];
     // Ownership-critical reads are infrequent, but a large host can have thousands of processes.
     // Bound concurrency so /proc inspection cannot exhaust the runner's file descriptors.
@@ -86,7 +90,11 @@ export async function listMarkedProcessIds(table: PosixProcessTable): Promise<Po
       else resolve(String(stdout));
     });
   });
-  return parsePosixMarkedProcessIds(output, table);
+  return parseEnvironmentMarkedProcessIds(output, table, environmentName);
+}
+
+export function listMarkedProcessIds(table: PosixProcessTable): Promise<PosixMarkedProcessIds> {
+  return listEnvironmentMarkedProcessIds(table, DESCENDANT_MARKER_ENV);
 }
 
 /** Parse the macOS/BSD `ps eww` form. Command arguments precede the appended environment, so use
@@ -95,8 +103,16 @@ export function parsePosixMarkedProcessIds(
   output: string,
   table: PosixProcessTable,
 ): PosixMarkedProcessIds {
+  return parseEnvironmentMarkedProcessIds(output, table, DESCENDANT_MARKER_ENV);
+}
+
+function parseEnvironmentMarkedProcessIds(
+  output: string,
+  table: PosixProcessTable,
+  environmentName: string,
+): PosixMarkedProcessIds {
   const result: PosixMarkedProcessIds = new Map();
-  const prefix = `${DESCENDANT_MARKER_ENV}=`;
+  const prefix = `${environmentName}=`;
   for (const line of output.split(/\r?\n/u)) {
     const match = /^\s*(\d+)\s+(.+)$/u.exec(line);
     if (!match) continue;
@@ -148,6 +164,10 @@ export class PosixMarkerScanner {
 }
 
 const markerScanner = new PosixMarkerScanner();
+const worktreeMarkerScanner = new PosixMarkerScanner(
+  listPosixProcesses,
+  (table) => listEnvironmentMarkedProcessIds(table, WORKTREE_DESCENDANT_MARKER_ENV),
+);
 
 function sameProcess(expected: PosixProcessIdentity, current: PosixProcessIdentity | undefined): boolean {
   return current?.startedAt === expected.startedAt;
@@ -265,6 +285,7 @@ export class PosixProcessBoundary {
     readonly owner?: object,
     private readonly marker?: string,
     private readonly testRuntime?: PosixProcessBoundaryTestRuntime,
+    private readonly scanner: PosixMarkerScanner = markerScanner,
   ) {
     boundaries.add(this);
     if (testRuntime) return;
@@ -282,7 +303,7 @@ export class PosixProcessBoundary {
         table = await this.testRuntime.listProcesses();
         markedProcessIds = await this.testRuntime.listMarkers?.(table) ?? new Map();
       } else {
-        const snapshot = await markerScanner.snapshot();
+        const snapshot = await this.scanner.snapshot();
         table = snapshot.table;
         markedProcessIds = snapshot.markedProcessIds;
       }
@@ -534,4 +555,13 @@ export function terminatePosixProcessBoundaries(owner?: object): Promise<boolean
   return [...boundaries]
     .filter((boundary) => owner === undefined || boundary.owner === owner)
     .map((boundary) => boundary.terminate());
+}
+
+/** Reconstruct an exact marker-backed boundary after the runner process that created it is gone.
+ * The random marker is runner-private durable cleanup identity; numeric PIDs alone are never
+ * trusted because they may have been reused while the runner was offline. */
+export async function terminatePosixProcessesByMarker(marker: string): Promise<boolean> {
+  if (process.platform === "win32") return true;
+  const boundary = new PosixProcessBoundary(0, undefined, marker, undefined, worktreeMarkerScanner);
+  return boundary.terminate();
 }

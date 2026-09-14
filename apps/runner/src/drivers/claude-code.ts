@@ -613,6 +613,7 @@ export class ClaudeCodeDriver implements Driver {
         isolation: this.opts.isolation,
         containerAgentLaunch: true,
         cloudAgentLaunch: true,
+        descendantMarker: this.opts.descendantMarker,
       });
     } catch (err) {
       throw new Error(`Claude fork failed to spawn: ${(err as Error).message}`);
@@ -896,6 +897,7 @@ export class ClaudeCodeDriver implements Driver {
           containerAgentLaunch: true,
           cloudAgentLaunch: true,
           descendantOwner: this.descendantOwner,
+          descendantMarker: this.opts.descendantMarker,
         });
       } catch (err) {
         this.cb.onEvent({ kind: "error", message: (err as Error).message });
@@ -1157,6 +1159,7 @@ export class ClaudeCodeDriver implements Driver {
           containerAgentLaunch: true,
           cloudAgentLaunch: true,
           descendantOwner: this.descendantOwner,
+          descendantMarker: this.opts.descendantMarker,
         });
       } catch (err) {
         this.openPersistentCircuit(`persistent claude spawn failed: ${(err as Error).message}`, turn);

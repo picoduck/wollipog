@@ -473,6 +473,7 @@ export class CodexAppServerDriver implements Driver {
       containerAgentLaunch: true,
       cloudAgentLaunch: true,
       descendantOwner: this.descendantOwner,
+      descendantMarker: this.opts.descendantMarker,
     });
     this.child = child;
     const peer = new JsonRpcPeer(child.stdin, child.stdout, (err) => this.emitProviderStderr(`transport: ${err.message}`));

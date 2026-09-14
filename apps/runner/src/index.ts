@@ -383,6 +383,12 @@ const metadata: RunnerMetadata = {
   runtime: {
     dataDir: config.dataDir,
     worktreeRoot: resolve(config.dataDir, "worktrees"),
+    worktreePorts: {
+      ...config.worktreePorts,
+      capacity: Math.floor(
+        (config.worktreePorts.end - config.worktreePorts.start + 1) / config.worktreePorts.blockSize,
+      ),
+    },
     maxConcurrentSessions: config.maxConcurrentSessions,
     admission: config.admission,
     executionIsolation: config.executionIsolation,
@@ -625,12 +631,12 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
     return !!key && freshSafeWslLaunches.has(key) && args.length === agent.args.length &&
       agent.args.every((arg, index) => arg === args[index]);
   },
+  config.worktreePorts,
 );
 authorizeSubscriptionUsageProbe = (agent, env, sourceId) =>
   sessions.prepareSubscriptionUsageProbe(agent, env, sourceId);
 const sessionStarts = new SessionStartFence();
 const pendingShellOpenCancellations = new PendingShellOpenCancellations();
-sessions.reconcileStore(); // demote any sessions left mid-flight by a previous run to idle
 
 // Per-session shells (Shells panel). Live output bypasses the general outbox so console spam
 // cannot evict session events. ShellManager retains a bounded sequenced tail and replays an
@@ -644,6 +650,9 @@ const shells = new ShellManager({
   onExit: (shellId, sessionId, code, outputSeq) =>
     sendUp({ type: "shell_exit", sessionId, shellId, code, outputSeq }),
 });
+sessions.setWorktreeShellRetirement((sessionId, context, path) =>
+  shells.closeForWorktree(sessionId, context, path));
+sessions.reconcileStore(); // demote stale sessions and replay cleanup only after shell retirement is wired
 
 // Buffer outbound events while the control-plane socket is down or mid-reconnect so a terminal
 // status or permission request produced during a blip is not lost. The buffering/coalescing/overflow
@@ -1977,6 +1986,8 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         sessionCanOpen: (sessionId) => sessions.sessionCanOpen(sessionId),
         resolveTarget: (sessionId) => sessionFilesTarget(sessionId),
         targetError: (target) => sessionFilesTargetError(target),
+        resolveCleanupBoundary: (sessionId, worktreePath) =>
+          sessions.worktreeShellCleanupBoundary(sessionId, worktreePath),
         launchEpoch: (sessionId) => sessions.agentTuiLaunchEpoch(sessionId),
         resolveAgentTuiLaunch: (meta) => prepareAgentTuiLaunch(meta, {
           controlPlaneProtocolVersion,
@@ -1994,7 +2005,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             sessions.acquireAgentTuiProviderHome(prepared);
           },
         }),
-        open: (message, target, launch) => {
+        open: (message, target, launch, cleanupBoundary) => {
           if (launch) sessions.acquireAgentTuiProviderHome({ ...target.meta, env: launch.env ?? {} });
           return shells.open(
             message.shellId,
@@ -2002,7 +2013,13 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             target.root,
             target.context,
             { cols: message.cols, rows: message.rows },
-            { name: message.name, createdAt: message.createdAt, kind: message.kind, launch },
+            {
+              name: message.name,
+              createdAt: message.createdAt,
+              kind: message.kind,
+              launch,
+              ...cleanupBoundary,
+            },
           );
         },
         send: (result) => sendUp(result),
