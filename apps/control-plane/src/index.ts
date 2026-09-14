@@ -68,6 +68,8 @@ import {
   type DescendantRequestResolution,
   type CreateWorkflowDecisionRequest,
   type ConsumeWorkflowDecisionRequest,
+  type RecordOrchestratorFollowUpRequest,
+  type VerifyOrchestratorChildRequest,
   type CreateWorkspaceReferenceRequest,
   type CreateProjectRequest,
   type UpdateProjectRequest,
@@ -3103,6 +3105,41 @@ app.post("/api/sessions/:id/parent-control-policy", async (req, reply) => {
     body?.decisions,
     body?.expectedRevision,
     { kind: "human", id: humanActorId(req) },
+  ));
+});
+
+app.get("/api/sessions/:id/orchestrator-campaign", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id || !principal.orchestrator) {
+    return reply.code(403).send({ error: "a matching Orchestrator session credential is required" });
+  }
+  return respond(reply, svc.campaignProjection(id));
+});
+
+app.post("/api/sessions/:id/orchestrator-campaign/follow-ups", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id || !principal.orchestrator) {
+    return reply.code(403).send({ error: "a matching Orchestrator session credential is required" });
+  }
+  return respond(reply, svc.recordCampaignFollowUp(
+    id,
+    req.body as RecordOrchestratorFollowUpRequest,
+    (sessionId) => db.canAccessSession(principal, sessionId),
+  ));
+});
+
+app.post("/api/sessions/:id/orchestrator-campaign/verify-child", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id || !principal.orchestrator) {
+    return reply.code(403).send({ error: "a matching Orchestrator session credential is required" });
+  }
+  return respond(reply, svc.verifyCampaignChild(
+    id,
+    req.body as VerifyOrchestratorChildRequest,
+    (sessionId) => db.canAccessSession(principal, sessionId),
   ));
 });
 

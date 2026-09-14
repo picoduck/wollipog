@@ -727,6 +727,9 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
       permissionModes: ["orchestrator"],
     };
+    const codex = meta.agents.find((agent) => agent.id === CODEX_APP_AGENT_ID)!;
+    codex.capabilities!.permissionModes = ["default", "orchestrator"];
+    codex.capabilities!.models.find((model) => model.id === "text-model")!.inputModalities = ["text", "image"];
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     const settings: OrchestratorSettingsView = {
       source: "user_default",
@@ -785,13 +788,22 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       "editing account defaults cannot mutate an active campaign snapshot");
 
     db.updateSessionStatus(parent.id, "running", Date.now());
+    assert.equal(svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
+      config: { model: "image-model", effort: "low" },
+    }, undefined, undefined, false, false, false, { parentSessionId: parent.id }).status, 409,
+    "a child assignment cannot override the campaign's fixed model and effort");
     const denied = svc.createSession({
       runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
       orchestrator: { behavior: { childModel: "image-model" } },
     }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
     assert.equal(denied.status, 403, "agents cannot set or broaden campaign policy");
 
-    const childRequest = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID };
+    const childRequest = {
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
+      prompt: "Coordinate the bounded child campaign",
+      config: { permissionMode: "orchestrator" },
+    };
     let child = svc.createSession(childRequest, undefined, undefined, false, false, false, { parentSessionId: parent.id });
     if (child.status === 428) {
       const approval = db.getSession(parent.id)!.pendingApproval!;
@@ -801,6 +813,63 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.ok(child.ok && child.data, child.error);
     assert.equal(child.data.model, "text-model");
     assert.equal(child.data.effort, "high");
+    assert.equal(child.data.orchestratorPolicy?.behavior.childModel, "text-model");
+    assert.equal(child.data.orchestratorPolicy?.behavior.childEffort, "high");
+    assert.equal(child.data.orchestratorPolicy?.delegation.decisions.pr_merge, "orchestrator");
+    assert.equal(child.data.orchestratorPolicy?.sources.behavior.childModel, "active_campaign");
+    const assignment = hub.sentOfType("start_session").find((message) => message.spec.sessionId === child.data!.id)?.initialPrompt ?? "";
+    assert.match(assignment, /Wollipog Campaign Policy — server-derived, revision 1/);
+    assert.match(assignment, /This is not blanket approval/);
+    assert.match(assignment, /exact-head CI/);
+    assert.match(assignment, /UI evidence remains human-owned/);
+
+    db.updateSessionStatus(child.data.id, "running", Date.now());
+    assert.equal(svc.setConfig(child.data.id, { model: "image-model", effort: "low" }).status, 409,
+      "mid-session config cannot escape the root campaign model and effort");
+    assert.equal(svc.prompt(child.data.id, "Attempt a turn escape", [], undefined, {
+      model: "image-model", effort: "low",
+    }).status, 409, "an atomic prompt config cannot escape the root campaign model and effort");
+    assert.equal(svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
+      prompt: "Attempt to escape fixed behavior", config: { model: "image-model", effort: "low" },
+    }, undefined, undefined, false, false, false, { parentSessionId: child.data.id }).status, 409,
+    "a nested Orchestrator cannot let descendants escape the root campaign model and effort");
+    const grandchildRequest = {
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
+      prompt: "Implement the bounded nested task",
+    };
+    let grandchild = svc.createSession(grandchildRequest, undefined, undefined, false, false, false, {
+      parentSessionId: child.data.id,
+    });
+    if (grandchild.status === 428) {
+      const approval = db.getSession(child.data.id)!.pendingApproval!;
+      assert.ok(svc.approve(child.data.id, approval.requestId, "allow").ok);
+      grandchild = svc.createSession(grandchildRequest, undefined, undefined, false, false, false, {
+        parentSessionId: child.data.id,
+      });
+    }
+    assert.ok(grandchild.ok && grandchild.data, grandchild.error);
+    assert.equal(grandchild.data.model, "text-model");
+    assert.equal(grandchild.data.effort, "high");
+    const nestedAssignment = hub.sentOfType("start_session")
+      .find((message) => message.spec.sessionId === grandchild.data!.id)?.initialPrompt ?? "";
+    assert.match(nestedAssignment, new RegExp(`Campaign ${parent.id}`));
+    assert.match(nestedAssignment, /Wollipog Campaign Policy — server-derived, revision 1/);
+    const mergeSnapshot = {
+      category: "pr_merge" as const,
+      repository: "picoduck/wollipog", pullRequest: 1091, headSha: "a".repeat(40),
+      reviewResult: "merge" as const,
+      requiredChecks: { headSha: "a".repeat(40), status: "passed" as const, checkedAt: 10,
+        checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }] },
+    };
+    const delegatedMerge = svc.createWorkflowDecision(grandchild.data.id, {
+      requestId: "nested-merge-before-revocation", resourceKey: "picoduck/wollipog#1091",
+      resourceSnapshot: mergeSnapshot,
+    });
+    assert.ok(delegatedMerge.ok && delegatedMerge.data, delegatedMerge.error);
+    assert.equal(delegatedMerge.data.controllingSessionId, parent.id,
+      "nested typed decisions bind to the outermost campaign policy revision");
+    assert.equal(delegatedMerge.data.authority, "orchestrator");
 
     assert.ok(svc.setConfig(parent.id, { maxChildSessions: 5 }).ok);
     assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.behavior.maximumConcurrentChildren, 5);
@@ -808,10 +877,138 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     const currentRevision = db.getSession(parent.id)!.parentControlPolicy!.revision;
     const decisions = { ...db.getSession(parent.id)!.parentControlPolicy!.decisions, pr_merge: "human" as const };
     assert.ok(svc.setParentControlPolicy(parent.id, decisions, currentRevision).ok);
+    assert.equal(db.workflowDecisionByOccurrence(delegatedMerge.data.occurrenceId)?.status, "revoked",
+      "a root policy change revokes a nested child's decision bound to the prior revision");
+    assert.equal(svc.descendantRequests(child.data.id, () => true).status, 403,
+      "a nested Orchestrator cannot retain its copied Parent Control authority");
+    assert.ok(svc.setParentControl(parent.id, "off").ok);
+    assert.equal(svc.descendantRequests(child.data.id, () => true).status, 403,
+      "turning root Parent Control off cannot be bypassed through a nested Orchestrator");
+    const humanMerge = svc.createWorkflowDecision(grandchild.data.id, {
+      requestId: "nested-merge-after-revocation", resourceKey: "picoduck/wollipog#1091-new-head",
+      resourceSnapshot: { ...mergeSnapshot, headSha: "b".repeat(40),
+        requiredChecks: { ...mergeSnapshot.requiredChecks, headSha: "b".repeat(40) } },
+    });
+    assert.ok(humanMerge.ok && humanMerge.data, humanMerge.error);
+    assert.equal(humanMerge.data.controllingSessionId, parent.id);
+    assert.equal(humanMerge.data.authority, "human");
+    const nestedProjection = db.campaignProjection(child.data.id);
+    assert.equal(nestedProjection?.policyRevision, db.getSession(parent.id)?.parentControlPolicy?.revision,
+      "a nested Orchestrator projects the root campaign's current revision");
+    assert.equal(nestedProjection?.decisionOwners.pr_merge, "human",
+      "a nested Orchestrator cannot project its stale copied decision owner");
+    assert.equal(nestedProjection?.status, "waiting_human",
+      "a root-owned pending grandchild decision is visible from a nested Orchestrator");
+    assert.ok(svc.resolveWorkflowDecision(
+      parent.id, grandchild.data.id, humanMerge.data.occurrenceId,
+      { outcome: "approve" }, "human", { kind: "human", id: "owner" }, () => true,
+    ).ok);
+    assert.ok(svc.consumeWorkflowDecision(grandchild.data.id, humanMerge.data.occurrenceId, {
+      resourceSnapshot: { ...mergeSnapshot, headSha: "b".repeat(40),
+        requiredChecks: { ...mergeSnapshot.requiredChecks, headSha: "b".repeat(40) } },
+    }).ok);
+    svc.onSessionStatus(grandchild.data.id, "idle");
+    const nestedReport = db.appendEvent(grandchild.data.id,
+      { kind: "agent_message", text: "Nested verified report", final: true }, Date.now());
+    const latestNestedReport = db.appendEvent(grandchild.data.id,
+      { kind: "agent_message", text: "Latest nested verified report", final: true }, Date.now());
+    assert.equal(svc.verifyCampaignChild(parent.id, {
+      childSessionId: grandchild.data.id, reportEventSeq: nestedReport.seq, followUpsAccounted: true,
+    }).status, 409, "verification cannot attest a stale report when the child has a newer final response");
+    assert.ok(svc.verifyCampaignChild(parent.id, {
+      childSessionId: grandchild.data.id, reportEventSeq: latestNestedReport.seq, followUpsAccounted: true,
+    }).ok);
+    svc.onSessionStatus(grandchild.data.id, "stopped");
+
     assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.delegation.decisions.pr_merge, "human");
     assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.sources.delegation.decisions.pr_merge, "active_campaign");
     assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.sources.delegation.decisions.implementation_question, "user_default");
-    assert.ok(hub.sentOfType("start_session").length >= 2);
+    hub.sessionChangedByIdCalls.length = 0;
+    const firstFollowUp = svc.recordCampaignFollowUp(parent.id, {
+      originSessionId: child.data.id, repository: "picoduck/wollipog", title: "Bounded Follow-Up",
+    });
+    const duplicateFollowUp = svc.recordCampaignFollowUp(parent.id, {
+      originSessionId: child.data.id, repository: "PICODUCK/WOLLIPOG", title: "  bounded   follow-up ",
+      recommendationKey: "different-caller-key",
+    });
+    assert.equal(firstFollowUp.data?.executionDisposition, "recommend_only_stop", "Recommend Only stops before execution");
+    assert.equal(duplicateFollowUp.data?.duplicate, true, "normalized repository and title deduplicate across caller ids");
+    assert.deepEqual(hub.sessionChangedByIdCalls, [parent.id, parent.id],
+      "each persisted follow-up refreshes the campaign summary for connected clients");
+    db.setWorktreePath(child.data.id, `/worktrees/${child.data.id}`);
+    db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?").run(JSON.stringify([{
+      id: "campaign-worktree", path: `/worktrees/${child.data.id}`, branch: "fix/campaign-child", source: "created",
+    }]), child.data.id);
+    svc.onSessionStatus(child.data.id, "idle");
+    const report = db.appendEvent(child.data.id, { kind: "agent_message", text: "Verified report", final: true }, Date.now());
+    const completion = svc.verifyCampaignChild(parent.id, {
+      childSessionId: child.data.id, reportEventSeq: report.seq, followUpsAccounted: true,
+    });
+    assert.ok(completion.ok, completion.error);
+    assert.equal(completion.data?.child.archiveStatus, "stop_pending");
+    assert.equal(completion.data?.campaign.children.cleanupPending, 1,
+      "Stop and Archive remains active until lifecycle and worktree cleanup are proven");
+    svc.onSessionStatus(child.data.id, "stopped");
+    assert.notEqual(db.campaignProjection(parent.id)?.status, "verified_complete",
+      "a stopped child with a retained worktree is not campaign-complete");
+    db.raw().prepare("UPDATE sessions SET archived=1, worktree_path=NULL, worktrees='[]' WHERE id=?")
+      .run(child.data.id);
+    assert.equal(db.campaignProjection(parent.id)?.status, "verified_complete");
+    assert.deepEqual(db.campaignProjection(parent.id)?.followUps, {
+      unique: 1, duplicates: 1,
+    });
+    let failedChild = svc.createSession(childRequest, undefined, undefined, false, false, false, {
+      parentSessionId: parent.id,
+    });
+    if (failedChild.status === 428) {
+      const approval = db.getSession(parent.id)!.pendingApproval!;
+      assert.ok(svc.approve(parent.id, approval.requestId, "allow").ok);
+      failedChild = svc.createSession(childRequest, undefined, undefined, false, false, false, {
+        parentSessionId: parent.id,
+      });
+    }
+    assert.ok(failedChild.ok && failedChild.data, failedChild.error);
+    svc.onSessionStatus(failedChild.data.id, "failed");
+    assert.equal(db.campaignProjection(parent.id)?.status, "blocked",
+      "an unverified failed child blocks campaign completion without stalling unrelated work");
+    const emptyChildRequest = {
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
+    };
+    let emptyChild = svc.createSession(emptyChildRequest, undefined, undefined, false, false, false, {
+      parentSessionId: parent.id,
+    });
+    if (emptyChild.status === 428) {
+      const approval = db.getSession(parent.id)!.pendingApproval!;
+      assert.ok(svc.approve(parent.id, approval.requestId, "allow").ok);
+      emptyChild = svc.createSession(emptyChildRequest, undefined, undefined, false, false, false, {
+        parentSessionId: parent.id,
+      });
+    }
+    assert.ok(emptyChild.ok && emptyChild.data, emptyChild.error);
+    const emptyStart = hub.sentOfType("start_session")
+      .find((message) => message.spec.sessionId === emptyChild.data!.id);
+    assert.equal(emptyStart?.initialPrompt, undefined,
+      "creating a campaign child without a task does not start a policy-only billed turn");
+    svc.onSessionStatus(emptyChild.data.id, "idle");
+    assert.ok(svc.prompt(emptyChild.data.id, "", [{
+      mimeType: "image/png",
+      data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    }]).ok);
+    const firstPrompt = hub.sentOfType("prompt_session")
+      .find((message) => message.sessionId === emptyChild.data!.id)?.text ?? "";
+    assert.match(firstPrompt, /Wollipog Campaign Policy — server-derived/);
+    assert.equal(hub.sentOfType("prompt_session")
+      .find((message) => message.sessionId === emptyChild.data!.id)?.images?.length, 1,
+    "an image-only first assignment retains its attachment alongside the campaign policy");
+    svc.onSessionStatus(emptyChild.data.id, "idle");
+    const retainedReport = db.appendEvent(emptyChild.data.id,
+      { kind: "agent_message", text: "Retained report", final: true }, Date.now());
+    db.verifyCampaignChildReport(parent.id, emptyChild.data.id, retainedReport.seq, Date.now());
+    hub.deliver = false;
+    assert.equal(svc.prompt(emptyChild.data.id, "Undelivered follow-on task").status, 409);
+    assert.equal(db.campaignChildReportVerified(parent.id, emptyChild.data.id), true,
+      "a prompt rejected at the socket boundary does not erase a valid report attestation");
+    assert.ok(hub.sentOfType("start_session").length >= 4);
   } finally {
     db.close();
   }
@@ -1728,6 +1925,7 @@ test("typed workflow decisions isolate categories and fail closed across stale p
       return created.data;
     };
     const child = createChild(parent.data.id, "Decision Child");
+    const unrelatedChild = createChild(parent.data.id, "Unrelated Active Child");
     const siblingParent = svc.createSession({
       runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
       config: { permissionMode: "orchestrator" },
@@ -1763,6 +1961,9 @@ test("typed workflow decisions isolate categories and fail closed across stale p
     assert.ok(merge.ok && merge.data, merge.error);
     assert.equal(merge.data.authority, "orchestrator");
     assert.equal(merge.data.policyRevision, 1);
+    assert.equal(db.campaignProjection(parent.data.id)?.status, "active",
+      "an Orchestrator-owned merge request remains active while awaiting an exact decision");
+    assert.equal(db.campaignProjection(parent.data.id)?.pendingDecisions.orchestrator, 1);
     assert.equal(db.getSession(child.id)?.pendingApproval?.kind, "workflow_decision");
     svc.onSessionStatus(child.id, "running");
     assert.equal(db.getSession(child.id)?.status, "input_required",
@@ -1828,6 +2029,10 @@ test("typed workflow decisions isolate categories and fail closed across stale p
     });
     assert.ok(publication.ok && publication.data);
     assert.equal(publication.data.authority, "human");
+    assert.equal(db.campaignProjection(parent.data.id)?.status, "waiting_human",
+      "a pending human-owned typed decision is visible as campaign waiting state");
+    assert.ok((db.campaignProjection(parent.data.id)?.children.active ?? 0) >= 1,
+      "unrelated children remain active while one child waits for a human-owned gate");
     assert.deepEqual(svc.descendantRequests(parent.data.id, () => true).data?.requests, [],
       "a human-owned category is isolated from the Orchestrator inbox");
     assert.equal(svc.resolveDescendantRequest(parent.data.id, child.id, publication.data.occurrenceId,
@@ -1846,12 +2051,16 @@ test("typed workflow decisions isolate categories and fail closed across stale p
       requestId: "ui-1", resourceKey: "pr-123-ui", resourceSnapshot: uiSnapshot,
     });
     assert.ok(ui.ok && ui.data);
+    assert.equal(ui.data.authority, "human", "UI review fails closed when the Orchestrator cannot inspect evidence bytes");
     assert.equal(svc.resolveDescendantRequest(parent.data.id, child.id, ui.data.occurrenceId,
-      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).status, 400,
-    "an Orchestrator cannot claim UI approval without identifying inspected evidence");
-    assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, ui.data.occurrenceId, {
-      action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ["after"],
-    }, () => true).ok);
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).status, 403,
+    "an Orchestrator cannot claim UI approval when its client cannot inspect evidence");
+    assert.equal(svc.resolveWorkflowDecision(parent.data.id, child.id, ui.data.occurrenceId,
+      { outcome: "approve" }, "human", { kind: "human", id: "owner" }, () => true).status, 400,
+    "the human still identifies the exact evidence reviewed");
+    assert.ok(svc.resolveWorkflowDecision(parent.data.id, child.id, ui.data.occurrenceId,
+      { outcome: "approve", evidenceReviewed: ["after"] }, "human",
+      { kind: "human", id: "owner" }, () => true).ok);
 
     const pending = svc.createWorkflowDecision(child.id, {
       requestId: "merge-revoked", resourceKey: "picoduck/wollipog#125",
@@ -1967,7 +2176,7 @@ test("typed workflow decisions isolate categories and fail closed across stale p
     svc.failRunnerSessions(RUNNER_ID);
     assert.equal(db.getSession(child.id)?.pendingApproval, null,
       "a provisional disconnect clears the session projection");
-    svc.reconcileRunnerSessions(RUNNER_ID, [parent.data.id, child.id, siblingParent.data.id]);
+    svc.reconcileRunnerSessions(RUNNER_ID, [parent.data.id, child.id, unrelatedChild.id, siblingParent.data.id]);
     assert.equal(db.getSession(child.id)?.pendingApproval?.requestId, reconnect.data.occurrenceId,
       "reconnect restores the server-owned request without minting a new occurrence");
     assert.equal(db.policyResumeStatus(child.id), "idle",

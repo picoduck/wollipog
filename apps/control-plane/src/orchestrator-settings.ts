@@ -118,7 +118,8 @@ function mergeModels(installations: AgentCapabilities[]): AgentModel[] {
 
 export function resolveOrchestratorCampaignPolicy(
   defaults: OrchestratorDefaults,
-  baseSource: Extract<OrchestratorPolicySource, "system_default" | "user_default" | "legacy_session">,
+  baseSource: Extract<OrchestratorPolicySource,
+    "system_default" | "user_default" | "legacy_session" | "active_campaign">,
   overrides: OrchestratorCampaignOverrides = {},
 ): OrchestratorCampaignPolicy {
   const behavior = { ...defaults.behavior, ...(overrides.behavior ?? {}) };

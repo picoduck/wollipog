@@ -154,14 +154,16 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 139", () => {
-  assert.equal(PROTOCOL_VERSION, 139);
+test("PROTOCOL_VERSION is 140", () => {
+  assert.equal(PROTOCOL_VERSION, 140);
   assert.equal(runnerSupportsProtocol(136, "capacityLockDiagnostics"), false);
   assert.equal(runnerSupportsProtocol(137, "capacityLockDiagnostics"), true);
   assert.equal(runnerSupportsProtocol(137, "sessionAgentControlReasoningEffort"), false);
   assert.equal(runnerSupportsProtocol(138, "sessionAgentControlReasoningEffort"), true);
   assert.equal(runnerSupportsProtocol(138, "typedWorkflowDecisionDelegation"), false);
   assert.equal(runnerSupportsProtocol(139, "typedWorkflowDecisionDelegation"), true);
+  assert.equal(runnerSupportsProtocol(139, "orchestratorCampaignManagement"), false);
+  assert.equal(runnerSupportsProtocol(140, "orchestratorCampaignManagement"), true);
   assert.equal(runnerSupportsProtocol(134, "runnerCapacityDimensions"), false);
   assert.equal(runnerSupportsProtocol(135, "runnerCapacityDimensions"), true);
   assert.equal(runnerSupportsProtocol(131, "machineRunnerCapacity"), false);

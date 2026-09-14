@@ -6227,12 +6227,18 @@ export function ComposerPlusMenu({
                     <strong>Campaign Behavior</strong>
                     <span className="muted">This campaign keeps its stored policy when account defaults change.</span>
                     <dl>
+                      {session.orchestratorCampaign && <div><dt>Campaign Status</dt><dd>{session.orchestratorCampaign.status === "waiting_human" ? "Waiting for Human" : titleCaseLabel(session.orchestratorCampaign.status.replaceAll("_", " "))}<small>Policy Revision {session.orchestratorCampaign.policyRevision}</small></dd></div>}
                       <div><dt>Child Model</dt><dd>{session.orchestratorPolicy.behavior.childModel ?? "Automatic"}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.childModel.replaceAll("_", " "))}</small></dd></div>
                       <div><dt>Child Effort</dt><dd>{session.orchestratorPolicy.behavior.childEffort ? titleCaseLabel(session.orchestratorPolicy.behavior.childEffort) : "Automatic"}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.childEffort.replaceAll("_", " "))}</small></dd></div>
                       <div><dt>Maximum Concurrent Children</dt><dd>{session.orchestratorPolicy.behavior.maximumConcurrentChildren}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.maximumConcurrentChildren.replaceAll("_", " "))}</small></dd></div>
                       <div><dt>Follow-Ups</dt><dd>{titleCaseLabel(session.orchestratorPolicy.behavior.followUps.replaceAll("_", " "))}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.followUps.replaceAll("_", " "))}</small></dd></div>
                       <div><dt>Completion</dt><dd>{titleCaseLabel(session.orchestratorPolicy.behavior.completion.replaceAll("_", " "))}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.completion.replaceAll("_", " "))}</small></dd></div>
+                      {session.orchestratorCampaign && <>
+                        <div><dt>Children</dt><dd>{session.orchestratorCampaign.children.total}<small>{session.orchestratorCampaign.children.verified} Verified · {session.orchestratorCampaign.children.active} Active · {session.orchestratorCampaign.children.waitingHuman} Waiting for Human · {session.orchestratorCampaign.children.blocked} Blocked</small></dd></div>
+                        <div><dt>Follow-Up Recommendations</dt><dd>{session.orchestratorCampaign.followUps.unique}<small>{session.orchestratorCampaign.followUps.duplicates} Duplicates Skipped</small></dd></div>
+                      </>}
                     </dl>
+                    {session.orchestratorCampaign?.uiEvidenceReview.status === "unavailable" && <span className="muted" role="status">UI evidence is routed to a human because this Orchestrator client cannot inspect the evidence bytes.</span>}
                   </section>}
                   <div className="parent-control-setting">
                     <span className="parent-control-setting-label">Descendant Requests</span>

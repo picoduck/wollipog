@@ -82,6 +82,7 @@ test("orchestrator MCP lists only management tools and rejects hidden mutations 
   assert.ok(names.includes("create_session"));
   assert.ok(names.includes("list_governance_policies"));
   for (const name of [
+    "get_campaign", "record_campaign_follow_up", "verify_campaign_child",
     "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
     "resolve_descendant_approval", "resolve_descendant_workflow_decision",
   ]) assert.ok(names.includes(name), name);
@@ -686,6 +687,37 @@ test("get_session -> GET /api/sessions/:id", async () => {
   assert.equal(calls[0]!.method, "GET");
   assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/s_9`);
   assert.equal(resultJson(result).session.id, "s_9");
+});
+
+test("campaign tools read policy state, deduplicate follow-ups, and verify exact reports", async () => {
+  const campaign = {
+    status: "waiting_human",
+    policyRevision: 4,
+    decisionOwners: { pr_merge: "human" },
+    limits: { maximumConcurrentChildren: 3, occupied: 2, remaining: 1, costBudgetUsd: 5, maxToolCalls: 20 },
+  };
+  const { deps, calls } = makeDeps((call) => {
+    if (call.url.endsWith("/orchestrator-campaign") && call.method === "GET") return { status: 200, body: campaign };
+    if (call.url.endsWith("/follow-ups")) return { status: 201, body: { id: "followup_1", duplicate: true, executionDisposition: "duplicate_stop" } };
+    if (call.url.endsWith("/verify-child")) return { status: 202, body: { campaign, child: { id: "s_child", archiveStatus: "stop_pending" } } };
+    return { status: 404, body: { error: "unexpected" } };
+  });
+  deps.orchestrator = true;
+  assert.deepEqual(resultJson(await callTool(deps, "get_campaign")).campaign, campaign);
+  const followUp = resultJson(await callTool(deps, "record_campaign_follow_up", {
+    originSessionId: "s_child", repository: "picoduck/wollipog", title: "Bounded Fix", recommendationKey: "key",
+  })).followUp;
+  assert.equal(followUp.duplicate, true);
+  const verified = resultJson(await callTool(deps, "verify_campaign_child", {
+    childSessionId: "s_child", reportEventSeq: 12, followUpsAccounted: true,
+  }));
+  assert.equal(verified.child.archiveStatus, "stop_pending");
+  assert.deepEqual(calls[1]!.body, {
+    originSessionId: "s_child", repository: "picoduck/wollipog", title: "Bounded Fix", recommendationKey: "key",
+  });
+  assert.deepEqual(calls[2]!.body, {
+    childSessionId: "s_child", reportEventSeq: 12, followUpsAccounted: true,
+  });
 });
 
 test("get_session redacts pendingApproval to its title and caps the preview (no requestId to replay)", async () => {
