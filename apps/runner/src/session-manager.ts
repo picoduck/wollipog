@@ -1253,10 +1253,13 @@ export class SessionManager {
 
   private ensureWorktreeProcessMarker(meta: SessionMeta, worktree: SessionWorktreeView): string | undefined {
     if (worktree.source === "attached") return undefined;
-    const existing = meta.worktreeProcessMarkers?.[worktree.id];
+    // Setup and shell-open callers may have crossed awaits with an older SessionMeta object. Merge
+    // against the latest durable map so one worktree can never erase another worktree's marker.
+    const latest = this.store.readMeta(meta.sessionId) ?? meta;
+    const existing = latest.worktreeProcessMarkers?.[worktree.id];
     if (existing) return existing;
     const marker = randomUUID();
-    const worktreeProcessMarkers = { ...(meta.worktreeProcessMarkers ?? {}), [worktree.id]: marker };
+    const worktreeProcessMarkers = { ...(latest.worktreeProcessMarkers ?? {}), [worktree.id]: marker };
     meta.worktreeProcessMarkers = worktreeProcessMarkers;
     this.store.patchMeta(meta.sessionId, { worktreeProcessMarkers });
     return marker;
@@ -9839,6 +9842,10 @@ export class SessionManager {
           baseCommit: baseRef,
           source: "legacy",
         }],
+        // Hooks and descendant markers are identities of the source worktree, not conversation
+        // history. The fork snapshots its own trusted config and creates its own process boundary.
+        worktreeHooks: undefined,
+        worktreeProcessMarkers: undefined,
         agentSessionId: forkedThreadId,
         status: "idle",
         tokensIn: 0,

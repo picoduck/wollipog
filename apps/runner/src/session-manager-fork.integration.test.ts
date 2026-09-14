@@ -174,6 +174,10 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
       costUsd: 0,
       preview: null,
       pendingApproval: null,
+      worktreeHooks: {
+        legacy: { configHash: "source-only-config", environment: {}, teardown: [] },
+      },
+      worktreeProcessMarkers: { legacy: "source-only-process-marker" },
       turnCount: 1,
       forkPoints: { "1": { agentTurnId: "turn-1", tree, baseCommit, eventSeq: 3 } },
       seq: 0,
@@ -251,6 +255,13 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     const target = store.readMeta("s_target")!;
     assert.equal(target.agentSessionId, "thread-forked");
     assert.equal(target.preview, null);
+    assert.equal(target.worktreeHooks, undefined, "a fork never inherits the source worktree's teardown identity");
+    assert.ok(target.worktreeProcessMarkers?.legacy, "fork setup stamps its own process boundary");
+    assert.notEqual(
+      target.worktreeProcessMarkers.legacy,
+      source.worktreeProcessMarkers?.legacy,
+      "a fork never inherits the source process boundary",
+    );
     assert.equal(target.forkPoints?.["1"]?.eventSeq, 2, "fork point is re-based to the child's event seq space");
     assert.equal(racedPrompts, 0, "a prompt arriving during fork setup is fenced");
     assert.match(

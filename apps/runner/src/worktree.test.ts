@@ -1015,6 +1015,43 @@ test("superseded launch rollback preserves a replacement generation reusing the 
   }
 });
 
+test("a stale worktree view cannot erase another worktree's process marker", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-marker-merge-"));
+  let manager: SessionManager | undefined;
+  try {
+    const sessionId = "s_marker_merge";
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({
+      sessionId, agentId: "claude", workspaceId: "repo", repoPath: join(root, "repo"),
+      worktreePath: join(root, "one"), worktreeBranch: "agent/one",
+      worktrees: [
+        { id: "one", path: join(root, "one"), branch: "agent/one", source: "created" },
+        { id: "two", path: join(root, "two"), branch: "agent/two", source: "created" },
+      ],
+      driver: "claude-code", command: "claude", args: [], env: {}, context: { kind: "native" },
+      agentSessionId: null, status: "idle", title: "marker merge", config: {}, tokensIn: 0,
+      tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null, seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    const stale = store.readMeta(sessionId)!;
+    store.patchMeta(sessionId, { worktreeProcessMarkers: { two: "marker-two" } });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, root);
+    const internals = manager as unknown as {
+      ensureWorktreeProcessMarker(meta: SessionMeta, worktree: SessionWorktreeView): string | undefined;
+    };
+
+    const markerOne = internals.ensureWorktreeProcessMarker(stale, stale.worktrees![0]);
+
+    assert.ok(markerOne);
+    assert.deepEqual(store.readMeta(sessionId)?.worktreeProcessMarkers, {
+      two: "marker-two",
+      one: markerOne,
+    });
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("safe cleanup retains unreadable live metadata without deadlocking its worktree lane", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-safe-cleanup-corrupt-meta-"));
   const dataDir = join(root, "data");
