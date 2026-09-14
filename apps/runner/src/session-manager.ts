@@ -1937,7 +1937,7 @@ export class SessionManager {
               "force",
             );
             this.cleanupJournal.add(cleanup);
-            await this.reapWorktree(cleanup, true, cleanupMeta);
+            await this.reapCreationRollback(cleanup, cleanupMeta);
             this.forgetTransientWorktreeSetupState(sessionId, worktree);
           } catch {
             this.log(`requested worktree cleanup for ${boundedSessionIdForLog(sessionId)} needs operator attention`);
@@ -2574,6 +2574,10 @@ export class SessionManager {
 
   private async removeRecordedWorktree(record: WorktreeCleanupRecord, meta?: SessionMeta): Promise<SafeWorktreeDiscardResult> {
     const beforeRemove = async () => {
+      if (this.providerTurnUsesPath(record.sessionId, record.context, record.worktreePath) ||
+          this.transitioningProviderUsesPath(record.sessionId, record.context, record.worktreePath)) {
+        throw new Error("the worktree became active in a provider turn while cleanup was proving safety");
+      }
       record.processTerminationStartedAt ??= Date.now();
       this.cleanupJournal.add(record);
       await this.retireWorktreeProcesses(
@@ -10573,6 +10577,12 @@ export class SessionManager {
     cleanupCurrentGeneration = false,
     isolationMeta?: SessionMeta,
   ): Promise<void> {
+    if (record.trigger === "creation_rollback" && this.store.has(record.sessionId)) {
+      await this.runWorktreeOperation(record.sessionId, async () => {
+        await this.reapCreationRollback(record, this.store.readMeta(record.sessionId) ?? undefined);
+      });
+      return;
+    }
     if (record.removalMode === "safe" && this.store.has(record.sessionId)) {
       await this.reapLiveSafeWorktree(record);
       return;
@@ -10650,6 +10660,22 @@ export class SessionManager {
     this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after ${failedPhases}`);
   }
 
+  /** A newly created worktree that never activated owns no conversation checkpoints. Reclaim its
+   * own processes, hooks, directory, branch, and port without entering the session-wide orphan
+   * lane, both synchronously and when replaying a crash-journaled creation rollback. */
+  private async reapCreationRollback(record: WorktreeCleanupRecord, meta?: SessionMeta): Promise<void> {
+    if (!record.worktreeRemovedAt) {
+      const removal = await this.removeRecordedWorktree(record, meta);
+      if (!removal.removed) {
+        this.log(`requested worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after worktree removal`);
+        return;
+      }
+      record.worktreeRemovedAt = Date.now();
+      this.cleanupJournal.add(record);
+    }
+    this.finishWorktreeCleanup(record);
+  }
+
   /** Resume an interrupted explicit or post-merge cleanup without treating its still-live session
    * as a replacement generation. The safe lane never reclaims checkpoint refs: those belong to
    * the live conversation, even when its selected worktree is being retired. */
@@ -10657,7 +10683,7 @@ export class SessionManager {
     await this.runWorktreeOperation(record.sessionId, async () => {
       const meta = this.store.readMeta(record.sessionId);
       if (!meta) {
-        await this.reapWorktree(record);
+        this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after live session metadata became unreadable`);
         return;
       }
       const worktree = this.attributedWorktrees(meta).find((item) =>

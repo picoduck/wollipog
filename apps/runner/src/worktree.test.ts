@@ -873,6 +873,93 @@ test("startup resumes safe cleanup for a live session without deleting its check
   }
 });
 
+test("failed requested-worktree creation preserves the live session's checkpoint refs", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-create-rollback-refs-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const sessionId = "s_create_rollback_refs";
+    const checkpointRef = `refs/wollipog/${sessionId}/turn-1`;
+    execFileSync("git", ["-C", repo, "update-ref", checkpointRef, "HEAD"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId, agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "rollback",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const internals = manager as unknown as {
+      checkpointRefOwnership: {
+        claim: (claim: { sessionId: string; repoPath: string; context: { kind: "native" } }) => unknown;
+        listSession: (id: string) => unknown[];
+      };
+      prepareWorktreeSetup: () => Promise<never>;
+    };
+    internals.checkpointRefOwnership.claim({ sessionId, repoPath: repo, context: { kind: "native" } });
+    internals.prepareWorktreeSetup = async () => { throw new Error("injected setup preparation failure"); };
+
+    await assert.rejects(
+      manager.requestWorktree(sessionId, { baseRef: "HEAD", branch: "fix/rollback-ref-safety" }),
+      /injected setup preparation failure/,
+    );
+    execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", checkpointRef]);
+    assert.equal(internals.checkpointRefOwnership.listSession(sessionId).length, 1,
+      "creation rollback leaves the live session's checkpoint ownership intact");
+    const receipt = new WorktreeCleanupJournal(dataDir).history()
+      .find((entry) => entry.trigger === "creation_rollback");
+    assert.ok(receipt?.worktreeRemovedAt, "only the failed worktree reaches a completed cleanup receipt");
+    assert.equal(existsSync(receipt.worktreePath), false);
+    assert.deepEqual(new WorktreeCleanupJournal(dataDir).list(), []);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("safe cleanup retains unreadable live metadata without deadlocking its worktree lane", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-safe-cleanup-corrupt-meta-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const sessionId = "s_corrupt_safe_cleanup";
+    const sessionDir = join(dataDir, "sessions", sessionId);
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(join(sessionDir, "meta.json"), "{not-json");
+    new WorktreeCleanupJournal(dataDir).add({
+      sessionId,
+      worktreeId: "created",
+      repoPath: join(root, "repo"),
+      worktreePath: join(root, "worktree"),
+      context: { kind: "native" },
+      branch: "fix/corrupt-safe-cleanup",
+      source: "created",
+      trigger: "explicit_discard",
+      removalMode: "safe",
+      createdAt: Date.now(),
+    });
+    const logs: string[] = [];
+    const store = new SessionStore(join(dataDir, "sessions"));
+    manager = new SessionManager(() => {}, (line) => logs.push(line), store, "runner", undefined, undefined, dataDir);
+    manager.reconcileStore();
+    await waitForCondition(
+      () => logs.some((line) => line.includes("live session metadata became unreadable")),
+      "safe cleanup did not report unreadable live metadata",
+    );
+    await waitForCondition(
+      () => !(manager as unknown as { worktreeOperations: Map<string, unknown> }).worktreeOperations.has(sessionId),
+      "safe cleanup recursively deadlocked its own worktree lane",
+    );
+    assert.equal(new WorktreeCleanupJournal(dataDir).list().length, 1,
+      "unreadable metadata retains the cleanup proof for repair and retry");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("session deletion removes its external worktree and durable store row", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-delete-wt-"));
   const repo = join(root, "repo");
@@ -1219,7 +1306,7 @@ test("PR reconciliation defers cleanup until the provider turn leaves the worktr
         : item),
     });
     const activeEntries = (manager as unknown as { active: Map<string, unknown> }).active;
-    activeEntries.set("s_pr_turn_cleanup", {
+    const active = {
       sessionId: "s_pr_turn_cleanup",
       context: { kind: "native" },
       cwd: merged.worktree.path,
@@ -1228,13 +1315,29 @@ test("PR reconciliation defers cleanup until the provider turn leaves the worktr
       queue: [],
       reservedPromotions: new Map(),
       client: { dispose: () => {} },
-    });
+    };
+    activeEntries.set("s_pr_turn_cleanup", active);
 
     await manager.reconcileWorktreePullRequests();
     assert.equal(existsSync(merged.worktree.path), true, "automatic cleanup does not interrupt an in-flight turn");
     assert.equal(activeEntries.has("s_pr_turn_cleanup"), true, "the provider remains alive to finish its reply");
     assert.equal(new WorktreeCleanupJournal(dataDir).list().length, 0, "deferral creates no destructive intent");
 
+    active.running = false;
+    const internals = manager as unknown as { discardSessionWorktreeIfSafe: typeof discardWorktreeIfSafe };
+    const originalDiscard = internals.discardSessionWorktreeIfSafe;
+    internals.discardSessionWorktreeIfSafe = async (...args) => {
+      active.running = true;
+      return originalDiscard(...args);
+    };
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(existsSync(merged.worktree.path), true,
+      "a turn that starts during Git safety proof is fenced before provider retirement");
+    assert.equal(activeEntries.has("s_pr_turn_cleanup"), true);
+    assert.equal(new WorktreeCleanupJournal(dataDir).list().length, 0,
+      "the final turn fence removes an unstarted cleanup intent");
+
+    internals.discardSessionWorktreeIfSafe = originalDiscard;
     activeEntries.delete("s_pr_turn_cleanup");
     await manager.reconcileWorktreePullRequests();
     assert.equal(existsSync(merged.worktree.path), false, "the same terminal worktree is removed after the turn settles");
