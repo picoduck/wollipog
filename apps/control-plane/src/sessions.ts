@@ -6935,6 +6935,9 @@ export class SessionsService {
     this.db.deleteSession(session.id);
     this.hub.sessionRemoved(session.id);
     this.publishCampaignAttentionTransition(campaignBefore);
+    if (session.parentSessionId && session.parentSessionId !== campaignBefore?.id) {
+      this.hub.sessionChangedById(session.parentSessionId);
+    }
     for (const pod of pods) {
       const updatedPod = this.db.reconcilePodAfterMembershipLoss(pod.id, Date.now());
       if (updatedPod) this.hub.podChanged(updatedPod);

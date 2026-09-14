@@ -1449,10 +1449,25 @@ export interface OrchestratorCampaignProjection {
   pendingRequests?: {
     human: number;
     orchestrator: number;
-    /** Content-free identity for detecting same-count human request replacement. */
-    humanRevision?: string;
+    /** Content-free identities for detecting additions without treating removals as new work. */
+    humanRequestTokens?: string[];
   };
   followUps: { unique: number; duplicates: number };
+}
+
+/** True only when a campaign gains human work. Exact content-free identities distinguish a
+ * same-count replacement from a partial clear; count comparison preserves mixed-version safety. */
+export function campaignHumanAttentionAdded(
+  previous: OrchestratorCampaignProjection["pendingRequests"] | undefined,
+  next: OrchestratorCampaignProjection["pendingRequests"] | undefined,
+): boolean {
+  if ((next?.human ?? 0) <= 0) return false;
+  if (previous?.humanRequestTokens && previous.humanRequestTokens.length === previous.human &&
+      next?.humanRequestTokens && next.humanRequestTokens.length === next.human) {
+    const existing = new Set(previous.humanRequestTokens);
+    return next.humanRequestTokens.some((token) => !existing.has(token));
+  }
+  return (next?.human ?? 0) > (previous?.human ?? 0);
 }
 
 export interface RecordOrchestratorFollowUpRequest {

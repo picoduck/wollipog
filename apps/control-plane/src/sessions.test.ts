@@ -2038,6 +2038,13 @@ test("opt-in Parent Control resolves exact nested request occurrences with agent
     const grandchild = createChild(child.id, "Grandchild");
     const nestedOrchestrator = createChild(parent.data.id, "Nested Orchestrator", true);
     const nestedGrandchild = createChild(nestedOrchestrator.id, "Nested Grandchild");
+    const deletedGrandchild = createChild(nestedOrchestrator.id, "Deleted Grandchild");
+    hub.sessionChangedByIdCalls.length = 0;
+    assert.ok(svc.delete(deletedGrandchild.id).ok);
+    assert.ok(hub.sessionChangedByIdCalls.includes(nestedOrchestrator.id),
+      "deleting a child refreshes its immediate parent's child-derived projection");
+    assert.ok(hub.sessionChangedByIdCalls.includes(parent.data.id),
+      "deleting a nested campaign child also refreshes the outermost campaign");
     const campaignOutboundCalls: Array<{ campaignSessionId: string; childSessionId: string; occurrenceId: string }> = [];
     const recordCampaignOutbound = db.recordOutboundCampaignInputRequired.bind(db);
     db.recordOutboundCampaignInputRequired = ((input) => {

@@ -12544,7 +12544,8 @@ export class ControlPlaneDb {
       ...(resolvedCampaignId === campaignSessionId ? { pendingRequests: {
         human: pendingHuman.length + pendingGenericHuman,
         orchestrator: pendingOrchestrator.length + pendingGenericOrchestrator,
-        humanRevision: createHash("sha256").update(humanRequestKeys.sort().join("\n")).digest("hex").slice(0, 16),
+        humanRequestTokens: humanRequestKeys.map((key) =>
+          createHash("sha256").update(key).digest("hex")).sort(),
       } } : {}),
       followUps: {
         unique: Number(followUps.unique_count ?? 0),

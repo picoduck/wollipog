@@ -680,14 +680,22 @@ test("pushDecision wakes an idle campaign only for newly added human-owned reque
 });
 
 test("pushDecision wakes an idle campaign when a human request is replaced at the same count", () => {
-  const campaign = (humanRevision: string) => ({
-    pendingRequests: { human: 1, orchestrator: 0, humanRevision },
+  const campaign = (humanRequestTokens: string[]) => ({
+    pendingRequests: { human: humanRequestTokens.length, orchestrator: 0, humanRequestTokens },
   }) as SessionView["orchestratorCampaign"];
-  const previous = view("idle", { orchestratorCampaign: campaign("request-a") });
-  const next = view("idle", { orchestratorCampaign: campaign("request-b") });
+  const previous = view("idle", { orchestratorCampaign: campaign(["request-a"]) });
+  const next = view("idle", { orchestratorCampaign: campaign(["request-b"]) });
   assert.equal(pushDecision(previous, next)?.urgency, "high");
   assert.equal(pushDecision(next, next), null);
+  assert.equal(pushDecision(campaignView(["request-a", "request-b"]), campaignView(["request-b"])), null,
+    "partially clearing human work does not create a new alert");
 });
+
+function campaignView(humanRequestTokens: string[]): SessionView {
+  return view("idle", { orchestratorCampaign: {
+    pendingRequests: { human: humanRequestTokens.length, orchestrator: 0, humanRequestTokens },
+  } as SessionView["orchestratorCampaign"] });
+}
 
 test("pushDecision does not notify for an Orchestrator-owned child request", () => {
   const previous = view("running");

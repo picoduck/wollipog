@@ -1,4 +1,9 @@
-import { pendingRequests, sessionAttentionStatus, type SessionView } from "@wollipog/protocol";
+import {
+  campaignHumanAttentionAdded,
+  pendingRequests,
+  sessionAttentionStatus,
+  type SessionView,
+} from "@wollipog/protocol";
 import type { AttentionTarget } from "./navigation.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "./instance-storage.js";
 
@@ -31,11 +36,7 @@ export function notifyDecision(prev: SessionView | undefined, next: SessionView)
   if (!prev) return null;
   const previousCampaignRequests = prev.orchestratorCampaign?.pendingRequests;
   const nextCampaignRequests = next.orchestratorCampaign?.pendingRequests;
-  const campaignAttentionAdded = (nextCampaignRequests?.human ?? 0) > 0 && (
-    previousCampaignRequests?.humanRevision && nextCampaignRequests?.humanRevision
-      ? previousCampaignRequests.humanRevision !== nextCampaignRequests.humanRevision
-      : (nextCampaignRequests?.human ?? 0) > (previousCampaignRequests?.human ?? 0)
-  );
+  const campaignAttentionAdded = campaignHumanAttentionAdded(previousCampaignRequests, nextCampaignRequests);
   const replacedAttention = next.status === "input_required" && prev.status === "input_required" &&
     prev.pendingApproval?.requestId !== next.pendingApproval?.requestId;
   if (prev.status === next.status && !replacedAttention && !campaignAttentionAdded) return null;

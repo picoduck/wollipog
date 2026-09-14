@@ -32,13 +32,16 @@ test("idle Orchestrator campaigns notify when a new human-owned request appears"
 });
 
 test("idle Orchestrator campaigns notify when a human request is replaced at the same count", () => {
-  const campaign = (humanRevision: string) => ({
-    pendingRequests: { human: 1, orchestrator: 0, humanRevision },
+  const campaign = (humanRequestTokens: string[]) => ({
+    pendingRequests: { human: humanRequestTokens.length, orchestrator: 0, humanRequestTokens },
   }) as SessionView["orchestratorCampaign"];
-  const previous = session({ status: "idle", orchestratorCampaign: campaign("request-a") });
-  const next = session({ status: "idle", orchestratorCampaign: campaign("request-b") });
+  const previous = session({ status: "idle", orchestratorCampaign: campaign(["request-a"]) });
+  const next = session({ status: "idle", orchestratorCampaign: campaign(["request-b"]) });
   assert.match(notifyDecision(previous, next)?.title ?? "", /needs your input/);
   assert.equal(notifyDecision(next, next), null);
+  const two = session({ status: "idle", orchestratorCampaign: campaign(["request-a", "request-b"]) });
+  assert.equal(notifyDecision(two, next), null,
+    "partially clearing human work does not create a new browser notification");
 });
 
 test("running -> input_required notifies with the approval title", () => {

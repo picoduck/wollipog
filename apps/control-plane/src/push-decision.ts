@@ -9,7 +9,13 @@
  * input_required status frame for the same request must stay silent.
  */
 
-import { pendingRequests, sessionAttentionStatus, type SessionStatus, type SessionView } from "@wollipog/protocol";
+import {
+  campaignHumanAttentionAdded,
+  pendingRequests,
+  sessionAttentionStatus,
+  type SessionStatus,
+  type SessionView,
+} from "@wollipog/protocol";
 import type { PushMessage } from "./web-push.js";
 
 const BUSY: SessionStatus[] = ["queued", "starting", "running"];
@@ -37,11 +43,7 @@ export function pushDecision(prev: PushDecisionPrev, next: SessionView): PushMes
   const name = clamp(next.title?.trim() || "Session", 60);
   const previousCampaignRequests = prev.orchestratorCampaign?.pendingRequests;
   const nextCampaignRequests = next.orchestratorCampaign?.pendingRequests;
-  const campaignAttentionAdded = (nextCampaignRequests?.human ?? 0) > 0 && (
-    previousCampaignRequests?.humanRevision && nextCampaignRequests?.humanRevision
-      ? previousCampaignRequests.humanRevision !== nextCampaignRequests.humanRevision
-      : (nextCampaignRequests?.human ?? 0) > (previousCampaignRequests?.human ?? 0)
-  );
+  const campaignAttentionAdded = campaignHumanAttentionAdded(previousCampaignRequests, nextCampaignRequests);
   if (campaignAttentionAdded) {
     return {
       title: `${name} needs your input`,
