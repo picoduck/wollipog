@@ -11,7 +11,9 @@ export function worktreeSetupNoticeSessionIds(
   sessions: Iterable<SessionView>,
   runners: ReadonlyMap<string, RunnerView>,
   dismissedProjectIds: ReadonlySet<string>,
+  controlPlaneSupported = true,
 ): Set<string> {
+  if (!controlPlaneSupported) return new Set();
   const firstByProject = new Map<string, SessionView>();
   for (const session of sessions) {
     if (!session.projectId || !session.worktreePath) continue;

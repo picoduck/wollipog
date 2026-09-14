@@ -31,4 +31,7 @@ test("only the authoritative absent first worktree session is eligible", () => {
 test("older peers and per-user dismissal fail closed", () => {
   assert.equal(worktreeSetupNoticeSessionIds([session("first", 1)], new Map([["r", runner(141)]]), new Set()).size, 0);
   assert.equal(worktreeSetupNoticeSessionIds([session("first", 1)], new Map([["r", runner(PROTOCOL_VERSION)]]), new Set(["p"])).size, 0);
+  assert.equal(worktreeSetupNoticeSessionIds(
+    [session("first", 1)], new Map([["r", runner(PROTOCOL_VERSION)]]), new Set(), false,
+  ).size, 0, "an older control plane never exposes unsupported setup actions");
 });

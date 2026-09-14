@@ -753,10 +753,11 @@ function SessionDetailLoaded({
   const runner = useStoreSelector((s) => s.runners.get(session.runnerId));
   const allSessions = useStoreSelector((s) => s.sessions);
   const allRunners = useStoreSelector((s) => s.runners);
+  const worktreeSetupConfigSupported = useStoreSelector((s) => s.worktreeSetupConfigSupported);
   const setupDismissals = useStoreSelector((s) => s.worktreeSetupNoticeDismissals);
   const showWorktreeSetupNotice = useMemo(() => worktreeSetupNoticeSessionIds(
-    allSessions.values(), allRunners, setupDismissals,
-  ).has(sessionId), [allRunners, allSessions, sessionId, setupDismissals]);
+    allSessions.values(), allRunners, setupDismissals, worktreeSetupConfigSupported,
+  ).has(sessionId), [allRunners, allSessions, sessionId, setupDismissals, worktreeSetupConfigSupported]);
   const activeWorktreeSetupConfig = session.worktreePath
     ? session.worktrees?.find((worktree) => worktree.path === session.worktreePath)?.setupConfig
     : undefined;

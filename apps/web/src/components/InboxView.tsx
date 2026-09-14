@@ -195,6 +195,7 @@ export function InboxView({
   const stalledIndex = useStoreSelector((state) => state.stalledSessionIds);
   const stalledRevision = useStoreSelector((state) => state.stalledRevision);
   const runners = useStoreSelector((state) => state.runners);
+  const worktreeSetupConfigSupported = useStoreSelector((state) => state.worktreeSetupConfigSupported);
   const worktreeSetupNoticeDismissals = useStoreSelector((state) => state.worktreeSetupNoticeDismissals);
   const snapshotLoaded = useStoreSelector((state) => state.snapshotLoaded);
   const inbox = useStoreSelector((state) => state.inbox);
@@ -1186,8 +1187,10 @@ export function InboxView({
   useInboxKeys(!isMobile && !expanded && !boardMode, keyActions);
   const boardSessions = useMemo(() => liveEntries.map((entry) => entry.session), [liveEntries]);
   const setupNoticeSessionIds = useMemo(
-    () => worktreeSetupNoticeSessionIds(sessions.values(), runners, worktreeSetupNoticeDismissals),
-    [sessions, runners, worktreeSetupNoticeDismissals],
+    () => worktreeSetupNoticeSessionIds(
+      sessions.values(), runners, worktreeSetupNoticeDismissals, worktreeSetupConfigSupported,
+    ),
+    [sessions, runners, worktreeSetupNoticeDismissals, worktreeSetupConfigSupported],
   );
   const openGeneratedWorktreeSetup = useCallback((sessionId: string) => {
     selectSession(sessionId, activeSplit?.key ?? null);

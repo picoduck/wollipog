@@ -140,6 +140,7 @@ export function ProjectsView({
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
   const projectLocationCreationSupported = useStoreSelector((state) => state.projectLocationCreationSupported);
   const accessScopeManagementSupported = useStoreSelector((state) => state.accessScopeManagementSupported);
+  const worktreeSetupConfigSupported = useStoreSelector((state) => state.worktreeSetupConfigSupported);
   const stopBeforeArchiveSupported = useStoreSelector((state) => state.stopBeforeArchiveSupported);
   const snapshotLoaded = useStoreSelector((state) => state.snapshotLoaded);
   const runners = useStoreSelector((state) => state.runners);
@@ -543,8 +544,10 @@ export function ProjectsView({
                               />
                             )}
                             {revealReason && <span className="project-location-reason">{revealReason}</span>}
-                            <ProjectLocationWorktreeSetup project={selected} location={location}
-                              runnerProtocolVersion={runner?.protocolVersion} />
+                            {worktreeSetupConfigSupported && (
+                              <ProjectLocationWorktreeSetup project={selected} location={location}
+                                runnerProtocolVersion={runner?.protocolVersion} />
+                            )}
                           </div>
                           <div className="project-location-actions">
                             <button
@@ -603,7 +606,7 @@ export function ProjectsView({
           boxes={boxes}
           canCreateLocation={projectLocationCreationSupported}
           accessScopeManagementSupported={accessScopeManagementSupported}
-          onboarding={dialog.onboarding}
+          onboarding={dialog.onboarding && worktreeSetupConfigSupported}
           onClose={() => setDialog(null)}
           onManageConnections={manageConnections}
           onAdd={async (candidate: ProjectLocationCandidate, generateSetup) => {
