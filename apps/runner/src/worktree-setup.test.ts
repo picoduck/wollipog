@@ -285,6 +285,32 @@ test("step output is streamed before the command completes", async (t) => {
   assert.equal((await run).status, "completed");
 });
 
+test("aborting setup terminates the running step without recording a false failure", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "wollipog-setup-abort-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await exec("git", ["init", "-q"], { cwd: root });
+  const controller = new AbortController();
+  let observeStart!: () => void;
+  const started = new Promise<void>((resolveStarted) => { observeStart = resolveStarted; });
+  let lastStatus: string | undefined;
+  const run = runWorktreeSetup({
+    context: native, primaryCheckout: root, worktreePath: root, branch: "agent/test",
+    signal: controller.signal,
+    config: { version: 1, copyFiles: [], environment: {}, setup: [{
+      name: "Long Step",
+      command: [process.execPath, "-e", "console.log('started');setTimeout(()=>{},60_000)"],
+      timeoutSeconds: 60,
+      optional: false,
+    }] },
+    onOutput: (_index, output) => { if (output.includes("started")) observeStart(); },
+    onState: (state) => { lastStatus = state.status; },
+  });
+  await started;
+  controller.abort();
+  await assert.rejects(run, (error: Error) => error.name === "AbortError" && /cancelled/u.test(error.message));
+  assert.equal(lastStatus, "running", "cancellation is not persisted as a setup failure or decline");
+});
+
 test("copy refuses a destination symlink before writing outside the worktree", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "wollipog-setup-link-"));
   t.after(() => rm(root, { recursive: true, force: true }));

@@ -214,3 +214,139 @@ test("declining setup retains the worktree while applying no copies, environment
   assert.ok(sent.some((message) => message.type === "session_event" && message.payload.kind === "stderr" &&
     message.payload.text.includes("created without copy, environment, or setup hooks")));
 });
+
+test("stopping while trust is pending cancels instead of persisting a decline and re-prompts", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-worktree-setup-trust-cancel-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const repo = await repository(root);
+  const dataDir = join(root, "data");
+  writeFileSync(join(repo, ".wollipog.json"), JSON.stringify({
+    version: 1,
+    environment: { PROJECT_MODE: "trusted" },
+    setup: [],
+  }), "utf8");
+  await exec("git", ["-C", repo, "add", ".wollipog.json"]);
+  await exec("git", ["-C", repo, "commit", "-qm", "setup config"]);
+
+  const store = new SessionStore(join(dataDir, "sessions"));
+  let manager!: SessionManager;
+  let trustRequests = 0;
+  const factory = () => ({
+    pid: 1,
+    initialize: async () => {}, newSession: async () => {}, prompt: async () => "end_turn" as const,
+    cancel: () => {}, close: async () => {}, dispose: () => {}, setConfig: () => {},
+    resolvePermission: () => false, agentSessionId: () => "provider-session",
+  });
+  manager = new SessionManager((message) => {
+    if (message.type !== "session_event" || message.payload.kind !== "permission_request" ||
+        message.payload.context?.toolName !== "wollipog.worktree_setup") return;
+    trustRequests++;
+    if (trustRequests === 1) setImmediate(() => manager.cancel("s_cancel_trust"));
+    else setImmediate(() => manager.resolvePermission("s_cancel_trust", message.payload.requestId, "trust"));
+  }, () => {}, store, "runner", undefined, factory as never, dataDir);
+  t.after(() => manager.shutdownAll());
+  const spec = {
+    sessionId: "s_cancel_trust", workspaceId: "repo", workspacePath: repo, agentId: "codex",
+    command: process.execPath, args: [] as string[], env: {}, useWorktree: true, driver: "codex" as const,
+    context: { kind: "native" as const },
+  };
+  assert.equal(await manager.start(spec), false);
+  assert.equal(store.readMeta("s_cancel_trust")?.status, "stopped");
+  assert.equal(store.readMeta("s_cancel_trust")?.worktrees?.some((worktree) => worktree.setup?.status === "declined") ?? false, false);
+
+  assert.equal(await manager.start(spec), true);
+  assert.equal(trustRequests, 2, "a cancellation does not become durable trust or decline");
+});
+
+test("stopping a running initial setup kills the step and cannot overwrite stopped state", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-worktree-setup-run-cancel-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const repo = await repository(root);
+  const dataDir = join(root, "data");
+  const lateMarker = join(repo, ".late-setup-write");
+  const delayedWrite = `console.log('setup-running');setTimeout(()=>require('fs').writeFileSync(${JSON.stringify(lateMarker)},'late'),300)`;
+  writeFileSync(join(repo, ".wollipog.json"), JSON.stringify({
+    version: 1,
+    setup: [{ name: "Long Setup", command: [process.execPath, "-e", delayedWrite], timeoutSeconds: 60 }],
+  }), "utf8");
+  await exec("git", ["-C", repo, "add", ".wollipog.json"]);
+  await exec("git", ["-C", repo, "commit", "-qm", "setup config"]);
+
+  const store = new SessionStore(join(dataDir, "sessions"));
+  let manager!: SessionManager;
+  let cancelled = false;
+  manager = new SessionManager((message) => {
+    if (message.type === "session_event" && message.payload.kind === "permission_request" &&
+        message.payload.context?.toolName === "wollipog.worktree_setup") {
+      setImmediate(() => manager.resolvePermission("s_cancel_running", message.payload.requestId, "trust"));
+    }
+    if (!cancelled && message.type === "session_event" && message.payload.kind === "command_output" &&
+        message.payload.text.includes("setup-running")) {
+      cancelled = true;
+      setImmediate(() => manager.cancel("s_cancel_running"));
+    }
+  }, () => {}, store, "runner", undefined, undefined, dataDir);
+  t.after(() => manager.shutdownAll());
+
+  assert.equal(await manager.start({
+    sessionId: "s_cancel_running", workspaceId: "repo", workspacePath: repo, agentId: "codex",
+    command: process.execPath, args: [], env: {}, useWorktree: true, driver: "codex",
+    context: { kind: "native" },
+  }), false);
+  assert.equal(cancelled, true);
+  assert.equal(store.readMeta("s_cancel_running")?.status, "stopped");
+  await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+  assert.equal(existsSync(lateMarker), false, "the cancelled setup process cannot keep writing");
+  assert.equal(store.readMeta("s_cancel_running")?.status, "stopped", "a stale setup continuation cannot report failure");
+});
+
+test("a pre-v141 worktree with baseCommit never discovers setup retroactively", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-worktree-setup-legacy-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const repo = await repository(root);
+  writeFileSync(join(repo, ".wollipog.json"), JSON.stringify({
+    version: 1,
+    environment: { RETROACTIVE_VALUE: "must-not-apply" },
+    setup: [{ name: "Must Not Run", command: [process.execPath, "-e", "require('fs').writeFileSync('.retroactive','bad')"], timeoutSeconds: 10 }],
+  }), "utf8");
+  await exec("git", ["-C", repo, "add", ".wollipog.json"]);
+  await exec("git", ["-C", repo, "commit", "-qm", "config predating feature"]);
+  const baseCommit = (await exec("git", ["-C", repo, "rev-parse", "HEAD"])).stdout.trim();
+  const worktreePath = join(root, "legacy-worktree");
+  await exec("git", ["-C", repo, "worktree", "add", "-qb", "agent/legacy", worktreePath, baseCommit]);
+
+  const dataDir = join(root, "data");
+  const store = new SessionStore(join(dataDir, "sessions"));
+  meta(store, "s_legacy_setup", repo);
+  store.patchMeta("s_legacy_setup", {
+    worktreePath,
+    worktreeBranch: "agent/legacy",
+    worktrees: [{
+      id: "legacy-existing", path: worktreePath, branch: "agent/legacy", baseRef: "HEAD", baseCommit, source: "created",
+    }],
+  });
+  let trustRequests = 0;
+  let launchEnvironment: Record<string, string> | undefined;
+  const manager = new SessionManager((message) => {
+    if (message.type === "session_event" && message.payload.kind === "permission_request" &&
+        message.payload.context?.toolName === "wollipog.worktree_setup") trustRequests++;
+  }, () => {}, store, "runner", undefined, ((_driver: unknown, options: { env: Record<string, string> }) => {
+    launchEnvironment = options.env;
+    return {
+      pid: 1,
+      initialize: async () => {}, newSession: async () => {}, prompt: async () => "end_turn" as const,
+      cancel: () => {}, close: async () => {}, dispose: () => {}, setConfig: () => {},
+      resolvePermission: () => false, agentSessionId: () => "provider-session",
+    };
+  }) as never, dataDir);
+  t.after(() => manager.shutdownAll());
+
+  assert.equal(await manager.start({
+    sessionId: "s_legacy_setup", workspaceId: "repo", workspacePath: repo, agentId: "codex",
+    command: process.execPath, args: [], env: {}, useWorktree: true, driver: "codex",
+    context: { kind: "native" },
+  }), true);
+  assert.equal(trustRequests, 0);
+  assert.equal(launchEnvironment?.RETROACTIVE_VALUE, undefined);
+  assert.equal(existsSync(join(worktreePath, ".retroactive")), false);
+});

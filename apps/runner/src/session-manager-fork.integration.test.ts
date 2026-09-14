@@ -23,6 +23,16 @@ for (const sourceDriver of ["codex-app-server", "claude-code"] as const) {
     git(repo, ["config", "user.email", "test@example.com"]);
     git(repo, ["config", "user.name", "Test"]);
     writeFileSync(join(repo, "file.txt"), "base");
+    writeFileSync(join(repo, ".gitignore"), ".fork-setup\n");
+    writeFileSync(join(repo, ".wollipog.json"), JSON.stringify({
+      version: 1,
+      environment: { FORK_SETUP_ENV: "from-checkpoint" },
+      setup: [{
+        name: "Prepare Fork",
+        command: [process.execPath, "-e", "require('fs').writeFileSync('.fork-setup',process.env.FORK_SETUP_ENV)"],
+        timeoutSeconds: 10,
+      }],
+    }));
     git(repo, ["add", "."]); git(repo, ["commit", "-qm", "base"]);
     const worktree = await createWorktree(repo, "s_handoff_source", { dataDir: root });
     writeFileSync(join(worktree.path, "file.txt"), "checkpoint");
@@ -62,7 +72,15 @@ for (const sourceDriver of ["codex-app-server", "claude-code"] as const) {
         setConfig: () => {}, cancel: () => {}, resolvePermission: () => false, dispose: () => {},
       };
     };
-    const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory, root);
+    let manager!: SessionManager;
+    let setupTrustRequests = 0;
+    manager = new SessionManager((message) => {
+      if (message.type === "session_event" && message.payload.kind === "permission_request" &&
+          message.payload.context?.toolName === "wollipog.worktree_setup") {
+        setupTrustRequests++;
+        setImmediate(() => manager.resolvePermission(source.sessionId, message.payload.requestId, "trust"));
+      }
+    }, () => {}, store, "runner", undefined, factory, root);
     try {
       const request = { agent: destination, config: { model: "test-model", effort: "high", permissionMode: "default" } };
       const creating = manager.forkConversation(source.sessionId, "s_handoff_child", 1, "Handoff", false, request);
@@ -72,17 +90,23 @@ for (const sourceDriver of ["codex-app-server", "claude-code"] as const) {
       assert.equal(result.ok, true, result.error);
       assert.equal(launches, 0); assert.equal(prompts, 0);
       const child = store.readMeta("s_handoff_child")!;
+      assert.equal(child.worktrees?.[0]?.setup?.status, "completed");
+      assert.equal(readFileSync(join(child.worktreePath!, ".fork-setup"), "utf8"), "from-checkpoint");
+      assert.equal(setupTrustRequests, 1);
       assert.equal(child.driver, destination.driver); assert.equal(child.agentSessionId, null);
       assert.equal(child.turnCount, 0); assert.deepEqual(child.env, {}); assert.deepEqual(child.args, []);
       assert.equal(child.tokensIn, 0); assert.equal(child.costUsd, 0);
       assert.equal(readFileSync(join(child.worktreePath!, "file.txt"), "utf8"), "checkpoint");
       assert.equal(git(child.worktreePath!, ["rev-parse", "HEAD"]), baseCommit);
       assert.equal(readFileSync(join(worktree.path, "file.txt"), "utf8"), "later source state");
-      assert.equal(JSON.stringify(store.readMeta(source.sessionId)), before);
+      const after = store.readMeta(source.sessionId)!;
+      const stableMeta = (value: typeof after) => JSON.parse(JSON.stringify({ ...value, seq: 0, updatedAt: 0 }));
+      assert.deepEqual(stableMeta(after), stableMeta(JSON.parse(before)));
       assert.match(result.handoffDraft!.text, /Keep the checkpoint/);
       assert.doesNotMatch(result.handoffDraft!.text, /later excluded|private-provider-id|source-private-value/);
-      assert.equal(result.events?.length, 1);
-      const boundary = result.events![0]!.payload;
+      assert.ok(result.events?.some((event) => event.payload.kind === "command_output" &&
+        event.payload.text.includes("[Worktree Setup — Prepare Fork]")));
+      const boundary = result.events!.find((event) => event.payload.kind === "conversation_forked")!.payload;
       assert.equal(boundary.kind, "conversation_forked");
       if (boundary.kind === "conversation_forked") assert.deepEqual([boundary.sourceSessionId, boundary.turn, boundary.handoff?.destinationAgent], [source.sessionId, 1, destination.id]);
       const unauthenticated = await manager.forkConversation(source.sessionId, "s_no_auth", 1, "No Auth", false,
@@ -102,6 +126,7 @@ for (const sourceDriver of ["codex-app-server", "claude-code"] as const) {
       manager.prompt(child.sessionId, result.handoffDraft!.text);
       for (let attempt = 0; attempt < 200 && !prompts; attempt++) await new Promise((resolve) => setTimeout(resolve, 10));
       assert.equal(prompts, 1); assert.equal(launches, 1); assert.equal(launchedOptions?.resumeId, undefined);
+      assert.equal(launchedOptions?.env.FORK_SETUP_ENV, "from-checkpoint");
       assert.equal(store.readMeta(child.sessionId)?.handoffPending, undefined);
       await manager.delete(child.sessionId);
     } finally { manager.shutdownAll(); rmSync(root, { recursive: true, force: true }); }

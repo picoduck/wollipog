@@ -3877,7 +3877,7 @@ async function runSessionWorktreeRequest(
       requestId,
       { ...request, type: "session_worktree", requestId, sessionId },
       request.operation === "create"
-        ? SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS
+        ? 65 * 60_000
         : request.operation === "retry_setup" ? 65 * 60_000 : 150_000,
     );
     if (res.type !== "session_worktree_result") return reply.code(502).send({ error: "unexpected runner reply" });

@@ -51,9 +51,18 @@ export interface WorktreeSetupRunOptions {
   onState?: (state: WorktreeSetupState) => void;
   onOutput?: (stepIndex: number, text: string) => void;
   isolation?: SpawnIsolation;
+  signal?: AbortSignal;
   /** Resolve a launch boundary only after local copies finish. Cloud preparation snapshots the
    * worktree, so resolving it earlier would omit copied files from setup and the later agent. */
   prepareExecution?: () => Promise<{ environment: Record<string, string>; isolation?: SpawnIsolation }>;
+}
+
+function setupCancelled(): Error {
+  return Object.assign(new Error("worktree setup was cancelled"), { name: "AbortError" });
+}
+
+function throwIfSetupCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) throw setupCancelled();
 }
 
 const MAX_CONFIG_BYTES = 256 * 1024;
@@ -348,6 +357,10 @@ async function runSetupCommand(
   isolation: SpawnIsolation | undefined,
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolveCommand, rejectCommand) => {
+    if (options.signal?.aborted) {
+      rejectCommand(setupCancelled());
+      return;
+    }
     if (isolation?.backend === "cloud") {
       const adapterNames = new Set(Object.keys(isolation.env).map((key) => key.toLowerCase()));
       const collision = Object.keys(environment).find((key) => adapterNames.has(key.toLowerCase()));
@@ -371,16 +384,20 @@ async function runSetupCommand(
     const stderr: Buffer[] = [];
     let size = 0;
     let timedOut = false;
+    let cancelled = false;
+    let outputLimitExceeded = false;
+    let settled = false;
     const outputError = (error: Error): Error & { stdout: string; stderr: string } => Object.assign(error, {
       stdout: Buffer.concat(stdout).toString("utf8"),
       stderr: Buffer.concat(stderr).toString("utf8"),
     });
     const collect = (target: Buffer[]) => (chunk: Buffer | string) => {
+      if (settled || cancelled || outputLimitExceeded) return;
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       size += buffer.length;
       if (size > 1024 * 1024) {
+        outputLimitExceeded = true;
         killTree(child);
-        rejectCommand(outputError(new Error(`${step.name} output exceeded 1 MiB`)));
         return;
       }
       target.push(buffer);
@@ -390,18 +407,38 @@ async function runSetupCommand(
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", collect(stdout));
     child.stderr.on("data", collect(stderr));
+    const onAbort = () => {
+      if (settled || cancelled) return;
+      cancelled = true;
+      killTree(child);
+    };
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    const finish = () => options.signal?.removeEventListener("abort", onAbort);
     const timer = setTimeout(() => {
+      if (settled) return;
       timedOut = true;
       killTree(child);
     }, step.timeoutSeconds * 1_000);
     timer.unref?.();
     child.once("error", (error) => {
       clearTimeout(timer);
-      rejectCommand(outputError(error));
+      finish();
+      if (settled) return;
+      settled = true;
+      rejectCommand(outputError(cancelled
+        ? setupCancelled()
+        : outputLimitExceeded ? new Error(`${step.name} output exceeded 1 MiB`) : error));
     });
     child.once("close", (code, signal) => {
       clearTimeout(timer);
-      if (timedOut) {
+      finish();
+      if (settled) return;
+      settled = true;
+      if (cancelled) {
+        rejectCommand(outputError(setupCancelled()));
+      } else if (outputLimitExceeded) {
+        rejectCommand(outputError(new Error(`${step.name} output exceeded 1 MiB`)));
+      } else if (timedOut) {
         rejectCommand(Object.assign(outputError(new Error(`${step.name} timed out after ${step.timeoutSeconds} second(s)`)), {
           code: "ETIMEDOUT",
           ...(signal ? { signal } : {}),
@@ -420,6 +457,7 @@ async function runSetupCommand(
 }
 
 export async function runWorktreeSetup(options: WorktreeSetupRunOptions): Promise<WorktreeSetupState> {
+  throwIfSetupCancelled(options.signal);
   let environment = options.environment ?? resolvedWorktreeSetupEnvironment(options.config, options);
   let isolation = options.isolation;
   const priorSteps = options.prior?.steps ?? [];
@@ -441,10 +479,12 @@ export async function runWorktreeSetup(options: WorktreeSetupRunOptions): Promis
     if (options.prior) state.copies = priorCopies.slice();
     if (copyStartAt < options.config.copyFiles.length) {
       for (let index = copyStartAt; index < options.config.copyFiles.length; index++) {
+        throwIfSetupCancelled(options.signal);
         const copy = options.config.copyFiles[index]!;
         const startedAt = Date.now();
         try {
           await copyConfiguredFile(options.context, options.primaryCheckout, options.worktreePath, copy);
+          throwIfSetupCancelled(options.signal);
           state.copies[index] = { ...copy, status: "completed", durationMs: Date.now() - startedAt };
         } catch (error) {
           state.copies[index] = { ...copy, status: "failed", durationMs: Date.now() - startedAt, error: error instanceof Error ? error.message : String(error) };
@@ -454,11 +494,14 @@ export async function runWorktreeSetup(options: WorktreeSetupRunOptions): Promis
       }
     }
     if (options.prepareExecution) {
+      throwIfSetupCancelled(options.signal);
       const prepared = await options.prepareExecution();
+      throwIfSetupCancelled(options.signal);
       environment = prepared.environment;
       isolation = prepared.isolation;
     }
     for (let index = startAt; index < options.config.setup.length; index++) {
+      throwIfSetupCancelled(options.signal);
       const step = options.config.setup[index]!;
       const startedAt = Date.now();
       const result = { name: step.name, status: "running" as const, optional: step.optional, startedAt };
@@ -468,6 +511,7 @@ export async function runWorktreeSetup(options: WorktreeSetupRunOptions): Promis
         await runSetupCommand(options, step, environment, index, isolation);
         state.steps[index] = { ...result, status: "completed", durationMs: Date.now() - startedAt, exitCode: 0 };
       } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") throw error;
         const commandError = error as NodeJS.ErrnoException & { killed?: boolean; signal?: string; exitCode?: number };
         const detail = commandError.code === "ETIMEDOUT" || commandError.killed || commandError.signal === "SIGKILL"
           ? `${step.name} timed out after ${step.timeoutSeconds} second(s)`
@@ -488,6 +532,7 @@ export async function runWorktreeSetup(options: WorktreeSetupRunOptions): Promis
     state.status = "completed";
     state.completedAt = Date.now();
   } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") throw error;
     state.status = "failed";
     state.completedAt = Date.now();
     state.error = error instanceof Error ? error.message : String(error);
