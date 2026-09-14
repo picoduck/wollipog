@@ -772,7 +772,7 @@ function SessionDetailLoaded({
   const ownEvidenceDecision = ownEvidenceSnapshot ? ownWorkflowDecision! : null;
   const [selectedRequestKey, setSelectedRequestKey] = useState<string | null>(null);
   const requestPanelOpen = mode === "expanded" && rightPanel.open && rightPanel.mode === "requests";
-  const openRequestPanel = useCallback((key: string | null = null) => {
+  const openRequestPanel = useCallback((key: string) => {
     setSelectedRequestKey(key);
     rightPanel.show("requests");
     if (mode === "preview") onExpand?.();
@@ -4311,7 +4311,8 @@ function SessionDetailLoaded({
           } : undefined}
           descendantRequests={descendantRequests.length > 0 ? {
             count: descendantRequests.length,
-            onOpen: () => openRequestPanel(),
+            // Reopening the inbox must not replace the row the user last selected.
+            onOpen: () => rightPanel.show("requests"),
           } : undefined}
           onOpenBackgroundWork={() => rightPanel.show("background")}
           onOpenAttention={() => {
