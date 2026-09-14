@@ -128,6 +128,33 @@ closing-tag delimiter; JSON decoding restores the original parameter string. The
 `invocationId`, and dispatch adds an `executionId`. These four identities let downstream work and
 audit history correlate one signed delivery without repeating its content.
 
+#### Outbound event integration boundary
+
+Issue #1099 provides the following reusable guarantees for outbound-event work:
+
+- `automation_trigger_invocations.invocation_id` is generated once when a signed delivery is
+  accepted, returned as `invocationId`, and retained as the stable invocation identity. The row's
+  `execution_id` links it to the claimed automation execution.
+- Delivery parameters have already passed the trigger policy's name allowlist, string-only shape,
+  count, and UTF-8 byte bounds before acceptance. The exact signed body is not stored; only its
+  SHA-256 digest is retained. Accepted values are currently materialized into the private action
+  snapshot and machine preamble, while public invocation and execution views expose only parameter
+  names and other content-free provenance.
+- For a `create_session` action, the deterministic session ID is staged durably on the execution
+  and its start command before the session row is created or the command is activated. Existing
+  session prompts retain the same invocation-to-execution-to-command correlation without changing
+  the target session's origin.
+
+This is a delivery boundary, not yet a session-origin or outbound-event schema. Issue #1100 must
+add a first-class accepted-parameter map from the already validated values; it must not parse the
+rendered prompt or retain the raw signed request. For created sessions it must also copy
+`invocationId` and that map into durable session-origin metadata. The origin write must be in the
+same transaction as session creation, or otherwise complete before `session.created` becomes
+observable, so an outbound event cannot see a trigger-created session without its origin. #1100
+owns the outbound retention and privacy projection of that metadata; #1099's private action
+snapshot on an execution is cleared at terminal state, and its invocation snapshot is compacted
+after 30 days. Neither is an outbound-event payload store.
+
 `missingReferences: "reject"` returns `400` when the delivery omits a prompt or parameter referenced
 by the template, without consuming its event ID. `"use_stored"` substitutes an empty string for the
 missing reference, preserving the surrounding stored text. Unsupported reference forms are rejected
