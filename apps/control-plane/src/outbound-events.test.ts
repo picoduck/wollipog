@@ -73,7 +73,8 @@ test("generated address classes fail closed for private, link-local, multicast, 
     "0.0.0.0", "10.0.0.1", "100.64.0.1", "127.99.1.2", "169.254.1.1",
     "172.16.0.1", "172.31.255.255", "192.0.2.1", "192.168.1.1", "198.18.0.1",
     "198.51.100.1", "203.0.113.1", "224.0.0.1", "255.255.255.255",
-    "::", "::1", "fc00::1", "fdff::1", "fe80::1", "ff02::1", "2001:db8::1",
+    "::", "::1", "::10.0.0.1", "64:ff9b::a00:1", "64:ff9b:1::a00:1",
+    "fc00::1", "fdff::1", "fe80::1", "ff02::1", "2001:db8::1",
   ];
   for (const address of blocked) assert.equal(isBlockedOutboundAddress(address), true, address);
   for (const address of ["1.1.1.1", "8.8.8.8", "93.184.216.34", "2606:4700:4700::1111"]) {
@@ -155,6 +156,26 @@ test("a loopback delivery is signed over its exact bytes and carries stable corr
     nonce: String(received.headers["x-wollipog-nonce"]),
     signature: String(received.headers["x-wollipog-signature"]),
   }, received.body, Number(received.headers["x-wollipog-timestamp"]) * 1_000), true);
+});
+
+test("a hostname delivery uses its DNS-pinned address on Node with automatic family selection", async (t) => {
+  let receivedHost: string | undefined;
+  const server = createServer((request, response) => {
+    receivedHost = request.headers.host;
+    request.resume();
+    response.writeHead(204).end();
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const address = server.address() as AddressInfo;
+  const settled: Array<Record<string, unknown>> = [];
+  const item = delivery({ callbackUrl: `http://pinned.localhost:${address.port}/hook` });
+  const service = new OutboundEventsService(fakeDb({ claims: [item], settled }), quietLogger,
+    (async () => [{ address: "127.0.0.1", family: 4 }]) as never);
+  await service.tick(10_000);
+  assert.equal(settled[0]?.disposition, "delivered");
+  assert.equal(receivedHost, `pinned.localhost:${address.port}`);
 });
 
 test("revocation aborts an in-flight request before recording any successful receipt", async () => {

@@ -302,3 +302,48 @@ test("check failure observations deduplicate the bounded public receipt shape", 
   assert.equal(payload.checks.url.length, 2_048);
   db.close();
 });
+
+test("check candidates exclude closed pull requests and rotate every attempted open session", () => {
+  const db = database();
+  const project = db.createProject({ name: "Candidate Rotation", now: 2 });
+  const location = db.addProjectLocation(project.id, { runnerId: "runner-1", workspaceId: "ws-1" }, 3);
+  db.createOutboundEventSubscription({
+    subscriptionId: "oes_candidate_rotation",
+    callbackUrl: "https://events.example.test/hook",
+    secret: "secret",
+    scope: { kind: "project", projectId: project.id },
+    eventKinds: ["checks.failed"],
+    includeSessionName: false,
+    includeQuestionTitle: false,
+    actor: { kind: "human", id: "user-1" },
+    now: 4,
+  });
+  const addSession = (index: number, state: "open" | "closed") => {
+    const id = `s_candidate_${state}_${index}`;
+    const url = `https://github.com/example/repo/pull/${state}-${index}`;
+    db.createSession({
+      id, runnerId: "runner-1", workspaceId: "ws-1", projectId: project.id,
+      projectLocationId: location.id, agentId: "agent-1", title: id, useWorktree: true,
+      driver: "acp", config: {}, now: 10 + index,
+    });
+    db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?").run(JSON.stringify([{
+      id: `wt_${id}`, path: `/repos/${id}`, branch: `branch-${id}`, source: "created",
+      pullRequest: { url, state },
+    }]), id);
+  };
+  for (let index = 0; index < 30; index += 1) addSession(index, "closed");
+  for (let index = 0; index < 26; index += 1) addSession(100 + index, "open");
+
+  const first = db.outboundCheckObservationCandidates();
+  assert.equal(first.length, 25);
+  assert.equal(first.every((session) => session.id.includes("_open_")), true);
+  for (const session of first) {
+    const pullRequest = session.worktrees?.[0]?.pullRequest;
+    assert.ok(pullRequest);
+    db.markOutboundCheckObservationAttempt(session.id, pullRequest.url, 1_000);
+  }
+  const second = db.outboundCheckObservationCandidates();
+  assert.equal(second.some((session) => session.id === "s_candidate_open_125"), true,
+    "the first unattempted open pull request is not starved by the bounded first cohort");
+  db.close();
+});

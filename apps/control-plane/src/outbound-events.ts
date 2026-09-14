@@ -61,7 +61,7 @@ for (const [network, prefix] of [
   ["203.0.113.0", 24], ["224.0.0.0", 4], ["240.0.0.0", 4],
 ] as const) BLOCKED_ADDRESSES.addSubnet(network, prefix, "ipv4");
 for (const [network, prefix] of [
-  ["::", 128], ["::1", 128], ["64:ff9b:1::", 48], ["100::", 64],
+  ["::", 96], ["64:ff9b::", 96], ["64:ff9b:1::", 48], ["100::", 64],
   ["2001::", 23], ["2001:db8::", 32], ["2002::", 16], ["fc00::", 7], ["fe80::", 10], ["ff00::", 8],
 ] as const) BLOCKED_ADDRESSES.addSubnet(network, prefix, "ipv6");
 
@@ -168,6 +168,7 @@ function defaultTransport(
       servername: target.url.protocol === "https:" && isIP(target.url.hostname) === 0
         ? target.url.hostname
         : undefined,
+      family: target.family,
       lookup: (_hostname, _options, callback) => callback(null, target.address, target.family),
       headers: {
         "content-type": WOLLIPOG_OUTBOUND_EVENT_MEDIA_TYPE,
@@ -179,7 +180,10 @@ function defaultTransport(
         "x-wollipog-event-id": delivery.eventId,
       },
     }, (response) => {
-      response.resume();
+      // Webhook response bodies are not part of the contract. Close immediately after the status
+      // so a receiver cannot retain sockets (and escape the timeout/concurrency bounds) by
+      // trickling an unbounded response body after sending headers.
+      response.destroy();
       resolve({ statusCode: response.statusCode ?? 0 });
     });
     request.on("error", reject);

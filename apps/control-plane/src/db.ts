@@ -1567,6 +1567,8 @@ CREATE INDEX IF NOT EXISTS idx_outbound_event_deliveries_due
   WHERE status IN ('pending','retrying','delivering');
 CREATE INDEX IF NOT EXISTS idx_outbound_event_deliveries_journal
   ON outbound_event_deliveries(subscription_id, created_at DESC, delivery_id DESC);
+CREATE INDEX IF NOT EXISTS idx_outbound_event_deliveries_event
+  ON outbound_event_deliveries(event_id);
 
 CREATE TABLE IF NOT EXISTS outbound_check_observations (
   session_id        TEXT NOT NULL,
@@ -19630,14 +19632,28 @@ export class ControlPlaneDb {
          AND subscription.state='active' AND subscription.event_kinds_json LIKE '%"checks.failed"%'
          AND ((subscription.scope_kind='project' AND subscription.project_id=session.project_id) OR
               (subscription.scope_kind='automation' AND subscription.automation_id=origin.automation_id))
-       LEFT JOIN outbound_check_observations observation ON observation.session_id=session.id
-       WHERE session.archived=0 AND session.worktrees IS NOT NULL
+       LEFT JOIN (
+         SELECT session_id,MAX(updated_at) AS updated_at
+         FROM outbound_check_observations GROUP BY session_id
+       ) observation ON observation.session_id=session.id
+       WHERE session.archived=0 AND session.worktrees IS NOT NULL AND EXISTS (
+         SELECT 1 FROM json_each(session.worktrees) worktree
+         WHERE lower(json_extract(worktree.value,'$.pullRequest.state'))='open'
+       )
        ORDER BY COALESCE(observation.updated_at,0),session.updated_at,session.id LIMIT ?`,
     ).all(Math.max(1, Math.min(100, Math.floor(limit)))) as unknown as Array<{ id: string }>;
     return rows.flatMap((row) => {
       const session = this.getSession(row.id);
       return session?.worktrees?.some((worktree) => worktree.pullRequest?.state === "open") ? [session] : [];
     });
+  }
+
+  markOutboundCheckObservationAttempt(sessionId: string, pullRequestUrl: string, now: number): void {
+    this.stmt(
+      `INSERT INTO outbound_check_observations
+       (session_id,pull_request_url,failing_signature,updated_at) VALUES (?,?,NULL,?)
+       ON CONFLICT(session_id,pull_request_url) DO UPDATE SET updated_at=MAX(updated_at,excluded.updated_at)`,
+    ).run(sessionId, pullRequestUrl, now);
   }
 
   recordOutboundCheckObservation(input: {

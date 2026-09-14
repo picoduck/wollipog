@@ -37,6 +37,7 @@ export function OutboundEventSubscriptions({
   const [subscriptions, setSubscriptions] = useState<OutboundEventSubscriptionView[]>([]);
   const [deliveries, setDeliveries] = useState<Record<string, OutboundEventDeliveryView[]>>({});
   const [credential, setCredential] = useState<OutboundEventSubscriptionCredential | null>(null);
+  const [loaded, setLoaded] = useState(false);
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -67,7 +68,12 @@ export function OutboundEventSubscriptions({
 
   useEffect(() => {
     let active = true;
-    const load = () => refresh().catch((cause) => active && setError((cause as Error).message));
+    const load = () => refresh().then(() => {
+      if (active) {
+        setError(null);
+        setLoaded(true);
+      }
+    }).catch((cause) => active && setError((cause as Error).message));
     void load();
     const timer = window.setInterval(load, 5_000);
     return () => { active = false; window.clearInterval(timer); };
@@ -164,7 +170,9 @@ export function OutboundEventSubscriptions({
         <button className="btn ghost sm" type="button" onClick={() => setCredential(null)}>Hide</button>
       </div>}
       <div className="outbound-event-list">
-        {subscriptions.length === 0 && <p className="automation-hint">No outbound event subscriptions yet.</p>}
+        {!loaded
+          ? <p className="automation-hint">Loading outbound event subscriptions…</p>
+          : subscriptions.length === 0 && <p className="automation-hint">No outbound event subscriptions yet.</p>}
         {subscriptions.map((subscription) => {
           const scope = subscription.scope;
           const scopeName = scope.kind === "project"

@@ -953,6 +953,12 @@ async function sweepOutboundChecks(): Promise<void> {
   outboundCheckSweepActive = true;
   try {
     for (const session of db.outboundCheckObservationCandidates()) {
+      const pullRequest = session.worktrees?.find((worktree) => worktree.pullRequest?.state === "open")
+        ?.pullRequest;
+      if (!pullRequest) continue;
+      // Advance every selected candidate, including offline and temporarily failing runners, so
+      // one cohort cannot occupy the bounded scan forever and starve newer open pull requests.
+      db.markOutboundCheckObservationAttempt(session.id, pullRequest.url, Date.now());
       if (!hub.isRunnerOnline(session.runnerId)) continue;
       const requestId = randomUUID();
       try {
