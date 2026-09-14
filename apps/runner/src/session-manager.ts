@@ -1366,6 +1366,16 @@ export class SessionManager {
       .find((worktree) => sameWorktreePath(meta.context, worktree.path, path));
   }
 
+  private runnerOwnedWorktreeBlocksWorkspaceRemap(
+    meta: SessionMeta | null,
+    repoPath: string,
+    context: AgentContext,
+  ): boolean {
+    return !!meta && (meta.repoPath !== repoPath ||
+      agentContextKey(meta.context) !== agentContextKey(context)) &&
+      this.attributedWorktrees(meta).some((worktree) => worktree.source !== "attached");
+  }
+
   private checkpointWorktreeId(meta: SessionMeta, path: string): string {
     const worktree = this.attributedWorktreeForPath(meta, path);
     if (!worktree) throw new Error("active worktree has no durable session identity");
@@ -2571,6 +2581,9 @@ export class SessionManager {
       driver: execution.driver,
       context: record.context,
       config: { permissionMode: execution.permissionMode },
+      // Cleanup records do not persist the authenticated v144 opt-out. Preserve the documented
+      // compatibility posture: a missing policy remains scratch-only rather than widening replay.
+      orchestrator: undefined,
       executionTarget: target,
       repoPath: record.repoPath,
       sessionId: record.sessionId,
@@ -2584,7 +2597,7 @@ export class SessionManager {
       env: {},
       sessionId: record.sessionId,
       cwd: record.worktreePath,
-      ...(execution.permissionMode === "orchestrator" ? { orchestratorScratchOnly: true } : {}),
+      ...(this.strictProjectIsolation(isolationMeta) ? { orchestratorScratchOnly: true } : {}),
       ...(additionalWritableRoots.length ? { additionalWritableRoots } : {}),
       ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
     });
@@ -4049,9 +4062,7 @@ export class SessionManager {
       ? spec.workspacePath
       : resolve(spec.workspacePath);
     const prior = this.store.readMeta(spec.sessionId);
-    if (prior && (prior.repoPath !== requestedRepoPath ||
-        agentContextKey(prior.context) !== agentContextKey(requestedContext)) &&
-        this.attributedWorktrees(prior).some((worktree) => worktree.source !== "attached")) {
+    if (this.runnerOwnedWorktreeBlocksWorkspaceRemap(prior, requestedRepoPath, requestedContext)) {
       const message = "session workspace or execution context changed while runner-owned worktrees remain; discard those worktrees before restarting this session";
       this.emitEvent(spec.sessionId, { kind: "error", message });
       durable?.failed(message, "INVALID_COMMAND");
@@ -4099,6 +4110,8 @@ export class SessionManager {
       return false;
     }
     const context = spec.context ?? { kind: "native" as const };
+    const isWsl = context.kind === "wsl";
+    const repoPath = isWsl ? spec.workspacePath : resolve(spec.workspacePath);
     try {
       this.assertHostIsolationContextSupported({
         agentId: spec.agentId,
@@ -4152,6 +4165,32 @@ export class SessionManager {
       durable?.failed("session deletion is in progress", "COMMAND_CANCELLED");
       return false;
     }
+    let remapBlocked = false;
+    if (this.store.has(spec.sessionId)) {
+      await this.runWorktreeOperation(spec.sessionId, async () => {
+        if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) return;
+        remapBlocked = this.runnerOwnedWorktreeBlocksWorkspaceRemap(
+          this.store.readMeta(spec.sessionId),
+          repoPath,
+          context,
+        );
+      });
+    }
+    if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) {
+      durable?.failed(
+        this.launchWasSuperseded(spec.sessionId, launchGeneration)
+          ? "session launch was superseded by a replacement"
+          : "session launch was cancelled before provider startup",
+        "COMMAND_CANCELLED",
+      );
+      return false;
+    }
+    if (remapBlocked) {
+      const message = "session workspace or execution context changed while runner-owned worktrees remain; discard those worktrees before restarting this session";
+      this.emitEvent(spec.sessionId, { kind: "error", message });
+      durable?.failed(message, "INVALID_COMMAND");
+      return false;
+    }
     // Explicit Restart is authoritative and keeps its historical behavior of discarding queued
     // work. Clear crash-recovery state before replacing/launching so it cannot intercept the
     // restart's initial prompt or later prompts.
@@ -4170,9 +4209,6 @@ export class SessionManager {
       this.clearLock(spec.sessionId);
       this.log(`restarting ${spec.sessionId} — replacing existing process`);
     }
-
-    const isWsl = context.kind === "wsl";
-    const repoPath = isWsl ? spec.workspacePath : resolve(spec.workspacePath);
 
     // Persist the session to the box store BEFORE anything else, so it is the source of truth, is
     // visible to other dashboards even if init fails, and so setup warnings below land in the log
@@ -4299,10 +4335,15 @@ export class SessionManager {
     // create() upserts meta.json (refreshing launch params) but preserves any existing event log,
     // so a restart keeps the timeline while re-spawning a fresh agent.
     await this.runWorktreeOperation(spec.sessionId, async () => {
+      if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) return;
       // A worktree request may have committed after the launch captured `prior` but before this
       // restart row is written. Merge that exact identity rather than recreating stale launch state.
       const latest = this.store.readMeta(spec.sessionId);
       if (latest) {
+        if (this.runnerOwnedWorktreeBlocksWorkspaceRemap(latest, repoPath, context)) {
+          remapBlocked = true;
+          return;
+        }
         prior = latest;
         const latestMatchesWorkspace = latest.repoPath === repoPath &&
           agentContextKey(latest.context) === agentContextKey(context);
@@ -4321,6 +4362,24 @@ export class SessionManager {
       this.store.create(meta);
       this.refreshCapacityInventorySession(spec.sessionId);
     });
+    if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) {
+      const superseded = this.launchWasSuperseded(spec.sessionId, launchGeneration);
+      if (priorResumeId && !superseded) this.store.releaseLock(spec.sessionId, this.lockOwner);
+      durable?.failed(
+        superseded
+          ? "session launch was superseded by a replacement"
+          : "session launch was cancelled before provider startup",
+        "COMMAND_CANCELLED",
+      );
+      return false;
+    }
+    if (remapBlocked) {
+      if (priorResumeId) this.store.releaseLock(spec.sessionId, this.lockOwner);
+      const message = "session workspace or execution context changed while runner-owned worktrees remain; discard those worktrees before restarting this session";
+      this.emitEvent(spec.sessionId, { kind: "error", message });
+      durable?.failed(message, "INVALID_COMMAND");
+      return false;
+    }
     durable?.queued();
     if (launchAssertionError) {
       this.emitEvent(spec.sessionId, { kind: "error", message: launchAssertionError });
@@ -6097,7 +6156,9 @@ export class SessionManager {
     assertExecutionIsolationContextSupported(this.executionIsolation, meta.context);
   }
 
-  private async requestedWorktreeIsolation(meta: SessionMeta): Promise<string[]> {
+  private async requestedWorktreeIsolation(
+    meta: Pick<SessionMeta, "config" | "orchestrator" | "context" | "repoPath" | "sessionId" | "worktreePath">,
+  ): Promise<string[]> {
     if (this.strictProjectIsolation(meta)) return [];
     if (this.executionIsolation.mode !== "bwrap" && this.executionIsolation.mode !== "seatbelt") return [];
     // Direct WSL orchestration creates child worktrees through the runner; the provider never

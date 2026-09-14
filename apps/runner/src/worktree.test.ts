@@ -1054,6 +1054,54 @@ test("a stale worktree view cannot erase another worktree's process marker", () 
   }
 });
 
+function initWorkspaceRemapRepo(path: string): void {
+  execFileSync("git", ["init", path]);
+  execFileSync("git", ["-C", path, "config", "user.email", "test@example.com"]);
+  execFileSync("git", ["-C", path, "config", "user.name", "Test"]);
+  execFileSync("git", ["-C", path, "commit", "--allow-empty", "-m", "base"]);
+}
+
+function createStoppedWorkspaceRemapSession(store: SessionStore, sessionId: string, repoPath: string): void {
+  store.create({
+    sessionId, agentId: "claude", workspaceId: "stable-id", repoPath, worktreePath: null,
+    driver: "claude-code", command: "claude", args: [], env: {}, context: { kind: "native" },
+    agentSessionId: null, status: "stopped", title: "workspace remap", config: {}, tokensIn: 0,
+    tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null, seq: 0, createdAt: 1, updatedAt: 1,
+  });
+}
+
+function workspaceRemapSpec(sessionId: string, workspacePath: string) {
+  return {
+    sessionId, workspaceId: "stable-id", workspacePath, agentId: "claude",
+    command: "claude", args: [], env: {}, useWorktree: false, driver: "claude-code" as const,
+    context: { kind: "native" as const },
+  };
+}
+
+function installWorkspaceRemapAwaitBoundary(
+  manager: SessionManager,
+  sessionId: string,
+  boundary: "closing" | "rebinding",
+): { launchGenerations: Map<string, number>; release(): void } {
+  let resolveBoundary!: () => void;
+  const promise = new Promise<void>((resolve) => { resolveBoundary = resolve; });
+  const internals = manager as unknown as {
+    launchGenerations: Map<string, number>;
+    closing: Map<string, { promise: Promise<void> }>;
+    worktreeRebindings: Map<string, { entry: unknown; promise: Promise<void> }>;
+  };
+  if (boundary === "closing") internals.closing.set(sessionId, { promise });
+  else internals.worktreeRebindings.set(sessionId, { entry: {}, promise });
+  return {
+    launchGenerations: internals.launchGenerations,
+    release: () => {
+      if (boundary === "closing") internals.closing.delete(sessionId);
+      else internals.worktreeRebindings.delete(sessionId);
+      resolveBoundary();
+    },
+  };
+}
+
 test("a workspace remap fails closed while its runner-owned worktree and port block remain", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-workspace-remap-retain-"));
   const dataDir = join(root, "data");
@@ -1094,6 +1142,286 @@ test("a workspace remap fails closed while its runner-owned worktree and port bl
     assert.deepEqual(retained.worktrees?.[0]?.portBlock, portBlock);
     assert.deepEqual(new WorktreePortAllocator(dataDir, manager.worktreePortRuntime()).get(owner), portBlock,
       "the old process tree keeps its reserved port block");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const boundary of ["closing", "rebinding"] as const) {
+  test(`a workspace remap rechecks runner-owned worktrees after ${boundary} settles`, {
+    skip: !haveGit(),
+  }, async () => {
+    const root = mkdtempSync(join(tmpdir(), `wollipog-workspace-remap-${boundary}-`));
+    const dataDir = join(root, "data");
+    const oldRepo = join(root, "old-repo");
+    const newRepo = join(root, "new-repo");
+    const sessionId = `s_workspace_remap_${boundary}`;
+    let manager: SessionManager | undefined;
+    let awaitBoundary: ReturnType<typeof installWorkspaceRemapAwaitBoundary> | undefined;
+    try {
+      initWorkspaceRemapRepo(oldRepo);
+      initWorkspaceRemapRepo(newRepo);
+      const store = new SessionStore(join(dataDir, "sessions"));
+      createStoppedWorkspaceRemapSession(store, sessionId, oldRepo);
+      manager = new SessionManager(() => {}, () => {}, store, "runner", undefined,
+        (() => { throw new Error("a refused remap must not construct a provider"); }) as never, dataDir, 1);
+      awaitBoundary = installWorkspaceRemapAwaitBoundary(manager, sessionId, boundary);
+
+      const start = manager.start(workspaceRemapSpec(sessionId, newRepo));
+      await waitForCondition(() => awaitBoundary!.launchGenerations.has(sessionId),
+        "the remap did not reach its launch-generation await boundary");
+      const requested = await manager.requestWorktree(sessionId, {
+        baseRef: "HEAD", branch: `fix/remap-${boundary}`,
+      });
+      const owner = `${sessionId}\0${requested.worktree.id}`;
+      assert.ok(requested.worktree.portBlock);
+      awaitBoundary.release();
+
+      assert.equal(await start, false);
+      const retained = store.readMeta(sessionId)!;
+      assert.equal(retained.repoPath, oldRepo);
+      assert.equal(retained.worktreePath, requested.worktree.path);
+      assert.equal(retained.worktrees?.some((worktree) => worktree.id === requested.worktree.id), true);
+      assert.equal(existsSync(requested.worktree.path), true);
+      assert.deepEqual(
+        new WorktreePortAllocator(dataDir, manager.worktreePortRuntime()).get(owner),
+        requested.worktree.portBlock,
+        "the refused remap preserves the exact worktree port owner",
+      );
+    } finally {
+      awaitBoundary?.release();
+      manager?.shutdownAll();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("a workspace remap waits for an already in-flight worktree request before deciding", {
+  skip: !haveGit(),
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-workspace-remap-in-flight-"));
+  const dataDir = join(root, "data");
+  const oldRepo = join(root, "old-repo");
+  const newRepo = join(root, "new-repo");
+  const sessionId = "s_workspace_remap_in_flight";
+  let manager: SessionManager | undefined;
+  let awaitBoundary: ReturnType<typeof installWorkspaceRemapAwaitBoundary> | undefined;
+  let releaseRequest = () => {};
+  try {
+    initWorkspaceRemapRepo(oldRepo);
+    initWorkspaceRemapRepo(newRepo);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    createStoppedWorkspaceRemapSession(store, sessionId, oldRepo);
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined,
+      (() => { throw new Error("a refused remap must not construct a provider"); }) as never, dataDir, 1);
+    awaitBoundary = installWorkspaceRemapAwaitBoundary(manager, sessionId, "closing");
+    const lane = manager as unknown as {
+      runWorktreeOperation: <T>(sessionId: string, operation: () => Promise<T>) => Promise<T>;
+    };
+    const originalLane = lane.runWorktreeOperation.bind(manager);
+    let requestEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { requestEntered = resolve; });
+    const requestGate = new Promise<void>((resolve) => { releaseRequest = resolve; });
+    let first = true;
+    lane.runWorktreeOperation = async (id, operation) => {
+      if (first) {
+        first = false;
+        requestEntered();
+        await requestGate;
+      }
+      return originalLane(id, operation);
+    };
+
+    const request = manager.requestWorktree(sessionId, {
+      baseRef: "HEAD", branch: "fix/remap-in-flight",
+    });
+    await entered;
+    const start = manager.start(workspaceRemapSpec(sessionId, newRepo));
+    await waitForCondition(() => awaitBoundary!.launchGenerations.has(sessionId),
+      "the remap did not reach the closing boundary");
+    releaseRequest();
+    const requested = await request;
+    awaitBoundary.release();
+
+    assert.equal(await start, false);
+    const retained = store.readMeta(sessionId)!;
+    assert.equal(retained.repoPath, oldRepo);
+    assert.equal(retained.worktrees?.some((worktree) => worktree.id === requested.worktree.id), true);
+    assert.equal(existsSync(requested.worktree.path), true);
+  } finally {
+    releaseRequest();
+    awaitBoundary?.release();
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the final serialized launch refresh rechecks a workspace remap", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-workspace-remap-final-refresh-"));
+  const dataDir = join(root, "data");
+  const oldRepo = join(root, "old-repo");
+  const newRepo = join(root, "new-repo");
+  const sessionId = "s_workspace_remap_final_refresh";
+  let manager: SessionManager | undefined;
+  let releaseRefresh = () => {};
+  try {
+    initWorkspaceRemapRepo(oldRepo);
+    initWorkspaceRemapRepo(newRepo);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    createStoppedWorkspaceRemapSession(store, sessionId, oldRepo);
+    store.patchMeta(sessionId, {
+      agentId: "codex-native",
+      driver: "codex-app-server",
+      command: "codex",
+      agentSessionId: "resumable-thread-final-refresh",
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined,
+      (() => { throw new Error("a refused remap must not construct a provider"); }) as never, dataDir, 1);
+    const lane = manager as unknown as {
+      runWorktreeOperation: <T>(sessionId: string, operation: () => Promise<T>) => Promise<T>;
+    };
+    const originalLane = lane.runWorktreeOperation.bind(manager);
+    let finalRefreshReached!: () => void;
+    const finalRefresh = new Promise<void>((resolve) => { finalRefreshReached = resolve; });
+    const refreshGate = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+    let laneCalls = 0;
+    lane.runWorktreeOperation = async (id, operation) => {
+      laneCalls++;
+      if (laneCalls === 2) {
+        finalRefreshReached();
+        await refreshGate;
+      }
+      return originalLane(id, operation);
+    };
+
+    const start = manager.start({
+      ...workspaceRemapSpec(sessionId, newRepo),
+      agentId: "codex-native",
+      driver: "codex-app-server" as const,
+      command: "codex",
+    });
+    await finalRefresh;
+    const managerInternals = manager as unknown as {
+      lockOwner: string;
+      admitted: Set<string>;
+      admissionQueue: Array<{ request: { sessionId: string } }>;
+    };
+    assert.equal(store.readMeta(sessionId)?.agentSessionId, "resumable-thread-final-refresh");
+    assert.equal(store.ownsLock(sessionId, managerInternals.lockOwner), true,
+      "the exact final-refresh barrier must be after the resumable-thread lock acquisition");
+    const requested = await manager.requestWorktree(sessionId, {
+      baseRef: "HEAD", branch: "fix/remap-final-refresh",
+    });
+    releaseRefresh();
+
+    assert.equal(await start, false);
+    const retained = store.readMeta(sessionId)!;
+    assert.equal(retained.repoPath, oldRepo);
+    assert.equal(retained.worktrees?.some((worktree) => worktree.id === requested.worktree.id), true);
+    assert.equal(managerInternals.admitted.has(sessionId), false,
+      "a final remap refusal must not consume resident capacity");
+    assert.equal(managerInternals.admissionQueue.some(
+      (entry) => entry.request.sessionId === sessionId,
+    ), false, "a final remap refusal must not leave a capacity waiter");
+    assert.equal(store.acquireLock(sessionId, "third-runner"), true,
+      "a final remap refusal must release the resumable-thread lock");
+    store.releaseLock(sessionId, "third-runner");
+  } finally {
+    releaseRefresh();
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a superseded launch cannot write stale workspace metadata from its final refresh", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-workspace-remap-generation-"));
+  const dataDir = join(root, "data");
+  const oldRepo = join(root, "old-repo");
+  const firstRepo = join(root, "first-repo");
+  const replacementRepo = join(root, "replacement-repo");
+  const sessionId = "s_workspace_remap_generation";
+  let manager: SessionManager | undefined;
+  let releaseRefresh = () => {};
+  try {
+    mkdirSync(oldRepo);
+    mkdirSync(firstRepo);
+    mkdirSync(replacementRepo);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    createStoppedWorkspaceRemapSession(store, sessionId, oldRepo);
+    const launched: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launched.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async () => ({ stopReason: "end_turn" as const }), cancel: () => {}, dispose: () => {},
+        setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => null,
+      };
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 2);
+    const lane = manager as unknown as {
+      runWorktreeOperation: <T>(sessionId: string, operation: () => Promise<T>) => Promise<T>;
+    };
+    const originalLane = lane.runWorktreeOperation.bind(manager);
+    let staleRefreshReached!: () => void;
+    const staleRefresh = new Promise<void>((resolve) => { staleRefreshReached = resolve; });
+    const refreshGate = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+    let laneCalls = 0;
+    lane.runWorktreeOperation = async (id, operation) => {
+      laneCalls++;
+      if (laneCalls === 2) {
+        staleRefreshReached();
+        await refreshGate;
+      }
+      return originalLane(id, operation);
+    };
+
+    const staleStart = manager.start(workspaceRemapSpec(sessionId, firstRepo));
+    await staleRefresh;
+    const replacementStart = manager.start(workspaceRemapSpec(sessionId, replacementRepo));
+    assert.equal(await replacementStart, true);
+    releaseRefresh();
+
+    assert.equal(await staleStart, false);
+    assert.equal(store.readMeta(sessionId)?.repoPath, replacementRepo);
+    assert.deepEqual(launched, [replacementRepo]);
+  } finally {
+    releaseRefresh();
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a workspace remap remains compatible with attached-only attribution", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-workspace-remap-attached-"));
+  const oldRepo = join(root, "old-repo");
+  const newRepo = join(root, "new-repo");
+  const attachedPath = join(root, "operator-worktree");
+  const sessionId = "s_workspace_remap_attached";
+  let manager: SessionManager | undefined;
+  try {
+    mkdirSync(oldRepo);
+    mkdirSync(newRepo);
+    mkdirSync(attachedPath);
+    const store = new SessionStore(join(root, "sessions"));
+    createStoppedWorkspaceRemapSession(store, sessionId, oldRepo);
+    store.patchMeta(sessionId, {
+      worktreePath: attachedPath,
+      worktreeBranch: "operator/attached",
+      worktrees: [{ id: "attached", path: attachedPath, branch: "operator/attached", source: "attached" }],
+    });
+    const factory = () => ({
+      pid: 1, initialize: async () => {}, newSession: async () => {},
+      prompt: async () => ({ stopReason: "end_turn" as const }), cancel: () => {}, dispose: () => {},
+      setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => null,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, root, 1);
+
+    assert.equal(await manager.start(workspaceRemapSpec(sessionId, newRepo)), true);
+    const remapped = store.readMeta(sessionId)!;
+    assert.equal(remapped.repoPath, newRepo);
+    assert.equal(remapped.worktreePath, null);
+    assert.deepEqual(remapped.worktrees, []);
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
