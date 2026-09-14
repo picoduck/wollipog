@@ -4042,7 +4042,7 @@ app.post("/api/sessions/:id/worktrees/retry-setup", async (req, reply) => {
 
 app.post("/api/sessions/:id/worktrees/generate-setup", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  return runSessionWorktreeRequest(id, { operation: "generate_setup" }, reply);
+  return runSessionWorktreeRequest(id, { operation: "generate_setup" }, requestPrincipal(req), reply);
 });
 
 // Per-turn checkpoint rewind (T3-style, files only — the conversation continues). The runner

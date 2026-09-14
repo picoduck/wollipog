@@ -10911,6 +10911,7 @@ export class SessionManager {
       record.worktreeRemovedAt = Date.now();
       this.cleanupJournal.add(record);
     }
+    await this.forgetRemovedWorktree(record);
     this.finishWorktreeCleanup(record);
   }
 

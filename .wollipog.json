@@ -13,5 +13,6 @@
       "timeoutSeconds": 600,
       "optional": false
     }
-  ]
+  ],
+  "teardown": []
 }

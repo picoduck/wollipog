@@ -116,7 +116,7 @@ export function generateWorktreeSetupConfig(
     .filter((candidate): candidate is typeof COPY_CANDIDATES[number] => COPY_CANDIDATES.includes(candidate as typeof COPY_CANDIDATES[number]))
     .sort()
     .map((candidate) => ({ source: candidate, destination: candidate }));
-  const config: WorktreeSetupConfig = { version: 1, copyFiles, environment: {}, setup: steps };
+  const config: WorktreeSetupConfig = { version: 1, copyFiles, environment: {}, setup: steps, teardown: [] };
   const source = `${JSON.stringify(config, null, 2)}\n`;
   // The generator is downstream of the production parser, never a second schema implementation.
   parseWorktreeSetupConfig(source);

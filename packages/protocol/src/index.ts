@@ -6548,7 +6548,7 @@ export type SessionWorktreeRequestMessage =
   | { type: "session_worktree"; requestId: string; sessionId: string; operation: "attach" | "select" | "discard" | "retry_setup"; path: string }
   | { type: "session_worktree"; requestId: string; sessionId: string; operation: "generate_setup" };
 
-/** Protocol v143. Inspect or generate the canonical config for one runner-owned workspace. The workspace id is
+/** Protocol v146. Inspect or generate the canonical config for one runner-owned workspace. The workspace id is
  * resolved by the runner; callers cannot supply a filesystem destination. */
 export interface WorkspaceWorktreeSetupRequestMessage {
   type: "workspace_worktree_setup";
@@ -6616,7 +6616,7 @@ export interface SessionWorktreeResultMessage {
   error?: string;
   worktree?: SessionWorktreeView;
   snapshot?: SessionSnapshot;
-  /** Protocol v143, generate_setup only. No file contents cross the wire. */
+  /** Protocol v146, generate_setup only. No file contents cross the wire. */
   generatedSetup?: { path: ".wollipog.json"; detected: string[] };
   /** Protocol v133+, attach only. */
   isolation?: SessionWorktreeIsolationNotice;

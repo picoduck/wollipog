@@ -37,14 +37,16 @@ Generating a valid file does not apply it retroactively to the current worktree.
       "timeoutSeconds": 600,
       "optional": false
     }
-  ]
+  ],
+  "teardown": []
 }
 ```
 
 - `version` must be `1`.
 - `copyFiles` contains relative `source` and `destination` paths. A destination must be ignored by Git. Existing destinations are preserved on retry.
-- `environment` contains non-sensitive literal values. Values may interpolate `${WOLLIPOG_WORKTREE_PATH}`, `${WOLLIPOG_WORKTREE_BRANCH}`, `${WOLLIPOG_WORKTREE_BASE_REF}`, and `${WOLLIPOG_PRIMARY_CHECKOUT}`. Wollipog-reserved, authentication, network, loader, and process-control environment names are rejected.
+- `environment` contains non-sensitive literal values. Values may interpolate `${WOLLIPOG_WORKTREE_PATH}`, `${WOLLIPOG_WORKTREE_BRANCH}`, `${WOLLIPOG_WORKTREE_BASE_REF}`, `${WOLLIPOG_PRIMARY_CHECKOUT}`, `${WOLLIPOG_PORT_BLOCK_START}`, `${WOLLIPOG_PORT_BLOCK_END}`, and `${WOLLIPOG_PORT_BLOCK_SIZE}`. Wollipog-reserved, authentication, network, loader, and process-control environment names are rejected.
 - `setup` contains named argv arrays, not shell strings. `timeoutSeconds` is 1–3,600 and defaults to 600. `optional` defaults to `false`.
+- `teardown` contains the separately ordered, trust-gated cleanup steps. See [Worktree Hooks and Ports](worktree-hooks-and-ports.md) for frozen teardown and stable port-allocation semantics.
 
 All sections may be empty:
 
@@ -53,7 +55,8 @@ All sections may be empty:
   "version": 1,
   "copyFiles": [],
   "environment": {},
-  "setup": []
+  "setup": [],
+  "teardown": []
 }
 ```
 

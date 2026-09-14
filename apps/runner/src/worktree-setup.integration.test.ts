@@ -730,10 +730,14 @@ test("an activation failure after absent-config discovery leaves no ghost worktr
     manager.requestWorktree("s_activation_failure", { baseRef: "HEAD", branch: "fix/activation-failure" }),
     /quarantined/u,
   );
-   assert.equal(store.readMeta("s_activation_failure")?.worktrees?.some((worktree) =>
-     worktree.branch === "fix/activation-failure") ?? false, false,
-   "status discovery cannot publish an identity for a worktree that cleanup removed");
- });
+  assert.equal(store.readMeta("s_activation_failure")?.worktrees?.some((worktree) =>
+    worktree.branch === "fix/activation-failure") ?? false, false,
+    "status discovery cannot publish an identity for a worktree that cleanup removed");
+  const allocations = JSON.parse(readFileSync(join(dataDir, "worktree-port-allocations.json"), "utf8")) as {
+    allocations: unknown[];
+  };
+  assert.deepEqual(allocations.allocations, [], "creation rollback releases the removed worktree's port block");
+});
 
 test("malformed setup is projected with its exact key and never reaches trust or execution", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-worktree-setup-invalid-"));
@@ -763,6 +767,8 @@ test("malformed setup is projected with its exact key and never reaches trust or
   const retained = store.readMeta("s_invalid_setup")?.worktrees?.find((worktree) =>
     worktree.branch === "fix/invalid-setup");
   assert.equal(retained?.setupConfig?.status, "invalid");
+  assert.deepEqual(retained?.portBlock, { start: 42_000, end: 42_019, size: 20 },
+    "invalid setup retains the runner-owned port allocation for later safe cleanup");
   assert.match(retained?.setupConfig?.status === "invalid" ? retained.setupConfig.error : "",
     /\.wollipog\.json\.setup\[0\]\.command/u);
   assert.equal(trustRequests, 0);
