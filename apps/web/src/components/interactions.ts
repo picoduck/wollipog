@@ -466,12 +466,6 @@ export function consumeLongPressClick(): boolean {
   return true;
 }
 
-/** Test seam: presses do not leak suppression across tests. */
-export function resetLongPressForTest(): void {
-  longPressState.held = false;
-  longPressState.releasedAt = 0;
-}
-
 export function useLongPress(onLongPress: (point: { x: number; y: number }) => void): LongPress {
   const callbackRef = useRef(onLongPress);
   callbackRef.current = onLongPress;
