@@ -151,6 +151,12 @@ test("HTTP agent management scopes descendants and composes governance policy vi
         assert.equal(duplicateFollowUp.status, 201);
         assert.equal((await duplicateFollowUp.json() as { duplicate: boolean }).duplicate, true,
           "campaign follow-up deduplication is enforced at the authenticated HTTP boundary");
+        assert.equal((await request(mode, "orchestrator-campaign/follow-ups", {
+          originSessionId: `${mode}-hidden`, repository: "picoduck/wollipog", title: "Hidden Follow-Up",
+        })).status, 404, "a campaign credential cannot record a follow-up from a hidden child");
+        assert.equal((await request(mode, "orchestrator-campaign/verify-child", {
+          childSessionId: `${mode}-hidden`, reportEventSeq: 1, followUpsAccounted: true,
+        })).status, 404, "a campaign credential cannot verify a hidden child");
         assert.equal((await request(mode, "parent-control", { mode: "questions" })).status, 401,
           "agent credentials cannot enable their own Parent Control");
         const humanRequest = (operation: string, body: unknown) => fetch(
@@ -191,6 +197,10 @@ test("HTTP agent management scopes descendants and composes governance policy vi
         });
         assert.equal(createdResponse.status, 201, "the exact child credential can create a typed decision");
         const created = await createdResponse.json() as { occurrenceId: string };
+        await settleStatus(`${mode}-child`, "idle");
+        assert.equal((await request(mode, "orchestrator-campaign/verify-child", {
+          childSessionId: `${mode}-child`, reportEventSeq: childReportSeq, followUpsAccounted: true,
+        })).status, 409, "an unresolved typed decision prevents child verification");
         assert.equal((await childRequest(`workflow-decisions/${created.occurrenceId}`, undefined, "GET")).status, 200);
         assert.equal((await request(`${mode}-child`, `workflow-decisions/${created.occurrenceId}/consume`, {
           resourceSnapshot: snapshot,
@@ -212,6 +222,9 @@ test("HTTP agent management scopes descendants and composes governance policy vi
         })).status, 409, "the grant cannot be replayed");
         await settleStatus(`${mode}-grandchild`, "idle");
         await settleStatus(`${mode}-child`, "idle");
+        assert.equal((await request(mode, "orchestrator-campaign/verify-child", {
+          childSessionId: `${mode}-child`, reportEventSeq: childReportSeq, followUpsAccounted: true,
+        })).status, 409, "an unfinished nested child prevents its parent from being verified");
         assert.equal((await request(mode, "orchestrator-campaign/verify-child", {
           childSessionId: `${mode}-grandchild`, reportEventSeq: grandchildReportSeq, followUpsAccounted: true,
         })).status, 200, "a nested child can be verified before its parent report");

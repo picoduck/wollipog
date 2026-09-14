@@ -5203,7 +5203,7 @@ export class SessionsService {
         !canAccess(campaignSessionId) || !canAccess(request.originSessionId)) {
       return fail("follow-up origin is not a visible campaign child", 404);
     }
-    return ok(this.db.recordCampaignFollowUp({
+    const followUp = this.db.recordCampaignFollowUp({
       campaignSessionId,
       originSessionId: request.originSessionId,
       repository: request.repository,
@@ -5211,7 +5211,9 @@ export class SessionsService {
       ...(request.recommendationKey ? { recommendationKey: request.recommendationKey } : {}),
       followUpsMode: campaign.orchestratorPolicy.behavior.followUps,
       now: Date.now(),
-    }), 201);
+    });
+    this.hub.sessionChangedById(campaignSessionId);
+    return ok(followUp, 201);
   }
 
   verifyCampaignChild(
@@ -5528,7 +5530,9 @@ export class SessionsService {
     category: WorkflowDecisionCategory,
   ): WorkflowDecisionAuthority {
     if (category !== "ui_evidence_approval") return policy.decisions[category];
-    return this.db.campaignProjection(controller.id)?.uiEvidenceReview.effectiveOwner ?? "human";
+    // Current audited clients cannot expose private evidence bytes to an isolated Orchestrator.
+    // Avoid rebuilding the full campaign projection for every decision in list/recovery loops.
+    return "human";
   }
 
   private workflowDecisionApproval(decision: WorkflowDecisionView): PendingApproval {

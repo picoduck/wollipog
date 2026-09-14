@@ -2255,6 +2255,7 @@ test("campaign report verification and normalized follow-up deduplication surviv
     initial.registerRunner(meta(), 500, PROTOCOL_VERSION);
     initial.createSession(newSession({ id: "campaign", config: { permissionMode: "orchestrator" } }));
     initial.createSession(newSession({ id: "child", parentSessionId: "campaign" }));
+    initial.updateSessionStatus("child", "idle", 999);
     const report = initial.appendEvent("child", {
       kind: "agent_message", text: "Final report", final: true,
     }, 1_000);
@@ -2276,6 +2277,19 @@ test("campaign report verification and normalized follow-up deduplication surviv
     assert.equal(reopened.hasCompletedAgentReportAt("child", report.seq), true);
     assert.equal(reopened.campaignProjection("campaign")?.status, "verified_complete");
     assert.deepEqual(reopened.campaignProjection("campaign")?.followUps, { unique: 1, duplicates: 1 });
+    reopened.updateSessionStatus("child", "running", 2_000);
+    assert.equal(reopened.campaignChildReportVerified("campaign", "child"), false,
+      "a retained child starting more work invalidates its prior verification");
+    assert.equal(reopened.campaignProjection("campaign")?.status, "active");
+    reopened.updateSessionStatus("child", "idle", 2_001);
+    const newerReport = reopened.appendEvent("child", {
+      kind: "agent_message", text: "New final report", final: true,
+    }, 2_002);
+    assert.equal(reopened.campaignChildReportVerified("campaign", "child"), false,
+      "a newer final response invalidates the stored exact report sequence");
+    reopened.verifyCampaignChildReport("campaign", "child", newerReport.seq, 2_003);
+    assert.equal(reopened.campaignChildReportVerified("campaign", "child"), true);
+    assert.equal(reopened.campaignProjection("campaign")?.status, "verified_complete");
     reopened.close();
   } finally {
     rmSync(root, { recursive: true, force: true });

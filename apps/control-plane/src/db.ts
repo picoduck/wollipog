@@ -11922,10 +11922,37 @@ export class ControlPlaneDb {
   }
 
   campaignChildReportVerified(campaignSessionId: string, childSessionId: string): boolean {
-    return Boolean(this.stmt(
-      `SELECT 1 FROM orchestrator_campaign_child_reports
-       WHERE campaign_session_id=? AND child_session_id=?`,
-    ).get(campaignSessionId, childSessionId));
+    return this.validCampaignChildReportIds(campaignSessionId, childSessionId).has(childSessionId);
+  }
+
+  private validCampaignChildReportIds(campaignSessionId: string, childSessionId?: string): Set<string> {
+    const childFilter = childSessionId === undefined ? "" : " AND verification.child_session_id=?";
+    const params = childSessionId === undefined ? [campaignSessionId] : [campaignSessionId, childSessionId];
+    const rows = this.stmt(
+      `SELECT verification.child_session_id AS id
+       FROM orchestrator_campaign_child_reports verification
+       JOIN sessions child ON child.id=verification.child_session_id
+       JOIN session_events target ON target.session_id=verification.child_session_id
+         AND target.seq=verification.report_event_seq
+       WHERE verification.campaign_session_id=?${childFilter}
+         AND (child.archived=1 OR child.status IN ('idle','completed','stopped'))
+         AND (
+           target.kind='agent_response_completed' OR
+           (target.kind='agent_message' AND json_extract(target.payload, '$.final')=1
+            AND trim(json_extract(target.payload, '$.text'))!=''
+            AND json_type(target.payload, '$.parentToolUseId') IS NULL)
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM session_events later
+           WHERE later.session_id=target.session_id AND later.seq>target.seq AND (
+             later.kind='agent_response_completed' OR
+             (later.kind='agent_message' AND json_extract(later.payload, '$.final')=1
+              AND trim(json_extract(later.payload, '$.text'))!=''
+              AND json_type(later.payload, '$.parentToolUseId') IS NULL)
+           )
+         )`,
+    ).all(...params) as unknown as Array<{ id: string }>;
+    return new Set(rows.map((row) => row.id));
   }
 
   recordCampaignFollowUp(input: {
@@ -11981,9 +12008,7 @@ export class ControlPlaneDb {
       id: string; status: SessionStatus; archived: number; worktree_path: string | null;
       worktrees: string | null; pending_approval: string | null;
     }>) : [];
-    const verified = new Set((this.stmt(
-      "SELECT child_session_id AS id FROM orchestrator_campaign_child_reports WHERE campaign_session_id=?",
-    ).all(campaignSessionId) as unknown as Array<{ id: string }>).map((row) => row.id));
+    const verified = this.validCampaignChildReportIds(campaignSessionId);
     const pending = this.stmt(
       `SELECT session_id, authority FROM workflow_decisions
        WHERE controlling_session_id=? AND status='pending'`,
@@ -12000,6 +12025,8 @@ export class ControlPlaneDb {
       const approval = parseJson<PendingApproval>(child.pending_approval);
       const genericPending = pendingRequests(approval).some((request) => request.kind !== "workflow_decision");
       if (childPending.some((decision) => decision.authority === "human") || genericPending) waitingHuman += 1;
+      // A retained child may receive more work after verification. Re-check both the exact
+      // latest report and terminal-for-review state instead of trusting a durable row forever.
       const reportVerified = verified.has(child.id);
       const worktrees = parseJson<SessionWorktreeView[]>(child.worktrees) ?? [];
       const cleanlyRetired = child.archived === 1 && child.worktree_path === null && worktrees.length === 0;

@@ -852,6 +852,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.delegation.decisions.pr_merge, "human");
     assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.sources.delegation.decisions.pr_merge, "active_campaign");
     assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.sources.delegation.decisions.implementation_question, "user_default");
+    hub.sessionChangedByIdCalls.length = 0;
     const firstFollowUp = svc.recordCampaignFollowUp(parent.id, {
       originSessionId: child.data.id, repository: "picoduck/wollipog", title: "Bounded Follow-Up",
     });
@@ -861,6 +862,8 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     });
     assert.equal(firstFollowUp.data?.executionDisposition, "recommend_only_stop", "Recommend Only stops before execution");
     assert.equal(duplicateFollowUp.data?.duplicate, true, "normalized repository and title deduplicate across caller ids");
+    assert.deepEqual(hub.sessionChangedByIdCalls, [parent.id, parent.id],
+      "each persisted follow-up refreshes the campaign summary for connected clients");
     db.setWorktreePath(child.data.id, `/worktrees/${child.data.id}`);
     db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?").run(JSON.stringify([{
       id: "campaign-worktree", path: `/worktrees/${child.data.id}`, branch: "fix/campaign-child", source: "created",
