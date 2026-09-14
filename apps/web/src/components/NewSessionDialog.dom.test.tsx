@@ -315,6 +315,21 @@ function pressFormShortcut(
   } as never) as never);
 }
 
+function setTouchChoicePicker(enabled: boolean): () => void {
+  const previous = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: enabled,
+    media: query,
+    onchange: null,
+    addListener: () => undefined,
+    removeListener: () => undefined,
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+    dispatchEvent: () => true,
+  })) as unknown as typeof domWindow.matchMedia;
+  return () => { domWindow.matchMedia = previous; };
+}
+
 test("New Session is a labelled form with Create Session as its default action", async () => {
   const fixture = await mountFixture();
   try {
@@ -332,6 +347,37 @@ test("New Session is a labelled form with Create Session as its default action",
     }
   } finally {
     await unmountFixture(fixture);
+  }
+});
+
+test("touch Project selection opens a non-editable list without summoning a keyboard", async () => {
+  const restoreMatchMedia = setTouchChoicePicker(true);
+  try {
+    const fixture = await mountFixture();
+    try {
+      assert.equal(fixture.container.querySelector('input[aria-label="Project"]'), null,
+        "touch layouts do not render an editable Project input");
+
+      const trigger = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Project:"]');
+      assert.ok(trigger, "touch layouts render the shared button/listbox picker");
+      await act(async () => { submitWithEnter(fixture.container); });
+      assert.equal((domWindow.document.activeElement as unknown) === trigger, true,
+        "mobile validation focuses the actionable Project picker");
+      await act(async () => { trigger.click(); });
+
+      const listbox = fixture.container.querySelector('[role="listbox"][aria-label="Project"]');
+      assert.ok(listbox, "the Project choices open without focusing a text field");
+      const option = [...listbox.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+        .find((candidate) => candidate.textContent?.startsWith(project.name));
+      assert.ok(option);
+      await act(async () => { option.click(); });
+      assert.equal(trigger.getAttribute("aria-label"), `Project: ${project.name}`);
+      assert.equal(createButton(fixture.container).disabled, false);
+    } finally {
+      await unmountFixture(fixture);
+    }
+  } finally {
+    restoreMatchMedia();
   }
 });
 

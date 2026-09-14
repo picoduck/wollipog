@@ -283,7 +283,7 @@ export function NewSessionDialog({
   const formId = `${generatedFormId}-new-session`;
   const projectInputId = `${generatedFormId}-project`;
   const agentInputId = `${generatedFormId}-agent`;
-  const touchAgentPicker = useTouchTargetMode();
+  const touchChoicePicker = useTouchTargetMode();
   const projectLocationOptionsId = `${generatedFormId}-project-locations`;
   const permissionOptionsId = `${generatedFormId}-permission-presets`;
   const liveChildLimitInputId = `${generatedFormId}-live-child-limit`;
@@ -765,19 +765,19 @@ export function NewSessionDialog({
         retainedSessionButtonRef.current?.focus();
       } else if (projectsSupported && !projectSelection) {
         setValidationError("Choose a Project or No Project.");
-        focusValidationProblem('[role="combobox"][aria-label="Project"]');
+        focusValidationProblem('[role="combobox"][aria-label="Project"], button[aria-label^="Project:"]');
       } else if (projectsSupported && projectSelection !== NO_PROJECT_SELECTION && !projectLocationLaunchable) {
         setValidationError("Choose an available Project Location.");
         focusValidationProblem(
           `[id="${projectLocationOptionsId}"] .ui-choice-card:not([aria-disabled="true"])`,
           '[data-validation-target="add-location"]:not(:disabled)',
-          '[role="combobox"][aria-label="Project"]',
+          '[role="combobox"][aria-label="Project"], button[aria-label^="Project:"]',
         );
       } else if (!runnerId) {
         setValidationError("Pick a runner, workspace, and agent.");
         focusValidationProblem(
           'button[aria-label^="Machine:"]',
-          '[role="combobox"][aria-label="Project"]',
+          '[role="combobox"][aria-label="Project"], button[aria-label^="Project:"]',
         );
       } else if (!workspaceId && !browsedPath) {
         setValidationError("Pick a runner, workspace, and agent.");
@@ -935,17 +935,29 @@ export function NewSessionDialog({
         {projectsSupported && (
             <>
               <div className="field">
-                <label className="new-session-field-label" htmlFor={projectInputId}>Project</label>
-                <SearchableCombobox<string>
-                  inputId={projectInputId}
-                  className="new-session-choice-control"
-                  label="Project"
-                  value={projectSelection || null}
-                  onChange={pickProject}
-                  options={projectOptions}
-                  placeholder="Choose a Project…"
-                  emptyLabel="No Matching Projects"
-                />
+                <label className="new-session-field-label" htmlFor={touchChoicePicker ? undefined : projectInputId}>Project</label>
+                {touchChoicePicker ? (
+                  <Select<string>
+                    className="new-session-choice-control"
+                    label="Project"
+                    value={projectSelection || null}
+                    onChange={pickProject}
+                    options={projectOptions}
+                    placeholder="Choose a Project…"
+                    emptyLabel="No Projects Available"
+                  />
+                ) : (
+                  <SearchableCombobox<string>
+                    inputId={projectInputId}
+                    className="new-session-choice-control"
+                    label="Project"
+                    value={projectSelection || null}
+                    onChange={pickProject}
+                    options={projectOptions}
+                    placeholder="Choose a Project…"
+                    emptyLabel="No Matching Projects"
+                  />
+                )}
               </div>
               <div className="new-session-project-actions">
                 <span className="muted">
@@ -1158,10 +1170,10 @@ export function NewSessionDialog({
           )}
 
           <div className="field">
-            <label className="new-session-field-label" htmlFor={touchAgentPicker ? undefined : agentInputId}>Agent</label>
+            <label className="new-session-field-label" htmlFor={touchChoicePicker ? undefined : agentInputId}>Agent</label>
             <div className="agent-select">
               <AgentIcon driver={agent?.driver ?? "acp"} agentName={agent?.name} size={15} />
-              {touchAgentPicker ? (
+              {touchChoicePicker ? (
                 <Select<string>
                   className="new-session-choice-control"
                   label="Agent"
