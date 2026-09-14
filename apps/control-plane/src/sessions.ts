@@ -5831,7 +5831,7 @@ export class SessionsService {
           runnerId: session.runnerId,
           runnerOnline: this.hub.isRunnerOnline(session.runnerId),
           eventEpoch: session.eventEpoch,
-          createdAt: session.updatedAt,
+          createdAt: session.requestCreatedAtById[request.requestId] ?? session.updatedAt,
           responseOwner: "human",
           occurrenceId: request.occurrenceId,
           request,

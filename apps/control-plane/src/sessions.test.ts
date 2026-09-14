@@ -1994,6 +1994,13 @@ test("opt-in Parent Control resolves exact nested request occurrences with agent
     assert.equal(listed.data.requests[0]?.responseOwner, "human");
     assert.ok(Number.isFinite(listed.data.requests[0]?.createdAt),
       "request metadata includes a stable age for the inbox");
+    const requestCreatedAt = listed.data.requests[0]!.createdAt;
+    db.updateSessionStatus(grandchild.id, "input_required", requestCreatedAt + 60_000);
+    assert.equal(
+      svc.descendantRequests(parent.data.id, () => true).data?.requests[0]?.createdAt,
+      requestCreatedAt,
+      "later child activity does not reset the pending request age",
+    );
     assert.deepEqual(svc.descendantRequests(parent.data.id, () => false).data?.requests, []);
     const answered = svc.resolveDescendantRequest(parent.data.id, grandchild.id, questionOccurrence, {
       action: "answer", answers: { q: "Continue" },

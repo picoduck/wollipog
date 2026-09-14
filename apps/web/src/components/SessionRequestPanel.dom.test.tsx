@@ -1,3 +1,4 @@
+import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import React, { act } from "react";
@@ -7,6 +8,9 @@ import type { DescendantRequestView, SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { loadEvidenceReviewDraft, saveEvidenceReviewDraft } from "../evidence-review-drafts.js";
+import { clearQuestionDrafts, storedQuestionDrafts } from "../question-response.js";
+import { SessionApprovalRegion } from "./SessionApproval.js";
 import { SessionRequestPanel, sessionRequestPanelKey } from "./SessionRequestPanel.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -17,9 +21,11 @@ const globals: Record<string, unknown> = {
   navigator: domWindow.navigator,
   localStorage: domWindow.localStorage,
   HTMLElement: domWindow.HTMLElement,
+  HTMLButtonElement: domWindow.HTMLButtonElement,
   HTMLInputElement: domWindow.HTMLInputElement,
   Node: domWindow.Node,
   Event: domWindow.Event,
+  InputEvent: domWindow.InputEvent,
   MouseEvent: domWindow.MouseEvent,
   KeyboardEvent: domWindow.KeyboardEvent,
   requestAnimationFrame: domWindow.requestAnimationFrame.bind(domWindow),
@@ -258,6 +264,116 @@ test("descendant inbox exposes count, ownership, keyboard selection, and canonic
       .find((button) => button.textContent === "Open Child Session")!;
     await act(async () => open.click());
     assert.deepEqual(opened, [orchestrator]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("switching between descendant questions preserves each request's draft", async () => {
+  const session = { ...evidenceSession(), pendingApproval: null } as SessionView;
+  const question = (suffix: string): DescendantRequestView => ({
+    sessionId: `child-${suffix}`,
+    sessionTitle: `Child ${suffix}`,
+    runnerId: "runner",
+    runnerOnline: true,
+    eventEpoch: 1,
+    createdAt: Date.now(),
+    responseOwner: "human",
+    occurrenceId: `occurrence-${suffix}`,
+    request: {
+      requestId: `question-${suffix}`,
+      occurrenceId: `occurrence-${suffix}`,
+      kind: "question",
+      title: "Question",
+      options: [],
+      questions: [{ id: "response", question: `Answer ${suffix}`, options: [], allowOther: true }],
+    },
+  });
+  const requests = [question("one"), question("two")];
+  let selected = sessionRequestPanelKey(requests[0]!.sessionId, requests[0]!.occurrenceId);
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const render = () => root.render(
+    <ApiProvider client={api}>
+      <SessionRequestPanel
+        session={session}
+        runnerOnline
+        descendants={requests}
+        selectedKey={selected}
+        onSelectedKeyChange={(key) => { selected = key ?? selected; render(); }}
+        onSessionUpdate={() => {}}
+        onDescendantsUpdate={() => {}}
+        onOpenChild={() => {}}
+      />
+    </ApiProvider>,
+  );
+  try {
+    await act(async () => render());
+    const firstInput = container.querySelector<HTMLInputElement>(".question-input")!;
+    await act(async () => {
+      firstInput.value = "Keep this draft";
+      fireDomEvent.change(firstInput, { target: { value: "Keep this draft" } } as never);
+    });
+    const storedDraft = storedQuestionDrafts("child-one", "question-one").response;
+    assert.equal(storedDraft?.kind === "other" ? storedDraft.value : undefined, "Keep this draft");
+    const rows = () => [...container.querySelectorAll<HTMLButtonElement>(".request-panel-row")];
+    await act(async () => rows()[1]!.click());
+    await act(async () => rows()[0]!.click());
+    assert.equal(container.querySelector<HTMLInputElement>(".question-input")?.value, "Keep this draft");
+  } finally {
+    clearQuestionDrafts("child-one", "question-one");
+    clearQuestionDrafts("child-two", "question-two");
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("remote evidence resolution clears the stale review draft", async () => {
+  const pending = evidenceSession();
+  const decision = pending.pendingApproval!.workflowDecision!;
+  const evidenceIds = decision.resourceSnapshot.category === "ui_evidence_approval"
+    ? decision.resourceSnapshot.evidence.map((item) => item.evidenceId) : [];
+  saveEvidenceReviewDraft(
+    "local",
+    pending.id,
+    pending.pendingApproval!.requestId,
+    decision.resourceDigest,
+    evidenceIds.slice(0, 2),
+  );
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const focusRef = React.createRef<HTMLElement>();
+  try {
+    await act(async () => root.render(
+      <ApiProvider client={api}>
+        <SessionApprovalRegion
+          session={pending}
+          runnerOnline
+          fallbackFocusRef={focusRef}
+          evidenceInReviewSurface
+        />
+      </ApiProvider>,
+    ));
+    await act(async () => root.render(
+      <ApiProvider client={api}>
+        <SessionApprovalRegion
+          session={{ ...pending, status: "running", pendingApproval: null } as SessionView}
+          runnerOnline
+          fallbackFocusRef={focusRef}
+          evidenceInReviewSurface
+        />
+      </ApiProvider>,
+    ));
+    assert.deepEqual(loadEvidenceReviewDraft(
+      "local",
+      pending.id,
+      pending.pendingApproval!.requestId,
+      decision.resourceDigest,
+      evidenceIds,
+    ), []);
   } finally {
     await act(async () => root.unmount());
     container.remove();

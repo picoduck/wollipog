@@ -236,6 +236,7 @@ export function SessionRequestPanel({
           </div>
         ) : selected.request.kind === "question" ? (
           <SessionQuestionBanner
+            key={selected.key}
             sessionId={selected.sessionId}
             requestId={selected.request.requestId}
             questions={selected.request.questions ?? []}
@@ -247,6 +248,7 @@ export function SessionRequestPanel({
           />
         ) : (
           <SessionApprovalBanner
+            key={selected.key}
             session={{
               ...session,
               id: selected.sessionId,

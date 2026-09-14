@@ -105,11 +105,38 @@ export function SessionApprovalRegion({
   /** Whether a UI-evidence decision is represented by the transcript trigger + request panel. */
   evidenceInReviewSurface?: boolean;
 }) {
+  const instanceScope = useInstanceScope();
   const approval = session.pendingApproval;
   const questionFallback = approval?.kind === "question" && !questionInTimeline;
   const standaloneApproval = approval?.kind === "question" ? null : approval;
   const reviewApproval = evidenceInReviewSurface && standaloneApproval?.kind === "workflow_decision" &&
-    standaloneApproval.workflowDecision?.resourceSnapshot.category === "ui_evidence_approval";
+    standaloneApproval.workflowDecision?.resourceSnapshot.category === "ui_evidence_approval"
+    ? standaloneApproval : null;
+  const evidenceRequestId = reviewApproval?.requestId ?? null;
+  const evidenceResourceDigest = reviewApproval?.workflowDecision?.resourceDigest ?? null;
+  const evidenceIdentity = evidenceRequestId && evidenceResourceDigest ? {
+    sessionId: session.id,
+    requestId: evidenceRequestId,
+    resourceDigest: evidenceResourceDigest,
+  } : null;
+  const previousEvidenceIdentityRef = useRef(evidenceIdentity);
+  useEffect(() => {
+    const previous = previousEvidenceIdentityRef.current;
+    if (previous && (
+      !evidenceIdentity ||
+      previous.sessionId !== evidenceIdentity.sessionId ||
+      previous.requestId !== evidenceIdentity.requestId ||
+      previous.resourceDigest !== evidenceIdentity.resourceDigest
+    )) {
+      clearEvidenceReviewDraft(
+        instanceScope,
+        previous.sessionId,
+        previous.requestId,
+        previous.resourceDigest,
+      );
+    }
+    previousEvidenceIdentityRef.current = evidenceIdentity;
+  }, [evidenceRequestId, evidenceResourceDigest, instanceScope, session.id]);
   const requestPresentation = questionFallback ? "fallback" : approval?.kind === "question"
     ? "timeline" : reviewApproval ? "timeline" : standaloneApproval ? "standalone" : "none";
   return (

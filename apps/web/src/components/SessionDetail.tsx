@@ -4311,9 +4311,7 @@ function SessionDetailLoaded({
           } : undefined}
           descendantRequests={descendantRequests.length > 0 ? {
             count: descendantRequests.length,
-            onOpen: () => openRequestPanel(
-              sessionRequestPanelKey(descendantRequests[0]!.sessionId, descendantRequests[0]!.occurrenceId),
-            ),
+            onOpen: () => openRequestPanel(),
           } : undefined}
           onOpenBackgroundWork={() => rightPanel.show("background")}
           onOpenAttention={() => {

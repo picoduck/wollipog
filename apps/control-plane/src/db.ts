@@ -10275,6 +10275,7 @@ export class ControlPlaneDb {
     runnerId: string;
     eventEpoch: number;
     updatedAt: number;
+    requestCreatedAtById: Record<string, number>;
     pendingApproval: PendingApproval | null;
   }> {
     const rows = this.stmt(`
@@ -10282,7 +10283,31 @@ export class ControlPlaneDb {
         SELECT id FROM sessions WHERE parent_session_id=?
         UNION
         SELECT s.id FROM sessions s JOIN descendants d ON s.parent_session_id=d.id
-      ) SELECT s.id, s.title, s.runner_id, s.event_epoch, s.updated_at, s.pending_approval
+      ) SELECT s.id, s.title, s.runner_id, s.event_epoch, s.updated_at, s.pending_approval,
+          (
+            SELECT COALESCE(json_group_object(
+              json_extract(event.payload, '$.requestId'),
+              (
+                SELECT MAX(latest.ts) FROM session_events latest
+                WHERE latest.session_id=s.id
+                  AND latest.kind IN ('permission_request', 'question_request')
+                  AND json_extract(latest.payload, '$.requestId')=
+                    json_extract(event.payload, '$.requestId')
+              )
+            ), '{}')
+            FROM session_events event
+            WHERE event.session_id=s.id
+              AND event.kind IN ('permission_request', 'question_request')
+              AND (
+                json_extract(s.pending_approval, '$.requestId')=
+                  json_extract(event.payload, '$.requestId')
+                OR EXISTS (
+                  SELECT 1 FROM json_each(s.pending_approval, '$.additionalRequests') additional
+                  WHERE json_extract(additional.value, '$.requestId')=
+                    json_extract(event.payload, '$.requestId')
+                )
+              )
+          ) AS request_created_at_by_id
         FROM descendants d JOIN sessions s ON s.id=d.id
         WHERE s.id<>? ORDER BY s.created_at DESC, s.id ASC
     `).all(ancestorId, ancestorId) as unknown as Array<{
@@ -10291,16 +10316,25 @@ export class ControlPlaneDb {
       runner_id: string;
       event_epoch: number;
       updated_at: number;
+      request_created_at_by_id: string;
       pending_approval: string | null;
     }>;
-    return rows.map((row) => ({
-      id: row.id,
-      title: row.title,
-      runnerId: row.runner_id,
-      eventEpoch: row.event_epoch,
-      updatedAt: row.updated_at,
-      pendingApproval: parseJson<PendingApproval>(row.pending_approval),
-    }));
+    return rows.map((row) => {
+      const parsedTimes = parseJson<Record<string, unknown>>(row.request_created_at_by_id) ?? {};
+      const requestCreatedAtById = Object.fromEntries(Object.entries(parsedTimes)
+        .filter((entry): entry is [string, number] =>
+          entry[0].length > 0 && typeof entry[1] === "number" &&
+          Number.isFinite(entry[1]) && entry[1] > 0));
+      return {
+        id: row.id,
+        title: row.title,
+        runnerId: row.runner_id,
+        eventEpoch: row.event_epoch,
+        updatedAt: row.updated_at,
+        requestCreatedAtById,
+        pendingApproval: parseJson<PendingApproval>(row.pending_approval),
+      };
+    });
   }
 
   childSessionAllocations(parentSessionId: string): {
