@@ -27,6 +27,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   validatePromptImages,
   validateQuestionAnswers,
   HUMAN_ONLY_PARENT_CONTROL_POLICY,
+  DEFAULT_ORCHESTRATOR_DEFAULTS,
   WORKFLOW_DECISION_CATEGORIES,
   type AgentContext,
   type AgentDriverKind,
@@ -70,6 +71,9 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type ParentControlDecisionPolicy,
   type ParentControlMode,
   type ParentControlPolicy,
+  type OrchestratorCampaignOverrides,
+  type OrchestratorCampaignPolicy,
+  type OrchestratorSettingsView,
   type PolicyHookEvaluationRequest,
   type PolicyHookEvaluationResponse,
   type RecordPolicyHookDecisionMessage,
@@ -163,6 +167,10 @@ import {
   agentHarnessIdentityFor,
   installationSupportsDefault,
 } from "./agent-harness-defaults.js";
+import {
+  parseOrchestratorOverrides,
+  resolveOrchestratorCampaignPolicy,
+} from "./orchestrator-settings.js";
 import {
   cleanupEventPayloadArtifacts,
   externalizeSessionEventPayload,
@@ -3009,7 +3017,12 @@ export class SessionsService {
     cleanupUndelivered = false,
     initiallyArchived = false,
     allowProjectWithoutLocation = false,
-    creationContext?: { defaultOwnerUserId?: string; parentSessionId?: string },
+    creationContext?: {
+      defaultOwnerUserId?: string;
+      parentSessionId?: string;
+      orchestratorDefaults?: OrchestratorSettingsView;
+      validateOrchestratorDefaults?: (defaults: OrchestratorCampaignPolicy) => string | null;
+    },
   ): ServiceResult<SessionView> {
     // Attribution is supplied only by the authenticated route, never by the request payload.
     const spawnRequest = req;
@@ -3019,17 +3032,28 @@ export class SessionsService {
       return fail("The Conductor agent is retired; select an ordinary agent to orchestrate child sessions.", 409);
     }
     const parentSessionId = creationContext?.parentSessionId;
+    const parsedOrchestratorOverrides = parseOrchestratorOverrides(req.orchestrator);
+    if (req.orchestrator !== undefined && !parsedOrchestratorOverrides) {
+      return fail("orchestrator overrides are invalid", 400);
+    }
+    if (parentSessionId && req.orchestrator !== undefined) {
+      return fail("an agent-created child cannot set Orchestrator campaign policy", 403);
+    }
+    if (req.orchestrator !== undefined && (req.parentControl !== undefined || req.parentControlPolicy !== undefined)) {
+      return fail("orchestrator overrides cannot be combined with legacy Parent Control fields", 400);
+    }
     let parentControl = req.parentControl ?? "off";
+    let parentControlPolicy = req.parentControlPolicy;
     if (parentControl !== "off" && parentControl !== "questions" && parentControl !== "questions_and_approvals") {
       return fail("parentControl must be off, questions, or questions_and_approvals", 400);
     }
     if (parentSessionId && parentControl !== "off") {
       return fail("an agent-created child cannot enable Parent Control", 403);
     }
-    if (req.parentControlPolicy && !validateParentControlDecisions(req.parentControlPolicy.decisions)) {
+    if (parentControlPolicy && !validateParentControlDecisions(parentControlPolicy.decisions)) {
       return fail("parentControlPolicy must assign every typed category to human or orchestrator", 400);
     }
-    if (parentSessionId && req.parentControlPolicy) {
+    if (parentSessionId && parentControlPolicy) {
       return fail("an agent-created child cannot set Parent Control policy", 403);
     }
     let parentSession: SessionView | null = null;
@@ -3207,6 +3231,15 @@ export class SessionsService {
       this.db.getRunner(req.runnerId)?.agents.find((agent) => agent.id === req.agentId)?.capabilities;
     const requestedConfig = { ...(snapshotSpec?.config ?? req.config ?? {}) };
     if (!snapshotSpec) {
+      const campaignBehavior = parentSession?.orchestratorPolicy?.behavior;
+      if (campaignBehavior) {
+        if (requestedConfig.model === undefined && campaignBehavior.childModel !== null) {
+          requestedConfig.model = campaignBehavior.childModel;
+        }
+        if (requestedConfig.effort === undefined && campaignBehavior.childEffort !== null) {
+          requestedConfig.effort = campaignBehavior.childEffort;
+        }
+      }
       const preference = creationContext?.defaultOwnerUserId
         ? this.db.getAgentHarnessDefault(
           creationContext.defaultOwnerUserId,
@@ -3255,12 +3288,72 @@ export class SessionsService {
     if (serviceTier) requestedConfig.serviceTier = serviceTier;
     else delete requestedConfig.serviceTier;
     const validationConfig = claudeModelConfigForValidation(requestedConfig, agentCapabilities, launch.driver);
-    if (creationContext?.defaultOwnerUserId && !parentSessionId && req.parentControl === undefined &&
-        requestedConfig.permissionMode === "orchestrator" && runnerSupportsProtocol(
-          runner.protocolVersion,
-          "delegatedParentControl",
-        )) {
-      parentControl = "questions_and_approvals";
+    let orchestratorPolicy: OrchestratorCampaignPolicy | undefined;
+    if (requestedConfig.permissionMode === "orchestrator") {
+      const configured = creationContext?.orchestratorDefaults;
+      const baseDefaults = configured?.defaults ?? structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
+      const overrides: OrchestratorCampaignOverrides = {
+        behavior: { ...(parsedOrchestratorOverrides?.behavior ?? {}) },
+        delegation: {
+          ...(parsedOrchestratorOverrides?.delegation ?? {}),
+          decisions: { ...(parsedOrchestratorOverrides?.delegation?.decisions ?? {}) },
+        },
+      };
+      if (req.config?.maxChildSessions !== undefined) {
+        overrides.behavior!.maximumConcurrentChildren = req.config.maxChildSessions;
+      }
+      if (req.parentControl !== undefined) overrides.delegation!.parentControl = req.parentControl;
+      if (req.parentControlPolicy) {
+        overrides.delegation!.decisions = { ...req.parentControlPolicy.decisions };
+      }
+      // Agent-created nested Orchestrators receive no inherited authority. Their own behavior is
+      // explicit and conservative; the parent policy only supplies model/effort for this launch.
+      const fallbackParentControl = creationContext?.defaultOwnerUserId && runnerSupportsProtocol(
+        runner.protocolVersion,
+        "delegatedParentControl",
+      ) ? DEFAULT_ORCHESTRATOR_DEFAULTS.delegation.parentControl : "off";
+      const campaignBase = parentSessionId || !configured ? {
+        ...structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS),
+        delegation: {
+          parentControl: parentSessionId ? "off" as const : fallbackParentControl,
+          decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY },
+        },
+      } : baseDefaults;
+      orchestratorPolicy = resolveOrchestratorCampaignPolicy(
+        campaignBase,
+        parentSessionId ? "system_default" : configured?.source ?? "system_default",
+        overrides,
+      );
+      // A saved account default must remain portable across a mixed runner fleet. Capabilities
+      // that predate the selected runner fail closed without turning an otherwise supported
+      // Orchestrator launch into a regression. Explicit per-session authority never downgrades
+      // silently: it reaches the ordinary capability checks below and is rejected.
+      if (!runnerSupportsProtocol(runner.protocolVersion, "delegatedParentControl") &&
+          orchestratorPolicy.delegation.parentControl !== "off" &&
+          orchestratorPolicy.sources.delegation.parentControl !== "session_override") {
+        orchestratorPolicy.delegation.parentControl = "off";
+        orchestratorPolicy.sources.delegation.parentControl = "compatibility_fallback";
+      }
+      if (!runnerSupportsProtocol(runner.protocolVersion, "typedWorkflowDecisionDelegation")) {
+        for (const category of WORKFLOW_DECISION_CATEGORIES) {
+          if (orchestratorPolicy.delegation.decisions[category] === "orchestrator" &&
+              orchestratorPolicy.sources.delegation.decisions[category] !== "session_override") {
+            orchestratorPolicy.delegation.decisions[category] = "human";
+            orchestratorPolicy.sources.delegation.decisions[category] = "compatibility_fallback";
+          }
+        }
+      }
+      const compatibilityError = !parentSessionId
+        ? creationContext?.validateOrchestratorDefaults?.(orchestratorPolicy)
+        : null;
+      if (compatibilityError) return fail(compatibilityError, 409);
+      requestedConfig.maxChildSessions = orchestratorPolicy.behavior.maximumConcurrentChildren;
+      parentControl = orchestratorPolicy.delegation.parentControl;
+      parentControlPolicy = Object.values(orchestratorPolicy.delegation.decisions).includes("orchestrator")
+        ? { decisions: orchestratorPolicy.delegation.decisions }
+        : undefined;
+    } else if (req.orchestrator !== undefined) {
+      return fail("Orchestrator campaign overrides require the Orchestrator preset", 409);
     }
     if (requestedConfig.permissionMode === "orchestrator") {
       if (req.launchSurface === "native_tui") {
@@ -3294,10 +3387,10 @@ export class SessionsService {
       );
       if (unsupported) return unsupported;
     }
-    if (req.parentControlPolicy && requestedConfig.permissionMode !== "orchestrator") {
+    if (parentControlPolicy && requestedConfig.permissionMode !== "orchestrator") {
       return fail("Parent Control policy is available only for the Orchestrator preset", 409);
     }
-    if (req.parentControlPolicy && Object.values(req.parentControlPolicy.decisions).includes("orchestrator")) {
+    if (parentControlPolicy && Object.values(parentControlPolicy.decisions).includes("orchestrator")) {
       const unsupported = this.capabilityFailure(
         req.runnerId,
         "typedWorkflowDecisionDelegation",
@@ -3447,7 +3540,8 @@ export class SessionsService {
       driver: launch.driver,
       config,
       parentControl,
-      parentControlPolicy: req.parentControlPolicy,
+      parentControlPolicy,
+      orchestratorPolicy,
       // Remember the ad-hoc browsed directory so restart re-launches from it (workspaceId is null).
       workspacePath: adHoc || null,
       acpSessionContext,
@@ -4035,6 +4129,11 @@ export class SessionsService {
       // A soft rule armed on an unparked session that already exceeds it must park now: nothing on
       // the runner will cancel the turn, so the next prompt would otherwise be admitted first.
       this.gateOnPolicy(sessionId, now, true, true);
+    }
+    if (config.maxChildSessions !== undefined && session.orchestratorPolicy) {
+      this.db.updateSessionOrchestratorBehavior(sessionId, {
+        maximumConcurrentChildren: config.maxChildSessions,
+      }, now);
     }
     const updated = this.db.getSession(sessionId)!;
     this.hub.sessionChanged(updated);

@@ -17,6 +17,7 @@ import type {
   SessionNamingRunnerErrorCode,
   SessionReminderView,
   SessionConfig,
+  OrchestratorSettingsView,
   SetSessionReminderRequest,
   SessionSnapshot,
   SessionView,
@@ -604,6 +605,46 @@ test("orchestrator is creation-only and requires the negotiated native harness b
     assert.equal(olderRunner.ok, true, olderRunner.error);
     assert.equal(olderRunner.data!.parentControl, "off",
       "a human default cannot require a capability that the runner has not negotiated");
+    const portableDefaults: OrchestratorSettingsView = {
+      source: "user_default",
+      defaults: {
+        behavior: {
+          childModel: null, childEffort: null, maximumConcurrentChildren: 4,
+          followUps: "recommend_only", completion: "retain",
+        },
+        delegation: {
+          parentControl: "questions_and_approvals",
+          decisions: {
+            implementation_question: "orchestrator",
+            pr_merge: "human",
+            merged_branch_deletion: "human",
+            follow_up_issue_publication: "human",
+            ui_evidence_approval: "human",
+          },
+        },
+      },
+      capabilities: { models: [], effortLevels: [], installations: 1, compatibleInstallations: 1, status: "available" },
+    };
+    const portable = svc.createSession(
+      { ...request, config: { permissionMode: "orchestrator" } },
+      undefined, undefined, false, false, false,
+      { defaultOwnerUserId: "human", orchestratorDefaults: portableDefaults, validateOrchestratorDefaults: () => null },
+    );
+    assert.equal(portable.ok, true, portable.error);
+    const portableStored = db.getSession(portable.data!.id)!;
+    assert.equal(portableStored.orchestratorPolicy?.delegation.parentControl, "off");
+    assert.equal(portableStored.orchestratorPolicy?.sources.delegation.parentControl, "compatibility_fallback");
+    assert.equal(portableStored.orchestratorPolicy?.delegation.decisions.implementation_question, "human");
+    assert.equal(portableStored.orchestratorPolicy?.sources.delegation.decisions.implementation_question,
+      "compatibility_fallback");
+    const explicitUnsupported = svc.createSession(
+      { ...request, config: { permissionMode: "orchestrator" }, orchestrator: {
+        delegation: { parentControl: "questions" },
+      } },
+      undefined, undefined, false, false, false,
+      { defaultOwnerUserId: "human", orchestratorDefaults: portableDefaults, validateOrchestratorDefaults: () => null },
+    );
+    assert.equal(explicitUnsupported.status, 409, "an explicit unsupported authority request still fails closed");
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     const automated = svc.createSession({ ...request, config: { permissionMode: "orchestrator" } });
     assert.equal(automated.data!.parentControl, "off", "non-human creation does not gain delegated authority");
@@ -675,6 +716,105 @@ test("orchestrator is creation-only and requires the negotiated native harness b
       config: { permissionMode: "orchestrator" } }).status, 409,
     "WSL Orchestrator Native TUI remains unavailable");
   } finally { db.close(); }
+});
+
+test("Orchestrator campaign policy resolves precedence, isolates active sessions, and governs child defaults", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    const planner = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+    planner.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const settings: OrchestratorSettingsView = {
+      source: "user_default",
+      defaults: {
+        behavior: {
+          childModel: "text-model",
+          childEffort: "high",
+          maximumConcurrentChildren: 6,
+          followUps: "recommend_only",
+          completion: "retain",
+        },
+        delegation: {
+          parentControl: "questions",
+          decisions: {
+            implementation_question: "human",
+            pr_merge: "human",
+            merged_branch_deletion: "human",
+            follow_up_issue_publication: "human",
+            ui_evidence_approval: "human",
+          },
+        },
+      },
+      capabilities: {
+        models: [{ id: "text-model", efforts: ["high"] }],
+        effortLevels: ["high"], installations: 1, compatibleInstallations: 1, status: "available",
+      },
+    };
+    const created = svc.createSession({
+      runnerId: RUNNER_ID,
+      workspaceId: WORKSPACE_ID,
+      agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" },
+      orchestrator: {
+        behavior: { maximumConcurrentChildren: 3, completion: "stop_and_archive" },
+        delegation: { decisions: { pr_merge: "orchestrator" } },
+      },
+    }, undefined, undefined, false, false, false, {
+      defaultOwnerUserId: "owner",
+      orchestratorDefaults: settings,
+      validateOrchestratorDefaults: () => null,
+    });
+    assert.ok(created.ok && created.data, created.error);
+    const parent = created.data;
+    assert.equal(parent.maxChildSessions, 3);
+    assert.equal(parent.orchestratorPolicy?.behavior.childModel, "text-model");
+    assert.equal(parent.orchestratorPolicy?.behavior.completion, "stop_and_archive");
+    assert.equal(parent.orchestratorPolicy?.sources.behavior.childModel, "user_default");
+    assert.equal(parent.orchestratorPolicy?.sources.behavior.maximumConcurrentChildren, "session_override");
+    assert.equal(parent.orchestratorPolicy?.sources.delegation.decisions.pr_merge, "session_override");
+    assert.equal(parent.parentControlPolicy?.revision, 1);
+
+    settings.defaults.behavior.childModel = "changed-later";
+    settings.defaults.delegation.decisions.pr_merge = "human";
+    assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.behavior.childModel, "text-model");
+    assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.delegation.decisions.pr_merge, "orchestrator",
+      "editing account defaults cannot mutate an active campaign snapshot");
+
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    const denied = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
+      orchestrator: { behavior: { childModel: "image-model" } },
+    }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    assert.equal(denied.status, 403, "agents cannot set or broaden campaign policy");
+
+    const childRequest = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID };
+    let child = svc.createSession(childRequest, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    if (child.status === 428) {
+      const approval = db.getSession(parent.id)!.pendingApproval!;
+      assert.ok(svc.approve(parent.id, approval.requestId, "allow").ok);
+      child = svc.createSession(childRequest, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    }
+    assert.ok(child.ok && child.data, child.error);
+    assert.equal(child.data.model, "text-model");
+    assert.equal(child.data.effort, "high");
+
+    assert.ok(svc.setConfig(parent.id, { maxChildSessions: 5 }).ok);
+    assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.behavior.maximumConcurrentChildren, 5);
+    assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.sources.behavior.maximumConcurrentChildren, "active_campaign");
+    const currentRevision = db.getSession(parent.id)!.parentControlPolicy!.revision;
+    const decisions = { ...db.getSession(parent.id)!.parentControlPolicy!.decisions, pr_merge: "human" as const };
+    assert.ok(svc.setParentControlPolicy(parent.id, decisions, currentRevision).ok);
+    assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.delegation.decisions.pr_merge, "human");
+    assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.sources.delegation.decisions.pr_merge, "active_campaign");
+    assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.sources.delegation.decisions.implementation_question, "user_default");
+    assert.ok(hub.sentOfType("start_session").length >= 2);
+  } finally {
+    db.close();
+  }
 });
 
 test("tracked guardrails and Native TUI cannot coexist across creation, inheritance, or later config", () => {

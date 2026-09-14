@@ -98,6 +98,7 @@ import {
   SessionNamingPanel,
   useNotifySetting,
 } from "./components/SettingsView.js";
+import { OrchestratorSettingsPanel } from "./components/OrchestratorSettingsPanel.js";
 import { EXPERIMENT_TITLES, experimentForViewName, type ExperimentId } from "./experiments.js";
 import { useExperiments } from "./use-experiments.js";
 import { conductorAgentId } from "./workflow-presets.js";
@@ -807,6 +808,7 @@ export function Shell() {
                   <QuestionPoliciesPanel />
                   </>
                 ),
+                orchestrator: <OrchestratorSettingsPanel discoveryRevision={runners} />,
                 network: <NetworkPanel tailnet={tailnet} />,
                 experimental: (
                   <ExperimentalPanel

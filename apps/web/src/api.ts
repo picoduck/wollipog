@@ -83,6 +83,8 @@ import type {
   AgentHarnessDefaultsView,
   UpdateAgentHarnessDefaultRequest,
   DeleteAgentHarnessDefaultRequest,
+  OrchestratorSettingsView,
+  UpdateOrchestratorSettingsRequest,
   SessionEventsResponse,
   SessionFileEntry,
   SessionView,
@@ -299,6 +301,14 @@ export function createApiClient(transport: ApiTransport) {
   deleteAgentHarnessDefault: (input: DeleteAgentHarnessDefaultRequest) =>
     req<AgentHarnessDefaultsView>("/api/agent-harness-defaults", {
       method: "DELETE",
+      body: JSON.stringify(input),
+    }),
+
+  orchestratorSettings: () => req<OrchestratorSettingsView>("/api/orchestrator-settings"),
+
+  updateOrchestratorSettings: (input: UpdateOrchestratorSettingsRequest) =>
+    req<OrchestratorSettingsView>("/api/orchestrator-settings", {
+      method: "PUT",
       body: JSON.stringify(input),
     }),
 

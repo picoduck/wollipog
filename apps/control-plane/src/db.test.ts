@@ -4053,6 +4053,37 @@ test("Parent Control defaults off and persists opt-in across restart", () => {
   }
 });
 
+test("legacy Orchestrator sessions gain an inspectable fail-closed campaign snapshot", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-orchestrator-policy-migration-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    initial.registerRunner(meta(), 500);
+    initial.createSession({
+      ...newSession(),
+      config: { permissionMode: "orchestrator", maxChildSessions: 9 },
+      parentControl: "questions",
+    });
+    initial.close();
+
+    const legacy = new DatabaseSync(path);
+    legacy.exec("ALTER TABLE sessions DROP COLUMN orchestrator_policy");
+    legacy.close();
+
+    const upgraded = ControlPlaneDb.open(path);
+    const policy = upgraded.getSession("sess-1")?.orchestratorPolicy;
+    assert.ok(policy);
+    assert.equal(policy.behavior.maximumConcurrentChildren, 9);
+    assert.equal(policy.delegation.parentControl, "questions");
+    assert.deepEqual(Object.values(policy.delegation.decisions), ["human", "human", "human", "human", "human"]);
+    assert.deepEqual(new Set(Object.values(policy.sources.behavior)), new Set(["legacy_session"]));
+    assert.deepEqual(new Set(Object.values(policy.sources.delegation.decisions)), new Set(["legacy_session"]));
+    upgraded.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("pending request occurrences remain stable until settlement and rotate after clearing", () => {
   const db = withRunner();
   try {

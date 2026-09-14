@@ -43,7 +43,7 @@ import {
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { isPartialHistory, isRebuiltEventsArray, useStoreActions, useStoreSelector } from "../store.js";
-import { relativeTime, shortenPath } from "../format.js";
+import { relativeTime, shortenPath, titleCaseLabel } from "../format.js";
 import { runnerDisplay } from "../runners.js";
 import { DirectoryPicker } from "./DirectoryPicker.js";
 import { type TimelineItem } from "../timeline.js";
@@ -6223,6 +6223,17 @@ export function ComposerPlusMenu({
               <div className="plus-budget">
                 <span className="plus-budget-prefix" aria-hidden="true">↯</span>
                 <div className="parent-control-settings">
+                  {session.orchestratorPolicy && <section className="active-campaign-policy" aria-label="Active Campaign Behavior">
+                    <strong>Campaign Behavior</strong>
+                    <span className="muted">This campaign keeps its stored policy when account defaults change.</span>
+                    <dl>
+                      <div><dt>Child Model</dt><dd>{session.orchestratorPolicy.behavior.childModel ?? "Automatic"}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.childModel.replaceAll("_", " "))}</small></dd></div>
+                      <div><dt>Child Effort</dt><dd>{session.orchestratorPolicy.behavior.childEffort ? titleCaseLabel(session.orchestratorPolicy.behavior.childEffort) : "Automatic"}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.childEffort.replaceAll("_", " "))}</small></dd></div>
+                      <div><dt>Maximum Concurrent Children</dt><dd>{session.orchestratorPolicy.behavior.maximumConcurrentChildren}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.maximumConcurrentChildren.replaceAll("_", " "))}</small></dd></div>
+                      <div><dt>Follow-Ups</dt><dd>{titleCaseLabel(session.orchestratorPolicy.behavior.followUps.replaceAll("_", " "))}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.followUps.replaceAll("_", " "))}</small></dd></div>
+                      <div><dt>Completion</dt><dd>{titleCaseLabel(session.orchestratorPolicy.behavior.completion.replaceAll("_", " "))}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.completion.replaceAll("_", " "))}</small></dd></div>
+                    </dl>
+                  </section>}
                   <div className="parent-control-setting">
                     <span className="parent-control-setting-label">Descendant Requests</span>
                     <Select<ParentControlMode>
@@ -6230,7 +6241,7 @@ export function ComposerPlusMenu({
                       value={session.parentControl ?? "off"}
                       onChange={(value) => onSetParentControl?.(value)}
                       options={[
-                        { value: "off", label: "Off", description: "Keep descendant requests human-only." },
+                        { value: "off", label: "Human", description: "Keep descendant requests human-owned." },
                         { value: "questions", label: "Questions", description: "Delegate non-secret descendant questions." },
                         { value: "questions_and_approvals", label: "Questions and Approvals", description: "Also delegate eligible one-time approvals." },
                       ]}
@@ -6256,7 +6267,7 @@ export function ComposerPlusMenu({
                       />
                     </div>
                   ))}
-                  <span className="muted parent-control-help">Only an authenticated human can change these assignments. Existing unconsumed approvals are revoked when the policy changes.</span>
+                  <span className="muted parent-control-help">Only an authenticated human can change these assignments. Existing unconsumed approvals are revoked when the policy changes. Secrets, authentication, persistent grants, governance, budgets, and tool guardrails remain human-only.</span>
                 </div>
               </div>
             )}

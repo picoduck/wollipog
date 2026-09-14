@@ -12617,9 +12617,69 @@ body.shell-dock-dragging * {
 .ui-row-switch.is-busy .ui-switch { opacity: 0.85; }
 .ui-row-switch.is-busy { cursor: progress; }
 
+/* Orchestrator defaults keep Behavior and Decision Delegation visibly separate while reusing the
+   settings row controls and their keyboard contracts. */
+.orchestrator-settings { display: grid; gap: var(--space-5); color: var(--text); }
+.orchestrator-settings .ui-row-choice { grid-template-columns: auto minmax(0, 1fr) 260px; }
+.settings-group-intro { margin: 0; padding: 0 var(--row-pad-x) var(--space-2); color: var(--text-dim); font-size: var(--text-sm); line-height: var(--leading-normal); }
+.orchestrator-number-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--row-pad-y) var(--row-pad-x);
+}
+.orchestrator-number-row input,
+.orchestrator-policy-control input {
+  min-height: 38px;
+  width: 100%;
+  color: var(--text);
+  background: var(--bg-elev-2);
+  border: 1px solid var(--control-outline);
+  border-radius: var(--radius-sm);
+  padding: 7px 9px;
+  font: inherit;
+}
+.orchestrator-settings .form-error { margin: 0 var(--row-pad-x); }
+.orchestrator-settings-actions { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+
+.new-session-orchestrator-policy { display: grid; gap: var(--space-3); margin-top: var(--space-2); }
+.orchestrator-policy-area {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+  margin: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.orchestrator-policy-area legend { padding: 0 var(--space-1); font-weight: var(--weight-semibold); }
+.orchestrator-policy-area > p { margin: 0; }
+.orchestrator-policy-control { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 220px); align-items: center; gap: var(--space-3); }
+.orchestrator-policy-control > span { display: flex; flex-direction: column; gap: 2px; font-weight: var(--weight-medium); }
+.orchestrator-policy-control small { color: var(--text-faint); font-size: var(--text-xs); font-weight: var(--weight-normal); }
+.orchestrator-policy-control .ui-select-trigger { width: 100%; }
+.orchestrator-policy-unavailable { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.active-campaign-policy { display: grid; gap: var(--space-2); padding-bottom: var(--space-3); border-bottom: 1px solid var(--border); }
+.active-campaign-policy dl { display: grid; gap: var(--space-2); margin: 0; }
+.active-campaign-policy dl > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2); }
+.active-campaign-policy dt { color: var(--text-dim); }
+.active-campaign-policy dd { display: flex; flex-direction: column; align-items: flex-end; margin: 0; text-align: right; }
+.active-campaign-policy small { color: var(--text-faint); font-size: var(--text-xs); }
+
+@media (max-width: 760px) {
+  .orchestrator-settings .ui-row-choice { grid-template-columns: minmax(0, 1fr); }
+  .orchestrator-number-row, .orchestrator-policy-control { grid-template-columns: minmax(0, 1fr); }
+  .orchestrator-settings-actions, .orchestrator-policy-unavailable { align-items: stretch; flex-direction: column; }
+  .active-campaign-policy dl > div { grid-template-columns: minmax(0, 1fr); }
+  .active-campaign-policy dd { align-items: flex-start; text-align: left; }
+  .orchestrator-settings-actions .btn, .orchestrator-policy-unavailable .btn { min-height: 44px; }
+}
+
 @media (hover: none), (pointer: coarse) {
   .ui-row { min-height: 44px; }
 }
+
 @media (prefers-reduced-motion: reduce) {
   .ui-row, .ui-switch, .ui-switch::after { transition: none; }
 }
@@ -13030,7 +13090,7 @@ body.shell-dock-dragging * {
   font-weight: var(--weight-medium);
 }
 .settings-panel { flex: 1; min-width: 0; max-width: 620px; display: flex; flex-direction: column; gap: var(--space-5); }
-.settings-panel > h2 { margin: 0; font-size: var(--text-xl); }
+.settings-panel > h2 { margin: 0; color: var(--text); font-size: var(--text-xl); }
 .settings-group { display: flex; flex-direction: column; gap: var(--space-2); }
 
 /* Settings -> Appearance -> Navigation: the rail's visibility and order editor (#385). */

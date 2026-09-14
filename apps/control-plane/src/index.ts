@@ -166,6 +166,8 @@ import {
 import { registerSessionNamingRoutes } from "./session-naming-route.js";
 import { AgentHarnessDefaultsSettings } from "./agent-harness-defaults.js";
 import { registerAgentHarnessDefaultsRoutes } from "./agent-harness-defaults-route.js";
+import { OrchestratorSettings } from "./orchestrator-settings.js";
+import { registerOrchestratorSettingsRoutes } from "./orchestrator-settings-route.js";
 import { registerRunnerAttestationRoute } from "./runner-attestation-route.js";
 import {
   canAssignSessionProject,
@@ -858,6 +860,7 @@ app.post("/api/public/push-receipt", async (req, reply) => {
 
 const sessionNamingSettings = new SessionNamingSettings(db, process.env, hub);
 const agentHarnessDefaultsSettings = new AgentHarnessDefaultsSettings(db);
+const orchestratorSettings = new OrchestratorSettings(db);
 
 const svc = new SessionsService(
   db,
@@ -882,6 +885,7 @@ const svc = new SessionsService(
 
 registerSessionNamingRoutes(app, sessionNamingSettings, requestPrincipal);
 registerAgentHarnessDefaultsRoutes(app, agentHarnessDefaultsSettings, requestPrincipal);
+registerOrchestratorSettingsRoutes(app, orchestratorSettings, requestPrincipal);
 
 registerPromptImageRoutes(app, {
   db,
@@ -3476,7 +3480,15 @@ app.post("/api/sessions", async (req, reply) => {
     initialNativeTui,
     false,
     false,
-    { defaultOwnerUserId: principal?.userId, parentSessionId },
+    {
+      defaultOwnerUserId: principal?.userId,
+      parentSessionId,
+      ...(principal ? {
+        orchestratorDefaults: orchestratorSettings.view(principal),
+        validateOrchestratorDefaults: (defaults: import("@wollipog/protocol").OrchestratorCampaignPolicy) =>
+          orchestratorSettings.compatibilityError(principal, defaults),
+      } : {}),
+    },
   );
   if (!created.ok || !created.data || ownership.body.launchSurface !== "native_tui") return respond(reply, created);
   const sessionId = created.data.id;

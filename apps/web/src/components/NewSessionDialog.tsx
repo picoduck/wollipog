@@ -1,7 +1,9 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
+  DEFAULT_ORCHESTRATOR_DEFAULTS,
   DEFAULT_LIVE_CHILD_LIMIT,
   MAX_LIVE_CHILD_LIMIT,
+  WORKFLOW_DECISION_CATEGORIES,
   type ProjectLocationView,
   type ProjectView,
   runnerCapabilityRequirement,
@@ -9,7 +11,10 @@ import {
   type BoxView,
   type AgentHarnessDefaultsView,
   type ParentControlMode,
+  type OrchestratorDefaults,
+  type OrchestratorSettingsView,
   type SessionConfig,
+  type WorkflowDecisionCategory,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { ApiError } from "../api.js";
@@ -56,6 +61,22 @@ import {
   type SearchableComboboxOption,
   useTouchTargetMode,
 } from "./ui/ChoiceControls.js";
+
+const AUTOMATIC_ORCHESTRATOR_VALUE = "__automatic__";
+const ORCHESTRATOR_DECISION_LABELS: Record<WorkflowDecisionCategory, string> = {
+  implementation_question: "Implementation Questions",
+  pr_merge: "PR Merge Approval",
+  merged_branch_deletion: "Merged Branch Deletion",
+  follow_up_issue_publication: "Follow-Up Issue Publication",
+  ui_evidence_approval: "UI Evidence Approval",
+};
+
+function cloneOrchestratorDefaults(defaults: OrchestratorDefaults): OrchestratorDefaults {
+  return {
+    behavior: { ...defaults.behavior },
+    delegation: { ...defaults.delegation, decisions: { ...defaults.delegation.decisions } },
+  };
+}
 
 /**
  * New Session is intentionally minimal — pick where it runs (runner + agent + workspace) and go.
@@ -186,12 +207,18 @@ export function NewSessionDialog({
   const initialAgentSelection = savedAgentSelection(initialAgentOptions, agentDefaults[runnerId]);
   const [agentId, setAgentId] = useState(initialAgentSelection.agentId);
   const [presetOverride, setPresetOverride] = useState<"default" | "orchestrator">("default");
-  const [parentControl, setParentControl] = useState<ParentControlMode>("off");
+  const [orchestratorDraft, setOrchestratorDraft] = useState<OrchestratorDefaults>(
+    () => cloneOrchestratorDefaults(DEFAULT_ORCHESTRATOR_DEFAULTS),
+  );
+  const [orchestratorOverrides, setOrchestratorOverrides] = useState(() => new Set<string>());
   const [liveChildLimitDraft, setLiveChildLimitDraft] = useState(String(DEFAULT_LIVE_CHILD_LIMIT));
   const [harnessDefaults, setHarnessDefaults] = useState<{
     api: typeof api; scope: typeof instanceScope; view: AgentHarnessDefaultsView | null; error: boolean;
   } | null>(null);
   const [defaultsRetry, setDefaultsRetry] = useState(0);
+  const [orchestratorSettings, setOrchestratorSettings] = useState<{
+    api: typeof api; scope: typeof instanceScope; view: OrchestratorSettingsView | null; error: string | null;
+  } | null>(null);
   useEffect(() => {
     let cancelled = false;
     setHarnessDefaults(null);
@@ -206,6 +233,34 @@ export function NewSessionDialog({
     return () => { cancelled = true; };
   }, [api, instanceScope, defaultsRetry]);
   const defaultsReady = harnessDefaults?.api === api && harnessDefaults.scope === instanceScope && !harnessDefaults.error;
+  useEffect(() => {
+    let cancelled = false;
+    setOrchestratorSettings(null);
+    void api.orchestratorSettings().then(
+      (view) => {
+        if (cancelled) return;
+        const defaults = cloneOrchestratorDefaults(view.defaults);
+        setOrchestratorSettings({ api, scope: instanceScope, view, error: null });
+        setOrchestratorDraft(defaults);
+        setLiveChildLimitDraft(String(defaults.behavior.maximumConcurrentChildren));
+        setOrchestratorOverrides(new Set());
+      },
+      (caught) => {
+        if (cancelled) return;
+        setOrchestratorSettings({
+          api,
+          scope: instanceScope,
+          view: null,
+          error: caught instanceof ApiError && caught.status === 404
+            ? "This control plane does not support campaign policy. Update or restart it so it matches this dashboard."
+            : caught instanceof Error ? caught.message : "Could not load Orchestrator defaults.",
+        });
+      },
+    );
+    return () => { cancelled = true; };
+  }, [api, instanceScope, defaultsRetry]);
+  const orchestratorSettingsReady = orchestratorSettings?.api === api &&
+    orchestratorSettings.scope === instanceScope && !!orchestratorSettings.view;
   const [launchSurface, setLaunchSurface] = useState<"direct" | "native_tui">("direct");
   const [useWorktree, setUseWorktree] = useState(preset?.worktree ?? false);
   const [executionTargetId, setExecutionTargetId] = useState("");
@@ -274,9 +329,48 @@ export function NewSessionDialog({
     "delegatedParentControl",
     "Parent Control",
   );
-  useEffect(() => {
-    setParentControl(orchestrator && parentControlSupported ? "questions_and_approvals" : "off");
-  }, [orchestrator, parentControlSupported]);
+  const typedDelegationSupported = runnerSupportsProtocol(runner?.protocolVersion, "typedWorkflowDecisionDelegation");
+  const typedDelegationUnavailable = runnerCapabilityRequirement(
+    runner?.protocolVersion,
+    "typedWorkflowDecisionDelegation",
+    "Typed Decision Delegation",
+  );
+  const setOrchestratorBehavior = <K extends keyof OrchestratorDefaults["behavior"]>(
+    key: K,
+    value: OrchestratorDefaults["behavior"][K],
+  ) => {
+    setOrchestratorDraft((current) => ({ ...current, behavior: { ...current.behavior, [key]: value } }));
+    setOrchestratorOverrides((current) => new Set(current).add(`behavior.${key}`));
+  };
+  const setOrchestratorDelegation = (category: WorkflowDecisionCategory, authority: "human" | "orchestrator") => {
+    setOrchestratorDraft((current) => ({
+      ...current,
+      delegation: {
+        ...current.delegation,
+        decisions: { ...current.delegation.decisions, [category]: authority },
+      },
+    }));
+    setOrchestratorOverrides((current) => new Set(current).add(`delegation.decisions.${category}`));
+  };
+  const effectiveParentControl = !parentControlSupported &&
+      !orchestratorOverrides.has("delegation.parentControl")
+    ? "off" as const
+    : orchestratorDraft.delegation.parentControl;
+  const effectiveDecision = (category: WorkflowDecisionCategory) => !typedDelegationSupported &&
+      !orchestratorOverrides.has(`delegation.decisions.${category}`)
+    ? "human" as const
+    : orchestratorDraft.delegation.decisions[category];
+  const orchestratorSource = (path: string) => {
+    if (orchestratorOverrides.has(path)) return "Session Override";
+    if (path === "delegation.parentControl" && !parentControlSupported &&
+        orchestratorDraft.delegation.parentControl !== "off") return "Compatibility Fallback";
+    const category = path.startsWith("delegation.decisions.")
+      ? path.slice("delegation.decisions.".length) as WorkflowDecisionCategory
+      : null;
+    if (category && !typedDelegationSupported &&
+        orchestratorDraft.delegation.decisions[category] === "orchestrator") return "Compatibility Fallback";
+    return orchestratorSettings?.view?.source === "user_default" ? "User Default" : "Wollipog Default";
+  };
   const orchestratorContext = agent?.context?.kind ?? "native";
   const directWslOrchestrator = orchestratorContext === "wsl" &&
     ["claude-code", "codex", "codex-app-server"].includes(agent?.driver ?? "acp") &&
@@ -296,6 +390,55 @@ export function NewSessionDialog({
     hostExecutionTarget,
   });
   const orchestratorSupported = orchestratorUnavailable === undefined;
+  const orchestratorCapabilities = orchestratorSettings?.view?.capabilities;
+  const fixedModelAvailable = !orchestratorDraft.behavior.childModel ||
+    !!orchestratorCapabilities?.models.some((model) => model.id === orchestratorDraft.behavior.childModel);
+  const fixedEffortAvailable = !orchestratorDraft.behavior.childEffort ||
+    !!orchestratorCapabilities?.effortLevels.includes(orchestratorDraft.behavior.childEffort);
+  const fixedPairAvailable = orchestratorCapabilities?.supportedPairs
+    ? orchestratorDraft.behavior.childModel
+      ? orchestratorCapabilities.supportedPairs.some((pair) =>
+        pair.modelId === orchestratorDraft.behavior.childModel &&
+        (!orchestratorDraft.behavior.childEffort || pair.effortLevels.includes(orchestratorDraft.behavior.childEffort)))
+      : orchestratorDraft.behavior.childEffort
+        ? orchestratorCapabilities.effortLevels.includes(orchestratorDraft.behavior.childEffort)
+        : orchestratorCapabilities.installations > 0
+    : orchestratorCapabilities?.status === "available";
+  const orchestratorCapabilitiesValid = !!fixedPairAvailable && fixedModelAvailable && fixedEffortAvailable;
+  const orchestratorDelegationValid =
+    (effectiveParentControl === "off" || parentControlSupported) &&
+    (!WORKFLOW_DECISION_CATEGORIES.some((category) => effectiveDecision(category) === "orchestrator") ||
+      typedDelegationSupported);
+  const childModelOptions = [
+    { value: AUTOMATIC_ORCHESTRATOR_VALUE, label: "Automatic", description: "Resolve from live child capabilities." },
+    ...(orchestratorCapabilities?.models ?? []).map((model) => ({
+      value: model.id,
+      label: model.displayName ?? model.id,
+      description: `Use ${model.displayName ?? model.id} for child sessions.`,
+    })),
+    ...(!fixedModelAvailable && orchestratorDraft.behavior.childModel ? [{
+      value: orchestratorDraft.behavior.childModel,
+      label: `${orchestratorDraft.behavior.childModel} (Unavailable)`,
+      description: "No current child installation advertises this saved model.",
+      disabled: true,
+      disabledReason: "Choose Automatic or a model advertised by a connected installation.",
+    }] : []),
+  ];
+  const childEffortOptions = [
+    { value: AUTOMATIC_ORCHESTRATOR_VALUE, label: "Automatic", description: "Use the child model's advertised default effort." },
+    ...(orchestratorCapabilities?.effortLevels ?? []).map((effort) => ({
+      value: effort,
+      label: titleCaseLabel(effort),
+      description: `Use ${titleCaseLabel(effort)} effort for child sessions.`,
+    })),
+    ...(!fixedEffortAvailable && orchestratorDraft.behavior.childEffort ? [{
+      value: orchestratorDraft.behavior.childEffort,
+      label: `${titleCaseLabel(orchestratorDraft.behavior.childEffort)} (Unavailable)`,
+      description: "No current child installation advertises this saved effort.",
+      disabled: true,
+      disabledReason: "Choose Automatic or an effort advertised by a connected installation.",
+    }] : []),
+  ];
   const directWslRequiresSafeOrchestrator = orchestratorContext === "wsl" &&
     launchSurface !== "native_tui" && runner?.runtime?.executionIsolation?.mode === "bwrap" &&
     hostExecutionTarget;
@@ -517,7 +660,8 @@ export function NewSessionDialog({
     (!executionTarget || executionTarget.available) && cloudBudgetValid &&
     (launchSurface !== "native_tui" || nativeTuiSupported) &&
     (defaultsReady || presetOverride === "orchestrator") &&
-    (!orchestrator || orchestratorSupported) &&
+    (!orchestrator || (orchestratorSupported && orchestratorSettingsReady &&
+      orchestratorCapabilitiesValid && orchestratorDelegationValid)) &&
     liveChildLimitValid &&
     (!directWslRequiresSafeOrchestrator || (orchestrator && orchestratorSupported)) && !retainedSessionId;
 
@@ -533,6 +677,7 @@ export function NewSessionDialog({
     executionTargetId, executionTarget?.id, executionTarget?.available,
     cloudBudgetUsd, cloudBudgetValid, retainedSessionId,
     liveChildLimitDraft, liveChildLimitValid,
+    orchestratorSettingsReady, orchestratorSettings?.error, orchestratorOverrides,
   ]);
 
   // Keep the secondary shortcut local to this dialog. Unmodified Enter is native form behavior: an
@@ -614,6 +759,18 @@ export function NewSessionDialog({
       } else if (orchestrator && !orchestratorSupported) {
         setValidationError("Choose an available Permission Preset.");
         focusValidationProblem(`[id="${permissionOptionsId}"] .ui-choice-card:not([aria-disabled="true"])`);
+      } else if (orchestrator && !orchestratorSettingsReady) {
+        setValidationError(orchestratorSettings?.error ?? "Wait for Orchestrator defaults to finish loading.");
+        focusValidationProblem('[data-validation-target="orchestrator-defaults"]');
+      } else if (orchestrator && !orchestratorCapabilitiesValid) {
+        setValidationError(orchestratorCapabilities?.reason ??
+          "Choose available Child Model and Child Effort values before creating this campaign.");
+        focusValidationProblem('[data-validation-target="orchestrator-defaults"]');
+      } else if (orchestrator && !orchestratorDelegationValid) {
+        setValidationError(effectiveParentControl !== "off" && !parentControlSupported
+          ? parentControlUnavailable ?? "Choose Human for Descendant Requests on this runner."
+          : typedDelegationUnavailable ?? "Choose Human for typed decisions on this runner.");
+        focusValidationProblem('[data-validation-target="orchestrator-defaults"]');
       } else if (!liveChildLimitValid) {
         setValidationError(`Enter a Live Child Limit from 0 to ${MAX_LIVE_CHILD_LIMIT}.`);
         focusValidationProblem(`[id="${liveChildLimitInputId}"]`);
@@ -646,15 +803,32 @@ export function NewSessionDialog({
       const config: SessionConfig = {
         ...(presetOverride === "orchestrator" ? { permissionMode: "orchestrator" } : {}),
         ...(executionTarget?.adapter === "cloud" ? { costBudgetUsd: cloudBudget } : {}),
-        ...(orchestrator ? { maxChildSessions: liveChildLimit } : {}),
       };
+      const decisionOverrides = Object.fromEntries(WORKFLOW_DECISION_CATEGORIES.flatMap((category) =>
+        orchestratorOverrides.has(`delegation.decisions.${category}`)
+          ? [[category, orchestratorDraft.delegation.decisions[category]]]
+          : [],
+      ));
+      const orchestratorRequest = orchestrator ? {
+        behavior: {
+          ...(orchestratorOverrides.has("behavior.childModel") ? { childModel: orchestratorDraft.behavior.childModel } : {}),
+          ...(orchestratorOverrides.has("behavior.childEffort") ? { childEffort: orchestratorDraft.behavior.childEffort } : {}),
+          ...(orchestratorOverrides.has("behavior.maximumConcurrentChildren") ? { maximumConcurrentChildren: liveChildLimit } : {}),
+          ...(orchestratorOverrides.has("behavior.followUps") ? { followUps: orchestratorDraft.behavior.followUps } : {}),
+          ...(orchestratorOverrides.has("behavior.completion") ? { completion: orchestratorDraft.behavior.completion } : {}),
+        },
+        delegation: {
+          ...(orchestratorOverrides.has("delegation.parentControl") ? { parentControl: orchestratorDraft.delegation.parentControl } : {}),
+          ...(Object.keys(decisionOverrides).length ? { decisions: decisionOverrides } : {}),
+        },
+      } : undefined;
       const session = await api.createSession({
         ...placement,
         agentId,
         useWorktree,
         executionTargetId: executionTarget?.id,
         config: Object.keys(config).length ? config : undefined,
-        ...(orchestrator ? { parentControl } : {}),
+        ...(orchestratorRequest ? { orchestrator: orchestratorRequest } : {}),
         workspacePath: (!projectsSupported || projectSelection === NO_PROJECT_SELECTION) ? browsedPath ?? undefined : undefined,
         acpSessionContext: additionalDirectories.length ? { additionalDirectories } : undefined,
         ...(launchSurface === "native_tui" ? { launchSurface: "native_tui" as const } : {}),
@@ -1011,8 +1185,8 @@ export function NewSessionDialog({
                   value: "orchestrator",
                   title: "Orchestrator",
                   description: agent?.driver === "codex" || agent?.driver === "codex-app-server"
-                    ? "Manage child sessions without shell or file-write tools. Guardian reviews eligible actions automatically, and Parent Control defaults to Questions and Approvals. Cannot change after creation."
-                    : "Manage child sessions without shell or file-write tools. Approval-required implementation actions stay blocked, and Parent Control defaults to Questions and Approvals. Cannot change after creation.",
+                    ? "Manage child sessions without shell or file-write tools. Guardian reviews eligible actions automatically. Effective campaign policy appears below. Cannot change after creation."
+                    : "Manage child sessions without shell or file-write tools. Approval-required implementation actions stay blocked. Effective campaign policy appears below. Cannot change after creation.",
                   // Rendered disabled rather than omitted. The list used to drop this option
                   // entirely when unsupported, leaving a one-option control that could not say
                   // whether the runner, the agent, the context or the target was the reason.
@@ -1036,55 +1210,129 @@ export function NewSessionDialog({
               {presetOverride === "default" && <span className="muted">Orchestrator is your saved Agent Harness default. Change it in Settings to use another default.</span>}
               {!orchestratorSupported && <span className="form-error">The saved Orchestrator preset is unavailable here. {orchestratorUnavailable} Choose a compatible target or change the saved default in Settings.</span>}
             </>}
-            {orchestrator && (
-              <div className="field">
-                <label className="new-session-field-label" htmlFor={liveChildLimitInputId}>
-                  Live Child Limit
+            {orchestrator && !orchestratorSettingsReady && <div className="orchestrator-policy-unavailable" role="status">
+              <span className={orchestratorSettings?.error ? "form-error" : "muted"}>
+                {orchestratorSettings?.error ?? "Loading effective Orchestrator policy…"}
+              </span>
+              {orchestratorSettings?.error && <button
+                type="button"
+                className="btn ghost sm"
+                data-validation-target="orchestrator-defaults"
+                onClick={() => setDefaultsRetry((value) => value + 1)}
+              >Retry Orchestrator Defaults</button>}
+            </div>}
+            {orchestrator && orchestratorSettingsReady && <div className="new-session-orchestrator-policy" data-validation-target="orchestrator-defaults">
+              <fieldset className="orchestrator-policy-area">
+                <legend>Behavior</legend>
+                <p className="muted">These effective values are resolved and stored before the campaign's first turn.</p>
+                <div className="orchestrator-policy-control">
+                  <span>Child Model <small aria-hidden="true">{orchestratorSource("behavior.childModel")}</small></span>
+                  <Select<string>
+                    label="Child Model"
+                    value={orchestratorDraft.behavior.childModel ?? AUTOMATIC_ORCHESTRATOR_VALUE}
+                    options={childModelOptions}
+                    onChange={(value) => setOrchestratorBehavior("childModel", value === AUTOMATIC_ORCHESTRATOR_VALUE ? null : value)}
+                  />
+                </div>
+                <div className="orchestrator-policy-control">
+                  <span>Child Effort <small aria-hidden="true">{orchestratorSource("behavior.childEffort")}</small></span>
+                  <Select<string>
+                    label="Child Effort"
+                    value={orchestratorDraft.behavior.childEffort ?? AUTOMATIC_ORCHESTRATOR_VALUE}
+                    options={childEffortOptions}
+                    onChange={(value) => setOrchestratorBehavior("childEffort", value === AUTOMATIC_ORCHESTRATOR_VALUE ? null : value)}
+                  />
+                </div>
+                <label className="orchestrator-policy-control" htmlFor={liveChildLimitInputId}>
+                  <span>Maximum Concurrent Children <small aria-hidden="true">{orchestratorSource("behavior.maximumConcurrentChildren")}</small></span>
+                  <input
+                    id={liveChildLimitInputId}
+                    type="number"
+                    inputMode="numeric"
+                    min="0"
+                    max={String(MAX_LIVE_CHILD_LIMIT)}
+                    step="1"
+                    required
+                    value={liveChildLimitDraft}
+                    aria-invalid={!liveChildLimitValid}
+                    aria-describedby={liveChildLimitHelpId}
+                    onChange={(event) => {
+                      setLiveChildLimitDraft(event.currentTarget.value);
+                      const value = Number(event.currentTarget.value);
+                      setOrchestratorBehavior("maximumConcurrentChildren", value);
+                    }}
+                  />
                 </label>
-                <input
-                  id={liveChildLimitInputId}
-                  type="number"
-                  inputMode="numeric"
-                  min="0"
-                  max={String(MAX_LIVE_CHILD_LIMIT)}
-                  step="1"
-                  required
-                  value={liveChildLimitDraft}
-                  aria-invalid={!liveChildLimitValid}
-                  aria-describedby={liveChildLimitHelpId}
-                  onChange={(event) => setLiveChildLimitDraft(event.currentTarget.value)}
-                />
-                <span
-                  id={liveChildLimitHelpId}
-                  className={liveChildLimitValid ? "muted" : "form-error"}
-                  role={liveChildLimitValid ? undefined : "alert"}
-                >
-                  {liveChildLimitValid
-                    ? "Choose 0 to pause new child admission, or up to 64 concurrent live children."
-                    : "Enter a whole number from 0 to 64."}
+                <span id={liveChildLimitHelpId} className={liveChildLimitValid ? "muted" : "form-error"} role={liveChildLimitValid ? undefined : "alert"}>
+                  {liveChildLimitValid ? "Choose 0 to pause admission, or up to 64 live children." : "Enter a whole number from 0 to 64."}
                 </span>
-              </div>
-            )}
-            {orchestrator && (
-              <ChoiceCards<ParentControlMode>
-                label="Parent Control"
-                value={parentControl}
-                onChange={setParentControl}
-                options={[
-                  { value: "off", title: "Off", description: "Keep descendant questions and approvals human-only." },
-                  {
-                    value: "questions", title: "Questions",
-                    description: "Let this session inspect and answer non-secret descendant questions.",
-                    disabled: !parentControlSupported, disabledReason: parentControlUnavailable,
-                  },
-                  {
-                    value: "questions_and_approvals", title: "Questions and Approvals",
-                    description: "Also allow eligible one-time descendant approval decisions.",
-                    disabled: !parentControlSupported, disabledReason: parentControlUnavailable,
-                  },
-                ]}
-              />
-            )}
+                <div className="orchestrator-policy-control">
+                  <span>Follow-Ups <small aria-hidden="true">{orchestratorSource("behavior.followUps")}</small></span>
+                  <Select<OrchestratorDefaults["behavior"]["followUps"]>
+                    label="Follow-Ups"
+                    value={orchestratorDraft.behavior.followUps}
+                    options={[
+                      { value: "recommend_only", label: "Recommend Only", description: "Recommend justified follow-ups and wait." },
+                      { value: "execute_approved", label: "Execute Approved", description: "Execute follow-ups only after approval." },
+                    ]}
+                    onChange={(value) => setOrchestratorBehavior("followUps", value)}
+                  />
+                </div>
+                <div className="orchestrator-policy-control">
+                  <span>Completion <small aria-hidden="true">{orchestratorSource("behavior.completion")}</small></span>
+                  <Select<OrchestratorDefaults["behavior"]["completion"]>
+                    label="Completion"
+                    value={orchestratorDraft.behavior.completion}
+                    options={[
+                      { value: "retain", label: "Retain", description: "Retain verified finished children for inspection." },
+                      { value: "stop_and_archive", label: "Stop and Archive", description: "Stop and archive only after verified completion." },
+                    ]}
+                    onChange={(value) => setOrchestratorBehavior("completion", value)}
+                  />
+                </div>
+              </fieldset>
+              <fieldset className="orchestrator-policy-area">
+                <legend>Decision Delegation</legend>
+                <div className="orchestrator-policy-control">
+                  <span>Descendant Requests <small aria-hidden="true">{orchestratorSource("delegation.parentControl")}</small></span>
+                  <Select<ParentControlMode>
+                    label="Descendant Requests"
+                    value={effectiveParentControl}
+                    options={[
+                      { value: "off", label: "Human", description: "Keep descendant questions and approvals human-owned." },
+                      { value: "questions", label: "Questions", description: "Delegate non-secret descendant implementation questions.", disabled: !parentControlSupported, disabledReason: parentControlUnavailable },
+                      { value: "questions_and_approvals", label: "Questions and Approvals", description: "Also delegate eligible one-time approvals.", disabled: !parentControlSupported, disabledReason: parentControlUnavailable },
+                    ]}
+                    onChange={(value) => {
+                      setOrchestratorDraft((current) => ({ ...current, delegation: { ...current.delegation, parentControl: value } }));
+                      setOrchestratorOverrides((current) => new Set(current).add("delegation.parentControl"));
+                    }}
+                  />
+                </div>
+                {!parentControlSupported && <span className="form-error">{parentControlUnavailable}</span>}
+                {WORKFLOW_DECISION_CATEGORIES.map((category) => <div className="orchestrator-policy-control" key={category}>
+                  <span>{ORCHESTRATOR_DECISION_LABELS[category]} <small aria-hidden="true">{orchestratorSource(`delegation.decisions.${category}`)}</small></span>
+                  <Select<"human" | "orchestrator">
+                    label={ORCHESTRATOR_DECISION_LABELS[category]}
+                    value={effectiveDecision(category)}
+                    options={[
+                      { value: "human", label: "Human", description: "Require a human decision for this exact gate." },
+                      { value: "orchestrator", label: "Orchestrator", description: "Delegate this typed gate to the campaign Orchestrator.", disabled: !typedDelegationSupported, disabledReason: typedDelegationUnavailable },
+                    ]}
+                    onChange={(value) => setOrchestratorDelegation(category, value)}
+                  />
+                </div>)}
+                <p className="muted">Secrets, authentication, persistent permission grants, governance changes, cost budgets, and tool guardrails stay human-only.</p>
+              </fieldset>
+              {!orchestratorCapabilitiesValid && <p className="form-error" role="alert">
+                {orchestratorCapabilities?.reason ?? "A saved Child Model or Child Effort is no longer advertised. Choose an available value."}
+              </p>}
+              {!orchestratorDelegationValid && <p className="form-error" role="alert">
+                {effectiveParentControl !== "off" && !parentControlSupported
+                  ? `${parentControlUnavailable} Choose Human for Descendant Requests or update the runner.`
+                  : `${typedDelegationUnavailable} Choose Human for every typed decision or update the runner.`}
+              </p>}
+            </div>}
             {directWslRequiresSafeOrchestrator && !orchestrator &&
               <span className="form-error">Direct WSL with bubblewrap is available only through the verified Orchestrator launcher. Choose Orchestrator or another execution context.</span>}
           </div>

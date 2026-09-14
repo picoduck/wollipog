@@ -639,6 +639,12 @@ test("list_sessions -> GET /api/sessions (+?archived=true), mapped with pendingA
           agentId: "claude-code",
           runId: null,
           maxChildSessions: 7,
+          orchestratorPolicy: {
+            version: 1,
+            behavior: { childModel: "sol", childEffort: "high", maximumConcurrentChildren: 7, followUps: "recommend_only", completion: "retain" },
+            delegation: { parentControl: "off", decisions: { implementation_question: "human", pr_merge: "human", merged_branch_deletion: "human", follow_up_issue_publication: "human", ui_evidence_approval: "human" } },
+            sources: { behavior: { childModel: "user_default", childEffort: "user_default", maximumConcurrentChildren: "session_override", followUps: "user_default", completion: "user_default" }, delegation: { parentControl: "user_default", decisions: { implementation_question: "user_default", pr_merge: "user_default", merged_branch_deletion: "user_default", follow_up_issue_publication: "user_default", ui_evidence_approval: "user_default" } } },
+          },
           liveChildCapacity: { limit: 7, occupied: 5, remaining: 2 },
           costUsd: 1.5,
           costBudgetUsd: 5,
@@ -659,6 +665,8 @@ test("list_sessions -> GET /api/sessions (+?archived=true), mapped with pendingA
   assert.equal(s.costBudgetUsd, 5);
   assert.equal(s.maxChildSessions, 7);
   assert.deepEqual(s.liveChildCapacity, { limit: 7, occupied: 5, remaining: 2 });
+  assert.equal(s.orchestratorPolicy.behavior.childModel, "sol",
+    "the active campaign can inspect its immutable-at-creation policy and sources");
   assert.equal(s.preview, undefined);
 
   result = await callTool(deps, "list_sessions", { archived: true });

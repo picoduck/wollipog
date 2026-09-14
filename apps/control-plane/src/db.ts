@@ -26,6 +26,7 @@ import {
   EVENT_PAYLOAD_CHUNK_BYTES,
   EVENT_PAYLOAD_PREVIEW_BYTES,
   HUMAN_ONLY_PARENT_CONTROL_POLICY,
+  DEFAULT_ORCHESTRATOR_DEFAULTS,
   WORKFLOW_DECISION_CATEGORIES,
   DEFAULT_LIVE_CHILD_LIMIT,
   columnForStatus,
@@ -115,6 +116,8 @@ import {
   type ParentControlDecisionPolicy,
   type ParentControlMode,
   type ParentControlPolicy,
+  type OrchestratorCampaignPolicy,
+  type OrchestratorDefaults,
   type WorkflowDecisionAuthority,
   type WorkflowDecisionStatus,
   type WorkflowDecisionView,
@@ -489,6 +492,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   parent_control TEXT NOT NULL DEFAULT 'off',
   parent_control_policy TEXT,
   parent_control_policy_revision INTEGER NOT NULL DEFAULT 0,
+  orchestrator_policy TEXT,
   policy_resume_status TEXT,
   driver         TEXT NOT NULL DEFAULT 'acp',
   model          TEXT,
@@ -1901,6 +1905,21 @@ CREATE TABLE IF NOT EXISTS agent_harness_defaults (
   FOREIGN KEY (user_id) REFERENCES identity_users(user_id) ON DELETE CASCADE
 );
 
+-- Cross-device defaults for new Orchestrator campaigns. A missing row is the conservative system
+-- default; existing sessions snapshot their own policy and never read through this table.
+CREATE TABLE IF NOT EXISTS orchestrator_settings (
+  user_id                     TEXT PRIMARY KEY,
+  child_model                 TEXT,
+  child_effort                TEXT,
+  maximum_concurrent_children INTEGER NOT NULL,
+  follow_ups                  TEXT NOT NULL CHECK (follow_ups IN ('recommend_only','execute_approved')),
+  completion                  TEXT NOT NULL CHECK (completion IN ('retain','stop_and_archive')),
+  parent_control              TEXT NOT NULL CHECK (parent_control IN ('off','questions','questions_and_approvals')),
+  decision_policy             TEXT NOT NULL,
+  updated_at                  INTEGER NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES identity_users(user_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS session_naming_custom_models (
   organization_id    TEXT PRIMARY KEY,
   runner_id          TEXT NOT NULL,
@@ -2138,6 +2157,7 @@ interface SessionRow {
   parent_control: string;
   parent_control_policy: string | null;
   parent_control_policy_revision: number;
+  orchestrator_policy: string | null;
   driver: string;
   model: string | null;
   resolved_model: string | null;
@@ -3022,6 +3042,7 @@ export interface NewSessionInput {
   /** Explicit human-owned descendant request delegation. */
   parentControl?: ParentControlMode;
   parentControlPolicy?: { decisions: ParentControlDecisionPolicy };
+  orchestratorPolicy?: OrchestratorCampaignPolicy;
   /** Ad-hoc browsed directory (when workspaceId is null); lets restart re-launch from it. */
   workspacePath?: string | null;
   acpSessionContext?: AcpSessionContextConfig;
@@ -3359,6 +3380,11 @@ export interface SessionNamingHarnessTargetRecord {
 
 export interface AgentHarnessDefaultRecord extends AgentHarnessIdentity {
   config: AgentHarnessDefaultConfig;
+  updatedAt: number;
+}
+
+export interface OrchestratorDefaultsRecord {
+  defaults: OrchestratorDefaults;
   updatedAt: number;
 }
 
@@ -4182,12 +4208,60 @@ export class ControlPlaneDb {
       "parent_control TEXT NOT NULL DEFAULT 'off' CHECK (parent_control IN ('off','questions','questions_and_approvals'))",
       "parent_control_policy TEXT",
       "parent_control_policy_revision INTEGER NOT NULL DEFAULT 0",
+      "orchestrator_policy TEXT",
     ]) {
       try {
         db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`);
       } catch {
         /* column already present */
       }
+    }
+    // Existing Orchestrator sessions become explicitly inspectable without gaining authority.
+    // Their current Parent Control fields are preserved and all typed categories remain fail-closed
+    // when the legacy JSON is absent or malformed.
+    const legacyOrchestrators = db.prepare(
+      `SELECT id, max_child_sessions, parent_control, parent_control_policy
+       FROM sessions WHERE permission_mode='orchestrator' AND orchestrator_policy IS NULL`,
+    ).all() as unknown as Array<{
+      id: string;
+      max_child_sessions: number | null;
+      parent_control: string;
+      parent_control_policy: string | null;
+    }>;
+    const saveLegacyOrchestrator = db.prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?");
+    for (const row of legacyOrchestrators) {
+      const source = "legacy_session" as const;
+      const policy: OrchestratorCampaignPolicy = {
+        version: 1,
+        behavior: {
+          ...DEFAULT_ORCHESTRATOR_DEFAULTS.behavior,
+          maximumConcurrentChildren: row.max_child_sessions ?? DEFAULT_LIVE_CHILD_LIMIT,
+        },
+        delegation: {
+          parentControl: row.parent_control === "questions" || row.parent_control === "questions_and_approvals"
+            ? row.parent_control
+            : "off",
+          decisions: parentControlDecisionPolicyFromJson(row.parent_control_policy) ?? {
+            ...HUMAN_ONLY_PARENT_CONTROL_POLICY,
+          },
+        },
+        sources: {
+          behavior: {
+            childModel: source,
+            childEffort: source,
+            maximumConcurrentChildren: source,
+            followUps: source,
+            completion: source,
+          },
+          delegation: {
+            parentControl: source,
+            decisions: Object.fromEntries(
+              WORKFLOW_DECISION_CATEGORIES.map((category) => [category, source]),
+            ) as Record<(typeof WORKFLOW_DECISION_CATEGORIES)[number], typeof source>,
+          },
+        },
+      };
+      saveLegacyOrchestrator.run(JSON.stringify(policy), row.id);
     }
     db.exec(
       "CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id, archived, updated_at DESC, id)",
@@ -7284,6 +7358,64 @@ export class ControlPlaneDb {
     }));
   }
 
+  getOrchestratorDefaults(userId: string): OrchestratorDefaultsRecord | null {
+    const row = this.stmt(
+      `SELECT child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
+              parent_control, decision_policy, updated_at
+       FROM orchestrator_settings WHERE user_id=?`,
+    ).get(userId) as {
+      child_model: string | null;
+      child_effort: string | null;
+      maximum_concurrent_children: number;
+      follow_ups: OrchestratorDefaults["behavior"]["followUps"];
+      completion: OrchestratorDefaults["behavior"]["completion"];
+      parent_control: ParentControlMode;
+      decision_policy: string;
+      updated_at: number;
+    } | undefined;
+    if (!row) return null;
+    const decisions = parentControlDecisionPolicyFromJson(row.decision_policy);
+    if (!decisions) return null;
+    return {
+      defaults: {
+        behavior: {
+          childModel: row.child_model,
+          childEffort: row.child_effort,
+          maximumConcurrentChildren: row.maximum_concurrent_children,
+          followUps: row.follow_ups,
+          completion: row.completion,
+        },
+        delegation: { parentControl: row.parent_control, decisions },
+      },
+      updatedAt: row.updated_at,
+    };
+  }
+
+  setOrchestratorDefaults(userId: string, defaults: OrchestratorDefaults, now = Date.now()): void {
+    this.stmt(
+      `INSERT INTO orchestrator_settings
+         (user_id, child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
+          parent_control, decision_policy, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET
+         child_model=excluded.child_model, child_effort=excluded.child_effort,
+         maximum_concurrent_children=excluded.maximum_concurrent_children,
+         follow_ups=excluded.follow_ups, completion=excluded.completion,
+         parent_control=excluded.parent_control, decision_policy=excluded.decision_policy,
+         updated_at=excluded.updated_at`,
+    ).run(
+      userId,
+      defaults.behavior.childModel,
+      defaults.behavior.childEffort,
+      defaults.behavior.maximumConcurrentChildren,
+      defaults.behavior.followUps,
+      defaults.behavior.completion,
+      defaults.delegation.parentControl,
+      JSON.stringify(defaults.delegation.decisions),
+      now,
+    );
+  }
+
   setAgentHarnessDefault(
     userId: string,
     identity: AgentHarnessIdentity,
@@ -10137,8 +10269,8 @@ export class ControlPlaneDb {
          `INSERT INTO sessions
            (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, status, run_id, use_worktree, archived,
              driver, model, effort, service_tier, permission_mode, parent_control, parent_control_policy,
-             parent_control_policy_revision, workspace_path, acp_session_context, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             parent_control_policy_revision, orchestrator_policy, workspace_path, acp_session_context, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.id,
@@ -10160,6 +10292,7 @@ export class ControlPlaneDb {
         input.parentControl ?? "off",
         input.parentControlPolicy ? JSON.stringify(input.parentControlPolicy.decisions) : null,
         input.parentControlPolicy ? 1 : 0,
+        input.orchestratorPolicy ? JSON.stringify(input.orchestratorPolicy) : null,
         input.workspacePath ?? null,
         input.acpSessionContext ? JSON.stringify(input.acpSessionContext) : null,
         input.now,
@@ -11659,7 +11792,13 @@ export class ControlPlaneDb {
   }
 
   updateSessionParentControl(id: string, mode: ParentControlMode, now: number): void {
-    this.stmt("UPDATE sessions SET parent_control=?, updated_at=? WHERE id=?").run(mode, now, id);
+    const policy = this.sessionOrchestratorPolicy(id);
+    if (policy) {
+      policy.delegation.parentControl = mode;
+      policy.sources.delegation.parentControl = "active_campaign";
+    }
+    this.stmt("UPDATE sessions SET parent_control=?, orchestrator_policy=COALESCE(?, orchestrator_policy), updated_at=? WHERE id=?")
+      .run(mode, policy ? JSON.stringify(policy) : null, now, id);
   }
 
   updateSessionParentControlPolicy(
@@ -11673,11 +11812,46 @@ export class ControlPlaneDb {
     ).get(id) as { revision: number } | undefined;
     if (!current || (expectedRevision !== undefined && current.revision !== expectedRevision)) return null;
     const revision = current.revision + 1;
+    const campaign = this.sessionOrchestratorPolicy(id);
+    if (campaign) {
+      for (const category of WORKFLOW_DECISION_CATEGORIES) {
+        if (campaign.delegation.decisions[category] !== decisions[category]) {
+          campaign.sources.delegation.decisions[category] = "active_campaign";
+        }
+      }
+      campaign.delegation.decisions = { ...decisions };
+    }
     const result = this.stmt(
-      `UPDATE sessions SET parent_control_policy=?, parent_control_policy_revision=?, updated_at=?
+      `UPDATE sessions SET parent_control_policy=?, parent_control_policy_revision=?,
+         orchestrator_policy=COALESCE(?, orchestrator_policy), updated_at=?
        WHERE id=? AND parent_control_policy_revision=?`,
-    ).run(JSON.stringify(decisions), revision, now, id, current.revision);
-    return Number(result.changes) === 1 ? { revision, decisions } : null;
+    ).run(
+      JSON.stringify(decisions), revision, campaign ? JSON.stringify(campaign) : null,
+      now, id, current.revision,
+    );
+    if (Number(result.changes) !== 1) return null;
+    return { revision, decisions };
+  }
+
+  sessionOrchestratorPolicy(id: string): OrchestratorCampaignPolicy | null {
+    const row = this.stmt("SELECT orchestrator_policy FROM sessions WHERE id=?")
+      .get(id) as { orchestrator_policy: string | null } | undefined;
+    return orchestratorCampaignPolicyFromJson(row?.orchestrator_policy ?? null);
+  }
+
+  updateSessionOrchestratorBehavior(
+    id: string,
+    patch: Partial<OrchestratorCampaignPolicy["behavior"]>,
+    now: number,
+  ): void {
+    const policy = this.sessionOrchestratorPolicy(id);
+    if (!policy) return;
+    Object.assign(policy.behavior, patch);
+    for (const key of Object.keys(patch) as Array<keyof OrchestratorCampaignPolicy["behavior"]>) {
+      policy.sources.behavior[key] = "active_campaign";
+    }
+    this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?")
+      .run(JSON.stringify(policy), now, id);
   }
 
   parentControlPolicy(id: string): ParentControlPolicy | null {
@@ -14933,6 +15107,10 @@ export class ControlPlaneDb {
           revision: row.parent_control_policy_revision,
           decisions: decisions ?? { ...HUMAN_ONLY_PARENT_CONTROL_POLICY },
         };
+      })(),
+      ...(() => {
+        const policy = orchestratorCampaignPolicyFromJson(row.orchestrator_policy);
+        return policy ? { orchestratorPolicy: policy } : {};
       })(),
       useWorktree: row.use_worktree === 1,
       worktreePath: row.worktree_path,
@@ -19582,6 +19760,32 @@ function parentControlDecisionPolicyFromJson(raw: string | null): ParentControlD
       !WORKFLOW_DECISION_CATEGORIES.every((category) =>
         candidate[category] === "human" || candidate[category] === "orchestrator")) return null;
   return candidate as ParentControlDecisionPolicy;
+}
+
+function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCampaignPolicy | null {
+  const value = parseJson<OrchestratorCampaignPolicy>(raw);
+  if (!value || value.version !== 1 || !value.behavior || !value.delegation || !value.sources) return null;
+  const behavior = value.behavior;
+  if ((behavior.childModel !== null && typeof behavior.childModel !== "string") ||
+      (behavior.childEffort !== null && typeof behavior.childEffort !== "string") ||
+      !Number.isSafeInteger(behavior.maximumConcurrentChildren) ||
+      behavior.maximumConcurrentChildren < 0 || behavior.maximumConcurrentChildren > 64 ||
+      (behavior.followUps !== "recommend_only" && behavior.followUps !== "execute_approved") ||
+      (behavior.completion !== "retain" && behavior.completion !== "stop_and_archive") ||
+      !["off", "questions", "questions_and_approvals"].includes(value.delegation.parentControl) ||
+      !parentControlDecisionPolicyFromJson(JSON.stringify(value.delegation.decisions))) return null;
+  const validSources = new Set([
+    "system_default", "user_default", "session_override", "compatibility_fallback", "legacy_session", "active_campaign",
+  ]);
+  const behaviorSourceKeys = ["childModel", "childEffort", "maximumConcurrentChildren", "followUps", "completion"] as const;
+  if (!value.sources.behavior || !value.sources.delegation || !value.sources.delegation.decisions ||
+      Object.keys(value.sources.behavior).length !== behaviorSourceKeys.length ||
+      !behaviorSourceKeys.every((key) => validSources.has(value.sources.behavior[key])) ||
+      Object.keys(value.sources.delegation.decisions).length !== WORKFLOW_DECISION_CATEGORIES.length ||
+      !validSources.has(value.sources.delegation.parentControl) ||
+      !WORKFLOW_DECISION_CATEGORIES.every((category) =>
+        validSources.has(value.sources.delegation.decisions[category]))) return null;
+  return value;
 }
 
 function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {

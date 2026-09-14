@@ -1340,6 +1340,95 @@ export const HUMAN_ONLY_PARENT_CONTROL_POLICY: ParentControlDecisionPolicy = {
   ui_evidence_approval: "human",
 };
 
+/** User-owned defaults for how a newly created Orchestrator campaign manages children. `null`
+ * means capability-driven automatic selection; model and effort are intentionally independent. */
+export interface OrchestratorBehaviorDefaults {
+  childModel: string | null;
+  childEffort: string | null;
+  maximumConcurrentChildren: number;
+  followUps: "recommend_only" | "execute_approved";
+  completion: "retain" | "stop_and_archive";
+}
+
+export interface OrchestratorDelegationDefaults {
+  /** Existing descendant question/approval delegation remains a separate, explicit axis. */
+  parentControl: ParentControlMode;
+  decisions: ParentControlDecisionPolicy;
+}
+
+export interface OrchestratorDefaults {
+  behavior: OrchestratorBehaviorDefaults;
+  delegation: OrchestratorDelegationDefaults;
+}
+
+export const DEFAULT_ORCHESTRATOR_DEFAULTS: OrchestratorDefaults = {
+  behavior: {
+    childModel: null,
+    childEffort: null,
+    maximumConcurrentChildren: DEFAULT_LIVE_CHILD_LIMIT,
+    followUps: "recommend_only",
+    completion: "retain",
+  },
+  delegation: {
+    parentControl: "questions_and_approvals",
+    decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY },
+  },
+};
+
+export type OrchestratorPolicySource =
+  | "system_default"
+  | "user_default"
+  | "session_override"
+  | "compatibility_fallback"
+  | "legacy_session"
+  | "active_campaign";
+
+export interface OrchestratorPolicySources {
+  behavior: Record<keyof OrchestratorBehaviorDefaults, OrchestratorPolicySource>;
+  delegation: {
+    parentControl: OrchestratorPolicySource;
+    decisions: Record<WorkflowDecisionCategory, OrchestratorPolicySource>;
+  };
+}
+
+/** Immutable-at-creation campaign snapshot. Active human changes replace only the affected field
+ * and source; editing user defaults never reaches an existing session. */
+export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
+  version: 1;
+  sources: OrchestratorPolicySources;
+}
+
+/** Omission inherits the latest authenticated-user default. Explicit `null` selects Automatic. */
+export interface OrchestratorCampaignOverrides {
+  behavior?: Partial<OrchestratorBehaviorDefaults>;
+  delegation?: {
+    parentControl?: ParentControlMode;
+    decisions?: Partial<ParentControlDecisionPolicy>;
+  };
+}
+
+export interface OrchestratorSettingsCapabilities {
+  models: AgentModel[];
+  effortLevels: string[];
+  /** Content-free installation/model matrix used to validate an independent fixed pair without
+   * implying that choices advertised by two different installations work together. */
+  supportedPairs?: Array<{ modelId: string; effortLevels: string[] }>;
+  installations: number;
+  compatibleInstallations: number;
+  status: "available" | "unavailable";
+  reason?: string;
+}
+
+export interface OrchestratorSettingsView {
+  defaults: OrchestratorDefaults;
+  source: "system_default" | "user_default";
+  capabilities: OrchestratorSettingsCapabilities;
+}
+
+export interface UpdateOrchestratorSettingsRequest {
+  defaults: OrchestratorDefaults;
+}
+
 /** Native provider TUIs do not expose their turns through Wollipog's structured event stream.
  * A positive tracked guardrail therefore cannot coexist with a Native TUI without presenting a
  * limit that the provider process can silently bypass. Keep this check shared by API and UI. */
@@ -4160,6 +4249,9 @@ export interface SessionView {
   parentControl?: ParentControlMode;
   /** Independent typed workflow assignments. Legacy modes never imply these grants. */
   parentControlPolicy?: ParentControlPolicy;
+  /** Resolved campaign behavior and authority snapshot. Present only for Orchestrator sessions
+   * created or migrated by a supporting control plane. */
+  orchestratorPolicy?: OrchestratorCampaignPolicy;
   runnerId: string;
   workspaceId: string | null;
   workspaceName: string | null;
@@ -7257,6 +7349,8 @@ export interface CreateSessionRequest {
   parentControl?: ParentControlMode;
   /** Optional initial typed policy. Only authenticated human creation may provide it. */
   parentControlPolicy?: { decisions: ParentControlDecisionPolicy };
+  /** Human-only overrides for the authenticated user's Orchestrator defaults. */
+  orchestrator?: OrchestratorCampaignOverrides;
   /** An ad-hoc directory chosen via the remote browser; overrides `workspaceId` when set. */
   workspacePath?: string;
   /** ACP-only session overrides. The control plane validates and persists only secret references. */
