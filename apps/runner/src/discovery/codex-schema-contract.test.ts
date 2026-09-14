@@ -7,6 +7,7 @@ import { test } from "node:test";
 import {
   CODEX_APP_SERVER_CONTRACT_FINGERPRINT,
   MIN_VERIFIED_CODEX_APP_SERVER_VERSION,
+  MIN_VERIFIED_CODEX_ORCHESTRATOR_APPROVAL_VERSION,
 } from "./codex-app-server.js";
 
 const root = resolve(import.meta.dirname, "..", "..", "..", "..");
@@ -72,10 +73,12 @@ test("pinned schema fixture matches discovery metadata and reports a useful drif
   const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as {
     contractFingerprint: string;
     minimumVerifiedVersion: string;
+    orchestratorApprovalMinimumVersion: string;
     files: Record<string, ExpectedShape & { definitions?: Record<string, ExpectedShape> }>;
   };
   assert.equal(fixture.contractFingerprint, CODEX_APP_SERVER_CONTRACT_FINGERPRINT);
   assert.equal(fixture.minimumVerifiedVersion, MIN_VERIFIED_CODEX_APP_SERVER_VERSION);
+  assert.equal(fixture.orchestratorApprovalMinimumVersion, MIN_VERIFIED_CODEX_ORCHESTRATOR_APPROVAL_VERSION);
 
   const dir = mkdtempSync(join(tmpdir(), "wollipog-codex-contract-test-"));
   try {

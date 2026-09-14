@@ -1237,7 +1237,16 @@ export class CodexAppServerDriver implements Driver {
     // (the Allow/Reject prompt) instead. (The separate guardianWarning notification is
     // skipped — it duplicates this verdict for plain approvals.)
     peer.onNotification("item/autoApprovalReview/completed", (p: Json) => {
-      const decision = parseReviewDecision(p);
+      let decision = parseReviewDecision(p);
+      const delivery = decision?.approvalDelivery;
+      if (decision && delivery && (
+        !this.promptBusy || !this.turnResolve ||
+        delivery.threadId !== this.threadId || delivery.turnId !== this.turnId
+      )) {
+        // Keep the visible review, but only the active root turn can carry action-admission proof.
+        const { approvalDelivery: _untrustedCorrelation, ...visibleDecision } = decision;
+        decision = visibleDecision;
+      }
       if (decision) this.cb.onEvent({ kind: "review_decision", ...decision });
     });
     peer.onNotification("turn/started", (p: Json) => {

@@ -17,6 +17,7 @@ import type {
   GitHubReviewSyncInfo,
   SessionConfig,
   SessionSnapshot,
+  WorkflowDecisionView,
   WorkflowArtifact,
   WorkflowArtifactView,
   type UsageAmount,
@@ -2286,6 +2287,46 @@ test("PR merge action admission stays durable and consumes only its matching dig
     assert.equal(reopened.consumeWorkflowDecisionAction(
       "workflow-merge-42", admission.commandDigest, 5_000,
     )?.status, "consumed");
+    reopened.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("provider action receipt claims survive restart and cannot consume a re-armed command", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-workflow-receipt-replay-"));
+  const file = join(root, "control-plane.db");
+  const commandDigest = "c".repeat(64);
+  const receiptDigest = "e".repeat(64);
+  const createDecision = (db: ControlPlaneDb, suffix: string, createdAt: number) => {
+    assert.ok(db.createWorkflowDecision({
+      requestId: `merge-${suffix}`, occurrenceId: `workflow-${suffix}`, sessionId: "child",
+      controllingSessionId: "parent", category: "pr_merge", resourceKey: `repo#${suffix}`,
+      resourceSnapshot: { marker: suffix } as unknown as WorkflowDecisionView["resourceSnapshot"],
+      resourceDigest: "b".repeat(64), policyRevision: 3, authority: "orchestrator", createdAt,
+    }));
+    assert.ok(db.resolveWorkflowDecision(`workflow-${suffix}`, "orchestrator", "approved", createdAt + 1));
+    assert.ok(db.armWorkflowDecisionAction(`workflow-${suffix}`, {
+      kind: "pr_merge_enqueue", command: "exact-command", commandDigest, armedAt: createdAt + 2,
+    }));
+  };
+  try {
+    const initial = ControlPlaneDb.open(file);
+    initial.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    initial.createSession(newSession({ id: "parent" }));
+    initial.createSession(newSession({ id: "child", parentSessionId: "parent" }));
+    createDecision(initial, "first", 1_000);
+    assert.equal(initial.consumeWorkflowDecisionActionWithReceipt(
+      "child", "workflow-first", commandDigest, receiptDigest, 2_000,
+    )?.status, "consumed");
+    initial.close();
+
+    const reopened = ControlPlaneDb.open(file);
+    createDecision(reopened, "second", 3_000);
+    assert.equal(reopened.consumeWorkflowDecisionActionWithReceipt(
+      "child", "workflow-second", commandDigest, receiptDigest, 4_000,
+    ), null, "the same provider invocation cannot consume a later identical command grant");
+    assert.equal(reopened.workflowDecisionByOccurrence("workflow-second")?.status, "approved");
     reopened.close();
   } finally {
     rmSync(root, { recursive: true, force: true });

@@ -582,6 +582,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_decisions_session_request
 CREATE INDEX IF NOT EXISTS idx_workflow_decisions_resource
   ON workflow_decisions(session_id, category, resource_key, created_at);
 
+-- Provider invocation identities are hashed before storage. Claiming one here makes a replayed
+-- pre-execution receipt unable to consume a later grant for the same canonical command.
+CREATE TABLE IF NOT EXISTS workflow_decision_action_receipts (
+  session_id      TEXT NOT NULL,
+  receipt_digest  TEXT NOT NULL,
+  command_digest  TEXT NOT NULL,
+  observed_at     INTEGER NOT NULL,
+  PRIMARY KEY (session_id, receipt_digest),
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
 -- Orchestrator completion is an explicit verification boundary. A child merely becoming Idle or
 -- terminal does not prove that its report and follow-ups were accounted for.
 CREATE TABLE IF NOT EXISTS orchestrator_campaign_child_reports (
@@ -12780,6 +12791,45 @@ export class ControlPlaneDb {
        WHERE occurrence_id=? AND status='approved' AND action_command_digest=?`,
     ).run(now, occurrenceId, commandDigest);
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
+  }
+
+  claimWorkflowDecisionActionReceipt(
+    sessionId: string,
+    receiptDigest: string,
+    commandDigest: string,
+    now: number,
+  ): boolean {
+    const result = this.stmt(
+      `INSERT INTO workflow_decision_action_receipts
+       (session_id, receipt_digest, command_digest, observed_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(session_id, receipt_digest) DO NOTHING`,
+    ).run(sessionId, receiptDigest, commandDigest, now);
+    return Number(result.changes) === 1;
+  }
+
+  consumeWorkflowDecisionActionWithReceipt(
+    sessionId: string,
+    occurrenceId: string,
+    commandDigest: string,
+    receiptDigest: string,
+    now: number,
+  ): WorkflowDecisionView | null {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (!this.claimWorkflowDecisionActionReceipt(sessionId, receiptDigest, commandDigest, now)) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      const result = this.stmt(
+        `UPDATE workflow_decisions SET status='consumed', consumed_at=?
+         WHERE occurrence_id=? AND session_id=? AND status='approved' AND action_command_digest=?`,
+      ).run(now, occurrenceId, sessionId, commandDigest);
+      this.db.exec("COMMIT");
+      return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   /** Advance the absolute cost threshold by its original fixed allowance window. */

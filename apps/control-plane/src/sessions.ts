@@ -102,6 +102,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type ReconcilePodRequest,
   type RunView,
   type ReviewFinding,
+  type ReviewDecisionApprovalDelivery,
   type ResourceScope,
   type ReviewFindingsResponse,
   type RunnerProtocolCapability,
@@ -1000,6 +1001,19 @@ function codexExecFallbackReason(
 function auditDigest(value: unknown): string | undefined {
   if (value == null) return undefined;
   return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
+}
+
+function validatedGuardianApprovalDelivery(value: unknown): ReviewDecisionApprovalDelivery | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Record<string, unknown>;
+  const boundedId = (field: unknown): field is string => typeof field === "string" && field.length > 0 &&
+    field.length <= 512 && !/[\x00-\x1f\x7f]/u.test(field);
+  if (candidate.transport !== "codex-app-server" || candidate.toolName !== "commandExecution" ||
+      candidate.optionKind !== "allow_once" || !boundedId(candidate.threadId) ||
+      !boundedId(candidate.turnId) || !boundedId(candidate.itemId) ||
+      typeof candidate.input !== "string" || candidate.input.length < 1 || candidate.input.length > 2000 ||
+      typeof candidate.inputSha256 !== "string" || !/^[0-9a-f]{64}$/u.test(candidate.inputSha256)) return null;
+  return candidate as unknown as ReviewDecisionApprovalDelivery;
 }
 
 function questionAuditContent(
@@ -9140,11 +9154,17 @@ export class SessionsService {
           { content: payload.rationale },
         );
       }
-      const delivery = payload.approvalDelivery;
+      const delivery = validatedGuardianApprovalDelivery(payload.approvalDelivery);
       const deliveryDigest = delivery && createHash("sha256").update(delivery.input, "utf8").digest("hex");
       if (delivery && reviewer?.kind === "agent" && reviewer.id === "codex-guardian" &&
           payload.outcome === "allowed" && session.driver === delivery.transport &&
           delivery.optionKind === "allow_once" && delivery.inputSha256 === deliveryDigest) {
+        const receiptDigest = auditDigest({
+          transport: delivery.transport,
+          threadId: delivery.threadId,
+          turnId: delivery.turnId,
+          itemId: delivery.itemId,
+        })!;
         const actionAdmission = this.workflowDecisionActionForCommand(
           session,
           delivery.toolName,
@@ -9152,9 +9172,11 @@ export class SessionsService {
         );
         if (actionAdmission) {
           const actor: GovernanceActor = { kind: "system", id: "workflow-decision-action-admission" };
-          const consumed = this.db.consumeWorkflowDecisionAction(
+          const consumed = this.db.consumeWorkflowDecisionActionWithReceipt(
+            session.id,
             actionAdmission.decision.occurrenceId,
             actionAdmission.commandDigest,
+            receiptDigest,
             now,
           );
           if (consumed) {
@@ -9185,6 +9207,15 @@ export class SessionsService {
             this.hub.sessionChangedById(sessionId);
             this.hub.sessionChangedById(consumed.controllingSessionId);
           }
+        } else {
+          // Burn a valid unmatched provider invocation identity as well: a delayed replay must not
+          // consume a future grant that happens to carry the same canonical command.
+          this.db.claimWorkflowDecisionActionReceipt(
+            session.id,
+            receiptDigest,
+            auditDigest({ kind: "pr_merge_enqueue", command: delivery.input })!,
+            now,
+          );
         }
       }
     }

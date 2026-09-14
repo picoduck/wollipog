@@ -2879,6 +2879,14 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
         entry.requestId === guardian.decision.occurrenceId && entry.outcome === "consumed").length, 1,
       "duplicate provider events cannot consume or audit consumption twice");
 
+      const rearmed = arm(1140);
+      svc.onSessionEvent(child.id, guardianReceipt);
+      assert.equal(db.workflowDecisionByOccurrence(rearmed.decision.occurrenceId)?.status, "approved",
+        "a replayed provider invocation cannot consume a later grant for the same command");
+      svc.onSessionEvent(child.id, receipt(rearmed.command));
+      assert.equal(db.workflowDecisionByOccurrence(rearmed.decision.occurrenceId)?.status, "consumed",
+        "a new provider invocation can consume the newly armed grant");
+
       const requested = arm(1141);
       svc.onSessionEvent(child.id, {
         kind: "permission_request",
@@ -2895,7 +2903,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     } finally { db.close(); }
   });
 
-  await t.test("command, tool, digest, child, and cancelled-delivery mismatches retain the grant", () => {
+  await t.test("command, tool, digest, child, reviewer, malformed, and cancelled mismatches retain the grant", () => {
     const { db, svc, child, createChild, arm, receipt } = setup();
     try {
       const armed = arm(1142);
@@ -2908,6 +2916,15 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       svc.onSessionEvent(child.id, wrongDigest);
       const otherChild = createChild(CODEX_APP_AGENT_ID);
       svc.onSessionEvent(otherChild.id, receipt(armed.command));
+      const wrongReviewer = receipt(armed.command);
+      wrongReviewer.reviewer = { kind: "agent", id: "another-reviewer" };
+      svc.onSessionEvent(child.id, wrongReviewer);
+      const wrongTransport = receipt(armed.command);
+      (wrongTransport.approvalDelivery as unknown as { transport: string }).transport = "claude-code";
+      svc.onSessionEvent(child.id, wrongTransport);
+      const malformed = receipt(armed.command);
+      (malformed.approvalDelivery as unknown as { input: unknown }).input = 1;
+      assert.doesNotThrow(() => svc.onSessionEvent(child.id, malformed));
       const cancelled = receipt(armed.command);
       cancelled.outcome = "aborted";
       svc.onSessionEvent(child.id, cancelled);
@@ -2949,6 +2966,15 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       } finally { db.close(); }
     });
   }
+
+  await t.test("a Claude session cannot consume an App Server receipt", () => {
+    const { db, svc, child, arm, receipt } = setup(AGENT_ID);
+    try {
+      const armed = arm(1159);
+      svc.onSessionEvent(child.id, receipt(armed.command));
+      assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "approved");
+    } finally { db.close(); }
+  });
 
   await t.test("native Codex fails closed before arming because it has no approval receipt", () => {
     const { db, svc, child } = setup(CODEX_AGENT_ID);
