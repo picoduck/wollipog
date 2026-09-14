@@ -154,6 +154,8 @@ export interface WorktreeCleanupRecord {
   /** Runner-private random marker inherited by worktree-owned native POSIX descendants. */
   processMarker?: string;
   processesTerminatedAt?: number;
+  /** Durable proof that removal completed even if port/history finalization must retry. */
+  worktreeRemovedAt?: number;
   createdAt?: number;
   completedAt?: number;
   /** Forge-verified head used only for safe cleanup when the branch upstream disappeared. */

@@ -2174,6 +2174,13 @@ export class SessionManager {
         sameWorktreePath(rebinding.entry.context, rebinding.entry.worktree.path, path));
   }
 
+  private providerTurnUsesPath(sessionId: string, context: AgentContext, path: string): boolean {
+    const active = this.active.get(sessionId);
+    if (!active || !sameWorktreePath(context, active.cwd, path)) return false;
+    return active.running || active.providerInitiatedTurnActive === true || (active.queue?.length ?? 0) > 0 ||
+      this.reservedPromotions(active).size > 0;
+  }
+
   private releaseActiveWorktreeLease(entry: ActiveSession): void {
     if (!entry.worktreeLeaseOwner) return;
     this.store.releaseWorktreeLease(entry.sessionId, entry.worktreeLeaseOwner);
@@ -2661,6 +2668,9 @@ export class SessionManager {
     if (this.transitioningProviderUsesPath(sessionId, meta.context, worktree.path)) {
       return { removed: false, reason: "the worktree is still active in a provider process" };
     }
+    if (this.providerTurnUsesPath(sessionId, meta.context, worktree.path)) {
+      return { removed: false, reason: "the worktree is still handling a provider turn or queued input" };
+    }
     if (options.refreshMergedHead !== false && !worktree.pullRequest) {
       await this.discoverUnlinkedMergedWorktree(sessionId, worktree.path);
       const latest = this.store.readMeta(sessionId);
@@ -2725,6 +2735,9 @@ export class SessionManager {
     }
     if (this.transitioningProviderUsesPath(sessionId, meta.context, worktree.path)) {
       return { removed: false, reason: "the worktree is still active in a provider process" };
+    }
+    if (this.providerTurnUsesPath(sessionId, meta.context, worktree.path)) {
+      return { removed: false, reason: "the worktree is still handling a provider turn or queued input" };
     }
     let teardownIdentityError: string | undefined;
     try {
@@ -2806,37 +2819,10 @@ export class SessionManager {
         } as const;
         return { removed: false, reason: reasons[result.reason] };
       }
+      cleanup.worktreeRemovedAt = Date.now();
+      this.cleanupJournal.add(cleanup);
+      const snapshot = await this.forgetRemovedWorktree(cleanup);
       this.finishWorktreeCleanup(cleanup);
-
-      // The session lane excludes create/attach/select/link/discard races. Re-read after Git I/O so
-      // an out-of-process store removal cannot be accidentally recreated by this patch.
-      const latest = this.store.readMeta(sessionId);
-      if (!latest) return { removed: true };
-      const worktrees = this.attributedWorktrees(latest)
-        .filter((item) => !sameWorktreePath(latest.context, item.path, worktree.path));
-      const worktreeHooks = { ...(latest.worktreeHooks ?? {}) };
-      delete worktreeHooks[worktree.id];
-      const worktreeProcessMarkers = { ...(latest.worktreeProcessMarkers ?? {}) };
-      delete worktreeProcessMarkers[worktree.id];
-      const removedActiveSelection = !!latest.worktreePath &&
-        sameWorktreePath(latest.context, latest.worktreePath, worktree.path);
-      const updated = this.store.patchMeta(sessionId, {
-        worktrees,
-        worktreeHooks: Object.keys(worktreeHooks).length ? worktreeHooks : undefined,
-        worktreeProcessMarkers: Object.keys(worktreeProcessMarkers).length ? worktreeProcessMarkers : undefined,
-        ...(removedActiveSelection
-          ? { worktreePath: null, worktreeBranch: undefined, lastTurnBaseTree: undefined }
-          : {}),
-      });
-      if (!updated) return { removed: true };
-      this.worktreeSetupEnvironments.delete(sessionId);
-      await removeRequestedWorktreeBoundary(meta.repoPath, sessionId, {
-        context: meta.context,
-        dataDir: this.dataDir,
-        ownerHash: this.runnerOwnerHash,
-      }).catch(() => false);
-      const snapshot = this.snapshot(updated);
-      this.send({ type: "session_runtime_updated", snapshot });
       return { removed: true, snapshot };
     } finally {
       const provider = this.active.get(sessionId);
@@ -2853,6 +2839,42 @@ export class SessionManager {
         this.store.releaseWorktreeLease(sessionId, cleanupLeaseOwner);
       }
     }
+  }
+
+  /** Remove a completed cleanup generation from a still-live session without disturbing any
+   * replacement identity. Safe cleanup replay and the initiating request share this path. */
+  private async forgetRemovedWorktree(record: WorktreeCleanupRecord): Promise<SessionSnapshot | undefined> {
+    const latest = this.store.readMeta(record.sessionId);
+    if (!latest) return undefined;
+    const removed = this.attributedWorktrees(latest).find((item) =>
+      item.id === record.worktreeId && sameWorktreePath(latest.context, item.path, record.worktreePath) &&
+      (!record.branch || item.branch === record.branch));
+    if (!removed) return undefined;
+    const worktrees = this.attributedWorktrees(latest).filter((item) => item.id !== removed.id);
+    const worktreeHooks = { ...(latest.worktreeHooks ?? {}) };
+    delete worktreeHooks[removed.id];
+    const worktreeProcessMarkers = { ...(latest.worktreeProcessMarkers ?? {}) };
+    delete worktreeProcessMarkers[removed.id];
+    const removedActiveSelection = !!latest.worktreePath &&
+      sameWorktreePath(latest.context, latest.worktreePath, removed.path);
+    const updated = this.store.patchMeta(record.sessionId, {
+      worktrees,
+      worktreeHooks: Object.keys(worktreeHooks).length ? worktreeHooks : undefined,
+      worktreeProcessMarkers: Object.keys(worktreeProcessMarkers).length ? worktreeProcessMarkers : undefined,
+      ...(removedActiveSelection
+        ? { worktreePath: null, worktreeBranch: undefined, lastTurnBaseTree: undefined }
+        : {}),
+    });
+    if (!updated) return undefined;
+    this.worktreeSetupEnvironments.delete(record.sessionId);
+    await removeRequestedWorktreeBoundary(record.repoPath, record.sessionId, {
+      context: record.context,
+      dataDir: this.dataDir,
+      ownerHash: this.runnerOwnerHash,
+    }).catch(() => false);
+    const snapshot = this.snapshot(updated);
+    this.send({ type: "session_runtime_updated", snapshot });
+    return snapshot;
   }
 
   /** Destructive session-scoped operation. Safety checks are identical to automatic PR cleanup;
@@ -10551,8 +10573,12 @@ export class SessionManager {
     cleanupCurrentGeneration = false,
     isolationMeta?: SessionMeta,
   ): Promise<void> {
+    if (record.removalMode === "safe" && this.store.has(record.sessionId)) {
+      await this.reapLiveSafeWorktree(record);
+      return;
+    }
     let checkpointRefsCleaned = true;
-    let worktreeRemoved = true;
+    let worktreeRemoved = !!record.worktreeRemovedAt;
     const cleanupOwnership: CheckpointRefOwnershipClaim = {
       sessionId: record.sessionId,
       repoPath: record.repoPath,
@@ -10604,8 +10630,14 @@ export class SessionManager {
         checkpointRefsCleaned = false;
       }
     }
-    const removal = await this.removeRecordedWorktree(record, isolationMeta);
-    worktreeRemoved = removal.removed;
+    if (!worktreeRemoved) {
+      const removal = await this.removeRecordedWorktree(record, isolationMeta);
+      worktreeRemoved = removal.removed;
+      if (worktreeRemoved) {
+        record.worktreeRemovedAt = Date.now();
+        this.cleanupJournal.add(record);
+      }
+    }
     if (checkpointRefsCleaned && worktreeRemoved) {
       this.finishWorktreeCleanup(record);
       return;
@@ -10616,6 +10648,67 @@ export class SessionManager {
       ? "worktree removal"
       : worktreeRemoved ? "checkpoint ref cleanup" : "checkpoint ref cleanup and worktree removal";
     this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after ${failedPhases}`);
+  }
+
+  /** Resume an interrupted explicit or post-merge cleanup without treating its still-live session
+   * as a replacement generation. The safe lane never reclaims checkpoint refs: those belong to
+   * the live conversation, even when its selected worktree is being retired. */
+  private async reapLiveSafeWorktree(record: WorktreeCleanupRecord): Promise<void> {
+    await this.runWorktreeOperation(record.sessionId, async () => {
+      const meta = this.store.readMeta(record.sessionId);
+      if (!meta) {
+        await this.reapWorktree(record);
+        return;
+      }
+      const worktree = this.attributedWorktrees(meta).find((item) =>
+        item.id === record.worktreeId && sameWorktreePath(meta.context, item.path, record.worktreePath) &&
+        (!record.branch || item.branch === record.branch));
+      if (!worktree) {
+        if (record.worktreeRemovedAt) this.finishWorktreeCleanup(record);
+        else this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after live worktree identity changed`);
+        return;
+      }
+      if (this.providerTurnUsesPath(record.sessionId, meta.context, record.worktreePath) ||
+          this.transitioningProviderUsesPath(record.sessionId, meta.context, record.worktreePath)) {
+        this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} deferred while a provider turn uses the worktree`);
+        return;
+      }
+
+      const cleanupLeaseOwner = `${this.lockOwner}:cleanup-replay:${randomUUID()}`;
+      let transferredFrom: string | null = null;
+      if (!this.store.acquireWorktreeLease(record.sessionId, cleanupLeaseOwner)) {
+        const holder = this.store.readWorktreeLease(record.sessionId);
+        const ownProvider = this.active.get(record.sessionId)?.worktreeLeaseOwner;
+        if (!holder || holder.pid !== process.pid || !ownProvider || holder.owner !== ownProvider ||
+            !this.store.transferWorktreeLease(record.sessionId, ownProvider, cleanupLeaseOwner)) {
+          this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} deferred while the live session lease is unavailable`);
+          return;
+        }
+        transferredFrom = ownProvider;
+      }
+      try {
+        if (!record.worktreeRemovedAt) {
+          const removal = await this.removeRecordedWorktree(record, meta);
+          if (!removal.removed) {
+            this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after safe worktree removal`);
+            return;
+          }
+          record.worktreeRemovedAt = Date.now();
+          this.cleanupJournal.add(record);
+        }
+        await this.forgetRemovedWorktree(record);
+        this.finishWorktreeCleanup(record);
+      } finally {
+        const provider = this.active.get(record.sessionId);
+        if (transferredFrom && provider?.worktreeLeaseOwner === transferredFrom) {
+          if (!this.store.transferWorktreeLease(record.sessionId, cleanupLeaseOwner, transferredFrom)) {
+            provider.worktreeLeaseOwner = cleanupLeaseOwner;
+          }
+        } else {
+          this.store.releaseWorktreeLease(record.sessionId, cleanupLeaseOwner);
+        }
+      }
+    });
   }
 
   private removeWorktreeCleanupRecord(record: Pick<WorktreeCleanupRecord, "sessionId" | "worktreeId">): boolean {

@@ -788,6 +788,91 @@ test("startup cleanup replays frozen teardown before removing an orphaned worktr
   }
 });
 
+test("startup resumes safe cleanup for a live session without deleting its checkpoint refs", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-startup-safe-cleanup-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const sessionId = "s_startup_safe_cleanup";
+    const handle = await createWorktree(repo, sessionId, { dataDir });
+    execFileSync("git", ["-C", handle.path, "push", "-u", "origin", handle.branch]);
+    const checkpointRef = `refs/wollipog/${sessionId}/turn-1`;
+    execFileSync("git", ["-C", repo, "update-ref", checkpointRef, "HEAD"]);
+    const replayedMarker = join(repo, "ambiguous-replayed.txt");
+    const continuedMarker = join(repo, "teardown-continued.txt");
+    const teardown = [
+      {
+        name: "Ambiguous",
+        command: [process.execPath, "-e", "require('fs').writeFileSync(process.argv[1],'replayed')", replayedMarker] as [string, ...string[]],
+        timeoutSeconds: 10,
+        optional: false,
+      },
+      {
+        name: "Continue",
+        command: [process.execPath, "-e", "require('fs').writeFileSync(process.argv[1],'continued')", continuedMarker] as [string, ...string[]],
+        timeoutSeconds: 10,
+        optional: false,
+      },
+    ];
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId, agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: handle.path, worktreeBranch: handle.branch,
+      worktrees: [{ id: "legacy", path: handle.path, branch: handle.branch, source: "legacy" }],
+      worktreeHooks: { legacy: { configHash: "trusted-config", environment: {}, teardown } },
+      driver: "claude-code", command: "claude", args: [], env: {}, context: { kind: "native" },
+      agentSessionId: null, status: "stopped", title: "safe replay", config: {}, tokensIn: 0,
+      tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null, seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    const now = Date.now();
+    new WorktreeCleanupJournal(dataDir).add({
+      sessionId,
+      worktreeId: "legacy",
+      repoPath: repo,
+      worktreePath: handle.path,
+      context: { kind: "native" },
+      branch: handle.branch,
+      source: "legacy",
+      trigger: "explicit_discard",
+      removalMode: "safe",
+      hooks: { configHash: "trusted-config", environment: {}, teardown },
+      processTerminationStartedAt: now - 100,
+      processesTerminatedAt: now - 50,
+      teardown: {
+        status: "running",
+        configHash: "trusted-config",
+        attemptId: "interrupted-attempt",
+        startedAt: now - 50,
+        steps: [{
+          name: "Ambiguous", status: "running", optional: false, startedAt: now - 25,
+          stdout: "partial", stderr: "",
+        }],
+      },
+      createdAt: now - 100,
+    });
+
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    manager.setWorktreeShellRetirement(async () => {});
+    manager.reconcileStore();
+    await waitForCondition(() => !existsSync(handle.path), "safe startup cleanup did not remove the worktree");
+    await waitForCondition(
+      () => new WorktreeCleanupJournal(dataDir).list().length === 0,
+      "safe startup cleanup did not complete its durable receipt",
+    );
+    assert.equal(existsSync(replayedMarker), false, "a crash-mid-step teardown command is never replayed");
+    assert.equal(readFileSync(continuedMarker, "utf8"), "continued");
+    const receipt = new WorktreeCleanupJournal(dataDir).history()[0];
+    assert.deepEqual(receipt?.teardown?.steps.map((step) => step.status), ["uncertain", "completed"]);
+    assert.equal(store.readMeta(sessionId)?.worktreePath, null);
+    assert.deepEqual(store.readMeta(sessionId)?.worktrees, []);
+    execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", checkpointRef]);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("session deletion removes its external worktree and durable store row", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-delete-wt-"));
   const repo = join(root, "repo");
@@ -1100,6 +1185,59 @@ test("PR reconciliation and explicit discard retain every unsafe worktree", { sk
     assert.equal(existsSync(dirty.worktree.path), false, "explicit discard uses the same safe removal checks");
     assert.equal(new WorktreeCleanupJournal(dataDir).history()
       .find((entry) => entry.worktreeId === dirty.worktree.id)?.trigger, "explicit_discard");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("PR reconciliation defers cleanup until the provider turn leaves the worktree", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-pr-turn-cleanup-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_pr_turn_cleanup", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "running", title: "cleanup",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const merged = await manager.requestWorktree("s_pr_turn_cleanup", { baseRef: "HEAD", branch: "fix/turn-cleanup" });
+    execFileSync("git", ["-C", merged.worktree.path, "push", "-u", "origin", merged.worktree.branch]);
+    await manager.linkWorktreePullRequest(
+      "s_pr_turn_cleanup", merged.worktree.path, "https://github.com/picoduck/wollipog/pull/799",
+    );
+    const headOid = execFileSync("git", ["-C", merged.worktree.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const meta = store.readMeta("s_pr_turn_cleanup")!;
+    store.patchMeta("s_pr_turn_cleanup", {
+      worktrees: meta.worktrees?.map((item) => item.id === merged.worktree.id
+        ? { ...item, pullRequest: { ...item.pullRequest!, state: "merged", headOid } }
+        : item),
+    });
+    const activeEntries = (manager as unknown as { active: Map<string, unknown> }).active;
+    activeEntries.set("s_pr_turn_cleanup", {
+      sessionId: "s_pr_turn_cleanup",
+      context: { kind: "native" },
+      cwd: merged.worktree.path,
+      worktree: { path: merged.worktree.path, branch: merged.worktree.branch },
+      running: true,
+      queue: [],
+      reservedPromotions: new Map(),
+      client: { dispose: () => {} },
+    });
+
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(existsSync(merged.worktree.path), true, "automatic cleanup does not interrupt an in-flight turn");
+    assert.equal(activeEntries.has("s_pr_turn_cleanup"), true, "the provider remains alive to finish its reply");
+    assert.equal(new WorktreeCleanupJournal(dataDir).list().length, 0, "deferral creates no destructive intent");
+
+    activeEntries.delete("s_pr_turn_cleanup");
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(existsSync(merged.worktree.path), false, "the same terminal worktree is removed after the turn settles");
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
