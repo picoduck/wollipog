@@ -292,9 +292,8 @@ function mapSession(s: Json): Json {
 function worktreeTarget(args: Json, deps: McpDeps): string | ToolResult {
   const sessionId = typeof args?.sessionId === "string" && args.sessionId ? args.sessionId : deps.selfSessionId;
   if (!sessionId) return errorResult("sessionId is required");
-  if (deps.orchestrator && sessionId === deps.selfSessionId) {
-    return errorResult("the orchestrator preset cannot manage its own worktrees; select a child session");
-  }
+  // The control plane owns the effective Orchestrator execution policy. It rejects self-targeting
+  // for Strict Project Isolation and admits it only for an authenticated non-strict session.
   if (!deps.orchestrator && deps.actorHeader === WOLLIPOG_AGENT_ACTOR_SESSION_HEADER && sessionId !== deps.selfSessionId) {
     return errorResult("refusing: a session credential may manage only its own worktrees");
   }

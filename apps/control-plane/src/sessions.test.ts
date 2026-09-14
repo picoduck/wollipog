@@ -578,13 +578,16 @@ test("the retired conductor cannot be advertised, created, or restored through d
   } finally { db.close(); }
 });
 
-test("orchestrator is creation-only and requires the negotiated native harness boundary", () => {
-  const { db, svc } = makeHarness();
+test("orchestrator separates default provider execution from the negotiated strict boundary", () => {
+  const { db, svc, hub } = makeHarness();
   try {
     const meta = runnerMeta();
+    meta.runtime = { dataDir: "/runner", worktreeRoot: "/runner/worktrees", maxConcurrentSessions: 4,
+      admission: { agentLimits: {}, agentWeights: {} },
+      executionIsolation: { mode: "bwrap", network: "inherit" } };
     const agent = meta.agents.find((item) => item.id === AGENT_ID)!;
     agent.capabilities = { models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
-      permissionModes: ["default", "orchestrator"] };
+      permissionModes: ["default", "dontAsk", "orchestrator"] };
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
     const created = svc.createSession(
@@ -593,6 +596,9 @@ test("orchestrator is creation-only and requires the negotiated native harness b
     );
     assert.equal(created.ok, true, created.error);
     assert.equal(created.data!.permissionMode, "orchestrator");
+    assert.equal(created.data!.orchestratorPolicy?.execution.strictProjectIsolation, false);
+    assert.equal(hub.sentOfType("start_session").find((message) =>
+      message.spec.sessionId === created.data!.id)?.spec.orchestrator?.strictProjectIsolation, false);
     assert.equal(created.data!.parentControl, "questions_and_approvals",
       "a human-created Orchestrator defaults delegated one-time decisions on");
     const explicitOff = svc.createSession({
@@ -600,8 +606,15 @@ test("orchestrator is creation-only and requires the negotiated native harness b
     });
     assert.equal(explicitOff.data!.parentControl, "off", "an explicit human choice remains authoritative");
     db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.delegatedParentControl - 1);
-    const olderRunner = svc.createSession(
+    const unsupportedProviderPolicy = svc.createSession(
       { ...request, config: { permissionMode: "orchestrator" } },
+      undefined, undefined, false, false, false, { defaultOwnerUserId: "human" },
+    );
+    assert.equal(unsupportedProviderPolicy.status, 409);
+    assert.match(unsupportedProviderPolicy.error!, /protocol-v144 runner/);
+    const olderRunner = svc.createSession(
+      { ...request, config: { permissionMode: "orchestrator" },
+        orchestrator: { execution: { strictProjectIsolation: true } } },
       undefined, undefined, false, false, false, { defaultOwnerUserId: "human" },
     );
     assert.equal(olderRunner.ok, true, olderRunner.error);
@@ -624,6 +637,7 @@ test("orchestrator is creation-only and requires the negotiated native harness b
             ui_evidence_approval: "human",
           },
         },
+        execution: { strictProjectIsolation: true },
       },
       capabilities: { models: [], effortLevels: [], installations: 1, compatibleInstallations: 1, status: "available" },
     };
@@ -678,7 +692,8 @@ test("orchestrator is creation-only and requires the negotiated native harness b
       permissionModes: ["orchestrator"], elicitation: { orchestrator: ["none"] },
     };
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
-    assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).ok, true,
+    assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" },
+      orchestrator: { execution: { strictProjectIsolation: true } } }).ok, true,
       "an ACP adapter may advertise a runner-verified structured boundary");
     const ordinaryAcp = svc.createSession({ ...request, prompt: "inspect", config: {
       effort: "provider-defined", permissionMode: "provider-defined",
@@ -693,14 +708,17 @@ test("orchestrator is creation-only and requires the negotiated native harness b
     "ACP has no standalone TUI enforcement path");
     agent.context = { kind: "wsl", distro: "Ubuntu" };
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
-    assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).status, 409,
+    assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" },
+      orchestrator: { execution: { strictProjectIsolation: true } } }).status, 409,
       "generic ACP stays unavailable through the target-local management bridge");
     agent.driver = "codex-app-server";
     db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.wslSafeLauncher - 1);
-    assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).status, 409,
+    assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" },
+      orchestrator: { execution: { strictProjectIsolation: true } } }).status, 409,
       "structured WSL fails closed before the safe-launcher capability");
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
-    assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).status, 409,
+    assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" },
+      orchestrator: { execution: { strictProjectIsolation: true } } }).status, 409,
       "protocol support alone cannot replace fresh target-local launcher attestation");
     agent.wslAgentControl = { protocolVersion: 1, nodeRuntime: "/usr/bin/node",
       safeLauncherProtocolVersion: 1, bwrapRuntime: "/usr/bin/bwrap" };
@@ -708,11 +726,13 @@ test("orchestrator is creation-only and requires the negotiated native harness b
       admission: { agentLimits: {}, agentWeights: {} },
       executionIsolation: { mode: "provider", network: "inherit" } };
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
-    assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).status, 409,
+    assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" },
+      orchestrator: { execution: { strictProjectIsolation: true } } }).status, 409,
       "target-local launcher attestation cannot enable the default provider isolation mode");
     meta.runtime.executionIsolation = { mode: "bwrap", network: "deny" };
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
-    assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).ok, true,
+    assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" },
+      orchestrator: { execution: { strictProjectIsolation: true } } }).ok, true,
       "current structured Direct WSL may use the authenticated target-local safe launcher");
     assert.equal(svc.createSession({ ...request, launchSurface: "native_tui",
       config: { permissionMode: "orchestrator" } }).status, 409,
@@ -727,7 +747,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     const planner = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
     planner.capabilities = {
       models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
-      permissionModes: ["orchestrator"],
+      permissionModes: ["default", "orchestrator"],
     };
     const codex = meta.agents.find((agent) => agent.id === CODEX_APP_AGENT_ID)!;
     codex.capabilities!.permissionModes = ["default", "orchestrator"];
@@ -753,6 +773,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
             ui_evidence_approval: "human",
           },
         },
+        execution: { strictProjectIsolation: false },
       },
       capabilities: {
         models: [{ id: "text-model", efforts: ["high"] }],
@@ -2000,7 +2021,7 @@ test("opt-in Parent Control resolves exact nested request occurrences with agent
     const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
     orchestrator.capabilities = {
       models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
-      permissionModes: ["orchestrator"],
+      permissionModes: ["default", "orchestrator"],
     };
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     const parent = svc.createSession({
@@ -2241,7 +2262,7 @@ test("typed workflow decisions isolate categories and fail closed across stale p
     const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
     orchestrator.capabilities = {
       models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
-      permissionModes: ["orchestrator"],
+      permissionModes: ["default", "orchestrator"],
     };
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     const parent = svc.createSession({
@@ -2765,7 +2786,7 @@ test("typed workflow decisions preserve provider settlement and cannot be replac
     const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
     orchestrator.capabilities = {
       models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
-      permissionModes: ["orchestrator"],
+      permissionModes: ["default", "orchestrator"],
     };
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     const parent = svc.createSession({

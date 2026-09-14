@@ -263,6 +263,7 @@ import {
   isMutationMethod,
   PERSONAL_ORGANIZATION_ID,
   mutationAuthorizationError,
+  orchestratorSelfWorktreeAuthorizationError,
   type AuthPrincipal,
   type HumanPrincipal,
   workflowActorForPrincipal,
@@ -3833,10 +3834,17 @@ async function runSessionWorktreeRequest(
   request:
     | { operation: "create"; baseRef?: string; branch: string; progress?: boolean }
     | { operation: "attach" | "select" | "discard" | "retry_setup"; path: string },
+  principal: AuthPrincipal | null,
   reply: FastifyReply,
 ) {
   const session = db.getSession(sessionId);
   if (!session) return reply.code(404).send({ error: "session not found" });
+  const authorizationError = orchestratorSelfWorktreeAuthorizationError(
+    principal,
+    sessionId,
+    session.orchestratorPolicy?.execution.strictProjectIsolation !== false,
+  );
+  if (authorizationError) return reply.code(403).send({ error: authorizationError });
   const unsupported = runnerCapabilityError(
     session.runnerId,
     request.operation === "discard" ? "sessionWorktreeDiscard" : request.operation === "retry_setup" ? "worktreeSetup" : "sessionWorktrees",
@@ -3922,7 +3930,7 @@ app.post("/api/sessions/:id/worktrees", async (req, reply) => {
     branch: body.branch,
     ...(typeof body.baseRef === "string" ? { baseRef: body.baseRef } : {}),
     ...(body.progress === true ? { progress: true } : {}),
-  }, reply);
+  }, requestPrincipal(req), reply);
 });
 
 app.post("/api/sessions/:id/worktrees/attach", async (req, reply) => {
@@ -3931,7 +3939,7 @@ app.post("/api/sessions/:id/worktrees/attach", async (req, reply) => {
   if (typeof path !== "string" || !path || path.length > 4096) {
     return reply.code(400).send({ error: "path must be a non-empty string of at most 4096 characters" });
   }
-  return runSessionWorktreeRequest(id, { operation: "attach", path }, reply);
+  return runSessionWorktreeRequest(id, { operation: "attach", path }, requestPrincipal(req), reply);
 });
 
 app.post("/api/sessions/:id/worktrees/select", async (req, reply) => {
@@ -3940,7 +3948,7 @@ app.post("/api/sessions/:id/worktrees/select", async (req, reply) => {
   if (typeof path !== "string" || !path || path.length > 4096) {
     return reply.code(400).send({ error: "path must be a non-empty string of at most 4096 characters" });
   }
-  return runSessionWorktreeRequest(id, { operation: "select", path }, reply);
+  return runSessionWorktreeRequest(id, { operation: "select", path }, requestPrincipal(req), reply);
 });
 
 app.post("/api/sessions/:id/worktrees/discard", async (req, reply) => {
@@ -3949,7 +3957,7 @@ app.post("/api/sessions/:id/worktrees/discard", async (req, reply) => {
   if (typeof path !== "string" || !path || path.length > 4096) {
     return reply.code(400).send({ error: "path must be a non-empty string of at most 4096 characters" });
   }
-  return runSessionWorktreeRequest(id, { operation: "discard", path }, reply);
+  return runSessionWorktreeRequest(id, { operation: "discard", path }, requestPrincipal(req), reply);
 });
 
 app.post("/api/sessions/:id/worktrees/retry-setup", async (req, reply) => {
@@ -3958,7 +3966,7 @@ app.post("/api/sessions/:id/worktrees/retry-setup", async (req, reply) => {
   if (typeof path !== "string" || !path || path.length > 4096) {
     return reply.code(400).send({ error: "path must be a non-empty string of at most 4096 characters" });
   }
-  return runSessionWorktreeRequest(id, { operation: "retry_setup", path }, reply);
+  return runSessionWorktreeRequest(id, { operation: "retry_setup", path }, requestPrincipal(req), reply);
 });
 
 // Per-turn checkpoint rewind (T3-style, files only — the conversation continues). The runner

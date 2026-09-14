@@ -307,8 +307,9 @@ test("HTTP agent management scopes descendants and composes governance policy vi
       const idleArchive = await request(`${mode}-child`, "archive", { archived: true });
       assert.equal(idleArchive.status, mode === "orchestrator" ? 202 : 200);
       assert.equal((await idleArchive.json() as { archived: boolean }).archived, mode !== "orchestrator");
-      const ownWorktree = await request(mode, "worktrees", {});
-      assert.equal(ownWorktree.status, mode === "orchestrator" ? 404 : 400);
+      const ownWorktree = await request(mode, "worktrees", { branch: "fix/self" });
+      assert.equal(ownWorktree.status, mode === "orchestrator" ? 403 : 409,
+        "strict Orchestrators are refused by immutable policy while ordinary self-worktrees reach runner admission");
       const childWorktree = await request(`${mode}-child`, "worktrees", {});
       assert.equal(childWorktree.status, mode === "normal" ? 404 : 400);
     }

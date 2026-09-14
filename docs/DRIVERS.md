@@ -130,12 +130,18 @@ and a root-owned per-session state anchor plus a target-local HOME lease bounds 
 scratch, and relay lifetime. Direct WSL provider mode, generic ACP, conversation fork/state adoption, and WSL Native TUI
 remain fail-closed. Use a supported native, container, or cloud execution target for those modes.
 
-Native Windows harnesses do not advertise the Orchestrator preset because a Job Object alone cannot
-attest the scratch-only filesystem boundary. Claude Bash-prefix rules are also insufficient there:
-an otherwise read-only Git command can redirect its output into a Project Location.
-For the same reason, native Claude Code and Claude Agent ACP require runner isolation mode `bwrap`
-on Linux or `seatbelt` on macOS. Native Codex uses its provider sandbox on those platforms and is
-withheld on other native operating systems where that boundary is not attested.
+The Orchestrator role is advertised separately from optional Strict Project Isolation. Provider-mode
+native Claude Code is eligible, including on Windows, only when discovery proves interactive Default
+approval support and the session-scoped management tools are available. It keeps ordinary provider
+edit and shell permissions, approval routing, and governance; this does not claim an OS read-only
+filesystem boundary. Native Codex remains limited to platforms with its audited provider sandbox.
+
+Strict Project Isolation preserves the scratch-only boundary. Claude Bash-prefix rules alone are
+insufficient because an otherwise read-only command can redirect output into a Project Location, so
+strict native Claude Code and Claude Agent ACP require runner isolation mode `bwrap` on Linux or
+`seatbelt` on macOS. Native Windows cannot enable strict mode. Direct WSL still requires its
+target-local bwrap launcher. Unsupported strict combinations fail before provider launch with an
+actionable compatibility error rather than silently falling back to provider mode.
 
 On upgrade, a persisted Conductor `--mcp-config` argument is rewritten to the attested runner's
 owned data directory before launch. The former `~/.agent-manager/conductor/*.mcp.json` file is never

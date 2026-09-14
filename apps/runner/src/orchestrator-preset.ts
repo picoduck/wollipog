@@ -28,9 +28,8 @@ const ORCHESTRATOR_CLAUDE_BASH_RULES = [
 
 export type OrchestratorIsolationMode = "provider" | "bwrap" | "seatbelt" | "windows-job";
 
-/** Codex supplies its own audited provider sandbox on Linux and macOS. Claude's Bash allowlist needs an
- * outer OS filesystem boundary because command prefixes cannot prevent output-file options or
- * redirection. Native Windows has no attested filesystem boundary for either harness. */
+/** Whether a native harness can enforce the optional Strict Project Isolation boundary. Provider
+ * mode may still support the Orchestrator role when its ordinary permission contract is verified. */
 export function supportsNativeOrchestratorBoundary(
   driver: SessionLaunchSpec["driver"],
   platform: NodeJS.Platform,
@@ -44,15 +43,26 @@ export function supportsNativeOrchestratorBoundary(
     (platform === "darwin" && isolationMode === "seatbelt");
 }
 
-export function orchestratorInstructions(projectPaths: readonly string[]): string {
+export function orchestratorInstructions(
+  projectPaths: readonly string[],
+  strictProjectIsolation = true,
+): string {
   const locations = [...new Set(projectPaths.filter(Boolean))];
   return [
-    "You are running with the Wollipog Orchestrator preset. Plan, delegate to child sessions, and verify their results; do not implement project changes yourself.",
+    "You are running with the Wollipog Orchestrator role. Delegate Implementation is the default: plan, assign work to child sessions, monitor them, and verify their results.",
+    "An ordinary multi-issue implementation request does not by itself authorize an orchestration campaign or child creation. Create children only when the human explicitly requests orchestration or delegation.",
     "When this Orchestrator was created directly by an authenticated human, that creation authorizes routine child creation within its existing audience, workspace access, and configured limits. Explicit governance ask or deny policies remain authoritative; agent-created descendants and ambiguous legacy sessions do not inherit this authorization.",
-    "Your working directory is private per-session scratch space. You may create notes and ledgers there, but nowhere else.",
-    locations.length
-      ? `Project locations are read-only: ${locations.map((path) => JSON.stringify(path)).join(", ")}.`
-      : "Project locations are read-only and may be inspected by absolute path.",
+    strictProjectIsolation
+      ? "Strict Project Isolation is enabled. Your working directory is private per-session scratch space. You may create notes and ledgers there, but nowhere else."
+      : "Strict Project Isolation is disabled. Provider permissions and governance still apply; this role does not grant unrestricted execution or an operating-system read-only boundary.",
+    strictProjectIsolation
+      ? (locations.length
+          ? `Project locations are read-only: ${locations.map((path) => JSON.stringify(path)).join(", ")}.`
+          : "Project locations are read-only and may be inspected by absolute path.")
+      : "You may create or update planning artifacts that the repository and human permit without spawning a child.",
+    strictProjectIsolation
+      ? "Do not implement project changes yourself."
+      : "Do not edit project files merely because work was requested. If the human explicitly asks this parent to implement, first check open child assignments and pull requests for overlapping ownership, then create and select a dedicated Wollipog worktree for yourself. Follow the repository's testing, cross-model review, UI evidence, merge, and cleanup workflow exactly.",
     "You may read and search project files and user skill directories, inspect Git history and branches, read GitHub issues, pull requests, checks, review threads, and comments, search or fetch the web, and use Wollipog session-management tools.",
     "At campaign start and after any human policy change, call get_campaign. Treat its policy revision, effective decision owners, limits, compatibility fallbacks, and status as authoritative. Never broaden that policy or change account defaults.",
     "Use capability discovery before selecting an Automatic child model or effort, then pass the chosen pair atomically to create_session. Fixed campaign values cannot be overridden. Every child receives the server-derived policy block in its initial assignment.",
@@ -62,8 +72,12 @@ export function orchestratorInstructions(projectPaths: readonly string[]): strin
     "Whenever progress depends on a human response, a blocking question must use the structured request_user_input tool in Codex or AskUserQuestion tool in Claude. A prose-only blocking question is not a valid escalation. If the provider does not expose its structured question tool, report a visible compatibility failure and stop instead of silently returning to idle.",
     "After receiving an exact completed child report and accounting for its follow-ups, call verify_campaign_child. Retain keeps verified children available. Stop and Archive uses the durable lifecycle and does not reach Verified Complete until campaign-owned worktrees are retired.",
     "GitHub writes are limited to assigning or unassigning issues, changing issue labels, and posting plan or status comments.",
-    "Do not edit project files, run builds, tests, or typechecks in a project location, commit, push, create branches or worktrees for yourself, open pull requests, merge, or perform control-plane mutations outside descendant session management.",
-    "If a requested operation is outside that boundary, explain that the Orchestrator preset refuses it and delegate the implementation to a child session.",
+    strictProjectIsolation
+      ? "Do not edit project files, run builds, tests, or typechecks in a project location, commit, push, create branches or worktrees for yourself, open pull requests, merge, or perform control-plane mutations outside descendant session management."
+      : "Provider edit and shell permissions remain subject to the selected provider policy and existing governance. Use typed workflow decisions for merge, branch deletion, follow-up publication, and UI evidence; never self-approve or relax isolation.",
+    strictProjectIsolation
+      ? "If a requested operation is outside that boundary, explain that Strict Project Isolation refuses it and delegate the implementation to a child session."
+      : "If explicit parent implementation cannot obtain a dedicated non-overlapping worktree or a required approval is denied, stop that implementation path and report the specific blocker.",
   ].join(" ");
 }
 
@@ -170,7 +184,8 @@ export function withOrchestratorPreset(
     }
     if (!codexApprovalSupported || (contextKind !== "native" && !wslSupported) ||
         (!acpSupported && !["claude-code", "codex", "codex-app-server"].includes(agent.driver ?? "acp"))) return agent;
-    if (contextKind === "native" && !supportsNativeOrchestratorBoundary(
+    const nativeBoundaryRequired = acpSupported || agent.driver === "codex" || agent.driver === "codex-app-server";
+    if (contextKind === "native" && nativeBoundaryRequired && !supportsNativeOrchestratorBoundary(
       agent.driver ?? "acp", host.platform ?? process.platform, host.isolationMode ?? host.wslIsolationMode,
     )) {
       if (!agent.capabilities?.permissionModes?.includes(ORCHESTRATOR_PRESET)) return agent;
@@ -182,8 +197,11 @@ export function withOrchestratorPreset(
     }
     if (!agent.capabilities) return agent;
     if (agent.driver === "claude-code" &&
-        !(agent.capabilities.permissionModes?.includes("default") &&
-          agent.capabilities.permissionModes.includes("dontAsk"))) return agent;
+        !(agent.capabilities.supportsApprovals &&
+          agent.capabilities.permissionModes?.includes("default"))) {
+      return { ...agent, capabilities: { ...agent.capabilities,
+        permissionModes: agent.capabilities.permissionModes?.filter((mode) => mode !== ORCHESTRATOR_PRESET) } };
+    }
     return { ...agent, capabilities: {
       ...agent.capabilities,
       permissionModes: [...new Set([...(agent.capabilities.permissionModes ?? []), ORCHESTRATOR_PRESET])],
@@ -207,9 +225,14 @@ export function orchestratorLaunchArgs(
   driver: SessionLaunchSpec["driver"],
   mcp: { command: string; args: string[]; env: Record<string, string> },
   projectPaths: readonly string[] = [],
+  strictProjectIsolation = true,
 ): string[] {
-  const instructions = orchestratorInstructions(projectPaths);
+  const instructions = orchestratorInstructions(projectPaths, strictProjectIsolation);
   if (driver === "claude-code") {
+    if (!strictProjectIsolation) {
+      return ["--strict-mcp-config", "--append-system-prompt", instructions,
+        ...projectPaths.flatMap((path) => ["--add-dir", path])];
+    }
     return ["--tools", ORCHESTRATOR_CLAUDE_TOOLS.join(","), "--strict-mcp-config", "--disable-slash-commands",
       "--permission-mode", "dontAsk", "--allowedTools", claudeAllowedTools().join(","),
       "--disallowedTools", "Write,Edit,MultiEdit,NotebookEdit,Agent,Task",
@@ -225,9 +248,9 @@ export function orchestratorLaunchArgs(
     ...["apps", "plugins", "hooks",
       "multi_agent", "browser_use", "computer_use", "image_generation"].flatMap((feature) => ["--disable", feature]),
     "-c", 'sandbox_mode="workspace-write"',
-    "-c", "sandbox_workspace_write.writable_roots=[]",
+    ...(strictProjectIsolation ? ["-c", "sandbox_workspace_write.writable_roots=[]"] : []),
     "-c", "sandbox_workspace_write.network_access=true",
-    "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
+    ...(strictProjectIsolation ? ["-c", "sandbox_workspace_write.exclude_slash_tmp=true"] : []),
     "-c", 'approvals_reviewer="auto_review"',
     "-c", `approval_policy=${toml({ granular: {
       mcp_elicitations: true,

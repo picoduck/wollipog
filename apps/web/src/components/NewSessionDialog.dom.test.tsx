@@ -188,6 +188,19 @@ async function mountFixture(
   return { container, root, socket, requests, terminalOpens };
 }
 
+async function strictOrchestratorDefaults(): Promise<OrchestratorSettingsView> {
+  const defaults = structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
+  defaults.execution.strictProjectIsolation = true;
+  return {
+    defaults,
+    source: "system_default",
+    capabilities: {
+      models: [{ id: "test-model", efforts: ["high"] }], effortLevels: ["high"],
+      installations: 1, compatibleInstallations: 1, status: "available",
+    },
+  };
+}
+
 async function unmountFixture(fixture: Fixture): Promise<void> {
   await act(async () => { fixture.root.unmount(); });
   fixture.container.remove();
@@ -636,7 +649,7 @@ test("saved-default recovery buttons name the agent they actually select", async
 test("retired Conductor stays hidden and native orchestrator selection is sent at creation", async () => {
   setExperimentFlag("conductor", true, LOCAL_INSTANCE_SCOPE);
   const enabledRunner: RunnerView = {
-    ...runner, protocolVersion: 109,
+    ...runner, protocolVersion: PROTOCOL_VERSION,
     agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
       models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
       permissionModes: ["default", "orchestrator"],
@@ -664,7 +677,7 @@ test("retired Conductor stays hidden and native orchestrator selection is sent a
 
 test("Maximum Concurrent Children rejects fractional and out-of-range creation values accessibly", async () => {
   const enabledRunner: RunnerView = {
-    ...runner, protocolVersion: 109,
+    ...runner, protocolVersion: PROTOCOL_VERSION,
     agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
       models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
       permissionModes: ["default", "orchestrator"],
@@ -700,7 +713,7 @@ test("Maximum Concurrent Children rejects fractional and out-of-range creation v
 
 test("Decision Delegation is Orchestrator-only and shows effective sources", async () => {
   const enabledRunner: RunnerView = {
-    ...runner, protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.delegatedParentControl,
+    ...runner, protocolVersion: PROTOCOL_VERSION,
     agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
       models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
       permissionModes: ["default", "orchestrator"],
@@ -714,12 +727,12 @@ test("Decision Delegation is Orchestrator-only and shows effective sources", asy
   try {
     await act(async () => { selectProject(fixture.container, project.id); });
     assert.equal(fixture.container.querySelector('[aria-label^="Descendant Requests:"]'), null);
-    assert.match(fixture.container.textContent ?? "", /Approval-required implementation actions stay blocked/);
-    assert.doesNotMatch(fixture.container.textContent ?? "", /Guardian reviews eligible actions/);
+    assert.match(fixture.container.textContent ?? "", /Delegate implementation by default/);
     await choosePermissionPreset(fixture.container, "Orchestrator");
     const descendant = fixture.container.querySelector<HTMLButtonElement>('[aria-label^="Descendant Requests:"]');
     assert.match(descendant?.getAttribute("aria-label") ?? "", /Questions and Approvals/);
     assert.match(fixture.container.textContent ?? "", /User Default/);
+    assert.match(fixture.container.textContent ?? "", /no read-only operating-system boundary is claimed/i);
     assert.ok(fixture.container.querySelector('[aria-label^="PR Merge Approval:"]'));
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests[0]?.orchestrator?.delegation?.parentControl, undefined,
@@ -836,12 +849,16 @@ test("a session override can repair drifted defaults without rewriting the accou
 test("Parent Control opt-ins stay disabled on an older runner", async () => {
   const oldRunner: RunnerView = {
     ...runner, protocolVersion: 134,
+    runtime: { dataDir: "/runner", worktreeRoot: "/runner/worktrees", maxConcurrentSessions: 4,
+      executionIsolation: { mode: "bwrap", network: "inherit" } },
     agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
       models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
-      permissionModes: ["default", "orchestrator"],
+      permissionModes: ["default", "dontAsk", "orchestrator"],
     } })),
   };
-  const fixture = await mountFixture({ runners: [oldRunner] });
+  const fixture = await mountFixture(
+    { runners: [oldRunner] }, undefined, undefined, undefined, undefined, strictOrchestratorDefaults,
+  );
   try {
     await act(async () => { selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
@@ -863,14 +880,16 @@ test("Native TUI orchestrator creation is gated by its own runner capability", a
   for (const protocolVersion of [111, 112]) {
     const enabledRunner: RunnerView = {
       ...runner, protocolVersion,
+      runtime: { dataDir: "/runner", worktreeRoot: "/runner/worktrees", maxConcurrentSessions: 4,
+        executionIsolation: { mode: "bwrap", network: "inherit" } },
       agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
         models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
-        permissionModes: ["default", "orchestrator"],
+        permissionModes: ["default", "dontAsk", "orchestrator"],
       } })),
     };
     const fixture = await mountFixture({ runners: [enabledRunner], capabilities: {
       sessionSubscriptions: false, nativeTuiLaunch: true,
-    } });
+    } }, undefined, undefined, undefined, undefined, strictOrchestratorDefaults);
     try {
       await act(async () => { await selectProject(fixture.container, project.id); });
       await choosePermissionPreset(fixture.container, "Orchestrator");
@@ -927,7 +946,7 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
   }, undefined, undefined, async () => ({ defaults: [{
     agentId: "claude", driver: "claude-code", context: { kind: "wsl", distro: "Ubuntu-24.04" }, name: "Claude",
     installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
-  }] }));
+  }] }), undefined, strictOrchestratorDefaults);
   try {
     await act(async () => { await selectProject(orchestrator.container, project.id); });
     assert.match(orchestrator.container.textContent ?? "",
@@ -945,7 +964,7 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
   }, undefined, undefined, async () => ({ defaults: [{
     agentId: "claude", driver: "claude-code", context: { kind: "wsl", distro: "Ubuntu-24.04" }, name: "Claude",
     installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
-  }] }));
+  }] }), undefined, strictOrchestratorDefaults);
   try {
     await act(async () => { await selectProject(protocolOnly.container, project.id); });
     assert.equal(createButton(protocolOnly.container).disabled, true,
@@ -972,7 +991,7 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
   }, undefined, undefined, async () => ({ defaults: [{
     agentId: "claude", driver: "claude-code", context: { kind: "wsl", distro: "Ubuntu-24.04" }, name: "Claude",
     installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
-  }] }));
+  }] }), undefined, strictOrchestratorDefaults);
   try {
     await act(async () => { await selectProject(providerMode.container, project.id); });
     assert.equal(createButton(providerMode.container).disabled, true,
@@ -985,7 +1004,7 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
   }, undefined, undefined, async () => ({ defaults: [{
     agentId: "claude", driver: "claude-code", context: { kind: "wsl", distro: "Ubuntu-24.04" }, name: "Claude",
     installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
-  }] }));
+  }] }), undefined, strictOrchestratorDefaults);
   try {
     await act(async () => { await selectProject(bridged.container, project.id); });
     assert.equal(createButton(bridged.container).disabled, false, "verified bridge enables Direct creation");
@@ -1002,9 +1021,11 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
 test("saved Orchestrator default is visible and gates Native TUI without requiring an override", async () => {
   for (const protocolVersion of [111, 112]) {
     const enabledRunner: RunnerView = { ...runner, protocolVersion,
+      runtime: { dataDir: "/runner", worktreeRoot: "/runner/worktrees", maxConcurrentSessions: 4,
+        executionIsolation: { mode: "bwrap", network: "inherit" } },
       agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
         models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
-        permissionModes: ["default", "orchestrator"],
+        permissionModes: ["default", "dontAsk", "orchestrator"],
       } })),
     };
     const fixture = await mountFixture({ runners: [enabledRunner], capabilities: {
@@ -1012,7 +1033,7 @@ test("saved Orchestrator default is visible and gates Native TUI without requiri
     } }, undefined, undefined, async () => ({ defaults: [{
       agentId: "claude", driver: "claude-code", context: { kind: "native" }, name: "Claude",
       installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
-    }] }));
+    }] }), undefined, strictOrchestratorDefaults);
     try {
       await act(async () => { await selectProject(fixture.container, project.id); });
       assert.ok(permissionPresetCard(fixture.container, "Saved Default — Orchestrator"),

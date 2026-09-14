@@ -376,6 +376,47 @@ test("persisted native Claude Orchestrator refuses provider-only isolation befor
   }
 });
 
+test("provider-mode Claude Orchestrator launches in its repository when strict isolation is disabled", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-orchestrator-provider-"));
+  try {
+    const store = new SessionStore(root);
+    store.create({
+      ...meta(),
+      config: { permissionMode: "orchestrator" },
+      orchestrator: { strictProjectIsolation: false },
+    });
+    let captured: DriverOptions | undefined;
+    let isolationInput: Record<string, unknown> | undefined;
+    const factory = (_driver: unknown, opts: DriverOptions) => {
+      captured = opts;
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => "provider-1",
+        prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {},
+        setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "provider-1",
+      };
+    };
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, factory as never,
+      join(root, ".runner-data"), 1, undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      { mode: "provider", network: "inherit" }, async (_policy, _context, _deps, options) => {
+        isolationInput = options as unknown as Record<string, unknown>;
+        return undefined;
+      },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(await internals.acquireAdmission("s1"), true);
+    assert.equal(await internals.launch(store.readMeta("s1")), true);
+    assert.equal(captured?.cwd, store.readMeta("s1")!.repoPath);
+    assert.deepEqual(captured?.orchestrator, { strictProjectIsolation: false });
+    assert.equal(isolationInput?.orchestratorScratchOnly, undefined);
+    assert.equal(existsSync(join(store.sessionPath("s1"), "orchestrator-scratch")), false);
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("WSL bwrap rejection precedes preparation, state migration, root resolution, and driver construction", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-wsl-isolation-fail-"));
   try {

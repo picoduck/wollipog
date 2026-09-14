@@ -3325,6 +3325,7 @@ export class SessionsService {
           ...(parsedOrchestratorOverrides?.delegation ?? {}),
           decisions: { ...(parsedOrchestratorOverrides?.delegation?.decisions ?? {}) },
         },
+        execution: { ...(parsedOrchestratorOverrides?.execution ?? {}) },
       };
       if (req.config?.maxChildSessions !== undefined) {
         overrides.behavior!.maximumConcurrentChildren = req.config.maxChildSessions;
@@ -3352,6 +3353,7 @@ export class SessionsService {
           parentControl: inheritedCampaign.delegation.parentControl,
           decisions: { ...inheritedCampaign.delegation.decisions },
         },
+        execution: { ...inheritedCampaign.execution },
       } : parentSessionId || !configured ? {
         ...structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS),
         delegation: {
@@ -3387,6 +3389,10 @@ export class SessionsService {
         ? creationContext?.validateOrchestratorDefaults?.(orchestratorPolicy)
         : null;
       if (compatibilityError) return fail(compatibilityError, 409);
+      if (!orchestratorPolicy.execution.strictProjectIsolation &&
+          !runnerSupportsProtocol(runner.protocolVersion, "orchestratorExecutionPolicy")) {
+        return fail("Delegate Implementation without Strict Project Isolation requires a protocol-v144 runner; update the runner or enable Strict Project Isolation.", 409);
+      }
       requestedConfig.maxChildSessions = orchestratorPolicy.behavior.maximumConcurrentChildren;
       parentControl = orchestratorPolicy.delegation.parentControl;
       parentControlPolicy = Object.values(orchestratorPolicy.delegation.decisions).includes("orchestrator")
@@ -3403,6 +3409,35 @@ export class SessionsService {
       const unsupported = this.capabilityFailure(req.runnerId, "sessionOrchestration", "Orchestrator preset");
       if (unsupported) return unsupported;
       const contextKind = launch.context?.kind ?? "native";
+      const strictProjectIsolation = orchestratorPolicy?.execution.strictProjectIsolation ?? true;
+      if (!strictProjectIsolation && (contextKind !== "native" ||
+          !["codex", "codex-app-server", "claude-code"].includes(launch.driver))) {
+        return fail("Delegate Implementation without Strict Project Isolation requires a supported native Codex or Claude Code harness.", 409);
+      }
+      if (!strictProjectIsolation && (launch.driver === "codex" || launch.driver === "codex-app-server") &&
+          !["linux", "macos"].includes(runner.os)) {
+        return fail("Provider-mode Codex Orchestrator requires its audited Linux or macOS sandbox.", 409);
+      }
+      if (!strictProjectIsolation && launch.driver === "claude-code" &&
+          (!agentCapabilities?.supportsApprovals ||
+            !agentCapabilities.permissionModes?.includes("default"))) {
+        return fail("Provider-mode Claude Orchestrator requires the verified interactive approval channel and Default permission mode.", 409);
+      }
+      if (strictProjectIsolation && contextKind === "native") {
+        const isolationMode = this.db.getRunner(req.runnerId)?.runtime?.executionIsolation?.mode;
+        const platform = this.db.getRunner(req.runnerId)?.os;
+        const strictBoundary = launch.driver === "codex" || launch.driver === "codex-app-server"
+          ? platform === "linux" || platform === "macos"
+          : (platform === "linux" && isolationMode === "bwrap") ||
+            (platform === "macos" && isolationMode === "seatbelt");
+        if (!strictBoundary) {
+          return fail("Strict Project Isolation requires an attested provider sandbox for Codex or runner bubblewrap/Seatbelt isolation for Claude Code.", 409);
+        }
+        if (launch.driver === "claude-code" &&
+            !agentCapabilities?.permissionModes?.includes("dontAsk")) {
+          return fail("Strict Project Isolation for Claude Code requires the verified dontAsk permission mode inside the operating-system boundary.", 409);
+        }
+      }
       const wslDirect = contextKind === "wsl" && req.launchSurface !== "native_tui" &&
         ["codex", "codex-app-server", "claude-code"].includes(launch.driver) &&
         this.capabilityFailure(req.runnerId, "wslAgentControlBridge", "Direct WSL Agent Control") === null &&
@@ -3531,6 +3566,7 @@ export class SessionsService {
       driver: launch.driver,
       context: launch.context,
       config,
+      ...(orchestratorPolicy ? { orchestrator: { ...orchestratorPolicy.execution } } : {}),
       acpSessionContext,
     };
     const command: DurableSessionCommand = snapshotCommand ?? {
@@ -3640,6 +3676,7 @@ export class SessionsService {
       driver: launch.driver,
       context: launch.context,
       config,
+      ...(orchestratorPolicy ? { orchestrator: { ...orchestratorPolicy.execution } } : {}),
       acpSessionContext,
     };
     if (delivery) {
@@ -5141,6 +5178,9 @@ export class SessionsService {
         costBudgetUsd: session.costBudgetUsd ?? undefined,
         maxToolCalls: session.maxToolCalls ?? undefined,
       },
+      ...(session.orchestratorPolicy
+        ? { orchestrator: { ...session.orchestratorPolicy.execution } }
+        : {}),
       acpSessionContext: this.db.getAcpSessionContext(sessionId),
     };
     // Persist replacement identity before the ambiguous socket write. A false send leaves the

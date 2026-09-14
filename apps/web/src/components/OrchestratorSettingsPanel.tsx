@@ -30,6 +30,7 @@ function cloneDefaults(defaults: OrchestratorDefaults): OrchestratorDefaults {
   return {
     behavior: { ...defaults.behavior },
     delegation: { ...defaults.delegation, decisions: { ...defaults.delegation.decisions } },
+    execution: { ...defaults.execution },
   };
 }
 
@@ -85,6 +86,13 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         ...current.delegation,
         decisions: { ...current.delegation.decisions, [category]: authority },
       },
+    } : current);
+  };
+  const updateExecution = (strictProjectIsolation: boolean) => {
+    draftDirty.current = true;
+    setDraft((current) => current ? {
+      ...current,
+      execution: { strictProjectIsolation },
     } : current);
   };
 
@@ -204,6 +212,36 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         ]}
         value={draft.behavior.completion}
         onChange={(value) => updateBehavior("completion", value as OrchestratorDefaults["behavior"]["completion"])}
+      />
+    </SettingsGroup>
+
+    <SettingsGroup title="Execution Permissions">
+      <p className="settings-group-intro">
+        The Orchestrator role defaults to delegation. Execution permissions are a separate policy
+        and apply only to new campaigns.
+      </p>
+      <SegmentedRow
+        title="Strict Project Isolation"
+        options={[
+          {
+            value: "disabled",
+            label: "Disabled",
+            description: "Use provider permissions and governance. Explicit parent implementation must use its own worktree.",
+          },
+          {
+            value: "enabled",
+            label: "Enabled",
+            description: "Enforce the legacy scratch-only project boundary with a compatible isolation backend.",
+          },
+        ]}
+        value={draft.execution.strictProjectIsolation ? "enabled" : "disabled"}
+        onChange={(value) => updateExecution(value === "enabled")}
+      />
+      <StaticRow
+        title="Effective Boundary"
+        description={draft.execution.strictProjectIsolation
+          ? "Project writes are blocked by operating-system or audited provider sandbox enforcement. Unsupported harness and isolation combinations are refused."
+          : "Provider approval controls and repository governance still apply. Orchestrator mode does not claim operating-system read-only enforcement."}
       />
     </SettingsGroup>
 

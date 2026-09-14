@@ -70,6 +70,7 @@ function defaults(overrides: Partial<OrchestratorDefaults["behavior"]> = {}): Or
         ui_evidence_approval: "orchestrator",
       },
     },
+    execution: { strictProjectIsolation: false },
   };
 }
 
@@ -136,6 +137,13 @@ test("Orchestrator parsing is exact and campaign resolution tracks field-level p
   assert.equal(policy.delegation.decisions.pr_merge, "orchestrator");
   assert.equal(policy.sources.delegation.decisions.pr_merge, "session_override");
   assert.equal(policy.sources.delegation.decisions.ui_evidence_approval, "user_default");
+  assert.equal(policy.execution.strictProjectIsolation, false);
+  assert.equal(policy.sources.execution.strictProjectIsolation, "user_default");
+  const strict = resolveOrchestratorCampaignPolicy(defaults(), "user_default", {
+    execution: { strictProjectIsolation: true },
+  });
+  assert.equal(strict.execution.strictProjectIsolation, true);
+  assert.equal(strict.sources.execution.strictProjectIsolation, "session_override");
 });
 
 test("Orchestrator settings routes reject agents and persist human updates", async () => {

@@ -2627,6 +2627,9 @@ test("runner-side capability gate rejects stale optional flags and image input",
   assert.equal(claudeCapabilityError({ permissionMode: "orchestrator" }, [], {
     ...capabilities, permissionModes: ["dontAsk"],
   }), null);
+  assert.equal(claudeCapabilityError({ permissionMode: "orchestrator" }, [], {
+    ...capabilities, supportsApprovals: true, permissionModes: ["default"],
+  }, false), null, "provider-mode Orchestrator uses the interactive approval-capable mode");
   assert.match(claudeCapabilityError({}, [{ mimeType: "image/png", data: "x" }], capabilities)!, /image input/);
   assert.equal(claudeCapabilityError({ effort: "low", permissionMode: "acceptEdits" }, [], capabilities), null);
 });

@@ -8,6 +8,7 @@ import {
   codexOrchestratorMcpProbe,
   isolateCodexMcpServers,
   orchestratorAcpSessionMeta,
+  orchestratorInstructions,
   orchestratorLaunchArgs,
   stripOrchestratorLaunchArgs,
   supportsClaudeAgentAcpOrchestrator,
@@ -15,6 +16,24 @@ import {
 } from "./orchestrator-preset.js";
 
 const mcp = { command: "/runner", args: ["agent", "mcp"], env: { WOLLIPOG_PERMISSION_PRESET: "orchestrator" } };
+
+test("Orchestrator instructions separate delegation from explicit parent implementation", () => {
+  const provider = orchestratorInstructions(["/repo"], false);
+  assert.match(provider, /Delegate Implementation is the default/);
+  assert.match(provider, /ordinary multi-issue implementation request does not.*authorize.*child creation/i);
+  assert.match(provider, /create or update planning artifacts/);
+  assert.match(provider, /explicitly asks this parent to implement/);
+  assert.match(provider, /overlapping ownership/);
+  assert.match(provider, /dedicated Wollipog worktree/);
+  assert.match(provider, /testing, cross-model review, UI evidence, merge, and cleanup/);
+  assert.doesNotMatch(provider, /Project locations are read-only/);
+
+  const strict = orchestratorInstructions(["/repo"], true);
+  assert.match(strict, /Strict Project Isolation is enabled/);
+  assert.match(strict, /Project locations are read-only: "\/repo"/);
+  assert.match(strict, /Do not implement project changes yourself/);
+  assert.match(strict, /create branches or worktrees for yourself/);
+});
 
 test("orchestrator capability requires a native harness or discovery-verified WSL bridge and never revives conductor", () => {
   const agent: AgentDefinition = { id: "agent", name: "Agent", command: "agent", args: [], env: {}, driver: "codex",
@@ -51,17 +70,18 @@ test("orchestrator capability requires a native harness or discovery-verified WS
   const claude = { ...agent, driver: "claude-code" as const,
     capabilities: { ...agent.capabilities!, permissionModes: ["default", "dontAsk"] } };
   assert.equal(withOrchestratorPreset([claude], { platform: "linux", isolationMode: "provider" })[0]!
-    .capabilities!.permissionModes!.includes("orchestrator"), false);
+    .capabilities!.permissionModes!.includes("orchestrator"), true);
   assert.equal(withOrchestratorPreset([claude], { platform: "linux", isolationMode: "bwrap" })[0]!
     .capabilities!.permissionModes!.includes("orchestrator"), true);
   assert.equal(withOrchestratorPreset([claude], { platform: "darwin", isolationMode: "provider" })[0]!
-    .capabilities!.permissionModes!.includes("orchestrator"), false);
+    .capabilities!.permissionModes!.includes("orchestrator"), true);
   assert.equal(withOrchestratorPreset([claude], { platform: "darwin", isolationMode: "seatbelt" })[0]!
     .capabilities!.permissionModes!.includes("orchestrator"), true);
   const staleClaude = { ...claude, capabilities: { ...claude.capabilities,
     permissionModes: ["default", "dontAsk", "orchestrator"] } };
   assert.equal(withOrchestratorPreset([staleClaude], { platform: "linux", isolationMode: "provider" })[0]!
-    .capabilities!.permissionModes!.includes("orchestrator"), false, "unsupported native isolation strips stale claims");
+    .capabilities!.permissionModes!.includes("orchestrator"), true,
+    "provider-mode Claude remains available without claiming strict filesystem isolation");
 });
 
 test("Codex orchestrator capability requires the discovery-verified automatic-review contract", () => {
@@ -110,7 +130,7 @@ test("Codex MCP isolation probes an in-distro WSL binary through exact argv", ()
   assert.equal(built.env.EXISTING, "override");
 });
 
-test("native Windows harnesses withhold orchestrator without filesystem confinement", () => {
+test("native Windows advertises provider-mode Claude without claiming strict filesystem confinement", () => {
   const agent: AgentDefinition = {
     id: "claude-code", name: "Claude Code", command: "claude.cmd", args: [], driver: "claude-code",
     env: {}, context: { kind: "native" },
@@ -118,16 +138,24 @@ test("native Windows harnesses withhold orchestrator without filesystem confinem
       supportsApprovals: true, permissionModes: ["default", "dontAsk"] },
   };
   const exists = (path: string) => path === "C:\\Program Files\\Git\\bin\\bash.exe";
-  assert.equal(withOrchestratorPreset([agent], { platform: "win32", env: {}, exists })[0]!.capabilities!.permissionModes!.includes("orchestrator"), false);
+  assert.equal(withOrchestratorPreset([agent], { platform: "win32", env: {}, exists })[0]!.capabilities!.permissionModes!.includes("orchestrator"), true);
   const ready = { ...agent, env: { CLAUDE_CODE_GIT_BASH_PATH: "C:\\Program Files\\Git\\bin\\bash.exe" } };
-  assert.equal(withOrchestratorPreset([ready], { platform: "win32", env: {}, exists })[0]!.capabilities!.permissionModes!.includes("orchestrator"), false);
+  assert.equal(withOrchestratorPreset([ready], { platform: "win32", env: {}, exists })[0]!.capabilities!.permissionModes!.includes("orchestrator"), true);
   const missingDontAsk = { ...ready, capabilities: { ...ready.capabilities!, permissionModes: ["default"] } };
   assert.equal(withOrchestratorPreset([missingDontAsk], { platform: "win32", env: {}, exists })[0]!
+    .capabilities!.permissionModes!.includes("orchestrator"), true,
+    "provider mode requires interactive Default, not dontAsk");
+  const missingInteractiveApproval = { ...ready, capabilities: {
+    ...ready.capabilities!, supportsApprovals: false, permissionModes: ["dontAsk"],
+  } };
+  assert.equal(withOrchestratorPreset([missingInteractiveApproval], { platform: "win32" })[0]!
     .capabilities!.permissionModes!.includes("orchestrator"), false);
   const relative = { ...agent, env: { CLAUDE_CODE_GIT_BASH_PATH: "Git\\bin\\bash.exe" } };
-  assert.equal(withOrchestratorPreset([relative], { platform: "win32", env: {}, exists })[0]!.capabilities!.permissionModes!.includes("orchestrator"), false);
+  assert.equal(withOrchestratorPreset([relative], { platform: "win32", env: {}, exists })[0]!.capabilities!.permissionModes!.includes("orchestrator"), true);
   const codex = { ...agent, id: "codex", command: "codex.exe", driver: "codex" as const,
-    capabilities: { ...agent.capabilities!, permissionModes: ["workspace-write"] } };
+    capabilities: { ...agent.capabilities!, permissionModes: ["workspace-write"] },
+    codexAppServer: { status: "supported" as const, appServerAvailable: true,
+      orchestratorApproval: { status: "supported" as const } } };
   assert.equal(withOrchestratorPreset([codex], { platform: "win32" })[0]!.capabilities!.permissionModes!.includes("orchestrator"), false,
     "Windows Codex stays fail closed until its filesystem sandbox can be attested");
   assert.equal(withOrchestratorPreset([codex], { platform: "freebsd" })[0]!.capabilities!.permissionModes!.includes("orchestrator"), false,
@@ -267,6 +295,19 @@ test("native orchestrator flags enable bounded planning while disabling implemen
     assert.match(args.join(" "), /blocking question.*structured/iu);
   }
   assert.throws(() => orchestratorLaunchArgs("acp", mcp), /native harness/);
+});
+
+test("provider-mode Orchestrator keeps implementation tools behind provider approvals", () => {
+  const claude = orchestratorLaunchArgs("claude-code", mcp, ["/repo"], false);
+  assert.equal(claude.includes("--tools"), false);
+  assert.equal(claude.includes("--disallowedTools"), false);
+  assert.equal(claude.includes("--permission-mode"), false,
+    "the Claude driver supplies its verified interactive Default permission channel");
+  assert.match(claude[claude.indexOf("--append-system-prompt") + 1] ?? "", /Strict Project Isolation is disabled/);
+  assert.match(claude[claude.indexOf("--append-system-prompt") + 1] ?? "", /dedicated Wollipog worktree/);
+  const codex = orchestratorLaunchArgs("codex", mcp, ["/repo"], false);
+  assert.equal(codex.includes("sandbox_workspace_write.writable_roots=[]"), false);
+  assert.match(codex.find((arg) => arg.startsWith("developer_instructions=")) ?? "", /does not grant unrestricted execution/);
 });
 
 test("resume replaces stale safety flags without stacking managed MCP configuration", () => {

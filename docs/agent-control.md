@@ -146,6 +146,31 @@ rows are upgraded only when their stored campaign-policy provenance establishes 
 This decision is control-plane-local, so mixed-version runners and clients continue through the same
 spawn gate without a protocol fallback or broadened resource access.
 
+## Orchestrator Role and Execution Policy
+
+Protocol v144 separates the Orchestrator's coordination role from its execution boundary. New
+sessions default to **Delegate Implementation** with `execution.strictProjectIsolation=false`.
+The parent plans, assigns explicitly authorized child work, monitors progress, and reviews results;
+an ordinary multi-issue request is not itself authorization to create a campaign or children. The
+parent may maintain planning artifacts permitted by its provider policy and governance settings.
+
+When a human explicitly asks the parent to implement, its launch instructions require it to inspect
+child assignments and open pull requests for overlapping ownership, create and select its own
+dedicated Wollipog worktree, and use the repository's normal testing, cross-model review, UI
+evidence, merge, and cleanup workflow. The exact-session credential can request that self-worktree
+only when the control plane's immutable campaign snapshot says strict isolation is disabled. No MCP
+argument or session configuration mutation can change that snapshot.
+
+**Strict Project Isolation** remains a human-controlled default for newly created sessions. It keeps
+the previous session-private scratch directory, project-write refusal, restricted launch tools, and
+host-boundary requirements. Legacy policy snapshots that lack the execution field normalize to
+strict mode, so an upgrade never silently broadens an existing session. The Settings and creation
+interfaces distinguish provider permission controls from OS-enforced read-only filesystem
+isolation. Provider-mode native Claude Code requires interactive Default approval support; strict
+Claude requires `dontAsk` plus `bwrap` on Linux or Seatbelt on macOS. Provider permission checks,
+Parent Control, typed workflow decisions, authentication exclusions, child admission, resource
+limits, and audit provenance are unchanged.
+
 ## Typed Parent Control Decisions
 
 An Orchestrator that cannot continue without a human response must create a structured blocking

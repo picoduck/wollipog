@@ -289,6 +289,7 @@ if (composerFixture) {
         parentControl: "questions_and_approvals",
         decisions: { ...session.parentControlPolicy.decisions },
       },
+      execution: { strictProjectIsolation: false },
       sources: {
         behavior: {
           childModel: "user_default",
@@ -307,6 +308,7 @@ if (composerFixture) {
             ui_evidence_approval: "user_default",
           },
         },
+        execution: { strictProjectIsolation: "user_default" },
       },
     };
     if (params.get("campaign-state") !== "off") {

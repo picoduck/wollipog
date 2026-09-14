@@ -3491,6 +3491,7 @@ export class SessionManager {
         driver: spec.driver ?? "acp",
         context,
         config: spec.config ?? {},
+        orchestrator: spec.orchestrator ?? this.store.readMeta(spec.sessionId)?.orchestrator,
         executionTarget: spec.executionTarget ?? this.store.readMeta(spec.sessionId)?.executionTarget,
       });
     } catch (error) {
@@ -3636,6 +3637,7 @@ export class SessionManager {
       title: spec.title ?? "",
       titleSource: spec.titleSource ?? "generated",
       config: spec.config ?? {},
+      orchestrator: spec.orchestrator ?? prior?.orchestrator,
       acpSessionContext,
       acpSessionOverrides,
       tokensIn: priorResumeId ? (prior?.tokensIn ?? 0) : 0,
@@ -5057,7 +5059,7 @@ export class SessionManager {
       });
       client = this.createDriver(
         meta.driver,
-        { command: meta.command, args: meta.args, cwd, env: meta.env, config: meta.config, context: meta.context, capabilities: meta.capabilities, resumeId, acpSessionContext: meta.acpSessionContext, isolation, sessionStateDir: this.store.sessionPath(sessionId), initialBackgroundTaskIds: meta.orphanedWork?.pendingTaskIds ?? meta.pendingBackgroundTaskIds },
+        { command: meta.command, args: meta.args, cwd, env: meta.env, config: meta.config, orchestrator: meta.orchestrator, context: meta.context, capabilities: meta.capabilities, resumeId, acpSessionContext: meta.acpSessionContext, isolation, sessionStateDir: this.store.sessionPath(sessionId), initialBackgroundTaskIds: meta.orphanedWork?.pendingTaskIds ?? meta.pendingBackgroundTaskIds },
         {
         supportsWorkerAttention: () => runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "workerAttention"),
         onEvent: (p) => this.onDriverEvent(sessionId, p),
@@ -5422,21 +5424,21 @@ export class SessionManager {
       env: meta.env,
       sessionId: meta.sessionId,
       cwd,
-      ...(meta.config.permissionMode === "orchestrator" ? { orchestratorScratchOnly: true } : {}),
+      ...(this.strictProjectIsolation(meta) ? { orchestratorScratchOnly: true } : {}),
       ...(additionalWritableRoots.length ? { additionalWritableRoots } : {}),
       ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
     }));
   }
 
   private assertHostIsolationContextSupported(
-    meta: Pick<SessionMeta, "agentId" | "command" | "args" | "driver" | "context" | "config" | "executionTarget">,
+    meta: Pick<SessionMeta, "agentId" | "command" | "args" | "driver" | "context" | "config" | "orchestrator" | "executionTarget">,
   ): void {
     if (meta.executionTarget?.adapter === "container" || meta.executionTarget?.adapter === "cloud") return;
-    if (meta.context.kind === "native" && meta.config.permissionMode === "orchestrator" &&
+    if (meta.context.kind === "native" && this.strictProjectIsolation(meta) &&
         !supportsNativeOrchestratorBoundary(meta.driver, process.platform, this.executionIsolation.mode)) {
       throw new Error("Orchestrator launch requires an attested native filesystem boundary for this harness");
     }
-    if (meta.context.kind === "wsl" && meta.config.permissionMode === "orchestrator") {
+    if (meta.context.kind === "wsl" && this.strictProjectIsolation(meta)) {
       if (this.executionIsolation.mode === "bwrap" && this.authorizeSafeWslLaunch?.(meta) === true) return;
       throw new Error("Direct WSL Orchestrator requires the freshly attested target-local bwrap launcher");
     }
@@ -5444,7 +5446,7 @@ export class SessionManager {
   }
 
   private async requestedWorktreeIsolation(meta: SessionMeta): Promise<string[]> {
-    if (meta.config.permissionMode === "orchestrator") return [];
+    if (this.strictProjectIsolation(meta)) return [];
     if (this.executionIsolation.mode !== "bwrap" && this.executionIsolation.mode !== "seatbelt") return [];
     // Direct WSL orchestration creates child worktrees through the runner; the provider never
     // needs the future requested-worktree boundary writable. Computing that legacy boundary would
@@ -5468,7 +5470,7 @@ export class SessionManager {
    * Project Location writable. Native storage lives under the session row and is removed by
    * SessionStore.remove; Direct WSL uses the launcher's root-owned per-session partition. */
   async prepareOrchestratorScratch(meta: SessionMeta): Promise<string> {
-    if (meta.config.permissionMode !== "orchestrator") return meta.worktreePath ?? meta.repoPath;
+    if (!this.strictProjectIsolation(meta)) return meta.worktreePath ?? meta.repoPath;
     if (meta.context.kind === "wsl") {
       if (!this.runnerOwnerHash) throw new Error("Direct WSL Orchestrator scratch requires an attested runner owner");
       return `${wslBwrapSessionRoot(this.runnerOwnerHash, providerStateKey(meta.sessionId))}/scratch`;
@@ -5480,6 +5482,15 @@ export class SessionManager {
       throw new Error("session disappeared while Orchestrator scratch was being prepared");
     }
     return scratch;
+  }
+
+  /** Missing execution policy came from a pre-v144 control plane and must retain the legacy
+   * scratch-only posture. Only an authenticated control-plane launch spec can set false. */
+  private strictProjectIsolation(
+    meta: Pick<SessionMeta, "config" | "orchestrator">,
+  ): boolean {
+    return meta.config.permissionMode === "orchestrator" &&
+      meta.orchestrator?.strictProjectIsolation !== false;
   }
 
   private async prepareCloudIsolation(

@@ -396,7 +396,9 @@
 //      closed instead of silently treating action arming as the v139 immediate-consume contract.
 // 143: Orchestrator campaign projections separate human-owned requests from agent-actionable
 //      requests so current clients can surface parent attention without conflating lifecycle.
-export const PROTOCOL_VERSION = 143;
+// 144: Orchestrator coordination behavior is independent from optional strict project isolation.
+//      Launch specs carry the immutable effective restriction so older peers retain strict mode.
+export const PROTOCOL_VERSION = 144;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -581,6 +583,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   typedWorkflowDecisionDelegation: 139,
   workflowDecisionActionAdmission: 142,
   orchestratorCampaignManagement: 140,
+  orchestratorExecutionPolicy: 144,
   worktreeSetup: 141,
   workerAttention: 108,
   backgroundWorkTracking: 83,
@@ -1370,9 +1373,15 @@ export interface OrchestratorDelegationDefaults {
   decisions: ParentControlDecisionPolicy;
 }
 
+export interface OrchestratorExecutionDefaults {
+  /** Enforce the legacy scratch-only project boundary with an attested OS/provider sandbox. */
+  strictProjectIsolation: boolean;
+}
+
 export interface OrchestratorDefaults {
   behavior: OrchestratorBehaviorDefaults;
   delegation: OrchestratorDelegationDefaults;
+  execution: OrchestratorExecutionDefaults;
 }
 
 export const DEFAULT_ORCHESTRATOR_DEFAULTS: OrchestratorDefaults = {
@@ -1387,6 +1396,7 @@ export const DEFAULT_ORCHESTRATOR_DEFAULTS: OrchestratorDefaults = {
     parentControl: "questions_and_approvals",
     decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY },
   },
+  execution: { strictProjectIsolation: false },
 };
 
 export type OrchestratorPolicySource =
@@ -1403,6 +1413,7 @@ export interface OrchestratorPolicySources {
     parentControl: OrchestratorPolicySource;
     decisions: Record<WorkflowDecisionCategory, OrchestratorPolicySource>;
   };
+  execution: Record<keyof OrchestratorExecutionDefaults, OrchestratorPolicySource>;
 }
 
 /** Immutable-at-creation campaign snapshot. Active human changes replace only the affected field
@@ -1506,6 +1517,7 @@ export interface OrchestratorCampaignOverrides {
     parentControl?: ParentControlMode;
     decisions?: Partial<ParentControlDecisionPolicy>;
   };
+  execution?: Partial<OrchestratorExecutionDefaults>;
 }
 
 export interface OrchestratorSettingsCapabilities {
@@ -6111,6 +6123,8 @@ export interface SessionLaunchSpec {
   driver?: AgentDriverKind;
   context?: AgentContext;
   config?: SessionConfig;
+  /** Runner-enforced Orchestrator restrictions. Missing on legacy peers means strict isolation. */
+  orchestrator?: OrchestratorExecutionDefaults;
   /** ACP-only, additive in protocol v38. Contains references, never resolved secret values. */
   acpSessionContext?: AcpSessionContextConfig;
 }

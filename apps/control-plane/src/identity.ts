@@ -119,6 +119,11 @@ export function agentCredentialSessionTargetError(
   // raise its own delegation concurrency without gaining authority over its spend/tool ceilings.
   if (routePath === "/api/sessions/:id/config" &&
       principal.credentialSessionId === targetSessionId) return null;
+  if (principal.orchestrator && worktreeRoute && principal.credentialSessionId === targetSessionId) {
+    // The session's immutable execution policy decides whether a self-worktree is allowed.
+    // Authentication only establishes that this credential belongs to the exact target row.
+    return null;
+  }
   if (descendantMutation || (principal.orchestrator && worktreeRoute)) {
     return principal.credentialSessionId && targetIsDescendant &&
       targetSessionId !== principal.credentialSessionId ? null : "the session credential may manage only its descendants";
@@ -126,6 +131,19 @@ export function agentCredentialSessionTargetError(
   if (!worktreeRoute) return null;
   return principal.credentialSessionId && principal.credentialSessionId !== targetSessionId
     ? "the session credential may manage only its own session"
+    : null;
+}
+
+/** Enforce immutable strict isolation after the exact target session has been loaded. Keeping this
+ * decision server-side prevents a session from relaxing its own launch policy through MCP input. */
+export function orchestratorSelfWorktreeAuthorizationError(
+  principal: AuthPrincipal | null,
+  targetSessionId: string,
+  strictProjectIsolation: boolean,
+): string | null {
+  return principal?.kind === "agent" && principal.orchestrator === true &&
+      principal.credentialSessionId === targetSessionId && strictProjectIsolation
+    ? "Strict Project Isolation prevents this Orchestrator from managing its own worktrees; select a child session."
     : null;
 }
 

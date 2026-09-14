@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   agentCredentialSessionTargetError,
+  orchestratorSelfWorktreeAuthorizationError,
   agentDelegationAuthorizationError,
   boundedTargetId,
   forkProjectAssignment,
@@ -82,7 +83,7 @@ test("a user- or team-scoped conductor cannot mutate organization-global resourc
   }), null);
 });
 
-test("orchestrators can mutate only verified descendants and cannot operate on their own worktree", () => {
+test("orchestrators can mutate verified descendants while execution policy governs their own worktree", () => {
   const credential: AgentPrincipal = {
     kind: "agent", actorId: "s_parent", credentialSessionId: "s_parent", orchestrator: true,
     organizationId: "org_1", delegatedScope: { organizationId: "org_1", owner: { kind: "user", userId: "usr_1" } },
@@ -90,15 +91,22 @@ test("orchestrators can mutate only verified descendants and cannot operate on t
   for (const route of ["/api/sessions/:id/worktrees", "/api/sessions/:id/worktrees/discard", "/api/sessions/:id/prompt", "/api/sessions/:id/stop", "/api/sessions/:id/restart"]) {
     assert.equal(agentCredentialSessionTargetError(route, credential, "s_child", true), null);
     assert.equal(agentCredentialSessionTargetError(route, credential, "s_grandchild", true), null);
-    for (const target of ["s_parent", "s_other", "s_sibling"]) {
+    for (const target of ["s_other", "s_sibling"]) {
       assert.match(agentCredentialSessionTargetError(route, credential, target)!, /descendants/);
     }
-    assert.match(agentCredentialSessionTargetError(route, credential, "s_parent", true)!, /descendants/);
+    if (route.includes("worktrees")) {
+      assert.equal(agentCredentialSessionTargetError(route, credential, "s_parent"), null);
+    } else {
+      assert.match(agentCredentialSessionTargetError(route, credential, "s_parent", true)!, /descendants/);
+    }
   }
   assert.equal(agentCredentialSessionTargetError("/api/sessions/:id/config", credential, "s_parent"), null);
   assert.equal(agentCredentialSessionTargetError("/api/sessions/:id/config", credential, "s_child", true), null);
   assert.match(agentCredentialSessionTargetError("/api/sessions/:id/config", credential, "s_sibling")!, /descendants/);
   assert.equal(agentDelegationAuthorizationError("/api/governance/policies", credential), null);
+  assert.match(orchestratorSelfWorktreeAuthorizationError(credential, "s_parent", true)!, /Strict Project Isolation/);
+  assert.equal(orchestratorSelfWorktreeAuthorizationError(credential, "s_parent", false), null);
+  assert.equal(orchestratorSelfWorktreeAuthorizationError(credential, "s_child", true), null);
 });
 
 test("ordinary credentials retain self worktrees but confine descendant lifecycle and guardrail mutations", () => {

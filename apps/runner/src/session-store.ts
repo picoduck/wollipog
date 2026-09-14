@@ -117,6 +117,8 @@ export interface SessionMeta {
   titleSource?: SessionTitleSource;
   providerUpdatedAt?: string;
   config: SessionConfig;
+  /** Effective Orchestrator restriction. Missing legacy metadata remains strict at launch. */
+  orchestrator?: { strictProjectIsolation: boolean };
   /** Exact provider model resolved from the selected alias for the active session. */
   resolvedModel?: string | null;
   /** Secret references only; actual MCP credentials are never written to meta.json. */

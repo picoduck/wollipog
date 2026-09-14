@@ -2083,6 +2083,7 @@ CREATE TABLE IF NOT EXISTS orchestrator_settings (
   maximum_concurrent_children INTEGER NOT NULL,
   follow_ups                  TEXT NOT NULL CHECK (follow_ups IN ('recommend_only','execute_approved')),
   completion                  TEXT NOT NULL CHECK (completion IN ('retain','stop_and_archive')),
+  strict_project_isolation    INTEGER NOT NULL DEFAULT 0 CHECK (strict_project_isolation IN (0, 1)),
   parent_control              TEXT NOT NULL CHECK (parent_control IN ('off','questions','questions_and_approvals')),
   decision_policy             TEXT NOT NULL,
   updated_at                  INTEGER NOT NULL,
@@ -4466,6 +4467,11 @@ export class ControlPlaneDb {
         /* column already present */
       }
     }
+    try {
+      db.exec("ALTER TABLE orchestrator_settings ADD COLUMN strict_project_isolation INTEGER NOT NULL DEFAULT 0 CHECK (strict_project_isolation IN (0, 1))");
+    } catch {
+      /* column already present */
+    }
     if (needsCreationActorBackfill) {
       // Parent attribution is durable CP-owned proof of agent creation. Existing top-level
       // Orchestrators qualify only when their already-persisted campaign snapshot establishes a
@@ -4535,6 +4541,7 @@ export class ControlPlaneDb {
             ...HUMAN_ONLY_PARENT_CONTROL_POLICY,
           },
         },
+        execution: { strictProjectIsolation: true },
         sources: {
           behavior: {
             childModel: source,
@@ -4549,6 +4556,7 @@ export class ControlPlaneDb {
               WORKFLOW_DECISION_CATEGORIES.map((category) => [category, source]),
             ) as Record<(typeof WORKFLOW_DECISION_CATEGORIES)[number], typeof source>,
           },
+          execution: { strictProjectIsolation: source },
         },
       };
       saveLegacyOrchestrator.run(JSON.stringify(policy), row.id);
@@ -7651,7 +7659,7 @@ export class ControlPlaneDb {
   getOrchestratorDefaults(userId: string): OrchestratorDefaultsRecord | null {
     const row = this.stmt(
       `SELECT child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
-              parent_control, decision_policy, updated_at
+              strict_project_isolation, parent_control, decision_policy, updated_at
        FROM orchestrator_settings WHERE user_id=?`,
     ).get(userId) as {
       child_model: string | null;
@@ -7659,6 +7667,7 @@ export class ControlPlaneDb {
       maximum_concurrent_children: number;
       follow_ups: OrchestratorDefaults["behavior"]["followUps"];
       completion: OrchestratorDefaults["behavior"]["completion"];
+      strict_project_isolation: number;
       parent_control: ParentControlMode;
       decision_policy: string;
       updated_at: number;
@@ -7676,6 +7685,7 @@ export class ControlPlaneDb {
           completion: row.completion,
         },
         delegation: { parentControl: row.parent_control, decisions },
+        execution: { strictProjectIsolation: row.strict_project_isolation === 1 },
       },
       updatedAt: row.updated_at,
     };
@@ -7685,12 +7695,13 @@ export class ControlPlaneDb {
     this.stmt(
       `INSERT INTO orchestrator_settings
          (user_id, child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
-          parent_control, decision_policy, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          strict_project_isolation, parent_control, decision_policy, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id) DO UPDATE SET
          child_model=excluded.child_model, child_effort=excluded.child_effort,
          maximum_concurrent_children=excluded.maximum_concurrent_children,
          follow_ups=excluded.follow_ups, completion=excluded.completion,
+         strict_project_isolation=excluded.strict_project_isolation,
          parent_control=excluded.parent_control, decision_policy=excluded.decision_policy,
          updated_at=excluded.updated_at`,
     ).run(
@@ -7700,6 +7711,7 @@ export class ControlPlaneDb {
       defaults.behavior.maximumConcurrentChildren,
       defaults.behavior.followUps,
       defaults.behavior.completion,
+      defaults.execution.strictProjectIsolation ? 1 : 0,
       defaults.delegation.parentControl,
       JSON.stringify(defaults.delegation.decisions),
       now,
@@ -21260,6 +21272,12 @@ function parentControlDecisionPolicyFromJson(raw: string | null): ParentControlD
 function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCampaignPolicy | null {
   const value = parseJson<OrchestratorCampaignPolicy>(raw);
   if (!value || value.version !== 1 || !value.behavior || !value.delegation || !value.sources) return null;
+  // Policies written before protocol v144 had only one possible execution posture: the enforced
+  // scratch-only boundary. Normalize them in memory without broadening the stored session.
+  if (!value.execution && !value.sources.execution) {
+    value.execution = { strictProjectIsolation: true };
+    value.sources.execution = { strictProjectIsolation: "legacy_session" };
+  }
   const behavior = value.behavior;
   if ((behavior.childModel !== null && typeof behavior.childModel !== "string") ||
       (behavior.childEffort !== null && typeof behavior.childEffort !== "string") ||
@@ -21268,16 +21286,19 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
       (behavior.followUps !== "recommend_only" && behavior.followUps !== "execute_approved") ||
       (behavior.completion !== "retain" && behavior.completion !== "stop_and_archive") ||
       !["off", "questions", "questions_and_approvals"].includes(value.delegation.parentControl) ||
+      typeof value.execution?.strictProjectIsolation !== "boolean" ||
       !parentControlDecisionPolicyFromJson(JSON.stringify(value.delegation.decisions))) return null;
   const validSources = new Set([
     "system_default", "user_default", "session_override", "compatibility_fallback", "legacy_session", "active_campaign",
   ]);
   const behaviorSourceKeys = ["childModel", "childEffort", "maximumConcurrentChildren", "followUps", "completion"] as const;
   if (!value.sources.behavior || !value.sources.delegation || !value.sources.delegation.decisions ||
+      !value.sources.execution ||
       Object.keys(value.sources.behavior).length !== behaviorSourceKeys.length ||
       !behaviorSourceKeys.every((key) => validSources.has(value.sources.behavior[key])) ||
       Object.keys(value.sources.delegation.decisions).length !== WORKFLOW_DECISION_CATEGORIES.length ||
       !validSources.has(value.sources.delegation.parentControl) ||
+      !validSources.has(value.sources.execution.strictProjectIsolation) ||
       !WORKFLOW_DECISION_CATEGORIES.every((category) =>
         validSources.has(value.sources.delegation.decisions[category]))) return null;
   return value;

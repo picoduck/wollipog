@@ -217,7 +217,7 @@ function removeAgentControlLaunchState(
  * socket and are scrubbed from durable session metadata by the existing env policy. */
 export function provisionAgentControl(
   spec: Pick<SessionLaunchSpec, "sessionId" | "driver" | "context" | "executionTarget" | "command" | "args" | "env"> &
-    Partial<Pick<SessionLaunchSpec, "config" | "acpSessionContext" | "workspacePath">> &
+    Partial<Pick<SessionLaunchSpec, "config" | "orchestrator" | "acpSessionContext" | "workspacePath">> &
     { repoPath?: string; worktreePath?: string | null },
   config: {
     controlPlaneUrl: string;
@@ -243,6 +243,7 @@ export function provisionAgentControl(
   const nativeHostExecution = context.kind === "native" && targetIsHost;
   const wslOrchestrator = context.kind === "wsl" && targetIsHost && spec.config?.permissionMode === "orchestrator";
   const orchestrator = spec.config?.permissionMode === "orchestrator";
+  const strictProjectIsolation = orchestrator && spec.orchestrator?.strictProjectIsolation !== false;
   const orchestratorProjectPaths = [...new Set([
     ...(config.orchestratorProjectPaths ?? []),
     spec.workspacePath,
@@ -259,7 +260,7 @@ export function provisionAgentControl(
     orchestratorAgent.args.every((arg, index) => arg === wslBaseArgs[index]) &&
     orchestratorAgent.driver === spec.driver && orchestratorAgent.context?.kind === "wsl" &&
     orchestratorAgent.context.distro === context.distro;
-  if (orchestrator && nativeHostExecution && !supportsNativeOrchestratorBoundary(
+  if (strictProjectIsolation && nativeHostExecution && !supportsNativeOrchestratorBoundary(
     spec.driver ?? "acp", host.platform ?? process.platform, config.executionIsolationMode,
   )) {
     throw new Error("the Orchestrator preset requires an attested native filesystem boundary for this harness");
@@ -275,6 +276,9 @@ export function provisionAgentControl(
     throw new Error("the orchestrator preset requires a current supported native harness or verified Direct WSL bridge on the host");
   }
   if (orchestrator && (spec.driver ?? "acp") === "acp") {
+    if (!strictProjectIsolation) {
+      throw new Error("provider-mode Orchestrator execution is not supported by the Claude ACP adapter");
+    }
     const agent = config.orchestratorAgent;
     const launchMatches = agent && agent.command === spec.command && agent.args.length === spec.args.length &&
       agent.args.every((arg, index) => arg === spec.args[index]);
@@ -331,7 +335,7 @@ export function provisionAgentControl(
       };
       spec.env[ORCHESTRATOR_ENV_KEY] = "orchestrator";
       spec.args = stripOrchestratorLaunchArgs(spec.args, spec.driver);
-      spec.args.push(...orchestratorLaunchArgs(spec.driver, helperLaunch, orchestratorProjectPaths));
+      spec.args.push(...orchestratorLaunchArgs(spec.driver, helperLaunch, orchestratorProjectPaths, strictProjectIsolation));
       if (spec.driver === "claude-code") spec.args.push("--mcp-config", WSL_AGENT_CONTROL_PRIVATE_MCP);
       wslLaunches.set(spec.sessionId, {
         protocolVersion: WSL_AGENT_CONTROL_PROTOCOL,
@@ -392,7 +396,7 @@ export function provisionAgentControl(
       };
     } else {
       spec.args = stripOrchestratorLaunchArgs(spec.args, spec.driver);
-      spec.args.push(...orchestratorLaunchArgs(spec.driver, mcp, orchestratorProjectPaths));
+      spec.args.push(...orchestratorLaunchArgs(spec.driver, mcp, orchestratorProjectPaths, strictProjectIsolation));
     }
   }
 

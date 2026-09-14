@@ -4176,9 +4176,12 @@ test("legacy Orchestrator sessions gain an inspectable fail-closed campaign snap
     assert.ok(policy);
     assert.equal(policy.behavior.maximumConcurrentChildren, 9);
     assert.equal(policy.delegation.parentControl, "questions");
+    assert.equal(policy.execution.strictProjectIsolation, true,
+      "legacy Orchestrators retain their original strict boundary");
     assert.deepEqual(Object.values(policy.delegation.decisions), ["human", "human", "human", "human", "human"]);
     assert.deepEqual(new Set(Object.values(policy.sources.behavior)), new Set(["legacy_session"]));
     assert.deepEqual(new Set(Object.values(policy.sources.delegation.decisions)), new Set(["legacy_session"]));
+    assert.equal(policy.sources.execution.strictProjectIsolation, "legacy_session");
     assert.equal(upgraded.sessionWasHumanCreatedOrchestrator("sess-1"), false,
       "ambiguous legacy configuration does not acquire spawn authority");
     upgraded.close();
