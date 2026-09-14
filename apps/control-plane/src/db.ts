@@ -4126,6 +4126,10 @@ export class ControlPlaneDb {
         /* column already present */
       }
     }
+    const sessionColumnsBeforeMigration = db.prepare("PRAGMA table_info(sessions)")
+      .all() as unknown as Array<{ name: string }>;
+    const needsCreationActorBackfill = !sessionColumnsBeforeMigration.some((column) =>
+      column.name === "creation_actor");
     for (const col of [
       // PROTOCOL_VERSION the runner registered with (version-skew badge). NULL ⇒ unknown — a
       // pre-v15 runner that never reported one.
@@ -4257,39 +4261,44 @@ export class ControlPlaneDb {
         /* column already present */
       }
     }
-    // Parent attribution is durable CP-owned proof of agent creation. Existing top-level
-    // Orchestrators qualify only when their already-persisted campaign snapshot establishes a
-    // human-only configuration path. Legacy, imported, workflow, auxiliary, and otherwise
-    // ambiguous rows deliberately remain NULL and preserve the approval gate.
-    db.exec("UPDATE sessions SET creation_actor='agent' WHERE creation_actor IS NULL AND parent_session_id IS NOT NULL");
-    const existingOrchestrators = db.prepare(
-      `SELECT session.id, session.parent_control, session.orchestrator_policy
-       FROM sessions session
-       WHERE session.creation_actor IS NULL AND session.permission_mode='orchestrator'
-         AND session.parent_session_id IS NULL AND session.adopted=0 AND session.run_id IS NULL
-         AND session.orchestrator_policy IS NOT NULL
-         AND NOT EXISTS (SELECT 1 FROM session_side_chats side_chat WHERE side_chat.child_session_id=session.id)`,
-    ).all() as unknown as Array<{
-      id: string;
-      parent_control: string;
-      orchestrator_policy: string;
-    }>;
-    const saveCreationActor = db.prepare("UPDATE sessions SET creation_actor='human' WHERE id=? AND creation_actor IS NULL");
-    for (const row of existingOrchestrators) {
-      const policy = orchestratorCampaignPolicyFromJson(row.orchestrator_policy);
-      if (!policy) continue;
-      const sources = [
-        ...Object.values(policy.sources.behavior),
-        policy.sources.delegation.parentControl,
-        ...Object.values(policy.sources.delegation.decisions),
-      ];
-      const explicitHumanConfiguration = sources.some((source) =>
-        source === "user_default" || source === "session_override");
-      const humanSystemDefault = row.parent_control !== "off" &&
-        sources.includes("system_default") &&
-        !sources.includes("active_campaign") &&
-        !sources.includes("legacy_session");
-      if (explicitHumanConfiguration || humanSystemDefault) saveCreationActor.run(row.id);
+    if (needsCreationActorBackfill) {
+      // Parent attribution is durable CP-owned proof of agent creation. Existing top-level
+      // Orchestrators qualify only when their already-persisted campaign snapshot establishes a
+      // human-only configuration path. Run this inference exactly once: later parent deletion can
+      // erase relational provenance, and must never cause a NULL row to acquire human authority.
+      // Legacy, imported, workflow, auxiliary, and otherwise ambiguous rows deliberately remain
+      // NULL and preserve the approval gate.
+      db.exec("UPDATE sessions SET creation_actor='agent' WHERE creation_actor IS NULL AND parent_session_id IS NOT NULL");
+      const existingOrchestrators = db.prepare(
+        `SELECT session.id, session.parent_control, session.orchestrator_policy
+         FROM sessions session
+         WHERE session.creation_actor IS NULL AND session.permission_mode='orchestrator'
+           AND session.parent_session_id IS NULL AND session.adopted=0 AND session.run_id IS NULL
+           AND session.orchestrator_policy IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM session_side_chats side_chat WHERE side_chat.child_session_id=session.id)`,
+      ).all() as unknown as Array<{
+        id: string;
+        parent_control: string;
+        orchestrator_policy: string;
+      }>;
+      const saveCreationActor = db.prepare("UPDATE sessions SET creation_actor='human' WHERE id=? AND creation_actor IS NULL");
+      for (const row of existingOrchestrators) {
+        const policy = orchestratorCampaignPolicyFromJson(row.orchestrator_policy);
+        if (!policy) continue;
+        const allSources = [
+          ...Object.values(policy.sources.behavior),
+          policy.sources.delegation.parentControl,
+          ...Object.values(policy.sources.delegation.decisions),
+        ];
+        const humanOnlyOverride = policy.sources.delegation.parentControl === "session_override" ||
+          Object.values(policy.sources.delegation.decisions).includes("session_override");
+        const explicitHumanConfiguration = allSources.includes("user_default") || humanOnlyOverride;
+        const humanSystemDefault = row.parent_control !== "off" &&
+          allSources.includes("system_default") &&
+          !allSources.includes("active_campaign") &&
+          !allSources.includes("legacy_session");
+        if (explicitHumanConfiguration || humanSystemDefault) saveCreationActor.run(row.id);
+      }
     }
 
     // Existing Orchestrator sessions become explicitly inspectable without gaining authority.
