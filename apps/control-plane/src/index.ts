@@ -57,6 +57,7 @@ import {
   type CreateRunRequest,
   type CreateAutomationRequest,
   type CreateAutomationTriggerRequest,
+  type CreateOutboundEventSubscriptionRequest,
   type CreateWorkflowDefinitionRequest,
   type CreateWorkflowDefinitionVersionRequest,
   type CreateWorkflowInstanceRequest,
@@ -77,6 +78,7 @@ import {
   type CreateProjectLocationRequest,
   type MoveProjectLocationRequest,
   type GitActionRequest,
+  type GitSummaryInfo,
   type GovernancePolicy,
   type OnboardingInfo,
   type OrganizationRole,
@@ -107,6 +109,7 @@ import {
   type UpdatePodOrchestrationRequest,
   type UpdateAutomationRequest,
 } from "@wollipog/protocol";
+import { OutboundEventsService } from "./outbound-events.js";
 import {
   nativeTuiCreationError,
   nativeTuiSessionError,
@@ -922,6 +925,66 @@ const automations = new AutomationsService(
   },
 );
 automations.recover(Date.now());
+
+const outboundEvents = new OutboundEventsService(db, {
+  info: (fields, message) => app.log.info(fields, message),
+  warn: (fields, message) => app.log.warn(fields, message),
+});
+
+function recordOutboundChecksFromSummary(sessionId: string, summary: GitSummaryInfo, now = Date.now()): void {
+  if (!summary.pr || summary.pr.state.toUpperCase() !== "OPEN" || !summary.checks ||
+      !Number.isSafeInteger(summary.checks.failing) || summary.checks.failing < 0 ||
+      !Array.isArray(summary.checks.failingNames) ||
+      summary.checks.failingNames.some((name) => typeof name !== "string")) return;
+  db.recordOutboundCheckObservation({
+    sessionId,
+    branch: summary.branch,
+    pullRequestUrl: summary.pr.url,
+    failing: summary.checks.failing,
+    failingNames: summary.checks.failingNames,
+    ...(summary.checks.url ? { checksUrl: summary.checks.url } : {}),
+    now,
+  });
+}
+
+let outboundCheckSweepActive = false;
+async function sweepOutboundChecks(): Promise<void> {
+  if (outboundCheckSweepActive) return;
+  outboundCheckSweepActive = true;
+  try {
+    for (const session of db.outboundCheckObservationCandidates()) {
+      const pullRequest = session.worktrees?.find((worktree) => worktree.pullRequest?.state === "open")
+        ?.pullRequest;
+      if (!pullRequest) continue;
+      // Advance every selected candidate, including offline and temporarily failing runners, so
+      // one cohort cannot occupy the bounded scan forever and starve newer open pull requests.
+      db.markOutboundCheckObservationAttempt(session.id, pullRequest.url, Date.now());
+      if (!hub.isRunnerOnline(session.runnerId)) continue;
+      const requestId = randomUUID();
+      try {
+        const result = await hub.requestFromRunner(session.runnerId, requestId, {
+          type: "git_action",
+          requestId,
+          sessionId: session.id,
+          ...(session.worktreePath ? { worktreePath: session.worktreePath } : {}),
+          action: { kind: "summary" },
+          timeoutMs: 30_000,
+        }, 30_000);
+        if (result.type === "git_result" && result.ok && result.data?.summary) {
+          recordOutboundChecksFromSummary(session.id, result.data.summary);
+        }
+      } catch (error) {
+        app.log.warn({
+          event: "outbound_check_observation",
+          sessionId: session.id,
+          error: error instanceof Error ? error.message : String(error),
+        }, "outbound check observation deferred");
+      }
+    }
+  } finally {
+    outboundCheckSweepActive = false;
+  }
+}
 
 function runnerCapabilityError(
   runnerId: string,
@@ -4258,6 +4321,18 @@ app.post("/api/sessions/:id/git", async (req, reply) => {
         reviewReconciliation: reconciliation,
       };
     }
+    if (action.kind === "summary" && result.data?.summary) {
+      recordOutboundChecksFromSummary(id, result.data.summary);
+    }
+    if (action.kind === "open_pr" && result.data?.pr &&
+        (result.data.pr.createdWithGh || result.data.pr.created === true)) {
+      db.recordOutboundPullRequestOpened({
+        sessionId: id,
+        branch: result.data.pr.branch,
+        pullRequestUrl: result.data.pr.url,
+        now: Date.now(),
+      });
+    }
     return result.data ?? {};
   } catch (err) {
     return reply.code(504).send({ error: (err as Error).message });
@@ -4731,6 +4806,40 @@ app.delete("/api/automations/:id/triggers/:triggerId", async (req, reply) => {
   return respond(reply, automations.deleteTrigger(params.id, params.triggerId, automationActor(req)));
 });
 
+app.get("/api/outbound-event-subscriptions", async () => outboundEvents.list());
+
+app.post("/api/outbound-event-subscriptions", async (req, reply) =>
+  respond(reply, await outboundEvents.create(
+    req.body as CreateOutboundEventSubscriptionRequest,
+    automationActor(req),
+  )),
+);
+
+app.get("/api/outbound-event-subscriptions/:id", async (req, reply) =>
+  respond(reply, outboundEvents.get((req.params as { id: string }).id)),
+);
+
+app.get("/api/outbound-event-subscriptions/:id/deliveries", async (req, reply) => {
+  const rawLimit = (req.query as { limit?: string } | undefined)?.limit;
+  const limit = rawLimit === undefined ? undefined : Number(rawLimit);
+  if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 200)) {
+    return reply.code(400).send({ error: "limit must be an integer between 1 and 200" });
+  }
+  return respond(reply, outboundEvents.deliveries((req.params as { id: string }).id, limit));
+});
+
+app.post("/api/outbound-event-subscriptions/:id/rotate", async (req, reply) =>
+  respond(reply, outboundEvents.rotate((req.params as { id: string }).id)),
+);
+
+app.post("/api/outbound-event-subscriptions/:id/resume", async (req, reply) =>
+  respond(reply, outboundEvents.resume((req.params as { id: string }).id)),
+);
+
+app.delete("/api/outbound-event-subscriptions/:id", async (req, reply) =>
+  respond(reply, outboundEvents.revoke((req.params as { id: string }).id)),
+);
+
 app.post("/hooks/v1/automation-triggers/:triggerId", { bodyLimit: AUTOMATION_TRIGGER_MAX_BODY_BYTES }, async (req, reply) => {
   const contentEncoding = req.headers["content-encoding"];
   if (contentEncoding !== undefined && contentEncoding !== "identity") {
@@ -4873,6 +4982,20 @@ const automationTimer = setInterval(() => {
       "automation tick deferred");
   }
 }, 5_000);
+void outboundEvents.tick().catch((error) => {
+  app.log.warn({ error: error instanceof Error ? error.message : String(error) },
+    "outbound event recovery deferred");
+});
+const outboundEventTimer = setInterval(() => {
+  void outboundEvents.tick().catch((error) => {
+    app.log.warn({ error: error instanceof Error ? error.message : String(error) },
+      "outbound event delivery deferred");
+  });
+}, 1_000);
+outboundEventTimer.unref();
+void sweepOutboundChecks();
+const outboundCheckTimer = setInterval(() => void sweepOutboundChecks(), 30_000);
+outboundCheckTimer.unref();
 const usagePricingTimer = setInterval(() => {
   void usagePricing.ensure().then(() => db.setUsageRateTable(usagePricing.current()));
 }, 60 * 60 * 1000);
@@ -4986,6 +5109,8 @@ runnerLivenessTimer.unref();
 app.addHook("onClose", async () => {
   clearInterval(workflowRecoveryTimer);
   clearInterval(automationTimer);
+  clearInterval(outboundEventTimer);
+  clearInterval(outboundCheckTimer);
   clearInterval(usagePricingTimer);
   clearInterval(sessionReminderTimer);
   clearInterval(sessionCommandRetryTimer);
@@ -4994,6 +5119,7 @@ app.addHook("onClose", async () => {
   clearInterval(policyHookApprovalTimer);
   clearInterval(artifactMaintenanceTimer);
   clearInterval(runnerLivenessTimer);
+  outboundEvents.close();
   orchestrator.shutdown();
 });
 // Re-entrancy guard: a second signal (or an uncaughtException raised WHILE app.close() drains)

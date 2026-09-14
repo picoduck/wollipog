@@ -23,6 +23,7 @@ import { machineOptionLabels } from "../runners.js";
 import { useExperiments } from "../use-experiments.js";
 import { agentDisplayName } from "../agent-presentation.js";
 import { Checkbox, Select } from "./ui/ChoiceControls.js";
+import { OutboundEventSubscriptions } from "./OutboundEventSubscriptions.js";
 import {
   buildSpec,
   defaults,
@@ -427,6 +428,8 @@ export function AutomationsView() {
         <button className="btn primary" type="button" onClick={openNewAutomation}>New Automation</button>
       </div>
       {error && <div className="automation-error" role="alert">{error}</div>}
+
+      <OutboundEventSubscriptions projects={[...projects.values()]} automations={items} />
 
       {showForm && (
         <div className="automation-editor" aria-label={editingId ? "Edit Automation" : "New Automation"}>

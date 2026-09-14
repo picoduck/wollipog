@@ -12,6 +12,9 @@ import type {
   AutomationSchedule,
   AutomationTriggerCredential,
   AutomationTriggerView,
+  OutboundEventDeliveryView,
+  OutboundEventSubscriptionCredential,
+  OutboundEventSubscriptionView,
   BoardColumn,
   BoxView,
   ChildSessionRegistryPage,
@@ -19,6 +22,7 @@ import type {
   CreateProjectRequest,
   CreateAutomationRequest,
   CreateAutomationTriggerRequest,
+  CreateOutboundEventSubscriptionRequest,
   CreateRunRequest,
   CreateSessionRequest,
   CreateWorkspaceReferenceRequest,
@@ -475,6 +479,38 @@ export function createApiClient(transport: ApiTransport) {
   deleteAutomationTrigger: (automationId: string, triggerId: string) =>
     req<{ deleted: true }>(
       `/api/automations/${encodeURIComponent(automationId)}/triggers/${encodeURIComponent(triggerId)}`,
+      { method: "DELETE" },
+    ),
+
+  outboundEventSubscriptions: () =>
+    req<OutboundEventSubscriptionView[]>("/api/outbound-event-subscriptions"),
+
+  createOutboundEventSubscription: (body: CreateOutboundEventSubscriptionRequest) =>
+    req<OutboundEventSubscriptionCredential>("/api/outbound-event-subscriptions", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  outboundEventDeliveries: (subscriptionId: string) =>
+    req<OutboundEventDeliveryView[]>(
+      `/api/outbound-event-subscriptions/${encodeURIComponent(subscriptionId)}/deliveries`,
+    ),
+
+  rotateOutboundEventSubscription: (subscriptionId: string) =>
+    req<OutboundEventSubscriptionCredential>(
+      `/api/outbound-event-subscriptions/${encodeURIComponent(subscriptionId)}/rotate`,
+      { method: "POST" },
+    ),
+
+  resumeOutboundEventSubscription: (subscriptionId: string) =>
+    req<OutboundEventSubscriptionView>(
+      `/api/outbound-event-subscriptions/${encodeURIComponent(subscriptionId)}/resume`,
+      { method: "POST" },
+    ),
+
+  deleteOutboundEventSubscription: (subscriptionId: string) =>
+    req<{ revoked: true }>(
+      `/api/outbound-event-subscriptions/${encodeURIComponent(subscriptionId)}`,
       { method: "DELETE" },
     ),
 

@@ -9,6 +9,9 @@ import type {
   AutomationSpec,
   AutomationTriggerView,
   CreateAutomationTriggerRequest,
+  CreateOutboundEventSubscriptionRequest,
+  OutboundEventDeliveryView,
+  OutboundEventSubscriptionView,
   RunnerView,
   UiSnapshotMessage,
 } from "@wollipog/protocol";
@@ -154,6 +157,7 @@ interface Fixture {
   root: Root;
   updates: Array<{ id: string; spec: AutomationSpec }>;
   triggerCreates: Array<{ id: string; request: CreateAutomationTriggerRequest }>;
+  outboundCreates: CreateOutboundEventSubscriptionRequest[];
 }
 
 let fixtureSequence = 0;
@@ -167,6 +171,8 @@ async function mountFixture(
   items: AutomationSchedule[] = [],
   executions: Record<string, AutomationExecution[]> = {},
   triggerViews: Record<string, AutomationTriggerView[]> = {},
+  outboundSubscriptions: OutboundEventSubscriptionView[] = [],
+  outboundDeliveries: Record<string, OutboundEventDeliveryView[]> = {},
 ): Promise<Fixture> {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
@@ -174,6 +180,7 @@ async function mountFixture(
   const socket = new FakeSocket();
   const updates: Array<{ id: string; spec: AutomationSpec }> = [];
   const triggerCreates: Array<{ id: string; request: CreateAutomationTriggerRequest }> = [];
+  const outboundCreates: CreateOutboundEventSubscriptionRequest[] = [];
   fixtureSequence += 1;
   const connection: UiConnectionRuntime = {
     instanceId: `automations-${fixtureSequence}`,
@@ -204,6 +211,26 @@ async function mountFixture(
       return { trigger, secret: `wollipogwhsec_${"A".repeat(43)}` };
     },
     workflowDefinitions: async () => [],
+    outboundEventSubscriptions: async () => [...outboundSubscriptions],
+    outboundEventDeliveries: async (subscriptionId: string) => outboundDeliveries[subscriptionId] ?? [],
+    createOutboundEventSubscription: async (request: CreateOutboundEventSubscriptionRequest) => {
+      outboundCreates.push(structuredClone(request));
+      const subscription: OutboundEventSubscriptionView = {
+        subscriptionId: "oes_created",
+        callbackUrl: request.callbackUrl,
+        scope: request.scope,
+        eventKinds: request.eventKinds,
+        includeSessionName: request.includeSessionName === true,
+        includeQuestionTitle: request.includeQuestionTitle === true,
+        state: "active",
+        generation: 1,
+        createdBy: { kind: "human", id: "test" },
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      outboundSubscriptions.push(subscription);
+      return { subscription, secret: `wollipogwhsec_${"B".repeat(43)}` };
+    },
     updateAutomation: async (id: string, spec: AutomationSpec) => {
       updates.push({ id, spec: structuredClone(spec) });
       return { ...items.find((item) => item.automationId === id)!, ...spec };
@@ -221,7 +248,7 @@ async function mountFixture(
   });
   await act(async () => { socket.push(snapshot()); });
   await act(settle);
-  return { container, root, updates, triggerCreates };
+  return { container, root, updates, triggerCreates, outboundCreates };
 }
 
 async function unmountFixture(fixture: Fixture): Promise<void> {
@@ -274,6 +301,19 @@ async function choose(container: HTMLDivElement, label: string, optionLabel: str
 async function openNew(fixture: Fixture): Promise<void> {
   await act(async () => { button(fixture.container, "New Automation").click(); });
   await act(settle);
+}
+
+async function setLabeledInput(container: HTMLDivElement, label: string, value: string): Promise<void> {
+  const wrapper = [...container.querySelectorAll<HTMLLabelElement>("label")]
+    .find((candidate) => candidate.childNodes[0]?.textContent?.trim() === label);
+  const input = wrapper?.querySelector("input") as HTMLInputElement | null;
+  assert.ok(input, `${label} input is rendered`);
+  const setter = Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")?.set;
+  assert.ok(setter);
+  await act(async () => {
+    setter.call(input, value);
+    input.dispatchEvent(new domWindow.InputEvent("input", { bubbles: true, data: value }) as never);
+  });
 }
 
 function cardToggle(container: HTMLDivElement, name: string): HTMLButtonElement {
@@ -367,6 +407,44 @@ test("Agent, Machine, and Model controls invoke their capability-transition help
     await choose(fixture.container, "Model", "Haiku");
     assert.equal(choiceTrigger(fixture.container, "Reasoning Effort")?.getAttribute("aria-label"), "Reasoning Effort: Agent Default");
     assert.equal(choiceTrigger(fixture.container, "Permission Mode")?.getAttribute("aria-label"), "Permission Mode: Auto");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("outbound event subscriptions expose privacy opt-ins and reveal the signing secret once", async () => {
+  const automation = schedule("automation-events", "Event Source");
+  const fixture = await mountFixture([automation]);
+  try {
+    await act(async () => { button(fixture.container, "New Subscription").click(); });
+    await choose(fixture.container, "Scope Type", "Automation");
+    await setLabeledInput(fixture.container, "Callback URL", "https://events.example.test/wollipog");
+    const sessionName = [...fixture.container.querySelectorAll<HTMLLabelElement>("label")]
+      .find((candidate) => candidate.textContent?.trim() === "Include Session Name")
+      ?.querySelector("input") as HTMLInputElement | null;
+    const questionTitle = [...fixture.container.querySelectorAll<HTMLLabelElement>("label")]
+      .find((candidate) => candidate.textContent?.trim() === "Include Question Title")
+      ?.querySelector("input") as HTMLInputElement | null;
+    assert.ok(sessionName && questionTitle);
+    await act(async () => {
+      sessionName.click();
+      questionTitle.click();
+    });
+    await act(async () => { button(fixture.container, "Create Subscription").click(); });
+    await act(settle);
+    assert.deepEqual(fixture.outboundCreates, [{
+      callbackUrl: "https://events.example.test/wollipog",
+      scope: { kind: "automation", automationId: "automation-events" },
+      eventKinds: ["session.created", "session.input_required"],
+      includeSessionName: true,
+      includeQuestionTitle: true,
+    }]);
+    assert.match(fixture.container.textContent ?? "", /Copy this signing secret now/);
+    assert.match(fixture.container.textContent ?? "", /wollipogwhsec_B+/);
+    assert.match(fixture.container.textContent ?? "", /Session Name Included/);
+    assert.match(fixture.container.textContent ?? "", /Question Title Included/);
+    await act(async () => { button(fixture.container, "Hide").click(); });
+    assert.doesNotMatch(fixture.container.textContent ?? "", /wollipogwhsec_B+/);
   } finally {
     await unmountFixture(fixture);
   }

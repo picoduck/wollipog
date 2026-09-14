@@ -147,6 +147,7 @@ import {
   MAX_UNRESOLVED_STEERING_ATTEMPTS,
   type AgentLaunch,
   type ControlPlaneDb,
+  type SessionAutomationOrigin,
 } from "./db.js";
 import { questionPolicyAnswers } from "./question-policy.js";
 import type { SessionEvent } from "@wollipog/protocol";
@@ -425,6 +426,8 @@ export interface PreStagedDeliveryOptions {
   memberSessionIds?: string[];
   /** Generates deterministic member IDs after the workflow definition reveals its member count. */
   memberSessionId?: (index: number) => string;
+  /** Trusted automation origin copied into every newly materialized session before it is visible. */
+  automationOrigin?: SessionAutomationOrigin;
   /** Recovery-only exact commands read from the durable outbox. When present, resource
    * materialization must derive launch metadata from these snapshots instead of mutable runner
    * discovery state. Initial staging omits this field and continues to build a fresh plan. */
@@ -3593,6 +3596,7 @@ export class SessionsService {
       workspacePath: adHoc || null,
       acpSessionContext,
       scope: sessionScope,
+      automationOrigin: delivery?.automationOrigin,
       now,
     });
     if (config.costBudgetUsd && config.costBudgetUsd > 0) {
@@ -7352,6 +7356,7 @@ export class SessionsService {
         driver: item.member.launch.driver,
         config: item.config,
         scope: item.member.orchestrator ? orchestratorScope! : workerSessionScope,
+        automationOrigin: delivery.automationOrigin,
         now,
       });
       if (req.costBudgetUsd && req.costBudgetUsd > 0) {

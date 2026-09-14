@@ -4,6 +4,8 @@ import type {
   AutomationExecution,
   AutomationSchedule,
   AutomationTriggerView,
+  OutboundEventDeliveryView,
+  OutboundEventSubscriptionView,
   RunnerView,
   UiSnapshotMessage,
 } from "@wollipog/protocol";
@@ -127,6 +129,48 @@ const executions: AutomationExecution[] = [{
   completedAt: Date.UTC(2026, 8, 14, 12, 4),
 }];
 
+const outboundSubscriptions: OutboundEventSubscriptionView[] = [{
+  subscriptionId: "oes_release_events",
+  callbackUrl: "https://events.example.com/wollipog",
+  scope: { kind: "automation", automationId: "automation-nightly-sweep" },
+  eventKinds: ["session.created", "session.input_required", "pull_request.opened", "checks.failed"],
+  includeSessionName: false,
+  includeQuestionTitle: false,
+  state: "paused",
+  pauseReason: "Paused after 6 bounded delivery attempts",
+  generation: 2,
+  createdBy: { kind: "human", id: "e2e" },
+  createdAt: Date.UTC(2026, 8, 14, 12),
+  updatedAt: Date.UTC(2026, 8, 14, 12, 31),
+}];
+
+const outboundDeliveries: OutboundEventDeliveryView[] = [{
+  deliveryId: "oed_release_created",
+  subscriptionId: "oes_release_events",
+  eventId: "oev_release_created",
+  kind: "session.created",
+  status: "failed",
+  attemptCount: 6,
+  statusCode: 503,
+  error: "Callback returned 503",
+  createdAt: Date.UTC(2026, 8, 14, 12),
+  updatedAt: Date.UTC(2026, 8, 14, 12, 31),
+  lastAttemptAt: Date.UTC(2026, 8, 14, 12, 31),
+}, {
+  deliveryId: "oed_checks_failed",
+  subscriptionId: "oes_release_events",
+  eventId: "oev_checks_failed",
+  kind: "checks.failed",
+  status: "retrying",
+  attemptCount: 2,
+  statusCode: 503,
+  error: "Callback returned 503",
+  createdAt: Date.UTC(2026, 8, 14, 12, 30),
+  updatedAt: Date.UTC(2026, 8, 14, 12, 31),
+  lastAttemptAt: Date.UTC(2026, 8, 14, 12, 31),
+  nextRetryAt: Date.UTC(2026, 8, 14, 12, 33),
+}];
+
 class FixtureSocket implements UiSocket {
   readonly readyState = UI_SOCKET_OPEN;
   onopen: (() => void) | null = null;
@@ -183,6 +227,8 @@ const client = {
   automationTriggers: async (id: string) => ({
     triggers: id === "automation-nightly-sweep" ? triggerItems : [],
   }),
+  outboundEventSubscriptions: async () => outboundSubscriptions,
+  outboundEventDeliveries: async () => outboundDeliveries,
   workflowDefinitions: async () => [],
 } as unknown as ApiClient;
 

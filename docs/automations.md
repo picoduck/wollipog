@@ -101,6 +101,8 @@ Trigger management adds authenticated routes under `/api/automations/:id/trigger
 uses the separate `/hooks/v1/automation-triggers/:triggerId` HMAC boundary; it does not use the
 paired-device bearer token. The exact signature, idempotency, request bodies, bounds, one-time secret
 handling, and response contract are documented in [signed automation triggers](./automation-triggers.md).
+Signed outbound callbacks are managed separately. Their event schema, HMAC verification, privacy
+opt-ins, retry limits, and SSRF boundary are documented in [outbound events](./outbound-events.md).
 
 Every dashboard, including loopback, presents either the local startup credential or an ordinary
 paired-device bearer token; see [device auth](./device-auth.md).

@@ -54,6 +54,13 @@ import {
   type AutomationTriggerInvocationView,
   type AutomationTriggerKind,
   type AutomationTriggerView,
+  type OutboundEventDeliveryStatus,
+  type OutboundEventDeliveryView,
+  type OutboundEventEnvelope,
+  type OutboundEventKind,
+  type OutboundEventSubscriptionScope,
+  type OutboundEventSubscriptionState,
+  type OutboundEventSubscriptionView,
   type AgentCapabilities,
   type AgentHarnessDefaultConfig,
   type AgentHarnessIdentity,
@@ -204,6 +211,22 @@ import {
   type WorkflowNodeState,
   type WorkflowNodeOutcome,
 } from "@wollipog/protocol";
+
+const OUTBOUND_EVENT_PENDING_LIMIT = 100;
+const OUTBOUND_EVENT_BODY_LIMIT_BYTES = 16 * 1_024;
+const OUTBOUND_EVENT_KINDS = new Set<OutboundEventKind>([
+  "session.created",
+  "session.input_required",
+  "session.idle",
+  "session.completed",
+  "session.failed",
+  "session.stopped",
+  "pull_request.opened",
+  "pull_request.merged",
+  "checks.failed",
+  "cost.checkpoint",
+  "cost.budget_exhausted",
+]);
 import { DEFAULT_POD_ORCHESTRATION_POLICY, type PodContextSelectionWindow } from "./pod-orchestration.js";
 import {
   LOCAL_OWNER_USER_ID,
@@ -1443,6 +1466,7 @@ CREATE TABLE IF NOT EXISTS automation_trigger_invocations (
   automation_revision INTEGER NOT NULL,
   spec_json     TEXT NOT NULL,
   delivery_metadata_json TEXT,
+  accepted_parameters_json TEXT,
   state         TEXT NOT NULL CHECK (state IN ('pending','dispatched','skipped','expired','rejected')),
   execution_id  TEXT,
   received_at   INTEGER NOT NULL,
@@ -1456,6 +1480,104 @@ CREATE INDEX IF NOT EXISTS idx_automation_trigger_invocations_pending
   ON automation_trigger_invocations(received_at, invocation_id) WHERE state='pending';
 CREATE INDEX IF NOT EXISTS idx_automation_trigger_invocations_trigger
   ON automation_trigger_invocations(trigger_id, received_at DESC, invocation_id DESC);
+
+-- Accepted trigger parameters become durable session provenance before a created session is
+-- observable. They are already policy-validated strings; raw signed bodies and rendered prompts
+-- never enter this boundary.
+CREATE TABLE IF NOT EXISTS automation_session_origins (
+  session_id      TEXT PRIMARY KEY,
+  automation_id   TEXT NOT NULL,
+  execution_id    TEXT NOT NULL,
+  trigger_id      TEXT,
+  invocation_id   TEXT,
+  parameters_json TEXT,
+  created_at      INTEGER NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY (automation_id) REFERENCES automations(automation_id),
+  FOREIGN KEY (execution_id) REFERENCES automation_executions(execution_id),
+  FOREIGN KEY (trigger_id) REFERENCES automation_triggers(trigger_id),
+  FOREIGN KEY (invocation_id) REFERENCES automation_trigger_invocations(invocation_id)
+);
+CREATE INDEX IF NOT EXISTS idx_automation_session_origins_execution
+  ON automation_session_origins(execution_id, session_id);
+
+CREATE TABLE IF NOT EXISTS outbound_event_subscriptions (
+  subscription_id       TEXT PRIMARY KEY,
+  callback_url          TEXT NOT NULL,
+  secret_key            TEXT NOT NULL,
+  generation            INTEGER NOT NULL DEFAULT 1,
+  scope_kind            TEXT NOT NULL CHECK (scope_kind IN ('project','automation')),
+  project_id            TEXT,
+  automation_id         TEXT,
+  event_kinds_json      TEXT NOT NULL,
+  include_session_name  INTEGER NOT NULL DEFAULT 0 CHECK (include_session_name IN (0,1)),
+  include_question_title INTEGER NOT NULL DEFAULT 0 CHECK (include_question_title IN (0,1)),
+  state                  TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','paused')),
+  pause_reason           TEXT,
+  consecutive_failures   INTEGER NOT NULL DEFAULT 0,
+  created_by_kind        TEXT NOT NULL,
+  created_by_id          TEXT,
+  created_at             INTEGER NOT NULL,
+  updated_at             INTEGER NOT NULL,
+  last_delivered_at      INTEGER,
+  revoked_at             INTEGER,
+  CHECK ((scope_kind='project' AND project_id IS NOT NULL AND automation_id IS NULL) OR
+         (scope_kind='automation' AND automation_id IS NOT NULL AND project_id IS NULL)),
+  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+  FOREIGN KEY (automation_id) REFERENCES automations(automation_id)
+);
+CREATE INDEX IF NOT EXISTS idx_outbound_event_subscriptions_active
+  ON outbound_event_subscriptions(state, scope_kind, project_id, automation_id)
+  WHERE revoked_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS outbound_events (
+  event_id       TEXT PRIMARY KEY,
+  source_key     TEXT NOT NULL UNIQUE,
+  kind           TEXT NOT NULL,
+  session_id     TEXT NOT NULL,
+  project_id     TEXT,
+  automation_id  TEXT,
+  occurred_at    INTEGER NOT NULL,
+  created_at     INTEGER NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS outbound_event_deliveries (
+  delivery_id      TEXT PRIMARY KEY,
+  subscription_id  TEXT NOT NULL,
+  event_id         TEXT NOT NULL,
+  kind             TEXT NOT NULL,
+  status           TEXT NOT NULL CHECK (status IN ('pending','delivering','retrying','delivered','failed','dropped')),
+  payload_json     TEXT,
+  attempt_count    INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at  INTEGER,
+  lease_id         TEXT,
+  lease_expires_at INTEGER,
+  last_attempt_at  INTEGER,
+  status_code      INTEGER,
+  error            TEXT,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL,
+  UNIQUE (subscription_id, event_id),
+  FOREIGN KEY (subscription_id) REFERENCES outbound_event_subscriptions(subscription_id) ON DELETE CASCADE,
+  FOREIGN KEY (event_id) REFERENCES outbound_events(event_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_outbound_event_deliveries_due
+  ON outbound_event_deliveries(next_attempt_at, created_at, delivery_id)
+  WHERE status IN ('pending','retrying','delivering');
+CREATE INDEX IF NOT EXISTS idx_outbound_event_deliveries_journal
+  ON outbound_event_deliveries(subscription_id, created_at DESC, delivery_id DESC);
+CREATE INDEX IF NOT EXISTS idx_outbound_event_deliveries_event
+  ON outbound_event_deliveries(event_id);
+
+CREATE TABLE IF NOT EXISTS outbound_check_observations (
+  session_id        TEXT NOT NULL,
+  pull_request_url  TEXT NOT NULL,
+  failing_signature TEXT,
+  updated_at        INTEGER NOT NULL,
+  PRIMARY KEY (session_id, pull_request_url),
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
 
 -- Legacy CP-owned workspace display-name overrides. The workspaces table is wiped and re-filled
 -- from runner config on every register, so a compatibility rename must live here and be applied
@@ -2825,7 +2947,30 @@ interface AutomationTriggerRow {
 interface AutomationTriggerInvocationRow {
   invocation_id: string; trigger_id: string; automation_id: string; event_id: string; body_sha256: string;
   sender_hash: string | null; automation_revision: number; spec_json: string; delivery_metadata_json: string | null;
+  accepted_parameters_json: string | null;
   state: AutomationTriggerInvocationState; execution_id: string | null; received_at: number; updated_at: number;
+}
+
+interface AutomationSessionOriginRow {
+  session_id: string; automation_id: string; execution_id: string; trigger_id: string | null;
+  invocation_id: string | null; parameters_json: string | null; created_at: number;
+}
+
+interface OutboundEventSubscriptionRow {
+  subscription_id: string; callback_url: string; secret_key: string; generation: number;
+  scope_kind: "project" | "automation"; project_id: string | null; automation_id: string | null;
+  event_kinds_json: string; include_session_name: number; include_question_title: number;
+  state: OutboundEventSubscriptionState; pause_reason: string | null; consecutive_failures: number;
+  created_by_kind: GovernanceActor["kind"]; created_by_id: string | null;
+  created_at: number; updated_at: number; last_delivered_at: number | null; revoked_at: number | null;
+}
+
+interface OutboundEventDeliveryRow {
+  delivery_id: string; subscription_id: string; event_id: string; kind: OutboundEventKind;
+  status: OutboundEventDeliveryStatus; payload_json: string | null; attempt_count: number;
+  next_attempt_at: number | null; lease_id: string | null; lease_expires_at: number | null;
+  last_attempt_at: number | null; status_code: number | null; error: string | null;
+  created_at: number; updated_at: number;
 }
 
 interface BoxRow {
@@ -3095,6 +3240,9 @@ export interface NewSessionInput {
   acpSessionContext?: AcpSessionContextConfig;
   /** Server-derived ownership; callers must never copy this from an untrusted request body. */
   scope?: ResourceScope;
+  /** Trusted automation provenance. It is written atomically with the session and is never read
+   * from a public session-creation request. */
+  automationOrigin?: SessionAutomationOrigin;
   now: number;
 }
 
@@ -3184,6 +3332,31 @@ export interface AutomationTriggerInvocationRecord extends AutomationTriggerInvo
   specJson: string;
   bodySha256: string;
   senderHash?: string;
+  acceptedParameters?: Record<string, string>;
+}
+
+export interface SessionAutomationOrigin {
+  automationId: string;
+  executionId: string;
+  triggerId?: string;
+  invocationId?: string;
+}
+
+export interface OutboundEventSubscriptionRecord extends OutboundEventSubscriptionView {
+  secret: string;
+  consecutiveFailures: number;
+}
+
+export interface ClaimedOutboundEventDelivery {
+  deliveryId: string;
+  subscriptionId: string;
+  eventId: string;
+  kind: OutboundEventKind;
+  callbackUrl: string;
+  secret: string;
+  payloadJson: string;
+  attempt: number;
+  leaseId: string;
 }
 
 interface LegacyProjectLocationCandidate {
@@ -3838,6 +4011,7 @@ export class ControlPlaneDb {
       ["automation_commands", "delivery_deadline_at INTEGER"],
       ["automation_triggers", "delivery_policy_json TEXT"],
       ["automation_trigger_invocations", "delivery_metadata_json TEXT"],
+      ["automation_trigger_invocations", "accepted_parameters_json TEXT"],
     ] as const) {
       try {
         db.exec(`ALTER TABLE ${table} ADD COLUMN ${column}`);
@@ -10470,6 +10644,47 @@ export class ControlPlaneDb {
           .run(JSON.stringify(handoffRequest), input.id);
       }
       this.insertSessionOwnership(input.id, scope, input.now);
+      if (input.automationOrigin) {
+        const execution = this.stmt(
+          "SELECT automation_id FROM automation_executions WHERE execution_id=?",
+        ).get(input.automationOrigin.executionId) as { automation_id: string } | undefined;
+        if (!execution || execution.automation_id !== input.automationOrigin.automationId) {
+          throw new Error("session automation origin does not match its execution");
+        }
+        let triggerId: string | null = null;
+        let invocationId: string | null = null;
+        let parametersJson: string | null = null;
+        if (input.automationOrigin.invocationId) {
+          const invocation = this.stmt(
+            `SELECT trigger_id, execution_id, accepted_parameters_json
+             FROM automation_trigger_invocations WHERE invocation_id=?`,
+          ).get(input.automationOrigin.invocationId) as {
+            trigger_id: string; execution_id: string | null; accepted_parameters_json: string | null;
+          } | undefined;
+          if (!invocation || invocation.execution_id !== input.automationOrigin.executionId ||
+              (input.automationOrigin.triggerId !== undefined &&
+                invocation.trigger_id !== input.automationOrigin.triggerId)) {
+            throw new Error("session automation origin does not match its trigger invocation");
+          }
+          triggerId = invocation.trigger_id;
+          invocationId = input.automationOrigin.invocationId;
+          parametersJson = invocation.accepted_parameters_json;
+        } else if (input.automationOrigin.triggerId !== undefined) {
+          throw new Error("session trigger origin requires an invocation");
+        }
+        this.stmt(
+          `INSERT INTO automation_session_origins
+           (session_id,automation_id,execution_id,trigger_id,invocation_id,parameters_json,created_at)
+           VALUES (?,?,?,?,?,?,?)`,
+        ).run(input.id, input.automationOrigin.automationId, input.automationOrigin.executionId,
+          triggerId, invocationId, parametersJson, input.now);
+      }
+      this.enqueueOutboundSessionEventInTransaction({
+        sourceKey: `session-created:${input.id}`,
+        kind: "session.created",
+        sessionId: input.id,
+        occurredAt: input.now,
+      });
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -10606,6 +10821,12 @@ export class ControlPlaneDb {
            VALUES (?, ?, ?, ?)`,
         ).run(snap.id, fork.sourceSessionId, fork.sourceTurn, now);
       }
+      this.enqueueOutboundSessionEventInTransaction({
+        sourceKey: `session-created:${snap.id}`,
+        kind: "session.created",
+        sessionId: snap.id,
+        occurredAt: now,
+      });
       this.reconcileUsageSnapshotInTransaction(snap.id, snap, now);
       this.upsertManagedBackgroundJobsInTransaction(snap.id, snap.backgroundJobs, now);
       this.db.exec("COMMIT");
@@ -10630,7 +10851,7 @@ export class ControlPlaneDb {
     // pending→null and resume over-limit work.
     const existing = this.stmt(
       `SELECT runner_id, workspace_id, project_id, pending_approval, title, title_source, semantic_title,
-              cost_budget_usd, execution_handoff, adopted, workspace_path
+              status, worktrees, cost_usd, cost_budget_usd, execution_handoff, adopted, workspace_path
        FROM sessions WHERE id=?`,
     ).get(id) as
       | {
@@ -10641,6 +10862,9 @@ export class ControlPlaneDb {
           title: string;
           title_source: string | null;
           semantic_title: number;
+          status: SessionStatus;
+          worktrees: string | null;
+          cost_usd: number;
           cost_budget_usd: number | null;
           execution_handoff: string | null;
           adopted: number;
@@ -10797,6 +11021,43 @@ export class ControlPlaneDb {
         };
         this.stmt("UPDATE sessions SET execution_handoff_request=?, execution_handoff=? WHERE id=?")
           .run(JSON.stringify(request), JSON.stringify(handoff), id);
+      }
+      this.enqueueOutboundStatusEventsInTransaction({
+        sessionId: id,
+        previousStatus: existing?.status,
+        status,
+        pending: parseJson<PendingApproval>(pendingJson),
+        costUsd: snap.costUsd,
+        costBudgetUsd: existing?.cost_budget_usd ?? undefined,
+        now,
+      });
+      const previousWorktrees = parseJson<SessionWorktreeView[]>(existing?.worktrees ?? null) ?? [];
+      const previousPullRequests = new Map(previousWorktrees.flatMap((worktree) =>
+        worktree.pullRequest ? [[worktree.pullRequest.url, worktree.pullRequest] as const] : []));
+      for (const worktree of snap.worktrees ?? []) {
+        const pullRequest = worktree.pullRequest;
+        if (!pullRequest) continue;
+        const prior = previousPullRequests.get(pullRequest.url);
+        if (pullRequest.state === "open" && !prior) {
+          this.enqueueOutboundSessionEventInTransaction({
+            sourceKey: `pull-request-opened:${id}:${pullRequest.url}`,
+            kind: "pull_request.opened",
+            sessionId: id,
+            occurredAt: now,
+            detail: { branch: worktree.branch, pullRequest: { url: pullRequest.url, state: "open" } },
+          });
+        } else if (pullRequest.state === "merged" && prior?.state !== "merged" && pullRequest.headOid) {
+          this.enqueueOutboundSessionEventInTransaction({
+            sourceKey: `pull-request-merged:${id}:${pullRequest.url}:${pullRequest.headOid}`,
+            kind: "pull_request.merged",
+            sessionId: id,
+            occurredAt: now,
+            detail: {
+              branch: worktree.branch,
+              pullRequest: { url: pullRequest.url, state: "merged", headOid: pullRequest.headOid },
+            },
+          });
+        }
       }
       this.reconcileUsageSnapshotInTransaction(id, snap, now);
       this.upsertManagedBackgroundJobsInTransaction(id, snap.backgroundJobs, now);
@@ -11479,8 +11740,10 @@ export class ControlPlaneDb {
     // Terminality couples the status write to its fences below; commit them together so a crash
     // between statements cannot persist a terminal status with a stale armed marker.
     this.atomic(() => {
-    const current = this.stmt("SELECT pending_approval FROM sessions WHERE id=?").get(id) as
-      | { pending_approval: string | null }
+    const current = this.stmt(
+      "SELECT status,pending_approval,cost_usd,cost_budget_usd FROM sessions WHERE id=?",
+    ).get(id) as
+      | { status: SessionStatus; pending_approval: string | null; cost_usd: number; cost_budget_usd: number | null }
       | undefined;
     const pending = parseJson<PendingApproval>(current?.pending_approval ?? null);
     const keepWorkflowPause = !isTerminal(status) &&
@@ -11530,6 +11793,15 @@ export class ControlPlaneDb {
     if (effectiveStatus !== "input_required") {
       this.stmt("UPDATE sessions SET pending_approval=NULL WHERE id=?").run(id);
     }
+    this.enqueueOutboundStatusEventsInTransaction({
+      sessionId: id,
+      previousStatus: current?.status,
+      status: effectiveStatus,
+      pending,
+      costUsd: current?.cost_usd ?? 0,
+      costBudgetUsd: current?.cost_budget_usd ?? undefined,
+      now,
+    });
     });
   }
 
@@ -18850,7 +19122,8 @@ export class ControlPlaneDb {
       if (!spec.enabled) {
         this.stmt(
           `UPDATE automation_trigger_invocations
-           SET state='rejected', spec_json='{}', sender_hash=NULL, delivery_metadata_json=NULL, updated_at=?
+           SET state='rejected', spec_json='{}', sender_hash=NULL, delivery_metadata_json=NULL,
+               accepted_parameters_json=NULL, updated_at=?
            WHERE state='pending' AND trigger_id IN
              (SELECT trigger_id FROM automation_triggers WHERE automation_id=? AND deleted_at IS NULL)`,
         ).run(input.now, input.automationId);
@@ -18882,7 +19155,8 @@ export class ControlPlaneDb {
       ).run(now, now, automationId);
       this.stmt(
         `UPDATE automation_trigger_invocations
-         SET state='rejected', spec_json='{}', sender_hash=NULL, delivery_metadata_json=NULL, updated_at=?
+         SET state='rejected', spec_json='{}', sender_hash=NULL, delivery_metadata_json=NULL,
+             accepted_parameters_json=NULL, updated_at=?
          WHERE state='pending' AND trigger_id IN (SELECT trigger_id FROM automation_triggers WHERE automation_id=?)`,
       ).run(now, automationId);
       this.insertAutomationEvent({ automationId, kind: "deleted", actor, now });
@@ -19029,7 +19303,8 @@ export class ControlPlaneDb {
       }
       this.stmt(
         `UPDATE automation_trigger_invocations
-         SET state='rejected', spec_json='{}', sender_hash=NULL, delivery_metadata_json=NULL, updated_at=?
+         SET state='rejected', spec_json='{}', sender_hash=NULL, delivery_metadata_json=NULL,
+             accepted_parameters_json=NULL, updated_at=?
          WHERE trigger_id=? AND state='pending'`,
       ).run(input.now, input.triggerId);
       this.insertAutomationEvent({
@@ -19053,6 +19328,7 @@ export class ControlPlaneDb {
     expectedAutomationRevision: number;
     specSnapshot: AutomationSpec;
     delivery?: AutomationTriggerDeliveryMetadata;
+    acceptedParameters?: Record<string, string>;
     now: number;
   }): { invocation?: AutomationTriggerInvocationRecord; duplicate: boolean; conflict: boolean; limited: boolean;
     retired?: boolean; unavailable?: boolean; stale?: boolean } | null {
@@ -19110,11 +19386,12 @@ export class ControlPlaneDb {
       this.stmt(
         `INSERT INTO automation_trigger_invocations
          (invocation_id,trigger_id,automation_id,event_id,body_sha256,sender_hash,automation_revision,spec_json,
-          delivery_metadata_json,state,received_at,updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?)`,
+          delivery_metadata_json,accepted_parameters_json,state,received_at,updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,'pending',?,?)`,
       ).run(input.invocationId, input.triggerId, schedule.automationId, input.eventId, input.bodySha256,
         input.senderHash ?? null, schedule.revision, JSON.stringify(input.specSnapshot),
-        input.delivery ? JSON.stringify(input.delivery) : null, input.now, input.now);
+        input.delivery ? JSON.stringify(input.delivery) : null,
+        input.acceptedParameters ? JSON.stringify(input.acceptedParameters) : null, input.now, input.now);
       this.stmt(
         `UPDATE automation_triggers SET invocation_count=invocation_count+1,
          last_invoked_at=MAX(COALESCE(last_invoked_at,?),?) WHERE trigger_id=?`,
@@ -19135,9 +19412,10 @@ export class ControlPlaneDb {
   compactAutomationTriggerInvocations(now: number): number {
     const compacted = this.stmt(
       `UPDATE automation_trigger_invocations
-       SET spec_json='{}', sender_hash=NULL, delivery_metadata_json=NULL
+       SET spec_json='{}', sender_hash=NULL, delivery_metadata_json=NULL, accepted_parameters_json=NULL
        WHERE state<>'pending' AND updated_at<?
-         AND (spec_json<>'{}' OR sender_hash IS NOT NULL OR delivery_metadata_json IS NOT NULL)`,
+         AND (spec_json<>'{}' OR sender_hash IS NOT NULL OR delivery_metadata_json IS NOT NULL OR
+              accepted_parameters_json IS NOT NULL)`,
     ).run(now - 30 * 24 * 60 * 60 * 1_000);
     return Number(compacted.changes);
   }
@@ -19156,6 +19434,332 @@ export class ControlPlaneDb {
       "SELECT * FROM automation_trigger_invocations WHERE trigger_id=? AND event_id=?",
     ).get(triggerId, eventId) as unknown as AutomationTriggerInvocationRow | undefined;
     return row ? this.automationTriggerInvocation(row) : null;
+  }
+
+  automationOriginForExecution(executionId: string): SessionAutomationOrigin | null {
+    const row = this.stmt(
+      `SELECT execution.automation_id, invocation.trigger_id, invocation.invocation_id
+       FROM automation_executions execution
+       LEFT JOIN automation_trigger_invocations invocation ON invocation.execution_id=execution.execution_id
+       WHERE execution.execution_id=?`,
+    ).get(executionId) as {
+      automation_id: string; trigger_id: string | null; invocation_id: string | null;
+    } | undefined;
+    if (!row) return null;
+    return {
+      automationId: row.automation_id,
+      executionId,
+      ...(row.trigger_id ? { triggerId: row.trigger_id } : {}),
+      ...(row.invocation_id ? { invocationId: row.invocation_id } : {}),
+    };
+  }
+
+  createOutboundEventSubscription(input: {
+    subscriptionId: string;
+    callbackUrl: string;
+    secret: string;
+    scope: OutboundEventSubscriptionScope;
+    eventKinds: OutboundEventKind[];
+    includeSessionName: boolean;
+    includeQuestionTitle: boolean;
+    actor: GovernanceActor;
+    now: number;
+  }): OutboundEventSubscriptionView | null {
+    if (input.scope.kind === "project" && !this.getProject(input.scope.projectId)) return null;
+    if (input.scope.kind === "automation" && !this.getAutomation(input.scope.automationId)) return null;
+    this.stmt(
+      `INSERT INTO outbound_event_subscriptions
+       (subscription_id,callback_url,secret_key,generation,scope_kind,project_id,automation_id,
+        event_kinds_json,include_session_name,include_question_title,state,created_by_kind,
+        created_by_id,created_at,updated_at)
+       VALUES (?,?,?,1,?,?,?,?,?,?,'active',?,?,?,?)`,
+    ).run(
+      input.subscriptionId,
+      input.callbackUrl,
+      input.secret,
+      input.scope.kind,
+      input.scope.kind === "project" ? input.scope.projectId : null,
+      input.scope.kind === "automation" ? input.scope.automationId : null,
+      JSON.stringify(input.eventKinds),
+      input.includeSessionName ? 1 : 0,
+      input.includeQuestionTitle ? 1 : 0,
+      input.actor.kind,
+      input.actor.id ?? null,
+      input.now,
+      input.now,
+    );
+    return this.getOutboundEventSubscription(input.subscriptionId);
+  }
+
+  listOutboundEventSubscriptions(): OutboundEventSubscriptionView[] {
+    const rows = this.stmt(
+      `SELECT * FROM outbound_event_subscriptions WHERE revoked_at IS NULL
+       ORDER BY created_at, subscription_id`,
+    ).all() as unknown as OutboundEventSubscriptionRow[];
+    return rows.map((row) => this.outboundEventSubscription(row));
+  }
+
+  getOutboundEventSubscription(subscriptionId: string): OutboundEventSubscriptionView | null {
+    const row = this.stmt(
+      "SELECT * FROM outbound_event_subscriptions WHERE subscription_id=? AND revoked_at IS NULL",
+    ).get(subscriptionId) as unknown as OutboundEventSubscriptionRow | undefined;
+    return row ? this.outboundEventSubscription(row) : null;
+  }
+
+  getOutboundEventSubscriptionRecord(subscriptionId: string): OutboundEventSubscriptionRecord | null {
+    const row = this.stmt(
+      "SELECT * FROM outbound_event_subscriptions WHERE subscription_id=? AND revoked_at IS NULL",
+    ).get(subscriptionId) as unknown as OutboundEventSubscriptionRow | undefined;
+    return row ? {
+      ...this.outboundEventSubscription(row),
+      secret: row.secret_key,
+      consecutiveFailures: row.consecutive_failures,
+    } : null;
+  }
+
+  rotateOutboundEventSubscription(input: {
+    subscriptionId: string;
+    secret: string;
+    now: number;
+  }): OutboundEventSubscriptionView | null {
+    const changed = this.stmt(
+      `UPDATE outbound_event_subscriptions SET secret_key=?,generation=generation+1,updated_at=?
+       WHERE subscription_id=? AND revoked_at IS NULL`,
+    ).run(input.secret, input.now, input.subscriptionId);
+    return Number(changed.changes) === 1 ? this.getOutboundEventSubscription(input.subscriptionId) : null;
+  }
+
+  resumeOutboundEventSubscription(subscriptionId: string, now: number): OutboundEventSubscriptionView | null {
+    const changed = this.stmt(
+      `UPDATE outbound_event_subscriptions
+       SET state='active',pause_reason=NULL,consecutive_failures=0,updated_at=?
+       WHERE subscription_id=? AND revoked_at IS NULL`,
+    ).run(now, subscriptionId);
+    return Number(changed.changes) === 1 ? this.getOutboundEventSubscription(subscriptionId) : null;
+  }
+
+  revokeOutboundEventSubscription(subscriptionId: string, now: number): boolean {
+    return this.atomic(() => {
+      const changed = this.stmt(
+        `UPDATE outbound_event_subscriptions
+         SET secret_key='',revoked_at=?,updated_at=? WHERE subscription_id=? AND revoked_at IS NULL`,
+      ).run(now, now, subscriptionId);
+      if (Number(changed.changes) !== 1) return false;
+      this.stmt(
+        `UPDATE outbound_event_deliveries
+         SET status='dropped',payload_json=NULL,next_attempt_at=NULL,lease_id=NULL,lease_expires_at=NULL,
+             error='Subscription revoked before delivery',updated_at=?
+         WHERE subscription_id=? AND status IN ('pending','retrying','delivering')`,
+      ).run(now, subscriptionId);
+      return true;
+    });
+  }
+
+  listOutboundEventDeliveries(subscriptionId: string, limit = 100): OutboundEventDeliveryView[] | null {
+    if (!this.getOutboundEventSubscription(subscriptionId)) return null;
+    const rows = this.stmt(
+      `SELECT * FROM outbound_event_deliveries WHERE subscription_id=?
+       ORDER BY created_at DESC,delivery_id DESC LIMIT ?`,
+    ).all(subscriptionId, Math.max(1, Math.min(200, Math.floor(limit)))) as unknown as OutboundEventDeliveryRow[];
+    return rows.map((row) => this.outboundEventDelivery(row));
+  }
+
+  claimOutboundEventDeliveries(now: number, limit: number, leaseMs: number): ClaimedOutboundEventDelivery[] {
+    return this.atomic(() => {
+      this.stmt(
+        `UPDATE outbound_event_deliveries SET status='retrying',next_attempt_at=?,lease_id=NULL,
+             lease_expires_at=NULL,error='Delivery lease expired before a receipt was recorded',updated_at=?
+         WHERE status='delivering' AND lease_expires_at<=?`,
+      ).run(now, now, now);
+      const rows = this.stmt(
+        `SELECT delivery.*,subscription.callback_url,subscription.secret_key
+         FROM outbound_event_deliveries delivery
+         JOIN outbound_event_subscriptions subscription
+           ON subscription.subscription_id=delivery.subscription_id
+         WHERE subscription.revoked_at IS NULL AND subscription.state='active'
+           AND delivery.status IN ('pending','retrying') AND delivery.next_attempt_at<=?
+           AND delivery.payload_json IS NOT NULL
+         ORDER BY delivery.next_attempt_at,delivery.created_at,delivery.delivery_id LIMIT ?`,
+      ).all(now, Math.max(1, Math.min(64, Math.floor(limit)))) as unknown as Array<
+        OutboundEventDeliveryRow & { callback_url: string; secret_key: string }
+      >;
+      const claimed: ClaimedOutboundEventDelivery[] = [];
+      for (const row of rows) {
+        const leaseId = `oel_${randomUUID().replace(/-/g, "")}`;
+        const changed = this.stmt(
+          `UPDATE outbound_event_deliveries SET status='delivering',attempt_count=attempt_count+1,
+             lease_id=?,lease_expires_at=?,last_attempt_at=?,next_attempt_at=NULL,updated_at=?
+           WHERE delivery_id=? AND status IN ('pending','retrying')`,
+        ).run(leaseId, now + leaseMs, now, now, row.delivery_id);
+        if (Number(changed.changes) !== 1) continue;
+        claimed.push({
+          deliveryId: row.delivery_id,
+          subscriptionId: row.subscription_id,
+          eventId: row.event_id,
+          kind: row.kind,
+          callbackUrl: row.callback_url,
+          secret: row.secret_key,
+          payloadJson: row.payload_json!,
+          attempt: row.attempt_count + 1,
+          leaseId,
+        });
+      }
+      return claimed;
+    });
+  }
+
+  settleOutboundEventDelivery(input: {
+    deliveryId: string;
+    subscriptionId: string;
+    leaseId: string;
+    disposition: "delivered" | "retry" | "failed";
+    now: number;
+    statusCode?: number;
+    nextAttemptAt?: number;
+    error?: string;
+    pauseReason?: string;
+  }): boolean {
+    return this.atomic(() => {
+      const status = input.disposition === "retry" ? "retrying" : input.disposition;
+      const changed = this.stmt(
+        `UPDATE outbound_event_deliveries SET status=?,payload_json=CASE WHEN ?='retrying' THEN payload_json ELSE NULL END,
+             next_attempt_at=?,lease_id=NULL,lease_expires_at=NULL,status_code=?,error=?,updated_at=?
+         WHERE delivery_id=? AND subscription_id=? AND status='delivering' AND lease_id=?`,
+      ).run(status, status, input.nextAttemptAt ?? null, input.statusCode ?? null,
+        input.error?.slice(0, 500) ?? null, input.now, input.deliveryId, input.subscriptionId, input.leaseId);
+      if (Number(changed.changes) !== 1) return false;
+      if (input.disposition === "delivered") {
+        this.stmt(
+          `UPDATE outbound_event_subscriptions SET consecutive_failures=0,last_delivered_at=?,updated_at=?
+           WHERE subscription_id=? AND revoked_at IS NULL`,
+        ).run(input.now, input.now, input.subscriptionId);
+      } else if (input.disposition === "failed") {
+        this.stmt(
+          `UPDATE outbound_event_subscriptions SET consecutive_failures=consecutive_failures+1,
+             state=CASE WHEN ? IS NOT NULL OR consecutive_failures+1>=3 THEN 'paused' ELSE state END,
+             pause_reason=CASE WHEN ? IS NOT NULL THEN ?
+               WHEN consecutive_failures+1>=3 THEN 'Paused after three permanent delivery failures'
+               ELSE pause_reason END,updated_at=?
+           WHERE subscription_id=? AND revoked_at IS NULL`,
+        ).run(input.pauseReason ?? null, input.pauseReason ?? null, input.pauseReason ?? null,
+          input.now, input.subscriptionId);
+      }
+      return true;
+    });
+  }
+
+  compactOutboundEventDeliveries(now: number): number {
+    return this.atomic(() => {
+      const removed = this.stmt(
+        `DELETE FROM outbound_event_deliveries
+         WHERE status IN ('delivered','failed','dropped') AND updated_at<?`,
+      ).run(now - 30 * 24 * 60 * 60 * 1_000);
+      this.stmt(
+        `DELETE FROM outbound_events WHERE NOT EXISTS (
+           SELECT 1 FROM outbound_event_deliveries delivery WHERE delivery.event_id=outbound_events.event_id
+         )`,
+      ).run();
+      return Number(removed.changes);
+    });
+  }
+
+  outboundCheckObservationCandidates(limit = 25): SessionView[] {
+    const rows = this.stmt(
+      `SELECT DISTINCT session.id
+       FROM sessions session
+       LEFT JOIN automation_session_origins origin ON origin.session_id=session.id
+       JOIN outbound_event_subscriptions subscription ON subscription.revoked_at IS NULL
+         AND subscription.state='active' AND subscription.event_kinds_json LIKE '%"checks.failed"%'
+         AND ((subscription.scope_kind='project' AND subscription.project_id=session.project_id) OR
+              (subscription.scope_kind='automation' AND subscription.automation_id=origin.automation_id))
+       LEFT JOIN (
+         SELECT session_id,MAX(updated_at) AS updated_at
+         FROM outbound_check_observations GROUP BY session_id
+       ) observation ON observation.session_id=session.id
+       WHERE session.archived=0 AND session.worktrees IS NOT NULL AND EXISTS (
+         SELECT 1 FROM json_each(session.worktrees) worktree
+         WHERE lower(json_extract(worktree.value,'$.pullRequest.state'))='open'
+       )
+       ORDER BY COALESCE(observation.updated_at,0),session.updated_at,session.id LIMIT ?`,
+    ).all(Math.max(1, Math.min(100, Math.floor(limit)))) as unknown as Array<{ id: string }>;
+    return rows.flatMap((row) => {
+      const session = this.getSession(row.id);
+      return session?.worktrees?.some((worktree) => worktree.pullRequest?.state === "open") ? [session] : [];
+    });
+  }
+
+  markOutboundCheckObservationAttempt(sessionId: string, pullRequestUrl: string, now: number): void {
+    this.stmt(
+      `INSERT INTO outbound_check_observations
+       (session_id,pull_request_url,failing_signature,updated_at) VALUES (?,?,NULL,?)
+       ON CONFLICT(session_id,pull_request_url) DO UPDATE SET updated_at=MAX(updated_at,excluded.updated_at)`,
+    ).run(sessionId, pullRequestUrl, now);
+  }
+
+  recordOutboundCheckObservation(input: {
+    sessionId: string;
+    branch: string;
+    pullRequestUrl: string;
+    failing: number;
+    failingNames: string[];
+    checksUrl?: string;
+    now: number;
+  }): boolean {
+    return this.atomic(() => {
+      const failingNames = input.failingNames.slice(0, 20)
+        .map((name) => name.slice(0, 256))
+        .sort();
+      const signature = input.failing > 0
+        ? createHash("sha256").update(JSON.stringify({
+          failing: input.failing,
+          names: failingNames,
+        })).digest("hex")
+        : null;
+      const prior = this.stmt(
+        `SELECT failing_signature FROM outbound_check_observations
+         WHERE session_id=? AND pull_request_url=?`,
+      ).get(input.sessionId, input.pullRequestUrl) as { failing_signature: string | null } | undefined;
+      this.stmt(
+        `INSERT INTO outbound_check_observations
+         (session_id,pull_request_url,failing_signature,updated_at) VALUES (?,?,?,?)
+         ON CONFLICT(session_id,pull_request_url) DO UPDATE SET
+           failing_signature=excluded.failing_signature,updated_at=excluded.updated_at`,
+      ).run(input.sessionId, input.pullRequestUrl, signature, input.now);
+      if (!signature || prior?.failing_signature === signature) return false;
+      return this.enqueueOutboundSessionEventInTransaction({
+        sourceKey: `checks-failed:${input.sessionId}:${randomUUID()}`,
+        kind: "checks.failed",
+        sessionId: input.sessionId,
+        occurredAt: input.now,
+        detail: {
+          branch: input.branch.slice(0, 256),
+          pullRequest: { url: input.pullRequestUrl.slice(0, 2_048), state: "open" },
+          checks: {
+            failing: input.failing,
+            failingNames,
+            ...(input.checksUrl ? { url: input.checksUrl.slice(0, 2_048) } : {}),
+          },
+        },
+      }) > 0;
+    });
+  }
+
+  recordOutboundPullRequestOpened(input: {
+    sessionId: string;
+    branch: string;
+    pullRequestUrl: string;
+    now: number;
+  }): boolean {
+    return this.atomic(() => this.enqueueOutboundSessionEventInTransaction({
+      sourceKey: `pull-request-opened:${input.sessionId}:${input.pullRequestUrl}`,
+      kind: "pull_request.opened",
+      sessionId: input.sessionId,
+      occurredAt: input.now,
+      detail: {
+        branch: input.branch,
+        pullRequest: { url: input.pullRequestUrl, state: "open" },
+      },
+    }) > 0);
   }
 
   pendingAutomationTriggerInvocations(limit = 100): AutomationTriggerInvocationRecord[] {
@@ -19193,8 +19797,9 @@ export class ControlPlaneDb {
        spec_json=CASE WHEN ?='rejected' THEN '{}' ELSE spec_json END,
        sender_hash=CASE WHEN ?='rejected' THEN NULL ELSE sender_hash END,
        delivery_metadata_json=CASE WHEN ?='rejected' THEN NULL ELSE delivery_metadata_json END,
+       accepted_parameters_json=CASE WHEN ?='rejected' THEN NULL ELSE accepted_parameters_json END,
        updated_at=? WHERE invocation_id=? AND state='pending'`,
-    ).run(state, state, state, state, now, invocationId);
+    ).run(state, state, state, state, state, now, invocationId);
     return this.getAutomationTriggerInvocation(invocationId);
   }
 
@@ -20034,10 +20639,232 @@ export class ControlPlaneDb {
       ...(row.delivery_metadata_json ? {
         delivery: JSON.parse(row.delivery_metadata_json) as AutomationTriggerDeliveryMetadata,
       } : {}),
+      ...(row.accepted_parameters_json ? {
+        acceptedParameters: JSON.parse(row.accepted_parameters_json) as Record<string, string>,
+      } : {}),
       receivedAt: row.received_at,
       updatedAt: row.updated_at,
       ...(row.execution_id ? { executionId: row.execution_id } : {}),
     };
+  }
+
+  private outboundEventSubscription(row: OutboundEventSubscriptionRow): OutboundEventSubscriptionView {
+    return {
+      subscriptionId: row.subscription_id,
+      callbackUrl: row.callback_url,
+      scope: row.scope_kind === "project"
+        ? { kind: "project", projectId: row.project_id! }
+        : { kind: "automation", automationId: row.automation_id! },
+      eventKinds: jsonArray(row.event_kinds_json).filter((kind): kind is OutboundEventKind =>
+        OUTBOUND_EVENT_KINDS.has(kind as OutboundEventKind)),
+      includeSessionName: row.include_session_name === 1,
+      includeQuestionTitle: row.include_question_title === 1,
+      state: row.state,
+      ...(row.pause_reason ? { pauseReason: row.pause_reason } : {}),
+      generation: row.generation,
+      createdBy: {
+        kind: row.created_by_kind,
+        ...(row.created_by_id ? { id: row.created_by_id } : {}),
+      },
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      ...(row.last_delivered_at === null ? {} : { lastDeliveredAt: row.last_delivered_at }),
+    };
+  }
+
+  private outboundEventDelivery(row: OutboundEventDeliveryRow): OutboundEventDeliveryView {
+    return {
+      deliveryId: row.delivery_id,
+      subscriptionId: row.subscription_id,
+      eventId: row.event_id,
+      kind: row.kind,
+      status: row.status,
+      attemptCount: row.attempt_count,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      ...(row.last_attempt_at === null ? {} : { lastAttemptAt: row.last_attempt_at }),
+      ...(row.status_code === null ? {} : { statusCode: row.status_code }),
+      ...(row.next_attempt_at === null ? {} : { nextRetryAt: row.next_attempt_at }),
+      ...(row.error ? { error: row.error } : {}),
+    };
+  }
+
+  private enqueueOutboundStatusEventsInTransaction(input: {
+    sessionId: string;
+    previousStatus?: SessionStatus;
+    status: SessionStatus;
+    pending: PendingApproval | null;
+    costUsd: number;
+    costBudgetUsd?: number;
+    now: number;
+  }): void {
+    if (input.previousStatus !== input.status) {
+      const kind = input.status === "idle"
+        ? "session.idle"
+        : input.status === "completed"
+          ? "session.completed"
+          : input.status === "failed"
+            ? "session.failed"
+            : input.status === "stopped"
+              ? "session.stopped"
+              : null;
+      if (kind) {
+        this.enqueueOutboundSessionEventInTransaction({
+          sourceKey: `session-status:${input.sessionId}:${kind}:${input.now}`,
+          kind,
+          sessionId: input.sessionId,
+          occurredAt: input.now,
+        });
+      }
+    }
+    if (input.status !== "input_required") return;
+    for (const request of pendingRequests(input.pending)) {
+      const occurrenceId = request.occurrenceId ?? request.requestId;
+      const auditRuleRow = this.stmt(
+        `SELECT policy_rule FROM governance_audit
+         WHERE session_id=? AND request_id=? AND policy_rule IS NOT NULL
+         ORDER BY row_id DESC LIMIT 1`,
+      ).get(input.sessionId, request.requestId) as { policy_rule: string } | undefined;
+      const auditRule = parseJson<{
+        kind?: string; checkpointUsd?: number; budgetUsd?: number;
+      }>(auditRuleRow?.policy_rule ?? null);
+      this.enqueueOutboundSessionEventInTransaction({
+        sourceKey: `session-input-required:${input.sessionId}:${occurrenceId}`,
+        kind: "session.input_required",
+        sessionId: input.sessionId,
+        occurredAt: input.now,
+        ...(request.kind === "question" ? { questionTitle: request.title } : {}),
+      });
+      if (request.kind === "cost_checkpoint") {
+        this.enqueueOutboundSessionEventInTransaction({
+          sourceKey: `cost-checkpoint:${input.sessionId}:${occurrenceId}`,
+          kind: "cost.checkpoint",
+          sessionId: input.sessionId,
+          occurredAt: input.now,
+          detail: {
+            cost: {
+              costUsd: input.costUsd,
+              ...(auditRule?.kind === "cost_checkpoint" && typeof auditRule.checkpointUsd === "number"
+                ? { checkpointUsd: auditRule.checkpointUsd }
+                : {}),
+            },
+          },
+        });
+      } else if (request.kind === "cost_budget" || request.kind === "daily_budget") {
+        this.enqueueOutboundSessionEventInTransaction({
+          sourceKey: `cost-budget-exhausted:${input.sessionId}:${occurrenceId}`,
+          kind: "cost.budget_exhausted",
+          sessionId: input.sessionId,
+          occurredAt: input.now,
+          detail: {
+            cost: {
+              costUsd: input.costUsd,
+              ...(request.runnerGuardrail?.threshold !== undefined
+                ? { budgetUsd: request.runnerGuardrail.threshold }
+                : typeof auditRule?.budgetUsd === "number"
+                  ? { budgetUsd: auditRule.budgetUsd }
+                  : input.costBudgetUsd !== undefined ? { budgetUsd: input.costBudgetUsd } : {}),
+            },
+          },
+        });
+      }
+    }
+  }
+
+  /** Insert the immutable event and every matching delivery while the caller's session mutation
+   * transaction is still open. A source key is the event producer's idempotency boundary. */
+  private enqueueOutboundSessionEventInTransaction(input: {
+    sourceKey: string;
+    kind: OutboundEventKind;
+    sessionId: string;
+    occurredAt: number;
+    detail?: Pick<OutboundEventEnvelope, "branch" | "pullRequest" | "checks" | "cost">;
+    questionTitle?: string;
+  }): number {
+    const session = this.stmt(
+      `SELECT id,project_id,title FROM sessions WHERE id=?`,
+    ).get(input.sessionId) as {
+      id: string; project_id: string | null; title: string;
+    } | undefined;
+    if (!session) return 0;
+    const origin = this.stmt(
+      `SELECT automation_id,execution_id,trigger_id,invocation_id,parameters_json
+       FROM automation_session_origins WHERE session_id=?`,
+    ).get(input.sessionId) as Omit<AutomationSessionOriginRow, "session_id" | "created_at"> | undefined;
+    const matching = (this.stmt(
+      `SELECT * FROM outbound_event_subscriptions
+       WHERE revoked_at IS NULL AND state='active'
+         AND ((scope_kind='project' AND project_id=?) OR
+              (scope_kind='automation' AND automation_id=?))
+       ORDER BY created_at,subscription_id`,
+    ).all(session.project_id, origin?.automation_id ?? null) as unknown as OutboundEventSubscriptionRow[])
+      .filter((row) => jsonArray(row.event_kinds_json).includes(input.kind));
+    if (matching.length === 0) return 0;
+
+    const eventId = `oev_${randomUUID().replace(/-/g, "")}`;
+    const created = this.stmt(
+      `INSERT OR IGNORE INTO outbound_events
+       (event_id,source_key,kind,session_id,project_id,automation_id,occurred_at,created_at)
+       VALUES (?,?,?,?,?,?,?,?)`,
+    ).run(eventId, input.sourceKey, input.kind, input.sessionId, session.project_id,
+      origin?.automation_id ?? null, input.occurredAt, input.occurredAt);
+    if (Number(created.changes) !== 1) return 0;
+
+    const parameters = origin?.parameters_json
+      ? jsonStringRecord(origin.parameters_json)
+      : undefined;
+    let enqueued = 0;
+    for (const row of matching) {
+      const queued = this.stmt(
+        `SELECT COUNT(*) AS count FROM outbound_event_deliveries
+         WHERE subscription_id=? AND status IN ('pending','retrying','delivering')`,
+      ).get(row.subscription_id) as { count: number };
+      if (queued.count >= OUTBOUND_EVENT_PENDING_LIMIT) {
+        this.stmt(
+          `UPDATE outbound_event_subscriptions
+           SET state='paused',pause_reason=?,updated_at=? WHERE subscription_id=?`,
+        ).run(`Paused because ${OUTBOUND_EVENT_PENDING_LIMIT} deliveries are pending`, input.occurredAt,
+          row.subscription_id);
+        continue;
+      }
+      const envelope: OutboundEventEnvelope = {
+        version: "v1",
+        eventId,
+        kind: input.kind,
+        occurredAt: input.occurredAt,
+        sessionId: input.sessionId,
+        ...(session.project_id ? { projectId: session.project_id } : {}),
+        ...(origin ? {
+          automationId: origin.automation_id,
+          automationExecutionId: origin.execution_id,
+          ...(origin.trigger_id ? { triggerId: origin.trigger_id } : {}),
+          ...(origin.invocation_id ? { triggerInvocationId: origin.invocation_id } : {}),
+          ...(parameters && Object.keys(parameters).length ? { parameters } : {}),
+        } : {}),
+        ...input.detail,
+        ...(row.include_session_name === 1 ? { sessionName: session.title } : {}),
+        ...(row.include_question_title === 1 && input.questionTitle
+          ? { questionTitle: input.questionTitle.slice(0, 240) }
+          : {}),
+      };
+      const payload = JSON.stringify(envelope);
+      if (Buffer.byteLength(payload) > OUTBOUND_EVENT_BODY_LIMIT_BYTES) {
+        this.stmt(
+          `UPDATE outbound_event_subscriptions
+           SET state='paused',pause_reason='Paused because an event exceeded the 16 KiB body limit',updated_at=?
+           WHERE subscription_id=?`,
+        ).run(input.occurredAt, row.subscription_id);
+        continue;
+      }
+      this.stmt(
+        `INSERT INTO outbound_event_deliveries
+         (delivery_id,subscription_id,event_id,kind,status,payload_json,next_attempt_at,created_at,updated_at)
+         VALUES (?,?,?,?,'pending',?,?,?,?)`,
+      ).run(`oed_${randomUUID().replace(/-/g, "")}`, row.subscription_id, eventId, input.kind,
+        payload, input.occurredAt, input.occurredAt, input.occurredAt);
+      enqueued += 1;
+    }
+    return enqueued;
   }
 
   private automationCommandView(command: AutomationCommandRecord): AutomationCommandView {
@@ -20121,6 +20948,18 @@ function jsonObject(raw: string): Record<string, string> {
     return v && typeof v === "object" && !Array.isArray(v) ? v : {};
   } catch {
     return {};
+  }
+}
+
+function jsonStringRecord(raw: string): Record<string, string> | undefined {
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const entries = Object.entries(value);
+    if (!entries.every(([key, item]) => key.length > 0 && typeof item === "string")) return undefined;
+    return Object.fromEntries(entries) as Record<string, string>;
+  } catch {
+    return undefined;
   }
 }
 
