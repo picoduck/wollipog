@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import type { DescendantRequestView, SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
+import { CampaignContinuationNotice } from "../components/SessionDetail.js";
 import { RightPanel, type RightPanelState } from "../components/RightPanel.js";
 import { SessionApprovalRegion } from "../components/SessionApproval.js";
 import { sessionRequestPanelKey } from "../components/SessionRequestPanel.js";
@@ -124,9 +125,48 @@ function descendantRequests(): DescendantRequestView[] {
   });
 }
 
+function continuationSession(): SessionView {
+  return {
+    ...evidenceSession(),
+    id: "campaign-session",
+    title: "Durable Campaign Recovery",
+    status: "idle",
+    pendingApproval: null,
+    orchestratorCampaign: {
+      status: "active",
+      policyRevision: 7,
+      decisionOwners: {
+        implementation_question: "orchestrator",
+        pr_merge: "human",
+        merged_branch_deletion: "human",
+        follow_up_issue_publication: "human",
+        ui_evidence_approval: "human",
+      },
+      limits: { maximumConcurrentChildren: 4, occupied: 2, remaining: 2, costBudgetUsd: null, maxToolCalls: null },
+      uiEvidenceReview: { status: "available", effectiveOwner: "orchestrator" },
+      children: { total: 4, active: 1, waitingHuman: 0, blocked: 0, verified: 2, cleanupPending: 1 },
+      pendingDecisions: { human: 0, orchestrator: 1 },
+      followUps: { unique: 0, duplicates: 0 },
+      continuation: {
+        state: "missing_result",
+        pendingEvents: 3,
+        continuationId: "campaign_cont_evidence",
+        commandId: "campaign_prompt_evidence",
+        eventFromSeq: 8,
+        eventThroughSeq: 10,
+        attemptCount: 2,
+        updatedAt: Date.now(),
+        error: "Provider accepted the turn but no terminal result was persisted.",
+        canAcknowledgeMissingResult: true,
+      },
+    },
+  } as SessionView;
+}
+
 function Fixture() {
-  const [session, setSession] = useState(() => scenario === "descendants"
-    ? {
+  const [session, setSession] = useState(() => scenario === "continuation"
+    ? continuationSession()
+    : scenario === "descendants" ? {
         ...evidenceSession(),
         status: "running",
         pendingApproval: null,
@@ -139,9 +179,11 @@ function Fixture() {
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<RightPanelMode>("requests");
   const [width, setWidth] = useState(420);
-  const [selectedKey, setSelectedKey] = useState<string | null>(() => scenario !== "descendants"
-    ? sessionRequestPanelKey(session.id, session.pendingApproval!.occurrenceId!)
-    : sessionRequestPanelKey(descendants[0]!.sessionId, descendants[0]!.occurrenceId));
+  const [selectedKey, setSelectedKey] = useState<string | null>(() => scenario === "descendants"
+    ? sessionRequestPanelKey(descendants[0]!.sessionId, descendants[0]!.occurrenceId)
+    : session.pendingApproval?.occurrenceId
+      ? sessionRequestPanelKey(session.id, session.pendingApproval.occurrenceId)
+      : null);
   const legacyFocusRef = useRef<HTMLTextAreaElement>(null);
   const state: RightPanelState = {
     open,
@@ -172,6 +214,17 @@ function Fixture() {
       setOpen(false);
       return updated;
     },
+    resolvePendingPrompt: async (_sessionId: string, commandId: string, action: "cancel" | "dismiss") => {
+      submissions.push({ commandId, action });
+      const updated = {
+        ...session,
+        orchestratorCampaign: session.orchestratorCampaign
+          ? { ...session.orchestratorCampaign, continuation: undefined }
+          : undefined,
+      } as SessionView;
+      setSession(updated);
+      return updated;
+    },
   } as ApiClient;
   const ownDecision = session.pendingApproval?.workflowDecision;
 
@@ -180,7 +233,7 @@ function Fixture() {
       <main className="app" style={{ display: "block", height: "100dvh" }}>
         <section className="session-detail expanded" style={{ height: "100%" }}>
           <header className="detail-head" style={{ justifyContent: "space-between" }}>
-            <h1 className="detail-title">Request Review</h1>
+            <h1 className="detail-title">{session.title}</h1>
             {scenario === "descendants" ? (
               <SessionStatusIndicators
                 session={session}
@@ -189,6 +242,12 @@ function Fixture() {
               />
             ) : <span />}
           </header>
+          {scenario === "continuation" && session.orchestratorCampaign?.continuation && (
+            <CampaignContinuationNotice
+              continuation={session.orchestratorCampaign.continuation}
+              onAcknowledge={(commandId) => void client.resolvePendingPrompt(session.id, commandId, "dismiss")}
+            />
+          )}
           <div className="detail-columns">
             <div className="detail-chat">
               {scenario === "legacy" && (
