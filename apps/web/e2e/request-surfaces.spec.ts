@@ -64,6 +64,22 @@ test("legacy inline evidence fixture reproduces the mobile over-height review", 
   expect(transcriptHeight).toBeLessThan(120);
 });
 
+test("missing campaign continuation result is visible and explicitly acknowledged", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/request-surfaces-e2e.html?scenario=continuation");
+  const notice = page.getByRole("status", { name: "Campaign Continuation: Missing Result" });
+  await expect(notice).toBeVisible();
+  await expect(notice).toContainText("3 Pending Events · Attempt 2");
+  await expect(notice).toContainText("It will not be replayed automatically");
+  await page.getByRole("button", { name: "Acknowledge Missing Result" }).click();
+  await expect(notice).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() =>
+    window.__WOLLIPOG_REQUEST_SURFACES_E2E__.submissions())).toEqual([{
+      commandId: "campaign_prompt_evidence",
+      action: "dismiss",
+    }]);
+});
+
 for (const viewport of [
   { name: "mobile portrait", width: 390, height: 844 },
   { name: "mobile landscape", width: 844, height: 390 },

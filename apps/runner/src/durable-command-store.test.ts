@@ -286,6 +286,37 @@ test("malformed durable envelopes fail closed without throwing", () => {
   }
 });
 
+test("campaign continuation metadata is bounded and bound to its exact session and event range", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-command-campaign-continuation-"));
+  try {
+    const store = new DurableCommandStore(root, { ownerId: "owner-a", now: () => 1 });
+    const valid: DurableSessionCommand = {
+      type: "prompt_session",
+      sessionId: "campaign",
+      text: "bounded summary",
+      campaignContinuation: {
+        campaignSessionId: "campaign",
+        continuationId: "campaign_cont_one",
+        eventFromSeq: 1,
+        eventThroughSeq: 4,
+      },
+    };
+    assert.equal(store.claim(message(valid, { commandId: "campaign_valid" })).kind, "new");
+    for (const [commandId, campaignContinuation] of [
+      ["campaign_wrong_session", { ...valid.campaignContinuation!, campaignSessionId: "other" }],
+      ["campaign_reverse_range", { ...valid.campaignContinuation!, eventFromSeq: 5, eventThroughSeq: 4 }],
+      ["campaign_extra_field", { ...valid.campaignContinuation!, secret: "not allowed" }],
+    ] as const) {
+      const command = { ...valid, campaignContinuation } as DurableSessionCommand;
+      const rejected = store.claim(message(command, { commandId }));
+      assert.notEqual(rejected.kind, "busy");
+      if (rejected.kind !== "busy") assert.equal(rejected.receipt.code, "INVALID_COMMAND");
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("durable command identities reject invalid command and execution ids", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-command-invalid-identity-"));
   try {

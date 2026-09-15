@@ -16,6 +16,7 @@ import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import {
+  CampaignContinuationNotice,
   ComposerPlusMenu,
   DESCENDANT_REQUEST_POLL_TIMEOUT_MS,
   useDescendantRequestPolling,
@@ -52,6 +53,73 @@ before(() => {
 after(() => {
   for (const [name, value] of Object.entries(prior)) {
     Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+  }
+});
+
+test("campaign continuation status explains missing results and exposes explicit acknowledgement", async () => {
+  const acknowledged: string[] = [];
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<CampaignContinuationNotice continuation={{
+      state: "missing_result",
+      pendingEvents: 3,
+      continuationId: "campaign_cont_one",
+      commandId: "campaign_prompt_one",
+      eventFromSeq: 4,
+      eventThroughSeq: 6,
+      attemptCount: 2,
+      updatedAt: 10,
+      error: "Provider result was not persisted.",
+      canAcknowledgeMissingResult: true,
+    }} onAcknowledge={(commandId) => acknowledged.push(commandId)} />);
+  });
+  try {
+    const notice = container.querySelector<HTMLElement>('[aria-label="Campaign Continuation: Missing Result"]');
+    assert.ok(notice);
+    assert.match(notice.textContent ?? "", /3 Pending Events · Attempt 2/);
+    assert.match(notice.textContent ?? "", /will not be replayed automatically/);
+    const acknowledge = container.querySelector<HTMLButtonElement>("button");
+    assert.equal(acknowledge?.textContent, "Acknowledge Missing Result");
+    await act(async () => fireDomEvent.click(acknowledge!));
+    assert.deepEqual(acknowledged, ["campaign_prompt_one"]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("campaign continuation status exposes an explicit retry after automatic retrying stops", async () => {
+  const retried: string[] = [];
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<CampaignContinuationNotice continuation={{
+      state: "failed",
+      pendingEvents: 2,
+      continuationId: "campaign_cont_failed",
+      commandId: "campaign_prompt_failed",
+      eventFromSeq: 7,
+      eventThroughSeq: 8,
+      attemptCount: 3,
+      updatedAt: 10,
+      error: "Runner queue remained full.",
+      canRetry: true,
+    }} onRetry={(commandId) => retried.push(commandId)} />);
+  });
+  try {
+    const notice = container.querySelector<HTMLElement>('[aria-label="Campaign Continuation: Failed"]');
+    assert.ok(notice);
+    assert.match(notice.textContent ?? "", /Automatic retrying stopped/);
+    const retry = container.querySelector<HTMLButtonElement>("button");
+    assert.equal(retry?.textContent, "Retry Campaign Continuation");
+    await act(async () => fireDomEvent.click(retry!));
+    assert.deepEqual(retried, ["campaign_prompt_failed"]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
   }
 });
 

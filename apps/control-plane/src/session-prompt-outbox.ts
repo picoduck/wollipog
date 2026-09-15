@@ -16,6 +16,7 @@ type Logger = { warn: (message: string) => void };
 
 const RECEIPT_HORIZON_MS = 30 * 24 * 60 * 60_000;
 const MAX_RETRY_MS = 30_000;
+const CAMPAIGN_HOLD_RECHECK_MS = 10_000;
 const RECEIPT_STATES = new Set(["accepted", "queued", "started", "completed", "failed", "uncertain"]);
 
 function retryDelay(attempt: number): number {
@@ -48,6 +49,33 @@ export class SessionPromptOutbox {
       payloadSha256: automationCommandDigest(command),
       expiresAt: now + RECEIPT_HORIZON_MS,
       now,
+    });
+  }
+
+  stageCampaignContinuation(input: {
+    continuationId: string;
+    campaignSessionId: string;
+    runnerId: string;
+    eventFromSeq: number;
+    eventThroughSeq: number;
+    attemptCount: number;
+    command: Extract<DurableSessionCommand, { type: "prompt_session" }>;
+    now: number;
+  }) {
+    const commandId = `campaign_prompt_${input.continuationId}`;
+    const payloadJson = canonicalAutomationCommandJson(input.command);
+    return this.db.stageCampaignContinuation({
+      continuationId: input.continuationId,
+      commandId,
+      campaignSessionId: input.campaignSessionId,
+      runnerId: input.runnerId,
+      eventFromSeq: input.eventFromSeq,
+      eventThroughSeq: input.eventThroughSeq,
+      payloadJson,
+      payloadSha256: automationCommandDigest(input.command),
+      expiresAt: input.now + RECEIPT_HORIZON_MS,
+      attemptCount: input.attemptCount,
+      now: input.now,
     });
   }
 
@@ -85,9 +113,24 @@ export class SessionPromptOutbox {
         this.failMalformed(row, "stored durable prompt digest does not match", now);
         continue;
       }
+      if (command.type === "prompt_session" && command.campaignContinuation) {
+        const campaign = this.db.campaignContinuationLifecycle(command.campaignContinuation.campaignSessionId);
+        const lifecycleEligible = campaign && !campaign.archived && campaign.status === "idle" &&
+          !campaign.hasPendingApproval;
+        const projection = lifecycleEligible
+          ? this.db.campaignProjection(command.campaignContinuation.campaignSessionId)
+          : null;
+        if (!lifecycleEligible || !projection || projection.status === "waiting_human" ||
+            projection.status === "verified_complete") {
+          this.db.deferSessionPromptCommand(row.commandId, now + CAMPAIGN_HOLD_RECHECK_MS, now);
+          continue;
+        }
+      }
       const capability = command.type === "answer_recovered_question"
         ? "resumableQuestionAnswers"
-        : "durablePromptQueueIdentity";
+        : command.type === "prompt_session" && command.campaignContinuation
+          ? "campaignContinuations"
+          : "durablePromptQueueIdentity";
       if (!runnerSupportsProtocol(this.db.getRunner(row.runnerId)?.protocolVersion, capability)) {
         this.db.recordSessionPromptCommandReceipt({
           commandId: row.commandId,
@@ -97,7 +140,9 @@ export class SessionPromptOutbox {
           revision: row.revision + 1,
           error: command.type === "answer_recovered_question"
             ? "runner no longer supports resumable structured-question answers"
-            : "runner no longer supports durable queued prompt identity",
+            : command.type === "prompt_session" && command.campaignContinuation
+              ? "runner no longer supports durable campaign continuations"
+              : "runner no longer supports durable queued prompt identity",
           now,
         });
         this.hub.sessionChangedById(row.sessionId);

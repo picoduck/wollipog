@@ -409,7 +409,10 @@
 // 148: App Server action admission is causally fenced in the runner-owned event log before the
 //      arming call returns. The returned thread, turn, history generation, and sequence bind a
 //      later Guardian receipt to an invocation that began after that exact provider-side boundary.
-export const PROTOCOL_VERSION = 148;
+// 149: durable campaign events fan into an idempotent parent continuation command. The command
+//      carries a content-free event range and older peers fail closed instead of accepting an
+//      unclassified synthetic provider turn.
+export const PROTOCOL_VERSION = 149;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -594,6 +597,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   typedWorkflowDecisionDelegation: 139,
   workflowDecisionActionAdmission: 148,
   orchestratorCampaignManagement: 140,
+  campaignContinuations: 149,
   orchestratorExecutionPolicy: 144,
   worktreeSetup: 141,
   worktreeTeardownPorts: 145,
@@ -1478,8 +1482,24 @@ export interface OrchestratorCampaignProjection {
     orchestrator: number;
     /** Content-free identities for detecting additions without treating removals as new work. */
     humanRequestTokens?: string[];
+    /** Content-free identities let continuation scheduling detect replacement and resolution. */
+    orchestratorRequestTokens?: string[];
   };
   followUps: { unique: number; duplicates: number };
+  /** Durable synthetic-turn state. Omitted only when the campaign has never needed a wake-up. */
+  continuation?: {
+    state: "pending" | "running" | "held" | "failed" | "missing_result";
+    pendingEvents: number;
+    continuationId?: string;
+    commandId?: string;
+    eventFromSeq?: number;
+    eventThroughSeq?: number;
+    attemptCount: number;
+    updatedAt: number;
+    error?: string;
+    canAcknowledgeMissingResult?: boolean;
+    canRetry?: boolean;
+  };
 }
 
 /** True only when a campaign gains human work. Exact content-free identities distinguish a
@@ -6292,6 +6312,14 @@ export interface PromptSessionMessage {
   config?: SessionConfig;
   /** Slash command name (without leading "/") if this turn invokes one. */
   slashCommand?: string;
+  /** Control-plane-authenticated synthetic campaign turn. Event bounds contain identities and
+   * metadata only; the provider must query scoped management tools for authorized details. */
+  campaignContinuation?: {
+    campaignSessionId: string;
+    continuationId: string;
+    eventFromSeq: number;
+    eventThroughSeq: number;
+  };
 }
 
 /** Continue an established provider conversation with the preserved answer to a structured
