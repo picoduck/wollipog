@@ -104,7 +104,7 @@ import {
   resolveWorktreeSetupRepositoryRoot,
   writeStarterWorktreeSetupConfig,
 } from "./worktree-setup-generator.js";
-import { NativeProviderAuthRecovery } from "./provider-auth-recovery.js";
+import { createRunnerProviderAuthRecovery } from "./provider-auth-recovery.js";
 import { handleResolveSteeringAttemptMessage, handleSteerSessionMessage } from "./steering-handler.js";
 import {
   CLAUDE_GRACEFUL_STOP_BUDGET_MS,
@@ -617,9 +617,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
   cloudTargets,
   () => controlPlaneProtocolVersion,
   dataDirLease.ownerHash,
-  // The existing runner credential is already staged in a protected local file. Reuse it only as
-  // an HMAC key so structural scope/account equality cannot be dictionary-tested from meta.json.
-  new NativeProviderAuthRecovery(undefined, config.token),
+  createRunnerProviderAuthRecovery(config.dataDir),
   (agentId, driver, context, update) => {
     subscriptionUsage.observe(agentId, driver, context, update);
   },
