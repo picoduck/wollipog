@@ -2340,7 +2340,7 @@ test("Guardian notification emits a structured review_decision instead of untype
   }]);
 });
 
-test("Guardian command approval carries one exact provider-correlated delivery receipt", () => {
+test("Guardian command approval carries one provider-correlated review receipt", () => {
   const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1140 --squash --match-head-commit ${"a".repeat(40)}`;
   const notification = {
     threadId: "thread-1",
@@ -2351,7 +2351,7 @@ test("Guardian command approval carries one exact provider-correlated delivery r
     review: { status: "approved", riskLevel: "high", userAuthorization: "high", rationale: "approved" },
     action: { type: "command", source: "unifiedExec", command, cwd: "/repo" },
   };
-  assert.deepEqual(parseReviewDecision(notification)?.approvalDelivery, {
+  assert.deepEqual(parseReviewDecision(notification)?.approvalReviewReceipt, {
     transport: "codex-app-server",
     threadId: "thread-1",
     turnId: "turn-1",
@@ -2359,7 +2359,6 @@ test("Guardian command approval carries one exact provider-correlated delivery r
     toolName: "commandExecution",
     input: command,
     inputSha256: createHash("sha256").update(command, "utf8").digest("hex"),
-    optionKind: "allow_once",
   });
 
   for (const malformed of [
@@ -2372,12 +2371,12 @@ test("Guardian command approval carries one exact provider-correlated delivery r
     { ...notification, action: { ...notification.action, source: "unknown" } },
     { ...notification, action: { ...notification.action, command: "x".repeat(2001) } },
   ]) {
-    assert.equal(parseReviewDecision(malformed)?.approvalDelivery, undefined,
+    assert.equal(parseReviewDecision(malformed)?.approvalReviewReceipt, undefined,
       "missing, denied, cancelled, or unsupported provider envelopes fail closed");
   }
 });
 
-test("Guardian action delivery is emitted only for the active root turn", () => {
+test("Guardian review correlation is emitted only for the active root turn", () => {
   const h = makeHarness();
   const notifications = new Map<string, (params: any) => void>();
   (h.driver as any).registerHandlers({
@@ -2402,12 +2401,17 @@ test("Guardian action delivery is emitted only for the active root turn", () => 
   notifications.get("item/autoApprovalReview/completed")!({
     ...notification,
     threadId: "subagent-thread",
-    turnId: "subagent-turn",
-    reviewId: "review-subagent",
-    targetItemId: "command-subagent",
+    reviewId: "review-wrong-thread",
+    targetItemId: "command-wrong-thread",
   });
-  assert.equal(h.events.length, 2);
-  assert.deepEqual((h.events[0] as any).approvalDelivery, {
+  notifications.get("item/autoApprovalReview/completed")!({
+    ...notification,
+    turnId: "stale-turn",
+    reviewId: "review-stale-turn",
+    targetItemId: "command-stale-turn",
+  });
+  assert.equal(h.events.length, 3);
+  assert.deepEqual((h.events[0] as any).approvalReviewReceipt, {
     transport: "codex-app-server",
     threadId: "root-thread",
     turnId: "root-turn",
@@ -2415,10 +2419,11 @@ test("Guardian action delivery is emitted only for the active root turn", () => 
     toolName: "commandExecution",
     input: command,
     inputSha256: createHash("sha256").update(command, "utf8").digest("hex"),
-    optionKind: "allow_once",
   });
-  assert.equal((h.events[1] as any).approvalDelivery, undefined,
-    "a subagent or stale turn remains visible but cannot carry action-admission proof");
+  assert.equal((h.events[1] as any).approvalReviewReceipt, undefined,
+    "a foreign thread remains visible but cannot carry action-admission correlation");
+  assert.equal((h.events[2] as any).approvalReviewReceipt, undefined,
+    "a stale turn remains visible but cannot carry action-admission correlation");
 });
 
 test("only auto-review approval requests carry Guardian escalation provenance", () => {

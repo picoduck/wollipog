@@ -102,7 +102,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type ReconcilePodRequest,
   type RunView,
   type ReviewFinding,
-  type ReviewDecisionApprovalDelivery,
+  type ReviewDecisionApprovalReviewReceipt,
   type ResourceScope,
   type ReviewFindingsResponse,
   type RunnerProtocolCapability,
@@ -1003,17 +1003,17 @@ function auditDigest(value: unknown): string | undefined {
   return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
 }
 
-function validatedGuardianApprovalDelivery(value: unknown): ReviewDecisionApprovalDelivery | null {
+function validatedGuardianApprovalReviewReceipt(value: unknown): ReviewDecisionApprovalReviewReceipt | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Record<string, unknown>;
   const boundedId = (field: unknown): field is string => typeof field === "string" && field.length > 0 &&
     field.length <= 512 && !/[\x00-\x1f\x7f]/u.test(field);
   if (candidate.transport !== "codex-app-server" || candidate.toolName !== "commandExecution" ||
-      candidate.optionKind !== "allow_once" || !boundedId(candidate.threadId) ||
+      !boundedId(candidate.threadId) ||
       !boundedId(candidate.turnId) || !boundedId(candidate.itemId) ||
       typeof candidate.input !== "string" || candidate.input.length < 1 || candidate.input.length > 2000 ||
       typeof candidate.inputSha256 !== "string" || !/^[0-9a-f]{64}$/u.test(candidate.inputSha256)) return null;
-  return candidate as unknown as ReviewDecisionApprovalDelivery;
+  return candidate as unknown as ReviewDecisionApprovalReviewReceipt;
 }
 
 function questionAuditContent(
@@ -5675,10 +5675,19 @@ export class SessionsService {
     }
     const now = Date.now();
     if (action.data) {
+      const providerTurnId = child.driver === "codex-app-server"
+        ? this.hub.activeTurnIdForSession(child.id)
+        : undefined;
+      if (child.driver === "codex-app-server" && !providerTurnId) {
+        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        return fail("App Server action admission requires an active provider turn", 409);
+      }
       const armed = this.db.armWorkflowDecisionAction(occurrenceId, {
         ...action.data,
         commandDigest: auditDigest(action.data)!,
         armedAt: now,
+        armedAfterEventSeq: this.db.sessionEventTailSeq(child.id),
+        ...(providerTurnId ? { providerTurnId } : {}),
       });
       if (!armed) return fail("workflow decision action admission changed concurrently", 409);
       this.hub.sessionChangedById(sessionId);
@@ -5700,7 +5709,12 @@ export class SessionsService {
     const command = approval.context?.input;
     const optionId = approval.options.find((option) => option.kind === "allow_once")?.optionId;
     if (approval.kind === "authentication" || typeof command !== "string" || !command || !optionId) return null;
-    const action = this.workflowDecisionActionForCommand(session, approval.context?.toolName, command);
+    const action = this.workflowDecisionActionForCommand(
+      session,
+      approval.context?.toolName,
+      command,
+      session.driver === "codex-app-server" ? this.hub.activeTurnIdForSession(session.id) : undefined,
+    );
     return action ? { ...action, optionId } : null;
   }
 
@@ -5708,6 +5722,8 @@ export class SessionsService {
     session: SessionView,
     toolName: string | undefined,
     command: string,
+    providerTurnId?: string,
+    providerItemId?: string,
   ): { decision: WorkflowDecisionView; commandDigest: string } | null {
     const expectedTool = session.driver === "codex-app-server"
       ? "commandExecution"
@@ -5718,9 +5734,20 @@ export class SessionsService {
     const matches = this.db.approvedWorkflowDecisionsForAction(session.id, commandDigest)
       .filter((decision) => decision.category === "pr_merge" &&
         decision.actionAdmission?.kind === action.kind &&
-        decision.actionAdmission.command === command);
+        decision.actionAdmission.command === command &&
+        (session.driver !== "codex-app-server" || (
+          providerTurnId != null && decision.actionAdmission.providerTurnId === providerTurnId
+        )));
     if (matches.length !== 1) return null;
     const decision = matches[0]!;
+    if (providerItemId && (
+      decision.actionAdmission?.armedAfterEventSeq == null ||
+      !this.db.isActiveRootToolCallStartedAfter(
+        session.id,
+        providerItemId,
+        decision.actionAdmission.armedAfterEventSeq,
+      )
+    )) return null;
     const parent = this.db.getSession(decision.controllingSessionId);
     const child = this.db.getSession(decision.sessionId);
     const policy = parent?.parentControlPolicy;
@@ -9154,21 +9181,24 @@ export class SessionsService {
           { content: payload.rationale },
         );
       }
-      const delivery = validatedGuardianApprovalDelivery(payload.approvalDelivery);
-      const deliveryDigest = delivery && createHash("sha256").update(delivery.input, "utf8").digest("hex");
-      if (delivery && reviewer?.kind === "agent" && reviewer.id === "codex-guardian" &&
-          payload.outcome === "allowed" && session.driver === delivery.transport &&
-          delivery.optionKind === "allow_once" && delivery.inputSha256 === deliveryDigest) {
+      const receipt = validatedGuardianApprovalReviewReceipt(payload.approvalReviewReceipt);
+      const receiptCommandDigest = receipt && createHash("sha256").update(receipt.input, "utf8").digest("hex");
+      if (receipt && reviewer?.kind === "agent" && reviewer.id === "codex-guardian" &&
+          payload.outcome === "allowed" && session.driver === receipt.transport &&
+          this.hub.activeTurnIdForSession(session.id) === receipt.turnId &&
+          receipt.inputSha256 === receiptCommandDigest) {
         const receiptDigest = auditDigest({
-          transport: delivery.transport,
-          threadId: delivery.threadId,
-          turnId: delivery.turnId,
-          itemId: delivery.itemId,
+          transport: receipt.transport,
+          threadId: receipt.threadId,
+          turnId: receipt.turnId,
+          itemId: receipt.itemId,
         })!;
         const actionAdmission = this.workflowDecisionActionForCommand(
           session,
-          delivery.toolName,
-          delivery.input,
+          receipt.toolName,
+          receipt.input,
+          receipt.turnId,
+          receipt.itemId,
         );
         if (actionAdmission) {
           const actor: GovernanceActor = { kind: "system", id: "workflow-decision-action-admission" };
@@ -9184,16 +9214,15 @@ export class SessionsService {
             this.recordGovernanceAudit(
               session,
               {
-                requestId: delivery.itemId,
+                requestId: receipt.itemId,
                 kind: "permission",
-                context: { toolName: delivery.toolName, input: delivery.input },
+                context: { toolName: receipt.toolName, input: receipt.input },
               },
               "resolution",
               "allowed",
               reviewer,
               now,
               {
-                optionId: delivery.optionKind,
                 workflowDecision: {
                   occurrenceId: consumed.occurrenceId,
                   parentSessionId: consumed.controllingSessionId,
@@ -9213,7 +9242,7 @@ export class SessionsService {
           this.db.claimWorkflowDecisionActionReceipt(
             session.id,
             receiptDigest,
-            auditDigest({ kind: "pr_merge_enqueue", command: delivery.input })!,
+            auditDigest({ kind: "pr_merge_enqueue", command: receipt.input })!,
             now,
           );
         }

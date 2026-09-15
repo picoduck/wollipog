@@ -68,7 +68,7 @@ const EVERY_PAYLOAD = {
     reviewer: { kind: "agent", id: "REVIEWER_LEAK" },
     outcome: "denied",
     rationale: "REVIEW_RATIONALE_LEAK",
-    approvalDelivery: {
+    approvalReviewReceipt: {
       transport: "codex-app-server",
       threadId: "REVIEW_THREAD_ID_LEAK",
       turnId: "REVIEW_TURN_ID_LEAK",
@@ -76,7 +76,6 @@ const EVERY_PAYLOAD = {
       toolName: "commandExecution",
       input: "REVIEW_COMMAND_LEAK",
       inputSha256: "a".repeat(64),
-      optionKind: "allow_once",
     },
   },
   permission_request: {

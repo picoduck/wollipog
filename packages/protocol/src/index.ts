@@ -403,8 +403,8 @@
 // 146: worktree setup configuration discovery distinguishes absent, valid, and invalid input;
 //      older peers omit the status and clients preserve that case as unknown. Starter generation
 //      is a narrow runner-owned mutation that cannot name an arbitrary destination.
-// 147: Guardian-direct action approval carries a provider-structured pre-execution receipt bound
-//      to the exact App Server invocation and command digest. PR-merge action admission now
+// 147: Guardian-direct action approval carries a provider-structured approval-review receipt bound
+//      to the App Server thread, turn, target item, and command digest. PR-merge action admission now
 //      requires this version so mixed deployments fail closed instead of retaining a used grant.
 export const PROTOCOL_VERSION = 147;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
@@ -2834,6 +2834,10 @@ export interface WorkflowDecisionAction {
 export interface WorkflowDecisionActionAdmission extends WorkflowDecisionAction {
   commandDigest: string;
   armedAt: number;
+  /** Control-plane event high-water captured atomically with the admission boundary. */
+  armedAfterEventSeq?: number;
+  /** Active provider turn captured at arm time. Required for App Server action admission. */
+  providerTurnId?: string;
 }
 
 /** One exact workflow gate. Raw rationale is never retained; only its digest reaches audit. */
@@ -3073,10 +3077,10 @@ export type GovernanceAuditOutcome =
 export type ReviewDecisionOutcome = "allowed" | "denied" | "escalated" | "timed_out" | "aborted";
 export type ReviewRiskLevel = "low" | "medium" | "high";
 
-/** Provider-structured proof that one exact Guardian-reviewed App Server command was allowed.
- * This is emitted from the approval-review completion notification before command execution, not
- * reconstructed from transcript prose or the truncated tool display title. */
-export interface ReviewDecisionApprovalDelivery {
+/** Provider-structured completion receipt for one Guardian approval review.
+ * It correlates the provider-reported thread, turn, target item, and command; it does not assert
+ * that command execution started, completed, or inherited any particular provider grant lifetime. */
+export interface ReviewDecisionApprovalReviewReceipt {
   transport: "codex-app-server";
   threadId: string;
   turnId: string;
@@ -3085,7 +3089,6 @@ export interface ReviewDecisionApprovalDelivery {
   input: string;
   /** SHA-256 of the exact UTF-8 input above, computed at the provider bridge. */
   inputSha256: string;
-  optionKind: "allow_once";
 }
 
 /** Provider-neutral terminal decision from an automated reviewer. Rationale is bounded by the
@@ -3098,8 +3101,8 @@ export interface ReviewDecision {
   rationale?: string;
   /** Provider approval/request id when the review can be correlated to one. */
   requestId?: string;
-  /** Exact one-shot delivery proof when the provider exposes a trusted invocation envelope. */
-  approvalDelivery?: ReviewDecisionApprovalDelivery;
+  /** Correlated approval-review completion metadata when the provider exposes a trusted envelope. */
+  approvalReviewReceipt?: ReviewDecisionApprovalReviewReceipt;
 }
 
 /** Durable content-safe approval provenance. Raw tool input and question answers are never stored. */

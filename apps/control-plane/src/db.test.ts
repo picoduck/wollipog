@@ -2274,6 +2274,8 @@ test("PR merge action admission stays durable and consumes only its matching dig
       command: `gh pr merge https://github.com/picoduck/wollipog/pull/42 --squash --match-head-commit ${snapshot.headSha}`,
       commandDigest: "c".repeat(64),
       armedAt: 3_000,
+      armedAfterEventSeq: 7,
+      providerTurnId: "turn-42",
     };
     assert.equal(initial.armWorkflowDecisionAction("workflow-merge-42", admission)?.status, "approved");
     initial.close();
@@ -2290,6 +2292,37 @@ test("PR merge action admission stays durable and consumes only its matching dig
     reopened.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("action invocation correlation requires a root tool call after the admission event boundary", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    db.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    db.createSession(newSession({ id: "parent" }));
+    db.createSession(newSession({ id: "child", parentSessionId: "parent" }));
+    db.appendEvent("child", {
+      kind: "tool_call", toolCallId: "stale", title: "Run", toolKind: "execute", status: "in_progress",
+    }, 1_000);
+    const boundary = db.sessionEventTailSeq("child");
+    db.appendEvent("child", {
+      kind: "tool_call", toolCallId: "fresh", title: "Run", toolKind: "execute", status: "in_progress",
+    }, 2_000);
+    assert.equal(db.isActiveRootToolCallStartedAfter("child", "stale", boundary), false);
+    assert.equal(db.isActiveRootToolCallStartedAfter("child", "fresh", boundary), true);
+    db.appendEvent("child", {
+      kind: "tool_call_update", toolCallId: "fresh", status: "completed",
+    }, 3_000);
+    assert.equal(db.isActiveRootToolCallStartedAfter("child", "fresh", boundary), false,
+      "a completed item is no longer an active invocation");
+    db.appendEvent("child", {
+      kind: "tool_call", toolCallId: "nested", title: "Run", toolKind: "execute", status: "in_progress",
+      parentToolUseId: "parent-tool",
+    }, 4_000);
+    assert.equal(db.isActiveRootToolCallStartedAfter("child", "nested", boundary), false,
+      "a subagent item cannot correlate a root action admission");
+  } finally {
+    db.close();
   }
 });
 

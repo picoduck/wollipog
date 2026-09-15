@@ -930,6 +930,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     const humanMergeSnapshot = { ...mergeSnapshot, headSha: "b".repeat(40),
       requiredChecks: { ...mergeSnapshot.requiredChecks, headSha: "b".repeat(40) } };
     const humanMergeCommand = canonicalPrMergeEnqueueCommand(humanMergeSnapshot);
+    hub.setSessionQueue(grandchild.data.id, [], false, "nested-human-turn");
     assert.ok(svc.consumeWorkflowDecision(grandchild.data.id, humanMerge.data.occurrenceId, {
       resourceSnapshot: humanMergeSnapshot,
       action: { kind: "pr_merge_enqueue", command: humanMergeCommand },
@@ -2811,6 +2812,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       return child.data;
     };
     const child = createChild(agentId);
+    if (agentId === CODEX_APP_AGENT_ID) hub.setSessionQueue(child.id, [], false, "turn-1");
     assert.ok(svc.setParentControlPolicy(parent.data.id, {
       implementation_question: "human",
       pr_merge: "orchestrator",
@@ -2819,7 +2821,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       ui_evidence_approval: "human",
     }, 0).ok);
     let sequence = 0;
-    const arm = (pullRequest = 1140) => {
+    const arm = (pullRequest = 1140, expectedStatus: 200 | 409 = 200) => {
       const headSha = String(pullRequest).padStart(40, "a").slice(-40);
       const snapshot = {
         category: "pr_merge" as const,
@@ -2845,30 +2847,38 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
         resourceSnapshot: snapshot,
         action: { kind: "pr_merge_enqueue", command },
       });
-      assert.equal(armed.data?.status, "approved", armed.error);
-      return { decision: decision.data, snapshot, command };
+      assert.equal(armed.status, expectedStatus, armed.error);
+      if (expectedStatus === 200) assert.equal(armed.data?.status, "approved", armed.error);
+      return { decision: decision.data, snapshot, command, armed };
     };
-    const receipt = (command: string): Extract<SessionEventPayload, { kind: "review_decision" }> => ({
-      kind: "review_decision",
-      reviewId: `review-${++sequence}`,
-      reviewer: { kind: "agent", id: "codex-guardian" },
-      outcome: "allowed",
-      approvalDelivery: {
+    const receipt = (command: string): Extract<SessionEventPayload, { kind: "review_decision" }> => {
+      const reviewId = `review-${++sequence}`;
+      const itemId = `command-${sequence}`;
+      // The provider emits the structured command item before its Guardian review completes.
+      svc.onSessionEvent(child.id, {
+        kind: "tool_call", toolCallId: itemId, title: "Run Command", toolKind: "execute", status: "in_progress",
+      });
+      return {
+        kind: "review_decision",
+        reviewId,
+        reviewer: { kind: "agent", id: "codex-guardian" },
+        outcome: "allowed",
+        approvalReviewReceipt: {
         transport: "codex-app-server",
         threadId: "thread-1",
-        turnId: "turn-1",
-        itemId: `command-${sequence}`,
+        turnId: hub.activeTurnIdForSession(child.id) ?? "turn-1",
+        itemId,
         toolName: "commandExecution",
         input: command,
         inputSha256: createHash("sha256").update(command, "utf8").digest("hex"),
-        optionKind: "allow_once",
-      },
-    });
+        },
+      };
+    };
     return { db, hub, svc, parent: parent.data, child, createChild, arm, receipt };
   };
 
   await t.test("exact Guardian and existing permission paths each consume only once", () => {
-    const { db, svc, child, arm, receipt } = setup();
+    const { db, hub, svc, child, arm, receipt } = setup();
     try {
       const guardian = arm(1140);
       const guardianReceipt = receipt(guardian.command);
@@ -2879,6 +2889,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
         entry.requestId === guardian.decision.occurrenceId && entry.outcome === "consumed").length, 1,
       "duplicate provider events cannot consume or audit consumption twice");
 
+      hub.setSessionQueue(child.id, [], false, "turn-2");
       const rearmed = arm(1140);
       svc.onSessionEvent(child.id, guardianReceipt);
       assert.equal(db.workflowDecisionByOccurrence(rearmed.decision.occurrenceId)?.status, "approved",
@@ -2887,6 +2898,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       assert.equal(db.workflowDecisionByOccurrence(rearmed.decision.occurrenceId)?.status, "consumed",
         "a new provider invocation can consume the newly armed grant");
 
+      hub.setSessionQueue(child.id, [], false, "turn-3");
       const requested = arm(1141);
       svc.onSessionEvent(child.id, {
         kind: "permission_request",
@@ -2903,16 +2915,82 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     } finally { db.close(); }
   });
 
+  await t.test("a first-seen receipt from an older provider turn cannot consume a fresh identical admission", () => {
+    const { db, hub, svc, child, arm, receipt } = setup();
+    try {
+      hub.setSessionQueue(child.id, [], false, "turn-old");
+      const old = arm(1161);
+      assert.equal(db.workflowDecisionByOccurrence(old.decision.occurrenceId)?.actionAdmission?.providerTurnId,
+        "turn-old", "arming captures the provider turn active at that boundary");
+      const staleReceipt = receipt(old.command);
+
+      const fresh = arm(1161);
+      assert.equal(db.workflowDecisionByOccurrence(fresh.decision.occurrenceId)?.actionAdmission?.providerTurnId,
+        "turn-old");
+      svc.onSessionEvent(child.id, staleReceipt);
+
+      assert.equal(db.workflowDecisionByOccurrence(fresh.decision.occurrenceId)?.status, "approved",
+        "command equality alone must not correlate an older invocation to the fresh admission");
+      svc.onSessionEvent(child.id, receipt(fresh.command));
+      assert.equal(db.workflowDecisionByOccurrence(fresh.decision.occurrenceId)?.status, "consumed",
+        "a provider item that starts after the fresh admission can consume it exactly once");
+    } finally { db.close(); }
+  });
+
+  await t.test("a review receipt observed only after its command item completed cannot consume", () => {
+    const { db, svc, child, arm, receipt } = setup();
+    try {
+      const armed = arm(1165);
+      const lateReceipt = receipt(armed.command);
+      svc.onSessionEvent(child.id, {
+        kind: "tool_call_update",
+        toolCallId: lateReceipt.approvalReviewReceipt!.itemId,
+        status: "completed",
+      });
+      svc.onSessionEvent(child.id, lateReceipt);
+      assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "approved",
+        "post-completion review audit is not treated as action-admission enforcement");
+    } finally { db.close(); }
+  });
+
+  await t.test("App Server action arming requires and binds the active provider turn and event high-water", () => {
+    const { db, hub, svc, child, arm } = setup();
+    try {
+      const first = arm(1162);
+      const admission = db.workflowDecisionByOccurrence(first.decision.occurrenceId)?.actionAdmission;
+      assert.equal(admission?.providerTurnId, "turn-1");
+      assert.equal(admission?.armedAfterEventSeq, db.sessionEventTailSeq(child.id));
+      assert.equal(db.workflowDecisionByOccurrence(first.decision.occurrenceId)?.status, "approved");
+      svc.onSessionEvent(child.id, { kind: "agent_thought", text: "later event" });
+      const retry = svc.consumeWorkflowDecision(child.id, first.decision.occurrenceId, {
+        resourceSnapshot: first.snapshot,
+        action: { kind: "pr_merge_enqueue", command: first.command },
+      });
+      assert.ok(retry.ok, retry.error);
+      assert.equal(retry.data?.actionAdmission?.armedAfterEventSeq, admission?.armedAfterEventSeq,
+        "an idempotent retry cannot move the original event-order boundary forward");
+
+      hub.setSessionQueue(child.id, [], false);
+      const missingTurn = arm(1164, 409);
+      assert.match(missingTurn.armed.error ?? "", /requires an active provider turn/u);
+      assert.equal(db.workflowDecisionByOccurrence(missingTurn.decision.occurrenceId)?.status, "revoked");
+    } finally { db.close(); }
+  });
+
   await t.test("command, tool, digest, child, reviewer, malformed, and cancelled mismatches retain the grant", () => {
     const { db, svc, child, createChild, arm, receipt } = setup();
     try {
       const armed = arm(1142);
       svc.onSessionEvent(child.id, receipt(`${armed.command} --delete-branch`));
       const wrongTool = receipt(armed.command);
-      wrongTool.approvalDelivery = { ...wrongTool.approvalDelivery!, toolName: "Bash" as "commandExecution" };
+      wrongTool.approvalReviewReceipt = {
+        ...wrongTool.approvalReviewReceipt!, toolName: "Bash" as "commandExecution",
+      };
       svc.onSessionEvent(child.id, wrongTool);
       const wrongDigest = receipt(armed.command);
-      wrongDigest.approvalDelivery = { ...wrongDigest.approvalDelivery!, inputSha256: "0".repeat(64) };
+      wrongDigest.approvalReviewReceipt = {
+        ...wrongDigest.approvalReviewReceipt!, inputSha256: "0".repeat(64),
+      };
       svc.onSessionEvent(child.id, wrongDigest);
       const otherChild = createChild(CODEX_APP_AGENT_ID);
       svc.onSessionEvent(otherChild.id, receipt(armed.command));
@@ -2920,10 +2998,10 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       wrongReviewer.reviewer = { kind: "agent", id: "another-reviewer" };
       svc.onSessionEvent(child.id, wrongReviewer);
       const wrongTransport = receipt(armed.command);
-      (wrongTransport.approvalDelivery as unknown as { transport: string }).transport = "claude-code";
+      (wrongTransport.approvalReviewReceipt as unknown as { transport: string }).transport = "claude-code";
       svc.onSessionEvent(child.id, wrongTransport);
       const malformed = receipt(armed.command);
-      (malformed.approvalDelivery as unknown as { input: unknown }).input = 1;
+      (malformed.approvalReviewReceipt as unknown as { input: unknown }).input = 1;
       assert.doesNotThrow(() => svc.onSessionEvent(child.id, malformed));
       const cancelled = receipt(armed.command);
       cancelled.outcome = "aborted";

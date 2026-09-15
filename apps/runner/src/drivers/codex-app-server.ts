@@ -1238,13 +1238,13 @@ export class CodexAppServerDriver implements Driver {
     // skipped — it duplicates this verdict for plain approvals.)
     peer.onNotification("item/autoApprovalReview/completed", (p: Json) => {
       let decision = parseReviewDecision(p);
-      const delivery = decision?.approvalDelivery;
-      if (decision && delivery && (
+      const receipt = decision?.approvalReviewReceipt;
+      if (decision && receipt && (
         !this.promptBusy || !this.turnResolve ||
-        delivery.threadId !== this.threadId || delivery.turnId !== this.turnId
+        receipt.threadId !== this.threadId || receipt.turnId !== this.turnId
       )) {
-        // Keep the visible review, but only the active root turn can carry action-admission proof.
-        const { approvalDelivery: _untrustedCorrelation, ...visibleDecision } = decision;
+        // Keep the visible review, but only the active root turn can carry admission correlation.
+        const { approvalReviewReceipt: _untrustedCorrelation, ...visibleDecision } = decision;
         decision = visibleDecision;
       }
       if (decision) this.cb.onEvent({ kind: "review_decision", ...decision });
@@ -1678,7 +1678,7 @@ export function parseReviewDecision(p: Json): ReviewDecision | null {
     ? truncate(r.rationale.trim(), 200)
     : undefined;
   const requestId = r?.requestId ?? r?.approvalId ?? p?.requestId ?? p?.approvalId;
-  const approvalDelivery = guardianApprovalDelivery(p);
+  const approvalReviewReceipt = guardianApprovalReviewReceipt(p);
   return {
     reviewId,
     reviewer: { kind: "agent", id: "codex-guardian" },
@@ -1686,14 +1686,15 @@ export function parseReviewDecision(p: Json): ReviewDecision | null {
     ...(riskLevel ? { riskLevel } : {}),
     ...(rationale ? { rationale } : {}),
     ...(typeof requestId === "string" && requestId ? { requestId } : {}),
-    ...(approvalDelivery ? { approvalDelivery } : {}),
+    ...(approvalReviewReceipt ? { approvalReviewReceipt } : {}),
   };
 }
 
-/** Extract only the current typed App Server approval envelope. The surrounding review parser is
- * deliberately liberal for display compatibility, but action admission must fail closed unless
- * every correlation field and the exact command are present on the documented top-level shape. */
-function guardianApprovalDelivery(p: Json): ReviewDecision["approvalDelivery"] {
+/** Extract only the current typed App Server approval-review completion envelope. The surrounding
+ * review parser is deliberately liberal for display compatibility, but action admission fails
+ * closed unless every correlation field and the exact command are on the documented top-level
+ * shape. This receipt does not prove command execution or a provider grant lifetime. */
+function guardianApprovalReviewReceipt(p: Json): ReviewDecision["approvalReviewReceipt"] {
   const review = p?.review;
   const action = p?.action;
   const boundedId = (value: unknown) => typeof value === "string" && value.length > 0 &&
@@ -1711,7 +1712,6 @@ function guardianApprovalDelivery(p: Json): ReviewDecision["approvalDelivery"] {
     toolName: "commandExecution",
     input: action.command,
     inputSha256: createHash("sha256").update(action.command, "utf8").digest("hex"),
-    optionKind: "allow_once",
   };
 }
 
