@@ -2343,6 +2343,16 @@ export interface ApprovalContext {
   /** Human-readable input rendering (command text, file path + content excerpt, JSON), bounded
    * by the emitter — never the raw multi-MB payload. */
   input?: string;
+  /** Provider-structured command identity used only for exact action admission. Display text such
+   * as an approval reason must never populate this field. App Server identities are bound to the
+   * active root provider invocation so stale or subagent requests fail closed. */
+  commandIdentity?: {
+    transport: "codex-app-server";
+    threadId: string;
+    turnId: string;
+    itemId: string;
+    input: string;
+  };
   /** Normalized, bounded resource selectors asserted by the authenticated runner. The control
    * plane parses path/network structure before matching; it does not independently inspect the
    * runner's filesystem or DNS. Auto-allow policies cannot depend on asserted escalation state. */

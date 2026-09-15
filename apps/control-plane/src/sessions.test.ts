@@ -957,15 +957,30 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       requiredChecks: { ...mergeSnapshot.requiredChecks, headSha: "b".repeat(40) } };
     const humanMergeCommand = canonicalPrMergeEnqueueCommand(humanMergeSnapshot);
     hub.setSessionQueue(grandchild.data.id, [], false, "nested-human-turn");
+    db.reconcileRunnerHistory(grandchild.data.id, 0, 0);
     const armedHumanMerge = await svc.consumeWorkflowDecision(grandchild.data.id, humanMerge.data.occurrenceId, {
       resourceSnapshot: humanMergeSnapshot,
       action: { kind: "pr_merge_enqueue", command: humanMergeCommand },
     });
     assert.ok(armedHumanMerge.ok, armedHumanMerge.error);
+    db.appendEvent(grandchild.data.id, {
+      kind: "tool_call", toolCallId: "nested-human-item", title: "Enqueue PR",
+      toolKind: "execute", status: "in_progress",
+    }, Date.now(), { runnerSeq: 2, historyEpoch: 0 });
     svc.onSessionEvent(grandchild.data.id, {
       kind: "permission_request", requestId: "nested-human-enqueue", title: "Enqueue PR",
       options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }],
-      context: { toolName: "commandExecution", input: humanMergeCommand },
+      context: {
+        toolName: "commandExecution",
+        input: humanMergeCommand,
+        commandIdentity: {
+          transport: "codex-app-server",
+          threadId: "test-provider-thread",
+          turnId: "nested-human-turn",
+          itemId: "nested-human-item",
+          input: humanMergeCommand,
+        },
+      },
     });
     assert.equal(db.workflowDecisionByOccurrence(humanMerge.data.occurrenceId)?.status, "consumed");
     svc.onSessionStatus(grandchild.data.id, "idle");
@@ -2931,11 +2946,37 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
         },
       };
     };
-    return { db, hub, svc, parent: parent.data, child, createChild, arm, receipt, runnerEvent };
+    const permission = (
+      command: string,
+      requestId = `permission-${++sequence}`,
+    ): Extract<SessionEventPayload, { kind: "permission_request" }> => {
+      const itemId = `command-${sequence}`;
+      runnerEvent({
+        kind: "tool_call", toolCallId: itemId, title: "Run Command", toolKind: "execute", status: "in_progress",
+      });
+      return {
+        kind: "permission_request",
+        requestId,
+        title: "Enqueue PR",
+        options: [{ optionId: "accept", name: "Allow Once", kind: "allow_once" }],
+        context: {
+          toolName: "commandExecution",
+          input: command,
+          commandIdentity: {
+            transport: "codex-app-server",
+            threadId: "thread-1",
+            turnId: hub.activeTurnIdForSession(child.id) ?? "turn-1",
+            itemId,
+            input: command,
+          },
+        },
+      };
+    };
+    return { db, hub, svc, parent: parent.data, child, createChild, arm, receipt, permission, runnerEvent };
   };
 
   await t.test("exact Guardian and existing permission paths each consume only once", async () => {
-    const { db, hub, svc, child, arm, receipt } = setup();
+    const { db, hub, svc, child, arm, receipt, permission } = setup();
     try {
       const guardian = await arm(1140);
       const guardianReceipt = receipt(guardian.command);
@@ -2957,18 +2998,74 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
 
       hub.setSessionQueue(child.id, [], false, "turn-3");
       const requested = await arm(1141);
-      svc.onSessionEvent(child.id, {
-        kind: "permission_request",
-        requestId: "provider-request-1141",
-        title: "Enqueue PR",
-        options: [{ optionId: "accept", name: "Allow Once", kind: "allow_once" }],
-        context: { toolName: "commandExecution", input: requested.command },
-      });
+      svc.onSessionEvent(child.id, permission(requested.command, "provider-request-1141"));
       assert.equal(db.workflowDecisionByOccurrence(requested.decision.occurrenceId)?.status, "consumed");
       svc.onSessionEvent(child.id, receipt(requested.command));
       assert.equal(svc.governanceAudit(child.id).filter((entry) =>
         entry.requestId === requested.decision.occurrenceId && entry.outcome === "consumed").length, 1,
       "a later Guardian event cannot double-consume the existing requestApproval path");
+    } finally { db.close(); }
+  });
+
+  await t.test("ordinary App Server permission admission never derives identity from display reason", async () => {
+    const { db, hub, svc, child, arm } = setup();
+    try {
+      for (const [pullRequest, reason] of [
+        [1171, "raw"],
+        [1172, "wrapped"],
+      ] as const) {
+        hub.setSessionQueue(child.id, [], false, `turn-${pullRequest}`);
+        const pending = await arm(pullRequest);
+        const displayInput = reason === "raw"
+          ? pending.command
+          : `/usr/bin/zsh -lc '${pending.command}'`;
+        const sendsBefore = hub.sentOfType("resolve_permission").length;
+        svc.onSessionEvent(child.id, {
+          kind: "permission_request",
+          requestId: `reason-only-${pullRequest}`,
+          title: "Network access requested",
+          options: [{ optionId: "accept", name: "Allow Once", kind: "allow_once" }],
+          context: {
+            toolName: "commandExecution",
+            input: displayInput,
+            network: "requested",
+          },
+        });
+        assert.equal(hub.sentOfType("resolve_permission").length, sendsBefore,
+          `${reason} explanatory reason cannot receive the typed allow response`);
+        assert.equal(db.workflowDecisionByOccurrence(pending.decision.occurrenceId)?.status, "approved",
+          `${reason} explanatory reason cannot consume command authorization`);
+        assert.equal(db.getSession(child.id)?.pendingApproval?.requestId, `reason-only-${pullRequest}`,
+          "the ordinary permission remains pending instead of being silently authorized");
+        db.setPendingApproval(child.id, null);
+        db.updateSessionStatus(child.id, "running", Date.now());
+      }
+    } finally { db.close(); }
+  });
+
+  await t.test("ordinary App Server permission admission requires the active root thread, turn, and item", async () => {
+    const { db, hub, svc, child, arm, permission } = setup();
+    try {
+      const cases = ["subagent", "thread", "turn", "item"] as const;
+      for (const [offset, mismatch] of cases.entries()) {
+        const pullRequest = 1180 + offset;
+        hub.setSessionQueue(child.id, [], false, `turn-${pullRequest}`);
+        const pending = await arm(pullRequest);
+        const event = permission(pending.command, `mismatch-${mismatch}`);
+        assert.ok(event.context?.commandIdentity);
+        if (mismatch === "subagent") event.ownerToolUseId = "spawn-child";
+        if (mismatch === "thread") event.context.commandIdentity.threadId = "child-thread";
+        if (mismatch === "turn") event.context.commandIdentity.turnId = "stale-turn";
+        if (mismatch === "item") event.context.commandIdentity.itemId = "unseen-item";
+        const sendsBefore = hub.sentOfType("resolve_permission").length;
+        svc.onSessionEvent(child.id, event);
+        assert.equal(hub.sentOfType("resolve_permission").length, sendsBefore,
+          `${mismatch} mismatch cannot receive the typed allow response`);
+        assert.equal(db.workflowDecisionByOccurrence(pending.decision.occurrenceId)?.status, "approved",
+          `${mismatch} mismatch cannot consume command authorization`);
+        db.setPendingApproval(child.id, null);
+        db.updateSessionStatus(child.id, "running", Date.now());
+      }
     } finally { db.close(); }
   });
 

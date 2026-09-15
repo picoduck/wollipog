@@ -5766,14 +5766,32 @@ export class SessionsService {
     session: SessionView,
     approval: PendingApproval,
   ): { decision: WorkflowDecisionView; commandDigest: string; optionId: string } | null {
-    const command = approval.context?.input;
     const optionId = approval.options.find((option) => option.kind === "allow_once")?.optionId;
-    if (approval.kind === "authentication" || typeof command !== "string" || !command || !optionId) return null;
+    if (approval.kind === "authentication" || !optionId) return null;
+    if (session.driver === "codex-app-server") {
+      const identity = approval.context?.commandIdentity;
+      const boundedId = (value: unknown) => typeof value === "string" && value.length > 0 &&
+        value.length <= 512 && !/[\x00-\x1f\x7f]/u.test(value);
+      if (approval.ownerToolUseId || identity?.transport !== "codex-app-server" ||
+          typeof identity.input !== "string" || !identity.input || identity.input.length > 2000 ||
+          !boundedId(identity.threadId) || !boundedId(identity.turnId) || !boundedId(identity.itemId) ||
+          this.hub.activeTurnIdForSession(session.id) !== identity.turnId) return null;
+      const action = this.workflowDecisionActionForCommand(
+        session,
+        approval.context?.toolName,
+        identity.input,
+        identity.turnId,
+        identity.itemId,
+        identity.threadId,
+      );
+      return action ? { ...action, optionId } : null;
+    }
+    const command = approval.context?.input;
+    if (typeof command !== "string" || !command) return null;
     const action = this.workflowDecisionActionForCommand(
       session,
       approval.context?.toolName,
       command,
-      session.driver === "codex-app-server" ? this.hub.activeTurnIdForSession(session.id) : undefined,
     );
     return action ? { ...action, optionId } : null;
   }

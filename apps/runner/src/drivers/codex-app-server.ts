@@ -1100,6 +1100,9 @@ export class CodexAppServerDriver implements Driver {
             method,
             params,
             [AUTO_REVIEW_MODE, "orchestrator"].includes(this.config.permissionMode || AUTO_REVIEW_MODE),
+            !ownership.ownerToolUseId && this.promptBusy && this.turnResolve && this.threadId && this.turnId
+              ? { threadId: this.threadId, turnId: this.turnId }
+              : undefined,
           ),
         });
       });
@@ -1688,6 +1691,11 @@ function codexProviderShellScript(command: string): string | null {
   return script;
 }
 
+function boundedProviderCorrelationId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 512 &&
+    !/[\x00-\x1f\x7f]/u.test(value);
+}
+
 export function parseReviewDecision(p: Json): ReviewDecision | null {
   const r = p?.review ?? p?.autoApprovalReview ?? p?.guardianApprovalReview ?? p?.item ?? p;
   const status = r?.status;
@@ -1720,13 +1728,12 @@ export function parseReviewDecision(p: Json): ReviewDecision | null {
 function guardianApprovalReviewReceipt(p: Json): ReviewDecision["approvalReviewReceipt"] {
   const review = p?.review;
   const action = p?.action;
-  const boundedId = (value: unknown) => typeof value === "string" && value.length > 0 &&
-    value.length <= 512 && !/[\x00-\x1f\x7f]/u.test(value);
   const input = typeof action?.command === "string" ? codexProviderShellScript(action.command) : null;
   if (p?.decisionSource !== "agent" || review?.status !== "approved" ||
       action?.type !== "command" || action?.source !== "unifiedExec" ||
-      !boundedId(p?.threadId) || !boundedId(p?.turnId) || !boundedId(p?.targetItemId) ||
-      !boundedId(p?.reviewId) || typeof action?.command !== "string" ||
+      !boundedProviderCorrelationId(p?.threadId) || !boundedProviderCorrelationId(p?.turnId) ||
+      !boundedProviderCorrelationId(p?.targetItemId) || !boundedProviderCorrelationId(p?.reviewId) ||
+      typeof action?.command !== "string" ||
       action.command.length < 1 || action.command.length > 2000 || !input) return undefined;
   return {
     transport: "codex-app-server",
@@ -1757,7 +1764,12 @@ function approvalTitle(params: Json): string {
   return "Codex requests approval";
 }
 
-export function approvalContext(method: string, params: Json, escalated: boolean) {
+export function approvalContext(
+  method: string,
+  params: Json,
+  escalated: boolean,
+  activeRoot?: { threadId: string; turnId: string },
+) {
   const toolName = method === PERMISSIONS_METHOD
     ? "permissions"
     : method.includes("fileChange")
@@ -1769,17 +1781,33 @@ export function approvalContext(method: string, params: Json, escalated: boolean
   const onlyChange = changes?.length === 1 ? changes[0] : changes ? null : params?.fileChange;
   const path = params?.path ?? params?.filePath ?? onlyChange?.path ?? onlyChange?.filePath;
   const branch = params?.branch ?? params?.branchName;
-  const providerInput = params?.command ?? params?.reason;
+  const providerCommand = typeof params?.command === "string" && params.command
+    ? params.command : null;
+  const displayInput = providerCommand ?? (typeof params?.reason === "string" ? params.reason : null);
   // Current App Servers expose commandExecution input through the same shlex-joined wrapper used
-  // by Guardian. Preserve older raw input and all unsupported shapes unchanged so the downstream
-  // exact-command matcher remains fail closed.
-  const input = toolName === "commandExecution" && typeof providerInput === "string"
-    ? codexProviderShellScript(providerInput) ?? providerInput
-    : providerInput;
+  // by Guardian. Preserve older raw command input and all unsupported shapes unchanged so the
+  // downstream exact-command matcher remains fail closed. Explanatory reason remains display-only.
+  const commandInput = toolName === "commandExecution" && providerCommand
+    ? codexProviderShellScript(providerCommand) ?? providerCommand
+    : null;
+  const input = commandInput ?? displayInput;
+  const commandIdentity = commandInput && commandInput.length <= 2000 && activeRoot &&
+      boundedProviderCorrelationId(params?.threadId) && params.threadId === activeRoot.threadId &&
+      boundedProviderCorrelationId(params?.turnId) && params.turnId === activeRoot.turnId &&
+      boundedProviderCorrelationId(params?.itemId)
+    ? {
+        transport: "codex-app-server" as const,
+        threadId: params.threadId,
+        turnId: params.turnId,
+        itemId: params.itemId,
+        input: commandInput,
+      }
+    : undefined;
   const networkRequested = params?.permissions?.network;
   return {
     toolName,
     ...(typeof input === "string" && input ? { input: truncate(input, 2000) } : {}),
+    ...(commandIdentity ? { commandIdentity } : {}),
     ...(typeof path === "string" && path ? { path: truncate(path, 1024) } : {}),
     ...(networkRequested ? { network: typeof networkRequested === "string" ? truncate(networkRequested, 1024) : "requested" } : {}),
     ...(typeof branch === "string" && branch ? { branch: truncate(branch, 1024) } : {}),
