@@ -88,6 +88,31 @@ function evidenceSession(): SessionView {
   } as SessionView;
 }
 
+function standaloneApprovalSession(): SessionView {
+  return {
+    ...evidenceSession(),
+    id: "session-worktree-trust",
+    title: "Worktree Setup",
+    updatedAt: Date.now(),
+    pendingApproval: {
+      requestId: "worktree-setup:one:hash",
+      occurrenceId: "worktree-setup-occurrence",
+      kind: "permission",
+      title: "Trust Worktree Setup Configuration?",
+      context: {
+        toolName: "wollipog.worktree_setup",
+        path: "/workspace/project",
+        branch: "fix/example",
+        input: "Copy .env.example to .env\nRun pnpm install\nEnvironment: API_BASE_URL",
+      },
+      options: [
+        { optionId: "trust", name: "Trust This Configuration", kind: "allow_always" },
+        { optionId: "skip", name: "Create Without Setup", kind: "reject_once" },
+      ],
+    },
+  } as SessionView;
+}
+
 test("eight-item evidence review stays bounded, persists acknowledgement drafts, and submits exact ids", async () => {
   domWindow.localStorage.clear();
   const session = evidenceSession();
@@ -158,6 +183,77 @@ test("eight-item evidence review stays bounded, persists acknowledgement drafts,
       optionId: "approve",
       evidenceReviewed: Array.from({ length: 8 }, (_, index) => `viewport-${index + 1}`),
     }]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("standalone approval review keeps request context collapsed and submits through the existing API", async () => {
+  const session = standaloneApprovalSession();
+  const approvals: unknown[] = [];
+  const client = {
+    ...api,
+    approve: async (_sessionId: string, body: unknown) => {
+      approvals.push(structuredClone(body));
+      return { ...session, status: "running", pendingApproval: null } as SessionView;
+    },
+  } as ApiClient;
+  const selected = sessionRequestPanelKey(session.id, session.pendingApproval!.occurrenceId!);
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(
+      <ApiProvider client={client}>
+        <SessionRequestPanel
+          session={session}
+          runnerOnline
+          descendants={[]}
+          selectedKey={selected}
+          onSelectedKeyChange={() => {}}
+          onSessionUpdate={() => {}}
+          onDescendantsUpdate={() => {}}
+          onOpenChild={() => {}}
+        />
+      </ApiProvider>,
+    ));
+    assert.equal(container.querySelector(".approval-bar"), null);
+    assert.ok(container.querySelector(".approval-review-surface"));
+    assert.match(container.querySelector(".approval-selector-context")?.textContent ?? "", /wollipog\.worktree_setup/);
+    assert.match(container.querySelector(".approval-selector-context")?.textContent ?? "", /fix\/example/);
+    const details = container.querySelector<HTMLDetailsElement>(".approval-review-details")!;
+    assert.equal(details.open, false);
+    assert.match(details.textContent ?? "", /pnpm install/);
+    const trust = [...container.querySelectorAll<HTMLButtonElement>(".approval-review-actions button")]
+      .find((button) => button.textContent === "Trust This Configuration")!;
+    await act(async () => trust.click());
+    assert.deepEqual(approvals, [{ requestId: "worktree-setup:one:hash", optionId: "trust" }]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("worker-owned approval stays in its canonical worker request surface", async () => {
+  const session = standaloneApprovalSession();
+  session.pendingApproval = { ...session.pendingApproval!, ownerToolUseId: "worker-tool" };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(
+      <ApiProvider client={api}>
+        <SessionApprovalRegion
+          session={session}
+          runnerOnline
+          fallbackFocusRef={{ current: null }}
+          standaloneInReviewSurface
+        />
+      </ApiProvider>,
+    ));
+    assert.equal(container.querySelector(".approval-bar"), null);
+    assert.equal(container.querySelector(".approval-review-surface"), null);
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -354,7 +450,7 @@ test("remote evidence resolution clears the stale review draft", async () => {
           session={pending}
           runnerOnline
           fallbackFocusRef={focusRef}
-          evidenceInReviewSurface
+          standaloneInReviewSurface
         />
       </ApiProvider>,
     ));
@@ -364,7 +460,7 @@ test("remote evidence resolution clears the stale review draft", async () => {
           session={{ ...pending, status: "running", pendingApproval: null } as SessionView}
           runnerOnline
           fallbackFocusRef={focusRef}
-          evidenceInReviewSurface
+          standaloneInReviewSurface
         />
       </ApiProvider>,
     ));

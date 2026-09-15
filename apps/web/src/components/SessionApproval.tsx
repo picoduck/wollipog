@@ -91,7 +91,7 @@ export function SessionApprovalRegion({
   onSessionUpdate,
   showKeyHints = true,
   questionInTimeline = false,
-  evidenceInReviewSurface = false,
+  standaloneInReviewSurface = false,
 }: {
   session: SessionView;
   runnerOnline: boolean;
@@ -102,16 +102,14 @@ export function SessionApprovalRegion({
   showKeyHints?: boolean;
   /** Whether the pending question already has an authoritative transcript row. */
   questionInTimeline?: boolean;
-  /** Whether a UI-evidence decision is represented by the transcript trigger + request panel. */
-  evidenceInReviewSurface?: boolean;
+  /** Whether the standalone approval is represented by its transcript trigger + request panel. */
+  standaloneInReviewSurface?: boolean;
 }) {
   const instanceScope = useInstanceScope();
   const approval = session.pendingApproval;
   const questionFallback = approval?.kind === "question" && !questionInTimeline;
-  const standaloneApproval = approval?.kind === "question" ? null : approval;
-  const reviewApproval = evidenceInReviewSurface && standaloneApproval?.kind === "workflow_decision" &&
-    standaloneApproval.workflowDecision?.resourceSnapshot.category === "ui_evidence_approval"
-    ? standaloneApproval : null;
+  const standaloneApproval = standaloneApprovalForReview(approval);
+  const reviewApproval = standaloneInReviewSurface ? standaloneApproval : null;
   const evidenceRequestId = reviewApproval?.requestId ?? null;
   const evidenceResourceDigest = reviewApproval?.workflowDecision?.resourceDigest ?? null;
   const evidenceIdentity = evidenceRequestId && evidenceResourceDigest ? {
@@ -179,6 +177,13 @@ export function SessionApprovalRegion({
       )}
     </>
   );
+}
+
+/** Questions and worker-owned requests already have authoritative interactive presentations. */
+export function standaloneApprovalForReview(
+  approval: SessionView["pendingApproval"],
+): NonNullable<SessionView["pendingApproval"]> | null {
+  return approval && approval.kind !== "question" && !approval.ownerToolUseId ? approval : null;
 }
 
 /** Keep one question representation at its event's timeline position while the request is live. */
@@ -526,6 +531,44 @@ export function SessionApprovalBanner({
               </button>
             );
           })}
+        </div>
+      </section>
+    );
+  }
+
+  if (presentation === "review") {
+    return (
+      <section className="approval-review-surface" aria-label="Approval Review" aria-busy={busy}>
+        <div className="approval-review-summary">
+          <h3>{approval.title}</h3>
+          <p>
+            Review the request details before choosing an action.
+            {!runnerOnline && decisionNeedsRunner && " The runner is offline."}
+          </p>
+        </div>
+        <div className="approval-review-body">
+          <ApprovalSelectorContext context={approval.context} />
+          {approval.context?.input && (
+            <details className="approval-review-details">
+              <summary>Request Details</summary>
+              <pre className="approval-context">{approval.context.input}</pre>
+            </details>
+          )}
+        </div>
+        {error && <div className="form-error" role="alert">Approval failed: {error}</div>}
+        <div className="approval-review-actions">
+          {approval.options.map((option) => (
+            <button
+              key={option.optionId}
+              type="button"
+              title={option.description}
+              className={`btn ${option.kind?.startsWith("allow") ? "primary" : "danger"}`}
+              disabled={busy || (decisionNeedsRunner && !runnerOnline)}
+              onClick={() => void decide(option.optionId)}
+            >
+              {busy ? "Submitting…" : option.name}
+            </button>
+          ))}
         </div>
       </section>
     );

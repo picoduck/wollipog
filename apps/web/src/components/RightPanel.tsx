@@ -30,7 +30,7 @@ import type { TimelineItem } from "../timeline.js";
 import type { GovernanceDecision } from "../governance.js";
 import { GovernanceHistoryPanel } from "./GovernanceHistoryPanel.js";
 import { AgentsPanel } from "./AgentsPanel.js";
-import { focusSessionRequest } from "./SessionApproval.js";
+import { focusSessionRequest, standaloneApprovalForReview } from "./SessionApproval.js";
 import { BackgroundWorkPanel } from "./BackgroundWorkPanel.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
 import { SessionRequestPanel } from "./SessionRequestPanel.js";
@@ -423,10 +423,8 @@ export function RightPanel({
               session.backgroundJobsAvailable === true ||
               session.backgroundWorkTracking != null || session.backgroundWorkState != null}
             governanceAvailable={governanceAvailable}
-            requestsAvailable={descendantRequests.length > 0 || (
-              session.pendingApproval?.kind === "workflow_decision" &&
-              session.pendingApproval.workflowDecision?.resourceSnapshot.category === "ui_evidence_approval"
-            )}
+            requestsAvailable={descendantRequests.length > 0 ||
+              standaloneApprovalForReview(session.pendingApproval) !== null}
           />
         ) : (
           <div className="rp-body">

@@ -6,9 +6,11 @@ import { ApiProvider } from "../api-context.js";
 import { CampaignContinuationNotice } from "../components/SessionDetail.js";
 import { RightPanel, type RightPanelState } from "../components/RightPanel.js";
 import { SessionApprovalRegion } from "../components/SessionApproval.js";
+import { EventTimeline } from "../components/EventTimeline.js";
 import { sessionRequestPanelKey } from "../components/SessionRequestPanel.js";
 import { SessionStatusIndicators } from "../components/common.js";
 import type { RightPanelMode } from "../right-panel.js";
+import type { TimelineItem } from "../timeline.js";
 import "../styles.css";
 
 declare global {
@@ -66,6 +68,36 @@ function evidenceSession(): SessionView {
         status: "pending",
         createdAt: Date.now() - 40_000,
       },
+    },
+  } as SessionView;
+}
+
+function standaloneApprovalSession(): SessionView {
+  return {
+    ...evidenceSession(),
+    id: "worktree-setup-session",
+    title: "Worktree Setup",
+    pendingApproval: {
+      requestId: "worktree-setup:one:hash",
+      occurrenceId: "worktree-setup-occurrence",
+      kind: "permission",
+      title: "Trust Worktree Setup Configuration?",
+      context: {
+        toolName: "wollipog.worktree_setup",
+        path: "/workspace/project",
+        branch: "fix/responsive-approval",
+        input: [
+          "Copies:",
+          ...Array.from({ length: 12 }, (_, index) => `  config/example-${index + 1}.env -> .env-${index + 1}`),
+          "Commands:",
+          ...Array.from({ length: 12 }, (_, index) => `  pnpm setup:step-${index + 1}`),
+          "Environment: API_BASE_URL, PORT, WOLLIPOG_PROJECT",
+        ].join("\n"),
+      },
+      options: [
+        { optionId: "trust", name: "Trust This Configuration", kind: "allow_always" },
+        { optionId: "skip", name: "Create Without Setup", kind: "reject_once" },
+      ],
     },
   } as SessionView;
 }
@@ -207,7 +239,7 @@ function Fixture() {
           pendingRequests: { human: 8, orchestrator: 4 },
         } as SessionView["orchestratorCampaign"],
       } as SessionView
-    : evidenceSession());
+    : scenario === "standalone" ? standaloneApprovalSession() : evidenceSession());
   const descendants = useMemo(() => includeDescendants ? descendantRequests() : [], []);
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<RightPanelMode>("requests");
@@ -260,6 +292,16 @@ function Fixture() {
     },
   } as ApiClient;
   const ownDecision = session.pendingApproval?.workflowDecision;
+  const standaloneTemplate = scenario === "standalone" ? standaloneApprovalSession().pendingApproval! : null;
+  const standaloneTimelineItems: TimelineItem[] = standaloneTemplate ? [{
+    kind: "permission",
+    id: 25,
+    requestId: standaloneTemplate.requestId,
+    title: standaloneTemplate.title,
+    options: standaloneTemplate.options,
+    context: standaloneTemplate.context,
+    ...(session.pendingApproval ? {} : { resolvedOptionId: "trust", resolutionReason: "submitted" as const }),
+  }] : [];
 
   return (
     <ApiProvider client={client}>
@@ -284,13 +326,14 @@ function Fixture() {
           )}
           <div className="detail-columns">
             <div className="detail-chat">
-              {scenario === "legacy" && (
+              {(scenario === "legacy" || scenario === "standalone") && (
                 <SessionApprovalRegion
                   session={session}
                   runnerOnline
                   fallbackFocusRef={legacyFocusRef}
                   onSessionUpdate={setSession}
                   showKeyHints={false}
+                  standaloneInReviewSurface={scenario === "standalone"}
                 />
               )}
               <div className="detail-main">
@@ -303,6 +346,16 @@ function Fixture() {
                         </div>
                       </div>
                     ))}
+                    {scenario === "standalone" && (
+                      <EventTimeline
+                        items={standaloneTimelineItems}
+                        approvalContext={session.pendingApproval ? {
+                          sessionId: session.id,
+                          requestId: session.pendingApproval.requestId,
+                          onOpenRequest: () => setOpen(true),
+                        } : undefined}
+                      />
+                    )}
                     {scenario === "evidence" && ownDecision?.resourceSnapshot.category === "ui_evidence_approval" && (
                       <section className="tl-request-card" aria-label="Pending UI Evidence Request">
                         <span className="tl-request-icon" aria-hidden="true">🖼️</span>

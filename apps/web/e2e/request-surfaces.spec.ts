@@ -16,6 +16,14 @@ async function assertActionsInsideRequestPanel(page: Page) {
   expect(geometry[1]!.bottom).toBeLessThanOrEqual(geometry[0]!.bottom + 1);
 }
 
+async function assertActionsInsidePanel(page: Page, selector: string) {
+  const geometry = await page.locator(`.right-panel, ${selector}`).evaluateAll((elements) =>
+    elements.map((element) => element.getBoundingClientRect().toJSON()));
+  expect(geometry).toHaveLength(2);
+  expect(geometry[1]!.top).toBeGreaterThanOrEqual(geometry[0]!.top - 1);
+  expect(geometry[1]!.bottom).toBeLessThanOrEqual(geometry[0]!.bottom + 1);
+}
+
 test("evidence actions remain reachable in a short desktop panel with child requests", async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 480 });
   await page.goto("/request-surfaces-e2e.html?scenario=evidence&items=8&children=1");
@@ -50,7 +58,6 @@ test("short desktop evidence review preserves child identity and navigation", as
   await expect.poll(() => page.evaluate(() =>
     window.__WOLLIPOG_REQUEST_SURFACES_E2E__.openedChild()?.sessionId)).toBe("child-1");
 });
-
 test("legacy inline evidence fixture reproduces the mobile over-height review", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/request-surfaces-e2e.html?scenario=legacy");
@@ -170,6 +177,66 @@ for (const viewport of [
       await assertActionsInsideRequestPanel(page);
     });
   }
+}
+
+for (const viewport of [
+  { name: "mobile", width: 390, height: 844 },
+  { name: "desktop", width: 1280, height: 800 },
+]) {
+  test(`standalone approval uses its transcript row and responsive review on ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/request-surfaces-e2e.html?scenario=standalone");
+
+    const transcript = page.getByRole("region", { name: "Session Activity" });
+    await expect(transcript).toBeVisible();
+    expect(await transcript.evaluate((element) => element.clientHeight)).toBeGreaterThan(viewport.height * 0.35);
+    await expect(page.locator(".approval-bar")).toHaveCount(0);
+    const requestRow = page.locator(".tl-perm");
+    await expect(requestRow).toHaveCount(1);
+    await expect(requestRow).toContainText("Trust Worktree Setup Configuration?");
+    const transcriptDetails = requestRow.locator(".perm-context");
+    await expect(transcriptDetails).not.toHaveAttribute("open", "");
+    await expect(transcriptDetails.locator("pre")).not.toBeVisible();
+
+    const trigger = requestRow.getByRole("button", { name: "Review Request" });
+    await trigger.scrollIntoViewIfNeeded();
+    const transcriptPosition = await transcript.evaluate((element) => element.scrollTop);
+    await trigger.click();
+    const panel = page.getByRole("complementary", { name: "Requests" });
+    await expect(panel).toBeVisible();
+    await expect(page.locator(".approval-review-surface")).toBeVisible();
+    await expect(page.locator(".approval-selector-context")).toContainText("wollipog.worktree_setup");
+    await expect(page.locator(".approval-selector-context")).toContainText("fix/responsive-approval");
+    const panelDetails = page.locator(".approval-review-details");
+    await expect(panelDetails).not.toHaveAttribute("open", "");
+    await expect(panelDetails.locator("pre")).not.toBeVisible();
+    await expect(page.getByRole("button", { name: "Trust This Configuration" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Create Without Setup" })).toBeVisible();
+    await assertActionsInsidePanel(page, ".approval-review-actions");
+
+    await panelDetails.locator("summary").click();
+    await expect(panelDetails.locator("pre")).toContainText("pnpm setup:step-12");
+    const scrollOwner = page.locator(viewport.width <= 760 ? ".request-panel" : ".approval-review-body");
+    await scrollOwner.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await assertActionsInsidePanel(page, ".approval-review-actions");
+
+    await page.getByRole("button", { name: "Close Panel" }).click();
+    await expect(panel).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+    expect(await transcript.evaluate((element) => element.scrollTop)).toBe(transcriptPosition);
+
+    await trigger.click();
+    await page.getByRole("button", { name: "Trust This Configuration" }).click();
+    await expect(panel).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Review Request" })).toHaveCount(0);
+    await expect(requestRow).toHaveCount(1);
+    await expect(requestRow).toContainText("trust");
+    await expect.poll(() => page.evaluate(() =>
+      window.__WOLLIPOG_REQUEST_SURFACES_E2E__.submissions())).toEqual([{
+        requestId: "worktree-setup:one:hash",
+        optionId: "trust",
+      }]);
+  });
 }
 
 for (const viewport of [
