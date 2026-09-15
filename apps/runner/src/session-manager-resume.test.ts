@@ -1345,6 +1345,22 @@ test("approved durable authentication recovery waits for command redelivery afte
     assert.doesNotMatch(recoveryGuidance.text, /message is queued/iu,
       "non-durable work must never be described as retained while durable identities recover");
     assert.deepEqual(h.prompts, []);
+    const recoveryRequestId = waiting.pendingApproval!.requestId;
+    const recoveryRequestCount = () => h.store.readEvents("resume-session").filter((event) =>
+      event.payload.kind === "permission_request" && event.payload.requestId === recoveryRequestId).length;
+    assert.equal(recoveryRequestCount(), 1);
+
+    replacement.shutdownAll();
+    replacement = new SessionManager(
+      (message) => h.sent.push(message), () => {}, h.store, "runner-restarted-again", undefined,
+      h.factory, undefined, 4, (agentId, update) => h.authStatuses.push([agentId, update]),
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, [],
+      undefined, undefined, undefined, undefined, undefined, undefined, controller,
+    );
+    replacement.reconcileStore();
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval?.requestId, recoveryRequestId);
+    assert.equal(h.store.readMeta("resume-session")?.status, "input_required");
+    assert.equal(recoveryRequestCount(), 1, "restart reconstruction must not append a duplicate request event");
 
     assert.equal(replacement.prompt(
       "resume-session",
@@ -1363,6 +1379,15 @@ test("approved durable authentication recovery waits for command redelivery afte
       undefined,
       recovered("durable-restart-1"),
     ), true);
+    assert.deepEqual(h.prompts, [], "the recovered prefix still waits for a later retained handle");
+    assert.equal(replacement.prompt(
+      "resume-session",
+      "submitted after restart",
+      [],
+      undefined,
+      undefined,
+      recovered("durable-restart-3"),
+    ), true);
     for (let index = 0; index < 60 && transitions.filter(([, state]) => state === "completed").length < 3; index += 1) {
       await shortDelay();
     }
@@ -1374,12 +1399,9 @@ test("approved durable authentication recovery waits for command redelivery afte
     assert.equal(transitions.some(([, state]) => state.startsWith("failed:") || state.startsWith("uncertain:")), false);
     assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
     assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
-    const recoveredCard = h.store.readEvents("resume-session").map((event) => event.payload)
-      .find((payload) => payload.kind === "permission_request" &&
-        payload.title === "Authentication Restored — Retained Messages Waiting");
-    assert.ok(recoveredCard?.kind === "permission_request");
-    assert.ok(h.store.readEvents("resume-session").some((event) => event.payload.kind === "permission_resolved" &&
-      event.payload.requestId === recoveredCard.requestId));
+    assert.equal(recoveryRequestCount(), 1);
+    assert.equal(h.store.readEvents("resume-session").filter((event) =>
+      event.payload.kind === "permission_resolved" && event.payload.requestId === recoveryRequestId).length, 1);
   } finally {
     replacement?.shutdownAll();
     h.manager.shutdownAll();
