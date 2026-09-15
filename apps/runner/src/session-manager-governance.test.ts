@@ -176,6 +176,13 @@ test("retroactive action reconciliation binds a CLI arm to its later durable Gua
       providerTurnId: "legacy-session-turn-stored-as-provider",
     });
     assert.ok(arm);
+    h.store.appendEvent("s_governance", {
+      kind: "tool_call",
+      toolCallId: "command-cli",
+      title: "merge",
+      toolKind: "execute",
+      status: "in_progress",
+    });
     const receipt = h.store.appendEvent("s_governance", {
       kind: "review_decision",
       reviewId: "review-cli",
@@ -238,6 +245,144 @@ test("retroactive action reconciliation binds a CLI arm to its later durable Gua
     });
   } finally {
     h.cleanup();
+  }
+});
+
+test("durable command completion survives provider history loss after restart", async () => {
+  const h = harness({}, true);
+  try {
+    const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1165 --squash --match-head-commit ${"c".repeat(40)}`;
+    const commandDigest = createHash("sha256").update(command, "utf8").digest("hex");
+    const arm = h.store.appendEvent("s_governance", {
+      kind: "workflow_action_admission_armed",
+      occurrenceId: "workflow-restarted",
+      commandDigest: "d".repeat(64),
+      sessionTurnId: "session-turn-cli",
+      providerTurnId: "provider-turn-before-restart",
+    });
+    assert.ok(arm);
+    h.store.appendEvent("s_governance", {
+      kind: "tool_call",
+      toolCallId: "command-cli",
+      title: "merge",
+      toolKind: "execute",
+      status: "in_progress",
+    });
+    const receipt = h.store.appendEvent("s_governance", {
+      kind: "review_decision",
+      reviewId: "review-cli",
+      reviewer: { kind: "agent", id: "codex-guardian" },
+      outcome: "allowed",
+      approvalReviewReceipt: {
+        transport: "codex-app-server",
+        threadId: "thread-exact",
+        turnId: "provider-turn-cli",
+        itemId: "command-cli",
+        toolName: "commandExecution",
+        input: command,
+        inputSha256: commandDigest,
+      },
+    });
+    assert.ok(receipt);
+    h.store.appendEvent("s_governance", {
+      kind: "tool_call_update",
+      toolCallId: "command-cli",
+      status: "completed",
+    });
+    (h.entry.client as any).reconcileCompletedCommand = async () => null;
+    (h.sm as any).resolveWorktreePullRequestState = async () => ({
+      state: "merged", headOid: "c".repeat(40),
+    });
+
+    const result = await h.sm.reconcileWorkflowAction("s_governance", {
+      occurrenceId: "workflow-restarted",
+      command,
+      commandDigest: "d".repeat(64),
+      pullRequestUrl: "https://github.com/picoduck/wollipog/pull/1165",
+      expectedHeadSha: "c".repeat(40),
+      armedAfterEventSeq: arm.seq,
+      runnerHistoryEpoch: 0,
+      actionProviderThreadId: "thread-exact",
+      actionProviderTurnId: "provider-turn-before-restart",
+    });
+    assert.equal(result.accepted, true);
+    assert.equal(result.providerItemId, "command-cli");
+    assert.equal(result.providerReviewEventSeq, receipt.seq);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("durable command completion rejects missing starts and missing, failed, misordered, or replayed terminals", async () => {
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1165 --squash --match-head-commit ${"c".repeat(40)}`;
+  const commandDigest = createHash("sha256").update(command, "utf8").digest("hex");
+  for (const mismatch of ["start", "missing", "failed", "order", "duplicate"] as const) {
+    const h = harness({}, true);
+    try {
+      const arm = h.store.appendEvent("s_governance", {
+        kind: "workflow_action_admission_armed",
+        occurrenceId: "workflow-restarted",
+        commandDigest: "d".repeat(64),
+        sessionTurnId: "session-turn-cli",
+        providerTurnId: "provider-turn-before-restart",
+      });
+      assert.ok(arm);
+      const terminal = (status: "completed" | "failed") => h.store.appendEvent("s_governance", {
+        kind: "tool_call_update" as const,
+        toolCallId: "command-cli",
+        status,
+      });
+      if (mismatch === "order") terminal("completed");
+      if (mismatch !== "start") {
+        h.store.appendEvent("s_governance", {
+          kind: "tool_call",
+          toolCallId: "command-cli",
+          title: "merge",
+          toolKind: "execute",
+          status: "in_progress",
+        });
+      }
+      h.store.appendEvent("s_governance", {
+        kind: "review_decision",
+        reviewId: "review-cli",
+        reviewer: { kind: "agent", id: "codex-guardian" },
+        outcome: "allowed",
+        approvalReviewReceipt: {
+          transport: "codex-app-server",
+          threadId: "thread-exact",
+          turnId: "provider-turn-cli",
+          itemId: "command-cli",
+          toolName: "commandExecution",
+          input: command,
+          inputSha256: commandDigest,
+        },
+      });
+      if (mismatch === "failed") terminal("failed");
+      if (mismatch === "start") terminal("completed");
+      if (mismatch === "duplicate") {
+        terminal("completed");
+        terminal("completed");
+      }
+      (h.entry.client as any).reconcileCompletedCommand = async () => null;
+      (h.sm as any).resolveWorktreePullRequestState = async () => ({
+        state: "merged", headOid: "c".repeat(40),
+      });
+      const result = await h.sm.reconcileWorkflowAction("s_governance", {
+        occurrenceId: "workflow-restarted",
+        command,
+        commandDigest: "d".repeat(64),
+        pullRequestUrl: "https://github.com/picoduck/wollipog/pull/1165",
+        expectedHeadSha: "c".repeat(40),
+        armedAfterEventSeq: arm.seq,
+        runnerHistoryEpoch: 0,
+        actionProviderThreadId: "thread-exact",
+        actionProviderTurnId: "provider-turn-before-restart",
+      });
+      assert.equal(result.accepted, false, mismatch);
+      assert.equal(result.error, "provider history did not contain one exact successful command");
+    } finally {
+      h.cleanup();
+    }
   }
 });
 

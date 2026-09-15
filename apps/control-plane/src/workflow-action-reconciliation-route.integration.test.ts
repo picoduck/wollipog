@@ -405,6 +405,7 @@ test("the real runner socket reconciles a CLI-armed lifecycle-revoked workflow a
     runnerHistoryEpoch: 0,
     armedAfterEventSeq: 10,
     providerReviewEventSeq: 12,
+    providerCompletionEventSeq: 13,
     forgeHeadSha: HEAD_SHA,
   }));
 

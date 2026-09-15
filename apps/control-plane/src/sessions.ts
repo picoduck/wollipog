@@ -6169,7 +6169,10 @@ export class SessionsService {
       proof.runnerHistoryEpoch === admission.runnerHistoryEpoch &&
       proof.armedAfterEventSeq === admission.armedAfterEventSeq &&
       Number.isSafeInteger(proof.providerReviewEventSeq) &&
-      proof.providerReviewEventSeq! > admission.armedAfterEventSeq!;
+      proof.providerReviewEventSeq! > admission.armedAfterEventSeq! &&
+      (proof.providerCompletionEventSeq === undefined ||
+        (Number.isSafeInteger(proof.providerCompletionEventSeq) &&
+          proof.providerCompletionEventSeq! > proof.providerReviewEventSeq!));
     if (proof.requestId !== requestId ||
         proof.sessionId !== sessionId || proof.occurrenceId !== occurrenceId || !proof.accepted ||
         proof.commandDigest !== commandDigest || !boundedProviderCorrelationId(proof.providerThreadId) ||
@@ -6239,6 +6242,8 @@ export class SessionsService {
             runnerHistoryEpoch: proof.runnerHistoryEpoch,
             armedAfterEventSeq: proof.armedAfterEventSeq,
             providerReviewEventSeq: proof.providerReviewEventSeq,
+            ...(proof.providerCompletionEventSeq !== undefined
+              ? { providerCompletionEventSeq: proof.providerCompletionEventSeq } : {}),
           } : {}),
           forgeHeadSha: proof.forgeHeadSha,
         },

@@ -4049,7 +4049,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
   });
 
   await t.test("durable receipt reconciliation rejects mismatched epochs and event ordering", async () => {
-    for (const mismatch of ["epoch", "order"] as const) {
+    for (const mismatch of ["epoch", "order", "completion_order"] as const) {
       const { db, hub, svc, child, arm } = setup();
       try {
         const armed = await arm(mismatch === "epoch" ? 1195 : 1196);
@@ -4071,6 +4071,8 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
           armedAfterEventSeq: admission.armedAfterEventSeq,
           providerReviewEventSeq: mismatch === "order"
             ? admission.armedAfterEventSeq : admission.armedAfterEventSeq! + 1,
+          ...(mismatch === "completion_order"
+            ? { providerCompletionEventSeq: admission.armedAfterEventSeq! + 1 } : {}),
           forgeHeadSha: armed.snapshot.headSha,
         });
         const result = await svc.reconcileWorkflowDecision(
