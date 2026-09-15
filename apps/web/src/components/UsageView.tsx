@@ -25,6 +25,7 @@ import {
   formatShare,
   metricValue,
   processedTokens,
+  subscriptionPlanLabel,
   windowDays,
   type UsageBreakdownMode,
   type UsageMetric,
@@ -364,8 +365,9 @@ export function UsageView() {
               <article className="runner-card subscription-source" key={`${source.runnerId}:${source.sourceId}`}>
                 <header>
                   <div>
-                    <h4>{source.provider === "codex" ? "Codex" : "Claude"}{source.plan ? ` — ${source.plan}` : ""}</h4>
+                    <h4>{source.provider === "codex" ? "Codex" : "Claude"}{source.plan ? ` — ${subscriptionPlanLabel(source.plan)}` : ""}</h4>
                     <p>{source.agentName} on {source.runnerName}</p>
+                    {source.accountLabel && <p className="subscription-account"><strong>Account:</strong> {source.accountLabel}</p>}
                   </div>
                   <span
                     className="subscription-state"

@@ -132,6 +132,7 @@ export function validateSubscriptionUsageSnapshot(
   }
   const detail = text(input.detail, "detail", 500, true);
   const plan = text(input.plan, "plan", 80, true);
+  const accountLabel = text(input.accountLabel, "accountLabel", 160, true);
   const creditsInput = input.credits === undefined ? undefined : record(input.credits);
   const credits = creditsInput ? {
     ...(boolean(creditsInput.hasCredits, "credits hasCredits") === undefined
@@ -157,6 +158,7 @@ export function validateSubscriptionUsageSnapshot(
     fetchedAt,
     buckets: input.buckets.map((item) => bucket(item, now)),
     ...(plan === undefined ? {} : { plan }),
+    ...(accountLabel === undefined ? {} : { accountLabel }),
     ...(credits === undefined ? {} : { credits }),
     ...(input.spendControls === undefined
       ? {}

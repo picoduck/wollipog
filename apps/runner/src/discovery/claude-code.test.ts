@@ -8,6 +8,7 @@ import {
   claudeCapabilitiesFromProbe,
   nativeClaudeGitBashCandidates,
   parseClaudeAuthStatus,
+  claudeCodeCapabilitiesForControlPlane,
   parseClaudeHelp,
   probeClaudeCode,
   resolveNativeClaudeGitBash,
@@ -89,16 +90,43 @@ test("Claude fixed modes remain explicitly unavailable without the control proto
   });
 });
 
-test("auth status parser persists no identity or organization fields", () => {
+test("auth status parser keeps only a bounded account label and discards organization identity", () => {
   const auth = parseClaudeAuthStatus(ok(JSON.stringify({
     loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty", subscriptionType: "max",
     email: "secret@example.com", orgId: "secret-org", orgName: "Secret Org",
   })));
   assert.deepEqual(auth, {
     status: "authenticated", method: "claude.ai", provider: "firstParty",
-    billingSource: "subscription", subscriptionType: "max",
+    billingSource: "subscription", subscriptionType: "max", accountLabel: "secret@example.com",
   });
-  assert.equal(JSON.stringify(auth).includes("secret"), false);
+  assert.doesNotMatch(JSON.stringify(auth), /secret-org|Secret Org/);
+});
+
+test("auth status parser rejects unsafe or overlong account labels", () => {
+  const unsafe = parseClaudeAuthStatus(ok(JSON.stringify({
+    loggedIn: true, authMethod: "claude.ai", email: "line\nbreak@example.com",
+  })));
+  const overlong = parseClaudeAuthStatus(ok(JSON.stringify({
+    loggedIn: true, authMethod: "claude.ai", email: `${"a".repeat(155)}@example.com`,
+  })));
+  assert.equal(unsafe.accountLabel, undefined);
+  assert.equal(overlong.accountLabel, undefined);
+});
+
+test("ordinary agent metadata strips the runner-local subscription account label", () => {
+  const capabilities = {
+    status: "ready" as const,
+    effortLevels: [], permissionModes: [], streamJsonInput: true, streamJsonImages: true,
+    controlProtocol: true, forkSession: true, replayUserMessages: true,
+    auth: {
+      status: "authenticated" as const,
+      billingSource: "subscription" as const,
+      accountLabel: "active@example.com",
+    },
+  };
+  const projected = claudeCodeCapabilitiesForControlPlane(capabilities);
+  assert.doesNotMatch(JSON.stringify(projected), /active@example/);
+  assert.deepEqual(projected.auth, { status: "authenticated", billingSource: "subscription" });
 });
 
 test("configured API billing overrides unauthenticated account readiness without retaining the key", () => {

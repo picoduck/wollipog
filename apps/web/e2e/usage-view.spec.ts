@@ -101,6 +101,8 @@ test("Claude subscription cards show used and remaining allowance per window (#2
   // A current Claude build: every window it tracks is listed independently, with real percentages
   // rather than the bare "Allowance Reported" fallback.
   const current = cards.filter({ hasText: "Claude Code on build-box" }).first();
+  await expect(current.locator("h4")).toHaveText("Claude — Max");
+  await expect(current.locator(".subscription-account")).toHaveText("Account: primary@example.com");
   const buckets = current.locator(".subscription-bucket");
   await expect(buckets).toHaveCount(3);
   await expect(buckets.nth(0)).toContainText("Five-Hour Window");
@@ -116,6 +118,7 @@ test("Claude subscription cards show used and remaining allowance per window (#2
   // A build that reports resets but no utilization says so, instead of reading as a source that
   // has not answered yet.
   const resetOnly = cards.filter({ hasText: "Claude Code (Ubuntu)" }).first();
+  await expect(resetOnly.locator(".subscription-account")).toHaveText("Account: alternate@example.com");
   await expect(resetOnly).toContainText("without utilization percentages");
   await expect(resetOnly).not.toContainText("after the first provider response");
 
@@ -141,6 +144,7 @@ test("Claude subscription cards show used and remaining allowance per window (#2
 
   // A source that answered without allowance headers gets its own explanation.
   const noHeaders = cards.filter({ hasText: "Claude Code (Debian)" }).first();
+  await expect(noHeaders.locator(".subscription-account")).toHaveCount(0);
   await expect(noHeaders).toContainText("Temporarily Unavailable");
   await expect(noHeaders).toContainText("answered without reporting subscription allowances");
   await expect(noHeaders).not.toContainText("after the first provider response");
@@ -149,4 +153,11 @@ test("Claude subscription cards show used and remaining allowance per window (#2
   await page.goto("/usage-view-e2e.html?subscriptions=1&theme=light");
   await expect(page.locator(".subscription-bucket").first()).toContainText("17% Remaining");
   await page.locator(".subscription-source-grid").screenshot({ path: `${SHOT}/subscription-claude-light.png` });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/usage-view-e2e.html?subscriptions=1");
+  const mobileCurrent = page.locator(".subscription-source").filter({ hasText: "primary@example.com" });
+  await expect(mobileCurrent.locator("h4")).toHaveText("Claude — Max");
+  await expect(mobileCurrent).toBeVisible();
+  await page.locator(".subscription-source-grid").screenshot({ path: `${SHOT}/subscription-claude-mobile.png` });
 });

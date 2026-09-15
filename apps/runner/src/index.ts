@@ -151,6 +151,7 @@ import {
   validateControlPlaneUrl,
 } from "./control-plane-transport.js";
 import { discoverAgents, enrichAgentModels, mergeAgents } from "./discovery/discover.js";
+import { claudeCodeCapabilitiesForControlPlane } from "./discovery/claude-code.js";
 import {
   prepareClaudeSlashCommandCatalog,
 } from "./discovery/claude-commands.js";
@@ -418,15 +419,24 @@ function agentsForControlPlane() {
     controlPlaneProtocolVersion,
     isolationMode: config.executionIsolation.mode,
   }).filter((agent) => agent.id !== "conductor")
-    .map((agent) => ({ ...agent, env: {},
-      ...((!runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionOrchestration") ||
+    .map((agent) => {
+      // Account labels are personal display data. Keep Claude's discovery value runner-local and
+      // publish it only through the principal-scoped subscription-usage snapshot.
+      return {
+        ...agent,
+        env: {},
+        ...(agent.claudeCode
+          ? { claudeCode: claudeCodeCapabilitiesForControlPlane(agent.claudeCode) }
+          : {}),
+        ...((!runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionOrchestration") ||
           ((agent.context?.kind ?? "native") === "wsl" &&
             (!runnerSupportsProtocol(controlPlaneProtocolVersion, "wslSafeLauncher") ||
               agent.wslAgentControl?.safeLauncherProtocolVersion !== 1 ||
               config.executionIsolation.mode !== "bwrap"))) && agent.capabilities
-        ? { capabilities: { ...agent.capabilities, permissionModes: agent.capabilities.permissionModes?.filter((mode) => mode !== "orchestrator") } }
-        : {}),
-    }));
+          ? { capabilities: { ...agent.capabilities, permissionModes: agent.capabilities.permissionModes?.filter((mode) => mode !== "orchestrator") } }
+          : {}),
+      };
+    });
 }
 
 /** Resolve exact configured/discovered agent env at the last responsible moment. */
@@ -444,6 +454,24 @@ const subscriptionUsage = new SubscriptionUsageManager({
   agents: () => metadata.agents,
   resolveEnv: (agentId, driver, context) =>
     runnerLocalAgentEnv(agentId, driver ?? "acp", context),
+  usesDiscoveredClaudeAccount: (agent) => {
+    const configured = config.agents.find((candidate) => candidate.id === agent.id);
+    if (!configured?.env) return true;
+    // The discovery auth probe runs in the context-default credential scope. If this agent selects
+    // another credential home or credential source, omitting the label is safer than attributing
+    // the default account to usage produced by the configured source.
+    return ![
+      "HOME",
+      "USERPROFILE",
+      "CLAUDE_CONFIG_DIR",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_AUTH_TOKEN",
+      "ANTHROPIC_BASE_URL",
+      "CLAUDE_CODE_USE_BEDROCK",
+      "CLAUDE_CODE_USE_VERTEX",
+    ].some((name) => Object.prototype.hasOwnProperty.call(configured.env, name));
+  },
   authorizeProbe: (agent, env, sourceId) => {
     if (!authorizeSubscriptionUsageProbe) {
       throw new Error("subscription usage probe authorization is not initialized");

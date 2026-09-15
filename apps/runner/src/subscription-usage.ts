@@ -19,6 +19,7 @@ export const SUBSCRIPTION_USAGE_REFRESH_DEDUPE_MS = 15_000;
 const MAX_PROVIDER_BUCKETS = 64;
 const MAX_WINDOW_DURATION_MINUTES = 2 * 365 * 24 * 60;
 const MAX_RESET_AHEAD_MS = 2 * 365 * 24 * 60 * 60_000;
+const MAX_ACCOUNT_LABEL_LENGTH = 160;
 
 function record(value: unknown): JsonRecord | null {
   return value != null && typeof value === "object" && !Array.isArray(value)
@@ -30,6 +31,15 @@ function stringValue(value: unknown, max = 160): string | undefined {
   if (typeof value !== "string") return undefined;
   const normalized = value.trim().replace(/[\u0000-\u001f\u007f]+/g, " ");
   return normalized ? normalized.slice(0, max) : undefined;
+}
+
+function accountLabel(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  return normalized && normalized.length <= MAX_ACCOUNT_LABEL_LENGTH &&
+    !/[\u0000-\u001f\u007f]/u.test(normalized)
+    ? normalized
+    : undefined;
 }
 
 function finite(value: unknown): number | undefined {
@@ -426,6 +436,7 @@ export interface CodexSubscriptionProbeResult {
   state: "available" | "unavailable" | "unauthenticated" | "not_applicable";
   detail?: string;
   plan?: string;
+  accountLabel?: string;
   rateLimits?: unknown;
 }
 
@@ -507,6 +518,7 @@ export async function probeCodexSubscriptionUsage(
     return {
       state: "available",
       ...(stringValue(accountValue.planType, 80) ? { plan: stringValue(accountValue.planType, 80)! } : {}),
+      ...(accountLabel(accountValue.email) ? { accountLabel: accountLabel(accountValue.email)! } : {}),
       rateLimits,
     };
   } finally {
@@ -522,12 +534,16 @@ interface SubscriptionSource {
   agent: AgentDefinition;
   provider: SubscriptionUsageProvider;
   sourceId: string;
+  accountLabel?: string;
 }
 
 export interface SubscriptionUsageManagerOptions {
   runnerId: string;
   agents: () => AgentDefinition[];
   resolveEnv: (agentId: string, driver: AgentDefinition["driver"], context: AgentContext) => Record<string, string>;
+  /** Discovery probes the context-default Claude credential scope. Configured sources that select
+   * another credential scope must not inherit that probe's account label. */
+  usesDiscoveredClaudeAccount?: (agent: AgentDefinition) => boolean;
   authorizeProbe?: (
     agent: AgentDefinition,
     env: Record<string, string>,
@@ -576,7 +592,17 @@ export class SubscriptionUsageManager {
       );
       if (seen.has(sourceId)) continue;
       seen.add(sourceId);
-      result.push({ agent, provider, sourceId });
+      const claudeAccountLabel = provider === "claude" &&
+        (this.options.usesDiscoveredClaudeAccount?.(agent) ?? true) &&
+        agent.claudeCode?.auth.billingSource === "subscription"
+        ? accountLabel((agent.claudeCode?.auth as { accountLabel?: unknown } | undefined)?.accountLabel)
+        : undefined;
+      result.push({
+        agent,
+        provider,
+        sourceId,
+        ...(claudeAccountLabel ? { accountLabel: claudeAccountLabel } : {}),
+      });
     }
     return result;
   }
@@ -590,6 +616,7 @@ export class SubscriptionUsageManager {
       provider,
       fetchedAt: this.now(),
       buckets: [],
+      ...(source.accountLabel ? { accountLabel: source.accountLabel } : {}),
     };
     if (agent.available === false) {
       return { ...base, state: "unavailable", detail: `${agent.name} is not available on this runner.` };
@@ -648,10 +675,14 @@ export class SubscriptionUsageManager {
     for (const source of sources) {
       const initial = this.initialSnapshot(source);
       const prior = this.snapshots.get(source.sourceId);
+      // Claude discovery owns its source label. Codex labels arrive only from an authoritative
+      // refresh, so comparing them here would mistake every populated Codex snapshot for a switch.
+      const accountChanged = source.provider === "claude" && Boolean(prior) &&
+        source.accountLabel !== prior?.accountLabel;
       const forced = initial.state === "unsupported" ||
         initial.state === "unauthenticated" ||
         initial.state === "not_applicable";
-      this.snapshots.set(source.sourceId, forced || !prior ? initial : {
+      this.snapshots.set(source.sourceId, forced || !prior || accountChanged ? initial : {
         ...prior,
         agentId: source.agent.id,
       });
@@ -807,10 +838,18 @@ export class SubscriptionUsageManager {
           this.now(),
         );
         if (!normalized) throw new Error("Codex returned no recognizable rate-limit fields");
-        const merged = mergeSnapshot(this.snapshots.get(source.sourceId), {
+        const prior = this.snapshots.get(source.sourceId);
+        const update = {
           ...normalized,
           ...(result.plan && !normalized.plan ? { plan: result.plan } : {}),
-        }, "plain");
+          ...(result.accountLabel ? { accountLabel: result.accountLabel } : {}),
+        };
+        // A provider-account switch changes the authority behind every allowance. Replace the
+        // source atomically so absent buckets from the new account cannot survive from the old one.
+        const accountChanged = Boolean(prior) && prior?.accountLabel !== update.accountLabel;
+        const merged = accountChanged
+          ? update
+          : mergeSnapshot(prior, update, "plain");
         this.snapshots.set(source.sourceId, merged);
         this.options.publish(merged);
         return;
@@ -821,6 +860,7 @@ export class SubscriptionUsageManager {
         detail: result.detail ?? initial.detail,
         fetchedAt: this.now(),
         ...(result.plan ? { plan: result.plan } : {}),
+        ...(result.accountLabel ? { accountLabel: result.accountLabel } : {}),
       };
       this.snapshots.set(source.sourceId, unavailable);
       this.options.publish(unavailable);

@@ -12905,6 +12905,8 @@ body.shell-dock-dragging * {
 .subscription-source > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
 .subscription-source h4 { margin: 0; }
 .subscription-source header p, .subscription-source footer { margin: 4px 0 0; color: var(--text-dim); font-size: var(--text-xs); }
+.subscription-source .subscription-account { overflow-wrap: anywhere; }
+.subscription-account strong { color: var(--text); font-weight: 650; }
 .subscription-source footer { margin-top: 12px; }
 .subscription-state { flex: none; border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 3px 7px; color: var(--text-dim); font-size: var(--text-2xs); font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
 .subscription-state[data-state="available"][data-freshness="fresh"] { border-color: color-mix(in srgb, var(--green) 50%, var(--border)); color: var(--green); }
