@@ -1449,6 +1449,62 @@ test("campaign continuation recovery holds for humans and never replays an ambig
   }
 });
 
+test("terminal retention preserves a running continuation made uncertain while its campaign is stopped", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+    orchestrator.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const root = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, parentControl: "questions",
+    }).data!;
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    db.recordCampaignContinuationEvent({
+      eventId: `test-stopped-uncertain:${root.id}`,
+      campaignSessionId: root.id,
+      kind: "human_blockers_cleared",
+      now: Date.now(),
+    });
+
+    const now = Date.now() + 2_000;
+    assert.equal(svc.retryDuePrompts(now), 1);
+    const delivery = hub.sentOfType("durable_session_command").at(-1)!;
+    assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+      type: "durable_session_command_result",
+      requestId: delivery.requestId,
+      commandId: delivery.commandId,
+      sessionId: root.id,
+      state: "accepted",
+      revision: 1,
+      duplicate: false,
+    }), true);
+    assert.equal(db.latestCampaignContinuation(root.id)?.state, "running");
+
+    db.cancelSessionPromptCommands(root.id, "session stopped", now + 1);
+    db.updateSessionStatus(root.id, "stopped", now + 1);
+    db.raw().prepare("UPDATE session_prompt_commands SET expires_at=0 WHERE command_id=?")
+      .run(delivery.commandId);
+    svc.maintainPrompts(now + 2);
+    assert.ok(db.getSessionPromptCommand(delivery.commandId),
+      "retention cannot erase unresolved work before a stopped campaign can reconcile it");
+
+    db.updateSessionStatus(root.id, "idle", now + 3);
+    const restartedHub = new FakeHub();
+    const restarted = new SessionsService(db, restartedHub as unknown as Hub, NOOP_LOG);
+    assert.equal(restarted.retryDuePrompts(now + 60_000), 0);
+    assert.equal(restartedHub.sentOfType("durable_session_command").length, 0,
+      "restarting the campaign exposes the missing result instead of replaying its event range");
+    assert.equal(db.campaignProjection(root.id)?.continuation?.state, "missing_result");
+  } finally {
+    db.close();
+  }
+});
+
 test("campaign continuation failures back off finitely and stopped campaigns reject stale wake-ups", () => {
   const { db, svc, hub } = makeHarness();
   try {

@@ -15731,7 +15731,7 @@ export class ControlPlaneDb {
          AND NOT EXISTS (
            SELECT 1 FROM orchestrator_campaign_continuations continuation
            WHERE continuation.command_id=prompt.command_id
-             AND continuation.state IN ('missing_result','failed')
+             AND continuation.state NOT IN ('completed','acknowledged')
              AND continuation.command_id=(
                SELECT latest.command_id FROM orchestrator_campaign_continuations latest
                WHERE latest.campaign_session_id=continuation.campaign_session_id
