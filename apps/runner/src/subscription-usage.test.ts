@@ -391,9 +391,9 @@ test("a successful refresh clears a prior fallback detail", async () => {
   assert.equal(manager.inventory()[0]?.detail, undefined);
 });
 
-test("a Codex account switch replaces the complete source snapshot", async () => {
+test("a Codex account switch, including to an unlabeled account, replaces the complete snapshot", async () => {
   let now = 20_000;
-  let activeAccount = "first@example.com";
+  let activeAccount: string | undefined = "first@example.com";
   let usedPercent = 20;
   let includeSecondary = true;
   const manager = new SubscriptionUsageManager({
@@ -405,8 +405,8 @@ test("a Codex account switch replaces the complete source snapshot", async () =>
     now: () => now,
     probeCodex: async () => ({
       state: "available",
-      accountLabel: activeAccount,
-      plan: activeAccount.startsWith("first") ? "pro" : "plus",
+      ...(activeAccount ? { accountLabel: activeAccount } : {}),
+      plan: activeAccount?.startsWith("first") ? "pro" : "plus",
       rateLimits: { rateLimits: {
         limitId: "codex",
         primary: { usedPercent },
@@ -429,6 +429,16 @@ test("a Codex account switch replaces the complete source snapshot", async () =>
   assert.deepEqual(switched.buckets.map((bucket) => [bucket.id, bucket.usedPercent]), [
     ["codex:primary", 5],
   ], "a bucket absent from the replacement account cannot survive from the prior account");
+
+  activeAccount = undefined;
+  usedPercent = 2;
+  now += 20_000;
+  await manager.refreshAll();
+  const unlabeled = manager.inventory()[0]!;
+  assert.equal(unlabeled.accountLabel, undefined, "the prior account label cannot survive");
+  assert.deepEqual(unlabeled.buckets.map((bucket) => [bucket.id, bucket.usedPercent]), [
+    ["codex:primary", 2],
+  ]);
 });
 
 test("subscription inventories wait for discovery and negotiated protocol support", () => {
@@ -540,7 +550,7 @@ function claudeAgent(overrides: Partial<AgentDefinition> = {}): AgentDefinition 
 }
 
 test("Claude account labels stay source-local and an account switch drops prior allowances", () => {
-  let accountLabel = "first@example.com";
+  let accountLabel: string | undefined = "first@example.com";
   const source = () => claudeAgent({
     claudeCode: {
       ...claudeAgent().claudeCode!,
@@ -571,6 +581,43 @@ test("Claude account labels stay source-local and an account switch drops prior 
   assert.equal(manager.inventory()[0]?.accountLabel, "second@example.com");
   assert.equal(manager.inventory()[0]?.buckets.length, 0);
   assert.equal(manager.inventory()[0]?.state, "unavailable");
+
+  manager.observe("claude", "claude-code", { kind: "native" }, {
+    provider: "claude",
+    kind: "sparse",
+    payload: rateLimitEvent({
+      status: "allowed",
+      rateLimitType: "five_hour",
+      unifiedWindows: { five_hour: { utilization: 0.2, resetsAt: FIVE_HOUR_RESET } },
+    }),
+  });
+  accountLabel = undefined;
+  manager.syncSources();
+  assert.equal(manager.inventory()[0]?.accountLabel, undefined);
+  assert.equal(manager.inventory()[0]?.buckets.length, 0, "an unlabeled account cannot retain prior allowances");
+});
+
+test("a configured Claude credential scope never inherits the discovery account label", () => {
+  const withLabel = (id: string) => claudeAgent({
+    id,
+    claudeCode: {
+      ...claudeAgent().claudeCode!,
+      auth: { ...claudeAgent().claudeCode!.auth, accountLabel: "default@example.com" } as never,
+    },
+  });
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [withLabel("default"), withLabel("work")],
+    resolveEnv: () => ({}),
+    usesDiscoveredClaudeAccount: (source) => source.id !== "work",
+    publish: () => {},
+    now: () => OBSERVED_AT,
+  });
+
+  assert.deepEqual(manager.syncSources().map((snapshot) => [snapshot.agentId, snapshot.accountLabel]), [
+    ["default", "default@example.com"],
+    ["work", undefined],
+  ]);
 });
 
 /** Exactly the shape `claude --output-format stream-json` emits: `utilization` is the fraction of

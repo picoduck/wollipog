@@ -541,6 +541,9 @@ export interface SubscriptionUsageManagerOptions {
   runnerId: string;
   agents: () => AgentDefinition[];
   resolveEnv: (agentId: string, driver: AgentDefinition["driver"], context: AgentContext) => Record<string, string>;
+  /** Discovery probes the context-default Claude credential scope. Configured sources that select
+   * another credential scope must not inherit that probe's account label. */
+  usesDiscoveredClaudeAccount?: (agent: AgentDefinition) => boolean;
   authorizeProbe?: (
     agent: AgentDefinition,
     env: Record<string, string>,
@@ -590,6 +593,7 @@ export class SubscriptionUsageManager {
       if (seen.has(sourceId)) continue;
       seen.add(sourceId);
       const claudeAccountLabel = provider === "claude" &&
+        (this.options.usesDiscoveredClaudeAccount?.(agent) ?? true) &&
         agent.claudeCode?.auth.billingSource === "subscription"
         ? accountLabel((agent.claudeCode?.auth as { accountLabel?: unknown } | undefined)?.accountLabel)
         : undefined;
@@ -671,9 +675,7 @@ export class SubscriptionUsageManager {
     for (const source of sources) {
       const initial = this.initialSnapshot(source);
       const prior = this.snapshots.get(source.sourceId);
-      const accountChanged = Boolean(
-        source.accountLabel && prior?.accountLabel && source.accountLabel !== prior.accountLabel,
-      );
+      const accountChanged = Boolean(prior) && source.accountLabel !== prior?.accountLabel;
       const forced = initial.state === "unsupported" ||
         initial.state === "unauthenticated" ||
         initial.state === "not_applicable";
@@ -841,8 +843,8 @@ export class SubscriptionUsageManager {
         };
         // A provider-account switch changes the authority behind every allowance. Replace the
         // source atomically so absent buckets from the new account cannot survive from the old one.
-        const merged = prior?.accountLabel && update.accountLabel &&
-          prior.accountLabel !== update.accountLabel
+        const accountChanged = Boolean(prior) && prior?.accountLabel !== update.accountLabel;
+        const merged = accountChanged
           ? update
           : mergeSnapshot(prior, update, "plain");
         this.snapshots.set(source.sourceId, merged);

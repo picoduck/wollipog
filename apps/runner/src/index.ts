@@ -454,6 +454,24 @@ const subscriptionUsage = new SubscriptionUsageManager({
   agents: () => metadata.agents,
   resolveEnv: (agentId, driver, context) =>
     runnerLocalAgentEnv(agentId, driver ?? "acp", context),
+  usesDiscoveredClaudeAccount: (agent) => {
+    const configured = config.agents.find((candidate) => candidate.id === agent.id);
+    if (!configured?.env) return true;
+    // The discovery auth probe runs in the context-default credential scope. If this agent selects
+    // another credential home or credential source, omitting the label is safer than attributing
+    // the default account to usage produced by the configured source.
+    return ![
+      "HOME",
+      "USERPROFILE",
+      "CLAUDE_CONFIG_DIR",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_AUTH_TOKEN",
+      "ANTHROPIC_BASE_URL",
+      "CLAUDE_CODE_USE_BEDROCK",
+      "CLAUDE_CODE_USE_VERTEX",
+    ].some((name) => Object.prototype.hasOwnProperty.call(configured.env, name));
+  },
   authorizeProbe: (agent, env, sourceId) => {
     if (!authorizeSubscriptionUsageProbe) {
       throw new Error("subscription usage probe authorization is not initialized");
