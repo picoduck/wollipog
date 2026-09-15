@@ -92,11 +92,21 @@ test("mobile: the overview stacks and every control stays reachable", async ({ p
   await page.screenshot({ path: `${SHOT}/mobile-dark-tokens.png`, fullPage: true });
 });
 
-test("Claude subscription cards show used and remaining allowance per window (#224)", async ({ page }) => {
+test("subscription cards show provider allowances in presentation order (#223, #224)", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 1000 });
   await page.goto("/usage-view-e2e.html?subscriptions=1");
   const cards = page.locator(".subscription-source");
-  await expect(cards).toHaveCount(3);
+  await expect(cards).toHaveCount(4);
+
+  // #223: the runner normalizes the account-wide Codex group before model-specific groups, and
+  // the shared desktop/mobile renderer preserves that order without matching display labels.
+  const codex = cards.filter({ hasText: "Codex App Server on build-box" });
+  await expect(codex.locator("h4")).toHaveText("Codex — Pro");
+  await expect(codex.locator(".subscription-bucket dt")).toHaveText([
+    "Codex — Weekly",
+    "GPT-5.3-Codex-Spark — 5-Hour Window",
+    "GPT-5.3-Codex-Spark — Weekly",
+  ]);
 
   // A current Claude build: every window it tracks is listed independently, with real percentages
   // rather than the bare "Allowance Reported" fallback.
@@ -151,7 +161,7 @@ test("Claude subscription cards show used and remaining allowance per window (#2
 
   await page.locator(".subscription-source-grid").screenshot({ path: `${SHOT}/subscription-claude-dark.png` });
   await page.goto("/usage-view-e2e.html?subscriptions=1&theme=light");
-  await expect(page.locator(".subscription-bucket").first()).toContainText("17% Remaining");
+  await expect(current.locator(".subscription-bucket").first()).toContainText("17% Remaining");
   await page.locator(".subscription-source-grid").screenshot({ path: `${SHOT}/subscription-claude-light.png` });
 
   await page.setViewportSize({ width: 390, height: 844 });
