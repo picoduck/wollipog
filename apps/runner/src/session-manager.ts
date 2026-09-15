@@ -13428,10 +13428,13 @@ export class SessionManager {
         durable: this.providerAuthDurables.get(retry.commandId)!,
       })),
     ].sort((left, right) => (left.ordinal ?? 0) - (right.ordinal ?? 0));
-    if (meta.pendingApproval?.requestId === providerAuthenticationRecoveryRequestId(block)) {
+    const recoveryRequestId = providerAuthenticationRecoveryRequestId(block);
+    const recoveryAlreadyResolved = this.store.readEvents(sessionId).some((event) =>
+      event.payload.kind === "permission_resolved" && event.payload.requestId === recoveryRequestId);
+    if (meta.pendingApproval?.requestId === recoveryRequestId && !recoveryAlreadyResolved) {
       this.emitEvent(meta.sessionId, {
         kind: "permission_resolved",
-        requestId: meta.pendingApproval.requestId,
+        requestId: recoveryRequestId,
         optionId: "auth:automatic-retry",
       });
     }

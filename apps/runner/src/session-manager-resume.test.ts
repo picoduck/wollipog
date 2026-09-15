@@ -1444,7 +1444,7 @@ test("approved durable authentication recovery waits for command redelivery afte
   }
 });
 
-test("startup publishes one retained-message request for a pre-projection approved block", () => {
+test("startup publishes one retained-message request for a pre-projection approved block", async () => {
   const h = harness({
     driver: "claude-code",
     command: "claude",
@@ -1478,9 +1478,34 @@ test("startup publishes one retained-message request for a pre-projection approv
       event.payload.kind === "permission_request" && event.payload.requestId === requestId).length;
     h.manager.reconcileStore();
     assert.equal(h.store.readMeta("resume-session")?.pendingApproval?.requestId, requestId);
+    assert.equal(h.store.readMeta("resume-session")?.status, "input_required",
+      "emitting the upgrade request accrues its attention status");
     assert.equal(requestCount(), 1);
     h.manager.reconcileStore();
     assert.equal(requestCount(), 1, "subsequent restarts must not duplicate the upgrade request");
+
+    h.store.appendEvent("resume-session", {
+      kind: "permission_resolved",
+      requestId,
+      optionId: "auth:automatic-retry",
+    });
+    const resolutionCount = () => h.store.readEvents("resume-session").filter((event) =>
+      event.payload.kind === "permission_resolved" && event.payload.requestId === requestId).length;
+    assert.equal(resolutionCount(), 1);
+    const recovered: DurableCommandLifecycle = {
+      commandId: "legacy-retained-command",
+      queued: () => {},
+      started: () => {},
+      completed: () => {},
+      failed: () => {},
+      uncertain: () => {},
+    };
+    (h.manager as any).providerAuthDurables.set(recovered.commandId, recovered);
+    (h.manager as any).settleResolvedProviderAuthentication("resume-session");
+    for (let index = 0; index < 8 && h.store.readMeta("resume-session")?.providerAuthBlock; index += 1) await tick();
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    assert.equal(resolutionCount(), 1,
+      "a restart after the durable resolution event must not append that resolution again");
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
