@@ -109,30 +109,25 @@ export function compareProviderAuthIdentity(
 ): ProviderAuthIdentityComparison {
   const observedEvidence = observed.identityEvidence;
   if (expectedEvidence && observedEvidence && expectedEvidence.version !== observedEvidence.version) {
-    // Version 2 changes only the evidence-generation marker. An exact aggregate identity match
-    // proves a forward v1 -> v2 upgrade kept the same stable key and account, so it can upgrade
-    // in place. Rollbacks and changed-key migrations remain incomparable and fail closed.
-    if (expectedEvidence.version < observedEvidence.version && expectedIdentityId &&
-        observed.identityId === expectedIdentityId) {
+    // Version 2 changes only the evidence-generation marker. Any equal field digest proves a
+    // forward v1 -> v2 observation kept the same stable HMAC key, after which the ordinary
+    // field-level comparison can distinguish partial observations from real account changes.
+    // Rollbacks and changed-key migrations remain incomparable and fail closed.
+    const sharedDigest = CLAUDE_ACCOUNT_FIELDS.some((field) =>
+      expectedEvidence.fields[field] !== undefined &&
+      expectedEvidence.fields[field] === observedEvidence.fields[field]);
+    const sameAggregate = !!expectedIdentityId && observed.identityId === expectedIdentityId;
+    if (expectedEvidence.version > observedEvidence.version || (!sharedDigest && !sameAggregate)) {
       return {
-        matches: true,
-        evidenceAvailable: true,
-        evidenceGenerationMismatch: false,
+        matches: false,
+        evidenceAvailable: false,
+        evidenceGenerationMismatch: true,
         differingFields: [],
         expectedMissingFields: [],
         observedMissingFields: [],
         sharedAccountFields: [],
       };
     }
-    return {
-      matches: false,
-      evidenceAvailable: false,
-      evidenceGenerationMismatch: true,
-      differingFields: [],
-      expectedMissingFields: [],
-      observedMissingFields: [],
-      sharedAccountFields: [],
-    };
   }
   if (expectedIdentityId && observed.identityId === expectedIdentityId) {
     return {
@@ -181,7 +176,13 @@ export function mergeProviderAuthIdentityEvidence(
 ): ProviderAuthIdentityEvidence | undefined {
   if (!expected) return observed;
   if (!observed) return expected;
-  if (expected.version !== observed.version) return observed;
+  if (expected.version !== observed.version) {
+    const sharedDigest = expected.version < observed.version && CLAUDE_ACCOUNT_FIELDS.some((field) =>
+      expected.fields[field] !== undefined && expected.fields[field] === observed.fields[field]);
+    return sharedDigest
+      ? { version: observed.version, fields: { ...expected.fields, ...observed.fields } }
+      : observed;
+  }
   return { version: observed.version, fields: { ...expected.fields, ...observed.fields } };
 }
 

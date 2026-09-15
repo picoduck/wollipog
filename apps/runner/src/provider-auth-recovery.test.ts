@@ -155,6 +155,59 @@ test("runner auth evidence survives transport credential rotation and controller
       true,
       "an exact stable-key v1 identity upgrades to v2 without another account prompt",
     );
+    const partialStable = await createTestProviderAuthRecovery(
+      async () => ({
+        stdout: JSON.stringify({
+          loggedIn: true,
+          email: "stable@example.test",
+          orgId: null,
+          authMethod: null,
+          apiProvider: null,
+        }),
+        stderr: "",
+      }),
+      stableKey,
+      {},
+      2,
+    ).revalidate(session);
+    const partialUpgrade = compareProviderAuthIdentity(
+      priorStable.identityId,
+      priorStable.identityEvidence,
+      partialStable,
+    );
+    assert.equal(partialUpgrade.matches, true,
+      "a partial v2 observation can prove a stable-key v1 identity from a shared account anchor");
+    assert.equal(partialUpgrade.evidenceGenerationMismatch, false);
+    assert.deepEqual(
+      mergeProviderAuthIdentityEvidence(priorStable.identityEvidence, partialStable.identityEvidence),
+      { version: 2, fields: priorStable.identityEvidence?.fields },
+      "the upgrade retains previously observed fields while adopting the current generation",
+    );
+
+    const changedAcrossUpgrade = await createTestProviderAuthRecovery(
+      async () => ({
+        stdout: JSON.stringify({
+          loggedIn: true,
+          email: "changed@example.test",
+          orgId: "stable-org",
+          authMethod: "claude.ai",
+          apiProvider: "firstParty",
+        }),
+        stderr: "",
+      }),
+      stableKey,
+      {},
+      2,
+    ).revalidate(session);
+    const changedUpgrade = compareProviderAuthIdentity(
+      priorStable.identityId,
+      priorStable.identityEvidence,
+      changedAcrossUpgrade,
+    );
+    assert.equal(changedUpgrade.matches, false);
+    assert.equal(changedUpgrade.evidenceGenerationMismatch, false);
+    assert.deepEqual(changedUpgrade.differingFields, ["email"]);
+    assert.match(describeProviderAuthIdentityMismatch(changedUpgrade), /email differed/iu);
     const rollback = compareProviderAuthIdentity(recorded.identityId, recorded.identityEvidence, priorStable);
     assert.equal(rollback.matches, false, "rolling v2 evidence back to v1 must fail closed");
     assert.equal(rollback.evidenceGenerationMismatch, true);
