@@ -90,6 +90,39 @@ test("campaign continuation status explains missing results and exposes explicit
   }
 });
 
+test("campaign continuation status exposes an explicit retry after automatic retrying stops", async () => {
+  const retried: string[] = [];
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<CampaignContinuationNotice continuation={{
+      state: "failed",
+      pendingEvents: 2,
+      continuationId: "campaign_cont_failed",
+      commandId: "campaign_prompt_failed",
+      eventFromSeq: 7,
+      eventThroughSeq: 8,
+      attemptCount: 3,
+      updatedAt: 10,
+      error: "Runner queue remained full.",
+      canRetry: true,
+    }} onRetry={(commandId) => retried.push(commandId)} />);
+  });
+  try {
+    const notice = container.querySelector<HTMLElement>('[aria-label="Campaign Continuation: Failed"]');
+    assert.ok(notice);
+    assert.match(notice.textContent ?? "", /Automatic retrying stopped/);
+    const retry = container.querySelector<HTMLButtonElement>("button");
+    assert.equal(retry?.textContent, "Retry Campaign Continuation");
+    await act(async () => fireDomEvent.click(retry!));
+    assert.deepEqual(retried, ["campaign_prompt_failed"]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("the Composer guardrails expose and persist the concurrent live-child limit", async () => {
   const applied: Partial<SessionConfig>[] = [];
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;

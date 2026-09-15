@@ -650,6 +650,16 @@ CREATE TABLE IF NOT EXISTS orchestrator_campaign_events (
 CREATE INDEX IF NOT EXISTS idx_orchestrator_campaign_events_pending
   ON orchestrator_campaign_events(campaign_session_id, seq);
 
+-- The consumed cursor outlives prompt-command receipt retention. Completed and explicitly
+-- acknowledged ranges advance it transactionally; retained event identities keep re-projection
+-- idempotent after the transport and continuation rows are pruned.
+CREATE TABLE IF NOT EXISTS orchestrator_campaign_cursors (
+  campaign_session_id TEXT PRIMARY KEY,
+  consumed_through_seq INTEGER NOT NULL DEFAULT 0,
+  updated_at          INTEGER NOT NULL,
+  FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS orchestrator_campaign_continuations (
   continuation_id     TEXT PRIMARY KEY,
   campaign_session_id TEXT NOT NULL,
@@ -12496,11 +12506,7 @@ export class ControlPlaneDb {
     throughCreatedAt = Number.MAX_SAFE_INTEGER,
     limit = 64,
   ): CampaignContinuationEventRecord[] {
-    const cursor = (this.stmt(
-      `SELECT COALESCE(MAX(event_through_seq),0) AS seq
-       FROM orchestrator_campaign_continuations
-       WHERE campaign_session_id=? AND state IN ('completed','acknowledged')`,
-    ).get(campaignSessionId) as { seq: number }).seq;
+    const cursor = this.campaignContinuationCursor(campaignSessionId);
     const rows = this.stmt(
       `SELECT * FROM orchestrator_campaign_events
        WHERE campaign_session_id=? AND seq>? AND created_at<=?
@@ -12560,7 +12566,8 @@ export class ControlPlaneDb {
     const rows = this.stmt(
       `SELECT id FROM sessions
        WHERE permission_mode='orchestrator' AND orchestrator_policy IS NOT NULL
-         AND parent_session_id IS NULL ${runnerId ? "AND runner_id=?" : ""}
+         AND parent_session_id IS NULL AND archived=0
+         AND status NOT IN ('completed','failed','stopped') ${runnerId ? "AND runner_id=?" : ""}
        ORDER BY created_at,id`,
     ).all(...(runnerId ? [runnerId] : [])) as Array<{ id: string }>;
     return rows.map((row) => row.id);
@@ -12647,24 +12654,73 @@ export class ControlPlaneDb {
     error?: string,
     nextAttemptAt?: number,
   ): CampaignContinuationRecord | null {
-    this.stmt(
-      `UPDATE orchestrator_campaign_continuations
-       SET state=?,error=?,next_attempt_at=?,updated_at=? WHERE command_id=?`,
-    ).run(state, error ?? null, nextAttemptAt ?? null, now, commandId);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.stmt(
+        `UPDATE orchestrator_campaign_continuations
+         SET state=?,error=?,next_attempt_at=?,updated_at=? WHERE command_id=?`,
+      ).run(state, error ?? null, nextAttemptAt ?? null, now, commandId);
+      if (state === "completed" || state === "acknowledged") {
+        this.advanceCampaignContinuationCursorForCommand(commandId, now);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
     return this.campaignContinuationForCommand(commandId);
   }
 
   acknowledgeCampaignContinuationMissingResult(commandId: string, now: number): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.stmt(
+        `UPDATE orchestrator_campaign_continuations
+         SET state='acknowledged',next_attempt_at=NULL,updated_at=?
+         WHERE command_id=? AND state='missing_result' AND EXISTS (
+           SELECT 1 FROM session_prompt_commands prompt
+           WHERE prompt.command_id=orchestrator_campaign_continuations.command_id
+             AND prompt.state='uncertain' AND prompt.dismissed_at IS NOT NULL
+         )`,
+      ).run(now, commandId);
+      if (Number(result.changes) === 1) this.advanceCampaignContinuationCursorForCommand(commandId, now);
+      this.db.exec("COMMIT");
+      return Number(result.changes) === 1;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  requestCampaignContinuationRetry(commandId: string, now: number): boolean {
     const result = this.stmt(
       `UPDATE orchestrator_campaign_continuations
-       SET state='acknowledged',next_attempt_at=NULL,updated_at=?
-       WHERE command_id=? AND state='missing_result' AND EXISTS (
-         SELECT 1 FROM session_prompt_commands prompt
-         WHERE prompt.command_id=orchestrator_campaign_continuations.command_id
-           AND prompt.state='uncertain' AND prompt.dismissed_at IS NOT NULL
-       )`,
-    ).run(now, commandId);
+       SET next_attempt_at=?,updated_at=? WHERE command_id=? AND state='failed'`,
+    ).run(0, now, commandId);
     return Number(result.changes) === 1;
+  }
+
+  latestCampaignContinuationEventSeq(campaignSessionId: string): number {
+    return Number((this.stmt(
+      "SELECT COALESCE(MAX(seq),0) AS seq FROM orchestrator_campaign_events WHERE campaign_session_id=?",
+    ).get(campaignSessionId) as { seq: number }).seq);
+  }
+
+  private campaignContinuationCursor(campaignSessionId: string): number {
+    return Number((this.stmt(
+      "SELECT COALESCE(consumed_through_seq,0) AS seq FROM orchestrator_campaign_cursors WHERE campaign_session_id=?",
+    ).get(campaignSessionId) as { seq: number } | undefined)?.seq ?? 0);
+  }
+
+  private advanceCampaignContinuationCursorForCommand(commandId: string, now: number): void {
+    this.stmt(
+      `INSERT INTO orchestrator_campaign_cursors (campaign_session_id,consumed_through_seq,updated_at)
+       SELECT campaign_session_id,event_through_seq,? FROM orchestrator_campaign_continuations
+       WHERE command_id=?
+       ON CONFLICT(campaign_session_id) DO UPDATE SET
+         consumed_through_seq=MAX(consumed_through_seq,excluded.consumed_through_seq),
+         updated_at=excluded.updated_at`,
+    ).run(now, commandId);
   }
 
   private campaignContinuationRecord(row: {
@@ -12912,19 +12968,19 @@ export class ControlPlaneDb {
     campaign: SessionRow,
     campaignStatus: OrchestratorCampaignProjection["status"],
   ): Pick<OrchestratorCampaignProjection, "continuation"> {
-    const cursor = (this.stmt(
-      `SELECT COALESCE(MAX(event_through_seq),0) AS seq
-       FROM orchestrator_campaign_continuations
-       WHERE campaign_session_id=? AND state IN ('completed','acknowledged')`,
-    ).get(campaign.id) as { seq: number }).seq;
+    const cursor = this.campaignContinuationCursor(campaign.id);
     const pendingEvents = Number((this.stmt(
       "SELECT COUNT(*) AS count FROM orchestrator_campaign_events WHERE campaign_session_id=? AND seq>?",
     ).get(campaign.id, cursor) as { count: number }).count);
     const latest = this.latestCampaignContinuation(campaign.id);
     if (pendingEvents === 0 && (!latest || latest.state === "completed" || latest.state === "acknowledged")) return {};
+    const runnerCompatible = runnerSupportsProtocol(
+      this.getRunner(campaign.runner_id)?.protocolVersion,
+      "campaignContinuations",
+    );
     const held = campaign.archived === 1 || isTerminal(campaign.status as SessionStatus) ||
       campaign.status === "input_required" || campaignStatus === "waiting_human" ||
-      campaignStatus === "verified_complete";
+      campaignStatus === "verified_complete" || !runnerCompatible;
     const state = latest?.state === "missing_result" ? "missing_result" as const
       : latest?.state === "failed" ? "failed" as const
       : held ? "held" as const
@@ -12941,8 +12997,11 @@ export class ControlPlaneDb {
       } : {}),
       attemptCount: latest?.attemptCount ?? 0,
       updatedAt: latest?.updatedAt ?? campaign.updated_at,
-      ...(latest?.error ? { error: latest.error.slice(0, 1_024) } : {}),
+      ...(latest?.error
+        ? { error: latest.error.slice(0, 1_024) }
+        : !runnerCompatible ? { error: "Runner Upgrade Required" } : {}),
       ...(state === "missing_result" ? { canAcknowledgeMissingResult: true } : {}),
+      ...(state === "failed" && latest?.nextAttemptAt === undefined ? { canRetry: true } : {}),
     } };
   }
 

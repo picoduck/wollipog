@@ -1498,6 +1498,7 @@ export interface OrchestratorCampaignProjection {
     updatedAt: number;
     error?: string;
     canAcknowledgeMissingResult?: boolean;
+    canRetry?: boolean;
   };
 }
 

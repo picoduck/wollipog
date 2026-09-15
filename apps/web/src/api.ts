@@ -767,7 +767,7 @@ export function createApiClient(transport: ApiTransport) {
     { method: "POST", body: JSON.stringify(input) },
   ),
 
-  resolvePendingPrompt: (id: string, commandId: string, action: "cancel" | "dismiss") =>
+  resolvePendingPrompt: (id: string, commandId: string, action: "cancel" | "dismiss" | "retry") =>
     req<SessionView>(
       `/api/sessions/${encodeURIComponent(id)}/pending-prompts/${encodeURIComponent(commandId)}/resolve`,
       { method: "POST", body: JSON.stringify({ action }) },

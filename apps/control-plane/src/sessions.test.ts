@@ -1189,9 +1189,71 @@ test("idle Orchestrators durably coalesce nested request and child-ready events 
     }), true);
     assert.equal(db.campaignContinuationEvents(root.id).length, 0,
       "a completed exact continuation range advances the durable cursor");
+    db.raw().prepare("UPDATE session_prompt_commands SET expires_at=? WHERE command_id=?")
+      .run(now - 1, delivery.commandId);
+    svc.maintainPrompts(now);
+    assert.equal(db.getSessionPromptCommand(delivery.commandId), null,
+      "terminal prompt retention may prune the transport and continuation rows");
     svc.onSessionStatus(completedChild.id, "idle");
     assert.equal(svc.retryDuePrompts(now + 180_000), 0,
       "replayed lifecycle projection cannot manufacture a duplicate event");
+  } finally {
+    db.close();
+  }
+});
+
+test("a staged campaign continuation rechecks human blockers before runner delivery", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+    orchestrator.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const root = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, parentControl: "questions",
+    }).data!;
+    db.updateSessionStatus(root.id, "running", Date.now());
+    let child = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID,
+    }, undefined, undefined, false, false, false, { parentSessionId: root.id });
+    if (child.status === 428) {
+      const approval = db.getSession(root.id)!.pendingApproval!;
+      assert.ok(svc.approve(root.id, approval.requestId, "allow").ok);
+      child = svc.createSession({
+        runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID,
+      }, undefined, undefined, false, false, false, { parentSessionId: root.id });
+    }
+    assert.ok(child.ok && child.data, child.error);
+    db.updateSessionStatus(child.data.id, "running", Date.now());
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    db.recordCampaignContinuationEvent({
+      eventId: `test-delivery-gate:${root.id}`,
+      campaignSessionId: root.id,
+      kind: "human_blockers_cleared",
+      now: Date.now(),
+    });
+    const now = Date.now() + 2_000;
+    hub.online = false;
+    assert.equal(svc.retryDuePrompts(now), 0);
+    assert.equal(db.campaignProjection(root.id)?.continuation?.state, "pending");
+    svc.onSessionEvent(child.data.id, {
+      kind: "question_request",
+      requestId: "late-human-question",
+      occurrenceId: "request_late_human_question",
+      questions: [{
+        id: "secret", header: "Credential", question: "Enter it", secret: true,
+        allowOther: true, options: [],
+      }],
+    });
+    hub.online = true;
+    assert.equal(svc.retryDuePrompts(now + 60_000), 0,
+      "the durable outbox does not send a prompt staged before a new human blocker");
+    assert.equal(hub.sentOfType("durable_session_command").length, 0);
+    assert.equal(db.campaignProjection(root.id)?.continuation?.state, "held");
   } finally {
     db.close();
   }
@@ -1320,6 +1382,13 @@ test("campaign continuation failures back off finitely and stopped campaigns rej
     }
     assert.equal(svc.retryDuePrompts(clock), 0,
       "a repeatedly failing campaign stops after its bounded retry allowance");
+    const exhausted = db.campaignProjection(root.id)?.continuation;
+    assert.equal(exhausted?.canRetry, true);
+    const sendsBeforeExplicitRetry = hub.sentOfType("durable_session_command").length;
+    assert.ok(svc.retryCampaignContinuation(root.id, exhausted!.commandId!, clock + 60_000).ok);
+    assert.equal(hub.sentOfType("durable_session_command").length, sendsBeforeExplicitRetry + 1,
+      "an explicit operator retry starts a fresh bounded attempt series");
+    assert.equal(db.campaignProjection(root.id)?.continuation?.attemptCount, 1);
 
     const stopped = createRoot();
     db.updateSessionStatus(stopped.id, "stopped", Date.now());
@@ -1346,8 +1415,14 @@ test("campaign continuation failures back off finitely and stopped campaigns rej
     assert.equal(svc.retryDuePrompts(clock + 180_000), 0);
     assert.equal(hub.sentOfType("durable_session_command").length, deliveriesBefore,
       "an older runner never receives an unclassified synthetic prompt");
-    assert.equal(db.campaignProjection(incompatible.id)?.continuation?.state, "failed");
-    assert.match(db.campaignProjection(incompatible.id)?.continuation?.error ?? "", /no longer supports/u);
+    assert.equal(db.campaignProjection(incompatible.id)?.continuation?.state, "held");
+    assert.match(db.campaignProjection(incompatible.id)?.continuation?.error ?? "", /Runner Upgrade Required/u);
+    assert.equal(db.latestCampaignContinuation(incompatible.id), null,
+      "runner incompatibility does not consume the durable campaign event");
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    assert.equal(svc.retryDuePrompts(clock + 240_000), 1,
+      "upgrading the runner resumes the preserved event without another descendant transition");
+    assert.equal(db.campaignProjection(incompatible.id)?.continuation?.attemptCount, 1);
   } finally {
     db.close();
   }

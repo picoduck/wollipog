@@ -112,6 +112,14 @@ export class SessionPromptOutbox {
         this.failMalformed(row, "stored durable prompt digest does not match", now);
         continue;
       }
+      if (command.type === "prompt_session" && command.campaignContinuation) {
+        const campaign = this.db.getSession(command.campaignContinuation.campaignSessionId);
+        const projection = campaign ? this.db.campaignProjection(campaign.id) : null;
+        if (!campaign || campaign.archived || campaign.status !== "idle" || campaign.pendingApproval ||
+            !projection || projection.status === "waiting_human" || projection.status === "verified_complete") {
+          continue;
+        }
+      }
       const capability = command.type === "answer_recovered_question"
         ? "resumableQuestionAnswers"
         : command.type === "prompt_session" && command.campaignContinuation

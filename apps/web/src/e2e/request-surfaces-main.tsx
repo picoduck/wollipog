@@ -214,7 +214,7 @@ function Fixture() {
       setOpen(false);
       return updated;
     },
-    resolvePendingPrompt: async (_sessionId: string, commandId: string, action: "cancel" | "dismiss") => {
+    resolvePendingPrompt: async (_sessionId: string, commandId: string, action: "cancel" | "dismiss" | "retry") => {
       submissions.push({ commandId, action });
       const updated = {
         ...session,
@@ -246,6 +246,7 @@ function Fixture() {
             <CampaignContinuationNotice
               continuation={session.orchestratorCampaign.continuation}
               onAcknowledge={(commandId) => void client.resolvePendingPrompt(session.id, commandId, "dismiss")}
+              onRetry={(commandId) => void client.resolvePendingPrompt(session.id, commandId, "retry")}
             />
           )}
           <div className="detail-columns">

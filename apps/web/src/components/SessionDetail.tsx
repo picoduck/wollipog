@@ -2496,7 +2496,7 @@ function SessionDetailLoaded({
   const queuedPromptControls = queuedPromptsWithControls(session.queued);
   const resolvePendingPrompt = useCallback(async (
     commandId: string,
-    action: "cancel" | "dismiss",
+    action: "cancel" | "dismiss" | "retry",
   ) => {
     if (pendingPromptAction) return;
     setPendingPromptAction(commandId);
@@ -4395,6 +4395,7 @@ function SessionDetailLoaded({
             continuation={session.orchestratorCampaign.continuation}
             acknowledgementPending={pendingPromptAction === session.orchestratorCampaign.continuation.commandId}
             onAcknowledge={(commandId) => void resolvePendingPrompt(commandId, "dismiss")}
+            onRetry={(commandId) => void resolvePendingPrompt(commandId, "retry")}
           />
         )}
         {activeWorktreeSetupConfig?.status === "invalid" && (
@@ -6177,10 +6178,12 @@ export function CampaignContinuationNotice({
   continuation,
   acknowledgementPending = false,
   onAcknowledge,
+  onRetry,
 }: {
   continuation: NonNullable<NonNullable<SessionView["orchestratorCampaign"]>["continuation"]>;
   acknowledgementPending?: boolean;
   onAcknowledge?: (commandId: string) => void;
+  onRetry?: (commandId: string) => void;
 }) {
   const label = continuation.state === "missing_result"
     ? "Missing Result"
@@ -6193,10 +6196,14 @@ export function CampaignContinuationNotice({
       : continuation.state === "held"
         ? "Campaign events are preserved until the current human, lifecycle, or guardrail blocker clears."
         : continuation.state === "failed"
-          ? "The continuation failed. Automatic retries use bounded backoff."
+          ? continuation.canRetry
+            ? "Automatic retrying stopped. Retry the continuation when the failure is resolved."
+            : "The continuation failed. Wollipog will retry it with bounded backoff."
           : "The provider accepted this continuation, but no terminal result was recorded. It will not be replayed automatically.";
   const canAcknowledge = continuation.state === "missing_result" &&
     continuation.canAcknowledgeMissingResult === true && Boolean(continuation.commandId) && onAcknowledge;
+  const canRetry = continuation.state === "failed" && continuation.canRetry === true &&
+    Boolean(continuation.commandId) && onRetry;
   return (
     <div
       className="campaign-continuation-notice"
@@ -6219,6 +6226,16 @@ export function CampaignContinuationNotice({
           onClick={() => onAcknowledge(continuation.commandId!)}
         >
           {acknowledgementPending ? "Acknowledging…" : "Acknowledge Missing Result"}
+        </button>
+      )}
+      {canRetry && (
+        <button
+          type="button"
+          className="btn sm"
+          disabled={acknowledgementPending}
+          onClick={() => onRetry(continuation.commandId!)}
+        >
+          {acknowledgementPending ? "Retrying…" : "Retry Campaign Continuation"}
         </button>
       )}
     </div>

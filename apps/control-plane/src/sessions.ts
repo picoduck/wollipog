@@ -4051,15 +4051,28 @@ export class SessionsService {
       if (latest) this.reconcileCampaignContinuationCommand(latest.commandId, now);
       const active = this.db.activeCampaignContinuation(campaignSessionId);
       if (active) continue;
-      const currentLatest = this.db.latestCampaignContinuation(campaignSessionId);
-      if (currentLatest?.state === "failed" &&
-          (currentLatest.attemptCount >= CAMPAIGN_CONTINUATION_MAX_ATTEMPTS ||
-            (currentLatest.nextAttemptAt ?? Number.MAX_SAFE_INTEGER) > now)) continue;
       const campaign = this.db.getSession(campaignSessionId);
+      if (!campaign || campaign.archived || campaign.status !== "idle" || campaign.pendingApproval) continue;
       const projection = this.db.campaignProjection(campaignSessionId);
-      if (!campaign || !projection || campaign.archived || campaign.status !== "idle" ||
-          campaign.pendingApproval || projection.status === "waiting_human" ||
-          projection.status === "verified_complete") continue;
+      if (!projection || projection.status === "waiting_human" || projection.status === "verified_complete" ||
+          !runnerSupportsProtocol(
+            this.db.getRunner(campaign.runnerId)?.protocolVersion,
+            "campaignContinuations",
+          )) continue;
+      const currentLatest = this.db.latestCampaignContinuation(campaignSessionId);
+      let resetAttemptCount = false;
+      if (currentLatest?.state === "failed") {
+        const newEventArrived = this.db.latestCampaignContinuationEventSeq(campaignSessionId) >
+          currentLatest.eventThroughSeq;
+        const runnerUpgradeRecovered = currentLatest.error?.includes(
+          "no longer supports durable campaign continuations",
+        ) === true;
+        const retryRequested = currentLatest.nextAttemptAt === 0;
+        resetAttemptCount = newEventArrived || runnerUpgradeRecovered || retryRequested;
+        if (!resetAttemptCount &&
+            (currentLatest.attemptCount >= CAMPAIGN_CONTINUATION_MAX_ATTEMPTS ||
+              (currentLatest.nextAttemptAt ?? Number.MAX_SAFE_INTEGER) > now)) continue;
+      }
       const events = this.db.campaignContinuationEvents(
         campaignSessionId,
         now - CAMPAIGN_CONTINUATION_FAN_IN_MS,
@@ -4089,7 +4102,9 @@ export class SessionsService {
         runnerId: campaign.runnerId,
         eventFromSeq,
         eventThroughSeq,
-        attemptCount: currentLatest?.state === "failed" ? currentLatest.attemptCount + 1 : 1,
+        attemptCount: currentLatest?.state === "failed" && !resetAttemptCount
+          ? currentLatest.attemptCount + 1
+          : 1,
         command: {
           type: "prompt_session",
           sessionId: campaignSessionId,
@@ -4126,7 +4141,9 @@ export class SessionsService {
       const safelyRetryable = command.userEventSeq === undefined &&
         command.errorCode !== "INVALID_COMMAND" &&
         !command.error?.includes("no longer supports");
-      if (safelyRetryable && continuation.attemptCount < CAMPAIGN_CONTINUATION_MAX_ATTEMPTS) {
+      if (continuation.state === "failed" && continuation.nextAttemptAt === 0) {
+        nextAttemptAt = 0;
+      } else if (safelyRetryable && continuation.attemptCount < CAMPAIGN_CONTINUATION_MAX_ATTEMPTS) {
         nextAttemptAt = continuation.state === "failed"
           ? continuation.nextAttemptAt
           : now + Math.min(30_000, 1_000 * (2 ** (continuation.attemptCount - 1)));
@@ -4166,6 +4183,26 @@ export class SessionsService {
     if (this.db.acknowledgeCampaignContinuationMissingResult(commandId, Date.now())) {
       this.hub.sessionChangedById(sessionId);
     }
+    return ok(this.db.getSession(sessionId)!);
+  }
+
+  retryCampaignContinuation(
+    sessionId: string,
+    commandId: string,
+    now = Date.now(),
+  ): ServiceResult<SessionView> {
+    const session = this.db.getSession(sessionId);
+    if (!session) return fail("session not found", 404);
+    const continuation = this.db.campaignContinuationForCommand(commandId);
+    if (!continuation || continuation.campaignSessionId !== sessionId) {
+      return fail("campaign continuation not found", 404);
+    }
+    if (continuation.state !== "failed") return fail("only failed campaign continuations can be retried", 409);
+    if (!this.db.requestCampaignContinuationRetry(commandId, now)) {
+      return fail("campaign continuation changed concurrently", 409);
+    }
+    this.retryDuePrompts(now + CAMPAIGN_CONTINUATION_FAN_IN_MS, session.runnerId);
+    this.hub.sessionChangedById(sessionId);
     return ok(this.db.getSession(sessionId)!);
   }
 
@@ -5349,9 +5386,10 @@ export class SessionsService {
       );
       if (unsupported) return unsupported;
     }
+    const campaignBefore = this.orchestratorCampaignController(session) ?? session;
     this.db.updateSessionParentControl(sessionId, mode, Date.now());
     for (const childId of this.db.campaignDescendantIds(sessionId)) this.hub.sessionChangedById(childId);
-    this.publishCampaignAttentionTransition(session);
+    this.publishCampaignAttentionTransition(campaignBefore);
     return ok(this.db.getSession(sessionId)!);
   }
 
@@ -5380,6 +5418,7 @@ export class SessionsService {
       );
       if (unsupported) return unsupported;
     }
+    const campaignBefore = this.orchestratorCampaignController(session) ?? session;
     const now = Date.now();
     const policy = this.db.updateSessionParentControlPolicy(sessionId, decisions, now, expectedRevision);
     if (!policy) return fail("Parent Control policy revision is stale", 409);
@@ -5395,7 +5434,7 @@ export class SessionsService {
         this.hub.sessionChangedById(child.id);
       }
     }
-    this.publishCampaignAttentionTransition(session);
+    this.publishCampaignAttentionTransition(campaignBefore);
     return ok(this.db.getSession(sessionId)!);
   }
 
