@@ -3,7 +3,7 @@ import type { AgentDefinition, WorkflowDefinition } from "@wollipog/protocol";
 export type RunWorkMode = "parallel" | "workflow";
 
 export function conductorAgentId(agents: AgentDefinition[]): string | undefined {
-  return agents.find((agent) => agent.id === "conductor" && agent.available !== false)?.id;
+  return agents.find((agent) => agent.id === "conductor" && agent.available === true)?.id;
 }
 
 export function workflowAgentRoles(definition: WorkflowDefinition | undefined): string[] {
@@ -18,7 +18,7 @@ export function defaultWorkflowBindings(
   definition: WorkflowDefinition | undefined,
   agents: AgentDefinition[],
 ): Record<string, string> {
-  const available = agents.filter((agent) => agent.available !== false && agent.id !== "conductor");
+  const available = agents.filter((agent) => agent.available === true && agent.id !== "conductor");
   const bindings: Record<string, string> = {};
   for (const role of workflowAgentRoles(definition)) {
     const exact = available.find((agent) => agent.id === role);

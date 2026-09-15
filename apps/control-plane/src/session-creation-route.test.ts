@@ -13,7 +13,7 @@ const runner: RunnerMetadata = {
   hostname: "host",
   os: "linux",
   version: "test",
-  agents: [{ id: "agent", name: "Agent", command: "agent", args: [], env: {}, driver: "acp" }],
+  agents: [{ id: "agent", name: "Agent", command: "agent", args: [], env: {}, driver: "acp", available: true }],
   workspaces: [{ id: "workspace-1", name: "Workspace", path: "/workspace" }],
 };
 

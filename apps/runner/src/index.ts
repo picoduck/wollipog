@@ -150,7 +150,12 @@ import {
   registrationSessionSnapshots,
   validateControlPlaneUrl,
 } from "./control-plane-transport.js";
-import { discoverAgents, enrichAgentModels, mergeAgents } from "./discovery/discover.js";
+import {
+  discoverAgents,
+  enrichAgentModels,
+  mergeAgents,
+  probeConfiguredAcpAgents,
+} from "./discovery/discover.js";
 import { claudeCodeCapabilitiesForControlPlane } from "./discovery/claude-code.js";
 import {
   prepareClaudeSlashCommandCatalog,
@@ -1137,12 +1142,17 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
           return [];
         })
       : Promise.resolve([]);
-    const [nativeAgents, registryAgents, editors] = await Promise.all([
+    const [nativeAgents, registryAgents, configuredAcpAgents, editors] = await Promise.all([
       discoverAgents(),
       registryPromise,
+      probeConfiguredAcpAgents(configAgents, (agentId) => {
+        const configured = config.agents.find((agent) => agent.id === agentId);
+        if (!configured) throw new Error("configured agent is unavailable");
+        return resolveAgentEnvironment(configured);
+      }),
       discoverEditors(),
     ]);
-    const discovered = [...nativeAgents, ...registryAgents];
+    const discovered = [...nativeAgents, ...registryAgents, ...configuredAcpAgents];
     freshSafeWslLaunches.clear();
     for (const agent of nativeAgents) {
       if (agent.wslAgentControl?.safeLauncherProtocolVersion !== 1) continue;
@@ -2376,7 +2386,7 @@ async function handleReprocess(msg: ReprocessSessionMessage): Promise<void> {
 async function handleListExternal(requestId: string, agentId?: string): Promise<void> {
   try {
     const selectedAgent = agentId
-      ? metadata.agents.find((agent) => agent.id === agentId && agent.available !== false)
+      ? metadata.agents.find((agent) => agent.id === agentId && agent.available === true)
       : undefined;
     if (agentId && !selectedAgent) {
       sendUp({

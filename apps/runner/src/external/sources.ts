@@ -187,6 +187,7 @@ export function resolveLaunchForDriver(
   context: AgentContext,
 ): { command: string; args: string[]; env: Record<string, string> } | null {
   const agent = agents.find((a) => {
+    if (a.available !== true) return false;
     const aDriver = a.driver ?? "acp";
     const aCtx = a.context ?? { kind: "native" as const };
     if (aDriver !== driver || aCtx.kind !== context.kind) return false;
@@ -211,7 +212,7 @@ export function resolveLaunchForAgent(
     if (candidateContext.kind !== context.kind ||
         (context.kind === "wsl" &&
           (candidateContext.kind !== "wsl" || candidateContext.distro !== context.distro))) return false;
-    if (candidate.available !== false) return true;
+    if (candidate.available === true) return true;
     if (driver === "claude-code") return candidate.claudeCode?.status === "unauthenticated";
     if (driver === "codex-app-server") {
       return candidate.authStatus === "unauthenticated" && candidate.codexAppServer?.status === "supported";

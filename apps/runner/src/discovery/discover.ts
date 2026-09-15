@@ -9,12 +9,14 @@ import { readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
+  AcpRuntimeCapabilities,
   AgentCapabilities,
   AgentContext,
   AgentDefinition,
   AgentDriverKind,
   AgentSlashCommand,
 } from "@wollipog/protocol";
+import { AcpClient } from "../acp.js";
 import { capabilitiesFor } from "../catalog.js";
 import {
   applyClaudeAgentEnvironment,
@@ -29,6 +31,98 @@ import { probeNativeCodexAppServer, probeWslCodexAppServer, unavailableCodexAppS
 import { discoverAgentModels, type AgentModelDiscovery } from "./models.js";
 import { unavailableNativeTuiAccounting } from "./native-tui-accounting.js";
 import { listWslDistros, resolveInWsl, resolveNative, run, type ResolvedLaunch } from "./resolve.js";
+
+const CONFIGURED_ACP_PROBE_TIMEOUT_MS = 8_000;
+
+/** Verify an operator-configured ACP launch with the protocol's side-effect-free initialize call.
+ * Provider stderr and thrown diagnostics are deliberately reduced to fixed operator guidance: a
+ * configured launch may receive credentials, so neither its environment nor its output may enter
+ * runner metadata. */
+export async function probeConfiguredAcpAgent(
+  agent: AgentDefinition,
+  env: Record<string, string>,
+  options: { cwd?: string; timeoutMs?: number; platform?: NodeJS.Platform } = {},
+): Promise<AgentDefinition> {
+  const context = agent.context ?? { kind: "native" as const };
+  if (context.kind === "wsl" && (options.platform ?? process.platform) !== "win32") {
+    return {
+      ...agent,
+      env: {},
+      available: false,
+      unavailableReason: "This WSL launch target is incompatible with a non-Windows runner.",
+    };
+  }
+
+  let exited = false;
+  let spawnFailed = false;
+  let capabilities: AcpRuntimeCapabilities | undefined;
+  let client: AcpClient | undefined;
+  let timer: NodeJS.Timeout | undefined;
+  let timedOut = false;
+  try {
+    client = new AcpClient({
+      command: agent.command,
+      args: [...(agent.args ?? [])],
+      cwd: options.cwd ?? process.cwd(),
+      env,
+      context,
+    }, {
+      onEvent: () => {},
+      onStderr: (text) => { if (text.startsWith("spawn error:")) spawnFailed = true; },
+      onExit: () => { exited = true; },
+      onAcpCapabilities: (value) => { capabilities = value; },
+    });
+    await Promise.race([
+      client.initialize(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(new Error("configured ACP probe timed out"));
+        }, options.timeoutMs ?? CONFIGURED_ACP_PROBE_TIMEOUT_MS);
+      }),
+    ]);
+    return {
+      ...agent,
+      env: {},
+      available: true,
+      unavailableReason: undefined,
+      ...(capabilities ? { acp: capabilities } : {}),
+    };
+  } catch {
+    const unavailableReason = spawnFailed
+      ? "The configured command was not found or could not be started in this execution context."
+      : exited
+        ? "The configured launch exited before completing an ACP initialize probe. Check its command and arguments."
+        : timedOut
+          ? "The configured launch did not complete an ACP initialize probe before the timeout."
+          : "The configured launch did not return a valid ACP initialize response.";
+    return { ...agent, env: {}, available: false, unavailableReason };
+  } finally {
+    if (timer) clearTimeout(timer);
+    client?.dispose();
+  }
+}
+
+/** Probe configured ACP entries independently so one missing environment reference or broken
+ * adapter cannot suppress discovery for the rest of the runner. */
+export async function probeConfiguredAcpAgents(
+  agents: AgentDefinition[],
+  resolveEnv: (agentId: string) => Record<string, string>,
+  options: { cwd?: string; timeoutMs?: number; platform?: NodeJS.Platform } = {},
+): Promise<AgentDefinition[]> {
+  return Promise.all(agents.filter((agent) => (agent.driver ?? "acp") === "acp").map(async (agent) => {
+    try {
+      return await probeConfiguredAcpAgent(agent, resolveEnv(agent.id), options);
+    } catch {
+      return {
+        ...agent,
+        env: {},
+        available: false,
+        unavailableReason: "The configured launch environment could not be resolved on this runner.",
+      };
+    }
+  }));
+}
 
 /** Where each driver keeps user-defined slash commands / prompts ($HOME-relative). */
 const COMMAND_DIRS: Partial<Record<AgentDriverKind, { dir: string; source: AgentSlashCommand["source"] }[]>> = {
@@ -576,7 +670,13 @@ export function mergeAgents(configAgents: AgentDefinition[], discovered: AgentDe
     const d = launchKeys(c).map((k) => byKey.get(k)).find(Boolean);
     if (!d) {
       const { wslAgentControl: _unverifiedWslAgentControl, ...configured } = c;
-      return configured;
+      return {
+        ...configured,
+        available: false,
+        unavailableReason: configured.context?.kind === "wsl" && process.platform !== "win32"
+          ? "This WSL launch target is incompatible with a non-Windows runner."
+          : configured.unavailableReason ?? "No completed discovery probe verified this configured launch target.",
+      };
     }
     // A bare path-less config command ("codex") is a pointer, not a launch override — and it
     // spawns via the daemon's non-login PATH, which is exactly where version-manager installs
@@ -590,7 +690,10 @@ export function mergeAgents(configAgents: AgentDefinition[], discovered: AgentDe
       env: { ...(d.env ?? {}), ...(c.env ?? {}) },
       version: c.version ?? d.version,
       authStatus: c.authStatus ?? d.authStatus,
-      available: c.available ?? d.available,
+      available: d.available === true && c.available !== false,
+      unavailableReason: d.available === true && c.available !== false
+        ? undefined
+        : d.unavailableReason ?? c.unavailableReason,
       // Diagnostics describe the live resolved launch, so fresh discovery wins over a stale
       // config/persisted value. Old runners simply omit the field and keep the config value.
       codexAppServer: d.codexAppServer ?? c.codexAppServer,

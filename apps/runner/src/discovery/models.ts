@@ -535,7 +535,7 @@ export function createAgentModelDiscoverer(deps: AgentModelDiscovererDeps) {
   return async (agent: AgentDefinition, options: { refresh?: boolean } = {}): Promise<AgentModelDiscovery> => {
     const driver = agent.driver ?? "acp";
     const context = agent.context ?? { kind: "native" as const };
-    if (agent.available === false) return { models: [] };
+    if (agent.available !== true) return { models: [] };
     if (driver !== "codex-app-server" && driver !== "claude-code") {
       return { models: await deps.fallback(driver, context), ...(driver === "codex" ? { source: "cached" as const } : {}) };
     }

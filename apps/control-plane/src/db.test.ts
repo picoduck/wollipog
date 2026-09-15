@@ -56,6 +56,7 @@ function acpAgent(): AgentDefinition {
     },
     source: "registry",
     version: "9.1.0",
+    available: true,
     acp: { logout: true, loadSession: true, sessionList: true, sessionDelete: false, sessionResume: true, sessionClose: true },
     registry: {
       id: "acp-agent",
@@ -80,6 +81,7 @@ function claudeAgent(): AgentDefinition {
     env: {},
     driver: "claude-code",
     context: { kind: "wsl", distro: "Ubuntu" },
+    available: true,
     claudeCode: {
       status: "ready",
       installedVersion: "2.1.205",
@@ -1750,6 +1752,36 @@ test("getAgentLaunch returns command/args/env/driver/context/version", () => {
 
   assert.equal(db.getAgentLaunch("runner-1", "nope"), null);
   assert.equal(db.getAgentLaunch("nope", "acp-agent"), null);
+});
+
+test("getAgentLaunch fails closed for unavailable and legacy unverified agents", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const unavailable = {
+    ...acpAgent(),
+    id: "unavailable-agent",
+    name: "Unavailable Agent",
+    available: false,
+    unavailableReason: "The configured launch did not return a valid ACP initialize response.",
+  };
+  const unverified = {
+    ...acpAgent(),
+    id: "legacy-unverified-agent",
+    name: "Legacy Unverified Agent",
+    available: undefined,
+  };
+  db.registerRunner(meta({ agents: [unavailable, unverified] }), 500, PROTOCOL_VERSION);
+
+  assert.equal(db.getAgentLaunch("runner-1", unavailable.id), null);
+  assert.equal(db.getAgentLaunch("runner-1", unverified.id), null);
+  assert.equal(
+    db.getRunner("runner-1")!.agents.find((agent) => agent.id === unavailable.id)!.unavailableReason,
+    unavailable.unavailableReason,
+  );
+  assert.equal(
+    db.getRunner("runner-1")!.agents.find((agent) => agent.id === unverified.id)!.available,
+    undefined,
+  );
+  db.close();
 });
 
 test("Direct WSL safe-launcher attestation round-trips only from a v124+ runner", () => {

@@ -162,8 +162,8 @@ test("onboarding health keeps ACP auth guidance provider-neutral and configured 
     workspaceId: "repo",
     runner: runner({ agents: [{ id: "custom", name: "Custom ACP", command: "custom", args: [], env: {}, driver: "acp" }] }),
   });
-  assert.equal(configured.find((check) => check.id === "agents")?.status, "warning");
-  assert.match(configured.find((check) => check.id === "agents")?.detail ?? "", /first live initialize/);
+  assert.equal(configured.find((check) => check.id === "agents")?.status, "fail");
+  assert.match(configured.find((check) => check.id === "agents")?.detail ?? "", /unavailable/);
 });
 
 test("onboarding health requires ACP live evidence and promotes configured ACP after handshake", () => {
@@ -182,6 +182,7 @@ test("onboarding health requires ACP live evidence and promotes configured ACP a
     workspaceId: "repo",
     runner: runner({ agents: [{
       id: "configured", name: "Configured ACP", command: "agent", args: [], env: {}, driver: "acp",
+      available: true,
       authStatus: "authenticated",
       acp: { logout: false, loadSession: false, sessionList: false, sessionDelete: false, sessionResume: false, sessionClose: false },
     }] }),

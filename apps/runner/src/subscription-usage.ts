@@ -655,7 +655,7 @@ export class SubscriptionUsageManager {
       buckets: [],
       ...(source.accountLabel ? { accountLabel: source.accountLabel } : {}),
     };
-    if (agent.available === false) {
+    if (agent.available !== true) {
       return { ...base, state: "unavailable", detail: `${agent.name} is not available on this runner.` };
     }
     if (agent.authStatus === "unauthenticated" ||
@@ -820,7 +820,7 @@ export class SubscriptionUsageManager {
     if (initial.state === "unsupported" ||
         initial.state === "unauthenticated" ||
         initial.state === "not_applicable" ||
-        initial.state === "unavailable" && source.agent.available === false) {
+        (initial.state === "unavailable" && source.agent.available !== true)) {
       this.snapshots.set(source.sourceId, initial);
       this.options.publish(initial);
       return;

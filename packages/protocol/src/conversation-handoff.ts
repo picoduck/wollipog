@@ -19,7 +19,7 @@ export function handoffDestinationError(
   config: SessionConfig,
   options: { allowSameProvider?: boolean } = {},
 ): string | null {
-  if (!agent || agent.available === false) return "The destination agent is unavailable.";
+  if (!agent || agent.available !== true) return "The destination agent is unavailable.";
   if (agent.driver !== "claude-code" && agent.driver !== "codex-app-server") return "This destination does not support checkpoint handoffs.";
   if (agent.driver === sourceDriver && !options.allowSameProvider) return "Choose a different agent provider, or use a native fork.";
   if (agent.authStatus !== "authenticated") return "The destination agent must authenticate independently before handoff.";

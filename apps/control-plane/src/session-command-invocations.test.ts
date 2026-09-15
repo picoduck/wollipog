@@ -32,6 +32,7 @@ function runnerMeta(): RunnerMetadata {
       args: [],
       env: {},
       driver: "claude-code",
+      available: true,
       context: { kind: "native" },
     }],
   };

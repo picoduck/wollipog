@@ -198,6 +198,7 @@ test("app-server discovery caches per version/context, refreshes, and only falls
     args: [],
     env: {},
     driver: "codex-app-server" as const,
+    available: true,
     context: { kind: "native" as const },
     version: "0.147.0",
   };
@@ -365,6 +366,7 @@ test("claudeModelProbeOptions matches real-turn auth and no-prompt launch bounda
       MAM_CLAUDE_PENDING_MAX_MS: "4000",
     },
     driver: "claude-code",
+    available: true,
     context: { kind: "native" },
   });
   assert.deepEqual(native.scrubInheritedEnv, [
@@ -474,6 +476,7 @@ test("claude discovery caches live metadata and retains it when refresh fails", 
     args: [],
     env: {},
     driver: "claude-code" as const,
+    available: true,
     context: { kind: "native" as const },
     version: "2.1.220",
     claudeCode: PROBE_CAPABLE_CLAUDE,
@@ -505,6 +508,7 @@ test("claude discovery retries an uncached transient first-probe failure", async
     args: [],
     env: {},
     driver: "claude-code" as const,
+    available: true,
     context: { kind: "native" as const },
     version: "2.1.220",
     claudeCode: PROBE_CAPABLE_CLAUDE,
@@ -532,6 +536,7 @@ test("claude discovery skips a probe whose required control flags are known unav
     args: [],
     env: {},
     driver: "claude-code",
+    available: true,
     context: { kind: "native" },
     version: "1.0.0",
     claudeCode: {
@@ -566,6 +571,7 @@ test("claude discovery negatively caches three cold probe failures until explici
     args: [],
     env: {},
     driver: "claude-code" as const,
+    available: true,
     context: { kind: "native" as const },
     version: "2.1.220",
     claudeCode: PROBE_CAPABLE_CLAUDE,

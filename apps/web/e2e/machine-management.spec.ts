@@ -32,6 +32,18 @@ test.beforeEach(async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
 });
 
+test("Connections distinguish verified, unavailable, and unverified agents", async ({ page }) => {
+  await expect(page.locator(".runner-agents-summary")).toHaveText("1 Available");
+  await page.getByText("Agents", { exact: true }).click();
+
+  await expect(page.getByText("Custom ACP", { exact: true })).toBeVisible();
+  await expect(page.getByText("Missing ACP", { exact: true })).toBeVisible();
+  await expect(page.getByText("Legacy Unverified ACP", { exact: true })).toBeVisible();
+  await expect(page.locator(".atag.broken", { hasText: "Unavailable" })).toHaveCount(1);
+  await expect(page.locator(".atag.broken", { hasText: "Unverified" })).toHaveCount(1);
+  await expect(page.getByText(/configured command was not found/u)).toBeVisible();
+});
+
 test("offline recovery stays stacked and usable in a narrow card on a desktop viewport", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await setOffline(page);

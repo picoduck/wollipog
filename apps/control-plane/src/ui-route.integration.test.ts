@@ -329,6 +329,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
       args: [],
       env: {},
       driver: "claude-code",
+      available: true,
       context: { kind: "native" },
     }],
   }, Date.now(), PROTOCOL_VERSION);
@@ -539,6 +540,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
         args: [],
         env: {},
         driver: "claude-code",
+        available: true,
         context: { kind: "native" },
       }],
     },

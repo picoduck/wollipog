@@ -4,9 +4,24 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ApiError } from "../api.js";
 import {
+  agentAvailabilityLabel,
+  availableAgentCount,
   LifecycleConflictDetails,
   lifecycleConflictPresentation,
 } from "./RunnersView.js";
+
+test("Connections counts only verified runnable agents and labels legacy rows unverified", () => {
+  const base = { name: "Agent", command: "agent", args: [], env: {} };
+  const agents = [
+    { ...base, id: "verified", available: true },
+    { ...base, id: "unavailable", available: false },
+    { ...base, id: "legacy" },
+  ];
+  assert.equal(availableAgentCount(agents), 1);
+  assert.equal(agentAvailabilityLabel(agents[0]!), "Available");
+  assert.equal(agentAvailabilityLabel(agents[1]!), "Unavailable");
+  assert.equal(agentAvailabilityLabel(agents[2]!), "Unverified");
+});
 
 test("runner lifecycle conflicts present bounded, normalized session details", () => {
   const error = new ApiError("active sessions", 409, "BOX_HAS_ACTIVE_SESSIONS", {

@@ -25,6 +25,7 @@ function agent(overrides: Partial<AgentDefinition> = {}): AgentDefinition {
     env: { KEY: "v" },
     driver: "claude-code",
     context: { kind: "native" },
+    available: true,
     ...overrides,
   };
 }

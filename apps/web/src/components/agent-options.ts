@@ -70,11 +70,10 @@ export function agentOptions(
   }
   // Hide the generic ACP path for a provider once a USABLE native harness for it exists — it's a
   // weaker duplicate (no model picker / slash commands). ACP stays for providers with no native
-  // driver, and an explicitly-unavailable native entry (discovery probed and failed) must not
-  // hide a working ACP fallback. `available === undefined` (config-authored) counts as usable.
+  // driver, and an unavailable or unverified native entry must not hide a working ACP fallback.
   const nativeProviders = new Set(
     agents
-      .filter((a) => a.driver && a.driver !== "acp" && a.available !== false)
+      .filter((a) => a.driver && a.driver !== "acp" && a.available === true)
       .map((a) => agentProvider(a.driver!, a.name)),
   );
   const visible = agents.filter((a) => {
@@ -113,7 +112,7 @@ export function agentOptions(
         label: a.driver === "codex-app-server"
           ? `${f} ${v}`
           : !v || (!multi && a.driver !== "codex") ? f : `${f} — ${v}`,
-        ...(a.available === false ? { disabled: true } : {}),
+        ...(a.available !== true ? { disabled: true } : {}),
         ...(a.driver === "codex" ? { advanced: true } : {}),
       });
     }
@@ -124,8 +123,7 @@ export function agentOptions(
 /** The option a fresh dialog should select: the first USABLE one (never a needs-setup entry). */
 export function firstEnabledAgentId(options: AgentOption[]): string {
   return (options.find((option) => !option.advanced && !option.disabled) ??
-    options.find((option) => !option.disabled) ??
-    options[0])?.agent.id ?? "";
+    options.find((option) => !option.disabled))?.agent.id ?? "";
 }
 
 export function primaryAgentOptions(options: AgentOption[]): AgentOption[] {
@@ -213,7 +211,7 @@ export function agentMeta(a: AgentDefinition): string {
         `run \`codex login\` ${a.context?.kind === "wsl" ? `inside ${a.context.distro}` : "on the runner host"}, then rediscover`,
         `runs on ${where}`,
       ]
-    : a.driver === "codex-app-server" && a.available === false
+    : a.driver === "codex-app-server" && a.available !== true
     ? ["Interactive target unavailable", `runs on ${where}`]
     : a.driver === "codex-app-server"
       ? [

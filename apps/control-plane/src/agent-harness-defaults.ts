@@ -85,7 +85,7 @@ export class AgentHarnessDefaultsSettings {
     const options = new Map<string, AgentHarnessDefaultOption>();
     for (const runner of this.db.listRunnersForPrincipal(principal)) {
       for (const agent of runner.agents) {
-        if (agent.id === "conductor" || agent.available === false) continue;
+        if (agent.id === "conductor" || agent.available !== true) continue;
         const identity = agentHarnessIdentityFor(agent);
         const key = agentHarnessIdentityKey(identity);
         const installation: AgentHarnessDefaultInstallation = {
