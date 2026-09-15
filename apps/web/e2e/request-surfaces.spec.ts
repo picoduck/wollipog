@@ -23,6 +23,10 @@ test("evidence actions remain reachable in a short desktop panel with child requ
 
   await expect(page.locator(".request-panel-row")).toHaveCount(13);
   await assertActionsInsideRequestPanel(page);
+  const checks = page.locator('.evidence-review-item input[type="checkbox"]');
+  await expect(checks.first()).toBeVisible();
+  for (let index = 0; index < 8; index += 1) await checks.nth(index).check();
+  await expect(page.getByRole("button", { name: "Approve" })).toBeEnabled();
   const detail = page.locator(".request-panel-detail");
   await detail.evaluate((element) => { element.scrollTop = element.scrollHeight; });
   await assertActionsInsideRequestPanel(page);

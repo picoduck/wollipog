@@ -2203,7 +2203,14 @@ textarea {
   }
 }
 @media (min-width: 761px) and (max-height: 500px) {
-  .request-panel-single .request-panel-detail:has(> .evidence-review-surface) > .request-panel-detail-head {
+  .request-panel-detail:has(> .evidence-review-surface) > .request-panel-detail-head {
+    display: none;
+  }
+  .request-panel:not(.request-panel-single) {
+    grid-template-rows: minmax(72px, 25%) minmax(0, 1fr);
+  }
+  .request-panel:not(.request-panel-single) .request-panel-detail:has(> .evidence-review-surface) > .request-owner,
+  .request-panel:not(.request-panel-single) .evidence-review-summary p {
     display: none;
   }
 }
