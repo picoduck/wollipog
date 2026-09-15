@@ -4704,6 +4704,7 @@ function SessionDetailLoaded({
                     onCancelPending={(commandId) => void resolvePendingPrompt(commandId, "cancel")}
                     onCancelLive={(commandId) => void cancelLivePendingPrompt(commandId)}
                     onDismiss={(commandId) => void resolvePendingPrompt(commandId, "dismiss")}
+                    onRetry={(commandId) => void resolvePendingPrompt(commandId, "retry")}
                   />
                   {showOptimistic && pending && (
                     <div className="tl-row user">

@@ -165,6 +165,20 @@ export interface SessionMeta {
     reason?: string;
     /** Correlates one live login subprocess; stale cancels cannot target a later generation. */
     loginOperationId?: string;
+    /** Durable prompt commands held before provider submission. The control plane retains the
+     * authoritative payload and image leases; this runner-local copy preserves FIFO/configuration
+     * coordinates and lets authentication recovery resume without a browser round trip. */
+    durableRetries?: Array<{
+      commandId: string;
+      ordinal: number;
+      text: string;
+      images: PromptImageInput[];
+      slashCommand?: string;
+      config?: SessionConfig;
+    }>;
+    /** Recovery can settle before a restarted runner has reclaimed every durable command handle.
+     * Keep the decision durable and content-free until the control plane replays those commands. */
+    resolution?: "approved";
     retry?: {
       /** Original runner-local FIFO position reserved before asynchronous launch/preflight. */
       ordinal?: number;
@@ -176,6 +190,9 @@ export interface SessionMeta {
   };
   /** At-most-once tombstone written and flushed before an automatic recovery prompt is enqueued. */
   providerAuthRetryAttemptedRecoveryId?: string;
+  /** Content-free command tombstones for auth recovery the user explicitly dismissed before a
+   * restarted runner reclaimed the corresponding durable handles. */
+  providerAuthDismissedCommandIds?: string[];
   /** Durable quarantine of a provider-owned conversation whose stored history the provider rejects
    * before inference. Authoritative across process restart: while it is set, no prompt, automatic
    * continuation, or compaction may be submitted to this thread, because every submission resends

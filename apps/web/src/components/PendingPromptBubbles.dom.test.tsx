@@ -76,6 +76,7 @@ test("one pending action disables every prompt action", async () => {
         onCancelPending={() => actions.push("pending")}
         onCancelLive={() => actions.push("live")}
         onDismiss={() => actions.push("dismiss")}
+        onRetry={() => actions.push("retry")}
       />);
     });
     const buttons = [...container.querySelectorAll("button")];
@@ -109,6 +110,11 @@ test("pending prompts render as stable transcript bubbles and reconcile by comma
             commandId: "failed", state: "failed", errorCode: "COMMAND_CANCELLED",
             error: "prompt cancelled before runner delivery", canDismiss: true,
           }),
+          pending({
+            commandId: "auth-retry", state: "failed", errorCode: "PROVIDER_AUTHENTICATION_REQUIRED",
+            error: "authentication recovery was dismissed; this message was not sent",
+            canDismiss: true, canRetry: true,
+          }),
           pending({ commandId: "delivered", state: "started" }),
         ]}
         deliveredCommandIds={new Set(["delivered"])}
@@ -117,23 +123,33 @@ test("pending prompts render as stable transcript bubbles and reconcile by comma
         onCancelPending={(id) => actions.push(`pending:${id}`)}
         onCancelLive={(id) => actions.push(`live:${id}`)}
         onDismiss={(id) => actions.push(`dismiss:${id}`)}
+        onRetry={(id) => actions.push(`retry:${id}`)}
       />);
     });
-    assert.equal(container.querySelectorAll(".pending-prompt-bubble").length, 3);
+    assert.equal(container.querySelectorAll(".pending-prompt-bubble").length, 4);
     assert.equal(container.querySelector("[data-testid='pending-prompt-delivered']"), null);
     assert.deepEqual(
       [...container.querySelectorAll(".pending-prompt-state")].map((node) => node.textContent),
-      ["Pending", "Queued", "Cancelled"],
+      ["Pending", "Queued", "Cancelled", "Delivery Failed"],
     );
     const buttons = [...container.querySelectorAll("button")];
     assert.deepEqual(buttons.map((button) => button.getAttribute("aria-describedby")), [
       "pending-prompt-details-cancel-local",
       "pending-prompt-details-cancel-live",
       "pending-prompt-details-failed",
+      "pending-prompt-details-auth-retry",
+      "pending-prompt-details-auth-retry",
     ]);
     await act(async () => { for (const button of buttons) button.click(); });
-    assert.deepEqual(actions, ["pending:cancel-local", "live:cancel-live", "dismiss:failed"]);
+    assert.deepEqual(actions, [
+      "pending:cancel-local",
+      "live:cancel-live",
+      "dismiss:failed",
+      "dismiss:auth-retry",
+      "retry:auth-retry",
+    ]);
     assert.match(container.textContent ?? "", /prompt cancelled before runner delivery/);
+    assert.match(container.textContent ?? "", /message was not sent/);
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
@@ -156,6 +172,7 @@ test("started prompts retire from partial transcripts using durable user-event e
         onCancelPending={noOp}
         onCancelLive={noOp}
         onDismiss={noOp}
+        onRetry={noOp}
       />);
     });
   };

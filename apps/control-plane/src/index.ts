@@ -2765,11 +2765,15 @@ app.post("/api/sessions/:id/pending-prompts/:commandId/resolve", async (req, rep
   if (body.action !== "cancel" && body.action !== "dismiss" && body.action !== "retry") {
     return reply.code(400).send({ error: "action must be cancel, dismiss, or retry" });
   }
-  const result = body.action === "cancel"
-    ? svc.cancelPendingPrompt(id, commandId)
-    : body.action === "dismiss"
-      ? svc.dismissPendingPrompt(id, commandId)
-      : svc.retryCampaignContinuation(id, commandId);
+  let result;
+  if (body.action === "cancel") result = svc.cancelPendingPrompt(id, commandId);
+  else if (body.action === "dismiss") result = svc.dismissPendingPrompt(id, commandId);
+  else {
+    const promptRetry = svc.retryPendingPrompt(id, commandId);
+    result = !promptRetry.ok && promptRetry.status === 404
+      ? svc.retryCampaignContinuation(id, commandId)
+      : promptRetry;
+  }
   if (!result.ok) return reply.code(result.status).send({ error: result.error });
   return result.data;
 });

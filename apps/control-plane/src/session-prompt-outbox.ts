@@ -233,6 +233,47 @@ export class SessionPromptOutbox {
     return result;
   }
 
+  retryAuthenticationFailure(
+    sessionId: string,
+    commandId: string,
+    now = Date.now(),
+  ): "retried" | "not_found" | "not_retryable" {
+    const prior = this.db.getSessionPromptCommand(commandId);
+    if (!prior || prior.sessionId !== sessionId || prior.dismissedAt !== undefined) return "not_found";
+    if (prior.state !== "failed" || prior.errorCode !== "PROVIDER_AUTHENTICATION_REQUIRED" ||
+        prior.userEventSeq !== undefined || prior.payloadJson === "null") return "not_retryable";
+    let command: DurableSessionCommand;
+    try {
+      command = JSON.parse(prior.payloadJson) as DurableSessionCommand;
+    } catch {
+      return "not_retryable";
+    }
+    if (command.type !== "prompt_session" || command.sessionId !== sessionId || command.campaignContinuation ||
+        automationCommandDigest(command) !== prior.payloadSha256) return "not_retryable";
+    // Every explicit retry belongs to one stable incident chain. A second authentication failure
+    // must advance `.retry-1` to `.retry-2`, rather than creating a nested identity that the
+    // bounded retry lookup would no longer recognize.
+    const baseCommandId = commandId.replace(/(?:\.retry-\d+)+$/u, "");
+    const staged = this.db.stageRetriableSessionPromptCommand({
+      baseCommandId,
+      sessionId,
+      runnerId: prior.runnerId,
+      payloadJson: prior.payloadJson,
+      payloadSha256: prior.payloadSha256,
+      expiresAt: now + RECEIPT_HORIZON_MS,
+      now,
+    });
+    if (staged.disposition !== "deliverable") return "not_retryable";
+    this.db.dismissTerminalSessionPromptCommand(sessionId, commandId, now);
+    this.hub.sessionChangedById(sessionId);
+    try {
+      this.flush(now, prior.runnerId);
+    } catch (error) {
+      this.log.warn(`retried durable prompt flush was deferred: ${(error as Error).message}`);
+    }
+    return "retried";
+  }
+
   private failMalformed(row: SessionPromptCommandRecord, error: string, now: number): void {
     this.log.warn(`${error} (${row.commandId})`);
     this.db.recordSessionPromptCommandReceipt({

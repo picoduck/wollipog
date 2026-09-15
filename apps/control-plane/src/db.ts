@@ -16807,6 +16807,8 @@ export class ControlPlaneDb {
         updatedAt: row.updated_at,
         ...(row.state === "pending" ? { canCancel: true } : {}),
         ...(row.state === "failed" || row.state === "uncertain" ? { canDismiss: true } : {}),
+        ...(row.state === "failed" && row.error_code === "PROVIDER_AUTHENTICATION_REQUIRED" &&
+          row.user_event_seq == null ? { canRetry: true } : {}),
       }];
     });
   }

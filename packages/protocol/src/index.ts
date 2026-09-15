@@ -4450,6 +4450,8 @@ export interface PendingPromptView {
   canCancel?: boolean;
   /** Terminal evidence may be hidden without changing its recorded outcome. */
   canDismiss?: boolean;
+  /** A definitive known-undelivered failure may be copied into a fresh durable command identity. */
+  canRetry?: boolean;
 }
 
 export type SteerDisposition = "accepted" | "converted_to_queue" | "rejected" | "uncertain";

@@ -7475,7 +7475,7 @@ test("durable queued prompts accept revision-zero failures and stop retrying aft
   assert.equal(db.getSessionPromptCommand(stranded.commandId), null);
 });
 
-test("runner provider-authentication failures terminalize the control-plane prompt projection", () => {
+test("runner provider-authentication queue receipts keep the control-plane prompt recoverable", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { prompt: "initial" });
   hub.sentToRunner.length = 0;
@@ -7488,7 +7488,7 @@ test("runner provider-authentication failures terminalize the control-plane prom
     requestId: sent.requestId,
     commandId: sent.commandId,
     sessionId: id,
-    state: "failed",
+    state: "queued",
     revision: 1,
     duplicate: false,
     error,
@@ -7496,7 +7496,7 @@ test("runner provider-authentication failures terminalize the control-plane prom
   }), true);
 
   const record = db.getSessionPromptCommand(sent.commandId);
-  assert.equal(record?.state, "failed");
+  assert.equal(record?.state, "queued");
   assert.equal(record?.error, error);
   assert.equal(record?.errorCode, "PROVIDER_AUTHENTICATION_REQUIRED");
   assert.deepEqual(db.getSession(id)?.pendingPrompts?.map((pending) => ({
@@ -7506,14 +7506,42 @@ test("runner provider-authentication failures terminalize the control-plane prom
     errorCode: pending.errorCode,
   })), [{
     commandId: sent.commandId,
-    state: "failed",
+    state: "queued",
     error,
     errorCode: "PROVIDER_AUTHENTICATION_REQUIRED",
   }]);
 
   hub.sentToRunner.length = 0;
-  assert.equal(svc.retryDuePrompts(Date.now() + 60_000), 0);
-  assert.equal(hub.sentOfType("durable_session_command").length, 0);
+  assert.equal(svc.retryDuePrompts(Date.now() + 60_000), 1);
+  assert.equal(hub.sentOfType("durable_session_command").length, 1);
+  assert.equal(hub.sentOfType("durable_session_command")[0]?.commandId, sent.commandId);
+});
+
+test("known-undelivered authentication failures expose an explicit durable retry", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { prompt: "initial" });
+  hub.sentToRunner.length = 0;
+  assert.equal(svc.prompt(id, "recoverable submission").ok, true);
+  const sent = hub.sentOfType("durable_session_command")[0]!;
+  assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+    type: "durable_session_command_update",
+    commandId: sent.commandId,
+    sessionId: id,
+    state: "failed",
+    revision: 2,
+    error: "authentication recovery was dismissed; this message was not sent",
+    code: "PROVIDER_AUTHENTICATION_REQUIRED",
+  }), true);
+  assert.equal(db.getSession(id)?.pendingPrompts?.[0]?.canRetry, true);
+
+  hub.sentToRunner.length = 0;
+  const retried = svc.retryPendingPrompt(id, sent.commandId);
+  assert.equal(retried.ok, true, retried.error);
+  const replacement = hub.sentOfType("durable_session_command")[0]!;
+  assert.equal(replacement.commandId, `${sent.commandId}.retry-1`);
+  assert.deepEqual(replacement.command, sent.command);
+  assert.equal(db.getSession(id)?.pendingPrompts?.some((prompt) => prompt.commandId === sent.commandId), false);
+  assert.equal(db.getSession(id)?.pendingPrompts?.[0]?.canRetry, undefined);
 });
 
 test("durable prompt retry attempt identities stay bounded while recent receipts remain valid", () => {

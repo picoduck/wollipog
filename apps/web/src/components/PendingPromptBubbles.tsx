@@ -52,6 +52,7 @@ export function PendingPromptBubbles({
   onCancelPending,
   onCancelLive,
   onDismiss,
+  onRetry,
 }: {
   prompts: PendingPromptView[];
   deliveredCommandIds: ReadonlySet<string>;
@@ -61,6 +62,7 @@ export function PendingPromptBubbles({
   onCancelPending: (commandId: string) => void;
   onCancelLive: (commandId: string) => void;
   onDismiss: (commandId: string) => void;
+  onRetry: (commandId: string) => void;
 }) {
   // userEventSeq comes from the runner only after the command-tagged user event is flushed. It is
   // therefore stronger delivery evidence than the currently loaded (possibly partial) timeline.
@@ -93,7 +95,7 @@ export function PendingPromptBubbles({
             {prompt.text && <div className="bubble-text">{prompt.text}</div>}
             {prompt.error && <div className="pending-prompt-error">{prompt.error}</div>}
           </div>
-          {(cancelPending || cancelLive || prompt.canDismiss) && (
+          {(cancelPending || cancelLive || prompt.canDismiss || prompt.canRetry) && (
             <div className="pending-prompt-actions" aria-busy={busy || undefined}>
               {(cancelPending || cancelLive) && (
                 <button
@@ -119,6 +121,18 @@ export function PendingPromptBubbles({
                   onClick={() => onDismiss(prompt.commandId)}
                 >
                   {busy ? "Dismissing…" : "Dismiss"}
+                </button>
+              )}
+              {prompt.canRetry && (
+                <button
+                  type="button"
+                  className="btn ghost sm"
+                  disabled={actionPending}
+                  aria-label={busy ? "Retrying Message" : "Retry Message"}
+                  aria-describedby={detailsId}
+                  onClick={() => onRetry(prompt.commandId)}
+                >
+                  {busy ? "Retrying…" : "Retry"}
                 </button>
               )}
             </div>

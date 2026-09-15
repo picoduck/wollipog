@@ -272,35 +272,93 @@ test("durable prompt receipts accept every protocol error code", () => {
   }
 });
 
-test("provider-authentication receipts terminalize durable prompts and stop retries", () => {
+test("provider-authentication queue receipts retain durable prompts for exact redelivery", () => {
   const { db, outbox, sent, changed, warnings } = fixture();
   try {
-    const staged = outbox.stage(SESSION_ID, RUNNER_ID, prompt(), NOW);
+    const command = {
+      type: "prompt_session" as const,
+      sessionId: SESSION_ID,
+      text: "recover this image prompt",
+      images: [{
+        artifactId: "artifact-auth-image",
+        mimeType: "image/png",
+        sizeBytes: 3,
+        sha256: "a".repeat(64),
+      }],
+      slashCommand: "review",
+      config: { model: "model-a" },
+    };
+    const staged = outbox.stage(SESSION_ID, RUNNER_ID, command, NOW);
     assert.equal(outbox.flush(NOW + 1), 1);
     assert.equal(sent.length, 1);
 
-    const error = "provider authentication is required";
+    const error = "Authentication is required. This message is queued for automatic delivery.";
+    assert.equal(outbox.receipt(RUNNER_ID, {
+      type: "durable_session_command_update",
+      commandId: staged.commandId,
+      sessionId: SESSION_ID,
+      state: "queued",
+      revision: 2,
+      error,
+      code: "PROVIDER_AUTHENTICATION_REQUIRED",
+    }, NOW + 2), true);
+
+    const held = db.getSessionPromptCommand(staged.commandId);
+    assert.equal(held?.state, "queued");
+    assert.equal(held?.revision, 2);
+    assert.equal(held?.error, error);
+    assert.equal(held?.errorCode, "PROVIDER_AUTHENTICATION_REQUIRED");
+    assert.deepEqual(JSON.parse(held!.payloadJson), command);
+    assert.deepEqual(changed, [SESSION_ID]);
+    assert.deepEqual(warnings, []);
+
+    sent.length = 0;
+    assert.equal(outbox.flush(NOW + 60_000), 1);
+    const redelivered = sent[0] as { commandId: string; command: DurableSessionCommand };
+    assert.equal(redelivered.commandId, staged.commandId);
+    assert.deepEqual(redelivered.command, command);
+  } finally {
+    db.close();
+  }
+});
+
+test("a dismissed known-undelivered authentication prompt retries under a fresh durable identity", () => {
+  const { db, outbox, sent } = fixture();
+  try {
+    const command = prompt("retry the retained content");
+    const staged = outbox.stage(SESSION_ID, RUNNER_ID, command, NOW);
+    assert.equal(outbox.flush(NOW + 1), 1);
     assert.equal(outbox.receipt(RUNNER_ID, {
       type: "durable_session_command_update",
       commandId: staged.commandId,
       sessionId: SESSION_ID,
       state: "failed",
-      revision: 1,
-      error,
+      revision: 2,
+      error: "authentication recovery was dismissed; this message was not sent",
       code: "PROVIDER_AUTHENTICATION_REQUIRED",
     }, NOW + 2), true);
 
-    const failed = db.getSessionPromptCommand(staged.commandId);
-    assert.equal(failed?.state, "failed");
-    assert.equal(failed?.revision, 1);
-    assert.equal(failed?.error, error);
-    assert.equal(failed?.errorCode, "PROVIDER_AUTHENTICATION_REQUIRED");
-    assert.deepEqual(changed, [SESSION_ID]);
-    assert.deepEqual(warnings, []);
-
     sent.length = 0;
-    assert.equal(outbox.flush(NOW + 60_000), 0);
-    assert.deepEqual(sent, [], "a terminal authentication failure is never resent");
+    assert.equal(outbox.retryAuthenticationFailure(SESSION_ID, staged.commandId, NOW + 3), "retried");
+    const retried = sent[0] as { commandId: string; command: DurableSessionCommand };
+    assert.equal(retried.commandId, `${staged.commandId}.retry-1`);
+    assert.deepEqual(retried.command, command);
+    assert.equal(db.getSessionPromptCommand(staged.commandId)?.payloadJson, "null");
+    assert.equal(db.getSessionPromptCommand(retried.commandId)?.state, "sent");
+    assert.equal(outbox.retryAuthenticationFailure(SESSION_ID, staged.commandId, NOW + 4), "not_found");
+
+    assert.equal(outbox.receipt(RUNNER_ID, {
+      type: "durable_session_command_update",
+      commandId: retried.commandId,
+      sessionId: SESSION_ID,
+      state: "failed",
+      revision: 2,
+      error: "authentication is still unavailable; this message was not sent",
+      code: "PROVIDER_AUTHENTICATION_REQUIRED",
+    }, NOW + 5), true);
+    sent.length = 0;
+    assert.equal(outbox.retryAuthenticationFailure(SESSION_ID, retried.commandId, NOW + 6), "retried");
+    assert.equal((sent[0] as { commandId: string }).commandId, `${staged.commandId}.retry-2`);
   } finally {
     db.close();
   }

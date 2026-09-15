@@ -284,7 +284,7 @@ function canCarrySlashCommandCatalog(
  * before emitting the corresponding runner receipt. */
 export interface DurableCommandLifecycle {
   readonly commandId: string;
-  queued(): void;
+  queued(error?: string, code?: DurableSessionCommandErrorCode): void;
   started(userEventSeq?: number): void;
   completed(): void;
   failed(error: string, code?: DurableSessionCommandErrorCode): void;
@@ -977,6 +977,9 @@ export class SessionManager {
   private readonly providerAuthOperations = new Set<string>();
   private readonly providerAuthRevalidations = new Map<string, Promise<void>>();
   private readonly providerAuthAutomaticAttempted = new Set<string>();
+  /** Process-local command handles for payloads whose durable replay coordinates live in the
+   * provider-auth block. A restarted runner reconstructs these from control-plane redelivery. */
+  private readonly providerAuthDurables = new Map<string, DurableCommandLifecycle>();
   /** Create/attach/select all merge durable session inventory, so serialize them per session. */
   private readonly worktreeOperations = new Map<string, Promise<unknown>>();
   /** Decisions can reach the runner while Claude's matching tool frame is still buffered. Hold
@@ -3649,7 +3652,8 @@ export class SessionManager {
         const block = reconciled.providerAuthBlock.loginOperationId
           ? { ...reconciled.providerAuthBlock, loginOperationId: undefined }
           : reconciled.providerAuthBlock;
-        const projection = this.providerAuthenticationOwner(block.credentialScopeId)?.sessionId === m.sessionId
+        const projection = !block.resolution &&
+          this.providerAuthenticationOwner(block.credentialScopeId)?.sessionId === m.sessionId
           ? this.providerAuthenticationProjection(reconciled, block)
           : null;
         this.store.patchMeta(m.sessionId, {
@@ -4890,10 +4894,21 @@ export class SessionManager {
       const authenticationBlocked = this.store.readMeta(spec.sessionId)?.providerAuthBlock;
       if (authenticationBlocked) {
         // Authentication is a recoverable launch state, not failed session construction. Preserve
-        // the materialized worktree and retain only ordinary, image-free work whose non-delivery
-        // was proven before a provider process existed. Durable commands were already settled by
-        // their receipt lane and must never execute later behind a terminal failure receipt.
-        if (!durable && authenticationBlocked.delivery === "not_delivered" && initialPrompt &&
+        // the materialized worktree and retain work whose non-delivery was proven before a provider
+        // process existed. Durable commands remain nonterminal so their control-plane payload,
+        // image leases, and journal identity survive every reconnect boundary.
+        let retainedDurable = false;
+        if (durable && authenticationBlocked.delivery === "not_delivered" && initialPrompt) {
+          retainedDurable = this.retainDurableProviderAuthenticationPrompt(
+            this.store.readMeta(spec.sessionId)!,
+            initialPrompt,
+            initialImages ?? [],
+            undefined,
+            spec.config,
+            durable,
+            undefined,
+          );
+        } else if (!durable && authenticationBlocked.delivery === "not_delivered" && initialPrompt &&
             (!initialImages || initialImages.length === 0) && !authenticationBlocked.retry) {
           this.store.patchMeta(spec.sessionId, {
             providerAuthBlock: {
@@ -4903,7 +4918,9 @@ export class SessionManager {
           });
           this.store.flush(spec.sessionId);
         }
-        durable?.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
+        if (!retainedDurable) {
+          durable?.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
+        }
         return false;
       }
       // A verification refusal proves the opposite of ownership: the path is missing, unregistered,
@@ -6691,6 +6708,14 @@ export class SessionManager {
       durable.uncertain("the durable user event already exists but provider submission state is unknown");
       return false;
     }
+    const dismissedAuthenticationCommands = this.store.readMeta(sessionId)?.providerAuthDismissedCommandIds;
+    if (durable && dismissedAuthenticationCommands?.includes(durable.commandId)) {
+      durable.failed(
+        "authentication recovery was dismissed; this message was not sent and remains available for retry",
+        "PROVIDER_AUTHENTICATION_REQUIRED",
+      );
+      return false;
+    }
     const effectiveConfig = this.snapshotQueuedConfig(sessionId, config);
     const rebindGeneration = this.launchGenerations.get(sessionId);
     // A normal rebind exposes its generation-owned pre-launch FIFO so prompts remain accepted.
@@ -6782,6 +6807,17 @@ export class SessionManager {
     if ((durableAuthenticationBlock || projectedAuthenticationBlock) && syntheticRecovery) return false;
     if (durableAuthenticationBlock && this.providerAuthRecovery && !syntheticRecovery) {
       const guidance = this.blockedPromptAuthenticationGuidance(persistedMeta!);
+      if (durable && persistedMeta!.providerAuthBlock!.delivery === "not_delivered") {
+        return this.retainDurableProviderAuthenticationPrompt(
+          persistedMeta!,
+          text,
+          images,
+          slashCommand,
+          effectiveConfig,
+          durable,
+          reservedOrdinal,
+        );
+      }
       this.emitEvent(sessionId, {
         kind: "stderr",
         text: guidance,
@@ -8463,7 +8499,18 @@ export class SessionManager {
       this.releaseAdmissionIfInactive(sessionId);
       if (resumeId) this.releaseResumeLock(sessionId, launchGeneration);
       const blocked = this.store.readMeta(sessionId);
-      if (blocked?.providerAuthBlock?.delivery === "not_delivered" &&
+      let retainedDurable = false;
+      if (blocked?.providerAuthBlock?.delivery === "not_delivered" && durable && !syntheticRecovery) {
+        retainedDurable = this.retainDurableProviderAuthenticationPrompt(
+          blocked,
+          text,
+          images,
+          slashCommand,
+          config,
+          durable,
+          reservedOrdinal,
+        );
+      } else if (blocked?.providerAuthBlock?.delivery === "not_delivered" &&
           blocked.providerAuthRetryAttemptedRecoveryId !== blocked.providerAuthBlock.recoveryId &&
           !blocked.providerAuthBlock.retry && !syntheticRecovery && !durable && images.length === 0) {
         this.store.patchMeta(sessionId, {
@@ -8482,7 +8529,9 @@ export class SessionManager {
         this.store.flush(sessionId);
       }
       if (blocked?.providerAuthBlock || isProviderAuthenticationBlock(blocked?.pendingApproval)) {
-        durable?.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
+        if (!retainedDurable) {
+          durable?.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
+        }
       } else {
         durable?.failed("provider session could not be resumed", "INVALID_COMMAND");
       }
@@ -10125,6 +10174,7 @@ export class SessionManager {
         providerCredentialIdentityEvidence: undefined,
         providerAuthBlock: undefined,
         providerAuthRetryAttemptedRecoveryId: undefined,
+        providerAuthDismissedCommandIds: undefined,
         // The fork's history stops at the checkpoint, so the source's quarantine is not inherited.
         // Its provenance is, so a fork poisoned again escalates to a fresh thread.
         providerHistoryBlock: undefined,
@@ -13173,8 +13223,122 @@ export class SessionManager {
     return "fork";
   }
 
+  /** Persist a known-undelivered durable prompt before acknowledging it as held. The durable
+   * command journal is the at-most-once fence; the runner-local copy supplies restart-safe FIFO
+   * and launch configuration while the control plane continues to own the source payload. */
+  private retainDurableProviderAuthenticationPrompt(
+    meta: SessionMeta,
+    text: string,
+    images: PromptImageInput[],
+    slashCommand: string | undefined,
+    config: SessionConfig | undefined,
+    durable: DurableCommandLifecycle,
+    reservedOrdinal: number | undefined,
+  ): boolean {
+    const block = meta.providerAuthBlock;
+    if (!block || block.delivery !== "not_delivered") return false;
+    const existing = block.durableRetries?.find((retry) => retry.commandId === durable.commandId);
+    if (!existing) {
+      const retries = block.durableRetries ?? [];
+      const retainedCount = retries.length + (block.retry ? 1 : 0);
+      const retainedBytes = retries.reduce(
+        (total, retry) => total + queuedPromptBytes(retry.text, retry.images),
+        block.retry ? queuedPromptBytes(block.retry.text, block.retry.images) : 0,
+      );
+      if (retainedCount >= MAX_QUEUED_PROMPTS ||
+          retainedBytes + queuedPromptBytes(text, images) > MAX_QUEUED_BYTES) {
+        durable.failed("prompt queue is full while provider authentication is blocked", "QUEUE_FULL");
+        return false;
+      }
+      const retry = {
+        commandId: durable.commandId,
+        ordinal: reservedOrdinal ?? this.nextQueueOrdinal(meta.sessionId),
+        text,
+        images,
+        ...(slashCommand ? { slashCommand } : {}),
+        ...(config ? { config } : {}),
+      };
+      this.ensureQueueOrdinal(meta.sessionId, retry);
+      this.store.patchMeta(meta.sessionId, {
+        providerAuthBlock: {
+          ...block,
+          durableRetries: [...retries, retry].sort((left, right) => left.ordinal - right.ordinal),
+        },
+      });
+      // This copy and its command identity must reach disk before the nonterminal receipt tells
+      // the control plane that automatic recovery owns the submission.
+      this.store.flush(meta.sessionId);
+    } else {
+      this.ensureQueueOrdinal(meta.sessionId, existing);
+    }
+    this.providerAuthDurables.set(durable.commandId, durable);
+    const queuedGuidance = block.resolution === "approved"
+      ? "Authentication was restored. This message is queued and will be submitted once its durable delivery record is recovered."
+      : "Provider authentication is required. This message was not submitted and is queued for automatic delivery after authentication succeeds; no resubmission is needed.";
+    durable.queued(queuedGuidance, "PROVIDER_AUTHENTICATION_REQUIRED");
+    this.settleResolvedProviderAuthentication(meta.sessionId);
+    return true;
+  }
+
+  /** Apply an already-recorded authentication decision once every durable journal handle needed
+   * for the ordered replay has been recovered. A restart can leave the decision waiting here
+   * briefly until the control-plane outbox redelivers each stable command identity. */
+  private settleResolvedProviderAuthentication(sessionId: string): void {
+    const meta = this.store.readMeta(sessionId);
+    const block = meta?.providerAuthBlock;
+    if (!meta || !block?.resolution) return;
+    const durableRetries = block.durableRetries ?? [];
+    if (durableRetries.some((retry) => !this.providerAuthDurables.has(retry.commandId))) {
+      this.emitStatus(
+        sessionId,
+        "idle",
+        "Authentication was restored; recovering retained messages from durable storage",
+      );
+      return;
+    }
+    const retries = [
+      ...(block.retry && meta.providerAuthRetryAttemptedRecoveryId !== block.recoveryId
+        ? [{ ...block.retry, ordinal: this.ensureQueueOrdinal(sessionId, block.retry) }]
+        : []),
+      ...durableRetries.map((retry) => ({
+        ...retry,
+        durable: this.providerAuthDurables.get(retry.commandId)!,
+      })),
+    ].sort((left, right) => (left.ordinal ?? 0) - (right.ordinal ?? 0));
+    this.store.patchMeta(sessionId, {
+      providerAuthBlock: undefined,
+      pendingApproval: null,
+      status: "idle",
+      ...(block.retry ? { providerAuthRetryAttemptedRecoveryId: block.recoveryId } : {}),
+    });
+    // Clear the admission barrier durably before any replay can create a user event. The durable
+    // command journal and command-tagged event then provide the two at-most-once boundaries.
+    this.store.flush(sessionId);
+    const entry = this.active.get(sessionId);
+    if (entry) entry.authenticationBlocked = false;
+    for (const retry of retries) {
+      if ("commandId" in retry) this.providerAuthDurables.delete(retry.commandId);
+      this.prompt(
+        sessionId,
+        retry.text,
+        retry.images,
+        retry.slashCommand,
+        retry.config,
+        "durable" in retry ? retry.durable : undefined,
+        false,
+        retry.ordinal,
+        true,
+      );
+    }
+    if (!retries.length) this.emitStatus(sessionId, "idle");
+    this.surfaceProviderAuthentication(block.credentialScopeId);
+  }
+
   private blockedPromptAuthenticationGuidance(meta: SessionMeta): string {
     const scopeId = meta.providerAuthBlock!.credentialScopeId;
+    if (meta.providerAuthBlock!.resolution === "approved") {
+      return "Authentication was restored. This message is queued and will be submitted once its durable delivery record is recovered.";
+    }
     if (this.providerAuthRevalidations.has(scopeId)) {
       return "Authentication is being checked automatically. This prompt was not submitted. Wait for recovery to finish, then retry this prompt.";
     }
@@ -13236,7 +13400,7 @@ export class SessionManager {
     detail?: string,
     inProgress = false,
   ): void {
-    if (this.providerAuthRevalidations.has(block.credentialScopeId) ||
+    if (block.resolution || this.providerAuthRevalidations.has(block.credentialScopeId) ||
         this.providerAuthenticationOwner(block.credentialScopeId)?.sessionId !== meta.sessionId) return;
     if (meta.agentId) this.onAgentAuthUpdate?.(meta.agentId, { status: "unauthenticated" });
     const projection = this.providerAuthenticationProjection(meta, block, detail, inProgress);
@@ -13296,6 +13460,7 @@ export class SessionManager {
         ? { expectedIdentityEvidence: prior?.expectedIdentityEvidence ?? meta.providerCredentialIdentityEvidence }
         : {}),
       ...(prior?.retry ? { retry: prior.retry } : {}),
+      ...(prior?.durableRetries?.length ? { durableRetries: prior.durableRetries } : {}),
       ...(identityMismatchReason ? { identityMismatch: true, reason: identityMismatchReason } : {}),
     };
     this.store.patchMeta(meta.sessionId, {
@@ -13317,7 +13482,8 @@ export class SessionManager {
 
   private providerAuthenticationOwner(scopeId: string): SessionMeta | undefined {
     const candidates = this.store.listSessions().filter((meta) =>
-      meta.status !== "stopped" && meta.providerAuthBlock?.credentialScopeId === scopeId);
+      meta.status !== "stopped" && meta.providerAuthBlock?.credentialScopeId === scopeId &&
+      !meta.providerAuthBlock.resolution);
     return candidates.find((meta) => meta.pendingApproval?.kind === "authentication") ??
       candidates.sort((a, b) => a.providerAuthBlock!.detectedAt - b.providerAuthBlock!.detectedAt ||
         a.sessionId.localeCompare(b.sessionId))[0];
@@ -13467,9 +13633,25 @@ export class SessionManager {
       if (block?.loginOperationId) this.providerAuthRecovery?.cancel(block.credentialScopeId);
       const current = this.store.readMeta(sessionId);
       if (!current || current.pendingApproval?.requestId !== requestId) return;
-      const retainedPrompt = !!current.providerAuthBlock?.retry;
+      const retainedPrompt = !!current.providerAuthBlock?.retry ||
+        Boolean(current.providerAuthBlock?.durableRetries?.length);
+      const durableRetries = current.providerAuthBlock?.durableRetries ?? [];
+      for (const retry of durableRetries) {
+        const lifecycle = this.providerAuthDurables.get(retry.commandId);
+        lifecycle?.failed(
+          "authentication recovery was dismissed; this message was not sent and remains available for retry",
+          "PROVIDER_AUTHENTICATION_REQUIRED",
+        );
+        this.providerAuthDurables.delete(retry.commandId);
+      }
       this.store.patchMeta(sessionId, {
         providerAuthBlock: undefined,
+        providerAuthDismissedCommandIds: [
+          ...new Set([
+            ...(current.providerAuthDismissedCommandIds ?? []),
+            ...durableRetries.map((retry) => retry.commandId),
+          ]),
+        ].slice(-MAX_QUEUED_PROMPTS),
         pendingApproval: null,
         ...(current.status === "stopped" ? {} : { status: "idle" as const }),
       });
@@ -13484,7 +13666,9 @@ export class SessionManager {
       if (retainedPrompt) {
         this.emitEvent(sessionId, {
           kind: "stderr",
-          text: "Authentication recovery was dismissed. The retained prompt was not retried; submit it again if needed.",
+          text: durableRetries.length
+            ? "Authentication recovery was dismissed. Retained messages were not sent and remain available for explicit retry."
+            : "Authentication recovery was dismissed. The retained prompt was not retried; submit it again if needed.",
         });
       }
       this.emitStatus(sessionId, current.status === "stopped" ? "stopped" : "idle");
@@ -13630,17 +13814,20 @@ export class SessionManager {
       // every newer prompt must sort after the retained pre-crash work even if it races this
       // recovery continuation.
       if (retry) this.ensureQueueOrdinal(meta.sessionId, retry);
+      const durableRetries = block.durableRetries ?? [];
       this.store.patchMeta(meta.sessionId, {
         providerCredentialScopeId: block.credentialScopeId,
         providerCredentialIdentityId: observation.identityId,
         providerCredentialIdentityEvidence: retainedEvidence,
-        providerAuthBlock: undefined,
+        providerAuthBlock: durableRetries.length ? { ...block, resolution: "approved" } : undefined,
         pendingApproval: null,
         status: "idle",
-        ...(retry ? { providerAuthRetryAttemptedRecoveryId: block.recoveryId } : {}),
+        ...(retry && !durableRetries.length
+          ? { providerAuthRetryAttemptedRecoveryId: block.recoveryId }
+          : {}),
       });
       // Persist the one-shot tombstone before the recovered prompt can reach a provider.
-      if (retry) this.store.flush(meta.sessionId);
+      if (retry || durableRetries.length) this.store.flush(meta.sessionId);
       const entry = this.active.get(meta.sessionId);
       if (entry) entry.authenticationBlocked = false;
       if (meta.agentId) this.onAgentAuthUpdate?.(meta.agentId, { status: "authenticated" });
@@ -13653,7 +13840,9 @@ export class SessionManager {
             : "auth:automatic-retry",
         });
       }
-      if (retry) {
+      if (durableRetries.length) {
+        this.settleResolvedProviderAuthentication(meta.sessionId);
+      } else if (retry) {
         // Admit the retained prompt synchronously after its tombstone is durable. The provider
         // launch remains asynchronous, but no newer prompt can win the admission boundary between
         // clearing the block and restoring the older FIFO item.
@@ -13865,6 +14054,8 @@ function providerAuthenticationGuidance(
         : `Run \`${login}\` in that exact context, then recheck authentication. In-app sign-in remains disabled until the runner can acquire the shared provider-home ownership lease.`,
     block?.delivery === "uncertain"
       ? "The interrupted prompt will not be retried automatically because provider delivery was uncertain."
+      : block?.durableRetries?.length
+        ? `${block.durableRetries.length === 1 ? "One message is" : `${block.durableRetries.length} messages are`} queued for automatic delivery after authentication succeeds.`
       : block?.retry
         ? "The retained prompt is eligible for one automatic retry after the original account is revalidated."
         : "No provider prompt will be sent until authentication is revalidated.",

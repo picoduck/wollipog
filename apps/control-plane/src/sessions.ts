@@ -4196,6 +4196,17 @@ export class SessionsService {
     return ok(this.db.getSession(sessionId)!);
   }
 
+  retryPendingPrompt(sessionId: string, commandId: string): ServiceResult<SessionView> {
+    const session = this.db.getSession(sessionId);
+    if (!session) return fail("session not found", 404);
+    const result = this.promptOutbox.retryAuthenticationFailure(sessionId, commandId);
+    if (result === "not_found") return fail("pending prompt not found", 404);
+    if (result === "not_retryable") {
+      return fail("only authentication-blocked messages with known non-delivery can be retried", 409);
+    }
+    return ok(this.db.getSession(sessionId)!);
+  }
+
   retryCampaignContinuation(
     sessionId: string,
     commandId: string,
