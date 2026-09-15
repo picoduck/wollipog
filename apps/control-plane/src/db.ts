@@ -12616,7 +12616,7 @@ export class ControlPlaneDb {
     const row = this.stmt(
       `SELECT * FROM orchestrator_campaign_continuations
        WHERE campaign_session_id=? AND state IN ('pending','running','missing_result')
-       ORDER BY created_at DESC,rowid DESC LIMIT 1`,
+       ORDER BY rowid DESC LIMIT 1`,
     ).get(campaignSessionId) as undefined | {
       continuation_id: string; campaign_session_id: string; command_id: string;
       event_from_seq: number; event_through_seq: number; observed_through_seq: number;
@@ -12627,9 +12627,10 @@ export class ControlPlaneDb {
   }
 
   latestCampaignContinuation(campaignSessionId: string): CampaignContinuationRecord | null {
+    // SQLite rowids preserve insertion order when the wall clock moves backwards.
     const row = this.stmt(
       `SELECT * FROM orchestrator_campaign_continuations
-       WHERE campaign_session_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1`,
+       WHERE campaign_session_id=? ORDER BY rowid DESC LIMIT 1`,
     ).get(campaignSessionId) as Parameters<ControlPlaneDb["campaignContinuationRecord"]>[0] | undefined;
     return row ? this.campaignContinuationRecord(row) : null;
   }
@@ -15725,6 +15726,7 @@ export class ControlPlaneDb {
   }
 
   pruneSessionPromptCommands(now: number, limit = 1_000): string[] {
+    // Protect the latest inserted unresolved continuation even when its timestamp predates a retry.
     const rows = this.stmt(
       `SELECT prompt.command_id,prompt.session_id FROM session_prompt_commands prompt
        WHERE prompt.state IN ('completed','failed','uncertain') AND prompt.expires_at<=?
@@ -15735,7 +15737,7 @@ export class ControlPlaneDb {
              AND continuation.command_id=(
                SELECT latest.command_id FROM orchestrator_campaign_continuations latest
                WHERE latest.campaign_session_id=continuation.campaign_session_id
-               ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1
+               ORDER BY latest.rowid DESC LIMIT 1
              )
          )
        ORDER BY prompt.expires_at,prompt.created_at,prompt.rowid LIMIT ?`,

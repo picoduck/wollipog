@@ -1449,7 +1449,7 @@ test("campaign continuation recovery holds for humans and never replays an ambig
   }
 });
 
-test("terminal retention preserves a running continuation made uncertain while its campaign is stopped", () => {
+test("continuation ordering survives clock rollback through retry, retention, and restart", () => {
   const { db, svc, hub } = makeHarness();
   try {
     const meta = runnerMeta();
@@ -1463,35 +1463,60 @@ test("terminal retention preserves a running continuation made uncertain while i
       runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
       config: { permissionMode: "orchestrator" }, parentControl: "questions",
     }).data!;
-    db.updateSessionStatus(root.id, "idle", Date.now());
+    const now = Date.now();
+    db.updateSessionStatus(root.id, "idle", now);
     db.recordCampaignContinuationEvent({
       eventId: `test-stopped-uncertain:${root.id}`,
       campaignSessionId: root.id,
       kind: "human_blockers_cleared",
-      now: Date.now(),
+      now: now - 300_000,
     });
 
-    const now = Date.now() + 2_000;
     assert.equal(svc.retryDuePrompts(now), 1);
-    const delivery = hub.sentOfType("durable_session_command").at(-1)!;
+    const first = hub.sentOfType("durable_session_command").at(-1)!;
     assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
       type: "durable_session_command_result",
-      requestId: delivery.requestId,
-      commandId: delivery.commandId,
+      requestId: first.requestId,
+      commandId: first.commandId,
+      sessionId: root.id,
+      state: "failed",
+      revision: 1,
+      duplicate: false,
+      code: "QUEUE_FULL",
+      error: "runner queue is temporarily full",
+    }), true);
+    assert.equal(db.latestCampaignContinuation(root.id)?.state, "failed");
+
+    const retryNow = now - 120_000;
+    assert.ok(svc.retryCampaignContinuation(root.id, first.commandId, retryNow).ok);
+    const second = hub.sentOfType("durable_session_command").at(-1)!;
+    assert.notEqual(second.commandId, first.commandId);
+    assert.ok(
+      db.campaignContinuationForCommand(second.commandId)!.createdAt <
+        db.campaignContinuationForCommand(first.commandId)!.createdAt,
+      "the controlled rollback gives the later insertion an earlier wall-clock timestamp",
+    );
+    assert.equal(db.latestCampaignContinuation(root.id)?.commandId, second.commandId,
+      "durable insertion order, not wall-clock time, identifies the latest continuation");
+    assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+      type: "durable_session_command_result",
+      requestId: second.requestId,
+      commandId: second.commandId,
       sessionId: root.id,
       state: "accepted",
       revision: 1,
       duplicate: false,
     }), true);
-    assert.equal(db.latestCampaignContinuation(root.id)?.state, "running");
 
     db.cancelSessionPromptCommands(root.id, "session stopped", now + 1);
     db.updateSessionStatus(root.id, "stopped", now + 1);
-    db.raw().prepare("UPDATE session_prompt_commands SET expires_at=0 WHERE command_id=?")
-      .run(delivery.commandId);
+    db.raw().prepare("UPDATE session_prompt_commands SET expires_at=0 WHERE session_id=?")
+      .run(root.id);
     svc.maintainPrompts(now + 2);
-    assert.ok(db.getSessionPromptCommand(delivery.commandId),
-      "retention cannot erase unresolved work before a stopped campaign can reconcile it");
+    assert.equal(db.getSessionPromptCommand(first.commandId), null,
+      "retention still prunes the superseded failed continuation");
+    assert.ok(db.getSessionPromptCommand(second.commandId),
+      "retention preserves the actual unresolved continuation despite its earlier timestamp");
 
     db.updateSessionStatus(root.id, "idle", now + 3);
     const restartedHub = new FakeHub();
@@ -1499,7 +1524,9 @@ test("terminal retention preserves a running continuation made uncertain while i
     assert.equal(restarted.retryDuePrompts(now + 60_000), 0);
     assert.equal(restartedHub.sentOfType("durable_session_command").length, 0,
       "restarting the campaign exposes the missing result instead of replaying its event range");
-    assert.equal(db.campaignProjection(root.id)?.continuation?.state, "missing_result");
+    const continuation = db.campaignProjection(root.id)?.continuation;
+    assert.equal(continuation?.commandId, second.commandId);
+    assert.equal(continuation?.state, "missing_result");
   } finally {
     db.close();
   }
