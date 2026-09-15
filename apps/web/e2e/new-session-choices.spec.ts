@@ -57,7 +57,9 @@ async function openDialogWithoutPointer(page: Page, query = "") {
   await page.keyboard.press("Enter");
   const dialog = page.getByRole("dialog", { name: "New Session" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toBeFocused();
+  const project = page.getByRole("combobox", { name: "Project" });
+  if (await project.count()) await expect(project).toBeFocused();
+  else await expect(dialog).toBeFocused();
   return { dialog, opener };
 }
 
@@ -65,9 +67,11 @@ async function selectCommonProjectWithoutPointer(page: Page, touch = false) {
   const project = touch
     ? page.getByRole("button", { name: /^Project:/ })
     : page.getByRole("combobox", { name: "Project" });
-  await page.keyboard.press("Tab");
-  await expect(page.getByRole("button", { name: "Close" })).toBeFocused();
-  await page.keyboard.press("Tab");
+  if (touch) {
+    await page.keyboard.press("Tab");
+    await expect(page.getByRole("button", { name: "Close" })).toBeFocused();
+    await page.keyboard.press("Tab");
+  }
   await expect(project).toBeFocused();
   if (touch) {
     await page.keyboard.press("Enter");
@@ -119,8 +123,9 @@ for (const viewport of VIEWPORTS) {
       const options = group.getByRole("radio");
       await expect(options).toHaveCount(2);
 
-      // The structural half: there is no trigger, so nothing can be behind one.
-      await expect(page.locator(".ui-select-list")).toHaveCount(0);
+      // The structural half: the inline Permission Preset group has no trigger or popup. The
+      // initial-focus Project combobox may legitimately have its own autocomplete open.
+      await expect(group.locator(".ui-select-trigger, .ui-select-list")).toHaveCount(0);
 
       const groupBox = await group.boundingBox();
       expect(groupBox).not.toBeNull();
@@ -421,8 +426,6 @@ test.describe("New Session dialog keyboard contract", () => {
 
   test("plain Enter reports an invalid closed combobox even while the submit button is disabled", async ({ page }) => {
     await openDialogWithoutPointer(page);
-    await page.keyboard.press("Tab");
-    await page.keyboard.press("Tab");
     const project = page.getByRole("combobox", { name: "Project" });
     await expect(project).toBeFocused();
     await page.keyboard.press("Escape");
@@ -436,6 +439,8 @@ test.describe("New Session dialog keyboard contract", () => {
   test("traps focus, validates, closes the selector before the dialog, and restores its opener", async ({ page }) => {
     const { dialog, opener } = await openDialogWithoutPointer(page);
 
+    await page.keyboard.press("Shift+Tab");
+    await expect(page.getByRole("button", { name: "Close" })).toBeFocused();
     await page.keyboard.press("Shift+Tab");
     await expect(page.getByRole("button", { name: "Cancel" })).toBeFocused();
     await page.keyboard.press("Tab");
@@ -483,8 +488,6 @@ test.describe("New Session dialog keyboard contract", () => {
 
   test("modified Enter submits from a Select trigger instead of reopening its list", async ({ page }) => {
     await openDialogWithoutPointer(page);
-    await page.keyboard.press("Tab");
-    await page.keyboard.press("Tab");
     const project = page.getByRole("combobox", { name: "Project" });
     await expect(project).toBeFocused();
     await page.keyboard.type("No Project");
