@@ -1362,6 +1362,32 @@ test("approved durable authentication recovery waits for command redelivery afte
     assert.equal(h.store.readMeta("resume-session")?.status, "input_required");
     assert.equal(recoveryRequestCount(), 1, "restart reconstruction must not append a duplicate request event");
 
+    h.store.create(stored(h.root, {
+      sessionId: "recovered-sibling",
+      driver: "claude-code",
+      command: "claude",
+      agentId: "claude-native",
+      providerCredentialIdentityId: "account-a",
+    }));
+    const sibling = h.store.readMeta("recovered-sibling")!;
+    (replacement as any).parkProviderAuthentication(
+      sibling,
+      controller.describe(sibling)!,
+      "turn",
+      "uncertain",
+    );
+    const siblingRequest = h.store.readMeta("recovered-sibling")!.pendingApproval!;
+    assert.equal(siblingRequest.kind, "authentication");
+    replacement.resolvePermission("recovered-sibling", siblingRequest.requestId, "auth:revalidate");
+    for (let index = 0; index < 12 && h.store.readMeta("recovered-sibling")?.providerAuthBlock; index += 1) {
+      await tick();
+    }
+    assert.equal(h.store.readMeta("recovered-sibling")?.providerAuthBlock, undefined);
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval?.requestId, recoveryRequestId,
+      "a sibling recovery must preserve the approved retained-message projection");
+    assert.equal(recoveryRequestCount(), 1,
+      "a sibling recovery must not emit the approved session's request a second time");
+
     assert.equal(replacement.prompt(
       "resume-session",
       "retained second",

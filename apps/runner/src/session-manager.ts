@@ -13916,6 +13916,7 @@ export class SessionManager {
     const candidates = targetOnly
       ? this.store.listSessions().filter((meta) => meta.sessionId === targetSessionId)
       : this.store.listSessions().filter((meta) =>
+          !meta.providerAuthBlock?.resolution &&
           meta.providerAuthBlock?.credentialScopeId === targetBlock.credentialScopeId &&
           compareProviderAuthIdentity(
             meta.providerAuthBlock.expectedIdentityId,
