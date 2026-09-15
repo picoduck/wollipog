@@ -2196,7 +2196,7 @@ textarea {
   .request-panel-detail:has(> .evidence-review-surface) {
     display: grid;
     grid-template-rows: auto auto minmax(0, 1fr);
-    overflow: hidden;
+    overflow: auto;
   }
   .request-panel-detail > .evidence-review-surface {
     min-height: 0;
@@ -2296,6 +2296,9 @@ textarea {
   padding: 12px 0 14px;
   border-top: 1px solid var(--border);
   background: var(--bg-elev);
+}
+.evidence-review-actions .btn {
+  min-height: 44px;
 }
 .agents-panel {
   display: flex;

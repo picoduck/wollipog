@@ -9,12 +9,29 @@ async function assertNoHorizontalOverflow(page: Page, selector: string) {
 }
 
 async function assertActionsInsideRequestPanel(page: Page) {
-  const geometry = await page.locator(".right-panel, .evidence-review-actions").evaluateAll((elements) =>
+  const geometry = await page.locator(".request-panel-detail, .evidence-review-actions").evaluateAll((elements) =>
     elements.map((element) => element.getBoundingClientRect().toJSON()));
   expect(geometry).toHaveLength(2);
   expect(geometry[1]!.top).toBeGreaterThanOrEqual(geometry[0]!.top - 1);
   expect(geometry[1]!.bottom).toBeLessThanOrEqual(geometry[0]!.bottom + 1);
 }
+
+test("evidence actions remain reachable in a short desktop panel with child requests", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 480 });
+  await page.goto("/request-surfaces-e2e.html?scenario=evidence&items=8&children=1");
+  await page.getByRole("button", { name: "Review Evidence" }).click();
+
+  await expect(page.locator(".request-panel-row")).toHaveCount(13);
+  await assertActionsInsideRequestPanel(page);
+  const detail = page.locator(".request-panel-detail");
+  await detail.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await assertActionsInsideRequestPanel(page);
+  for (const button of ["Approve", "Deny"]) {
+    const height = await page.getByRole("button", { name: button }).evaluate((element) =>
+      element.getBoundingClientRect().height);
+    expect(height).toBeGreaterThanOrEqual(44);
+  }
+});
 
 test("legacy inline evidence fixture reproduces the mobile over-height review", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });

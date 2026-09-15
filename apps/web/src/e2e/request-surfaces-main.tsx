@@ -21,6 +21,8 @@ declare global {
 
 const scenario = new URLSearchParams(window.location.search).get("scenario") ?? "evidence";
 const evidenceCount = Number(new URLSearchParams(window.location.search).get("items")) || 8;
+const includeDescendants = scenario === "descendants" ||
+  new URLSearchParams(window.location.search).get("children") === "1";
 let openedChild: DescendantRequestView | null = null;
 const submissions: unknown[] = [];
 
@@ -136,7 +138,7 @@ function Fixture() {
         } as SessionView["orchestratorCampaign"],
       } as SessionView
     : evidenceSession());
-  const descendants = useMemo(() => scenario === "descendants" ? descendantRequests() : [], []);
+  const descendants = useMemo(() => includeDescendants ? descendantRequests() : [], []);
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<RightPanelMode>("requests");
   const [width, setWidth] = useState(420);
