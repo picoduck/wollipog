@@ -116,11 +116,11 @@ export function PendingPromptBubbles({
                   type="button"
                   className="btn ghost sm"
                   disabled={actionPending}
-                  aria-label={busy ? "Dismissing Pending Message" : "Dismiss Pending Message"}
+                  aria-label={busy && !prompt.canRetry ? "Dismissing Pending Message" : "Dismiss Pending Message"}
                   aria-describedby={detailsId}
                   onClick={() => onDismiss(prompt.commandId)}
                 >
-                  {busy ? "Dismissing…" : "Dismiss"}
+                  {busy && !prompt.canRetry ? "Dismissing…" : "Dismiss"}
                 </button>
               )}
               {prompt.canRetry && (
@@ -128,11 +128,11 @@ export function PendingPromptBubbles({
                   type="button"
                   className="btn ghost sm"
                   disabled={actionPending}
-                  aria-label={busy ? "Retrying Message" : "Retry Message"}
+                  aria-label={busy && !prompt.canDismiss ? "Retrying Message" : "Retry Message"}
                   aria-describedby={detailsId}
                   onClick={() => onRetry(prompt.commandId)}
                 >
-                  {busy ? "Retrying…" : "Retry"}
+                  {busy && !prompt.canDismiss ? "Retrying…" : "Retry"}
                 </button>
               )}
             </div>

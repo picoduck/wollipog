@@ -1586,7 +1586,8 @@ test("campaign continuation failures back off finitely and stopped campaigns rej
     assert.ok(db.getSessionPromptCommand(exhausted!.commandId!),
       "retention preserves the latest exhausted failure and its bounded attempt count");
     const sendsBeforeExplicitRetry = hub.sentOfType("durable_session_command").length;
-    assert.ok(svc.retryCampaignContinuation(root.id, exhausted!.commandId!, clock + 60_000).ok);
+    assert.ok(svc.retryPendingWork(root.id, exhausted!.commandId!, clock + 60_000).ok,
+      "the shared HTTP service path preserves campaign continuation retries");
     assert.equal(hub.sentOfType("durable_session_command").length, sendsBeforeExplicitRetry + 1,
       "an explicit operator retry starts a fresh bounded attempt series");
     assert.equal(db.campaignProjection(root.id)?.continuation?.attemptCount, 1);
@@ -7535,7 +7536,7 @@ test("known-undelivered authentication failures expose an explicit durable retry
   assert.equal(db.getSession(id)?.pendingPrompts?.[0]?.canRetry, true);
 
   hub.sentToRunner.length = 0;
-  const retried = svc.retryPendingPrompt(id, sent.commandId);
+  const retried = svc.retryPendingWork(id, sent.commandId);
   assert.equal(retried.ok, true, retried.error);
   const replacement = hub.sentOfType("durable_session_command")[0]!;
   assert.equal(replacement.commandId, `${sent.commandId}.retry-1`);

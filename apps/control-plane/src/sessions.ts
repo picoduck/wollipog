@@ -4207,6 +4207,17 @@ export class SessionsService {
     return ok(this.db.getSession(sessionId)!);
   }
 
+  /** The dashboard intentionally shares one Retry endpoint for ordinary prompts and campaign
+   * continuations. Route by durable ownership before interpreting the prompt row, because both
+   * kinds live in session_prompt_commands and a campaign row is otherwise a misleading 409. */
+  retryPendingWork(sessionId: string, commandId: string, now = Date.now()): ServiceResult<SessionView> {
+    const continuation = this.db.campaignContinuationForCommand(commandId);
+    if (continuation?.campaignSessionId === sessionId) {
+      return this.retryCampaignContinuation(sessionId, commandId, now);
+    }
+    return this.retryPendingPrompt(sessionId, commandId);
+  }
+
   retryCampaignContinuation(
     sessionId: string,
     commandId: string,

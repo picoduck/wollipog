@@ -174,6 +174,10 @@ test("a stale queued command resets to accepted when a new process reclaims it",
     assert.equal(blocked.state, "queued");
     assert.match(blocked.error ?? "", /message retained/u);
     assert.equal(blocked.code, "PROVIDER_AUTHENTICATION_REQUIRED");
+    const released = claimed.handle.queued();
+    assert.equal(released.state, "queued");
+    assert.equal(released.error, undefined, "replay admission clears the authentication explanation");
+    assert.equal(released.code, undefined);
 
     now = 20;
     const second = new DurableCommandStore(root, { ownerId: "owner-b", now: () => now, ownerStaleMs: 10 });

@@ -2768,12 +2768,7 @@ app.post("/api/sessions/:id/pending-prompts/:commandId/resolve", async (req, rep
   let result;
   if (body.action === "cancel") result = svc.cancelPendingPrompt(id, commandId);
   else if (body.action === "dismiss") result = svc.dismissPendingPrompt(id, commandId);
-  else {
-    const promptRetry = svc.retryPendingPrompt(id, commandId);
-    result = !promptRetry.ok && promptRetry.status === 404
-      ? svc.retryCampaignContinuation(id, commandId)
-      : promptRetry;
-  }
+  else result = svc.retryPendingWork(id, commandId);
   if (!result.ok) return reply.code(result.status).send({ error: result.error });
   return result.data;
 });

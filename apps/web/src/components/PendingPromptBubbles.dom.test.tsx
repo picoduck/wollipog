@@ -150,6 +150,30 @@ test("pending prompts render as stable transcript bubbles and reconcile by comma
     ]);
     assert.match(container.textContent ?? "", /prompt cancelled before runner delivery/);
     assert.match(container.textContent ?? "", /message was not sent/);
+
+    const noOp = () => {};
+    await act(async () => {
+      root.render(<PendingPromptBubbles
+        prompts={[pending({
+          commandId: "auth-retry", state: "failed", errorCode: "PROVIDER_AUTHENTICATION_REQUIRED",
+          error: "authentication recovery was dismissed; this message was not sent",
+          canDismiss: true, canRetry: true,
+        })]}
+        deliveredCommandIds={new Set()}
+        liveQueueIds={new Set()}
+        canCancelLive
+        pendingAction="auth-retry"
+        onCancelPending={noOp}
+        onCancelLive={noOp}
+        onDismiss={noOp}
+        onRetry={noOp}
+      />);
+    });
+    assert.deepEqual(
+      [...container.querySelectorAll("button")].map((button) => [button.textContent, button.getAttribute("aria-label"), button.disabled]),
+      [["Dismiss", "Dismiss Pending Message", true], ["Retry", "Retry Message", true]],
+      "a shared busy identity must not claim both mutually exclusive actions are running",
+    );
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
