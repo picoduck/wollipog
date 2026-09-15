@@ -99,7 +99,7 @@ test("a single-line preview truncates visually while expansion preserves and foc
 for (const exception of [
   { name: "multi-line draft", query: "&draft=Line%20one%5CnLine%20two", visible: ".composer-input" },
   { name: "attachment", query: "&attachment=1", visible: ".image-strip" },
-  { name: "pending approval", query: "&approval=checkpoint", visible: ".approval-bar" },
+  { name: "pending approval", query: "&approval=checkpoint", visible: ".tl-request-card" },
   { name: "pending question", query: "&approval=question&draft=Preserved", visible: ".composer-question-waiting" },
   { name: "recovery notice", query: "&quarantine=1", visible: ".quarantine-banner" },
 ]) {
@@ -122,7 +122,7 @@ test("Answer Mode keeps the phone composer expanded", async ({ page }) => {
 
 test("resolving a focused phone request reveals and returns focus to the composer", async ({ page }) => {
   await openComposer(page, 393, "&approval=checkpoint");
-  await page.getByRole("button", { name: "Continue" }).focus();
+  await page.getByRole("button", { name: "Review Request" }).focus();
   await page.evaluate(() => window.resolveSessionUsageQuestion());
 
   const composer = page.locator(".composer-box");
@@ -132,13 +132,17 @@ test("resolving a focused phone request reveals and returns focus to the compose
   await expect(textarea).toBeFocused();
 });
 
-test("a focused phone request falls back to the transcript when the composer becomes disabled", async ({ page }) => {
+test("a focused phone request keeps its review trigger reachable when the composer becomes disabled", async ({ page }) => {
   await openComposer(page, 393, "&approval=permission");
   await expect(page.locator(".composer-input")).toBeEnabled();
-  await page.getByRole("button", { name: "Allow Once" }).focus();
+  const review = page.getByRole("button", { name: "Review Request" });
+  await review.focus();
   await page.evaluate(() => window.setSessionUsageRunnerOnline(false));
 
-  await expect(page.locator(".detail-scroll")).toBeFocused();
+  await expect(review).toBeVisible();
+  await expect(review).toBeEnabled();
+  await expect(review).toBeFocused();
+  await expect(page.locator(".composer-input")).toBeDisabled();
 });
 
 test("active dictation expands the capsule on the initial press", async ({ page }) => {

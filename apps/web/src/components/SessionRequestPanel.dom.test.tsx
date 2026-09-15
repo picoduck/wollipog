@@ -235,6 +235,48 @@ test("standalone approval review keeps request context collapsed and submits thr
   }
 });
 
+test("cost checkpoints retain their Continue and Stop actions in the responsive review surface", async () => {
+  const session = standaloneApprovalSession();
+  session.pendingApproval = {
+    requestId: "cost-checkpoint:session:1",
+    occurrenceId: "cost-checkpoint-occurrence",
+    kind: "cost_checkpoint",
+    title: "Cost checkpoint — $2.61 of $2.50. Continue?",
+    options: [
+      { optionId: "continue", name: "Continue", kind: "allow_once" },
+      { optionId: "cancel", name: "Stop", kind: "reject_once" },
+    ],
+  };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(
+      <ApiProvider client={api}>
+        <SessionRequestPanel
+          session={session}
+          runnerOnline
+          descendants={[]}
+          selectedKey={sessionRequestPanelKey(session.id, session.pendingApproval!.occurrenceId!)}
+          onSelectedKeyChange={() => {}}
+          onSessionUpdate={() => {}}
+          onDescendantsUpdate={() => {}}
+          onOpenChild={() => {}}
+        />
+      </ApiProvider>,
+    ));
+    assert.match(container.querySelector(".approval-review-surface")?.textContent ?? "", /Cost checkpoint/);
+    assert.deepEqual(
+      [...container.querySelectorAll<HTMLButtonElement>(".approval-review-actions button")]
+        .map((button) => button.textContent),
+      ["Continue", "Stop"],
+    );
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("worker-owned approval stays in its canonical worker request surface", async () => {
   const session = standaloneApprovalSession();
   session.pendingApproval = { ...session.pendingApproval!, ownerToolUseId: "worker-tool" };

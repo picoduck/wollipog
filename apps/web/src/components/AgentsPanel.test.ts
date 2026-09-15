@@ -122,4 +122,9 @@ test("a worker-owned primary approval stays actionable in the Agents panel", () 
     primary.requestId,
     true,
   ), true);
+  assert.equal(shouldOpenPrimaryRequestInSession(
+    { ...primary, kind: "question", questions: [] },
+    primary.requestId,
+    true,
+  ), true);
 });

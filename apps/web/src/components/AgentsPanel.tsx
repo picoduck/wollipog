@@ -87,7 +87,7 @@ export function shouldOpenPrimaryRequestInSession(
   primaryRequestId: string | undefined,
   hasOpenHandler: boolean,
 ): boolean {
-  return Boolean(hasOpenHandler && request && !request.ownerToolUseId &&
+  return Boolean(hasOpenHandler && request && (request.kind === "question" || !request.ownerToolUseId) &&
     request.requestId === primaryRequestId);
 }
 
@@ -409,7 +409,7 @@ export function AgentsPanel(props: Props) {
       return;
     }
     primaryRequestRef.current?.focus();
-  }, [selectedRequest?.requestId, primaryInSession]);
+  }, [selectedRequest?.requestId, primaryInSession, requests.length]);
   const selectedKey = requestedId ? `subagent:${requestedId}` : chosen;
   const selected = rows.find((row) => row.id === selectedKey);
   const filtered = rows.filter((row) => filter === "all" || (filter === "active" ? isCurrentWorker(row) : !isCurrentWorker(row)));
