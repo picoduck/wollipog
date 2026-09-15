@@ -216,6 +216,25 @@ async function workflowDecisionActionCompatibilityError(deps: McpDeps): Promise<
       );
 }
 
+async function workflowDecisionReconciliationCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation;
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const result = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!result.ok) {
+      return errorResult(
+        `PR merge reconciliation requires control plane protocol v${required}, but compatibility could not be verified: ${result.message}`,
+      );
+    }
+    actual = result.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= required
+    ? null
+    : errorResult(
+        `PR merge reconciliation requires control plane protocol v${required}; connected control plane reports v${String(actual ?? "unknown")}. Update Wollipog before reconciling this approval.`,
+      );
+}
+
 /** Keep the exact invocation alive while its CP-owned child approval is pending, including
  * run fan-out. Retrying maintains the durable approval's abandonment fence. */
 async function createWithSpawnApproval(deps: McpDeps, path: string, body: unknown) {
@@ -533,6 +552,7 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child",
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question", "resolve_descendant_approval",
   "resolve_descendant_workflow_decision", "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
+  "reconcile_workflow_decision",
   "wait_session", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "stop_session", "restart_session", "archive_session", "set_guardrails", "create_worktree", "attach_worktree",
   "select_worktree", "discard_worktree"]);
@@ -1000,6 +1020,36 @@ export const TOOLS: McpTool[] = [
         "POST",
         `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/workflow-decisions/${encodeURIComponent(args.occurrenceId)}/consume`,
         { resourceSnapshot: args?.resourceSnapshot, ...(args?.action ? { action: args.action } : {}) },
+      );
+      return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
+    },
+  },
+  {
+    name: "reconcile_workflow_decision",
+    description: "Reconcile an already-successful canonical PR merge action without executing it again. The runner must prove one exact successful provider-history command and the forge must report the approved head as merged; stale, mismatched, replayed, unavailable, and mixed-version evidence fails closed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        occurrenceId: { type: "string" },
+        resourceSnapshot: WORKFLOW_DECISION_RESOURCE_SCHEMA,
+      },
+      required: ["occurrenceId", "resourceSnapshot"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId || typeof args?.occurrenceId !== "string" || !args.occurrenceId) {
+        return errorResult("occurrenceId and a session identity are required");
+      }
+      if (args?.resourceSnapshot?.category !== "pr_merge") {
+        return errorResult("only PR merge decisions support action reconciliation");
+      }
+      const compatibilityError = await workflowDecisionReconciliationCompatibilityError(deps);
+      if (compatibilityError) return compatibilityError;
+      const r = await cpFetch(
+        deps,
+        "POST",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/workflow-decisions/${encodeURIComponent(args.occurrenceId)}/reconcile`,
+        { resourceSnapshot: args.resourceSnapshot },
       );
       return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
     },

@@ -82,6 +82,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type PolicyHookEvaluationResponse,
   type RecordPolicyHookDecisionMessage,
   type RecordWorkflowActionAdmissionMessage,
+  type ReconcileWorkflowActionMessage,
   type PodContextEntry,
   type PodMemberRole,
   type PodOrchestrationActionResult,
@@ -5967,6 +5968,139 @@ export class SessionsService {
     const consumed = this.db.consumeWorkflowDecision(occurrenceId, now);
     if (!consumed) return fail("workflow decision was already consumed", 409);
     this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "agent", id: sessionId }, now);
+    this.hub.sessionChangedById(sessionId);
+    this.hub.sessionChangedById(parent.id);
+    return ok(consumed);
+  }
+
+  /** Reconcile a command that already completed without replaying it. This exists for durable
+   * approved admissions whose provider took the Guardian-direct path before correlated receipts
+   * were available. The runner must prove the exact command item and the forge's merged head. */
+  async reconcileWorkflowDecision(
+    sessionId: string,
+    occurrenceId: string,
+    request: Pick<ConsumeWorkflowDecisionRequest, "resourceSnapshot">,
+    canAccess: (sessionId: string) => boolean = () => true,
+  ): Promise<ServiceResult<WorkflowDecisionView>> {
+    const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+    if (!decision || decision.sessionId !== sessionId) return fail("workflow decision not found", 404);
+    if (decision.status !== "approved") {
+      return fail(`workflow decision cannot be reconciled from ${decision.status} state`, 409);
+    }
+    const normalized = normalizeWorkflowDecisionSnapshot(request?.resourceSnapshot);
+    if (!normalized.ok || !normalized.data) return fail(normalized.error!, normalized.status);
+    if (normalized.data.category !== "pr_merge" || decision.category !== "pr_merge" ||
+        auditDigest(normalized.data) !== decision.resourceDigest) {
+      this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+      return fail("workflow decision resource snapshot is stale", 409);
+    }
+    const child = this.db.getSession(sessionId);
+    const parent = this.db.getSession(decision.controllingSessionId);
+    const policy = parent?.parentControlPolicy;
+    if (!child || child.driver !== "codex-app-server" || !parent || isTerminal(child.status) ||
+        isTerminal(parent.status) || !canAccess(child.id) || !canAccess(parent.id) ||
+        !this.db.isSessionDescendant(parent.id, child.id) || !policy ||
+        policy.revision !== decision.policyRevision ||
+        this.effectiveWorkflowDecisionAuthority(parent, policy, "pr_merge") !== decision.authority) {
+      this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+      return fail("workflow decision authority was revoked or ancestry changed before reconciliation", 409);
+    }
+    for (const owner of [child, parent]) {
+      const unsupported = this.capabilityFailure(
+        owner.runnerId,
+        "workflowDecisionActionReconciliation",
+        "Workflow decision action reconciliation",
+      );
+      if (unsupported) return fail(unsupported.error!, unsupported.status);
+    }
+    const command = canonicalPrMergeEnqueueCommand(normalized.data);
+    const admission = decision.actionAdmission;
+    const action: WorkflowDecisionAction = { kind: "pr_merge_enqueue", command };
+    if (!admission || admission.kind !== action.kind || admission.command !== command ||
+        admission.commandDigest !== auditDigest(action) || !Number.isSafeInteger(admission.armedAt) ||
+        admission.armedAt < 1) {
+      return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
+    }
+    const requestId = `workflow_action_reconcile_${randomUUID()}`;
+    const message: ReconcileWorkflowActionMessage = {
+      type: "reconcile_workflow_action",
+      requestId,
+      sessionId,
+      occurrenceId,
+      command,
+      commandDigest: admission.commandDigest,
+      pullRequestUrl: `https://github.com/${normalized.data.repository}/pull/${normalized.data.pullRequest}`,
+      expectedHeadSha: normalized.data.headSha,
+    };
+    let proof;
+    try {
+      proof = await this.hub.requestFromRunner(child.runnerId, requestId, message, 45_000);
+    } catch (error) {
+      return fail(isRunnerRequestTimeoutError(error)
+        ? "workflow action reconciliation timed out"
+        : isRunnerRequestNotSentError(error)
+          ? "runner is offline"
+          : "workflow action reconciliation failed", 409);
+    }
+    const commandDigest = createHash("sha256").update(command, "utf8").digest("hex");
+    if (proof.type !== "workflow_action_reconciliation_result" || proof.requestId !== requestId ||
+        proof.sessionId !== sessionId || proof.occurrenceId !== occurrenceId || !proof.accepted ||
+        proof.commandDigest !== commandDigest || !boundedProviderCorrelationId(proof.providerThreadId) ||
+        !boundedProviderCorrelationId(proof.providerTurnId) ||
+        !boundedProviderCorrelationId(proof.providerAdmissionItemId) ||
+        !boundedProviderCorrelationId(proof.providerItemId) ||
+        proof.forgeHeadSha !== normalized.data.headSha) {
+      return fail(proof.type === "workflow_action_reconciliation_result" && proof.error
+        ? proof.error
+        : "runner could not prove the exact command and forge result", 409);
+    }
+    const receiptDigest = auditDigest({
+      transport: "codex-app-server",
+      threadId: proof.providerThreadId,
+      turnId: proof.providerTurnId,
+      itemId: proof.providerItemId,
+    })!;
+    const now = Date.now();
+    const consumed = this.db.consumeWorkflowDecisionActionWithReceipt(
+      sessionId,
+      occurrenceId,
+      admission.commandDigest,
+      receiptDigest,
+      now,
+    );
+    if (!consumed) return fail("workflow action proof was already used or the decision changed", 409);
+    const actor: GovernanceActor = { kind: "system", id: "workflow-decision-action-reconciliation" };
+    this.recordWorkflowDecisionAudit(consumed, "consumed", actor, now);
+    this.recordGovernanceAudit(
+      child,
+      {
+        requestId: proof.providerItemId,
+        kind: "permission",
+        context: { toolName: "commandExecution" },
+      },
+      "resolution",
+      "allowed",
+      actor,
+      now,
+      {
+        content: {
+          transport: "codex-app-server",
+          threadId: proof.providerThreadId,
+          turnId: proof.providerTurnId,
+          admissionItemId: proof.providerAdmissionItemId,
+          itemId: proof.providerItemId,
+          forgeHeadSha: proof.forgeHeadSha,
+        },
+        workflowDecision: {
+          occurrenceId: consumed.occurrenceId,
+          parentSessionId: consumed.controllingSessionId,
+          childSessionId: consumed.sessionId,
+          category: consumed.category,
+          policyRevision: consumed.policyRevision,
+          resourceDigest: consumed.resourceDigest,
+        },
+      },
+    );
     this.hub.sessionChangedById(sessionId);
     this.hub.sessionChangedById(parent.id);
     return ok(consumed);

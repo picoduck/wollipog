@@ -205,6 +205,15 @@ Other categories retain immediate consumption. Consumption records that the exte
 have started. A later policy change can revoke only approvals that have not been consumed; it does
 not claim to roll back an action already in progress.
 
+Protocol v150 adds a read-only reconciliation path for a PR merge that completed before its exact
+armed occurrence was consumed. The child must be resumed on the same App Server thread and submit
+the unchanged resource snapshot. Full provider history proves the exact successful command followed
+its exact completed Wollipog admission call in the same turn, and the forge proves the approved
+merged head. Only then does the control plane consume the original occurrence with
+a content-safe audit receipt. Reconciliation never executes the command, and unavailable history,
+duplicate commands, failed execution, stale policy or ancestry, changed evidence, forge mismatch,
+or mixed-version peers leave the occurrence approved and unconsumed.
+
 The control plane owns this lifecycle. A generic question answer or provider permission response
 cannot satisfy a typed workflow decision. Authentication, identity, governance-policy changes,
 secret access, and persistent permission grants are not typed categories and remain human-only.
@@ -224,6 +233,10 @@ a generic or altered forge command deliberately falls back to its
 ordinary human-only permission boundary. Audit entries correlate the typed decision occurrence and
 matching permission through content-safe digests and outcomes without retaining raw rationale or
 credentials or recording a second user decision.
+For the exceptional case where that exact command already succeeded but the armed occurrence was
+not consumed, `reconcile_workflow_decision` performs the v150 proof above against the original
+occurrence and snapshot. It is not a retry mechanism and must never be followed by replaying the
+merge command.
 
 Before creating a child, an Orchestrator can call `get_agent_capabilities` with an exact `runnerId`
 and `agentId`. The matching CLI command is:

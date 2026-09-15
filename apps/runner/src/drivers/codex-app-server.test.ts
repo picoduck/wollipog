@@ -2431,6 +2431,119 @@ test("Guardian review correlation is emitted only for the active root turn", () 
     "a stale turn remains visible but cannot carry action-admission correlation");
 });
 
+test("historical reconciliation proves one exact completed root command without replaying it", async () => {
+  const h = makeHarness({ resumeId: "thread-legacy" });
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1146 --squash --match-head-commit ${"a".repeat(40)}`;
+  (h.driver as any).threadId = "thread-legacy";
+  (h.driver as any).peer = {
+    request: async (method: string, params: unknown) => {
+      assert.equal(method, "thread/read");
+      assert.deepEqual(params, { threadId: "thread-legacy", includeTurns: true });
+      return {
+        thread: {
+          id: "thread-legacy",
+          status: { type: "idle" },
+          turns: [{
+            id: "turn-legacy",
+            status: "completed",
+            itemsView: "full",
+            items: [{
+              id: "admission-legacy",
+              type: "mcpToolCall",
+              server: "wollipog",
+              tool: "consume_workflow_decision",
+              arguments: {
+                occurrenceId: "workflow-legacy",
+                action: { kind: "pr_merge_enqueue", command },
+              },
+              status: "completed",
+              error: null,
+              result: { content: [{ type: "text", text: JSON.stringify({
+                decision: {
+                  occurrenceId: "workflow-legacy",
+                  status: "approved",
+                  actionAdmission: { kind: "pr_merge_enqueue", command },
+                },
+              }) }] },
+            }, {
+              id: "command-legacy",
+              type: "commandExecution",
+              command: `/usr/bin/zsh -lc '${command}'`,
+              status: "completed",
+              exitCode: 0,
+            }],
+          }],
+        },
+      };
+    },
+  };
+
+  assert.deepEqual(await (h.driver as any).reconcileCompletedCommand("workflow-legacy", command), {
+    commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
+    providerThreadId: "thread-legacy",
+    providerTurnId: "turn-legacy",
+    providerAdmissionItemId: "admission-legacy",
+    providerItemId: "command-legacy",
+  });
+});
+
+test("historical reconciliation rejects failed, partial, mismatched, and replay-ambiguous history", async () => {
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1146 --squash --match-head-commit ${"a".repeat(40)}`;
+  for (const mismatch of [
+    "admission", "admission_result", "admission_duplicate", "order",
+    "failed", "partial", "command", "duplicate",
+  ] as const) {
+    const h = makeHarness({ resumeId: "thread-legacy" });
+    (h.driver as any).threadId = "thread-legacy";
+    const item = {
+      id: "command-legacy",
+      type: "commandExecution",
+      command: mismatch === "command" ? `${command} --delete-branch` : command,
+      status: "completed",
+      exitCode: mismatch === "failed" ? 1 : 0,
+    };
+    const admission = {
+      id: "admission-legacy",
+      type: "mcpToolCall",
+      server: "wollipog",
+      tool: "consume_workflow_decision",
+      arguments: {
+        occurrenceId: mismatch === "admission" ? "workflow-wrong" : "workflow-legacy",
+        action: { kind: "pr_merge_enqueue", command },
+      },
+      status: "completed",
+      error: null,
+      result: { content: [{ type: "text", text: JSON.stringify({
+        decision: {
+          occurrenceId: "workflow-legacy",
+          status: mismatch === "admission_result" ? "denied" : "approved",
+          actionAdmission: { kind: "pr_merge_enqueue", command },
+        },
+      }) }] },
+    };
+    (h.driver as any).peer = {
+      request: async () => ({
+        thread: {
+          id: "thread-legacy",
+          status: { type: "idle" },
+          turns: [{
+            id: "turn-legacy",
+            status: "completed",
+            itemsView: mismatch === "partial" ? "summary" : "full",
+            items: mismatch === "duplicate"
+              ? [admission, item, { ...item, id: "command-replay" }]
+              : mismatch === "admission_duplicate"
+                ? [admission, { ...admission, id: "admission-replay" }, item]
+                : mismatch === "order" ? [item, admission] : [admission, item],
+          }],
+        },
+      }),
+    };
+    assert.equal(await h.driver.reconcileCompletedCommand("workflow-legacy", command), null,
+      `${mismatch} fails closed`);
+  }
+});
+
 test("only auto-review approval requests carry Guardian escalation provenance", () => {
   for (const [mode, escalated] of [[undefined, true], ["on-request", false]] as const) {
     const h = makeHarness({ config: mode ? cfg(mode) : {} as SessionConfig });

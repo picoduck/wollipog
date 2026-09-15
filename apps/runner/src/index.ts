@@ -1361,6 +1361,32 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       }));
       break;
     }
+    case "reconcile_workflow_action": {
+      runCommandTask("reconcile_workflow_action", sessions.reconcileWorkflowAction(msg.sessionId, {
+        occurrenceId: msg.occurrenceId,
+        command: msg.command,
+        commandDigest: msg.commandDigest,
+        pullRequestUrl: msg.pullRequestUrl,
+        expectedHeadSha: msg.expectedHeadSha,
+      }).then((reconciled) => {
+        sendUp({
+          type: "workflow_action_reconciliation_result",
+          requestId: msg.requestId,
+          sessionId: msg.sessionId,
+          occurrenceId: reconciled.occurrenceId,
+          accepted: reconciled.accepted,
+          ...(reconciled.commandDigest ? { commandDigest: reconciled.commandDigest } : {}),
+          ...(reconciled.providerThreadId ? { providerThreadId: reconciled.providerThreadId } : {}),
+          ...(reconciled.providerTurnId ? { providerTurnId: reconciled.providerTurnId } : {}),
+          ...(reconciled.providerAdmissionItemId
+            ? { providerAdmissionItemId: reconciled.providerAdmissionItemId } : {}),
+          ...(reconciled.providerItemId ? { providerItemId: reconciled.providerItemId } : {}),
+          ...(reconciled.forgeHeadSha ? { forgeHeadSha: reconciled.forgeHeadSha } : {}),
+          ...(reconciled.error ? { error: reconciled.error } : {}),
+        });
+      }));
+      break;
+    }
     case "agent_control_credential_registered":
       try {
         const pendingKey = agentControlRegistrationKey(msg.sessionId, msg.tokenHash);

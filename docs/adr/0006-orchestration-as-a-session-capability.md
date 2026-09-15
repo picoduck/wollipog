@@ -98,6 +98,12 @@ the matching runner permission consumes the grant only after delivery, while alt
 persistent grants, policy hooks, unsupported providers, and mixed-version peers retain their
 ordinary human-only or fail-closed behavior. The control plane does not claim to intercept
 independently available external credentials.
+Protocol v150 permits the same child to reconcile an already-successful armed PR merge without
+replaying it. A resumed App Server thread must prove one exact completed Wollipog admission followed
+by one exact successful provider command in the same turn, and the forge must prove that the
+approved head merged. The original occurrence is then consumed atomically with a content-safe
+receipt. Missing, duplicate, failed, stale, mismatched, or mixed-version evidence fails closed and
+leaves the occurrence unconsumed.
 
 Protocol v143 projects exact human-owned and Orchestrator-owned descendant request counts onto the
 root campaign. Human clients may inspect both groups in the parent request surface; session-scoped

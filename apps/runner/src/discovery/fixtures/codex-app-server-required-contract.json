@@ -1,5 +1,5 @@
 {
-  "contractFingerprint": "codex-app-server-v2-guardian-receipt-surface-2026-09-14",
+  "contractFingerprint": "codex-app-server-v2-reconciliation-surface-2026-09-15",
   "generatedWith": "codex-cli 0.154.0",
   "minimumVerifiedVersion": "0.147.0",
   "orchestratorApprovalMinimumVersion": "0.154.0",
@@ -85,6 +85,58 @@
               "systemError",
               "active"
             ]
+          }
+        },
+        "Turn": {
+          "required": [
+            "id",
+            "items",
+            "status"
+          ],
+          "properties": [
+            "id",
+            "items",
+            "itemsView",
+            "status"
+          ]
+        },
+        "ThreadItem": {
+          "variantRequiredProperties": {
+            "CommandExecutionThreadItem": {
+              "required": [
+                "command",
+                "id",
+                "status",
+                "type"
+              ],
+              "properties": [
+                "command",
+                "exitCode",
+                "id",
+                "status",
+                "type"
+              ]
+            },
+            "McpToolCallThreadItem": {
+              "required": [
+                "arguments",
+                "id",
+                "server",
+                "status",
+                "tool",
+                "type"
+              ],
+              "properties": [
+                "arguments",
+                "error",
+                "id",
+                "result",
+                "server",
+                "status",
+                "tool",
+                "type"
+              ]
+            }
           }
         }
       }

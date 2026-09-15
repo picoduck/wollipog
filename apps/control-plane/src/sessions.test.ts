@@ -3791,6 +3791,122 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       assert.equal(db.workflowDecisionByOccurrence(decision.data.occurrenceId)?.status, "revoked");
     } finally { db.close(); }
   });
+
+  await t.test("a legacy successful Guardian enqueue reconciles only from exact provider and forge proof", async () => {
+    const { db, hub, svc, child, arm } = setup();
+    try {
+      const armed = await arm(1146);
+      db.raw().prepare(
+        `UPDATE workflow_decisions SET action_armed_after_event_seq=NULL,
+         action_provider_turn_id=NULL, action_provider_thread_id=NULL,
+         action_runner_history_epoch=NULL WHERE occurrence_id=?`,
+      ).run(armed.decision.occurrenceId);
+      hub.requestHandler = (message) => {
+        if (message.type !== "reconcile_workflow_action") {
+          throw new Error(`unexpected runner request ${message.type}`);
+        }
+        return {
+          type: "workflow_action_reconciliation_result",
+          requestId: message.requestId,
+          sessionId: child.id,
+          occurrenceId: armed.decision.occurrenceId,
+          accepted: true,
+          commandDigest: createHash("sha256").update(armed.command, "utf8").digest("hex"),
+          providerThreadId: "thread-legacy",
+          providerTurnId: "turn-legacy",
+          providerAdmissionItemId: "admission-legacy",
+          providerItemId: "command-legacy",
+          forgeHeadSha: armed.snapshot.headSha,
+        };
+      };
+
+      const result = await (svc as any).reconcileWorkflowDecision(
+        child.id,
+        armed.decision.occurrenceId,
+        { resourceSnapshot: armed.snapshot },
+        () => true,
+      );
+      assert.ok(result.ok, result.error);
+      assert.equal(result.data?.status, "consumed");
+      assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "consumed");
+      assert.ok(svc.governanceAudit(child.id).some((entry) =>
+        entry.requestId === armed.decision.occurrenceId && entry.outcome === "consumed"));
+      assert.ok(svc.governanceAudit(child.id).some((entry) =>
+        entry.requestId === "command-legacy" && entry.outcome === "allowed" && entry.contentDigest),
+      "the reconciliation proof coordinates and forge head are retained as a content-safe digest");
+      const replay = await svc.reconcileWorkflowDecision(
+        child.id,
+        armed.decision.occurrenceId,
+        { resourceSnapshot: armed.snapshot },
+        () => true,
+      );
+      assert.equal(replay.status, 409, "the consumed occurrence cannot be reconciled twice");
+    } finally { db.close(); }
+  });
+
+  await t.test("failed or mixed-version reconciliation retains the approved occurrence", async () => {
+    for (const mismatch of ["proof", "protocol"] as const) {
+      const { db, hub, svc, child, arm } = setup();
+      try {
+        const armed = await arm(mismatch === "proof" ? 1190 : 1191);
+        if (mismatch === "protocol") {
+          db.registerRunner(runnerMeta(), Date.now(),
+            RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation - 1);
+        } else {
+          hub.requestHandler = (message) => ({
+            type: "workflow_action_reconciliation_result",
+            requestId: message.type === "reconcile_workflow_action" ? message.requestId : "wrong",
+            sessionId: child.id,
+            occurrenceId: armed.decision.occurrenceId,
+            accepted: false,
+            error: "provider history did not contain one exact successful command",
+          });
+        }
+        const result = await svc.reconcileWorkflowDecision(
+          child.id,
+          armed.decision.occurrenceId,
+          { resourceSnapshot: armed.snapshot },
+          () => true,
+        );
+        assert.equal(result.status, 409);
+        assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "approved",
+          `${mismatch} is retryable after proof or deployment is repaired`);
+      } finally { db.close(); }
+    }
+  });
+
+  await t.test("stale snapshot, policy, ancestry, and authority cannot reconcile", async () => {
+    for (const mismatch of ["snapshot", "revision", "ancestry", "authority"] as const) {
+      const { db, svc, child, arm } = setup();
+      try {
+        const armed = await arm(1200 + ["snapshot", "revision", "ancestry", "authority"].indexOf(mismatch));
+        if (mismatch === "revision") {
+          db.raw().prepare("UPDATE workflow_decisions SET policy_revision=policy_revision+1 WHERE occurrence_id=?")
+            .run(armed.decision.occurrenceId);
+        } else if (mismatch === "ancestry") {
+          db.raw().prepare("UPDATE workflow_decisions SET controlling_session_id=? WHERE occurrence_id=?")
+            .run(child.id, armed.decision.occurrenceId);
+        } else if (mismatch === "authority") {
+          db.raw().prepare("UPDATE workflow_decisions SET authority='human' WHERE occurrence_id=?")
+            .run(armed.decision.occurrenceId);
+        }
+        const staleSnapshot = mismatch === "snapshot" ? {
+          ...armed.snapshot,
+          headSha: "f".repeat(40),
+          requiredChecks: { ...armed.snapshot.requiredChecks, headSha: "f".repeat(40) },
+        } : armed.snapshot;
+        const result = await svc.reconcileWorkflowDecision(
+          child.id,
+          armed.decision.occurrenceId,
+          { resourceSnapshot: staleSnapshot },
+          () => true,
+        );
+        assert.equal(result.status, 409);
+        assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "revoked",
+          `${mismatch} must fail closed instead of remaining retryable`);
+      } finally { db.close(); }
+    }
+  });
 });
 
 test("typed workflow decisions preserve provider settlement and cannot be replaced by generic approvals", async () => {

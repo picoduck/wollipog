@@ -12056,6 +12056,76 @@ export class SessionManager {
     };
   }
 
+  /** Prove an already-completed PR merge action without executing it again. Provider history
+   * supplies the exact successful command after its exact Wollipog admission, and the forge
+   * supplies the authoritative merged head. Every source must agree. */
+  async reconcileWorkflowAction(
+    sessionId: string,
+    value: unknown,
+  ): Promise<{
+    accepted: boolean;
+    occurrenceId: string;
+    commandDigest?: string;
+    providerThreadId?: string;
+    providerTurnId?: string;
+    providerAdmissionItemId?: string;
+    providerItemId?: string;
+    forgeHeadSha?: string;
+    error?: string;
+  }> {
+    const fail = (occurrenceId: string, error: string) => ({ accepted: false, occurrenceId, error });
+    if (!value || typeof value !== "object" || Array.isArray(value)) return fail("", "reconciliation is malformed");
+    const raw = value as Record<string, unknown>;
+    const occurrenceId = typeof raw.occurrenceId === "string" ? raw.occurrenceId : "";
+    const bounded = (field: unknown, max: number) => typeof field === "string" &&
+      field.length > 0 && field.length <= max && !/[\x00-\x1f\x7f]/u.test(field);
+    if (Object.keys(raw).some((key) => ![
+      "occurrenceId", "command", "commandDigest", "pullRequestUrl", "expectedHeadSha",
+    ].includes(key)) || !bounded(raw.occurrenceId, 256) || !bounded(raw.command, 2000) ||
+        typeof raw.commandDigest !== "string" || !/^[0-9a-f]{64}$/u.test(raw.commandDigest) ||
+        !bounded(raw.pullRequestUrl, 1000) || typeof raw.expectedHeadSha !== "string" ||
+        !/^[0-9a-f]{40}$/u.test(raw.expectedHeadSha)) {
+      return fail(occurrenceId, "reconciliation identity is invalid");
+    }
+    const meta = this.store.readMeta(sessionId);
+    const active = this.active.get(sessionId);
+    if (!meta || meta.driver !== "codex-app-server" || !active ||
+        !active.client.reconcileCompletedCommand) {
+      return fail(occurrenceId, "App Server session is not active; resume it before reconciliation");
+    }
+    if (active.client.agentSessionId() !== meta.agentSessionId) {
+      return fail(occurrenceId, "active provider thread does not match durable session identity");
+    }
+    let proof;
+    try {
+      proof = await active.client.reconcileCompletedCommand(occurrenceId, raw.command as string);
+    } catch {
+      return fail(occurrenceId, "provider history could not prove the completed command");
+    }
+    if (!proof || proof.providerThreadId !== meta.agentSessionId ||
+        proof.commandDigest !== createHash("sha256").update(raw.command as string, "utf8").digest("hex")) {
+      return fail(occurrenceId, "provider history did not contain one exact successful command");
+    }
+    const forge = await this.resolveWorktreePullRequestState(
+      meta.worktreePath ?? meta.repoPath,
+      raw.pullRequestUrl as string,
+      { context: meta.context, provider: "github" },
+    );
+    if (forge?.state !== "merged" || forge.headOid?.toLowerCase() !== raw.expectedHeadSha) {
+      return fail(occurrenceId, "forge did not prove the exact approved head was merged");
+    }
+    return {
+      accepted: true,
+      occurrenceId,
+      commandDigest: proof.commandDigest,
+      providerThreadId: proof.providerThreadId,
+      providerTurnId: proof.providerTurnId,
+      providerAdmissionItemId: proof.providerAdmissionItemId,
+      providerItemId: proof.providerItemId,
+      forgeHeadSha: forge.headOid.toLowerCase(),
+    };
+  }
+
   private flushPolicyHookDecisionAfterToolCall(sessionId: string, toolCallId: string): void {
     const pendingKey = `${sessionId}\0${toolCallId}`;
     const pending = this.pendingPolicyHookDecisions.get(pendingKey);
