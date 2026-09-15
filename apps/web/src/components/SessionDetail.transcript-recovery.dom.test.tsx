@@ -487,6 +487,21 @@ test("SessionDetail keeps a standalone request reachable through skeleton and em
   }
 });
 
+test("SessionDetail places a standalone fallback after loaded timeline activity", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages, 12, { pendingStandalone: true });
+  try {
+    const timeline = fixture.container.querySelector(".timeline");
+    const request = fixture.container.querySelector(".tl-request-card");
+    assert.ok(timeline);
+    assert.ok(request);
+    assert.ok(timeline.compareDocumentPosition(request) & domWindow.Node.DOCUMENT_POSITION_FOLLOWING,
+      "a tail-following reader encounters the pending request after loaded activity");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("recovery over a long cached transcript announces at the reader's lower edge while following live output", async () => {
   const pages = pageController();
   const fixture = await mountFixture(pages);

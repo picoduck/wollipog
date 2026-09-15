@@ -5,7 +5,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { SessionView } from "@wollipog/protocol";
 import type { TimelineItem } from "../timeline.js";
-import { RightPanel, useRightPanelState, type RightPanelState } from "./RightPanel.js";
+import { panelReturnFocusTarget, RightPanel, useRightPanelState, type RightPanelState } from "./RightPanel.js";
 import type { GitStatus } from "./useGitStatus.js";
 import { StoreProvider } from "../store.js";
 import { api, ApiError, type ApiClient } from "../api.js";
@@ -146,6 +146,23 @@ function PanelHarness({
     </>
   );
 }
+
+test("panel close falls back to the session composer when virtualization removes its trigger", () => {
+  const surface = domWindow.document.createElement("section") as unknown as HTMLElement;
+  surface.dataset.sessionSurfaceId = "focus-session";
+  const composer = domWindow.document.createElement("textarea") as unknown as HTMLElement;
+  composer.className = "composer-input";
+  surface.append(composer);
+  domWindow.document.body.append(surface as never);
+  const detachedTrigger = domWindow.document.createElement("button") as unknown as HTMLElement;
+  try {
+    assert.equal(panelReturnFocusTarget(detachedTrigger, "focus-session", domWindow.document as unknown as ParentNode), composer);
+    surface.append(detachedTrigger);
+    assert.equal(panelReturnFocusTarget(detachedTrigger, "focus-session", domWindow.document as unknown as ParentNode), detachedTrigger);
+  } finally {
+    surface.remove();
+  }
+});
 
 test("RightPanel consumes a transcript focus request in shared state and does not replay it after remount", async () => {
   const happyContainer = domWindow.document.createElement("div");

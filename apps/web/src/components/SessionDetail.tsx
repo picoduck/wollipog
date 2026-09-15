@@ -4318,6 +4318,36 @@ function SessionDetailLoaded({
   const currentProjectName = projectsSupported
     ? (session.projectId ? projects.get(session.projectId)?.name : undefined) ?? session.projectName ?? "No Project"
     : session.workspaceName ?? "No Workspace";
+  const standaloneRequestCard = ownStandaloneApproval && ownApprovalOccurrenceId &&
+    !transcriptRendersRequestRow(transcript.body, ownApprovalHasTimelineRow) ? (
+      <section
+        className="tl-request-card"
+        aria-label={`Pending ${requestTypeLabel(ownStandaloneApproval)} Request`}
+        data-session-request-id={ownStandaloneApproval.requestId}
+        data-session-request-session={session.id}
+      >
+        <span className="tl-request-icon" aria-hidden="true">{ownEvidenceSnapshot ? "🖼️" : "🔐"}</span>
+        <span className="tl-request-copy">
+          <strong>{ownStandaloneApproval.title}</strong>
+          <span>
+            {ownEvidenceSnapshot
+              ? `${ownEvidenceSnapshot.evidence.length} evidence ${ownEvidenceSnapshot.evidence.length === 1 ? "item" : "items"}`
+              : `${requestTypeLabel(ownStandaloneApproval)} · Review Required`}
+          </span>
+        </span>
+        <button
+          className="btn primary sm"
+          type="button"
+          data-session-request-control="review"
+          aria-controls="right-panel"
+          onClick={() => openRequestPanel(
+            sessionRequestPanelKey(session.id, ownApprovalOccurrenceId),
+          )}
+        >
+          {ownEvidenceDecision ? "Review Evidence" : "Review Request"}
+        </button>
+      </section>
+    ) : null;
 
   return (
     <div className={`session-detail ${mode}`} data-session-surface-id={session.id}>
@@ -4606,36 +4636,7 @@ function SessionDetailLoaded({
                   onLoad={loadEarlierFromControl}
                 />
               )}
-              {ownStandaloneApproval && ownApprovalOccurrenceId &&
-                !transcriptRendersRequestRow(transcript.body, ownApprovalHasTimelineRow) && (
-                <section
-                  className="tl-request-card"
-                  aria-label={`Pending ${requestTypeLabel(ownStandaloneApproval)} Request`}
-                  data-session-request-id={ownStandaloneApproval.requestId}
-                  data-session-request-session={session.id}
-                >
-                  <span className="tl-request-icon" aria-hidden="true">{ownEvidenceSnapshot ? "🖼️" : "🔐"}</span>
-                  <span className="tl-request-copy">
-                    <strong>{ownStandaloneApproval.title}</strong>
-                    <span>
-                      {ownEvidenceSnapshot
-                        ? `${ownEvidenceSnapshot.evidence.length} evidence ${ownEvidenceSnapshot.evidence.length === 1 ? "item" : "items"}`
-                        : `${requestTypeLabel(ownStandaloneApproval)} · Review Required`}
-                    </span>
-                  </span>
-                  <button
-                    className="btn primary sm"
-                    type="button"
-                    data-session-request-control="review"
-                    aria-controls="right-panel"
-                    onClick={() => openRequestPanel(
-                      sessionRequestPanelKey(session.id, ownApprovalOccurrenceId),
-                    )}
-                  >
-                    {ownEvidenceDecision ? "Review Evidence" : "Review Request"}
-                  </button>
-                </section>
-              )}
+              {transcript.body !== "timeline" && standaloneRequestCard}
               {transcript.body === "skeleton" ? (
                 <TranscriptSkeleton />
               ) : transcript.body === "unavailable" ? (
@@ -4712,6 +4713,7 @@ function SessionDetailLoaded({
                       onOpenSubagent={mode === "expanded" ? openSubagent : undefined}
                     />
                   )}
+                  {transcript.body === "timeline" && standaloneRequestCard}
                 </>
               )}
             </div>
