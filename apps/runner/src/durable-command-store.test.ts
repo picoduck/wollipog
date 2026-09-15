@@ -167,7 +167,17 @@ test("a stale queued command resets to accepted when a new process reclaims it",
     const claimed = first.claim(message());
     assert.equal(claimed.kind, "new");
     if (claimed.kind !== "new") return;
-    assert.equal(claimed.handle.queued().state, "queued");
+    const blocked = claimed.handle.queued(
+      "authentication required; message retained",
+      "PROVIDER_AUTHENTICATION_REQUIRED",
+    );
+    assert.equal(blocked.state, "queued");
+    assert.match(blocked.error ?? "", /message retained/u);
+    assert.equal(blocked.code, "PROVIDER_AUTHENTICATION_REQUIRED");
+    const released = claimed.handle.queued();
+    assert.equal(released.state, "queued");
+    assert.equal(released.error, undefined, "replay admission clears the authentication explanation");
+    assert.equal(released.code, undefined);
 
     now = 20;
     const second = new DurableCommandStore(root, { ownerId: "owner-b", now: () => now, ownerStaleMs: 10 });
@@ -176,7 +186,12 @@ test("a stale queued command resets to accepted when a new process reclaims it",
     if (reclaimed.kind !== "reclaimed") return;
     assert.equal(reclaimed.receipt.state, "accepted");
     assert.equal(reclaimed.receipt.duplicate, true);
-    assert.equal(reclaimed.handle.started(8).state, "started");
+    assert.equal(reclaimed.receipt.error, undefined, "reclaim clears the temporary blocked explanation");
+    assert.equal(reclaimed.receipt.code, undefined);
+    const started = reclaimed.handle.started(8);
+    assert.equal(started.state, "started");
+    assert.equal(started.error, undefined);
+    assert.equal(started.code, undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

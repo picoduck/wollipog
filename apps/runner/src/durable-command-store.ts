@@ -304,8 +304,8 @@ export class DurableCommandStore {
       revision: current.revision + 1,
       ownerId: this.ownerId,
       updatedAt: this.now(),
-      ...(patch.error ? { error: patch.error.slice(0, MAX_ERROR) } : {}),
-      ...(patch.code ? { code: patch.code } : {}),
+      error: patch.error ? patch.error.slice(0, MAX_ERROR) : undefined,
+      code: patch.code,
       ...(patch.userEventSeq !== undefined ? { userEventSeq: patch.userEventSeq } : {}),
     };
     this.writeAtomic(this.recordPath(next.commandId), next);
@@ -482,8 +482,8 @@ export class DurableCommandHandle {
   get state(): DurableSessionCommandState { return this.record.state; }
   get current(): DurableCommandReceipt { return receipt(this.record, false); }
 
-  queued(): DurableCommandReceipt {
-    return this.nonterminal(() => this.store.transition(this.record, "queued", {}));
+  queued(error?: string, code?: DurableSessionCommandErrorCode): DurableCommandReceipt {
+    return this.nonterminal(() => this.store.transition(this.record, "queued", { error, code }));
   }
 
   started(userEventSeq?: number): DurableCommandReceipt {

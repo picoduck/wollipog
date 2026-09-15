@@ -73,3 +73,44 @@ for (const viewport of [
     await expect(page.getByTestId("pending-prompt-admission-queued")).toHaveCount(0);
   });
 }
+
+test("known-undelivered authentication prompts expose a prominent retry path", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(fixtureUrl);
+  await page.evaluate(() => localStorage.clear());
+  await page.goto(fixtureUrl);
+  const recoverablePrompt = {
+    commandId: "authentication-recovery",
+    text: "Review the attached authentication screenshot.",
+    hasImages: true,
+    state: "failed" as const,
+    revision: 3,
+    attemptCount: 2,
+    error: "Authentication recovery was dismissed. This message was not sent.",
+    errorCode: "PROVIDER_AUTHENTICATION_REQUIRED" as const,
+    canDismiss: true,
+    createdAt: 10,
+    updatedAt: 20,
+  };
+  await page.evaluate((prompt) => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+      status: "idle",
+      pendingPrompts: [prompt],
+    });
+  }, recoverablePrompt);
+  await openAlphaSession(page);
+
+  const prompt = page.getByTestId("pending-prompt-authentication-recovery");
+  await expect(prompt).toContainText("This message was not sent");
+  await expect(page.getByRole("button", { name: "Retry Message" })).toHaveCount(0);
+  await capture(page, "auth-recovery-before", "desktop");
+
+  await page.evaluate((updatedPrompt) => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+      pendingPrompts: [{ ...updatedPrompt, canRetry: true }],
+    });
+  }, recoverablePrompt);
+  await expect(page.getByRole("button", { name: "Retry Message" })).toBeVisible();
+  await expect(prompt).toContainText("Review the attached authentication screenshot.");
+  await capture(page, "auth-recovery-after", "desktop");
+});

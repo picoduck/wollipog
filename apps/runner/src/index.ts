@@ -807,7 +807,7 @@ function durableLifecycle(handle: DurableCommandHandle): DurableCommandLifecycle
   };
   return {
     commandId: handle.commandId,
-    queued: () => transition(() => handle.queued()),
+    queued: (error, code) => transition(() => handle.queued(error, code)),
     started: (userEventSeq) => transition(() => handle.started(userEventSeq)),
     completed: () => bestEffort(() => handle.completed()),
     failed: (error, code) => bestEffort(() => handle.failed(error, code)),

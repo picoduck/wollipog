@@ -13,6 +13,10 @@ import type { Hub } from "./hub.js";
 
 type Receipt = DurableSessionCommandResultMessage | DurableSessionCommandUpdateMessage;
 type Logger = { warn: (message: string) => void };
+export type RetryableAuthenticationPrompt = {
+  command: Extract<DurableSessionCommand, { type: "prompt_session" }>;
+  runnerId: string;
+};
 
 const RECEIPT_HORIZON_MS = 30 * 24 * 60 * 60_000;
 const MAX_RETRY_MS = 30_000;
@@ -231,6 +235,63 @@ export class SessionPromptOutbox {
     const result = this.db.dismissTerminalSessionPromptCommand(sessionId, commandId, now);
     if (result === "dismissed") this.hub.sessionChangedById(sessionId);
     return result;
+  }
+
+  retryAuthenticationFailure(
+    sessionId: string,
+    commandId: string,
+    now = Date.now(),
+    flush = true,
+  ): "retried" | "not_found" | "not_retryable" {
+    const candidate = this.retryableAuthenticationPrompt(sessionId, commandId);
+    if (typeof candidate === "string") return candidate;
+    const prior = this.db.getSessionPromptCommand(commandId);
+    if (!prior) return "not_found";
+    // Every explicit retry belongs to one stable incident chain. A second authentication failure
+    // must advance `.retry-1` to `.retry-2`, rather than creating a nested identity that the
+    // bounded retry lookup would no longer recognize.
+    const baseCommandId = commandId.replace(/(?:\.retry-\d+)+$/u, "");
+    const staged = this.db.stageRetriableSessionPromptCommand({
+      baseCommandId,
+      dismissCommandId: commandId,
+      sessionId,
+      runnerId: prior.runnerId,
+      payloadJson: prior.payloadJson,
+      payloadSha256: prior.payloadSha256,
+      expiresAt: now + RECEIPT_HORIZON_MS,
+      now,
+    });
+    if (staged.disposition !== "deliverable") return "not_retryable";
+    this.hub.sessionChangedById(sessionId);
+    if (flush) {
+      try {
+        this.flush(now, prior.runnerId);
+      } catch (error) {
+        this.log.warn(`retried durable prompt flush was deferred: ${(error as Error).message}`);
+      }
+    }
+    return "retried";
+  }
+
+  /** Read-only validation used by the service admission gate before it mutates either prompt
+   * identity. retryAuthenticationFailure repeats this check at its synchronous commit boundary. */
+  retryableAuthenticationPrompt(
+    sessionId: string,
+    commandId: string,
+  ): RetryableAuthenticationPrompt | "not_found" | "not_retryable" {
+    const prior = this.db.getSessionPromptCommand(commandId);
+    if (!prior || prior.sessionId !== sessionId || prior.dismissedAt !== undefined) return "not_found";
+    if (prior.state !== "failed" || prior.errorCode !== "PROVIDER_AUTHENTICATION_REQUIRED" ||
+        prior.userEventSeq !== undefined || prior.payloadJson === "null") return "not_retryable";
+    let command: DurableSessionCommand;
+    try {
+      command = JSON.parse(prior.payloadJson) as DurableSessionCommand;
+    } catch {
+      return "not_retryable";
+    }
+    if (command.type !== "prompt_session" || command.sessionId !== sessionId || command.campaignContinuation ||
+        automationCommandDigest(command) !== prior.payloadSha256) return "not_retryable";
+    return { command, runnerId: prior.runnerId };
   }
 
   private failMalformed(row: SessionPromptCommandRecord, error: string, now: number): void {
