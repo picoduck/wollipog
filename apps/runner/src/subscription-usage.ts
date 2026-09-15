@@ -675,7 +675,10 @@ export class SubscriptionUsageManager {
     for (const source of sources) {
       const initial = this.initialSnapshot(source);
       const prior = this.snapshots.get(source.sourceId);
-      const accountChanged = Boolean(prior) && source.accountLabel !== prior?.accountLabel;
+      // Claude discovery owns its source label. Codex labels arrive only from an authoritative
+      // refresh, so comparing them here would mistake every populated Codex snapshot for a switch.
+      const accountChanged = source.provider === "claude" && Boolean(prior) &&
+        source.accountLabel !== prior?.accountLabel;
       const forced = initial.state === "unsupported" ||
         initial.state === "unauthenticated" ||
         initial.state === "not_applicable";

@@ -418,6 +418,18 @@ test("a Codex account switch, including to an unlabeled account, replaces the co
   assert.deepEqual(manager.inventory()[0]?.buckets.map((bucket) => bucket.id), [
     "codex:primary", "codex:secondary",
   ]);
+  manager.syncSources();
+  manager.observe("codex", "codex-app-server", { kind: "native" }, {
+    provider: "codex",
+    kind: "sparse",
+    payload: { rateLimits: { limitId: "codex", primary: { usedPercent: 25 } } },
+  });
+  const afterSparseUpdate = manager.inventory()[0]!;
+  assert.equal(afterSparseUpdate.accountLabel, "first@example.com");
+  assert.equal(afterSparseUpdate.plan, "pro");
+  assert.deepEqual(afterSparseUpdate.buckets.map((bucket) => [bucket.id, bucket.usedPercent]), [
+    ["codex:primary", 25], ["codex:secondary", 70],
+  ], "source synchronization and sparse updates preserve the refreshed Codex account snapshot");
   activeAccount = "second@example.com";
   usedPercent = 5;
   includeSecondary = false;
