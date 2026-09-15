@@ -7545,6 +7545,42 @@ test("known-undelivered authentication failures expose an explicit durable retry
   assert.equal(db.getSession(id)?.pendingPrompts?.[0]?.canRetry, undefined);
 });
 
+test("authentication prompt retry refuses a stopped session without replacing retained content", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { prompt: "initial" });
+  hub.sentToRunner.length = 0;
+  assert.equal(svc.prompt(id, "retry only while live").ok, true);
+  const sent = hub.sentOfType("durable_session_command")[0]!;
+
+  svc.onSessionStatus(id, "stopped", "stopped by user", RUNNER_ID);
+  assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+    type: "durable_session_command_update",
+    commandId: sent.commandId,
+    sessionId: id,
+    state: "failed",
+    revision: 2,
+    error: "session stopped during authentication recovery; this message was not sent",
+    code: "PROVIDER_AUTHENTICATION_REQUIRED",
+  }), true);
+  const retained = db.getSessionPromptCommand(sent.commandId)!;
+  assert.equal(retained.state, "failed");
+  assert.equal(db.getSession(id)?.pendingPrompts?.[0]?.canRetry, undefined,
+    "terminal sessions must not advertise a retry they cannot deliver");
+
+  hub.sentToRunner.length = 0;
+  const retry = svc.retryPendingWork(id, sent.commandId);
+  assert.equal(retry.ok, false);
+  if (!retry.ok) {
+    assert.equal(retry.status, 409);
+    assert.equal(retry.error, "session is stopped");
+  }
+  assert.equal(hub.sentOfType("durable_session_command").length, 0);
+  assert.equal(db.getSessionPromptCommand(sent.commandId)?.payloadJson, retained.payloadJson,
+    "a refused retry keeps the original recoverable content intact");
+  assert.equal(db.getSessionPromptCommand(sent.commandId)?.dismissedAt, undefined);
+  assert.equal(db.getSession(id)?.pendingPrompts?.length, 1);
+});
+
 test("durable prompt retry attempt identities stay bounded while recent receipts remain valid", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { prompt: "initial" });

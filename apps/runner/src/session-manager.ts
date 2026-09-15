@@ -13373,7 +13373,7 @@ export class SessionManager {
   private blockedPromptAuthenticationGuidance(meta: SessionMeta): string {
     const scopeId = meta.providerAuthBlock!.credentialScopeId;
     if (meta.providerAuthBlock!.resolution === "approved") {
-      return "Authentication was restored. This message is queued and will be submitted once its durable delivery record is recovered.";
+      return "Authentication was restored, but this message was not submitted while retained durable messages were still being recovered. Wait for recovery to finish, then retry this prompt.";
     }
     if (this.providerAuthRevalidations.has(scopeId)) {
       return "Authentication is being checked automatically. This prompt was not submitted. Wait for recovery to finish, then retry this prompt.";

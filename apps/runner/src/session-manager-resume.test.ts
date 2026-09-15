@@ -1332,6 +1332,15 @@ test("approved durable authentication recovery waits for command redelivery afte
     assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock?.resolution, "approved");
     assert.deepEqual(h.prompts, [], "approval cannot bypass the missing durable journal handle");
 
+    assert.equal(replacement.prompt("resume-session", "plain prompt during recovery"), false);
+    const recoveryGuidance = h.store.readEvents("resume-session").map((event) => event.payload)
+      .filter((payload) => payload.kind === "stderr").at(-1);
+    assert.ok(recoveryGuidance?.kind === "stderr");
+    assert.match(recoveryGuidance.text, /message was not submitted/iu);
+    assert.doesNotMatch(recoveryGuidance.text, /message is queued/iu,
+      "non-durable work must never be described as retained while durable identities recover");
+    assert.deepEqual(h.prompts, []);
+
     assert.equal(replacement.prompt(
       "resume-session",
       "retained second",
@@ -1361,6 +1370,65 @@ test("approved durable authentication recovery waits for command redelivery afte
     assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
   } finally {
     replacement?.shutdownAll();
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("one retained authentication replay failure does not strand later durable prompts", async () => {
+  const observations = [
+    { status: "authenticated" as const, identityId: "account-b" },
+    { status: "authenticated" as const, identityId: "account-b" },
+    { status: "authenticated" as const, identityId: "account-b" },
+  ];
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "scope-a", provider: "claude", canStartLogin: false, configuredCredential: false }),
+    revalidate: async () => observations.shift() ?? { status: "authenticated", identityId: "account-a" },
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  const h = harness({
+    driver: "claude-code", command: "claude", agentId: "claude-native",
+    providerCredentialIdentityId: "account-a",
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  const failed: string[] = [];
+  const completed: string[] = [];
+  const durable = (commandId: string): DurableCommandLifecycle => ({
+    commandId,
+    queued: () => {},
+    started: () => {},
+    completed: () => completed.push(commandId),
+    failed: (error) => failed.push(`${commandId}:${error}`),
+    uncertain: () => assert.fail("known non-delivery cannot become uncertain"),
+  });
+  try {
+    h.manager.prompt(
+      "resume-session", "replay receipt will fail", [], undefined, undefined,
+      durable("durable-isolation-1"),
+    );
+    for (let index = 0; index < 8 && !h.store.readMeta("resume-session")?.providerAuthBlock; index += 1) {
+      await tick();
+    }
+    assert.equal(h.manager.prompt(
+      "resume-session", "later retained prompt", [], undefined, undefined,
+      durable("durable-isolation-2"),
+    ), true);
+    const requestId = h.store.readMeta("resume-session")!.pendingApproval!.requestId;
+    const prompt = h.manager.prompt.bind(h.manager);
+    h.manager.prompt = (...args) => {
+      if (args[5]?.commandId === "durable-isolation-1") {
+        throw new Error("simulated replay admission failure");
+      }
+      return prompt(...args);
+    };
+    h.manager.resolvePermission("resume-session", requestId, "auth:accept-current");
+    for (let index = 0; index < 60 && completed.length < 1; index += 1) await shortDelay();
+
+    assert.match(failed[0] ?? "", /durable-isolation-1:.*could not be restored/iu);
+    assert.deepEqual(h.prompts, ["later retained prompt"]);
+    assert.deepEqual(completed, ["durable-isolation-2"]);
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+  } finally {
     h.manager.shutdownAll();
     h.cleanup();
   }

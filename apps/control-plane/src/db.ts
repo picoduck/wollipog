@@ -16486,7 +16486,7 @@ export class ControlPlaneDb {
     const pendingRequestOwners = this.pendingRequestOwners(row, pending);
 
     const durablePromptQueue = this.pendingSessionPromptQueue(row.id);
-    const pendingPrompts = this.pendingSessionPrompts(row.id);
+    const pendingPrompts = this.pendingSessionPrompts(row.id, row.status as SessionStatus);
     // Provenance is useful on the lightweight session projection only when it describes all usage
     // in that projection. A lagging ledger must not let an older provider-priced zero characterize
     // newer runner counters whose cost is not known yet; the detailed `/usage` consumer applies
@@ -16775,7 +16775,7 @@ export class ControlPlaneDb {
     });
   }
 
-  private pendingSessionPrompts(sessionId: string): PendingPromptView[] {
+  private pendingSessionPrompts(sessionId: string, sessionStatus: SessionStatus): PendingPromptView[] {
     const rows = this.stmt(
       `SELECT * FROM (
          SELECT *,rowid AS prompt_rowid FROM session_prompt_commands
@@ -16807,7 +16807,8 @@ export class ControlPlaneDb {
         updatedAt: row.updated_at,
         ...(row.state === "pending" ? { canCancel: true } : {}),
         ...(row.state === "failed" || row.state === "uncertain" ? { canDismiss: true } : {}),
-        ...(row.state === "failed" && row.error_code === "PROVIDER_AUTHENTICATION_REQUIRED" &&
+        ...(row.state === "failed" && !isTerminal(sessionStatus) &&
+          row.error_code === "PROVIDER_AUTHENTICATION_REQUIRED" &&
           row.user_event_seq == null ? { canRetry: true } : {}),
       }];
     });

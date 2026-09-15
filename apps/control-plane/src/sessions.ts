@@ -4196,14 +4196,89 @@ export class SessionsService {
     return ok(this.db.getSession(sessionId)!);
   }
 
-  retryPendingPrompt(sessionId: string, commandId: string): ServiceResult<SessionView> {
+  retryPendingPrompt(
+    sessionId: string,
+    commandId: string,
+    now = Date.now(),
+  ): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
-    const result = this.promptOutbox.retryAuthenticationFailure(sessionId, commandId);
+    const candidate = this.promptOutbox.retryableAuthenticationPrompt(sessionId, commandId);
+    if (candidate === "not_found") return fail("pending prompt not found", 404);
+    if (candidate === "not_retryable") {
+      return fail("only authentication-blocked messages with known non-delivery can be retried", 409);
+    }
+
+    // A Retry is a fresh turn admission with an old, exact payload. Reapply every mutable
+    // session/fleet fence before replacing the terminal identity; otherwise a stopped,
+    // quarantined, approval-blocked, over-budget, offline, or capability-downgraded session could
+    // report success for work the durable outbox cannot or must not deliver.
+    const configInputError = sessionGuardrailConfigError(candidate.command.config);
+    if (configInputError) return fail(configInputError, 400);
+    const campaignBehaviorError = this.campaignChildBehaviorError(session, candidate.command.config);
+    if (campaignBehaviorError) return fail(campaignBehaviorError, 409);
+    const tuiGuardrailError = this.activeAgentTuiGuardrailError(session, candidate.command.config);
+    if (tuiGuardrailError) return fail(tuiGuardrailError, 409);
+    const incomingMode = candidate.command.config?.permissionMode;
+    if (incomingMode !== undefined &&
+        (incomingMode === "orchestrator") !== (session.permissionMode === "orchestrator")) {
+      return fail("the orchestrator preset is fixed at session creation; start a new session to change it", 409);
+    }
+    const reconciliationBlock = this.podReconciliationMutationError(sessionId);
+    if (reconciliationBlock) return fail(reconciliationBlock, 409);
+    if (isTerminal(session.status)) return fail(`session is ${session.status}`, 409);
+    if (session.historyQuarantine) return fail(QUARANTINED_CONVERSATION_ERROR, 409);
+    if (session.pendingApproval?.kind === "cost_budget") {
+      return fail("cost budget reached — choose Continue or Stop before retrying this prompt", 409);
+    }
+    if (session.pendingApproval?.kind === "policy_hook") {
+      return fail("a tool approval is pending — choose Allow or Deny before retrying this prompt", 409);
+    }
+    if (isGuardrailApproval(session.pendingApproval)) {
+      return fail("tool-call limit reached — choose Continue or Stop before retrying this prompt", 409);
+    }
+    const daily = this.dailyBudgetFor(sessionId);
+    if (daily && daily.spentUsd >= daily.budgetUsd) {
+      this.gateOnPolicy(sessionId, now);
+      this.hub.sessionChangedById(sessionId);
+      return fail("daily budget reached — new turns pause until the day rolls over or an owner or admin raises it", 409);
+    }
+    if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
+    if (candidate.runnerId !== session.runnerId) {
+      return fail("the retained prompt belongs to a different runner generation", 409);
+    }
+    const images = candidate.command.images ?? [];
+    const imageValidation = validateImagesForDriver(images, session.driver);
+    if (!imageValidation.ok) return fail(imageValidation.error ?? "invalid image attachment", 400);
+    if (images.some(isWorkspaceReference)) {
+      const unsupported = this.capabilityFailure(
+        session.runnerId,
+        "workspaceReferences",
+        "Workspace references",
+      );
+      if (unsupported) return unsupported;
+    }
+    if (images.some((image) => !isWorkspaceReference(image))) {
+      const unsupported = this.capabilityFailure(
+        session.runnerId,
+        "promptImageReferences",
+        "Prompt image attachments",
+      );
+      if (unsupported) return unsupported;
+    }
+
+    const result = this.promptOutbox.retryAuthenticationFailure(sessionId, commandId, now, false);
     if (result === "not_found") return fail("pending prompt not found", 404);
     if (result === "not_retryable") {
       return fail("only authentication-blocked messages with known non-delivery can be retried", 409);
     }
+    this.db.updateSessionStatus(sessionId, "running", now, false, false);
+    try {
+      this.promptOutbox.flush(now, session.runnerId);
+    } catch (error) {
+      this.log.warn(`retried durable prompt flush was deferred: ${(error as Error).message}`);
+    }
+    this.hub.sessionChangedById(sessionId);
     return ok(this.db.getSession(sessionId)!);
   }
 
@@ -4215,7 +4290,7 @@ export class SessionsService {
     if (continuation?.campaignSessionId === sessionId) {
       return this.retryCampaignContinuation(sessionId, commandId, now);
     }
-    return this.retryPendingPrompt(sessionId, commandId);
+    return this.retryPendingPrompt(sessionId, commandId, now);
   }
 
   retryCampaignContinuation(
