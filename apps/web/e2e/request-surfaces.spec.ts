@@ -37,6 +37,20 @@ test("evidence actions remain reachable in a short desktop panel with child requ
   }
 });
 
+test("short desktop evidence review preserves child identity and navigation", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 480 });
+  await page.goto("/request-surfaces-e2e.html?scenario=evidence&children=1");
+  await page.getByRole("button", { name: "Review Evidence" }).click();
+  await page.getByRole("button", { name: /^Child Session 1 UI Evidence/u }).click();
+
+  await expect(page.locator(".request-panel-detail-head h3")).toHaveText("Child Session 1");
+  const openChild = page.getByRole("button", { name: "Open Child Session" });
+  await expect(openChild).toBeVisible();
+  await openChild.click();
+  await expect.poll(() => page.evaluate(() =>
+    window.__WOLLIPOG_REQUEST_SURFACES_E2E__.openedChild()?.sessionId)).toBe("child-1");
+});
+
 test("legacy inline evidence fixture reproduces the mobile over-height review", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/request-surfaces-e2e.html?scenario=legacy");

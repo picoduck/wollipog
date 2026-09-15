@@ -81,7 +81,37 @@ function descendantRequests(): DescendantRequestView[] {
       createdAt: Date.now() - ((index + 1) * 60_000),
       responseOwner: orchestrator ? "orchestrator" : "human",
       occurrenceId: `occurrence-${index + 1}`,
-      request: orchestrator ? {
+      request: index === 0 ? {
+        requestId: "child-evidence",
+        occurrenceId: "occurrence-1",
+        kind: "workflow_decision",
+        title: "Child UI Evidence Approval",
+        options: [
+          { optionId: "approve", name: "Approve", kind: "allow_once" },
+          { optionId: "deny", name: "Deny", kind: "reject_once" },
+        ],
+        workflowDecision: {
+          requestId: "child-evidence-request",
+          occurrenceId: "occurrence-1",
+          sessionId: "child-1",
+          controllingSessionId: "parent",
+          category: "ui_evidence_approval",
+          resourceKey: "pr-1107-child-ui",
+          resourceSnapshot: {
+            category: "ui_evidence_approval",
+            evidence: [{
+              evidenceId: "child-viewport",
+              uri: "https://evidence.example/child.png?signature=hidden-child",
+              sha256: "d".repeat(64),
+            }],
+          },
+          resourceDigest: "e".repeat(64),
+          policyRevision: 1,
+          authority: "human",
+          status: "pending",
+          createdAt: Date.now() - 60_000,
+        },
+      } : orchestrator ? {
         requestId: `merge-${index + 1}`,
         occurrenceId: `occurrence-${index + 1}`,
         kind: "workflow_decision",
