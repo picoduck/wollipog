@@ -2192,6 +2192,41 @@ textarea {
   grid-template-rows: auto minmax(0, 1fr) auto auto;
   min-height: 100%;
 }
+@media (min-width: 761px) {
+  .request-panel-detail:has(> .evidence-review-surface) {
+    display: grid;
+    grid-template-rows: auto auto minmax(0, 1fr);
+    overflow: auto;
+  }
+  .request-panel-detail > .evidence-review-surface {
+    min-height: 0;
+  }
+}
+@media (min-width: 761px) and (max-height: 500px) {
+  .request-panel-detail:has(> .evidence-review-surface) > .request-panel-detail-head {
+    align-items: center;
+    min-width: 0;
+    margin-bottom: 4px;
+  }
+  .request-panel-detail:has(> .evidence-review-surface) > .request-panel-detail-head > div {
+    min-width: 0;
+  }
+  .request-panel-detail:has(> .evidence-review-surface) > .request-panel-detail-head h3 {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .request-panel-detail:has(> .evidence-review-surface) > .request-panel-detail-head p {
+    display: none;
+  }
+  .request-panel:not(.request-panel-single) {
+    grid-template-rows: minmax(72px, 25%) minmax(0, 1fr);
+  }
+  .request-panel:not(.request-panel-single) .request-panel-detail:has(> .evidence-review-surface) > .request-owner,
+  .request-panel:not(.request-panel-single) .evidence-review-summary p {
+    display: none;
+  }
+}
 .evidence-review-summary {
   display: flex;
   align-items: flex-start;
@@ -2270,12 +2305,20 @@ textarea {
   cursor: pointer;
 }
 .evidence-review-actions {
+  position: sticky;
+  z-index: var(--z-sticky);
+  bottom: 0;
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
-  padding-top: 12px;
+  margin-top: 8px;
+  padding: 12px 0 14px;
   border-top: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+.evidence-review-actions .btn {
+  min-height: 44px;
 }
 .agents-panel {
   display: flex;
@@ -12254,15 +12297,6 @@ body.shell-dock-dragging * {
   .evidence-review-summary > strong {
     white-space: nowrap;
   }
-  .evidence-review-actions {
-    position: sticky;
-    z-index: var(--z-sticky);
-    bottom: -14px;
-    margin-top: 8px;
-    padding: 12px 0 14px;
-    background: var(--bg-elev);
-  }
-
   /* Composer: shallower default. */
   .composer-input {
     min-height: 42px;
