@@ -126,6 +126,24 @@ const claudeSource = {
 const subscription: SubscriptionUsageResponse = {
   sources: params.get("subscriptions") !== "1" ? [] : [
     {
+      runnerId: "r-build-box", runnerName: "build-box", runnerStatus: "online",
+      provider: "codex", freshness: "fresh", plan: "pro",
+      fetchedAt: SUBSCRIPTION_NOW, sourceId: "8b66ac9939adad73bfadb15095f19d9c",
+      agentId: "codex", agentName: "Codex App Server", state: "available",
+      accountLabel: "codex@example.com",
+      buckets: [
+        { id: "codex:primary", label: "Codex — Weekly", usedPercent: 42, remainingPercent: 58,
+          windowDurationMinutes: 10_080, resetsAt: SUBSCRIPTION_NOW + 6 * DAY, status: "available" },
+        { id: "codex_spark:primary", label: "GPT-5.3-Codex-Spark — 5-Hour Window",
+          usedPercent: 0, remainingPercent: 100, windowDurationMinutes: 300,
+          resetsAt: SUBSCRIPTION_NOW + 5 * 3_600_000, status: "available" },
+        { id: "codex_spark:secondary", label: "GPT-5.3-Codex-Spark — Weekly",
+          usedPercent: 0, remainingPercent: 100, windowDurationMinutes: 10_080,
+          resetsAt: SUBSCRIPTION_NOW + 7 * DAY, status: "available" },
+      ],
+      credits: { hasCredits: false, balance: "0" },
+    },
+    {
       ...claudeSource, sourceId: "4e9ca361dace7ad20c621d0eadac54f0",
       agentId: "claude", agentName: "Claude Code", state: "available",
       accountLabel: "primary@example.com",

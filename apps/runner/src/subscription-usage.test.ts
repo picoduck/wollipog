@@ -47,6 +47,40 @@ test("Codex normalization preserves arbitrary limit IDs, both windows, credits, 
   assert.equal(snapshot.spendControls?.[0]?.reached, true);
 });
 
+test("Codex normalization is independent of provider insertion order", () => {
+  const account = {
+    limitId: "codex",
+    limitName: "Codex",
+    primary: { usedPercent: 42, windowDurationMins: 10_080, resetsAt: 2_000_000_000 },
+  };
+  const spark = {
+    limitId: "codex_spark",
+    limitName: "GPT-5.3-Codex-Spark",
+    primary: { usedPercent: 0, windowDurationMins: 10_080, resetsAt: 2_000_200_000 },
+    secondary: { usedPercent: 85, windowDurationMins: 300, resetsAt: 2_000_100_000 },
+  };
+  const future = {
+    limitId: "future_model",
+    limitName: "Future Model",
+    primary: { usedPercent: 100 },
+  };
+  const normalize = (rateLimitsByLimitId: Record<string, unknown>) =>
+    normalizeCodexRateLimits({ rateLimitsByLimitId }, base, 1_000);
+
+  const accountLast = normalize({ spark, future, account });
+  const accountFirst = normalize({ account, future, spark });
+  assert.ok(accountLast);
+  assert.ok(accountFirst);
+  assert.deepEqual(accountLast.buckets.map((bucket) => bucket.id), [
+    "codex:primary",
+    "codex_spark:secondary",
+    "codex_spark:primary",
+    "future_model:primary",
+  ]);
+  assert.deepEqual(accountFirst.buckets, accountLast.buckets,
+    "ordering and each bucket's percentages, reset, warning, and exhaustion data stay associated");
+});
+
 test("Claude normalization accepts named, model-specific, additional, and status-only windows", () => {
   const snapshot = normalizeClaudeRateLimits({
     rate_limit_info: {

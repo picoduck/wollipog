@@ -167,6 +167,32 @@ function codexWindow(
   };
 }
 
+function codexLimitId(input: unknown, fallbackId: string): string {
+  const snapshot = record(input);
+  return stringValue(snapshot?.limitId ?? snapshot?.limit_id, 86) ??
+    stringValue(fallbackId, 86) ?? "codex";
+}
+
+function compareStableText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function compareCodexLimitEntries(
+  [leftFallbackId, leftValue]: [string, unknown],
+  [rightFallbackId, rightValue]: [string, unknown],
+): number {
+  const leftId = codexLimitId(leftValue, leftFallbackId);
+  const rightId = codexLimitId(rightValue, rightFallbackId);
+  const priority = Number(rightId === "codex") - Number(leftId === "codex");
+  return priority || compareStableText(leftId, rightId) || compareStableText(leftFallbackId, rightFallbackId);
+}
+
+function compareCodexWindows(left: SubscriptionUsageBucket, right: SubscriptionUsageBucket): number {
+  const leftDuration = left.windowDurationMinutes ?? Number.POSITIVE_INFINITY;
+  const rightDuration = right.windowDurationMinutes ?? Number.POSITIVE_INFINITY;
+  return leftDuration - rightDuration || compareStableText(left.id, right.id);
+}
+
 function normalizeCodexSnapshot(
   input: unknown,
   fallbackId: string,
@@ -181,14 +207,14 @@ function normalizeCodexSnapshot(
   if (!snapshot) return null;
   // Bucket ids append `:secondary`; keep the provider segment within the control-plane's
   // exact 96-character bound and sanitize map keys just like explicit ids.
-  const limitId = stringValue(snapshot.limitId ?? snapshot.limit_id, 86) ??
-    stringValue(fallbackId, 86) ?? "codex";
+  const limitId = codexLimitId(snapshot, fallbackId);
   const limitLabel = stringValue(snapshot.limitName ?? snapshot.limit_name, 120) ??
     subscriptionUsageBucketLabel(limitId);
   const buckets = [
     codexWindow(limitId, limitLabel, "primary", snapshot.primary, observedAt),
     codexWindow(limitId, limitLabel, "secondary", snapshot.secondary, observedAt),
-  ].filter((bucket): bucket is SubscriptionUsageBucket => bucket !== null);
+  ].filter((bucket): bucket is SubscriptionUsageBucket => bucket !== null)
+    .sort(compareCodexWindows);
   const creditsRecord = record(snapshot.credits);
   const balance = creditsRecord ? stringValue(creditsRecord.balance, 80) : undefined;
   const credits = creditsRecord ? {
@@ -239,7 +265,7 @@ export function normalizeCodexRateLimits(
   const spendControls: SubscriptionUsageSpendControl[] = [];
   let plan: string | undefined;
   let credits: SubscriptionUsageSnapshot["credits"];
-  for (const [fallbackId, value] of snapshots.slice(0, MAX_PROVIDER_BUCKETS)) {
+  for (const [fallbackId, value] of snapshots.sort(compareCodexLimitEntries).slice(0, MAX_PROVIDER_BUCKETS)) {
     const normalized = normalizeCodexSnapshot(value, fallbackId, fetchedAt);
     if (!normalized) continue;
     buckets.push(...normalized.buckets);
