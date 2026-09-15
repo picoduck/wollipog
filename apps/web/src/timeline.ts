@@ -764,6 +764,10 @@ export class TimelineBuilder {
           ...(Number.isFinite(ev.ts) ? { createdAt: ev.ts } : {}),
         }) - 1);
         break;
+      case "workflow_action_admission_armed":
+        // This runner-owned ordering fence is operational metadata, not transcript content.
+        this.breakText();
+        break;
       case "policy_hook_decision": {
         this.breakText();
         const decision = nativePolicyHookDecision(ev);

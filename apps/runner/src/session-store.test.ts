@@ -476,39 +476,45 @@ test("every distinct wire projection gets its own dense sequence space", () => {
   const { store, root } = tmpStore();
   try {
     store.create(meta());
-    // Two omission policies mean three projections, and they must never share an epoch: a control
+    // Three omission policies mean four projections, and they must never share an epoch: a control
     // plane that hydrated through one and reconnects through the other has to resync rather than
     // reuse cursors whose sequence numbers now name different events.
-    const epochs = [86, 129, CURRENT_PEER].map((peer) => store.snapshots(peer)[0]!.historyEpoch);
+    const epochs = [86, 129, 147, CURRENT_PEER].map((peer) => store.snapshots(peer)[0]!.historyEpoch);
     assert.equal(new Set(epochs).size, epochs.length, `distinct epochs per projection, got ${epochs.join(",")}`);
-    assert.deepEqual(epochs, [wireEpoch(0, 86), wireEpoch(0, 129), wireEpoch(0, CURRENT_PEER)]);
+    assert.deepEqual(epochs, [86, 129, 147, CURRENT_PEER].map((peer) => wireEpoch(0, peer)));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("the second projection policy fences every prior one-policy wire generation", () => {
+test("the projection-count encoding fences every prior one-policy wire generation", () => {
   const { store, root } = tmpStore();
   try {
     store.create(meta());
     const legacy = store.snapshots(86)[0]!;
     const intermediate = store.snapshots(129)[0]!;
+    const recent = store.snapshots(147)[0]!;
     const current = store.snapshots(CURRENT_PEER)[0]!;
 
     // Before v130 the one-policy encoding at local epoch zero was 1 for v86 and 0 for every
-    // v87+ peer. The reserved offset makes every new projection larger, so every control plane
-    // resyncs when the runner upgrades even if its negotiated protocol changes at the same time.
+    // v87+ peer. Before v148 the three-variant encoding used offset 2. The advanced offset makes
+    // every current projection larger than either predecessor at the same local epoch, so every
+    // control plane resyncs when the runner upgrades even if its protocol changes at the same time.
     assert.notEqual(legacy.historyEpoch, 1);
     assert.notEqual(intermediate.historyEpoch, 0);
-    assert.equal(legacy.historyEpoch, 4);
-    assert.equal(intermediate.historyEpoch, 3);
+    assert.equal(legacy.historyEpoch, 8);
+    assert.equal(intermediate.historyEpoch, 7);
+    assert.equal(recent.historyEpoch, 6);
 
-    assert.equal(current.historyEpoch, 2);
+    assert.equal(current.historyEpoch, 5);
     for (let localEpoch = 0; localEpoch < 8; localEpoch++) {
       const retiredFormatMaximum = localEpoch * 2 + 1;
-      for (const peer of [86, 129, CURRENT_PEER]) {
+      const precedingFormatMaximum = 2 + localEpoch * 3 + 2;
+      for (const peer of [86, 129, 147, CURRENT_PEER]) {
         assert.ok(store.projectedHistoryEpoch(localEpoch, peer) > retiredFormatMaximum,
           `v${peer} local epoch ${localEpoch} sorts above the retired encoding`);
+        assert.ok(store.projectedHistoryEpoch(localEpoch, peer) > precedingFormatMaximum,
+          `v${peer} local epoch ${localEpoch} sorts above the preceding three-variant encoding`);
       }
     }
 

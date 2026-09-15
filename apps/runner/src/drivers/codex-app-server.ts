@@ -22,6 +22,7 @@ import {
   type ReviewDecision,
   type SessionConfig,
 } from "@wollipog/protocol";
+import { createHash } from "node:crypto";
 import { JsonRpcPeer } from "../jsonrpc.js";
 import {
   killTree,
@@ -1099,6 +1100,9 @@ export class CodexAppServerDriver implements Driver {
             method,
             params,
             [AUTO_REVIEW_MODE, "orchestrator"].includes(this.config.permissionMode || AUTO_REVIEW_MODE),
+            !ownership.ownerToolUseId && this.promptBusy && this.turnResolve && this.threadId && this.turnId
+              ? { threadId: this.threadId, turnId: this.turnId }
+              : undefined,
           ),
         });
       });
@@ -1236,7 +1240,16 @@ export class CodexAppServerDriver implements Driver {
     // (the Allow/Reject prompt) instead. (The separate guardianWarning notification is
     // skipped — it duplicates this verdict for plain approvals.)
     peer.onNotification("item/autoApprovalReview/completed", (p: Json) => {
-      const decision = parseReviewDecision(p);
+      let decision = parseReviewDecision(p);
+      const receipt = decision?.approvalReviewReceipt;
+      if (decision && receipt && (
+        !this.promptBusy || !this.turnResolve ||
+        receipt.threadId !== this.threadId || receipt.turnId !== this.turnId
+      )) {
+        // Keep the visible review, but only the active root turn can carry admission correlation.
+        const { approvalReviewReceipt: _untrustedCorrelation, ...visibleDecision } = decision;
+        decision = visibleDecision;
+      }
       if (decision) this.cb.onEvent({ kind: "review_decision", ...decision });
     });
     peer.onNotification("turn/started", (p: Json) => {
@@ -1655,6 +1668,34 @@ const REVIEW_OUTCOMES = {
 } as const;
 const REVIEW_RISK_LEVELS = new Set(["low", "medium", "high"]);
 
+/** Codex 0.154.x reports unified-exec commands after applying Rust shlex::try_join to
+ * `[absolute-shell, -c|-lc, raw-script]`. Admission needs the raw script that was actually
+ * reviewed, but must not accept a general shell rendering as trusted identity. Decode only the
+ * canonical single-quoted representation that can contain the merge command alphabet; unusual
+ * shells and quoting strategies remain visible but fail closed downstream. */
+const CODEX_PROVIDER_SHELLS = new Set(["ash", "bash", "dash", "ksh", "sh", "zsh"]);
+const CODEX_SHLEX_UNQUOTED = /^[+\-./:@\]_0-9A-Za-z]+$/u;
+const CODEX_SINGLE_QUOTED_SHELL_WRAPPER =
+  /^(\/[+\-./:@\]_0-9A-Za-z]+) (-c|-lc) '([^'\\^\x00-\x1f\x7f]+)'$/u;
+
+function codexProviderShellScript(command: string): string | null {
+  const match = CODEX_SINGLE_QUOTED_SHELL_WRAPPER.exec(command);
+  if (!match) return null;
+  const shellPath = match[1];
+  const script = match[3];
+  if (!shellPath || !script) return null;
+  const shell = shellPath.slice(shellPath.lastIndexOf("/") + 1);
+  // shlex::try_join leaves fully safe words unquoted. Requiring an unsafe byte proves this exact
+  // shape is its canonical representation, rather than merely another shell-equivalent spelling.
+  if (!CODEX_PROVIDER_SHELLS.has(shell) || CODEX_SHLEX_UNQUOTED.test(script)) return null;
+  return script;
+}
+
+function boundedProviderCorrelationId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 512 &&
+    !/[\x00-\x1f\x7f]/u.test(value);
+}
+
 export function parseReviewDecision(p: Json): ReviewDecision | null {
   const r = p?.review ?? p?.autoApprovalReview ?? p?.guardianApprovalReview ?? p?.item ?? p;
   const status = r?.status;
@@ -1668,6 +1709,7 @@ export function parseReviewDecision(p: Json): ReviewDecision | null {
     ? truncate(r.rationale.trim(), 200)
     : undefined;
   const requestId = r?.requestId ?? r?.approvalId ?? p?.requestId ?? p?.approvalId;
+  const approvalReviewReceipt = guardianApprovalReviewReceipt(p);
   return {
     reviewId,
     reviewer: { kind: "agent", id: "codex-guardian" },
@@ -1675,6 +1717,32 @@ export function parseReviewDecision(p: Json): ReviewDecision | null {
     ...(riskLevel ? { riskLevel } : {}),
     ...(rationale ? { rationale } : {}),
     ...(typeof requestId === "string" && requestId ? { requestId } : {}),
+    ...(approvalReviewReceipt ? { approvalReviewReceipt } : {}),
+  };
+}
+
+/** Extract only the current typed App Server approval-review completion envelope. The surrounding
+ * review parser is deliberately liberal for display compatibility, but action admission fails
+ * closed unless every correlation field and the exact command are on the documented top-level
+ * shape. This receipt does not prove command execution or a provider grant lifetime. */
+function guardianApprovalReviewReceipt(p: Json): ReviewDecision["approvalReviewReceipt"] {
+  const review = p?.review;
+  const action = p?.action;
+  const input = typeof action?.command === "string" ? codexProviderShellScript(action.command) : null;
+  if (p?.decisionSource !== "agent" || review?.status !== "approved" ||
+      action?.type !== "command" || action?.source !== "unifiedExec" ||
+      !boundedProviderCorrelationId(p?.threadId) || !boundedProviderCorrelationId(p?.turnId) ||
+      !boundedProviderCorrelationId(p?.targetItemId) || !boundedProviderCorrelationId(p?.reviewId) ||
+      typeof action?.command !== "string" ||
+      action.command.length < 1 || action.command.length > 2000 || !input) return undefined;
+  return {
+    transport: "codex-app-server",
+    threadId: p.threadId,
+    turnId: p.turnId,
+    itemId: p.targetItemId,
+    toolName: "commandExecution",
+    input,
+    inputSha256: createHash("sha256").update(input, "utf8").digest("hex"),
   };
 }
 
@@ -1696,7 +1764,12 @@ function approvalTitle(params: Json): string {
   return "Codex requests approval";
 }
 
-export function approvalContext(method: string, params: Json, escalated: boolean) {
+export function approvalContext(
+  method: string,
+  params: Json,
+  escalated: boolean,
+  activeRoot?: { threadId: string; turnId: string },
+) {
   const toolName = method === PERMISSIONS_METHOD
     ? "permissions"
     : method.includes("fileChange")
@@ -1708,11 +1781,33 @@ export function approvalContext(method: string, params: Json, escalated: boolean
   const onlyChange = changes?.length === 1 ? changes[0] : changes ? null : params?.fileChange;
   const path = params?.path ?? params?.filePath ?? onlyChange?.path ?? onlyChange?.filePath;
   const branch = params?.branch ?? params?.branchName;
-  const input = params?.command ?? params?.reason;
+  const providerCommand = typeof params?.command === "string" && params.command
+    ? params.command : null;
+  const displayInput = providerCommand ?? (typeof params?.reason === "string" ? params.reason : null);
+  // Current App Servers expose commandExecution input through the same shlex-joined wrapper used
+  // by Guardian. Preserve older raw command input and all unsupported shapes unchanged so the
+  // downstream exact-command matcher remains fail closed. Explanatory reason remains display-only.
+  const commandInput = toolName === "commandExecution" && providerCommand
+    ? codexProviderShellScript(providerCommand) ?? providerCommand
+    : null;
+  const input = commandInput ?? displayInput;
+  const commandIdentity = commandInput && commandInput.length <= 2000 && activeRoot &&
+      boundedProviderCorrelationId(params?.threadId) && params.threadId === activeRoot.threadId &&
+      boundedProviderCorrelationId(params?.turnId) && params.turnId === activeRoot.turnId &&
+      boundedProviderCorrelationId(params?.itemId)
+    ? {
+        transport: "codex-app-server" as const,
+        threadId: params.threadId,
+        turnId: params.turnId,
+        itemId: params.itemId,
+        input: commandInput,
+      }
+    : undefined;
   const networkRequested = params?.permissions?.network;
   return {
     toolName,
     ...(typeof input === "string" && input ? { input: truncate(input, 2000) } : {}),
+    ...(commandIdentity ? { commandIdentity } : {}),
     ...(typeof path === "string" && path ? { path: truncate(path, 1024) } : {}),
     ...(networkRequested ? { network: typeof networkRequested === "string" ? truncate(networkRequested, 1024) : "requested" } : {}),
     ...(typeof branch === "string" && branch ? { branch: truncate(branch, 1024) } : {}),

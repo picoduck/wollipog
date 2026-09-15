@@ -81,6 +81,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type PolicyHookEvaluationRequest,
   type PolicyHookEvaluationResponse,
   type RecordPolicyHookDecisionMessage,
+  type RecordWorkflowActionAdmissionMessage,
   type PodContextEntry,
   type PodMemberRole,
   type PodOrchestrationActionResult,
@@ -102,6 +103,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type ReconcilePodRequest,
   type RunView,
   type ReviewFinding,
+  type ReviewDecisionApprovalReviewReceipt,
   type ResourceScope,
   type ReviewFindingsResponse,
   type RunnerProtocolCapability,
@@ -215,6 +217,7 @@ export const EXTERNAL_SESSION_ADOPTION_TIMEOUT_MS = 45_000;
 export const STEERING_REQUEST_TIMEOUT_MS = 15_000;
 /** Leave headroom inside the hook sidecar's 1.5s HTTP deadline for request parsing and response. */
 export const POLICY_HOOK_EVENT_APPEND_TIMEOUT_MS = 1_000;
+export const WORKFLOW_ACTION_ADMISSION_APPEND_TIMEOUT_MS = 5_000;
 export const SESSION_COMMAND_INVOCATION_EXPIRY_MS = 24 * 60 * 60_000;
 export const SESSION_COMMAND_INVOCATION_RETENTION_MS = 30 * 24 * 60 * 60_000;
 /** One day beyond the browser's seven-day queued-edit recovery window. */
@@ -1000,6 +1003,22 @@ function codexExecFallbackReason(
 function auditDigest(value: unknown): string | undefined {
   if (value == null) return undefined;
   return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
+}
+
+function boundedProviderCorrelationId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 512 &&
+    !/[\x00-\x1f\x7f]/u.test(value);
+}
+
+function validatedGuardianApprovalReviewReceipt(value: unknown): ReviewDecisionApprovalReviewReceipt | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.transport !== "codex-app-server" || candidate.toolName !== "commandExecution" ||
+      !boundedProviderCorrelationId(candidate.threadId) ||
+      !boundedProviderCorrelationId(candidate.turnId) || !boundedProviderCorrelationId(candidate.itemId) ||
+      typeof candidate.input !== "string" || candidate.input.length < 1 || candidate.input.length > 2000 ||
+      typeof candidate.inputSha256 !== "string" || !/^[0-9a-f]{64}$/u.test(candidate.inputSha256)) return null;
+  return candidate as unknown as ReviewDecisionApprovalReviewReceipt;
 }
 
 function questionAuditContent(
@@ -5601,12 +5620,12 @@ export class SessionsService {
     return ok(resolved);
   }
 
-  consumeWorkflowDecision(
+  async consumeWorkflowDecision(
     sessionId: string,
     occurrenceId: string,
     request: ConsumeWorkflowDecisionRequest,
     canAccess: (sessionId: string) => boolean = () => true,
-  ): ServiceResult<WorkflowDecisionView> {
+  ): Promise<ServiceResult<WorkflowDecisionView>> {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== sessionId) return fail("workflow decision not found", 404);
     if (decision.status !== "approved") {
@@ -5643,6 +5662,10 @@ export class SessionsService {
     const action = normalizeWorkflowDecisionAction(normalized.data, request?.action);
     if (!action.ok) return fail(action.error!, action.status);
     if (action.data) {
+      if (child.driver !== "claude-code" && child.driver !== "codex-app-server") {
+        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        return fail(`${child.driver} does not expose trusted correlated command-decision evidence`, 409);
+      }
       for (const owner of [child, parent]) {
         const unsupported = this.capabilityFailure(
           owner.runnerId,
@@ -5657,10 +5680,74 @@ export class SessionsService {
     }
     const now = Date.now();
     if (action.data) {
+      const providerTurnId = child.driver === "codex-app-server"
+        ? this.hub.activeTurnIdForSession(child.id)
+        : undefined;
+      if (child.driver === "codex-app-server" && !providerTurnId) {
+        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        return fail("App Server action admission requires an active provider turn", 409);
+      }
+      let providerFence: Pick<NonNullable<WorkflowDecisionView["actionAdmission"]>,
+        "armedAfterEventSeq" | "providerTurnId" | "providerThreadId" | "runnerHistoryEpoch"> = {};
+      if (child.driver === "codex-app-server") {
+        if (decision.actionAdmission) {
+          if (decision.actionAdmission.providerTurnId !== providerTurnId ||
+              typeof decision.actionAdmission.providerThreadId !== "string" ||
+              !decision.actionAdmission.providerThreadId ||
+              !Number.isSafeInteger(decision.actionAdmission.runnerHistoryEpoch) ||
+              decision.actionAdmission.runnerHistoryEpoch! < 0 ||
+              !Number.isSafeInteger(decision.actionAdmission.armedAfterEventSeq) ||
+              decision.actionAdmission.armedAfterEventSeq! < 1) {
+            return fail("existing App Server action admission has no current runner boundary", 409);
+          }
+          providerFence = decision.actionAdmission;
+        } else {
+          const commandDigest = auditDigest(action.data)!;
+          const requestId = `workflow_action_arm_${randomUUID()}`;
+          const message: RecordWorkflowActionAdmissionMessage = {
+            type: "record_workflow_action_admission",
+            requestId,
+            sessionId: child.id,
+            occurrenceId,
+            commandDigest,
+            providerTurnId: providerTurnId!,
+          };
+          try {
+            const recorded = await this.hub.requestFromRunner(
+              child.runnerId,
+              requestId,
+              message,
+              WORKFLOW_ACTION_ADMISSION_APPEND_TIMEOUT_MS,
+            );
+            if (recorded.type !== "workflow_action_admission_recorded" ||
+                recorded.sessionId !== child.id || recorded.occurrenceId !== occurrenceId ||
+                !recorded.accepted || recorded.providerTurnId !== providerTurnId ||
+                !boundedProviderCorrelationId(recorded.providerThreadId) ||
+                !Number.isSafeInteger(recorded.historyEpoch) || recorded.historyEpoch! < 0 ||
+                !Number.isSafeInteger(recorded.eventSeq) || recorded.eventSeq! < 1) {
+              return fail("runner could not establish the App Server action admission boundary", 409);
+            }
+            providerFence = {
+              armedAfterEventSeq: recorded.eventSeq,
+              providerTurnId: recorded.providerTurnId,
+              providerThreadId: recorded.providerThreadId,
+              runnerHistoryEpoch: recorded.historyEpoch,
+            };
+          } catch (error) {
+            this.log.warn(`workflow action admission append failed for ${child.id}: ${
+              isRunnerRequestTimeoutError(error) ? "runner acknowledgement timed out"
+                : isRunnerRequestNotSentError(error) ? "runner is offline"
+                  : error instanceof Error ? error.message : "unknown runner error"
+            }`);
+            return fail("runner could not establish the App Server action admission boundary", 409);
+          }
+        }
+      }
       const armed = this.db.armWorkflowDecisionAction(occurrenceId, {
         ...action.data,
         commandDigest: auditDigest(action.data)!,
         armedAt: now,
+        ...providerFence,
       });
       if (!armed) return fail("workflow decision action admission changed concurrently", 409);
       this.hub.sessionChangedById(sessionId);
@@ -5679,21 +5766,71 @@ export class SessionsService {
     session: SessionView,
     approval: PendingApproval,
   ): { decision: WorkflowDecisionView; commandDigest: string; optionId: string } | null {
+    const optionId = approval.options.find((option) => option.kind === "allow_once")?.optionId;
+    if (approval.kind === "authentication" || !optionId) return null;
+    if (session.driver === "codex-app-server") {
+      const identity = approval.context?.commandIdentity;
+      const boundedId = (value: unknown) => typeof value === "string" && value.length > 0 &&
+        value.length <= 512 && !/[\x00-\x1f\x7f]/u.test(value);
+      if (approval.ownerToolUseId || identity?.transport !== "codex-app-server" ||
+          typeof identity.input !== "string" || !identity.input || identity.input.length > 2000 ||
+          !boundedId(identity.threadId) || !boundedId(identity.turnId) || !boundedId(identity.itemId) ||
+          this.hub.activeTurnIdForSession(session.id) !== identity.turnId) return null;
+      const action = this.workflowDecisionActionForCommand(
+        session,
+        approval.context?.toolName,
+        identity.input,
+        identity.turnId,
+        identity.itemId,
+        identity.threadId,
+      );
+      return action ? { ...action, optionId } : null;
+    }
+    const command = approval.context?.input;
+    if (typeof command !== "string" || !command) return null;
+    const action = this.workflowDecisionActionForCommand(
+      session,
+      approval.context?.toolName,
+      command,
+    );
+    return action ? { ...action, optionId } : null;
+  }
+
+  private workflowDecisionActionForCommand(
+    session: SessionView,
+    toolName: string | undefined,
+    command: string,
+    providerTurnId?: string,
+    providerItemId?: string,
+    providerThreadId?: string,
+  ): { decision: WorkflowDecisionView; commandDigest: string } | null {
     const expectedTool = session.driver === "codex-app-server"
       ? "commandExecution"
       : session.driver === "claude-code" ? "Bash" : null;
-    const command = approval.context?.input;
-    const optionId = approval.options.find((option) => option.kind === "allow_once")?.optionId;
-    if (!expectedTool || approval.kind === "authentication" || approval.context?.toolName !== expectedTool ||
-        typeof command !== "string" || !command || !optionId) return null;
+    if (!expectedTool || toolName !== expectedTool) return null;
     const action: WorkflowDecisionAction = { kind: "pr_merge_enqueue", command };
     const commandDigest = auditDigest(action)!;
     const matches = this.db.approvedWorkflowDecisionsForAction(session.id, commandDigest)
       .filter((decision) => decision.category === "pr_merge" &&
         decision.actionAdmission?.kind === action.kind &&
-        decision.actionAdmission.command === command);
+        decision.actionAdmission.command === command &&
+        (session.driver !== "codex-app-server" || (
+          providerTurnId != null && decision.actionAdmission.providerTurnId === providerTurnId &&
+          (providerThreadId == null || decision.actionAdmission.providerThreadId === providerThreadId)
+        )));
     if (matches.length !== 1) return null;
     const decision = matches[0]!;
+    const history = providerItemId ? this.db.getRunnerHistoryState(session.id) : null;
+    if (providerItemId && (
+      decision.actionAdmission?.armedAfterEventSeq == null ||
+      decision.actionAdmission.runnerHistoryEpoch == null ||
+      history?.historyEpoch !== decision.actionAdmission.runnerHistoryEpoch ||
+      !this.db.isActiveRootToolCallStartedAfterRunnerSeq(
+        session.id,
+        providerItemId,
+        decision.actionAdmission.armedAfterEventSeq,
+      )
+    )) return null;
     const parent = this.db.getSession(decision.controllingSessionId);
     const child = this.db.getSession(decision.sessionId);
     const policy = parent?.parentControlPolicy;
@@ -5712,7 +5849,7 @@ export class SessionsService {
       this.revokeWorkflowDecision(decision, { kind: "system", id: "workflow-decision-action-admission" });
       return null;
     }
-    return { decision, commandDigest, optionId };
+    return { decision, commandDigest };
   }
 
   private workflowDecisionController(child: SessionView): {
@@ -9126,6 +9263,73 @@ export class SessionsService {
           now,
           { content: payload.rationale },
         );
+      }
+      const receipt = validatedGuardianApprovalReviewReceipt(payload.approvalReviewReceipt);
+      const receiptCommandDigest = receipt && createHash("sha256").update(receipt.input, "utf8").digest("hex");
+      if (receipt && reviewer?.kind === "agent" && reviewer.id === "codex-guardian" &&
+          payload.outcome === "allowed" && session.driver === receipt.transport &&
+          this.hub.activeTurnIdForSession(session.id) === receipt.turnId &&
+          receipt.inputSha256 === receiptCommandDigest) {
+        const receiptDigest = auditDigest({
+          transport: receipt.transport,
+          threadId: receipt.threadId,
+          turnId: receipt.turnId,
+          itemId: receipt.itemId,
+        })!;
+        const actionAdmission = this.workflowDecisionActionForCommand(
+          session,
+          receipt.toolName,
+          receipt.input,
+          receipt.turnId,
+          receipt.itemId,
+          receipt.threadId,
+        );
+        if (actionAdmission) {
+          const actor: GovernanceActor = { kind: "system", id: "workflow-decision-action-admission" };
+          const consumed = this.db.consumeWorkflowDecisionActionWithReceipt(
+            session.id,
+            actionAdmission.decision.occurrenceId,
+            actionAdmission.commandDigest,
+            receiptDigest,
+            now,
+          );
+          if (consumed) {
+            this.recordWorkflowDecisionAudit(consumed, "consumed", actor, now);
+            this.recordGovernanceAudit(
+              session,
+              {
+                requestId: receipt.itemId,
+                kind: "permission",
+                context: { toolName: receipt.toolName, input: receipt.input },
+              },
+              "resolution",
+              "allowed",
+              reviewer,
+              now,
+              {
+                workflowDecision: {
+                  occurrenceId: consumed.occurrenceId,
+                  parentSessionId: consumed.controllingSessionId,
+                  childSessionId: consumed.sessionId,
+                  category: consumed.category,
+                  policyRevision: consumed.policyRevision,
+                  resourceDigest: consumed.resourceDigest,
+                },
+              },
+            );
+            this.hub.sessionChangedById(sessionId);
+            this.hub.sessionChangedById(consumed.controllingSessionId);
+          }
+        } else {
+          // Burn a valid unmatched provider invocation identity as well: a delayed replay must not
+          // consume a future grant that happens to carry the same canonical command.
+          this.db.claimWorkflowDecisionActionReceipt(
+            session.id,
+            receiptDigest,
+            auditDigest({ kind: "pr_merge_enqueue", command: receipt.input })!,
+            now,
+          );
+        }
       }
     }
 

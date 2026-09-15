@@ -1327,10 +1327,38 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           sessionId: msg.sessionId,
           auditId: recorded.auditId,
           accepted: recorded.accepted,
-          ...(recorded.eventSeq !== undefined ? { eventSeq: recorded.eventSeq } : {}),
+          ...(recorded.eventSeq !== undefined
+            ? { eventSeq: store.projectedEventSeq(msg.sessionId, recorded.eventSeq, controlPlaneProtocolVersion) }
+            : {}),
           ...(recorded.error ? { error: recorded.error } : {}),
         });
       })());
+      break;
+    }
+    case "record_workflow_action_admission": {
+      runCommandTask("record_workflow_action_admission", Promise.resolve().then(() => {
+        const recorded = sessions.recordWorkflowActionAdmission(msg.sessionId, {
+          occurrenceId: msg.occurrenceId,
+          commandDigest: msg.commandDigest,
+          providerTurnId: msg.providerTurnId,
+        });
+        sendUp({
+          type: "workflow_action_admission_recorded",
+          requestId: msg.requestId,
+          sessionId: msg.sessionId,
+          occurrenceId: recorded.occurrenceId,
+          accepted: recorded.accepted,
+          ...(recorded.providerTurnId ? { providerTurnId: recorded.providerTurnId } : {}),
+          ...(recorded.providerThreadId ? { providerThreadId: recorded.providerThreadId } : {}),
+          ...(recorded.historyEpoch !== undefined
+            ? { historyEpoch: store.projectedHistoryEpoch(recorded.historyEpoch, controlPlaneProtocolVersion) }
+            : {}),
+          ...(recorded.eventSeq !== undefined
+            ? { eventSeq: store.projectedEventSeq(msg.sessionId, recorded.eventSeq, controlPlaneProtocolVersion) }
+            : {}),
+          ...(recorded.error ? { error: recorded.error } : {}),
+        });
+      }));
       break;
     }
     case "agent_control_credential_registered":

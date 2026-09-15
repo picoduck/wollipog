@@ -403,7 +403,13 @@
 // 146: worktree setup configuration discovery distinguishes absent, valid, and invalid input;
 //      older peers omit the status and clients preserve that case as unknown. Starter generation
 //      is a narrow runner-owned mutation that cannot name an arbitrary destination.
-export const PROTOCOL_VERSION = 146;
+// 147: Guardian-direct action reconciliation carries a provider-structured approval-review receipt bound
+//      to the App Server thread, turn, target item, and command digest. PR-merge action admission now
+//      requires this version so mixed deployments fail closed on uncorrelated review records.
+// 148: App Server action admission is causally fenced in the runner-owned event log before the
+//      arming call returns. The returned thread, turn, history generation, and sequence bind a
+//      later Guardian receipt to an invocation that began after that exact provider-side boundary.
+export const PROTOCOL_VERSION = 148;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -586,7 +592,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   backgroundMissingResultRecovery: 134,
   delegatedParentControl: 136,
   typedWorkflowDecisionDelegation: 139,
-  workflowDecisionActionAdmission: 142,
+  workflowDecisionActionAdmission: 148,
   orchestratorCampaignManagement: 140,
   orchestratorExecutionPolicy: 144,
   worktreeSetup: 141,
@@ -792,9 +798,11 @@ export function providerAuthenticationReceiptCode(
  * Additive event kinds that older peers must not receive.
  *
  * Adding an entry changes the projected-history-epoch encoding (`localEpoch * VARIANTS + variant`).
- * Protocol v130 therefore reserves an offset before the three-way encoding. For the same or any
- * later local epoch, every new-format value sorts above both values the one-policy format could
- * have published, forcing a resync before a cached sequence number can name a different event.
+ * Protocol v130 introduced offset 2 to fence the retired two-way encoding. Every later radix
+ * change must advance the offset by the prior radix before adding the new variant; v148 therefore
+ * uses 5 (= 2 + 3). For the same or any later local epoch, every new-format value then sorts above
+ * every value the preceding format could publish, forcing a resync before a cached sequence number
+ * can name a different event.
  *
  * Prefer carrying additive state on the session snapshot, which is version-gated per field and
  * needs no sequence space at all.
@@ -802,6 +810,7 @@ export function providerAuthenticationReceiptCode(
 const SESSION_EVENT_WIRE_POLICIES = {
   agent_response_completed: { minProtocol: 87, legacy: "omit" },
   policy_hook_decision: { minProtocol: 130, legacy: "omit" },
+  workflow_action_admission_armed: { minProtocol: 148, legacy: "omit" },
 } as const satisfies Partial<Record<SessionEventKind, {
   minProtocol: number;
   legacy: "omit";
@@ -831,8 +840,8 @@ export function sessionEventWireProjectionVariant(
 export const SESSION_EVENT_WIRE_PROJECTION_VARIANTS =
   Object.keys(SESSION_EVENT_WIRE_POLICIES).length + 1;
 
-/** Numeric fence between the retired two-way encoding and the v130 three-way encoding. */
-export const SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET = 2;
+/** Numeric fence advanced at each projection-radix change; v148 follows v130's offset 2 + radix 3. */
+export const SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET = 5;
 
 /** Whether this peer needs any explicit additive session-event compatibility projection.
  * Keeping policy inspection beside the policy table avoids callers probing it with a fabricated
@@ -2334,6 +2343,16 @@ export interface ApprovalContext {
   /** Human-readable input rendering (command text, file path + content excerpt, JSON), bounded
    * by the emitter — never the raw multi-MB payload. */
   input?: string;
+  /** Provider-structured command identity used only for exact action admission. Display text such
+   * as an approval reason must never populate this field. App Server identities are bound to the
+   * active root provider invocation so stale or subagent requests fail closed. */
+  commandIdentity?: {
+    transport: "codex-app-server";
+    threadId: string;
+    turnId: string;
+    itemId: string;
+    input: string;
+  };
   /** Normalized, bounded resource selectors asserted by the authenticated runner. The control
    * plane parses path/network structure before matching; it does not independently inspect the
    * runner's filesystem or DNS. Auto-allow policies cannot depend on asserted escalation state. */
@@ -2827,10 +2846,18 @@ export interface WorkflowDecisionAction {
   command: string;
 }
 
-/** Durable, content-safe proof that one exact action is waiting for its matching runner ask. */
+/** Durable, content-safe record that one exact action awaits correlated provider decision evidence. */
 export interface WorkflowDecisionActionAdmission extends WorkflowDecisionAction {
   commandDigest: string;
   armedAt: number;
+  /** Runner-owned event sequence of the causal arm marker. */
+  armedAfterEventSeq?: number;
+  /** Active provider turn captured at arm time. Required for App Server action admission. */
+  providerTurnId?: string;
+  /** Active provider thread captured by the runner at arm time. */
+  providerThreadId?: string;
+  /** Runner history generation containing `armedAfterEventSeq`. */
+  runnerHistoryEpoch?: number;
 }
 
 /** One exact workflow gate. Raw rationale is never retained; only its digest reaches audit. */
@@ -2874,7 +2901,7 @@ export interface ConsumeWorkflowDecisionRequest {
   /** The action supplies the exact snapshot it is about to use, not only a remembered digest. */
   resourceSnapshot: WorkflowDecisionResourceSnapshot;
   /** Required for PR merge. The approved grant remains unconsumed until this exact command's
-   * one-shot runner permission is delivered; other decision categories still consume directly. */
+   * correlated provider decision evidence arrives; other decision categories consume directly. */
   action?: WorkflowDecisionAction;
 }
 
@@ -3070,6 +3097,21 @@ export type GovernanceAuditOutcome =
 export type ReviewDecisionOutcome = "allowed" | "denied" | "escalated" | "timed_out" | "aborted";
 export type ReviewRiskLevel = "low" | "medium" | "high";
 
+/** Provider-structured completion receipt for one Guardian approval review.
+ * It correlates the provider-reported thread, turn, target item, and command; it does not assert
+ * that command execution started, completed, or inherited any particular provider grant lifetime. */
+export interface ReviewDecisionApprovalReviewReceipt {
+  transport: "codex-app-server";
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  toolName: "commandExecution";
+  /** Exact logical tool input recovered from the provider's canonical command wrapper. */
+  input: string;
+  /** SHA-256 of the exact UTF-8 logical input above, computed at the provider bridge. */
+  inputSha256: string;
+}
+
 /** Provider-neutral terminal decision from an automated reviewer. Rationale is bounded by the
  * emitter for the visible transcript; the governance audit stores only its SHA-256 digest. */
 export interface ReviewDecision {
@@ -3080,6 +3122,8 @@ export interface ReviewDecision {
   rationale?: string;
   /** Provider approval/request id when the review can be correlated to one. */
   requestId?: string;
+  /** Correlated approval-review completion metadata when the provider exposes a trusted envelope. */
+  approvalReviewReceipt?: ReviewDecisionApprovalReviewReceipt;
 }
 
 /** Durable content-safe approval provenance. Raw tool input and question answers are never stored. */
@@ -3683,6 +3727,7 @@ export type SessionEventPayload =
       restoresElicitation?: boolean;
     }
   | PolicyHookDecisionEvent
+  | WorkflowActionAdmissionArmedEvent
   | ({ kind: "review_decision" } & ReviewDecision)
   | { kind: "permission_request"; requestId: string; occurrenceId?: string; title: string; options: PermissionOption[]; context?: ApprovalContext; purpose?: "authentication"; ownerToolUseId?: string }
   | {
@@ -3753,6 +3798,16 @@ export interface PolicyHookDecisionEvent {
   actor: GovernanceActor;
   governancePolicyId?: string;
   toolCallId: string;
+}
+
+/** Content-safe runner-owned causal marker written before an App Server action admission returns.
+ * Its sequence, rather than control-plane arrival order, separates older provider invocations from
+ * the invocation that is allowed to consume the admission. */
+export interface WorkflowActionAdmissionArmedEvent {
+  kind: "workflow_action_admission_armed";
+  occurrenceId: string;
+  commandDigest: string;
+  providerTurnId: string;
 }
 
 /* ---------------------- Usage and cost aggregation ---------------------- */
@@ -5751,6 +5806,30 @@ export interface PolicyHookDecisionRecordedMessage {
   error?: string;
 }
 
+/** Correlated request for the runner to establish the runner-owned action-arm ordering fence. */
+export interface RecordWorkflowActionAdmissionMessage {
+  type: "record_workflow_action_admission";
+  requestId: string;
+  sessionId: string;
+  occurrenceId: string;
+  commandDigest: string;
+  providerTurnId: string;
+}
+
+/** Runner-authoritative coordinates for one successfully appended action-arm fence. */
+export interface WorkflowActionAdmissionRecordedMessage {
+  type: "workflow_action_admission_recorded";
+  requestId: string;
+  sessionId: string;
+  occurrenceId: string;
+  accepted: boolean;
+  providerTurnId?: string;
+  providerThreadId?: string;
+  historyEpoch?: number;
+  eventSeq?: number;
+  error?: string;
+}
+
 /** Hash-only binding for one runner-minted, exact-session CLI/MCP credential. The plaintext stays
  * in a protected runner-local file and is never placed in argv or a durable command snapshot. */
 export interface AgentControlCredentialMessage {
@@ -6084,6 +6163,7 @@ export type RunnerToControlPlane =
   | StopSessionResultMessage
   | PolicyHookCredentialMessage
   | PolicyHookDecisionRecordedMessage
+  | WorkflowActionAdmissionRecordedMessage
   | AgentControlCredentialMessage
   | SessionRuntimeUpdatedMessage
   | GovernanceTrippedMessage
@@ -7554,6 +7634,7 @@ export type ControlPlaneToRunner =
   | RegisterRejectedMessage
   | PolicyHookCredentialRegisteredMessage
   | RecordPolicyHookDecisionMessage
+  | RecordWorkflowActionAdmissionMessage
   | AgentControlCredentialRegisteredMessage
   | StartSessionMessage
   | PromptSessionMessage

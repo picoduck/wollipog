@@ -572,6 +572,10 @@ CREATE TABLE IF NOT EXISTS workflow_decisions (
   action_command        TEXT,
   action_command_digest TEXT,
   action_armed_at       INTEGER,
+  action_armed_after_event_seq INTEGER,
+  action_provider_turn_id TEXT,
+  action_provider_thread_id TEXT,
+  action_runner_history_epoch INTEGER,
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
   FOREIGN KEY (controlling_session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
@@ -581,6 +585,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_decisions_session_request
   ON workflow_decisions(session_id, request_id);
 CREATE INDEX IF NOT EXISTS idx_workflow_decisions_resource
   ON workflow_decisions(session_id, category, resource_key, created_at);
+-- Provider invocation identities are hashed before storage. Claiming one here makes a replayed
+-- approval-review receipt unable to consume a later grant for the same canonical command.
+CREATE TABLE IF NOT EXISTS workflow_decision_action_receipts (
+  session_id      TEXT NOT NULL,
+  receipt_digest  TEXT NOT NULL,
+  command_digest  TEXT NOT NULL,
+  observed_at     INTEGER NOT NULL,
+  PRIMARY KEY (session_id, receipt_digest),
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
 
 -- Orchestrator completion is an explicit verification boundary. A child merely becoming Idle or
 -- terminal does not prove that its report and follow-ups were accounted for.
@@ -4296,9 +4310,16 @@ export class ControlPlaneDb {
       "action_command TEXT",
       "action_command_digest TEXT",
       "action_armed_at INTEGER",
+      "action_armed_after_event_seq INTEGER",
+      "action_provider_turn_id TEXT",
+      "action_provider_thread_id TEXT",
+      "action_runner_history_epoch INTEGER",
     ]) {
       try { db.exec(`ALTER TABLE workflow_decisions ADD COLUMN ${column}`); } catch { /* already present */ }
     }
+    // An early v147 iteration used one-admission-per-turn uniqueness. Event-order correlation is
+    // narrower and permits multiple distinct invocations in one provider turn.
+    db.exec("DROP INDEX IF EXISTS idx_workflow_decisions_provider_turn_action");
     try {
       db.exec("ALTER TABLE governance_policies ADD COLUMN ask_timeout INTEGER");
     } catch {
@@ -12744,15 +12765,26 @@ export class ControlPlaneDb {
   ): WorkflowDecisionView | null {
     const result = this.stmt(
       `UPDATE workflow_decisions
-       SET action_kind=?, action_command=?, action_command_digest=?, action_armed_at=?
+       SET action_kind=?, action_command=?, action_command_digest=?,
+           action_armed_at=COALESCE(action_armed_at, ?),
+           action_armed_after_event_seq=COALESCE(action_armed_after_event_seq, ?),
+           action_provider_turn_id=COALESCE(action_provider_turn_id, ?),
+           action_provider_thread_id=COALESCE(action_provider_thread_id, ?),
+           action_runner_history_epoch=COALESCE(action_runner_history_epoch, ?)
        WHERE occurrence_id=? AND status='approved' AND (
          action_command_digest IS NULL OR (
-           action_kind=? AND action_command=? AND action_command_digest=?
+           action_kind=? AND action_command=? AND action_command_digest=? AND
+           (action_provider_turn_id IS NULL OR action_provider_turn_id IS ?) AND
+           (action_provider_thread_id IS NULL OR action_provider_thread_id IS ?) AND
+           (action_runner_history_epoch IS NULL OR action_runner_history_epoch IS ?)
          )
        )`,
     ).run(
-      action.kind, action.command, action.commandDigest, action.armedAt, occurrenceId,
-      action.kind, action.command, action.commandDigest,
+      action.kind, action.command, action.commandDigest, action.armedAt,
+      action.armedAfterEventSeq ?? null, action.providerTurnId ?? null,
+      action.providerThreadId ?? null, action.runnerHistoryEpoch ?? null, occurrenceId,
+      action.kind, action.command, action.commandDigest, action.providerTurnId ?? null,
+      action.providerThreadId ?? null, action.runnerHistoryEpoch ?? null,
     );
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
   }
@@ -12770,6 +12802,22 @@ export class ControlPlaneDb {
     );
   }
 
+  isActiveRootToolCallStartedAfterRunnerSeq(
+    sessionId: string,
+    toolCallId: string,
+    afterRunnerSeq: number,
+  ): boolean {
+    const row = this.stmt(
+      `SELECT kind, payload FROM session_events
+       WHERE session_id=? AND runner_seq>? AND kind IN ('tool_call','tool_call_update')
+         AND json_extract(payload,'$.toolCallId')=?
+       ORDER BY runner_seq DESC LIMIT 1`,
+    ).get(sessionId, afterRunnerSeq, toolCallId) as unknown as { kind: string; payload: string } | undefined;
+    if (!row || row.kind !== "tool_call") return false;
+    const payload = parseJson<SessionEventPayload>(row.payload);
+    return payload?.kind === "tool_call" && payload.status === "in_progress" && !payload.parentToolUseId;
+  }
+
   consumeWorkflowDecisionAction(
     occurrenceId: string,
     commandDigest: string,
@@ -12780,6 +12828,45 @@ export class ControlPlaneDb {
        WHERE occurrence_id=? AND status='approved' AND action_command_digest=?`,
     ).run(now, occurrenceId, commandDigest);
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
+  }
+
+  claimWorkflowDecisionActionReceipt(
+    sessionId: string,
+    receiptDigest: string,
+    commandDigest: string,
+    now: number,
+  ): boolean {
+    const result = this.stmt(
+      `INSERT INTO workflow_decision_action_receipts
+       (session_id, receipt_digest, command_digest, observed_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(session_id, receipt_digest) DO NOTHING`,
+    ).run(sessionId, receiptDigest, commandDigest, now);
+    return Number(result.changes) === 1;
+  }
+
+  consumeWorkflowDecisionActionWithReceipt(
+    sessionId: string,
+    occurrenceId: string,
+    commandDigest: string,
+    receiptDigest: string,
+    now: number,
+  ): WorkflowDecisionView | null {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (!this.claimWorkflowDecisionActionReceipt(sessionId, receiptDigest, commandDigest, now)) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      const result = this.stmt(
+        `UPDATE workflow_decisions SET status='consumed', consumed_at=?
+         WHERE occurrence_id=? AND session_id=? AND status='approved' AND action_command_digest=?`,
+      ).run(now, occurrenceId, sessionId, commandDigest);
+      this.db.exec("COMMIT");
+      return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   /** Advance the absolute cost threshold by its original fixed allowance window. */
@@ -21348,6 +21435,10 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     action_command?: string | null;
     action_command_digest?: string | null;
     action_armed_at?: number | null;
+    action_armed_after_event_seq?: number | null;
+    action_provider_turn_id?: string | null;
+    action_provider_thread_id?: string | null;
+    action_runner_history_epoch?: number | null;
   } | undefined;
   if (!row?.request_id || !row.occurrence_id || !row.session_id || !row.controlling_session_id ||
       !row.category || !row.resource_key || !row.resource_snapshot || !row.resource_digest ||
@@ -21380,6 +21471,14 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
           command: row.action_command,
           commandDigest: row.action_command_digest,
           armedAt: row.action_armed_at,
+          ...(row.action_armed_after_event_seq != null
+            ? { armedAfterEventSeq: row.action_armed_after_event_seq }
+            : {}),
+          ...(row.action_provider_turn_id ? { providerTurnId: row.action_provider_turn_id } : {}),
+          ...(row.action_provider_thread_id ? { providerThreadId: row.action_provider_thread_id } : {}),
+          ...(row.action_runner_history_epoch != null
+            ? { runnerHistoryEpoch: row.action_runner_history_epoch }
+            : {}),
         } }
       : {}),
   };

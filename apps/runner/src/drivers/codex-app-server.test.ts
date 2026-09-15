@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -2339,6 +2340,97 @@ test("Guardian notification emits a structured review_decision instead of untype
   }]);
 });
 
+test("Guardian command approval carries one provider-correlated review receipt", () => {
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1140 --squash --match-head-commit ${"a".repeat(40)}`;
+  const providerCommand = `/usr/bin/zsh -lc '${command}'`;
+  const notification = {
+    threadId: "thread-1",
+    turnId: "turn-1",
+    reviewId: "review-1",
+    targetItemId: "command-1",
+    decisionSource: "agent",
+    review: { status: "approved", riskLevel: "high", userAuthorization: "high", rationale: "approved" },
+    action: { type: "command", source: "unifiedExec", command: providerCommand, cwd: "/repo" },
+  };
+  assert.deepEqual(parseReviewDecision(notification)?.approvalReviewReceipt, {
+    transport: "codex-app-server",
+    threadId: "thread-1",
+    turnId: "turn-1",
+    itemId: "command-1",
+    toolName: "commandExecution",
+    input: command,
+    inputSha256: createHash("sha256").update(command, "utf8").digest("hex"),
+  });
+
+  for (const malformed of [
+    { ...notification, targetItemId: null },
+    { ...notification, decisionSource: "policy" },
+    { ...notification, review: { ...notification.review, status: "denied" } },
+    { ...notification, review: { ...notification.review, status: "timedOut" } },
+    { ...notification, review: { ...notification.review, status: "aborted" } },
+    { ...notification, action: { ...notification.action, type: "execve" } },
+    { ...notification, action: { ...notification.action, source: "unknown" } },
+    { ...notification, action: { ...notification.action, source: "shell" } },
+    { ...notification, action: { ...notification.action, command } },
+    { ...notification, action: { ...notification.action, command: `/usr/bin/zsh -lc '${command}' extra` } },
+    { ...notification, action: { ...notification.action, command: "x".repeat(2001) } },
+  ]) {
+    assert.equal(parseReviewDecision(malformed)?.approvalReviewReceipt, undefined,
+      "missing, denied, cancelled, or unsupported provider envelopes fail closed");
+  }
+});
+
+test("Guardian review correlation is emitted only for the active root turn", () => {
+  const h = makeHarness();
+  const notifications = new Map<string, (params: any) => void>();
+  (h.driver as any).registerHandlers({
+    onRequest: () => {},
+    onNotification: (method: string, handler: (params: any) => void) => notifications.set(method, handler),
+  });
+  (h.driver as any).threadId = "root-thread";
+  (h.driver as any).turnId = "root-turn";
+  (h.driver as any).promptBusy = true;
+  (h.driver as any).turnResolve = () => {};
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1140 --squash --match-head-commit ${"a".repeat(40)}`;
+  const providerCommand = `/usr/bin/zsh -lc '${command}'`;
+  const notification = {
+    threadId: "root-thread",
+    turnId: "root-turn",
+    reviewId: "review-root",
+    targetItemId: "command-root",
+    decisionSource: "agent",
+    review: { status: "approved", riskLevel: "high", rationale: "approved" },
+    action: { type: "command", source: "unifiedExec", command: providerCommand, cwd: "/repo" },
+  };
+  notifications.get("item/autoApprovalReview/completed")!(notification);
+  notifications.get("item/autoApprovalReview/completed")!({
+    ...notification,
+    threadId: "subagent-thread",
+    reviewId: "review-wrong-thread",
+    targetItemId: "command-wrong-thread",
+  });
+  notifications.get("item/autoApprovalReview/completed")!({
+    ...notification,
+    turnId: "stale-turn",
+    reviewId: "review-stale-turn",
+    targetItemId: "command-stale-turn",
+  });
+  assert.equal(h.events.length, 3);
+  assert.deepEqual((h.events[0] as any).approvalReviewReceipt, {
+    transport: "codex-app-server",
+    threadId: "root-thread",
+    turnId: "root-turn",
+    itemId: "command-root",
+    toolName: "commandExecution",
+    input: command,
+    inputSha256: createHash("sha256").update(command, "utf8").digest("hex"),
+  });
+  assert.equal((h.events[1] as any).approvalReviewReceipt, undefined,
+    "a foreign thread remains visible but cannot carry action-admission correlation");
+  assert.equal((h.events[2] as any).approvalReviewReceipt, undefined,
+    "a stale turn remains visible but cannot carry action-admission correlation");
+});
+
 test("only auto-review approval requests carry Guardian escalation provenance", () => {
   for (const [mode, escalated] of [[undefined, true], ["on-request", false]] as const) {
     const h = makeHarness({ config: mode ? cfg(mode) : {} as SessionConfig });
@@ -2353,6 +2445,114 @@ test("only auto-review approval requests carry Guardian escalation provenance", 
     if (event?.kind === "permission_request") {
       assert.deepEqual(event.context?.escalatedBy, escalated ? { kind: "agent", id: "codex-guardian" } : undefined);
     }
+  }
+});
+
+test("requestApproval emits command identity only for the live root provider invocation", () => {
+  const command = "git status --short";
+  const emit = (params: Record<string, unknown>, active = true) => {
+    const h = makeHarness();
+    (h.driver as any).threadId = "root-thread";
+    (h.driver as any).turnId = "root-turn";
+    (h.driver as any).promptBusy = active;
+    (h.driver as any).turnResolve = active ? (() => {}) : null;
+    const requests = new Map<string, (params: any) => Promise<any>>();
+    (h.driver as any).registerHandlers({
+      onRequest: (method: string, handler: (request: any) => Promise<any>) => requests.set(method, handler),
+      onNotification: () => {},
+    });
+    void requests.get("item/commandExecution/requestApproval")!({ approvalId: "approval", ...params });
+    const event = h.events.at(-1);
+    assert.equal(event?.kind, "permission_request");
+    return event?.kind === "permission_request" ? event.context : undefined;
+  };
+
+  assert.equal(emit({
+    threadId: "root-thread", turnId: "root-turn", itemId: "command-1", command,
+  })?.commandIdentity?.input, command);
+  assert.equal(emit({
+    threadId: "child-thread", turnId: "root-turn", itemId: "command-1", command,
+  })?.commandIdentity, undefined, "a subagent thread cannot carry root command identity");
+  assert.equal(emit({
+    threadId: "root-thread", turnId: "root-turn", itemId: "command-1", command,
+  }, false)?.commandIdentity, undefined, "a request outside a live root turn cannot carry command identity");
+});
+
+test("App Server command approval context recovers only an exact provider shell wrapper", () => {
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1140 --squash --match-head-commit ${"a".repeat(40)}`;
+  const root = { threadId: "root-thread", turnId: "root-turn" };
+  const correlated = { threadId: root.threadId, turnId: root.turnId, itemId: "command-1" };
+  const wrapped = approvalContext("item/commandExecution/requestApproval", {
+    ...correlated, command: `/usr/bin/zsh -c '${command}'`,
+  }, false, root);
+  assert.equal(wrapped.input, command);
+  assert.deepEqual(wrapped.commandIdentity, {
+    transport: "codex-app-server",
+    ...correlated,
+    input: command,
+  });
+  assert.equal(approvalContext("item/commandExecution/requestApproval", {
+    ...correlated, command,
+  }, false, root).commandIdentity?.input, command,
+    "older raw provider input remains compatible");
+  assert.equal(approvalContext("item/commandExecution/requestApproval", {
+    ...correlated, command: `/usr/bin/zsh -c '${command}' trailing`,
+  }, false, root).commandIdentity?.input, `/usr/bin/zsh -c '${command}' trailing`,
+  "a non-canonical wrapper remains unmatched and fails closed downstream");
+  for (const unsupported of [
+    `/opt/custom-shell -c '${command}'`,
+    `/usr/bin/zsh -c \"${command}\"`,
+    "/usr/bin/zsh -c 'echo'",
+  ]) {
+    assert.equal(approvalContext("item/commandExecution/requestApproval", {
+      ...correlated, command: unsupported,
+    }, false, root).commandIdentity?.input, unsupported, "unsupported wrappers remain exact and unmatched");
+  }
+});
+
+test("App Server approval reasons stay display-only and command identity requires exact root correlation", () => {
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1140 --squash --match-head-commit ${"a".repeat(40)}`;
+  const wrapped = `/usr/bin/zsh -lc '${command}'`;
+  const root = { threadId: "root-thread", turnId: "root-turn" };
+  const base = { threadId: root.threadId, turnId: root.turnId, itemId: "command-1" };
+
+  for (const [name, commandValue] of [
+    ["missing", undefined],
+    ["null", null],
+    ["empty", ""],
+    ["malformed", { rendered: command }],
+  ] as const) {
+    const context = approvalContext("item/commandExecution/requestApproval", {
+      ...base,
+      ...(commandValue === undefined ? {} : { command: commandValue }),
+      reason: command,
+    }, false, root);
+    assert.equal(context.input, command, `${name} command retains the reason only for display`);
+    assert.equal(context.commandIdentity, undefined, `${name} command cannot derive identity from reason`);
+  }
+  for (const reason of [command, wrapped]) {
+    const context = approvalContext("item/commandExecution/requestApproval", {
+      ...base, reason,
+    }, false, root);
+    assert.equal(context.input, reason, "raw and wrapped reasons retain their display spelling");
+    assert.equal(context.commandIdentity, undefined, "a canonical-looking reason is never command identity");
+  }
+  const networkOnly = approvalContext("item/commandExecution/requestApproval", {
+    ...base, reason: command, permissions: { network: true },
+  }, false, root);
+  assert.equal(networkOnly.network, "requested");
+  assert.equal(networkOnly.commandIdentity, undefined);
+
+  for (const params of [
+    { ...base, threadId: "child-thread", command },
+    { ...base, turnId: "stale-turn", command },
+    { threadId: root.threadId, turnId: root.turnId, command },
+  ]) {
+    assert.equal(
+      approvalContext("item/commandExecution/requestApproval", params, false, root).commandIdentity,
+      undefined,
+      "foreign thread, stale turn, and missing item identities fail closed",
+    );
   }
 });
 

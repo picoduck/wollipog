@@ -154,8 +154,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 146", () => {
-  assert.equal(PROTOCOL_VERSION, 146);
+test("PROTOCOL_VERSION is 148", () => {
+  assert.equal(PROTOCOL_VERSION, 148);
   assert.equal(runnerSupportsProtocol(136, "capacityLockDiagnostics"), false);
   assert.equal(runnerSupportsProtocol(137, "capacityLockDiagnostics"), true);
   assert.equal(runnerSupportsProtocol(137, "sessionAgentControlReasoningEffort"), false);
@@ -164,8 +164,8 @@ test("PROTOCOL_VERSION is 146", () => {
   assert.equal(runnerSupportsProtocol(139, "typedWorkflowDecisionDelegation"), true);
   assert.equal(runnerSupportsProtocol(139, "orchestratorCampaignManagement"), false);
   assert.equal(runnerSupportsProtocol(140, "orchestratorCampaignManagement"), true);
-  assert.equal(runnerSupportsProtocol(141, "workflowDecisionActionAdmission"), false);
-  assert.equal(runnerSupportsProtocol(142, "workflowDecisionActionAdmission"), true);
+  assert.equal(runnerSupportsProtocol(147, "workflowDecisionActionAdmission"), false);
+  assert.equal(runnerSupportsProtocol(148, "workflowDecisionActionAdmission"), true);
   assert.equal(runnerSupportsProtocol(143, "orchestratorExecutionPolicy"), false);
   assert.equal(runnerSupportsProtocol(144, "orchestratorExecutionPolicy"), true);
   assert.equal(runnerSupportsProtocol(145, "worktreeSetupConfig"), false);
@@ -903,8 +903,8 @@ test("additive session-event kinds use explicit older-peer policies without muta
   assert.equal(sessionEventWireProjectionRequiredForProtocol(undefined), true);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(86), true);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(87), true);
-  assert.equal(sessionEventWireProjectionVariant(86), 2);
-  assert.equal(sessionEventWireProjectionVariant(87), 1);
+  assert.equal(sessionEventWireProjectionVariant(86), 3);
+  assert.equal(sessionEventWireProjectionVariant(87), 2);
 
   const hookDecision = {
     kind: "policy_hook_decision",
@@ -918,18 +918,32 @@ test("additive session-event kinds use explicit older-peer policies without muta
   assert.equal(projectSessionEventPayloadForProtocol(hookDecision, 129), null);
   assert.equal(projectSessionEventPayloadForProtocol(hookDecision, 130), hookDecision);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(129), true);
-  assert.equal(sessionEventWireProjectionRequiredForProtocol(130), false);
-  assert.equal(sessionEventWireProjectionVariant(129), 1);
-  assert.equal(sessionEventWireProjectionVariant(130), 0);
-  assert.equal(SESSION_EVENT_WIRE_PROJECTION_VARIANTS, 3);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(130), true);
+  assert.equal(sessionEventWireProjectionVariant(129), 2);
+  assert.equal(sessionEventWireProjectionVariant(130), 1);
+
+  const actionArm = {
+    kind: "workflow_action_admission_armed",
+    occurrenceId: "workflow-1",
+    commandDigest: "a".repeat(64),
+    providerTurnId: "turn-1",
+  } as const;
+  assert.equal(projectSessionEventPayloadForProtocol(actionArm, 147), null);
+  assert.equal(projectSessionEventPayloadForProtocol(actionArm, 148), actionArm);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(147), true);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(148), false);
+  assert.equal(sessionEventWireProjectionVariant(147), 1);
+  assert.equal(sessionEventWireProjectionVariant(148), 0);
+  assert.equal(SESSION_EVENT_WIRE_PROJECTION_VARIANTS, 4);
 
   // The variant is the count of unmet policies, so it stays a dense index. The count is the
   // projected-epoch radix, and the explicit offset fences the retired one-policy encoding.
-  assert.equal(sessionEventWireProjectionVariant(86), 2);
-  assert.equal(sessionEventWireProjectionVariant(undefined), 2);
-  assert.equal(sessionEventWireProjectionVariant(87), 1);
-  assert.equal(sessionEventWireProjectionVariant(130), 0);
-  assert.equal(SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET, 2);
+  assert.equal(sessionEventWireProjectionVariant(86), 3);
+  assert.equal(sessionEventWireProjectionVariant(undefined), 3);
+  assert.equal(sessionEventWireProjectionVariant(87), 2);
+  assert.equal(sessionEventWireProjectionVariant(130), 1);
+  assert.equal(sessionEventWireProjectionVariant(148), 0);
+  assert.equal(SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET, 5);
 
   const required = { kind: "error", message: "still required" } as const;
   assert.equal(projectSessionEventPayloadForProtocol(required, 1), required,

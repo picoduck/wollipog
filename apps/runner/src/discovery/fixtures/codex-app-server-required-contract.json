@@ -1,7 +1,8 @@
 {
-  "contractFingerprint": "codex-app-server-v2-subagents-reasoning-consumed-surface-2026-08-25",
-  "generatedWith": "codex-cli 0.147.0",
+  "contractFingerprint": "codex-app-server-v2-guardian-receipt-surface-2026-09-14",
+  "generatedWith": "codex-cli 0.154.0",
   "minimumVerifiedVersion": "0.147.0",
+  "orchestratorApprovalMinimumVersion": "0.154.0",
   "files": {
     "v1/InitializeParams.json": {
       "required": [
@@ -1009,6 +1010,86 @@
       },
       "propertyRefs": {
         "action": "McpServerElicitationAction"
+      }
+    },
+    "v2/ItemGuardianApprovalReviewCompletedNotification.json": {
+      "required": [
+        "action",
+        "decisionSource",
+        "review",
+        "reviewId",
+        "threadId",
+        "turnId"
+      ],
+      "properties": [
+        "action",
+        "decisionSource",
+        "review",
+        "reviewId",
+        "targetItemId",
+        "threadId",
+        "turnId"
+      ],
+      "propertyRefs": {
+        "action": "GuardianApprovalReviewAction",
+        "decisionSource": "AutoReviewDecisionSource",
+        "review": "GuardianApprovalReview"
+      },
+      "definitions": {
+        "AutoReviewDecisionSource": {
+          "enumValues": [
+            "agent"
+          ]
+        },
+        "GuardianApprovalReview": {
+          "required": [
+            "status"
+          ],
+          "properties": [
+            "rationale",
+            "riskLevel",
+            "status",
+            "userAuthorization"
+          ],
+          "propertyRefs": {
+            "status": "GuardianApprovalReviewStatus"
+          }
+        },
+        "GuardianApprovalReviewStatus": {
+          "enumValues": [
+            "approved",
+            "denied",
+            "timedOut",
+            "aborted"
+          ]
+        },
+        "GuardianApprovalReviewAction": {
+          "variantRequiredProperties": {
+            "CommandGuardianApprovalReviewAction": {
+              "required": [
+                "command",
+                "cwd",
+                "source",
+                "type"
+              ],
+              "properties": [
+                "command",
+                "cwd",
+                "source",
+                "type"
+              ],
+              "propertyRefs": {
+                "source": "GuardianCommandSource"
+              }
+            }
+          }
+        },
+        "GuardianCommandSource": {
+          "enumValues": [
+            "shell",
+            "unifiedExec"
+          ]
+        }
       }
     },
     "v2/ServerRequestResolvedNotification.json": {

@@ -208,7 +208,10 @@ test("PR merge action admission fails closed against mixed-version control plane
     },
   });
   assert.equal(result.isError, true);
-  assert.match(resultText(result), /protocol v142/u);
+  assert.match(resultText(result), new RegExp(
+    `protocol v${RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionAdmission}`,
+    "u",
+  ));
   assert.equal(calls.length, 0, "an old peer never receives an action-bearing consume request");
 });
 
