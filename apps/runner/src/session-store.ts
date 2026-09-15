@@ -287,7 +287,9 @@ export interface SessionMeta {
 export type ProviderAuthIdentityField = "email" | "orgId" | "authMethod" | "apiProvider";
 
 export interface ProviderAuthIdentityEvidence {
-  version: 1;
+  /** Version 1 evidence predates the runner-stable evidence key. Version 2 is generated only by
+   * the production data-directory-keyed controller. Different versions are never comparable. */
+  version: 1 | 2;
   /** Each value is a runner-keyed digest of the field name and value, never the provider value. */
   fields: Partial<Record<ProviderAuthIdentityField, string>>;
 }

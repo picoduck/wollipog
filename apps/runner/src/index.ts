@@ -645,7 +645,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
   cloudTargets,
   () => controlPlaneProtocolVersion,
   dataDirLease.ownerHash,
-  createRunnerProviderAuthRecovery(config.dataDir),
+  createRunnerProviderAuthRecovery(config),
   (agentId, driver, context, update) => {
     subscriptionUsage.observe(agentId, driver, context, update);
   },
