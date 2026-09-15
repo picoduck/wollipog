@@ -1234,7 +1234,57 @@ test("an idle terminal notification preserves launch metadata and requests one c
   driver.dispose();
 });
 
-test("an idle provider-initiated turn records its reply instead of discarding every frame", async () => {
+test("a text-only wake-up after a task notification opens on its first turn-bearing frame", async () => {
+  const child = fakeProcess();
+  const events: SessionEventPayload[] = [];
+  const lifecycle: Array<[string, string]> = [];
+  const driver = new ClaudeCodeDriver(
+    {
+      ...baseOpts,
+      env: { [CLAUDE_PERSISTENT_FLAG]: "1" },
+      capabilities: steeringCapabilities,
+      config: { permissionMode: "acceptEdits" },
+    },
+    {
+      ...noopCb,
+      onEvent: (event) => events.push(event),
+      onProviderInitiatedTurn: (state, turnId) => lifecycle.push([state, turnId]),
+    },
+    { spawn: () => child, kill: () => {} } as any,
+  );
+  const first = driver.prompt("launch background work");
+  await nextTask();
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await first, "end_turn");
+
+  child.stdout.write(JSON.stringify({
+    type: "system", subtype: "task_notification", task_id: "watcher", status: "completed",
+  }) + "\n");
+  await nextTask();
+  assert.deepEqual(lifecycle, [], "a notification without reply frames must not strand an active turn");
+  child.stdout.write(JSON.stringify({
+    type: "stream_event",
+    event: { type: "message_start", message: { id: "provider-text-turn" } },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "stream_event",
+    event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Background summary" } },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "result", subtype: "success", usage: { input_tokens: 2, output_tokens: 3 },
+  }) + "\n");
+  await nextTask();
+
+  assert.equal(events.some((event) => event.kind === "agent_message" && event.text === "Background summary"), true);
+  assert.equal(events.some((event) => event.kind === "token_usage"), true);
+  assert.equal(events.some((event) => event.kind === "agent_response_completed"), true);
+  assert.equal(events.some((event) => event.kind === "error"), false);
+  assert.deepEqual(lifecycle, [["started", "provider:2"], ["settled", "provider:2"]]);
+  driver.dispose();
+  child.emit("close", 0);
+});
+
+test("a stream event opens a tool-using provider-initiated turn without dropping early frames", async () => {
   const child = fakeProcess();
   const events: SessionEventPayload[] = [];
   const stderr: string[] = [];
@@ -1260,11 +1310,6 @@ test("an idle provider-initiated turn records its reply instead of discarding ev
   assert.equal(await first, "end_turn");
 
   child.stdout.write(JSON.stringify({
-    type: "user",
-    session_id: (driver as any).sessionId,
-    message: { role: "user", content: [{ type: "text", text: "<task-notification>done</task-notification>" }] },
-  }) + "\n");
-  child.stdout.write(JSON.stringify({
     type: "stream_event",
     event: { type: "message_start", message: { id: "provider-turn" } },
   }) + "\n");
@@ -1289,6 +1334,7 @@ test("an idle provider-initiated turn records its reply instead of discarding ev
   assert.equal(events.some((event) => event.kind === "tool_call" && event.toolCallId === "provider-tool"), true);
   assert.equal(events.some((event) => event.kind === "tool_call_update" && event.toolCallId === "provider-tool"), true);
   assert.equal(events.some((event) => event.kind === "token_usage"), true);
+  assert.equal(events.some((event) => event.kind === "error"), false);
   assert.equal(stderr.some((text) => /outside an active Claude turn/.test(text)), false);
   assert.deepEqual(lifecycle, [["started", "provider:2"], ["settled", "provider:2"]]);
   driver.dispose();
@@ -1485,7 +1531,7 @@ test("provider-initiated turns surface answerable approvals and structured quest
   child.emit("close", 0);
 });
 
-test("unattributable persistent turn frames emit structured errors without changing idle system handling", async () => {
+test("an unattributable persistent control frame emits one diagnostic without changing idle system handling", async () => {
   const child = fakeProcess();
   const events: SessionEventPayload[] = [];
   const stderr: string[] = [];
@@ -1518,7 +1564,7 @@ test("unattributable persistent turn frames emit structured errors without chang
   await nextTask();
 
   const errors = events.filter((event) => event.kind === "error");
-  assert.equal(errors.length, 3);
+  assert.equal(errors.length, 1);
   assert.ok(errors.every((event) => /outside an active Claude turn/.test(event.message)));
   assert.equal(driver.resolvePermission("ownerless", "allow"), false);
   assert.deepEqual(stderr, []);

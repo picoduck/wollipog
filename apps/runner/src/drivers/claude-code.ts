@@ -1052,7 +1052,7 @@ export class ClaudeCodeDriver implements Driver {
     return done;
   }
 
-  /** Claim an unsolicited user frame and all following turn-bound frames until its result. */
+  /** Claim the first unsolicited turn-bearing frame and all following frames until its result. */
   private beginProviderInitiatedTurn(): PersistentTurn {
     this.resetTurnEventState();
     this.clearIdleTimer();
@@ -1280,7 +1280,7 @@ export class ClaudeCodeDriver implements Driver {
     if (this.disposed) return;
 
     let turn = this.activePersistentTurn;
-    if (!turn && msg.type === "user") {
+    if (!turn && opensProviderInitiatedTurn(msg)) {
       turn = this.beginProviderInitiatedTurn();
     }
     if (!turn) {
@@ -2412,6 +2412,15 @@ export class ClaudeCodeDriver implements Driver {
         return null;
     }
   }
+}
+
+/** A terminal task notification can arrive without a reply, so lifecycle-only system frames must
+ * not strand the transport in an active turn. The first frame carrying actual turn traffic owns it. */
+function opensProviderInitiatedTurn(msg: Json): boolean {
+  return msg.type === "user" ||
+    msg.type === "assistant" ||
+    msg.type === "stream_event" ||
+    msg.type === "result";
 }
 
 function structuredToolResult(content: Json): Record<string, Json> | null {
