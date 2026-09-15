@@ -177,6 +177,12 @@ test("typed workflow decision tools preserve exact request, resolution, and cons
   assert.deepEqual(calls.at(-1)?.body, { resourceSnapshot: snapshot, action });
   assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/workflow-decisions/workflow_1/consume`);
 
+  await callTool(deps, "reconcile_workflow_decision", {
+    occurrenceId: "workflow_1", resourceSnapshot: snapshot,
+  });
+  assert.deepEqual(calls.at(-1)?.body, { resourceSnapshot: snapshot });
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/workflow-decisions/workflow_1/reconcile`);
+
   deps.orchestrator = true;
   const resolution = await callTool(deps, "resolve_descendant_workflow_decision", {
     sessionId: "child", occurrenceId: "workflow_1", outcome: "approve",
@@ -213,6 +219,26 @@ test("PR merge action admission fails closed against mixed-version control plane
     "u",
   ));
   assert.equal(calls.length, 0, "an old peer never receives an action-bearing consume request");
+});
+
+test("PR merge reconciliation fails closed against mixed-version control planes", async () => {
+  const { deps, calls } = makeDeps();
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation - 1;
+  const result = await callTool(deps, "reconcile_workflow_decision", {
+    occurrenceId: "workflow_old",
+    resourceSnapshot: {
+      category: "pr_merge", repository: "picoduck/wollipog", pullRequest: 42,
+      headSha: "a".repeat(40), reviewResult: "merge",
+      requiredChecks: { headSha: "a".repeat(40), status: "passed", checkedAt: 1,
+        checks: [{ name: "Required", state: "passed" }] },
+    },
+  });
+  assert.equal(result.isError, true);
+  assert.match(resultText(result), new RegExp(
+    `protocol v${RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation}`,
+    "u",
+  ));
+  assert.equal(calls.length, 0, "an old peer never receives a reconciliation request");
 });
 
 /* -------------------------------------------------------------------------- */
@@ -253,6 +279,7 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "request_workflow_decision",
       "get_workflow_decision",
       "consume_workflow_decision",
+      "reconcile_workflow_decision",
       "get_session_events",
       "wait_session",
       "list_runs",

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -117,6 +118,91 @@ test("App Server action admission uses a runner-owned fence after older provider
       commandDigest: "b".repeat(64),
       providerTurnId: "turn-stale",
     }).accepted, false, "a control-plane turn projection cannot override the runner's active turn");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("retroactive action reconciliation binds exact provider admission, command, and forge evidence", async () => {
+  const h = harness({}, true);
+  try {
+    const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1146 --squash --match-head-commit ${"a".repeat(40)}`;
+    (h.entry.client as any).reconcileCompletedCommand = async (occurrenceId: string, candidate: string) =>
+      occurrenceId === "workflow-history" && candidate === command ? {
+        commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
+        providerThreadId: "thread-exact",
+        providerTurnId: "turn-history",
+        providerAdmissionItemId: "admission-history",
+        providerItemId: "command-history",
+      } : null;
+    (h.sm as any).resolveWorktreePullRequestState = async (path: string, url: string) => {
+      assert.equal(path, "/repo");
+      assert.equal(url, "https://github.com/picoduck/wollipog/pull/1146");
+      return { state: "merged", headOid: "a".repeat(40) };
+    };
+    assert.deepEqual(await h.sm.reconcileWorkflowAction("s_governance", {
+      occurrenceId: "workflow-history",
+      command,
+      commandDigest: "b".repeat(64),
+      pullRequestUrl: "https://github.com/picoduck/wollipog/pull/1146",
+      expectedHeadSha: "a".repeat(40),
+    }), {
+      accepted: true,
+      occurrenceId: "workflow-history",
+      commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
+      providerThreadId: "thread-exact",
+      providerTurnId: "turn-history",
+      providerAdmissionItemId: "admission-history",
+      providerItemId: "command-history",
+      forgeHeadSha: "a".repeat(40),
+    });
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("retroactive action reconciliation fails closed without each independent proof", async () => {
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1146 --squash --match-head-commit ${"a".repeat(40)}`;
+  for (const mismatch of ["provider", "forge"] as const) {
+    const h = harness({}, true);
+    try {
+      (h.entry.client as any).reconcileCompletedCommand = async () => mismatch === "provider" ? null : {
+        commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
+        providerThreadId: "thread-exact",
+        providerTurnId: "turn-history",
+        providerAdmissionItemId: "admission-history",
+        providerItemId: "command-history",
+      };
+      (h.sm as any).resolveWorktreePullRequestState = async () => mismatch === "forge"
+        ? { state: "merged", headOid: "f".repeat(40) }
+        : { state: "merged", headOid: "a".repeat(40) };
+      const result = await h.sm.reconcileWorkflowAction("s_governance", {
+        occurrenceId: `workflow-${mismatch}`,
+        command,
+        commandDigest: "b".repeat(64),
+        pullRequestUrl: "https://github.com/picoduck/wollipog/pull/1146",
+        expectedHeadSha: "a".repeat(40),
+      });
+      assert.equal(result.accepted, false, `${mismatch} cannot reconcile`);
+    } finally {
+      h.cleanup();
+    }
+  }
+});
+
+test("retroactive action reconciliation requires the original App Server thread after restart", async () => {
+  const h = harness({}, true);
+  try {
+    (h.sm as any).active.delete("s_governance");
+    const result = await h.sm.reconcileWorkflowAction("s_governance", {
+      occurrenceId: "workflow-after-restart",
+      command: `gh pr merge https://github.com/picoduck/wollipog/pull/1146 --squash --match-head-commit ${"a".repeat(40)}`,
+      commandDigest: "b".repeat(64),
+      pullRequestUrl: "https://github.com/picoduck/wollipog/pull/1146",
+      expectedHeadSha: "a".repeat(40),
+    });
+    assert.equal(result.accepted, false);
+    assert.match(result.error ?? "", /resume it before reconciliation/u);
   } finally {
     h.cleanup();
   }

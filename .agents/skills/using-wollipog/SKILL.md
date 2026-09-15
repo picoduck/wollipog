@@ -55,6 +55,11 @@ must use `request_workflow_decision`, `get_workflow_decision`, and `consume_work
 implementation questions, PR merge, merged-branch deletion, follow-up publication, and UI evidence.
 Only the current owner may resolve the exact pending occurrence. Authentication, secrets,
 persistent grants, governance, budgets, and tool guardrails remain human-only.
+If an exact armed PR merge command already succeeded but its approved occurrence remained
+unconsumed, use `reconcile_workflow_decision` with that occurrence's unchanged resource snapshot.
+It proves the exact completed admission, provider command, and merged forge head; it never reruns the
+command. Resume the same App Server session first, and treat any unavailable or mismatched proof as
+a blocker rather than requesting a replacement approval or replaying the action.
 
 Record each proposed follow-up with `record_campaign_follow_up` before starting it. Server-side
 repository/title normalization deduplicates recommendations across children. `Recommend Only`

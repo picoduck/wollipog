@@ -31,6 +31,7 @@ import {
   type AgentProcess,
 } from "../spawn.js";
 import type {
+  CompletedCommandReconciliationProof,
   Driver,
   DriverCallbacks,
   DriverOptions,
@@ -409,6 +410,43 @@ export class CodexAppServerDriver implements Driver {
 
   agentSessionId(): string | null {
     return this.threadId;
+  }
+
+  async reconcileCompletedCommand(
+    occurrenceId: string,
+    command: string,
+  ): Promise<CompletedCommandReconciliationProof | null> {
+    if (!this.peer || !boundedProviderCorrelationId(occurrenceId) ||
+        typeof command !== "string" || !command || command.length > 2000 ||
+        !boundedProviderCorrelationId(this.threadId)) return null;
+    const read = await this.peer.request<Json>("thread/read", {
+      threadId: this.threadId,
+      includeTurns: true,
+    });
+    if (read?.thread?.id !== this.threadId || !Array.isArray(read?.thread?.turns)) return null;
+    const matches: CompletedCommandReconciliationProof[] = [];
+    for (const turn of read.thread.turns as Json[]) {
+      if (!boundedProviderCorrelationId(turn?.id) || turn?.status !== "completed" ||
+          (turn?.itemsView != null && turn.itemsView !== "full") || !Array.isArray(turn?.items)) continue;
+      const items = turn.items as Json[];
+      for (const [index, item] of items.entries()) {
+        if (item?.type !== "commandExecution" || item?.status !== "completed" || item?.exitCode !== 0 ||
+            !boundedProviderCorrelationId(item?.id) || typeof item?.command !== "string") continue;
+        const logicalCommand = codexProviderShellScript(item.command) ?? item.command;
+        if (logicalCommand !== command) continue;
+        const admissions = items.slice(0, index).filter((candidate) =>
+          completedWorkflowActionAdmission(candidate, occurrenceId, command));
+        if (admissions.length !== 1 || !boundedProviderCorrelationId(admissions[0]?.id)) continue;
+        matches.push({
+          commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
+          providerThreadId: this.threadId,
+          providerTurnId: turn.id,
+          providerAdmissionItemId: admissions[0].id,
+          providerItemId: item.id,
+        });
+      }
+    }
+    return matches.length === 1 ? matches[0]! : null;
   }
 
   agentTurnId(): string | null {
@@ -1694,6 +1732,29 @@ function codexProviderShellScript(command: string): string | null {
 function boundedProviderCorrelationId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 512 &&
     !/[\x00-\x1f\x7f]/u.test(value);
+}
+
+/** The historical provider transcript is the durable causal fence when the bounded runner event
+ * tail no longer contains the old command. Require the exact Wollipog admission call, its armed
+ * response, and the successful command later in the same completed turn. */
+function completedWorkflowActionAdmission(item: Json, occurrenceId: string, command: string): boolean {
+  if (item?.type !== "mcpToolCall" || item?.server !== "wollipog" ||
+      item?.tool !== "consume_workflow_decision" || item?.status !== "completed" || item?.error != null ||
+      !boundedProviderCorrelationId(item?.id) || !item?.arguments ||
+      typeof item.arguments !== "object" || Array.isArray(item.arguments)) return false;
+  const args = item.arguments as Json;
+  if (args?.occurrenceId !== occurrenceId || args?.action?.kind !== "pr_merge_enqueue" ||
+      args?.action?.command !== command) return false;
+  const text = item?.result?.content?.[0]?.text;
+  if (typeof text !== "string" || text.length > 100_000) return false;
+  try {
+    const parsed = JSON.parse(text) as Json;
+    return parsed?.decision?.occurrenceId === occurrenceId && parsed?.decision?.status === "approved" &&
+      parsed?.decision?.actionAdmission?.kind === "pr_merge_enqueue" &&
+      parsed?.decision?.actionAdmission?.command === command;
+  } catch {
+    return false;
+  }
 }
 
 export function parseReviewDecision(p: Json): ReviewDecision | null {

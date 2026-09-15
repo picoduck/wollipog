@@ -412,7 +412,10 @@
 // 149: durable campaign events fan into an idempotent parent continuation command. The command
 //      carries a content-free event range and older peers fail closed instead of accepting an
 //      unclassified synthetic provider turn.
-export const PROTOCOL_VERSION = 149;
+// 150: approved-but-unconsumed PR merge actions can be reconciled from an exact successful
+//      provider-history command after its exact admission call plus a forge-verified merged head.
+//      Older peers cannot supply both proofs and fail closed without changing the decision.
+export const PROTOCOL_VERSION = 150;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -596,6 +599,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   delegatedParentControl: 136,
   typedWorkflowDecisionDelegation: 139,
   workflowDecisionActionAdmission: 148,
+  workflowDecisionActionReconciliation: 150,
   orchestratorCampaignManagement: 140,
   campaignContinuations: 149,
   orchestratorExecutionPolicy: 144,
@@ -5856,6 +5860,35 @@ export interface WorkflowActionAdmissionRecordedMessage {
   error?: string;
 }
 
+/** Read-only request to prove that an already-armed canonical PR merge command completed and the
+ * forge merged the exact approved head. It never invokes or retries the command. */
+export interface ReconcileWorkflowActionMessage {
+  type: "reconcile_workflow_action";
+  requestId: string;
+  sessionId: string;
+  occurrenceId: string;
+  command: string;
+  commandDigest: string;
+  pullRequestUrl: string;
+  expectedHeadSha: string;
+}
+
+/** Content-safe proof coordinates from provider-owned history and authoritative forge state. */
+export interface WorkflowActionReconciliationResultMessage {
+  type: "workflow_action_reconciliation_result";
+  requestId: string;
+  sessionId: string;
+  occurrenceId: string;
+  accepted: boolean;
+  commandDigest?: string;
+  providerThreadId?: string;
+  providerTurnId?: string;
+  providerAdmissionItemId?: string;
+  providerItemId?: string;
+  forgeHeadSha?: string;
+  error?: string;
+}
+
 /** Hash-only binding for one runner-minted, exact-session CLI/MCP credential. The plaintext stays
  * in a protected runner-local file and is never placed in argv or a durable command snapshot. */
 export interface AgentControlCredentialMessage {
@@ -6190,6 +6223,7 @@ export type RunnerToControlPlane =
   | PolicyHookCredentialMessage
   | PolicyHookDecisionRecordedMessage
   | WorkflowActionAdmissionRecordedMessage
+  | WorkflowActionReconciliationResultMessage
   | AgentControlCredentialMessage
   | SessionRuntimeUpdatedMessage
   | GovernanceTrippedMessage
@@ -7669,6 +7703,7 @@ export type ControlPlaneToRunner =
   | PolicyHookCredentialRegisteredMessage
   | RecordPolicyHookDecisionMessage
   | RecordWorkflowActionAdmissionMessage
+  | ReconcileWorkflowActionMessage
   | AgentControlCredentialRegisteredMessage
   | StartSessionMessage
   | PromptSessionMessage

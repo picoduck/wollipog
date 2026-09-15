@@ -1184,6 +1184,11 @@ app.register(async (instance) => {
           app.log.warn(`runner ${runnerId} sent an unsolicited workflow action admission receipt`);
         }
         break;
+      case "workflow_action_reconciliation_result":
+        if (runnerId && !hub.resolveRunnerRequest(msg, runnerId)) {
+          app.log.warn(`runner ${runnerId} sent an unsolicited workflow action reconciliation receipt`);
+        }
+        break;
       case "agent_control_credential":
         {
           const accepted = db.setAgentControlCredential(msg.sessionId, runnerId!, msg.tokenHash, Date.now());
@@ -3261,6 +3266,22 @@ app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/consume", async (re
     id,
     occurrenceId,
     req.body as ConsumeWorkflowDecisionRequest,
+    (sessionId) => db.canAccessSession(principal, sessionId),
+  ));
+});
+
+app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/reconcile", async (req, reply) => {
+  const { id, occurrenceId } = req.params as { id: string; occurrenceId: string };
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching session credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  if (!validParentControlCoordinate(occurrenceId)) return reply.code(400).send({ error: "invalid occurrenceId" });
+  return respond(reply, await svc.reconcileWorkflowDecision(
+    id,
+    occurrenceId,
+    req.body as Pick<ConsumeWorkflowDecisionRequest, "resourceSnapshot">,
     (sessionId) => db.canAccessSession(principal, sessionId),
   ));
 });

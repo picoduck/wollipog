@@ -42,6 +42,17 @@ export interface PreparedDriverCommand {
   readonly executionMode: "passthrough" | "structured";
 }
 
+/** Content-safe identity for one exact admitted and successful command recovered from
+ * provider-owned history. Raw output stays provider-local; callers must independently bind this
+ * item to the external system's authoritative result before changing durable workflow state. */
+export interface CompletedCommandReconciliationProof {
+  commandDigest: string;
+  providerThreadId: string;
+  providerTurnId: string;
+  providerAdmissionItemId: string;
+  providerItemId: string;
+}
+
 export interface DriverSteerInput {
   submissionId: string;
   text: string;
@@ -214,6 +225,13 @@ export interface Driver {
   /** Begin an already-prepared provider command synchronously. The returned promise represents
    * turn completion; implementations must reject tokens not minted by this exact driver. */
   invokeCommand?(command: PreparedDriverCommand): Promise<StopReason>;
+
+  /** Read provider-owned history without executing anything and prove exactly one successful
+   * occurrence of the supplied command. Unsupported providers omit this method. */
+  reconcileCompletedCommand?(
+    occurrenceId: string,
+    command: string,
+  ): Promise<CompletedCommandReconciliationProof | null>;
 
   /** Incorporate input into the currently active provider turn when the transport can receipt it. */
   steer?(input: DriverSteerInput): Promise<DriverSteerResult>;

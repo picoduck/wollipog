@@ -27,6 +27,7 @@ test("orchestrator credentials expose only session management and governance rea
     ["POST", "/api/sessions/:id/workflow-decisions"],
     ["GET", "/api/sessions/:id/workflow-decisions/:occurrenceId"],
     ["POST", "/api/sessions/:id/workflow-decisions/:occurrenceId/consume"],
+    ["POST", "/api/sessions/:id/workflow-decisions/:occurrenceId/reconcile"],
     ["GET", "/api/sessions/:id/orchestrator-campaign"],
     ["POST", "/api/sessions/:id/orchestrator-campaign/follow-ups"],
     ["POST", "/api/sessions/:id/orchestrator-campaign/verify-child"],
