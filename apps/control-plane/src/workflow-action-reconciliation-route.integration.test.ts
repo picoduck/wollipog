@@ -240,6 +240,11 @@ function seed(database: string): string {
       command,
       commandDigest: digest({ kind: "pr_merge_enqueue", command }),
       armedAt: now + 5,
+      armedAfterEventSeq: 10,
+      sessionTurnId: "session-turn-historical",
+      providerTurnId: "legacy-session-turn-stored-as-provider",
+      providerThreadId: "thread-reconciliation",
+      runnerHistoryEpoch: 0,
     }));
     const workflowDecision = {
       occurrenceId: OCCURRENCE_ID,
@@ -319,7 +324,7 @@ function sessionSnapshot(id: string, agentId: string, driver: "claude-code" | "c
   };
 }
 
-test("the real runner socket reconciles a persisted lifecycle-revoked workflow action", { timeout: 30_000 }, async (t) => {
+test("the real runner socket reconciles a CLI-armed lifecycle-revoked workflow action", { timeout: 30_000 }, async (t) => {
   const temp = mkdtempSync(join(tmpdir(), "wollipog-workflow-action-reconciliation-"));
   const database = join(temp, "control-plane.db");
   const port = await reservePort();
@@ -383,6 +388,10 @@ test("the real runner socket reconciles a persisted lifecycle-revoked workflow a
   assert.equal(request.occurrenceId, OCCURRENCE_ID);
   assert.equal(request.command, command);
   assert.equal(request.expectedHeadSha, HEAD_SHA);
+  assert.equal(request.armedAfterEventSeq, 10);
+  assert.equal(request.runnerHistoryEpoch, 0);
+  assert.equal(request.actionProviderThreadId, "thread-reconciliation");
+  assert.equal(request.actionProviderTurnId, "legacy-session-turn-stored-as-provider");
   runner.send(JSON.stringify({
     type: "workflow_action_reconciliation_result",
     requestId: request.requestId,
@@ -391,9 +400,11 @@ test("the real runner socket reconciles a persisted lifecycle-revoked workflow a
     accepted: true,
     commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
     providerThreadId: "thread-reconciliation",
-    providerTurnId: "turn-reconciliation",
-    providerAdmissionItemId: "admission-reconciliation",
+    providerTurnId: "provider-turn-reconciliation",
     providerItemId: "command-reconciliation",
+    runnerHistoryEpoch: 0,
+    armedAfterEventSeq: 10,
+    providerReviewEventSeq: 12,
     forgeHeadSha: HEAD_SHA,
   }));
 

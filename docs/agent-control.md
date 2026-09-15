@@ -214,6 +214,17 @@ a content-safe audit receipt. Reconciliation never executes the command, and una
 duplicate commands, failed execution, forge mismatch, or mixed-version peers leave the occurrence
 approved and retryable. Stale policy, ancestry, authority, or resource evidence revokes it.
 
+Protocol v151 separates Wollipog's runner turn from the App Server's provider turn throughout
+action admission. The control plane binds retries to the runner turn while the runner records the
+provider turn returned by App Server; neither identifier may be substituted for the other. This
+lets the ordinary `commandExecution` and Guardian auto-review paths consume the same exact typed
+occurrence without a second decision. It also extends read-only reconciliation for CLI-arm paths
+that do not appear as native provider MCP items: one exact durable arm marker must precede exactly
+one allowed Guardian receipt for the canonical command in the same runner-history generation, and
+provider history must contain exactly one successful command with those exact thread, turn, and
+item coordinates. The forge, snapshot, policy, ancestry, and authority checks remain unchanged.
+Missing, reordered, duplicated, cross-generation, replayed, or mismatched evidence fails closed.
+
 The control plane owns this lifecycle. A generic question answer or provider permission response
 cannot satisfy a typed workflow decision. Authentication, identity, governance-policy changes,
 secret access, and persistent permission grants are not typed categories and remain human-only.
@@ -234,7 +245,7 @@ ordinary human-only permission boundary. Audit entries correlate the typed decis
 matching permission through content-safe digests and outcomes without retaining raw rationale or
 credentials or recording a second user decision.
 For the exceptional case where that exact command already succeeded but the armed occurrence was
-not consumed, `reconcile_workflow_decision` performs the v150 proof above against the original
+not consumed, `reconcile_workflow_decision` performs the v150/v151 proof above against the original
 occurrence and snapshot. It is not a retry mechanism and must never be followed by replaying the
 merge command.
 

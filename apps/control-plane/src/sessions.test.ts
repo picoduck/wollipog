@@ -303,7 +303,8 @@ class FakeHub {
         sessionId: msg.sessionId,
         occurrenceId: msg.occurrenceId,
         accepted: true,
-        providerTurnId: msg.providerTurnId,
+        sessionTurnId: msg.sessionTurnId,
+        providerTurnId: `provider-${msg.sessionTurnId}`,
         providerThreadId: "test-provider-thread",
         historyEpoch: 0,
         eventSeq: 1,
@@ -515,7 +516,8 @@ function makeHarness(
         sessionId: message.sessionId,
         occurrenceId: message.occurrenceId,
         accepted: true,
-        providerTurnId: message.providerTurnId,
+        sessionTurnId: message.sessionTurnId,
+        providerTurnId: `provider-${message.sessionTurnId}`,
         providerThreadId: "test-provider-thread",
         historyEpoch: 0,
         eventSeq: 1,
@@ -976,7 +978,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
         commandIdentity: {
           transport: "codex-app-server",
           threadId: "test-provider-thread",
-          turnId: "nested-human-turn",
+          turnId: "provider-nested-human-turn",
           itemId: "nested-human-item",
           input: humanMergeCommand,
         },
@@ -3395,7 +3397,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       return child.data;
     };
     const child = createChild(agentId);
-    if (agentId === CODEX_APP_AGENT_ID) hub.setSessionQueue(child.id, [], false, "turn-1");
+    if (agentId === CODEX_APP_AGENT_ID) hub.setSessionQueue(child.id, [], false, "session-turn-1");
     db.reconcileRunnerHistory(child.id, 0, 0);
     assert.ok(svc.setParentControlPolicy(parent.data.id, {
       implementation_question: "human",
@@ -3420,7 +3422,8 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
         kind: "workflow_action_admission_armed",
         occurrenceId: message.occurrenceId,
         commandDigest: message.commandDigest,
-        providerTurnId: message.providerTurnId,
+        sessionTurnId: message.sessionTurnId,
+        providerTurnId: `provider-${message.sessionTurnId}`,
       });
       return {
         type: "workflow_action_admission_recorded",
@@ -3428,7 +3431,8 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
         sessionId: child.id,
         occurrenceId: message.occurrenceId,
         accepted: true,
-        providerTurnId: message.providerTurnId,
+        sessionTurnId: message.sessionTurnId,
+        providerTurnId: `provider-${message.sessionTurnId}`,
         providerThreadId: "thread-1",
         historyEpoch: 0,
         eventSeq: runnerSeq,
@@ -3479,7 +3483,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
         approvalReviewReceipt: {
         transport: "codex-app-server",
         threadId: "thread-1",
-        turnId: hub.activeTurnIdForSession(child.id) ?? "turn-1",
+        turnId: `provider-${hub.activeTurnIdForSession(child.id) ?? "session-turn-1"}`,
         itemId,
         toolName: "commandExecution",
         input: command,
@@ -3506,7 +3510,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
           commandIdentity: {
             transport: "codex-app-server",
             threadId: "thread-1",
-            turnId: hub.activeTurnIdForSession(child.id) ?? "turn-1",
+            turnId: `provider-${hub.activeTurnIdForSession(child.id) ?? "session-turn-1"}`,
             itemId,
             input: command,
           },
@@ -3520,6 +3524,15 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     const { db, hub, svc, child, arm, receipt, permission } = setup();
     try {
       const guardian = await arm(1140);
+      assert.deepEqual({
+        sessionTurnId: db.workflowDecisionByOccurrence(guardian.decision.occurrenceId)?.actionAdmission?.sessionTurnId,
+        providerTurnId: db.workflowDecisionByOccurrence(guardian.decision.occurrenceId)?.actionAdmission?.providerTurnId,
+        activeSessionTurnId: hub.activeTurnIdForSession(child.id),
+      }, {
+        sessionTurnId: "session-turn-1",
+        providerTurnId: "provider-session-turn-1",
+        activeSessionTurnId: "session-turn-1",
+      });
       const guardianReceipt = receipt(guardian.command);
       svc.onSessionEvent(child.id, guardianReceipt);
       svc.onSessionEvent(child.id, guardianReceipt);
@@ -3528,7 +3541,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
         entry.requestId === guardian.decision.occurrenceId && entry.outcome === "consumed").length, 1,
       "duplicate provider events cannot consume or audit consumption twice");
 
-      hub.setSessionQueue(child.id, [], false, "turn-2");
+      hub.setSessionQueue(child.id, [], false, "session-turn-2");
       const rearmed = await arm(1140);
       svc.onSessionEvent(child.id, guardianReceipt);
       assert.equal(db.workflowDecisionByOccurrence(rearmed.decision.occurrenceId)?.status, "approved",
@@ -3537,7 +3550,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       assert.equal(db.workflowDecisionByOccurrence(rearmed.decision.occurrenceId)?.status, "consumed",
         "a new provider invocation can consume the newly armed grant");
 
-      hub.setSessionQueue(child.id, [], false, "turn-3");
+      hub.setSessionQueue(child.id, [], false, "session-turn-3");
       const requested = await arm(1141);
       svc.onSessionEvent(child.id, permission(requested.command, "provider-request-1141"));
       assert.equal(db.workflowDecisionByOccurrence(requested.decision.occurrenceId)?.status, "consumed");
@@ -3555,7 +3568,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
         [1171, "raw"],
         [1172, "wrapped"],
       ] as const) {
-        hub.setSessionQueue(child.id, [], false, `turn-${pullRequest}`);
+        hub.setSessionQueue(child.id, [], false, `session-turn-${pullRequest}`);
         const pending = await arm(pullRequest);
         const displayInput = reason === "raw"
           ? pending.command
@@ -3590,7 +3603,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       const cases = ["subagent", "thread", "turn", "item"] as const;
       for (const [offset, mismatch] of cases.entries()) {
         const pullRequest = 1180 + offset;
-        hub.setSessionQueue(child.id, [], false, `turn-${pullRequest}`);
+        hub.setSessionQueue(child.id, [], false, `session-turn-${pullRequest}`);
         const pending = await arm(pullRequest);
         const event = permission(pending.command, `mismatch-${mismatch}`);
         assert.ok(event.context?.commandIdentity);
@@ -3613,15 +3626,15 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
   await t.test("a first-seen receipt from an older provider turn cannot consume a fresh identical admission", async () => {
     const { db, hub, svc, child, arm, receipt } = setup();
     try {
-      hub.setSessionQueue(child.id, [], false, "turn-old");
+      hub.setSessionQueue(child.id, [], false, "session-turn-old");
       const old = await arm(1161);
       assert.equal(db.workflowDecisionByOccurrence(old.decision.occurrenceId)?.actionAdmission?.providerTurnId,
-        "turn-old", "arming captures the provider turn active at that boundary");
+        "provider-session-turn-old", "arming captures the provider turn returned by the runner");
       const staleReceipt = receipt(old.command);
 
       const fresh = await arm(1161);
       assert.equal(db.workflowDecisionByOccurrence(fresh.decision.occurrenceId)?.actionAdmission?.providerTurnId,
-        "turn-old");
+        "provider-session-turn-old");
       svc.onSessionEvent(child.id, staleReceipt);
 
       assert.equal(db.workflowDecisionByOccurrence(fresh.decision.occurrenceId)?.status, "approved",
@@ -3653,7 +3666,8 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     try {
       const first = await arm(1162);
       const admission = db.workflowDecisionByOccurrence(first.decision.occurrenceId)?.actionAdmission;
-      assert.equal(admission?.providerTurnId, "turn-1");
+      assert.equal(admission?.sessionTurnId, "session-turn-1");
+      assert.equal(admission?.providerTurnId, "provider-session-turn-1");
       assert.equal(admission?.providerThreadId, "thread-1");
       assert.equal(admission?.runnerHistoryEpoch, 0);
       assert.equal(admission?.armedAfterEventSeq, db.sessionEventTailSeq(child.id));
@@ -3667,9 +3681,17 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       assert.equal(retry.data?.actionAdmission?.armedAfterEventSeq, admission?.armedAfterEventSeq,
         "an idempotent retry cannot move the original event-order boundary forward");
 
+      hub.setSessionQueue(child.id, [], false, "session-turn-retry");
+      const crossTurnRetry = await svc.consumeWorkflowDecision(child.id, first.decision.occurrenceId, {
+        resourceSnapshot: first.snapshot,
+        action: { kind: "pr_merge_enqueue", command: first.command },
+      });
+      assert.equal(crossTurnRetry.status, 409,
+        "a later runner turn cannot reuse the stored session/provider admission pair");
+
       hub.setSessionQueue(child.id, [], false);
       const missingTurn = await arm(1164, 409);
-      assert.match(missingTurn.armed.error ?? "", /requires an active provider turn/u);
+      assert.match(missingTurn.armed.error ?? "", /requires an active runner turn/u);
       assert.equal(db.workflowDecisionByOccurrence(missingTurn.decision.occurrenceId)?.status, "revoked");
     } finally { db.close(); }
   });
@@ -3885,7 +3907,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
         accepted: true,
         commandDigest: createHash("sha256").update(armed.command, "utf8").digest("hex"),
         providerThreadId: "thread-1",
-        providerTurnId: "turn-1",
+        providerTurnId: "provider-session-turn-1",
         providerAdmissionItemId: "admission-after-restart",
         providerItemId: "command-after-restart",
         forgeHeadSha: armed.snapshot.headSha,
@@ -3900,6 +3922,89 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       assert.ok(result.ok, result.error);
       assert.equal(result.data?.status, "consumed");
     } finally { db.close(); }
+  });
+
+  await t.test("a CLI-armed enqueue reconciles from its exact durable runner receipt coordinates", async () => {
+    const { db, hub, svc, child, arm } = setup();
+    try {
+      const armed = await arm(1194);
+      const admission = db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.actionAdmission;
+      assert.ok(admission?.armedAfterEventSeq != null);
+      assert.ok(admission.runnerHistoryEpoch != null);
+      (svc as any).revokeUnconsumedWorkflowDecisionsForSession(child.id, "provider-session-ended");
+      hub.requestHandler = (message) => {
+        assert.equal(message.type, "reconcile_workflow_action");
+        if (message.type !== "reconcile_workflow_action") throw new Error("unexpected runner request");
+        assert.equal(message.armedAfterEventSeq, admission.armedAfterEventSeq);
+        assert.equal(message.runnerHistoryEpoch, admission.runnerHistoryEpoch);
+        assert.equal(message.actionProviderThreadId, "thread-1");
+        assert.equal(message.actionProviderTurnId, "provider-session-turn-1");
+        return {
+          type: "workflow_action_reconciliation_result",
+          requestId: message.requestId,
+          sessionId: child.id,
+          occurrenceId: armed.decision.occurrenceId,
+          accepted: true,
+          commandDigest: createHash("sha256").update(armed.command, "utf8").digest("hex"),
+          providerThreadId: "thread-1",
+          providerTurnId: "provider-turn-from-guardian-receipt",
+          providerItemId: "command-from-guardian-receipt",
+          runnerHistoryEpoch: admission.runnerHistoryEpoch,
+          armedAfterEventSeq: admission.armedAfterEventSeq,
+          providerReviewEventSeq: admission.armedAfterEventSeq + 2,
+          forgeHeadSha: armed.snapshot.headSha,
+        };
+      };
+
+      const result = await svc.reconcileWorkflowDecision(
+        child.id,
+        armed.decision.occurrenceId,
+        { resourceSnapshot: armed.snapshot },
+        () => true,
+      );
+      assert.ok(result.ok, result.error);
+      assert.equal(result.data?.status, "consumed");
+      assert.ok(svc.governanceAudit(child.id).some((entry) =>
+        entry.requestId === "command-from-guardian-receipt" && entry.outcome === "allowed"),
+      "the durable receipt path records its provider and runner coordinates in audit");
+    } finally { db.close(); }
+  });
+
+  await t.test("durable receipt reconciliation rejects mismatched epochs and event ordering", async () => {
+    for (const mismatch of ["epoch", "order"] as const) {
+      const { db, hub, svc, child, arm } = setup();
+      try {
+        const armed = await arm(mismatch === "epoch" ? 1195 : 1196);
+        const admission = db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.actionAdmission;
+        assert.ok(admission?.armedAfterEventSeq != null);
+        assert.ok(admission.runnerHistoryEpoch != null);
+        hub.requestHandler = (message) => ({
+          type: "workflow_action_reconciliation_result",
+          requestId: message.type === "reconcile_workflow_action" ? message.requestId : "wrong",
+          sessionId: child.id,
+          occurrenceId: armed.decision.occurrenceId,
+          accepted: true,
+          commandDigest: createHash("sha256").update(armed.command, "utf8").digest("hex"),
+          providerThreadId: "thread-1",
+          providerTurnId: "provider-turn-from-guardian-receipt",
+          providerItemId: "command-from-guardian-receipt",
+          runnerHistoryEpoch: mismatch === "epoch"
+            ? admission.runnerHistoryEpoch! + 1 : admission.runnerHistoryEpoch,
+          armedAfterEventSeq: admission.armedAfterEventSeq,
+          providerReviewEventSeq: mismatch === "order"
+            ? admission.armedAfterEventSeq : admission.armedAfterEventSeq! + 1,
+          forgeHeadSha: armed.snapshot.headSha,
+        });
+        const result = await svc.reconcileWorkflowDecision(
+          child.id,
+          armed.decision.occurrenceId,
+          { resourceSnapshot: armed.snapshot },
+          () => true,
+        );
+        assert.equal(result.status, 409);
+        assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "approved");
+      } finally { db.close(); }
+    }
   });
 
   await t.test("the historical provider-ended legacy admission reconciles from exact proof", async () => {
@@ -3951,7 +4056,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
           accepted: true,
           commandDigest: createHash("sha256").update(armed.command, "utf8").digest("hex"),
           providerThreadId: "thread-1",
-          providerTurnId: "turn-1",
+          providerTurnId: "provider-session-turn-1",
           providerAdmissionItemId: "admission-race",
           providerItemId: "command-race",
           forgeHeadSha: armed.snapshot.headSha,
@@ -3996,7 +4101,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
             accepted: true,
             commandDigest: createHash("sha256").update(armed.command, "utf8").digest("hex"),
             providerThreadId: "thread-1",
-            providerTurnId: "turn-1",
+            providerTurnId: "provider-session-turn-1",
             providerAdmissionItemId: `admission-${mismatch}`,
             providerItemId: `command-${mismatch}`,
             forgeHeadSha: armed.snapshot.headSha,
@@ -4077,7 +4182,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
         accepted: true,
         commandDigest: createHash("sha256").update(armed.command, "utf8").digest("hex"),
         providerThreadId: "thread-1",
-        providerTurnId: "turn-1",
+        providerTurnId: "provider-session-turn-1",
         providerAdmissionItemId: "admission-after-stale-retry",
         providerItemId: "command-after-stale-retry",
         forgeHeadSha: armed.snapshot.headSha,

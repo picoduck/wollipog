@@ -66,6 +66,7 @@ const EVERY_PAYLOAD = {
     kind: "workflow_action_admission_armed",
     occurrenceId: "ACTION_OCCURRENCE_LEAK",
     commandDigest: "b".repeat(64),
+    sessionTurnId: "ACTION_SESSION_TURN_LEAK",
     providerTurnId: "ACTION_TURN_LEAK",
   },
   review_decision: {

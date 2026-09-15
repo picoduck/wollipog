@@ -1340,7 +1340,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         const recorded = sessions.recordWorkflowActionAdmission(msg.sessionId, {
           occurrenceId: msg.occurrenceId,
           commandDigest: msg.commandDigest,
-          providerTurnId: msg.providerTurnId,
+          sessionTurnId: msg.sessionTurnId,
         });
         sendUp({
           type: "workflow_action_admission_recorded",
@@ -1348,6 +1348,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           sessionId: msg.sessionId,
           occurrenceId: recorded.occurrenceId,
           accepted: recorded.accepted,
+          ...(recorded.sessionTurnId ? { sessionTurnId: recorded.sessionTurnId } : {}),
           ...(recorded.providerTurnId ? { providerTurnId: recorded.providerTurnId } : {}),
           ...(recorded.providerThreadId ? { providerThreadId: recorded.providerThreadId } : {}),
           ...(recorded.historyEpoch !== undefined
@@ -1368,6 +1369,10 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         commandDigest: msg.commandDigest,
         pullRequestUrl: msg.pullRequestUrl,
         expectedHeadSha: msg.expectedHeadSha,
+        ...(msg.armedAfterEventSeq !== undefined ? { armedAfterEventSeq: msg.armedAfterEventSeq } : {}),
+        ...(msg.runnerHistoryEpoch !== undefined ? { runnerHistoryEpoch: msg.runnerHistoryEpoch } : {}),
+        ...(msg.actionProviderThreadId ? { actionProviderThreadId: msg.actionProviderThreadId } : {}),
+        ...(msg.actionProviderTurnId ? { actionProviderTurnId: msg.actionProviderTurnId } : {}),
       }).then((reconciled) => {
         sendUp({
           type: "workflow_action_reconciliation_result",
@@ -1381,6 +1386,12 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           ...(reconciled.providerAdmissionItemId
             ? { providerAdmissionItemId: reconciled.providerAdmissionItemId } : {}),
           ...(reconciled.providerItemId ? { providerItemId: reconciled.providerItemId } : {}),
+          ...(reconciled.runnerHistoryEpoch !== undefined
+            ? { runnerHistoryEpoch: reconciled.runnerHistoryEpoch } : {}),
+          ...(reconciled.armedAfterEventSeq !== undefined
+            ? { armedAfterEventSeq: reconciled.armedAfterEventSeq } : {}),
+          ...(reconciled.providerReviewEventSeq !== undefined
+            ? { providerReviewEventSeq: reconciled.providerReviewEventSeq } : {}),
           ...(reconciled.forgeHeadSha ? { forgeHeadSha: reconciled.forgeHeadSha } : {}),
           ...(reconciled.error ? { error: reconciled.error } : {}),
         });

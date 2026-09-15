@@ -49,7 +49,15 @@ export interface CompletedCommandReconciliationProof {
   commandDigest: string;
   providerThreadId: string;
   providerTurnId: string;
-  providerAdmissionItemId: string;
+  providerAdmissionItemId?: string;
+  providerItemId: string;
+}
+
+/** Runner-log receipt that can replace a provider-native MCP admission item. The session manager
+ * derives this only from an exact Guardian review recorded after the durable action-arm fence. */
+export interface CompletedCommandReconciliationFence {
+  providerThreadId: string;
+  providerTurnId: string;
   providerItemId: string;
 }
 
@@ -231,6 +239,7 @@ export interface Driver {
   reconcileCompletedCommand?(
     occurrenceId: string,
     command: string,
+    fence?: CompletedCommandReconciliationFence,
   ): Promise<CompletedCommandReconciliationProof | null>;
 
   /** Incorporate input into the currently active provider turn when the transport can receipt it. */

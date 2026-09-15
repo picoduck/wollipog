@@ -573,6 +573,7 @@ CREATE TABLE IF NOT EXISTS workflow_decisions (
   action_command_digest TEXT,
   action_armed_at       INTEGER,
   action_armed_after_event_seq INTEGER,
+  action_session_turn_id TEXT,
   action_provider_turn_id TEXT,
   action_provider_thread_id TEXT,
   action_runner_history_epoch INTEGER,
@@ -4405,6 +4406,7 @@ export class ControlPlaneDb {
       "action_command_digest TEXT",
       "action_armed_at INTEGER",
       "action_armed_after_event_seq INTEGER",
+      "action_session_turn_id TEXT",
       "action_provider_turn_id TEXT",
       "action_provider_thread_id TEXT",
       "action_runner_history_epoch INTEGER",
@@ -13217,12 +13219,14 @@ export class ControlPlaneDb {
        SET action_kind=?, action_command=?, action_command_digest=?,
            action_armed_at=COALESCE(action_armed_at, ?),
            action_armed_after_event_seq=COALESCE(action_armed_after_event_seq, ?),
+           action_session_turn_id=COALESCE(action_session_turn_id, ?),
            action_provider_turn_id=COALESCE(action_provider_turn_id, ?),
            action_provider_thread_id=COALESCE(action_provider_thread_id, ?),
            action_runner_history_epoch=COALESCE(action_runner_history_epoch, ?)
        WHERE occurrence_id=? AND status='approved' AND (
          action_command_digest IS NULL OR (
            action_kind=? AND action_command=? AND action_command_digest=? AND
+           (action_session_turn_id IS NULL OR action_session_turn_id IS ?) AND
            (action_provider_turn_id IS NULL OR action_provider_turn_id IS ?) AND
            (action_provider_thread_id IS NULL OR action_provider_thread_id IS ?) AND
            (action_runner_history_epoch IS NULL OR action_runner_history_epoch IS ?)
@@ -13230,9 +13234,10 @@ export class ControlPlaneDb {
        )`,
     ).run(
       action.kind, action.command, action.commandDigest, action.armedAt,
-      action.armedAfterEventSeq ?? null, action.providerTurnId ?? null,
+      action.armedAfterEventSeq ?? null, action.sessionTurnId ?? null, action.providerTurnId ?? null,
       action.providerThreadId ?? null, action.runnerHistoryEpoch ?? null, occurrenceId,
-      action.kind, action.command, action.commandDigest, action.providerTurnId ?? null,
+      action.kind, action.command, action.commandDigest, action.sessionTurnId ?? null,
+      action.providerTurnId ?? null,
       action.providerThreadId ?? null, action.runnerHistoryEpoch ?? null,
     );
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
@@ -21997,6 +22002,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     action_command_digest?: string | null;
     action_armed_at?: number | null;
     action_armed_after_event_seq?: number | null;
+    action_session_turn_id?: string | null;
     action_provider_turn_id?: string | null;
     action_provider_thread_id?: string | null;
     action_runner_history_epoch?: number | null;
@@ -22035,6 +22041,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
           ...(row.action_armed_after_event_seq != null
             ? { armedAfterEventSeq: row.action_armed_after_event_seq }
             : {}),
+          ...(row.action_session_turn_id ? { sessionTurnId: row.action_session_turn_id } : {}),
           ...(row.action_provider_turn_id ? { providerTurnId: row.action_provider_turn_id } : {}),
           ...(row.action_provider_thread_id ? { providerThreadId: row.action_provider_thread_id } : {}),
           ...(row.action_runner_history_epoch != null

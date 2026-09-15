@@ -212,6 +212,7 @@ test("workflow action admission markers stay hidden and separate adjacent provid
       kind: "workflow_action_admission_armed",
       occurrenceId: "workflow-1",
       commandDigest: "a".repeat(64),
+      sessionTurnId: "session-turn-1",
       providerTurnId: "turn-1",
     }),
     ev({ kind: "agent_message", text: "after" }),

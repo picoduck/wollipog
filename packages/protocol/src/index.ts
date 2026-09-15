@@ -415,7 +415,9 @@
 // 150: approved-but-unconsumed PR merge actions can be reconciled from an exact successful
 //      provider-history command after its exact admission call plus a forge-verified merged head.
 //      Older peers cannot supply both proofs and fail closed without changing the decision.
-export const PROTOCOL_VERSION = 150;
+// 151: App Server action admission separates the runner session turn from the provider turn, and
+//      reconciliation can bind one exact successful command to a later durable Guardian receipt.
+export const PROTOCOL_VERSION = 151;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -598,8 +600,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   backgroundMissingResultRecovery: 134,
   delegatedParentControl: 136,
   typedWorkflowDecisionDelegation: 139,
-  workflowDecisionActionAdmission: 148,
-  workflowDecisionActionReconciliation: 150,
+  workflowDecisionActionAdmission: 151,
+  workflowDecisionActionReconciliation: 151,
   orchestratorCampaignManagement: 140,
   campaignContinuations: 149,
   orchestratorExecutionPolicy: 144,
@@ -818,7 +820,7 @@ export function providerAuthenticationReceiptCode(
 const SESSION_EVENT_WIRE_POLICIES = {
   agent_response_completed: { minProtocol: 87, legacy: "omit" },
   policy_hook_decision: { minProtocol: 130, legacy: "omit" },
-  workflow_action_admission_armed: { minProtocol: 148, legacy: "omit" },
+  workflow_action_admission_armed: { minProtocol: 151, legacy: "omit" },
 } as const satisfies Partial<Record<SessionEventKind, {
   minProtocol: number;
   legacy: "omit";
@@ -2876,6 +2878,8 @@ export interface WorkflowDecisionActionAdmission extends WorkflowDecisionAction 
   armedAt: number;
   /** Runner-owned event sequence of the causal arm marker. */
   armedAfterEventSeq?: number;
+  /** Control-plane/runner turn captured at arm time. Never substituted for a provider turn ID. */
+  sessionTurnId?: string;
   /** Active provider turn captured at arm time. Required for App Server action admission. */
   providerTurnId?: string;
   /** Active provider thread captured by the runner at arm time. */
@@ -3831,6 +3835,7 @@ export interface WorkflowActionAdmissionArmedEvent {
   kind: "workflow_action_admission_armed";
   occurrenceId: string;
   commandDigest: string;
+  sessionTurnId: string;
   providerTurnId: string;
 }
 
@@ -5843,7 +5848,7 @@ export interface RecordWorkflowActionAdmissionMessage {
   sessionId: string;
   occurrenceId: string;
   commandDigest: string;
-  providerTurnId: string;
+  sessionTurnId: string;
 }
 
 /** Runner-authoritative coordinates for one successfully appended action-arm fence. */
@@ -5853,6 +5858,7 @@ export interface WorkflowActionAdmissionRecordedMessage {
   sessionId: string;
   occurrenceId: string;
   accepted: boolean;
+  sessionTurnId?: string;
   providerTurnId?: string;
   providerThreadId?: string;
   historyEpoch?: number;
@@ -5871,6 +5877,10 @@ export interface ReconcileWorkflowActionMessage {
   commandDigest: string;
   pullRequestUrl: string;
   expectedHeadSha: string;
+  armedAfterEventSeq?: number;
+  runnerHistoryEpoch?: number;
+  actionProviderThreadId?: string;
+  actionProviderTurnId?: string;
 }
 
 /** Content-safe proof coordinates from provider-owned history and authoritative forge state. */
@@ -5885,6 +5895,9 @@ export interface WorkflowActionReconciliationResultMessage {
   providerTurnId?: string;
   providerAdmissionItemId?: string;
   providerItemId?: string;
+  runnerHistoryEpoch?: number;
+  armedAfterEventSeq?: number;
+  providerReviewEventSeq?: number;
   forgeHeadSha?: string;
   error?: string;
 }

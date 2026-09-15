@@ -2275,6 +2275,7 @@ test("PR merge action admission stays durable and consumes only its matching dig
       commandDigest: "c".repeat(64),
       armedAt: 3_000,
       armedAfterEventSeq: 7,
+      sessionTurnId: "session-turn-42",
       providerTurnId: "turn-42",
       providerThreadId: "thread-42",
       runnerHistoryEpoch: 3,
@@ -2307,7 +2308,7 @@ test("action invocation correlation uses runner order when an older item reaches
     const boundary = 2;
     db.appendEvent("child", {
       kind: "workflow_action_admission_armed", occurrenceId: "workflow-1",
-      commandDigest: "a".repeat(64), providerTurnId: "turn-1",
+      commandDigest: "a".repeat(64), sessionTurnId: "session-turn-1", providerTurnId: "turn-1",
     }, 1_000, { runnerSeq: boundary, historyEpoch: 0 });
     db.appendEvent("child", { kind: "agent_thought", text: "control-plane-only interleave" }, 1_500);
     db.appendEvent("child", {
