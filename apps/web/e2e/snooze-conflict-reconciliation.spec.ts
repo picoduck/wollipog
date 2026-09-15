@@ -86,6 +86,8 @@ test("a removed reminder can create a new reminder from its preserved draft", as
   await page.getByRole("button", { name: "Create New Reminder from Draft" }).click();
   await expect(page.getByRole("heading", { name: "Create New Reminder" })).toBeVisible();
   await expect(page.getByText(/preserved schedule, time zone, and wake policy will create a new reminder/i)).toBeVisible();
+  await expect(page.getByRole("dialog").locator('[role="status"].sr-only'))
+    .toContainText("Creating a new reminder from the preserved draft");
   await expect(expression).toHaveValue("today at 3:30 pm");
   await expect(exact).toHaveValue("2099-04-05T06:30");
   await expect(page.getByRole("radio", { name: /Regardless/ })).toHaveAttribute("aria-checked", "true");

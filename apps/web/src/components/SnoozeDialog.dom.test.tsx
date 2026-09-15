@@ -446,8 +446,9 @@ test("a removed reminder can be recreated explicitly from the complete preserved
   });
 
   assert.equal(container.querySelector(".modal-head h2")?.textContent, "Create New Reminder");
-  assert.equal(container.querySelector("#snooze-description")?.getAttribute("role"), "status");
   assert.match(container.querySelector("#snooze-description")?.textContent ?? "", /will create a new reminder.*will not be restored/i);
+  assert.match(container.querySelector('[role="status"].sr-only')?.textContent ?? "",
+    /creating a new reminder from the preserved draft.*will not be restored/i);
   assert.equal(domWindow.document.activeElement, expression, "activating draft reuse keeps focus in the dialog");
   assert.equal(expression.value, "today at 3:30 pm", "natural-language input is retained");
   assert.equal(exact.value, "2099-04-05T06:30", "exact date and time are retained");
@@ -463,6 +464,49 @@ test("a removed reminder can be recreated explicitly from the complete preserved
   assert.equal(accepted?.wakePolicy, "regardless");
   assert.equal(acceptedPrevious, undefined, "undo behavior also treats the write as a new reminder");
   assert.equal(closeCalls, 1);
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("draft reuse retains an untouched stored instant and time zone", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const scheduledFor = Date.UTC(2099, 4, 6, 12, 45);
+  const original: SessionReminderView = {
+    reminderId: "reminder-original",
+    sessionId: "session-1",
+    scheduledFor,
+    timeZone: "Asia/Tokyo",
+    originalExpression: "2099-05-06T21:45",
+    wakePolicy: "regardless",
+    state: "pending",
+    revision: 4,
+    createdAt: 1,
+    updatedAt: 4,
+  };
+  let accepted: SetSessionReminderRequest | undefined;
+  const props = {
+    onClose: () => undefined,
+    onSave: async (request: SetSessionReminderRequest) => { accepted = request; },
+    onRemove: async () => undefined,
+  };
+
+  await act(async () => { root.render(<SnoozeDialog reminder={original} {...props} />); });
+  await act(async () => { root.render(<SnoozeDialog reminder={undefined} {...props} />); });
+  await act(async () => {
+    [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Create New Reminder from Draft")!.click();
+  });
+  await act(async () => { container.querySelector<HTMLButtonElement>('button[type="submit"]')!.click(); });
+
+  assert.equal(accepted?.scheduledFor, scheduledFor);
+  assert.equal(accepted?.timeZone, "Asia/Tokyo");
+  assert.equal(accepted?.originalExpression, "2099-05-06T21:45");
+  assert.equal(accepted?.wakePolicy, "regardless");
+  assert.equal(accepted?.expectedRevision, 0);
+  assert.equal(accepted && "expectedReminderId" in accepted, false);
 
   await act(async () => { root.unmount(); });
   container.remove();

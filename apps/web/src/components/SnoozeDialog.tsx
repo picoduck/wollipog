@@ -184,13 +184,18 @@ export function SnoozeDialog({
       </>}
     >
       <form id="snooze-session-form" className="snooze-form" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
-        <p id="snooze-description" role={creatingFromDraft ? "status" : undefined}>
+        <p id="snooze-description">
           {creatingFromDraft
             ? "The preserved schedule, time zone, and wake policy will create a new reminder. The removed reminder will not be restored."
             : returnedReminder
             ? `This session returned from snooze after ${formatReminderInstant(returnedReminder.scheduledFor, returnedReminder.timeZone)}. Choose a new time to snooze it again.`
             : "Snoozing changes Inbox visibility only. Running work and lifecycle state continue unchanged."}
         </p>
+        <span className="sr-only" role="status" aria-live="polite">
+          {creatingFromDraft
+            ? "Creating a new reminder from the preserved draft. The removed reminder will not be restored."
+            : ""}
+        </span>
         {conflict && (
           <div className="snooze-conflict" role="alert" aria-live="assertive">
             <strong>Stored Reminder Changed</strong>
