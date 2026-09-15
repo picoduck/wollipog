@@ -1342,6 +1342,16 @@ test("commandExecution: started -> tool_call, completed -> tool_call_update + co
   assert.equal((h.events[1] as { status: string }).status, "completed");
 });
 
+test("commandExecution: a nonzero exit remains failed even with a completed lifecycle", () => {
+  const h = makeHarness();
+  h.onItem({ type: "commandExecution", id: "failed", command: "false" }, false);
+  h.onItem({
+    type: "commandExecution", id: "failed", command: "false", status: "completed", exitCode: 1,
+  }, true);
+  assert.equal((h.events[1] as { kind: string }).kind, "tool_call_update");
+  assert.equal((h.events[1] as { status: string }).status, "failed");
+});
+
 test("fileChange -> a file_edit per change + a tool_call", () => {
   const h = makeHarness();
   h.onItem({ type: "fileChange", id: "f1", changes: [{ path: "a.ts", diff: "@@" }, { path: "b.ts" }] }, true);
@@ -2485,6 +2495,113 @@ test("historical reconciliation proves one exact completed root command without 
     providerAdmissionItemId: "admission-legacy",
     providerItemId: "command-legacy",
   });
+});
+
+test("historical reconciliation falls back to the durable rollout after App Server restart", async () => {
+  const h = makeHarness({
+    resumeId: "thread-restarted", context: { kind: "native" }, env: { HOME: "/provider/home" },
+  });
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1146 --squash --match-head-commit ${"a".repeat(40)}`;
+  (h.driver as any).threadId = "thread-restarted";
+  (h.driver as any).peer = {
+    request: async () => ({
+      thread: { id: "thread-restarted", status: { type: "idle" }, turns: [] },
+    }),
+  };
+  let fallback: unknown[] | undefined;
+  (h.driver as any).readRolloutProof = async (...args: unknown[]) => {
+    fallback = args;
+    return {
+      commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
+      providerThreadId: "thread-restarted",
+      providerTurnId: "turn-historical",
+      providerAdmissionItemId: "admission-historical",
+      providerItemId: "command-historical",
+    };
+  };
+
+  const proof = await h.driver.reconcileCompletedCommand?.("workflow-historical", command);
+  assert.equal(proof?.providerItemId, "command-historical");
+  assert.deepEqual(fallback, [
+    { kind: "native" }, "/provider/home/.codex", "thread-restarted", "workflow-historical", command, undefined,
+  ]);
+});
+
+test("historical reconciliation never overrides an exact command rejected by live history", async () => {
+  const h = makeHarness({ resumeId: "thread-live", context: { kind: "native" } });
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1146 --squash --match-head-commit ${"a".repeat(40)}`;
+  (h.driver as any).threadId = "thread-live";
+  (h.driver as any).peer = {
+    request: async () => ({
+      thread: {
+        id: "thread-live",
+        turns: [{
+          id: "turn-interrupted",
+          status: "interrupted",
+          itemsView: "full",
+          items: [{
+            type: "commandExecution", id: "command-live", command, status: "completed", exitCode: 0,
+          }],
+        }],
+      },
+    }),
+  };
+  let fallbackCalled = false;
+  (h.driver as any).readRolloutProof = async () => {
+    fallbackCalled = true;
+    return {
+      commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
+      providerThreadId: "thread-live",
+      providerTurnId: "turn-interrupted",
+      providerItemId: "command-live",
+    };
+  };
+
+  assert.equal(await h.driver.reconcileCompletedCommand?.("workflow-live", command, {
+    providerThreadId: "thread-live",
+    providerTurnId: "turn-interrupted",
+    providerItemId: "command-live",
+  }), null);
+  assert.equal(fallbackCalled, false);
+});
+
+test("historical reconciliation searches the provider's inherited native CODEX_HOME", async () => {
+  const previous = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = "/provider/codex-home";
+  try {
+    const h = makeHarness({ resumeId: "thread-home", context: { kind: "native" } });
+    const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1146 --squash --match-head-commit ${"a".repeat(40)}`;
+    (h.driver as any).threadId = "thread-home";
+    (h.driver as any).peer = null;
+    let configuredHome: unknown;
+    (h.driver as any).readRolloutProof = async (_context: unknown, codexHome: unknown) => {
+      configuredHome = codexHome;
+      return null;
+    };
+    await h.driver.reconcileCompletedCommand?.("workflow-home", command);
+    assert.equal(configuredHome, "/provider/codex-home");
+  } finally {
+    if (previous === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previous;
+  }
+});
+
+test("historical reconciliation derives a POSIX Codex home for Direct WSL", async () => {
+  const h = makeHarness({
+    resumeId: "thread-wsl-home",
+    context: { kind: "wsl", distro: "Ubuntu" },
+    env: { HOME: "/home/provider" },
+  });
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1146 --squash --match-head-commit ${"a".repeat(40)}`;
+  (h.driver as any).threadId = "thread-wsl-home";
+  (h.driver as any).peer = null;
+  let configuredHome: unknown;
+  (h.driver as any).readRolloutProof = async (_context: unknown, codexHome: unknown) => {
+    configuredHome = codexHome;
+    return null;
+  };
+  await h.driver.reconcileCompletedCommand?.("workflow-wsl-home", command);
+  assert.equal(configuredHome, "/home/provider/.codex");
 });
 
 test("historical reconciliation accepts one exact completed command from a durable runner receipt fence", async () => {

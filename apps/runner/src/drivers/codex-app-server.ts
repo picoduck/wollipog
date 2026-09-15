@@ -23,6 +23,7 @@ import {
   type SessionConfig,
 } from "@wollipog/protocol";
 import { createHash } from "node:crypto";
+import { isAbsolute, join, posix } from "node:path";
 import { JsonRpcPeer } from "../jsonrpc.js";
 import {
   killTree,
@@ -45,6 +46,7 @@ import { providerRejectionShape } from "./provider-rejection-shape.js";
 import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
 import { stagePromptImages, type StagedPromptImages } from "./prompt-images.js";
 import { codexOrchestratorMcpArgs } from "../orchestrator-preset.js";
+import { readCodexRolloutCompletedCommand } from "./codex-rollout-proof.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any;
@@ -391,18 +393,24 @@ export class CodexAppServerDriver implements Driver {
   private initializing = false;
   private readonly spawn: typeof spawnAgent;
   private readonly kill: typeof killTree;
+  private readonly readRolloutProof: typeof readCodexRolloutCompletedCommand;
   private readonly descendantOwner = {};
 
   constructor(
     private readonly opts: DriverOptions,
     private readonly cb: DriverCallbacks,
     private readonly imageStager: typeof stagePromptImages = stagePromptImages,
-    deps: Partial<{ spawn: typeof spawnAgent; kill: typeof killTree }> = {},
+    deps: Partial<{
+      spawn: typeof spawnAgent;
+      kill: typeof killTree;
+      readRolloutProof: typeof readCodexRolloutCompletedCommand;
+    }> = {},
   ) {
     this.cwd = opts.cwd;
     this.config = opts.config;
     this.spawn = deps.spawn ?? spawnAgent;
     this.kill = deps.kill ?? killTree;
+    this.readRolloutProof = deps.readRolloutProof ?? readCodexRolloutCompletedCommand;
   }
 
   get pid(): number | undefined {
@@ -418,50 +426,86 @@ export class CodexAppServerDriver implements Driver {
     command: string,
     fence?: CompletedCommandReconciliationFence,
   ): Promise<CompletedCommandReconciliationProof | null> {
-    if (!this.peer || !boundedProviderCorrelationId(occurrenceId) ||
+    if (!boundedProviderCorrelationId(occurrenceId) ||
         typeof command !== "string" || !command || command.length > 2000 ||
         !boundedProviderCorrelationId(this.threadId)) return null;
-    const read = await this.peer.request<Json>("thread/read", {
-      threadId: this.threadId,
-      includeTurns: true,
-    });
-    if (read?.thread?.id !== this.threadId || !Array.isArray(read?.thread?.turns)) return null;
-    const matches: CompletedCommandReconciliationProof[] = [];
-    const successfulExactCommands: { turnId: string; itemId: string }[] = [];
-    for (const turn of read.thread.turns as Json[]) {
-      if (!boundedProviderCorrelationId(turn?.id) || turn?.status !== "completed" ||
-          (turn?.itemsView != null && turn.itemsView !== "full") || !Array.isArray(turn?.items)) continue;
-      const items = turn.items as Json[];
-      for (const [index, item] of items.entries()) {
-        if (item?.type !== "commandExecution" || item?.status !== "completed" || item?.exitCode !== 0 ||
-            !boundedProviderCorrelationId(item?.id) || typeof item?.command !== "string") continue;
-        const logicalCommand = codexProviderShellScript(item.command) ?? item.command;
-        if (logicalCommand !== command) continue;
-        successfulExactCommands.push({ turnId: turn.id, itemId: item.id });
-        const admissions = items.slice(0, index).filter((candidate) =>
-          completedWorkflowActionAdmission(candidate, occurrenceId, command));
-        if (admissions.length !== 1 || !boundedProviderCorrelationId(admissions[0]?.id)) continue;
-        matches.push({
-          commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
-          providerThreadId: this.threadId,
-          providerTurnId: turn.id,
-          providerAdmissionItemId: admissions[0].id,
-          providerItemId: item.id,
+    if (this.peer) {
+      try {
+        const read = await this.peer.request<Json>("thread/read", {
+          threadId: this.threadId,
+          includeTurns: true,
         });
+        if (read?.thread?.id === this.threadId && Array.isArray(read?.thread?.turns)) {
+          const matches: CompletedCommandReconciliationProof[] = [];
+          const successfulExactCommands: { turnId: string; itemId: string }[] = [];
+          let liveSawExactCommand = false;
+          for (const turn of read.thread.turns as Json[]) {
+            if (!Array.isArray(turn?.items)) continue;
+            const items = turn.items as Json[];
+            for (const [index, item] of items.entries()) {
+              if (item?.type !== "commandExecution" || typeof item?.command !== "string") continue;
+              const logicalCommand = codexProviderShellScript(item.command) ?? item.command;
+              if (logicalCommand !== command) continue;
+              liveSawExactCommand = true;
+              if (!boundedProviderCorrelationId(turn?.id) || turn?.status !== "completed" ||
+                  (turn?.itemsView != null && turn.itemsView !== "full") || item?.status !== "completed" ||
+                  item?.exitCode !== 0 || !boundedProviderCorrelationId(item?.id)) continue;
+              successfulExactCommands.push({ turnId: turn.id, itemId: item.id });
+              const admissions = items.slice(0, index).filter((candidate) =>
+                completedWorkflowActionAdmission(candidate, occurrenceId, command));
+              if (admissions.length !== 1 || !boundedProviderCorrelationId(admissions[0]?.id)) continue;
+              matches.push({
+                commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
+                providerThreadId: this.threadId,
+                providerTurnId: turn.id,
+                providerAdmissionItemId: admissions[0].id,
+                providerItemId: item.id,
+              });
+            }
+          }
+          if (matches.length !== 0) {
+            return matches.length === 1 && successfulExactCommands.length === 1 ? matches[0]! : null;
+          }
+          if (fence && fence.providerThreadId === this.threadId &&
+              boundedProviderCorrelationId(fence.providerTurnId) &&
+              boundedProviderCorrelationId(fence.providerItemId) && successfulExactCommands.length === 1) {
+            const [completed] = successfulExactCommands;
+            if (completed?.turnId === fence.providerTurnId && completed.itemId === fence.providerItemId) {
+              return {
+                commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
+                providerThreadId: this.threadId,
+                providerTurnId: completed.turnId,
+                providerItemId: completed.itemId,
+              };
+            }
+          }
+          // Live history is authoritative when it still contains the command. A failed,
+          // interrupted, ambiguous, or otherwise rejected live item cannot be reconsidered by a
+          // differently shaped rollout projection. Rollout is only a missing-history fallback.
+          if (liveSawExactCommand) return null;
+        }
+      } catch {
+        // The append-only rollout below is the restart/compaction-safe provider history source.
       }
     }
-    if (matches.length !== 0) return matches.length === 1 ? matches[0]! : null;
-    if (!fence || fence.providerThreadId !== this.threadId ||
-        !boundedProviderCorrelationId(fence.providerTurnId) ||
-        !boundedProviderCorrelationId(fence.providerItemId) || successfulExactCommands.length !== 1) return null;
-    const [completed] = successfulExactCommands;
-    if (completed?.turnId !== fence.providerTurnId || completed.itemId !== fence.providerItemId) return null;
-    return {
-      commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
-      providerThreadId: this.threadId,
-      providerTurnId: completed.turnId,
-      providerItemId: completed.itemId,
-    };
+    const inheritedCodexHome = this.opts.context.kind === "native" ? process.env.CODEX_HOME : undefined;
+    const effectiveHome = this.opts.env.HOME ??
+      (this.opts.context.kind === "native" ? process.env.HOME : undefined);
+    const defaultCodexHome = effectiveHome
+      ? this.opts.context.kind === "wsl"
+        ? posix.isAbsolute(effectiveHome) ? posix.join(effectiveHome, ".codex") : undefined
+        : isAbsolute(effectiveHome) ? join(effectiveHome, ".codex") : undefined
+      : undefined;
+    const configuredCodexHome = this.opts.env.CODEX_HOME ?? inheritedCodexHome ??
+      defaultCodexHome;
+    return this.readRolloutProof(
+      this.opts.context,
+      configuredCodexHome,
+      this.threadId,
+      occurrenceId,
+      command,
+      fence,
+    );
   }
 
   agentTurnId(): string | null {
@@ -1622,7 +1666,11 @@ export class CodexAppServerDriver implements Driver {
         }
         break;
       case "commandExecution": {
-        const status: ToolStatus = completed ? (item.exitCode === 0 || item.status === "completed" ? "completed" : "failed") : "in_progress";
+        const status: ToolStatus = completed
+          ? typeof item.exitCode === "number"
+            ? item.exitCode === 0 ? "completed" : "failed"
+            : item.status === "completed" ? "completed" : "failed"
+          : "in_progress";
         this.emitTool(id, `$ ${truncate(String(item.command ?? ""), 80)}`, "execute", status, parentToolUseId);
         const out = item.aggregatedOutput ?? item.output;
         if (completed && out) {

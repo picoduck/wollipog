@@ -80,6 +80,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { makeDriver, type Driver } from "./drivers/factory.js";
 import type {
+  CompletedCommandReconciliationProof,
   DriverBackgroundWorkUpdate,
   DriverSteerResult,
   DriverSubscriptionUsageUpdate,
@@ -12154,6 +12155,7 @@ export class SessionManager {
     runnerHistoryEpoch?: number;
     armedAfterEventSeq?: number;
     providerReviewEventSeq?: number;
+    providerCompletionEventSeq?: number;
     forgeHeadSha?: string;
     error?: string;
   }> {
@@ -12194,6 +12196,7 @@ export class SessionManager {
       providerTurnId: string;
       providerItemId: string;
       reviewEventSeq: number;
+      completionEventSeq?: number;
     } | undefined;
     if (hasRunnerFence && (meta.logEpoch ?? 0) === raw.runnerHistoryEpoch) {
       const events = this.store.readEvents(sessionId);
@@ -12219,32 +12222,50 @@ export class SessionManager {
           const receipt = receipts[0]!.payload.kind === "review_decision"
             ? receipts[0]!.payload.approvalReviewReceipt : undefined;
           if (receipt && !interveningArm) {
+            const starts = events.filter((event) => event.seq > (raw.armedAfterEventSeq as number) &&
+              event.seq < receipts[0]!.seq && event.payload.kind === "tool_call" &&
+              event.payload.toolCallId === receipt.itemId && event.payload.status === "in_progress");
+            const terminal = events.filter((event) => event.seq > receipts[0]!.seq &&
+              event.payload.kind === "tool_call_update" &&
+              event.payload.toolCallId === receipt.itemId && event.payload.status !== "in_progress");
             durableReceipt = {
               providerThreadId: receipt.threadId,
               providerTurnId: receipt.turnId,
               providerItemId: receipt.itemId,
               reviewEventSeq: receipts[0]!.seq,
+              ...(starts.length === 1 && terminal.length === 1 &&
+                terminal[0]!.payload.kind === "tool_call_update" &&
+                terminal[0]!.payload.status === "completed"
+                ? { completionEventSeq: terminal[0]!.seq } : {}),
             };
           }
         }
       }
     }
-    let proof;
-    try {
-      proof = await active.client.reconcileCompletedCommand(
-        occurrenceId,
-        raw.command as string,
-        durableReceipt && {
-          providerThreadId: durableReceipt.providerThreadId,
-          providerTurnId: durableReceipt.providerTurnId,
-          providerItemId: durableReceipt.providerItemId,
-        },
-      );
-    } catch {
-      return fail(occurrenceId, "provider history could not prove the completed command");
+    const commandDigest = createHash("sha256").update(raw.command as string, "utf8").digest("hex");
+    let proof: CompletedCommandReconciliationProof | undefined = durableReceipt?.completionEventSeq ? {
+      commandDigest,
+      providerThreadId: durableReceipt.providerThreadId,
+      providerTurnId: durableReceipt.providerTurnId,
+      providerItemId: durableReceipt.providerItemId,
+    } : undefined;
+    if (!proof) {
+      try {
+        proof = await active.client.reconcileCompletedCommand(
+          occurrenceId,
+          raw.command as string,
+          durableReceipt && {
+            providerThreadId: durableReceipt.providerThreadId,
+            providerTurnId: durableReceipt.providerTurnId,
+            providerItemId: durableReceipt.providerItemId,
+          },
+        ) ?? undefined;
+      } catch {
+        return fail(occurrenceId, "provider history could not prove the completed command");
+      }
     }
     if (!proof || proof.providerThreadId !== meta.agentSessionId ||
-        proof.commandDigest !== createHash("sha256").update(raw.command as string, "utf8").digest("hex")) {
+        proof.commandDigest !== commandDigest) {
       return fail(occurrenceId, "provider history did not contain one exact successful command");
     }
     const nativeAdmission = bounded(proof.providerAdmissionItemId, 512);
@@ -12274,6 +12295,8 @@ export class SessionManager {
         runnerHistoryEpoch: raw.runnerHistoryEpoch as number,
         armedAfterEventSeq: raw.armedAfterEventSeq as number,
         providerReviewEventSeq: durableReceipt.reviewEventSeq,
+        ...(durableReceipt.completionEventSeq !== undefined
+          ? { providerCompletionEventSeq: durableReceipt.completionEventSeq } : {}),
       } : {}),
       forgeHeadSha: forge.headOid.toLowerCase(),
     };

@@ -420,7 +420,10 @@
 // 152: subscription-usage snapshots may carry a bounded, user-recognizable active-account label.
 //      The optional field preserves rolling compatibility and remains scoped to the exact runner
 //      source that reported it; it is display-only and never an identity or authorization key.
-export const PROTOCOL_VERSION = 152;
+// 153: workflow-action reconciliation can bind a durable provider item completion after its exact
+//      Guardian receipt, and Codex runners can recover exact successful command proof from the
+//      provider's append-only rollout after App Server restart or compaction.
+export const PROTOCOL_VERSION = 153;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -604,7 +607,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   delegatedParentControl: 136,
   typedWorkflowDecisionDelegation: 139,
   workflowDecisionActionAdmission: 151,
-  workflowDecisionActionReconciliation: 151,
+  workflowDecisionActionReconciliation: 153,
   orchestratorCampaignManagement: 140,
   campaignContinuations: 149,
   orchestratorExecutionPolicy: 144,
@@ -5906,6 +5909,7 @@ export interface WorkflowActionReconciliationResultMessage {
   runnerHistoryEpoch?: number;
   armedAfterEventSeq?: number;
   providerReviewEventSeq?: number;
+  providerCompletionEventSeq?: number;
   forgeHeadSha?: string;
   error?: string;
 }

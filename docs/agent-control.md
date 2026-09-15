@@ -227,6 +227,14 @@ one shared claim across live consumption and every reconciliation proof. The for
 policy, ancestry, and authority checks remain unchanged.
 Missing, reordered, duplicated, cross-generation, replayed, or mismatched evidence fails closed.
 
+Protocol v153 keeps that proof available across provider and session restarts. An ordered durable
+runner sequence—arm, exact Guardian receipt, and one successful terminal update for the receipt's
+item—can prove completion without asking the restarted App Server to reconstruct an old turn. A
+legacy CLI admission that predates those runner fences may use only the exact Codex rollout for the
+stored provider thread: one successful consume call for the occurrence and one later exact command
+must appear uniquely in the same completed turn. The runner does not relay rollout contents, and
+all existing snapshot, forge, policy, ancestry, authority, and receipt-replay checks still apply.
+
 The control plane owns this lifecycle. A generic question answer or provider permission response
 cannot satisfy a typed workflow decision. Authentication, identity, governance-policy changes,
 secret access, and persistent permission grants are not typed categories and remain human-only.

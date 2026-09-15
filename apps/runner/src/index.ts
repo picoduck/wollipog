@@ -1418,6 +1418,8 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             ? { armedAfterEventSeq: reconciled.armedAfterEventSeq } : {}),
           ...(reconciled.providerReviewEventSeq !== undefined
             ? { providerReviewEventSeq: reconciled.providerReviewEventSeq } : {}),
+          ...(reconciled.providerCompletionEventSeq !== undefined
+            ? { providerCompletionEventSeq: reconciled.providerCompletionEventSeq } : {}),
           ...(reconciled.forgeHeadSha ? { forgeHeadSha: reconciled.forgeHeadSha } : {}),
           ...(reconciled.error ? { error: reconciled.error } : {}),
         });

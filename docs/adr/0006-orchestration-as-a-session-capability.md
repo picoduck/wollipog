@@ -119,6 +119,17 @@ does not weaken the existing forge, snapshot,
 policy, ancestry, replay, or authority checks; incomplete, reordered, duplicated, cross-generation,
 or mismatched evidence remains unconsumed.
 
+Protocol v153 removes the remaining process-lifetime dependency from that proof. When the runner
+already durably recorded the exact arm, Guardian receipt, and one successful terminal update for
+the same provider item, reconciliation uses those ordered events directly even if a restarted App
+Server no longer projects the old item from `thread/read`. For legacy CLI admissions that lack
+those runner events, the Codex driver may instead read the exact thread's append-only rollout and
+requires one completed consume call for the occurrence followed by one exact successful command in
+the same turn. Rollout lookup,
+thread identity, admission, command, order, success, and uniqueness all fail closed. Raw transcript
+content remains runner-local; only content-safe item coordinates and the command digest cross the
+runner boundary.
+
 Protocol v143 projects exact human-owned and Orchestrator-owned descendant request counts onto the
 root campaign. Human clients may inspect both groups in the parent request surface; session-scoped
 agent credentials continue to list and resolve only requests assigned to that Orchestrator. A
