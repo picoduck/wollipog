@@ -253,6 +253,7 @@ export class SessionPromptOutbox {
     const baseCommandId = commandId.replace(/(?:\.retry-\d+)+$/u, "");
     const staged = this.db.stageRetriableSessionPromptCommand({
       baseCommandId,
+      dismissCommandId: commandId,
       sessionId,
       runnerId: prior.runnerId,
       payloadJson: prior.payloadJson,
@@ -261,7 +262,6 @@ export class SessionPromptOutbox {
       now,
     });
     if (staged.disposition !== "deliverable") return "not_retryable";
-    this.db.dismissTerminalSessionPromptCommand(sessionId, commandId, now);
     this.hub.sessionChangedById(sessionId);
     if (flush) {
       try {

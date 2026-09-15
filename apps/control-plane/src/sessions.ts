@@ -4267,12 +4267,15 @@ export class SessionsService {
       if (unsupported) return unsupported;
     }
 
+    const pendingInputBarrier = session.status === "input_required" || session.pendingApproval != null;
     const result = this.promptOutbox.retryAuthenticationFailure(sessionId, commandId, now, false);
     if (result === "not_found") return fail("pending prompt not found", 404);
     if (result === "not_retryable") {
       return fail("only authentication-blocked messages with known non-delivery can be retried", 409);
     }
-    this.db.updateSessionStatus(sessionId, "running", now, false, false);
+    if (!pendingInputBarrier && session.status !== "queued" && session.status !== "starting") {
+      this.db.updateSessionStatus(sessionId, "running", now, false, false);
+    }
     try {
       this.promptOutbox.flush(now, session.runnerId);
     } catch (error) {

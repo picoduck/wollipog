@@ -364,6 +364,38 @@ test("a dismissed known-undelivered authentication prompt retries under a fresh 
   }
 });
 
+test("authentication retry identity replacement rolls back atomically when dismissal fails", () => {
+  const { db, outbox } = fixture();
+  try {
+    const command = prompt("retry atomically");
+    const staged = outbox.stage(SESSION_ID, RUNNER_ID, command, NOW);
+    assert.equal(outbox.receipt(RUNNER_ID, {
+      type: "durable_session_command_update",
+      commandId: staged.commandId,
+      sessionId: SESSION_ID,
+      state: "failed",
+      revision: 1,
+      error: "authentication recovery was dismissed; this message was not sent",
+      code: "PROVIDER_AUTHENTICATION_REQUIRED",
+    }, NOW + 1), true);
+    db.raw().exec(`CREATE TRIGGER reject_retry_dismissal
+      BEFORE UPDATE OF dismissed_at ON session_prompt_commands
+      WHEN OLD.command_id='${staged.commandId}'
+      BEGIN SELECT RAISE(ABORT, 'simulated dismissal failure'); END`);
+
+    assert.throws(
+      () => outbox.retryAuthenticationFailure(SESSION_ID, staged.commandId, NOW + 2),
+      /simulated dismissal failure/u,
+    );
+    assert.equal(db.getSessionPromptCommand(`${staged.commandId}.retry-1`), null,
+      "the replacement insert rolls back with its predecessor dismissal");
+    assert.equal(db.getSessionPromptCommand(staged.commandId)?.dismissedAt, undefined);
+    assert.notEqual(db.getSessionPromptCommand(staged.commandId)?.payloadJson, "null");
+  } finally {
+    db.close();
+  }
+});
+
 test("flush fails an unparseable stored durable prompt without sending it", () => {
   const { db, outbox, sent, changed, warnings } = fixture();
   try {

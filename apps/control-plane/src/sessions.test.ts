@@ -7543,6 +7543,31 @@ test("known-undelivered authentication failures expose an explicit durable retry
   assert.deepEqual(replacement.command, sent.command);
   assert.equal(db.getSession(id)?.pendingPrompts?.some((prompt) => prompt.commandId === sent.commandId), false);
   assert.equal(db.getSession(id)?.pendingPrompts?.[0]?.canRetry, undefined);
+
+  assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+    type: "durable_session_command_update",
+    commandId: replacement.commandId,
+    sessionId: id,
+    state: "failed",
+    revision: 2,
+    error: "authentication is still unavailable; this message was not sent",
+    code: "PROVIDER_AUTHENTICATION_REQUIRED",
+  }), true);
+  db.setPendingApproval(id, {
+    requestId: "provider-auth:retry-block",
+    title: "Authentication Required — Claude Code",
+    kind: "authentication",
+    options: [{ optionId: "auth:revalidate", name: "Recheck Authentication", kind: "allow_once" }],
+  });
+  db.updateSessionStatus(id, "input_required", Date.now());
+  hub.sentToRunner.length = 0;
+
+  const retriedWhileBlocked = svc.retryPendingWork(id, replacement.commandId);
+  assert.equal(retriedWhileBlocked.ok, true, retriedWhileBlocked.error);
+  assert.equal(hub.sentOfType("durable_session_command")[0]?.commandId, `${sent.commandId}.retry-2`);
+  assert.equal(db.getSession(id)?.status, "input_required",
+    "retry preserves the authentication barrier instead of claiming the retained prompt is running");
+  assert.equal(db.getSession(id)?.pendingApproval?.requestId, "provider-auth:retry-block");
 });
 
 test("authentication prompt retry refuses a stopped session without replacing retained content", () => {

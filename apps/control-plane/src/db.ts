@@ -15537,6 +15537,9 @@ export class ControlPlaneDb {
    * with a correlated user event is fenced because the provider may already have seen it. */
   stageRetriableSessionPromptCommand(input: {
     baseCommandId: string;
+    /** When supplied, terminalize and scrub this failed predecessor in the same transaction that
+     * publishes its fresh retry identity. */
+    dismissCommandId?: string;
     sessionId: string;
     runnerId: string;
     payloadJson: string;
@@ -15547,6 +15550,16 @@ export class ControlPlaneDb {
     JSON.parse(input.payloadJson);
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const dismissPredecessor = () => {
+        if (!input.dismissCommandId) return;
+        if (this.dismissTerminalSessionPromptCommand(
+          input.sessionId,
+          input.dismissCommandId,
+          input.now,
+        ) !== "dismissed") {
+          throw new Error("retry predecessor changed before its replacement was committed");
+        }
+      };
       const latestRow = this.stmt(
         `SELECT * FROM session_prompt_commands
          WHERE command_id=? OR command_id GLOB ?
@@ -15562,6 +15575,7 @@ export class ControlPlaneDb {
           if (latest.payloadJson !== input.payloadJson || latest.payloadSha256 !== input.payloadSha256) {
             throw new Error("durable command identity is already bound to different content");
           }
+          dismissPredecessor();
           this.db.exec("COMMIT");
           return { command: latest, disposition: "deliverable" };
         }
@@ -15585,6 +15599,7 @@ export class ControlPlaneDb {
         input.now, input.expiresAt, input.now, input.now,
       );
       const command = this.getSessionPromptCommand(commandId)!;
+      dismissPredecessor();
       this.db.exec("COMMIT");
       return { command, disposition: "deliverable" };
     } catch (error) {
