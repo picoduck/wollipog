@@ -14,6 +14,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AgentDriverKind } from "@wollipog/protocol";
+import type { RunnerConfig } from "./config.js";
 import { runContextCommand, type ContextCommandResult } from "./context-command.js";
 import {
   CLAUDE_PENDING_MAX_MS,
@@ -50,6 +51,7 @@ export interface ProviderAuthObservation {
 export interface ProviderAuthIdentityComparison {
   matches: boolean;
   evidenceAvailable: boolean;
+  evidenceGenerationMismatch: boolean;
   differingFields: ProviderAuthIdentityField[];
   expectedMissingFields: ProviderAuthIdentityField[];
   observedMissingFields: ProviderAuthIdentityField[];
@@ -91,12 +93,13 @@ function digest(value: unknown, key?: DigestKey): string {
 function identityEvidence(
   account: Record<ProviderAuthIdentityField, string | null>,
   key?: DigestKey,
+  version: ProviderAuthIdentityEvidence["version"] = 1,
 ): ProviderAuthIdentityEvidence {
   const fields: ProviderAuthIdentityEvidence["fields"] = {};
   for (const field of CLAUDE_ACCOUNT_FIELDS) {
     if (account[field] !== null) fields[field] = digest([field, account[field]], key);
   }
-  return { version: 1, fields };
+  return { version, fields };
 }
 
 export function compareProviderAuthIdentity(
@@ -104,21 +107,44 @@ export function compareProviderAuthIdentity(
   expectedEvidence: ProviderAuthIdentityEvidence | undefined,
   observed: ProviderAuthObservation,
 ): ProviderAuthIdentityComparison {
+  const observedEvidence = observed.identityEvidence;
+  if (expectedEvidence && observedEvidence && expectedEvidence.version !== observedEvidence.version) {
+    // Version 2 changes only the evidence-generation marker. Any equal field digest proves a
+    // forward v1 -> v2 observation kept the same stable HMAC key, after which the ordinary
+    // field-level comparison can distinguish partial observations from real account changes.
+    // Rollbacks and changed-key migrations remain incomparable and fail closed.
+    const sharedDigest = CLAUDE_ACCOUNT_FIELDS.some((field) =>
+      expectedEvidence.fields[field] !== undefined &&
+      expectedEvidence.fields[field] === observedEvidence.fields[field]);
+    const sameAggregate = !!expectedIdentityId && observed.identityId === expectedIdentityId;
+    if (expectedEvidence.version > observedEvidence.version || (!sharedDigest && !sameAggregate)) {
+      return {
+        matches: false,
+        evidenceAvailable: false,
+        evidenceGenerationMismatch: true,
+        differingFields: [],
+        expectedMissingFields: [],
+        observedMissingFields: [],
+        sharedAccountFields: [],
+      };
+    }
+  }
   if (expectedIdentityId && observed.identityId === expectedIdentityId) {
     return {
       matches: true,
       evidenceAvailable: !!expectedEvidence && !!observed.identityEvidence,
+      evidenceGenerationMismatch: false,
       differingFields: [],
       expectedMissingFields: [],
       observedMissingFields: [],
       sharedAccountFields: [],
     };
   }
-  const observedEvidence = observed.identityEvidence;
   if (!expectedEvidence || !observedEvidence) {
     return {
       matches: false,
       evidenceAvailable: false,
+      evidenceGenerationMismatch: false,
       differingFields: [],
       expectedMissingFields: [],
       observedMissingFields: [],
@@ -136,6 +162,7 @@ export function compareProviderAuthIdentity(
   return {
     matches: differingFields.length === 0 && sharedAccountFields.length > 0,
     evidenceAvailable: true,
+    evidenceGenerationMismatch: false,
     differingFields,
     expectedMissingFields,
     observedMissingFields,
@@ -149,10 +176,23 @@ export function mergeProviderAuthIdentityEvidence(
 ): ProviderAuthIdentityEvidence | undefined {
   if (!expected) return observed;
   if (!observed) return expected;
-  return { version: 1, fields: { ...expected.fields, ...observed.fields } };
+  if (expected.version !== observed.version) {
+    const sharedDigest = expected.version < observed.version && CLAUDE_ACCOUNT_FIELDS.some((field) =>
+      expected.fields[field] !== undefined && expected.fields[field] === observed.fields[field]);
+    return sharedDigest
+      ? { version: observed.version, fields: { ...expected.fields, ...observed.fields } }
+      : observed;
+  }
+  return { version: observed.version, fields: { ...expected.fields, ...observed.fields } };
 }
 
 export function describeProviderAuthIdentityMismatch(comparison: ProviderAuthIdentityComparison): string {
+  if (comparison.evidenceGenerationMismatch) {
+    return "The recorded provider identity evidence uses a previous evidence-key generation and cannot be " +
+      "compared with the current authenticated state. Wollipog cannot determine whether the account changed. " +
+      "Choose Use Current Account to accept the current authenticated state for this session, or restore the " +
+      "recorded authentication and choose Recheck Authentication. Credential and account values are redacted.";
+  }
   if (!comparison.evidenceAvailable) {
     return "Wollipog cannot match the current authenticated state to the state recorded for this session " +
       "with the available evidence, so it cannot determine whether the account changed. Choose Use Current Account " +
@@ -243,7 +283,11 @@ export function describeProviderCredentialScope(meta: SessionMeta, digestKey?: D
   };
 }
 
-function claudeObservation(result: ContextCommandResult, digestKey?: DigestKey): ProviderAuthObservation {
+function claudeObservation(
+  result: ContextCommandResult,
+  digestKey?: DigestKey,
+  evidenceVersion: ProviderAuthIdentityEvidence["version"] = 1,
+): ProviderAuthObservation {
   let parsed: Record<string, unknown> | undefined;
   try {
     const value = JSON.parse(result.stdout);
@@ -264,7 +308,7 @@ function claudeObservation(result: ContextCommandResult, digestKey?: DigestKey):
     status: "authenticated",
     ...(hasAccountIdentity ? {
       identityId: digest(account, digestKey),
-      identityEvidence: identityEvidence(account, digestKey),
+      identityEvidence: identityEvidence(account, digestKey, evidenceVersion),
     } : {}),
   };
 }
@@ -281,7 +325,7 @@ function codexIdentity(meta: SessionMeta, digestKey?: DigestKey): string | undef
   return undefined;
 }
 
-export class NativeProviderAuthRecovery implements ProviderAuthRecoveryController {
+class NativeProviderAuthRecovery implements ProviderAuthRecoveryController {
   private readonly spawn: typeof spawnAgent;
   private readonly kill: typeof killTree;
 
@@ -289,6 +333,7 @@ export class NativeProviderAuthRecovery implements ProviderAuthRecoveryControlle
     private readonly injectedRun?: CommandRunner,
     private readonly digestKey?: DigestKey,
     deps: Partial<{ spawn: typeof spawnAgent; kill: typeof killTree }> = {},
+    private readonly evidenceVersion: ProviderAuthIdentityEvidence["version"] = 1,
   ) {
     this.spawn = deps.spawn ?? spawnAgent;
     this.kill = deps.kill ?? killTree;
@@ -380,7 +425,7 @@ export class NativeProviderAuthRecovery implements ProviderAuthRecoveryControlle
     try {
       if (scope.provider === "claude") {
         const result = await this.runExact(meta, meta.command, providerArgs(meta, ["auth", "status"]), 15_000, 64 * 1024);
-        return claudeObservation(result, this.digestKey);
+        return claudeObservation(result, this.digestKey, this.evidenceVersion);
       }
       await this.runExact(meta, meta.command, providerArgs(meta, ["login", "status"]), 15_000, 64 * 1024);
       const identityId = codexIdentity(meta, this.digestKey);
@@ -392,7 +437,9 @@ export class NativeProviderAuthRecovery implements ProviderAuthRecoveryControlle
       // positive provider-native evidence and otherwise remain unknown/fail closed.
       if (scope.provider === "claude" && error && typeof error === "object" && "stdout" in error) {
         const stdout = (error as { stdout?: unknown }).stdout;
-        if (typeof stdout === "string") return claudeObservation({ stdout, stderr: "" }, this.digestKey);
+        if (typeof stdout === "string") {
+          return claudeObservation({ stdout, stderr: "" }, this.digestKey, this.evidenceVersion);
+        }
       }
       return { status: "unknown" };
     }
@@ -413,10 +460,26 @@ export class NativeProviderAuthRecovery implements ProviderAuthRecoveryControlle
  * rotation. Existing evidence produced with the legacy transport-token key intentionally fails
  * comparison once, requiring explicit acceptance before the stable baseline is recorded. */
 export function createRunnerProviderAuthRecovery(
-  dataDir: string,
+  config: Pick<RunnerConfig, "dataDir">,
   injectedRun?: CommandRunner,
-): NativeProviderAuthRecovery {
-  return new NativeProviderAuthRecovery(injectedRun, loadOrCreateProviderAuthEvidenceKey(dataDir));
+): ProviderAuthRecoveryController {
+  return new NativeProviderAuthRecovery(
+    injectedRun,
+    loadOrCreateProviderAuthEvidenceKey(config.dataDir),
+    {},
+    2,
+  );
+}
+
+/** Unit-test seam for exact provider observations. Production assembly cannot import the native
+ * implementation directly and must use createRunnerProviderAuthRecovery with the runner config. */
+export function createTestProviderAuthRecovery(
+  injectedRun?: CommandRunner,
+  digestKey?: DigestKey,
+  deps: Partial<{ spawn: typeof spawnAgent; kill: typeof killTree }> = {},
+  evidenceVersion: ProviderAuthIdentityEvidence["version"] = 1,
+): ProviderAuthRecoveryController {
+  return new NativeProviderAuthRecovery(injectedRun, digestKey, deps, evidenceVersion);
 }
 
 function loadOrCreateProviderAuthEvidenceKey(dataDir: string): Buffer {

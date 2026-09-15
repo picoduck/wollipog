@@ -8,9 +8,9 @@ import { test } from "node:test";
 import {
   compareProviderAuthIdentity,
   createRunnerProviderAuthRecovery,
+  createTestProviderAuthRecovery,
   describeProviderAuthIdentityMismatch,
   mergeProviderAuthIdentityEvidence,
-  NativeProviderAuthRecovery,
   describeProviderCredentialScope,
 } from "./provider-auth-recovery.js";
 import { writeRunnerCredentialFile } from "./runner-credential-file.js";
@@ -76,7 +76,7 @@ test("credential scope unifies Codex transports but separates install, distro, a
 });
 
 test("Claude status derives only an opaque account identity and never returns provider output", async () => {
-  const controller = new NativeProviderAuthRecovery(async (_context, command, args, options) => {
+  const controller = createTestProviderAuthRecovery(async (_context, command, args, options) => {
     assert.equal(command, "claude");
     assert.deepEqual(args, ["auth", "status"]);
     assert.notEqual(options.cwd, "/repo", "auth probes use a stable credential context, not a worktree");
@@ -114,21 +114,107 @@ test("runner auth evidence survives transport credential rotation and controller
   const evidenceKeyFile = join(dir, "credentials", "provider-auth-evidence-hmac.key");
   try {
     writeRunnerCredentialFile(dir, "transport-token-before-rotation");
-    const legacyRecorded = await new NativeProviderAuthRecovery(
+    const legacyRecorded = await createTestProviderAuthRecovery(
       run,
       "transport-token-before-rotation",
     ).revalidate(session);
-    const initialController = createRunnerProviderAuthRecovery(dir, run);
+    const config = { dataDir: dir, token: "transport-token-before-rotation" };
+    const initialController = createRunnerProviderAuthRecovery(config, run);
     const recordedScope = initialController.describe(session);
     const recorded = await initialController.revalidate(session);
+    assert.equal(legacyRecorded.identityEvidence?.version, 1);
+    assert.equal(recorded.identityEvidence?.version, 2);
+    const migration = compareProviderAuthIdentity(
+      legacyRecorded.identityId,
+      legacyRecorded.identityEvidence,
+      recorded,
+    );
+    assert.equal(migration.matches, false,
+      "legacy transport-keyed evidence must fail closed until the current account is accepted");
+    assert.equal(migration.evidenceGenerationMismatch, true);
+    assert.deepEqual(migration.differingFields, []);
+    assert.match(describeProviderAuthIdentityMismatch(migration), /previous evidence-key generation/iu);
+    assert.doesNotMatch(describeProviderAuthIdentityMismatch(migration), /email differed/iu);
+
+    const stableKey = await readFile(evidenceKeyFile);
+    const priorStable = await createTestProviderAuthRecovery(
+      async () => ({
+        stdout: JSON.stringify({
+          loggedIn: true,
+          email: "stable@example.test",
+          orgId: "stable-org",
+          authMethod: "claude.ai",
+          apiProvider: "firstParty",
+        }),
+        stderr: "",
+      }),
+      stableKey,
+    ).revalidate(session);
     assert.equal(
-      compareProviderAuthIdentity(legacyRecorded.identityId, legacyRecorded.identityEvidence, recorded).matches,
-      false,
-      "legacy transport-keyed evidence must fail closed until the current account is accepted",
+      compareProviderAuthIdentity(priorStable.identityId, priorStable.identityEvidence, recorded).matches,
+      true,
+      "an exact stable-key v1 identity upgrades to v2 without another account prompt",
+    );
+    const partialStable = await createTestProviderAuthRecovery(
+      async () => ({
+        stdout: JSON.stringify({
+          loggedIn: true,
+          email: "stable@example.test",
+          orgId: null,
+          authMethod: null,
+          apiProvider: null,
+        }),
+        stderr: "",
+      }),
+      stableKey,
+      {},
+      2,
+    ).revalidate(session);
+    const partialUpgrade = compareProviderAuthIdentity(
+      priorStable.identityId,
+      priorStable.identityEvidence,
+      partialStable,
+    );
+    assert.equal(partialUpgrade.matches, true,
+      "a partial v2 observation can prove a stable-key v1 identity from a shared account anchor");
+    assert.equal(partialUpgrade.evidenceGenerationMismatch, false);
+    assert.deepEqual(
+      mergeProviderAuthIdentityEvidence(priorStable.identityEvidence, partialStable.identityEvidence),
+      { version: 2, fields: priorStable.identityEvidence?.fields },
+      "the upgrade retains previously observed fields while adopting the current generation",
     );
 
+    const changedAcrossUpgrade = await createTestProviderAuthRecovery(
+      async () => ({
+        stdout: JSON.stringify({
+          loggedIn: true,
+          email: "changed@example.test",
+          orgId: "stable-org",
+          authMethod: "claude.ai",
+          apiProvider: "firstParty",
+        }),
+        stderr: "",
+      }),
+      stableKey,
+      {},
+      2,
+    ).revalidate(session);
+    const changedUpgrade = compareProviderAuthIdentity(
+      priorStable.identityId,
+      priorStable.identityEvidence,
+      changedAcrossUpgrade,
+    );
+    assert.equal(changedUpgrade.matches, false);
+    assert.equal(changedUpgrade.evidenceGenerationMismatch, false);
+    assert.deepEqual(changedUpgrade.differingFields, ["email"]);
+    assert.match(describeProviderAuthIdentityMismatch(changedUpgrade), /email differed/iu);
+    const rollback = compareProviderAuthIdentity(recorded.identityId, recorded.identityEvidence, priorStable);
+    assert.equal(rollback.matches, false, "rolling v2 evidence back to v1 must fail closed");
+    assert.equal(rollback.evidenceGenerationMismatch, true);
+
     writeRunnerCredentialFile(dir, "transport-token-after-rotation");
-    const reconstructed = createRunnerProviderAuthRecovery(dir, run);
+    config.token = "transport-token-after-rotation";
+    const reconstructed = createRunnerProviderAuthRecovery(config, run);
     assert.equal(reconstructed.describe(session)?.id, recordedScope?.id);
     const unchanged = await reconstructed.revalidate(session);
     assert.equal(
@@ -147,7 +233,7 @@ test("runner auth evidence survives transport credential rotation and controller
     if (process.platform !== "win32") assert.equal((await stat(evidenceKeyFile)).mode & 0o777, 0o600);
     await writeFile(evidenceKeyFile, "malformed");
     assert.throws(
-      () => createRunnerProviderAuthRecovery(dir, run),
+      () => createRunnerProviderAuthRecovery(config, run),
       /provider authentication evidence key is malformed/,
       "a damaged key must fail closed instead of silently rotating every persisted digest",
     );
@@ -162,7 +248,7 @@ test("partial Claude account observations compare by shared redacted fields with
     { loggedIn: true, email: "private@example.test", authMethod: "claude.ai", apiProvider: "firstParty" },
     { loggedIn: true, email: "other@example.test", authMethod: "claude.ai", apiProvider: "firstParty" },
   ];
-  const controller = new NativeProviderAuthRecovery(async () => ({
+  const controller = createTestProviderAuthRecovery(async () => ({
     stdout: JSON.stringify(results.shift()),
     stderr: "",
   }), "runner-local-hmac-key");
@@ -200,6 +286,7 @@ test("evidence-free mismatch guidance explains uncertainty and names available r
   const guidance = describeProviderAuthIdentityMismatch({
     matches: false,
     evidenceAvailable: false,
+    evidenceGenerationMismatch: false,
     differingFields: [],
     expectedMissingFields: [],
     observedMissingFields: [],
@@ -252,7 +339,7 @@ test("production auth probe spawn scrubs daemon-only credentials", async () => {
       "process.stdout.write(JSON.stringify({ loggedIn, email: loggedIn ? 'account@example.test' : null }));",
     ].join("\n"), { mode: 0o600 });
     process.env.ANTHROPIC_API_KEY = "daemon-only-secret";
-    const controller = new NativeProviderAuthRecovery(undefined, "runner-local-hmac-key");
+    const controller = createTestProviderAuthRecovery(undefined, "runner-local-hmac-key");
     const observation = await controller.revalidate(meta({
       driver: "claude-code",
       command: process.execPath,
@@ -269,7 +356,7 @@ test("production auth probe spawn scrubs daemon-only credentials", async () => {
 
 test("provider auth probe drains the final status payload after process exit", async () => {
   const child = fakeAgentProcess();
-  const controller = new NativeProviderAuthRecovery(undefined, "runner-local-hmac-key", {
+  const controller = createTestProviderAuthRecovery(undefined, "runner-local-hmac-key", {
     spawn: () => child,
     kill: () => {},
   });
@@ -285,16 +372,16 @@ test("provider auth probe drains the final status payload after process exit", a
 });
 
 test("only structured provider denial is unauthenticated while exit and context failures remain unknown", async () => {
-  const denied = new NativeProviderAuthRecovery(async () => {
+  const denied = createTestProviderAuthRecovery(async () => {
     throw Object.assign(new Error("logged out"), {
       code: 1,
       stdout: JSON.stringify({ loggedIn: false }),
     });
   });
-  const unsupported = new NativeProviderAuthRecovery(async () => {
+  const unsupported = createTestProviderAuthRecovery(async () => {
     throw Object.assign(new Error("unsupported auth status"), { code: 1, stdout: "usage: claude" });
   });
-  const unavailable = new NativeProviderAuthRecovery(async () => {
+  const unavailable = createTestProviderAuthRecovery(async () => {
     throw Object.assign(new Error("spawn failed with sensitive diagnostics"), { code: "ENOENT" });
   });
   assert.equal((await denied.revalidate(meta({ driver: "claude-code", command: "claude" }))).status, "unauthenticated");
