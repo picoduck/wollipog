@@ -497,20 +497,24 @@ test("the projection-count encoding fences every prior one-policy wire generatio
     const current = store.snapshots(CURRENT_PEER)[0]!;
 
     // Before v130 the one-policy encoding at local epoch zero was 1 for v86 and 0 for every
-    // v87+ peer. The reserved offset makes every new projection larger, so every control plane
-    // resyncs when the runner upgrades even if its negotiated protocol changes at the same time.
+    // v87+ peer. Before v148 the three-variant encoding used offset 2. The advanced offset makes
+    // every current projection larger than either predecessor at the same local epoch, so every
+    // control plane resyncs when the runner upgrades even if its protocol changes at the same time.
     assert.notEqual(legacy.historyEpoch, 1);
     assert.notEqual(intermediate.historyEpoch, 0);
-    assert.equal(legacy.historyEpoch, 5);
-    assert.equal(intermediate.historyEpoch, 4);
-    assert.equal(recent.historyEpoch, 3);
+    assert.equal(legacy.historyEpoch, 8);
+    assert.equal(intermediate.historyEpoch, 7);
+    assert.equal(recent.historyEpoch, 6);
 
-    assert.equal(current.historyEpoch, 2);
+    assert.equal(current.historyEpoch, 5);
     for (let localEpoch = 0; localEpoch < 8; localEpoch++) {
       const retiredFormatMaximum = localEpoch * 2 + 1;
+      const precedingFormatMaximum = 2 + localEpoch * 3 + 2;
       for (const peer of [86, 129, 147, CURRENT_PEER]) {
         assert.ok(store.projectedHistoryEpoch(localEpoch, peer) > retiredFormatMaximum,
           `v${peer} local epoch ${localEpoch} sorts above the retired encoding`);
+        assert.ok(store.projectedHistoryEpoch(localEpoch, peer) > precedingFormatMaximum,
+          `v${peer} local epoch ${localEpoch} sorts above the preceding three-variant encoding`);
       }
     }
 

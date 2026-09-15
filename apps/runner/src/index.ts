@@ -1327,7 +1327,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           sessionId: msg.sessionId,
           auditId: recorded.auditId,
           accepted: recorded.accepted,
-          ...(recorded.eventSeq !== undefined ? { eventSeq: recorded.eventSeq } : {}),
+          ...(recorded.eventSeq !== undefined
+            ? { eventSeq: store.projectedEventSeq(msg.sessionId, recorded.eventSeq, controlPlaneProtocolVersion) }
+            : {}),
           ...(recorded.error ? { error: recorded.error } : {}),
         });
       })());
@@ -1351,7 +1353,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           ...(recorded.historyEpoch !== undefined
             ? { historyEpoch: store.projectedHistoryEpoch(recorded.historyEpoch, controlPlaneProtocolVersion) }
             : {}),
-          ...(recorded.eventSeq !== undefined ? { eventSeq: recorded.eventSeq } : {}),
+          ...(recorded.eventSeq !== undefined
+            ? { eventSeq: store.projectedEventSeq(msg.sessionId, recorded.eventSeq, controlPlaneProtocolVersion) }
+            : {}),
           ...(recorded.error ? { error: recorded.error } : {}),
         });
       }));

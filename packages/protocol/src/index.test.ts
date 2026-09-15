@@ -943,7 +943,7 @@ test("additive session-event kinds use explicit older-peer policies without muta
   assert.equal(sessionEventWireProjectionVariant(87), 2);
   assert.equal(sessionEventWireProjectionVariant(130), 1);
   assert.equal(sessionEventWireProjectionVariant(148), 0);
-  assert.equal(SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET, 2);
+  assert.equal(SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET, 5);
 
   const required = { kind: "error", message: "still required" } as const;
   assert.equal(projectSessionEventPayloadForProtocol(required, 1), required,

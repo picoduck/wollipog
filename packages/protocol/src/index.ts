@@ -798,9 +798,11 @@ export function providerAuthenticationReceiptCode(
  * Additive event kinds that older peers must not receive.
  *
  * Adding an entry changes the projected-history-epoch encoding (`localEpoch * VARIANTS + variant`).
- * Protocol v130 therefore reserves an offset before the projection-count encoding. For the same or any
- * later local epoch, every new-format value sorts above both values the one-policy format could
- * have published, forcing a resync before a cached sequence number can name a different event.
+ * Protocol v130 introduced offset 2 to fence the retired two-way encoding. Every later radix
+ * change must advance the offset by the prior radix before adding the new variant; v148 therefore
+ * uses 5 (= 2 + 3). For the same or any later local epoch, every new-format value then sorts above
+ * every value the preceding format could publish, forcing a resync before a cached sequence number
+ * can name a different event.
  *
  * Prefer carrying additive state on the session snapshot, which is version-gated per field and
  * needs no sequence space at all.
@@ -838,8 +840,8 @@ export function sessionEventWireProjectionVariant(
 export const SESSION_EVENT_WIRE_PROJECTION_VARIANTS =
   Object.keys(SESSION_EVENT_WIRE_POLICIES).length + 1;
 
-/** Numeric fence between the retired two-way encoding and the v130 projection-count encoding. */
-export const SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET = 2;
+/** Numeric fence advanced at each projection-radix change; v148 follows v130's offset 2 + radix 3. */
+export const SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET = 5;
 
 /** Whether this peer needs any explicit additive session-event compatibility projection.
  * Keeping policy inspection beside the policy table avoids callers probing it with a fabricated
