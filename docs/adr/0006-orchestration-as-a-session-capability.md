@@ -103,7 +103,8 @@ replaying it. A resumed App Server thread must prove one exact completed Wollipo
 by one exact successful provider command in the same turn, and the forge must prove that the
 approved head merged. The original occurrence is then consumed atomically with a content-safe
 receipt. Missing, duplicate, failed, stale, mismatched, or mixed-version evidence fails closed and
-leaves the occurrence unconsumed.
+leaves the occurrence unconsumed. Missing provider proof, failed execution, forge mismatch, and
+mixed-version peers remain retryable; stale governance or resource evidence revokes the approval.
 
 Protocol v143 projects exact human-owned and Orchestrator-owned descendant request counts onto the
 root campaign. Human clients may inspect both groups in the parent request surface; session-scoped

@@ -1184,6 +1184,11 @@ app.register(async (instance) => {
           app.log.warn(`runner ${runnerId} sent an unsolicited workflow action admission receipt`);
         }
         break;
+      case "workflow_action_reconciliation_result":
+        if (runnerId && !hub.resolveRunnerRequest(msg, runnerId)) {
+          app.log.warn(`runner ${runnerId} sent an unsolicited workflow action reconciliation receipt`);
+        }
+        break;
       case "agent_control_credential":
         {
           const accepted = db.setAgentControlCredential(msg.sessionId, runnerId!, msg.tokenHash, Date.now());

@@ -211,8 +211,8 @@ the unchanged resource snapshot. Full provider history proves the exact successf
 its exact completed Wollipog admission call in the same turn, and the forge proves the approved
 merged head. Only then does the control plane consume the original occurrence with
 a content-safe audit receipt. Reconciliation never executes the command, and unavailable history,
-duplicate commands, failed execution, stale policy or ancestry, changed evidence, forge mismatch,
-or mixed-version peers leave the occurrence approved and unconsumed.
+duplicate commands, failed execution, forge mismatch, or mixed-version peers leave the occurrence
+approved and retryable. Stale policy, ancestry, authority, or resource evidence revokes it.
 
 The control plane owns this lifecycle. A generic question answer or provider permission response
 cannot satisfy a typed workflow decision. Authentication, identity, governance-policy changes,
