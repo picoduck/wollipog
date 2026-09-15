@@ -10373,7 +10373,8 @@ export class ControlPlaneDb {
   ): SubscriptionUsageSnapshot {
     if (snapshot.state !== "unavailable" || snapshot.buckets.length > 0 ||
         !Array.isArray(prior?.buckets) || prior.buckets.length === 0 ||
-        prior.provider !== snapshot.provider || prior.agentId !== snapshot.agentId) {
+        prior.provider !== snapshot.provider || prior.agentId !== snapshot.agentId ||
+        prior.accountLabel !== snapshot.accountLabel) {
       return snapshot;
     }
     return {

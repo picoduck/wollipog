@@ -149,6 +149,44 @@ test("account labels remain isolated by runner and switch atomically with availa
   db.close();
 });
 
+test("an unavailable account transition never retains another account's last-known usage", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const now = 1_000_000;
+  db.registerRunner(meta("runner-1"), now, PROTOCOL_VERSION, {
+    organizationId: "org_personal", owner: { kind: "user", userId: "alice" },
+  });
+  const prior = { ...snapshot("runner-1", now), accountLabel: "first@example.com" };
+  db.upsertSubscriptionUsageSnapshot(prior, now);
+
+  db.upsertSubscriptionUsageSnapshot({
+    ...prior,
+    state: "unavailable",
+    fetchedAt: now + 1,
+    buckets: [],
+    accountLabel: "second@example.com",
+    detail: "Usage for the new account is not available yet.",
+  }, now + 1);
+  let current = db.subscriptionUsageForPrincipal(human(), now + 1).sources[0]!;
+  assert.equal(current.accountLabel, "second@example.com");
+  assert.equal(current.state, "unavailable");
+  assert.deepEqual(current.buckets, []);
+
+  db.upsertSubscriptionUsageSnapshot(prior, now + 2);
+  const { accountLabel: _accountLabel, ...unlabeledPrior } = prior;
+  db.upsertSubscriptionUsageSnapshot({
+    ...unlabeledPrior,
+    state: "unavailable",
+    fetchedAt: now + 3,
+    buckets: [],
+    detail: "The active account has no display label.",
+  }, now + 3);
+  current = db.subscriptionUsageForPrincipal(human(), now + 3).sources[0]!;
+  assert.equal(current.accountLabel, undefined);
+  assert.equal(current.state, "unavailable");
+  assert.deepEqual(current.buckets, []);
+  db.close();
+});
+
 test("principal projection preserves stale last-known data and synthesizes mixed-version support", () => {
   const db = ControlPlaneDb.open(":memory:");
   const now = 20 * 60_000;
