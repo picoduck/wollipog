@@ -1331,15 +1331,69 @@ test("approved durable authentication recovery waits for command redelivery afte
     }
     assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock?.resolution, "approved");
     assert.deepEqual(h.prompts, [], "approval cannot bypass the missing durable journal handle");
+    const waiting = h.store.readMeta("resume-session")!;
+    assert.equal(waiting.status, "input_required");
+    assert.equal(waiting.pendingApproval?.title, "Authentication Restored — Retained Messages Waiting");
+    assert.deepEqual(waiting.pendingApproval?.options.map((option) => option.name), ["Dismiss Retained Messages"]);
 
     assert.equal(replacement.prompt("resume-session", "plain prompt during recovery"), false);
     const recoveryGuidance = h.store.readEvents("resume-session").map((event) => event.payload)
       .filter((payload) => payload.kind === "stderr").at(-1);
     assert.ok(recoveryGuidance?.kind === "stderr");
     assert.match(recoveryGuidance.text, /message was not submitted/iu);
+    assert.match(recoveryGuidance.text, /Dismiss Retained Messages/iu);
     assert.doesNotMatch(recoveryGuidance.text, /message is queued/iu,
       "non-durable work must never be described as retained while durable identities recover");
     assert.deepEqual(h.prompts, []);
+    const recoveryRequestId = waiting.pendingApproval!.requestId;
+    const recoveryRequestCount = () => h.store.readEvents("resume-session").filter((event) =>
+      event.payload.kind === "permission_request" && event.payload.requestId === recoveryRequestId).length;
+    assert.equal(recoveryRequestCount(), 1);
+
+    replacement.shutdownAll();
+    replacement = new SessionManager(
+      (message) => h.sent.push(message), () => {}, h.store, "runner-restarted-again", undefined,
+      h.factory, undefined, 4, (agentId, update) => h.authStatuses.push([agentId, update]),
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, [],
+      undefined, undefined, undefined, undefined, undefined, undefined, controller,
+    );
+    replacement.reconcileStore();
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval?.requestId, recoveryRequestId);
+    assert.equal(h.store.readMeta("resume-session")?.status, "input_required");
+    assert.equal(recoveryRequestCount(), 1, "restart reconstruction must not append a duplicate request event");
+
+    h.store.create(stored(h.root, {
+      sessionId: "recovered-sibling",
+      driver: "claude-code",
+      command: "claude",
+      agentId: "claude-native",
+      providerCredentialIdentityId: "account-a",
+    }));
+    const sibling = h.store.readMeta("recovered-sibling")!;
+    (replacement as any).parkProviderAuthentication(
+      sibling,
+      controller.describe(sibling)!,
+      "turn",
+      "uncertain",
+    );
+    const siblingRequest = h.store.readMeta("recovered-sibling")!.pendingApproval!;
+    assert.equal(siblingRequest.kind, "authentication");
+    replacement.resolvePermission("recovered-sibling", siblingRequest.requestId, "auth:revalidate");
+    for (let index = 0; index < 12 && h.store.readMeta("recovered-sibling")?.providerAuthBlock; index += 1) {
+      await tick();
+    }
+    assert.equal(h.store.readMeta("recovered-sibling")?.providerAuthBlock, undefined);
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval?.requestId, recoveryRequestId,
+      "a sibling recovery must preserve the approved retained-message projection");
+    assert.equal(recoveryRequestCount(), 1,
+      "a sibling recovery must not emit the approved session's request a second time");
+    assert.equal(replacement.prompt(
+      "resume-session", "retained while recovery is visible", [], undefined, undefined,
+      recovered("durable-restart-4"),
+    ), true);
+    assert.match(h.store.readMeta("resume-session")?.pendingApproval?.context?.input ?? "", /4 retained messages/iu,
+      "the stable request projection refreshes its count without another transcript event");
+    assert.equal(recoveryRequestCount(), 1);
 
     assert.equal(replacement.prompt(
       "resume-session",
@@ -1358,16 +1412,164 @@ test("approved durable authentication recovery waits for command redelivery afte
       undefined,
       recovered("durable-restart-1"),
     ), true);
-    for (let index = 0; index < 60 && transitions.filter(([, state]) => state === "completed").length < 3; index += 1) {
+    assert.deepEqual(h.prompts, [], "the recovered prefix still waits for a later retained handle");
+    assert.equal(replacement.prompt(
+      "resume-session",
+      "submitted after restart",
+      [],
+      undefined,
+      undefined,
+      recovered("durable-restart-3"),
+    ), true);
+    for (let index = 0; index < 60 && transitions.filter(([, state]) => state === "completed").length < 4; index += 1) {
       await shortDelay();
     }
-    assert.deepEqual(h.prompts, ["retained first", "retained second", "submitted after restart"]);
+    assert.deepEqual(h.prompts, [
+      "retained first", "retained second", "submitted after restart", "retained while recovery is visible",
+    ]);
     assert.deepEqual(
       transitions.filter(([, state]) => state === "started").map(([id]) => id),
-      ["durable-restart-1", "durable-restart-2", "durable-restart-3"],
+      ["durable-restart-1", "durable-restart-2", "durable-restart-3", "durable-restart-4"],
     );
     assert.equal(transitions.some(([, state]) => state.startsWith("failed:") || state.startsWith("uncertain:")), false);
     assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
+    assert.equal(recoveryRequestCount(), 1);
+    assert.equal(h.store.readEvents("resume-session").filter((event) =>
+      event.payload.kind === "permission_resolved" && event.payload.requestId === recoveryRequestId).length, 1);
+  } finally {
+    replacement?.shutdownAll();
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("startup publishes one retained-message request for a pre-projection approved block", async () => {
+  const h = harness({
+    driver: "claude-code",
+    command: "claude",
+    agentId: "claude-native",
+    status: "idle",
+    providerCredentialScopeId: "scope-a",
+    providerCredentialIdentityId: "account-a",
+    providerAuthBlock: {
+      version: 1,
+      recoveryId: "legacy-approved",
+      credentialScopeId: "scope-a",
+      detectedAt: 1,
+      phase: "turn",
+      delivery: "not_delivered",
+      canStartLogin: false,
+      configuredCredential: false,
+      expectedIdentityId: "account-a",
+      durableRetries: [{
+        commandId: "legacy-retained-command",
+        ordinal: 1,
+        text: "retained before the projection existed",
+        images: [],
+      }],
+      resolution: "approved",
+    },
+    pendingApproval: null,
+  });
+  try {
+    const requestId = "provider-auth:legacy-approved:retained-messages";
+    const requestCount = () => h.store.readEvents("resume-session").filter((event) =>
+      event.payload.kind === "permission_request" && event.payload.requestId === requestId).length;
+    h.manager.reconcileStore();
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval?.requestId, requestId);
+    assert.equal(h.store.readMeta("resume-session")?.status, "input_required",
+      "emitting the upgrade request accrues its attention status");
+    assert.equal(requestCount(), 1);
+    h.manager.reconcileStore();
+    assert.equal(requestCount(), 1, "subsequent restarts must not duplicate the upgrade request");
+
+    h.store.appendEvent("resume-session", {
+      kind: "permission_resolved",
+      requestId,
+      optionId: "auth:automatic-retry",
+    });
+    const resolutionCount = () => h.store.readEvents("resume-session").filter((event) =>
+      event.payload.kind === "permission_resolved" && event.payload.requestId === requestId).length;
+    assert.equal(resolutionCount(), 1);
+    const recovered: DurableCommandLifecycle = {
+      commandId: "legacy-retained-command",
+      queued: () => {},
+      started: () => {},
+      completed: () => {},
+      failed: () => {},
+      uncertain: () => {},
+    };
+    (h.manager as any).providerAuthDurables.set(recovered.commandId, recovered);
+    (h.manager as any).settleResolvedProviderAuthentication("resume-session");
+    for (let index = 0; index < 8 && h.store.readMeta("resume-session")?.providerAuthBlock; index += 1) await tick();
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    assert.equal(resolutionCount(), 1,
+      "a restart after the durable resolution event must not append that resolution again");
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("approved durable authentication recovery can dismiss a missing terminal handle without replay", async () => {
+  const observations = [
+    { status: "unauthenticated" as const },
+    { status: "authenticated" as const, identityId: "account-a" },
+  ];
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "scope-a", provider: "claude", canStartLogin: false, configuredCredential: false }),
+    revalidate: async () => observations.shift() ?? { status: "authenticated", identityId: "account-a" },
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  const h = harness({
+    driver: "claude-code", command: "claude", agentId: "claude-native",
+    providerCredentialIdentityId: "account-a",
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  const original: DurableCommandLifecycle = {
+    commandId: "durable-terminal-before-redelivery",
+    queued: () => {}, started: () => {}, completed: () => {}, failed: () => {}, uncertain: () => {},
+  };
+  let replacement: SessionManager | undefined;
+  const failures: string[] = [];
+  try {
+    h.manager.prompt("resume-session", "retained before restart", [], undefined, undefined, original);
+    for (let index = 0; index < 8 && !h.store.readMeta("resume-session")?.providerAuthBlock; index += 1) await tick();
+    const authRequestId = h.store.readMeta("resume-session")!.pendingApproval!.requestId;
+    h.manager.shutdownAll();
+    replacement = new SessionManager(
+      (message) => h.sent.push(message), () => {}, h.store, "runner-restarted", undefined,
+      h.factory, undefined, 4, (agentId, update) => h.authStatuses.push([agentId, update]),
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, [],
+      undefined, undefined, undefined, undefined, undefined, undefined, controller,
+    );
+    replacement.reconcileStore();
+    replacement.resolvePermission("resume-session", authRequestId, "auth:revalidate");
+    for (let index = 0; index < 8 && h.store.readMeta("resume-session")?.providerAuthBlock?.resolution !== "approved"; index += 1) {
+      await tick();
+    }
+    const recoveryRequest = h.store.readMeta("resume-session")!.pendingApproval!;
+    assert.equal(recoveryRequest.title, "Authentication Restored — Retained Messages Waiting");
+
+    replacement.resolvePermission("resume-session", recoveryRequest.requestId, "auth:dismiss");
+    for (let index = 0; index < 8 && h.store.readMeta("resume-session")?.providerAuthBlock; index += 1) await tick();
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    assert.equal(h.store.readMeta("resume-session")?.status, "idle");
+
+    const redelivered: DurableCommandLifecycle = {
+      commandId: original.commandId,
+      queued: () => {},
+      started: () => assert.fail("dismissed terminal work cannot start"),
+      completed: () => assert.fail("dismissed terminal work cannot complete"),
+      failed: (error) => failures.push(error),
+      uncertain: () => assert.fail("known non-delivery cannot become uncertain"),
+    };
+    assert.equal(replacement.prompt(
+      "resume-session", "retained before restart", [], undefined, undefined, redelivered,
+    ), false);
+    assert.match(failures[0] ?? "", /not sent/iu);
+    assert.deepEqual(h.prompts, []);
   } finally {
     replacement?.shutdownAll();
     h.manager.shutdownAll();

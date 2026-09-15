@@ -271,7 +271,7 @@ function offlinePolicySession(requestId: string, withContext: boolean): SessionV
   } as SessionView;
 }
 
-function authenticationSession(): SessionView {
+function authenticationSession(title = "Authentication Required — Claude Code"): SessionView {
   return {
     id: "session-1",
     runnerId: "runner-1",
@@ -280,14 +280,14 @@ function authenticationSession(): SessionView {
     pendingApproval: {
       kind: "authentication",
       requestId: "provider-auth:test",
-      title: "Authentication Required — Claude Code",
+      title,
       options: [],
       context: { toolName: "Claude Code", input: "Run `claude` in this exact context." },
     },
   } as unknown as SessionView;
 }
 
-test("provider authentication card uses the visible Authentication Required accessible name", async () => {
+test("provider authentication card uses its visible title as the accessible name", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
@@ -301,7 +301,7 @@ test("provider authentication card uses the visible Authentication Required acce
       />,
     );
   });
-  const card = container.querySelector<HTMLElement>('[aria-label="Authentication Required"]');
+  const card = container.querySelector<HTMLElement>('[aria-label="Authentication Required — Claude Code"]');
   assert.ok(card);
   assert.match(card.textContent ?? "", /Authentication Required — Claude Code/);
   assert.deepEqual(
@@ -309,6 +309,28 @@ test("provider authentication card uses the visible Authentication Required acce
     ["Hide Details"],
     "terminal login guidance offers context details but no fake provider approval action",
   );
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("restored authentication recovery card uses its visible title as the accessible name", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const title = "Authentication Restored — Retained Messages Waiting";
+  await act(async () => {
+    root.render(
+      <SessionApprovalRegion
+        session={authenticationSession(title)}
+        runnerOnline
+        fallbackFocusRef={{ current: null }}
+      />,
+    );
+  });
+  const card = container.querySelector<HTMLElement>(`[aria-label="${title}"]`);
+  assert.ok(card);
+  assert.match(card.textContent ?? "", new RegExp(title));
   await act(async () => { root.unmount(); });
   container.remove();
 });

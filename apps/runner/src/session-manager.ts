@@ -3659,15 +3659,34 @@ export class SessionManager {
         const block = reconciled.providerAuthBlock.loginOperationId
           ? { ...reconciled.providerAuthBlock, loginOperationId: undefined }
           : reconciled.providerAuthBlock;
-        const projection = !block.resolution &&
-          this.providerAuthenticationOwner(block.credentialScopeId)?.sessionId === m.sessionId
-          ? this.providerAuthenticationProjection(reconciled, block)
-          : null;
-        this.store.patchMeta(m.sessionId, {
-          providerAuthBlock: block,
-          status: projection ? "input_required" : "idle",
-          pendingApproval: projection,
-        });
+        const projection = block.resolution
+          ? this.providerAuthenticationRecoveryProjection(reconciled, block)
+          : this.providerAuthenticationOwner(block.credentialScopeId)?.sessionId === m.sessionId
+            ? this.providerAuthenticationProjection(reconciled, block)
+            : null;
+        const missingRecoveryRequest = !!block.resolution && !!projection &&
+          !this.store.readEvents(m.sessionId).some((event) =>
+            event.payload.kind === "permission_request" && event.payload.requestId === projection.requestId);
+        if (missingRecoveryRequest) {
+          // Older runners could persist an approved block while durable handles were still absent,
+          // before the retained-message request existed. Publish that request exactly once on
+          // upgrade so its later resolution never appears orphaned in the transcript.
+          this.store.patchMeta(m.sessionId, { providerAuthBlock: block });
+          this.emitEvent(m.sessionId, {
+            kind: "permission_request",
+            requestId: projection.requestId,
+            title: projection.title,
+            options: projection.options,
+            purpose: "authentication",
+            context: projection.context,
+          });
+        } else {
+          this.store.patchMeta(m.sessionId, {
+            providerAuthBlock: block,
+            status: projection ? "input_required" : "idle",
+            pendingApproval: projection,
+          });
+        }
       } else if (terminal) {
         if (reconciled.pendingApproval) this.store.patchMeta(m.sessionId, { pendingApproval: null });
       } else if (pendingRequests(reconciled.pendingApproval).some((request) => request.ownerToolUseId)) {
@@ -13378,10 +13397,25 @@ export class SessionManager {
     if (!meta || !block?.resolution) return;
     const durableRetries = block.durableRetries ?? [];
     if (durableRetries.some((retry) => !this.providerAuthDurables.has(retry.commandId))) {
+      const projection = this.providerAuthenticationRecoveryProjection(meta, block);
+      if (meta.pendingApproval?.requestId !== projection.requestId) {
+        this.emitEvent(meta.sessionId, {
+          kind: "permission_request",
+          requestId: projection.requestId,
+          title: projection.title,
+          options: projection.options,
+          purpose: "authentication",
+          context: projection.context,
+        });
+      } else {
+        // The request identity is stable across the wait, but newly retained durable work changes
+        // its count. Refresh the live projection without appending a duplicate transcript event.
+        this.store.patchMeta(meta.sessionId, { pendingApproval: projection });
+      }
       this.emitStatus(
         sessionId,
-        "idle",
-        "Authentication was restored; recovering retained messages from durable storage",
+        "input_required",
+        "Authentication was restored; retained messages are still being recovered",
       );
       return;
     }
@@ -13394,6 +13428,16 @@ export class SessionManager {
         durable: this.providerAuthDurables.get(retry.commandId)!,
       })),
     ].sort((left, right) => (left.ordinal ?? 0) - (right.ordinal ?? 0));
+    const recoveryRequestId = providerAuthenticationRecoveryRequestId(block);
+    const recoveryAlreadyResolved = this.store.readEvents(sessionId).some((event) =>
+      event.payload.kind === "permission_resolved" && event.payload.requestId === recoveryRequestId);
+    if (meta.pendingApproval?.requestId === recoveryRequestId && !recoveryAlreadyResolved) {
+      this.emitEvent(meta.sessionId, {
+        kind: "permission_resolved",
+        requestId: recoveryRequestId,
+        optionId: "auth:automatic-retry",
+      });
+    }
     this.store.patchMeta(sessionId, {
       providerAuthBlock: undefined,
       pendingApproval: null,
@@ -13450,7 +13494,7 @@ export class SessionManager {
   private blockedPromptAuthenticationGuidance(meta: SessionMeta): string {
     const scopeId = meta.providerAuthBlock!.credentialScopeId;
     if (meta.providerAuthBlock!.resolution === "approved") {
-      return "Authentication was restored, but this message was not submitted while retained durable messages were still being recovered. Wait for recovery to finish, then retry this prompt.";
+      return "Authentication was restored, but this message was not submitted while retained durable messages were still being recovered. Wait for recovery to finish, or use this session's recovery card to choose Dismiss Retained Messages, then retry this prompt.";
     }
     if (this.providerAuthRevalidations.has(scopeId)) {
       return "Authentication is being checked automatically. This prompt was not submitted. Wait for recovery to finish, then retry this prompt.";
@@ -13545,6 +13589,34 @@ export class SessionManager {
       options: this.providerAuthenticationOptions(block, inProgress),
       kind: "authentication",
       context: { toolName: provider, input: providerAuthenticationGuidance(meta, block, detail ?? block.reason) },
+    };
+  }
+
+  private providerAuthenticationRecoveryProjection(
+    meta: SessionMeta,
+    block: NonNullable<SessionMeta["providerAuthBlock"]>,
+  ): NonNullable<SessionMeta["pendingApproval"]> {
+    const provider = providerDisplayName(meta.driver);
+    const count = block.durableRetries?.length ?? 0;
+    return {
+      requestId: providerAuthenticationRecoveryRequestId(block),
+      title: "Authentication Restored — Retained Messages Waiting",
+      options: [{
+        optionId: "auth:dismiss",
+        name: "Dismiss Retained Messages",
+        description: "Do not send the retained messages and make the session promptable again.",
+        kind: "reject_once",
+      }],
+      kind: "authentication",
+      context: {
+        toolName: provider,
+        input: [
+          `Provider: ${provider}`,
+          `${count === 1 ? "One retained message is" : `${count} retained messages are`} waiting for durable delivery records after authentication was restored.`,
+          "Wollipog will submit them in order if their delivery records return.",
+          "Choose Dismiss Retained Messages to abandon them without submission, or use Stop Session to stop the session.",
+        ].join("\n"),
+      },
     };
   }
 
@@ -13869,6 +13941,7 @@ export class SessionManager {
     const candidates = targetOnly
       ? this.store.listSessions().filter((meta) => meta.sessionId === targetSessionId)
       : this.store.listSessions().filter((meta) =>
+          !meta.providerAuthBlock?.resolution &&
           meta.providerAuthBlock?.credentialScopeId === targetBlock.credentialScopeId &&
           compareProviderAuthIdentity(
             meta.providerAuthBlock.expectedIdentityId,
@@ -14137,6 +14210,10 @@ function isProviderAuthenticationBlock(pending: SessionMeta["pendingApproval"] |
 
 function providerAuthenticationRequestId(block: NonNullable<SessionMeta["providerAuthBlock"]>): string {
   return `provider-auth:${block.recoveryId}${block.loginOperationId ? `:${block.loginOperationId}` : ""}`;
+}
+
+function providerAuthenticationRecoveryRequestId(block: NonNullable<SessionMeta["providerAuthBlock"]>): string {
+  return `provider-auth:${block.recoveryId}:retained-messages`;
 }
 
 function providerDisplayName(driver: AgentDriverKind): string {

@@ -577,7 +577,7 @@ export function SessionApprovalBanner({
   return (
     <section
       className={`approval-bar${isPolicy ? " cost-budget" : ""}`}
-      aria-label={approval.kind === "authentication" ? "Authentication Required"
+      aria-label={approval.kind === "authentication" ? approval.title
         : approval.kind === "workflow_decision" ? "Workflow Decision Required" : "Agent Approval Required"}
     >
       <div className="approval-main">
