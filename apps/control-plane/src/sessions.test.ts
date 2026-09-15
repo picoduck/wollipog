@@ -1090,6 +1090,269 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
   }
 });
 
+test("idle Orchestrators durably coalesce nested request and child-ready events into one bounded continuation", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+    orchestrator.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const root = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, parentControl: "questions",
+    }).data!;
+    db.updateSessionStatus(root.id, "running", Date.now());
+    const createChild = (parentSessionId: string) => {
+      let result = svc.createSession({
+        runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID,
+      }, undefined, undefined, false, false, false, { parentSessionId });
+      if (result.status === 428) {
+        const approval = db.getSession(parentSessionId)!.pendingApproval!;
+        assert.ok(svc.approve(parentSessionId, approval.requestId, "allow").ok);
+        result = svc.createSession({
+          runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID,
+        }, undefined, undefined, false, false, false, { parentSessionId });
+      }
+      assert.ok(result.ok && result.data, result.error);
+      db.updateSessionStatus(result.data.id, "running", Date.now());
+      return result.data;
+    };
+    const nestedParent = createChild(root.id);
+    const questionChild = createChild(nestedParent.id);
+    const completedChild = createChild(root.id);
+    const failedChild = createChild(root.id);
+    const stoppedChild = createChild(nestedParent.id);
+    svc.onSessionEvent(questionChild.id, {
+      kind: "question_request",
+      requestId: "campaign-question",
+      occurrenceId: "request_campaign_question",
+      questions: [{ id: "next", header: "Next", question: "Sensitive task details?", options: [{ label: "Continue" }] }],
+    });
+    const report = db.appendEvent(completedChild.id, {
+      kind: "agent_message", text: "Completed child report", final: true,
+    }, Date.now());
+    assert.ok(report.seq > 0);
+    svc.onSessionStatus(completedChild.id, "idle");
+    svc.onSessionStatus(failedChild.id, "failed");
+    svc.onSessionStatus(stoppedChild.id, "stopped");
+    db.updateSessionStatus(root.id, "idle", Date.now());
+
+    const now = Date.now() + 2_000;
+    hub.online = false;
+    assert.equal(svc.retryDuePrompts(now), 0);
+    assert.equal(db.campaignProjection(root.id)?.continuation?.state, "pending",
+      "runner unavailability preserves the pending durable turn");
+    hub.online = true;
+    assert.equal(svc.retryDuePrompts(now + 60_000), 1);
+    const deliveries = hub.sentOfType("durable_session_command");
+    assert.equal(deliveries.length, 1, "near-simultaneous descendant events fan into one turn");
+    const delivery = deliveries[0]!;
+    assert.equal(delivery.command.type, "prompt_session");
+    assert.equal(delivery.command.type === "prompt_session"
+      ? delivery.command.campaignContinuation?.campaignSessionId
+      : undefined, root.id);
+    const text = delivery.command.type === "prompt_session" ? delivery.command.text : "";
+    assert.match(text, /request_actionable/u);
+    assert.match(text, /child_ready/u);
+    assert.match(text, /"status":"failed"/u);
+    assert.match(text, /"status":"stopped"/u);
+    assert.match(text, new RegExp(questionChild.id, "u"));
+    assert.doesNotMatch(text, /Sensitive task details/u,
+      "the generated payload contains identifiers and metadata, not request contents");
+    assert.equal(db.getSession(root.id)?.pendingPrompts, undefined,
+      "synthetic continuations stay out of the manual prompt-recovery surface");
+    assert.equal(db.campaignProjection(root.id)?.continuation?.state, "pending");
+
+    assert.equal(svc.retryDuePrompts(now + 120_000), 1);
+    assert.equal(hub.sentOfType("durable_session_command").at(-1)?.commandId, delivery.commandId,
+      "transport retries reuse the exact command identity while the runner journal deduplicates it");
+
+    assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+      type: "durable_session_command_result",
+      requestId: delivery.requestId,
+      commandId: delivery.commandId,
+      sessionId: root.id,
+      state: "accepted",
+      revision: 1,
+      duplicate: false,
+    }), true);
+    assert.equal(db.campaignProjection(root.id)?.continuation?.state, "running");
+    assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+      type: "durable_session_command_update",
+      commandId: delivery.commandId,
+      sessionId: root.id,
+      state: "completed",
+      revision: 2,
+    }), true);
+    assert.equal(db.campaignContinuationEvents(root.id).length, 0,
+      "a completed exact continuation range advances the durable cursor");
+    svc.onSessionStatus(completedChild.id, "idle");
+    assert.equal(svc.retryDuePrompts(now + 180_000), 0,
+      "replayed lifecycle projection cannot manufacture a duplicate event");
+  } finally {
+    db.close();
+  }
+});
+
+test("campaign continuation recovery holds for humans and never replays an ambiguous accepted turn", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+    orchestrator.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const root = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, parentControl: "questions",
+    }).data!;
+    db.updateSessionStatus(root.id, "running", Date.now());
+    const createChild = () => {
+      let result = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID },
+        undefined, undefined, false, false, false, { parentSessionId: root.id });
+      if (result.status === 428) {
+        const approval = db.getSession(root.id)!.pendingApproval!;
+        assert.ok(svc.approve(root.id, approval.requestId, "allow").ok);
+        result = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID },
+          undefined, undefined, false, false, false, { parentSessionId: root.id });
+      }
+      assert.ok(result.ok && result.data, result.error);
+      db.updateSessionStatus(result.data.id, "running", Date.now());
+      return result.data;
+    };
+    const humanChild = createChild();
+    const orchestratorChild = createChild();
+    svc.onSessionEvent(humanChild.id, {
+      kind: "question_request", requestId: "secret-question", occurrenceId: "request_secret",
+      questions: [{ id: "secret", header: "Credential", question: "Enter it", secret: true, allowOther: true, options: [] }],
+    });
+    svc.onSessionEvent(orchestratorChild.id, {
+      kind: "question_request", requestId: "ordinary-question", occurrenceId: "request_ordinary",
+      questions: [{ id: "q", header: "Choice", question: "Choose", options: [{ label: "Continue" }] }],
+    });
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    assert.equal(svc.retryDuePrompts(Date.now() + 2_000), 0);
+    assert.equal(db.campaignProjection(root.id)?.continuation?.state, "held",
+      "human-owned campaign input blocks automatic continuation");
+    assert.ok(svc.answerQuestion(humanChild.id, "secret-question", { secret: "one-time" }).ok);
+    assert.equal(svc.retryDuePrompts(Date.now() + 4_000), 1);
+    const first = hub.sentOfType("durable_session_command").at(-1)!;
+    const firstText = first.command.type === "prompt_session" ? first.command.text : "";
+    assert.match(firstText, /human_blockers_cleared/u);
+
+    assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+      type: "durable_session_command_update",
+      commandId: first.commandId,
+      sessionId: root.id,
+      state: "uncertain",
+      revision: 1,
+      error: "provider accepted the turn but no terminal result was persisted",
+    }), true);
+    assert.equal(db.campaignProjection(root.id)?.continuation?.state, "missing_result");
+    const sentBeforeRestart = hub.sentOfType("durable_session_command").length;
+    const restartedHub = new FakeHub();
+    const restarted = new SessionsService(db, restartedHub as unknown as Hub, NOOP_LOG);
+    assert.equal(restarted.retryDuePrompts(Date.now() + 120_000), 0);
+    assert.equal(restartedHub.sentOfType("durable_session_command").length, 0);
+    assert.equal(hub.sentOfType("durable_session_command").length, sentBeforeRestart,
+      "accepted-without-result work remains explicit and is never replayed after restart");
+    const missing = db.campaignProjection(root.id)?.continuation;
+    assert.equal(missing?.commandId, first.commandId);
+    assert.equal(missing?.canAcknowledgeMissingResult, true);
+    assert.ok(restarted.dismissPendingPrompt(root.id, first.commandId).ok,
+      "explicit dismissal acknowledges the ambiguity without replaying the accepted turn");
+    assert.equal(db.campaignProjection(root.id)?.continuation, undefined,
+      "acknowledgement advances the exact event range and clears the diagnostic");
+    assert.equal(restarted.retryDuePrompts(Date.now() + 180_000), 0);
+    assert.equal(db.campaignProjection(root.id)?.continuation, undefined,
+      "later recovery passes cannot resurrect an acknowledged ambiguous result");
+  } finally {
+    db.close();
+  }
+});
+
+test("campaign continuation failures back off finitely and stopped campaigns reject stale wake-ups", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+    orchestrator.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const createRoot = () => svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, parentControl: "questions",
+    }).data!;
+    const root = createRoot();
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    db.recordCampaignContinuationEvent({
+      eventId: `test-failure:${root.id}`,
+      campaignSessionId: root.id,
+      kind: "human_blockers_cleared",
+      now: Date.now(),
+    });
+
+    let clock = Date.now() + 2_000;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      assert.equal(svc.retryDuePrompts(clock), 1);
+      const delivery = hub.sentOfType("durable_session_command").at(-1)!;
+      assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+        type: "durable_session_command_result",
+        requestId: delivery.requestId,
+        commandId: delivery.commandId,
+        sessionId: root.id,
+        state: "failed",
+        revision: 1,
+        duplicate: false,
+        code: "QUEUE_FULL",
+        error: "runner queue is temporarily full",
+      }), true);
+      assert.equal(db.campaignProjection(root.id)?.continuation?.attemptCount, attempt);
+      assert.equal(db.campaignProjection(root.id)?.continuation?.state, "failed");
+      clock += 60_000;
+    }
+    assert.equal(svc.retryDuePrompts(clock), 0,
+      "a repeatedly failing campaign stops after its bounded retry allowance");
+
+    const stopped = createRoot();
+    db.updateSessionStatus(stopped.id, "stopped", Date.now());
+    db.recordCampaignContinuationEvent({
+      eventId: `test-stopped:${stopped.id}`,
+      campaignSessionId: stopped.id,
+      kind: "human_blockers_cleared",
+      now: Date.now(),
+    });
+    assert.equal(svc.retryDuePrompts(clock + 60_000), 0);
+    assert.equal(db.campaignProjection(stopped.id)?.continuation?.state, "held");
+
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.campaignContinuations - 1);
+    const incompatible = createRoot();
+    db.updateSessionStatus(incompatible.id, "idle", Date.now());
+    db.recordCampaignContinuationEvent({
+      eventId: `test-incompatible:${incompatible.id}`,
+      campaignSessionId: incompatible.id,
+      kind: "human_blockers_cleared",
+      now: Date.now(),
+    });
+    const deliveriesBefore = hub.sentOfType("durable_session_command").length;
+    assert.equal(svc.retryDuePrompts(clock + 120_000), 0);
+    assert.equal(svc.retryDuePrompts(clock + 180_000), 0);
+    assert.equal(hub.sentOfType("durable_session_command").length, deliveriesBefore,
+      "an older runner never receives an unclassified synthetic prompt");
+    assert.equal(db.campaignProjection(incompatible.id)?.continuation?.state, "failed");
+    assert.match(db.campaignProjection(incompatible.id)?.continuation?.error ?? "", /no longer supports/u);
+  } finally {
+    db.close();
+  }
+});
+
 test("tracked guardrails and Native TUI cannot coexist across creation, inheritance, or later config", () => {
   const { db, svc, hub } = makeHarness();
   try {

@@ -630,6 +630,48 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestrator_follow_up_unique
 CREATE INDEX IF NOT EXISTS idx_orchestrator_follow_up_campaign
   ON orchestrator_campaign_follow_ups(campaign_session_id, created_at, id);
 
+-- Descendant transitions are durable before a synthetic parent turn is admitted. Stable event
+-- identities make repeated projection/reconnect passes harmless, while the continuation range is
+-- the consumed cursor: only a completed provider turn or explicit ambiguous-result acknowledgement
+-- advances past those events.
+CREATE TABLE IF NOT EXISTS orchestrator_campaign_events (
+  seq                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id            TEXT NOT NULL UNIQUE,
+  campaign_session_id TEXT NOT NULL,
+  kind                TEXT NOT NULL CHECK (kind IN
+                       ('request_actionable','request_resolved','child_ready','human_blockers_cleared')),
+  subject_session_id  TEXT,
+  occurrence_id       TEXT,
+  subject_status      TEXT,
+  created_at          INTEGER NOT NULL,
+  FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY (subject_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_orchestrator_campaign_events_pending
+  ON orchestrator_campaign_events(campaign_session_id, seq);
+
+CREATE TABLE IF NOT EXISTS orchestrator_campaign_continuations (
+  continuation_id     TEXT PRIMARY KEY,
+  campaign_session_id TEXT NOT NULL,
+  command_id          TEXT NOT NULL UNIQUE,
+  event_from_seq      INTEGER NOT NULL,
+  event_through_seq   INTEGER NOT NULL,
+  state               TEXT NOT NULL CHECK (state IN
+                       ('pending','running','completed','failed','missing_result','acknowledged')),
+  attempt_count       INTEGER NOT NULL DEFAULT 1,
+  next_attempt_at     INTEGER,
+  error               TEXT,
+  created_at          INTEGER NOT NULL,
+  updated_at          INTEGER NOT NULL,
+  FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY (command_id) REFERENCES session_prompt_commands(command_id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestrator_campaign_continuation_active
+  ON orchestrator_campaign_continuations(campaign_session_id)
+  WHERE state IN ('pending','running','missing_result');
+CREATE INDEX IF NOT EXISTS idx_orchestrator_campaign_continuation_campaign
+  ON orchestrator_campaign_continuations(campaign_session_id, created_at, continuation_id);
+
 -- A reminder belongs to one human even when the underlying session is shared. The single row per
 -- (session,user) makes replacement atomic, while state+revision make firing and multi-client edits
 -- idempotent. Absolute instants drive scheduling; zone/expression retain the user's editing intent.
@@ -2507,6 +2549,37 @@ interface SessionPromptCommandRow {
   dismissed_at: number | null;
   created_at: number;
   updated_at: number;
+}
+
+export type CampaignContinuationEventKind =
+  | "request_actionable"
+  | "request_resolved"
+  | "child_ready"
+  | "human_blockers_cleared";
+
+export interface CampaignContinuationEventRecord {
+  seq: number;
+  eventId: string;
+  campaignSessionId: string;
+  kind: CampaignContinuationEventKind;
+  subjectSessionId?: string;
+  occurrenceId?: string;
+  subjectStatus?: string;
+  createdAt: number;
+}
+
+export interface CampaignContinuationRecord {
+  continuationId: string;
+  campaignSessionId: string;
+  commandId: string;
+  eventFromSeq: number;
+  eventThroughSeq: number;
+  state: "pending" | "running" | "completed" | "failed" | "missing_result" | "acknowledged";
+  attemptCount: number;
+  nextAttemptAt?: number;
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface StageSessionCommandInvocationInput {
@@ -12397,6 +12470,224 @@ export class ControlPlaneDb {
     return this.validCampaignChildReportIds(campaignSessionId, childSessionId).has(childSessionId);
   }
 
+  recordCampaignContinuationEvent(input: {
+    eventId: string;
+    campaignSessionId: string;
+    kind: CampaignContinuationEventKind;
+    subjectSessionId?: string;
+    occurrenceId?: string;
+    subjectStatus?: string;
+    now: number;
+  }): boolean {
+    if (!input.eventId || input.eventId.length > 512) throw new Error("campaign event identity is invalid");
+    const result = this.stmt(
+      `INSERT OR IGNORE INTO orchestrator_campaign_events
+       (event_id,campaign_session_id,kind,subject_session_id,occurrence_id,subject_status,created_at)
+       VALUES (?,?,?,?,?,?,?)`,
+    ).run(
+      input.eventId, input.campaignSessionId, input.kind, input.subjectSessionId ?? null,
+      input.occurrenceId ?? null, input.subjectStatus ?? null, input.now,
+    );
+    return Number(result.changes) === 1;
+  }
+
+  campaignContinuationEvents(
+    campaignSessionId: string,
+    throughCreatedAt = Number.MAX_SAFE_INTEGER,
+    limit = 64,
+  ): CampaignContinuationEventRecord[] {
+    const cursor = (this.stmt(
+      `SELECT COALESCE(MAX(event_through_seq),0) AS seq
+       FROM orchestrator_campaign_continuations
+       WHERE campaign_session_id=? AND state IN ('completed','acknowledged')`,
+    ).get(campaignSessionId) as { seq: number }).seq;
+    const rows = this.stmt(
+      `SELECT * FROM orchestrator_campaign_events
+       WHERE campaign_session_id=? AND seq>? AND created_at<=?
+       ORDER BY seq LIMIT ?`,
+    ).all(campaignSessionId, cursor, throughCreatedAt, Math.max(1, Math.min(limit, 64))) as Array<{
+      seq: number; event_id: string; campaign_session_id: string; kind: CampaignContinuationEventKind;
+      subject_session_id: string | null; occurrence_id: string | null; subject_status: string | null;
+      created_at: number;
+    }>;
+    return rows.map((row) => ({
+      seq: row.seq,
+      eventId: row.event_id,
+      campaignSessionId: row.campaign_session_id,
+      kind: row.kind,
+      ...(row.subject_session_id ? { subjectSessionId: row.subject_session_id } : {}),
+      ...(row.occurrence_id ? { occurrenceId: row.occurrence_id } : {}),
+      ...(row.subject_status ? { subjectStatus: row.subject_status } : {}),
+      createdAt: row.created_at,
+    }));
+  }
+
+  campaignContinuationChildCandidates(campaignSessionId: string): Array<{
+    sessionId: string;
+    status: SessionStatus;
+    eventSeq: number;
+  }> {
+    const verified = this.validCampaignChildReportIds(campaignSessionId);
+    const candidates: Array<{ sessionId: string; status: SessionStatus; eventSeq: number }> = [];
+    for (const sessionId of this.campaignDescendantIds(campaignSessionId)) {
+      if (verified.has(sessionId)) continue;
+      const child = this.stmt("SELECT status FROM sessions WHERE id=?").get(sessionId) as
+        | { status: SessionStatus }
+        | undefined;
+      if (!child || !["idle", "completed", "failed", "stopped"].includes(child.status)) continue;
+      const latest = this.stmt(
+        `SELECT COALESCE(MAX(seq),0) AS seq FROM session_events WHERE session_id=?`,
+      ).get(sessionId) as { seq: number };
+      if (child.status === "idle" && !this.hasCompletedAgentReportAt(sessionId, latest.seq)) {
+        const report = this.stmt(
+          `SELECT MAX(seq) AS seq FROM session_events WHERE session_id=? AND (
+             kind='agent_response_completed' OR
+             (kind='agent_message' AND json_extract(payload,'$.final')=1
+              AND trim(json_extract(payload,'$.text'))!=''
+              AND json_type(payload,'$.parentToolUseId') IS NULL)
+           )`,
+        ).get(sessionId) as { seq: number | null };
+        if (report.seq == null) continue;
+        candidates.push({ sessionId, status: child.status, eventSeq: report.seq });
+      } else {
+        candidates.push({ sessionId, status: child.status, eventSeq: latest.seq });
+      }
+    }
+    return candidates;
+  }
+
+  listOrchestratorCampaignSessionIds(runnerId?: string): string[] {
+    const rows = this.stmt(
+      `SELECT id FROM sessions
+       WHERE permission_mode='orchestrator' AND orchestrator_policy IS NOT NULL
+         AND parent_session_id IS NULL ${runnerId ? "AND runner_id=?" : ""}
+       ORDER BY created_at,id`,
+    ).all(...(runnerId ? [runnerId] : [])) as Array<{ id: string }>;
+    return rows.map((row) => row.id);
+  }
+
+  activeCampaignContinuation(campaignSessionId: string): CampaignContinuationRecord | null {
+    const row = this.stmt(
+      `SELECT * FROM orchestrator_campaign_continuations
+       WHERE campaign_session_id=? AND state IN ('pending','running','missing_result')
+       ORDER BY created_at DESC,rowid DESC LIMIT 1`,
+    ).get(campaignSessionId) as undefined | {
+      continuation_id: string; campaign_session_id: string; command_id: string;
+      event_from_seq: number; event_through_seq: number;
+      state: CampaignContinuationRecord["state"]; attempt_count: number;
+      next_attempt_at: number | null; error: string | null; created_at: number; updated_at: number;
+    };
+    return row ? this.campaignContinuationRecord(row) : null;
+  }
+
+  latestCampaignContinuation(campaignSessionId: string): CampaignContinuationRecord | null {
+    const row = this.stmt(
+      `SELECT * FROM orchestrator_campaign_continuations
+       WHERE campaign_session_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1`,
+    ).get(campaignSessionId) as Parameters<ControlPlaneDb["campaignContinuationRecord"]>[0] | undefined;
+    return row ? this.campaignContinuationRecord(row) : null;
+  }
+
+  campaignContinuationForCommand(commandId: string): CampaignContinuationRecord | null {
+    const row = this.stmt("SELECT * FROM orchestrator_campaign_continuations WHERE command_id=?")
+      .get(commandId) as Parameters<ControlPlaneDb["campaignContinuationRecord"]>[0] | undefined;
+    return row ? this.campaignContinuationRecord(row) : null;
+  }
+
+  stageCampaignContinuation(input: {
+    continuationId: string;
+    commandId: string;
+    campaignSessionId: string;
+    runnerId: string;
+    eventFromSeq: number;
+    eventThroughSeq: number;
+    payloadJson: string;
+    payloadSha256: string;
+    expiresAt: number;
+    attemptCount: number;
+    now: number;
+  }): CampaignContinuationRecord | null {
+    JSON.parse(input.payloadJson);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (this.activeCampaignContinuation(input.campaignSessionId)) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      this.stmt(
+        `INSERT INTO session_prompt_commands
+         (command_id,session_id,runner_id,payload_json,payload_sha256,state,revision,attempt_count,
+          next_attempt_at,expires_at,created_at,updated_at)
+         VALUES (?,?,?,?,?,'pending',0,0,?,?,?,?)`,
+      ).run(
+        input.commandId, input.campaignSessionId, input.runnerId, input.payloadJson,
+        input.payloadSha256, input.now, input.expiresAt, input.now, input.now,
+      );
+      this.stmt(
+        `INSERT INTO orchestrator_campaign_continuations
+         (continuation_id,campaign_session_id,command_id,event_from_seq,event_through_seq,state,
+          attempt_count,next_attempt_at,created_at,updated_at)
+         VALUES (?,?,?,?,?,'pending',?,?,?,?)`,
+      ).run(
+        input.continuationId, input.campaignSessionId, input.commandId, input.eventFromSeq,
+        input.eventThroughSeq, input.attemptCount, input.now, input.now, input.now,
+      );
+      this.db.exec("COMMIT");
+      return this.campaignContinuationForCommand(input.commandId);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  updateCampaignContinuationForCommand(
+    commandId: string,
+    state: CampaignContinuationRecord["state"],
+    now: number,
+    error?: string,
+    nextAttemptAt?: number,
+  ): CampaignContinuationRecord | null {
+    this.stmt(
+      `UPDATE orchestrator_campaign_continuations
+       SET state=?,error=?,next_attempt_at=?,updated_at=? WHERE command_id=?`,
+    ).run(state, error ?? null, nextAttemptAt ?? null, now, commandId);
+    return this.campaignContinuationForCommand(commandId);
+  }
+
+  acknowledgeCampaignContinuationMissingResult(commandId: string, now: number): boolean {
+    const result = this.stmt(
+      `UPDATE orchestrator_campaign_continuations
+       SET state='acknowledged',next_attempt_at=NULL,updated_at=?
+       WHERE command_id=? AND state='missing_result' AND EXISTS (
+         SELECT 1 FROM session_prompt_commands prompt
+         WHERE prompt.command_id=orchestrator_campaign_continuations.command_id
+           AND prompt.state='uncertain' AND prompt.dismissed_at IS NOT NULL
+       )`,
+    ).run(now, commandId);
+    return Number(result.changes) === 1;
+  }
+
+  private campaignContinuationRecord(row: {
+    continuation_id: string; campaign_session_id: string; command_id: string;
+    event_from_seq: number; event_through_seq: number;
+    state: CampaignContinuationRecord["state"]; attempt_count: number;
+    next_attempt_at: number | null; error: string | null; created_at: number; updated_at: number;
+  }): CampaignContinuationRecord {
+    return {
+      continuationId: row.continuation_id,
+      campaignSessionId: row.campaign_session_id,
+      commandId: row.command_id,
+      eventFromSeq: row.event_from_seq,
+      eventThroughSeq: row.event_through_seq,
+      state: row.state,
+      attemptCount: row.attempt_count,
+      ...(row.next_attempt_at != null ? { nextAttemptAt: row.next_attempt_at } : {}),
+      ...(row.error ? { error: row.error } : {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
   invalidateCampaignChildReports(childSessionId: string): void {
     this.stmt("DELETE FROM orchestrator_campaign_child_reports WHERE child_session_id=?")
       .run(childSessionId);
@@ -12527,6 +12818,8 @@ export class ControlPlaneDb {
     let pendingGenericOrchestrator = 0;
     const humanRequestKeys = pendingHuman.map((decision) =>
       `typed:${decision.session_id}:${decision.occurrence_id}`);
+    const orchestratorRequestKeys = pendingOrchestrator.map((decision) =>
+      `typed:${decision.session_id}:${decision.occurrence_id}`);
     let waitingHuman = 0;
     let active = 0;
     let blocked = 0;
@@ -12544,6 +12837,7 @@ export class ControlPlaneDb {
       for (const request of generic) {
         if (delegatedGenericSupported && parentControlRequestEligible(parentControl, request)) {
           pendingGenericOrchestrator += 1;
+          orchestratorRequestKeys.push(`generic:${child.id}:${request.occurrenceId ?? request.requestId}`);
         } else {
           pendingGenericHuman += 1;
           humanRequestKeys.push(`generic:${child.id}:${request.occurrenceId ?? request.requestId}`);
@@ -12601,12 +12895,55 @@ export class ControlPlaneDb {
         orchestrator: pendingOrchestrator.length + pendingGenericOrchestrator,
         humanRequestTokens: humanRequestKeys.map((key) =>
           createHash("sha256").update(key).digest("hex")).sort(),
+        orchestratorRequestTokens: orchestratorRequestKeys.map((key) =>
+          createHash("sha256").update(key).digest("hex")).sort(),
       } } : {}),
       followUps: {
         unique: Number(followUps.unique_count ?? 0),
         duplicates: Number(followUps.duplicate_count ?? 0),
       },
+      ...(resolvedCampaignId === campaignSessionId
+        ? this.campaignContinuationProjection(campaign, status)
+        : {}),
     };
+  }
+
+  private campaignContinuationProjection(
+    campaign: SessionRow,
+    campaignStatus: OrchestratorCampaignProjection["status"],
+  ): Pick<OrchestratorCampaignProjection, "continuation"> {
+    const cursor = (this.stmt(
+      `SELECT COALESCE(MAX(event_through_seq),0) AS seq
+       FROM orchestrator_campaign_continuations
+       WHERE campaign_session_id=? AND state IN ('completed','acknowledged')`,
+    ).get(campaign.id) as { seq: number }).seq;
+    const pendingEvents = Number((this.stmt(
+      "SELECT COUNT(*) AS count FROM orchestrator_campaign_events WHERE campaign_session_id=? AND seq>?",
+    ).get(campaign.id, cursor) as { count: number }).count);
+    const latest = this.latestCampaignContinuation(campaign.id);
+    if (pendingEvents === 0 && (!latest || latest.state === "completed" || latest.state === "acknowledged")) return {};
+    const held = campaign.archived === 1 || isTerminal(campaign.status as SessionStatus) ||
+      campaign.status === "input_required" || campaignStatus === "waiting_human" ||
+      campaignStatus === "verified_complete";
+    const state = latest?.state === "missing_result" ? "missing_result" as const
+      : latest?.state === "failed" ? "failed" as const
+      : held ? "held" as const
+      : latest?.state === "running" ? "running" as const
+      : "pending" as const;
+    return { continuation: {
+      state,
+      pendingEvents,
+      ...(latest ? {
+        continuationId: latest.continuationId,
+        commandId: latest.commandId,
+        eventFromSeq: latest.eventFromSeq,
+        eventThroughSeq: latest.eventThroughSeq,
+      } : {}),
+      attemptCount: latest?.attemptCount ?? 0,
+      updatedAt: latest?.updatedAt ?? campaign.updated_at,
+      ...(latest?.error ? { error: latest.error.slice(0, 1_024) } : {}),
+      ...(state === "missing_result" ? { canAcknowledgeMissingResult: true } : {}),
+    } };
   }
 
   updateSessionOrchestratorBehavior(
@@ -16193,7 +16530,7 @@ export class ControlPlaneDb {
     return rows.flatMap((row) => {
       try {
         const command = JSON.parse(row.payload_json) as PromptSessionMessage;
-        if (command.type !== "prompt_session") return [];
+        if (command.type !== "prompt_session" || command.campaignContinuation) return [];
         const durableDeliveryState = row.state === "queued" || row.state === "failed" || row.state === "uncertain"
           ? row.state
           : "pending";
@@ -16231,7 +16568,7 @@ export class ControlPlaneDb {
       } catch {
         return [];
       }
-      if (command?.type !== "prompt_session") return [];
+      if (command?.type !== "prompt_session" || command.campaignContinuation) return [];
       return [{
         commandId: row.command_id,
         text: command.text.length > 4_096 ? `${command.text.slice(0, 4_095)}…` : command.text,

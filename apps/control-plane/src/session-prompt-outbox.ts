@@ -51,6 +51,33 @@ export class SessionPromptOutbox {
     });
   }
 
+  stageCampaignContinuation(input: {
+    continuationId: string;
+    campaignSessionId: string;
+    runnerId: string;
+    eventFromSeq: number;
+    eventThroughSeq: number;
+    attemptCount: number;
+    command: Extract<DurableSessionCommand, { type: "prompt_session" }>;
+    now: number;
+  }) {
+    const commandId = `campaign_prompt_${input.continuationId}`;
+    const payloadJson = canonicalAutomationCommandJson(input.command);
+    return this.db.stageCampaignContinuation({
+      continuationId: input.continuationId,
+      commandId,
+      campaignSessionId: input.campaignSessionId,
+      runnerId: input.runnerId,
+      eventFromSeq: input.eventFromSeq,
+      eventThroughSeq: input.eventThroughSeq,
+      payloadJson,
+      payloadSha256: automationCommandDigest(input.command),
+      expiresAt: input.now + RECEIPT_HORIZON_MS,
+      attemptCount: input.attemptCount,
+      now: input.now,
+    });
+  }
+
   stageRecoveredAnswer(
     sessionId: string,
     runnerId: string,
@@ -87,7 +114,9 @@ export class SessionPromptOutbox {
       }
       const capability = command.type === "answer_recovered_question"
         ? "resumableQuestionAnswers"
-        : "durablePromptQueueIdentity";
+        : command.type === "prompt_session" && command.campaignContinuation
+          ? "campaignContinuations"
+          : "durablePromptQueueIdentity";
       if (!runnerSupportsProtocol(this.db.getRunner(row.runnerId)?.protocolVersion, capability)) {
         this.db.recordSessionPromptCommandReceipt({
           commandId: row.commandId,
@@ -97,7 +126,9 @@ export class SessionPromptOutbox {
           revision: row.revision + 1,
           error: command.type === "answer_recovered_question"
             ? "runner no longer supports resumable structured-question answers"
-            : "runner no longer supports durable queued prompt identity",
+            : command.type === "prompt_session" && command.campaignContinuation
+              ? "runner no longer supports durable campaign continuations"
+              : "runner no longer supports durable queued prompt identity",
           now,
         });
         this.hub.sessionChangedById(row.sessionId);

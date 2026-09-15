@@ -7119,6 +7119,29 @@ button.file-head.source-path-link {
   overflow-wrap: anywhere;
 }
 
+.campaign-continuation-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin: 8px 12px;
+  padding: 10px 12px;
+  color: var(--text);
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.campaign-continuation-notice[data-state="failed"],
+.campaign-continuation-notice[data-state="missing_result"] { border-color: var(--warning); }
+.campaign-continuation-copy { display: grid; gap: 2px; min-width: 0; }
+.campaign-continuation-copy span { color: var(--text-dim); }
+.campaign-continuation-copy small { color: var(--text-faint); overflow-wrap: anywhere; }
+
+@media (max-width: 600px) {
+  .campaign-continuation-notice { align-items: stretch; flex-direction: column; }
+  .campaign-continuation-notice .btn { min-height: 44px; }
+}
+
 .project-location-setup-status {
   display: grid;
   justify-items: start;

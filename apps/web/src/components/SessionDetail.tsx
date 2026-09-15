@@ -4390,6 +4390,13 @@ function SessionDetailLoaded({
               .finally(() => setSetupGeneratePending(false));
           }} />
         )}
+        {session.orchestratorCampaign?.continuation && (
+          <CampaignContinuationNotice
+            continuation={session.orchestratorCampaign.continuation}
+            acknowledgementPending={pendingPromptAction === session.orchestratorCampaign.continuation.commandId}
+            onAcknowledge={(commandId) => void resolvePendingPrompt(commandId, "dismiss")}
+          />
+        )}
         {activeWorktreeSetupConfig?.status === "invalid" && (
           <div className="worktree-setup-config-error" role="alert">
             <strong>Invalid Worktree Setup Configuration</strong>
@@ -6161,6 +6168,58 @@ function LegacyWorkspaceChip({ session }: { session: SessionView }) {
             )}
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+export function CampaignContinuationNotice({
+  continuation,
+  acknowledgementPending = false,
+  onAcknowledge,
+}: {
+  continuation: NonNullable<NonNullable<SessionView["orchestratorCampaign"]>["continuation"]>;
+  acknowledgementPending?: boolean;
+  onAcknowledge?: (commandId: string) => void;
+}) {
+  const label = continuation.state === "missing_result"
+    ? "Missing Result"
+    : titleCaseLabel(continuation.state);
+  const eventLabel = `${continuation.pendingEvents} Pending ${continuation.pendingEvents === 1 ? "Event" : "Events"}`;
+  const explanation = continuation.state === "pending"
+    ? "Wollipog is coalescing durable campaign events before resuming the Orchestrator."
+    : continuation.state === "running"
+      ? "The Orchestrator is reconciling durable descendant campaign events."
+      : continuation.state === "held"
+        ? "Campaign events are preserved until the current human, lifecycle, or guardrail blocker clears."
+        : continuation.state === "failed"
+          ? "The continuation failed. Automatic retries use bounded backoff."
+          : "The provider accepted this continuation, but no terminal result was recorded. It will not be replayed automatically.";
+  const canAcknowledge = continuation.state === "missing_result" &&
+    continuation.canAcknowledgeMissingResult === true && Boolean(continuation.commandId) && onAcknowledge;
+  return (
+    <div
+      className="campaign-continuation-notice"
+      data-state={continuation.state}
+      role="status"
+      aria-label={`Campaign Continuation: ${label}`}
+      aria-busy={acknowledgementPending || undefined}
+    >
+      <div className="campaign-continuation-copy">
+        <strong>Campaign Continuation: {label}</strong>
+        <span>{explanation}</span>
+        <small>{eventLabel} · Attempt {continuation.attemptCount}</small>
+        {continuation.error && <small>{continuation.error}</small>}
+      </div>
+      {canAcknowledge && (
+        <button
+          type="button"
+          className="btn sm"
+          disabled={acknowledgementPending}
+          onClick={() => onAcknowledge(continuation.commandId!)}
+        >
+          {acknowledgementPending ? "Acknowledging…" : "Acknowledge Missing Result"}
+        </button>
       )}
     </div>
   );

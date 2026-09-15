@@ -627,11 +627,23 @@ export function isDurableSessionCommandMessage(value: unknown): value is Durable
       !isObject(value.command)) return false;
   const command = value.command;
   if (command.type === "prompt_session") {
+    const continuation = command.campaignContinuation;
     return typeof command.sessionId === "string" && Boolean(command.sessionId) &&
       typeof command.text === "string" &&
       (command.images === undefined || (Array.isArray(command.images) && validatePromptImageInputs(command.images as never[]).ok)) &&
       (command.slashCommand === undefined || typeof command.slashCommand === "string") &&
-      (command.config === undefined || isObject(command.config));
+      (command.config === undefined || isObject(command.config)) &&
+      (continuation === undefined || (
+        isObject(continuation) && Object.keys(continuation).every((key) => [
+          "campaignSessionId", "continuationId", "eventFromSeq", "eventThroughSeq",
+        ].includes(key)) &&
+        continuation.campaignSessionId === command.sessionId &&
+        typeof continuation.continuationId === "string" && continuation.continuationId.length > 0 &&
+        continuation.continuationId.length <= 128 &&
+        Number.isSafeInteger(continuation.eventFromSeq) && Number(continuation.eventFromSeq) > 0 &&
+        Number.isSafeInteger(continuation.eventThroughSeq) &&
+        Number(continuation.eventThroughSeq) >= Number(continuation.eventFromSeq)
+      ));
   }
   if (command.type === "answer_recovered_question") {
     return typeof command.sessionId === "string" && Boolean(command.sessionId) &&

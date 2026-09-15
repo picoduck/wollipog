@@ -149,6 +149,7 @@ import {
   MAX_PENDING_STEERING_RESOLUTION_REPLAYS,
   MAX_UNRESOLVED_STEERING_ATTEMPTS,
   type AgentLaunch,
+  type CampaignContinuationRecord,
   type ControlPlaneDb,
   type SessionAutomationOrigin,
 } from "./db.js";
@@ -227,6 +228,8 @@ const SESSION_COMMAND_RECEIPT_ERROR_MAX_CHARS = 512;
 export const SESSION_STOP_RETRY_INTERVAL_MS = 10_000;
 export const SESSION_STOP_TIMEOUT_MS = 45_000;
 export const SESSION_STOP_MAX_ATTEMPTS = 3;
+export const CAMPAIGN_CONTINUATION_FAN_IN_MS = 1_000;
+export const CAMPAIGN_CONTINUATION_MAX_ATTEMPTS = 3;
 const SESSION_STOP_FAILURE_MESSAGE_MAX_CHARS = 240;
 // One invocation lives for at most 24 hours and has only a handful of defined lifecycle edges.
 // This generous ceiling preserves future expansion without letting an absurd but safe integer
@@ -4025,6 +4028,7 @@ export class SessionsService {
   }
 
   retryDuePrompts(now = Date.now(), runnerId?: string): number {
+    this.maintainCampaignContinuations(now, runnerId);
     return this.promptOutbox.flush(now, runnerId);
   }
 
@@ -4036,7 +4040,110 @@ export class SessionsService {
     runnerId: string,
     message: DurableSessionCommandResultMessage | DurableSessionCommandUpdateMessage,
   ): boolean {
-    return this.promptOutbox.receipt(runnerId, message);
+    const handled = this.promptOutbox.receipt(runnerId, message);
+    if (handled) this.reconcileCampaignContinuationCommand(message.commandId, Date.now());
+    return handled;
+  }
+
+  private maintainCampaignContinuations(now: number, runnerId?: string): void {
+    for (const campaignSessionId of this.db.listOrchestratorCampaignSessionIds(runnerId)) {
+      const latest = this.db.latestCampaignContinuation(campaignSessionId);
+      if (latest) this.reconcileCampaignContinuationCommand(latest.commandId, now);
+      const active = this.db.activeCampaignContinuation(campaignSessionId);
+      if (active) continue;
+      const currentLatest = this.db.latestCampaignContinuation(campaignSessionId);
+      if (currentLatest?.state === "failed" &&
+          (currentLatest.attemptCount >= CAMPAIGN_CONTINUATION_MAX_ATTEMPTS ||
+            (currentLatest.nextAttemptAt ?? Number.MAX_SAFE_INTEGER) > now)) continue;
+      const campaign = this.db.getSession(campaignSessionId);
+      const projection = this.db.campaignProjection(campaignSessionId);
+      if (!campaign || !projection || campaign.archived || campaign.status !== "idle" ||
+          campaign.pendingApproval || projection.status === "waiting_human" ||
+          projection.status === "verified_complete") continue;
+      const events = this.db.campaignContinuationEvents(
+        campaignSessionId,
+        now - CAMPAIGN_CONTINUATION_FAN_IN_MS,
+      );
+      if (events.length === 0) continue;
+      const continuationId = `campaign_cont_${randomUUID().replaceAll("-", "")}`;
+      const eventFromSeq = events[0]!.seq;
+      const eventThroughSeq = events.at(-1)!.seq;
+      const eventSummary = events.map((event) => ({
+        seq: event.seq,
+        kind: event.kind,
+        ...(event.subjectSessionId ? { sessionId: event.subjectSessionId } : {}),
+        ...(event.occurrenceId ? { occurrenceId: event.occurrenceId } : {}),
+        ...(event.subjectStatus ? { status: event.subjectStatus } : {}),
+        createdAt: event.createdAt,
+      }));
+      const prompt = [
+        `[Wollipog Campaign Continuation — ${continuationId}]`,
+        `Campaign ${campaignSessionId}; durable event range ${eventFromSeq}-${eventThroughSeq}.`,
+        `Canonical event metadata: ${JSON.stringify(eventSummary)}`,
+        "Query authoritative campaign and descendant state with get_campaign and list_descendant_requests. Drain every currently actionable Orchestrator-owned request, verify terminal child reports and required cleanup, and then continue the campaign or return idle. Human-owned questions and approvals remain blocked on the human and must not be answered or bypassed. Treat repeated metadata as idempotent; do not infer request contents from this summary.",
+        "[End Wollipog Campaign Continuation]",
+      ].join("\n");
+      this.promptOutbox.stageCampaignContinuation({
+        continuationId,
+        campaignSessionId,
+        runnerId: campaign.runnerId,
+        eventFromSeq,
+        eventThroughSeq,
+        attemptCount: currentLatest?.state === "failed" ? currentLatest.attemptCount + 1 : 1,
+        command: {
+          type: "prompt_session",
+          sessionId: campaignSessionId,
+          text: prompt,
+          campaignContinuation: {
+            campaignSessionId,
+            continuationId,
+            eventFromSeq,
+            eventThroughSeq,
+          },
+        },
+        now,
+      });
+      this.hub.sessionChangedById(campaignSessionId);
+    }
+  }
+
+  private reconcileCampaignContinuationCommand(commandId: string, now: number): void {
+    const continuation = this.db.campaignContinuationForCommand(commandId);
+    if (!continuation) return;
+    if (continuation.state === "completed" || continuation.state === "acknowledged") return;
+    const command = this.db.getSessionPromptCommand(commandId);
+    if (!command) return;
+    let state: CampaignContinuationRecord["state"] = continuation.state;
+    let nextAttemptAt: number | undefined;
+    if (command.state === "accepted" || command.state === "queued" || command.state === "started") {
+      state = "running";
+    } else if (command.state === "completed") {
+      state = "completed";
+    } else if (command.state === "uncertain") {
+      state = "missing_result";
+    } else if (command.state === "failed") {
+      state = "failed";
+      const safelyRetryable = command.userEventSeq === undefined &&
+        command.errorCode !== "INVALID_COMMAND" &&
+        !command.error?.includes("no longer supports");
+      if (safelyRetryable && continuation.attemptCount < CAMPAIGN_CONTINUATION_MAX_ATTEMPTS) {
+        nextAttemptAt = continuation.state === "failed"
+          ? continuation.nextAttemptAt
+          : now + Math.min(30_000, 1_000 * (2 ** (continuation.attemptCount - 1)));
+      }
+    } else {
+      state = "pending";
+    }
+    if (state === continuation.state && nextAttemptAt === continuation.nextAttemptAt &&
+        command.error === continuation.error) return;
+    this.db.updateCampaignContinuationForCommand(
+      commandId,
+      state,
+      now,
+      command.error,
+      nextAttemptAt,
+    );
+    this.hub.sessionChangedById(continuation.campaignSessionId);
   }
 
   cancelPendingPrompt(sessionId: string, commandId: string): ServiceResult<SessionView> {
@@ -4056,6 +4163,9 @@ export class SessionsService {
     const result = this.promptOutbox.dismissTerminal(sessionId, commandId);
     if (result === "not_found") return fail("pending prompt not found", 404);
     if (result === "not_terminal") return fail("only failed or uncertain prompts can be dismissed", 409);
+    if (this.db.acknowledgeCampaignContinuationMissingResult(commandId, Date.now())) {
+      this.hub.sessionChangedById(sessionId);
+    }
     return ok(this.db.getSession(sessionId)!);
   }
 
@@ -5422,10 +5532,9 @@ export class SessionsService {
   private publishCampaignAttentionTransition(before: SessionView | null): void {
     if (!before) return;
     const now = Date.now();
-    const requests = this.descendantRequests(before.id, () => true, "human");
-    if (requests.ok) {
-      for (const item of requests.data!.requests) {
-        if (item.responseOwner !== "human") continue;
+    const humanRequests = this.descendantRequests(before.id, () => true, "human");
+    if (humanRequests.ok && humanRequests.data) {
+      for (const item of humanRequests.data.requests) {
         this.db.recordOutboundCampaignInputRequired({
           campaignSessionId: before.id,
           childSessionId: item.sessionId,
@@ -5434,6 +5543,59 @@ export class SessionsService {
           now,
         });
       }
+    }
+    const orchestratorRequests = this.descendantRequests(before.id, () => true);
+    if (orchestratorRequests.ok && orchestratorRequests.data) {
+      for (const item of orchestratorRequests.data.requests) {
+        this.db.recordCampaignContinuationEvent({
+          eventId: `request-actionable:${before.id}:${item.sessionId}:${item.occurrenceId}`,
+          campaignSessionId: before.id,
+          kind: "request_actionable",
+          subjectSessionId: item.sessionId,
+          occurrenceId: item.occurrenceId,
+          now,
+        });
+      }
+    }
+    const after = this.db.campaignProjection(before.id);
+    const previousOrchestratorTokens = new Set(
+      before.orchestratorCampaign?.pendingRequests?.orchestratorRequestTokens ?? [],
+    );
+    const currentOrchestratorTokens = new Set(
+      after?.pendingRequests?.orchestratorRequestTokens ?? [],
+    );
+    for (const token of previousOrchestratorTokens) {
+      if (currentOrchestratorTokens.has(token)) continue;
+      this.db.recordCampaignContinuationEvent({
+        eventId: `request-resolved:${before.id}:${token}`,
+        campaignSessionId: before.id,
+        kind: "request_resolved",
+        occurrenceId: token,
+        now,
+      });
+    }
+    const previousHuman = before.orchestratorCampaign?.pendingRequests;
+    if ((previousHuman?.human ?? 0) > 0 && (after?.pendingRequests?.human ?? 0) === 0) {
+      const clearedIdentity = createHash("sha256").update(JSON.stringify(
+        previousHuman?.humanRequestTokens ?? [before.updatedAt, previousHuman?.human],
+      )).digest("hex");
+      this.db.recordCampaignContinuationEvent({
+        eventId: `human-blockers-cleared:${before.id}:${clearedIdentity}`,
+        campaignSessionId: before.id,
+        kind: "human_blockers_cleared",
+        now,
+      });
+    }
+    for (const child of this.db.campaignContinuationChildCandidates(before.id)) {
+      this.db.recordCampaignContinuationEvent({
+        eventId: `child-ready:${before.id}:${child.sessionId}:${child.status}:${child.eventSeq}`,
+        campaignSessionId: before.id,
+        kind: "child_ready",
+        subjectSessionId: child.sessionId,
+        subjectStatus: child.status,
+        occurrenceId: `event-seq:${child.eventSeq}`,
+        now,
+      });
     }
     this.notifyTransition(before, before.id);
     this.hub.sessionChangedById(before.id);
@@ -5539,10 +5701,8 @@ export class SessionsService {
     this.recordWorkflowDecisionAudit(decision, "pending", { kind: "agent", id: sessionId }, now);
     if (decision.authority === "human") {
       this.notifyTransition(child, sessionId);
-      this.publishCampaignAttentionTransition(controller.session);
-    } else {
-      this.hub.sessionChangedById(controller.session.id);
     }
+    this.publishCampaignAttentionTransition(controller.session);
     this.hub.sessionChangedById(sessionId);
     return ok(decision, 201);
   }
@@ -5615,8 +5775,7 @@ export class SessionsService {
       checked.data.rationale,
     );
     this.hub.sessionChangedById(childSessionId);
-    if (decision.authority === "human") this.publishCampaignAttentionTransition(currentParent);
-    else this.hub.sessionChangedById(parentSessionId);
+    this.publishCampaignAttentionTransition(currentParent);
     return ok(resolved);
   }
 
@@ -5971,8 +6130,7 @@ export class SessionsService {
     this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
     this.recordWorkflowDecisionAudit(decision, "revoked", actor, now);
     this.hub.sessionChangedById(decision.sessionId);
-    if (decision.authority === "human") this.publishCampaignAttentionTransition(controllerBefore);
-    else this.hub.sessionChangedById(decision.controllingSessionId);
+    this.publishCampaignAttentionTransition(controllerBefore);
   }
 
   /** Settle a server-owned workflow card against the provider state it temporarily covered. */
