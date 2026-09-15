@@ -54,7 +54,14 @@ export function InlineListbox<T>({
   style?: CSSProperties;
 }) {
   return (
-    <div className={className} role="listbox" id={id} aria-label={label} style={style}>
+    <div
+      className={className}
+      role="listbox"
+      id={id}
+      aria-label={label}
+      style={style}
+      onMouseDown={(event) => event.preventDefault()}
+    >
       {before}
       {options.map((option, index) => {
         const optionDisabled = isOptionDisabled?.(option) ?? false;
@@ -70,7 +77,7 @@ export function InlineListbox<T>({
               + `${optionDisabled ? " is-disabled" : ""}`}
             key={getKey(option)}
             onMouseDown={(event) => event.preventDefault()}
-            onMouseEnter={() => onActiveChange?.(index)}
+            onMouseMove={() => onActiveChange?.(index)}
             onClick={() => { if (!optionDisabled) onSelect(option); }}
           >
             {renderOption(option)}
@@ -171,7 +178,7 @@ export function SegmentedControl<T extends string>({
   className,
 }: {
   options: readonly SegmentedOption<T>[];
-  value: T;
+  value: T | null;
   onChange: (value: T) => void;
   /** The group's accessible name. Required: an unlabelled radiogroup announces only its options. */
   label: string;

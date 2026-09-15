@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { SessionReminderView, SetSessionReminderRequest } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
+import { parseReminderExpression } from "../reminder-schedule.js";
 import { SnoozeDialog } from "./SnoozeDialog.js";
 
 const domWindow = new Window({ url: "http://localhost/inbox" });
@@ -18,7 +19,9 @@ for (const [name, value] of Object.entries({
   Node: domWindow.Node,
   Event: domWindow.Event,
   MouseEvent: domWindow.MouseEvent,
+  PointerEvent: domWindow.PointerEvent,
   KeyboardEvent: domWindow.KeyboardEvent,
+  CompositionEvent: domWindow.CompositionEvent,
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
@@ -375,10 +378,16 @@ test("409 reconciliation distinguishes authoritative reminder states without liv
     await act(async () => { reload.click(); });
     assert.equal(domWindow.document.activeElement, expression, `${scenario.name}: reload restores dialog focus`);
     if (scenario.authoritative === null) {
-      assert.equal(expression.value, "tomorrow morning", "normal reset discards the natural-language draft");
+      assert.equal(expression.value, "", "normal reset discards the natural-language draft without inventing input");
       assert.equal(exact.value, "", "normal reset discards the exact-time draft");
       assert.equal(container.querySelector<HTMLButtonElement>('[role="radio"][aria-checked="true"]')
         ?.textContent?.includes("Until Activity"), true, "normal reset restores the default Wake Policy");
+      assert.equal(container.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled, true,
+        "a reset reminder remains unavailable until the user chooses a schedule");
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent === "Tomorrow Morning")!.click();
+      });
     }
     await act(async () => { container.querySelector<HTMLButtonElement>('button[type="submit"]')!.click(); });
     assert.equal(accepted?.expectedRevision, scenario.expectedRevision, scenario.name);
@@ -719,6 +728,229 @@ test("a newer live update wins when it arrives during authoritative reconciliati
   await act(async () => { container.querySelector<HTMLButtonElement>('button[type="submit"]')!.click(); });
   assert.equal(accepted?.expectedRevision, 3);
   assert.equal(accepted?.expectedReminderId, "reminder-original");
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("new reminders start empty while existing natural-language expressions remain intact", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<SnoozeDialog onClose={() => undefined} onSave={async () => undefined} />);
+  });
+
+  const expression = container.querySelector<HTMLInputElement>("#snooze-expression")!;
+  const submit = container.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+  assert.equal(expression.value, "");
+  assert.equal(expression.placeholder, "Try “in 2 hours”");
+  assert.equal(expression.getAttribute("role"), "combobox");
+  assert.equal(expression.getAttribute("aria-expanded"), "false");
+  assert.equal(submit.disabled, true);
+  assert.match(container.querySelector(".snooze-preview")?.textContent ?? "", /Choose a preset or enter a future schedule/);
+
+  const existing: SessionReminderView = {
+    reminderId: "reminder-existing", sessionId: "session-1", scheduledFor: Date.now() + 7_200_000,
+    timeZone: "UTC", originalExpression: "in 2 hours", wakePolicy: "until_activity", state: "pending",
+    revision: 1, createdAt: 1, updatedAt: 1,
+  };
+  await act(async () => { root.unmount(); });
+  const secondRoot = createRoot(container);
+  await act(async () => {
+    secondRoot.render(<SnoozeDialog reminder={existing} onClose={() => undefined} onSave={async () => undefined} />);
+  });
+  assert.equal(container.querySelector<HTMLInputElement>("#snooze-expression")?.value, "in 2 hours");
+  assert.match(container.querySelector(".snooze-preview")?.textContent ?? "", /Schedule Source: Stored Reminder/);
+
+  await act(async () => { secondRoot.unmount(); });
+  container.remove();
+});
+
+test("schedule suggestions expose listbox semantics and keyboard selection submits exactly once", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const saved: SetSessionReminderRequest[] = [];
+  let closes = 0;
+  await act(async () => {
+    root.render(<SnoozeDialog onClose={() => { closes++; }} onSave={async (request) => { saved.push(request); }} />);
+  });
+  const expression = container.querySelector<HTMLInputElement>("#snooze-expression")!;
+  await act(async () => { fireDomEvent.change(expression, { target: { value: "in 23" } }); });
+
+  const listbox = container.querySelector<HTMLElement>('[role="listbox"]')!;
+  const options = [...container.querySelectorAll<HTMLElement>('[role="option"]')];
+  assert.equal(expression.getAttribute("aria-expanded"), "true");
+  assert.equal(expression.getAttribute("aria-controls"), listbox.id);
+  assert.equal(listbox.getAttribute("aria-label"), "Schedule Suggestions");
+  assert.deepEqual(options.map((option) => option.textContent?.match(/^In 23 (?:Minutes|Hours|Days)/)?.[0]), [
+    "In 23 Minutes", "In 23 Hours", "In 23 Days",
+  ]);
+  assert.equal(options.every((option) => option.tabIndex === -1), true);
+  assert.equal(expression.hasAttribute("aria-activedescendant"), false,
+    "typing alone must not make Enter replace an already-valid expression with a different suggestion");
+
+  await act(async () => { fireDomEvent.keyDown(expression, { key: "ArrowDown" }); });
+  assert.equal(expression.getAttribute("aria-activedescendant"), options[0]?.id);
+  await act(async () => { fireDomEvent.keyDown(expression, { key: "ArrowDown" }); });
+  assert.equal(expression.getAttribute("aria-activedescendant"), options[1]?.id);
+  await act(async () => { fireDomEvent.keyDown(expression, { key: "ArrowUp" }); });
+  assert.equal(expression.getAttribute("aria-activedescendant"), options[0]?.id);
+  await act(async () => {
+    fireDomEvent.keyDown(expression, { key: "Enter" });
+    fireDomEvent.keyDown(expression, { key: "Enter" });
+    await Promise.resolve();
+  });
+  assert.equal(expression.value, "In 23 Minutes");
+  assert.equal(expression.getAttribute("aria-expanded"), "false");
+  assert.equal(saved.length, 1, "suggestion acceptance and form bubbling must not submit twice");
+  assert.equal(saved[0]?.originalExpression, "In 23 Minutes");
+  assert.equal(closes, 1);
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("Escape dismisses suggestions before the dialog and Tab leaves suggestion options out of traversal", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  let closes = 0;
+  await act(async () => {
+    root.render(<SnoozeDialog onClose={() => { closes++; }} onSave={async () => undefined} />);
+  });
+  const expression = container.querySelector<HTMLInputElement>("#snooze-expression")!;
+  await act(async () => { fireDomEvent.change(expression, { target: { value: "tom" } }); });
+  assert.equal(expression.getAttribute("aria-expanded"), "true");
+  await act(async () => { fireDomEvent.keyDown(expression, { key: "Escape" }); });
+  assert.equal(expression.getAttribute("aria-expanded"), "false");
+  assert.equal(closes, 0, "the popup owns the first Escape");
+  await act(async () => { fireDomEvent.keyDown(expression, { key: "Escape" }); });
+  assert.equal(closes, 1, "the dialog owns the next Escape");
+
+  await act(async () => { fireDomEvent.change(expression, { target: { value: "in 7" } }); });
+  const tab = new domWindow.KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+  await act(async () => { expression.dispatchEvent(tab as never); });
+  assert.equal(tab.defaultPrevented, false, "native focus traversal remains available");
+  assert.equal(expression.getAttribute("aria-expanded"), "false");
+  assert.equal([...container.querySelectorAll<HTMLElement>('[role="option"]')].every((option) => option.tabIndex === -1), true);
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("touch selection remains focus-safe and IME Enter never selects or submits", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const saved: SetSessionReminderRequest[] = [];
+  await act(async () => {
+    root.render(<SnoozeDialog onClose={() => undefined} onSave={async (request) => { saved.push(request); }} />);
+  });
+  const expression = container.querySelector<HTMLInputElement>("#snooze-expression")!;
+  await act(async () => { fireDomEvent.change(expression, { target: { value: "in 7" } }); });
+  const option = container.querySelector<HTMLElement>('[role="option"]')!;
+  const originalActive = expression.getAttribute("aria-activedescendant");
+  await act(async () => { fireDomEvent.keyDown(expression, { key: "Enter", isComposing: true }); });
+  assert.equal(saved.length, 0);
+  assert.equal(expression.getAttribute("aria-expanded"), "true");
+  assert.equal(expression.getAttribute("aria-activedescendant"), originalActive);
+
+  expression.focus();
+  await act(async () => {
+    fireDomEvent.pointerDown(option, { pointerType: "touch" });
+    fireDomEvent.click(option);
+  });
+  assert.equal(expression.value, "In 7 Days");
+  assert.equal(domWindow.document.activeElement, expression);
+  assert.equal(saved.length, 0, "pointer and touch selection choose a schedule without implicitly submitting");
+  assert.equal(container.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled, false);
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("presets stay distinct from text input and every invalid schedule gets an actionable explanation", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<SnoozeDialog onClose={() => undefined} onSave={async () => undefined} />);
+  });
+  const expression = container.querySelector<HTMLInputElement>("#snooze-expression")!;
+  const exact = container.querySelector<HTMLInputElement>("#snooze-exact")!;
+  const submit = container.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+  const preview = () => container.querySelector(".snooze-preview")?.textContent ?? "";
+  const tomorrow = [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent === "Tomorrow Morning")!;
+  await act(async () => { tomorrow.click(); });
+  assert.equal(expression.value, "", "a preset must not masquerade as authored natural language");
+  assert.equal(tomorrow.getAttribute("aria-checked"), "true");
+  assert.equal(submit.disabled, false);
+  assert.match(preview(), /Schedule Source: Preset — Tomorrow Morning/);
+
+  await act(async () => { fireDomEvent.change(expression, { target: { value: "08\/22\/2026" } }); });
+  assert.equal(submit.disabled, true);
+  assert.match(preview(), /Numeric dates are ambiguous.*Exact Date and Time/);
+  await act(async () => { fireDomEvent.change(expression, { target: { value: "whenever is good" } }); });
+  assert.match(preview(), /Complete a supported phrase or choose a schedule suggestion/);
+  await act(async () => { fireDomEvent.change(expression, { target: { value: "in 0 hours" } }); });
+  assert.match(preview(), /not in the future.*positive interval/);
+  await act(async () => { fireDomEvent.change(expression, { target: { value: "today at 25" } }); });
+  assert.match(preview(), /valid clock time.*today at 3:30 PM/);
+  await act(async () => { fireDomEvent.change(exact, { target: { value: "2000-01-01T00:00" } }); });
+  assert.match(preview(), /exact date and time in the future/);
+  assert.match(preview(), /Schedule Source: Exact Date and Time/);
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("a complete natural-language expression leaves Enter available to the enclosing form", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const saved: SetSessionReminderRequest[] = [];
+  await act(async () => {
+    root.render(<SnoozeDialog onClose={() => undefined} onSave={async (request) => { saved.push(request); }} />);
+  });
+  const expression = container.querySelector<HTMLInputElement>("#snooze-expression")!;
+  await act(async () => { fireDomEvent.change(expression, { target: { value: "in 2 hours" } }); });
+  assert.equal(expression.getAttribute("aria-expanded"), "false");
+  const enter = new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+  await act(async () => { expression.dispatchEvent(enter as never); });
+  assert.equal(enter.defaultPrevented, false, "closed autocomplete must not take Enter away from the form");
+  await act(async () => { fireDomEvent.submit(container.querySelector("form")!); });
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0]?.originalExpression, "in 2 hours");
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("Enter submits a complete typed schedule even when broader suggestions remain visible", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const saved: SetSessionReminderRequest[] = [];
+  await act(async () => {
+    root.render(<SnoozeDialog onClose={() => undefined} onSave={async (request) => { saved.push(request); }} />);
+  });
+  const expression = container.querySelector<HTMLInputElement>("#snooze-expression")!;
+  await act(async () => { fireDomEvent.change(expression, { target: { value: "tomorrow at 3 pm" } }); });
+  assert.equal(expression.getAttribute("aria-expanded"), "true");
+  assert.equal(expression.hasAttribute("aria-activedescendant"), false);
+  assert.match(container.querySelector(".snooze-preview")?.textContent ?? "", /3:00 PM/);
+
+  const expected = parseReminderExpression("tomorrow at 3 pm");
+  const enter = new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+  await act(async () => { expression.dispatchEvent(enter as never); });
+  assert.equal(enter.defaultPrevented, false, "a suggestion is selected only after explicit arrow or pointer intent");
+  await act(async () => { fireDomEvent.submit(container.querySelector("form")!); });
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0]?.originalExpression, "tomorrow at 3 pm");
+  assert.equal(saved[0]?.scheduledFor, expected?.scheduledFor);
 
   await act(async () => { root.unmount(); });
   container.remove();

@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { SessionReminderView } from "@wollipog/protocol";
-import { exactReminderSchedule, parseReminderExpression, storedReminderSchedule } from "./reminder-schedule.js";
+import {
+  exactReminderSchedule,
+  parseReminderExpression,
+  storedReminderSchedule,
+  suggestReminderExpressions,
+} from "./reminder-schedule.js";
 
 test("natural reminder expressions reject an explicitly past Today time", () => {
   const now = new Date(2026, 7, 21, 15, 0, 0, 0);
@@ -31,4 +36,28 @@ test("editing preserves the authoritative stored instant and time zone", () => {
     timeZone: "America/New_York",
     originalExpression: "2026-11-01T01:30",
   });
+});
+
+test("reminder suggestions complete common partials and are all accepted by the parser", () => {
+  const now = new Date(2026, 7, 21, 10, 0, 0, 0);
+  const relative = suggestReminderExpressions("in 23", now);
+  assert.deepEqual(relative.map((suggestion) => suggestion.originalExpression), [
+    "In 23 Minutes",
+    "In 23 Hours",
+    "In 23 Days",
+  ]);
+
+  const clock = suggestReminderExpressions("tomorrow at 3:30", now);
+  assert.deepEqual(clock.map((suggestion) => suggestion.originalExpression), [
+    "Tomorrow at 3:30 PM",
+    "Tomorrow at 3:30 AM",
+  ]);
+
+  for (const suggestion of [...relative, ...clock, ...suggestReminderExpressions("tom", now)]) {
+    assert.ok(parseReminderExpression(suggestion.originalExpression, now),
+      `${suggestion.originalExpression} must remain inside the authoritative grammar`);
+  }
+  assert.deepEqual(suggestReminderExpressions("In 2 Hours", now), [],
+    "a complete valid expression should release Enter back to form submission");
+  assert.deepEqual(suggestReminderExpressions("", now), []);
 });
