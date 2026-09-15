@@ -18,6 +18,7 @@ declare global {
     __WOLLIPOG_REQUEST_SURFACES_E2E__: {
       openedChild(): DescendantRequestView | null;
       submissions(): unknown[];
+      workerReviewOpened(): boolean;
     };
   }
 }
@@ -28,6 +29,7 @@ const includeDescendants = scenario === "descendants" ||
   new URLSearchParams(window.location.search).get("children") === "1";
 let openedChild: DescendantRequestView | null = null;
 const submissions: unknown[] = [];
+let workerReviewOpened = false;
 
 function evidenceSession(): SessionView {
   const evidence = Array.from({ length: evidenceCount }, (_, index) => ({
@@ -239,7 +241,14 @@ function Fixture() {
           pendingRequests: { human: 8, orchestrator: 4 },
         } as SessionView["orchestratorCampaign"],
       } as SessionView
-    : scenario === "standalone" ? standaloneApprovalSession() : evidenceSession());
+    : scenario === "standalone" || scenario === "worker"
+      ? {
+          ...standaloneApprovalSession(),
+          pendingApproval: scenario === "worker"
+            ? { ...standaloneApprovalSession().pendingApproval!, ownerToolUseId: "worker-tool" }
+            : standaloneApprovalSession().pendingApproval,
+        } as SessionView
+      : evidenceSession());
   const descendants = useMemo(() => includeDescendants ? descendantRequests() : [], []);
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<RightPanelMode>("requests");
@@ -292,7 +301,8 @@ function Fixture() {
     },
   } as ApiClient;
   const ownDecision = session.pendingApproval?.workflowDecision;
-  const standaloneTemplate = scenario === "standalone" ? standaloneApprovalSession().pendingApproval! : null;
+  const standaloneTemplate = scenario === "standalone" || scenario === "worker"
+    ? standaloneApprovalSession().pendingApproval! : null;
   const standaloneTimelineItems: TimelineItem[] = standaloneTemplate ? [{
     kind: "permission",
     id: 25,
@@ -326,7 +336,7 @@ function Fixture() {
           )}
           <div className="detail-columns">
             <div className="detail-chat">
-              {(scenario === "legacy" || scenario === "standalone") && (
+              {(scenario === "legacy" || scenario === "standalone" || scenario === "worker") && (
                 <SessionApprovalRegion
                   session={session}
                   runnerOnline
@@ -346,13 +356,16 @@ function Fixture() {
                         </div>
                       </div>
                     ))}
-                    {scenario === "standalone" && (
+                    {(scenario === "standalone" || scenario === "worker") && (
                       <EventTimeline
                         items={standaloneTimelineItems}
                         approvalContext={session.pendingApproval ? {
                           sessionId: session.id,
                           requestId: session.pendingApproval.requestId,
-                          onOpenRequest: () => setOpen(true),
+                          onOpenRequest: () => {
+                            if (scenario === "worker") workerReviewOpened = true;
+                            else setOpen(true);
+                          },
                         } : undefined}
                       />
                     )}
@@ -418,6 +431,7 @@ function Fixture() {
 window.__WOLLIPOG_REQUEST_SURFACES_E2E__ = {
   openedChild: () => openedChild,
   submissions: () => submissions,
+  workerReviewOpened: () => workerReviewOpened,
 };
 
 createRoot(document.getElementById("root")!).render(<Fixture />);

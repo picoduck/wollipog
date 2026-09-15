@@ -779,8 +779,11 @@ function SessionDetailLoaded({
     ),
   });
   const ownStandaloneApproval = standaloneApprovalForReview(session.pendingApproval);
+  const ownWorkerApproval = session.pendingApproval?.ownerToolUseId
+    ? session.pendingApproval : null;
   const ownApprovalRequestId = ownStandaloneApproval?.requestId;
   const ownApprovalOccurrenceId = ownStandaloneApproval?.occurrenceId ?? ownStandaloneApproval?.requestId;
+  const timelineApprovalRequestId = ownApprovalRequestId ?? ownWorkerApproval?.requestId;
   const ownWorkflowDecision = ownStandaloneApproval?.kind === "workflow_decision"
     ? ownStandaloneApproval.workflowDecision : undefined;
   const ownEvidenceSnapshot = ownWorkflowDecision?.resourceSnapshot.category === "ui_evidence_approval"
@@ -2372,8 +2375,8 @@ function SessionDetailLoaded({
   // Incremental derivation: streamed chunks push only the NEW events into a per-session
   // builder instead of re-folding the whole array (O(n²) over a long session).
   const items = useTimeline(sessionId, evs);
-  const ownApprovalHasTimelineRow = ownApprovalRequestId !== undefined && items.some((item) =>
-    item.kind === "permission" && item.requestId === ownApprovalRequestId &&
+  const ownApprovalHasTimelineRow = timelineApprovalRequestId !== undefined && items.some((item) =>
+    item.kind === "permission" && item.requestId === timelineApprovalRequestId &&
     item.resolvedOptionId === undefined);
   // Governance outcomes are transcript context, not a persistent header: the decisions whose
   // request has no transcript row of its own are spliced in at their chronological position, and
@@ -3387,13 +3390,20 @@ function SessionDetailLoaded({
     showKeyHints: !isMobile,
   }), [handlePendingQuestionAvailabilityChange, isMobile, loadSession, questionInTimeline, runnerOnline,
     session.id, timelinePendingQuestion]);
-  const timelineApprovalContext = useMemo(() => ownApprovalRequestId && ownApprovalOccurrenceId &&
-    ownApprovalHasTimelineRow ? {
+  const timelineApprovalContext = useMemo(() => timelineApprovalRequestId && ownApprovalHasTimelineRow ? {
       sessionId: session.id,
-      requestId: ownApprovalRequestId,
-      onOpenRequest: () => openRequestPanel(sessionRequestPanelKey(session.id, ownApprovalOccurrenceId)),
-    } : undefined, [openRequestPanel, ownApprovalHasTimelineRow, ownApprovalOccurrenceId,
-      ownApprovalRequestId, session.id]);
+      requestId: timelineApprovalRequestId,
+      onOpenRequest: ownStandaloneApproval && ownApprovalOccurrenceId
+        ? () => openRequestPanel(sessionRequestPanelKey(session.id, ownApprovalOccurrenceId))
+        : () => {
+            rightPanel.show("subagents");
+            navigate({ name: "session", id: session.id, attention: {
+              eventEpoch: session.eventEpoch ?? 0,
+              requestId: timelineApprovalRequestId,
+            } });
+          },
+    } : undefined, [navigate, openRequestPanel, ownApprovalHasTimelineRow, ownApprovalOccurrenceId,
+      ownStandaloneApproval, rightPanel, session.eventEpoch, session.id, timelineApprovalRequestId]);
   const working =
     showOptimistic || (!terminal && (session.status === "running" || session.status === "starting"));
   // The merged Working row must also survive approval/question waits: the projector keeps
@@ -4395,6 +4405,13 @@ function SessionDetailLoaded({
           onOpenBackgroundWork={() => rightPanel.show("background")}
           onOpenAttention={() => {
             const requests = pendingRequests(session.pendingApproval);
+            if (requests.length > 1) {
+              rightPanel.show("subagents");
+              navigate({ name: "session", id: session.id, attention: {
+                eventEpoch: session.eventEpoch ?? 0,
+              } });
+              return;
+            }
             if (ownStandaloneApproval && ownApprovalOccurrenceId) {
               openRequestPanel(sessionRequestPanelKey(session.id, ownApprovalOccurrenceId));
               return;

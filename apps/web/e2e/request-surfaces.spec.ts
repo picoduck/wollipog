@@ -87,6 +87,15 @@ test("missing campaign continuation result is visible and explicitly acknowledge
     }]);
 });
 
+test("worker-owned approval stays canonical while its transcript row opens worker review", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/request-surfaces-e2e.html?scenario=worker");
+  await expect(page.locator(".approval-bar")).toHaveCount(0);
+  await page.getByRole("button", { name: "Review Request" }).click();
+  await expect.poll(() => page.evaluate(() =>
+    window.__WOLLIPOG_REQUEST_SURFACES_E2E__.workerReviewOpened())).toBe(true);
+});
+
 for (const viewport of [
   { name: "mobile portrait", width: 390, height: 844 },
   { name: "mobile landscape", width: 844, height: 390 },
