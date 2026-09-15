@@ -947,7 +947,12 @@ test("unified Inbox creation opens both existing workflows with the active Proje
   await expect(choices.getByRole("menuitem").allTextContents()).resolves.toEqual(["New Session", "New Project"]);
   await choices.getByRole("menuitem", { name: "New Session", exact: true }).click();
   const sessionDialog = page.getByRole("dialog", { name: "New Session" });
-  await expect(sessionDialog.getByRole("combobox", { name: "Project" })).toHaveValue("Alpha");
+  const project = sessionDialog.getByRole("combobox", { name: "Project" });
+  await expect(project).toHaveValue("Alpha");
+  await expect(project).toHaveAttribute("aria-expanded", "true");
+  await page.keyboard.press("Escape");
+  await expect(project).toHaveAttribute("aria-expanded", "false");
+  await expect(sessionDialog).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(sessionDialog).toBeHidden();
   await expect(create).toBeFocused();
