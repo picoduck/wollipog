@@ -23,7 +23,7 @@ import {
   type SessionConfig,
 } from "@wollipog/protocol";
 import { createHash } from "node:crypto";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, posix } from "node:path";
 import { JsonRpcPeer } from "../jsonrpc.js";
 import {
   killTree,
@@ -491,8 +491,13 @@ export class CodexAppServerDriver implements Driver {
     const inheritedCodexHome = this.opts.context.kind === "native" ? process.env.CODEX_HOME : undefined;
     const effectiveHome = this.opts.env.HOME ??
       (this.opts.context.kind === "native" ? process.env.HOME : undefined);
+    const defaultCodexHome = effectiveHome
+      ? this.opts.context.kind === "wsl"
+        ? posix.isAbsolute(effectiveHome) ? posix.join(effectiveHome, ".codex") : undefined
+        : isAbsolute(effectiveHome) ? join(effectiveHome, ".codex") : undefined
+      : undefined;
     const configuredCodexHome = this.opts.env.CODEX_HOME ?? inheritedCodexHome ??
-      (effectiveHome && isAbsolute(effectiveHome) ? join(effectiveHome, ".codex") : undefined);
+      defaultCodexHome;
     return this.readRolloutProof(
       this.opts.context,
       configuredCodexHome,

@@ -2586,6 +2586,24 @@ test("historical reconciliation searches the provider's inherited native CODEX_H
   }
 });
 
+test("historical reconciliation derives a POSIX Codex home for Direct WSL", async () => {
+  const h = makeHarness({
+    resumeId: "thread-wsl-home",
+    context: { kind: "wsl", distro: "Ubuntu" },
+    env: { HOME: "/home/provider" },
+  });
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1146 --squash --match-head-commit ${"a".repeat(40)}`;
+  (h.driver as any).threadId = "thread-wsl-home";
+  (h.driver as any).peer = null;
+  let configuredHome: unknown;
+  (h.driver as any).readRolloutProof = async (_context: unknown, codexHome: unknown) => {
+    configuredHome = codexHome;
+    return null;
+  };
+  await h.driver.reconcileCompletedCommand?.("workflow-wsl-home", command);
+  assert.equal(configuredHome, "/home/provider/.codex");
+});
+
 test("historical reconciliation accepts one exact completed command from a durable runner receipt fence", async () => {
   const h = makeHarness({ resumeId: "thread-cli" });
   const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1162 --squash --match-head-commit ${"b".repeat(40)}`;
