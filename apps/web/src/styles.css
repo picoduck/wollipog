@@ -7964,6 +7964,8 @@ button.file-head.source-path-link {
 .snooze-presets { display: flex; flex-wrap: wrap; gap: 7px; }
 .snooze-form .field-label { margin: 4px 0 -4px; }
 .snooze-form .field-hint { color: var(--text-faint); font-size: var(--text-sm); line-height: 1.4; }
+.snooze-expression-combobox { position: relative; }
+.snooze-suggestions { font-size: var(--text-sm); }
 .snooze-conflict {
   display: grid;
   justify-items: start;

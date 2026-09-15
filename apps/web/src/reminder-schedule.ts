@@ -6,6 +6,22 @@ export interface ParsedReminderSchedule {
   originalExpression: string;
 }
 
+const REMINDER_SUGGESTION_SEEDS = [
+  "Later Today",
+  "Tomorrow",
+  "Tomorrow Morning",
+  "Tomorrow Afternoon",
+  "Tomorrow at 9 AM",
+  "Tomorrow at 1 PM",
+  "Tomorrow at 3:30 PM",
+  "In 15 Minutes",
+  "In 30 Minutes",
+  "In 1 Hour",
+  "In 2 Hours",
+  "In 1 Day",
+  "In 7 Days",
+] as const;
+
 export function browserTimeZone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }
@@ -54,6 +70,59 @@ export function parseReminderExpression(
   }
   if (!scheduled || !Number.isFinite(scheduled.getTime()) || scheduled.getTime() <= now.getTime()) return null;
   return { scheduledFor: scheduled.getTime(), timeZone: browserTimeZone(), originalExpression };
+}
+
+/** Complete a partially typed expression using only values accepted by the authoritative parser.
+ * Keeping this beside the parser makes it difficult for autocomplete and validation to drift. */
+export function suggestReminderExpressions(
+  query: string,
+  now = new Date(),
+): ParsedReminderSchedule[] {
+  const normalized = query.trim().toLocaleLowerCase().replace(/\s+/g, " ");
+  if (!normalized) return [];
+
+  const candidates = new Set<string>(REMINDER_SUGGESTION_SEEDS);
+  for (const hoursFromNow of [1, 3]) {
+    const future = new Date(now.getTime() + hoursFromNow * 3_600_000);
+    if (future.toDateString() !== now.toDateString()) continue;
+    const hour = future.getHours() % 12 || 12;
+    const minute = future.getMinutes() ? `:${String(future.getMinutes()).padStart(2, "0")}` : "";
+    candidates.add(`Today at ${hour}${minute} ${future.getHours() < 12 ? "AM" : "PM"}`);
+  }
+  const relative = /^in\s+(\d{1,4})(?:\s+[a-z]*)?$/.exec(normalized);
+  if (relative) {
+    const amount = Number(relative[1]);
+    candidates.add(`In ${amount} ${amount === 1 ? "Minute" : "Minutes"}`);
+    candidates.add(`In ${amount} ${amount === 1 ? "Hour" : "Hours"}`);
+    candidates.add(`In ${amount} ${amount === 1 ? "Day" : "Days"}`);
+  }
+
+  const clock = /^(today|tomorrow)(?:\s+at)?\s+(\d{1,2})(?::(\d{1,2}))?\s*(a|am|p|pm)?$/.exec(normalized);
+  if (clock) {
+    const day = clock[1] === "today" ? "Today" : "Tomorrow";
+    const hour = Number(clock[2]);
+    const minute = clock[3] ? `:${clock[3].padStart(2, "0")}` : "";
+    const typedMeridiem = clock[4];
+    const meridiems = typedMeridiem
+      ? [typedMeridiem.startsWith("a") ? "AM" : "PM"]
+      : hour >= 1 && hour <= 12 ? ["AM", "PM"] : [""];
+    for (const meridiem of meridiems) {
+      candidates.add(`${day} at ${hour}${minute}${meridiem ? ` ${meridiem}` : ""}`);
+    }
+  }
+
+  const terms = normalized.split(" ");
+  const suggestions: ParsedReminderSchedule[] = [];
+  for (const candidate of candidates) {
+    const candidateNormalized = candidate.toLocaleLowerCase();
+    const candidateTerms = candidateNormalized.split(" ");
+    if (candidateNormalized === normalized
+      || !terms.every((term) => candidateTerms.some((candidateTerm) => candidateTerm.startsWith(term)))) continue;
+    const parsed = parseReminderExpression(candidate, now);
+    if (parsed) suggestions.push(parsed);
+    if (suggestions.length === 6) break;
+  }
+  return suggestions;
 }
 
 /** A datetime-local control is interpreted by the browser runtime. Persist that runtime's zone

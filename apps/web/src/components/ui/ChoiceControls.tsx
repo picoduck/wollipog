@@ -171,7 +171,7 @@ export function SegmentedControl<T extends string>({
   className,
 }: {
   options: readonly SegmentedOption<T>[];
-  value: T;
+  value: T | null;
   onChange: (value: T) => void;
   /** The group's accessible name. Required: an unlabelled radiogroup announces only its options. */
   label: string;
