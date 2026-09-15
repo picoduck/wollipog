@@ -2342,6 +2342,7 @@ test("Guardian notification emits a structured review_decision instead of untype
 
 test("Guardian command approval carries one provider-correlated review receipt", () => {
   const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1140 --squash --match-head-commit ${"a".repeat(40)}`;
+  const providerCommand = `/usr/bin/zsh -lc '${command}'`;
   const notification = {
     threadId: "thread-1",
     turnId: "turn-1",
@@ -2349,7 +2350,7 @@ test("Guardian command approval carries one provider-correlated review receipt",
     targetItemId: "command-1",
     decisionSource: "agent",
     review: { status: "approved", riskLevel: "high", userAuthorization: "high", rationale: "approved" },
-    action: { type: "command", source: "unifiedExec", command, cwd: "/repo" },
+    action: { type: "command", source: "unifiedExec", command: providerCommand, cwd: "/repo" },
   };
   assert.deepEqual(parseReviewDecision(notification)?.approvalReviewReceipt, {
     transport: "codex-app-server",
@@ -2369,6 +2370,9 @@ test("Guardian command approval carries one provider-correlated review receipt",
     { ...notification, review: { ...notification.review, status: "aborted" } },
     { ...notification, action: { ...notification.action, type: "execve" } },
     { ...notification, action: { ...notification.action, source: "unknown" } },
+    { ...notification, action: { ...notification.action, source: "shell" } },
+    { ...notification, action: { ...notification.action, command } },
+    { ...notification, action: { ...notification.action, command: `/usr/bin/zsh -lc '${command}' extra` } },
     { ...notification, action: { ...notification.action, command: "x".repeat(2001) } },
   ]) {
     assert.equal(parseReviewDecision(malformed)?.approvalReviewReceipt, undefined,
@@ -2388,6 +2392,7 @@ test("Guardian review correlation is emitted only for the active root turn", () 
   (h.driver as any).promptBusy = true;
   (h.driver as any).turnResolve = () => {};
   const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1140 --squash --match-head-commit ${"a".repeat(40)}`;
+  const providerCommand = `/usr/bin/zsh -lc '${command}'`;
   const notification = {
     threadId: "root-thread",
     turnId: "root-turn",
@@ -2395,7 +2400,7 @@ test("Guardian review correlation is emitted only for the active root turn", () 
     targetItemId: "command-root",
     decisionSource: "agent",
     review: { status: "approved", riskLevel: "high", rationale: "approved" },
-    action: { type: "command", source: "unifiedExec", command, cwd: "/repo" },
+    action: { type: "command", source: "unifiedExec", command: providerCommand, cwd: "/repo" },
   };
   notifications.get("item/autoApprovalReview/completed")!(notification);
   notifications.get("item/autoApprovalReview/completed")!({
@@ -2440,6 +2445,28 @@ test("only auto-review approval requests carry Guardian escalation provenance", 
     if (event?.kind === "permission_request") {
       assert.deepEqual(event.context?.escalatedBy, escalated ? { kind: "agent", id: "codex-guardian" } : undefined);
     }
+  }
+});
+
+test("App Server command approval context recovers only an exact provider shell wrapper", () => {
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1140 --squash --match-head-commit ${"a".repeat(40)}`;
+  assert.equal(approvalContext("item/commandExecution/requestApproval", {
+    command: `/usr/bin/zsh -c '${command}'`,
+  }, false).input, command);
+  assert.equal(approvalContext("item/commandExecution/requestApproval", { command }, false).input, command,
+    "older raw provider input remains compatible");
+  assert.equal(approvalContext("item/commandExecution/requestApproval", {
+    command: `/usr/bin/zsh -c '${command}' trailing`,
+  }, false).input, `/usr/bin/zsh -c '${command}' trailing`,
+  "a non-canonical wrapper remains unmatched and fails closed downstream");
+  for (const unsupported of [
+    `/opt/custom-shell -c '${command}'`,
+    `/usr/bin/zsh -c \"${command}\"`,
+    "/usr/bin/zsh -c 'echo'",
+  ]) {
+    assert.equal(approvalContext("item/commandExecution/requestApproval", {
+      command: unsupported,
+    }, false).input, unsupported, "unsupported or non-canonical wrappers remain unmatched");
   }
 });
 

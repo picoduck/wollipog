@@ -3096,8 +3096,9 @@ export interface ReviewDecisionApprovalReviewReceipt {
   turnId: string;
   itemId: string;
   toolName: "commandExecution";
+  /** Exact logical tool input recovered from the provider's canonical command wrapper. */
   input: string;
-  /** SHA-256 of the exact UTF-8 input above, computed at the provider bridge. */
+  /** SHA-256 of the exact UTF-8 logical input above, computed at the provider bridge. */
   inputSha256: string;
 }
 

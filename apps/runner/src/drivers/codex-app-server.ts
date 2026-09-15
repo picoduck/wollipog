@@ -1665,6 +1665,29 @@ const REVIEW_OUTCOMES = {
 } as const;
 const REVIEW_RISK_LEVELS = new Set(["low", "medium", "high"]);
 
+/** Codex 0.154.x reports unified-exec commands after applying Rust shlex::try_join to
+ * `[absolute-shell, -c|-lc, raw-script]`. Admission needs the raw script that was actually
+ * reviewed, but must not accept a general shell rendering as trusted identity. Decode only the
+ * canonical single-quoted representation that can contain the merge command alphabet; unusual
+ * shells and quoting strategies remain visible but fail closed downstream. */
+const CODEX_PROVIDER_SHELLS = new Set(["ash", "bash", "dash", "ksh", "sh", "zsh"]);
+const CODEX_SHLEX_UNQUOTED = /^[+\-./:@\]_0-9A-Za-z]+$/u;
+const CODEX_SINGLE_QUOTED_SHELL_WRAPPER =
+  /^(\/[+\-./:@\]_0-9A-Za-z]+) (-c|-lc) '([^'\\^\x00-\x1f\x7f]+)'$/u;
+
+function codexProviderShellScript(command: string): string | null {
+  const match = CODEX_SINGLE_QUOTED_SHELL_WRAPPER.exec(command);
+  if (!match) return null;
+  const shellPath = match[1];
+  const script = match[3];
+  if (!shellPath || !script) return null;
+  const shell = shellPath.slice(shellPath.lastIndexOf("/") + 1);
+  // shlex::try_join leaves fully safe words unquoted. Requiring an unsafe byte proves this exact
+  // shape is its canonical representation, rather than merely another shell-equivalent spelling.
+  if (!CODEX_PROVIDER_SHELLS.has(shell) || CODEX_SHLEX_UNQUOTED.test(script)) return null;
+  return script;
+}
+
 export function parseReviewDecision(p: Json): ReviewDecision | null {
   const r = p?.review ?? p?.autoApprovalReview ?? p?.guardianApprovalReview ?? p?.item ?? p;
   const status = r?.status;
@@ -1699,19 +1722,20 @@ function guardianApprovalReviewReceipt(p: Json): ReviewDecision["approvalReviewR
   const action = p?.action;
   const boundedId = (value: unknown) => typeof value === "string" && value.length > 0 &&
     value.length <= 512 && !/[\x00-\x1f\x7f]/u.test(value);
+  const input = typeof action?.command === "string" ? codexProviderShellScript(action.command) : null;
   if (p?.decisionSource !== "agent" || review?.status !== "approved" ||
-      action?.type !== "command" || !["shell", "unifiedExec"].includes(action?.source) ||
+      action?.type !== "command" || action?.source !== "unifiedExec" ||
       !boundedId(p?.threadId) || !boundedId(p?.turnId) || !boundedId(p?.targetItemId) ||
       !boundedId(p?.reviewId) || typeof action?.command !== "string" ||
-      action.command.length < 1 || action.command.length > 2000) return undefined;
+      action.command.length < 1 || action.command.length > 2000 || !input) return undefined;
   return {
     transport: "codex-app-server",
     threadId: p.threadId,
     turnId: p.turnId,
     itemId: p.targetItemId,
     toolName: "commandExecution",
-    input: action.command,
-    inputSha256: createHash("sha256").update(action.command, "utf8").digest("hex"),
+    input,
+    inputSha256: createHash("sha256").update(input, "utf8").digest("hex"),
   };
 }
 
@@ -1745,7 +1769,13 @@ export function approvalContext(method: string, params: Json, escalated: boolean
   const onlyChange = changes?.length === 1 ? changes[0] : changes ? null : params?.fileChange;
   const path = params?.path ?? params?.filePath ?? onlyChange?.path ?? onlyChange?.filePath;
   const branch = params?.branch ?? params?.branchName;
-  const input = params?.command ?? params?.reason;
+  const providerInput = params?.command ?? params?.reason;
+  // Current App Servers expose commandExecution input through the same shlex-joined wrapper used
+  // by Guardian. Preserve older raw input and all unsupported shapes unchanged so the downstream
+  // exact-command matcher remains fail closed.
+  const input = toolName === "commandExecution" && typeof providerInput === "string"
+    ? codexProviderShellScript(providerInput) ?? providerInput
+    : providerInput;
   const networkRequested = params?.permissions?.network;
   return {
     toolName,
