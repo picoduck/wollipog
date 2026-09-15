@@ -151,6 +151,7 @@ import {
   validateControlPlaneUrl,
 } from "./control-plane-transport.js";
 import { discoverAgents, enrichAgentModels, mergeAgents } from "./discovery/discover.js";
+import { claudeCodeCapabilitiesForControlPlane } from "./discovery/claude-code.js";
 import {
   prepareClaudeSlashCommandCatalog,
 } from "./discovery/claude-commands.js";
@@ -418,15 +419,24 @@ function agentsForControlPlane() {
     controlPlaneProtocolVersion,
     isolationMode: config.executionIsolation.mode,
   }).filter((agent) => agent.id !== "conductor")
-    .map((agent) => ({ ...agent, env: {},
-      ...((!runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionOrchestration") ||
+    .map((agent) => {
+      // Account labels are personal display data. Keep Claude's discovery value runner-local and
+      // publish it only through the principal-scoped subscription-usage snapshot.
+      return {
+        ...agent,
+        env: {},
+        ...(agent.claudeCode
+          ? { claudeCode: claudeCodeCapabilitiesForControlPlane(agent.claudeCode) }
+          : {}),
+        ...((!runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionOrchestration") ||
           ((agent.context?.kind ?? "native") === "wsl" &&
             (!runnerSupportsProtocol(controlPlaneProtocolVersion, "wslSafeLauncher") ||
               agent.wslAgentControl?.safeLauncherProtocolVersion !== 1 ||
               config.executionIsolation.mode !== "bwrap"))) && agent.capabilities
-        ? { capabilities: { ...agent.capabilities, permissionModes: agent.capabilities.permissionModes?.filter((mode) => mode !== "orchestrator") } }
-        : {}),
-    }));
+          ? { capabilities: { ...agent.capabilities, permissionModes: agent.capabilities.permissionModes?.filter((mode) => mode !== "orchestrator") } }
+          : {}),
+      };
+    });
 }
 
 /** Resolve exact configured/discovered agent env at the last responsible moment. */

@@ -150,7 +150,7 @@ test("the Codex refresh probe uses only account APIs, never starts a turn, and a
       methods.push(message.method);
       if (message.id === undefined) continue;
       const result = message.method === "account/read"
-        ? { account: { type: "chatgpt", planType: "plus" } }
+        ? { account: { type: "chatgpt", planType: "plus", email: "active@example.com" } }
         : message.method === "account/rateLimits/read"
           ? { rateLimits: { limitId: "codex", primary: { usedPercent: 12 } } }
           : {};
@@ -169,6 +169,7 @@ test("the Codex refresh probe uses only account APIs, never starts a turn, and a
   assert.equal(launched?.isolation, isolation);
   assert.equal(killed, 1);
   assert.equal(result.state, "available");
+  assert.equal(result.accountLabel, "active@example.com");
 });
 
 test("the Codex refresh probe accepts its final response between exit and close", async () => {
@@ -193,7 +194,7 @@ test("the Codex refresh probe accepts its final response between exit and close"
       if (message.id === undefined) continue;
       if (message.method === "account/rateLimits/read") child.emit("exit", 0, null);
       const result = message.method === "account/read"
-        ? { account: { type: "chatgpt", planType: "plus" } }
+        ? { account: { type: "chatgpt", planType: "plus", email: "active@example.com" } }
         : message.method === "account/rateLimits/read"
           ? { rateLimits: { limitId: "codex", primary: { usedPercent: 12 } } }
           : {};
@@ -207,6 +208,38 @@ test("the Codex refresh probe accepts its final response between exit and close"
     kill: (() => {}) as never,
   }, { cwd: "/safe/subscription-probe" });
   assert.equal(result.state, "available");
+  assert.equal(result.accountLabel, "active@example.com");
+});
+
+test("the Codex refresh probe rejects unsafe or overlong account labels", async () => {
+  for (const email of ["line\nbreak@example.com", `${"a".repeat(155)}@example.com`]) {
+    const requestStream = new PassThrough();
+    const responseStream = new PassThrough();
+    const child = new EventEmitter() as AgentProcess;
+    Object.assign(child, { pid: 123, stdin: requestStream, stdout: responseStream, stderr: new PassThrough() });
+    let buffered = "";
+    requestStream.setEncoding("utf8");
+    requestStream.on("data", (chunk: string) => {
+      buffered += chunk;
+      while (buffered.includes("\n")) {
+        const index = buffered.indexOf("\n");
+        const message = JSON.parse(buffered.slice(0, index)) as { id?: number; method: string };
+        buffered = buffered.slice(index + 1);
+        if (message.id === undefined) continue;
+        const result = message.method === "account/read"
+          ? { account: { type: "chatgpt", planType: "pro", email } }
+          : message.method === "account/rateLimits/read"
+            ? { rateLimits: { limitId: "codex", primary: { usedPercent: 12 } } }
+            : {};
+        responseStream.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\n");
+      }
+    });
+    const result = await probeCodexSubscriptionUsage(agent(), {}, 1_000, {
+      spawn: (() => child) as never,
+      kill: (() => {}) as never,
+    }, { cwd: "/safe/subscription-probe" });
+    assert.equal(result.accountLabel, undefined);
+  }
 });
 
 test("a probe spawn error rejects through the refresh path and still reaps", async () => {
@@ -358,6 +391,46 @@ test("a successful refresh clears a prior fallback detail", async () => {
   assert.equal(manager.inventory()[0]?.detail, undefined);
 });
 
+test("a Codex account switch replaces the complete source snapshot", async () => {
+  let now = 20_000;
+  let activeAccount = "first@example.com";
+  let usedPercent = 20;
+  let includeSecondary = true;
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent()],
+    resolveEnv: () => ({}),
+    authorizeProbe: () => ({ cwd: "/safe/subscription-probe" }),
+    publish: () => {},
+    now: () => now,
+    probeCodex: async () => ({
+      state: "available",
+      accountLabel: activeAccount,
+      plan: activeAccount.startsWith("first") ? "pro" : "plus",
+      rateLimits: { rateLimits: {
+        limitId: "codex",
+        primary: { usedPercent },
+        ...(includeSecondary ? { secondary: { usedPercent: 70 } } : {}),
+      } },
+    }),
+  });
+  await manager.refreshAll();
+  assert.deepEqual(manager.inventory()[0]?.buckets.map((bucket) => bucket.id), [
+    "codex:primary", "codex:secondary",
+  ]);
+  activeAccount = "second@example.com";
+  usedPercent = 5;
+  includeSecondary = false;
+  now += 20_000;
+  await manager.refreshAll();
+  const switched = manager.inventory()[0]!;
+  assert.equal(switched.accountLabel, "second@example.com");
+  assert.equal(switched.plan, "plus");
+  assert.deepEqual(switched.buckets.map((bucket) => [bucket.id, bucket.usedPercent]), [
+    ["codex:primary", 5],
+  ], "a bucket absent from the replacement account cannot survive from the prior account");
+});
+
 test("subscription inventories wait for discovery and negotiated protocol support", () => {
   assert.equal(shouldPublishSubscriptionUsageInventory(false, 80), false);
   assert.equal(shouldPublishSubscriptionUsageInventory(true, 79), false);
@@ -465,6 +538,40 @@ function claudeAgent(overrides: Partial<AgentDefinition> = {}): AgentDefinition 
     ...overrides,
   });
 }
+
+test("Claude account labels stay source-local and an account switch drops prior allowances", () => {
+  let accountLabel = "first@example.com";
+  const source = () => claudeAgent({
+    claudeCode: {
+      ...claudeAgent().claudeCode!,
+      auth: { ...claudeAgent().claudeCode!.auth, accountLabel } as never,
+    },
+  });
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [source()],
+    resolveEnv: () => ({}),
+    publish: () => {},
+    now: () => OBSERVED_AT,
+  });
+  manager.observe("claude", "claude-code", { kind: "native" }, {
+    provider: "claude",
+    kind: "sparse",
+    payload: rateLimitEvent({
+      status: "allowed",
+      rateLimitType: "five_hour",
+      unifiedWindows: { five_hour: { utilization: 0.4, resetsAt: FIVE_HOUR_RESET } },
+    }),
+  });
+  assert.equal(manager.inventory()[0]?.accountLabel, "first@example.com");
+  assert.equal(manager.inventory()[0]?.buckets.length, 1);
+
+  accountLabel = "second@example.com";
+  manager.syncSources();
+  assert.equal(manager.inventory()[0]?.accountLabel, "second@example.com");
+  assert.equal(manager.inventory()[0]?.buckets.length, 0);
+  assert.equal(manager.inventory()[0]?.state, "unavailable");
+});
 
 /** Exactly the shape `claude --output-format stream-json` emits: `utilization` is the fraction of
  * the window consumed and `resetsAt` is unix epoch seconds. */

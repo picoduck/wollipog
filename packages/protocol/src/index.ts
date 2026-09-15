@@ -417,7 +417,10 @@
 //      Older peers cannot supply both proofs and fail closed without changing the decision.
 // 151: App Server action admission separates the runner session turn from the provider turn, and
 //      reconciliation can bind one exact successful command to a later durable Guardian receipt.
-export const PROTOCOL_VERSION = 151;
+// 152: subscription-usage snapshots may carry a bounded, user-recognizable active-account label.
+//      The optional field preserves rolling compatibility and remains scoped to the exact runner
+//      source that reported it; it is display-only and never an identity or authorization key.
+export const PROTOCOL_VERSION = 152;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -4185,8 +4188,10 @@ export interface SubscriptionUsageSpendControl {
   reached?: boolean;
 }
 
-/** Secret-free runner snapshot for one configured provider source. `sourceId` is an opaque hash of
- * runner-local agent/context metadata, never an account id, email, credential, or filesystem path. */
+/** Credential-free runner snapshot for one configured provider source. `sourceId` is an opaque
+ * hash of runner-local agent/context metadata, never an account id, email, credential, or
+ * filesystem path. `accountLabel`, when present, is bounded personal display data and is never an
+ * identity or authorization key. */
 export interface SubscriptionUsageSnapshot {
   sourceId: string;
   runnerId: string;
@@ -4197,6 +4202,7 @@ export interface SubscriptionUsageSnapshot {
   fetchedAt: number;
   buckets: SubscriptionUsageBucket[];
   plan?: string;
+  accountLabel?: string;
   credits?: SubscriptionUsageCredits;
   spendControls?: SubscriptionUsageSpendControl[];
 }

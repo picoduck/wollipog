@@ -13,8 +13,16 @@ import {
   formatShare,
   niceScale,
   processedTokens,
+  subscriptionPlanLabel,
   windowDays,
 } from "./usage-view-model.js";
+
+test("subscription plans normalize known branding and preserve unknown provider labels", () => {
+  assert.equal(subscriptionPlanLabel("pro"), "Pro");
+  assert.equal(subscriptionPlanLabel("PRO"), "Pro");
+  assert.equal(subscriptionPlanLabel("max"), "Max");
+  assert.equal(subscriptionPlanLabel("Future_Tier"), "Future_Tier");
+});
 
 function amount(over: Partial<UsageAmount> = {}): UsageAmount {
   return {

@@ -73,10 +73,11 @@ function snapshot(runnerId: string, fetchedAt: number) {
       status: "available",
     }],
     plan: "plus",
+    accountLabel: "account@example.com",
   } as const;
 }
 
-test("snapshot validation binds runner, advertised source, schema bounds, and drops unknown account data", () => {
+test("snapshot validation binds runner, advertised source, bounded display label, and drops raw account data", () => {
   const db = ControlPlaneDb.open(":memory:");
   const now = 1_000_000;
   db.registerRunner(meta("runner-1"), now, PROTOCOL_VERSION);
@@ -90,7 +91,61 @@ test("snapshot validation binds runner, advertised source, schema bounds, and dr
     ...value,
     buckets: [{ ...value.buckets[0], usedPercent: 101 }],
   }, "runner-1", db, now), /out of range/);
+  assert.throws(() => validateSubscriptionUsageSnapshot({
+    ...value,
+    accountLabel: "line\nbreak@example.com",
+  }, "runner-1", db, now), /accountLabel.*invalid/);
+  assert.throws(() => validateSubscriptionUsageSnapshot({
+    ...value,
+    accountLabel: `${"a".repeat(155)}@example.com`,
+  }, "runner-1", db, now), /accountLabel.*invalid/);
   assert.throws(() => validateSubscriptionUsageInventory(new Array(33).fill(value), "runner-1", db, now), /inventory/);
+  db.close();
+});
+
+test("account labels remain isolated by runner and switch atomically with available usage", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const now = 1_000_000;
+  for (const runnerId of ["runner-1", "runner-2"]) {
+    db.registerRunner(meta(runnerId), now, PROTOCOL_VERSION, {
+      organizationId: "org_personal", owner: { kind: "user", userId: "alice" },
+    });
+  }
+  db.upsertSubscriptionUsageSnapshot({
+    ...snapshot("runner-1", now),
+    accountLabel: "first@example.com",
+  });
+  db.upsertSubscriptionUsageSnapshot({
+    ...snapshot("runner-2", now),
+    accountLabel: "second@example.com",
+  });
+  assert.deepEqual(
+    db.subscriptionUsageForPrincipal(human(), now).sources.map((source) => [
+      source.runnerId, source.accountLabel, source.buckets[0]?.remainingPercent,
+    ]),
+    [
+      ["runner-1", "first@example.com", 75],
+      ["runner-2", "second@example.com", 75],
+    ],
+  );
+
+  db.upsertSubscriptionUsageSnapshot({
+    ...snapshot("runner-1", now + 1),
+    accountLabel: "replacement@example.com",
+    buckets: [{ ...snapshot("runner-1", now + 1).buckets[0], remainingPercent: 20 }],
+  });
+  const switched = db.subscriptionUsageForPrincipal(human(), now + 1).sources;
+  assert.deepEqual(switched.map((source) => [source.accountLabel, source.buckets[0]?.remainingPercent]), [
+    ["replacement@example.com", 20],
+    ["second@example.com", 75],
+  ]);
+  db.upsertSubscriptionUsageSnapshot({
+    ...snapshot("runner-2", now + 2),
+    accountLabel: "replacement@example.com",
+  });
+  const matching = db.subscriptionUsageForPrincipal(human(), now + 2).sources;
+  assert.equal(matching.length, 2, "matching display labels never deduplicate distinct runner sources");
+  assert.deepEqual(matching.map((source) => source.runnerId), ["runner-1", "runner-2"]);
   db.close();
 });
 

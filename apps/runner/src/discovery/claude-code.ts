@@ -13,6 +13,7 @@ import { win32 } from "node:path";
 type ProbeExec = (args: string[], timeoutMs?: number) => Promise<ExecResult>;
 
 const SAFE_LABEL = /^[a-zA-Z0-9._ -]{1,40}$/;
+const MAX_ACCOUNT_LABEL_LENGTH = 160;
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const PERMISSION_MODES = ["acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan"];
 export const CLAUDE_STEERING_MIN_VERSION = "2.1.241";
@@ -150,8 +151,22 @@ function safeEnum<T extends string>(value: unknown, allowed: readonly T[]): T | 
   return typeof value === "string" && allowed.includes(value as T) ? value as T : undefined;
 }
 
-/** Parse only the non-secret auth fields we persist; email and organization fields are discarded. */
-export function parseClaudeAuthStatus(result: ExecResult): ClaudeCodeAuth {
+/** Runner-local auth shape. The account label is stripped from advertised agent metadata and may
+ * leave the runner only through the principal-scoped subscription-usage snapshot. */
+export type RunnerClaudeCodeAuth = ClaudeCodeAuth & { accountLabel?: string };
+
+function safeAccountLabel(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  return normalized && normalized.length <= MAX_ACCOUNT_LABEL_LENGTH &&
+    !/[\u0000-\u001f\u007f]/u.test(normalized)
+    ? normalized
+    : undefined;
+}
+
+/** Parse only bounded account display data and non-secret auth fields. Organization fields and
+ * provider account ids are discarded. */
+export function parseClaudeAuthStatus(result: ExecResult): RunnerClaudeCodeAuth {
   let raw: Record<string, unknown> | undefined;
   try {
     const parsed = JSON.parse(result.stdout);
@@ -169,6 +184,7 @@ export function parseClaudeAuthStatus(result: ExecResult): ClaudeCodeAuth {
   const subscriptionType = typeof raw.subscriptionType === "string" && SAFE_LABEL.test(raw.subscriptionType)
     ? raw.subscriptionType
     : undefined;
+  const accountLabel = safeAccountLabel(raw.email);
   const billingSource: ClaudeCodeAuth["billingSource"] = rawProvider === "bedrock"
     ? "bedrock"
     : rawProvider === "vertex"
@@ -184,7 +200,16 @@ export function parseClaudeAuthStatus(result: ExecResult): ClaudeCodeAuth {
     provider: rawProvider ?? "unknown",
     billingSource,
     ...(subscriptionType ? { subscriptionType } : {}),
+    ...(accountLabel ? { accountLabel } : {}),
   };
+}
+
+/** Remove runner-local personal display data before ordinary agent metadata is advertised. */
+export function claudeCodeCapabilitiesForControlPlane(
+  capabilities: ClaudeCodeCapabilities,
+): ClaudeCodeCapabilities {
+  const { accountLabel: _accountLabel, ...auth } = capabilities.auth as RunnerClaudeCodeAuth;
+  return { ...capabilities, auth };
 }
 
 /** Explicit per-agent auth environment wins over the CLI account's default billing path. */

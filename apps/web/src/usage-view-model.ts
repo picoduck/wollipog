@@ -49,6 +49,17 @@ export function driverLabel(driver: string): string {
   return isDriverKind(driver) ? DRIVER_PRESENTATION[driver].label : driver;
 }
 
+const SUBSCRIPTION_PLAN_LABELS: Readonly<Record<string, string>> = {
+  max: "Max",
+  pro: "Pro",
+};
+
+/** Provider plan values are open strings. Correct only tier names whose branding is known and
+ * preserve every unknown value exactly so a new provider tier remains recognizable. */
+export function subscriptionPlanLabel(plan: string): string {
+  return SUBSCRIPTION_PLAN_LABELS[plan.toLocaleLowerCase("en-US")] ?? plan;
+}
+
 /**
  * Every token the provider processed. The control plane derives `processedTokens` per row with the
  * driver's input semantics and sums it, so the figure is additive across buckets, breakdowns, and
