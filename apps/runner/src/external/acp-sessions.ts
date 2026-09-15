@@ -25,7 +25,7 @@ export function configuredAcpAgent(
   agentId: string,
 ): AgentDefinition | null {
   return agents.find((agent) =>
-    agent.id === agentId && (agent.driver ?? "acp") === "acp" && agent.available !== false
+    agent.id === agentId && (agent.driver ?? "acp") === "acp" && agent.available === true
   ) ?? null;
 }
 
@@ -48,7 +48,7 @@ export async function listAcpExternalSessions(
   onWarning?: (warning: string) => void,
 ): Promise<AcpExternalSession[]> {
   const configured = agents
-    .filter((agent) => (agent.driver ?? "acp") === "acp" && agent.available !== false);
+    .filter((agent) => (agent.driver ?? "acp") === "acp" && agent.available === true);
   if (configured.length > MAX_PROBED_ADAPTERS) {
     onWarning?.(
       `ACP session discovery is limited to the first ${MAX_PROBED_ADAPTERS} of ${configured.length} configured adapters`,

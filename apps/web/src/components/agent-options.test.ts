@@ -183,6 +183,16 @@ test("same variant from two sources collapses to one, preferring the available a
   assert.equal(opts[0]!.agent.id, "codex-disc"); // the available one wins
 });
 
+test("an omitted legacy availability state is visible but never selectable", () => {
+  const opts = agentOptions([
+    agent({ id: "legacy-config", name: "Custom ACP", driver: "acp", available: undefined }),
+  ]);
+  assert.equal(opts.length, 1);
+  assert.equal(opts[0]!.disabled, true);
+  assert.deepEqual(runnableAgentIds(opts.map((option) => option.agent)), []);
+  assert.equal(firstEnabledAgentId(opts), "");
+});
+
 test("ACP duplicate is hidden when a native harness exists for the same provider", () => {
   const out = labels([
     agent({ id: "claude-code", name: "Claude Code (ACP)" }), // acp, no driver
@@ -347,12 +357,12 @@ test("a newly available native harness removes its now-hidden ACP duplicate from
   ]), ["claude-native"]);
 });
 
-test("multi-agent runs exclude known-unavailable discovery rows", () => {
+test("multi-agent runs exclude unavailable and unverified discovery rows", () => {
   assert.deepEqual(runnableAgentIds([
     agent({ id: "codex", name: "Codex", driver: "codex-app-server", available: false }),
     agent({ id: "codex-exec", name: "Codex exec", driver: "codex", available: true }),
     agent({ id: "config", name: "Config agent", driver: "acp", available: undefined }),
-  ]), ["codex-exec", "config"]);
+  ]), ["codex-exec"]);
 });
 
 test("multi-agent run defaults exclude advanced exec while keeping it explicitly runnable", () => {

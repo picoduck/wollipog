@@ -996,7 +996,7 @@ function codexExecFallbackReason(
   const interactive = db.getRunner(runnerId)?.agents.some(
     (agent) =>
       agent.driver === "codex-app-server" &&
-      agent.available !== false &&
+      agent.available === true &&
       (agent.context?.kind ?? "native") === launch.context.kind &&
       (launch.context.kind !== "wsl" ||
         (agent.context?.kind === "wsl" && agent.context.distro === launch.context.distro)),
@@ -10480,7 +10480,7 @@ export class SessionsService {
     const unsupported = this.capabilityFailure(runnerId, "externalSessions", "Finding agent sessions");
     if (unsupported) return unsupported;
     const selectedAgent = agentId
-      ? this.db.getRunner(runnerId)?.agents.find((agent) => agent.id === agentId && agent.available !== false)
+      ? this.db.getRunner(runnerId)?.agents.find((agent) => agent.id === agentId && agent.available === true)
       : undefined;
     if (agentId && !selectedAgent) return fail("the selected agent is not available on this runner", 404);
     if (selectedAgent?.driver === "codex-app-server") {

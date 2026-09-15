@@ -65,6 +65,14 @@ function authTitle(status: AgentDefinition["authStatus"]): string {
   return "Auth status unknown";
 }
 
+export function agentAvailabilityLabel(agent: AgentDefinition): "Available" | "Unavailable" | "Unverified" {
+  return agent.available === true ? "Available" : agent.available === false ? "Unavailable" : "Unverified";
+}
+
+export function availableAgentCount(agents: AgentDefinition[]): number {
+  return agents.filter((agent) => agent.available === true).length;
+}
+
 function acpCapabilitySummary(a: AgentDefinition): string {
   if (!a.acp) return "Capabilities pending live ACP handshake";
   const names: Array<[keyof NonNullable<AgentDefinition["acp"]>, string]> = [
@@ -95,7 +103,7 @@ function AgentDetailsDialog({ a, onClose }: { a: AgentDefinition; onClose: () =>
         <div><dt>Execution Context</dt><dd>{titleCaseLabel(contextLabel(a.context))}</dd></div>
         <div><dt>Source</dt><dd>{titleCaseLabel(a.source ?? "configured")}</dd></div>
         <div><dt>Version</dt><dd>{a.version ? `v${a.version}` : "Unknown"}</dd></div>
-        <div><dt>Availability</dt><dd>{a.available === false ? "Unavailable" : "Available"}</dd></div>
+        <div><dt>Availability</dt><dd>{agentAvailabilityLabel(a)}</dd></div>
         <div><dt>Authentication</dt><dd>{titleCaseLabel(a.authStatus ?? "unknown")}</dd></div>
       </dl>
       <section className="agent-details-section">
@@ -115,6 +123,12 @@ function AgentDetailsDialog({ a, onClose }: { a: AgentDefinition; onClose: () =>
         <section className="agent-details-section">
           <h3>App Server Status</h3>
           <p>{a.codexAppServer.failure.message}</p>
+        </section>
+      )}
+      {a.unavailableReason && (
+        <section className="agent-details-section">
+          <h3>Availability Status</h3>
+          <p>{a.unavailableReason}</p>
         </section>
       )}
       {a.registry && (
@@ -225,7 +239,7 @@ function AgentRow({
         <span className="atag ctx">{contextLabel(a.context)}</span>
         {a.source === "discovered" && <span className="atag discovered">Discovered</span>}
         {a.source === "registry" && <span className="atag discovered">ACP Registry</span>}
-        {a.available === false && <span className="atag broken">Unavailable</span>}
+        {a.available !== true && <span className="atag broken">{agentAvailabilityLabel(a)}</span>}
         {a.registry && <span className="atag">{a.registry.transport}</span>}
         {!a.registry && a.acpTransport && <span className="atag">{a.acpTransport}</span>}
         {a.registry && <span className="atag">Adapter v{a.registry.adapterVersion}</span>}
@@ -262,6 +276,7 @@ function AgentRow({
       {a.claudeCode && a.claudeCode.status !== "ready" && a.claudeCode.failure?.message && (
         <div className="empty-sub">{a.claudeCode.failure.message}</div>
       )}
+      {a.unavailableReason && <div className="empty-sub">{a.unavailableReason}</div>}
       {a.registry && (
         <div className="empty-sub">
           {a.registry.description} · {acpCapabilitySummary(a)} · registry requires authentication; status is verified at live initialize
@@ -280,7 +295,7 @@ function AgentRow({
             {a.registry.installStatus === "approval-required"
               ? "Registry launch is disabled until this exact version and command receive explicit confirmation."
               : a.registry.installStatus === "approved"
-                ? a.available === false
+                ? a.available !== true
                   ? "Exact launch approval is retained, but its package runner is unavailable. Install it, then Rediscover."
                   : "Exact Registry package launch approved. A changed version or command is disabled automatically."
                 : a.registry.installStatus === "manual-only"
@@ -387,7 +402,7 @@ function RunnerDetails({ runner, online }: { runner: RunnerView; online: boolean
             <span className="runner-agents-label">Agents</span>
             <span className="group-count">{runner.agents.length}</span>
             <span className="runner-agents-summary">
-              {runner.agents.filter((agent) => agent.available !== false).length} Available
+              {availableAgentCount(runner.agents)} Available
             </span>
             <ChevronRightIcon className="runner-disclosure-chevron" />
           </summary>
@@ -406,15 +421,21 @@ function RunnerDetails({ runner, online }: { runner: RunnerView; online: boolean
                     />
                   ))}
                 </div>
-                {runner.agents.every((agent) => agent.available === false) && (
+                {runner.agents.every((agent) => agent.available !== true) && (
                   <div className="install-hints">
-                    <p className="hint">No usable agent CLIs found on this machine — install one:</p>
-                    {agentInstallHints(runner.os).map((h) => (
-                      <pre key={h.name} className="code-block install-cmd" title={`Install ${h.name}`}>
-                        {h.command}
-                        <CopyButton text={h.command} />
-                      </pre>
-                    ))}
+                    {runnerSupportsProtocol(runner.protocolVersion, "verifiedAgentAvailability") ? (
+                      <>
+                        <p className="hint">No usable agent CLIs found on this machine — install one:</p>
+                        {agentInstallHints(runner.os).map((h) => (
+                          <pre key={h.name} className="code-block install-cmd" title={`Install ${h.name}`}>
+                            {h.command}
+                            <CopyButton text={h.command} />
+                          </pre>
+                        ))}
+                      </>
+                    ) : (
+                      <p className="hint">Update this runner to verify its configured agent availability.</p>
+                    )}
                   </div>
                 )}
               </>

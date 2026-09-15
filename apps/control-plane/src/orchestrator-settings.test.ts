@@ -29,6 +29,7 @@ function runner(runnerId: string, model: string, efforts: string[]): RunnerMetad
       name: "Codex App Server",
       command: "codex",
       driver: "codex-app-server",
+      available: true,
       context: { kind: "native" },
       capabilities: {
         models: [{ id: model, displayName: model.toUpperCase(), efforts }],

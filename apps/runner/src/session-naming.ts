@@ -69,7 +69,7 @@ export interface SessionNamingAccount {
 }
 
 export function sessionNamingAccountForAgent(agent: AgentDefinition | undefined): SessionNamingAccount | null {
-  if (!agent || agent.available === false || agent.authStatus !== "authenticated") return null;
+  if (!agent || agent.available !== true || agent.authStatus !== "authenticated") return null;
   const driver = agent.driver ?? "acp";
   if ((driver === "codex" || driver === "codex-app-server") && agent.codexAppServer?.status === "supported" &&
       agent.codexAppServer.sessionNaming === true) {

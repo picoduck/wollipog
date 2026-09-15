@@ -183,12 +183,20 @@ async function startLiveStack(
   mkdirSync(workspaceDir, { recursive: true });
   mkdirSync(runnerHome, { recursive: true });
   mkdirSync(runnerBin, { recursive: true });
+  if (provider === "codex") {
+    mkdirSync(join(runnerHome, ".codex"), { recursive: true });
+    writeFileSync(join(runnerHome, ".codex", "auth.json"), "{}");
+  }
   const fakeClaudeCommand = join(runnerBin, process.platform === "win32" ? "claude.cmd" : "claude");
+  const fakeCodexCommand = join(runnerBin, process.platform === "win32" ? "codex.cmd" : "codex");
   if (process.platform === "win32") {
     writeFileSync(fakeClaudeCommand, `@\"${process.execPath}\" \"${FAKE_CLAUDE}\" %*\r\n`);
+    writeFileSync(fakeCodexCommand, `@\"${process.execPath}\" \"${FAKE_CODEX}\" %*\r\n`);
   } else {
     copyFileSync(FAKE_CLAUDE, fakeClaudeCommand);
     chmodSync(fakeClaudeCommand, 0o755);
+    copyFileSync(FAKE_CODEX, fakeCodexCommand);
+    chmodSync(fakeCodexCommand, 0o755);
   }
 
   const ownerToken = loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
@@ -267,11 +275,11 @@ async function startLiveStack(
       ? {
           id: "codex-question",
           name: "Codex Question E2E",
-          command: process.execPath,
-          args: [FAKE_CODEX, codexScenario],
+          command: "codex",
           driver: "codex-app-server",
           context: { kind: "native" },
           env: {
+            WOLLIPOG_FAKE_CODEX_SCENARIO: codexScenario,
             WOLLIPOG_FAKE_CODEX_RECEIPT: receiptPath,
             ...(restartRecovery ? { WOLLIPOG_FAKE_QUESTION_STATE: recoveryStatePath } : {}),
           },

@@ -32,7 +32,16 @@ function runnerMeta(): RunnerMetadata {
     version: "1.0.0",
     workspaces: [{ id: "ws-1", name: "Demo", path: "/repos/demo" }],
     agents: [
-      { id: "claude", name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code", context: { kind: "native" } },
+      {
+        id: "claude",
+        name: "Claude",
+        command: "claude",
+        args: [],
+        env: {},
+        driver: "claude-code",
+        available: true,
+        context: { kind: "native" },
+      },
     ],
   };
 }
@@ -450,6 +459,7 @@ test("listExternalSessions requires protocol v63 for Codex App Server discovery"
     args: ["app-server"],
     env: {},
     driver: "codex-app-server" as const,
+    available: true,
     context: { kind: "native" as const },
   };
   meta.agents.push(appServer);

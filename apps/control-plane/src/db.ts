@@ -477,6 +477,7 @@ CREATE TABLE IF NOT EXISTS runner_agents (
   version      TEXT,
   auth_status  TEXT,
   available    INTEGER,
+  unavailable_reason TEXT,
   source       TEXT,
   codex_app_server TEXT,
   claude_code TEXT,
@@ -4449,7 +4450,7 @@ export class ControlPlaneDb {
     );
     db.prepare("DELETE FROM driver_telemetry_hourly WHERE bucket_ts < ?").run(Date.now() - 180 * 86_400_000);
     // Additive migrations for DBs created before discovery columns existed.
-    for (const col of ["version TEXT", "auth_status TEXT", "available INTEGER", "source TEXT", "codex_app_server TEXT", "claude_code TEXT", "native_tui_accounting TEXT", "wsl_agent_control TEXT", "acp TEXT", "registry TEXT", "acp_transport TEXT"]) {
+    for (const col of ["version TEXT", "auth_status TEXT", "available INTEGER", "unavailable_reason TEXT", "source TEXT", "codex_app_server TEXT", "claude_code TEXT", "native_tui_accounting TEXT", "wsl_agent_control TEXT", "acp TEXT", "registry TEXT", "acp_transport TEXT"]) {
       try {
         db.exec(`ALTER TABLE runner_agents ADD COLUMN ${col}`);
       } catch {
@@ -5085,8 +5086,8 @@ export class ControlPlaneDb {
     );
     const insRa = this.stmt(
       `INSERT INTO runner_agents
-         (runner_id, agent_id, command, args, env, driver, context, capabilities, version, auth_status, available, source, codex_app_server, claude_code, native_tui_accounting, wsl_agent_control, acp, registry, acp_transport)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (runner_id, agent_id, command, args, env, driver, context, capabilities, version, auth_status, available, unavailable_reason, source, codex_app_server, claude_code, native_tui_accounting, wsl_agent_control, acp, registry, acp_transport)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const a of agents) {
       upAgent.run(a.id, a.name, now);
@@ -5102,6 +5103,7 @@ export class ControlPlaneDb {
         a.version ?? null,
         a.authStatus ?? null,
         a.available == null ? null : a.available ? 1 : 0,
+        a.unavailableReason ?? null,
         a.source ?? null,
         a.codexAppServer ? JSON.stringify(a.codexAppServer) : null,
         a.claudeCode ? JSON.stringify(a.claudeCode) : null,
@@ -9385,7 +9387,8 @@ export class ControlPlaneDb {
       this.stmt(
           `SELECT ra.agent_id AS agent_id, ad.name AS name, ra.command AS command, ra.args AS args, ra.env AS env,
                   ra.driver AS driver, ra.context AS context, ra.capabilities AS capabilities,
-                  ra.version AS version, ra.auth_status AS auth_status, ra.available AS available, ra.source AS source,
+                  ra.version AS version, ra.auth_status AS auth_status, ra.available AS available,
+                  ra.unavailable_reason AS unavailable_reason, ra.source AS source,
                   ra.codex_app_server AS codex_app_server, ra.claude_code AS claude_code,
                   ra.native_tui_accounting AS native_tui_accounting,
                   ra.wsl_agent_control AS wsl_agent_control,
@@ -9405,6 +9408,7 @@ export class ControlPlaneDb {
         version: string | null;
         auth_status: string | null;
         available: number | null;
+        unavailable_reason: string | null;
         source: string | null;
         codex_app_server: string | null;
         claude_code: string | null;
@@ -9428,6 +9432,7 @@ export class ControlPlaneDb {
       version: a.version ?? undefined,
       authStatus: (a.auth_status as AgentDefinition["authStatus"]) ?? undefined,
       available: a.available == null ? undefined : a.available === 1,
+      unavailableReason: a.unavailable_reason ?? undefined,
       source: (a.source as AgentDefinition["source"] | null) ?? "config",
       codexAppServer: parseJson<AgentDefinition["codexAppServer"]>(a.codex_app_server) ?? undefined,
       claudeCode: parseJson<AgentDefinition["claudeCode"]>(a.claude_code) ?? undefined,
@@ -9503,10 +9508,8 @@ export class ControlPlaneDb {
 
   /** Resolve a runner+agent to its launch command/args/env + driver/context. */
   getAgentLaunch(runnerId: string, agentId: string): AgentLaunch | null {
-    // NULL is the backwards-compatible state advertised by older runners. Only an explicit
-    // discovery result of `available: false` makes a definition non-launchable.
     const row = this.stmt(
-      "SELECT command, args, env, driver, context, version, capabilities, wsl_agent_control FROM runner_agents WHERE runner_id=? AND agent_id=? AND available IS NOT 0",
+      "SELECT command, args, env, driver, context, version, capabilities, wsl_agent_control FROM runner_agents WHERE runner_id=? AND agent_id=? AND available = 1",
     )
       .get(runnerId, agentId) as unknown as
       | { command: string; args: string; env: string; driver: string; context: string | null; version: string | null; capabilities: string | null; wsl_agent_control: string | null }

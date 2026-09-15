@@ -97,7 +97,7 @@ function agentProblem(agent: AgentDefinition): { detail: string; command?: strin
   } else if (agent.authStatus === "unauthenticated") {
     return { detail: `${label} requires authentication. Complete its adapter login on the runner, then run Rediscover.` };
   }
-  if (agent.available === false) {
+  if (agent.available !== true) {
     return agent.driver === "claude-code"
       ? { detail: `${label} is not installed or could not be launched.`, command: "npm install -g @anthropic-ai/claude-code" }
       : agent.driver?.startsWith("codex")

@@ -26,6 +26,7 @@ function runner(runnerId: string, models: string[], permissionModes: string[]): 
       args: ["app-server"],
       env: { SECRET: "must-not-project" },
       driver: "codex-app-server",
+      available: true,
       context: { kind: "native" },
       capabilities: {
         models: models.map((id, index) => ({

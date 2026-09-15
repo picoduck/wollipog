@@ -10,9 +10,102 @@ import {
   probedAuthFileStatus,
   supportedWslAgentControlNodeRuntime,
   parseVersion,
+  probeConfiguredAcpAgent,
+  probeConfiguredAcpAgents,
   unavailableCodexAgentDefinition,
   unavailableClaudeAgentDefinition,
 } from "./discover.js";
+
+const ACP_INITIALIZE_FIXTURE = [
+  'let input="";',
+  'process.stdin.setEncoding("utf8");',
+  'process.stdin.on("data",(chunk)=>{input+=chunk;const end=input.indexOf("\\n");if(end<0)return;',
+  'const request=JSON.parse(input.slice(0,end));',
+  'process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:request.id,result:{protocolVersion:1,agentCapabilities:{}}})+"\\n");});',
+].join("");
+
+test("configured ACP discovery verifies a valid custom command and arguments", async () => {
+  const configured = cfg({
+    id: "custom-acp",
+    driver: "acp",
+    command: process.execPath,
+    args: ["-e", ACP_INITIALIZE_FIXTURE],
+    source: "config",
+    available: undefined,
+  });
+  const probed = await probeConfiguredAcpAgent(configured, { FIXTURE_SECRET: "not-published" }, { timeoutMs: 1_000 });
+  assert.equal(probed.available, true, probed.unavailableReason);
+  assert.deepEqual(probed.env, {});
+  assert.ok(probed.acp);
+  assert.equal(probed.unavailableReason, undefined);
+  assert.equal(mergeAgents([configured], [], [probed])[0]?.available, true,
+    "a verified configured launch becomes selectable after the discovery merge");
+});
+
+test("configured ACP probe results stay attached to their exact config ids", () => {
+  const valid = cfg({ id: "valid", driver: "acp", command: "shared-adapter", args: ["--valid"] });
+  const broken = cfg({ id: "broken", driver: "acp", command: "shared-adapter", args: ["--broken"] });
+  const validProbe = { ...valid, available: true, unavailableReason: undefined };
+  const brokenProbe = { ...broken, available: false, unavailableReason: "The configured launch exited before completing an ACP initialize probe." };
+
+  const merged = mergeAgents([valid, broken], [], [validProbe, brokenProbe]);
+  assert.equal(merged.find((agent) => agent.id === "valid")?.available, true);
+  assert.equal(merged.find((agent) => agent.id === "broken")?.available, false);
+  assert.match(merged.find((agent) => agent.id === "broken")?.unavailableReason ?? "", /exited/u);
+
+  const reversed = mergeAgents([broken, valid], [], [brokenProbe, validProbe]);
+  assert.equal(reversed.find((agent) => agent.id === "valid")?.available, true);
+  assert.equal(reversed.find((agent) => agent.id === "broken")?.available, false);
+
+  const registryMatch = { ...valid, id: "registry-shape", source: "discovered" as const, available: true };
+  assert.equal(
+    mergeAgents([broken], [registryMatch], [brokenProbe])[0]?.available,
+    false,
+    "a Registry shape match cannot override the exact configured probe",
+  );
+});
+
+test("configured ACP discovery fails closed for missing commands and invalid arguments", async () => {
+  const missing = await probeConfiguredAcpAgent(cfg({
+    id: "missing-acp", driver: "acp", command: `/definitely-missing-wollipog-${process.pid}`, args: [],
+  }), {}, { timeoutMs: 1_000 });
+  assert.equal(missing.available, false);
+  assert.match(missing.unavailableReason!, /not found or could not be started|exited before completing/u);
+  assert.doesNotMatch(missing.unavailableReason!, /definitely-missing-wollipog/u);
+
+  const invalid = await probeConfiguredAcpAgent(cfg({
+    id: "invalid-acp",
+    driver: "acp",
+    command: process.execPath,
+    args: ["-e", 'process.stderr.write("credential=TOP_SECRET");process.exit(2)'],
+  }), { API_TOKEN: "TOP_SECRET" }, { timeoutMs: 1_000 });
+  assert.equal(invalid.available, false);
+  assert.match(invalid.unavailableReason!, /command and arguments/u);
+  assert.doesNotMatch(invalid.unavailableReason!, /TOP_SECRET|API_TOKEN|credential/u);
+});
+
+test("configured ACP discovery reports timeouts and incompatible WSL without launching them", async () => {
+  const timedOut = await probeConfiguredAcpAgent(cfg({
+    id: "slow-acp", driver: "acp", command: process.execPath, args: ["-e", "setInterval(()=>{},1000)"],
+  }), {}, { timeoutMs: 25 });
+  assert.equal(timedOut.available, false);
+  assert.match(timedOut.unavailableReason!, /timeout/u);
+
+  const wsl = await probeConfiguredAcpAgent(cfg({
+    id: "wsl-acp", driver: "acp", command: "/usr/bin/agent", context: { kind: "wsl", distro: "Ubuntu" },
+  }), {}, { platform: "linux" });
+  assert.equal(wsl.available, false);
+  assert.match(wsl.unavailableReason!, /incompatible with a non-Windows runner/u);
+});
+
+test("configured ACP discovery sanitizes environment-resolution failures", async () => {
+  const [probed] = await probeConfiguredAcpAgents([
+    cfg({ id: "secret-acp", driver: "acp", command: "agent", available: undefined }),
+  ], () => { throw new Error("missing SECRET_ENV_NAME with value TOP_SECRET"); });
+  assert.equal(probed!.available, false);
+  assert.match(probed!.unavailableReason!, /environment could not be resolved/u);
+  assert.doesNotMatch(probed!.unavailableReason!, /SECRET_ENV_NAME|TOP_SECRET/u);
+});
 
 test("Codex prompts and skills are not advertised as slash commands", () => {
   assert.deepEqual(commandDirectoriesForDriver("codex"), []);
@@ -34,6 +127,8 @@ test("config-only agents cannot self-attest a Direct WSL Agent Control runtime",
     wslAgentControl: { protocolVersion: 1, nodeRuntime: "/unverified/node",
       safeLauncherProtocolVersion: 1, bwrapRuntime: "/usr/bin/bwrap" } });
   assert.equal(mergeAgents([configured], [])[0]!.wslAgentControl, undefined);
+  assert.equal(mergeAgents([configured], [])[0]!.available, false);
+  assert.match(mergeAgents([configured], [])[0]!.unavailableReason!, /incompatible|No completed discovery probe/u);
 });
 
 test("parseVersion extracts a semver token from --version noise", () => {

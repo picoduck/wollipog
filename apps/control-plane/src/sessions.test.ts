@@ -434,6 +434,7 @@ function runnerMeta(): RunnerMetadata {
         args: ["--flag"],
         env: { FOO: "bar" },
         driver: "claude-code",
+        available: true,
         context: { kind: "native" },
         version: "2.1.0",
       },
@@ -444,6 +445,7 @@ function runnerMeta(): RunnerMetadata {
         args: ["exec"],
         env: {},
         driver: "codex",
+        available: true,
         context: { kind: "native" },
       },
       {
@@ -453,6 +455,7 @@ function runnerMeta(): RunnerMetadata {
         args: [],
         env: {},
         driver: "codex-app-server",
+        available: true,
         context: { kind: "native" },
         capabilities: {
           models: [
@@ -474,6 +477,7 @@ function runnerMeta(): RunnerMetadata {
         args: ["--acp"],
         env: {},
         driver: "acp",
+        available: true,
         context: { kind: "native" },
       },
       {
@@ -483,6 +487,7 @@ function runnerMeta(): RunnerMetadata {
         args: [],
         env: {},
         driver: "claude-code",
+        available: true,
         context: { kind: "native" },
       },
     ],
@@ -589,7 +594,15 @@ test("the retired conductor cannot be advertised, created, or restored through d
   const { db, svc, hub } = makeHarness();
   try {
     const meta = runnerMeta();
-    meta.agents.push({ id: CONDUCTOR_ID, name: "Stale Conductor", command: "claude", args: [], env: {}, driver: "claude-code" });
+    meta.agents.push({
+      id: CONDUCTOR_ID,
+      name: "Stale Conductor",
+      command: "claude",
+      args: [],
+      env: {},
+      driver: "claude-code",
+      available: true,
+    });
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     assert.equal(db.getRunner(RUNNER_ID)!.agents.some((agent) => agent.id === CONDUCTOR_ID), false);
     for (const permissionMode of [undefined, "default", "acceptEdits"]) {
@@ -13380,6 +13393,7 @@ test("restart routes a persisted WSL exec session to its distro compatibility ro
         args: ["-d", "Ubuntu", "--", "codex"],
         env: {},
         driver: "codex-app-server",
+        available: true,
         context: { kind: "wsl", distro: "Ubuntu" },
       },
       {
@@ -13389,6 +13403,7 @@ test("restart routes a persisted WSL exec session to its distro compatibility ro
         args: ["-d", "Ubuntu", "--", "codex", "exec"],
         env: {},
         driver: "codex",
+        available: true,
         context: { kind: "wsl", distro: "Ubuntu" },
       },
     ],

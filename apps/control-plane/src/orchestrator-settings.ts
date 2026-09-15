@@ -173,7 +173,7 @@ export class OrchestratorSettings {
 
   private capabilities(principal: HumanPrincipal, defaults: OrchestratorDefaults): OrchestratorSettingsCapabilities {
     const installations = this.db.listRunnersForPrincipal(principal).filter((runner) => runner.status === "online").flatMap((runner) =>
-      runner.agents.filter((agent) => agent.id !== "conductor" && agent.available !== false && agent.capabilities)
+      runner.agents.filter((agent) => agent.id !== "conductor" && agent.available === true && agent.capabilities)
         .map((agent) => agent.capabilities!),
     );
     const models = mergeModels(installations);

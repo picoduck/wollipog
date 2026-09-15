@@ -423,7 +423,10 @@
 // 153: workflow-action reconciliation can bind a durable provider item completion after its exact
 //      Guardian receipt, and Codex runners can recover exact successful command proof from the
 //      provider's append-only rollout after App Server restart or compaction.
-export const PROTOCOL_VERSION = 153;
+// 154: agent discovery publishes an explicit evidence-backed availability result plus a bounded,
+//      content-free unavailable reason. Clients and control planes fail closed when older runners
+//      omit availability instead of treating an unverified configured launch as runnable.
+export const PROTOCOL_VERSION = 154;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -551,6 +554,7 @@ export interface RunnerControlPlaneAttestation {
  * Keep this table aligned with the version history above. Missing protocol metadata means the
  * runner predates v15, so support cannot be proven and callers must fail closed. */
 export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
+  verifiedAgentAvailability: 154,
   externalSessions: 6,
   /** Correlated adoption results were introduced in v35. The result shape is provider-neutral;
    * current runners revalidate native Codex/Claude descriptors as well as ACP descriptors. */
@@ -1675,6 +1679,9 @@ export interface AgentDefinition {
   context?: AgentContext;
   version?: string;
   available?: boolean;
+  /** Content-free result of runner-local launch discovery. Never contains command output, paths,
+   * environment names, environment values, or provider diagnostics. */
+  unavailableReason?: string;
   authStatus?: "authenticated" | "unauthenticated" | "unknown";
   /** Secret-free Codex billing boundary derived locally from configured auth or CLI account state. */
   codexBillingSource?: "api" | "provider_account";
@@ -6178,7 +6185,7 @@ export type SessionNamingRunnerErrorCode =
 export function sessionNamingAgentFailureCode(
   agent: AgentDefinition | undefined,
 ): "harness_unavailable" | "account_unavailable" | null {
-  if (!agent || agent.available === false) return "harness_unavailable";
+  if (!agent || agent.available !== true) return "harness_unavailable";
   if (agent.authStatus !== "authenticated") return "account_unavailable";
   const driver = agent.driver ?? "acp";
   if (driver === "codex" || driver === "codex-app-server") {
