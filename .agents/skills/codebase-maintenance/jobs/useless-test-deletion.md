@@ -49,8 +49,10 @@ test would fail to catch, and name the other test that does catch it.
 
 ## Report
 
-**Calibration, recorded 2026-09-01:** two consecutive weekly runs over a ~4,300-test suite have
-produced exactly one small duplicate-test finding each and zero findings in the other three
+**Calibration, recorded 2026-09-01, re-based 2026-09-15:** the suite was ~4,300 tests on
+2026-09-01 and ~6,460 (589 files, e2e included) on 2026-09-15; count it with an inventory that
+also matches `test(`/`it(` nested inside `describe` blocks, not only at column one. Weekly runs
+have produced at most one small duplicate-test finding each and zero findings in the other three
 categories — this job's steady-state yield is roughly one six-to-nine-line finding per run. The
 schedule stays weekly by explicit decision (the cost is negligible on a subscription); read this
 as the expected baseline, not as underperformance, and do not manufacture findings to beat it.

@@ -34,8 +34,14 @@ Hard rules:
    raw evidence behind a report stays inspectable until the report is reviewed; and it is
    namespaced per run, because a session that loses its conversation context can otherwise find
    another session's files and mistake them for its own — which happened, and turned one lost
-   session into a false "already published" claim. At the start of each run, delete directories
-   under `~/.cache/wollipog-maintenance/` older than 30 days; nothing else cleans this location.
+   session into a false "already published" claim. At the start of each run, delete this job's
+   own scratch directories older than 30 days, as a standalone command scoped to the job's
+   prefix — `find ~/.cache/wollipog-maintenance -mindepth 1 -maxdepth 1 -type d -name
+   '<job-id>-*' -mtime +30 -exec rm -rf {} +` — never a sweep of the whole location chained onto
+   other commands. Each job cleans only what it wrote; nothing else cleans this location. The
+   auto-mode classifier has denied the location-wide sweep as a "shared scratch sweep" while
+   passing the identical command the week before; if the scoped prune is still denied, list what
+   would have been removed, record it as an `environment` item, and continue.
 3. Before finishing, run `git status --porcelain` and `git stash list`. The working tree must be
    exactly as you found it. If anything changed, say so explicitly at the top of your report and
    name the files rather than quietly reverting.
