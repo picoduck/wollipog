@@ -93,3 +93,18 @@ test("Snooze suggestions remain touch-sized and contained on mobile", async ({ p
   if (EVIDENCE_CAPTURE) await page.screenshot({ path: testInfo.outputPath("mobile-selected.png") });
   await pause(4_000);
 });
+
+test("a stationary pointer does not choose a suggestion for typed Enter submission", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openNewSnoozeDialog(page);
+
+  const expression = page.getByRole("combobox", { name: "Natural Language" });
+  const bounds = await expression.boundingBox();
+  expect(bounds).not.toBeNull();
+  await page.mouse.move(bounds!.x + 24, bounds!.y + bounds!.height + 36);
+  await expression.fill("tomorrow at 3 pm");
+  await page.waitForTimeout(100);
+
+  await expect(page.getByRole("listbox", { name: "Schedule Suggestions" })).toBeVisible();
+  await expect(expression).not.toHaveAttribute("aria-activedescendant", /.+/);
+});

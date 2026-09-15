@@ -77,7 +77,7 @@ export function InlineListbox<T>({
               + `${optionDisabled ? " is-disabled" : ""}`}
             key={getKey(option)}
             onMouseDown={(event) => event.preventDefault()}
-            onMouseEnter={() => onActiveChange?.(index)}
+            onMouseMove={() => onActiveChange?.(index)}
             onClick={() => { if (!optionDisabled) onSelect(option); }}
           >
             {renderOption(option)}
