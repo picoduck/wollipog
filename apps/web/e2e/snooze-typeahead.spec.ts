@@ -39,10 +39,12 @@ test("Snooze typeahead preserves the keyboard-first create flow", async ({ page 
   await expect(listbox).toBeVisible();
   await expect(listbox.getByRole("option")).toHaveCount(2);
   await expect(expression).toHaveAttribute("aria-expanded", "true");
-  await expect(expression).toHaveAttribute("aria-activedescendant", /suggestions-0$/);
+  await expect(expression).not.toHaveAttribute("aria-activedescendant", /.+/);
   if (EVIDENCE_CAPTURE) await page.screenshot({ path: testInfo.outputPath("desktop-suggestions.png") });
   await pause(3_000);
 
+  await expression.press("ArrowDown");
+  await expect(expression).toHaveAttribute("aria-activedescendant", /suggestions-0$/);
   await expression.press("ArrowDown");
   await expect(expression).toHaveAttribute("aria-activedescendant", /suggestions-1$/);
   await pause(1_500);

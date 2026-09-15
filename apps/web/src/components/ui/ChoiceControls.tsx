@@ -54,7 +54,14 @@ export function InlineListbox<T>({
   style?: CSSProperties;
 }) {
   return (
-    <div className={className} role="listbox" id={id} aria-label={label} style={style}>
+    <div
+      className={className}
+      role="listbox"
+      id={id}
+      aria-label={label}
+      style={style}
+      onMouseDown={(event) => event.preventDefault()}
+    >
       {before}
       {options.map((option, index) => {
         const optionDisabled = isOptionDisabled?.(option) ?? false;

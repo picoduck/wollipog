@@ -12,7 +12,13 @@ import {
 } from "../reminder-schedule.js";
 import { useAnchoredMenuStyle } from "./interactions.js";
 import { Modal } from "./common.js";
-import { ChoiceCards, InlineListbox, SegmentedControl } from "./ui/ChoiceControls.js";
+import {
+  ChoiceCards,
+  InlineListbox,
+  SegmentedControl,
+  selectMenuDesiredHeight,
+  useTouchTargetMode,
+} from "./ui/ChoiceControls.js";
 
 const REMINDER_PRESETS = [
   { expression: "later today", label: "Later Today" },
@@ -49,7 +55,7 @@ export function SnoozeDialog({
   const [selectedPreset, setSelectedPreset] = useState<ReminderPresetExpression | null>(null);
   const [selectedSuggestion, setSelectedSuggestion] = useState<ParsedReminderSchedule | null>(null);
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
-  const [activeSuggestion, setActiveSuggestion] = useState(0);
+  const [activeSuggestion, setActiveSuggestion] = useState(-1);
   const [wakePolicy, setWakePolicy] = useState<SessionReminderWakePolicy>(initialDraft.wakePolicy);
   const [scheduleTouched, setScheduleTouched] = useState(false);
   const [creatingFromDraft, setCreatingFromDraft] = useState(false);
@@ -79,13 +85,18 @@ export function SnoozeDialog({
     () => suggestReminderExpressions(expression, new Date()),
     [expression],
   );
-  const activeSuggestionIndex = suggestions.length === 0
-    ? 0
+  const activeSuggestionIndex = suggestions.length === 0 || activeSuggestion < 0
+    ? -1
     : Math.min(activeSuggestion, suggestions.length - 1);
   const activeSuggestionValue = suggestions[activeSuggestionIndex];
   const suggestionPopupOpen = suggestionsOpen && suggestions.length > 0;
+  const coarsePointer = useTouchTargetMode();
   const suggestionListStyle = useAnchoredMenuStyle(suggestionPopupOpen, expressionRef, {
-    desiredHeight: Math.min(280, suggestions.length * 52 + 8),
+    desiredHeight: selectMenuDesiredHeight({
+      optionCount: suggestions.length,
+      maxOptionLines: 2,
+      coarsePointer,
+    }),
     matchTriggerWidth: true,
   });
   const parsed = useMemo(() => {
@@ -120,6 +131,12 @@ export function SnoozeDialog({
   useEffect(() => {
     setReconciled((current) => current && current.liveKey !== liveReminderKey ? null : current);
   }, [liveReminderKey]);
+
+  useEffect(() => {
+    if (!suggestionPopupOpen || activeSuggestionIndex < 0) return;
+    document.getElementById(`${suggestionListId}-${activeSuggestionIndex}`)
+      ?.scrollIntoView?.({ block: "nearest" });
+  }, [activeSuggestionIndex, suggestionListId, suggestionPopupOpen]);
 
   const reload = () => {
     const next = draftForReminder(currentReminder);
@@ -320,7 +337,7 @@ export function SnoozeDialog({
               setSelectedSuggestion(null);
               setExact("");
               setExpression(event.target.value);
-              setActiveSuggestion(0);
+              setActiveSuggestion(-1);
               setSuggestionsOpen(Boolean(event.target.value.trim()));
             }}
             onBlur={() => setSuggestionsOpen(false)}
@@ -341,6 +358,10 @@ export function SnoozeDialog({
                 event.preventDefault();
                 if (!suggestionPopupOpen) {
                   setSuggestionsOpen(true);
+                  setActiveSuggestion(event.key === "ArrowDown" ? 0 : suggestions.length - 1);
+                  return;
+                }
+                if (activeSuggestionIndex < 0) {
                   setActiveSuggestion(event.key === "ArrowDown" ? 0 : suggestions.length - 1);
                   return;
                 }
@@ -442,7 +463,14 @@ function invalidScheduleMessage(
   if (/^in 0 (minute|minutes|hour|hours|day|days)$/.test(normalized)) {
     return "That schedule is not in the future. Choose a positive interval.";
   }
-  if (/^today(?: at)? \d{1,2}(?::\d{2})?\s*(?:am|pm)?$/.test(normalized)) {
+  const todayClock = /^today(?: at)? (\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/.exec(normalized);
+  if (todayClock) {
+    const hour = Number(todayClock[1]);
+    const minute = Number(todayClock[2] ?? "0");
+    const validHour = todayClock[3] ? hour >= 1 && hour <= 12 : hour <= 23;
+    if (!validHour || minute > 59) {
+      return "Enter a valid clock time, such as today at 3:30 PM.";
+    }
     return "That time is not in the future. Choose a later time or use tomorrow.";
   }
   return "Complete a supported phrase or choose a schedule suggestion.";

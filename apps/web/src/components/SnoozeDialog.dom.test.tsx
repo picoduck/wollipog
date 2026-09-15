@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { SessionReminderView, SetSessionReminderRequest } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
+import { parseReminderExpression } from "../reminder-schedule.js";
 import { SnoozeDialog } from "./SnoozeDialog.js";
 
 const domWindow = new Window({ url: "http://localhost/inbox" });
@@ -787,8 +788,11 @@ test("schedule suggestions expose listbox semantics and keyboard selection submi
     "In 23 Minutes", "In 23 Hours", "In 23 Days",
   ]);
   assert.equal(options.every((option) => option.tabIndex === -1), true);
-  assert.equal(expression.getAttribute("aria-activedescendant"), options[0]?.id);
+  assert.equal(expression.hasAttribute("aria-activedescendant"), false,
+    "typing alone must not make Enter replace an already-valid expression with a different suggestion");
 
+  await act(async () => { fireDomEvent.keyDown(expression, { key: "ArrowDown" }); });
+  assert.equal(expression.getAttribute("aria-activedescendant"), options[0]?.id);
   await act(async () => { fireDomEvent.keyDown(expression, { key: "ArrowDown" }); });
   assert.equal(expression.getAttribute("aria-activedescendant"), options[1]?.id);
   await act(async () => { fireDomEvent.keyDown(expression, { key: "ArrowUp" }); });
@@ -893,6 +897,8 @@ test("presets stay distinct from text input and every invalid schedule gets an a
   assert.match(preview(), /Complete a supported phrase or choose a schedule suggestion/);
   await act(async () => { fireDomEvent.change(expression, { target: { value: "in 0 hours" } }); });
   assert.match(preview(), /not in the future.*positive interval/);
+  await act(async () => { fireDomEvent.change(expression, { target: { value: "today at 25" } }); });
+  assert.match(preview(), /valid clock time.*today at 3:30 PM/);
   await act(async () => { fireDomEvent.change(exact, { target: { value: "2000-01-01T00:00" } }); });
   assert.match(preview(), /exact date and time in the future/);
   assert.match(preview(), /Schedule Source: Exact Date and Time/);
@@ -918,6 +924,33 @@ test("a complete natural-language expression leaves Enter available to the enclo
   await act(async () => { fireDomEvent.submit(container.querySelector("form")!); });
   assert.equal(saved.length, 1);
   assert.equal(saved[0]?.originalExpression, "in 2 hours");
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("Enter submits a complete typed schedule even when broader suggestions remain visible", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const saved: SetSessionReminderRequest[] = [];
+  await act(async () => {
+    root.render(<SnoozeDialog onClose={() => undefined} onSave={async (request) => { saved.push(request); }} />);
+  });
+  const expression = container.querySelector<HTMLInputElement>("#snooze-expression")!;
+  await act(async () => { fireDomEvent.change(expression, { target: { value: "tomorrow at 3 pm" } }); });
+  assert.equal(expression.getAttribute("aria-expanded"), "true");
+  assert.equal(expression.hasAttribute("aria-activedescendant"), false);
+  assert.match(container.querySelector(".snooze-preview")?.textContent ?? "", /3:00 PM/);
+
+  const expected = parseReminderExpression("tomorrow at 3 pm");
+  const enter = new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+  await act(async () => { expression.dispatchEvent(enter as never); });
+  assert.equal(enter.defaultPrevented, false, "a suggestion is selected only after explicit arrow or pointer intent");
+  await act(async () => { fireDomEvent.submit(container.querySelector("form")!); });
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0]?.originalExpression, "tomorrow at 3 pm");
+  assert.equal(saved[0]?.scheduledFor, expected?.scheduledFor);
 
   await act(async () => { root.unmount(); });
   container.remove();
