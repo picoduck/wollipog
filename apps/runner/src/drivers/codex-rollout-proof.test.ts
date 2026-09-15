@@ -40,12 +40,18 @@ function commandItem(
   }, timestamp);
 }
 
+function completedTurn(timestamp = "2026-09-15T03:52:40.000Z"): string {
+  return line("event_msg", { type: "task_complete", turn_id: TURN }, timestamp);
+}
+
 function historicalRollout(command = COMMAND, commandExtra: Record<string, unknown> = {}): string {
   const admissionScript = `task_token=$(<"$WOLLIPOG_SESSION_TOKEN_FILE")\n` +
     `curl --silent --show-error --fail-with-body -X POST ` +
+    `-H "authorization: Bearer $task_token" ` +
     `-H "x-wollipog-agent-session: $WOLLIPOG_SESSION_ID" ` +
+    `-H "content-type: application/json" --data-binary @/tmp/pr-1146-merge-consume.json ` +
     `"$WOLLIPOG_CONTROL_PLANE_URL/api/sessions/$WOLLIPOG_SESSION_ID/` +
-    `workflow-decisions/${OCCURRENCE}/consume"`;
+    `workflow-decisions/${OCCURRENCE}/consume" | jq '{occurrenceId,status,authority,action,consumedAt}'`;
   return [
     line("session_meta", { id: THREAD }, "2026-09-15T03:50:00.000Z"),
     commandItem("admission-cli", admissionScript, "2026-09-15T03:51:58.716Z", "completed", {
@@ -58,6 +64,7 @@ function historicalRollout(command = COMMAND, commandExtra: Record<string, unkno
       }),
     }),
     commandItem("command-merge", command, "2026-09-15T03:52:38.122Z", "completed", commandExtra),
+    completedTurn(),
     line("compacted", {}, "2026-09-15T04:15:56.857Z"),
     line("event_msg", { type: "user_message", message: "resumed after restart" }, "2026-09-15T21:15:00.000Z"),
   ].join("\n");
@@ -89,10 +96,33 @@ test("historical CLI merge proof rejects mismatch, failure, ordering, and replay
   }
 });
 
+test("historical CLI admission rejects a substring spoof and an incomplete provider turn", () => {
+  const spoof = `: curl -X POST $WOLLIPOG_SESSION_TOKEN_FILE x-wollipog-agent-session ` +
+    `/workflow-decisions/${OCCURRENCE}/consume; printf fake`;
+  const content = [
+    line("session_meta", { id: THREAD }, "2026-09-15T03:50:00.000Z"),
+    commandItem("fake-admission", spoof, "2026-09-15T03:51:58.716Z", "completed", {
+      stdout: JSON.stringify({
+        occurrenceId: OCCURRENCE, status: "approved", authority: "orchestrator", consumedAt: null,
+      }),
+    }),
+    commandItem("command-merge", COMMAND, "2026-09-15T03:52:38.122Z"),
+    completedTurn(),
+  ].join("\n");
+  assert.equal(parseCodexRolloutCompletedCommand(content, THREAD, OCCURRENCE, COMMAND), null);
+  assert.equal(parseCodexRolloutCompletedCommand(
+    historicalRollout().split("\n").filter((row) => !row.includes('"task_complete"')).join("\n"),
+    THREAD,
+    OCCURRENCE,
+    COMMAND,
+  ), null);
+});
+
 test("durable runner fence binds the exact rollout command without a legacy admission", () => {
   const content = [
     line("session_meta", { id: THREAD }, "2026-09-15T03:50:00.000Z"),
     commandItem("command-current", COMMAND, "2026-09-15T03:52:38.122Z"),
+    completedTurn(),
   ].join("\n");
   assert.equal(parseCodexRolloutCompletedCommand(content, THREAD, OCCURRENCE, COMMAND, {
     providerThreadId: THREAD,

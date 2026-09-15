@@ -438,15 +438,18 @@ export class CodexAppServerDriver implements Driver {
         if (read?.thread?.id === this.threadId && Array.isArray(read?.thread?.turns)) {
           const matches: CompletedCommandReconciliationProof[] = [];
           const successfulExactCommands: { turnId: string; itemId: string }[] = [];
+          let liveSawExactCommand = false;
           for (const turn of read.thread.turns as Json[]) {
-            if (!boundedProviderCorrelationId(turn?.id) || turn?.status !== "completed" ||
-                (turn?.itemsView != null && turn.itemsView !== "full") || !Array.isArray(turn?.items)) continue;
+            if (!Array.isArray(turn?.items)) continue;
             const items = turn.items as Json[];
             for (const [index, item] of items.entries()) {
-              if (item?.type !== "commandExecution" || item?.status !== "completed" || item?.exitCode !== 0 ||
-                  !boundedProviderCorrelationId(item?.id) || typeof item?.command !== "string") continue;
+              if (item?.type !== "commandExecution" || typeof item?.command !== "string") continue;
               const logicalCommand = codexProviderShellScript(item.command) ?? item.command;
               if (logicalCommand !== command) continue;
+              liveSawExactCommand = true;
+              if (!boundedProviderCorrelationId(turn?.id) || turn?.status !== "completed" ||
+                  (turn?.itemsView != null && turn.itemsView !== "full") || item?.status !== "completed" ||
+                  item?.exitCode !== 0 || !boundedProviderCorrelationId(item?.id)) continue;
               successfulExactCommands.push({ turnId: turn.id, itemId: item.id });
               const admissions = items.slice(0, index).filter((candidate) =>
                 completedWorkflowActionAdmission(candidate, occurrenceId, command));
@@ -460,7 +463,9 @@ export class CodexAppServerDriver implements Driver {
               });
             }
           }
-          if (matches.length !== 0) return matches.length === 1 ? matches[0]! : null;
+          if (matches.length !== 0) {
+            return matches.length === 1 && successfulExactCommands.length === 1 ? matches[0]! : null;
+          }
           if (fence && fence.providerThreadId === this.threadId &&
               boundedProviderCorrelationId(fence.providerTurnId) &&
               boundedProviderCorrelationId(fence.providerItemId) && successfulExactCommands.length === 1) {
@@ -474,13 +479,20 @@ export class CodexAppServerDriver implements Driver {
               };
             }
           }
+          // Live history is authoritative when it still contains the command. A failed,
+          // interrupted, ambiguous, or otherwise rejected live item cannot be reconsidered by a
+          // differently shaped rollout projection. Rollout is only a missing-history fallback.
+          if (liveSawExactCommand) return null;
         }
       } catch {
         // The append-only rollout below is the restart/compaction-safe provider history source.
       }
     }
-    const configuredCodexHome = this.opts.env.CODEX_HOME ??
-      (this.opts.env.HOME && isAbsolute(this.opts.env.HOME) ? join(this.opts.env.HOME, ".codex") : undefined);
+    const inheritedCodexHome = this.opts.context.kind === "native" ? process.env.CODEX_HOME : undefined;
+    const effectiveHome = this.opts.env.HOME ??
+      (this.opts.context.kind === "native" ? process.env.HOME : undefined);
+    const configuredCodexHome = this.opts.env.CODEX_HOME ?? inheritedCodexHome ??
+      (effectiveHome && isAbsolute(effectiveHome) ? join(effectiveHome, ".codex") : undefined);
     return this.readRolloutProof(
       this.opts.context,
       configuredCodexHome,

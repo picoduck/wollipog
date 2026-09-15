@@ -284,11 +284,12 @@ test("durable command completion survives provider history loss after restart", 
       },
     });
     assert.ok(receipt);
-    h.store.appendEvent("s_governance", {
+    const completion = h.store.appendEvent("s_governance", {
       kind: "tool_call_update",
       toolCallId: "command-cli",
       status: "completed",
     });
+    assert.ok(completion);
     (h.entry.client as any).reconcileCompletedCommand = async () => null;
     (h.sm as any).resolveWorktreePullRequestState = async () => ({
       state: "merged", headOid: "c".repeat(40),
@@ -308,6 +309,7 @@ test("durable command completion survives provider history loss after restart", 
     assert.equal(result.accepted, true);
     assert.equal(result.providerItemId, "command-cli");
     assert.equal(result.providerReviewEventSeq, receipt.seq);
+    assert.equal(result.providerCompletionEventSeq, completion.seq);
   } finally {
     h.cleanup();
   }
