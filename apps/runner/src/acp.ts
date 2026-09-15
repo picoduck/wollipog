@@ -139,6 +139,9 @@ export class AcpClient {
       cloudAgentLaunch?: boolean;
       orchestrator?: boolean;
       descendantMarker?: string;
+      /** Discovery probes negotiate only the ACP initialize response and must not expose client
+       * filesystem, terminal, permission, or session-update services to the launched adapter. */
+      initializeOnly?: boolean;
     },
     private readonly ev: AcpEvents,
     deps: Partial<AcpClientDeps> = {},
@@ -184,7 +187,7 @@ export class AcpClient {
       this.ev.onExit(null);
     });
 
-    this.registerHandlers();
+    if (!opts.initializeOnly) this.registerHandlers();
   }
 
   private readonly sessionContext: AcpSessionContextConfig | undefined;

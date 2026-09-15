@@ -32,7 +32,8 @@ import { discoverAgentModels, type AgentModelDiscovery } from "./models.js";
 import { unavailableNativeTuiAccounting } from "./native-tui-accounting.js";
 import { listWslDistros, resolveInWsl, resolveNative, run, type ResolvedLaunch } from "./resolve.js";
 
-const CONFIGURED_ACP_PROBE_TIMEOUT_MS = 8_000;
+const CONFIGURED_ACP_PROBE_TIMEOUT_MS = 20_000;
+const MAX_CONCURRENT_CONFIGURED_ACP_PROBES = 4;
 
 /** Verify an operator-configured ACP launch with the protocol's side-effect-free initialize call.
  * Provider stderr and thrown diagnostics are deliberately reduced to fixed operator guidance: a
@@ -66,6 +67,7 @@ export async function probeConfiguredAcpAgent(
       cwd: options.cwd ?? process.cwd(),
       env,
       context,
+      initializeOnly: true,
     }, {
       onEvent: () => {},
       onStderr: (text) => { if (text.startsWith("spawn error:")) spawnFailed = true; },
@@ -110,18 +112,30 @@ export async function probeConfiguredAcpAgents(
   resolveEnv: (agentId: string) => Record<string, string>,
   options: { cwd?: string; timeoutMs?: number; platform?: NodeJS.Platform } = {},
 ): Promise<AgentDefinition[]> {
-  return Promise.all(agents.filter((agent) => (agent.driver ?? "acp") === "acp").map(async (agent) => {
-    try {
-      return await probeConfiguredAcpAgent(agent, resolveEnv(agent.id), options);
-    } catch {
-      return {
-        ...agent,
-        env: {},
-        available: false,
-        unavailableReason: "The configured launch environment could not be resolved on this runner.",
-      };
+  const pending = agents.filter((agent) => (agent.driver ?? "acp") === "acp");
+  const results = new Array<AgentDefinition>(pending.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < pending.length) {
+      const index = next++;
+      const agent = pending[index]!;
+      try {
+        results[index] = await probeConfiguredAcpAgent(agent, resolveEnv(agent.id), options);
+      } catch {
+        results[index] = {
+          ...agent,
+          env: {},
+          available: false,
+          unavailableReason: "The configured launch environment could not be resolved on this runner.",
+        };
+      }
     }
-  }));
+  };
+  await Promise.all(Array.from(
+    { length: Math.min(MAX_CONCURRENT_CONFIGURED_ACP_PROBES, pending.length) },
+    () => worker(),
+  ));
+  return results;
 }
 
 /** Where each driver keeps user-defined slash commands / prompts ($HOME-relative). */
@@ -656,7 +670,11 @@ function launchKeys(a: AgentDefinition): string[] {
  * (version, auth status, slash commands) when they point at the same launch target.
  * Discovered agents that don't match a config entry are appended as new entries.
  */
-export function mergeAgents(configAgents: AgentDefinition[], discovered: AgentDefinition[]): AgentDefinition[] {
+export function mergeAgents(
+  configAgents: AgentDefinition[],
+  discovered: AgentDefinition[],
+  configuredAcpProbes: AgentDefinition[] = [],
+): AgentDefinition[] {
   // Config selects a driver but cannot attest to live provider contracts. Strip stale steering
   // and Native TUI accounting claims first; only matching discovery may restore them.
   const safeConfigAgents = configAgents.map(withoutConfiguredProviderAttestations);
@@ -666,8 +684,22 @@ export function mergeAgents(configAgents: AgentDefinition[], discovered: AgentDe
   for (const d of discovered) {
     for (const k of launchKeys(d)) if (!byKey.has(k)) byKey.set(k, d);
   }
+  // Configured ACP probes are exact evidence for one config identity. They cannot share the
+  // launch-shape index: two rows may intentionally use the same adapter command with different
+  // arguments or environment references, and each probe result must stay attached to its own id.
+  const configuredAcpProbeById = new Map(configuredAcpProbes.map((probe) => [probe.id, probe]));
   const enriched = safeConfigAgents.map((c) => {
-    const d = launchKeys(c).map((k) => byKey.get(k)).find(Boolean);
+    const shapeMatch = launchKeys(c).map((k) => byKey.get(k)).find(Boolean);
+    const configuredProbe = configuredAcpProbeById.get(c.id);
+    const d = configuredProbe
+      ? {
+          ...shapeMatch,
+          ...configuredProbe,
+          version: configuredProbe.version ?? shapeMatch?.version,
+          authStatus: configuredProbe.authStatus ?? shapeMatch?.authStatus,
+          registry: shapeMatch?.registry ?? configuredProbe.registry,
+        }
+      : shapeMatch;
     if (!d) {
       const { wslAgentControl: _unverifiedWslAgentControl, ...configured } = c;
       return {

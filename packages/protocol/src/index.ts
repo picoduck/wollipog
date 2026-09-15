@@ -554,6 +554,7 @@ export interface RunnerControlPlaneAttestation {
  * Keep this table aligned with the version history above. Missing protocol metadata means the
  * runner predates v15, so support cannot be proven and callers must fail closed. */
 export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
+  verifiedAgentAvailability: 153,
   externalSessions: 6,
   /** Correlated adoption results were introduced in v35. The result shape is provider-neutral;
    * current runners revalidate native Codex/Claude descriptors as well as ACP descriptors. */

@@ -187,11 +187,19 @@ export function resolveLaunchForDriver(
   context: AgentContext,
 ): { command: string; args: string[]; env: Record<string, string> } | null {
   const agent = agents.find((a) => {
-    if (a.available !== true) return false;
     const aDriver = a.driver ?? "acp";
     const aCtx = a.context ?? { kind: "native" as const };
     if (aDriver !== driver || aCtx.kind !== context.kind) return false;
-    return context.kind !== "wsl" || (aCtx.kind === "wsl" && aCtx.distro === context.distro);
+    if (context.kind === "wsl" && (aCtx.kind !== "wsl" || aCtx.distro !== context.distro)) return false;
+    if (a.available === true) return true;
+    // Native provider discovery can prove that a CLI is installed while its account is signed
+    // out. Preserve the established SessionManager authentication-recovery path for that narrow,
+    // evidence-bearing state; config-only and otherwise unavailable rows still fail closed.
+    if (driver === "claude-code") return a.claudeCode?.status === "unauthenticated";
+    if (driver === "codex-app-server") {
+      return a.authStatus === "unauthenticated" && a.codexAppServer?.status === "supported";
+    }
+    return driver === "codex" && a.authStatus === "unauthenticated" && a.codexAppServer != null;
   });
   return agent ? { command: agent.command, args: agent.args ?? [], env: agent.env ?? {} } : null;
 }

@@ -1152,7 +1152,7 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
       }),
       discoverEditors(),
     ]);
-    const discovered = [...nativeAgents, ...registryAgents, ...configuredAcpAgents];
+    const discovered = [...nativeAgents, ...registryAgents];
     freshSafeWslLaunches.clear();
     for (const agent of nativeAgents) {
       if (agent.wslAgentControl?.safeLauncherProtocolVersion !== 1) continue;
@@ -1163,7 +1163,7 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
     // labeled cache fallback, codex-exec cache, or Claude aliases), replacing the catalog list.
     metadata.agents = applyClaudeHookCapability(
       await enrichAgentModels(
-        mergeAgents(configAgents, discovered).filter((agent) => agent.id !== "conductor"), {
+        mergeAgents(configAgents, discovered, configuredAcpAgents).filter((agent) => agent.id !== "conductor"), {
         refresh: refreshModels,
       }),
       claudeHookFeatureEnabled,

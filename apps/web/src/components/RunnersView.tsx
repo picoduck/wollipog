@@ -423,13 +423,19 @@ function RunnerDetails({ runner, online }: { runner: RunnerView; online: boolean
                 </div>
                 {runner.agents.every((agent) => agent.available !== true) && (
                   <div className="install-hints">
-                    <p className="hint">No usable agent CLIs found on this machine — install one:</p>
-                    {agentInstallHints(runner.os).map((h) => (
-                      <pre key={h.name} className="code-block install-cmd" title={`Install ${h.name}`}>
-                        {h.command}
-                        <CopyButton text={h.command} />
-                      </pre>
-                    ))}
+                    {runnerSupportsProtocol(runner.protocolVersion, "verifiedAgentAvailability") ? (
+                      <>
+                        <p className="hint">No usable agent CLIs found on this machine — install one:</p>
+                        {agentInstallHints(runner.os).map((h) => (
+                          <pre key={h.name} className="code-block install-cmd" title={`Install ${h.name}`}>
+                            {h.command}
+                            <CopyButton text={h.command} />
+                          </pre>
+                        ))}
+                      </>
+                    ) : (
+                      <p className="hint">Update this runner to verify its configured agent availability.</p>
+                    )}
                   </div>
                 )}
               </>

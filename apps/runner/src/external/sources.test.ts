@@ -138,6 +138,22 @@ test("matches an agent by driver + native context and returns its launch params"
   assert.deepEqual(launch, { command: "claude", args: ["--flag"], env: { KEY: "v" } });
 });
 
+test("driver launch resolution preserves verified signed-out provider recovery", () => {
+  const signedOut = agent({
+    available: false,
+    authStatus: "unauthenticated",
+    claudeCode: { status: "unauthenticated" } as AgentDefinition["claudeCode"],
+  });
+  assert.deepEqual(resolveLaunchForDriver([signedOut], "claude-code", { kind: "native" }), {
+    command: "claude",
+    args: ["--flag"],
+    env: { KEY: "v" },
+  });
+  assert.equal(resolveLaunchForDriver([
+    agent({ available: false, authStatus: "unauthenticated", claudeCode: undefined }),
+  ], "claude-code", { kind: "native" }), null, "config-only unavailable rows cannot self-attest recovery");
+});
+
 test("returns null when no agent matches the driver (the non-resumable case)", () => {
   assert.equal(resolveLaunchForDriver([agent()], "codex", { kind: "native" }), null);
 });

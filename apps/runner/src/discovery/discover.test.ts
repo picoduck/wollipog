@@ -38,8 +38,31 @@ test("configured ACP discovery verifies a valid custom command and arguments", a
   assert.deepEqual(probed.env, {});
   assert.ok(probed.acp);
   assert.equal(probed.unavailableReason, undefined);
-  assert.equal(mergeAgents([configured], [probed])[0]?.available, true,
+  assert.equal(mergeAgents([configured], [], [probed])[0]?.available, true,
     "a verified configured launch becomes selectable after the discovery merge");
+});
+
+test("configured ACP probe results stay attached to their exact config ids", () => {
+  const valid = cfg({ id: "valid", driver: "acp", command: "shared-adapter", args: ["--valid"] });
+  const broken = cfg({ id: "broken", driver: "acp", command: "shared-adapter", args: ["--broken"] });
+  const validProbe = { ...valid, available: true, unavailableReason: undefined };
+  const brokenProbe = { ...broken, available: false, unavailableReason: "The configured launch exited before completing an ACP initialize probe." };
+
+  const merged = mergeAgents([valid, broken], [], [validProbe, brokenProbe]);
+  assert.equal(merged.find((agent) => agent.id === "valid")?.available, true);
+  assert.equal(merged.find((agent) => agent.id === "broken")?.available, false);
+  assert.match(merged.find((agent) => agent.id === "broken")?.unavailableReason ?? "", /exited/u);
+
+  const reversed = mergeAgents([broken, valid], [], [brokenProbe, validProbe]);
+  assert.equal(reversed.find((agent) => agent.id === "valid")?.available, true);
+  assert.equal(reversed.find((agent) => agent.id === "broken")?.available, false);
+
+  const registryMatch = { ...valid, id: "registry-shape", source: "discovered" as const, available: true };
+  assert.equal(
+    mergeAgents([broken], [registryMatch], [brokenProbe])[0]?.available,
+    false,
+    "a Registry shape match cannot override the exact configured probe",
+  );
 });
 
 test("configured ACP discovery fails closed for missing commands and invalid arguments", async () => {
