@@ -8,6 +8,14 @@ async function assertNoHorizontalOverflow(page: Page, selector: string) {
   expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
 }
 
+async function assertActionsInsideRequestPanel(page: Page) {
+  const geometry = await page.locator(".right-panel, .evidence-review-actions").evaluateAll((elements) =>
+    elements.map((element) => element.getBoundingClientRect().toJSON()));
+  expect(geometry).toHaveLength(2);
+  expect(geometry[1]!.top).toBeGreaterThanOrEqual(geometry[0]!.top - 1);
+  expect(geometry[1]!.bottom).toBeLessThanOrEqual(geometry[0]!.bottom + 1);
+}
+
 test("legacy inline evidence fixture reproduces the mobile over-height review", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/request-surfaces-e2e.html?scenario=legacy");
@@ -87,6 +95,30 @@ for (const viewport of [
         evidenceReviewed: Array.from({ length: 8 }, (_, index) => `viewport-${index + 1}`),
       }]);
   });
+}
+
+for (const viewport of [
+  { name: "mobile breakpoint", width: 760, height: 800 },
+  { name: "desktop breakpoint", width: 761, height: 800 },
+  { name: "split pane", width: 900, height: 800 },
+  { name: "desktop", width: 1280, height: 800 },
+]) {
+  for (const itemCount of [3, 8]) {
+    test(`evidence actions stay visible with ${itemCount} items at ${viewport.name}`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.goto(`/request-surfaces-e2e.html?scenario=evidence&items=${itemCount}`);
+      await page.getByRole("button", { name: "Review Evidence" }).click();
+
+      const actions = page.locator(".evidence-review-actions");
+      await expect(actions.getByRole("button", { name: "Approve" })).toBeDisabled();
+      await expect(actions.getByRole("button", { name: "Deny" })).toBeVisible();
+      await assertActionsInsideRequestPanel(page);
+
+      const scrollOwner = page.locator(viewport.width <= 760 ? ".request-panel" : ".evidence-review-list");
+      await scrollOwner.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+      await assertActionsInsideRequestPanel(page);
+    });
+  }
 }
 
 for (const viewport of [

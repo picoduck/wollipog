@@ -20,11 +20,12 @@ declare global {
 }
 
 const scenario = new URLSearchParams(window.location.search).get("scenario") ?? "evidence";
+const evidenceCount = Number(new URLSearchParams(window.location.search).get("items")) || 8;
 let openedChild: DescendantRequestView | null = null;
 const submissions: unknown[] = [];
 
 function evidenceSession(): SessionView {
-  const evidence = Array.from({ length: 8 }, (_, index) => ({
+  const evidence = Array.from({ length: evidenceCount }, (_, index) => ({
     evidenceId: `viewport-${index + 1}`,
     uri: `https://evidence.example/item-${index + 1}.png?signature=hidden-${index + 1}`,
     sha256: String(index).padStart(64, "0"),
