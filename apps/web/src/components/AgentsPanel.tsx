@@ -82,6 +82,15 @@ export function mergeCompactAttentionOwners(
   return [...byRequest.values()];
 }
 
+export function shouldOpenPrimaryRequestInSession(
+  request: SessionView["pendingApproval"] | undefined,
+  primaryRequestId: string | undefined,
+  hasOpenHandler: boolean,
+): boolean {
+  return Boolean(hasOpenHandler && request && !request.ownerToolUseId &&
+    request.requestId === primaryRequestId);
+}
+
 export function childRegistryProgressKey(
   session: Pick<SessionView, "messageCount" | "lastEventAt" | "status" | "pendingApproval">,
 ): string {
@@ -373,7 +382,11 @@ export function AgentsPanel(props: Props) {
       (request.requestId === session.pendingApproval?.requestId ? primaryRequestRef.current : requestDetailRef.current)?.focus());
   }, [targetKey, targetEpochMatches, linkedRequestMissing, target, requests, projection.ambiguousIds, unresolvedOwnerIds,
     props.onSelect, session.pendingApproval?.requestId]);
-  const primaryInSession = Boolean(props.onOpenPrimaryRequest && selectedRequest?.requestId === session.pendingApproval?.requestId);
+  const primaryInSession = shouldOpenPrimaryRequestInSession(
+    selectedRequest,
+    session.pendingApproval?.requestId,
+    Boolean(props.onOpenPrimaryRequest),
+  );
   useLayoutEffect(() => {
     if ((!selectedRequest || primaryInSession) && requestOwnsFocus.current) {
       requestOwnsFocus.current = false;
