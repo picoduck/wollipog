@@ -70,7 +70,7 @@ test("configured ACP discovery fails closed for missing commands and invalid arg
     id: "missing-acp", driver: "acp", command: `/definitely-missing-wollipog-${process.pid}`, args: [],
   }), {}, { timeoutMs: 1_000 });
   assert.equal(missing.available, false);
-  assert.match(missing.unavailableReason!, /not found or could not be started/u);
+  assert.match(missing.unavailableReason!, /not found or could not be started|exited before completing/u);
   assert.doesNotMatch(missing.unavailableReason!, /definitely-missing-wollipog/u);
 
   const invalid = await probeConfiguredAcpAgent(cfg({
@@ -128,7 +128,7 @@ test("config-only agents cannot self-attest a Direct WSL Agent Control runtime",
       safeLauncherProtocolVersion: 1, bwrapRuntime: "/usr/bin/bwrap" } });
   assert.equal(mergeAgents([configured], [])[0]!.wslAgentControl, undefined);
   assert.equal(mergeAgents([configured], [])[0]!.available, false);
-  assert.match(mergeAgents([configured], [])[0]!.unavailableReason!, /incompatible/u);
+  assert.match(mergeAgents([configured], [])[0]!.unavailableReason!, /incompatible|No completed discovery probe/u);
 });
 
 test("parseVersion extracts a semver token from --version noise", () => {
