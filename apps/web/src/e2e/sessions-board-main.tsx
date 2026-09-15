@@ -37,7 +37,7 @@ const empty = new URLSearchParams(location.search).has("empty");
 /** An orchestrator with four children and a session with three pending requests (#896). */
 const threads = new URLSearchParams(location.search).has("threads");
 const openAiThreadParent = new URLSearchParams(location.search).get("thread-provider") === "openai";
-const reminderConflict = new URLSearchParams(location.search).has("reminder-conflict");
+const reminderConflict = new URLSearchParams(location.search).get("reminder-conflict");
 
 const runner: RunnerView = {
   runnerId: "runner-1",
@@ -283,12 +283,14 @@ const client = {
   },
   setReminder: async (_sessionId: string, request: import("@wollipog/protocol").SetSessionReminderRequest) => {
     window.__reminderWriteCalls++;
-    if (reminderConflict && window.__reminderWriteCalls === 1) {
+    if (reminderConflict !== null && window.__reminderWriteCalls === 1) {
       throw new ApiError("reminder changed in another client; reload and try again", 409);
     }
     return { ...reconciledReminder, ...request, revision: reconciledReminder.revision + 1, updatedAt: Date.now() };
   },
-  sessionReminder: async () => ({ reminder: structuredClone(reconciledReminder) }),
+  sessionReminder: async () => ({
+    reminder: reminderConflict === "removed" ? null : structuredClone(reconciledReminder),
+  }),
   removeReminder: async (sessionId: string) => {
     const index = reminders.findIndex((reminder) => reminder.sessionId === sessionId);
     if (index >= 0) reminders.splice(index, 1);

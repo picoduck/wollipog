@@ -33,6 +33,7 @@ export function SnoozeDialog({
   const [exact, setExact] = useState(initialDraft.exact);
   const [wakePolicy, setWakePolicy] = useState<SessionReminderWakePolicy>(initialDraft.wakePolicy);
   const [scheduleTouched, setScheduleTouched] = useState(false);
+  const [creatingFromDraft, setCreatingFromDraft] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [reconciling, setReconciling] = useState(false);
   const [reconciled, setReconciled] = useState<{
@@ -51,7 +52,8 @@ export function SnoozeDialog({
   const timeZone = loadedReminder && !scheduleTouched ? loadedReminder.timeZone : localTimeZone;
   const returnedReminder = loadedReminder?.state === "fired" ? loadedReminder : undefined;
   const currentReminder = reconciled ? reconciled.reminder ?? undefined : reminder;
-  const conflict = submitting ? null : reminderConflict(loadedReminder, currentReminder);
+  const mutationReminder = creatingFromDraft ? undefined : loadedReminder;
+  const conflict = submitting ? null : reminderConflict(mutationReminder, currentReminder);
   const parsed = useMemo(() => {
     if (loadedReminder && !scheduleTouched) return storedReminderSchedule(loadedReminder);
     return exact
@@ -63,7 +65,7 @@ export function SnoozeDialog({
     if (!focusExpressionAfterReloadRef.current) return;
     focusExpressionAfterReloadRef.current = false;
     expressionRef.current?.focus();
-  }, [loadedReminder]);
+  }, [creatingFromDraft, loadedReminder]);
 
   useEffect(() => {
     setReconciled((current) => current && current.liveKey !== liveReminderKey ? null : current);
@@ -72,11 +74,19 @@ export function SnoozeDialog({
   const reload = () => {
     const next = draftForReminder(currentReminder);
     focusExpressionAfterReloadRef.current = true;
+    setCreatingFromDraft(false);
     setLoadedReminder(currentReminder);
     setExpression(next.expression);
     setExact(next.exact);
     setWakePolicy(next.wakePolicy);
     setScheduleTouched(false);
+    setError(null);
+    setReconciliationFailed(false);
+  };
+
+  const createNewFromDraft = () => {
+    focusExpressionAfterReloadRef.current = true;
+    setCreatingFromDraft(true);
     setError(null);
     setReconciliationFailed(false);
   };
@@ -115,9 +125,9 @@ export function SnoozeDialog({
       await onSave({
         ...parsed,
         wakePolicy,
-        expectedRevision: loadedReminder?.revision ?? 0,
-        ...(loadedReminder ? { expectedReminderId: loadedReminder.reminderId } : {}),
-      }, loadedReminder);
+        expectedRevision: mutationReminder?.revision ?? 0,
+        ...(mutationReminder ? { expectedReminderId: mutationReminder.reminderId } : {}),
+      }, mutationReminder);
       onClose();
     } catch (cause) {
       setError((cause as Error).message);
@@ -128,7 +138,7 @@ export function SnoozeDialog({
   };
 
   const remove = async () => {
-    if (!onRemove || !loadedReminder || submitting || conflict) return;
+    if (!onRemove || !loadedReminder || creatingFromDraft || submitting || conflict) return;
     setSubmitting(true);
     setError(null);
     setReconciliationFailed(false);
@@ -147,11 +157,11 @@ export function SnoozeDialog({
     <Modal
       {...(returnFocusRef ? { returnFocusRef } : {})}
       className="snooze-dialog"
-      title={loadedReminder ? "Edit Reminder" : "Snooze Session"}
+      title={creatingFromDraft ? "Create New Reminder" : loadedReminder ? "Edit Reminder" : "Snooze Session"}
       onClose={onClose}
       describedBy="snooze-description"
       footer={<>
-        {loadedReminder && onRemove && <button
+        {!creatingFromDraft && loadedReminder && onRemove && <button
           className="btn ghost"
           type="button"
           onClick={() => void remove()}
@@ -169,23 +179,32 @@ export function SnoozeDialog({
           disabled={!parsed || submitting}
           aria-disabled={Boolean(conflict) || undefined}
         >
-          {submitting ? "Saving…" : loadedReminder ? "Update Reminder" : "Snooze Session"}
+          {submitting ? "Saving…" : creatingFromDraft ? "Create New Reminder" : loadedReminder ? "Update Reminder" : "Snooze Session"}
         </button>
       </>}
     >
       <form id="snooze-session-form" className="snooze-form" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
-        <p id="snooze-description">
-          {returnedReminder
+        <p id="snooze-description" role={creatingFromDraft ? "status" : undefined}>
+          {creatingFromDraft
+            ? "The preserved schedule, time zone, and wake policy will create a new reminder. The removed reminder will not be restored."
+            : returnedReminder
             ? `This session returned from snooze after ${formatReminderInstant(returnedReminder.scheduledFor, returnedReminder.timeZone)}. Choose a new time to snooze it again.`
             : "Snoozing changes Inbox visibility only. Running work and lifecycle state continue unchanged."}
         </p>
         {conflict && (
           <div className="snooze-conflict" role="alert" aria-live="assertive">
             <strong>Stored Reminder Changed</strong>
-            <span>{conflict} Your local draft is preserved. Continue reviewing it, or reload before saving.</span>
-            <button className="btn sm" type="button" onClick={reload}>
-              {currentReminder ? "Reload Reminder" : "Start New Reminder"}
-            </button>
+            <span>{conflict} Your local draft is preserved. {currentReminder
+              ? "Continue reviewing it, or reload before saving."
+              : "Create a new reminder from this draft, or discard it and start from defaults."}</span>
+            {currentReminder ? (
+              <button className="btn sm" type="button" onClick={reload}>Reload Reminder</button>
+            ) : (<>
+              <button className="btn sm" type="button" onClick={createNewFromDraft}>
+                Create New Reminder from Draft
+              </button>
+              <button className="btn sm" type="button" onClick={reload}>Start New Reminder</button>
+            </>)}
           </div>
         )}
         {reconciling && <p className="form-error" role="status">Loading current reminder state…</p>}

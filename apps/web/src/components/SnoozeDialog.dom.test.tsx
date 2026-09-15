@@ -374,6 +374,12 @@ test("409 reconciliation distinguishes authoritative reminder states without liv
       .find((button) => button.textContent === scenario.action)!;
     await act(async () => { reload.click(); });
     assert.equal(domWindow.document.activeElement, expression, `${scenario.name}: reload restores dialog focus`);
+    if (scenario.authoritative === null) {
+      assert.equal(expression.value, "tomorrow morning", "normal reset discards the natural-language draft");
+      assert.equal(exact.value, "", "normal reset discards the exact-time draft");
+      assert.equal(container.querySelector<HTMLButtonElement>('[role="radio"][aria-checked="true"]')
+        ?.textContent?.includes("Until Activity"), true, "normal reset restores the default Wake Policy");
+    }
     await act(async () => { container.querySelector<HTMLButtonElement>('button[type="submit"]')!.click(); });
     assert.equal(accepted?.expectedRevision, scenario.expectedRevision, scenario.name);
     assert.equal(accepted?.expectedReminderId, scenario.expectedReminderId, scenario.name);
@@ -382,6 +388,199 @@ test("409 reconciliation distinguishes authoritative reminder states without liv
     await act(async () => { root.unmount(); });
     container.remove();
   }
+});
+
+test("a removed reminder can be recreated explicitly from the complete preserved draft", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const original: SessionReminderView = {
+    reminderId: "reminder-original",
+    sessionId: "session-1",
+    scheduledFor: Date.now() + 86_400_000,
+    timeZone: "America/Chicago",
+    originalExpression: "tomorrow morning",
+    wakePolicy: "until_activity",
+    state: "pending",
+    revision: 1,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  let accepted: SetSessionReminderRequest | undefined;
+  let acceptedPrevious: SessionReminderView | undefined;
+  let closeCalls = 0;
+  const props = {
+    onClose: () => { closeCalls++; },
+    onSave: async (request: SetSessionReminderRequest, previous?: SessionReminderView) => {
+      accepted = request;
+      acceptedPrevious = previous;
+    },
+    onRemove: async () => undefined,
+  };
+
+  await act(async () => { root.render(<SnoozeDialog reminder={original} {...props} />); });
+  const expression = container.querySelector<HTMLInputElement>("#snooze-expression")!;
+  const exact = container.querySelector<HTMLInputElement>("#snooze-exact")!;
+  await act(async () => {
+    expression.value = "today at 3:30 pm";
+    fireDomEvent.change(expression);
+    exact.value = "2099-04-05T06:30";
+    fireDomEvent.change(exact);
+    [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+      .find((button) => button.textContent?.includes("Regardless"))!.click();
+    exact.focus();
+  });
+  const draftTimeZone = [...container.querySelectorAll(".snooze-preview span")].at(-1)?.textContent;
+
+  await act(async () => { root.render(<SnoozeDialog reminder={undefined} {...props} />); });
+  const conflict = container.querySelector('[role="alert"]')!;
+  assert.match(conflict.textContent ?? "", /removed in another client/i);
+  assert.match(conflict.textContent ?? "", /create a new reminder from this draft.*discard it.*defaults/i);
+  assert.equal(domWindow.document.activeElement, exact, "remote removal keeps the active draft field focused");
+  assert.equal([...container.querySelectorAll<HTMLButtonElement>("button")]
+    .some((button) => button.textContent === "Start New Reminder"), true, "the normal reset remains separate");
+
+  await act(async () => {
+    [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Create New Reminder from Draft")!.click();
+  });
+
+  assert.equal(container.querySelector(".modal-head h2")?.textContent, "Create New Reminder");
+  assert.equal(container.querySelector("#snooze-description")?.getAttribute("role"), "status");
+  assert.match(container.querySelector("#snooze-description")?.textContent ?? "", /will create a new reminder.*will not be restored/i);
+  assert.equal(domWindow.document.activeElement, expression, "activating draft reuse keeps focus in the dialog");
+  assert.equal(expression.value, "today at 3:30 pm", "natural-language input is retained");
+  assert.equal(exact.value, "2099-04-05T06:30", "exact date and time are retained");
+  assert.equal(container.querySelector<HTMLButtonElement>('[role="radio"][aria-checked="true"]')
+    ?.textContent?.includes("Regardless"), true, "Wake Policy is retained");
+  assert.equal([...container.querySelectorAll(".snooze-preview span")].at(-1)?.textContent, draftTimeZone,
+    "time-zone context is retained");
+
+  await act(async () => { container.querySelector<HTMLButtonElement>('button[type="submit"]')!.click(); });
+  assert.equal(accepted?.expectedRevision, 0, "draft reuse is create-only");
+  assert.equal(accepted && "expectedReminderId" in accepted, false, "create-only requests cannot target the removed reminder");
+  assert.equal(accepted?.originalExpression, "2099-04-05T06:30");
+  assert.equal(accepted?.wakePolicy, "regardless");
+  assert.equal(acceptedPrevious, undefined, "undo behavior also treats the write as a new reminder");
+  assert.equal(closeCalls, 1);
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("a concurrent recreation blocks preserved-draft creation and reload keeps focus in the dialog", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const original: SessionReminderView = {
+    reminderId: "reminder-original", sessionId: "session-1", scheduledFor: Date.now() + 60_000,
+    timeZone: "UTC", originalExpression: "in 1 hour", wakePolicy: "until_activity", state: "pending",
+    revision: 1, createdAt: 1, updatedAt: 1,
+  };
+  const recreated: SessionReminderView = {
+    ...original,
+    reminderId: "reminder-recreated",
+    originalExpression: "in 2 hours",
+    scheduledFor: Date.now() + 120_000,
+    updatedAt: 2,
+  };
+  const saved: SetSessionReminderRequest[] = [];
+  const props = {
+    onClose: () => undefined,
+    onSave: async (request: SetSessionReminderRequest) => { saved.push(request); },
+    onRemove: async () => undefined,
+  };
+
+  await act(async () => { root.render(<SnoozeDialog reminder={original} {...props} />); });
+  await act(async () => { root.render(<SnoozeDialog reminder={undefined} {...props} />); });
+  await act(async () => {
+    [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Create New Reminder from Draft")!.click();
+  });
+  const expression = container.querySelector<HTMLInputElement>("#snooze-expression")!;
+  assert.equal(domWindow.document.activeElement, expression);
+
+  await act(async () => { root.render(<SnoozeDialog reminder={recreated} {...props} />); });
+  assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /created in another client/i);
+  assert.equal(domWindow.document.activeElement, expression, "the new conflict does not move focus");
+  const submit = container.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+  assert.equal(submit.getAttribute("aria-disabled"), "true");
+  await act(async () => { submit.click(); });
+  assert.equal(saved.length, 0, "the create-only write is blocked before submission when recreation is known");
+
+  await act(async () => {
+    [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Reload Reminder")!.click();
+  });
+  assert.equal(domWindow.document.activeElement, expression, "resolving the new conflict keeps focus in the dialog");
+  assert.equal(expression.value, "in 2 hours");
+  await act(async () => { submit.click(); });
+  assert.equal(saved[0]?.expectedRevision, 1);
+  assert.equal(saved[0]?.expectedReminderId, "reminder-recreated");
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("a create-only race reconciles a reminder recreated without live delivery", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const original: SessionReminderView = {
+    reminderId: "reminder-original", sessionId: "session-1", scheduledFor: Date.now() + 60_000,
+    timeZone: "UTC", originalExpression: "in 1 hour", wakePolicy: "until_activity", state: "pending",
+    revision: 1, createdAt: 1, updatedAt: 1,
+  };
+  const recreated: SessionReminderView = {
+    ...original,
+    reminderId: "reminder-recreated",
+    originalExpression: "in 2 hours",
+    scheduledFor: Date.now() + 120_000,
+    updatedAt: 2,
+  };
+  const saved: SetSessionReminderRequest[] = [];
+  let reconciliations = 0;
+  const props = {
+    onClose: () => undefined,
+    onSave: async (request: SetSessionReminderRequest) => {
+      saved.push(request);
+      if (saved.length === 1) throw new ApiError("reminder changed in another client", 409);
+    },
+    onRemove: async () => undefined,
+    onReconcile: async () => { reconciliations++; return recreated; },
+  };
+
+  await act(async () => { root.render(<SnoozeDialog reminder={original} {...props} />); });
+  await act(async () => { root.render(<SnoozeDialog reminder={undefined} {...props} />); });
+  await act(async () => {
+    [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Create New Reminder from Draft")!.click();
+  });
+  const expression = container.querySelector<HTMLInputElement>("#snooze-expression")!;
+  await act(async () => {
+    container.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
+    await Promise.resolve();
+  });
+
+  assert.equal(saved.length, 1, "the stale create is never retried automatically");
+  assert.equal(saved[0]?.expectedRevision, 0);
+  assert.equal(saved[0] && "expectedReminderId" in saved[0], false);
+  assert.equal(reconciliations, 1);
+  assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /created in another client/i);
+  assert.equal(domWindow.document.activeElement, expression, "authoritative reconciliation keeps focus in the dialog");
+
+  await act(async () => {
+    [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Reload Reminder")!.click();
+  });
+  assert.equal(domWindow.document.activeElement, expression);
+  assert.equal(expression.value, "in 2 hours");
+  await act(async () => { container.querySelector<HTMLButtonElement>('button[type="submit"]')!.click(); });
+  assert.equal(saved[1]?.expectedRevision, 1);
+  assert.equal(saved[1]?.expectedReminderId, "reminder-recreated");
+
+  await act(async () => { root.unmount(); });
+  container.remove();
 });
 
 test("unsupported and failed reconciliation remains visible and safely retryable", async () => {
