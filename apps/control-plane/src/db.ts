@@ -10371,10 +10371,15 @@ export class ControlPlaneDb {
     snapshot: SubscriptionUsageSnapshot,
     prior: SubscriptionUsageSnapshot | undefined,
   ): SubscriptionUsageSnapshot {
+    // Claude discovery owns even an absent label, while Codex learns its label only after a
+    // provider probe. An unlabeled starting Codex snapshot after restart is therefore unknown,
+    // not evidence that the account changed; a present replacement label remains authoritative.
+    const accountChanged = prior?.accountLabel !== snapshot.accountLabel &&
+      (snapshot.provider === "claude" || snapshot.accountLabel !== undefined);
     if (snapshot.state !== "unavailable" || snapshot.buckets.length > 0 ||
         !Array.isArray(prior?.buckets) || prior.buckets.length === 0 ||
         prior.provider !== snapshot.provider || prior.agentId !== snapshot.agentId ||
-        prior.accountLabel !== snapshot.accountLabel) {
+        accountChanged) {
       return snapshot;
     }
     return {

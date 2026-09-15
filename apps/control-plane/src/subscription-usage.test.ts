@@ -171,8 +171,9 @@ test("an unavailable account transition never retains another account's last-kno
   assert.equal(current.state, "unavailable");
   assert.deepEqual(current.buckets, []);
 
-  db.upsertSubscriptionUsageSnapshot(prior, now + 2);
-  const { accountLabel: _accountLabel, ...unlabeledPrior } = prior;
+  const claudePrior = { ...prior, provider: "claude" as const };
+  db.upsertSubscriptionUsageSnapshot(claudePrior, now + 2);
+  const { accountLabel: _accountLabel, ...unlabeledPrior } = claudePrior;
   db.upsertSubscriptionUsageSnapshot({
     ...unlabeledPrior,
     state: "unavailable",
@@ -224,8 +225,9 @@ test("authoritative inventories replace removed sources atomically", () => {
   };
   db.replaceSubscriptionUsageSnapshots("runner-1", [first, second]);
   assert.equal(db.subscriptionUsageForPrincipal(human(), now).sources.length, 2);
+  const { accountLabel: _accountLabel, ...unlabeledFirst } = first;
   db.replaceSubscriptionUsageSnapshots("runner-1", [{
-    ...first,
+    ...unlabeledFirst,
     state: "unavailable",
     fetchedAt: now + 1,
     buckets: [],
@@ -234,6 +236,7 @@ test("authoritative inventories replace removed sources atomically", () => {
   const retained = db.subscriptionUsageForPrincipal(human(), now + 1).sources[0]!;
   assert.equal(retained.state, "available");
   assert.equal(retained.fetchedAt, first.fetchedAt);
+  assert.equal(retained.accountLabel, first.accountLabel);
   assert.equal(retained.buckets[0]?.id, "future-model:primary");
   assert.equal(retained.detail, "The runner restarted before provider usage was fetched.");
   db.upsertSubscriptionUsageSnapshot({
