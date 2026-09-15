@@ -3875,6 +3875,37 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     }
   });
 
+  await t.test("reconciliation cannot cross the provider thread or turn stored at admission", async () => {
+    for (const mismatch of ["thread", "turn"] as const) {
+      const { db, hub, svc, child, arm } = setup();
+      try {
+        const armed = await arm(mismatch === "thread" ? 1192 : 1193);
+        hub.requestHandler = (message) => ({
+          type: "workflow_action_reconciliation_result",
+          requestId: message.type === "reconcile_workflow_action" ? message.requestId : "wrong",
+          sessionId: child.id,
+          occurrenceId: armed.decision.occurrenceId,
+          accepted: true,
+          commandDigest: createHash("sha256").update(armed.command, "utf8").digest("hex"),
+          providerThreadId: mismatch === "thread" ? "thread-other" : "thread-1",
+          providerTurnId: mismatch === "turn" ? "turn-other" : "turn-1",
+          providerAdmissionItemId: "admission-mismatch",
+          providerItemId: "command-mismatch",
+          forgeHeadSha: armed.snapshot.headSha,
+        });
+        const result = await svc.reconcileWorkflowDecision(
+          child.id,
+          armed.decision.occurrenceId,
+          { resourceSnapshot: armed.snapshot },
+          () => true,
+        );
+        assert.equal(result.status, 409);
+        assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "approved",
+          `${mismatch} mismatch remains fail-closed and retryable`);
+      } finally { db.close(); }
+    }
+  });
+
   await t.test("stale snapshot, policy, ancestry, and authority cannot reconcile", async () => {
     for (const mismatch of ["snapshot", "revision", "ancestry", "authority"] as const) {
       const { db, svc, child, arm } = setup();

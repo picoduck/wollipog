@@ -6049,6 +6049,8 @@ export class SessionsService {
         !boundedProviderCorrelationId(proof.providerTurnId) ||
         !boundedProviderCorrelationId(proof.providerAdmissionItemId) ||
         !boundedProviderCorrelationId(proof.providerItemId) ||
+        (admission.providerThreadId != null && proof.providerThreadId !== admission.providerThreadId) ||
+        (admission.providerTurnId != null && proof.providerTurnId !== admission.providerTurnId) ||
         proof.forgeHeadSha !== normalized.data.headSha) {
       return fail(proof.type === "workflow_action_reconciliation_result" && proof.error
         ? proof.error
