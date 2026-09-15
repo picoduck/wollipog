@@ -4608,6 +4608,16 @@ app.put("/api/sessions/:id/reminder", async (req, reply) => {
     (req.body ?? {}) as Partial<SetSessionReminderRequest>));
 });
 
+app.get("/api/sessions/:id/reminder", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const human = requestHuman(req);
+  if (!human) return reply.code(403).send({ error: "session reminders require a human user" });
+  // The central authorization gate has already required access to this exact session. The user id
+  // remains part of the database key so an organization peer can never observe the owner's row.
+  reply.header("cache-control", "no-store");
+  return { reminder: db.getSessionReminder(id, human.userId) };
+});
+
 app.delete("/api/sessions/:id/reminder", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const human = requestHuman(req);

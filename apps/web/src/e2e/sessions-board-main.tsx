@@ -10,7 +10,7 @@ import {
   type SessionView,
   type UiSnapshotMessage,
 } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { InboxView } from "../components/InboxView.js";
@@ -37,6 +37,7 @@ const empty = new URLSearchParams(location.search).has("empty");
 /** An orchestrator with four children and a session with three pending requests (#896). */
 const threads = new URLSearchParams(location.search).has("threads");
 const openAiThreadParent = new URLSearchParams(location.search).get("thread-provider") === "openai";
+const reminderConflict = new URLSearchParams(location.search).has("reminder-conflict");
 
 const runner: RunnerView = {
   runnerId: "runner-1",
@@ -245,10 +246,22 @@ declare global {
   interface Window {
     __setColumnCalls: Array<{ sessionId: string; column: BoardColumn }>;
     __approveCalls: string[];
+    __reminderWriteCalls: number;
   }
 }
 window.__setColumnCalls = [];
 window.__approveCalls = [];
+window.__reminderWriteCalls = 0;
+
+const reconciledReminder: SessionReminderView = {
+  ...reminders.find((candidate) => candidate.sessionId === "s-snoozed")!,
+  scheduledFor: new Date("2099-05-06T12:45:00.000Z").getTime(),
+  timeZone: "Asia/Tokyo",
+  originalExpression: "2099-05-06T21:45",
+  wakePolicy: "until_activity",
+  revision: 2,
+  updatedAt: 2,
+};
 
 const client = {
   ...api,
@@ -268,6 +281,14 @@ const client = {
     window.setTimeout(() => socket?.push({ type: "session_upsert", session: structuredClone(approved) }), 0);
     return structuredClone(approved);
   },
+  setReminder: async (_sessionId: string, request: import("@wollipog/protocol").SetSessionReminderRequest) => {
+    window.__reminderWriteCalls++;
+    if (reminderConflict && window.__reminderWriteCalls === 1) {
+      throw new ApiError("reminder changed in another client; reload and try again", 409);
+    }
+    return { ...reconciledReminder, ...request, revision: reconciledReminder.revision + 1, updatedAt: Date.now() };
+  },
+  sessionReminder: async () => ({ reminder: structuredClone(reconciledReminder) }),
   removeReminder: async (sessionId: string) => {
     const index = reminders.findIndex((reminder) => reminder.sessionId === sessionId);
     if (index >= 0) reminders.splice(index, 1);

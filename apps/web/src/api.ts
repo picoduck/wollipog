@@ -92,6 +92,7 @@ import type {
   SessionEventsResponse,
   SessionFileEntry,
   SessionView,
+  SessionReminderReadResponse,
   SessionReminderView,
   SessionCommandInvocationView,
   SteerRequest,
@@ -963,6 +964,11 @@ export function createApiClient(transport: ApiTransport) {
     req<SessionReminderView>(`/api/sessions/${encodeURIComponent(id)}/reminder`, {
       method: "PUT",
       body: JSON.stringify(body),
+    }),
+
+  sessionReminder: (id: string) =>
+    req<SessionReminderReadResponse>(`/api/sessions/${encodeURIComponent(id)}/reminder`, {
+      cache: "no-store",
     }),
 
   removeReminder: (id: string, revision?: number, reminderId?: string) => {

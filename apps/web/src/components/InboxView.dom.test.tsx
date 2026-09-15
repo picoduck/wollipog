@@ -4,10 +4,17 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { ControlPlaneToUi, ProjectView, SessionReminderView, SessionView, UiSnapshotMessage } from "@wollipog/protocol";
+import type {
+  ControlPlaneToUi,
+  ProjectView,
+  SessionReminderView,
+  SessionView,
+  SetSessionReminderRequest,
+  UiSnapshotMessage,
+} from "@wollipog/protocol";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { filterInboxSplitsForReminderMode, InboxView } from "./InboxView.js";
@@ -985,6 +992,111 @@ test("a two-client reminder upsert preserves the open Inbox Snooze draft and foc
   assert.equal(container.querySelector<HTMLInputElement>("#snooze-exact")?.value, "2099-05-06T07:45");
   assert.equal(container.querySelector('[role="alert"]'), null, "closing still discards the local draft normally");
 
+});
+
+test("a 409 reconciles the open Snooze dialog without WebSocket delivery", async () => {
+  mobileViewport = false;
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-reminder-read-reconciliation-test",
+    runtimeKey: "inbox-reminder-read-reconciliation-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const original: SessionReminderView = {
+    reminderId: "reminder-original",
+    sessionId: "session-reminder",
+    scheduledFor: Date.now() + 86_400_000,
+    timeZone: "America/Chicago",
+    originalExpression: "tomorrow morning",
+    wakePolicy: "until_activity",
+    state: "pending",
+    revision: 1,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const updated: SessionReminderView = {
+    ...original,
+    scheduledFor: Date.now() + 172_800_000,
+    timeZone: "Asia/Tokyo",
+    originalExpression: "2099-05-06T07:45",
+    wakePolicy: "regardless",
+    revision: 2,
+    updatedAt: 2,
+  };
+  const writes: SetSessionReminderRequest[] = [];
+  let reads = 0;
+  const client = {
+    ...api,
+    setReminder: async (_sessionId: string, request: SetSessionReminderRequest) => {
+      writes.push(request);
+      if (writes.length === 1) throw new ApiError("reminder changed in another client", 409);
+      return { ...updated, ...request, revision: 3, updatedAt: 3 };
+    },
+    sessionReminder: async () => { reads++; return { reminder: updated }; },
+  } as ApiClient;
+
+  await act(async () => {
+    root.render(
+      <ApiProvider client={client}>
+        <StoreProvider connection={connection} navigation={navigation}>
+          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+        </StoreProvider>
+      </ApiProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push({
+      type: "snapshot",
+      capabilities: {
+        sessionSubscriptions: false,
+        boundedDelivery: false,
+        paginatedSessionHistory: false,
+        projects: false,
+        sessionReminders: true,
+      },
+      runners: [],
+      boxes: [],
+      sessions: [session("session-reminder", 10, { status: "input_required" })],
+      reminders: [original],
+      runs: [],
+      pods: [],
+    });
+  });
+  await act(async () => { container.querySelector<HTMLButtonElement>('[title="Snoozed"]')!.click(); });
+  await act(async () => { container.querySelector<HTMLButtonElement>(".inbox-row")!.click(); });
+  const snooze = [...container.querySelectorAll<HTMLButtonElement>('button[aria-label="Snooze"]')].at(0)!;
+  await act(async () => { snooze.click(); });
+  const expression = container.querySelector<HTMLInputElement>("#snooze-expression")!;
+  const exact = container.querySelector<HTMLInputElement>("#snooze-exact")!;
+  await act(async () => {
+    expression.value = "today at 3:30 pm";
+    fireDomEvent.change(expression);
+    exact.value = "2099-04-05T06:30";
+    fireDomEvent.change(exact);
+    exact.focus();
+    container.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  assert.equal(writes.length, 1);
+  assert.equal(reads, 1);
+  assert.equal(expression.value, "today at 3:30 pm");
+  assert.equal(exact.value, "2099-04-05T06:30");
+  assert.equal(domWindow.document.activeElement, exact);
+  assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /updated in another client/i);
+
+  await act(async () => {
+    [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Reload Reminder")!.click();
+  });
+  assert.equal(container.querySelector<HTMLInputElement>("#snooze-exact")?.value, "2099-05-06T07:45");
+  assert.equal(domWindow.document.activeElement, expression);
+  await act(async () => { container.querySelector<HTMLButtonElement>('button[type="submit"]')!.click(); });
+  assert.equal(writes.length, 2);
+  assert.equal(writes[1]?.expectedRevision, 2);
+  assert.equal(writes[1]?.expectedReminderId, "reminder-original");
 });
 
 test("desktop search Enter focuses the exact filtered result set without activating a session", async () => {
