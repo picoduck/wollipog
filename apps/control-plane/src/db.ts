@@ -13318,6 +13318,100 @@ export class ControlPlaneDb {
     }
   }
 
+  /** A lifecycle cleanup may revoke an exact action admission before its delayed provider receipt
+   * is reconciled. Only the original request -> Orchestrator allow -> compatible lifecycle revoke
+   * audit sequence is recoverable; every other revoked decision remains terminal. */
+  isRecoverableWorkflowDecisionActionRevocation(
+    sessionId: string,
+    occurrenceId: string,
+  ): boolean {
+    const decision = this.workflowDecisionByOccurrence(occurrenceId);
+    const admission = decision?.actionAdmission;
+    if (!decision || decision.sessionId !== sessionId || decision.status !== "revoked" ||
+        decision.category !== "pr_merge" || decision.authority !== "orchestrator" ||
+        decision.consumedAt !== undefined || !admission || admission.kind !== "pr_merge_enqueue" ||
+        !Number.isSafeInteger(admission.armedAt) || admission.armedAt < 1 ||
+        decision.resolvedAt === undefined) return false;
+    const rows = this.stmt(
+      `SELECT stage, outcome, actor_kind, actor_id, content_digest, workflow_decision, created_at
+       FROM governance_audit
+       WHERE session_id=? AND request_id=? AND approval_kind='workflow_decision'
+       ORDER BY created_at, row_id LIMIT 4`,
+    ).all(sessionId, occurrenceId) as unknown as Array<{
+      stage: GovernanceAuditEntry["stage"];
+      outcome: GovernanceAuditEntry["outcome"];
+      actor_kind: GovernanceAuditEntry["actor"]["kind"];
+      actor_id: string | null;
+      content_digest: string | null;
+      workflow_decision: string | null;
+      created_at: number;
+    }>;
+    if (rows.length !== 3) return false;
+    const [requested, allowed, revoked] = rows;
+    if (!requested || !allowed || !revoked ||
+        requested.stage !== "request" || requested.outcome !== "pending" ||
+        requested.actor_kind !== "agent" || requested.actor_id !== decision.sessionId ||
+        requested.created_at !== decision.createdAt ||
+        allowed.stage !== "resolution" || allowed.outcome !== "allowed" ||
+        allowed.actor_kind !== "agent" || allowed.actor_id !== decision.controllingSessionId ||
+        allowed.created_at !== decision.resolvedAt ||
+        revoked.stage !== "resolution" || revoked.outcome !== "revoked" ||
+        revoked.actor_kind !== "system" ||
+        (revoked.actor_id !== "session-restarted" && revoked.actor_id !== "provider-session-ended") ||
+        admission.armedAt < allowed.created_at || admission.armedAt > revoked.created_at) return false;
+    for (const row of rows) {
+      if (row.content_digest !== decision.resourceDigest || !row.workflow_decision) return false;
+      const provenance = parseJson<NonNullable<GovernanceAuditEntry["workflowDecision"]>>(
+        row.workflow_decision,
+      );
+      if (!provenance || provenance.occurrenceId !== decision.occurrenceId ||
+          provenance.parentSessionId !== decision.controllingSessionId ||
+          provenance.childSessionId !== decision.sessionId ||
+          provenance.category !== decision.category ||
+          provenance.policyRevision !== decision.policyRevision ||
+          provenance.resourceDigest !== decision.resourceDigest) return false;
+    }
+    return true;
+  }
+
+  /** Atomically claim one reconciliation proof and consume either a live approval or the narrowly
+   * auditable lifecycle-revoked state above. The eligibility check is repeated under the write
+   * lock so restart/revocation races cannot widen recovery. */
+  consumeReconciledWorkflowDecisionActionWithReceipt(
+    sessionId: string,
+    occurrenceId: string,
+    commandDigest: string,
+    receiptDigest: string,
+    now: number,
+  ): WorkflowDecisionView | null {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const decision = this.workflowDecisionByOccurrence(occurrenceId);
+      const eligible = decision?.sessionId === sessionId &&
+        (decision.status === "approved" ||
+          this.isRecoverableWorkflowDecisionActionRevocation(sessionId, occurrenceId));
+      if (!eligible || decision?.actionAdmission?.commandDigest !== commandDigest ||
+          !this.claimWorkflowDecisionActionReceipt(sessionId, receiptDigest, commandDigest, now)) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      const result = this.stmt(
+        `UPDATE workflow_decisions SET status='consumed', consumed_at=?
+         WHERE occurrence_id=? AND session_id=? AND status IN ('approved','revoked')
+           AND action_command_digest=?`,
+      ).run(now, occurrenceId, sessionId, commandDigest);
+      if (Number(result.changes) !== 1) {
+        this.db.exec("ROLLBACK");
+        return null;
+      }
+      this.db.exec("COMMIT");
+      return this.workflowDecisionByOccurrence(occurrenceId);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   /** Advance the absolute cost threshold by its original fixed allowance window. */
   rearmSessionCostBudget(id: string, observedCostUsd: number, now: number): number | null {
     const row = this.stmt(

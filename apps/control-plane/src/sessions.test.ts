@@ -3871,6 +3871,184 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     } finally { db.close(); }
   });
 
+  await t.test("an exactly armed enqueue survives a compatible lifecycle revocation through proof", async () => {
+    const { db, hub, svc, child, arm } = setup();
+    try {
+      const armed = await arm(1158);
+      (svc as any).revokeUnconsumedWorkflowDecisionsForSession(child.id, "session-restarted");
+      assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "revoked");
+      hub.requestHandler = (message) => ({
+        type: "workflow_action_reconciliation_result",
+        requestId: message.type === "reconcile_workflow_action" ? message.requestId : "wrong",
+        sessionId: child.id,
+        occurrenceId: armed.decision.occurrenceId,
+        accepted: true,
+        commandDigest: createHash("sha256").update(armed.command, "utf8").digest("hex"),
+        providerThreadId: "thread-1",
+        providerTurnId: "turn-1",
+        providerAdmissionItemId: "admission-after-restart",
+        providerItemId: "command-after-restart",
+        forgeHeadSha: armed.snapshot.headSha,
+      });
+
+      const result = await svc.reconcileWorkflowDecision(
+        child.id,
+        armed.decision.occurrenceId,
+        { resourceSnapshot: armed.snapshot },
+        () => true,
+      );
+      assert.ok(result.ok, result.error);
+      assert.equal(result.data?.status, "consumed");
+    } finally { db.close(); }
+  });
+
+  await t.test("the historical provider-ended legacy admission reconciles from exact proof", async () => {
+    const { db, hub, svc, child, arm } = setup();
+    try {
+      const armed = await arm(1146);
+      db.raw().prepare(
+        `UPDATE workflow_decisions SET action_armed_after_event_seq=NULL,
+         action_provider_turn_id=NULL, action_provider_thread_id=NULL,
+         action_runner_history_epoch=NULL WHERE occurrence_id=?`,
+      ).run(armed.decision.occurrenceId);
+      (svc as any).revokeUnconsumedWorkflowDecisionsForSession(child.id, "provider-session-ended");
+      hub.requestHandler = (message) => ({
+        type: "workflow_action_reconciliation_result",
+        requestId: message.type === "reconcile_workflow_action" ? message.requestId : "wrong",
+        sessionId: child.id,
+        occurrenceId: armed.decision.occurrenceId,
+        accepted: true,
+        commandDigest: createHash("sha256").update(armed.command, "utf8").digest("hex"),
+        providerThreadId: "thread-historical-179",
+        providerTurnId: "turn-historical-179",
+        providerAdmissionItemId: "admission-historical-179",
+        providerItemId: "command-historical-179",
+        forgeHeadSha: armed.snapshot.headSha,
+      });
+
+      const result = await svc.reconcileWorkflowDecision(
+        child.id,
+        armed.decision.occurrenceId,
+        { resourceSnapshot: armed.snapshot },
+        () => true,
+      );
+      assert.ok(result.ok, result.error);
+      assert.equal(result.data?.status, "consumed");
+    } finally { db.close(); }
+  });
+
+  await t.test("a lifecycle revoke racing the proof response is rechecked atomically", async () => {
+    const { db, hub, svc, child, arm } = setup();
+    try {
+      const armed = await arm(1168);
+      hub.requestHandler = (message) => {
+        (svc as any).revokeUnconsumedWorkflowDecisionsForSession(child.id, "session-restarted");
+        return {
+          type: "workflow_action_reconciliation_result",
+          requestId: message.type === "reconcile_workflow_action" ? message.requestId : "wrong",
+          sessionId: child.id,
+          occurrenceId: armed.decision.occurrenceId,
+          accepted: true,
+          commandDigest: createHash("sha256").update(armed.command, "utf8").digest("hex"),
+          providerThreadId: "thread-1",
+          providerTurnId: "turn-1",
+          providerAdmissionItemId: "admission-race",
+          providerItemId: "command-race",
+          forgeHeadSha: armed.snapshot.headSha,
+        };
+      };
+      const result = await svc.reconcileWorkflowDecision(
+        child.id,
+        armed.decision.occurrenceId,
+        { resourceSnapshot: armed.snapshot },
+        () => true,
+      );
+      assert.ok(result.ok, result.error);
+      assert.equal(result.data?.status, "consumed");
+      assert.equal(svc.governanceAudit(child.id).filter((entry) =>
+        entry.requestId === armed.decision.occurrenceId && entry.outcome === "consumed").length, 1);
+    } finally { db.close(); }
+  });
+
+  await t.test("policy and runner capability changes during proof fail closed", async () => {
+    for (const mismatch of ["policy", "capability"] as const) {
+      const { db, hub, svc, parent, child, arm } = setup();
+      try {
+        const armed = await arm(mismatch === "policy" ? 1169 : 1170);
+        hub.requestHandler = (message) => {
+          if (mismatch === "policy") {
+            assert.ok(svc.setParentControlPolicy(parent.id, {
+              implementation_question: "human",
+              pr_merge: "human",
+              merged_branch_deletion: "human",
+              follow_up_issue_publication: "human",
+              ui_evidence_approval: "human",
+            }, 1).ok);
+          } else {
+            db.registerRunner(runnerMeta(), Date.now(),
+              RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation - 1);
+          }
+          return {
+            type: "workflow_action_reconciliation_result",
+            requestId: message.type === "reconcile_workflow_action" ? message.requestId : "wrong",
+            sessionId: child.id,
+            occurrenceId: armed.decision.occurrenceId,
+            accepted: true,
+            commandDigest: createHash("sha256").update(armed.command, "utf8").digest("hex"),
+            providerThreadId: "thread-1",
+            providerTurnId: "turn-1",
+            providerAdmissionItemId: `admission-${mismatch}`,
+            providerItemId: `command-${mismatch}`,
+            forgeHeadSha: armed.snapshot.headSha,
+          };
+        };
+        const result = await svc.reconcileWorkflowDecision(
+          child.id,
+          armed.decision.occurrenceId,
+          { resourceSnapshot: armed.snapshot },
+          () => true,
+        );
+        assert.equal(result.status, 409);
+        assert.notEqual(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "consumed");
+      } finally { db.close(); }
+    }
+  });
+
+  await t.test("arbitrary, incomplete, and misordered revoked histories remain terminal", async () => {
+    for (const mismatch of ["actor", "missing-audit", "order"] as const) {
+      const { db, hub, svc, child, arm } = setup();
+      try {
+        const armed = await arm(1174 + ["actor", "missing-audit", "order"].indexOf(mismatch));
+        if (mismatch === "missing-audit") {
+          assert.ok(db.markWorkflowDecisionRevoked(armed.decision.occurrenceId, Date.now()));
+        } else {
+          (svc as any).revokeUnconsumedWorkflowDecisionsForSession(
+            child.id,
+            mismatch === "actor" ? "guardrail-stopped" : "session-restarted",
+          );
+          if (mismatch === "order") {
+            db.raw().prepare("UPDATE workflow_decisions SET action_armed_at=? WHERE occurrence_id=?")
+              .run(Date.now() + 60_000, armed.decision.occurrenceId);
+          }
+        }
+        let proofRequested = false;
+        hub.requestHandler = () => {
+          proofRequested = true;
+          throw new Error("invalid revoked history must not reach the runner");
+        };
+        const result = await svc.reconcileWorkflowDecision(
+          child.id,
+          armed.decision.occurrenceId,
+          { resourceSnapshot: armed.snapshot },
+          () => true,
+        );
+        assert.equal(result.status, 409);
+        assert.equal(proofRequested, false);
+        assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "revoked");
+      } finally { db.close(); }
+    }
+  });
+
   await t.test("failed or mixed-version reconciliation retains the approved occurrence", async () => {
     for (const mismatch of ["proof", "protocol"] as const) {
       const { db, hub, svc, child, arm } = setup();

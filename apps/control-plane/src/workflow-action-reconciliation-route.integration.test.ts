@@ -241,6 +241,54 @@ function seed(database: string): string {
       commandDigest: digest({ kind: "pr_merge_enqueue", command }),
       armedAt: now + 5,
     }));
+    const workflowDecision = {
+      occurrenceId: OCCURRENCE_ID,
+      parentSessionId: PARENT_SESSION_ID,
+      childSessionId: CHILD_SESSION_ID,
+      category: "pr_merge" as const,
+      policyRevision: 1,
+      resourceDigest: digest(SNAPSHOT),
+    };
+    const auditScope = {
+      sessionId: CHILD_SESSION_ID,
+      runnerId: RUNNER_ID,
+      workspaceId: WORKSPACE_ID,
+      agentId: "codex-agent",
+    };
+    db.appendGovernanceAudit({
+      requestId: OCCURRENCE_ID,
+      approvalKind: "workflow_decision",
+      stage: "request",
+      outcome: "pending",
+      actor: { kind: "agent", id: CHILD_SESSION_ID },
+      scope: auditScope,
+      contentDigest: digest(SNAPSHOT),
+      workflowDecision,
+      timestamp: now + 3,
+    });
+    db.appendGovernanceAudit({
+      requestId: OCCURRENCE_ID,
+      approvalKind: "workflow_decision",
+      stage: "resolution",
+      outcome: "allowed",
+      actor: { kind: "agent", id: PARENT_SESSION_ID },
+      scope: auditScope,
+      contentDigest: digest(SNAPSHOT),
+      workflowDecision,
+      timestamp: now + 4,
+    });
+    assert.ok(db.markWorkflowDecisionRevoked(OCCURRENCE_ID, now + 6));
+    db.appendGovernanceAudit({
+      requestId: OCCURRENCE_ID,
+      approvalKind: "workflow_decision",
+      stage: "resolution",
+      outcome: "revoked",
+      actor: { kind: "system", id: "provider-session-ended" },
+      scope: auditScope,
+      contentDigest: digest(SNAPSHOT),
+      workflowDecision,
+      timestamp: now + 6,
+    });
     assert.equal(db.setAgentControlCredential(CHILD_SESSION_ID, RUNNER_ID, hashToken(AGENT_TOKEN), now + 6), true);
     return command;
   } finally {
@@ -271,7 +319,7 @@ function sessionSnapshot(id: string, agentId: string, driver: "claude-code" | "c
   };
 }
 
-test("the real runner socket delivers a workflow action reconciliation receipt", { timeout: 30_000 }, async (t) => {
+test("the real runner socket reconciles a persisted lifecycle-revoked workflow action", { timeout: 30_000 }, async (t) => {
   const temp = mkdtempSync(join(tmpdir(), "wollipog-workflow-action-reconciliation-"));
   const database = join(temp, "control-plane.db");
   const port = await reservePort();

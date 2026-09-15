@@ -5984,7 +5984,8 @@ export class SessionsService {
   ): Promise<ServiceResult<WorkflowDecisionView>> {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== sessionId) return fail("workflow decision not found", 404);
-    if (decision.status !== "approved") {
+    if (decision.status !== "approved" &&
+        !this.db.isRecoverableWorkflowDecisionActionRevocation(sessionId, occurrenceId)) {
       return fail(`workflow decision cannot be reconciled from ${decision.status} state`, 409);
     }
     const normalized = normalizeWorkflowDecisionSnapshot(request?.resourceSnapshot);
@@ -6056,6 +6057,24 @@ export class SessionsService {
         ? proof.error
         : "runner could not prove the exact command and forge result", 409);
     }
+    const currentChild = this.db.getSession(sessionId);
+    const currentParent = this.db.getSession(decision.controllingSessionId);
+    const currentPolicy = currentParent?.parentControlPolicy;
+    if (!currentChild || !currentParent || isTerminal(currentChild.status) || isTerminal(currentParent.status) ||
+        !canAccess(currentChild.id) || !canAccess(currentParent.id) ||
+        !this.db.isSessionDescendant(currentParent.id, currentChild.id) || !currentPolicy ||
+        currentPolicy.revision !== decision.policyRevision ||
+        this.effectiveWorkflowDecisionAuthority(currentParent, currentPolicy, "pr_merge") !== decision.authority) {
+      return fail("workflow decision authority or ancestry changed during reconciliation", 409);
+    }
+    for (const owner of [currentChild, currentParent]) {
+      const unsupported = this.capabilityFailure(
+        owner.runnerId,
+        "workflowDecisionActionReconciliation",
+        "Workflow decision action reconciliation",
+      );
+      if (unsupported) return fail(unsupported.error!, unsupported.status);
+    }
     const receiptDigest = auditDigest({
       transport: "codex-app-server",
       threadId: proof.providerThreadId,
@@ -6063,7 +6082,7 @@ export class SessionsService {
       itemId: proof.providerItemId,
     })!;
     const now = Date.now();
-    const consumed = this.db.consumeWorkflowDecisionActionWithReceipt(
+    const consumed = this.db.consumeReconciledWorkflowDecisionActionWithReceipt(
       sessionId,
       occurrenceId,
       admission.commandDigest,
