@@ -44,6 +44,7 @@ function makeHarness(options = {}) {
   const fakeBin = join(root, "fake-bin");
   const binary = join(root, "runner.bin");
   const manifest = join(root, "SHA256SUMS");
+  const releaseJson = join(root, "release.json");
   const ghLog = join(root, "gh.log");
   const bytes = Buffer.from("verified runner bytes\n");
   mkdirSync(fakeBin, { recursive: true });
@@ -65,9 +66,7 @@ while [ "$#" -gt 0 ]; do
 done
 if [ "\${TEST_PRIVATE:-0}" = 1 ] && echo "$url" | grep -q '/releases/latest$'; then exit 22; fi
 if echo "$url" | grep -q '/releases/latest$'; then
-  manifest_asset=
-  [ "\${TEST_MANIFEST:-1}" = 0 ] || manifest_asset=$(printf ',{"name":"SHA256SUMS","digest":"sha256:${manifestDigest}","browser_download_url":"https://download.test/%s/SHA256SUMS"}' "$TEST_RELEASE_TAG")
-  printf '{"tag_name":"%s","assets":[{"name":"%s","digest":"sha256:%s","browser_download_url":"https://download.test/%s/%s"}%s]}' "$TEST_RELEASE_TAG" "$TEST_ASSET" "$TEST_DIGEST" "$TEST_RELEASE_TAG" "$TEST_ASSET" "$manifest_asset"
+  cat "$TEST_RELEASE_JSON"
 elif echo "$url" | grep -q '/SHA256SUMS$'; then
   cp "$TEST_MANIFEST_FILE" "$out"
 else
@@ -99,13 +98,36 @@ fi
 `);
 
   const run = ({ home: runHome = home, releaseTag: runReleaseTag = options.releaseTag ?? releaseTag } = {}) => {
+    const assets = [{
+      name: asset,
+      digest: `sha256:${digest}`,
+      browser_download_url: `https://download.test/${runReleaseTag}/${asset}`,
+    }];
+    if (options.includeManifest !== false) {
+      assets.push({
+        name: "SHA256SUMS",
+        digest: `sha256:${manifestDigest}`,
+        browser_download_url: `https://download.test/${runReleaseTag}/SHA256SUMS`,
+      });
+    }
+    const beforeColon = options.assetsWhitespace?.beforeColon ?? "";
+    const afterColon = options.assetsWhitespace?.afterColon ?? "";
+    const metadata = JSON.stringify(
+      { tag_name: runReleaseTag, assets },
+      null,
+      options.prettyMetadata === true ? 2 : 0,
+    ).replace(
+      '"assets":',
+      `"assets"${beforeColon}:${afterColon}`,
+    );
+    writeFileSync(releaseJson, metadata);
     const shellArgs = [
       "-c",
       'PATH="$1:$PATH"; HOME="$2"; TEST_ASSET="$3"; TEST_MANIFEST="$4"; TEST_PRIVATE="$5"; ' +
         'TEST_BINARY_FILE="$6"; TEST_MANIFEST_FILE="$7"; TEST_GH_LOG="$8"; TEST_DIGEST="$9"; ' +
-        'TEST_RELEASE_TAG="${10}"; ' +
-        'export PATH HOME TEST_ASSET TEST_MANIFEST TEST_PRIVATE TEST_BINARY_FILE TEST_MANIFEST_FILE TEST_GH_LOG TEST_DIGEST TEST_RELEASE_TAG; ' +
-        'exec sh "${11}"',
+        'TEST_RELEASE_TAG="${10}"; TEST_RELEASE_JSON="${11}"; ' +
+        'export PATH HOME TEST_ASSET TEST_MANIFEST TEST_PRIVATE TEST_BINARY_FILE TEST_MANIFEST_FILE TEST_GH_LOG TEST_DIGEST TEST_RELEASE_TAG TEST_RELEASE_JSON; ' +
+        'exec sh "${12}"',
       "installer-test",
       shellPath(fakeBin),
       shellPath(runHome),
@@ -117,6 +139,7 @@ fi
       shellPath(ghLog),
       digest,
       runReleaseTag,
+      shellPath(releaseJson),
       installer,
     ];
     return spawnSync(
@@ -149,6 +172,36 @@ function assertNoStagingFiles(harness) {
   assert.deepEqual(readdirSync(dir).filter((name) =>
     name.includes(".download.") || name.includes(".alias.") || name.includes(".SHA256SUMS.")), []);
 }
+
+posixTest("public release asset discovery is invariant to JSON whitespace around the assets delimiter", () => {
+  const whitespace = ["", " ", "\t", "\r", "\n"];
+  for (const beforeColon of whitespace) {
+    for (const afterColon of whitespace) {
+      const harness = makeHarness({ assetsWhitespace: { beforeColon, afterColon } });
+      try {
+        const result = harness.run();
+        const label = JSON.stringify({ beforeColon, afterColon });
+        assert.equal(result.status, 0, `${label}: ${result.stderr}`);
+        assert.deepEqual(readFileSync(harness.live), harness.bytes, label);
+        assertNoStagingFiles(harness);
+      } finally {
+        rmSync(harness.root, { recursive: true, force: true });
+      }
+    }
+  }
+});
+
+posixTest("public release asset discovery accepts representative pretty-formatted GitHub metadata", () => {
+  const harness = makeHarness({ prettyMetadata: true, assetsWhitespace: { beforeColon: "", afterColon: " " } });
+  try {
+    const result = harness.run();
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(readFileSync(harness.live), harness.bytes);
+    assertNoStagingFiles(harness);
+  } finally {
+    rmSync(harness.root, { recursive: true, force: true });
+  }
+});
 
 posixTest("POSIX runner installer verifies the exact canonical checksum before atomic promotion", () => {
   const harness = makeHarness();

@@ -78,10 +78,9 @@ release_asset_record() {
     }
     { json = json $0 }
     END {
-      marker = "\"assets\":["
-      start = index(json, marker)
+      start = match(json, /"assets"[[:space:]]*:[[:space:]]*\[/)
       if (start == 0) exit
-      json = substr(json, start + length(marker))
+      json = substr(json, start + RLENGTH)
       depth = 0; quoted = 0; escaped = 0; object_start = 0
       for (i = 1; i <= length(json); i++) {
         ch = substr(json, i, 1)
