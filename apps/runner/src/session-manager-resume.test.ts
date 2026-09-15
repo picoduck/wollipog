@@ -1387,6 +1387,13 @@ test("approved durable authentication recovery waits for command redelivery afte
       "a sibling recovery must preserve the approved retained-message projection");
     assert.equal(recoveryRequestCount(), 1,
       "a sibling recovery must not emit the approved session's request a second time");
+    assert.equal(replacement.prompt(
+      "resume-session", "retained while recovery is visible", [], undefined, undefined,
+      recovered("durable-restart-4"),
+    ), true);
+    assert.match(h.store.readMeta("resume-session")?.pendingApproval?.context?.input ?? "", /4 retained messages/iu,
+      "the stable request projection refreshes its count without another transcript event");
+    assert.equal(recoveryRequestCount(), 1);
 
     assert.equal(replacement.prompt(
       "resume-session",
@@ -1414,13 +1421,15 @@ test("approved durable authentication recovery waits for command redelivery afte
       undefined,
       recovered("durable-restart-3"),
     ), true);
-    for (let index = 0; index < 60 && transitions.filter(([, state]) => state === "completed").length < 3; index += 1) {
+    for (let index = 0; index < 60 && transitions.filter(([, state]) => state === "completed").length < 4; index += 1) {
       await shortDelay();
     }
-    assert.deepEqual(h.prompts, ["retained first", "retained second", "submitted after restart"]);
+    assert.deepEqual(h.prompts, [
+      "retained first", "retained second", "submitted after restart", "retained while recovery is visible",
+    ]);
     assert.deepEqual(
       transitions.filter(([, state]) => state === "started").map(([id]) => id),
-      ["durable-restart-1", "durable-restart-2", "durable-restart-3"],
+      ["durable-restart-1", "durable-restart-2", "durable-restart-3", "durable-restart-4"],
     );
     assert.equal(transitions.some(([, state]) => state.startsWith("failed:") || state.startsWith("uncertain:")), false);
     assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
@@ -1430,6 +1439,49 @@ test("approved durable authentication recovery waits for command redelivery afte
       event.payload.kind === "permission_resolved" && event.payload.requestId === recoveryRequestId).length, 1);
   } finally {
     replacement?.shutdownAll();
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("startup publishes one retained-message request for a pre-projection approved block", () => {
+  const h = harness({
+    driver: "claude-code",
+    command: "claude",
+    agentId: "claude-native",
+    status: "idle",
+    providerCredentialScopeId: "scope-a",
+    providerCredentialIdentityId: "account-a",
+    providerAuthBlock: {
+      version: 1,
+      recoveryId: "legacy-approved",
+      credentialScopeId: "scope-a",
+      detectedAt: 1,
+      phase: "turn",
+      delivery: "not_delivered",
+      canStartLogin: false,
+      configuredCredential: false,
+      expectedIdentityId: "account-a",
+      durableRetries: [{
+        commandId: "legacy-retained-command",
+        ordinal: 1,
+        text: "retained before the projection existed",
+        images: [],
+      }],
+      resolution: "approved",
+    },
+    pendingApproval: null,
+  });
+  try {
+    const requestId = "provider-auth:legacy-approved:retained-messages";
+    const requestCount = () => h.store.readEvents("resume-session").filter((event) =>
+      event.payload.kind === "permission_request" && event.payload.requestId === requestId).length;
+    h.manager.reconcileStore();
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval?.requestId, requestId);
+    assert.equal(requestCount(), 1);
+    h.manager.reconcileStore();
+    assert.equal(requestCount(), 1, "subsequent restarts must not duplicate the upgrade request");
+  } finally {
     h.manager.shutdownAll();
     h.cleanup();
   }

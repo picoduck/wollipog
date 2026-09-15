@@ -3664,11 +3664,29 @@ export class SessionManager {
           : this.providerAuthenticationOwner(block.credentialScopeId)?.sessionId === m.sessionId
             ? this.providerAuthenticationProjection(reconciled, block)
             : null;
-        this.store.patchMeta(m.sessionId, {
-          providerAuthBlock: block,
-          status: projection ? "input_required" : "idle",
-          pendingApproval: projection,
-        });
+        const missingRecoveryRequest = !!block.resolution && !!projection &&
+          !this.store.readEvents(m.sessionId).some((event) =>
+            event.payload.kind === "permission_request" && event.payload.requestId === projection.requestId);
+        if (missingRecoveryRequest) {
+          // Older runners could persist an approved block while durable handles were still absent,
+          // before the retained-message request existed. Publish that request exactly once on
+          // upgrade so its later resolution never appears orphaned in the transcript.
+          this.store.patchMeta(m.sessionId, { providerAuthBlock: block });
+          this.emitEvent(m.sessionId, {
+            kind: "permission_request",
+            requestId: projection.requestId,
+            title: projection.title,
+            options: projection.options,
+            purpose: "authentication",
+            context: projection.context,
+          });
+        } else {
+          this.store.patchMeta(m.sessionId, {
+            providerAuthBlock: block,
+            status: projection ? "input_required" : "idle",
+            pendingApproval: projection,
+          });
+        }
       } else if (terminal) {
         if (reconciled.pendingApproval) this.store.patchMeta(m.sessionId, { pendingApproval: null });
       } else if (pendingRequests(reconciled.pendingApproval).some((request) => request.ownerToolUseId)) {
@@ -13389,6 +13407,10 @@ export class SessionManager {
           purpose: "authentication",
           context: projection.context,
         });
+      } else {
+        // The request identity is stable across the wait, but newly retained durable work changes
+        // its count. Refresh the live projection without appending a duplicate transcript event.
+        this.store.patchMeta(meta.sessionId, { pendingApproval: projection });
       }
       this.emitStatus(
         sessionId,
