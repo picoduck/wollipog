@@ -314,6 +314,61 @@ function agent(overrides: Partial<AgentDefinition> = {}): AgentDefinition {
   };
 }
 
+test("Codex sparse events and refreshes retain normalized presentation order", async () => {
+  let now = 1_760_000_000_000;
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent()],
+    resolveEnv: () => ({}),
+    authorizeProbe: () => ({ cwd: "/safe/subscription-probe" }),
+    publish: () => {},
+    now: () => now,
+    probeCodex: async () => ({
+      state: "available",
+      rateLimits: {
+        rateLimits: {
+          limitId: "codex",
+          limitName: "Codex",
+          primary: { usedPercent: 42, windowDurationMins: 10_080, resetsAt: 1_760_300_000 },
+        },
+      },
+    }),
+  });
+  const observe = (rateLimits: Record<string, unknown>) => manager.observe(
+    "codex",
+    "codex-app-server",
+    { kind: "native" },
+    { provider: "codex", payload: { rateLimits } },
+  );
+
+  observe({
+    limitId: "codex_spark",
+    limitName: "GPT-5.3-Codex-Spark",
+    primary: { usedPercent: 10, windowDurationMins: 10_080, resetsAt: 1_760_200_000 },
+  });
+  now += 2_000;
+  observe({
+    limitId: "codex_spark",
+    limitName: "GPT-5.3-Codex-Spark",
+    secondary: { usedPercent: 85, windowDurationMins: 300, resetsAt: 1_760_100_000 },
+  });
+  assert.deepEqual(manager.inventory()[0]?.buckets.map((bucket) => bucket.id), [
+    "codex_spark:secondary", "codex_spark:primary",
+  ], "a shorter window reported later moves ahead of the stored weekly window");
+
+  now += 1_000;
+  await manager.refreshAll();
+  const buckets = manager.inventory()[0]?.buckets ?? [];
+  assert.deepEqual(buckets.map((bucket) => bucket.id), [
+    "codex:primary", "codex_spark:secondary", "codex_spark:primary",
+  ], "an account-wide refresh moves ahead of model windows observed first");
+  assert.deepEqual(buckets.map((bucket) => [bucket.usedPercent, bucket.resetsAt, bucket.status]), [
+    [42, 1_760_300_000_000, "available"],
+    [85, 1_760_100_000_000, "warning"],
+    [10, 1_760_200_000_000, "available"],
+  ], "sorting preserves each bucket's utilization, reset, and status");
+});
+
 test("event updates merge sparse buckets and concurrent manual refreshes share one no-turn probe", async () => {
   let now = 1_000;
   let probes = 0;
@@ -1097,7 +1152,7 @@ test("a limiting window id past the control-plane bound still receives its statu
   );
 });
 
-test("a Codex source keeps the plain bucket truncation it had before Claude gained windows", () => {
+test("Codex merges sort before truncation so account-wide and stable future groups stay visible", () => {
   let now = OBSERVED_AT;
   const manager = new SubscriptionUsageManager({
     runnerId: "runner-1",
@@ -1114,11 +1169,13 @@ test("a Codex source keeps the plain bucket truncation it had before Claude gain
     Array.from({ length: 32 }, (_, index) => [`old${index}`, 10] as [string, number])) });
   assert.equal(manager.inventory()[0]?.buckets.length, 64);
   now = OBSERVED_AT + 60_000;
-  observe({ rateLimitsByLimitId: limits([["new", 50]]) });
+  observe({ rateLimitsByLimitId: limits([["new", 50], ["codex", 60]]) });
   const ids = manager.inventory()[0]?.buckets.map((bucket) => bucket.id) ?? [];
   assert.equal(ids.length, 64);
-  assert.ok(ids.includes("old31:primary"), "reported-priority eviction is a Claude rule, not a Codex one");
-  assert.ok(!ids.includes("new:primary"));
+  assert.deepEqual(ids.slice(0, 4), [
+    "codex:primary", "codex:secondary", "new:primary", "new:secondary",
+  ]);
+  assert.ok(!ids.includes("old9:primary"), "the deterministic tail is truncated after sorting");
 });
 
 test("Claude window ids that collide once bounded do not fuse into a hybrid window", () => {

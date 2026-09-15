@@ -187,10 +187,19 @@ function compareCodexLimitEntries(
   return priority || compareStableText(leftId, rightId) || compareStableText(leftFallbackId, rightFallbackId);
 }
 
-function compareCodexWindows(left: SubscriptionUsageBucket, right: SubscriptionUsageBucket): number {
+function codexBucketLimitId(id: string): string {
+  const laneSeparator = id.lastIndexOf(":");
+  return laneSeparator < 0 ? id : id.slice(0, laneSeparator);
+}
+
+function compareCodexBuckets(left: SubscriptionUsageBucket, right: SubscriptionUsageBucket): number {
+  const leftLimitId = codexBucketLimitId(left.id);
+  const rightLimitId = codexBucketLimitId(right.id);
+  const priority = Number(rightLimitId === "codex") - Number(leftLimitId === "codex");
   const leftDuration = left.windowDurationMinutes ?? Number.POSITIVE_INFINITY;
   const rightDuration = right.windowDurationMinutes ?? Number.POSITIVE_INFINITY;
-  return leftDuration - rightDuration || compareStableText(left.id, right.id);
+  return priority || compareStableText(leftLimitId, rightLimitId) ||
+    leftDuration - rightDuration || compareStableText(left.id, right.id);
 }
 
 function normalizeCodexSnapshot(
@@ -214,7 +223,7 @@ function normalizeCodexSnapshot(
     codexWindow(limitId, limitLabel, "primary", snapshot.primary, observedAt),
     codexWindow(limitId, limitLabel, "secondary", snapshot.secondary, observedAt),
   ].filter((bucket): bucket is SubscriptionUsageBucket => bucket !== null)
-    .sort(compareCodexWindows);
+    .sort(compareCodexBuckets);
   const creditsRecord = record(snapshot.credits);
   const balance = creditsRecord ? stringValue(creditsRecord.balance, 80) : undefined;
   const credits = creditsRecord ? {
@@ -442,6 +451,8 @@ function mergeSnapshot(
   const merge = mergeMode === "claude-notification" ? mergeObservedBucket : mergeBucket;
   const buckets = new Map(prior.buckets.map((bucket) => [bucket.id, bucket]));
   for (const bucket of update.buckets) buckets.set(bucket.id, merge(buckets.get(bucket.id), bucket));
+  const orderedBuckets = [...buckets.values()];
+  if (update.provider === "codex") orderedBuckets.sort(compareCodexBuckets);
   const spendControls = new Map((prior.spendControls ?? []).map((item) => [item.id, item]));
   for (const item of update.spendControls ?? []) {
     spendControls.set(item.id, { ...spendControls.get(item.id), ...item });
@@ -451,8 +462,8 @@ function mergeSnapshot(
     ...priorWithoutDetail,
     ...update,
     buckets: mergeMode === "claude-notification"
-      ? boundBuckets([...buckets.values()], new Set(update.buckets.map((bucket) => bucket.id)))
-      : [...buckets.values()].slice(0, MAX_PROVIDER_BUCKETS),
+      ? boundBuckets(orderedBuckets, new Set(update.buckets.map((bucket) => bucket.id)))
+      : orderedBuckets.slice(0, MAX_PROVIDER_BUCKETS),
     ...(update.credits || prior.credits ? { credits: { ...prior.credits, ...update.credits } } : {}),
     ...(spendControls.size > 0 ? { spendControls: [...spendControls.values()] } : {}),
   };
