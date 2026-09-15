@@ -31,6 +31,7 @@ import {
   type AgentProcess,
 } from "../spawn.js";
 import type {
+  CompletedCommandReconciliationFence,
   CompletedCommandReconciliationProof,
   Driver,
   DriverCallbacks,
@@ -415,6 +416,7 @@ export class CodexAppServerDriver implements Driver {
   async reconcileCompletedCommand(
     occurrenceId: string,
     command: string,
+    fence?: CompletedCommandReconciliationFence,
   ): Promise<CompletedCommandReconciliationProof | null> {
     if (!this.peer || !boundedProviderCorrelationId(occurrenceId) ||
         typeof command !== "string" || !command || command.length > 2000 ||
@@ -425,6 +427,7 @@ export class CodexAppServerDriver implements Driver {
     });
     if (read?.thread?.id !== this.threadId || !Array.isArray(read?.thread?.turns)) return null;
     const matches: CompletedCommandReconciliationProof[] = [];
+    const successfulExactCommands: { turnId: string; itemId: string }[] = [];
     for (const turn of read.thread.turns as Json[]) {
       if (!boundedProviderCorrelationId(turn?.id) || turn?.status !== "completed" ||
           (turn?.itemsView != null && turn.itemsView !== "full") || !Array.isArray(turn?.items)) continue;
@@ -434,6 +437,7 @@ export class CodexAppServerDriver implements Driver {
             !boundedProviderCorrelationId(item?.id) || typeof item?.command !== "string") continue;
         const logicalCommand = codexProviderShellScript(item.command) ?? item.command;
         if (logicalCommand !== command) continue;
+        successfulExactCommands.push({ turnId: turn.id, itemId: item.id });
         const admissions = items.slice(0, index).filter((candidate) =>
           completedWorkflowActionAdmission(candidate, occurrenceId, command));
         if (admissions.length !== 1 || !boundedProviderCorrelationId(admissions[0]?.id)) continue;
@@ -446,7 +450,18 @@ export class CodexAppServerDriver implements Driver {
         });
       }
     }
-    return matches.length === 1 ? matches[0]! : null;
+    if (matches.length !== 0) return matches.length === 1 ? matches[0]! : null;
+    if (!fence || fence.providerThreadId !== this.threadId ||
+        !boundedProviderCorrelationId(fence.providerTurnId) ||
+        !boundedProviderCorrelationId(fence.providerItemId) || successfulExactCommands.length !== 1) return null;
+    const [completed] = successfulExactCommands;
+    if (completed?.turnId !== fence.providerTurnId || completed.itemId !== fence.providerItemId) return null;
+    return {
+      commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
+      providerThreadId: this.threadId,
+      providerTurnId: completed.turnId,
+      providerItemId: completed.itemId,
+    };
   }
 
   agentTurnId(): string | null {

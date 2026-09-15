@@ -12062,6 +12062,7 @@ export class SessionManager {
   ): {
     accepted: boolean;
     occurrenceId: string;
+    sessionTurnId?: string;
     providerTurnId?: string;
     providerThreadId?: string;
     historyEpoch?: number;
@@ -12074,8 +12075,8 @@ export class SessionManager {
     const occurrenceId = typeof raw.occurrenceId === "string" ? raw.occurrenceId : "";
     const bounded = (field: unknown, max: number) => typeof field === "string" &&
       field.length > 0 && field.length <= max && !/[\x00-\x1f\x7f]/u.test(field);
-    if (Object.keys(raw).some((key) => !["occurrenceId", "commandDigest", "providerTurnId"].includes(key)) ||
-        !bounded(raw.occurrenceId, 256) || !bounded(raw.providerTurnId, 512) ||
+    if (Object.keys(raw).some((key) => !["occurrenceId", "commandDigest", "sessionTurnId"].includes(key)) ||
+        !bounded(raw.occurrenceId, 256) || !bounded(raw.sessionTurnId, 512) ||
         typeof raw.commandDigest !== "string" || !/^[0-9a-f]{64}$/u.test(raw.commandDigest)) {
       return fail(occurrenceId, "admission identity is invalid");
     }
@@ -12084,11 +12085,13 @@ export class SessionManager {
     if (!meta || meta.driver !== "codex-app-server" || !active) {
       return fail(occurrenceId, "App Server session is not active");
     }
-    const providerTurnId = active.providerInitiatedTurnActive
+    const sessionTurnId = active.providerInitiatedTurnActive
       ? active.providerInitiatedTurnId
       : active.running ? active.activeTurnId : undefined;
+    const providerTurnId = active.client.agentTurnId?.();
     const providerThreadId = active.client.agentSessionId();
-    if (!providerTurnId || providerTurnId !== raw.providerTurnId ||
+    if (!sessionTurnId || sessionTurnId !== raw.sessionTurnId ||
+        typeof providerTurnId !== "string" || !bounded(providerTurnId, 512) ||
         typeof providerThreadId !== "string" || !bounded(providerThreadId, 512)) {
       return fail(occurrenceId, "App Server provider coordinates changed before action arming");
     }
@@ -12096,6 +12099,7 @@ export class SessionManager {
       kind: "workflow_action_admission_armed",
       occurrenceId,
       commandDigest: raw.commandDigest,
+      sessionTurnId,
       providerTurnId,
     };
     const stored = this.emitEvent(sessionId, payload);
@@ -12106,6 +12110,7 @@ export class SessionManager {
     return {
       accepted: true,
       occurrenceId,
+      sessionTurnId,
       providerTurnId,
       providerThreadId,
       historyEpoch,
@@ -12127,6 +12132,9 @@ export class SessionManager {
     providerTurnId?: string;
     providerAdmissionItemId?: string;
     providerItemId?: string;
+    runnerHistoryEpoch?: number;
+    armedAfterEventSeq?: number;
+    providerReviewEventSeq?: number;
     forgeHeadSha?: string;
     error?: string;
   }> {
@@ -12138,11 +12146,20 @@ export class SessionManager {
       field.length > 0 && field.length <= max && !/[\x00-\x1f\x7f]/u.test(field);
     if (Object.keys(raw).some((key) => ![
       "occurrenceId", "command", "commandDigest", "pullRequestUrl", "expectedHeadSha",
+      "armedAfterEventSeq", "runnerHistoryEpoch", "actionProviderThreadId", "actionProviderTurnId",
     ].includes(key)) || !bounded(raw.occurrenceId, 256) || !bounded(raw.command, 2000) ||
         typeof raw.commandDigest !== "string" || !/^[0-9a-f]{64}$/u.test(raw.commandDigest) ||
         !bounded(raw.pullRequestUrl, 1000) || typeof raw.expectedHeadSha !== "string" ||
         !/^[0-9a-f]{40}$/u.test(raw.expectedHeadSha)) {
       return fail(occurrenceId, "reconciliation identity is invalid");
+    }
+    const hasRunnerFence = raw.armedAfterEventSeq !== undefined || raw.runnerHistoryEpoch !== undefined ||
+      raw.actionProviderThreadId !== undefined || raw.actionProviderTurnId !== undefined;
+    if (hasRunnerFence && (!Number.isSafeInteger(raw.armedAfterEventSeq) ||
+        (raw.armedAfterEventSeq as number) < 1 || !Number.isSafeInteger(raw.runnerHistoryEpoch) ||
+        (raw.runnerHistoryEpoch as number) < 0 || !bounded(raw.actionProviderThreadId, 512) ||
+        !bounded(raw.actionProviderTurnId, 512))) {
+      return fail(occurrenceId, "reconciliation runner fence is invalid");
     }
     const meta = this.store.readMeta(sessionId);
     const active = this.active.get(sessionId);
@@ -12153,15 +12170,70 @@ export class SessionManager {
     if (active.client.agentSessionId() !== meta.agentSessionId) {
       return fail(occurrenceId, "active provider thread does not match durable session identity");
     }
+    let durableReceipt: {
+      providerThreadId: string;
+      providerTurnId: string;
+      providerItemId: string;
+      reviewEventSeq: number;
+    } | undefined;
+    if (hasRunnerFence && (meta.logEpoch ?? 0) === raw.runnerHistoryEpoch) {
+      const events = this.store.readEvents(sessionId);
+      const arm = events.find((event) => event.seq === raw.armedAfterEventSeq);
+      if (arm?.payload.kind === "workflow_action_admission_armed" &&
+          arm.payload.occurrenceId === occurrenceId && arm.payload.commandDigest === raw.commandDigest &&
+          arm.payload.providerTurnId === raw.actionProviderTurnId) {
+        const commandSha256 = createHash("sha256").update(raw.command as string, "utf8").digest("hex");
+        const receipts = events.filter((event) => {
+          const payload = event.payload;
+          const receipt = payload.kind === "review_decision" ? payload.approvalReviewReceipt : undefined;
+          return event.seq > (raw.armedAfterEventSeq as number) && payload.kind === "review_decision" &&
+            payload.outcome === "allowed" && payload.reviewer?.kind === "agent" &&
+            payload.reviewer.id === "codex-guardian" && receipt?.transport === "codex-app-server" &&
+            receipt.threadId === raw.actionProviderThreadId && receipt.toolName === "commandExecution" &&
+            receipt.input === raw.command && receipt.inputSha256 === commandSha256 &&
+            bounded(receipt.turnId, 512) && bounded(receipt.itemId, 512);
+        });
+        if (receipts.length === 1) {
+          const interveningArm = events.some((event) => event.seq > (raw.armedAfterEventSeq as number) &&
+            event.seq < receipts[0]!.seq && event.payload.kind === "workflow_action_admission_armed" &&
+            event.payload.commandDigest === raw.commandDigest);
+          const receipt = receipts[0]!.payload.kind === "review_decision"
+            ? receipts[0]!.payload.approvalReviewReceipt : undefined;
+          if (receipt && !interveningArm) {
+            durableReceipt = {
+              providerThreadId: receipt.threadId,
+              providerTurnId: receipt.turnId,
+              providerItemId: receipt.itemId,
+              reviewEventSeq: receipts[0]!.seq,
+            };
+          }
+        }
+      }
+    }
     let proof;
     try {
-      proof = await active.client.reconcileCompletedCommand(occurrenceId, raw.command as string);
+      proof = await active.client.reconcileCompletedCommand(
+        occurrenceId,
+        raw.command as string,
+        durableReceipt && {
+          providerThreadId: durableReceipt.providerThreadId,
+          providerTurnId: durableReceipt.providerTurnId,
+          providerItemId: durableReceipt.providerItemId,
+        },
+      );
     } catch {
       return fail(occurrenceId, "provider history could not prove the completed command");
     }
     if (!proof || proof.providerThreadId !== meta.agentSessionId ||
         proof.commandDigest !== createHash("sha256").update(raw.command as string, "utf8").digest("hex")) {
       return fail(occurrenceId, "provider history did not contain one exact successful command");
+    }
+    const nativeAdmission = bounded(proof.providerAdmissionItemId, 512);
+    const durableAdmission = durableReceipt && !proof.providerAdmissionItemId &&
+      proof.providerThreadId === durableReceipt.providerThreadId &&
+      proof.providerTurnId === durableReceipt.providerTurnId && proof.providerItemId === durableReceipt.providerItemId;
+    if (!nativeAdmission && !durableAdmission) {
+      return fail(occurrenceId, "provider history did not contain the exact action admission");
     }
     const forge = await this.resolveWorktreePullRequestState(
       meta.worktreePath ?? meta.repoPath,
@@ -12177,8 +12249,13 @@ export class SessionManager {
       commandDigest: proof.commandDigest,
       providerThreadId: proof.providerThreadId,
       providerTurnId: proof.providerTurnId,
-      providerAdmissionItemId: proof.providerAdmissionItemId,
+      ...(proof.providerAdmissionItemId ? { providerAdmissionItemId: proof.providerAdmissionItemId } : {}),
       providerItemId: proof.providerItemId,
+      ...(durableAdmission && durableReceipt ? {
+        runnerHistoryEpoch: raw.runnerHistoryEpoch as number,
+        armedAfterEventSeq: raw.armedAfterEventSeq as number,
+        providerReviewEventSeq: durableReceipt.reviewEventSeq,
+      } : {}),
       forgeHeadSha: forge.headOid.toLowerCase(),
     };
   }

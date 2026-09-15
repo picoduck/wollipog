@@ -2487,6 +2487,80 @@ test("historical reconciliation proves one exact completed root command without 
   });
 });
 
+test("historical reconciliation accepts one exact completed command from a durable runner receipt fence", async () => {
+  const h = makeHarness({ resumeId: "thread-cli" });
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1162 --squash --match-head-commit ${"b".repeat(40)}`;
+  (h.driver as any).threadId = "thread-cli";
+  (h.driver as any).peer = {
+    request: async () => ({
+      thread: {
+        id: "thread-cli",
+        status: { type: "idle" },
+        turns: [{
+          id: "provider-turn-cli",
+          status: "completed",
+          itemsView: "full",
+          items: [{
+            id: "command-cli",
+            type: "commandExecution",
+            command,
+            status: "completed",
+            exitCode: 0,
+          }],
+        }],
+      },
+    }),
+  };
+
+  const fence = {
+    providerThreadId: "thread-cli",
+    providerTurnId: "provider-turn-cli",
+    providerItemId: "command-cli",
+  };
+  assert.deepEqual(await h.driver.reconcileCompletedCommand("workflow-cli", command, fence), {
+    commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
+    providerThreadId: "thread-cli",
+    providerTurnId: "provider-turn-cli",
+    providerItemId: "command-cli",
+  });
+  for (const candidate of [
+    { ...fence, providerThreadId: "thread-other" },
+    { ...fence, providerTurnId: "provider-turn-other" },
+    { ...fence, providerItemId: "command-other" },
+    undefined,
+  ]) {
+    assert.equal(await h.driver.reconcileCompletedCommand("workflow-cli", command, candidate), null,
+      "every runner receipt coordinate is mandatory and exact");
+  }
+});
+
+test("a runner receipt fence cannot disambiguate replayed successful commands", async () => {
+  const h = makeHarness({ resumeId: "thread-cli" });
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1162 --squash --match-head-commit ${"b".repeat(40)}`;
+  (h.driver as any).threadId = "thread-cli";
+  (h.driver as any).peer = {
+    request: async () => ({
+      thread: {
+        id: "thread-cli",
+        status: { type: "idle" },
+        turns: [{
+          id: "provider-turn-cli",
+          status: "completed",
+          itemsView: "full",
+          items: ["command-cli", "command-replay"].map((id) => ({
+            id, type: "commandExecution", command, status: "completed", exitCode: 0,
+          })),
+        }],
+      },
+    }),
+  };
+  assert.equal(await h.driver.reconcileCompletedCommand("workflow-cli", command, {
+    providerThreadId: "thread-cli",
+    providerTurnId: "provider-turn-cli",
+    providerItemId: "command-cli",
+  }), null);
+});
+
 test("historical reconciliation rejects failed, partial, mismatched, and replay-ambiguous history", async () => {
   const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1146 --squash --match-head-commit ${"a".repeat(40)}`;
   for (const mismatch of [

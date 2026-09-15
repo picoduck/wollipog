@@ -154,8 +154,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 150", () => {
-  assert.equal(PROTOCOL_VERSION, 150);
+test("PROTOCOL_VERSION is 151", () => {
+  assert.equal(PROTOCOL_VERSION, 151);
   assert.equal(runnerSupportsProtocol(136, "capacityLockDiagnostics"), false);
   assert.equal(runnerSupportsProtocol(137, "capacityLockDiagnostics"), true);
   assert.equal(runnerSupportsProtocol(137, "sessionAgentControlReasoningEffort"), false);
@@ -164,12 +164,12 @@ test("PROTOCOL_VERSION is 150", () => {
   assert.equal(runnerSupportsProtocol(139, "typedWorkflowDecisionDelegation"), true);
   assert.equal(runnerSupportsProtocol(139, "orchestratorCampaignManagement"), false);
   assert.equal(runnerSupportsProtocol(140, "orchestratorCampaignManagement"), true);
-  assert.equal(runnerSupportsProtocol(147, "workflowDecisionActionAdmission"), false);
-  assert.equal(runnerSupportsProtocol(148, "workflowDecisionActionAdmission"), true);
+  assert.equal(runnerSupportsProtocol(150, "workflowDecisionActionAdmission"), false);
+  assert.equal(runnerSupportsProtocol(151, "workflowDecisionActionAdmission"), true);
   assert.equal(runnerSupportsProtocol(148, "campaignContinuations"), false);
   assert.equal(runnerSupportsProtocol(149, "campaignContinuations"), true);
-  assert.equal(runnerSupportsProtocol(149, "workflowDecisionActionReconciliation"), false);
-  assert.equal(runnerSupportsProtocol(150, "workflowDecisionActionReconciliation"), true);
+  assert.equal(runnerSupportsProtocol(150, "workflowDecisionActionReconciliation"), false);
+  assert.equal(runnerSupportsProtocol(151, "workflowDecisionActionReconciliation"), true);
   assert.equal(runnerSupportsProtocol(143, "orchestratorExecutionPolicy"), false);
   assert.equal(runnerSupportsProtocol(144, "orchestratorExecutionPolicy"), true);
   assert.equal(runnerSupportsProtocol(145, "worktreeSetupConfig"), false);
@@ -930,14 +930,15 @@ test("additive session-event kinds use explicit older-peer policies without muta
     kind: "workflow_action_admission_armed",
     occurrenceId: "workflow-1",
     commandDigest: "a".repeat(64),
+    sessionTurnId: "session-turn-1",
     providerTurnId: "turn-1",
   } as const;
-  assert.equal(projectSessionEventPayloadForProtocol(actionArm, 147), null);
-  assert.equal(projectSessionEventPayloadForProtocol(actionArm, 148), actionArm);
-  assert.equal(sessionEventWireProjectionRequiredForProtocol(147), true);
-  assert.equal(sessionEventWireProjectionRequiredForProtocol(148), false);
-  assert.equal(sessionEventWireProjectionVariant(147), 1);
-  assert.equal(sessionEventWireProjectionVariant(148), 0);
+  assert.equal(projectSessionEventPayloadForProtocol(actionArm, 150), null);
+  assert.equal(projectSessionEventPayloadForProtocol(actionArm, 151), actionArm);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(150), true);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(151), false);
+  assert.equal(sessionEventWireProjectionVariant(150), 1);
+  assert.equal(sessionEventWireProjectionVariant(151), 0);
   assert.equal(SESSION_EVENT_WIRE_PROJECTION_VARIANTS, 4);
 
   // The variant is the count of unmet policies, so it stays a dense index. The count is the
@@ -946,7 +947,7 @@ test("additive session-event kinds use explicit older-peer policies without muta
   assert.equal(sessionEventWireProjectionVariant(undefined), 3);
   assert.equal(sessionEventWireProjectionVariant(87), 2);
   assert.equal(sessionEventWireProjectionVariant(130), 1);
-  assert.equal(sessionEventWireProjectionVariant(148), 0);
+  assert.equal(sessionEventWireProjectionVariant(151), 0);
   assert.equal(SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET, 5);
 
   const required = { kind: "error", message: "still required" } as const;

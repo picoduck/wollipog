@@ -52,6 +52,7 @@ function harness(config: SessionConfig, appServer = false) {
     },
     setConfig: () => {},
     agentSessionId: () => appServer ? "thread-exact" : null,
+    agentTurnId: () => appServer ? "provider-turn-exact" : null,
   };
   const sm = new SessionManager((message) => sent.push(message), () => {}, store, "test-runner");
   const entry: any = {
@@ -83,7 +84,7 @@ function harness(config: SessionConfig, appServer = false) {
   };
 }
 
-test("App Server action admission uses a runner-owned fence after older provider events", () => {
+test("App Server action admission distinguishes the runner turn from the provider turn", () => {
   const h = harness({}, true);
   try {
     (h.sm as any).onDriverEvent("s_governance", {
@@ -92,12 +93,13 @@ test("App Server action admission uses a runner-owned fence after older provider
     const recorded = h.sm.recordWorkflowActionAdmission("s_governance", {
       occurrenceId: "workflow-exact",
       commandDigest: "a".repeat(64),
-      providerTurnId: "turn-exact",
+      sessionTurnId: "turn-exact",
     });
     assert.deepEqual(recorded, {
       accepted: true,
       occurrenceId: "workflow-exact",
-      providerTurnId: "turn-exact",
+      sessionTurnId: "turn-exact",
+      providerTurnId: "provider-turn-exact",
       providerThreadId: "thread-exact",
       historyEpoch: 0,
       eventSeq: 2,
@@ -116,7 +118,7 @@ test("App Server action admission uses a runner-owned fence after older provider
     assert.equal(h.sm.recordWorkflowActionAdmission("s_governance", {
       occurrenceId: "workflow-stale-turn",
       commandDigest: "b".repeat(64),
-      providerTurnId: "turn-stale",
+      sessionTurnId: "turn-stale",
     }).accepted, false, "a control-plane turn projection cannot override the runner's active turn");
   } finally {
     h.cleanup();
@@ -158,6 +160,161 @@ test("retroactive action reconciliation binds exact provider admission, command,
     });
   } finally {
     h.cleanup();
+  }
+});
+
+test("retroactive action reconciliation binds a CLI arm to its later durable Guardian receipt", async () => {
+  const h = harness({}, true);
+  try {
+    const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1162 --squash --match-head-commit ${"c".repeat(40)}`;
+    const commandDigest = createHash("sha256").update(command, "utf8").digest("hex");
+    const arm = h.store.appendEvent("s_governance", {
+      kind: "workflow_action_admission_armed",
+      occurrenceId: "workflow-cli",
+      commandDigest: "d".repeat(64),
+      sessionTurnId: "session-turn-cli",
+      providerTurnId: "legacy-session-turn-stored-as-provider",
+    });
+    assert.ok(arm);
+    const receipt = h.store.appendEvent("s_governance", {
+      kind: "review_decision",
+      reviewId: "review-cli",
+      reviewer: { kind: "agent", id: "codex-guardian" },
+      outcome: "allowed",
+      approvalReviewReceipt: {
+        transport: "codex-app-server",
+        threadId: "thread-exact",
+        turnId: "provider-turn-cli",
+        itemId: "command-cli",
+        toolName: "commandExecution",
+        input: command,
+        inputSha256: commandDigest,
+      },
+    });
+    assert.ok(receipt);
+    (h.entry.client as any).reconcileCompletedCommand = async (
+      occurrenceId: string,
+      candidate: string,
+      fence: unknown,
+    ) => {
+      assert.equal(occurrenceId, "workflow-cli");
+      assert.equal(candidate, command);
+      assert.deepEqual(fence, {
+        providerThreadId: "thread-exact",
+        providerTurnId: "provider-turn-cli",
+        providerItemId: "command-cli",
+      });
+      return {
+        commandDigest,
+        providerThreadId: "thread-exact",
+        providerTurnId: "provider-turn-cli",
+        providerItemId: "command-cli",
+      };
+    };
+    (h.sm as any).resolveWorktreePullRequestState = async () => ({
+      state: "merged", headOid: "c".repeat(40),
+    });
+    assert.deepEqual(await h.sm.reconcileWorkflowAction("s_governance", {
+      occurrenceId: "workflow-cli",
+      command,
+      commandDigest: "d".repeat(64),
+      pullRequestUrl: "https://github.com/picoduck/wollipog/pull/1162",
+      expectedHeadSha: "c".repeat(40),
+      armedAfterEventSeq: arm.seq,
+      runnerHistoryEpoch: 0,
+      actionProviderThreadId: "thread-exact",
+      actionProviderTurnId: "legacy-session-turn-stored-as-provider",
+    }), {
+      accepted: true,
+      occurrenceId: "workflow-cli",
+      commandDigest,
+      providerThreadId: "thread-exact",
+      providerTurnId: "provider-turn-cli",
+      providerItemId: "command-cli",
+      runnerHistoryEpoch: 0,
+      armedAfterEventSeq: arm.seq,
+      providerReviewEventSeq: receipt.seq,
+      forgeHeadSha: "c".repeat(40),
+    });
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("durable reconciliation rejects missing, misordered, duplicated, and cross-epoch receipts", async () => {
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1162 --squash --match-head-commit ${"c".repeat(40)}`;
+  const commandDigest = createHash("sha256").update(command, "utf8").digest("hex");
+  for (const mismatch of ["missing", "order", "duplicate", "intervening", "epoch"] as const) {
+    const h = harness({}, true);
+    try {
+      const appendReceipt = () => h.store.appendEvent("s_governance", {
+        kind: "review_decision" as const,
+        reviewId: `review-cli-${mismatch}-${h.store.readEvents("s_governance").length}`,
+        reviewer: { kind: "agent" as const, id: "codex-guardian" },
+        outcome: "allowed" as const,
+        approvalReviewReceipt: {
+          transport: "codex-app-server" as const,
+          threadId: "thread-exact",
+          turnId: "provider-turn-cli",
+          itemId: "command-cli",
+          toolName: "commandExecution" as const,
+          input: command,
+          inputSha256: commandDigest,
+        },
+      });
+      if (mismatch === "order") appendReceipt();
+      const arm = h.store.appendEvent("s_governance", {
+        kind: "workflow_action_admission_armed",
+        occurrenceId: "workflow-cli",
+        commandDigest: "d".repeat(64),
+        sessionTurnId: "session-turn-cli",
+        providerTurnId: "legacy-session-turn-stored-as-provider",
+      });
+      assert.ok(arm);
+      if (mismatch === "intervening") {
+        h.store.appendEvent("s_governance", {
+          kind: "workflow_action_admission_armed",
+          occurrenceId: "workflow-cli-newer",
+          commandDigest: "d".repeat(64),
+          sessionTurnId: "session-turn-cli",
+          providerTurnId: "legacy-session-turn-stored-as-provider",
+        });
+      }
+      if (mismatch !== "missing" && mismatch !== "order") appendReceipt();
+      if (mismatch === "duplicate") appendReceipt();
+      let receivedFence: unknown = "not-called";
+      (h.entry.client as any).reconcileCompletedCommand = async (
+        _occurrenceId: string,
+        _candidate: string,
+        fence: unknown,
+      ) => {
+        receivedFence = fence;
+        return {
+          commandDigest,
+          providerThreadId: "thread-exact",
+          providerTurnId: "provider-turn-cli",
+          providerItemId: "command-cli",
+        };
+      };
+      (h.sm as any).resolveWorktreePullRequestState = async () => ({
+        state: "merged", headOid: "c".repeat(40),
+      });
+      const result = await h.sm.reconcileWorkflowAction("s_governance", {
+        occurrenceId: "workflow-cli",
+        command,
+        commandDigest: "d".repeat(64),
+        pullRequestUrl: "https://github.com/picoduck/wollipog/pull/1162",
+        expectedHeadSha: "c".repeat(40),
+        armedAfterEventSeq: arm.seq,
+        runnerHistoryEpoch: mismatch === "epoch" ? 1 : 0,
+        actionProviderThreadId: "thread-exact",
+        actionProviderTurnId: "legacy-session-turn-stored-as-provider",
+      });
+      assert.equal(result.accepted, false, `${mismatch} must fail closed`);
+      assert.equal(receivedFence, undefined, `${mismatch} cannot mint a runner receipt fence`);
+    } finally {
+      h.cleanup();
+    }
   }
 });
 

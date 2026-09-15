@@ -5991,18 +5991,21 @@ export class SessionsService {
     }
     const now = Date.now();
     if (action.data) {
-      const providerTurnId = child.driver === "codex-app-server"
+      const sessionTurnId = child.driver === "codex-app-server"
         ? this.hub.activeTurnIdForSession(child.id)
         : undefined;
-      if (child.driver === "codex-app-server" && !providerTurnId) {
+      if (child.driver === "codex-app-server" && !sessionTurnId) {
         this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
-        return fail("App Server action admission requires an active provider turn", 409);
+        return fail("App Server action admission requires an active runner turn", 409);
       }
       let providerFence: Pick<NonNullable<WorkflowDecisionView["actionAdmission"]>,
-        "armedAfterEventSeq" | "providerTurnId" | "providerThreadId" | "runnerHistoryEpoch"> = {};
+        "armedAfterEventSeq" | "sessionTurnId" | "providerTurnId" | "providerThreadId" |
+        "runnerHistoryEpoch"> = {};
       if (child.driver === "codex-app-server") {
         if (decision.actionAdmission) {
-          if (decision.actionAdmission.providerTurnId !== providerTurnId ||
+          if (decision.actionAdmission.sessionTurnId !== sessionTurnId ||
+              typeof decision.actionAdmission.providerTurnId !== "string" ||
+              !decision.actionAdmission.providerTurnId ||
               typeof decision.actionAdmission.providerThreadId !== "string" ||
               !decision.actionAdmission.providerThreadId ||
               !Number.isSafeInteger(decision.actionAdmission.runnerHistoryEpoch) ||
@@ -6021,7 +6024,7 @@ export class SessionsService {
             sessionId: child.id,
             occurrenceId,
             commandDigest,
-            providerTurnId: providerTurnId!,
+            sessionTurnId: sessionTurnId!,
           };
           try {
             const recorded = await this.hub.requestFromRunner(
@@ -6032,7 +6035,8 @@ export class SessionsService {
             );
             if (recorded.type !== "workflow_action_admission_recorded" ||
                 recorded.sessionId !== child.id || recorded.occurrenceId !== occurrenceId ||
-                !recorded.accepted || recorded.providerTurnId !== providerTurnId ||
+                !recorded.accepted || recorded.sessionTurnId !== sessionTurnId ||
+                !boundedProviderCorrelationId(recorded.providerTurnId) ||
                 !boundedProviderCorrelationId(recorded.providerThreadId) ||
                 !Number.isSafeInteger(recorded.historyEpoch) || recorded.historyEpoch! < 0 ||
                 !Number.isSafeInteger(recorded.eventSeq) || recorded.eventSeq! < 1) {
@@ -6040,6 +6044,7 @@ export class SessionsService {
             }
             providerFence = {
               armedAfterEventSeq: recorded.eventSeq,
+              sessionTurnId: recorded.sessionTurnId,
               providerTurnId: recorded.providerTurnId,
               providerThreadId: recorded.providerThreadId,
               runnerHistoryEpoch: recorded.historyEpoch,
@@ -6136,6 +6141,12 @@ export class SessionsService {
       commandDigest: admission.commandDigest,
       pullRequestUrl: `https://github.com/${normalized.data.repository}/pull/${normalized.data.pullRequest}`,
       expectedHeadSha: normalized.data.headSha,
+      ...(admission.armedAfterEventSeq !== undefined
+        ? { armedAfterEventSeq: admission.armedAfterEventSeq } : {}),
+      ...(admission.runnerHistoryEpoch !== undefined
+        ? { runnerHistoryEpoch: admission.runnerHistoryEpoch } : {}),
+      ...(admission.providerThreadId ? { actionProviderThreadId: admission.providerThreadId } : {}),
+      ...(admission.providerTurnId ? { actionProviderTurnId: admission.providerTurnId } : {}),
     };
     let proof;
     try {
@@ -6147,19 +6158,29 @@ export class SessionsService {
           ? "runner is offline"
           : "workflow action reconciliation failed", 409);
     }
+    if (proof.type !== "workflow_action_reconciliation_result") {
+      return fail("runner could not prove the exact command and forge result", 409);
+    }
     const commandDigest = createHash("sha256").update(command, "utf8").digest("hex");
-    if (proof.type !== "workflow_action_reconciliation_result" || proof.requestId !== requestId ||
+    const nativeAdmissionProof = boundedProviderCorrelationId(proof.providerAdmissionItemId);
+    const durableAdmissionProof = !proof.providerAdmissionItemId &&
+      Number.isSafeInteger(admission.runnerHistoryEpoch) && admission.runnerHistoryEpoch! >= 0 &&
+      Number.isSafeInteger(admission.armedAfterEventSeq) && admission.armedAfterEventSeq! >= 1 &&
+      proof.runnerHistoryEpoch === admission.runnerHistoryEpoch &&
+      proof.armedAfterEventSeq === admission.armedAfterEventSeq &&
+      Number.isSafeInteger(proof.providerReviewEventSeq) &&
+      proof.providerReviewEventSeq! > admission.armedAfterEventSeq!;
+    if (proof.requestId !== requestId ||
         proof.sessionId !== sessionId || proof.occurrenceId !== occurrenceId || !proof.accepted ||
         proof.commandDigest !== commandDigest || !boundedProviderCorrelationId(proof.providerThreadId) ||
         !boundedProviderCorrelationId(proof.providerTurnId) ||
-        !boundedProviderCorrelationId(proof.providerAdmissionItemId) ||
+        (!nativeAdmissionProof && !durableAdmissionProof) ||
         !boundedProviderCorrelationId(proof.providerItemId) ||
         (admission.providerThreadId != null && proof.providerThreadId !== admission.providerThreadId) ||
-        (admission.providerTurnId != null && proof.providerTurnId !== admission.providerTurnId) ||
+        (nativeAdmissionProof && admission.providerTurnId != null &&
+          proof.providerTurnId !== admission.providerTurnId) ||
         proof.forgeHeadSha !== normalized.data.headSha) {
-      return fail(proof.type === "workflow_action_reconciliation_result" && proof.error
-        ? proof.error
-        : "runner could not prove the exact command and forge result", 409);
+      return fail(proof.error ?? "runner could not prove the exact command and forge result", 409);
     }
     const currentChild = this.db.getSession(sessionId);
     const currentParent = this.db.getSession(decision.controllingSessionId);
@@ -6212,8 +6233,13 @@ export class SessionsService {
           transport: "codex-app-server",
           threadId: proof.providerThreadId,
           turnId: proof.providerTurnId,
-          admissionItemId: proof.providerAdmissionItemId,
+          ...(proof.providerAdmissionItemId ? { admissionItemId: proof.providerAdmissionItemId } : {}),
           itemId: proof.providerItemId,
+          ...(durableAdmissionProof ? {
+            runnerHistoryEpoch: proof.runnerHistoryEpoch,
+            armedAfterEventSeq: proof.armedAfterEventSeq,
+            providerReviewEventSeq: proof.providerReviewEventSeq,
+          } : {}),
           forgeHeadSha: proof.forgeHeadSha,
         },
         workflowDecision: {
@@ -6243,8 +6269,7 @@ export class SessionsService {
         value.length <= 512 && !/[\x00-\x1f\x7f]/u.test(value);
       if (approval.ownerToolUseId || identity?.transport !== "codex-app-server" ||
           typeof identity.input !== "string" || !identity.input || identity.input.length > 2000 ||
-          !boundedId(identity.threadId) || !boundedId(identity.turnId) || !boundedId(identity.itemId) ||
-          this.hub.activeTurnIdForSession(session.id) !== identity.turnId) return null;
+          !boundedId(identity.threadId) || !boundedId(identity.turnId) || !boundedId(identity.itemId)) return null;
       const action = this.workflowDecisionActionForCommand(
         session,
         approval.context?.toolName,
@@ -6279,11 +6304,16 @@ export class SessionsService {
     if (!expectedTool || toolName !== expectedTool) return null;
     const action: WorkflowDecisionAction = { kind: "pr_merge_enqueue", command };
     const commandDigest = auditDigest(action)!;
+    const activeSessionTurnId = session.driver === "codex-app-server"
+      ? this.hub.activeTurnIdForSession(session.id)
+      : undefined;
     const matches = this.db.approvedWorkflowDecisionsForAction(session.id, commandDigest)
       .filter((decision) => decision.category === "pr_merge" &&
         decision.actionAdmission?.kind === action.kind &&
         decision.actionAdmission.command === command &&
         (session.driver !== "codex-app-server" || (
+          activeSessionTurnId != null &&
+          decision.actionAdmission.sessionTurnId === activeSessionTurnId &&
           providerTurnId != null && decision.actionAdmission.providerTurnId === providerTurnId &&
           (providerThreadId == null || decision.actionAdmission.providerThreadId === providerThreadId)
         )));
@@ -9736,7 +9766,6 @@ export class SessionsService {
       const receiptCommandDigest = receipt && createHash("sha256").update(receipt.input, "utf8").digest("hex");
       if (receipt && reviewer?.kind === "agent" && reviewer.id === "codex-guardian" &&
           payload.outcome === "allowed" && session.driver === receipt.transport &&
-          this.hub.activeTurnIdForSession(session.id) === receipt.turnId &&
           receipt.inputSha256 === receiptCommandDigest) {
         const receiptDigest = auditDigest({
           transport: receipt.transport,

@@ -106,6 +106,19 @@ receipt. Missing, duplicate, failed, stale, mismatched, or mixed-version evidenc
 leaves the occurrence unconsumed. Missing provider proof, failed execution, forge mismatch, and
 mixed-version peers remain retryable; stale governance or resource evidence revokes the approval.
 
+Protocol v151 distinguishes the control-plane/runner turn from the provider-owned App Server turn
+instead of treating their unrelated identifiers as interchangeable. The stored action admission
+binds both identities, and a later live receipt must match the provider turn while the active
+workflow remains on the stored runner turn. For an exact CLI arm that lacks a native provider MCP
+item, reconciliation may substitute only a durable runner-history proof: the exact arm event must
+precede exactly one allowed Guardian receipt for the canonical command in the same history
+generation, and provider history must prove exactly one successful command at the receipt's exact
+thread, turn, and item. A later arm for the same command invalidates the earlier fallback, and the
+provider item has one shared claim across live and reconciled consumption. This additive fallback
+does not weaken the existing forge, snapshot,
+policy, ancestry, replay, or authority checks; incomplete, reordered, duplicated, cross-generation,
+or mismatched evidence remains unconsumed.
+
 Protocol v143 projects exact human-owned and Orchestrator-owned descendant request counts onto the
 root campaign. Human clients may inspect both groups in the parent request surface; session-scoped
 agent credentials continue to list and resolve only requests assigned to that Orchestrator. A
