@@ -199,10 +199,12 @@ async function mountFixture(
   {
     pinnedOpen = false,
     pendingQuestion = false,
+    pendingStandalone = false,
     mode = "expanded",
   }: {
     pinnedOpen?: boolean;
     pendingQuestion?: boolean;
+    pendingStandalone?: boolean;
     mode?: "preview" | "expanded";
   } = {},
 ): Promise<Fixture> {
@@ -220,6 +222,20 @@ async function mountFixture(
         question: "Which language should I use?",
         options: [{ label: "TypeScript" }, { label: "JavaScript" }],
       }],
+    };
+  }
+  if (pendingStandalone) {
+    currentSession.status = "input_required";
+    currentSession.pendingApproval = {
+      kind: "permission",
+      requestId: "worktree-trust",
+      occurrenceId: "worktree-trust",
+      title: "Trust Worktree Configuration",
+      context: { input: "pnpm install" },
+      options: [
+        { optionId: "trust", name: "Trust This Configuration", kind: "allow_once" },
+        { optionId: "deny", name: "Deny", kind: "reject_once" },
+      ],
     };
   }
   const socket = new FakeSocket();
@@ -446,6 +462,41 @@ test("SessionDetail keeps the temporary question fallback until a virtual row is
     assert.equal(fixture.scroller.contains(liveQuestion), false,
       "the fallback stays authoritative because this hydration harness mounts no virtual rows");
     assert.equal(fixture.container.querySelector("[data-virtual-row]"), null);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("SessionDetail keeps a standalone request reachable through skeleton and empty transcript states", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages, 0, { pendingStandalone: true });
+  try {
+    const request = () => fixture.container.querySelector('[data-session-request-control="review"]');
+    assert.ok(request(), "the standalone request is reachable while history is loading");
+    assert.ok(fixture.container.querySelector(".transcript-skeleton"));
+
+    await act(async () => {
+      pages.releaseTail({ events: [], eventEpoch: 0, nextBefore: 0, hasMoreOlder: false, cacheComplete: true });
+    });
+    await flushAsyncWork();
+
+    assert.ok(request(), "the standalone request remains reachable beside an authoritative empty state");
+    assert.match(fixture.scroller.textContent ?? "", /No Activity Yet/u);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("SessionDetail places a standalone fallback after loaded timeline activity", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages, 12, { pendingStandalone: true });
+  try {
+    const timeline = fixture.container.querySelector(".timeline");
+    const request = fixture.container.querySelector(".tl-request-card");
+    assert.ok(timeline);
+    assert.ok(request);
+    assert.ok(timeline.compareDocumentPosition(request) & domWindow.Node.DOCUMENT_POSITION_FOLLOWING,
+      "a tail-following reader encounters the pending request after loaded activity");
   } finally {
     await unmountFixture(fixture);
   }

@@ -64,6 +64,12 @@ export interface TimelineQuestionContext {
   showKeyHints?: boolean;
 }
 
+export interface TimelineApprovalContext {
+  sessionId: string;
+  requestId: string;
+  onOpenRequest: () => void;
+}
+
 export function timelineFileSourceLocation(path: string): SourceLocation | null {
   const normalized = normalizeSourcePath(path);
   return normalized ? { path: normalized } : null;
@@ -175,6 +181,7 @@ export const EventTimeline = memo(function EventTimeline({
   revealRequest,
   onRevealHandled,
   questionContext,
+  approvalContext,
 }: {
   handoff?: { open: (turn: number) => void; reason?: string };
   items: TimelineItem[];
@@ -209,6 +216,8 @@ export const EventTimeline = memo(function EventTimeline({
   onRevealHandled?: (requestId: number, outcome: VirtualRevealOutcome) => void;
   /** Authoritative pending request used to replace its matching historical question row in place. */
   questionContext?: TimelineQuestionContext;
+  /** Pending standalone approval that adds one review action to its canonical permission row. */
+  approvalContext?: TimelineApprovalContext;
 }) {
   const effectiveHistoryKey = historyKey ?? "timeline";
   const scopedRevealRequest = revealRequest?.historyKey === effectiveHistoryKey ? revealRequest : null;
@@ -238,6 +247,7 @@ export const EventTimeline = memo(function EventTimeline({
       revealRequest={scopedRevealRequest}
       onRevealHandled={onRevealHandled}
       questionContext={questionContext}
+      approvalContext={approvalContext}
     />
     </HandoffContext.Provider>
   );
@@ -266,6 +276,7 @@ function EventTimelineBody({
   revealRequest,
   onRevealHandled,
   questionContext,
+  approvalContext,
 }: {
   items: TimelineItem[];
   onRewind?: (turn: number) => void;
@@ -289,6 +300,7 @@ function EventTimelineBody({
   revealRequest?: TimelineRevealRequest | null;
   onRevealHandled?: (requestId: number, outcome: VirtualRevealOutcome) => void;
   questionContext?: TimelineQuestionContext;
+  approvalContext?: TimelineApprovalContext;
 }) {
   const projector = useRef<IncrementalTimelineRows | null>(null);
   if (!projector.current) projector.current = new IncrementalTimelineRows();
@@ -421,6 +433,8 @@ function EventTimelineBody({
           forkAvailability={assistantForkTurn == null ? undefined : forkAvailabilityByTurn?.get(assistantForkTurn)}
           questionContext={item.kind === "question" && row.key === pinnedQuestionRow?.key &&
             questionContext?.questionInTimeline === true ? questionContext : undefined}
+          approvalContext={item.kind === "permission" && item.resolvedOptionId === undefined &&
+            item.requestId === approvalContext?.requestId ? approvalContext : undefined}
         />
       </div>
     );
@@ -1591,6 +1605,7 @@ const TimelineRow = memo(function TimelineRow({
   disclosureOpen = false,
   onDisclosureToggle,
   questionContext,
+  approvalContext,
 }: {
   item: TimelineItem;
   inWork?: boolean;
@@ -1608,6 +1623,7 @@ const TimelineRow = memo(function TimelineRow({
   disclosureOpen?: boolean;
   onDisclosureToggle?: () => void;
   questionContext?: TimelineQuestionContext;
+  approvalContext?: TimelineApprovalContext;
 }) {
   const timingDescriptionId = useId();
   const sessionActive = useContext(TimelineActivityContext);
@@ -1872,7 +1888,11 @@ const TimelineRow = memo(function TimelineRow({
       );
     case "permission":
       return (
-        <div className="tl-perm">
+        <div
+          className="tl-perm"
+          data-session-request-id={approvalContext?.requestId}
+          data-session-request-session={approvalContext?.sessionId}
+        >
           <div className="tl-perm-head">
             <span className="perm-icon">🔐</span>
             <span>{item.title}</span>
@@ -1899,6 +1919,17 @@ const TimelineRow = memo(function TimelineRow({
               </span>
             ) : (
               <span className="perm-pending">awaiting decision…</span>
+            )}
+            {approvalContext && (
+              <button
+                className="btn primary sm tl-perm-review"
+                type="button"
+                data-session-request-control="review"
+                aria-controls="right-panel"
+                onClick={approvalContext.onOpenRequest}
+              >
+                Review Request
+              </button>
             )}
           </div>
           {item.context?.input && (

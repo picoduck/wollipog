@@ -3,7 +3,7 @@ import test from "node:test";
 import type { SubagentDescriptor } from "../subagents.js";
 import type { ChildSessionRegistryEntry, SessionView } from "@wollipog/protocol";
 import { childRegistryProgressKey, mergeCompactAttentionOwners, mergeDurableAgents,
-  mergeRegistrySnapshotPages } from "./AgentsPanel.js";
+  mergeRegistrySnapshotPages, shouldOpenPrimaryRequestInSession } from "./AgentsPanel.js";
 
 const child = (id: string, lifecycle: SubagentDescriptor["lifecycle"], sourceIndex: number): SubagentDescriptor => ({
   id,
@@ -106,4 +106,25 @@ test("message progress invalidates the registry even inside one timestamp millis
     pendingApproval: null } as unknown as SessionView;
   const next = { ...session, messageCount: 21 };
   assert.notEqual(childRegistryProgressKey(session), childRegistryProgressKey(next));
+});
+
+test("a worker-owned primary approval stays actionable in the Agents panel", () => {
+  const primary = {
+    requestId: "worker-permission",
+    kind: "permission",
+    title: "Allow Command",
+    options: [],
+    ownerToolUseId: "worker-tool",
+  } as NonNullable<SessionView["pendingApproval"]>;
+  assert.equal(shouldOpenPrimaryRequestInSession(primary, primary.requestId, true), false);
+  assert.equal(shouldOpenPrimaryRequestInSession(
+    { ...primary, ownerToolUseId: undefined },
+    primary.requestId,
+    true,
+  ), true);
+  assert.equal(shouldOpenPrimaryRequestInSession(
+    { ...primary, kind: "question", questions: [] },
+    primary.requestId,
+    true,
+  ), true);
 });

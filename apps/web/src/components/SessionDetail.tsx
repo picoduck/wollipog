@@ -106,7 +106,7 @@ import {
   shouldHydrateRoutedSession,
   type RoutedSessionLookup,
 } from "../detail-placeholder.js";
-import { transcriptPresentation } from "../transcript-presentation.js";
+import { transcriptPresentation, transcriptRendersRequestRow } from "../transcript-presentation.js";
 import {
   acquireSessionFork,
   canStopActiveTurn,
@@ -118,8 +118,8 @@ import {
   subscribeSessionForks,
   type ConversationForkAvailability,
 } from "../session-actions.js";
-import { SessionApprovalRegion } from "./SessionApproval.js";
-import { sessionRequestPanelKey } from "./SessionRequestPanel.js";
+import { SessionApprovalRegion, standaloneApprovalForReview } from "./SessionApproval.js";
+import { requestTypeLabel, sessionRequestPanelKey } from "./SessionRequestPanel.js";
 import { ComposerQuestionResponse } from "./ComposerQuestionResponse.js";
 import { useGovernanceAudit, useGovernanceTimeline } from "./useGovernanceAudit.js";
 import { SessionHeader } from "./SessionHeader.js";
@@ -778,8 +778,14 @@ function SessionDetailLoaded({
       Object.values(session.parentControlPolicy?.decisions ?? {}).includes("orchestrator")
     ),
   });
-  const ownWorkflowDecision = session.pendingApproval?.kind === "workflow_decision"
-    ? session.pendingApproval.workflowDecision : undefined;
+  const ownStandaloneApproval = standaloneApprovalForReview(session.pendingApproval);
+  const ownWorkerApproval = session.pendingApproval?.ownerToolUseId
+    ? session.pendingApproval : null;
+  const ownApprovalRequestId = ownStandaloneApproval?.requestId;
+  const ownApprovalOccurrenceId = ownStandaloneApproval?.occurrenceId ?? ownStandaloneApproval?.requestId;
+  const timelineApprovalRequestId = ownApprovalRequestId ?? ownWorkerApproval?.requestId;
+  const ownWorkflowDecision = ownStandaloneApproval?.kind === "workflow_decision"
+    ? ownStandaloneApproval.workflowDecision : undefined;
   const ownEvidenceSnapshot = ownWorkflowDecision?.resourceSnapshot.category === "ui_evidence_approval"
     ? ownWorkflowDecision.resourceSnapshot : null;
   const ownEvidenceDecision = ownEvidenceSnapshot ? ownWorkflowDecision! : null;
@@ -791,8 +797,8 @@ function SessionDetailLoaded({
     if (mode === "preview") onExpand?.();
   }, [mode, onExpand, rightPanel]);
   useEffect(() => {
-    if (requestPanelOpen && !ownEvidenceDecision && descendantRequests.length === 0) rightPanel.close();
-  }, [descendantRequests.length, ownEvidenceDecision, requestPanelOpen, rightPanel]);
+    if (requestPanelOpen && !ownStandaloneApproval && descendantRequests.length === 0) rightPanel.close();
+  }, [descendantRequests.length, ownStandaloneApproval, requestPanelOpen, rightPanel]);
   const anchorRecoveryPending = eventHistory?.refreshing === true ||
     (conn === "online" && eventHistory?.everComplete !== true && eventHistory?.error == null);
   const recoveryRevision = useStoreSelector((s) =>
@@ -2369,6 +2375,9 @@ function SessionDetailLoaded({
   // Incremental derivation: streamed chunks push only the NEW events into a per-session
   // builder instead of re-folding the whole array (O(n²) over a long session).
   const items = useTimeline(sessionId, evs);
+  const ownApprovalHasTimelineRow = timelineApprovalRequestId !== undefined && items.some((item) =>
+    item.kind === "permission" && item.requestId === timelineApprovalRequestId &&
+    item.resolvedOptionId === undefined);
   // Governance outcomes are transcript context, not a persistent header: the decisions whose
   // request has no transcript row of its own are spliced in at their chronological position, and
   // the whole list stays reviewable in the side panel (a full-screen drawer on phones).
@@ -3381,6 +3390,20 @@ function SessionDetailLoaded({
     showKeyHints: !isMobile,
   }), [handlePendingQuestionAvailabilityChange, isMobile, loadSession, questionInTimeline, runnerOnline,
     session.id, timelinePendingQuestion]);
+  const timelineApprovalContext = useMemo(() => timelineApprovalRequestId && ownApprovalHasTimelineRow ? {
+      sessionId: session.id,
+      requestId: timelineApprovalRequestId,
+      onOpenRequest: ownStandaloneApproval && ownApprovalOccurrenceId
+        ? () => openRequestPanel(sessionRequestPanelKey(session.id, ownApprovalOccurrenceId))
+        : () => {
+            rightPanel.show("subagents");
+            navigate({ name: "session", id: session.id, attention: {
+              eventEpoch: session.eventEpoch ?? 0,
+              requestId: timelineApprovalRequestId,
+            } });
+          },
+    } : undefined, [navigate, openRequestPanel, ownApprovalHasTimelineRow, ownApprovalOccurrenceId,
+      ownStandaloneApproval, rightPanel, session.eventEpoch, session.id, timelineApprovalRequestId]);
   const working =
     showOptimistic || (!terminal && (session.status === "running" || session.status === "starting"));
   // The merged Working row must also survive approval/question waits: the projector keeps
@@ -4305,6 +4328,36 @@ function SessionDetailLoaded({
   const currentProjectName = projectsSupported
     ? (session.projectId ? projects.get(session.projectId)?.name : undefined) ?? session.projectName ?? "No Project"
     : session.workspaceName ?? "No Workspace";
+  const standaloneRequestCard = ownStandaloneApproval && ownApprovalOccurrenceId &&
+    !transcriptRendersRequestRow(transcript.body, ownApprovalHasTimelineRow) ? (
+      <section
+        className="tl-request-card"
+        aria-label={`Pending ${requestTypeLabel(ownStandaloneApproval)} Request`}
+        data-session-request-id={ownStandaloneApproval.requestId}
+        data-session-request-session={session.id}
+      >
+        <span className="tl-request-icon" aria-hidden="true">{ownEvidenceSnapshot ? "🖼️" : "🔐"}</span>
+        <span className="tl-request-copy">
+          <strong>{ownStandaloneApproval.title}</strong>
+          <span>
+            {ownEvidenceSnapshot
+              ? `${ownEvidenceSnapshot.evidence.length} evidence ${ownEvidenceSnapshot.evidence.length === 1 ? "item" : "items"}`
+              : `${requestTypeLabel(ownStandaloneApproval)} · Review Required`}
+          </span>
+        </span>
+        <button
+          className="btn primary sm"
+          type="button"
+          data-session-request-control="review"
+          aria-controls="right-panel"
+          onClick={() => openRequestPanel(
+            sessionRequestPanelKey(session.id, ownApprovalOccurrenceId),
+          )}
+        >
+          {ownEvidenceDecision ? "Review Evidence" : "Review Request"}
+        </button>
+      </section>
+    ) : null;
 
   return (
     <div className={`session-detail ${mode}`} data-session-surface-id={session.id}>
@@ -4352,8 +4405,15 @@ function SessionDetailLoaded({
           onOpenBackgroundWork={() => rightPanel.show("background")}
           onOpenAttention={() => {
             const requests = pendingRequests(session.pendingApproval);
-            if (ownEvidenceDecision) {
-              openRequestPanel(sessionRequestPanelKey(session.id, ownEvidenceDecision.occurrenceId));
+            if (requests.length > 1) {
+              rightPanel.show("subagents");
+              navigate({ name: "session", id: session.id, attention: {
+                eventEpoch: session.eventEpoch ?? 0,
+              } });
+              return;
+            }
+            if (ownStandaloneApproval && ownApprovalOccurrenceId) {
+              openRequestPanel(sessionRequestPanelKey(session.id, ownApprovalOccurrenceId));
               return;
             }
             if (requests.length === 0 && (session.orchestratorCampaign?.pendingRequests?.human ?? 0) > 0) {
@@ -4479,7 +4539,7 @@ function SessionDetailLoaded({
             // The fallback owns the request only until the matching pinned row is mounted and the
             // virtual list can keep it reachable at its canonical transcript position.
             questionInTimeline={questionInTimeline}
-            evidenceInReviewSurface={Boolean(ownEvidenceDecision)}
+            standaloneInReviewSurface={Boolean(ownStandaloneApproval)}
           />
           <div
             className="detail-main"
@@ -4593,6 +4653,7 @@ function SessionDetailLoaded({
                   onLoad={loadEarlierFromControl}
                 />
               )}
+              {transcript.body !== "timeline" && standaloneRequestCard}
               {transcript.body === "skeleton" ? (
                 <TranscriptSkeleton />
               ) : transcript.body === "unavailable" ? (
@@ -4631,6 +4692,7 @@ function SessionDetailLoaded({
                       revealRequest={timelineRevealRequest}
                       onRevealHandled={handleTimelineReveal}
                       questionContext={timelineQuestionContext}
+                      approvalContext={timelineApprovalContext}
                     />
                   )}
                   <PendingPromptBubbles
@@ -4668,34 +4730,7 @@ function SessionDetailLoaded({
                       onOpenSubagent={mode === "expanded" ? openSubagent : undefined}
                     />
                   )}
-                  {ownEvidenceDecision && ownEvidenceSnapshot && session.pendingApproval && (
-                    <section
-                      className="tl-request-card"
-                      aria-label="Pending UI Evidence Request"
-                      data-session-request-id={session.pendingApproval.requestId}
-                      data-session-request-session={session.id}
-                    >
-                      <span className="tl-request-icon" aria-hidden="true">🖼️</span>
-                      <span className="tl-request-copy">
-                        <strong>UI Evidence Review Required</strong>
-                        <span>
-                          {ownEvidenceSnapshot.evidence.length} evidence{" "}
-                          {ownEvidenceSnapshot.evidence.length === 1 ? "item" : "items"}
-                        </span>
-                      </span>
-                      <button
-                        className="btn primary sm"
-                        type="button"
-                        data-session-request-control="review"
-                        aria-controls="right-panel"
-                        onClick={() => openRequestPanel(
-                          sessionRequestPanelKey(session.id, ownEvidenceDecision.occurrenceId),
-                        )}
-                      >
-                        Review Evidence
-                      </button>
-                    </section>
-                  )}
+                  {transcript.body === "timeline" && standaloneRequestCard}
                 </>
               )}
             </div>

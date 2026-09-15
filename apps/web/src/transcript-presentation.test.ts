@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { EventHistoryState } from "./store.js";
-import { transcriptPresentation } from "./transcript-presentation.js";
+import { transcriptPresentation, transcriptRendersRequestRow } from "./transcript-presentation.js";
 
 const history = (overrides: Partial<EventHistoryState> = {}): EventHistoryState => ({
   eventEpoch: 0,
@@ -50,4 +50,12 @@ test("disconnect cancels busy/retrying copy while honestly labeling cached conte
     conn: "offline",
   });
   assert.deepEqual([cached.body, cached.busy, cached.notice], ["timeline", false, "stale"]);
+});
+
+test("a request timeline row is available only while the timeline body is mounted", () => {
+  assert.equal(transcriptRendersRequestRow("timeline", true), true);
+  assert.equal(transcriptRendersRequestRow("timeline", false), false);
+  for (const body of ["skeleton", "empty", "unavailable"] as const) {
+    assert.equal(transcriptRendersRequestRow(body, true), false);
+  }
 });

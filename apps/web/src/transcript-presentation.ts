@@ -9,6 +9,13 @@ export interface TranscriptPresentation {
   error: string | null;
 }
 
+export function transcriptRendersRequestRow(
+  body: TranscriptBody,
+  hasMatchingTimelineRow: boolean,
+): boolean {
+  return body === "timeline" && hasMatchingTimelineRow;
+}
+
 /** Decide transcript chrome without conflating an incomplete empty cache with authoritative empty.
  * Existing content always stays mounted while a reconnect recovery checks for missed activity. */
 export function transcriptPresentation(input: {

@@ -30,7 +30,7 @@ import type { TimelineItem } from "../timeline.js";
 import type { GovernanceDecision } from "../governance.js";
 import { GovernanceHistoryPanel } from "./GovernanceHistoryPanel.js";
 import { AgentsPanel } from "./AgentsPanel.js";
-import { focusSessionRequest } from "./SessionApproval.js";
+import { focusSessionRequest, standaloneApprovalForReview } from "./SessionApproval.js";
 import { BackgroundWorkPanel } from "./BackgroundWorkPanel.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
 import { SessionRequestPanel } from "./SessionRequestPanel.js";
@@ -43,6 +43,17 @@ function viewportPanelMax(): number {
 
 const EMPTY_PARENT_TURN_EVENTS: ReadonlyMap<string, number> = new Map();
 const EMPTY_GOVERNANCE_DECISIONS: readonly GovernanceDecision[] = [];
+
+export function panelReturnFocusTarget(
+  captured: HTMLElement | null,
+  sessionId: string,
+  root: ParentNode = document,
+): HTMLElement | null {
+  if (captured?.isConnected) return captured;
+  const surface = [...root.querySelectorAll<HTMLElement>("[data-session-surface-id]")]
+    .find((candidate) => candidate.dataset.sessionSurfaceId === sessionId);
+  return surface?.querySelector<HTMLElement>(".composer-input") ?? null;
+}
 
 /**
  * The right side panel's app-level state. Lives in App.tsx (NOT inside the per-session-keyed
@@ -258,12 +269,12 @@ export function RightPanel({
       return;
     }
     if (!wasOpen || state.open) return;
-    const target = returnFocusRef.current;
+    const target = panelReturnFocusTarget(returnFocusRef.current, session.id);
     returnFocusRef.current = null;
     window.requestAnimationFrame(() => {
       if (target?.isConnected) target.focus();
     });
-  }, [state.open]);
+  }, [session.id, state.open]);
 
   // Viewport-aware ceiling as STATE (the rendered width and the separator's ARIA range both
   // re-derive from it) — the stored width PREFERENCE is left untouched, so a temporary window
@@ -423,10 +434,8 @@ export function RightPanel({
               session.backgroundJobsAvailable === true ||
               session.backgroundWorkTracking != null || session.backgroundWorkState != null}
             governanceAvailable={governanceAvailable}
-            requestsAvailable={descendantRequests.length > 0 || (
-              session.pendingApproval?.kind === "workflow_decision" &&
-              session.pendingApproval.workflowDecision?.resourceSnapshot.category === "ui_evidence_approval"
-            )}
+            requestsAvailable={descendantRequests.length > 0 ||
+              standaloneApprovalForReview(session.pendingApproval) !== null}
           />
         ) : (
           <div className="rp-body">

@@ -2320,6 +2320,63 @@ textarea {
 .evidence-review-actions .btn {
   min-height: 44px;
 }
+.approval-review-surface {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  min-height: 100%;
+}
+.approval-review-summary {
+  padding-bottom: 12px;
+}
+.approval-review-summary h3,
+.approval-review-summary p {
+  margin: 0;
+}
+.approval-review-summary p {
+  margin-top: 4px;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+.approval-review-body {
+  min-height: 0;
+  overflow: auto;
+}
+.approval-review-details {
+  margin-top: 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.approval-review-details summary {
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.approval-review-details .approval-context {
+  max-height: none;
+  margin: 10px 0 0;
+}
+.approval-review-actions {
+  position: sticky;
+  z-index: var(--z-sticky);
+  bottom: 0;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 12px 0 14px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+@media (min-width: 761px) {
+  .request-panel-detail:has(> .approval-review-surface) {
+    display: grid;
+    grid-template-rows: auto auto minmax(0, 1fr);
+    overflow: hidden;
+  }
+  .request-panel-detail > .approval-review-surface {
+    min-height: 0;
+  }
+}
 .agents-panel {
   display: flex;
   flex-direction: column;
@@ -5653,6 +5710,9 @@ button.file-head.source-path-link {
 }
 .perm-pending {
   color: var(--amber);
+}
+.tl-perm-review {
+  margin-left: auto;
 }
 .perm-resolved {
   color: var(--green);
@@ -12283,7 +12343,8 @@ body.shell-dock-dragging * {
   }
   .request-panel-list,
   .request-panel-detail,
-  .evidence-review-list {
+  .evidence-review-list,
+  .approval-review-body {
     overflow: visible;
     max-height: none;
   }
@@ -12294,7 +12355,9 @@ body.shell-dock-dragging * {
   .request-panel-detail-head .btn,
   .evidence-review-item-main .btn,
   .evidence-reviewed-control,
-  .evidence-review-actions .btn {
+  .evidence-review-actions .btn,
+  .approval-review-actions .btn,
+  .tl-perm-review {
     min-height: 44px;
   }
   .request-panel-detail-head {
@@ -12309,6 +12372,10 @@ body.shell-dock-dragging * {
     min-height: 44px;
   }
   .evidence-review-surface {
+    display: block;
+    min-height: 100%;
+  }
+  .approval-review-surface {
     display: block;
     min-height: 100%;
   }

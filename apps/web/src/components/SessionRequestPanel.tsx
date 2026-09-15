@@ -15,7 +15,11 @@ import {
   type WorkflowDecisionResourceSnapshot,
 } from "@wollipog/protocol";
 import { relativeTime } from "../format.js";
-import { SessionApprovalBanner, SessionQuestionBanner } from "./SessionApproval.js";
+import {
+  SessionApprovalBanner,
+  SessionQuestionBanner,
+  standaloneApprovalForReview,
+} from "./SessionApproval.js";
 
 type RequestPanelItem = {
   key: string;
@@ -111,21 +115,21 @@ export function SessionRequestPanel({
   onDescendantsUpdate: () => void;
   onOpenChild: (request: DescendantRequestView) => void;
 }) {
-  const ownDecision = session.pendingApproval?.kind === "workflow_decision" &&
-    session.pendingApproval.workflowDecision?.resourceSnapshot.category === "ui_evidence_approval"
-    ? session.pendingApproval.workflowDecision : null;
+  const ownRequest = standaloneApprovalForReview(session.pendingApproval);
+  const ownDecision = ownRequest?.kind === "workflow_decision" ? ownRequest.workflowDecision : null;
+  const ownOccurrenceId = ownRequest?.occurrenceId ?? ownRequest?.requestId;
   const items = useMemo<RequestPanelItem[]>(() => [
-    ...(ownDecision && session.pendingApproval ? [{
-      key: itemKey(session.id, ownDecision.occurrenceId),
+    ...(ownRequest && ownOccurrenceId ? [{
+      key: itemKey(session.id, ownOccurrenceId),
       sessionId: session.id,
       sessionTitle: session.title,
       runnerId: session.runnerId,
       runnerOnline,
       eventEpoch: session.eventEpoch ?? 0,
-      createdAt: ownDecision.createdAt,
+      createdAt: ownDecision?.createdAt ?? session.updatedAt,
       responseOwner: "human" as const,
-      occurrenceId: ownDecision.occurrenceId,
-      request: session.pendingApproval,
+      occurrenceId: ownOccurrenceId,
+      request: ownRequest,
       descendant: false,
     }] : []),
     ...descendants.map((item) => ({
@@ -143,7 +147,8 @@ export function SessionRequestPanel({
     })),
   ].sort((left, right) => left.responseOwner === right.responseOwner
     ? 0
-    : left.responseOwner === "human" ? -1 : 1), [descendants, ownDecision, runnerOnline, session]);
+    : left.responseOwner === "human" ? -1 : 1), [descendants, ownDecision?.createdAt, ownOccurrenceId,
+      ownRequest, runnerOnline, session]);
   const activeKey = items.some((item) => item.key === selectedKey) ? selectedKey : items[0]?.key ?? null;
   const selected = items.find((item) => item.key === activeKey) ?? null;
   const listId = useId();
@@ -280,7 +285,7 @@ export function SessionRequestPanel({
             runnerOnline={selected.runnerOnline}
             onSessionUpdate={selected.descendant ? onDescendantsUpdate : onSessionUpdate}
             showKeyHints={false}
-            presentation={workflowDecision?.resourceSnapshot.category === "ui_evidence_approval" ? "review" : "banner"}
+            presentation="review"
           />
         )}
       </section>

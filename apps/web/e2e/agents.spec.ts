@@ -65,8 +65,9 @@ test("aggregate attention links focus the full request list without choosing a r
 test("attention links cannot alias reused requests after reprocessing and primary requests keep one form", async ({ page }) => {
   await serveFixtureUnderSessionRoutes(page);
   await page.goto(`${attentionPath("permission-a")}?epoch=0`);
-  await expect(page.getByRole("button", { name: "Open Request in Session", exact: true })).toBeFocused();
+  await expect(page.getByRole("region", { name: "Selected Worker Request", exact: true })).toBeFocused();
   await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Open Request in Session", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Reprocess Session", exact: true }).click();
   await expect(page.getByText("This attention link belongs to an earlier session version. No request was selected.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Open Request in Session", exact: true })).toHaveCount(0);
@@ -88,7 +89,7 @@ test("a selected child request promoted to primary moves focus to its canonical 
   await expect(page.getByRole("region", { name: "Selected Worker Request", exact: true })).toBeFocused();
   await page.getByRole("button", { name: "Resolve Primary Request", exact: true }).click();
   await expect(page.locator('[data-session-request-id="permission-b"]')).toBeFocused();
-  await expect(page.getByRole("button", { name: "Open Request in Session", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open Request in Session", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(1);
 });
 

@@ -281,13 +281,14 @@ test("the warning state above the threshold", async ({ page }) => {
   await expect(page.locator(".session-usage-popover").first()).toContainText("claude-fable-5-1");
 });
 
-test("a cost checkpoint parks the session with a Continue/Stop card", async ({ page }) => {
+test("a cost checkpoint parks the session with a compact responsive-review request", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 820 });
   await page.goto("/session-usage-e2e.html?width=1180&height=780&approval=checkpoint");
-  const card = page.locator(".approval-bar").first();
+  await expect(page.locator(".approval-bar")).toHaveCount(0);
+  const card = page.getByRole("region", { name: "Pending Approval Request" });
   await expect(card).toContainText("Cost checkpoint — $2.61 of $2.50. Continue?");
-  await expect(card.getByRole("button", { name: "Continue" })).toBeVisible();
-  await expect(card.getByRole("button", { name: "Stop" })).toBeVisible();
+  const trigger = page.getByRole("button", { name: "Review Request" });
+  await expect(trigger).toBeVisible();
   await page.screenshot({ path: `${SHOT}/desktop-checkpoint-card.png` });
 });
 
