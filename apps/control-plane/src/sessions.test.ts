@@ -4049,6 +4049,50 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     }
   });
 
+  await t.test("a stale attempt cannot destroy an otherwise recoverable revoked occurrence", async () => {
+    const { db, hub, svc, child, arm } = setup();
+    try {
+      const armed = await arm(1178);
+      (svc as any).revokeUnconsumedWorkflowDecisionsForSession(child.id, "session-restarted");
+      const staleHead = "f".repeat(40);
+      const stale = await svc.reconcileWorkflowDecision(
+        child.id,
+        armed.decision.occurrenceId,
+        { resourceSnapshot: {
+          ...armed.snapshot,
+          headSha: staleHead,
+          requiredChecks: { ...armed.snapshot.requiredChecks, headSha: staleHead },
+        } },
+        () => true,
+      );
+      assert.equal(stale.status, 409);
+      assert.equal(svc.governanceAudit(child.id).filter((entry) =>
+        entry.requestId === armed.decision.occurrenceId).length, 3,
+      "a failed retry cannot fabricate another revocation transition");
+      hub.requestHandler = (message) => ({
+        type: "workflow_action_reconciliation_result",
+        requestId: message.type === "reconcile_workflow_action" ? message.requestId : "wrong",
+        sessionId: child.id,
+        occurrenceId: armed.decision.occurrenceId,
+        accepted: true,
+        commandDigest: createHash("sha256").update(armed.command, "utf8").digest("hex"),
+        providerThreadId: "thread-1",
+        providerTurnId: "turn-1",
+        providerAdmissionItemId: "admission-after-stale-retry",
+        providerItemId: "command-after-stale-retry",
+        forgeHeadSha: armed.snapshot.headSha,
+      });
+      const retry = await svc.reconcileWorkflowDecision(
+        child.id,
+        armed.decision.occurrenceId,
+        { resourceSnapshot: armed.snapshot },
+        () => true,
+      );
+      assert.ok(retry.ok, retry.error);
+      assert.equal(retry.data?.status, "consumed");
+    } finally { db.close(); }
+  });
+
   await t.test("failed or mixed-version reconciliation retains the approved occurrence", async () => {
     for (const mismatch of ["proof", "protocol"] as const) {
       const { db, hub, svc, child, arm } = setup();
