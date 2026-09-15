@@ -288,7 +288,9 @@ export type ProviderAuthIdentityField = "email" | "orgId" | "authMethod" | "apiP
 
 export interface ProviderAuthIdentityEvidence {
   /** Version 1 evidence predates the runner-stable evidence key. Version 2 is generated only by
-   * the production data-directory-keyed controller. Different versions are never comparable. */
+   * the production data-directory-keyed controller. A forward change is comparable only when an
+   * equal digest or aggregate proves both observations used the same stable key; rollbacks and
+   * changed-key evidence fail closed. */
   version: 1 | 2;
   /** Each value is a runner-keyed digest of the field name and value, never the provider value. */
   fields: Partial<Record<ProviderAuthIdentityField, string>>;
