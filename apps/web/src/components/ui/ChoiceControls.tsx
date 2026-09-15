@@ -434,6 +434,7 @@ export function SearchableCombobox<T extends string>({
   disabled = false,
   className,
   inputId,
+  autoFocus,
 }: {
   options: readonly SearchableComboboxOption<T>[];
   value: T | null;
@@ -446,6 +447,8 @@ export function SearchableCombobox<T extends string>({
   className?: string;
   /** Optional DOM id for associating a visible label with the editable owner. */
   inputId?: string;
+  /** Claim focus when the editable owner is initially mounted. */
+  autoFocus?: boolean;
 }) {
   const generatedId = useId();
   const listboxId = `${generatedId}-listbox`;
@@ -529,6 +532,7 @@ export function SearchableCombobox<T extends string>({
       <input
         id={inputId}
         ref={inputRef}
+        autoFocus={autoFocus}
         type="text"
         role="combobox"
         aria-label={label}

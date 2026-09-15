@@ -294,6 +294,12 @@ export function NewSessionDialog({
   const projectInputId = `${generatedFormId}-project`;
   const agentInputId = `${generatedFormId}-agent`;
   const touchChoicePicker = useTouchTargetMode();
+  const initialProjectAutoFocusRef = useRef(projectsSupported && !touchChoicePicker);
+  useLayoutEffect(() => {
+    // React's autoFocus runs when the editable Project owner mounts. Consume that one-time claim
+    // after the opening commit so a later touch-to-desktop presentation swap cannot steal focus.
+    initialProjectAutoFocusRef.current = false;
+  }, []);
   const previousTouchChoicePickerRef = useRef(touchChoicePicker);
   // Capture ownership DURING render, while the old control is still mounted. By the time a layout
   // effect runs after the media-query change, React has replaced the focused input or listbox and
@@ -981,6 +987,7 @@ export function NewSessionDialog({
                 ) : (
                   <SearchableCombobox<string>
                     inputId={projectInputId}
+                    autoFocus={initialProjectAutoFocusRef.current}
                     className="new-session-choice-control"
                     label="Project"
                     value={projectSelection || null}
