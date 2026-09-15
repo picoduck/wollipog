@@ -666,6 +666,7 @@ CREATE TABLE IF NOT EXISTS orchestrator_campaign_continuations (
   command_id          TEXT NOT NULL UNIQUE,
   event_from_seq      INTEGER NOT NULL,
   event_through_seq   INTEGER NOT NULL,
+  observed_through_seq INTEGER NOT NULL,
   state               TEXT NOT NULL CHECK (state IN
                        ('pending','running','completed','failed','missing_result','acknowledged')),
   attempt_count       INTEGER NOT NULL DEFAULT 1,
@@ -2584,6 +2585,7 @@ export interface CampaignContinuationRecord {
   commandId: string;
   eventFromSeq: number;
   eventThroughSeq: number;
+  observedThroughSeq: number;
   state: "pending" | "running" | "completed" | "failed" | "missing_result" | "acknowledged";
   attemptCount: number;
   nextAttemptAt?: number;
@@ -3785,6 +3787,15 @@ export class ControlPlaneDb {
     db.exec("PRAGMA secure_delete = ON;");
     db.exec("PRAGMA foreign_keys = ON;");
     db.exec(SCHEMA);
+    const campaignContinuationColumns = db.prepare("PRAGMA table_info(orchestrator_campaign_continuations)")
+      .all() as unknown as Array<{ name: string }>;
+    if (!campaignContinuationColumns.some((column) => column.name === "observed_through_seq")) {
+      db.exec("ALTER TABLE orchestrator_campaign_continuations ADD COLUMN observed_through_seq INTEGER NOT NULL DEFAULT 0");
+      db.exec(
+        `UPDATE orchestrator_campaign_continuations SET observed_through_seq=event_through_seq
+         WHERE observed_through_seq=0`,
+      );
+    }
     const namingPreferenceSchema = db.prepare(
       "SELECT sql FROM sqlite_master WHERE type='table' AND name='session_naming_preferences'",
     ).get() as { sql?: string } | undefined;
@@ -12509,14 +12520,16 @@ export class ControlPlaneDb {
     const cursor = this.campaignContinuationCursor(campaignSessionId);
     const rows = this.stmt(
       `SELECT * FROM orchestrator_campaign_events
-       WHERE campaign_session_id=? AND seq>? AND created_at<=?
+       WHERE campaign_session_id=? AND seq>?
        ORDER BY seq LIMIT ?`,
-    ).all(campaignSessionId, cursor, throughCreatedAt, Math.max(1, Math.min(limit, 64))) as Array<{
+    ).all(campaignSessionId, cursor, Math.max(1, Math.min(limit, 64))) as Array<{
       seq: number; event_id: string; campaign_session_id: string; kind: CampaignContinuationEventKind;
       subject_session_id: string | null; occurrence_id: string | null; subject_status: string | null;
       created_at: number;
     }>;
-    return rows.map((row) => ({
+    const firstIneligible = rows.findIndex((row) => row.created_at > throughCreatedAt);
+    const eligibleRows = firstIneligible === -1 ? rows : rows.slice(0, firstIneligible);
+    return eligibleRows.map((row) => ({
       seq: row.seq,
       eventId: row.event_id,
       campaignSessionId: row.campaign_session_id,
@@ -12526,6 +12539,12 @@ export class ControlPlaneDb {
       ...(row.subject_status ? { subjectStatus: row.subject_status } : {}),
       createdAt: row.created_at,
     }));
+  }
+
+  hasPendingCampaignContinuationEvents(campaignSessionId: string): boolean {
+    return Boolean(this.stmt(
+      "SELECT 1 FROM orchestrator_campaign_events WHERE campaign_session_id=? AND seq>? LIMIT 1",
+    ).get(campaignSessionId, this.campaignContinuationCursor(campaignSessionId)));
   }
 
   campaignContinuationChildCandidates(campaignSessionId: string): Array<{
@@ -12573,6 +12592,26 @@ export class ControlPlaneDb {
     return rows.map((row) => row.id);
   }
 
+  campaignContinuationLifecycle(campaignSessionId: string): {
+    runnerId: string;
+    status: SessionStatus;
+    archived: boolean;
+    hasPendingApproval: boolean;
+  } | null {
+    const row = this.stmt(
+      `SELECT runner_id,status,archived,pending_approval FROM sessions
+       WHERE id=? AND permission_mode='orchestrator' AND orchestrator_policy IS NOT NULL`,
+    ).get(campaignSessionId) as {
+      runner_id: string; status: SessionStatus; archived: number; pending_approval: string | null;
+    } | undefined;
+    return row ? {
+      runnerId: row.runner_id,
+      status: row.status,
+      archived: row.archived === 1,
+      hasPendingApproval: row.pending_approval !== null,
+    } : null;
+  }
+
   activeCampaignContinuation(campaignSessionId: string): CampaignContinuationRecord | null {
     const row = this.stmt(
       `SELECT * FROM orchestrator_campaign_continuations
@@ -12580,7 +12619,7 @@ export class ControlPlaneDb {
        ORDER BY created_at DESC,rowid DESC LIMIT 1`,
     ).get(campaignSessionId) as undefined | {
       continuation_id: string; campaign_session_id: string; command_id: string;
-      event_from_seq: number; event_through_seq: number;
+      event_from_seq: number; event_through_seq: number; observed_through_seq: number;
       state: CampaignContinuationRecord["state"]; attempt_count: number;
       next_attempt_at: number | null; error: string | null; created_at: number; updated_at: number;
     };
@@ -12632,12 +12671,16 @@ export class ControlPlaneDb {
       );
       this.stmt(
         `INSERT INTO orchestrator_campaign_continuations
-         (continuation_id,campaign_session_id,command_id,event_from_seq,event_through_seq,state,
-          attempt_count,next_attempt_at,created_at,updated_at)
-         VALUES (?,?,?,?,?,'pending',?,?,?,?)`,
+         (continuation_id,campaign_session_id,command_id,event_from_seq,event_through_seq,
+          observed_through_seq,state,attempt_count,next_attempt_at,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,'pending',?,?,?,?)`,
       ).run(
         input.continuationId, input.campaignSessionId, input.commandId, input.eventFromSeq,
-        input.eventThroughSeq, input.attemptCount, input.now, input.now, input.now,
+        input.eventThroughSeq,
+        Number((this.stmt(
+          "SELECT COALESCE(MAX(seq),0) AS seq FROM orchestrator_campaign_events WHERE campaign_session_id=?",
+        ).get(input.campaignSessionId) as { seq: number }).seq),
+        input.attemptCount, input.now, input.now, input.now,
       );
       this.db.exec("COMMIT");
       return this.campaignContinuationForCommand(input.commandId);
@@ -12671,18 +12714,22 @@ export class ControlPlaneDb {
     return this.campaignContinuationForCommand(commandId);
   }
 
-  acknowledgeCampaignContinuationMissingResult(commandId: string, now: number): boolean {
+  acknowledgeCampaignContinuationMissingResult(
+    campaignSessionId: string,
+    commandId: string,
+    now: number,
+  ): boolean {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const result = this.stmt(
         `UPDATE orchestrator_campaign_continuations
          SET state='acknowledged',next_attempt_at=NULL,updated_at=?
-         WHERE command_id=? AND state='missing_result' AND EXISTS (
+         WHERE campaign_session_id=? AND command_id=? AND state='missing_result' AND EXISTS (
            SELECT 1 FROM session_prompt_commands prompt
            WHERE prompt.command_id=orchestrator_campaign_continuations.command_id
              AND prompt.state='uncertain' AND prompt.dismissed_at IS NOT NULL
          )`,
-      ).run(now, commandId);
+      ).run(now, campaignSessionId, commandId);
       if (Number(result.changes) === 1) this.advanceCampaignContinuationCursorForCommand(commandId, now);
       this.db.exec("COMMIT");
       return Number(result.changes) === 1;
@@ -12700,10 +12747,14 @@ export class ControlPlaneDb {
     return Number(result.changes) === 1;
   }
 
-  latestCampaignContinuationEventSeq(campaignSessionId: string): number {
-    return Number((this.stmt(
-      "SELECT COALESCE(MAX(seq),0) AS seq FROM orchestrator_campaign_events WHERE campaign_session_id=?",
-    ).get(campaignSessionId) as { seq: number }).seq);
+  hasCampaignContinuationEventAfter(
+    campaignSessionId: string,
+    observedThroughSeq: number,
+  ): boolean {
+    return Boolean(this.stmt(
+      `SELECT 1 FROM orchestrator_campaign_events
+       WHERE campaign_session_id=? AND seq>? LIMIT 1`,
+    ).get(campaignSessionId, observedThroughSeq));
   }
 
   private campaignContinuationCursor(campaignSessionId: string): number {
@@ -12725,7 +12776,7 @@ export class ControlPlaneDb {
 
   private campaignContinuationRecord(row: {
     continuation_id: string; campaign_session_id: string; command_id: string;
-    event_from_seq: number; event_through_seq: number;
+    event_from_seq: number; event_through_seq: number; observed_through_seq: number;
     state: CampaignContinuationRecord["state"]; attempt_count: number;
     next_attempt_at: number | null; error: string | null; created_at: number; updated_at: number;
   }): CampaignContinuationRecord {
@@ -12735,6 +12786,7 @@ export class ControlPlaneDb {
       commandId: row.command_id,
       eventFromSeq: row.event_from_seq,
       eventThroughSeq: row.event_through_seq,
+      observedThroughSeq: row.observed_through_seq,
       state: row.state,
       attemptCount: row.attempt_count,
       ...(row.next_attempt_at != null ? { nextAttemptAt: row.next_attempt_at } : {}),
@@ -15466,6 +15518,13 @@ export class ControlPlaneDb {
     return rows.map((row) => this.sessionPromptCommand(row));
   }
 
+  deferSessionPromptCommand(commandId: string, nextAttemptAt: number, now: number): void {
+    this.stmt(
+      `UPDATE session_prompt_commands SET next_attempt_at=?,updated_at=?
+       WHERE command_id=? AND state IN ('pending','sent','accepted','queued','started')`,
+    ).run(nextAttemptAt, now, commandId);
+  }
+
   markSessionPromptCommandSent(
     commandId: string,
     requestId: string,
@@ -15667,9 +15726,19 @@ export class ControlPlaneDb {
 
   pruneSessionPromptCommands(now: number, limit = 1_000): string[] {
     const rows = this.stmt(
-      `SELECT command_id,session_id FROM session_prompt_commands
-       WHERE state IN ('completed','failed','uncertain') AND expires_at<=?
-       ORDER BY expires_at,created_at,rowid LIMIT ?`,
+      `SELECT prompt.command_id,prompt.session_id FROM session_prompt_commands prompt
+       WHERE prompt.state IN ('completed','failed','uncertain') AND prompt.expires_at<=?
+         AND NOT EXISTS (
+           SELECT 1 FROM orchestrator_campaign_continuations continuation
+           WHERE continuation.command_id=prompt.command_id
+             AND continuation.state IN ('missing_result','failed')
+             AND continuation.command_id=(
+               SELECT latest.command_id FROM orchestrator_campaign_continuations latest
+               WHERE latest.campaign_session_id=continuation.campaign_session_id
+               ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1
+             )
+         )
+       ORDER BY prompt.expires_at,prompt.created_at,prompt.rowid LIMIT ?`,
     ).all(now, Math.max(1, Math.min(limit, 10_000))) as Array<{ command_id: string; session_id: string }>;
     if (!rows.length) return [];
     const placeholders = rows.map(() => "?").join(",");

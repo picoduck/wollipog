@@ -1254,6 +1254,111 @@ test("a staged campaign continuation rechecks human blockers before runner deliv
       "the durable outbox does not send a prompt staged before a new human blocker");
     assert.equal(hub.sentOfType("durable_session_command").length, 0);
     assert.equal(db.campaignProjection(root.id)?.continuation?.state, "held");
+    const held = db.activeCampaignContinuation(root.id)!;
+    assert.equal(db.getSessionPromptCommand(held.commandId)?.nextAttemptAt, now + 70_000,
+      "a held continuation yields its due-queue slot until the next eligibility check");
+  } finally {
+    db.close();
+  }
+});
+
+test("campaign fan-in never advances past an earlier event delayed by a backwards clock step", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+    orchestrator.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const root = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, parentControl: "questions",
+    }).data!;
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    const base = Date.now();
+    db.recordCampaignContinuationEvent({
+      eventId: `test-clock-first:${root.id}`,
+      campaignSessionId: root.id,
+      kind: "child_ready",
+      now: base + 60_000,
+    });
+    db.recordCampaignContinuationEvent({
+      eventId: `test-clock-second:${root.id}`,
+      campaignSessionId: root.id,
+      kind: "request_actionable",
+      now: base,
+    });
+    assert.equal(svc.retryDuePrompts(base + 2_000), 0,
+      "a later sequence cannot leapfrog an earlier event beyond the fan-in cutoff");
+    assert.equal(db.latestCampaignContinuation(root.id), null);
+    assert.equal(svc.retryDuePrompts(base + 62_000), 1);
+    const delivery = hub.sentOfType("durable_session_command").at(-1)!;
+    const text = delivery.command.type === "prompt_session" ? delivery.command.text : "";
+    assert.match(text, /child_ready/u);
+    assert.match(text, /request_actionable/u);
+  } finally {
+    db.close();
+  }
+});
+
+test("nested Parent Control changes publish continuation events only to the outer campaign", () => {
+  const { db, svc } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    for (const agentId of ["test-orchestrator", CODEX_APP_AGENT_ID]) {
+      const agent = meta.agents.find((candidate) => candidate.id === agentId)!;
+      agent.capabilities = {
+        ...agent.capabilities,
+        models: agent.capabilities?.models ?? [],
+        effortLevels: agent.capabilities?.effortLevels ?? [],
+        slashCommands: agent.capabilities?.slashCommands ?? [],
+        supportsImages: agent.capabilities?.supportsImages ?? false,
+        supportsApprovals: true,
+        permissionModes: ["default", "orchestrator"],
+      };
+    }
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const root = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, parentControl: "questions",
+    }).data!;
+    db.updateSessionStatus(root.id, "running", Date.now());
+    const createChild = (parentSessionId: string, orchestrator = false) => {
+      const request = {
+        runnerId: RUNNER_ID,
+        workspaceId: WORKSPACE_ID,
+        agentId: orchestrator ? CODEX_APP_AGENT_ID : AGENT_ID,
+        ...(orchestrator ? { config: { permissionMode: "orchestrator" as const } } : {}),
+      };
+      let result = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId });
+      if (result.status === 428) {
+        const approval = db.getSession(parentSessionId)!.pendingApproval!;
+        assert.ok(svc.approve(parentSessionId, approval.requestId, "allow").ok);
+        result = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId });
+      }
+      assert.ok(result.ok && result.data, result.error);
+      db.updateSessionStatus(result.data.id, "running", Date.now());
+      return result.data;
+    };
+    const nested = createChild(root.id, true);
+    const leaf = createChild(nested.id);
+    svc.onSessionStatus(leaf.id, "failed");
+
+    db.raw().prepare("DELETE FROM orchestrator_campaign_events").run();
+    assert.ok(svc.setParentControl(nested.id, "questions_and_approvals").ok);
+    assert.equal(db.campaignContinuationEvents(nested.id).length, 0);
+    assert.equal(db.campaignContinuationEvents(root.id).length, 1);
+
+    db.raw().prepare("DELETE FROM orchestrator_campaign_events").run();
+    const policy = db.getSession(nested.id)!.parentControlPolicy!;
+    assert.ok(svc.setParentControlPolicy(nested.id, {
+      ...policy.decisions,
+      implementation_question: policy.decisions.implementation_question === "human" ? "orchestrator" : "human",
+    }, policy.revision).ok);
+    assert.equal(db.campaignContinuationEvents(nested.id).length, 0);
+    assert.equal(db.campaignContinuationEvents(root.id).length, 1);
   } finally {
     db.close();
   }
@@ -1316,6 +1421,10 @@ test("campaign continuation recovery holds for humans and never replays an ambig
       error: "provider accepted the turn but no terminal result was persisted",
     }), true);
     assert.equal(db.campaignProjection(root.id)?.continuation?.state, "missing_result");
+    db.raw().prepare("UPDATE session_prompt_commands SET expires_at=0 WHERE command_id=?").run(first.commandId);
+    svc.maintainPrompts(Date.now());
+    assert.ok(db.getSessionPromptCommand(first.commandId),
+      "retention cannot erase an unresolved accepted-without-result diagnostic");
     const sentBeforeRestart = hub.sentOfType("durable_session_command").length;
     const restartedHub = new FakeHub();
     const restarted = new SessionsService(db, restartedHub as unknown as Hub, NOOP_LOG);
@@ -1326,8 +1435,10 @@ test("campaign continuation recovery holds for humans and never replays an ambig
     const missing = db.campaignProjection(root.id)?.continuation;
     assert.equal(missing?.commandId, first.commandId);
     assert.equal(missing?.canAcknowledgeMissingResult, true);
+    assert.equal(db.dismissTerminalSessionPromptCommand(root.id, first.commandId, Date.now()), "dismissed",
+      "simulate a process crash after prompt dismissal but before cursor acknowledgement");
     assert.ok(restarted.dismissPendingPrompt(root.id, first.commandId).ok,
-      "explicit dismissal acknowledges the ambiguity without replaying the accepted turn");
+      "retrying dismissal heals the crash gap and acknowledges without replaying the accepted turn");
     assert.equal(db.campaignProjection(root.id)?.continuation, undefined,
       "acknowledgement advances the exact event range and clears the diagnostic");
     assert.equal(restarted.retryDuePrompts(Date.now() + 180_000), 0);
@@ -1354,12 +1465,14 @@ test("campaign continuation failures back off finitely and stopped campaigns rej
     }).data!;
     const root = createRoot();
     db.updateSessionStatus(root.id, "idle", Date.now());
-    db.recordCampaignContinuationEvent({
-      eventId: `test-failure:${root.id}`,
-      campaignSessionId: root.id,
-      kind: "human_blockers_cleared",
-      now: Date.now(),
-    });
+    for (let event = 0; event < 65; event += 1) {
+      db.recordCampaignContinuationEvent({
+        eventId: `test-failure:${root.id}:${event}`,
+        campaignSessionId: root.id,
+        kind: "human_blockers_cleared",
+        now: Date.now(),
+      });
+    }
 
     let clock = Date.now() + 2_000;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -1384,11 +1497,18 @@ test("campaign continuation failures back off finitely and stopped campaigns rej
       "a repeatedly failing campaign stops after its bounded retry allowance");
     const exhausted = db.campaignProjection(root.id)?.continuation;
     assert.equal(exhausted?.canRetry, true);
+    db.raw().prepare("UPDATE session_prompt_commands SET expires_at=0 WHERE command_id=?")
+      .run(exhausted!.commandId!);
+    svc.maintainPrompts(clock);
+    assert.ok(db.getSessionPromptCommand(exhausted!.commandId!),
+      "retention preserves the latest exhausted failure and its bounded attempt count");
     const sendsBeforeExplicitRetry = hub.sentOfType("durable_session_command").length;
     assert.ok(svc.retryCampaignContinuation(root.id, exhausted!.commandId!, clock + 60_000).ok);
     assert.equal(hub.sentOfType("durable_session_command").length, sendsBeforeExplicitRetry + 1,
       "an explicit operator retry starts a fresh bounded attempt series");
     assert.equal(db.campaignProjection(root.id)?.continuation?.attemptCount, 1);
+    assert.equal(svc.retryCampaignContinuation(root.id, exhausted!.commandId!, clock + 60_001).status, 409,
+      "an older failed command cannot report a successful no-op retry");
 
     const stopped = createRoot();
     db.updateSessionStatus(stopped.id, "stopped", Date.now());

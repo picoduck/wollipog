@@ -16,6 +16,7 @@ type Logger = { warn: (message: string) => void };
 
 const RECEIPT_HORIZON_MS = 30 * 24 * 60 * 60_000;
 const MAX_RETRY_MS = 30_000;
+const CAMPAIGN_HOLD_RECHECK_MS = 10_000;
 const RECEIPT_STATES = new Set(["accepted", "queued", "started", "completed", "failed", "uncertain"]);
 
 function retryDelay(attempt: number): number {
@@ -113,10 +114,15 @@ export class SessionPromptOutbox {
         continue;
       }
       if (command.type === "prompt_session" && command.campaignContinuation) {
-        const campaign = this.db.getSession(command.campaignContinuation.campaignSessionId);
-        const projection = campaign ? this.db.campaignProjection(campaign.id) : null;
-        if (!campaign || campaign.archived || campaign.status !== "idle" || campaign.pendingApproval ||
-            !projection || projection.status === "waiting_human" || projection.status === "verified_complete") {
+        const campaign = this.db.campaignContinuationLifecycle(command.campaignContinuation.campaignSessionId);
+        const lifecycleEligible = campaign && !campaign.archived && campaign.status === "idle" &&
+          !campaign.hasPendingApproval;
+        const projection = lifecycleEligible
+          ? this.db.campaignProjection(command.campaignContinuation.campaignSessionId)
+          : null;
+        if (!lifecycleEligible || !projection || projection.status === "waiting_human" ||
+            projection.status === "verified_complete") {
+          this.db.deferSessionPromptCommand(row.commandId, now + CAMPAIGN_HOLD_RECHECK_MS, now);
           continue;
         }
       }
