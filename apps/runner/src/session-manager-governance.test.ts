@@ -244,7 +244,7 @@ test("retroactive action reconciliation binds a CLI arm to its later durable Gua
 test("durable reconciliation rejects missing, misordered, duplicated, and cross-epoch receipts", async () => {
   const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1162 --squash --match-head-commit ${"c".repeat(40)}`;
   const commandDigest = createHash("sha256").update(command, "utf8").digest("hex");
-  for (const mismatch of ["missing", "order", "duplicate", "epoch"] as const) {
+  for (const mismatch of ["missing", "order", "duplicate", "intervening", "epoch"] as const) {
     const h = harness({}, true);
     try {
       const appendReceipt = () => h.store.appendEvent("s_governance", {
@@ -271,6 +271,15 @@ test("durable reconciliation rejects missing, misordered, duplicated, and cross-
         providerTurnId: "legacy-session-turn-stored-as-provider",
       });
       assert.ok(arm);
+      if (mismatch === "intervening") {
+        h.store.appendEvent("s_governance", {
+          kind: "workflow_action_admission_armed",
+          occurrenceId: "workflow-cli-newer",
+          commandDigest: "d".repeat(64),
+          sessionTurnId: "session-turn-cli",
+          providerTurnId: "legacy-session-turn-stored-as-provider",
+        });
+      }
       if (mismatch !== "missing" && mismatch !== "order") appendReceipt();
       if (mismatch === "duplicate") appendReceipt();
       let receivedFence: unknown = "not-called";

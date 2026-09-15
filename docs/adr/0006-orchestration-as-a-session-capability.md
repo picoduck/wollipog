@@ -113,7 +113,9 @@ workflow remains on the stored runner turn. For an exact CLI arm that lacks a na
 item, reconciliation may substitute only a durable runner-history proof: the exact arm event must
 precede exactly one allowed Guardian receipt for the canonical command in the same history
 generation, and provider history must prove exactly one successful command at the receipt's exact
-thread, turn, and item. This additive fallback does not weaken the existing forge, snapshot,
+thread, turn, and item. A later arm for the same command invalidates the earlier fallback, and the
+provider item has one shared claim across live and reconciled consumption. This additive fallback
+does not weaken the existing forge, snapshot,
 policy, ancestry, replay, or authority checks; incomplete, reordered, duplicated, cross-generation,
 or mismatched evidence remains unconsumed.
 

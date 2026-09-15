@@ -222,7 +222,9 @@ occurrence without a second decision. It also extends read-only reconciliation f
 that do not appear as native provider MCP items: one exact durable arm marker must precede exactly
 one allowed Guardian receipt for the canonical command in the same runner-history generation, and
 provider history must contain exactly one successful command with those exact thread, turn, and
-item coordinates. The forge, snapshot, policy, ancestry, and authority checks remain unchanged.
+item coordinates. No later arm for the same command may intervene, and the provider item retains
+one shared claim across live consumption and every reconciliation proof. The forge, snapshot,
+policy, ancestry, and authority checks remain unchanged.
 Missing, reordered, duplicated, cross-generation, replayed, or mismatched evidence fails closed.
 
 The control plane owns this lifecycle. A generic question answer or provider permission response

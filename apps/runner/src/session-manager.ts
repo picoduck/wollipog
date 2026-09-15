@@ -12137,9 +12137,12 @@ export class SessionManager {
             bounded(receipt.turnId, 512) && bounded(receipt.itemId, 512);
         });
         if (receipts.length === 1) {
+          const interveningArm = events.some((event) => event.seq > (raw.armedAfterEventSeq as number) &&
+            event.seq < receipts[0]!.seq && event.payload.kind === "workflow_action_admission_armed" &&
+            event.payload.commandDigest === raw.commandDigest);
           const receipt = receipts[0]!.payload.kind === "review_decision"
             ? receipts[0]!.payload.approvalReviewReceipt : undefined;
-          if (receipt) {
+          if (receipt && !interveningArm) {
             durableReceipt = {
               providerThreadId: receipt.threadId,
               providerTurnId: receipt.turnId,

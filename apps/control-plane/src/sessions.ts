@@ -6105,12 +6105,6 @@ export class SessionsService {
       threadId: proof.providerThreadId,
       turnId: proof.providerTurnId,
       itemId: proof.providerItemId,
-      admission: nativeAdmissionProof ? "provider_mcp" : "runner_guardian_receipt",
-      ...(durableAdmissionProof ? {
-        runnerHistoryEpoch: proof.runnerHistoryEpoch,
-        armedAfterEventSeq: proof.armedAfterEventSeq,
-        providerReviewEventSeq: proof.providerReviewEventSeq,
-      } : {}),
     })!;
     const now = Date.now();
     const consumed = this.db.consumeReconciledWorkflowDecisionActionWithReceipt(

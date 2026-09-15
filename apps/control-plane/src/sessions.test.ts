@@ -3970,6 +3970,83 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     } finally { db.close(); }
   });
 
+  await t.test("one provider command receipt cannot reconcile two identical typed occurrences", async () => {
+    const { db, hub, svc, child, arm } = setup();
+    try {
+      const first = await arm(1197);
+      (svc as any).revokeUnconsumedWorkflowDecisionsForSession(child.id, "provider-session-ended");
+      const second = await arm(1197);
+      (svc as any).revokeUnconsumedWorkflowDecisionsForSession(child.id, "provider-session-ended");
+      hub.requestHandler = (message) => {
+        if (message.type !== "reconcile_workflow_action") throw new Error("unexpected runner request");
+        return {
+          type: "workflow_action_reconciliation_result",
+          requestId: message.requestId,
+          sessionId: child.id,
+          occurrenceId: message.occurrenceId,
+          accepted: true,
+          commandDigest: createHash("sha256").update(first.command, "utf8").digest("hex"),
+          providerThreadId: "thread-1",
+          providerTurnId: "one-provider-turn",
+          providerItemId: "one-provider-command",
+          runnerHistoryEpoch: message.runnerHistoryEpoch,
+          armedAfterEventSeq: message.armedAfterEventSeq,
+          providerReviewEventSeq: (message.armedAfterEventSeq ?? 0) + 1,
+          forgeHeadSha: first.snapshot.headSha,
+        };
+      };
+      const reconcile = (occurrenceId: string) => svc.reconcileWorkflowDecision(
+        child.id,
+        occurrenceId,
+        { resourceSnapshot: first.snapshot },
+        () => true,
+      );
+      assert.equal((await reconcile(first.decision.occurrenceId)).data?.status, "consumed");
+      const replay = await reconcile(second.decision.occurrenceId);
+      assert.equal(replay.status, 409);
+      assert.match(replay.error ?? "", /proof was already used/u);
+      assert.equal(db.workflowDecisionByOccurrence(second.decision.occurrenceId)?.status, "revoked");
+    } finally { db.close(); }
+  });
+
+  await t.test("a receipt consumed live cannot later reconcile another occurrence", async () => {
+    const { db, hub, svc, child, arm, receipt } = setup();
+    try {
+      const recoverable = await arm(1198);
+      (svc as any).revokeUnconsumedWorkflowDecisionsForSession(child.id, "provider-session-ended");
+      const live = await arm(1198);
+      const liveReceipt = receipt(live.command);
+      svc.onSessionEvent(child.id, liveReceipt);
+      assert.equal(db.workflowDecisionByOccurrence(live.decision.occurrenceId)?.status, "consumed");
+      hub.requestHandler = (message) => {
+        if (message.type !== "reconcile_workflow_action") throw new Error("unexpected runner request");
+        return {
+          type: "workflow_action_reconciliation_result",
+          requestId: message.requestId,
+          sessionId: child.id,
+          occurrenceId: recoverable.decision.occurrenceId,
+          accepted: true,
+          commandDigest: createHash("sha256").update(recoverable.command, "utf8").digest("hex"),
+          providerThreadId: liveReceipt.approvalReviewReceipt!.threadId,
+          providerTurnId: liveReceipt.approvalReviewReceipt!.turnId,
+          providerItemId: liveReceipt.approvalReviewReceipt!.itemId,
+          runnerHistoryEpoch: message.runnerHistoryEpoch,
+          armedAfterEventSeq: message.armedAfterEventSeq,
+          providerReviewEventSeq: (message.armedAfterEventSeq ?? 0) + 1,
+          forgeHeadSha: recoverable.snapshot.headSha,
+        };
+      };
+      const replay = await svc.reconcileWorkflowDecision(
+        child.id,
+        recoverable.decision.occurrenceId,
+        { resourceSnapshot: recoverable.snapshot },
+        () => true,
+      );
+      assert.equal(replay.status, 409);
+      assert.equal(db.workflowDecisionByOccurrence(recoverable.decision.occurrenceId)?.status, "revoked");
+    } finally { db.close(); }
+  });
+
   await t.test("durable receipt reconciliation rejects mismatched epochs and event ordering", async () => {
     for (const mismatch of ["epoch", "order"] as const) {
       const { db, hub, svc, child, arm } = setup();
