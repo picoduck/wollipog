@@ -1,5 +1,18 @@
-import { createHash, createHmac } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  fsyncSync,
+  linkSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import type { AgentDriverKind } from "@wollipog/protocol";
 import { runContextCommand, type ContextCommandResult } from "./context-command.js";
 import {
@@ -51,6 +64,10 @@ export interface ProviderAuthRecoveryController {
 }
 
 type CommandRunner = typeof runContextCommand;
+type DigestKey = string | Buffer;
+
+const PROVIDER_AUTH_EVIDENCE_KEY_FILE = "provider-auth-evidence-hmac.key";
+const PROVIDER_AUTH_EVIDENCE_KEY_BYTES = 32;
 
 const CLAUDE_CREDENTIAL_ENV = [
   "ANTHROPIC_API_KEY",
@@ -64,7 +81,7 @@ const CODEX_CREDENTIAL_ENV = ["OPENAI_API_KEY"] as const;
 const CLAUDE_ACCOUNT_FIELDS = ["email", "orgId", "authMethod", "apiProvider"] as const satisfies readonly ProviderAuthIdentityField[];
 const CLAUDE_ACCOUNT_ANCHORS = ["email", "orgId"] as const;
 
-function digest(value: unknown, key?: string): string {
+function digest(value: unknown, key?: DigestKey): string {
   const payload = JSON.stringify(value);
   return key
     ? createHmac("sha256", key).update(payload).digest("hex")
@@ -73,7 +90,7 @@ function digest(value: unknown, key?: string): string {
 
 function identityEvidence(
   account: Record<ProviderAuthIdentityField, string | null>,
-  key?: string,
+  key?: DigestKey,
 ): ProviderAuthIdentityEvidence {
   const fields: ProviderAuthIdentityEvidence["fields"] = {};
   for (const field of CLAUDE_ACCOUNT_FIELDS) {
@@ -198,7 +215,7 @@ function credentialHome(meta: SessionMeta, provider: "claude" | "codex"): string
   return meta.env.HOME ?? "<context-default-home>";
 }
 
-export function describeProviderCredentialScope(meta: SessionMeta, digestKey?: string): ProviderCredentialScope | null {
+export function describeProviderCredentialScope(meta: SessionMeta, digestKey?: DigestKey): ProviderCredentialScope | null {
   const provider = providerFamily(meta.driver);
   // Container/cloud adapters own their provider process and credential projection, but do not yet
   // expose a provider-native status probe. Persisting a runner-owned block for one would create a
@@ -226,7 +243,7 @@ export function describeProviderCredentialScope(meta: SessionMeta, digestKey?: s
   };
 }
 
-function claudeObservation(result: ContextCommandResult, digestKey?: string): ProviderAuthObservation {
+function claudeObservation(result: ContextCommandResult, digestKey?: DigestKey): ProviderAuthObservation {
   let parsed: Record<string, unknown> | undefined;
   try {
     const value = JSON.parse(result.stdout);
@@ -252,7 +269,7 @@ function claudeObservation(result: ContextCommandResult, digestKey?: string): Pr
   };
 }
 
-function codexIdentity(meta: SessionMeta, digestKey?: string): string | undefined {
+function codexIdentity(meta: SessionMeta, digestKey?: DigestKey): string | undefined {
   const credentialNames = credentialEnvNames(meta, "codex");
   if (credentialNames.length) {
     // Only the digest is persisted. Raw values never leave this function or enter logs/events.
@@ -270,7 +287,7 @@ export class NativeProviderAuthRecovery implements ProviderAuthRecoveryControlle
 
   constructor(
     private readonly injectedRun?: CommandRunner,
-    private readonly digestKey?: string,
+    private readonly digestKey?: DigestKey,
     deps: Partial<{ spawn: typeof spawnAgent; kill: typeof killTree }> = {},
   ) {
     this.spawn = deps.spawn ?? spawnAgent;
@@ -389,5 +406,67 @@ export class NativeProviderAuthRecovery implements ProviderAuthRecoveryControlle
   cancel(scopeId: string): boolean {
     void scopeId;
     return false;
+  }
+}
+
+/** Construct the runner-owned recovery controller with evidence that survives transport token
+ * rotation. Existing evidence produced with the legacy transport-token key intentionally fails
+ * comparison once, requiring explicit acceptance before the stable baseline is recorded. */
+export function createRunnerProviderAuthRecovery(
+  dataDir: string,
+  injectedRun?: CommandRunner,
+): NativeProviderAuthRecovery {
+  return new NativeProviderAuthRecovery(injectedRun, loadOrCreateProviderAuthEvidenceKey(dataDir));
+}
+
+function loadOrCreateProviderAuthEvidenceKey(dataDir: string): Buffer {
+  const directory = join(dataDir, "credentials");
+  const file = join(directory, PROVIDER_AUTH_EVIDENCE_KEY_FILE);
+  const directoryExisted = existsSync(directory);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  if (!directoryExisted) fsyncDirectory(dirname(directory));
+  if (existsSync(file)) return readProviderAuthEvidenceKey(file);
+
+  const key = randomBytes(PROVIDER_AUTH_EVIDENCE_KEY_BYTES);
+  const temp = `${file}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  const fd = openSync(temp, "wx", 0o600);
+  try {
+    writeFileSync(fd, key);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  try {
+    // Publish without replacement so even an unexpected concurrent constructor can observe only
+    // one complete key. The runner data-directory lease normally provides exclusive ownership.
+    linkSync(temp, file);
+    fsyncDirectory(directory);
+    return key;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    return readProviderAuthEvidenceKey(file);
+  } finally {
+    rmSync(temp, { force: true });
+  }
+}
+
+function readProviderAuthEvidenceKey(file: string): Buffer {
+  const key = readFileSync(file);
+  if (key.length !== PROVIDER_AUTH_EVIDENCE_KEY_BYTES) {
+    throw new Error("provider authentication evidence key is malformed");
+  }
+  try { chmodSync(file, 0o600); } catch { /* Windows ACLs are managed by the owning account. */ }
+  return key;
+}
+
+function fsyncDirectory(directory: string): void {
+  let fd: number | undefined;
+  try {
+    fd = openSync(directory, "r");
+    fsyncSync(fd);
+  } catch (error) {
+    if (process.platform !== "win32") throw error;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }

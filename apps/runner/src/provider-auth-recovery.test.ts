@@ -1,17 +1,19 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import {
   compareProviderAuthIdentity,
+  createRunnerProviderAuthRecovery,
   describeProviderAuthIdentityMismatch,
   mergeProviderAuthIdentityEvidence,
   NativeProviderAuthRecovery,
   describeProviderCredentialScope,
 } from "./provider-auth-recovery.js";
+import { writeRunnerCredentialFile } from "./runner-credential-file.js";
 import type { SessionMeta } from "./session-store.js";
 import type { AgentProcess } from "./spawn.js";
 
@@ -97,6 +99,61 @@ test("Claude status derives only an opaque account identity and never returns pr
     ["apiProvider", "authMethod", "email", "orgId"]);
   assert.equal(JSON.stringify(observation).includes("private"), false);
   assert.equal(JSON.stringify(observation).includes("must-not-escape"), false);
+});
+
+test("runner auth evidence survives transport credential rotation and controller reconstruction", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "wollipog-auth-evidence-"));
+  const results = [
+    { loggedIn: true, email: "stable@example.test", orgId: "stable-org", authMethod: "claude.ai", apiProvider: "firstParty" },
+    { loggedIn: true, email: "stable@example.test", orgId: "stable-org", authMethod: "claude.ai", apiProvider: "firstParty" },
+    { loggedIn: true, email: "stable@example.test", orgId: "stable-org", authMethod: "claude.ai", apiProvider: "firstParty" },
+    { loggedIn: true, email: "changed@example.test", orgId: "stable-org", authMethod: "claude.ai", apiProvider: "firstParty" },
+  ];
+  const run = async () => ({ stdout: JSON.stringify(results.shift()!), stderr: "" });
+  const session = meta({ driver: "claude-code", command: "claude" });
+  const evidenceKeyFile = join(dir, "credentials", "provider-auth-evidence-hmac.key");
+  try {
+    writeRunnerCredentialFile(dir, "transport-token-before-rotation");
+    const legacyRecorded = await new NativeProviderAuthRecovery(
+      run,
+      "transport-token-before-rotation",
+    ).revalidate(session);
+    const initialController = createRunnerProviderAuthRecovery(dir, run);
+    const recordedScope = initialController.describe(session);
+    const recorded = await initialController.revalidate(session);
+    assert.equal(
+      compareProviderAuthIdentity(legacyRecorded.identityId, legacyRecorded.identityEvidence, recorded).matches,
+      false,
+      "legacy transport-keyed evidence must fail closed until the current account is accepted",
+    );
+
+    writeRunnerCredentialFile(dir, "transport-token-after-rotation");
+    const reconstructed = createRunnerProviderAuthRecovery(dir, run);
+    assert.equal(reconstructed.describe(session)?.id, recordedScope?.id);
+    const unchanged = await reconstructed.revalidate(session);
+    assert.equal(
+      compareProviderAuthIdentity(recorded.identityId, recorded.identityEvidence, unchanged).matches,
+      true,
+      "transport credential rotation must not change account evidence",
+    );
+
+    const changed = await reconstructed.revalidate(session);
+    const mismatch = compareProviderAuthIdentity(recorded.identityId, recorded.identityEvidence, changed);
+    assert.equal(mismatch.matches, false);
+    assert.deepEqual(mismatch.differingFields, ["email"]);
+
+    const key = await readFile(evidenceKeyFile);
+    assert.equal(key.length, 32);
+    if (process.platform !== "win32") assert.equal((await stat(evidenceKeyFile)).mode & 0o777, 0o600);
+    await writeFile(evidenceKeyFile, "malformed");
+    assert.throws(
+      () => createRunnerProviderAuthRecovery(dir, run),
+      /provider authentication evidence key is malformed/,
+      "a damaged key must fail closed instead of silently rotating every persisted digest",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("partial Claude account observations compare by shared redacted fields without hiding real changes", async () => {
