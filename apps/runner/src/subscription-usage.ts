@@ -425,7 +425,8 @@ function mergeObservedBucket(
 /** Hold the snapshot inside the control plane's bucket bound, which it enforces by rejecting the
  * whole update. Buckets the update did not report are dropped first: retaining an old bucket at the
  * cost of a currently reported window is how a source loses the windows the user actually needs.
- * Claude only — Codex keeps the plain truncation it had before Claude gained sparse windows. */
+ * This helper is Claude-only. Codex buckets are sorted deterministically before using a direct
+ * capped slice, so account-wide limits retain priority over model-specific limits. */
 function boundBuckets(ordered: SubscriptionUsageBucket[], reported: Set<string>): SubscriptionUsageBucket[] {
   if (ordered.length <= MAX_PROVIDER_BUCKETS) return ordered;
   const excess = ordered.length - MAX_PROVIDER_BUCKETS;
@@ -440,8 +441,9 @@ function boundBuckets(ordered: SubscriptionUsageBucket[], reported: Set<string>)
 function mergeSnapshot(
   prior: SubscriptionUsageSnapshot | undefined,
   update: SubscriptionUsageSnapshot,
-  /** Only Claude notifications are both unordered and carry the per-window semantics the ordering
-   * rules rely on. Codex probes and Codex push updates keep the plain pre-existing merge. */
+  /** Only Claude notifications carry the per-window semantics needed for freshness-aware merging.
+   * Codex probes and push updates use a plain field merge, then sort buckets deterministically
+   * before truncation so sparse updates cannot change their presentation priority. */
   mergeMode: "claude-notification" | "plain",
 ): SubscriptionUsageSnapshot {
   if (!prior || prior.provider !== update.provider) return update;
