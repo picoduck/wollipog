@@ -4719,6 +4719,12 @@ export interface SessionReminderView {
   wakeReason?: SessionReminderWakeReason;
 }
 
+/** Exact-owner authoritative reminder state for one session. `null` is a positive observation
+ * that the caller has no reminder, rather than an omitted or delayed live update. */
+export interface SessionReminderReadResponse {
+  reminder: SessionReminderView | null;
+}
+
 /** A provider-neutral auxiliary conversation attached to one primary session. The child is a
  * separate session (and therefore has separate transcript, accounting, and worktree state); this
  * relationship deliberately does not confer provider-fork or artifact ancestry. */

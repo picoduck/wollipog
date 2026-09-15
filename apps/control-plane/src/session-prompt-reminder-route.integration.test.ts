@@ -20,6 +20,7 @@ const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const RUNNER_ID = "runner-prompt-reminder-route";
 const SESSION_ID = "session-prompt-reminder-route";
 const PARENT_SESSION_ID = "session-prompt-reminder-parent";
+const PRIVATE_SESSION_ID = "session-prompt-reminder-private";
 const OWNER_TOKEN = "prompt-reminder-owner-token";
 const OTHER_TOKEN = "prompt-reminder-other-token";
 const AGENT_TOKEN = "prompt-reminder-agent-token";
@@ -191,6 +192,21 @@ function seed(database: string, runner: RunnerMetadata): { ownerUserId: string; 
       },
       now: now + 4,
     });
+    db.createSession({
+      id: PRIVATE_SESSION_ID,
+      runnerId: RUNNER_ID,
+      workspaceId: null,
+      agentId: null,
+      title: "Private Reminder Route",
+      useWorktree: false,
+      driver: "acp",
+      config: {},
+      scope: {
+        organizationId: identity.organizationId,
+        owner: { kind: "user", userId: identity.userId },
+      },
+      now: now + 4,
+    });
     db.updateSessionStatus(SESSION_ID, "running", now + 5);
     db.updateSessionStatus(PARENT_SESSION_ID, "running", now + 5);
     assert.equal(db.setAgentControlCredential(PARENT_SESSION_ID, RUNNER_ID, hashToken(AGENT_TOKEN), now + 6), true);
@@ -210,6 +226,16 @@ function seed(database: string, runner: RunnerMetadata): { ownerUserId: string; 
       assert.equal(created.kind, "updated");
       if (created.kind === "updated") reminderIds.set(userId, created.reminder.reminderId);
     }
+    assert.equal(db.setSessionReminder({
+      sessionId: PRIVATE_SESSION_ID,
+      userId: identity.userId,
+      scheduledFor: now + 60_000,
+      timeZone: "UTC",
+      originalExpression: "private reminder expression",
+      wakePolicy: "regardless",
+      expectedRevision: 0,
+      now,
+    }).kind, "updated");
     assert.equal(db.fireDueSessionReminders(now).length, 2);
     return { ownerUserId: identity.userId, reminderIds };
   } finally {
@@ -264,6 +290,66 @@ test("prompt route acknowledges fired reminders only for accepted human principa
     authorization: `Bearer ${OWNER_TOKEN}`,
     "content-type": "application/json",
   };
+  const readReminder = async (headers: Record<string, string>, sessionId = SESSION_ID) => {
+    const response = await fetch(`${baseUrl}/api/sessions/${sessionId}/reminder`, { headers });
+    const body = await response.json() as { reminder?: { reminderId?: string; originalExpression?: string } | null; error?: string };
+    return { response, body };
+  };
+  const ownerRead = await readReminder(humanHeaders);
+  assert.equal(ownerRead.response.status, 200);
+  assert.equal(ownerRead.response.headers.get("cache-control"), "no-store");
+  assert.deepEqual(ownerRead.body.reminder?.reminderId, seeded.reminderIds.get(seeded.ownerUserId));
+  assert.equal(JSON.stringify(ownerRead.body).includes(seeded.reminderIds.get(OTHER_USER_ID)!), false,
+    "the owner's response must not expose another user's reminder identity");
+
+  const otherHeaders = {
+    authorization: `Bearer ${OTHER_TOKEN}`,
+    "content-type": "application/json",
+  };
+  const otherRead = await readReminder(otherHeaders);
+  assert.equal(otherRead.response.status, 200);
+  assert.deepEqual(otherRead.body.reminder?.reminderId, seeded.reminderIds.get(OTHER_USER_ID));
+  assert.equal(JSON.stringify(otherRead.body).includes(seeded.reminderIds.get(seeded.ownerUserId)!), false,
+    "an organization peer sees only their exact-owner reminder row");
+
+  const staleWrite = await fetch(`${baseUrl}/api/sessions/${SESSION_ID}/reminder`, {
+    method: "PUT",
+    headers: humanHeaders,
+    body: JSON.stringify({
+      scheduledFor: Date.now() + 60_000,
+      timeZone: "Pacific/Honolulu",
+      originalExpression: "in one minute",
+      wakePolicy: "until_activity",
+      expectedRevision: 0,
+    }),
+  });
+  const staleBody = await staleWrite.json() as Record<string, unknown>;
+  assert.equal(staleWrite.status, 409);
+  assert.deepEqual(staleBody, { error: "reminder changed in another client; reload and try again" });
+  for (const secret of [
+    seeded.reminderIds.get(seeded.ownerUserId)!,
+    seeded.reminderIds.get(OTHER_USER_ID)!,
+    "one second ago",
+    "fired",
+  ]) {
+    assert.equal(JSON.stringify(staleBody).includes(secret), false,
+      `the bounded conflict response must not expose ${secret}`);
+  }
+
+  const inaccessible = await readReminder(otherHeaders, PRIVATE_SESSION_ID);
+  assert.equal(inaccessible.response.status, 404);
+  assert.deepEqual(inaccessible.body, { error: "session not found" });
+  assert.equal(JSON.stringify(inaccessible.body).includes("private reminder expression"), false);
+
+  const agentRead = await readReminder({
+    authorization: `Bearer ${AGENT_TOKEN}`,
+    [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: PARENT_SESSION_ID,
+    "content-type": "application/json",
+  });
+  assert.equal(agentRead.response.status, 401);
+  assert.match(agentRead.body.error ?? "", /unauthorized/i);
+  assert.equal(agentRead.body.reminder, undefined);
+
   const offline = await fetch(`${baseUrl}/api/sessions/${SESSION_ID}/prompt`, {
     method: "POST",
     headers: humanHeaders,
@@ -341,6 +427,10 @@ test("prompt route acknowledges fired reminders only for accepted human principa
   }, "other user's accepted prompt");
   assert.equal(otherDelivery.text, "other user's accepted prompt");
   assert.equal(storedReminder(database, OTHER_USER_ID), null);
+  const removedRead = await readReminder(otherHeaders);
+  assert.equal(removedRead.response.status, 200);
+  assert.deepEqual(removedRead.body, { reminder: null },
+    "absence is authoritative and does not fall through to another user's reminder");
   assert.deepEqual(
     storedReminder(database, seeded.ownerUserId),
     { reminderId: seeded.reminderIds.get(seeded.ownerUserId), state: "fired" },

@@ -977,8 +977,11 @@ export function InboxView({
     setSeen(next);
   }, [instanceScope, sessions]);
 
-  const saveReminder = useCallback(async (sessionId: string, request: SetSessionReminderRequest) => {
-    const previous = reminders.get(sessionId);
+  const saveReminder = useCallback(async (
+    sessionId: string,
+    request: SetSessionReminderRequest,
+    previous?: SessionReminderView,
+  ) => {
     const updated = await api.setReminder(sessionId, request);
     showUndo(previous ? "Reminder updated." : "Session snoozed.", async () => {
       if (previous) {
@@ -997,16 +1000,13 @@ export function InboxView({
         await api.removeReminder(sessionId, updated.revision, updated.reminderId);
       }
     });
-  }, [api, reminders, showUndo]);
+  }, [api, showUndo]);
 
   const removeReminder = useCallback(async (
     sessionId: string,
-    expectedRevision: number,
-    expectedReminderId: string,
+    previous: SessionReminderView,
   ) => {
-    const previous = reminders.get(sessionId);
-    if (!previous) return;
-    await api.removeReminder(sessionId, expectedRevision, expectedReminderId);
+    await api.removeReminder(sessionId, previous.revision, previous.reminderId);
     showUndo("Reminder removed.", async () => {
       await api.setReminder(sessionId, {
         scheduledFor: previous.scheduledFor,
@@ -1024,7 +1024,7 @@ export function InboxView({
   const dismissReturnedReminder = useCallback(async (sessionId: string) => {
     const current = reminders.get(sessionId);
     if (current?.state !== "fired") return;
-    await removeReminder(sessionId, current.revision, current.reminderId);
+    await removeReminder(sessionId, current);
   }, [reminders, removeReminder]);
 
   const archive = useCallback(async (sessionId: string) => {
@@ -1623,9 +1623,9 @@ export function InboxView({
             setSnoozeSessionId(null);
             setSnoozeReturnFocusRef(undefined);
           }}
-          onSave={(request) => saveReminder(snoozeSessionId, request)}
-          onRemove={(expectedRevision, expectedReminderId) =>
-            removeReminder(snoozeSessionId, expectedRevision, expectedReminderId)}
+          onSave={(request, previous) => saveReminder(snoozeSessionId, request, previous)}
+          onRemove={(previous) => removeReminder(snoozeSessionId, previous)}
+          onReconcile={async () => (await api.sessionReminder(snoozeSessionId)).reminder}
         />
       )}
     </div>

@@ -1,5 +1,6 @@
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { SessionReminderView, SessionReminderWakePolicy, SetSessionReminderRequest } from "@wollipog/protocol";
+import { ApiError } from "../api.js";
 import {
   browserTimeZone,
   exactReminderSchedule,
@@ -15,12 +16,14 @@ export function SnoozeDialog({
   onClose,
   onSave,
   onRemove,
+  onReconcile,
   returnFocusRef,
 }: {
   reminder?: SessionReminderView;
   onClose: () => void;
-  onSave: (request: SetSessionReminderRequest) => Promise<void>;
-  onRemove?: (expectedRevision: number, expectedReminderId: string) => Promise<void>;
+  onSave: (request: SetSessionReminderRequest, previous?: SessionReminderView) => Promise<void>;
+  onRemove?: (previous: SessionReminderView) => Promise<void>;
+  onReconcile?: () => Promise<SessionReminderView | null>;
   /** Where focus returns on close when the dialog was opened from a context menu (#154). */
   returnFocusRef?: { current: HTMLElement | null };
 }) {
@@ -31,13 +34,24 @@ export function SnoozeDialog({
   const [wakePolicy, setWakePolicy] = useState<SessionReminderWakePolicy>(initialDraft.wakePolicy);
   const [scheduleTouched, setScheduleTouched] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [reconciling, setReconciling] = useState(false);
+  const [reconciled, setReconciled] = useState<{
+    reminder: SessionReminderView | null;
+    liveKey: string;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reconciliationFailed, setReconciliationFailed] = useState(false);
   const expressionRef = useRef<HTMLInputElement>(null);
   const focusExpressionAfterReloadRef = useRef(false);
+  const reconcilingRef = useRef(false);
+  const liveReminderKey = reminderKey(reminder);
+  const liveReminderKeyRef = useRef(liveReminderKey);
+  liveReminderKeyRef.current = liveReminderKey;
   const localTimeZone = browserTimeZone();
   const timeZone = loadedReminder && !scheduleTouched ? loadedReminder.timeZone : localTimeZone;
   const returnedReminder = loadedReminder?.state === "fired" ? loadedReminder : undefined;
-  const conflict = submitting ? null : reminderConflict(loadedReminder, reminder);
+  const currentReminder = reconciled ? reconciled.reminder ?? undefined : reminder;
+  const conflict = submitting ? null : reminderConflict(loadedReminder, currentReminder);
   const parsed = useMemo(() => {
     if (loadedReminder && !scheduleTouched) return storedReminderSchedule(loadedReminder);
     return exact
@@ -51,31 +65,63 @@ export function SnoozeDialog({
     expressionRef.current?.focus();
   }, [loadedReminder]);
 
+  useEffect(() => {
+    setReconciled((current) => current && current.liveKey !== liveReminderKey ? null : current);
+  }, [liveReminderKey]);
+
   const reload = () => {
-    const next = draftForReminder(reminder);
+    const next = draftForReminder(currentReminder);
     focusExpressionAfterReloadRef.current = true;
-    setLoadedReminder(reminder);
+    setLoadedReminder(currentReminder);
     setExpression(next.expression);
     setExact(next.exact);
     setWakePolicy(next.wakePolicy);
     setScheduleTouched(false);
     setError(null);
+    setReconciliationFailed(false);
+  };
+
+  const reconcile = async () => {
+    if (!onReconcile || reconcilingRef.current) return;
+    reconcilingRef.current = true;
+    setReconciling(true);
+    const startedWithLiveKey = liveReminderKeyRef.current;
+    try {
+      const authoritative = await onReconcile();
+      const latestLiveKey = liveReminderKeyRef.current;
+      if (latestLiveKey === startedWithLiveKey) {
+        setReconciled({ reminder: authoritative, liveKey: latestLiveKey });
+      } else {
+        // A live change observed after the read started is the fresher client observation.
+        setReconciled(null);
+      }
+      setError(null);
+      setReconciliationFailed(false);
+    } catch (cause) {
+      setError(`Unable to load the current reminder state. ${(cause as Error).message}`);
+      setReconciliationFailed(true);
+    } finally {
+      reconcilingRef.current = false;
+      setReconciling(false);
+    }
   };
 
   const submit = async () => {
     if (!parsed || submitting || conflict) return;
     setSubmitting(true);
     setError(null);
+    setReconciliationFailed(false);
     try {
       await onSave({
         ...parsed,
         wakePolicy,
         expectedRevision: loadedReminder?.revision ?? 0,
         ...(loadedReminder ? { expectedReminderId: loadedReminder.reminderId } : {}),
-      });
+      }, loadedReminder);
       onClose();
     } catch (cause) {
       setError((cause as Error).message);
+      if (cause instanceof ApiError && cause.status === 409) await reconcile();
     } finally {
       setSubmitting(false);
     }
@@ -85,11 +131,13 @@ export function SnoozeDialog({
     if (!onRemove || !loadedReminder || submitting || conflict) return;
     setSubmitting(true);
     setError(null);
+    setReconciliationFailed(false);
     try {
-      await onRemove(loadedReminder.revision, loadedReminder.reminderId);
+      await onRemove(loadedReminder);
       onClose();
     } catch (cause) {
       setError((cause as Error).message);
+      if (cause instanceof ApiError && cause.status === 409) await reconcile();
     } finally {
       setSubmitting(false);
     }
@@ -136,10 +184,17 @@ export function SnoozeDialog({
             <strong>Stored Reminder Changed</strong>
             <span>{conflict} Your local draft is preserved. Continue reviewing it, or reload before saving.</span>
             <button className="btn sm" type="button" onClick={reload}>
-              {reminder ? "Reload Reminder" : "Start New Reminder"}
+              {currentReminder ? "Reload Reminder" : "Start New Reminder"}
             </button>
           </div>
         )}
+        {reconciling && <p className="form-error" role="status">Loading current reminder state…</p>}
+        {error && !reconciling && <p className="form-error" role="alert">
+          {error}
+          {reconciliationFailed && onReconcile && <>{" "}<button className="btn sm" type="button" onClick={() => void reconcile()}>
+            Retry Reconciliation
+          </button></>}
+        </p>}
         <div className="snooze-presets" role="group" aria-label="Reminder Presets">
           {["later today", "tomorrow morning", "in 1 day", "in 7 days"].map((preset) => (
             <button key={preset} className="btn sm" type="button" onClick={() => { setScheduleTouched(true); setExact(""); setExpression(preset); }}>
@@ -173,10 +228,13 @@ export function SnoozeDialog({
           <span>{parsed ? formatReminderInstant(parsed.scheduledFor, parsed.timeZone) : "Enter an unambiguous future time."}</span>
           <span>Time Zone: {timeZone}</span>
         </div>
-        {error && <p className="form-error" role="alert">{error}</p>}
       </form>
     </Modal>
   );
+}
+
+function reminderKey(reminder?: SessionReminderView): string {
+  return reminder ? `${reminder.reminderId}:${reminder.revision}:${reminder.state}` : "absent";
 }
 
 function draftForReminder(reminder?: SessionReminderView): {

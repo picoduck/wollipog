@@ -5,6 +5,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { SessionReminderView, SetSessionReminderRequest } from "@wollipog/protocol";
+import { ApiError } from "../api.js";
 import { SnoozeDialog } from "./SnoozeDialog.js";
 
 const domWindow = new Window({ url: "http://localhost/inbox" });
@@ -179,7 +180,7 @@ test("the server echo from the dialog's own save is not announced as a remote co
   await act(async () => { root.render(<SnoozeDialog reminder={original} {...props} />); });
   await act(async () => {
     container.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
-    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
   });
   await act(async () => {
     root.render(<SnoozeDialog reminder={{ ...original, revision: 2, updatedAt: 2 }} {...props} />);
@@ -248,6 +249,233 @@ test("fired, removed, and recreated reminders have distinct live-conflict messag
 
   await render({ ...original, reminderId: "reminder-recreated", revision: 1 });
   assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /removed and recreated in another client/i);
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void; reject(cause: unknown): void } {
+  let resolve!: (value: T) => void;
+  let reject!: (cause: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+test("409 reconciliation distinguishes authoritative reminder states without live delivery", async () => {
+  const original: SessionReminderView = {
+    reminderId: "reminder-original",
+    sessionId: "session-1",
+    scheduledFor: Date.now() + 60_000,
+    timeZone: "America/Chicago",
+    originalExpression: "in 1 hour",
+    wakePolicy: "until_activity",
+    state: "pending",
+    revision: 1,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const cases: Array<{
+    name: string;
+    authoritative: SessionReminderView | null;
+    message: RegExp;
+    action: "Reload Reminder" | "Start New Reminder";
+    expectedRevision: number;
+    expectedReminderId?: string;
+  }> = [
+    {
+      name: "updated",
+      authoritative: { ...original, originalExpression: "in 2 hours", revision: 2, updatedAt: 2 },
+      message: /updated in another client/i,
+      action: "Reload Reminder",
+      expectedRevision: 2,
+      expectedReminderId: "reminder-original",
+    },
+    {
+      name: "fired",
+      authoritative: {
+        ...original,
+        state: "fired",
+        revision: 2,
+        updatedAt: 2,
+        firedAt: 2,
+        wakeReason: "scheduled",
+      },
+      message: /already fired/i,
+      action: "Reload Reminder",
+      expectedRevision: 2,
+      expectedReminderId: "reminder-original",
+    },
+    {
+      name: "removed",
+      authoritative: null,
+      message: /removed in another client/i,
+      action: "Start New Reminder",
+      expectedRevision: 0,
+    },
+    {
+      name: "removed and recreated at the same revision",
+      authoritative: { ...original, reminderId: "reminder-recreated", revision: 1, updatedAt: 3 },
+      message: /removed and recreated in another client/i,
+      action: "Reload Reminder",
+      expectedRevision: 1,
+      expectedReminderId: "reminder-recreated",
+    },
+  ];
+
+  for (const scenario of cases) {
+    const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+    domWindow.document.body.append(container as never);
+    const root = createRoot(container);
+    let saveCalls = 0;
+    let reconciliations = 0;
+    let accepted: SetSessionReminderRequest | undefined;
+    let acceptedPrevious: SessionReminderView | undefined;
+    await act(async () => {
+      root.render(<SnoozeDialog
+        reminder={original}
+        onClose={() => undefined}
+        onSave={async (request, previous) => {
+          saveCalls++;
+          if (saveCalls === 1) throw new ApiError("reminder changed in another client", 409);
+          accepted = request;
+          acceptedPrevious = previous;
+        }}
+        onRemove={async () => undefined}
+        onReconcile={async () => { reconciliations++; return scenario.authoritative; }}
+      />);
+    });
+    const expression = container.querySelector<HTMLInputElement>("#snooze-expression")!;
+    const exact = container.querySelector<HTMLInputElement>("#snooze-exact")!;
+    await act(async () => {
+      expression.value = "today at 3:30 pm";
+      fireDomEvent.change(expression);
+      exact.value = "2099-04-05T06:30";
+      fireDomEvent.change(exact);
+      [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+        .find((button) => button.textContent?.includes("Regardless"))!.click();
+      exact.focus();
+      container.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
+      await Promise.resolve();
+    });
+
+    assert.equal(saveCalls, 1, `${scenario.name}: the stale mutation is not retried`);
+    assert.equal(reconciliations, 1, `${scenario.name}: exactly one authoritative read follows the conflict`);
+    assert.equal(expression.value, "today at 3:30 pm", `${scenario.name}: natural-language draft`);
+    assert.equal(exact.value, "2099-04-05T06:30", `${scenario.name}: exact-time draft`);
+    assert.equal(container.querySelector<HTMLButtonElement>('[role="radio"][aria-checked="true"]')
+      ?.textContent?.includes("Regardless"), true, `${scenario.name}: Wake Policy draft`);
+    assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", scenario.message, scenario.name);
+    assert.equal(domWindow.document.activeElement, exact, `${scenario.name}: reconciliation keeps focus`);
+
+    const reload = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === scenario.action)!;
+    await act(async () => { reload.click(); });
+    assert.equal(domWindow.document.activeElement, expression, `${scenario.name}: reload restores dialog focus`);
+    await act(async () => { container.querySelector<HTMLButtonElement>('button[type="submit"]')!.click(); });
+    assert.equal(accepted?.expectedRevision, scenario.expectedRevision, scenario.name);
+    assert.equal(accepted?.expectedReminderId, scenario.expectedReminderId, scenario.name);
+    assert.equal(acceptedPrevious?.reminderId, scenario.authoritative?.reminderId, scenario.name);
+
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+test("unsupported and failed reconciliation remains visible and safely retryable", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const original: SessionReminderView = {
+    reminderId: "reminder-original", sessionId: "session-1", scheduledFor: Date.now() + 60_000,
+    timeZone: "UTC", originalExpression: "in 1 hour", wakePolicy: "until_activity", state: "pending",
+    revision: 1, createdAt: 1, updatedAt: 1,
+  };
+  const updated = { ...original, originalExpression: "in 2 hours", revision: 2, updatedAt: 2 };
+  let saveCalls = 0;
+  let readCalls = 0;
+  await act(async () => {
+    root.render(<SnoozeDialog
+      reminder={original}
+      onClose={() => undefined}
+      onSave={async () => { saveCalls++; throw new ApiError("stale reminder", 409); }}
+      onReconcile={async () => {
+        readCalls++;
+        if (readCalls === 1) throw new ApiError("not found", 404);
+        if (readCalls === 2) throw new ApiError("control plane unavailable", 503);
+        return updated;
+      }}
+    />);
+  });
+
+  await act(async () => {
+    container.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /unable to load.*not found/i);
+  assert.equal(saveCalls, 1);
+  assert.equal(readCalls, 1);
+
+  const retry = [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent === "Retry Reconciliation")!;
+  await act(async () => { retry.click(); await Promise.resolve(); });
+  assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /unable to load.*control plane unavailable/i);
+  assert.equal(saveCalls, 1, "an unsupported or unavailable read never retries the mutation");
+  assert.equal(readCalls, 2);
+
+  const retryAgain = [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent === "Retry Reconciliation")!;
+  await act(async () => { retryAgain.click(); await Promise.resolve(); });
+  assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /updated in another client/i);
+  assert.equal(saveCalls, 1, "retry performs only the safe read");
+  assert.equal(readCalls, 3);
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("a newer live update wins when it arrives during authoritative reconciliation", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const original: SessionReminderView = {
+    reminderId: "reminder-original", sessionId: "session-1", scheduledFor: Date.now() + 60_000,
+    timeZone: "UTC", originalExpression: "in 1 hour", wakePolicy: "until_activity", state: "pending",
+    revision: 1, createdAt: 1, updatedAt: 1,
+  };
+  const readResult = { ...original, originalExpression: "in 2 hours", revision: 2, updatedAt: 2 };
+  const newerLive = { ...original, originalExpression: "in 3 hours", revision: 3, updatedAt: 3 };
+  const pendingRead = deferred<SessionReminderView | null>();
+  let saveCalls = 0;
+  let accepted: SetSessionReminderRequest | undefined;
+  const props = {
+    onClose: () => undefined,
+    onSave: async (request: SetSessionReminderRequest) => {
+      saveCalls++;
+      if (saveCalls === 1) throw new ApiError("stale reminder", 409);
+      accepted = request;
+    },
+    onReconcile: () => pendingRead.promise,
+  };
+  await act(async () => { root.render(<SnoozeDialog reminder={original} {...props} />); });
+  await act(async () => {
+    container.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
+    await Promise.resolve();
+  });
+  await act(async () => { root.render(<SnoozeDialog reminder={newerLive} {...props} />); });
+  await act(async () => { pendingRead.resolve(readResult); await pendingRead.promise; });
+
+  assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /updated in another client/i);
+  await act(async () => {
+    [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Reload Reminder")!.click();
+  });
+  assert.equal(container.querySelector<HTMLInputElement>("#snooze-expression")?.value, "in 3 hours");
+  await act(async () => { container.querySelector<HTMLButtonElement>('button[type="submit"]')!.click(); });
+  assert.equal(accepted?.expectedRevision, 3);
+  assert.equal(accepted?.expectedReminderId, "reminder-original");
 
   await act(async () => { root.unmount(); });
   container.remove();

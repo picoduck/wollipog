@@ -70,6 +70,28 @@ test("cancelTurn posts to the encoded non-terminal turn endpoint", async () => {
   assert.deepEqual(calls, [{ path: "/api/sessions/session%2F1/cancel", method: "POST" }]);
 });
 
+test("authoritative reminder reads use the encoded no-cache endpoint", async () => {
+  const calls: Array<{ path: string; method: string; cache: RequestCache | undefined }> = [];
+  const client = createApiClient({
+    instanceId: "instance-a",
+    publicOrigin: "https://instance-a.example.test",
+    async request(path, init) {
+      calls.push({ path, method: init?.method ?? "GET", cache: init?.cache });
+      return new Response(JSON.stringify({ reminder: null }), {
+        headers: { "content-type": "application/json" },
+      });
+    },
+    close() {},
+  });
+
+  assert.deepEqual(await client.sessionReminder("session/1"), { reminder: null });
+  assert.deepEqual(calls, [{
+    path: "/api/sessions/session%2F1/reminder",
+    method: "GET",
+    cache: "no-store",
+  }]);
+});
+
 test("Parent Control setting and descendant reads use encoded session-scoped endpoints", async () => {
   const calls: Array<{ path: string; method: string; body: unknown }> = [];
   const signals: Array<AbortSignal | null | undefined> = [];
