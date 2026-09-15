@@ -1,7 +1,20 @@
+#!/usr/bin/env node
+
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
-const scenario = process.argv[2] ?? "resume";
+const argv = process.argv.slice(2);
+if (argv.length === 1 && argv[0] === "--version") {
+  process.stdout.write("codex-cli 0.154.0\n");
+  process.exit(0);
+}
+if (argv.length === 2 && argv[0] === "app-server" && argv[1] === "--help") {
+  process.stdout.write("Usage: codex app-server [OPTIONS]\nstdio:// transport\ngenerate-json-schema\n");
+  process.exit(0);
+}
+
+const configuredScenario = process.env.WOLLIPOG_FAKE_CODEX_SCENARIO;
+const scenario = configuredScenario ?? argv[0] ?? "resume";
 const threadId = scenario === "fresh"
   ? "fixture-fresh"
   : scenario === "question" || scenario === "dogfood-question"
@@ -20,8 +33,9 @@ const expectedQueuedDogfoodPrompts = [
   "The complete two-question form must remain visible and reachable above the composer.",
 ];
 const expectedLaunchArgs = ["--enable", "default_mode_request_user_input", "app-server"];
-if (JSON.stringify(process.argv.slice(3)) !== JSON.stringify(expectedLaunchArgs)) {
-  process.stderr.write("unexpected app-server launch arguments: " + JSON.stringify(process.argv.slice(3)) + "\n");
+const launchArgs = configuredScenario ? argv : argv.slice(1);
+if (JSON.stringify(launchArgs) !== JSON.stringify(expectedLaunchArgs)) {
+  process.stderr.write("unexpected app-server launch arguments: " + JSON.stringify(launchArgs) + "\n");
   process.exit(3);
 }
 
