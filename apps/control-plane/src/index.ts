@@ -1179,6 +1179,11 @@ app.register(async (instance) => {
           app.log.warn(`runner ${runnerId} sent an unsolicited policy-hook decision receipt`);
         }
         break;
+      case "workflow_action_admission_recorded":
+        if (runnerId && !hub.resolveRunnerRequest(msg, runnerId)) {
+          app.log.warn(`runner ${runnerId} sent an unsolicited workflow action admission receipt`);
+        }
+        break;
       case "agent_control_credential":
         {
           const accepted = db.setAgentControlCredential(msg.sessionId, runnerId!, msg.tokenHash, Date.now());
@@ -3250,7 +3255,7 @@ app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/consume", async (re
   }
   if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
   if (!validParentControlCoordinate(occurrenceId)) return reply.code(400).send({ error: "invalid occurrenceId" });
-  return respond(reply, svc.consumeWorkflowDecision(
+  return respond(reply, await svc.consumeWorkflowDecision(
     id,
     occurrenceId,
     req.body as ConsumeWorkflowDecisionRequest,

@@ -62,6 +62,12 @@ const EVERY_PAYLOAD = {
     governancePolicyId: "HOOK_POLICY_LEAK",
     toolCallId: "HOOK_TOOL_LEAK",
   },
+  workflow_action_admission_armed: {
+    kind: "workflow_action_admission_armed",
+    occurrenceId: "ACTION_OCCURRENCE_LEAK",
+    commandDigest: "b".repeat(64),
+    providerTurnId: "ACTION_TURN_LEAK",
+  },
   review_decision: {
     kind: "review_decision",
     reviewId: "REVIEW_ID_LEAK",
@@ -138,7 +144,7 @@ test("strict projection exhaustively allowlists user, top-level assistant, and i
     "IMAGE_LEAK", "COMMAND_ID_LEAK", "AGENT_THOUGHT_LEAK", "TOOL_", "PLAN_LEAK",
     "COMMAND_OUTPUT_LEAK", "FILE_PATH_LEAK", "DIFF_LEAK", "STDERR_LEAK", "ERROR_LEAK",
     "REVIEW_", "PERMISSION_", "OPTION_", "QUESTION_", "ANSWER_KEY_LEAK", "CHECKPOINT_",
-    "SOURCE_SESSION_LEAK", "USAGE_PARENT_LEAK", "HOOK_", "INTERNAL_SESSION_ID", "1700000000000",
+    "SOURCE_SESSION_LEAK", "USAGE_PARENT_LEAK", "HOOK_", "ACTION_", "INTERNAL_SESSION_ID", "1700000000000",
   ]) {
     assert.ok(!serialized.includes(forbidden), `${forbidden} must not cross the operational projection`);
   }

@@ -207,6 +207,7 @@ function publicMessages(
       case "error":
       case "policy_transport":
       case "policy_hook_decision":
+      case "workflow_action_admission_armed":
       case "review_decision":
       case "permission_request":
       case "permission_resolved":

@@ -47,6 +47,7 @@ import type {
   SessionCommandInvocationErrorCode,
   SessionEventPayload,
   PolicyHookDecisionEvent,
+  WorkflowActionAdmissionArmedEvent,
   SessionLaunchSpec,
   SessionSnapshot,
   SessionStatus,
@@ -11993,6 +11994,66 @@ export class SessionManager {
     return stored
       ? { accepted: true, auditId: payload.auditId, eventSeq: stored.seq }
       : { accepted: false, auditId: payload.auditId, error: "decision history append failed" };
+  }
+
+  /** Append the causal boundary for an App Server workflow action before its MCP/CLI arming call
+   * can return. Provider events already durable in the runner log stay below this sequence even
+   * when their control-plane relay is delayed. */
+  recordWorkflowActionAdmission(
+    sessionId: string,
+    value: unknown,
+  ): {
+    accepted: boolean;
+    occurrenceId: string;
+    providerTurnId?: string;
+    providerThreadId?: string;
+    historyEpoch?: number;
+    eventSeq?: number;
+    error?: string;
+  } {
+    const fail = (occurrenceId: string, error: string) => ({ accepted: false, occurrenceId, error });
+    if (!value || typeof value !== "object" || Array.isArray(value)) return fail("", "admission is malformed");
+    const raw = value as Record<string, unknown>;
+    const occurrenceId = typeof raw.occurrenceId === "string" ? raw.occurrenceId : "";
+    const bounded = (field: unknown, max: number) => typeof field === "string" &&
+      field.length > 0 && field.length <= max && !/[\x00-\x1f\x7f]/u.test(field);
+    if (Object.keys(raw).some((key) => !["occurrenceId", "commandDigest", "providerTurnId"].includes(key)) ||
+        !bounded(raw.occurrenceId, 256) || !bounded(raw.providerTurnId, 512) ||
+        typeof raw.commandDigest !== "string" || !/^[0-9a-f]{64}$/u.test(raw.commandDigest)) {
+      return fail(occurrenceId, "admission identity is invalid");
+    }
+    const meta = this.store.readMeta(sessionId);
+    const active = this.active.get(sessionId);
+    if (!meta || meta.driver !== "codex-app-server" || !active) {
+      return fail(occurrenceId, "App Server session is not active");
+    }
+    const providerTurnId = active.providerInitiatedTurnActive
+      ? active.providerInitiatedTurnId
+      : active.running ? active.activeTurnId : undefined;
+    const providerThreadId = active.client.agentSessionId();
+    if (!providerTurnId || providerTurnId !== raw.providerTurnId ||
+        typeof providerThreadId !== "string" || !bounded(providerThreadId, 512)) {
+      return fail(occurrenceId, "App Server provider coordinates changed before action arming");
+    }
+    const payload: WorkflowActionAdmissionArmedEvent = {
+      kind: "workflow_action_admission_armed",
+      occurrenceId,
+      commandDigest: raw.commandDigest,
+      providerTurnId,
+    };
+    const stored = this.emitEvent(sessionId, payload);
+    const historyEpoch = this.store.readMeta(sessionId)?.logEpoch ?? 0;
+    if (!stored || !Number.isSafeInteger(historyEpoch) || historyEpoch < 0) {
+      return fail(occurrenceId, "action admission history append failed");
+    }
+    return {
+      accepted: true,
+      occurrenceId,
+      providerTurnId,
+      providerThreadId,
+      historyEpoch,
+      eventSeq: stored.seq,
+    };
   }
 
   private flushPolicyHookDecisionAfterToolCall(sessionId: string, toolCallId: string): void {

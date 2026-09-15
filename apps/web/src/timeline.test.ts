@@ -205,6 +205,20 @@ test("streaming metadata settles on the content-free response completion fence",
   assert.deepEqual(settled, streaming, "streaming state never changes the durable transcript shape");
 });
 
+test("workflow action admission markers stay hidden and separate adjacent provider text", () => {
+  const items = deriveTimeline([
+    ev({ kind: "agent_message", text: "before" }),
+    ev({
+      kind: "workflow_action_admission_armed",
+      occurrenceId: "workflow-1",
+      commandDigest: "a".repeat(64),
+      providerTurnId: "turn-1",
+    }),
+    ev({ kind: "agent_message", text: "after" }),
+  ]);
+  assert.deepEqual(items.map((item) => item.kind === "agent_message" ? item.text : ""), ["before", "after"]);
+});
+
 test("managed continuation delivery markers remain durable but hidden from the timeline", () => {
   const items = deriveTimeline([
     ev({ kind: "stderr", text: "before" }),

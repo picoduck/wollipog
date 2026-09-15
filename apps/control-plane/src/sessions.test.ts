@@ -296,6 +296,19 @@ class FakeHub {
         reason: "applied",
       };
     }
+    if (!this.requestHandler && msg.type === "record_workflow_action_admission") {
+      return {
+        type: "workflow_action_admission_recorded",
+        requestId: msg.requestId,
+        sessionId: msg.sessionId,
+        occurrenceId: msg.occurrenceId,
+        accepted: true,
+        providerTurnId: msg.providerTurnId,
+        providerThreadId: "test-provider-thread",
+        historyEpoch: 0,
+        eventSeq: 1,
+      };
+    }
     if (!this.requestHandler) throw new Error("runner did not respond in time");
     return await this.requestHandler(msg);
   }
@@ -493,6 +506,19 @@ function makeHarness(
         sessionId: message.sessionId,
         applied: true,
         reason: "applied",
+      };
+    }
+    if (message.type === "record_workflow_action_admission") {
+      return {
+        type: "workflow_action_admission_recorded",
+        requestId: message.requestId,
+        sessionId: message.sessionId,
+        occurrenceId: message.occurrenceId,
+        accepted: true,
+        providerTurnId: message.providerTurnId,
+        providerThreadId: "test-provider-thread",
+        historyEpoch: 0,
+        eventSeq: 1,
       };
     }
     if (message.type !== "adopt_session") throw new Error("runner did not respond in time");
@@ -741,7 +767,7 @@ test("orchestrator separates default provider execution from the negotiated stri
   } finally { db.close(); }
 });
 
-test("Orchestrator campaign policy resolves precedence, isolates active sessions, and governs child defaults", () => {
+test("Orchestrator campaign policy resolves precedence, isolates active sessions, and governs child defaults", async () => {
   const { db, svc, hub } = makeHarness();
   try {
     const meta = runnerMeta();
@@ -931,10 +957,11 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       requiredChecks: { ...mergeSnapshot.requiredChecks, headSha: "b".repeat(40) } };
     const humanMergeCommand = canonicalPrMergeEnqueueCommand(humanMergeSnapshot);
     hub.setSessionQueue(grandchild.data.id, [], false, "nested-human-turn");
-    assert.ok(svc.consumeWorkflowDecision(grandchild.data.id, humanMerge.data.occurrenceId, {
+    const armedHumanMerge = await svc.consumeWorkflowDecision(grandchild.data.id, humanMerge.data.occurrenceId, {
       resourceSnapshot: humanMergeSnapshot,
       action: { kind: "pr_merge_enqueue", command: humanMergeCommand },
-    }).ok);
+    });
+    assert.ok(armedHumanMerge.ok, armedHumanMerge.error);
     svc.onSessionEvent(grandchild.data.id, {
       kind: "permission_request", requestId: "nested-human-enqueue", title: "Enqueue PR",
       options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }],
@@ -2252,7 +2279,7 @@ test("opt-in Parent Control resolves exact nested request occurrences with agent
   } finally { db.close(); }
 });
 
-test("typed workflow decisions isolate categories and fail closed across stale policy, snapshot, replay, and ancestry", () => {
+test("typed workflow decisions isolate categories and fail closed across stale policy, snapshot, replay, and ancestry", async () => {
   const { db, hub } = makeHarness();
   const notifications: Array<{ sessionId: string; title: string }> = [];
   const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG, (previous, current) => {
@@ -2360,9 +2387,9 @@ test("typed workflow decisions isolate categories and fail closed across stale p
       parent.data.id, child.id, merge.data.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "approve" }, () => true,
     ).status, 409, "a duplicate resolution is rejected");
-    assert.equal(svc.consumeWorkflowDecision(child.id, merge.data.occurrenceId, {
+    assert.equal((await svc.consumeWorkflowDecision(child.id, merge.data.occurrenceId, {
       resourceSnapshot: { ...mergeSnapshot, pullRequest: 124 },
-    }).status, 409, "a changed resource snapshot revokes the approval before action start");
+    })).status, 409, "a changed resource snapshot revokes the approval before action start");
     assert.equal(db.workflowDecisionByOccurrence(merge.data.occurrenceId)?.status, "revoked");
 
     const changedCommand = svc.createWorkflowDecision(child.id, {
@@ -2379,9 +2406,9 @@ test("typed workflow decisions isolate categories and fail closed across stale p
         command: "gh pr merge 999 --squash",
       },
     } as unknown as Parameters<typeof svc.consumeWorkflowDecision>[2];
-    assert.equal(svc.consumeWorkflowDecision(
+    assert.equal((await svc.consumeWorkflowDecision(
       child.id, changedCommand.data.occurrenceId, mismatchedAdmission,
-    ).status, 409, "a changed enqueue command fails admission");
+    )).status, 409, "a changed enqueue command fails admission");
     assert.equal(db.workflowDecisionByOccurrence(changedCommand.data.occurrenceId)?.status, "approved",
       "failed command admission does not consume the typed authorization");
 
@@ -2393,7 +2420,7 @@ test("typed workflow decisions isolate categories and fail closed across stale p
       { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
     const exactSnapshot = { ...mergeSnapshot, pullRequest: 124 };
     const exactCommand = canonicalPrMergeEnqueueCommand(exactSnapshot);
-    const armed = svc.consumeWorkflowDecision(child.id, exact.data.occurrenceId, {
+    const armed = await svc.consumeWorkflowDecision(child.id, exact.data.occurrenceId, {
       resourceSnapshot: exactSnapshot,
       action: { kind: "pr_merge_enqueue", command: exactCommand },
     });
@@ -2422,10 +2449,10 @@ test("typed workflow decisions isolate categories and fail closed across stale p
     assert.equal(pendingRequests(db.getSession(child.id)?.pendingApproval).some(
       (request) => request.requestId === "enqueue-pr-124"), false,
     "the matching action does not become a second human approval");
-    assert.equal(svc.consumeWorkflowDecision(child.id, exact.data.occurrenceId, {
+    assert.equal((await svc.consumeWorkflowDecision(child.id, exact.data.occurrenceId, {
       resourceSnapshot: exactSnapshot,
       action: { kind: "pr_merge_enqueue", command: exactCommand },
-    }).status, 409, "authorization is one-shot");
+    })).status, 409, "authorization is one-shot");
     const sendsBeforeReplay = hub.sentOfType("resolve_permission").length;
     svc.onSessionEvent(child.id, {
       kind: "permission_request", requestId: "enqueue-pr-124-replay", title: "Enqueue PR",
@@ -2446,10 +2473,10 @@ test("typed workflow decisions isolate categories and fail closed across stale p
     assert.ok(retry.ok && retry.data);
     assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, retry.data.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
-    assert.equal(svc.consumeWorkflowDecision(child.id, retry.data.occurrenceId, {
+    assert.equal((await svc.consumeWorkflowDecision(child.id, retry.data.occurrenceId, {
       resourceSnapshot: retrySnapshot,
       action: { kind: "pr_merge_enqueue", command: retryCommand },
-    }).data?.status, "approved");
+    })).data?.status, "approved");
     const sendsBeforeMismatch = hub.sentOfType("resolve_permission").length;
     svc.onSessionEvent(child.id, {
       kind: "permission_request", requestId: "enqueue-mismatch", title: "Enqueue PR",
@@ -2551,9 +2578,9 @@ test("typed workflow decisions isolate categories and fail closed across stale p
     assert.ok(hub.sessionChangedByIdCalls.includes(parent.data.id),
       "expiry refreshes the campaign parent as well as the child");
 
-    assert.equal(svc.consumeWorkflowDecision(child.id, publication.data.occurrenceId, {
+    assert.equal((await svc.consumeWorkflowDecision(child.id, publication.data.occurrenceId, {
       resourceSnapshot: { ...publicationSnapshot, labels: ["bug"] },
-    }).status, 409, "publication approval binds exact repository, title, body, and labels");
+    })).status, 409, "publication approval binds exact repository, title, body, and labels");
 
     const uiSnapshot = {
       category: "ui_evidence_approval" as const,
@@ -2582,13 +2609,13 @@ test("typed workflow decisions isolate categories and fail closed across stale p
     assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, pending.data.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
     const pendingSnapshot = { ...mergeSnapshot, pullRequest: 125 };
-    assert.equal(svc.consumeWorkflowDecision(child.id, pending.data.occurrenceId, {
+    assert.equal((await svc.consumeWorkflowDecision(child.id, pending.data.occurrenceId, {
       resourceSnapshot: pendingSnapshot,
       action: {
         kind: "pr_merge_enqueue",
         command: canonicalPrMergeEnqueueCommand(pendingSnapshot),
       },
-    }).data?.status, "approved");
+    })).data?.status, "approved");
     assert.ok(svc.setParentControlPolicy(
       parent.data.id,
       { ...decisions, implementation_question: "orchestrator" },
@@ -2614,10 +2641,10 @@ test("typed workflow decisions isolate categories and fail closed across stale p
     }).status, 409, "idempotency keys cannot be replayed with different content");
     assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, second.data.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
-    assert.equal(svc.consumeWorkflowDecision(child.id, second.data.occurrenceId, {
+    assert.equal((await svc.consumeWorkflowDecision(child.id, second.data.occurrenceId, {
       resourceSnapshot: { ...mergeSnapshot, pullRequest: 126, headSha: "c".repeat(40),
         requiredChecks: { ...mergeSnapshot.requiredChecks, headSha: "c".repeat(40) } },
-    }, (sessionId) => sessionId !== parent.data!.id).status, 409,
+    }, (sessionId) => sessionId !== parent.data!.id)).status, 409,
     "loss of the controlling session's current audience revokes an unconsumed approval");
 
     assert.equal(svc.createWorkflowDecision(child.id, {
@@ -2632,7 +2659,7 @@ test("typed workflow decisions isolate categories and fail closed across stale p
         requestId: `protected-${category}`, resourceKey: category, resourceSnapshot: { category } as never,
       }).status, 400, `${category} cannot become a delegated workflow category`);
     }
-    assert.equal(svc.consumeWorkflowDecision(child.id, "ordinary-question", { resourceSnapshot: mergeSnapshot }).status, 404,
+    assert.equal((await svc.consumeWorkflowDecision(child.id, "ordinary-question", { resourceSnapshot: mergeSnapshot })).status, 404,
       "a generic structured question cannot substitute for a typed workflow gate");
 
     const downgrade = svc.createWorkflowDecision(child.id, {
@@ -2662,13 +2689,13 @@ test("typed workflow decisions isolate categories and fail closed across stale p
       Date.now(),
       RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionAdmission - 1,
     );
-    assert.equal(svc.consumeWorkflowDecision(child.id, mixedVersion.data.occurrenceId, {
+    assert.equal((await svc.consumeWorkflowDecision(child.id, mixedVersion.data.occurrenceId, {
       resourceSnapshot: mixedVersionSnapshot,
       action: {
         kind: "pr_merge_enqueue",
         command: canonicalPrMergeEnqueueCommand(mixedVersionSnapshot),
       },
-    }).status, 409, "a mixed-version runner cannot arm an action that it may admit unsafely");
+    })).status, 409, "a mixed-version runner cannot arm an action that it may admit unsafely");
     assert.equal(db.workflowDecisionByOccurrence(mixedVersion.data.occurrenceId)?.status, "revoked");
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
 
@@ -2680,13 +2707,13 @@ test("typed workflow decisions isolate categories and fail closed across stale p
     assert.ok(denied.ok && denied.data);
     assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, denied.data.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "deny" }, () => true).ok);
-    assert.equal(svc.consumeWorkflowDecision(child.id, denied.data.occurrenceId, {
+    assert.equal((await svc.consumeWorkflowDecision(child.id, denied.data.occurrenceId, {
       resourceSnapshot: deniedSnapshot,
       action: {
         kind: "pr_merge_enqueue",
         command: canonicalPrMergeEnqueueCommand(deniedSnapshot),
       },
-    }).status, 409, "a denied merge cannot arm its enqueue action");
+    })).status, 409, "a denied merge cannot arm its enqueue action");
 
     const ancestryChild = createChild(parent.data.id, "Changed Ancestry Child");
     const ancestrySnapshot = { ...mergeSnapshot, pullRequest: 230 };
@@ -2698,10 +2725,10 @@ test("typed workflow decisions isolate categories and fail closed across stale p
     assert.ok(svc.resolveDescendantRequest(parent.data.id, ancestryChild.id, ancestry.data.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
     const ancestryCommand = canonicalPrMergeEnqueueCommand(ancestrySnapshot);
-    assert.equal(svc.consumeWorkflowDecision(ancestryChild.id, ancestry.data.occurrenceId, {
+    assert.equal((await svc.consumeWorkflowDecision(ancestryChild.id, ancestry.data.occurrenceId, {
       resourceSnapshot: ancestrySnapshot,
       action: { kind: "pr_merge_enqueue", command: ancestryCommand },
-    }).data?.status, "approved");
+    })).data?.status, "approved");
     db.raw().prepare("UPDATE sessions SET parent_session_id=? WHERE id=?")
       .run(siblingParent.data.id, ancestryChild.id);
     const sendsBeforeAncestryChange = hub.sentOfType("resolve_permission").length;
@@ -2813,6 +2840,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     };
     const child = createChild(agentId);
     if (agentId === CODEX_APP_AGENT_ID) hub.setSessionQueue(child.id, [], false, "turn-1");
+    db.reconcileRunnerHistory(child.id, 0, 0);
     assert.ok(svc.setParentControlPolicy(parent.data.id, {
       implementation_question: "human",
       pr_merge: "orchestrator",
@@ -2821,7 +2849,36 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       ui_evidence_approval: "human",
     }, 0).ok);
     let sequence = 0;
-    const arm = (pullRequest = 1140, expectedStatus: 200 | 409 = 200) => {
+    let runnerSeq = 0;
+    const runnerEvent = (payload: SessionEventPayload) => db.appendEvent(
+      child.id,
+      payload,
+      Date.now(),
+      { runnerSeq: ++runnerSeq, historyEpoch: 0 },
+    );
+    hub.requestHandler = (message) => {
+      if (message.type !== "record_workflow_action_admission") {
+        throw new Error(`unexpected runner request ${message.type}`);
+      }
+      runnerEvent({
+        kind: "workflow_action_admission_armed",
+        occurrenceId: message.occurrenceId,
+        commandDigest: message.commandDigest,
+        providerTurnId: message.providerTurnId,
+      });
+      return {
+        type: "workflow_action_admission_recorded",
+        requestId: message.requestId,
+        sessionId: child.id,
+        occurrenceId: message.occurrenceId,
+        accepted: true,
+        providerTurnId: message.providerTurnId,
+        providerThreadId: "thread-1",
+        historyEpoch: 0,
+        eventSeq: runnerSeq,
+      };
+    };
+    const arm = async (pullRequest = 1140, expectedStatus: 200 | 409 = 200) => {
       const headSha = String(pullRequest).padStart(40, "a").slice(-40);
       const snapshot = {
         category: "pr_merge" as const,
@@ -2843,7 +2900,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       assert.ok(svc.resolveDescendantRequest(parent.data!.id, child.id, decision.data.occurrenceId,
         { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
       const command = canonicalPrMergeEnqueueCommand(snapshot);
-      const armed = svc.consumeWorkflowDecision(child.id, decision.data.occurrenceId, {
+      const armed = await svc.consumeWorkflowDecision(child.id, decision.data.occurrenceId, {
         resourceSnapshot: snapshot,
         action: { kind: "pr_merge_enqueue", command },
       });
@@ -2855,7 +2912,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       const reviewId = `review-${++sequence}`;
       const itemId = `command-${sequence}`;
       // The provider emits the structured command item before its Guardian review completes.
-      svc.onSessionEvent(child.id, {
+      runnerEvent({
         kind: "tool_call", toolCallId: itemId, title: "Run Command", toolKind: "execute", status: "in_progress",
       });
       return {
@@ -2874,13 +2931,13 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
         },
       };
     };
-    return { db, hub, svc, parent: parent.data, child, createChild, arm, receipt };
+    return { db, hub, svc, parent: parent.data, child, createChild, arm, receipt, runnerEvent };
   };
 
-  await t.test("exact Guardian and existing permission paths each consume only once", () => {
+  await t.test("exact Guardian and existing permission paths each consume only once", async () => {
     const { db, hub, svc, child, arm, receipt } = setup();
     try {
-      const guardian = arm(1140);
+      const guardian = await arm(1140);
       const guardianReceipt = receipt(guardian.command);
       svc.onSessionEvent(child.id, guardianReceipt);
       svc.onSessionEvent(child.id, guardianReceipt);
@@ -2890,7 +2947,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       "duplicate provider events cannot consume or audit consumption twice");
 
       hub.setSessionQueue(child.id, [], false, "turn-2");
-      const rearmed = arm(1140);
+      const rearmed = await arm(1140);
       svc.onSessionEvent(child.id, guardianReceipt);
       assert.equal(db.workflowDecisionByOccurrence(rearmed.decision.occurrenceId)?.status, "approved",
         "a replayed provider invocation cannot consume a later grant for the same command");
@@ -2899,7 +2956,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
         "a new provider invocation can consume the newly armed grant");
 
       hub.setSessionQueue(child.id, [], false, "turn-3");
-      const requested = arm(1141);
+      const requested = await arm(1141);
       svc.onSessionEvent(child.id, {
         kind: "permission_request",
         requestId: "provider-request-1141",
@@ -2915,16 +2972,16 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     } finally { db.close(); }
   });
 
-  await t.test("a first-seen receipt from an older provider turn cannot consume a fresh identical admission", () => {
+  await t.test("a first-seen receipt from an older provider turn cannot consume a fresh identical admission", async () => {
     const { db, hub, svc, child, arm, receipt } = setup();
     try {
       hub.setSessionQueue(child.id, [], false, "turn-old");
-      const old = arm(1161);
+      const old = await arm(1161);
       assert.equal(db.workflowDecisionByOccurrence(old.decision.occurrenceId)?.actionAdmission?.providerTurnId,
         "turn-old", "arming captures the provider turn active at that boundary");
       const staleReceipt = receipt(old.command);
 
-      const fresh = arm(1161);
+      const fresh = await arm(1161);
       assert.equal(db.workflowDecisionByOccurrence(fresh.decision.occurrenceId)?.actionAdmission?.providerTurnId,
         "turn-old");
       svc.onSessionEvent(child.id, staleReceipt);
@@ -2937,12 +2994,12 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     } finally { db.close(); }
   });
 
-  await t.test("a review receipt observed only after its command item completed cannot consume", () => {
-    const { db, svc, child, arm, receipt } = setup();
+  await t.test("a review receipt observed only after its command item completed cannot consume", async () => {
+    const { db, svc, child, arm, receipt, runnerEvent } = setup();
     try {
-      const armed = arm(1165);
+      const armed = await arm(1165);
       const lateReceipt = receipt(armed.command);
-      svc.onSessionEvent(child.id, {
+      runnerEvent({
         kind: "tool_call_update",
         toolCallId: lateReceipt.approvalReviewReceipt!.itemId,
         status: "completed",
@@ -2953,16 +3010,18 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     } finally { db.close(); }
   });
 
-  await t.test("App Server action arming requires and binds the active provider turn and event high-water", () => {
+  await t.test("App Server action arming requires and binds the active provider turn and runner event fence", async () => {
     const { db, hub, svc, child, arm } = setup();
     try {
-      const first = arm(1162);
+      const first = await arm(1162);
       const admission = db.workflowDecisionByOccurrence(first.decision.occurrenceId)?.actionAdmission;
       assert.equal(admission?.providerTurnId, "turn-1");
+      assert.equal(admission?.providerThreadId, "thread-1");
+      assert.equal(admission?.runnerHistoryEpoch, 0);
       assert.equal(admission?.armedAfterEventSeq, db.sessionEventTailSeq(child.id));
       assert.equal(db.workflowDecisionByOccurrence(first.decision.occurrenceId)?.status, "approved");
       svc.onSessionEvent(child.id, { kind: "agent_thought", text: "later event" });
-      const retry = svc.consumeWorkflowDecision(child.id, first.decision.occurrenceId, {
+      const retry = await svc.consumeWorkflowDecision(child.id, first.decision.occurrenceId, {
         resourceSnapshot: first.snapshot,
         action: { kind: "pr_merge_enqueue", command: first.command },
       });
@@ -2971,16 +3030,16 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
         "an idempotent retry cannot move the original event-order boundary forward");
 
       hub.setSessionQueue(child.id, [], false);
-      const missingTurn = arm(1164, 409);
+      const missingTurn = await arm(1164, 409);
       assert.match(missingTurn.armed.error ?? "", /requires an active provider turn/u);
       assert.equal(db.workflowDecisionByOccurrence(missingTurn.decision.occurrenceId)?.status, "revoked");
     } finally { db.close(); }
   });
 
-  await t.test("command, tool, digest, child, reviewer, malformed, and cancelled mismatches retain the grant", () => {
+  await t.test("command, tool, digest, child, reviewer, malformed, and cancelled mismatches retain the grant", async () => {
     const { db, svc, child, createChild, arm, receipt } = setup();
     try {
-      const armed = arm(1142);
+      const armed = await arm(1142);
       svc.onSessionEvent(child.id, receipt(`${armed.command} --delete-branch`));
       const wrongTool = receipt(armed.command);
       wrongTool.approvalReviewReceipt = {
@@ -2992,6 +3051,16 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
         ...wrongDigest.approvalReviewReceipt!, inputSha256: "0".repeat(64),
       };
       svc.onSessionEvent(child.id, wrongDigest);
+      const wrongThread = receipt(armed.command);
+      wrongThread.approvalReviewReceipt = {
+        ...wrongThread.approvalReviewReceipt!, threadId: "thread-other",
+      };
+      svc.onSessionEvent(child.id, wrongThread);
+      const wrongItem = receipt(armed.command);
+      wrongItem.approvalReviewReceipt = {
+        ...wrongItem.approvalReviewReceipt!, itemId: "item-never-observed",
+      };
+      svc.onSessionEvent(child.id, wrongItem);
       const otherChild = createChild(CODEX_APP_AGENT_ID);
       svc.onSessionEvent(otherChild.id, receipt(armed.command));
       const wrongReviewer = receipt(armed.command);
@@ -3010,11 +3079,42 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     } finally { db.close(); }
   });
 
+  await t.test("a runner fence rejection retains an approved but unarmed decision", async () => {
+    const { db, hub, arm } = setup();
+    try {
+      hub.requestHandler = (message) => {
+        if (message.type !== "record_workflow_action_admission") throw new Error("unexpected runner request");
+        return {
+          type: "workflow_action_admission_recorded",
+          requestId: message.requestId,
+          sessionId: message.sessionId,
+          occurrenceId: message.occurrenceId,
+          accepted: false,
+          error: "provider turn changed",
+        };
+      };
+      const rejected = await arm(1166, 409);
+      assert.equal(db.workflowDecisionByOccurrence(rejected.decision.occurrenceId)?.status, "approved");
+      assert.equal(db.workflowDecisionByOccurrence(rejected.decision.occurrenceId)?.actionAdmission, undefined);
+    } finally { db.close(); }
+  });
+
+  await t.test("a runner history generation change invalidates the action-arm fence", async () => {
+    const { db, svc, child, arm, receipt } = setup();
+    try {
+      const armed = await arm(1167);
+      db.reconcileRunnerHistory(child.id, 1, 0);
+      svc.onSessionEvent(child.id, receipt(armed.command));
+      assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "approved",
+        "an event sequence from another runner history generation cannot consume the admission");
+    } finally { db.close(); }
+  });
+
   for (const mismatch of ["parent", "revision", "authority", "head", "capability"] as const) {
-    await t.test(`${mismatch} mismatch revokes rather than consumes`, () => {
+    await t.test(`${mismatch} mismatch revokes rather than consumes`, async () => {
       const { db, svc, parent, child, arm, receipt } = setup();
       try {
-        const armed = arm(1150 + ["parent", "revision", "authority", "head", "capability"].indexOf(mismatch));
+        const armed = await arm(1150 + ["parent", "revision", "authority", "head", "capability"].indexOf(mismatch));
         if (mismatch === "parent") {
           const unrelated = svc.createSession({
             runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
@@ -3045,16 +3145,16 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     });
   }
 
-  await t.test("a Claude session cannot consume an App Server receipt", () => {
+  await t.test("a Claude session cannot consume an App Server receipt", async () => {
     const { db, svc, child, arm, receipt } = setup(AGENT_ID);
     try {
-      const armed = arm(1159);
+      const armed = await arm(1159);
       svc.onSessionEvent(child.id, receipt(armed.command));
       assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "approved");
     } finally { db.close(); }
   });
 
-  await t.test("native Codex fails closed before arming because it has no approval receipt", () => {
+  await t.test("native Codex fails closed before arming because it has no approval receipt", async () => {
     const { db, svc, child } = setup(CODEX_AGENT_ID);
     try {
       const headSha = "d".repeat(40);
@@ -3071,18 +3171,18 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       const parentId = decision.data.controllingSessionId;
       assert.ok(svc.resolveDescendantRequest(parentId, child.id, decision.data.occurrenceId,
         { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
-      const result = svc.consumeWorkflowDecision(child.id, decision.data.occurrenceId, {
+      const result = await svc.consumeWorkflowDecision(child.id, decision.data.occurrenceId, {
         resourceSnapshot: snapshot,
         action: { kind: "pr_merge_enqueue", command: canonicalPrMergeEnqueueCommand(snapshot) },
       });
       assert.equal(result.status, 409);
-      assert.match(result.error ?? "", /does not expose a trusted one-shot command approval boundary/u);
+      assert.match(result.error ?? "", /does not expose trusted correlated command-decision evidence/u);
       assert.equal(db.workflowDecisionByOccurrence(decision.data.occurrenceId)?.status, "revoked");
     } finally { db.close(); }
   });
 });
 
-test("typed workflow decisions preserve provider settlement and cannot be replaced by generic approvals", () => {
+test("typed workflow decisions preserve provider settlement and cannot be replaced by generic approvals", async () => {
   const { db, svc, hub } = makeHarness();
   try {
     const meta = runnerMeta();
@@ -3141,9 +3241,9 @@ test("typed workflow decisions preserve provider settlement and cannot be replac
     assert.equal(db.getSession(child.data.id)?.status, "idle",
       "resolving a control-plane gate restores the provider's swallowed idle");
     assert.equal(db.policyResumeStatus(child.data.id), null);
-    assert.ok(svc.consumeWorkflowDecision(child.data.id, choice.data.occurrenceId, {
+    assert.ok((await svc.consumeWorkflowDecision(child.data.id, choice.data.occurrenceId, {
       resourceSnapshot: implementationSnapshot,
-    }).ok);
+    })).ok);
 
     db.updateSessionStatus(child.data.id, "running", Date.now());
     assert.ok(svc.setConfig(child.data.id, { costCheckpointsUsd: [1] }).ok);
@@ -3211,9 +3311,9 @@ test("typed workflow decisions preserve provider settlement and cannot be replac
     assert.ok(svc.approve(child.data.id, durable.data.occurrenceId, "approve",
       { kind: "human", id: "owner" }, undefined, () => true).ok);
     assert.equal(db.workflowDecisionByOccurrence(durable.data.occurrenceId)?.selectedOptionId, "approve");
-    assert.ok(svc.consumeWorkflowDecision(child.data.id, durable.data.occurrenceId, {
+    assert.ok((await svc.consumeWorkflowDecision(child.data.id, durable.data.occurrenceId, {
       resourceSnapshot: implementationSnapshot,
-    }).ok);
+    })).ok);
 
     const staleProjection = svc.createWorkflowDecision(child.data.id, {
       requestId: "stale-projection", resourceKey: "implementation:stale",
@@ -3255,9 +3355,9 @@ test("typed workflow decisions preserve provider settlement and cannot be replac
       { kind: "human", id: "owner" }, undefined, () => true).ok);
     assert.equal(db.getSession(child.data.id)?.status, "idle",
       "a decision created from provider Idle restores Idle when settled");
-    assert.ok(svc.consumeWorkflowDecision(child.data.id, idleDecision.data.occurrenceId, {
+    assert.ok((await svc.consumeWorkflowDecision(child.data.id, idleDecision.data.occurrenceId, {
       resourceSnapshot: implementationSnapshot,
-    }).ok);
+    })).ok);
 
     db.updateSessionStatus(child.data.id, "running", Date.now());
     const supersededIdle = svc.createWorkflowDecision(child.data.id, {
@@ -3287,9 +3387,9 @@ test("typed workflow decisions preserve provider settlement and cannot be replac
     assert.ok(svc.approve(child.data.id, terminalApproval.data.occurrenceId, "approve",
       { kind: "human", id: "owner" }, undefined, () => true).ok);
     db.updateSessionStatus(child.data.id, "completed", Date.now());
-    assert.equal(svc.consumeWorkflowDecision(child.data.id, terminalApproval.data.occurrenceId, {
+    assert.equal((await svc.consumeWorkflowDecision(child.data.id, terminalApproval.data.occurrenceId, {
       resourceSnapshot: implementationSnapshot,
-    }).status, 409, "an approved decision cannot be consumed after its child becomes terminal");
+    })).status, 409, "an approved decision cannot be consumed after its child becomes terminal");
     assert.equal(db.workflowDecisionByOccurrence(terminalApproval.data.occurrenceId)?.status, "revoked");
     assert.equal(svc.createWorkflowDecision(child.data.id, {
       requestId: "terminal-request", resourceKey: "implementation:terminal",

@@ -45,6 +45,7 @@ import type {
   PodView,
   ProjectView,
   PolicyHookDecisionRecordedMessage,
+  WorkflowActionAdmissionRecordedMessage,
   SessionEvent,
   SessionEventPayload,
   SessionHistoryResultMessage,
@@ -205,7 +206,8 @@ export type RunnerRequestResult =
   | SessionNamingCustomModelResultMessage
   | SessionWorktreeResultMessage
   | WorkspaceWorktreeSetupResultMessage
-  | PolicyHookDecisionRecordedMessage;
+  | PolicyHookDecisionRecordedMessage
+  | WorkflowActionAdmissionRecordedMessage;
 
 interface PendingRequest {
   runnerId: string;

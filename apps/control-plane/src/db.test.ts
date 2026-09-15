@@ -2276,6 +2276,8 @@ test("PR merge action admission stays durable and consumes only its matching dig
       armedAt: 3_000,
       armedAfterEventSeq: 7,
       providerTurnId: "turn-42",
+      providerThreadId: "thread-42",
+      runnerHistoryEpoch: 3,
     };
     assert.equal(initial.armWorkflowDecisionAction("workflow-merge-42", admission)?.status, "approved");
     initial.close();
@@ -2295,31 +2297,37 @@ test("PR merge action admission stays durable and consumes only its matching dig
   }
 });
 
-test("action invocation correlation requires a root tool call after the admission event boundary", () => {
+test("action invocation correlation uses runner order when an older item reaches the control plane late", () => {
   const db = ControlPlaneDb.open(":memory:");
   try {
     db.registerRunner(meta(), 500, PROTOCOL_VERSION);
     db.createSession(newSession({ id: "parent" }));
     db.createSession(newSession({ id: "child", parentSessionId: "parent" }));
+    db.reconcileRunnerHistory("child", 0, 0);
+    const boundary = 2;
+    db.appendEvent("child", {
+      kind: "workflow_action_admission_armed", occurrenceId: "workflow-1",
+      commandDigest: "a".repeat(64), providerTurnId: "turn-1",
+    }, 1_000, { runnerSeq: boundary, historyEpoch: 0 });
+    db.appendEvent("child", { kind: "agent_thought", text: "control-plane-only interleave" }, 1_500);
     db.appendEvent("child", {
       kind: "tool_call", toolCallId: "stale", title: "Run", toolKind: "execute", status: "in_progress",
-    }, 1_000);
-    const boundary = db.sessionEventTailSeq("child");
+    }, 1_750, { runnerSeq: 1, historyEpoch: 0 });
     db.appendEvent("child", {
       kind: "tool_call", toolCallId: "fresh", title: "Run", toolKind: "execute", status: "in_progress",
-    }, 2_000);
-    assert.equal(db.isActiveRootToolCallStartedAfter("child", "stale", boundary), false);
-    assert.equal(db.isActiveRootToolCallStartedAfter("child", "fresh", boundary), true);
+    }, 2_000, { runnerSeq: 3, historyEpoch: 0 });
+    assert.equal(db.isActiveRootToolCallStartedAfterRunnerSeq("child", "stale", boundary), false);
+    assert.equal(db.isActiveRootToolCallStartedAfterRunnerSeq("child", "fresh", boundary), true);
     db.appendEvent("child", {
       kind: "tool_call_update", toolCallId: "fresh", status: "completed",
-    }, 3_000);
-    assert.equal(db.isActiveRootToolCallStartedAfter("child", "fresh", boundary), false,
+    }, 3_000, { runnerSeq: 4, historyEpoch: 0 });
+    assert.equal(db.isActiveRootToolCallStartedAfterRunnerSeq("child", "fresh", boundary), false,
       "a completed item is no longer an active invocation");
     db.appendEvent("child", {
       kind: "tool_call", toolCallId: "nested", title: "Run", toolKind: "execute", status: "in_progress",
       parentToolUseId: "parent-tool",
-    }, 4_000);
-    assert.equal(db.isActiveRootToolCallStartedAfter("child", "nested", boundary), false,
+    }, 4_000, { runnerSeq: 5, historyEpoch: 0 });
+    assert.equal(db.isActiveRootToolCallStartedAfterRunnerSeq("child", "nested", boundary), false,
       "a subagent item cannot correlate a root action admission");
   } finally {
     db.close();

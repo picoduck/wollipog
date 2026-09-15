@@ -574,6 +574,8 @@ CREATE TABLE IF NOT EXISTS workflow_decisions (
   action_armed_at       INTEGER,
   action_armed_after_event_seq INTEGER,
   action_provider_turn_id TEXT,
+  action_provider_thread_id TEXT,
+  action_runner_history_epoch INTEGER,
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
   FOREIGN KEY (controlling_session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
@@ -4310,6 +4312,8 @@ export class ControlPlaneDb {
       "action_armed_at INTEGER",
       "action_armed_after_event_seq INTEGER",
       "action_provider_turn_id TEXT",
+      "action_provider_thread_id TEXT",
+      "action_runner_history_epoch INTEGER",
     ]) {
       try { db.exec(`ALTER TABLE workflow_decisions ADD COLUMN ${column}`); } catch { /* already present */ }
     }
@@ -12764,17 +12768,23 @@ export class ControlPlaneDb {
        SET action_kind=?, action_command=?, action_command_digest=?,
            action_armed_at=COALESCE(action_armed_at, ?),
            action_armed_after_event_seq=COALESCE(action_armed_after_event_seq, ?),
-           action_provider_turn_id=COALESCE(action_provider_turn_id, ?)
+           action_provider_turn_id=COALESCE(action_provider_turn_id, ?),
+           action_provider_thread_id=COALESCE(action_provider_thread_id, ?),
+           action_runner_history_epoch=COALESCE(action_runner_history_epoch, ?)
        WHERE occurrence_id=? AND status='approved' AND (
          action_command_digest IS NULL OR (
            action_kind=? AND action_command=? AND action_command_digest=? AND
-           (action_provider_turn_id IS NULL OR action_provider_turn_id IS ?)
+           (action_provider_turn_id IS NULL OR action_provider_turn_id IS ?) AND
+           (action_provider_thread_id IS NULL OR action_provider_thread_id IS ?) AND
+           (action_runner_history_epoch IS NULL OR action_runner_history_epoch IS ?)
          )
        )`,
     ).run(
       action.kind, action.command, action.commandDigest, action.armedAt,
-      action.armedAfterEventSeq ?? null, action.providerTurnId ?? null, occurrenceId,
+      action.armedAfterEventSeq ?? null, action.providerTurnId ?? null,
+      action.providerThreadId ?? null, action.runnerHistoryEpoch ?? null, occurrenceId,
       action.kind, action.command, action.commandDigest, action.providerTurnId ?? null,
+      action.providerThreadId ?? null, action.runnerHistoryEpoch ?? null,
     );
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
   }
@@ -12792,13 +12802,17 @@ export class ControlPlaneDb {
     );
   }
 
-  isActiveRootToolCallStartedAfter(sessionId: string, toolCallId: string, afterSeq: number): boolean {
+  isActiveRootToolCallStartedAfterRunnerSeq(
+    sessionId: string,
+    toolCallId: string,
+    afterRunnerSeq: number,
+  ): boolean {
     const row = this.stmt(
       `SELECT kind, payload FROM session_events
-       WHERE session_id=? AND seq>? AND kind IN ('tool_call','tool_call_update')
+       WHERE session_id=? AND runner_seq>? AND kind IN ('tool_call','tool_call_update')
          AND json_extract(payload,'$.toolCallId')=?
-       ORDER BY seq DESC LIMIT 1`,
-    ).get(sessionId, afterSeq, toolCallId) as unknown as { kind: string; payload: string } | undefined;
+       ORDER BY runner_seq DESC LIMIT 1`,
+    ).get(sessionId, afterRunnerSeq, toolCallId) as unknown as { kind: string; payload: string } | undefined;
     if (!row || row.kind !== "tool_call") return false;
     const payload = parseJson<SessionEventPayload>(row.payload);
     return payload?.kind === "tool_call" && payload.status === "in_progress" && !payload.parentToolUseId;
@@ -21423,6 +21437,8 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     action_armed_at?: number | null;
     action_armed_after_event_seq?: number | null;
     action_provider_turn_id?: string | null;
+    action_provider_thread_id?: string | null;
+    action_runner_history_epoch?: number | null;
   } | undefined;
   if (!row?.request_id || !row.occurrence_id || !row.session_id || !row.controlling_session_id ||
       !row.category || !row.resource_key || !row.resource_snapshot || !row.resource_digest ||
@@ -21459,6 +21475,10 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
             ? { armedAfterEventSeq: row.action_armed_after_event_seq }
             : {}),
           ...(row.action_provider_turn_id ? { providerTurnId: row.action_provider_turn_id } : {}),
+          ...(row.action_provider_thread_id ? { providerThreadId: row.action_provider_thread_id } : {}),
+          ...(row.action_runner_history_epoch != null
+            ? { runnerHistoryEpoch: row.action_runner_history_epoch }
+            : {}),
         } }
       : {}),
   };

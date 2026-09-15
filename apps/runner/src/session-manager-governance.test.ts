@@ -8,19 +8,19 @@ import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { claudeProjectPathKey } from "./claude-background-work.js";
 
-function meta(config: SessionConfig): SessionMeta {
+function meta(config: SessionConfig, appServer = false): SessionMeta {
   return {
     sessionId: "s_governance",
-    agentId: "claude-native",
+    agentId: appServer ? "codex-app-server" : "claude-native",
     workspaceId: "repo",
     repoPath: "/repo",
     worktreePath: null,
-    driver: "claude-code",
-    command: "claude",
+    driver: appServer ? "codex-app-server" : "claude-code",
+    command: appServer ? "codex" : "claude",
     args: [],
     env: {},
     context: { kind: "native" },
-    agentSessionId: null,
+    agentSessionId: appServer ? "thread-exact" : null,
     status: "running",
     title: "governance test",
     config,
@@ -35,10 +35,10 @@ function meta(config: SessionConfig): SessionMeta {
   };
 }
 
-function harness(config: SessionConfig) {
+function harness(config: SessionConfig, appServer = false) {
   const root = mkdtempSync(join(tmpdir(), "wollipog-sm-governance-"));
   const store = new SessionStore(root);
-  store.create(meta(config));
+  store.create(meta(config, appServer));
   const sent: RunnerToControlPlane[] = [];
   let cancels = 0;
   let prompts = 0;
@@ -50,7 +50,7 @@ function harness(config: SessionConfig) {
       return Promise.resolve("cancelled" as const);
     },
     setConfig: () => {},
-    agentSessionId: () => null,
+    agentSessionId: () => appServer ? "thread-exact" : null,
   };
   const sm = new SessionManager((message) => sent.push(message), () => {}, store, "test-runner");
   const entry: any = {
@@ -62,6 +62,7 @@ function harness(config: SessionConfig) {
     context: { kind: "native" as const },
     status: "running" as const,
     running: true,
+    activeTurnId: appServer ? "turn-exact" : undefined,
     queue: [],
     toolCallIds: config.maxToolCalls ? new Set<string>() : undefined,
     policyHookToolCallIds: new Set<string>(),
@@ -80,6 +81,46 @@ function harness(config: SessionConfig) {
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
 }
+
+test("App Server action admission uses a runner-owned fence after older provider events", () => {
+  const h = harness({}, true);
+  try {
+    (h.sm as any).onDriverEvent("s_governance", {
+      kind: "tool_call", toolCallId: "old-command", title: "Run", status: "in_progress",
+    });
+    const recorded = h.sm.recordWorkflowActionAdmission("s_governance", {
+      occurrenceId: "workflow-exact",
+      commandDigest: "a".repeat(64),
+      providerTurnId: "turn-exact",
+    });
+    assert.deepEqual(recorded, {
+      accepted: true,
+      occurrenceId: "workflow-exact",
+      providerTurnId: "turn-exact",
+      providerThreadId: "thread-exact",
+      historyEpoch: 0,
+      eventSeq: 2,
+    });
+    (h.sm as any).onDriverEvent("s_governance", {
+      kind: "tool_call", toolCallId: "fresh-command", title: "Run", status: "in_progress",
+    });
+    assert.deepEqual(h.store.readEvents("s_governance").map((event) => ({
+      seq: event.seq,
+      kind: event.payload.kind,
+    })), [
+      { seq: 1, kind: "tool_call" },
+      { seq: 2, kind: "workflow_action_admission_armed" },
+      { seq: 3, kind: "tool_call" },
+    ]);
+    assert.equal(h.sm.recordWorkflowActionAdmission("s_governance", {
+      occurrenceId: "workflow-stale-turn",
+      commandDigest: "b".repeat(64),
+      providerTurnId: "turn-stale",
+    }).accepted, false, "a control-plane turn projection cannot override the runner's active turn");
+  } finally {
+    h.cleanup();
+  }
+});
 
 test("policy-hook decisions wait for their exact buffered tool event and deduplicate by audit id", async () => {
   const h = harness({});
