@@ -113,8 +113,6 @@ function agentProblem(agent: AgentDefinition): { detail: string; command?: strin
       ? { detail: `${label} is not installed or could not be launched.`, command: "npm install -g @anthropic-ai/claude-code" }
       : agent.driver?.startsWith("codex")
         ? { detail: `${label} is not installed or could not be launched.`, command: "npm install -g @openai/codex@latest" }
-        : agent.driver === "pi"
-          ? { detail: agent.unavailableReason ?? `${label} is unavailable.`, command: "npm install -g @earendil-works/pi-coding-agent@latest" }
         : { detail: `${label} is unavailable. Check its launch command on the runner.` };
   }
   return null;

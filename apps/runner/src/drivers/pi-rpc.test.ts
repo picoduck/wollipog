@@ -86,6 +86,32 @@ test("Pi RPC correlates extension dialogs to durable Wollipog questions", async 
   assert.equal(events.some((event) => event.kind === "agent_message" && event.text === "Selected Stable"), true);
 });
 
+test("Pi RPC caps pending extension dialogs and cancels excess requests", async (t) => {
+  const events: SessionEventPayload[] = [];
+  const sent: Record<string, unknown>[] = [];
+  const driver = new PiRpcDriver(options(), callbacks(events));
+  t.after(() => driver.dispose());
+  await driver.initialize();
+  (driver as any).peer = {
+    send: (message: Record<string, unknown>) => {
+      sent.push(message);
+      return true;
+    },
+    dispose: () => {},
+  };
+  for (let index = 0; index <= 128; index += 1) {
+    (driver as any).onExtensionUiRequest({
+      type: "extension_ui_request",
+      id: `dialog-${index}`,
+      method: "select",
+      title: "Choose",
+      options: ["One"],
+    });
+  }
+  assert.equal(events.filter((event) => event.kind === "question_request").length, 128);
+  assert.deepEqual(sent, [{ type: "extension_ui_response", id: "dialog-128", cancelled: true }]);
+});
+
 test("Pi RPC receipts steering, cancels, and resumes the exact provider session", async (t) => {
   const events: SessionEventPayload[] = [];
   let acceptedReady!: () => void;

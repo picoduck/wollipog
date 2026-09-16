@@ -24,6 +24,8 @@ interface PendingPiQuestion {
   timer?: NodeJS.Timeout;
 }
 
+const MAX_PENDING_PI_QUESTIONS = 128;
+
 function object(value: unknown): Json | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Json : undefined;
 }
@@ -488,6 +490,10 @@ export class PiRpcDriver implements Driver {
       return;
     }
     const typedMethod = method as PendingPiQuestion["method"];
+    if (this.pendingQuestions.has(requestId) || this.pendingQuestions.size >= MAX_PENDING_PI_QUESTIONS) {
+      this.peer?.send({ type: "extension_ui_response", id: requestId, cancelled: true });
+      return;
+    }
     const title = string(event.title) ?? "Pi Extension Request";
     const questionId = `${requestId}:value`;
     const question: AgentQuestion = typedMethod === "select"

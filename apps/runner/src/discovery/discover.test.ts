@@ -166,6 +166,43 @@ test("configured Pi discovery adopts the verified resolved launch for a bare com
   assert.deepEqual(probed!.args, ["/opt/pi/lib/cli.js"]);
 });
 
+test("configured Pi discovery probes custom arguments instead of reusing a bare launch", async () => {
+  let receivedCommand: string | undefined;
+  let receivedArgs: string[] | undefined;
+  const configured = cfg({
+    id: "configured-pi",
+    driver: "pi",
+    command: "pi",
+    args: ["--config", "/opt/pi/alternate.json"],
+    capabilities: capabilitiesFor("pi"),
+  });
+  const discovered = cfg({
+    id: "pi",
+    driver: "pi",
+    command: "/opt/pi/bin/pi",
+    bin: "pi",
+    source: "discovered",
+    available: true,
+  });
+  const [probed] = await probeConfiguredPiAgents([configured], () => ({}), {
+    discovered: [discovered],
+    probe: async (launch) => {
+      receivedCommand = launch.command;
+      receivedArgs = launch.args;
+      return {
+        available: false,
+        authStatus: "unknown",
+        capabilities: capabilitiesFor("pi"),
+        unavailableReason: "custom arguments were probed",
+      };
+    },
+  });
+  assert.equal(receivedCommand, "/opt/pi/bin/pi");
+  assert.deepEqual(receivedArgs, ["--config", "/opt/pi/alternate.json"]);
+  assert.equal(probed!.available, false);
+  assert.equal(probed!.unavailableReason, "custom arguments were probed");
+});
+
 test("Codex prompts and skills are not advertised as slash commands", () => {
   assert.deepEqual(commandDirectoriesForDriver("codex"), []);
   assert.deepEqual(commandDirectoriesForDriver("codex-app-server"), []);

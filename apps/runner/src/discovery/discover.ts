@@ -174,10 +174,14 @@ export async function probeConfiguredPiAgents(
         const env = resolveEnv(agent.id);
         const shapeMatch = options.discovered?.find((candidate) =>
           launchKeys(agent).some((key) => launchKeys(candidate).includes(key)));
-        const adoptLaunch = Boolean(shapeMatch) && !/[\\/]/.test(agent.command) &&
-          (agent.args?.length ?? 0) === 0 && /[\\/]/.test(shapeMatch!.command);
-        const launchAgent = adoptLaunch ? shapeMatch! : agent;
-        if (shapeMatch && Object.keys(env).length === 0) {
+        const adoptLaunch = Boolean(shapeMatch) && !/[\\/]/.test(agent.command) && /[\\/]/.test(shapeMatch!.command);
+        const launchAgent = adoptLaunch
+          ? { ...shapeMatch!, args: [...(shapeMatch!.args ?? []), ...(agent.args ?? [])] }
+          : agent;
+        const exactLaunchMatch = Boolean(shapeMatch) && agent.command === shapeMatch!.command &&
+          JSON.stringify(agent.args ?? []) === JSON.stringify(shapeMatch!.args ?? []);
+        const unchangedAdoptedLaunch = adoptLaunch && (agent.args?.length ?? 0) === 0;
+        if (shapeMatch && Object.keys(env).length === 0 && (unchangedAdoptedLaunch || exactLaunchMatch)) {
           results[index] = {
             ...agent,
             command: launchAgent.command,
