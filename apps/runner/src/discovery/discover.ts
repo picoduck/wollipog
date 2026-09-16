@@ -191,6 +191,7 @@ export async function probeConfiguredPiAgents(
             available: shapeMatch.available,
             authStatus: shapeMatch.authStatus,
             capabilities: shapeMatch.capabilities,
+            piAgentControl: shapeMatch.piAgentControl,
             unavailableReason: shapeMatch.unavailableReason,
           };
           continue;
@@ -212,6 +213,7 @@ export async function probeConfiguredPiAgents(
           available: result.available,
           authStatus: result.authStatus,
           capabilities: result.capabilities,
+          piAgentControl: result.piAgentControl,
           unavailableReason: result.unavailableReason,
         };
       } catch {
@@ -321,7 +323,11 @@ function verifiedCodexAppServerCapabilities(
 function withoutConfiguredProviderAttestations(agent: AgentDefinition): AgentDefinition {
   // Native TUI accounting is a live provider-contract attestation, never configuration. A stale
   // persisted value must not survive when a v121 runner cannot rediscover the same launch.
-  const { nativeTuiAccounting: _unverifiedAccounting, ...withoutAccounting } = agent;
+  const {
+    nativeTuiAccounting: _unverifiedAccounting,
+    piAgentControl: _unverifiedPiAgentControl,
+    ...withoutAccounting
+  } = agent;
   const codexAppServer = withoutAccounting.codexAppServer;
   const { orchestratorApproval: _unverifiedOrchestratorApproval, ...verifiedCodexAppServer } = codexAppServer ?? {};
   const withoutCodexOrchestratorApproval = codexAppServer
@@ -659,6 +665,7 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
         capabilities: piRpc?.capabilities ?? (claudeCode && catalogCapabilities
           ? claudeCapabilitiesFromProbe(catalogCapabilities, claudeCode)
           : catalogCapabilities),
+        ...(piRpc?.piAgentControl ? { piAgentControl: piRpc.piAgentControl } : {}),
         source: "discovered",
         ...(codexAppServer ? { codexAppServer } : {}),
         ...(claudeCode ? { claudeCode } : {}),
@@ -871,6 +878,7 @@ export function mergeAgents(
       registry: d.registry ?? c.registry,
       acp: d.acp ?? c.acp,
       wslAgentControl: d.wslAgentControl,
+      piAgentControl: d.piAgentControl,
       capabilities: c.capabilities
         ? c.driver === "claude-code" && d.capabilities
           ? {

@@ -1707,6 +1707,10 @@ export interface AgentDefinition {
    * entry file may be generically named (cli.js/index.js), so neither command nor args identify
    * the agent — this does. Absent on config entries and pre-v18 runners. */
   bin?: string;
+  /** Runner-local Pi extension compatibility, proven by loading a runner-owned extension during
+   * live RPC discovery. It is stripped from control-plane projection; absence means Agent Control
+   * tool injection and Orchestrator are disabled. */
+  piAgentControl?: { protocolVersion: 1 };
   /** Discovery-verified target-local runtime for the narrow Direct WSL Agent Control helper.
    * Secret-free; absence means WSL orchestration must fail closed. */
   wslAgentControl?: {

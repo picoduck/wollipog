@@ -8,6 +8,7 @@ const scenario = process.env.WOLLIPOG_FAKE_PI_SCENARIO ?? "normal";
 const resumedAt = argv.indexOf("--session");
 const forkedAt = argv.indexOf("--fork");
 const explicitSessionIdAt = argv.indexOf("--session-id");
+const agentControlProbe = argv.includes("--extension");
 const sessionId = scenario === "fork-ignores-session-id" && forkedAt >= 0
   ? "pi-generated-fork-id"
   : explicitSessionIdAt >= 0
@@ -111,6 +112,9 @@ function handle(request) {
       return response("get_commands", request, { commands: [
         { name: "skill:review", description: "Review code", source: "skill", location: "user" },
         { name: "ship", description: "Ship it", source: "prompt", location: "user" },
+        ...(agentControlProbe && scenario !== "extension-unsupported"
+          ? [{ name: "wollipog-agent-control-probe", description: "probe", source: "extension" }]
+          : []),
       ] });
     case "get_entries":
       if (scenario === "legacy-no-entries") {

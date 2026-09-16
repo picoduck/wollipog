@@ -22,6 +22,7 @@ import {
   agentControlReadyPath,
   markAgentControlCredentialReady,
   markAgentControlCredentialRejected,
+  piAgentControlExtensionPath,
   provisionAgentControl,
   removeAgentControlFiles,
   sweepAgentControlFiles,
@@ -145,6 +146,58 @@ test("orchestrator provisioning restricts native tools and refuses unsupported l
       assert.throws(() => provisionAgentControl(launch, control, () => {}, host), /supported native/);
       assert.equal(existsSync(agentControlTokenPath(root, launch.sessionId)), false);
     }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("discovery-verified Pi receives a private Agent Control extension and strict Orchestrator flags", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-pi-agent-control-"));
+  try {
+    const host: AgentControlHost = {
+      isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root, platform: "linux",
+    };
+    const control = {
+      controlPlaneUrl: "ws://127.0.0.1:4317/runner",
+      controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      executionIsolationMode: "bwrap" as const,
+    };
+    const ordinary = spec("pi");
+    ordinary.agentId = "pi";
+    ordinary.command = "pi";
+    const piAgent: AgentDefinition = {
+      id: "pi", name: "Pi", command: "pi", args: [], env: {}, driver: "pi",
+      context: { kind: "native" }, piAgentControl: { protocolVersion: 1 },
+    };
+    provisionAgentControl(ordinary, { ...control, orchestratorAgent: piAgent }, () => {}, host);
+    const extension = piAgentControlExtensionPath(root, ordinary.sessionId);
+    assert.equal(statSync(extension).mode & 0o777, 0o600);
+    assert.match(readFileSync(extension, "utf8"), /registerTool/);
+    assert.equal(ordinary.args[ordinary.args.indexOf("--extension") + 1], extension);
+    assert.equal(ordinary.env.WOLLIPOG_PI_AGENT_CONTROL_COMMAND, "/opt/runner");
+    assert.deepEqual(JSON.parse(ordinary.env.WOLLIPOG_PI_AGENT_CONTROL_ARGS!), ["--agent-control-mcp"]);
+    assert.match(ordinary.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE ?? "", /^[A-Za-z0-9_-]{32}$/u);
+
+    const orchestrator = spec("pi");
+    orchestrator.sessionId = "s_pi_orchestrator";
+    orchestrator.agentId = "pi";
+    orchestrator.command = "pi";
+    orchestrator.config = { permissionMode: "orchestrator" };
+    provisionAgentControl(orchestrator, { ...control, orchestratorAgent: piAgent }, () => {}, host);
+    const args = [...orchestrator.args];
+    provisionAgentControl(orchestrator, { ...control, orchestratorAgent: piAgent }, () => {}, host);
+    assert.deepEqual(orchestrator.args, args, "Pi resume replaces rather than stacks controlled flags");
+    assert.ok(orchestrator.args.includes("--no-extensions"));
+    assert.equal(orchestrator.args[orchestrator.args.indexOf("--exclude-tools") + 1], "bash,edit,write");
+    assert.equal(orchestrator.args.filter((arg) => arg === "--extension").length, 1);
+
+    const unverified = spec("pi");
+    unverified.sessionId = "s_unverified_pi";
+    unverified.agentId = "pi";
+    unverified.command = "pi";
+    unverified.config = { permissionMode: "orchestrator" };
+    assert.throws(() => provisionAgentControl(unverified, { ...control,
+      orchestratorAgent: { ...piAgent, piAgentControl: undefined },
+    }, () => {}, host), /discovery-verified Pi extension bridge/);
+    assert.equal(existsSync(agentControlTokenPath(root, unverified.sessionId)), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

@@ -180,6 +180,35 @@ test("Pi RPC correlates extension dialogs to durable Wollipog questions", async 
   assert.equal(events.some((event) => event.kind === "agent_message" && event.text === "Selected Stable"), true);
 });
 
+test("Pi RPC accepts only the exact Agent Control readiness nonce and fails on extension errors", async () => {
+  const driver = new PiRpcDriver(options(), callbacks([]));
+  let resolved = false;
+  let rejected: Error | undefined;
+  const timer = setTimeout(() => {}, 10_000);
+  (driver as any).agentControlBridge = {
+    nonce: "expected",
+    promise: Promise.resolve(),
+    resolve: () => { resolved = true; },
+    reject: (error: Error) => { rejected = error; },
+    timer,
+  };
+  (driver as any).onRpcEvent({ type: "extension_ui_request", method: "setStatus",
+    statusKey: "wollipog-agent-control", statusText: "wrong" });
+  assert.equal(resolved, false);
+  (driver as any).onRpcEvent({ type: "extension_ui_request", method: "setStatus",
+    statusKey: "wollipog-agent-control", statusText: "expected" });
+  assert.equal(resolved, true);
+
+  const secondTimer = setTimeout(() => {}, 10_000);
+  (driver as any).agentControlBridge = {
+    nonce: "another", promise: Promise.resolve(), resolve: () => {},
+    reject: (error: Error) => { rejected = error; }, timer: secondTimer,
+  };
+  (driver as any).onRpcEvent({ type: "extension_error", message: "secret provider detail" });
+  assert.match(rejected?.message ?? "", /failed during startup/);
+  assert.doesNotMatch(rejected?.message ?? "", /secret provider detail/);
+});
+
 test("Pi RPC caps pending extension dialogs and cancels excess requests", async (t) => {
   const events: SessionEventPayload[] = [];
   const sent: Record<string, unknown>[] = [];

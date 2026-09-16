@@ -128,6 +128,7 @@ test("configured Pi discovery uses runner-local environment without publishing i
           supportsConversationFork: false,
           permissionModes: [],
         },
+        piAgentControl: { protocolVersion: 1 },
       };
     },
   });
@@ -135,6 +136,7 @@ test("configured Pi discovery uses runner-local environment without publishing i
   assert.deepEqual(probed!.env, {});
   assert.equal(probed!.available, true);
   assert.equal(probed!.capabilities?.models[0]?.id, "anthropic/sonnet");
+  assert.deepEqual(probed!.piAgentControl, { protocolVersion: 1 });
 });
 
 test("configured Pi discovery adopts the verified resolved launch for a bare command", async () => {
@@ -399,6 +401,16 @@ test("configured agents cannot self-attest Codex Orchestrator automatic review",
     },
   });
   assert.equal(mergeAgents([claimed], [])[0]!.codexAppServer?.orchestratorApproval, undefined);
+});
+
+test("configured agents cannot self-attest the Pi Agent Control extension bridge", () => {
+  const claimed = cfg({
+    id: "claimed-pi",
+    driver: "pi",
+    command: "/opt/custom/pi",
+    piAgentControl: { protocolVersion: 1 },
+  });
+  assert.equal(mergeAgents([claimed], [])[0]!.piAgentControl, undefined);
 });
 
 test("fresh discovery replaces a configured Native TUI accounting diagnostic", () => {
