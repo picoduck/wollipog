@@ -11,6 +11,13 @@ export class PiRpcTransportError extends Error {
   }
 }
 
+export class PiRpcRequestTimeoutError extends PiRpcTransportError {
+  constructor(readonly command: string) {
+    super(`Pi RPC ${command} response timed out`);
+    this.name = "PiRpcRequestTimeoutError";
+  }
+}
+
 export class PiRpcResponseError extends Error {
   constructor(message: string, readonly command: string) {
     super(message);
@@ -41,6 +48,7 @@ export class PiRpcPeer {
   private nextId = 0;
   private disposed = false;
   private readonly pending = new Map<string, PendingRequest>();
+  private readonly lateDiscardableResponses = new Map<string, string>();
 
   constructor(
     private readonly input: Writable,
@@ -64,7 +72,13 @@ export class PiRpcPeer {
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new PiRpcTransportError(`Pi RPC ${command.type} response timed out`));
+        if (options.discardOversizedResponse === true) {
+          this.lateDiscardableResponses.set(id, command.type);
+          if (this.lateDiscardableResponses.size > 8) {
+            this.lateDiscardableResponses.delete(this.lateDiscardableResponses.keys().next().value!);
+          }
+        }
+        reject(new PiRpcRequestTimeoutError(command.type));
       }, timeoutMs);
       timer.unref?.();
       this.pending.set(id, {
@@ -102,6 +116,7 @@ export class PiRpcPeer {
       request.reject(error);
     }
     this.pending.clear();
+    this.lateDiscardableResponses.clear();
   }
 
   private write(message: Record<string, unknown>, done: (error?: Error) => void): void {
@@ -181,13 +196,23 @@ export class PiRpcPeer {
       pending.reject(new PiRpcOversizedResponseError(pending.command));
       return true;
     }
+    for (const [id, command] of this.lateDiscardableResponses) {
+      const idFirst = `{"id":"${id}","type":"response","command":"${command}",`;
+      const typeFirst = `{"type":"response","id":"${id}","command":"${command}",`;
+      if (!prefix.startsWith(idFirst) && !prefix.startsWith(typeFirst)) continue;
+      this.lateDiscardableResponses.delete(id);
+      return true;
+    }
     return false;
   }
 
   private route(message: Record<string, unknown>): void {
     if (message.type === "response" && typeof message.id === "string") {
       const pending = this.pending.get(message.id);
-      if (!pending) return;
+      if (!pending) {
+        this.lateDiscardableResponses.delete(message.id);
+        return;
+      }
       this.pending.delete(message.id);
       clearTimeout(pending.timer);
       if (message.success === false) {

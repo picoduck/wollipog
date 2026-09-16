@@ -76,3 +76,32 @@ test("Pi RPC can drain one opted-in oversized response and preserve later frames
   assert.deepEqual(events, [{ type: "agent_start" }]);
   peer.dispose();
 });
+
+test("Pi RPC drains an opted-in oversized response that arrives after its timeout", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const events: Record<string, unknown>[] = [];
+  const errors: Error[] = [];
+  const peer = new PiRpcPeer(input, output, (event) => events.push(event), (error) => errors.push(error), 96);
+  let written = "";
+  input.on("data", (chunk) => { written += String(chunk); });
+  const pending = peer.request(
+    { type: "get_entries" },
+    10,
+    { discardOversizedResponse: true },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  const request = JSON.parse(written.trim()) as { id: string };
+  await assert.rejects(pending, /timed out/);
+  output.write(`${JSON.stringify({
+    id: request.id,
+    type: "response",
+    command: "get_entries",
+    success: true,
+    data: { entries: [{ data: "x".repeat(200) }], leafId: "leaf" },
+  })}\n${JSON.stringify({ type: "agent_start" })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(errors, []);
+  assert.deepEqual(events, [{ type: "agent_start" }]);
+  peer.dispose();
+});

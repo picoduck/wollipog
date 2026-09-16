@@ -8,7 +8,9 @@ const scenario = process.env.WOLLIPOG_FAKE_PI_SCENARIO ?? "normal";
 const resumedAt = argv.indexOf("--session");
 const forkedAt = argv.indexOf("--fork");
 const explicitSessionIdAt = argv.indexOf("--session-id");
-const sessionId = explicitSessionIdAt >= 0
+const sessionId = scenario === "fork-ignores-session-id" && forkedAt >= 0
+  ? "pi-generated-fork-id"
+  : explicitSessionIdAt >= 0
   ? argv[explicitSessionIdAt + 1]
   : forkedAt >= 0 ? "pi-fork-session-1" : resumedAt >= 0 ? argv[resumedAt + 1] : "pi-session-1";
 const fakeSessionRoot = process.env.WOLLIPOG_FAKE_PI_SESSION_ROOT;

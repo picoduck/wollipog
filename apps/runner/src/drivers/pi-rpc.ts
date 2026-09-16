@@ -10,6 +10,7 @@ import {
 import {
   PiRpcOversizedResponseError,
   PiRpcPeer,
+  PiRpcRequestTimeoutError,
   PiRpcResponseError,
   PiRpcTransportError,
 } from "../pi-rpc-peer.js";
@@ -276,18 +277,20 @@ export class PiRpcDriver implements Driver {
     try {
       const state = object((await forkPeer.request<Json>({ type: "get_state" })).data);
       const forkedSessionId = string(state?.sessionId);
+      const sessionFile = string(state?.sessionFile);
+      const fileIsTargetOwned = !!forkedSessionId && forkedSessionId !== sourceSessionId && !!sessionFile && safelyAttributedSessionFile(
+        this.sessionFile, sessionFile, forkedSessionId, this.opts.context.kind === "wsl",
+      );
+      if (fileIsTargetOwned) this.forkedSessionFiles.set(expectedForkSessionId, sessionFile!);
       if (forkedSessionId !== expectedForkSessionId || forkedSessionId === sourceSessionId) {
         throw new Error("Pi did not establish an independent fork session");
       }
-      const sessionFile = string(state?.sessionFile);
       const paths = this.opts.context.kind === "wsl" || process.platform !== "win32" ? posix : win32;
       const fileName = paths.basename(sessionFile ?? "");
-      if (!sessionFile || (fileName !== `${forkedSessionId}.jsonl` && !fileName.endsWith(`_${forkedSessionId}.jsonl`))) {
+      if (!fileIsTargetOwned || !sessionFile ||
+          (fileName !== `${forkedSessionId}.jsonl` && !fileName.endsWith(`_${forkedSessionId}.jsonl`))) {
         throw new Error("Pi fork did not report a safely attributable session file");
       }
-      if (safelyAttributedSessionFile(
-        this.sessionFile, sessionFile, forkedSessionId, this.opts.context.kind === "wsl",
-      )) this.forkedSessionFiles.set(forkedSessionId, sessionFile);
       const forkedEntries = object((await forkPeer.request<Json>(
         { type: "get_entries", since: lastTurnId },
         5_000,
@@ -695,6 +698,7 @@ export class PiRpcDriver implements Driver {
       this.completedTurnId = null;
       return;
     }
+    const hadCursor = this.completedTurnId !== null;
     try {
       const response = await this.peer?.request<Json>(
         { type: "get_entries", ...(this.completedTurnId ? { since: this.completedTurnId } : {}) },
@@ -706,7 +710,7 @@ export class PiRpcDriver implements Driver {
       if (!leafId) this.cb.onStderr("Pi RPC did not report a completed conversation leaf; fork checkpoint omitted");
     } catch (error) {
       this.completedTurnId = null;
-      if (error instanceof PiRpcOversizedResponseError) {
+      if (error instanceof PiRpcOversizedResponseError || !hadCursor && error instanceof PiRpcRequestTimeoutError) {
         this.checkpointRefreshDisabled = true;
         return;
       }

@@ -96,6 +96,26 @@ test("Pi RPC rejects a mismatched fork leaf without initialization and removes i
   assert.deepEqual(readdirSync(sessionRoot), [], "a failed provider-mode fork leaves no orphaned Pi transcript");
 });
 
+test("Pi RPC removes the child transcript when a fork helper ignores the requested session id", async (t) => {
+  const sessionRoot = mkdtempSync(join(tmpdir(), "wollipog-pi-fork-id-"));
+  const driver = new PiRpcDriver({
+    ...options("fork-ignores-session-id", "persisted-pi-session"),
+    env: {
+      WOLLIPOG_FAKE_PI_SCENARIO: "fork-ignores-session-id",
+      WOLLIPOG_FAKE_PI_SESSION_ROOT: sessionRoot,
+    },
+  }, callbacks([]));
+  t.after(() => {
+    driver.dispose();
+    rmSync(sessionRoot, { recursive: true, force: true });
+  });
+  await assert.rejects(
+    driver.forkSession("pi-entry-1", process.cwd()),
+    /did not establish an independent fork session/,
+  );
+  assert.deepEqual(readdirSync(sessionRoot), [], "the helper's independently minted transcript is removed");
+});
+
 test("Pi RPC drains an oversized optional entry response without killing the live session", async (t) => {
   const exits: Array<number | null> = [];
   const driver = new PiRpcDriver(options("oversized-entries"), callbacks([], {
