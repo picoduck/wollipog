@@ -579,11 +579,28 @@ export function SessionDetail(props: SessionDetailProps) {
 
 const DESCENDANT_REQUEST_POLL_INTERVAL_MS = 2_000;
 export const DESCENDANT_REQUEST_POLL_TIMEOUT_MS = 10_000;
+const EMPTY_DESCENDANT_REQUESTS: readonly DescendantRequestView[] = Object.freeze([]);
 
 type ActiveDescendantRequestPoll = {
   controller: AbortController;
   timeout: number;
 };
+
+type DescendantRequestSnapshot = {
+  contextKey: string;
+  status: DescendantRequestStatus;
+  requests: readonly DescendantRequestView[];
+};
+
+function transitionToEmptyDescendantRequestSnapshot(
+  current: DescendantRequestSnapshot,
+  contextKey: string,
+  status: "idle" | "unavailable",
+): DescendantRequestSnapshot {
+  return current.contextKey === contextKey && current.status === status && current.requests.length === 0
+    ? current
+    : { contextKey, status, requests: EMPTY_DESCENDANT_REQUESTS };
+}
 
 export function useDescendantRequestPolling({
   sessionId,
@@ -594,21 +611,19 @@ export function useDescendantRequestPolling({
   enabled: boolean;
   available: boolean;
 }): {
-  requests: DescendantRequestView[];
+  requests: readonly DescendantRequestView[];
   status: DescendantRequestStatus;
   refreshAfterResolution: () => void;
 } {
   const api = useApi();
   const contextKey = JSON.stringify([sessionId, enabled, available]);
   const fallbackStatus: DescendantRequestStatus = !enabled ? "idle" : available ? "loading" : "unavailable";
-  const [snapshot, setSnapshot] = useState<{
-    contextKey: string;
-    status: DescendantRequestStatus;
-    requests: DescendantRequestView[];
-  }>(() => ({ contextKey, status: fallbackStatus, requests: [] }));
+  const [snapshot, setSnapshot] = useState<DescendantRequestSnapshot>(
+    () => ({ contextKey, status: fallbackStatus, requests: EMPTY_DESCENDANT_REQUESTS }),
+  );
   const currentSnapshot = snapshot.contextKey === contextKey
     ? snapshot
-    : { contextKey, status: fallbackStatus, requests: [] };
+    : { contextKey, status: fallbackStatus, requests: EMPTY_DESCENDANT_REQUESTS };
   const generationRef = useRef(0);
   const inFlightRef = useRef<ActiveDescendantRequestPoll | null>(null);
   const enabledRef = useRef(enabled);
@@ -632,13 +647,17 @@ export function useDescendantRequestPolling({
     if (!enabledRef.current) {
       generationRef.current += 1;
       abortInFlight();
-      setSnapshot({ contextKey: contextKeyRef.current, status: "idle", requests: [] });
+      setSnapshot((current) => transitionToEmptyDescendantRequestSnapshot(
+        current, contextKeyRef.current, "idle",
+      ));
       return;
     }
     if (!availableRef.current) {
       generationRef.current += 1;
       abortInFlight();
-      setSnapshot({ contextKey: contextKeyRef.current, status: "unavailable", requests: [] });
+      setSnapshot((current) => transitionToEmptyDescendantRequestSnapshot(
+        current, contextKeyRef.current, "unavailable",
+      ));
       return;
     }
     if (inFlightRef.current && !supersede) return;
@@ -648,12 +667,14 @@ export function useDescendantRequestPolling({
     const requestContextKey = contextKeyRef.current;
     setSnapshot((current) => current.contextKey === requestContextKey
       ? current
-      : { contextKey: requestContextKey, status: "loading", requests: [] });
+      : { contextKey: requestContextKey, status: "loading", requests: EMPTY_DESCENDANT_REQUESTS });
     const timeout = window.setTimeout(() => {
       if (inFlightRef.current?.controller !== controller) return;
       inFlightRef.current = null;
       if (generation === generationRef.current && requestContextKey === contextKeyRef.current) {
-        setSnapshot({ contextKey: requestContextKey, status: "unavailable", requests: [] });
+        setSnapshot((current) => transitionToEmptyDescendantRequestSnapshot(
+          current, requestContextKey, "unavailable",
+        ));
       }
       controller.abort();
     }, DESCENDANT_REQUEST_POLL_TIMEOUT_MS);
@@ -669,7 +690,9 @@ export function useDescendantRequestPolling({
           (request.responseOwner === "human" || request.responseOwner === "orchestrator"))
           ? next : null;
         if (compatible === null) {
-          setSnapshot({ contextKey: requestContextKey, status: "unavailable", requests: [] });
+          setSnapshot((current) => transitionToEmptyDescendantRequestSnapshot(
+            current, requestContextKey, "unavailable",
+          ));
           return;
         }
         setSnapshot((current) => current.contextKey === requestContextKey && current.status === "ready" &&
@@ -679,7 +702,9 @@ export function useDescendantRequestPolling({
       },
       () => {
         if (controller.signal.aborted || generation !== generationRef.current) return;
-        setSnapshot({ contextKey: requestContextKey, status: "unavailable", requests: [] });
+        setSnapshot((current) => transitionToEmptyDescendantRequestSnapshot(
+          current, requestContextKey, "unavailable",
+        ));
       },
     ).finally(() => {
       if (inFlightRef.current?.controller !== controller) return;
@@ -690,7 +715,7 @@ export function useDescendantRequestPolling({
   const refreshAfterResolution = useCallback(() => refresh(true), [refresh]);
   useEffect(() => {
     refresh();
-    if (!enabled) return;
+    if (!enabled || !available) return;
     const timer = window.setInterval(refresh, DESCENDANT_REQUEST_POLL_INTERVAL_MS);
     return () => {
       window.clearInterval(timer);
