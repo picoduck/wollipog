@@ -71,8 +71,13 @@ evidence required before deleting fallback support is defined in
 [Legacy Asset Removal Gate](./runner-updates.md#legacy-asset-removal-gate).
 
 macOS bundles are **signed and notarized** with a Developer ID Application certificate when the
-six `APPLE_*` repository secrets are present (certificate, certificate password, signing identity,
-Apple ID, app-specific password, Team ID). The workflow exports them only on the macOS legs and only
+`APPLE_*` repository secrets are present: `APPLE_CERTIFICATE` (base64 p12), `APPLE_CERTIFICATE_PASSWORD`,
+and `APPLE_SIGNING_IDENTITY` for signing, plus one notarization method. Preferred: an App Store
+Connect API key as `APPLE_API_KEY_ID`, `APPLE_API_ISSUER_ID`, and `APPLE_API_KEY_P8` (base64 of the
+`.p8`). Fallback: the Apple ID trio `APPLE_ID`, `APPLE_PASSWORD` (app-specific password), and
+`APPLE_TEAM_ID`. The key is preferred because the notary service has answered app-specific-password
+submissions with HTTP 500 for accounts that notarize fine with a key, and Apple's guidance for that
+error is key-based authentication. The workflow exports the secrets only on the macOS legs and only
 when the certificate secret is non-empty. A branch test dispatch without it still produces an
 unsigned throwaway bundle instead of failing; a tag run without it fails, so a missing or deleted
 secret cannot publish an unsigned release. When they are present, the Tauri bundler signs the app and both

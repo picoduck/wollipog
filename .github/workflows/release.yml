@@ -153,13 +153,20 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # macOS Developer ID signing + notarization. The six APPLE_* secrets are exported to the
-      # build step only here, only on macOS, and only when the certificate secret is non-empty.
+      # macOS Developer ID signing + notarization. The APPLE_* secrets are exported to the build
+      # step only here, only on macOS, and only when the certificate secret is non-empty.
       # A branch (test) dispatch without the certificate builds an unsigned throwaway bundle
       # instead of failing on an empty certificate; a real tag run without it fails, so a
       # missing or deleted secret can never publish an unsigned release whose body claims
       # signing. A present-but-broken secret fails the leg (the bundler aborts on a signing or
       # notarization error, and the verification step below re-checks the result).
+      #
+      # Notarization authenticates with an App Store Connect API key when the three
+      # APPLE_API_* secrets are present, and otherwise with the Apple ID trio. The bundler
+      # prefers the Apple ID trio whenever all three of its variables are set, so exactly one
+      # method is exported. The key is preferred: the notary service has returned HTTP 500 to
+      # app-specific-password submissions from accounts that work with a key, and Apple's own
+      # guidance for that failure is to switch to key-based authentication.
       # Windows Authenticode is configured separately via tauri.conf.json bundle.windows.
       - name: Export macOS signing credentials
         if: startsWith(matrix.os, 'macos')
@@ -169,6 +176,9 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -182,7 +192,7 @@ jobs:
             echo "MACOS_SIGNING=0" >> "$GITHUB_ENV"
             exit 0
           fi
-          for name in APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+          for name in APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do
             if [ -z "${!name}" ]; then
               echo "::error::APPLE_CERTIFICATE is set but $name is empty; refusing a partially configured signing setup"
               exit 1
@@ -193,11 +203,39 @@ jobs:
             echo "APPLE_CERTIFICATE=$APPLE_CERTIFICATE"
             echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD"
             echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY"
+          } >> "$GITHUB_ENV"
+          if [ -n "$APPLE_API_KEY_ID" ] || [ -n "$APPLE_API_ISSUER_ID" ] || [ -n "$APPLE_API_KEY_P8" ]; then
+            for name in APPLE_API_KEY_ID APPLE_API_ISSUER_ID APPLE_API_KEY_P8; do
+              if [ -z "${!name}" ]; then
+                echo "::error::App Store Connect API key notarization is partially configured: $name is empty"
+                exit 1
+              fi
+            done
+            key_dir=$(mktemp -d)
+            key_path="$key_dir/AuthKey_${APPLE_API_KEY_ID}.p8"
+            umask 077
+            printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$key_path"
+            grep -q "BEGIN PRIVATE KEY" "$key_path" || { echo "::error::APPLE_API_KEY_P8 did not decode to a PEM private key"; exit 1; }
+            {
+              echo "APPLE_API_KEY=$APPLE_API_KEY_ID"
+              echo "APPLE_API_ISSUER=$APPLE_API_ISSUER_ID"
+              echo "APPLE_API_KEY_PATH=$key_path"
+            } >> "$GITHUB_ENV"
+            echo "macOS signing enabled for identity: $APPLE_SIGNING_IDENTITY; notarizing with App Store Connect API key $APPLE_API_KEY_ID"
+            exit 0
+          fi
+          for name in APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::No App Store Connect API key is configured and Apple ID notarization is missing $name"
+              exit 1
+            fi
+          done
+          {
             echo "APPLE_ID=$APPLE_ID"
             echo "APPLE_PASSWORD=$APPLE_PASSWORD"
             echo "APPLE_TEAM_ID=$APPLE_TEAM_ID"
           } >> "$GITHUB_ENV"
-          echo "macOS signing enabled for identity: $APPLE_SIGNING_IDENTITY"
+          echo "macOS signing enabled for identity: $APPLE_SIGNING_IDENTITY; notarizing with Apple ID"
 
       - name: Build & publish desktop bundles
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
