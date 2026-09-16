@@ -119,7 +119,11 @@ import {
   type ConversationForkAvailability,
 } from "../session-actions.js";
 import { SessionApprovalRegion, standaloneApprovalForReview } from "./SessionApproval.js";
-import { requestTypeLabel, sessionRequestPanelKey } from "./SessionRequestPanel.js";
+import {
+  requestTypeLabel,
+  sessionRequestPanelKey,
+  type DescendantRequestStatus,
+} from "./SessionRequestPanel.js";
 import { ComposerQuestionResponse } from "./ComposerQuestionResponse.js";
 import { useGovernanceAudit, useGovernanceTimeline } from "./useGovernanceAudit.js";
 import { SessionHeader } from "./SessionHeader.js";
@@ -584,23 +588,39 @@ type ActiveDescendantRequestPoll = {
 export function useDescendantRequestPolling({
   sessionId,
   enabled,
+  available,
 }: {
   sessionId: string;
   enabled: boolean;
+  available: boolean;
 }): {
   requests: DescendantRequestView[];
+  status: DescendantRequestStatus;
   refreshAfterResolution: () => void;
 } {
   const api = useApi();
-  const [requests, setRequests] = useState<DescendantRequestView[]>([]);
+  const contextKey = JSON.stringify([sessionId, enabled, available]);
+  const fallbackStatus: DescendantRequestStatus = !enabled ? "idle" : available ? "loading" : "unavailable";
+  const [snapshot, setSnapshot] = useState<{
+    contextKey: string;
+    status: DescendantRequestStatus;
+    requests: DescendantRequestView[];
+  }>(() => ({ contextKey, status: fallbackStatus, requests: [] }));
+  const currentSnapshot = snapshot.contextKey === contextKey
+    ? snapshot
+    : { contextKey, status: fallbackStatus, requests: [] };
   const generationRef = useRef(0);
   const inFlightRef = useRef<ActiveDescendantRequestPoll | null>(null);
   const enabledRef = useRef(enabled);
+  const availableRef = useRef(available);
   const sessionIdRef = useRef(sessionId);
+  const contextKeyRef = useRef(contextKey);
   useLayoutEffect(() => {
     enabledRef.current = enabled;
+    availableRef.current = available;
     sessionIdRef.current = sessionId;
-  }, [enabled, sessionId]);
+    contextKeyRef.current = contextKey;
+  }, [available, contextKey, enabled, sessionId]);
   const abortInFlight = useCallback(() => {
     const active = inFlightRef.current;
     if (!active) return;
@@ -612,16 +632,29 @@ export function useDescendantRequestPolling({
     if (!enabledRef.current) {
       generationRef.current += 1;
       abortInFlight();
-      setRequests((current) => current.length ? [] : current);
+      setSnapshot({ contextKey: contextKeyRef.current, status: "idle", requests: [] });
+      return;
+    }
+    if (!availableRef.current) {
+      generationRef.current += 1;
+      abortInFlight();
+      setSnapshot({ contextKey: contextKeyRef.current, status: "unavailable", requests: [] });
       return;
     }
     if (inFlightRef.current && !supersede) return;
     abortInFlight();
     const controller = new AbortController();
     const generation = ++generationRef.current;
+    const requestContextKey = contextKeyRef.current;
+    setSnapshot((current) => current.contextKey === requestContextKey
+      ? current
+      : { contextKey: requestContextKey, status: "loading", requests: [] });
     const timeout = window.setTimeout(() => {
       if (inFlightRef.current?.controller !== controller) return;
       inFlightRef.current = null;
+      if (generation === generationRef.current && requestContextKey === contextKeyRef.current) {
+        setSnapshot({ contextKey: requestContextKey, status: "unavailable", requests: [] });
+      }
       controller.abort();
     }, DESCENDANT_REQUEST_POLL_TIMEOUT_MS);
     inFlightRef.current = { controller, timeout };
@@ -634,12 +667,19 @@ export function useDescendantRequestPolling({
           Number.isSafeInteger(request.eventEpoch) && request.eventEpoch >= 0 &&
           Number.isFinite(request.createdAt) && request.createdAt > 0 &&
           (request.responseOwner === "human" || request.responseOwner === "orchestrator"))
-          ? next : [];
-        setRequests((current) => JSON.stringify(current) === JSON.stringify(compatible) ? current : compatible);
+          ? next : null;
+        if (compatible === null) {
+          setSnapshot({ contextKey: requestContextKey, status: "unavailable", requests: [] });
+          return;
+        }
+        setSnapshot((current) => current.contextKey === requestContextKey && current.status === "ready" &&
+          JSON.stringify(current.requests) === JSON.stringify(compatible)
+          ? current
+          : { contextKey: requestContextKey, status: "ready", requests: compatible });
       },
       () => {
         if (controller.signal.aborted || generation !== generationRef.current) return;
-        setRequests((current) => current.length ? [] : current);
+        setSnapshot({ contextKey: requestContextKey, status: "unavailable", requests: [] });
       },
     ).finally(() => {
       if (inFlightRef.current?.controller !== controller) return;
@@ -649,9 +689,6 @@ export function useDescendantRequestPolling({
   }, [abortInFlight, api]);
   const refreshAfterResolution = useCallback(() => refresh(true), [refresh]);
   useEffect(() => {
-    setRequests((current) => current.length ? [] : current);
-  }, [sessionId]);
-  useEffect(() => {
     refresh();
     if (!enabled) return;
     const timer = window.setInterval(refresh, DESCENDANT_REQUEST_POLL_INTERVAL_MS);
@@ -660,8 +697,12 @@ export function useDescendantRequestPolling({
       generationRef.current += 1;
       abortInFlight();
     };
-  }, [abortInFlight, enabled, refresh, sessionId]);
-  return { requests, refreshAfterResolution };
+  }, [abortInFlight, available, enabled, refresh, sessionId]);
+  return {
+    requests: currentSnapshot.requests,
+    status: currentSnapshot.status,
+    refreshAfterResolution,
+  };
 }
 
 function SessionDetailLoaded({
@@ -767,16 +808,19 @@ function SessionDetailLoaded({
   const richGitSupported = runnerSupportsProtocol(runner?.protocolVersion, "gitVisibility");
   const box = useStoreSelector((s) => [...s.boxes.values()].find((candidate) => candidate.runnerId === session.runnerId));
   const conn = useStoreSelector((s) => s.conn);
+  const descendantRequestPollingEnabled = mode === "expanded" && (
+    session.orchestratorCampaign != null ||
+    (session.parentControl ?? "off") !== "off" ||
+    Object.values(session.parentControlPolicy?.decisions ?? {}).includes("orchestrator")
+  );
   const {
     requests: descendantRequests,
+    status: descendantRequestStatus,
     refreshAfterResolution: refreshDescendantRequestsAfterResolution,
   } = useDescendantRequestPolling({
     sessionId,
-    enabled: mode === "expanded" && conn === "online" && (
-      session.orchestratorCampaign != null ||
-      (session.parentControl ?? "off") !== "off" ||
-      Object.values(session.parentControlPolicy?.decisions ?? {}).includes("orchestrator")
-    ),
+    enabled: descendantRequestPollingEnabled,
+    available: conn === "online",
   });
   const ownStandaloneApproval = standaloneApprovalForReview(session.pendingApproval);
   const ownWorkerApproval = session.pendingApproval?.ownerToolUseId
@@ -797,10 +841,12 @@ function SessionDetailLoaded({
     if (mode === "preview") onExpand?.();
   }, [mode, onExpand, rightPanel]);
   useLayoutEffect(() => {
-    if (!requestPanelModeActive || ownStandaloneApproval || descendantRequests.length > 0) return;
+    if (!requestPanelModeActive || ownStandaloneApproval || descendantRequests.length > 0 ||
+        (descendantRequestStatus !== "idle" && descendantRequestStatus !== "ready")) return;
     rightPanel.setMode("launcher");
     if (rightPanel.open) rightPanel.close();
-  }, [descendantRequests.length, ownStandaloneApproval, requestPanelModeActive, rightPanel]);
+  }, [descendantRequests.length, descendantRequestStatus, ownStandaloneApproval,
+    requestPanelModeActive, rightPanel]);
   const anchorRecoveryPending = eventHistory?.refreshing === true ||
     (conn === "online" && eventHistory?.everComplete !== true && eventHistory?.error == null);
   const recoveryRevision = useStoreSelector((s) =>
@@ -5402,6 +5448,7 @@ function SessionDetailLoaded({
           governanceLoadingOlder={governanceAudit.loadingOlder}
           onLoadOlderGovernance={governanceAudit.loadOlder}
           descendantRequests={descendantRequests}
+          descendantRequestStatus={descendantRequestStatus}
           selectedRequestKey={selectedRequestKey}
           onSelectedRequestKeyChange={setSelectedRequestKey}
           onSessionUpdate={loadSession}

@@ -35,6 +35,8 @@ type RequestPanelItem = {
   descendant: boolean;
 };
 
+export type DescendantRequestStatus = "idle" | "loading" | "ready" | "unavailable";
+
 const listScrollPositions = new Map<string, number>();
 
 export function descendantRequestCounts(requests: readonly Pick<DescendantRequestView, "responseOwner">[]) {
@@ -100,6 +102,7 @@ export function SessionRequestPanel({
   session,
   runnerOnline,
   descendants,
+  descendantStatus = "ready",
   selectedKey,
   onSelectedKeyChange,
   onSessionUpdate,
@@ -109,6 +112,7 @@ export function SessionRequestPanel({
   session: SessionView;
   runnerOnline: boolean;
   descendants: readonly DescendantRequestView[];
+  descendantStatus?: DescendantRequestStatus;
   selectedKey: string | null;
   onSelectedKeyChange: (key: string | null) => void;
   onSessionUpdate: (session: SessionView) => void;
@@ -185,6 +189,18 @@ export function SessionRequestPanel({
   };
 
   if (!selected) {
+    if (descendantStatus === "loading") {
+      return <div className="request-panel-empty" role="status">
+        <h3>Loading Requests</h3>
+        <p>Checking for pending requests from descendant sessions.</p>
+      </div>;
+    }
+    if (descendantStatus === "unavailable") {
+      return <div className="request-panel-empty" role="status">
+        <h3>Requests Unavailable</h3>
+        <p>Pending requests cannot be verified right now. Wollipog will retry automatically.</p>
+      </div>;
+    }
     return <div className="request-panel-empty">
       <h3>No Pending Requests</h3>
       <p>Resolved, replaced, expired, and revoked requests leave this inbox automatically.</p>

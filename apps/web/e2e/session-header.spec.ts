@@ -151,6 +151,51 @@ for (const viewport of [
   });
 }
 
+test("the Requests panel stays open until descendant polling authoritatively settles", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow&fullShell=1");
+  await page.evaluate(() => localStorage.clear());
+  await page.reload();
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+      orchestratorCampaign: { pendingRequests: { human: 1, orchestrator: 0 } } as never,
+    });
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.setDescendantRequests("one");
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextDescendantRequests();
+  });
+  await page.getByRole("button", { name: /Alpha Session/ }).click();
+  const expand = page.getByRole("button", { name: "Expand Session" });
+  if (await expand.isVisible()) await expand.click();
+  await expect.poll(() => page.evaluate(() =>
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.descendantRequestCallCount())).toBe(1);
+
+  const trigger = page.getByRole("button", { name: "Needs Your Input: 1 Requests" });
+  await trigger.click();
+  const panel = page.getByRole("complementary", { name: "Requests" });
+  await expect(panel).toBeVisible();
+  await expect(panel.getByRole("heading", { name: "Loading Requests" })).toBeVisible();
+
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredDescendantRequests();
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.failNextDescendantRequests();
+  });
+  await expect(panel.getByRole("heading", { name: "Descendant Request Fixture" })).toBeVisible();
+  await expect.poll(() => page.evaluate(() =>
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.descendantRequestCallCount())).toBeGreaterThanOrEqual(2);
+  await expect(panel.getByRole("heading", { name: "Requests Unavailable" })).toBeVisible();
+  await expect(panel.locator(".request-panel-row")).toHaveCount(0);
+
+  await expect.poll(() => page.evaluate(() =>
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.descendantRequestCallCount())).toBeGreaterThanOrEqual(3);
+  await expect(panel.getByRole("heading", { name: "Descendant Request Fixture" })).toBeVisible();
+
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setDescendantRequests("empty"));
+  await expect.poll(() => page.evaluate(() =>
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.descendantRequestCallCount())).toBeGreaterThanOrEqual(4);
+  await expect(panel).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+});
+
 test("resolving a closed Requests surface leaves the cross-session generic toggle on the launcher", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow&fullShell=1");

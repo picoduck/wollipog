@@ -302,6 +302,44 @@ test("worker-owned approval stays in its canonical worker request surface", asyn
   }
 });
 
+test("empty descendant inbox distinguishes loading, unavailable, and authoritative empty states", async () => {
+  const session = { ...evidenceSession(), pendingApproval: null } as SessionView;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const render = (descendantStatus: "loading" | "unavailable" | "ready") => root.render(
+    <ApiProvider client={api}>
+      <SessionRequestPanel
+        session={session}
+        runnerOnline
+        descendants={[]}
+        descendantStatus={descendantStatus}
+        selectedKey={null}
+        onSelectedKeyChange={() => {}}
+        onSessionUpdate={() => {}}
+        onDescendantsUpdate={() => {}}
+        onOpenChild={() => {}}
+      />
+    </ApiProvider>,
+  );
+  try {
+    await act(async () => render("loading"));
+    assert.match(container.textContent ?? "", /Loading Requests/);
+    assert.doesNotMatch(container.textContent ?? "", /No Pending Requests/);
+
+    await act(async () => render("unavailable"));
+    assert.match(container.textContent ?? "", /Requests Unavailable/);
+    assert.match(container.textContent ?? "", /retry automatically/);
+    assert.equal(container.querySelector("button"), null, "unverified request controls fail closed");
+
+    await act(async () => render("ready"));
+    assert.match(container.textContent ?? "", /No Pending Requests/);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("descendant inbox exposes count, ownership, keyboard selection, and canonical child links", async () => {
   const session = { ...evidenceSession(), pendingApproval: null } as SessionView;
   const human: DescendantRequestView = {
