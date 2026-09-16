@@ -121,10 +121,10 @@ export function conversationForkAvailability(
   if (context.busy) {
     return { available: false, reason: "Another session action is already in progress." };
   }
-  if (context.driver === "claude-code" && forkTurn !== latestKnownTurn) {
+  if ((context.driver === "claude-code" || context.driver === "pi") && forkTurn !== latestKnownTurn) {
     return {
       available: false,
-      reason: "Claude Code can fork only its latest completed conversation checkpoint.",
+      reason: `${context.driver === "pi" ? "Pi" : "Claude Code"} can fork only its latest completed conversation checkpoint.`,
     };
   }
   return { available: true, forkTurn: forkTurn! };
@@ -138,7 +138,7 @@ export function forkFailureIsAmbiguous(httpStatus?: number): boolean {
 /**
  * Editing completed turn N means forking the provider/files AFTER N-1, then preparing the edited
  * prompt in the child composer. Only Codex app-server currently proves historical provider forks;
- * Claude's --fork-session can fork only its latest transcript and therefore cannot remove N.
+ * Claude and Pi can fork only their latest transcripts and therefore cannot remove N.
  */
 export function editInForkAvailability(
   userTurn: number | undefined,

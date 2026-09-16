@@ -1390,7 +1390,7 @@ function SessionDetailLoaded({
   const effectiveModel = optimisticModel ?? session?.model;
   const selectedModelSupportsImages = modelSupportsImages(sessionCaps, effectiveModel);
   // Codex app-server forks predate the generic capability bit (rolling-upgrade compatibility).
-  // Claude must explicitly prove --fork-session through discovery before the button appears.
+  // Claude and Pi must explicitly prove their native clone surface before the button appears.
   const supportsConversationFork = session
     ? providerSupportsConversationFork(session.driver, sessionCaps)
     : false;
@@ -3052,9 +3052,13 @@ function SessionDetailLoaded({
   const onFork = useCallback(
     async (turn: number) => {
       if (busy || forkInFlightRef.current) return;
-      const provider = session?.driver === "claude-code" ? "Claude session" : "Codex thread";
-      const providerNote = session?.driver === "claude-code"
-        ? " Claude Code can fork only the latest completed conversation turn."
+      const provider = session?.driver === "claude-code"
+        ? "Claude session"
+        : session?.driver === "pi"
+          ? "Pi session"
+          : "Codex thread";
+      const providerNote = session?.driver === "claude-code" || session?.driver === "pi"
+        ? ` ${session.driver === "pi" ? "Pi" : "Claude Code"} can fork only the latest completed conversation turn.`
         : "";
       if (!await confirm({
         title: `Fork after turn ${turn}?`,

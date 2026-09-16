@@ -211,17 +211,18 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     let forkCwd = "";
     const forkSources: string[] = [];
     const archivedForks: string[] = [];
+    let piInitializations = 0;
     let racedPrompts = 0;
     let manager!: SessionManager;
-    const factory = (_kind: AgentDriverKind, options: DriverOptions, _callbacks: DriverCallbacks): Driver => ({
+    const factory = (kind: AgentDriverKind, options: DriverOptions, _callbacks: DriverCallbacks): Driver => ({
       get pid() { return undefined; },
-      initialize: async () => {},
+      initialize: async () => { if (kind === "pi") piInitializations++; },
       newSession: async () => options.resumeId ?? "",
       agentSessionId: () => options.resumeId ?? null,
       forkSession: async (_turn, cwd) => {
         forkCwd = cwd;
         forkSources.push(_turn);
-        manager.prompt("s_source", "must not race the fork");
+        manager.prompt(options.resumeId === "pi-source-session" ? "s_pi_source" : "s_source", "must not race the fork");
         return "thread-forked";
       },
       archiveSession: async (sessionId) => { archivedForks.push(sessionId); },
@@ -484,9 +485,60 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     );
     assert.equal(afterCancelled.ok, false);
     assert.match(afterCancelled.error ?? "", /current transcript/);
+
+    // Pi never mutates the live source RPC process. Its temporary clone helper runs from a copy of
+    // the source provider state that already belongs to the target session, making rollback
+    // partition-local and preserving the authoritative Pi leaf as the checkpoint coordinate.
+    const piSource: SessionMeta = {
+      ...source,
+      sessionId: "s_pi_source",
+      worktreeBranch: sourceWorktree.branch,
+      driver: "pi",
+      agentId: "pi",
+      agentSessionId: "pi-source-session",
+      capabilities: {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: false,
+        supportsConversationFork: true,
+      },
+      providerStateVersion: 2,
+      turnCount: 2,
+      forkPoints: {
+        "1": { agentTurnId: "pi-leaf-1", tree, baseCommit, eventSeq: 2 },
+        "2": { agentTurnId: "pi-leaf-2", tree, baseCommit, eventSeq: 4 },
+      },
+      seq: 0,
+    };
+    store.create(piSource);
+    store.appendEvent(piSource.sessionId, { kind: "user_message", text: "Pi prompt" });
+    store.appendEvent(piSource.sessionId, { kind: "conversation_checkpoint", turn: 1 });
+    store.appendEvent(piSource.sessionId, { kind: "user_message", text: "Pi follow-up" });
+    store.appendEvent(piSource.sessionId, { kind: "conversation_checkpoint", turn: 2 });
+    store.flush(piSource.sessionId);
+    const historicalPi = await manager.forkConversation(piSource.sessionId, "s_pi_historical", 1, "Old Pi fork");
+    assert.equal(historicalPi.ok, false);
+    assert.match(historicalPi.error ?? "", /current transcript/);
+    assert.equal(store.has("s_pi_historical"), false);
+    const piFork = await manager.forkConversation(piSource.sessionId, "s_pi_target", 2, "Pi fork");
+    assert.equal(piFork.ok, true, piFork.error);
+    assert.equal(store.readMeta("s_pi_target")?.driver, "pi");
+    assert.equal(store.readMeta("s_pi_target")?.agentSessionId, "thread-forked");
+    assert.equal(forkSources.at(-1), "pi-leaf-2");
+    assert.equal(piInitializations, 0, "Pi forks do not open the copied source session in a competing process");
+    assert.deepEqual(stateTransfers.at(-1), { source: "s_pi_source", target: "s_pi_target" });
+    assert.equal(
+      stateTransfers.filter((transfer) => transfer.target === "s_pi_target").length,
+      1,
+      "Pi provider state is copied before the helper and not duplicated afterward",
+    );
+    assert.equal(verifiedForks.at(-1), "thread-forked");
+    assert.match(
+      (store.readEvents(piSource.sessionId).at(-1)?.payload as { message?: string }).message ?? "",
+      /conversation fork is in progress/,
+    );
     await manager.delete("s_target");
     await manager.delete("s_claude_target");
-    assert.deepEqual(stateRemovals, ["s_clone_fail", "s_post_anchor_fail", "s_target", "s_claude_target"]);
+    await manager.delete("s_pi_target");
+    assert.deepEqual(stateRemovals, ["s_clone_fail", "s_post_anchor_fail", "s_target", "s_claude_target", "s_pi_target"]);
     manager.shutdownAll();
     git(repo, ["worktree", "remove", "--force", sourceWorktree.path]);
   } finally {

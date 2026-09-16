@@ -32,7 +32,7 @@ test("edit-and-fork targets the completed predecessor and fails closed without i
 
 test("historical edit-and-fork is Codex interactive only and every runtime gate fails closed", () => {
   const turns = new Set([1, 2]);
-  for (const driver of ["claude-code", "codex", "acp"] as const) {
+  for (const driver of ["claude-code", "pi", "codex", "acp"] as const) {
     assert.equal(editInForkAvailability(2, turns, { ...base, driver }).available, false);
   }
   const blocked: EditInForkContext[] = [
@@ -49,7 +49,7 @@ test("historical edit-and-fork is Codex interactive only and every runtime gate 
   for (const context of blocked) assert.equal(editInForkAvailability(2, turns, context).available, false);
 });
 
-test("plain conversation forks share runtime gates and preserve Claude latest-only behavior", () => {
+test("plain conversation forks share runtime gates and preserve Claude and Pi latest-only behavior", () => {
   const context = { ...base, providerSupported: true, forkInProgress: false };
   assert.deepEqual(conversationForkAvailability(2, 3, context), { available: true, forkTurn: 2 });
   assert.deepEqual(conversationForkAvailability(3, 3, { ...context, driver: "claude-code" }), {
@@ -62,6 +62,13 @@ test("plain conversation forks share runtime gates and preserve Claude latest-on
       : conversationForkAvailability(2, 3, { ...context, driver: "claude-code" }).reason,
     /latest completed conversation checkpoint/,
   );
+  assert.deepEqual(conversationForkAvailability(3, 3, { ...context, driver: "pi" }), {
+    available: true,
+    forkTurn: 3,
+  });
+  const historicalPi = conversationForkAvailability(2, 3, { ...context, driver: "pi" });
+  assert.equal(historicalPi.available, false);
+  if (!historicalPi.available) assert.match(historicalPi.reason, /^Pi can fork only/u);
 
   const blocked = [
     { context: { ...context, hasWorktree: false }, reason: /isolated worktree/ },

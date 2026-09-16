@@ -1,9 +1,26 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
 const argv = process.argv.slice(2);
 if (!argv.includes("--mode") || !argv.includes("rpc") || !argv.includes("--no-approve")) process.exit(64);
 
 const scenario = process.env.WOLLIPOG_FAKE_PI_SCENARIO ?? "normal";
 const resumedAt = argv.indexOf("--session");
-const sessionId = resumedAt >= 0 ? argv[resumedAt + 1] : "pi-session-1";
+const forkedAt = argv.indexOf("--fork");
+const explicitSessionIdAt = argv.indexOf("--session-id");
+const sessionId = scenario === "fork-ignores-session-id" && forkedAt >= 0
+  ? "pi-generated-fork-id"
+  : explicitSessionIdAt >= 0
+  ? argv[explicitSessionIdAt + 1]
+  : forkedAt >= 0 ? "pi-fork-session-1" : resumedAt >= 0 ? argv[resumedAt + 1] : "pi-session-1";
+const fakeSessionRoot = process.env.WOLLIPOG_FAKE_PI_SESSION_ROOT;
+const sessionFile = fakeSessionRoot
+  ? join(fakeSessionRoot, `${sessionId}.jsonl`)
+  : `/tmp/.pi/agent/sessions/fake-project/${sessionId}.jsonl`;
+if (forkedAt >= 0 && fakeSessionRoot) {
+  mkdirSync(fakeSessionRoot, { recursive: true });
+  writeFileSync(sessionFile, `${JSON.stringify({ type: "session", id: sessionId })}\n`, { flag: "wx" });
+}
 if (!process.env.WOLLIPOG_FAKE_PI_SCENARIO && !argv.includes("--no-session")) process.exit(64);
 if (resumedAt >= 0 && sessionId !== "persisted-pi-session") process.exit(66);
 const models = [
@@ -12,6 +29,18 @@ const models = [
 ];
 let selected = models[0];
 let buffer = Buffer.alloc(0);
+let entries = forkedAt >= 0 ? [
+  { type: "message", id: "pi-user-1", parentId: null, message: { role: "user", content: "hello" } },
+  { type: "message", id: "pi-entry-1", parentId: "pi-user-1", message: { role: "assistant", content: "Hello from Pi" } },
+] : [];
+let leafId = forkedAt >= 0 ? "pi-entry-1" : null;
+if (scenario === "fork-leaf-mismatch" && forkedAt >= 0) {
+  entries = [
+    { type: "message", id: "expected-leaf", parentId: null, message: { role: "assistant", content: "Expected" } },
+    { type: "message", id: "different-leaf", parentId: "expected-leaf", message: { role: "assistant", content: "Later" } },
+  ];
+  leafId = "different-leaf";
+}
 
 function send(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -37,6 +66,11 @@ function settleNormal() {
   send({ type: "turn_start" });
   send({ type: "turn_end", message: {}, toolResults: [] });
   send({ type: "agent_end", messages: [], willRetry: false });
+  entries = [
+    { type: "message", id: "pi-user-1", parentId: null, message: { role: "user", content: "hello" } },
+    { type: "message", id: "pi-entry-1", parentId: "pi-user-1", message: { role: "assistant", content: "Hello from Pi" } },
+  ];
+  leafId = "pi-entry-1";
   send({ type: "agent_settled" });
 }
 
@@ -47,13 +81,18 @@ function settleToolOnly() {
   send({ type: "tool_execution_start", toolCallId: "tool-only", toolName: "bash", args: { command: "true" } });
   send({ type: "tool_execution_end", toolCallId: "tool-only", result: { content: "" }, isError: false });
   send({ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", id: "tool-only", name: "bash" }], stopReason: "toolUse" } });
+  entries = [
+    { type: "message", id: "pi-user-1", parentId: null, message: { role: "user", content: "use a tool" } },
+    { type: "message", id: "pi-entry-1", parentId: "pi-user-1", message: { role: "assistant", content: [] } },
+  ];
+  leafId = "pi-entry-1";
   send({ type: "agent_settled" });
 }
 
 function handle(request) {
   switch (request.type) {
     case "get_state":
-      return response("get_state", request, { sessionId, sessionFile: `/tmp/${sessionId}.jsonl`, model: selected,
+      return response("get_state", request, { sessionId, sessionFile, model: selected,
         thinkingLevel: selected.id === "sonnet" ? "high" : "off", isStreaming: false });
     case "get_available_models":
       return response("get_available_models", request, { models });
@@ -73,6 +112,27 @@ function handle(request) {
         { name: "skill:review", description: "Review code", source: "skill", location: "user" },
         { name: "ship", description: "Ship it", source: "prompt", location: "user" },
       ] });
+    case "get_entries":
+      if (scenario === "legacy-no-entries") {
+        send({ type: "response", id: request.id, command: request.type, success: false, error: "unsupported" });
+        return;
+      }
+      if (scenario === "legacy-hanging-entries") return;
+      if (scenario === "oversized-entries") {
+        return response("get_entries", request, {
+          entries: [{ type: "custom", id: "huge-entry", data: "x".repeat(4 * 1024 * 1024 + 1024) }],
+          leafId: "huge-entry",
+        });
+      }
+      if (request.since !== undefined) {
+        const sinceIndex = entries.findIndex((entry) => entry.id === request.since);
+        if (sinceIndex < 0) {
+          send({ type: "response", id: request.id, command: request.type, success: false, error: `Entry not found: ${request.since}` });
+          return;
+        }
+        return response("get_entries", request, { entries: entries.slice(sinceIndex + 1), leafId });
+      }
+      return response("get_entries", request, { entries, leafId });
     case "get_session_stats":
       return response("get_session_stats", request, { sessionId, tokens: { input: 12, output: 4 }, cost: 0.02,
         contextUsage: { tokens: 16, contextWindow: selected.contextWindow, percent: 1 } });

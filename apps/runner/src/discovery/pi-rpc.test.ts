@@ -24,6 +24,7 @@ test("Pi discovery derives models, thinking levels, images, commands, and skills
     { id: "openai/mini", efforts: ["off"], modalities: ["text"], contextWindow: 128000 },
   ]);
   assert.equal(result.capabilities.supportsImages, true);
+  assert.equal(result.capabilities.supportsConversationFork, true);
   assert.deepEqual(result.capabilities.effortLevels, ["off", "low", "high"]);
   assert.deepEqual(result.capabilities.slashCommands, [
     { name: "skill:review", description: "Review code", source: "user" },
@@ -42,6 +43,35 @@ test("Pi discovery fails closed when the RPC contract is not compatible", async 
   assert.equal(result.authStatus, "unknown");
   assert.match(result.unavailableReason ?? "", /compatibility probe/u);
   assert.deepEqual(result.capabilities.models, []);
+});
+
+test("Pi discovery does not advertise forks without authoritative entry cursors", async () => {
+  const result = await probePiRpc(
+    { command: process.execPath, args: [fixture] },
+    { kind: "native" },
+    {
+      cwd: process.cwd(),
+      timeoutMs: 2_000,
+      env: { WOLLIPOG_FAKE_PI_SCENARIO: "legacy-no-entries" },
+    },
+  );
+  assert.equal(result.available, true, result.unavailableReason);
+  assert.equal(result.capabilities.supportsConversationFork, false);
+});
+
+test("Pi discovery keeps older RPCs available when an unknown entry command never answers", async () => {
+  const result = await probePiRpc(
+    { command: process.execPath, args: [fixture] },
+    { kind: "native" },
+    {
+      cwd: process.cwd(),
+      timeoutMs: 1_000,
+      env: { WOLLIPOG_FAKE_PI_SCENARIO: "legacy-hanging-entries" },
+    },
+  );
+  assert.equal(result.available, true, result.unavailableReason);
+  assert.equal(result.capabilities.supportsConversationFork, false);
+  assert.equal(result.capabilities.models.length, 2, "required model probes still use the remaining budget");
 });
 
 test("Pi discovery uses a Linux working directory for WSL probes", async () => {

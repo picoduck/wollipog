@@ -1,11 +1,20 @@
 import { randomUUID } from "node:crypto";
+import { rm } from "node:fs/promises";
+import { posix, win32 } from "node:path";
 import {
   DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH,
   type AgentQuestion,
   type PromptImage,
   type SessionConfig,
 } from "@wollipog/protocol";
-import { PiRpcPeer, PiRpcResponseError, PiRpcTransportError } from "../pi-rpc-peer.js";
+import {
+  PiRpcOversizedResponseError,
+  PiRpcPeer,
+  PiRpcRequestTimeoutError,
+  PiRpcResponseError,
+  PiRpcTransportError,
+} from "../pi-rpc-peer.js";
+import { runContextCommand } from "../context-command.js";
 import { killTree, spawnAgent, terminateDescendantBoundaries, type AgentProcess } from "../spawn.js";
 import type {
   Driver,
@@ -64,12 +73,34 @@ function promptImages(images: PromptImage[]): Json[] {
   return images.map((image) => ({ type: "image", data: image.data, mimeType: image.mimeType }));
 }
 
+function safelyAttributedSessionFile(sourceFile: string | null, targetFile: string, sessionId: string, wsl: boolean): boolean {
+  if (sourceFile === targetFile) return false;
+  const paths = wsl || process.platform !== "win32" ? posix : win32;
+  if (!paths.isAbsolute(targetFile)) return false;
+  const fileName = paths.basename(targetFile);
+  if (fileName !== `${sessionId}.jsonl` && !fileName.endsWith(`_${sessionId}.jsonl`)) return false;
+  // The fork id is minted by this driver and passed through --session-id, so an exact filename is
+  // target-owned even when this helper deliberately was not initialized on the copied source.
+  if (!sourceFile) return true;
+  const sourceParts = sourceFile.split(paths.sep);
+  const piRoot = sourceParts.findIndex((part, index) =>
+    part === ".pi" && sourceParts[index + 1] === "agent" && sourceParts[index + 2] === "sessions");
+  const root = piRoot >= 0
+    ? sourceParts.slice(0, piRoot + 3).join(paths.sep) || paths.sep
+    : paths.dirname(sourceFile);
+  const relative = paths.relative(root, targetFile);
+  return relative !== "" && relative !== ".." && !relative.startsWith(`..${paths.sep}`) && !paths.isAbsolute(relative);
+}
+
 export class PiRpcDriver implements Driver {
   private child: AgentProcess | null = null;
   private peer: PiRpcPeer | null = null;
   private config: SessionConfig;
   private cwd: string;
   private sessionId: string | null = null;
+  private sessionFile: string | null = null;
+  private completedTurnId: string | null = null;
+  private checkpointRefreshDisabled = false;
   private turnId: string | null = null;
   private promptBusy = false;
   private promptAccepted = false;
@@ -87,6 +118,7 @@ export class PiRpcDriver implements Driver {
   private messageSeq = 0;
   private readonly toolCalls = new Set<string>();
   private readonly pendingQuestions = new Map<string, PendingPiQuestion>();
+  private readonly forkedSessionFiles = new Map<string, string>();
   private readonly descendantOwner = {};
 
   constructor(
@@ -108,7 +140,7 @@ export class PiRpcDriver implements Driver {
   }
 
   agentTurnId(): string | null {
-    return this.turnId;
+    return this.completedTurnId;
   }
 
   activeSteeringTurnId(): string | null {
@@ -184,6 +216,120 @@ export class PiRpcDriver implements Driver {
     if (!this.peer || !this.sessionId) throw new Error("Pi RPC session is not ready");
     this.cb.onSessionEstablished?.(this.sessionId);
     return this.sessionId;
+  }
+
+  /** Pi's --fork startup option clones the active branch into the process cwd without replacing
+   * the source RPC process. Wollipog deliberately exposes only the latest completed checkpoint:
+   * the public RPC can clone its current leaf, but cannot fork "at" an arbitrary historical entry. */
+  async forkSession(
+    lastTurnId: string,
+    cwd: string,
+    options: { isolation?: DriverOptions["isolation"]; descendantMarker?: string } = {},
+  ): Promise<string> {
+    const peer = this.peer;
+    const sourceSessionId = this.sessionId ?? this.opts.resumeId;
+    if (!sourceSessionId || this.disposed) throw new PiRpcTransportError("Pi RPC has no resumable source session");
+    if (this.promptBusy) throw new Error("Pi cannot clone while a turn is running");
+    if (peer) {
+      if (this.completedTurnId !== lastTurnId) {
+        throw new Error("Pi can clone only its latest completed conversation checkpoint");
+      }
+      const sourceEntries = object((await peer.request<Json>(
+        { type: "get_entries", since: lastTurnId },
+        5_000,
+        { discardOversizedResponse: true },
+      )).data);
+      if (string(sourceEntries?.leafId) !== lastTurnId) {
+        throw new Error("Pi can clone only its latest completed conversation checkpoint");
+      }
+    }
+
+    const expectedForkSessionId = randomUUID();
+    const child = this.spawn({
+      command: this.opts.command,
+      args: [
+        ...this.opts.args,
+        "--mode", "rpc",
+        "--no-approve",
+        "--fork", sourceSessionId,
+        "--session-id", expectedForkSessionId,
+      ],
+      cwd,
+      env: this.opts.env,
+      context: this.opts.context,
+      isolation: options.isolation ?? this.opts.isolation,
+      containerAgentLaunch: true,
+      cloudAgentLaunch: true,
+      descendantOwner: this.descendantOwner,
+      descendantMarker: options.descendantMarker ?? this.opts.descendantMarker,
+    });
+    const forkPeer = new PiRpcPeer(child.stdin, child.stdout, () => {}, () => {
+      if (child.exitCode == null) this.kill(child);
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      const text = String(chunk).trim();
+      if (text && !this.disposed) this.cb.onStderr(`Pi fork: ${text}`);
+    });
+    const close = (detail: string) => forkPeer.dispose(detail);
+    child.on("error", (error: Error) => close(error.message));
+    child.on("close", () => close("Pi fork helper exited"));
+    try {
+      const state = object((await forkPeer.request<Json>({ type: "get_state" })).data);
+      const forkedSessionId = string(state?.sessionId);
+      const sessionFile = string(state?.sessionFile);
+      const fileIsTargetOwned = !!forkedSessionId && forkedSessionId !== sourceSessionId && !!sessionFile && safelyAttributedSessionFile(
+        this.sessionFile, sessionFile, forkedSessionId, this.opts.context.kind === "wsl",
+      );
+      if (fileIsTargetOwned) this.forkedSessionFiles.set(expectedForkSessionId, sessionFile!);
+      if (forkedSessionId !== expectedForkSessionId || forkedSessionId === sourceSessionId) {
+        throw new Error("Pi did not establish an independent fork session");
+      }
+      const paths = this.opts.context.kind === "wsl" || process.platform !== "win32" ? posix : win32;
+      const fileName = paths.basename(sessionFile ?? "");
+      if (!fileIsTargetOwned || !sessionFile ||
+          (fileName !== `${forkedSessionId}.jsonl` && !fileName.endsWith(`_${forkedSessionId}.jsonl`))) {
+        throw new Error("Pi fork did not report a safely attributable session file");
+      }
+      const forkedEntries = object((await forkPeer.request<Json>(
+        { type: "get_entries", since: lastTurnId },
+        5_000,
+        { discardOversizedResponse: true },
+      )).data);
+      if (string(forkedEntries?.leafId) !== lastTurnId) {
+        throw new Error("Pi fork did not preserve the requested completed checkpoint");
+      }
+      return forkedSessionId;
+    } catch (error) {
+      try {
+        await this.archiveSession(expectedForkSessionId);
+      } catch (cleanupError) {
+        this.cb.onStderr(`Pi fork cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+      }
+      throw error;
+    } finally {
+      forkPeer.dispose("Pi fork helper complete");
+      this.kill(child);
+    }
+  }
+
+  /** Roll back only a session file minted by this driver instance. Isolated forks live in the
+   * target's hashed provider-state partition, which the manager removes atomically instead. */
+  async archiveSession(sessionId: string): Promise<void> {
+    const sessionFile = this.forkedSessionFiles.get(sessionId);
+    if (!sessionFile) return;
+    this.forkedSessionFiles.delete(sessionId);
+    const backend = this.opts.isolation?.backend;
+    if (backend === "bwrap" || backend === "wsl-bwrap") return;
+    if (this.opts.context.kind === "wsl") {
+      await runContextCommand(this.opts.context, "rm", ["-f", "--", sessionFile], {
+        cwd: "/",
+        timeoutMs: 5_000,
+      });
+      return;
+    }
+    if (backend === "container" || backend === "cloud") return;
+    await rm(sessionFile, { force: true });
   }
 
   async prompt(text: string, images: PromptImage[] = [], slashCommand?: string): Promise<StopReason> {
@@ -328,6 +474,8 @@ export class PiRpcDriver implements Driver {
   private applyState(state: Json | undefined): void {
     const id = string(state?.sessionId);
     if (id) this.sessionId = id;
+    const sessionFile = string(state?.sessionFile);
+    if (sessionFile) this.sessionFile = sessionFile;
     const model = object(state?.model);
     const provider = string(model?.provider);
     const modelId = string(model?.id);
@@ -541,7 +689,33 @@ export class PiRpcDriver implements Driver {
     this.dismissQuestions("provider_resolved");
     if (this.streamedAgentResponse) this.cb.onEvent({ kind: "agent_response_completed" });
     await this.refreshSessionStats();
+    await this.refreshCompletedTurnId();
     this.settleTurn(this.cancelled ? "cancelled" : this.turnStop);
+  }
+
+  private async refreshCompletedTurnId(): Promise<void> {
+    if (this.opts.capabilities?.supportsConversationFork !== true || this.checkpointRefreshDisabled) {
+      this.completedTurnId = null;
+      return;
+    }
+    const hadCursor = this.completedTurnId !== null;
+    try {
+      const response = await this.peer?.request<Json>(
+        { type: "get_entries", ...(this.completedTurnId ? { since: this.completedTurnId } : {}) },
+        5_000,
+        { discardOversizedResponse: true },
+      );
+      const leafId = string(object(response?.data)?.leafId);
+      this.completedTurnId = leafId ?? null;
+      if (!leafId) this.cb.onStderr("Pi RPC did not report a completed conversation leaf; fork checkpoint omitted");
+    } catch (error) {
+      this.completedTurnId = null;
+      if (error instanceof PiRpcOversizedResponseError || !hadCursor && error instanceof PiRpcRequestTimeoutError) {
+        this.checkpointRefreshDisabled = true;
+        return;
+      }
+      this.cb.onStderr(`Pi RPC could not read the completed conversation leaf: ${(error as Error).message}`);
+    }
   }
 
   private async refreshSessionStats(): Promise<void> {

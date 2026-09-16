@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import type { SessionEventPayload } from "@wollipog/protocol";
@@ -16,6 +19,10 @@ function options(scenario = "normal", resumeId?: string): DriverOptions {
     config: {},
     context: { kind: "native" },
     resumeId,
+    capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: false,
+      supportsConversationFork: true,
+    },
   };
 }
 
@@ -43,6 +50,7 @@ test("Pi RPC normalizes one multi-stage run without duplicate or empty messages"
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(stop, "end_turn");
   assert.equal(accepted, 1);
+  assert.equal(driver.agentTurnId(), "pi-entry-1", "the durable Pi leaf becomes the fork checkpoint");
   assert.deepEqual(events.filter((event) => event.kind === "agent_message").map((event) => event.text), ["Hello from Pi"]);
   assert.deepEqual(events.filter((event) => event.kind === "agent_thought").map((event) => event.text), ["Reason\u2028carefully"]);
   assert.equal(events.filter((event) => event.kind === "agent_response_completed").length, 1);
@@ -50,6 +58,92 @@ test("Pi RPC normalizes one multi-stage run without duplicate or empty messages"
   assert.equal(events.filter((event) => event.kind === "tool_call_update" && event.status === "completed").length, 1);
   assert.deepEqual(events.filter((event) => event.kind === "token_usage").map((event) => [event.inputTokens, event.outputTokens, event.costUsd]), [[12, 4, 0.02]]);
   assert.deepEqual(context, { contextTokensUsed: 16, contextWindow: 200000 });
+});
+
+test("Pi RPC clones the latest completed leaf into the target worktree without replacing the source", async (t) => {
+  const driver = new PiRpcDriver(options(), callbacks([]));
+  t.after(() => driver.dispose());
+  await driver.initialize();
+  await driver.newSession(process.cwd());
+  await driver.prompt("hello");
+  const forkedSessionId = await driver.forkSession("pi-entry-1", process.cwd());
+  assert.match(forkedSessionId, /^[0-9a-f-]{36}$/u);
+  assert.equal(driver.agentSessionId(), "pi-session-1", "the source RPC process keeps its session");
+  await assert.rejects(
+    driver.forkSession("historical-entry", process.cwd()),
+    /latest completed conversation checkpoint/,
+  );
+});
+
+test("Pi RPC rejects a mismatched fork leaf without initialization and removes its target file", async (t) => {
+  const sessionRoot = mkdtempSync(join(tmpdir(), "wollipog-pi-fork-"));
+  const driver = new PiRpcDriver({
+    ...options("fork-leaf-mismatch", "persisted-pi-session"),
+    env: {
+      WOLLIPOG_FAKE_PI_SCENARIO: "fork-leaf-mismatch",
+      WOLLIPOG_FAKE_PI_SESSION_ROOT: sessionRoot,
+    },
+  }, callbacks([]));
+  t.after(() => {
+    driver.dispose();
+    rmSync(sessionRoot, { recursive: true, force: true });
+  });
+  await assert.rejects(
+    driver.forkSession("expected-leaf", process.cwd()),
+    /did not preserve the requested completed checkpoint/,
+  );
+  assert.equal(existsSync(sessionRoot), true);
+  assert.deepEqual(readdirSync(sessionRoot), [], "a failed provider-mode fork leaves no orphaned Pi transcript");
+});
+
+test("Pi RPC removes the child transcript when a fork helper ignores the requested session id", async (t) => {
+  const sessionRoot = mkdtempSync(join(tmpdir(), "wollipog-pi-fork-id-"));
+  const driver = new PiRpcDriver({
+    ...options("fork-ignores-session-id", "persisted-pi-session"),
+    env: {
+      WOLLIPOG_FAKE_PI_SCENARIO: "fork-ignores-session-id",
+      WOLLIPOG_FAKE_PI_SESSION_ROOT: sessionRoot,
+    },
+  }, callbacks([]));
+  t.after(() => {
+    driver.dispose();
+    rmSync(sessionRoot, { recursive: true, force: true });
+  });
+  await assert.rejects(
+    driver.forkSession("pi-entry-1", process.cwd()),
+    /did not establish an independent fork session/,
+  );
+  assert.deepEqual(readdirSync(sessionRoot), [], "the helper's independently minted transcript is removed");
+});
+
+test("Pi RPC drains an oversized optional entry response without killing the live session", async (t) => {
+  const exits: Array<number | null> = [];
+  const driver = new PiRpcDriver(options("oversized-entries"), callbacks([], {
+    onExit: (code) => exits.push(code),
+  }));
+  t.after(() => driver.dispose());
+  await driver.initialize();
+  await driver.newSession(process.cwd());
+  assert.equal(await driver.prompt("large transcript"), "end_turn");
+  assert.equal(driver.agentTurnId(), null, "an oversized advisory response omits the fork checkpoint");
+  assert.deepEqual(exits, [], "the oversized optional response does not close the Pi transport");
+  assert.equal(await driver.prompt("still alive"), "end_turn", "later turns continue on the same process");
+  assert.equal(driver.agentSessionId(), "pi-session-1");
+});
+
+test("Pi RPC skips entry refresh for capability-disabled older versions", async (t) => {
+  const stderr: string[] = [];
+  const legacy = options("legacy-hanging-entries");
+  legacy.capabilities = { ...legacy.capabilities!, supportsConversationFork: false };
+  const driver = new PiRpcDriver(legacy, callbacks([], { onStderr: (text) => stderr.push(text) }));
+  t.after(() => driver.dispose());
+  await driver.initialize();
+  await driver.newSession(process.cwd());
+  const startedAt = Date.now();
+  assert.equal(await driver.prompt("legacy prompt"), "end_turn");
+  assert.ok(Date.now() - startedAt < 1_000, "an unsupported optional command never delays turn settlement");
+  assert.equal(driver.agentTurnId(), null);
+  assert.deepEqual(stderr, []);
 });
 
 test("Pi RPC tool-only stages do not emit empty assistant messages", async (t) => {
