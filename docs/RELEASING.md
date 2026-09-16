@@ -70,8 +70,17 @@ silent, and the long-running control-plane path persists its own release-scoped 
 evidence required before deleting fallback support is defined in
 [Legacy Asset Removal Gate](./runner-updates.md#legacy-asset-removal-gate).
 
-Bundles are currently **unsigned** (first launch shows an "unidentified developer" warning).
-Signing/notarization slots are stubbed in the workflow `env:` for later.
+macOS bundles are **signed and notarized** with a Developer ID Application certificate when the
+six `APPLE_*` repository secrets are present (certificate, certificate password, signing identity,
+Apple ID, app-specific password, Team ID). The workflow exports them only on the macOS legs and only
+when the certificate secret is non-empty, so a fork or a secret-less dispatch still produces an
+unsigned bundle instead of failing. When they are present, the Tauri bundler signs the app and both
+Node sidecars with the hardened runtime and
+[`entitlements.plist`](../apps/desktop/src-tauri/entitlements.plist) (the JIT subset V8 needs),
+notarizes, and staples; a post-build step then requires `codesign --verify --deep --strict`,
+`spctl --assess`, and a stapled ticket, so a signing or notarization failure fails the release rather
+than publishing an unsigned macOS bundle. Windows bundles are still unsigned (SmartScreen warns on
+first launch); Authenticode is configured separately via `tauri.conf.json` `bundle.windows`.
 
 ## One-line install
 
