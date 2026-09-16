@@ -44,18 +44,24 @@ test("acp driver has no curated caps (advertised from the live agent)", () => {
   assert.equal(capabilitiesFor("acp"), undefined);
 });
 
-test("every catalog driver advertises exactly one default model", () => {
+test("every driver with a curated model catalog advertises exactly one default model", () => {
   for (const [driver, caps] of Object.entries(CAPABILITY_CATALOG)) {
+    if (caps.models.length === 0) continue;
     const defaults = caps.models.filter((m) => m.default);
     assert.equal(defaults.length, 1, `${driver} should have exactly one default model`);
   }
 });
 
-test("the default model id is 'default' (the skip-the-flag sentinel)", () => {
+test("the curated default model id is 'default' (the skip-the-flag sentinel)", () => {
   for (const caps of Object.values(CAPABILITY_CATALOG)) {
+    if (caps.models.length === 0) continue;
     const def = caps.models.find((m) => m.default);
     assert.equal(def?.id, "default");
   }
+});
+
+test("Pi has no synthetic model before live RPC discovery", () => {
+  assert.deepEqual(capabilitiesFor("pi")?.models, []);
 });
 
 test("model ids are unique within a driver", () => {
