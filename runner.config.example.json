@@ -66,14 +66,6 @@
       "context": { "kind": "wsl", "distro": "Ubuntu-24.04" }
     },
     {
-      "id": "conductor",
-      "name": "Conductor (Wollipog)",
-      "command": "claude",
-      "args": [],
-      "env": {},
-      "driver": "claude-code"
-    },
-    {
       "id": "claude-code",
       "name": "Claude Code (ACP)",
       "command": "npx",

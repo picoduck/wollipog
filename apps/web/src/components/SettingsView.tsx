@@ -1488,8 +1488,6 @@ export function ExperimentalPanel({
 }: {
   flags: ExperimentFlags;
   onToggle: (id: ExperimentId, enabled: boolean) => void;
-  /** Whether any connected runner advertises an available conductor agent. */
-  conductorAvailable: boolean;
 }) {
   return (
     <SettingsGroup title="Untested Features">

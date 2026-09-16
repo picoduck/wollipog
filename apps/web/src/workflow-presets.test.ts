@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentDefinition, WorkflowDefinition } from "@wollipog/protocol";
-import { conductorAgentId, defaultWorkflowBindings, workflowAgentRoles, workflowBindingsComplete } from "./workflow-presets.js";
+import { defaultWorkflowBindings, workflowAgentRoles, workflowBindingsComplete } from "./workflow-presets.js";
 
 const definition = {
   workflowId: "builtin:build-review", version: 1, source: "builtin", name: "Build review",
@@ -27,7 +27,6 @@ test("workflow presets dedupe graph roles and bind primary provider-native agent
   assert.deepEqual(workflowAgentRoles(definition), ["claude", "codex"]);
   assert.deepEqual(defaultWorkflowBindings(definition, agents), { claude: "claude-code", codex: "codex" });
   assert.equal(workflowBindingsComplete(definition, { claude: "claude-code", codex: "codex" }), true);
-  assert.equal(conductorAgentId(agents), "conductor");
 });
 
 test("workflow preset binding fails closed when a required provider is unavailable", () => {
@@ -37,5 +36,4 @@ test("workflow preset binding fails closed when a required provider is unavailab
   ];
   assert.deepEqual(defaultWorkflowBindings(definition, agents), {});
   assert.equal(workflowBindingsComplete(definition, {}), false);
-  assert.equal(conductorAgentId(agents), undefined);
 });

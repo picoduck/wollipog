@@ -101,7 +101,6 @@ import {
 import { OrchestratorSettingsPanel } from "./components/OrchestratorSettingsPanel.js";
 import { EXPERIMENT_TITLES, experimentForViewName, type ExperimentId } from "./experiments.js";
 import { useExperiments } from "./use-experiments.js";
-import { conductorAgentId } from "./workflow-presets.js";
 import {
   isTauriRuntime,
   readTailnetAccess,
@@ -275,14 +274,6 @@ export function Shell() {
   const stalledSessionIds = useStoreSelector((s) => s.stalledSessionIds);
   const stalledRevision = useStoreSelector((s) => s.stalledRevision);
   const experiments = useExperiments();
-  // The Conductor switch needs to say when the runner side is missing. ONLINE runners only:
-  // the store keeps a disconnected runner's advertised agents, and a row calling the conductor
-  // available on the strength of a runner that cannot start anything would be a false claim.
-  const conductorAvailable = useMemo(
-    () => [...runners.values()].some((runner) =>
-      runner.status === "online" && conductorAgentId(runner.agents ?? []) !== undefined),
-    [runners],
-  );
   // A route into a feature this device has switched off renders the explanation instead of the
   // feature: removing the branch entirely would make a bookmarked /runs a silent Inbox redirect.
   const disabledExperimentView = (() => {
@@ -814,7 +805,6 @@ export function Shell() {
                   <ExperimentalPanel
                     flags={experiments.flags}
                     onToggle={experiments.setFlag}
-                    conductorAvailable={conductorAvailable}
                   />
                 ),
                 about: <AboutPanel />,
