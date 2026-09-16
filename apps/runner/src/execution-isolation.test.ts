@@ -285,7 +285,7 @@ test("strict bwrap policy fails closed when the target context cannot provide it
   }), /refuses a root runner/);
 });
 
-test("strict sessions virtualize only Claude/Codex transcript roots under runner data", async () => {
+test("strict sessions virtualize native harness transcript roots under runner data", async () => {
   const sessionKey = providerStateKey("session/../../../host");
   const nativeCreated: string[][] = [];
   const native = await resolveExecutionIsolation(bwrap, { kind: "native" }, {
@@ -321,6 +321,18 @@ test("strict sessions virtualize only Claude/Codex transcript roots under runner
   assert.deepEqual(codex?.writableBinds?.[0], {
     source: `/var/lib/wollipog/provider-state/codex/${providerStateKey("s-codex")}/sessions`,
     target: "/home/me/.codex/sessions",
+  });
+
+  const pi = await resolveExecutionIsolation(bwrap, { kind: "native" }, {
+    platform: "linux", uid: () => 1000, nativeHome: () => "/home/me",
+    resolveNative: async () => ({
+      path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] },
+    }),
+    mkdirNative: async () => {},
+  }, { driver: "pi", dataDir: "/var/lib/wollipog", env: {}, sessionId: "s-pi", cwd: "/work" });
+  assert.deepEqual(pi?.writableBinds?.[0], {
+    source: `/var/lib/wollipog/provider-state/pi/${providerStateKey("s-pi")}/sessions`,
+    target: "/home/me/.pi/agent/sessions",
   });
 });
 

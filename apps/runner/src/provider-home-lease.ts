@@ -92,6 +92,7 @@ function defaultProcessAlive(pid: number): boolean {
 function providerKey(driver: AgentDriverKind, command: string): string {
   if (driver === "claude-code") return "claude";
   if (driver === "codex" || driver === "codex-app-server") return "codex";
+  if (driver === "pi") return "pi";
   return `acp-${createHash("sha256").update(command).digest("hex").slice(0, 16)}`;
 }
 

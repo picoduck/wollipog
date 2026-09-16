@@ -1,6 +1,6 @@
 import type { DriverTelemetryMessage } from "@wollipog/protocol";
 
-const DRIVERS = new Set(["acp", "claude-code", "codex", "codex-app-server"]);
+const DRIVERS = new Set(["acp", "claude-code", "codex", "codex-app-server", "pi"]);
 const METRICS = new Set(["launch", "resume", "approval", "crash", "fallback"]);
 const OUTCOMES = new Set(["success", "failure", "allowed", "denied", "cancelled", "observed"]);
 const REASONS = new Set(["fresh", "process_restart", "app_server_exit", "agent_exit", "explicit_exec", "compatibility_exec"]);

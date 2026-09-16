@@ -14,6 +14,7 @@
   --usage-series-2: #3987e5;
   --usage-series-3: #199e70;
   --usage-series-4: #9085e9;
+  --usage-series-5: #c65d86;
   /* The dim tiers, for text that sits on a TINTED row rather than a plain surface.
      A diff gutter, a slash-menu source, a syntax comment: each declares only a colour and inherits
      its ground from a container that paints a 16% wash of accent, green or red. The plain dim tiers
@@ -166,6 +167,7 @@
   --usage-series-2: #2a78d6;
   --usage-series-3: #18966a;
   --usage-series-4: #4a3aa7;
+  --usage-series-5: #a33f68;
   /* The dim tiers, for text that sits on a TINTED row rather than a plain surface.
      A diff gutter, a slash-menu source, a syntax comment: each declares only a colour and inherits
      its ground from a container that paints a 16% wash of accent, green or red. The plain dim tiers
@@ -12974,6 +12976,7 @@ body.shell-dock-dragging * {
 .usage-series-2 { --usage-series: var(--usage-series-2); }
 .usage-series-3 { --usage-series: var(--usage-series-3); }
 .usage-series-4 { --usage-series: var(--usage-series-4); }
+.usage-series-5 { --usage-series: var(--usage-series-5); }
 .usage-series-swatch, .usage-series-key { display: inline-block; vertical-align: middle; margin-right: 7px; background: var(--usage-series); }
 .usage-series-swatch { width: 10px; height: 10px; }
 .usage-series-key { width: 12px; height: 2px; }
@@ -14078,6 +14081,7 @@ body.shell-dock-dragging * {
   --usage-series-2: #3987e5;
   --usage-series-3: #199e70;
   --usage-series-4: #9085e9;
+  --usage-series-5: #c65d86;
   --diff-add-bg: #152c20;
   --diff-delete-bg: #321e22;
   --modal-backdrop: rgba(7, 9, 12, 0.62);
@@ -14149,6 +14153,7 @@ body.shell-dock-dragging * {
   --usage-series-2: #2a78d6;
   --usage-series-3: #18966a;
   --usage-series-4: #4a3aa7;
+  --usage-series-5: #a33f68;
   --diff-add-bg: #dae9df;
   --diff-delete-bg: #f7dfe0;
   --modal-backdrop: rgba(28, 32, 36, 0.32);
@@ -14222,6 +14227,7 @@ body.shell-dock-dragging * {
   --usage-series-2: #3987e5;
   --usage-series-3: #199e70;
   --usage-series-4: #9085e9;
+  --usage-series-5: #c65d86;
   --diff-add-bg: #3a443f;
   --diff-delete-bg: #31272c;
   --modal-backdrop: rgba(20, 22, 26, 0.62);
@@ -14293,6 +14299,7 @@ body.shell-dock-dragging * {
   --usage-series-2: #2a78d6;
   --usage-series-3: #18966a;
   --usage-series-4: #4a3aa7;
+  --usage-series-5: #a33f68;
   --diff-add-bg: #dde3de;
   --diff-delete-bg: #f0d6dd;
   --modal-backdrop: rgba(50, 52, 59, 0.32);
@@ -14366,6 +14373,7 @@ body.shell-dock-dragging * {
   --usage-series-2: #3987e5;
   --usage-series-3: #199e70;
   --usage-series-4: #9085e9;
+  --usage-series-5: #c65d86;
   --diff-add-bg: #2e4b41;
   --diff-delete-bg: #4a3c46;
   --modal-backdrop: rgba(20, 21, 27, 0.62);
@@ -14437,6 +14445,7 @@ body.shell-dock-dragging * {
   --usage-series-2: #2a78d6;
   --usage-series-3: #18966a;
   --usage-series-4: #4a3aa7;
+  --usage-series-5: #a33f68;
   --diff-add-bg: #d9e5c7;
   --diff-delete-bg: #f3dbcc;
   --modal-backdrop: rgba(28, 28, 28, 0.32);
@@ -14510,6 +14519,7 @@ body.shell-dock-dragging * {
   --usage-series-2: #3987e5;
   --usage-series-3: #199e70;
   --usage-series-4: #9085e9;
+  --usage-series-5: #c65d86;
   --diff-add-bg: #3b4624;
   --diff-delete-bg: #493839;
   --modal-backdrop: rgba(20, 20, 17, 0.62);
@@ -14581,6 +14591,7 @@ body.shell-dock-dragging * {
   --usage-series-2: #2a78d6;
   --usage-series-3: #18966a;
   --usage-series-4: #4a3aa7;
+  --usage-series-5: #a33f68;
   --diff-add-bg: #e0e6d2;
   --diff-delete-bg: #f3d9dd;
   --modal-backdrop: rgba(40, 40, 34, 0.32);

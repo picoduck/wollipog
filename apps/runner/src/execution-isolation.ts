@@ -152,6 +152,7 @@ export function parseWslIsolationProbe(stdout: string): { command: string; uid: 
 function statePath(driver: AgentDriverKind): { provider: string; relative: string } | null {
   if (driver === "claude-code") return { provider: "claude", relative: ".claude/projects" };
   if (driver === "codex" || driver === "codex-app-server") return { provider: "codex", relative: ".codex/sessions" };
+  if (driver === "pi") return { provider: "pi", relative: ".pi/agent/sessions" };
   return null;
 }
 

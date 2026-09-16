@@ -24,6 +24,7 @@ export function agentVariant(a: AgentDefinition): string {
   const wsl = a.context?.kind === "wsl" ? ` · WSL: ${a.context.distro}` : "";
   if (a.driver === "codex-app-server") return `App Server${wsl}`;
   if (a.driver === "codex") return `Non-Interactive (codex exec)${wsl}`;
+  if (a.driver === "pi") return `RPC${wsl}`;
   if (a.context?.kind === "wsl") return `WSL: ${a.context.distro}`;
   if (a.driver === "claude-code") return "Native";
   return "";
@@ -109,7 +110,7 @@ export function agentOptions(
     for (const [v, a] of variants) {
       out.push({
         agent: a,
-        label: a.driver === "codex-app-server"
+        label: a.driver === "codex-app-server" || a.driver === "pi"
           ? `${f} ${v}`
           : !v || (!multi && a.driver !== "codex") ? f : `${f} — ${v}`,
         ...(a.available !== true ? { disabled: true } : {}),

@@ -14,7 +14,7 @@ export { installationSupportsDefault } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import type { HumanPrincipal } from "./identity.js";
 
-const DRIVERS = new Set(["acp", "codex", "codex-app-server", "claude-code"]);
+const DRIVERS = new Set(["acp", "codex", "codex-app-server", "claude-code", "pi"]);
 
 function boundedIdentifier(value: unknown, maximum = 256): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= maximum &&

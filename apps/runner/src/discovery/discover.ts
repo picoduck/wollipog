@@ -30,6 +30,7 @@ import {
 import { probeNativeCodexAppServer, probeWslCodexAppServer, unavailableCodexAppServer } from "./codex-app-server.js";
 import { discoverAgentModels, type AgentModelDiscovery } from "./models.js";
 import { unavailableNativeTuiAccounting } from "./native-tui-accounting.js";
+import { probePiRpc, unavailablePiCapabilities } from "./pi-rpc.js";
 import { listWslDistros, resolveInWsl, resolveNative, run, type ResolvedLaunch } from "./resolve.js";
 
 const CONFIGURED_ACP_PROBE_TIMEOUT_MS = 20_000;
@@ -232,7 +233,8 @@ function withoutConfiguredProviderAttestations(agent: AgentDefinition): AgentDef
   const withoutCodexOrchestratorApproval = codexAppServer
     ? { ...withoutAccounting, codexAppServer: verifiedCodexAppServer as typeof codexAppServer }
     : withoutAccounting;
-  if ((agent.driver !== "codex-app-server" && agent.driver !== "claude-code") || !agent.capabilities?.supportsSteering) {
+  if ((agent.driver !== "codex-app-server" && agent.driver !== "claude-code" && agent.driver !== "pi") ||
+      !agent.capabilities?.supportsSteering) {
     return withoutCodexOrchestratorApproval;
   }
   const { supportsSteering: _unverified, ...capabilities } = agent.capabilities;
@@ -310,12 +312,13 @@ interface KnownAgent {
   bin: string;
   driver: AgentDriverKind;
   /** Path under $HOME whose existence means the agent is logged in. */
-  authFile: string;
+  authFile?: string;
 }
 
 const KNOWN: KnownAgent[] = [
   { id: "claude-code", name: "Claude Code", bin: "claude", driver: "claude-code", authFile: ".claude/.credentials.json" },
   { id: "codex", name: "Codex", bin: "codex", driver: "codex", authFile: ".codex/auth.json" },
+  { id: "pi", name: "Pi", bin: "pi", driver: "pi" },
 ];
 
 function codexExecId(primaryId: string): string {
@@ -428,6 +431,30 @@ export function unavailableClaudeAgentDefinition(
   };
 }
 
+/** Keep Pi absence explicit so onboarding can offer exact installation guidance without ever
+ * presenting a configured-but-unverified runtime as ready. */
+export function unavailablePiAgentDefinition(
+  id: string,
+  name: string,
+  context: AgentContext,
+): AgentDefinition {
+  return {
+    id,
+    name,
+    command: "pi",
+    args: [],
+    env: {},
+    bin: "pi",
+    driver: "pi",
+    context,
+    available: false,
+    authStatus: "unknown",
+    unavailableReason: "Pi is not installed. Install `@earendil-works/pi-coding-agent`, authenticate a provider, then rediscover.",
+    capabilities: unavailablePiCapabilities(),
+    source: "discovered",
+  };
+}
+
 /** Pull a semver-ish token out of `--version` output, else the trimmed first line. */
 export function parseVersion(s: string): string | undefined {
   const m = s.match(/\d+\.\d+\.\d+[\w.-]*/);
@@ -450,7 +477,7 @@ export function supportedWslAgentControlNodeRuntime(
 async function nativeProbe(k: KnownAgent, launch: ResolvedLaunch): Promise<{ version?: string; authStatus: AuthStatus }> {
   const v = await run(launch.command, [...launch.args, "--version"], { timeoutMs: 5000 });
   const version = v.code === 0 ? parseVersion(v.stdout || v.stderr) : undefined;
-  const authStatus = localAuthFileStatus(join(homedir(), k.authFile));
+  const authStatus = k.authFile ? localAuthFileStatus(join(homedir(), k.authFile)) : "unknown";
   return { version, authStatus };
 }
 
@@ -461,7 +488,9 @@ async function wslProbe(
 ): Promise<{ version?: string; authStatus: AuthStatus }> {
   const [v, a] = await Promise.all([
     run("wsl.exe", ["-d", distro, "--exec", launch.command, ...launch.args, "--version"], { timeoutMs: 8000 }),
-    run("wsl.exe", ["-d", distro, "--exec", "sh", "-c", `test -f "$HOME/${k.authFile}"`], { timeoutMs: 6000 }),
+    k.authFile
+      ? run("wsl.exe", ["-d", distro, "--exec", "sh", "-c", `test -f "$HOME/${k.authFile}"`], { timeoutMs: 6000 })
+      : Promise.resolve({ code: 2, stdout: "", stderr: "" }),
   ]);
   return {
     version: v.code === 0 ? parseVersion(v.stdout || v.stderr) : undefined,
@@ -502,6 +531,7 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
       if (!bin) {
         if (k.bin === "codex") found.push(unavailableCodexAgentDefinition("codex", "Codex", { kind: "native" }));
         if (k.bin === "claude") found.push(unavailableClaudeAgentDefinition("claude-code", "Claude Code", { kind: "native" }));
+        if (k.bin === "pi") found.push(unavailablePiAgentDefinition("pi", "Pi", { kind: "native" }));
         return;
       }
       const gitBashPath = k.bin === "claude" ? await resolveNativeClaudeGitBash() : undefined;
@@ -512,6 +542,7 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
         ? { version: claudeCode.installedVersion, authStatus: claudeCode.auth.status }
         : await nativeProbe(k, bin.launch);
       const codexAppServer = k.bin === "codex" ? await probeNativeCodexAppServer(bin.launch, version) : undefined;
+      const piRpc = k.bin === "pi" ? await probePiRpc(bin.launch, { kind: "native" }) : undefined;
       const slashCommands = nativeSlashCommands(k.driver);
       const catalogCapabilities = withSlashCommands(k.driver, slashCommands);
       const base: AgentDefinition = {
@@ -528,19 +559,20 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
         driver: k.driver,
         context: { kind: "native" },
         version,
-        available: claudeCode ? claudeCode.status === "ready" : true,
-        authStatus,
-        capabilities: claudeCode && catalogCapabilities
+        available: piRpc ? piRpc.available : claudeCode ? claudeCode.status === "ready" : true,
+        authStatus: piRpc?.authStatus ?? authStatus,
+        unavailableReason: piRpc?.unavailableReason,
+        capabilities: piRpc?.capabilities ?? (claudeCode && catalogCapabilities
           ? claudeCapabilitiesFromProbe(catalogCapabilities, claudeCode)
-          : catalogCapabilities,
+          : catalogCapabilities),
         source: "discovered",
         ...(codexAppServer ? { codexAppServer } : {}),
         ...(claudeCode ? { claudeCode } : {}),
-        nativeTuiAccounting: unavailableNativeTuiAccounting(
+        ...(k.bin !== "pi" ? { nativeTuiAccounting: unavailableNativeTuiAccounting(
           k.bin === "claude" ? "claude-code" : "codex",
           version,
           k.bin === "claude" ? claudeCode?.streamJsonInput === true : codexAppServer?.appServerAvailable === true,
-        ),
+        ) } : {}),
       };
       found.push(...(codexAppServer ? codexAgentDefinitions(base, codexAppServer, slashCommands) : [base]));
     }),
@@ -567,6 +599,13 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
               { kind: "wsl", distro },
             ));
           }
+          if (k.bin === "pi") {
+            found.push(unavailablePiAgentDefinition(
+              `pi-wsl-${distro}`,
+              `Pi (WSL: ${distro})`,
+              { kind: "wsl", distro },
+            ));
+          }
           return;
         }
         const [baseProbe, slash, nodeVersion, safeLauncher] = await Promise.all([
@@ -584,6 +623,7 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
           ? { version: claudeCode.installedVersion, authStatus: claudeCode.auth.status }
           : baseProbe as Awaited<ReturnType<typeof wslProbe>>;
         const codexAppServer = k.bin === "codex" ? await probeWslCodexAppServer(distro, bin.launch, version) : undefined;
+        const piRpc = k.bin === "pi" ? await probePiRpc(bin.launch, { kind: "wsl", distro }) : undefined;
         const catalogCapabilities = withSlashCommands(k.driver, slash);
         const base: AgentDefinition = {
           id: `${k.id}-wsl-${distro}`,
@@ -595,11 +635,12 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
           driver: k.driver,
           context: { kind: "wsl", distro },
           version,
-          available: claudeCode ? claudeCode.status === "ready" : true,
-          authStatus,
-          capabilities: claudeCode && catalogCapabilities
+          available: piRpc ? piRpc.available : claudeCode ? claudeCode.status === "ready" : true,
+          authStatus: piRpc?.authStatus ?? authStatus,
+          unavailableReason: piRpc?.unavailableReason,
+          capabilities: piRpc?.capabilities ?? (claudeCode && catalogCapabilities
             ? claudeCapabilitiesFromProbe(catalogCapabilities, claudeCode)
-            : catalogCapabilities,
+            : catalogCapabilities),
           source: "discovered",
           ...(agentControlRuntime
             ? { wslAgentControl: { protocolVersion: 1 as const, nodeRuntime: agentControlRuntime,
@@ -608,11 +649,11 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
             : {}),
           ...(codexAppServer ? { codexAppServer } : {}),
           ...(claudeCode ? { claudeCode } : {}),
-          nativeTuiAccounting: unavailableNativeTuiAccounting(
+          ...(k.bin !== "pi" ? { nativeTuiAccounting: unavailableNativeTuiAccounting(
             k.bin === "claude" ? "claude-code" : "codex",
             version,
             k.bin === "claude" ? claudeCode?.streamJsonInput === true : codexAppServer?.appServerAvailable === true,
-          ),
+          ) } : {}),
         };
         found.push(...(codexAppServer ? codexAgentDefinitions(base, codexAppServer, slash) : [base]));
       }),

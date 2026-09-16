@@ -5598,6 +5598,28 @@ test("explicit app-server restart takes the same cross-runner resume lease", asy
   }
 });
 
+test("explicit Pi restart resumes the exact persisted RPC session", async () => {
+  const h = harness({
+    agentId: "pi",
+    driver: "pi",
+    command: "pi",
+    agentSessionId: "pi-session-persisted",
+  });
+  try {
+    await h.manager.start({
+      ...launchSpec(h.root),
+      agentId: "pi",
+      driver: "pi",
+      command: "pi",
+    });
+    assert.equal(h.launches[0]!.kind, "pi");
+    assert.equal(h.launches[0]!.options.resumeId, "pi-session-persisted");
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("explicit restart keeps legacy exec Codex fresh while its process-loss resume path stays unchanged", async () => {
   const h = harness({ driver: "codex", agentSessionId: "exec-thread", tokensIn: 40, tokensOut: 10 });
   try {

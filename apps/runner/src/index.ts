@@ -423,7 +423,9 @@ function agentsForControlPlane() {
   return projectOrchestratorPresetForPeer(metadata.agents, {
     controlPlaneProtocolVersion,
     isolationMode: config.executionIsolation.mode,
-  }).filter((agent) => agent.id !== "conductor")
+  }).filter((agent) =>
+    agent.id !== "conductor" &&
+    (agent.driver !== "pi" || runnerSupportsProtocol(controlPlaneProtocolVersion, "piHarness")))
     .map((agent) => {
       // Account labels are personal display data. Keep Claude's discovery value runner-local and
       // publish it only through the principal-scoped subscription-usage snapshot.

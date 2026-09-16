@@ -729,6 +729,7 @@ const HELPER_CLASSES = new Map<string, string>([
   ["usage-series-2", "usage-view-model.ts seriesClass"],
   ["usage-series-3", "usage-view-model.ts seriesClass"],
   ["usage-series-4", "usage-view-model.ts seriesClass"],
+  ["usage-series-5", "usage-view-model.ts seriesClass"],
 ]);
 
 /**

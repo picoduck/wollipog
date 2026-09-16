@@ -4,7 +4,7 @@ import { driverKindLabel } from "../agent-presentation.js";
 import { invocationLabel, skillEligibleAgents, type SkillAgentSelector, type SkillSummary } from "../skills.js";
 import { Modal } from "./common.js";
 import { Select } from "./ui/ChoiceControls.js";
-const ASSIGNABLE_DRIVERS = ["claude-code", "codex", "codex-app-server"] as const;
+const ASSIGNABLE_DRIVERS = ["claude-code", "codex", "codex-app-server", "pi"] as const;
 
 export function AddAssignmentDialog({ skill, runners, machineLabels, busy, error, onClose, onCreate }: {
   skill: SkillSummary;

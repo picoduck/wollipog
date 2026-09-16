@@ -24,12 +24,13 @@ test("buildRunnerConfigJson produces valid JSON wired to the given control plane
   assert.equal(cfg.controlPlaneUrl, "ws://192.168.1.20:4317/runner");
   assert.equal("token" in cfg, false, "the reusable config never contains the one-time plaintext secret");
   assert.deepEqual(cfg.workspaces, [{ id: "my-repo", name: "my-repo", path: "/home/me/my-repo" }]);
-  // ships with a Claude + Codex native driver so the runner is useful immediately
+  // ships with the supported native drivers so the runner is useful immediately
   assert.deepEqual(
     cfg.agents.map((a: { driver: string }) => a.driver),
-    ["claude-code", "codex-app-server"],
+    ["claude-code", "codex-app-server", "pi"],
   );
   assert.equal(cfg.agents[1].name, "Codex App Server");
+  assert.equal(cfg.agents[2].name, "Pi");
   // pretty-printed for human editing
   assert.ok(json.includes("\n  "));
   assert.equal(RUNNER_TOKEN_FILE, ".agent-manager/runner.token");

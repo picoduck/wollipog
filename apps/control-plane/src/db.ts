@@ -2137,7 +2137,7 @@ CREATE TABLE IF NOT EXISTS session_naming_harness_targets (
 CREATE TABLE IF NOT EXISTS agent_harness_defaults (
   user_id          TEXT NOT NULL,
   agent_id         TEXT NOT NULL,
-  driver           TEXT NOT NULL CHECK (driver IN ('acp','codex','codex-app-server','claude-code')),
+  driver           TEXT NOT NULL CHECK (driver IN ('acp','codex','codex-app-server','claude-code','pi')),
   context_kind     TEXT NOT NULL CHECK (context_kind IN ('native','wsl')),
   context_distro   TEXT NOT NULL DEFAULT '',
   model            TEXT,
@@ -4455,6 +4455,42 @@ export class ControlPlaneDb {
         db.exec(`ALTER TABLE runner_agents ADD COLUMN ${col}`);
       } catch {
         /* column already present */
+      }
+    }
+    const harnessDefaultsSql = db.prepare(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_harness_defaults'",
+    ).get() as unknown as { sql?: string } | undefined;
+    if (harnessDefaultsSql?.sql && !harnessDefaultsSql.sql.includes("'pi'")) {
+      db.exec("PRAGMA foreign_keys = OFF;");
+      try {
+        db.exec(`
+          BEGIN IMMEDIATE;
+          CREATE TABLE agent_harness_defaults_v155 (
+            user_id          TEXT NOT NULL,
+            agent_id         TEXT NOT NULL,
+            driver           TEXT NOT NULL CHECK (driver IN ('acp','codex','codex-app-server','claude-code','pi')),
+            context_kind     TEXT NOT NULL CHECK (context_kind IN ('native','wsl')),
+            context_distro   TEXT NOT NULL DEFAULT '',
+            model            TEXT,
+            effort           TEXT,
+            permission_mode  TEXT,
+            updated_at       INTEGER NOT NULL,
+            PRIMARY KEY (user_id, agent_id, driver, context_kind, context_distro),
+            CHECK (context_kind='wsl' OR context_distro=''),
+            CHECK (model IS NOT NULL OR effort IS NOT NULL OR permission_mode IS NOT NULL),
+            FOREIGN KEY (user_id) REFERENCES identity_users(user_id) ON DELETE CASCADE
+          );
+          INSERT INTO agent_harness_defaults_v155
+            SELECT * FROM agent_harness_defaults;
+          DROP TABLE agent_harness_defaults;
+          ALTER TABLE agent_harness_defaults_v155 RENAME TO agent_harness_defaults;
+          COMMIT;
+        `);
+      } catch (error) {
+        try { db.exec("ROLLBACK;"); } catch { /* no active transaction */ }
+        throw error;
+      } finally {
+        db.exec("PRAGMA foreign_keys = ON;");
       }
     }
     const sessionColumnsBeforeMigration = db.prepare("PRAGMA table_info(sessions)")

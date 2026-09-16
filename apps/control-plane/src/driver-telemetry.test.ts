@@ -14,6 +14,7 @@ const valid = {
 
 test("driver telemetry accepts only closed, bounded, content-free dimensions", () => {
   assert.deepEqual(normalizeDriverTelemetry(valid), valid);
+  assert.equal(normalizeDriverTelemetry({ ...valid, driver: "pi" })?.driver, "pi");
   assert.equal(normalizeDriverTelemetry({ ...valid, durationMs: Number.NaN }), null);
   assert.equal(normalizeDriverTelemetry({ ...valid, durationMs: -1 }), null);
   assert.equal(normalizeDriverTelemetry({ ...valid, version: "C:/secret/path" })?.version, undefined);

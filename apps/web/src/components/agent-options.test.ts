@@ -30,7 +30,15 @@ test("driver presentation never exposes protocol ids", () => {
   assert.equal(agentDriverLabel(agent({ id: "codex", name: "Codex", driver: "codex-app-server" })), "Codex App Server");
   assert.equal(agentDriverLabel(agent({ id: "exec", name: "Codex", driver: "codex" })), "Codex Non-Interactive");
   assert.equal(agentDriverLabel(agent({ id: "claude", name: "Claude", driver: "claude-code" })), "Claude Code Native");
+  assert.equal(agentDriverLabel(agent({ id: "pi", name: "Pi", driver: "pi" })), "Pi RPC");
   assert.equal(agentDriverLabel(agent({ id: "gemini", name: "Gemini", driver: "acp" })), "ACP Adapter");
+});
+
+test("Pi RPC remains distinct in native and WSL choices", () => {
+  assert.deepEqual(labels([
+    agent({ id: "pi", name: "Pi", driver: "pi" }),
+    agent({ id: "pi-wsl", name: "Pi", driver: "pi", context: { kind: "wsl", distro: "Ubuntu" } }),
+  ]), ["Pi RPC", "Pi RPC · WSL: Ubuntu"]);
 });
 
 test("families group and order: Claude Code, then Codex, then Conductor last", () => {

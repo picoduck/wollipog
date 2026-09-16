@@ -147,6 +147,20 @@ test("Agent Harness default parsing rejects ambiguous identities and free-form e
   });
   assert.ok(identity);
   assert.equal(agentHarnessIdentityKey(identity), '["codex","codex-app-server","wsl","Ubuntu"]');
+  assert.deepEqual(parseAgentHarnessIdentity({
+    agentId: "pi", driver: "pi", context: { kind: "native" },
+  }), { agentId: "pi", driver: "pi", context: { kind: "native" } });
+});
+
+test("Agent Harness defaults persist Pi selections", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const userId = db.localIdentityContext().userId;
+  const identity = { agentId: "pi", driver: "pi" as const, context: { kind: "native" as const } };
+  db.setAgentHarnessDefault(userId, identity, { model: "anthropic/sonnet", effort: "high" }, 10);
+  assert.deepEqual(db.getAgentHarnessDefault(userId, identity)?.config, {
+    model: "anthropic/sonnet",
+    effort: "high",
+  });
 });
 
 test("Agent Harness default routes require a human and let each authenticated user manage only their own rows", async () => {

@@ -28,6 +28,7 @@ test("provider-state reconciliation protects live sessions, expires owned orphan
   const freshOldest = "b".repeat(64);
   const freshNewest = "c".repeat(64);
   const wslOrphan = "d".repeat(64);
+  const piOrphan = "e".repeat(64);
   const inProgress = providerStateKey("in-progress-fork");
   const peerWsl = "f".repeat(64);
   const failedCleanup = providerStateKey("failed-cleanup");
@@ -46,6 +47,9 @@ test("provider-state reconciliation protects live sessions, expires owned orphan
       { name: failedCleanup, mtimeMs: now - 8 * day, bytes: 10 },
       { name: "sessions", mtimeMs: now - 30 * day, bytes: 900 },
     ]],
+    ["/data/provider-state/pi", [
+      { name: piOrphan, mtimeMs: now - 8 * day, bytes: 20, ownerKey },
+    ]],
     [`${wslBase}/provider-state/claude`, []],
     [`${wslBase}/provider-state/codex`, [
       { name: activeWslCodex, mtimeMs: now - 30 * day, bytes: 500 },
@@ -53,6 +57,7 @@ test("provider-state reconciliation protects live sessions, expires owned orphan
       { name: peerWsl, mtimeMs: now - 30 * day, bytes: 500, ownerKey: providerStateKey("runner-b") },
       { name: "sessions", mtimeMs: now - 30 * day, bytes: 900 },
     ]],
+    [`${wslBase}/provider-state/pi`, []],
   ]);
   const removed: string[] = [];
   const fs: StateFs = {
@@ -72,6 +77,7 @@ test("provider-state reconciliation protects live sessions, expires owned orphan
   assert.deepEqual(removed.sort(), [
     `/data/provider-state/claude/${expired}`,
     `/data/provider-state/codex/${freshOldest}`,
+    `/data/provider-state/pi/${piOrphan}`,
     `${wslBase}/provider-state/codex/${wslOrphan}`,
   ].sort());
   assert.equal(removed.includes("/data/provider-state/claude/projects"), false, "legacy root remains until every old session migrates");

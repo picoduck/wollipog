@@ -271,8 +271,9 @@ test.describe("responsive Project and Agent controls", () => {
     expect(await page.evaluate(() => document.activeElement instanceof HTMLInputElement)).toBe(false);
 
     const options = page.getByRole("listbox", { name: "Agent" }).getByRole("option");
-    await expect(options).toHaveCount(3);
+    await expect(options).toHaveCount(4);
     await expect(options.filter({ hasText: "Advanced Agent" })).toHaveCount(1);
+    await expect(options.filter({ hasText: "Pi" })).toContainText("RPC");
     const unavailable = options.filter({ hasText: "Codex App Server" });
     await expect(unavailable).toHaveAttribute("aria-disabled", "true");
     await expect(unavailable).toContainText("Needs setup");
@@ -551,6 +552,6 @@ test.describe("increased text size", () => {
     const lastOption = list.getByRole("option").last();
     await lastOption.scrollIntoViewIfNeeded();
     await lastOption.click();
-    await expect(agent).toHaveAccessibleName(/Agent: Codex — Non-Interactive/);
+    await expect(agent).toHaveAccessibleName(/Agent: Pi RPC/);
   });
 });

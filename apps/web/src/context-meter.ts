@@ -20,7 +20,7 @@ const UNKNOWN: ContextFill = { fillPct: 0, formatPct: "—", isFull: false, know
  * window fills; none advertises the threshold, and Wollipog exposes no manual compact, so the
  * sentence names the fact rather than a number. ACP agents are opaque about it. */
 export function compactionNote(driver: string | undefined): string {
-  if (driver === "claude-code" || driver === "codex" || driver === "codex-app-server") {
+  if (driver === "claude-code" || driver === "codex" || driver === "codex-app-server" || driver === "pi") {
     return "Context compacts automatically when the window fills.";
   }
   return "Compaction is up to the agent.";
