@@ -546,7 +546,8 @@ function canResumeSession(meta: SessionMeta): boolean {
   if (meta.driver === "acp") {
     return meta.acpCapabilities?.sessionResume === true || meta.acpCapabilities?.loadSession === true;
   }
-  return meta.driver === "claude-code" || meta.driver === "codex" || meta.driver === "codex-app-server";
+  return meta.driver === "claude-code" || meta.driver === "codex" || meta.driver === "codex-app-server" ||
+    meta.driver === "pi";
 }
 
 function canResumeRecoveredQuestion(
@@ -4378,7 +4379,9 @@ export class SessionManager {
     // This roadmap slice changes explicit Restart semantics only for app-server: its durable
     // thread must survive desktop/runner restarts. Preserve the existing fresh-start behavior
     // for Claude and exec Codex; their ordinary prompt-after-process-loss resume path is unchanged.
-    const priorResumeId = prior?.driver === driver && driver === "codex-app-server" ? prior.agentSessionId : null;
+    const priorResumeId = prior?.driver === driver && (driver === "codex-app-server" || driver === "pi")
+      ? prior.agentSessionId
+      : null;
     if (priorResumeId && !this.acquireResumeLock(spec.sessionId, launchGeneration)) {
       this.emitEvent(spec.sessionId, { kind: "error", message: "this session is being restarted by another runner — retry shortly" });
       this.emitStatus(spec.sessionId, "idle");
@@ -5597,7 +5600,9 @@ export class SessionManager {
       ? "claude"
       : meta?.driver === "codex" || meta?.driver === "codex-app-server"
         ? "codex"
-        : null;
+        : meta?.driver === "pi"
+          ? "pi"
+          : null;
     return {
       sessionId,
       agentId,
@@ -6221,7 +6226,7 @@ export class SessionManager {
       // App-server and ACP establish a real provider session during new/resume/load. Persist it
       // immediately so a crash before the first completed turn does not lose the coordinate. ACP
       // resumability remains capability-derived from the handshake stored above.
-      if (meta.driver === "codex-app-server" || meta.driver === "acp") {
+      if (meta.driver === "codex-app-server" || meta.driver === "pi" || meta.driver === "acp") {
         this.captureAgentSessionId(sessionId, client);
       }
       if (meta.driver === "acp" && client.prepareCommand && client.invokeCommand) {
@@ -6866,7 +6871,7 @@ export class SessionManager {
       });
       if (!this.recoveryLaunching.has(sessionId)) {
         setImmediate(() => void this.recoverQueuedAppServer(sessionId).catch((error) =>
-          this.log(`queued app-server recovery failed for ${sessionId}: ${errText(error)}`),
+          this.log(`queued persistent-provider recovery failed for ${sessionId}: ${errText(error)}`),
         ));
       }
       return true;
@@ -8397,6 +8402,15 @@ export class SessionManager {
       });
       this.emitStatus(sessionId, "stopped");
       durable?.failed("app-server history has no resumable thread id", "INVALID_COMMAND");
+      return;
+    }
+    if (!established && meta.driver === "pi" && meta.seq > 0 && !meta.handoffPending) {
+      this.emitEvent(sessionId, {
+        kind: "error",
+        message: "this Pi history has no persisted provider session id and cannot be continued without risking a duplicate prompt",
+      });
+      this.emitStatus(sessionId, "stopped");
+      durable?.failed("Pi history has no resumable provider session id", "INVALID_COMMAND");
       return;
     }
     if (!established && meta.driver === "acp" && meta.seq > 0) {
@@ -11444,8 +11458,9 @@ export class SessionManager {
         reason: meta.driver === "codex-app-server" ? "app_server_exit" : "agent_exit",
       });
     }
-    const recoverableAppServer =
-      meta?.driver === "codex-app-server" && !!meta.agentSessionId && entry.status !== "stopped";
+    const recoverablePersistentProvider =
+      (meta?.driver === "codex-app-server" || meta?.driver === "pi") &&
+      !!meta.agentSessionId && entry.status !== "stopped";
     if (entry.historyIntegrityFailure) {
       const queued = entry.queue.splice(0);
       this.deleteActiveSession(sessionId, entry);
@@ -11463,7 +11478,7 @@ export class SessionManager {
       this.deleteActiveSession(sessionId, entry);
       if (hadQueueProjection) this.emitQueue(sessionId);
       if (queued.length) {
-        if (meta?.driver === "codex-app-server" && meta.agentSessionId) {
+        if ((meta?.driver === "codex-app-server" || meta?.driver === "pi") && meta.agentSessionId) {
           this.stabilizeRecoveryQueue(sessionId, queued);
           this.recoveryQueues.set(sessionId, queued);
           if (entry.controlPlaneHold) this.recoveryHolds.add(sessionId);
@@ -11506,11 +11521,12 @@ export class SessionManager {
         this.rejectQueued(queued, "Claude exited before queued command started");
         this.emitStatus(sessionId, "idle", "Claude exited with pending background work; recovery is resuming automatically");
         this.scheduleOrphanRecovery(sessionId);
-      } else if (recoverableAppServer) {
-        // A crashed turn may already have reached turn/start, so never replay it. The entries
+      } else if (recoverablePersistentProvider) {
+        // A crashed turn may already have reached the provider, so never replay it. The entries
         // still in queue are provably unsubmitted and can safely continue after a fresh process
-        // resumes the same durable thread.
-        this.emitStatus(sessionId, "idle", "Codex app-server exited; the next prompt will resume the thread");
+        // resumes the same durable conversation.
+        const provider = meta?.driver === "pi" ? "Pi RPC" : "Codex app-server";
+        this.emitStatus(sessionId, "idle", `${provider} exited; the next prompt will resume the conversation`);
         if (queued.length) {
           this.stabilizeRecoveryQueue(sessionId, queued);
           this.recoveryQueues.set(sessionId, queued);
@@ -11589,11 +11605,12 @@ export class SessionManager {
     let launchGeneration: number | undefined;
     try {
       const meta = this.store.readMeta(sessionId);
-      const resumeId = meta?.driver === "codex-app-server" ? meta.agentSessionId : null;
+      const persistentDriver = meta?.driver === "codex-app-server" || meta?.driver === "pi";
+      const resumeId = persistentDriver ? meta.agentSessionId : null;
       if (!meta || !resumeId) {
-        this.rejectQueued(queued, "queued prompts could not recover because the Codex thread id is unavailable");
+        this.rejectQueued(queued, "queued prompts could not recover because the provider session id is unavailable");
         this.recoveryQueues.delete(sessionId);
-        this.emitEvent(sessionId, { kind: "error", message: "queued prompts could not recover because the Codex thread id is unavailable" });
+        this.emitEvent(sessionId, { kind: "error", message: "queued prompts could not recover because the provider session id is unavailable" });
         return;
       }
       if (!this.store.acquireLock(sessionId, this.lockOwner)) {
@@ -14265,6 +14282,7 @@ function providerAuthenticationRecoveryRequestId(block: NonNullable<SessionMeta[
 function providerDisplayName(driver: AgentDriverKind): string {
   if (driver === "claude-code") return "Claude Code";
   if (driver === "codex" || driver === "codex-app-server") return "Codex";
+  if (driver === "pi") return "Pi";
   return "Agent Provider";
 }
 
@@ -14278,7 +14296,9 @@ function providerAuthenticationGuidance(
     ? "claude auth login"
     : meta.driver === "codex" || meta.driver === "codex-app-server"
       ? "codex login"
-      : "the provider-specific login command";
+      : meta.driver === "pi"
+        ? "pi"
+        : "the provider-specific login command";
   const machine = meta.executionTarget
     ? `${meta.executionTarget.adapter} target ${meta.executionTarget.id}`
     : meta.context.kind === "wsl"

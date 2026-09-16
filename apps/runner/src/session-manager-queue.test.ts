@@ -464,7 +464,7 @@ test("a synchronous provider cancel failure rolls back the interruption hold", (
 });
 
 test("turn-only interruption auto-resumes the exact FIFO after safe settlement for every driver contract", async () => {
-  for (const driver of ["codex-app-server", "codex", "claude-code", "acp"] as AgentDriverKind[]) {
+  for (const driver of ["codex-app-server", "codex", "claude-code", "pi", "acp"] as AgentDriverKind[]) {
     const root = mkdtempSync(join(tmpdir(), `wollipog-sm-interrupt-${driver}-`));
     const sent: RunnerToControlPlane[] = [];
     const store = new SessionStore(root);

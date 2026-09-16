@@ -10,6 +10,7 @@ const agents: AgentDefinition[] = [
   { id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex" },
   { id: "app", name: "App", command: "codex", args: [], env: {}, driver: "codex-app-server" },
   { id: "claude", name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code" },
+  { id: "pi", name: "Pi", command: "pi", args: [], env: {}, driver: "pi" },
   { id: "conductor", name: "Conductor", command: "claude", args: [], env: {}, driver: "claude-code" },
   { id: "wsl", name: "WSL", command: "codex", args: [], env: {}, driver: "codex", context: { kind: "wsl", distro: "Ubuntu" } },
 ];
@@ -21,7 +22,7 @@ function payload(content = "Original") {
 }
 test("adoption prerequisites use effective targets and pins, and disclose shared readers without changing state", (t) => {
   const db = ControlPlaneDb.open(":memory:"); t.after(() => db.close());
-  db.registerRunner({ runnerId: "one", hostname: "host", os: "linux", version: "1", agents, workspaces: [] }, 1, 111);
+  db.registerRunner({ runnerId: "one", hostname: "host", os: "linux", version: "1", agents, workspaces: [] }, 1, 155);
   const original = payload();
   const check = (sourceDirectory = candidate.sourceDirectory) => skillAdoptionPreflight(db, "one", { ...candidate, sourceDirectory }, original.digest);
   assert.ok(check().blockers.includes("library_skill_missing"));
@@ -33,7 +34,7 @@ test("adoption prerequisites use effective targets and pins, and disclose shared
   assert.deepEqual(check().sharedReaders, ["app"]);
   assert.ok(check(".claude/skills").blockers.includes("source_not_targeted"));
   assert.equal(check(".agents/skills").status, "prerequisites_met");
-  assert.deepEqual(check(".agents/skills").sharedReaders, ["app", "claude"], "non-native contexts and the synthesized conductor are not counted");
+  assert.deepEqual(check(".agents/skills").sharedReaders, ["app", "claude", "pi"], "non-native contexts and the synthesized conductor are not counted");
   db.updateSkillAssignment(assignment.id, { invocation: "manual" });
   assert.ok(check().blockers.includes("invocation_unsupported"));
   db.updateSkillAssignment(assignment.id, { invocation: "agent", enabled: false });

@@ -18,11 +18,12 @@ export type UsageBreakdownMode = "model" | "time";
 
 /** Fixed categorical slot per driver. Colour follows the entity, never its rank: a driver keeps
  * its slot whether or not the others have usage in the window. Slots map to `--usage-series-N`. */
-export const DRIVER_PRESENTATION: Record<AgentDriverKind, { label: string; slot: 1 | 2 | 3 | 4 }> = {
+export const DRIVER_PRESENTATION: Record<AgentDriverKind, { label: string; slot: 1 | 2 | 3 | 4 | 5 }> = {
   "claude-code": { label: "Claude Code", slot: 1 },
   "codex-app-server": { label: "Codex", slot: 2 },
   codex: { label: "Codex CLI", slot: 3 },
   acp: { label: "ACP", slot: 4 },
+  pi: { label: "Pi", slot: 5 },
 };
 
 /** Stable reading order across the driver list, chart bands, legend, and hover readout. */
@@ -30,11 +31,12 @@ export const DRIVER_ORDER = (Object.keys(DRIVER_PRESENTATION) as AgentDriverKind
   .sort((a, b) => DRIVER_PRESENTATION[a].slot - DRIVER_PRESENTATION[b].slot);
 
 /** Literal class per slot, so the stylesheet's class inventory can see every series class. */
-const SERIES_CLASS: Record<1 | 2 | 3 | 4, string> = {
+const SERIES_CLASS: Record<1 | 2 | 3 | 4 | 5, string> = {
   1: "usage-series-1",
   2: "usage-series-2",
   3: "usage-series-3",
   4: "usage-series-4",
+  5: "usage-series-5",
 };
 
 export function seriesClass(driver: AgentDriverKind): string {

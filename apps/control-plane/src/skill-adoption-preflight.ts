@@ -1,4 +1,4 @@
-import type { MachineSkillCandidate } from "@wollipog/protocol";
+import { runnerSupportsProtocol, type MachineSkillCandidate } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import { resolveDesiredSkillSnapshot, validateSkillPayload } from "./skills.js";
 
@@ -17,11 +17,15 @@ export function skillAdoptionPreflight(db: ControlPlaneDb, runnerId: string, can
     const payload = validateSkillPayload({ name: candidate.name, files: version.files });
     if (!payload.ok || payload.digest !== version.digest) blockers.push("library_version_invalid");
   }
-  const agents = db.getRunner(runnerId)?.agents ?? [];
+  const runner = db.getRunner(runnerId);
+  const agents = runner?.agents ?? [];
+  const piEnabled = runnerSupportsProtocol(runner?.protocolVersion, "piHarness");
   const directory = (driver: string | undefined) => driver === "claude-code" ? ".claude/skills"
-    : driver === "codex" || driver === "codex-app-server" ? ".codex/skills" : null;
+    : driver === "codex" || driver === "codex-app-server" ? ".codex/skills"
+      : driver === "pi" ? ".pi/agent/skills" : null;
   const readers = agents.filter((agent) => agent.id !== "conductor" && (agent.context?.kind ?? "native") === "native" &&
-    directory(agent.driver) && (candidate.sourceDirectory === ".agents/skills" || directory(agent.driver) === candidate.sourceDirectory));
+    (agent.driver !== "pi" || piEnabled) && directory(agent.driver) &&
+    (candidate.sourceDirectory === ".agents/skills" || directory(agent.driver) === candidate.sourceDirectory));
   const targets = (desired?.targets ?? []).map((target) => ({ ...target,
     sourceReader: readers.some((agent) => agent.id === target.agentId),
   }));

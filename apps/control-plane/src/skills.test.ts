@@ -115,6 +115,7 @@ test("validateSkillPayload requires a top-level SKILL.md whose frontmatter name 
 test("parseSkillAgentSelector accepts exactly the three selector shapes", () => {
   assert.deepEqual(parseSkillAgentSelector({ kind: "all" }), { kind: "all" });
   assert.deepEqual(parseSkillAgentSelector({ kind: "driver", driver: "codex" }), { kind: "driver", driver: "codex" });
+  assert.deepEqual(parseSkillAgentSelector({ kind: "driver", driver: "pi" }), { kind: "driver", driver: "pi" });
   assert.deepEqual(parseSkillAgentSelector({ kind: "agent", agentId: "claude" }), { kind: "agent", agentId: "claude" });
   for (const bad of [null, "all", { kind: "driver", driver: "vim" }, { kind: "agent" }, { kind: "all", extra: 1 }]) {
     assert.equal(parseSkillAgentSelector(bad), null);
@@ -127,6 +128,7 @@ const AGENTS: AgentDefinition[] = [
   { id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code" },
   { id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex" },
   { id: "codex-app", name: "Codex App", command: "codex", args: [], env: {}, driver: "codex-app-server" },
+  { id: "pi", name: "Pi", command: "pi", args: [], env: {}, driver: "pi" },
   {
     id: "wsl-claude", name: "WSL Claude", command: "claude", args: [], env: {},
     driver: "claude-code", context: { kind: "wsl", distro: "Ubuntu" },
@@ -190,6 +192,12 @@ test("resolveDesiredSkills capability-gates WSL while targeting supported native
     resolveDesiredSkills(db, "runner-1")[0]!.targets.map((target) => target.agentId).sort(),
     ["claude", "codex", "codex-app", "wsl-claude"],
     "protocol 125 admits supported WSL agent contexts",
+  );
+  db.registerRunner(runnerMeta("runner-1"), 12, 155);
+  assert.deepEqual(
+    resolveDesiredSkills(db, "runner-1")[0]!.targets.map((target) => target.agentId).sort(),
+    ["claude", "codex", "codex-app", "pi", "wsl-claude"],
+    "protocol 155 admits Pi skill targets",
   );
   assert.deepEqual(resolveDesiredSkills(db, "missing-runner"), []);
 });

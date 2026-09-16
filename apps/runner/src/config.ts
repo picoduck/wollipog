@@ -13,7 +13,7 @@ export interface RunnerConfigAgent {
   args?: string[];
   /** Runner-local only. Literal values remain compatible; fromEnv defers host lookup to launch. */
   env?: Record<string, string | AcpEnvironmentReference>;
-  /** Driver to use: "acp" (default), "claude-code", or "codex". */
+  /** Driver to use: "acp" (default), "claude-code", "codex", "codex-app-server", or "pi". */
   driver?: AgentDriverKind;
   /** Native (default) or { kind: "wsl", distro }. */
   context?: AgentContext;

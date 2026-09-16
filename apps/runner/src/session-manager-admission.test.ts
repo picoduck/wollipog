@@ -1620,8 +1620,8 @@ test("authoritative background work retains the active-work permit and cannot be
   }
 });
 
-test("Codex, app-server, and resume-capable ACP sessions park and resume by provider identity", async () => {
-  for (const driver of ["codex", "codex-app-server", "acp"] as const) {
+test("native persistent drivers and resume-capable ACP sessions park and resume by provider identity", async () => {
+  for (const driver of ["codex", "codex-app-server", "pi", "acp"] as const) {
     const root = mkdtempSync(join(tmpdir(), `wollipog-${driver}-parking-`));
     try {
       const store = new SessionStore(join(root, "sessions"));
@@ -1719,6 +1719,7 @@ test("parking eligibility is capability-derived and fails closed for provider-ow
       { id: "claude", driver: "claude-code", expected: true },
       { id: "codex", driver: "codex", expected: true },
       { id: "app-server", driver: "codex-app-server", expected: true },
+      { id: "pi", driver: "pi", expected: true },
       { id: "acp-resume", driver: "acp", acpCapabilities: { sessionResume: true }, expected: true },
       { id: "acp-load", driver: "acp", acpCapabilities: { loadSession: true }, expected: true },
       { id: "acp-unsafe", driver: "acp", acpCapabilities: {}, expected: false },

@@ -164,7 +164,7 @@ export function parseSkillAgentSelector(value: unknown): SkillAgentSelector | nu
   if (record.kind === "all" && Object.keys(record).length === 1) return { kind: "all" };
   if (record.kind === "driver" && Object.keys(record).length === 2 &&
       (record.driver === "acp" || record.driver === "claude-code" ||
-        record.driver === "codex" || record.driver === "codex-app-server")) {
+        record.driver === "codex" || record.driver === "codex-app-server" || record.driver === "pi")) {
     return { kind: "driver", driver: record.driver };
   }
   if (record.kind === "agent" && Object.keys(record).length === 2 &&
@@ -177,14 +177,15 @@ export function parseSkillAgentSelector(value: unknown): SkillAgentSelector | nu
 /* --------------------------- Desired-state resolution --------------------------- */
 
 /** Drivers whose harness skill directories the runner knows how to link in MVP. */
-const SKILL_TARGET_DRIVERS = new Set<string>(["claude-code", "codex", "codex-app-server"]);
+const SKILL_TARGET_DRIVERS = new Set<string>(["claude-code", "codex", "codex-app-server", "pi"]);
 
-function agentEligibleForSkills(agent: AgentDefinition, wslEnabled: boolean): boolean {
+function agentEligibleForSkills(agent: AgentDefinition, wslEnabled: boolean, piEnabled: boolean): boolean {
   // The synthesized conductor shares its donor Claude's harness directory, so as a skills
   // target it is the same directory twice: "all"/driver selectors would double-target it and
   // mixed per-agent policies would report a conflict that is really one directory.
   return agent.id !== "conductor" &&
     SKILL_TARGET_DRIVERS.has(agent.driver ?? "acp") &&
+    (agent.driver !== "pi" || piEnabled) &&
     ((agent.context?.kind ?? "native") === "native" || (agent.context?.kind === "wsl" && wslEnabled));
 }
 
@@ -234,7 +235,8 @@ export function resolveDesiredSkillSnapshot(
   const runnerScope = db.runnerScope(runnerId);
   if (!runnerScope) return [];
   const wslEnabled = runnerSupportsProtocol(runner.protocolVersion, "wslMachineSkills");
-  const eligibleAgents = runner.agents.filter((agent) => agentEligibleForSkills(agent, wslEnabled));
+  const piEnabled = runnerSupportsProtocol(runner.protocolVersion, "piHarness");
+  const eligibleAgents = runner.agents.filter((agent) => agentEligibleForSkills(agent, wslEnabled, piEnabled));
   const bySkill = new Map<string, SkillAssignmentView[]>();
   for (const assignment of [...db.listSkillAssignmentsForRunner(runnerId), ...db.listExpandedSkillGroupAssignments(runnerId)]) {
     const list = bySkill.get(assignment.skillId) ?? [];

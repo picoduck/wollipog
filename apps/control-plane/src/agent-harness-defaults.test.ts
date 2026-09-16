@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import Fastify from "fastify";
 import { PROTOCOL_VERSION, type RunnerMetadata } from "@wollipog/protocol";
@@ -147,6 +151,76 @@ test("Agent Harness default parsing rejects ambiguous identities and free-form e
   });
   assert.ok(identity);
   assert.equal(agentHarnessIdentityKey(identity), '["codex","codex-app-server","wsl","Ubuntu"]');
+  assert.deepEqual(parseAgentHarnessIdentity({
+    agentId: "pi", driver: "pi", context: { kind: "native" },
+  }), { agentId: "pi", driver: "pi", context: { kind: "native" } });
+});
+
+test("Agent Harness defaults persist Pi selections", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const userId = db.localIdentityContext().userId;
+  const identity = { agentId: "pi", driver: "pi" as const, context: { kind: "native" as const } };
+  db.setAgentHarnessDefault(userId, identity, { model: "anthropic/sonnet", effort: "high" }, 10);
+  assert.deepEqual(db.getAgentHarnessDefault(userId, identity)?.config, {
+    model: "anthropic/sonnet",
+    effort: "high",
+  });
+});
+
+test("Agent Harness defaults migration preserves legacy rows and admits Pi", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-harness-defaults-v155-"));
+  const path = join(root, "control-plane.sqlite");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    const userId = initial.localIdentityContext().userId;
+    initial.setAgentHarnessDefault(userId, {
+      agentId: "codex",
+      driver: "codex",
+      context: { kind: "native" },
+    }, { model: "gpt-5" }, 7);
+    initial.close();
+
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      PRAGMA foreign_keys = OFF;
+      BEGIN IMMEDIATE;
+      CREATE TABLE agent_harness_defaults_legacy (
+        user_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        driver TEXT NOT NULL CHECK (driver IN ('acp','codex','codex-app-server','claude-code')),
+        context_kind TEXT NOT NULL CHECK (context_kind IN ('native','wsl')),
+        context_distro TEXT NOT NULL DEFAULT '',
+        model TEXT,
+        effort TEXT,
+        permission_mode TEXT,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, agent_id, driver, context_kind, context_distro),
+        CHECK (context_kind='wsl' OR context_distro=''),
+        CHECK (model IS NOT NULL OR effort IS NOT NULL OR permission_mode IS NOT NULL),
+        FOREIGN KEY (user_id) REFERENCES identity_users(user_id) ON DELETE CASCADE
+      );
+      INSERT INTO agent_harness_defaults_legacy SELECT * FROM agent_harness_defaults;
+      DROP TABLE agent_harness_defaults;
+      ALTER TABLE agent_harness_defaults_legacy RENAME TO agent_harness_defaults;
+      COMMIT;
+      PRAGMA foreign_keys = ON;
+    `);
+    legacy.close();
+
+    const migrated = ControlPlaneDb.open(path);
+    assert.equal(migrated.getAgentHarnessDefault(userId, {
+      agentId: "codex", driver: "codex", context: { kind: "native" },
+    })?.config.model, "gpt-5");
+    migrated.setAgentHarnessDefault(userId, {
+      agentId: "pi", driver: "pi", context: { kind: "native" },
+    }, { model: "anthropic/sonnet" }, 8);
+    assert.equal(migrated.getAgentHarnessDefault(userId, {
+      agentId: "pi", driver: "pi", context: { kind: "native" },
+    })?.config.model, "anthropic/sonnet");
+    migrated.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("Agent Harness default routes require a human and let each authenticated user manage only their own rows", async () => {

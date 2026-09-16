@@ -4,6 +4,7 @@ import { AcpDriver } from "./acp-driver.js";
 import { ClaudeCodeDriver } from "./claude-code.js";
 import { CodexDriver } from "./codex.js";
 import { CodexAppServerDriver } from "./codex-app-server.js";
+import { PiRpcDriver } from "./pi-rpc.js";
 
 export function makeDriver(
   driver: AgentDriverKind,
@@ -17,6 +18,8 @@ export function makeDriver(
       return new CodexDriver(opts, cb);
     case "codex-app-server":
       return new CodexAppServerDriver(opts, cb);
+    case "pi":
+      return new PiRpcDriver(opts, cb);
     case "acp":
     default:
       return new AcpDriver(opts, cb);

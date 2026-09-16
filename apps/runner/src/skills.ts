@@ -78,11 +78,12 @@ import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
 import { replaceWindowsSkillJunction } from "./windows-skill-junction.js";
 import { validWslDistroName } from "./wsl-context.js";
 
-/** Harness skill directories, home-relative. Only native claude-code/codex deployment is built. */
+/** Harness skill directories, home-relative. */
 export const SKILL_DIRS: Partial<Record<AgentDriverKind, string>> = {
   "claude-code": ".claude/skills",
   codex: ".codex/skills",
   "codex-app-server": ".codex/skills",
+  pi: ".pi/agent/skills",
 };
 
 export const SKILL_SCAN_LIMITS = {

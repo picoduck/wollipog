@@ -254,7 +254,7 @@ export function invocationLabel(invocation: SkillInvocationPolicy): string {
 }
 
 /** Drivers the runner reconciler can deploy to. */
-const DEPLOYABLE_DRIVERS = new Set(["claude-code", "codex", "codex-app-server"]);
+const DEPLOYABLE_DRIVERS = new Set(["claude-code", "codex", "codex-app-server", "pi"]);
 
 /** Agents on this machine that skill deployment can actually reach. The pickers list these so an
  * assignment cannot be aimed at an ACP or unsupported execution context. */

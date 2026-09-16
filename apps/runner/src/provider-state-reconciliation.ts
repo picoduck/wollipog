@@ -170,9 +170,10 @@ const defaultFs: StateFs = {
   },
 };
 
-function provider(driver: AgentDriverKind): "claude" | "codex" | null {
+function provider(driver: AgentDriverKind): "claude" | "codex" | "pi" | null {
   if (driver === "claude-code") return "claude";
   if (driver === "codex" || driver === "codex-app-server") return "codex";
+  if (driver === "pi") return "pi";
   return null;
 }
 
@@ -224,7 +225,7 @@ export async function reconcileProviderState(
       const base = context.kind === "wsl"
         ? posix.join(await fs.wslHome(context), ".agent-manager", "runner-instances", ownerKey)
         : dataDir;
-      for (const providerName of ["claude", "codex"] as const) {
+      for (const providerName of ["claude", "codex", "pi"] as const) {
       const root = context.kind === "wsl"
         ? posix.join(base, "provider-state", providerName)
         : join(base, "provider-state", providerName);

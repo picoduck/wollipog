@@ -1,7 +1,7 @@
 import type { AgentDriverKind, UsageAggregationGranularity, UsageRetentionPolicy } from "@wollipog/protocol";
 import type { UsageAggregationQuery } from "./db.js";
 
-const DRIVERS = new Set<AgentDriverKind>(["acp", "claude-code", "codex", "codex-app-server"]);
+const DRIVERS = new Set<AgentDriverKind>(["acp", "claude-code", "codex", "codex-app-server", "pi"]);
 const DAY_MS = 86_400_000;
 
 function boundedFilter(value: unknown, name: string): string | undefined {

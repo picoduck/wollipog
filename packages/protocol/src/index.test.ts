@@ -154,8 +154,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 154", () => {
-  assert.equal(PROTOCOL_VERSION, 154);
+test("PROTOCOL_VERSION is 155", () => {
+  assert.equal(PROTOCOL_VERSION, 155);
   assert.equal(runnerSupportsProtocol(136, "capacityLockDiagnostics"), false);
   assert.equal(runnerSupportsProtocol(137, "capacityLockDiagnostics"), true);
   assert.equal(runnerSupportsProtocol(137, "sessionAgentControlReasoningEffort"), false);
@@ -213,6 +213,9 @@ test("PROTOCOL_VERSION is 154", () => {
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.codexServiceTiers, 126);
   assert.equal(runnerSupportsProtocol(125, "codexServiceTiers"), false);
   assert.equal(runnerSupportsProtocol(126, "codexServiceTiers"), true);
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.piHarness, 155);
+  assert.equal(runnerSupportsProtocol(154, "piHarness"), false);
+  assert.equal(runnerSupportsProtocol(155, "piHarness"), true);
   assert.equal(runnerSupportsProtocol(116, "hostAdminDoctor"), false);
   assert.equal(runnerSupportsProtocol(117, "hostAdminDoctor"), true);
   assert.equal(runnerSupportsProtocol(114, "machineSkillAdoption"), false);

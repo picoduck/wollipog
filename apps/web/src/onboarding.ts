@@ -20,6 +20,7 @@ export function buildRunnerConfigJson(o: RunnerConfigOptions): string {
     agents: [
       { id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code" },
       { id: "codex-app", name: "Codex App Server", command: "codex", args: [], env: {}, driver: "codex-app-server" },
+      { id: "pi", name: "Pi", command: "pi", args: [], env: {}, driver: "pi" },
     ],
   };
   return JSON.stringify(config, null, 2);
@@ -93,6 +94,16 @@ function agentProblem(agent: AgentDefinition): { detail: string; command?: strin
   } else if (agent.driver === "codex") {
     if (agent.authStatus === "unauthenticated") {
       return { detail: `${label} is installed but not signed in.`, command: "codex login" };
+    }
+  } else if (agent.driver === "pi") {
+    if (agent.authStatus === "unauthenticated") {
+      return { detail: `${label} is installed but has no authenticated model.`, command: "pi" };
+    }
+    if (agent.available !== true) {
+      return {
+        detail: agent.unavailableReason ?? `${label} is not installed or its RPC protocol is incompatible.`,
+        command: "npm install -g @earendil-works/pi-coding-agent@latest",
+      };
     }
   } else if (agent.authStatus === "unauthenticated") {
     return { detail: `${label} requires authentication. Complete its adapter login on the runner, then run Rediscover.` };
@@ -253,7 +264,7 @@ export function onboardingHealth(input: {
             label: "Agent Readiness",
             status: online ? "fail" : "warning",
             detail: online
-              ? "No agent CLI was discovered. Install Claude Code or Codex, then run Rediscover."
+              ? "No agent CLI was discovered. Install Claude Code, Codex, or Pi, then run Rediscover."
               : "No agent CLI was discovered when this runner was last online.",
           });
     }

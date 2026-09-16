@@ -60,6 +60,20 @@ export const CAPABILITY_CATALOG: Partial<Record<AgentDriverKind, AgentCapabiliti
       "danger-full-access": ["app-server"],
     },
   },
+  pi: {
+    // Pi's catalog is installation- and credential-dependent. Discovery replaces these empty
+    // collections from the running RPC process; never invent a fallback model or thinking level.
+    models: [],
+    effortLevels: [],
+    slashCommands: [],
+    supportsImages: false,
+    supportsApprovals: false,
+    supportsConversationFork: false,
+    supportsSteering: true,
+    // Pi has no built-in pre-execution permission boundary. Runner isolation still applies, but
+    // provider permission presets must remain hidden rather than promising unenforced behavior.
+    permissionModes: [],
+  },
 };
 
 export function capabilitiesFor(driver: AgentDriverKind): AgentCapabilities | undefined {

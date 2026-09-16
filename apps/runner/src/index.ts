@@ -155,6 +155,7 @@ import {
   enrichAgentModels,
   mergeAgents,
   probeConfiguredAcpAgents,
+  probeConfiguredPiAgents,
 } from "./discovery/discover.js";
 import { claudeCodeCapabilitiesForControlPlane } from "./discovery/claude-code.js";
 import {
@@ -423,7 +424,9 @@ function agentsForControlPlane() {
   return projectOrchestratorPresetForPeer(metadata.agents, {
     controlPlaneProtocolVersion,
     isolationMode: config.executionIsolation.mode,
-  }).filter((agent) => agent.id !== "conductor")
+  }).filter((agent) =>
+    agent.id !== "conductor" &&
+    (agent.driver !== "pi" || runnerSupportsProtocol(controlPlaneProtocolVersion, "piHarness")))
     .map((agent) => {
       // Account labels are personal display data. Keep Claude's discovery value runner-local and
       // publish it only through the principal-scoped subscription-usage snapshot.
@@ -1152,6 +1155,11 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
       }),
       discoverEditors(),
     ]);
+    const configuredPiAgents = await probeConfiguredPiAgents(configAgents, (agentId) => {
+      const configured = config.agents.find((agent) => agent.id === agentId);
+      if (!configured) throw new Error("configured agent is unavailable");
+      return resolveAgentEnvironment(configured);
+    }, { discovered: nativeAgents });
     const discovered = [...nativeAgents, ...registryAgents];
     freshSafeWslLaunches.clear();
     for (const agent of nativeAgents) {
@@ -1163,7 +1171,8 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
     // labeled cache fallback, codex-exec cache, or Claude aliases), replacing the catalog list.
     metadata.agents = applyClaudeHookCapability(
       await enrichAgentModels(
-        mergeAgents(configAgents, discovered, configuredAcpAgents).filter((agent) => agent.id !== "conductor"), {
+        mergeAgents(configAgents, discovered, [...configuredAcpAgents, ...configuredPiAgents])
+          .filter((agent) => agent.id !== "conductor"), {
         refresh: refreshModels,
       }),
       claudeHookFeatureEnabled,

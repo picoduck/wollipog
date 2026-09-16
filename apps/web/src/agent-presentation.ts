@@ -6,6 +6,7 @@ export function driverKindLabel(driver: AgentDriverKind, registry = false): stri
   if (driver === "codex-app-server") return "Codex App Server";
   if (driver === "codex") return "Codex Non-Interactive";
   if (driver === "claude-code") return "Claude Code Native";
+  if (driver === "pi") return "Pi RPC";
   return registry ? "ACP Registry Adapter" : "ACP Adapter";
 }
 
@@ -38,6 +39,9 @@ export function agentDriverDescription(agent: AgentDefinition): string {
   }
   if (agent.driver === "claude-code") {
     return "Uses the native Claude Code integration and its local session history.";
+  }
+  if (agent.driver === "pi") {
+    return "Uses Pi's persistent RPC mode for streaming, tools, steering, extension questions, and local session history.";
   }
   return "Uses the configured ACP adapter and its session capabilities.";
 }
