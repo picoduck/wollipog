@@ -430,6 +430,7 @@ export class CodexAppServerDriver implements Driver {
         typeof command !== "string" || !command || command.length > 2000 ||
         !boundedProviderCorrelationId(this.threadId)) return null;
     let liveCompletedCommand: { turnId: string; itemId: string } | undefined;
+    let liveProjectionRequiresAgreement = false;
     if (this.peer) {
       try {
         const read = await this.peer.request<Json>("thread/read", {
@@ -492,7 +493,8 @@ export class CodexAppServerDriver implements Driver {
           // provider turn/item coordinates to agree with the successful live command below.
           if (liveSawExactCommand) {
             if (fence || liveSawAdmissionCandidate || successfulExactCommands.length !== 1) return null;
-            liveCompletedCommand = successfulExactCommands[0];
+            liveProjectionRequiresAgreement = true;
+            liveCompletedCommand = successfulExactCommands[0]!;
           }
         }
       } catch {
@@ -517,7 +519,8 @@ export class CodexAppServerDriver implements Driver {
       command,
       fence,
     );
-    if (!liveCompletedCommand) return proof;
+    if (!liveProjectionRequiresAgreement) return proof;
+    if (!liveCompletedCommand) return null;
     const commandDigest = createHash("sha256").update(command, "utf8").digest("hex");
     return proof?.commandDigest === commandDigest && proof.providerThreadId === this.threadId &&
         proof.providerTurnId === liveCompletedCommand.turnId &&
