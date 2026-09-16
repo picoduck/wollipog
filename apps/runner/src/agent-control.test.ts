@@ -175,6 +175,13 @@ test("discovery-verified Pi receives a private Agent Control extension and stric
     assert.equal(ordinary.env.WOLLIPOG_PI_AGENT_CONTROL_COMMAND, "/opt/runner");
     assert.deepEqual(JSON.parse(ordinary.env.WOLLIPOG_PI_AGENT_CONTROL_ARGS!), ["--agent-control-mcp"]);
     assert.match(ordinary.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE ?? "", /^[A-Za-z0-9_-]{32}$/u);
+    provisionAgentControl(ordinary, { ...control,
+      orchestratorAgent: { ...piAgent, piAgentControl: undefined },
+    }, () => {}, host);
+    assert.equal(ordinary.env.WOLLIPOG_CLI, "/opt/runner");
+    assert.equal(ordinary.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE, undefined);
+    assert.equal(ordinary.args.includes("--extension"), false);
+    assert.equal(existsSync(extension), false, "lost attestation removes the stale runner-owned extension");
 
     const ordinaryUnverified = spec("pi");
     ordinaryUnverified.sessionId = "s_unverified_ordinary_pi";

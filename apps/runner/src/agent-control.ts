@@ -216,15 +216,28 @@ function removeAgentControlLaunchState(
 ): void {
   wslLaunches.delete(spec.sessionId);
   const mcpConfig = agentControlMcpConfigPath(host.configDir, spec.sessionId);
-  const piExtension = piAgentControlExtensionPath(host.configDir, spec.sessionId);
   for (let i = spec.args.length - 2; i >= 0; i--) {
-    if ((spec.args[i] === "--mcp-config" && spec.args[i + 1] === mcpConfig) ||
-        ((spec.args[i] === "--extension" || spec.args[i] === "-e") && spec.args[i + 1] === piExtension)) {
+    if (spec.args[i] === "--mcp-config" && spec.args[i + 1] === mcpConfig) {
       spec.args.splice(i, 2);
     }
   }
+  removePiAgentControlLaunchState(spec, host);
   for (const key of AGENT_CONTROL_ENV_KEYS) delete spec.env[key];
   removeAgentControlFiles(spec.sessionId, host.configDir);
+}
+
+function removePiAgentControlLaunchState(
+  spec: Pick<SessionLaunchSpec, "sessionId" | "args" | "env">,
+  host: AgentControlHost,
+): void {
+  const extension = piAgentControlExtensionPath(host.configDir, spec.sessionId);
+  for (let i = spec.args.length - 2; i >= 0; i--) {
+    if ((spec.args[i] === "--extension" || spec.args[i] === "-e") && spec.args[i + 1] === extension) {
+      spec.args.splice(i, 2);
+    }
+  }
+  for (const key of PI_AGENT_CONTROL_ENV_KEYS) delete spec.env[key];
+  rmSync(extension, { force: true });
 }
 
 /** Mutates only ephemeral runner-side launch state. The credential bytes never cross the runner
@@ -312,6 +325,7 @@ export function provisionAgentControl(
   const piAgentControlVerified = spec.driver === "pi" &&
     config.orchestratorAgent?.piAgentControl?.protocolVersion === PI_AGENT_CONTROL_PROTOCOL;
   if (spec.driver === "pi" && !piAgentControlVerified) {
+    removePiAgentControlLaunchState(spec, host);
     log(`agent control ${spec.sessionId}: Pi extension bridge was not discovery-verified`);
   }
   if (!supported || (!nativeHostExecution && !wslOrchestrator)) {

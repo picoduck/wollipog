@@ -65,6 +65,8 @@ export interface McpDeps {
   sleep?: (milliseconds: number) => Promise<void>;
   /** Deterministic request budgets for timeout tests. */
   requestTimeoutMs?: number;
+  /** Request-scoped MCP cancellation. Never persist or share this controller across calls. */
+  signal?: AbortSignal;
   /** A caller that already authenticated `/api/compatibility` may pass the exact proven version
    * so shared handlers do not repeat the same round-trip. */
   controlPlaneProtocolVersion?: number;
@@ -143,15 +145,17 @@ async function cpFetch(
   if (actorHeader && deps.selfSessionId) headers[actorHeader] = deps.selfSessionId;
   let res: McpFetchResponse;
   try {
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
     res = await deps.fetch(`${deps.cpUrl}${path}`, {
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
       // Bound the round-trip; the catch below maps the TimeoutError into an isError tool
       // result like any other network failure, so the model can relay "CP unreachable".
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: deps.signal ? AbortSignal.any([deps.signal, timeoutSignal]) : timeoutSignal,
     });
   } catch (err) {
+    if (deps.signal?.aborted) return { ok: false, message: "request cancelled" };
     return { ok: false, message: `control plane request failed: ${(err as Error)?.message ?? String(err)}` };
   }
   let raw = "";
@@ -171,6 +175,27 @@ async function cpFetch(
     return { ok: false, message: `HTTP ${res.status}: ${detail}`, status: res.status };
   }
   return { ok: true, data };
+}
+
+async function cancellableSleep(deps: McpDeps, milliseconds: number): Promise<boolean> {
+  const sleep = deps.sleep ?? ((duration: number) =>
+    new Promise<void>((resolve) => setTimeout(resolve, duration)));
+  const signal = deps.signal;
+  if (!signal) {
+    await sleep(milliseconds);
+    return true;
+  }
+  if (signal.aborted) return false;
+  let onAbort!: () => void;
+  const cancelled = new Promise<boolean>((resolve) => {
+    onAbort = () => resolve(false);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([sleep(milliseconds).then(() => true), cancelled]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
 }
 
 async function explicitEffortCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
@@ -240,7 +265,7 @@ async function workflowDecisionReconciliationCompatibilityError(deps: McpDeps): 
 async function createWithSpawnApproval(deps: McpDeps, path: string, body: unknown) {
   let result = await cpFetch(deps, "POST", path, body);
   while (!result.ok && result.status === 428) {
-    await (deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))))(1000);
+    if (!await cancellableSleep(deps, 1_000)) return { ok: false as const, message: "request cancelled" };
     result = await cpFetch(deps, "POST", path, body);
   }
   return result;
@@ -1117,8 +1142,6 @@ export const TOOLS: McpTool[] = [
       let intervalMs = Math.min(MAX_WAIT_SESSION_INTERVAL_MS,
         Math.max(50, Number.isFinite(args.intervalMs) ? Math.floor(args.intervalMs) : 500));
       const now = deps.now ?? Date.now;
-      const sleep = deps.sleep ?? ((milliseconds: number) =>
-        new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
       const deadline = now() + timeoutMs;
       do {
         const r = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(args.sessionId)}`);
@@ -1129,7 +1152,9 @@ export const TOOLS: McpTool[] = [
         }
         const remaining = deadline - now();
         if (remaining <= 0) break;
-        await sleep(Math.min(intervalMs, remaining));
+        if (!await cancellableSleep(deps, Math.min(intervalMs, remaining))) {
+          return errorResult("request cancelled");
+        }
         intervalMs = nextWaitSessionIntervalMs(intervalMs);
       } while (now() <= deadline);
       return errorResult(`timed out waiting for session ${args.sessionId} to reach ${[...wanted].join(", ")}`);
@@ -1534,11 +1559,9 @@ export const TOOLS: McpTool[] = [
       const body: Json = { branch: args.branch, progress: true };
       if (typeof args.baseRef === "string") body.baseRef = args.baseRef;
       const path = `/api/sessions/${encodeURIComponent(sessionId)}/worktrees`;
-      const sleep = deps.sleep ?? ((milliseconds: number) =>
-        new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
       let result = await cpFetch(deps, "POST", path, body, SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS);
       while (result.ok && result.data?.operation?.status === "in_progress") {
-        await sleep(1_000);
+        if (!await cancellableSleep(deps, 1_000)) return errorResult("request cancelled");
         // Repeating the exact coordinates joins the existing v113 operation. Against an older
         // control plane the first response remains the complete legacy result and never loops.
         result = await cpFetch(deps, "POST", path, body, SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS);
@@ -1941,6 +1964,8 @@ export async function executeManagerTool(name: string, args: Json, deps: McpDeps
  */
 export function serveSessionManagementMcp(input: Readable, output: Writable, deps: McpDeps): void {
   let buffer = "";
+  const pending = new Map<string, AbortController>();
+  const requestKey = (id: number | string): string => `${typeof id}:${String(id)}`;
   const handleLine = (line: string) => {
     const trimmed = line.trim();
     if (!trimmed) return;
@@ -1950,13 +1975,33 @@ export function serveSessionManagementMcp(input: Readable, output: Writable, dep
     } catch {
       return; // skip non-JSON noise
     }
-    void dispatch(msg, deps)
+    const rpc = msg as RpcMessage;
+    if (rpc?.method === "notifications/cancelled") {
+      const requestId = rpc.params?.requestId;
+      if (typeof requestId === "string" || typeof requestId === "number") {
+        pending.get(requestKey(requestId))?.abort();
+      }
+      return;
+    }
+    const id = rpc?.id;
+    const controller = (typeof id === "string" || typeof id === "number") && rpc.method === "tools/call"
+      ? new AbortController()
+      : undefined;
+    const key = controller ? requestKey(id as string | number) : undefined;
+    if (controller && key) {
+      pending.get(key)?.abort();
+      pending.set(key, controller);
+    }
+    void dispatch(msg, controller ? { ...deps, signal: controller.signal } : deps)
       .then((res) => {
         if (res) output.write(JSON.stringify(res) + "\n");
       })
       .catch((err) => {
         // dispatch never rejects by design; belt so a bad frame can't become an unhandled rejection.
         console.error(`[session-management-mcp] dispatch failed: ${(err as Error)?.message ?? String(err)}`);
+      })
+      .finally(() => {
+        if (controller && key && pending.get(key) === controller) pending.delete(key);
       });
   };
   input.setEncoding("utf8");
@@ -1968,5 +2013,9 @@ export function serveSessionManagementMcp(input: Readable, output: Writable, dep
       buffer = buffer.slice(idx + 1);
       handleLine(line);
     }
+  });
+  input.on("end", () => {
+    for (const controller of pending.values()) controller.abort();
+    pending.clear();
   });
 }

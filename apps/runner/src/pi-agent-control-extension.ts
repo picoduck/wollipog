@@ -19,13 +19,6 @@ export function piAgentControlProbeSource(nonce: string): string {
   if (typeof pi.registerCommand !== "function" || typeof pi.registerTool !== "function" ||
       typeof pi.on !== "function" || typeof pi.getActiveTools !== "function" ||
       typeof pi.setActiveTools !== "function") return;
-  pi.registerTool({
-    name: ${JSON.stringify(PI_AGENT_CONTROL_PROBE_COMMAND)},
-    label: "Wollipog Agent Control Probe",
-    description: "Wollipog Agent Control compatibility probe",
-    parameters: { type: "object", properties: {}, additionalProperties: false },
-    execute: async () => ({ content: [{ type: "text", text: "ready" }], details: {} }),
-  });
   pi.registerCommand(${JSON.stringify(PI_AGENT_CONTROL_PROBE_COMMAND)}, {
     description: "Wollipog Agent Control compatibility probe",
     handler: async () => {},
@@ -33,8 +26,16 @@ export function piAgentControlProbeSource(nonce: string): string {
   pi.on("session_start", async (_event, ctx) => {
     if (!ctx?.ui || typeof ctx.ui.setStatus !== "function" || typeof ctx.ui.select !== "function" ||
         typeof ctx.ui.input !== "function") return;
+    await Promise.resolve();
+    pi.registerTool({
+      name: ${JSON.stringify(PI_AGENT_CONTROL_PROBE_COMMAND)},
+      label: "Wollipog Agent Control Probe",
+      description: "Wollipog Agent Control compatibility probe",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      execute: async () => ({ content: [{ type: "text", text: "ready" }], details: {} }),
+    });
     const active = pi.getActiveTools();
-    if (!Array.isArray(active)) return;
+    if (!Array.isArray(active) || !active.includes(${JSON.stringify(PI_AGENT_CONTROL_PROBE_COMMAND)})) return;
     pi.setActiveTools(active);
     ctx.ui.setStatus(${JSON.stringify(PI_AGENT_CONTROL_PROBE_STATUS_KEY)}, ${JSON.stringify(nonce)});
   });

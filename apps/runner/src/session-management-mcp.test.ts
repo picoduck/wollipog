@@ -455,6 +455,40 @@ test("a stalled CP request does not head-of-line block other tools (concurrent d
   assert.equal(stalled, 1);
 });
 
+test("MCP cancellation promptly interrupts a long wait_session request", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  let fetches = 0;
+  const fetch: McpFetch = async () => {
+    fetches++;
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ session: { id: "child", status: "running" } }),
+    };
+  };
+  serveSessionManagementMcp(input, output, {
+    fetch, cpUrl: CP_URL, selfSessionId: SELF_ID, token: "",
+  });
+
+  let out = "";
+  output.setEncoding("utf8");
+  output.on("data", (chunk: string) => { out += chunk; });
+  input.write(JSON.stringify({ jsonrpc: "2.0", id: 41, method: "tools/call", params: {
+    name: "wait_session", arguments: { sessionId: "child", states: ["completed"], timeoutMs: 600_000 },
+  } }) + "\n");
+  for (let i = 0; i < 50 && fetches === 0; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  input.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/cancelled",
+    params: { requestId: 41, reason: "user stopped the turn" } }) + "\n");
+  for (let i = 0; i < 50 && !out.includes("\n"); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+
+  const response = JSON.parse(out.trim());
+  assert.equal(response.id, 41);
+  assert.equal(response.result.isError, true);
+  assert.match(response.result.content[0].text, /cancelled/);
+  assert.equal(fetches, 1, "cancellation stops the polling loop before another side effect");
+});
+
 /* -------------------------------------------------------------------------- */
 /* Per-tool dispatch: exact method + URL + body                                */
 /* -------------------------------------------------------------------------- */
