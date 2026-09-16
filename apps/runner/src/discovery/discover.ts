@@ -845,12 +845,12 @@ export function mergeAgents(
           : configured.unavailableReason ?? "No completed discovery probe verified this configured launch target.",
       };
     }
-    // A bare path-less config command ("codex") is a pointer, not a launch override — and it
-    // spawns via the daemon's non-login PATH, which is exactly where version-manager installs
-    // are invisible. Adopt discovery's RESOLVED launch (absolute command + base args) so the
-    // enriched entry can actually spawn; a config entry with a path or custom args keeps its
-    // own launch (genuine user override).
-    const adoptLaunch = !/[\\/]/.test(c.command) && (c.args?.length ?? 0) === 0 && /[\\/]/.test(d.command);
+    // A completed configured probe is exact evidence for the launch it actually executed; keep
+    // an adopted absolute executable/wrapper prefix through this merge. Otherwise a bare path-less
+    // config command ("codex") is a pointer, not a launch override, and should adopt discovery's
+    // resolved launch only when it has no custom arguments.
+    const adoptLaunch = configuredProbe != null ||
+      (!/[\\/]/.test(c.command) && (c.args?.length ?? 0) === 0 && /[\\/]/.test(d.command));
     return applyCodexAgentEnvironment(applyClaudeAgentEnvironment({
       ...c,
       ...(adoptLaunch ? { command: d.command, args: [...(d.args ?? [])] } : {}),

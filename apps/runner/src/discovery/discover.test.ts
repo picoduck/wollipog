@@ -201,6 +201,10 @@ test("configured Pi discovery probes custom arguments instead of reusing a bare 
   assert.deepEqual(receivedArgs, ["--config", "/opt/pi/alternate.json"]);
   assert.equal(probed!.available, false);
   assert.equal(probed!.unavailableReason, "custom arguments were probed");
+  const [merged] = mergeAgents([configured], [discovered], [probed!]);
+  assert.equal(merged!.command, "/opt/pi/bin/pi");
+  assert.deepEqual(merged!.args, ["--config", "/opt/pi/alternate.json"]);
+  assert.equal(merged!.available, false);
 });
 
 test("Codex prompts and skills are not advertised as slash commands", () => {
