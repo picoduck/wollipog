@@ -99,6 +99,113 @@ function expectMobileSessionColumnsAligned(geometry: Awaited<ReturnType<typeof m
   expect(geometry.hasPageOverflow).toBe(false);
 }
 
+for (const viewport of [
+  { name: "desktop", width: 1280, height: 800 },
+  { name: "split pane", width: 900, height: 800 },
+  { name: "mobile", width: 390, height: 844 },
+]) {
+  test(`the generic side-panel toggle recovers from empty persisted Requests mode on ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow&fullShell=1");
+    await page.evaluate(() => {
+      localStorage.clear();
+      localStorage.setItem("wollipog.rightpanel.open", "0");
+      localStorage.setItem("wollipog.rightpanel.mode", "requests");
+    });
+    await page.reload();
+    await page.getByRole("button", { name: /Alpha Session/ }).click();
+    const expand = page.getByRole("button", { name: "Expand Session" });
+    if (await expand.isVisible()) await expand.click();
+    const toggle = page.getByRole("button", { name: "Show Side Panel" });
+    await expect(toggle).toBeVisible();
+
+    expect(await page.evaluate(() => {
+      const observed: string[] = [];
+      const panelOwner = document.querySelector(".session-detail.expanded .detail-columns");
+      if (!panelOwner) throw new Error("missing panel owner");
+      const observer = new MutationObserver((records) => {
+        for (const _record of records) {
+          observed.push(document.querySelector("#right-panel") ? "added" : "removed");
+        }
+      });
+      observer.observe(panelOwner, { childList: true });
+      (window as typeof window & { __rightPanelMutations?: string[] }).__rightPanelMutations = observed;
+      return observed;
+    })).toEqual([]);
+
+    await toggle.click();
+    await page.waitForTimeout(200);
+
+    await expect(page.locator("#right-panel")).toBeVisible();
+    await expect(page.locator("#right-panel")).toHaveAccessibleName("Panel");
+    await expect(page.getByRole("button", { name: "Hide Side Panel" })).toBeFocused();
+    const persisted = await page.evaluate(() => ({
+      open: localStorage.getItem("wollipog.rightpanel.open"),
+      mode: localStorage.getItem("wollipog.rightpanel.mode"),
+      mutations: (window as typeof window & { __rightPanelMutations?: string[] }).__rightPanelMutations,
+    }));
+    expect(persisted.open).toBe("1");
+    expect(persisted.mode).toBe("launcher");
+    expect(persisted.mutations?.length).toBeGreaterThan(0);
+    expect(persisted.mutations).not.toContain("removed");
+  });
+}
+
+test("resolving a closed Requests surface leaves the cross-session generic toggle on the launcher", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow&fullShell=1");
+  await page.evaluate(() => localStorage.clear());
+  await page.reload();
+  await page.getByRole("button", { name: /Alpha Session/ }).click();
+  await page.getByRole("button", { name: "Expand Session" }).click();
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+      status: "input_required",
+      pendingApproval: {
+        requestId: "right-panel-recovery",
+        occurrenceId: "right-panel-recovery-1",
+        kind: "permission",
+        title: "Approve Right Panel Recovery?",
+        context: { toolName: "fixture.recovery", input: "Verify request panel recovery." },
+        options: [
+          { optionId: "approve", name: "Approve", kind: "allow_once" },
+          { optionId: "deny", name: "Deny", kind: "reject_once" },
+        ],
+      },
+    });
+  });
+
+  const review = page.getByRole("button", { name: "Review Request" });
+  await review.scrollIntoViewIfNeeded();
+  await review.click();
+  await expect(page.locator("#right-panel")).toHaveAccessibleName("Requests");
+  await page.getByRole("button", { name: "Close Panel" }).click();
+  await expect(page.locator("#right-panel")).toHaveCount(0);
+  await expect(review).toBeFocused();
+
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+      status: "running",
+      pendingApproval: null,
+    });
+  });
+
+  await expect(page.locator("#right-panel")).toHaveCount(0);
+  await expect(page.locator(".composer-input")).toBeFocused();
+  await expect.poll(() => page.evaluate(() => ({
+    open: localStorage.getItem("wollipog.rightpanel.open"),
+    mode: localStorage.getItem("wollipog.rightpanel.mode"),
+  }))).toEqual({ open: "0", mode: "launcher" });
+
+  await page.getByRole("button", { name: "Back to Inbox" }).click();
+  await page.getByRole("button", { name: /No Project Session/ }).click();
+  await page.getByRole("button", { name: "Expand Session" }).click();
+  const toggle = page.getByRole("button", { name: "Show Side Panel" });
+  await toggle.click();
+  await expect(page.locator("#right-panel")).toHaveAccessibleName("Panel");
+  await expect(page.getByRole("button", { name: "Hide Side Panel" })).toBeFocused();
+});
+
 test("the unified session bar balances navigation, breadcrumb, status, and actions on one row", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openSession(page);

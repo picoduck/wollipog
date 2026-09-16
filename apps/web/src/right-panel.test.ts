@@ -45,13 +45,13 @@ test("parseStoredRightPanelWidth: numeric strings parse and clamp", () => {
 });
 
 test("parseStoredRightPanelMode: valid modes pass through", () => {
-  for (const m of ["launcher", "review", "files", "terminal", "browser", "sidechat", "subagents", "background"] as const) {
+  for (const m of ["launcher", "review", "files", "terminal", "browser", "sidechat", "subagents", "background", "governance"] as const) {
     assert.equal(parseStoredRightPanelMode(m), m);
   }
 });
 
-test("parseStoredRightPanelMode: missing/garbage falls back to the launcher", () => {
-  for (const raw of [null, "", "shell", "Files", "0"]) {
+test("parseStoredRightPanelMode: transient, missing, and invalid modes fall back to the launcher", () => {
+  for (const raw of ["requests", null, "", "shell", "Files", "0"]) {
     assert.equal(parseStoredRightPanelMode(raw), "launcher", `raw=${JSON.stringify(raw)}`);
   }
 });

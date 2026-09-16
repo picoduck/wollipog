@@ -39,9 +39,15 @@ export function parseStoredRightPanelWidth(raw: string | null): number {
   return clampRightPanelWidth(n);
 }
 
-/** Parse a persisted mode; anything unknown falls back to the launcher. */
+/**
+ * Parse a persisted mode. Requests are session-scoped and may disappear while the panel is
+ * closed or the browser is reloading, so they are restored through the stable launcher rather
+ * than poisoning the generic toggle with a transient destination.
+ */
 export function parseStoredRightPanelMode(raw: string | null): RightPanelMode {
-  return (RIGHT_PANEL_MODES as readonly string[]).includes(raw ?? "") ? (raw as RightPanelMode) : "launcher";
+  return raw !== "requests" && (RIGHT_PANEL_MODES as readonly string[]).includes(raw ?? "")
+    ? (raw as RightPanelMode)
+    : "launcher";
 }
 
 /**
