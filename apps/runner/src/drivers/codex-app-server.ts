@@ -445,6 +445,9 @@ export class CodexAppServerDriver implements Driver {
           for (const turn of read.thread.turns as Json[]) {
             if (!Array.isArray(turn?.items)) continue;
             const items = turn.items as Json[];
+            const turnSawAdmissionCandidate = items.some((candidate) =>
+              candidate?.type === "mcpToolCall" && candidate?.server === "wollipog" &&
+              candidate?.tool === "consume_workflow_decision");
             for (const [index, item] of items.entries()) {
               if (item?.type !== "commandExecution" || typeof item?.command !== "string") continue;
               const logicalCommand = codexProviderShellScript(item.command) ?? item.command;
@@ -457,7 +460,7 @@ export class CodexAppServerDriver implements Driver {
               const admissionCandidates = items.slice(0, index).filter((candidate) =>
                 candidate?.type === "mcpToolCall" && candidate?.server === "wollipog" &&
                 candidate?.tool === "consume_workflow_decision");
-              if (admissionCandidates.length > 0) liveSawAdmissionCandidate = true;
+              if (turnSawAdmissionCandidate) liveSawAdmissionCandidate = true;
               const admissions = admissionCandidates.filter((candidate) =>
                 completedWorkflowActionAdmission(candidate, occurrenceId, command));
               if (admissions.length !== 1 || !boundedProviderCorrelationId(admissions[0]?.id)) continue;

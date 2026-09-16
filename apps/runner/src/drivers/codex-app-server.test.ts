@@ -2610,7 +2610,7 @@ test("historical CLI admission survives a live projection that retained only the
   }
   rolloutProof = acceptedProof;
   const callsBeforeVetoes = fallbackCalls;
-  liveItems = [{
+  const mismatchedNativeAdmission = {
     id: "native-admission-wrong-occurrence",
     type: "mcpToolCall",
     server: "wollipog",
@@ -2621,18 +2621,24 @@ test("historical CLI admission survives a live projection that retained only the
     },
     status: "completed",
     error: null,
-  }, commandItem];
+  };
+  liveItems = [mismatchedNativeAdmission, commandItem];
   assert.equal(await h.driver.reconcileCompletedCommand?.(
     "workflow_e80c5fe8343d4c8582e3d3207434ec0f",
     command,
   ), null, "a mismatched native admission cannot be replaced by legacy rollout evidence");
+  liveItems = [commandItem, mismatchedNativeAdmission];
+  assert.equal(await h.driver.reconcileCompletedCommand?.(
+    "workflow_e80c5fe8343d4c8582e3d3207434ec0f",
+    command,
+  ), null, "a wrong-order native admission cannot be replaced by legacy rollout evidence");
   liveItems = [legacyAdmission, commandItem, { ...commandItem, id: "command-replay" }];
   assert.equal(await h.driver.reconcileCompletedCommand?.(
     "workflow_e80c5fe8343d4c8582e3d3207434ec0f",
     command,
   ), null, "duplicate successful live commands remain replay-ambiguous");
   assert.equal(fallbackCalls, callsBeforeVetoes,
-    "live native-admission mismatch and replay ambiguity must reject before rollout lookup");
+    "live native-admission mismatch, wrong order, and replay ambiguity must reject before rollout lookup");
 });
 
 test("historical reconciliation never overrides an exact command rejected by live history", async () => {
