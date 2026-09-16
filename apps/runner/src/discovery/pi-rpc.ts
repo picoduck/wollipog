@@ -1,6 +1,16 @@
-import { homedir } from "node:os";
+import { randomBytes } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AgentCapabilities, AgentContext, AgentModel, AgentSlashCommand } from "@wollipog/protocol";
 import { PiRpcPeer } from "../pi-rpc-peer.js";
+import {
+  PI_AGENT_CONTROL_PROBE_COMMAND,
+  PI_AGENT_CONTROL_PROBE_NONCE_ENV,
+  PI_AGENT_CONTROL_PROBE_STATUS_KEY,
+  PI_AGENT_CONTROL_PROTOCOL,
+  piAgentControlProbeSource,
+} from "../pi-agent-control-extension.js";
 import { killTree, spawnAgent, type AgentProcess } from "../spawn.js";
 import type { ResolvedLaunch } from "./resolve.js";
 
@@ -26,6 +36,7 @@ export interface PiRpcDiscoveryResult {
   available: boolean;
   authStatus: "authenticated" | "unauthenticated" | "unknown";
   capabilities: AgentCapabilities;
+  piAgentControl?: { protocolVersion: 1 };
   unavailableReason?: string;
 }
 
@@ -54,17 +65,37 @@ export async function probePiRpc(
   };
   let child: AgentProcess | null = null;
   let peer: PiRpcPeer | null = null;
+  let probeRoot: string | undefined;
+  let probeNonce: string | undefined;
+  let probeReady = false;
   try {
+    const extensionArgs: string[] = [];
+    if (context.kind === "native") {
+      probeRoot = mkdtempSync(join(tmpdir(), "wollipog-pi-probe-"));
+      const extension = join(probeRoot, "agent-control-probe.mjs");
+      probeNonce = randomBytes(24).toString("base64url");
+      writeFileSync(extension, piAgentControlProbeSource(probeNonce), { flag: "wx", mode: 0o600 });
+      extensionArgs.push("--extension", extension);
+    }
     child = spawn({
       command: launch.command,
-      args: [...launch.args, "--mode", "rpc", "--no-approve", "--no-session"],
+      args: [...launch.args, ...extensionArgs, "--mode", "rpc", "--no-approve", "--no-session"],
       cwd: options.cwd ?? (context.kind === "wsl" ? "/" : homedir()),
-      env: { ...options.env, PI_OFFLINE: "1" },
+      env: {
+        ...options.env,
+        PI_OFFLINE: "1",
+        ...(probeNonce ? { [PI_AGENT_CONTROL_PROBE_NONCE_ENV]: probeNonce } : {}),
+      },
       context,
       trackDescendants: false,
     });
     let transportError: Error | null = null;
-    peer = new PiRpcPeer(child.stdin, child.stdout, () => {}, (error) => { transportError = error; });
+    peer = new PiRpcPeer(child.stdin, child.stdout, (event) => {
+      if (probeNonce && event.type === "extension_ui_request" && event.method === "setStatus" &&
+          event.statusKey === PI_AGENT_CONTROL_PROBE_STATUS_KEY && event.statusText === probeNonce) {
+        probeReady = true;
+      }
+    }, (error) => { transportError = error; });
     const initialRequestTimeoutMs = remaining();
     const [stateResponse, modelsResponse, commandsResponse] = await Promise.all([
       peer.request<Json>({ type: "get_state" }, initialRequestTimeoutMs),
@@ -123,10 +154,12 @@ export async function probePiRpc(
     const rawCommands = object(commandsResponse.data)?.commands;
     if (!Array.isArray(rawCommands)) throw new Error("get_commands returned no command catalog");
     if (rawCommands.length > MAX_DISCOVERED_COMMANDS) throw new Error("command catalog exceeds the supported bound");
+    const piAgentControlSupported = context.kind === "native" && probeReady &&
+      rawCommands.some((raw) => object(raw)?.name === PI_AGENT_CONTROL_PROBE_COMMAND);
     const slashCommands = rawCommands.flatMap((raw): AgentSlashCommand[] => {
       const command = object(raw);
       const name = nonempty(command?.name);
-      if (!command || !name) return [];
+      if (!command || !name || name === PI_AGENT_CONTROL_PROBE_COMMAND) return [];
       return [{ name, description: nonempty(command.description), source: commandSource(command) }];
     });
     const effortLevels = [...new Set(models.flatMap((model) => model.efforts ?? []))];
@@ -152,7 +185,12 @@ export async function probePiRpc(
         unavailableReason: "Pi is installed, but it reported no authenticated models. Run `pi` and configure a provider account.",
       };
     }
-    return { available: true, authStatus: "authenticated", capabilities };
+    return {
+      available: true,
+      authStatus: "authenticated",
+      capabilities,
+      ...(piAgentControlSupported ? { piAgentControl: { protocolVersion: PI_AGENT_CONTROL_PROTOCOL } } : {}),
+    };
   } catch {
     return {
       available: false,
@@ -172,6 +210,7 @@ export async function probePiRpc(
   } finally {
     peer?.dispose("Pi discovery complete");
     if (child) kill(child);
+    if (probeRoot) rmSync(probeRoot, { recursive: true, force: true });
   }
 }
 

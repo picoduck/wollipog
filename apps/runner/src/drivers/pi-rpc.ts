@@ -15,6 +15,10 @@ import {
   PiRpcTransportError,
 } from "../pi-rpc-peer.js";
 import { runContextCommand } from "../context-command.js";
+import {
+  PI_AGENT_CONTROL_EXTENSION_SUFFIX,
+  PI_AGENT_CONTROL_STATUS_KEY,
+} from "../pi-agent-control-extension.js";
 import { killTree, spawnAgent, terminateDescendantBoundaries, type AgentProcess } from "../spawn.js";
 import type {
   Driver,
@@ -33,7 +37,16 @@ interface PendingPiQuestion {
   timer?: NodeJS.Timeout;
 }
 
+interface PendingAgentControlBridge {
+  nonce: string;
+  promise: Promise<void>;
+  resolve(): void;
+  reject(error: Error): void;
+  timer?: NodeJS.Timeout;
+}
+
 const MAX_PENDING_PI_QUESTIONS = 128;
+const PI_AGENT_CONTROL_READY_TIMEOUT_MS = 30_000;
 
 function object(value: unknown): Json | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Json : undefined;
@@ -120,6 +133,7 @@ export class PiRpcDriver implements Driver {
   private readonly pendingQuestions = new Map<string, PendingPiQuestion>();
   private readonly forkedSessionFiles = new Map<string, string>();
   private readonly descendantOwner = {};
+  private agentControlBridge: PendingAgentControlBridge | null = null;
 
   constructor(
     private readonly opts: DriverOptions,
@@ -150,6 +164,19 @@ export class PiRpcDriver implements Driver {
   async initialize(): Promise<void> {
     if (this.disposed) throw new Error("session disposed before Pi launch");
     this.exitReported = false;
+    const bridgeNonce = this.opts.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE;
+    let bridgeReady: Promise<void> | undefined;
+    if (bridgeNonce) {
+      let resolve!: () => void;
+      let reject!: (error: Error) => void;
+      const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+        resolve = resolvePromise;
+        reject = rejectPromise;
+      });
+      this.agentControlBridge = { nonce: bridgeNonce, promise, resolve, reject };
+      bridgeReady = promise;
+      void promise.catch(() => {});
+    }
     const args = [
       ...this.opts.args,
       "--mode", "rpc",
@@ -196,6 +223,7 @@ export class PiRpcDriver implements Driver {
       if (this.child === child) this.child = null;
       peer.dispose(detail?.message ?? "Pi exited");
       this.dismissQuestions("provider_resolved");
+      this.rejectAgentControlBridge(detail ?? new Error("Pi exited before Agent Control became ready"));
       this.reportExit(code);
       this.settleTurn(this.cancelled ? "cancelled" : "refusal");
     };
@@ -209,6 +237,14 @@ export class PiRpcDriver implements Driver {
       throw new Error(`Pi resumed session ${this.sessionId} instead of ${this.opts.resumeId}`);
     }
     await this.applyConfig(this.config);
+    if (this.agentControlBridge) {
+      const timer = setTimeout(() => this.rejectAgentControlBridge(
+        new Error("Pi Agent Control extension did not become ready"),
+      ), PI_AGENT_CONTROL_READY_TIMEOUT_MS);
+      timer.unref?.();
+      this.agentControlBridge.timer = timer;
+    }
+    await bridgeReady;
   }
 
   async newSession(cwd: string): Promise<string> {
@@ -447,6 +483,7 @@ export class PiRpcDriver implements Driver {
     this.cancelled = true;
     this.dismissQuestions("replaced");
     this.settleTurn("cancelled");
+    this.rejectAgentControlBridge(new Error("Pi driver disposed before Agent Control became ready"));
     this.peer?.dispose("Pi driver disposed");
     this.peer = null;
     if (this.child) this.kill(this.child);
@@ -511,7 +548,13 @@ export class PiRpcDriver implements Driver {
         this.onToolUpdate(event, true);
         return;
       case "extension_ui_request":
+        if (this.acceptAgentControlReady(event)) return;
         this.onExtensionUiRequest(event);
+        return;
+      case "extension_error":
+        if (event.extensionPath === this.agentControlExtensionPath()) {
+          this.rejectAgentControlBridge(new Error("Pi Agent Control extension failed during startup"));
+        }
         return;
       case "compaction_end": {
         const result = object(event.result);
@@ -521,6 +564,34 @@ export class PiRpcDriver implements Driver {
       default:
         return;
     }
+  }
+
+  private acceptAgentControlReady(event: Json): boolean {
+    const pending = this.agentControlBridge;
+    if (!pending || event.method !== "setStatus" || event.statusKey !== PI_AGENT_CONTROL_STATUS_KEY ||
+        event.statusText !== pending.nonce) return false;
+    if (pending.timer) clearTimeout(pending.timer);
+    this.agentControlBridge = null;
+    pending.resolve();
+    return true;
+  }
+
+  private rejectAgentControlBridge(error: Error): void {
+    const pending = this.agentControlBridge;
+    if (!pending) return;
+    if (pending.timer) clearTimeout(pending.timer);
+    this.agentControlBridge = null;
+    pending.reject(error);
+  }
+
+  private agentControlExtensionPath(): string | undefined {
+    for (let index = this.opts.args.length - 2; index >= 0; index--) {
+      if ((this.opts.args[index] === "--extension" || this.opts.args[index] === "-e") &&
+          this.opts.args[index + 1]?.endsWith(PI_AGENT_CONTROL_EXTENSION_SUFFIX)) {
+        return this.opts.args[index + 1];
+      }
+    }
+    return undefined;
   }
 
   private onMessageUpdate(update: Json | undefined): void {

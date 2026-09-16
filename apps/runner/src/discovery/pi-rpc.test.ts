@@ -25,6 +25,7 @@ test("Pi discovery derives models, thinking levels, images, commands, and skills
   ]);
   assert.equal(result.capabilities.supportsImages, true);
   assert.equal(result.capabilities.supportsConversationFork, true);
+  assert.deepEqual(result.piAgentControl, { protocolVersion: 1 });
   assert.deepEqual(result.capabilities.effortLevels, ["off", "low", "high"]);
   assert.deepEqual(result.capabilities.slashCommands, [
     { name: "skill:review", description: "Review code", source: "user" },
@@ -59,6 +60,26 @@ test("Pi discovery does not advertise forks without authoritative entry cursors"
   assert.equal(result.capabilities.supportsConversationFork, false);
 });
 
+test("Pi discovery keeps RPC available without advertising an unproved extension bridge", async () => {
+  const result = await probePiRpc(
+    { command: process.execPath, args: [fixture] },
+    { kind: "native" },
+    { cwd: process.cwd(), timeoutMs: 2_000, env: { WOLLIPOG_FAKE_PI_SCENARIO: "extension-unsupported" } },
+  );
+  assert.equal(result.available, true, result.unavailableReason);
+  assert.equal(result.piAgentControl, undefined);
+});
+
+test("Pi discovery requires the extension's session-start readiness proof", async () => {
+  const result = await probePiRpc(
+    { command: process.execPath, args: [fixture] },
+    { kind: "native" },
+    { cwd: process.cwd(), timeoutMs: 2_000, env: { WOLLIPOG_FAKE_PI_SCENARIO: "extension-no-readiness" } },
+  );
+  assert.equal(result.available, true, result.unavailableReason);
+  assert.equal(result.piAgentControl, undefined);
+});
+
 test("Pi discovery keeps older RPCs available when an unknown entry command never answers", async () => {
   const result = await probePiRpc(
     { command: process.execPath, args: [fixture] },
@@ -89,6 +110,7 @@ test("Pi discovery uses a Linux working directory for WSL probes", async () => {
   );
   assert.equal(result.available, true, result.unavailableReason);
   assert.equal(observedCwd, "/");
+  assert.equal(result.piAgentControl, undefined, "host probe extensions are never projected into WSL");
 });
 
 test("Pi discovery enforces one wall-clock deadline across model enumeration", async () => {

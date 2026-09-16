@@ -432,6 +432,10 @@ function agentsForControlPlane() {
       // publish it only through the principal-scoped subscription-usage snapshot.
       return {
         ...agent,
+        // Pi bridge attestation authorizes runner-local launch construction. The projected
+        // Orchestrator permission mode is sufficient for the control plane; do not persist the
+        // local implementation marker as if a future runner could inherit it.
+        piAgentControl: undefined,
         env: {},
         ...(agent.claudeCode
           ? { claudeCode: claudeCodeCapabilitiesForControlPlane(agent.claudeCode) }

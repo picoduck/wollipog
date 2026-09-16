@@ -46,6 +46,12 @@ import {
   supportsClaudeAgentAcpOrchestrator,
   supportsNativeOrchestratorBoundary,
 } from "./orchestrator-preset.js";
+import {
+  PI_AGENT_CONTROL_ENV_KEYS,
+  PI_AGENT_CONTROL_EXTENSION_SUFFIX,
+  PI_AGENT_CONTROL_PROTOCOL,
+  piAgentControlExtensionSource,
+} from "./pi-agent-control-extension.js";
 
 const TOKEN_PREFIX = "wollipoga_";
 const TOKEN_PATTERN = /^wollipoga_[A-Za-z0-9_-]{43}$/u;
@@ -57,6 +63,7 @@ const AGENT_CONTROL_ENV_KEYS = [
   "WOLLIPOG_SESSION_CREDENTIAL_READY_FILE",
   "WOLLIPOG_CLI",
   "WOLLIPOG_CLI_ARGS",
+  ...PI_AGENT_CONTROL_ENV_KEYS,
 ] as const;
 const STAGED_AGENT_CONTROL_FILE_PATTERN =
   /^\.pending-[1-9]\d*-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -135,6 +142,11 @@ export function agentControlReadyPath(configDir: string, sessionId: string): str
   return join(configDir, `${sessionId}.ready`);
 }
 
+export function piAgentControlExtensionPath(configDir: string, sessionId: string): string {
+  assertSafeSessionFileId(sessionId);
+  return join(configDir, `${sessionId}${PI_AGENT_CONTROL_EXTENSION_SUFFIX}`);
+}
+
 function protectedWrite(file: string, value: string): void {
   const dir = dirname(file);
   mkdirSync(dir, { recursive: true });
@@ -209,8 +221,23 @@ function removeAgentControlLaunchState(
       spec.args.splice(i, 2);
     }
   }
+  removePiAgentControlLaunchState(spec, host);
   for (const key of AGENT_CONTROL_ENV_KEYS) delete spec.env[key];
   removeAgentControlFiles(spec.sessionId, host.configDir);
+}
+
+function removePiAgentControlLaunchState(
+  spec: Pick<SessionLaunchSpec, "sessionId" | "args" | "env">,
+  host: AgentControlHost,
+): void {
+  const extension = piAgentControlExtensionPath(host.configDir, spec.sessionId);
+  for (let i = spec.args.length - 2; i >= 0; i--) {
+    if ((spec.args[i] === "--extension" || spec.args[i] === "-e") && spec.args[i + 1] === extension) {
+      spec.args.splice(i, 2);
+    }
+  }
+  for (const key of PI_AGENT_CONTROL_ENV_KEYS) delete spec.env[key];
+  rmSync(extension, { force: true });
 }
 
 /** Mutates only ephemeral runner-side launch state. The credential bytes never cross the runner
@@ -251,7 +278,7 @@ export function provisionAgentControl(
     spec.worktreePath ?? undefined,
   ].filter((path): path is string => typeof path === "string" && path.length > 0 &&
     projectPathMatchesContext(path, context, host.platform ?? process.platform)))];
-  const structuredDriver = ["codex", "codex-app-server", "claude-code"].includes(spec.driver ?? "acp");
+  const structuredDriver = ["codex", "codex-app-server", "claude-code", "pi"].includes(spec.driver ?? "acp");
   const orchestratorAgent = config.orchestratorAgent;
   const wslAgentControl = orchestratorAgent?.wslAgentControl;
   const wslBaseArgs = stripOrchestratorLaunchArgs(spec.args, spec.driver);
@@ -266,7 +293,7 @@ export function provisionAgentControl(
     throw new Error("the Orchestrator preset requires an attested native filesystem boundary for this harness");
   }
   if (orchestrator && (!targetIsHost || !runnerSupportsProtocol(config.controlPlaneProtocolVersion, "sessionOrchestration") ||
-      !(nativeHostExecution ? ["acp", "codex", "codex-app-server", "claude-code"].includes(spec.driver ?? "acp")
+      !(nativeHostExecution ? ["acp", "codex", "codex-app-server", "claude-code", "pi"].includes(spec.driver ?? "acp")
         : wslOrchestrator && structuredDriver &&
           runnerSupportsProtocol(config.controlPlaneProtocolVersion, "wslAgentControlBridge") &&
           runnerSupportsProtocol(config.controlPlaneProtocolVersion, "wslSafeLauncher") &&
@@ -274,6 +301,15 @@ export function provisionAgentControl(
           wslAgentControl.safeLauncherProtocolVersion === 1 &&
           config.executionIsolationMode === "bwrap" && wslLaunchMatches))) {
     throw new Error("the orchestrator preset requires a current supported native harness or verified Direct WSL bridge on the host");
+  }
+  if (orchestrator && spec.driver === "pi") {
+    const agent = config.orchestratorAgent;
+    const baseArgs = stripOrchestratorLaunchArgs(spec.args, spec.driver);
+    const launchMatches = agent && agent.driver === "pi" && agent.command === spec.command &&
+      agent.args.length === baseArgs.length && agent.args.every((arg, index) => arg === baseArgs[index]);
+    if (!launchMatches || agent?.piAgentControl?.protocolVersion !== PI_AGENT_CONTROL_PROTOCOL) {
+      throw new Error("the Orchestrator preset requires the exact discovery-verified Pi extension bridge");
+    }
   }
   if (orchestrator && (spec.driver ?? "acp") === "acp") {
     if (!strictProjectIsolation) {
@@ -285,6 +321,12 @@ export function provisionAgentControl(
     if (!agent || !launchMatches || !supportsClaudeAgentAcpOrchestrator(agent)) {
       throw new Error("the Orchestrator preset requires the exact audited Claude Agent ACP adapter");
     }
+  }
+  const piAgentControlVerified = spec.driver === "pi" &&
+    config.orchestratorAgent?.piAgentControl?.protocolVersion === PI_AGENT_CONTROL_PROTOCOL;
+  if (spec.driver === "pi" && !piAgentControlVerified) {
+    removePiAgentControlLaunchState(spec, host);
+    log(`agent control ${spec.sessionId}: Pi extension bridge was not discovery-verified`);
   }
   if (!supported || (!nativeHostExecution && !wslOrchestrator)) {
     removeAgentControlLaunchState(spec, host);
@@ -370,6 +412,18 @@ export function provisionAgentControl(
     WOLLIPOG_CLI_ARGS: JSON.stringify(cli.args),
   };
   delete spec.env[ORCHESTRATOR_ENV_KEY];
+  if (piAgentControlVerified) {
+    const file = piAgentControlExtensionPath(host.configDir, spec.sessionId);
+    const mcp = runnerReentryCommand(host, "--agent-control-mcp");
+    protectedWrite(file, piAgentControlExtensionSource());
+    spec.env.WOLLIPOG_PI_AGENT_CONTROL_COMMAND = mcp.command;
+    spec.env.WOLLIPOG_PI_AGENT_CONTROL_ARGS = JSON.stringify(mcp.args);
+    spec.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE = randomBytes(24).toString("base64url");
+    for (let i = spec.args.length - 2; i >= 0; i--) {
+      if ((spec.args[i] === "--extension" || spec.args[i] === "-e") && spec.args[i + 1] === file) spec.args.splice(i, 2);
+    }
+    spec.args.push("--extension", file);
+  }
   if (orchestrator) {
     spec.env[ORCHESTRATOR_ENV_KEY] = "orchestrator";
     const mcp = {
@@ -397,6 +451,9 @@ export function provisionAgentControl(
     } else {
       spec.args = stripOrchestratorLaunchArgs(spec.args, spec.driver);
       spec.args.push(...orchestratorLaunchArgs(spec.driver, mcp, orchestratorProjectPaths, strictProjectIsolation));
+      if (spec.driver === "pi") {
+        spec.args.push("--extension", piAgentControlExtensionPath(host.configDir, spec.sessionId));
+      }
     }
   }
 
@@ -409,7 +466,7 @@ export function provisionAgentControl(
     }
     if (!already) spec.args.push("--mcp-config", file);
   }
-  log(`agent control ${spec.sessionId}: CLI${spec.driver === "claude-code" || (orchestrator && spec.driver === "acp") ? " and MCP" : ""} provisioned`);
+  log(`agent control ${spec.sessionId}: CLI${["claude-code", "pi"].includes(spec.driver ?? "") || (orchestrator && spec.driver === "acp") ? " and MCP" : ""} provisioned`);
 }
 
 export function removeAgentControlFiles(sessionId: string, configDir: string): void {
@@ -418,6 +475,7 @@ export function removeAgentControlFiles(sessionId: string, configDir: string): v
     agentControlTokenPath(configDir, sessionId),
     agentControlMcpConfigPath(configDir, sessionId),
     agentControlReadyPath(configDir, sessionId),
+    piAgentControlExtensionPath(configDir, sessionId),
   ]) {
     try { rmSync(file, { force: true }); } catch { /* Best effort after session deletion. */ }
   }
@@ -430,7 +488,7 @@ export function sweepAgentControlFiles(configDir: string): number {
   let removed = 0;
   for (const entry of readdirSync(configDir, { withFileTypes: true })) {
     if (!entry.isFile() ||
-        !([".token", ".mcp.json", ".ready"].some((suffix) => entry.name.endsWith(suffix)) ||
+        !([".token", ".mcp.json", ".ready", PI_AGENT_CONTROL_EXTENSION_SUFFIX].some((suffix) => entry.name.endsWith(suffix)) ||
           STAGED_AGENT_CONTROL_FILE_PATTERN.test(entry.name))) continue;
     rmSync(join(configDir, entry.name), { force: true });
     removed++;

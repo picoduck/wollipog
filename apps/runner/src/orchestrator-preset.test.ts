@@ -71,6 +71,19 @@ test("orchestrator capability requires a native harness or discovery-verified WS
   assert.equal(withOrchestratorPreset([{ ...agent, context: { kind: "wsl", distro: "Ubuntu" },
     capabilities: { ...agent.capabilities!, permissionModes: ["read-only", "orchestrator"] } }])[0]!
     .capabilities!.permissionModes!.includes("orchestrator"), false, "stale configured capability cannot self-attest the bridge");
+  const pi = { ...agent, id: "pi", command: "pi", driver: "pi" as const,
+    capabilities: { ...agent.capabilities!, permissionModes: [] },
+    piAgentControl: { protocolVersion: 1 as const } };
+  assert.equal(withOrchestratorPreset([pi], { platform: "linux", isolationMode: "bwrap" })[0]!
+    .capabilities!.permissionModes!.includes("orchestrator"), true);
+  assert.equal(withOrchestratorPreset([pi], { platform: "linux", isolationMode: "provider" })[0]!
+    .capabilities!.permissionModes!.includes("orchestrator"), false,
+  "Pi needs the runner-owned filesystem boundary in addition to its extension bridge");
+  assert.equal(withOrchestratorPreset([{ ...pi, piAgentControl: undefined,
+    capabilities: { ...pi.capabilities, permissionModes: ["orchestrator"] } }], {
+    platform: "linux", isolationMode: "bwrap",
+  })[0]!.capabilities!.permissionModes!.includes("orchestrator"), false,
+  "a stale permission mode cannot self-attest the Pi extension bridge");
 
   const claude = { ...agent, driver: "claude-code" as const,
     capabilities: { ...agent.capabilities!, permissionModes: ["default", "dontAsk"] } };
@@ -324,6 +337,12 @@ test("native orchestrator flags enable bounded planning while disabling implemen
   assert.equal(claude.includes("--settings-sources"), false, "the historical spelling prevents launch");
   assert.ok(claude.includes('{"disableAllHooks":true}'));
   const codex = orchestratorLaunchArgs("codex", mcp, ["/repo"]);
+  const pi = orchestratorLaunchArgs("pi", mcp, ["/repo"]);
+  for (const flag of ["--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files"]) {
+    assert.ok(pi.includes(flag));
+  }
+  assert.equal(pi[pi.indexOf("--exclude-tools") + 1], "bash,edit,write");
+  assert.match(pi[pi.indexOf("--append-system-prompt") + 1] ?? "", /Project locations are read-only/);
   for (const setting of ['sandbox_mode="workspace-write"', "sandbox_workspace_write.writable_roots=[]",
     "sandbox_workspace_write.network_access=true", "sandbox_workspace_write.exclude_slash_tmp=true",
     'web_search="live"']) assert.ok(codex.includes(setting));
@@ -345,7 +364,7 @@ test("native orchestrator flags enable bounded planning while disabling implemen
   assert.match(codex.find((arg) => arg.startsWith("developer_instructions=")) ?? "", /Project locations are read-only/);
   assert.match(codex.find((arg) => arg.startsWith("developer_instructions=")) ?? "", /call get_campaign/);
   assert.match(codex.find((arg) => arg.startsWith("developer_instructions=")) ?? "", /created directly by an authenticated human/);
-  for (const args of [claude, codex]) {
+  for (const args of [claude, codex, pi]) {
     assert.match(args.join(" "), /blocking question.*structured/iu);
   }
   assert.throws(() => orchestratorLaunchArgs("acp", mcp), /native harness/);
@@ -373,6 +392,10 @@ test("resume replaces stale safety flags without stacking managed MCP configurat
     "--model", "example", "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions",
   ], "claude-code"), ["--model", "example"]);
   assert.deepEqual(stripOrchestratorLaunchArgs(["--yolo", "--sandbox=workspace-write", "-a", "on-request", "-C", "/other", "--enable", "shell_tool"], "codex"), []);
+  assert.deepEqual(stripOrchestratorLaunchArgs([
+    "--model", "example", "--no-extensions", "--exclude-tools", "bash", "--extension", "/tmp/old.mjs",
+    "--append-system-prompt", "old",
+  ], "pi"), ["--model", "example"]);
 });
 
 test("Codex MCP isolation disables every ambient server and fails closed on unverifiable output", () => {

@@ -8,6 +8,11 @@ const scenario = process.env.WOLLIPOG_FAKE_PI_SCENARIO ?? "normal";
 const resumedAt = argv.indexOf("--session");
 const forkedAt = argv.indexOf("--fork");
 const explicitSessionIdAt = argv.indexOf("--session-id");
+const agentControlProbe = argv.includes("--extension");
+const agentControlProbeNonce = process.env.WOLLIPOG_PI_AGENT_CONTROL_PROBE_NONCE;
+const agentControlReadyNonce = process.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE;
+const agentControlExtensionPath = argv.find((arg, index) =>
+  (argv[index - 1] === "--extension" || argv[index - 1] === "-e") && arg.endsWith(".pi-agent-control.mjs"));
 const sessionId = scenario === "fork-ignores-session-id" && forkedAt >= 0
   ? "pi-generated-fork-id"
   : explicitSessionIdAt >= 0
@@ -48,6 +53,25 @@ function send(value) {
 
 function response(command, request, data) {
   send({ type: "response", id: request.id, command, success: true, ...(data === undefined ? {} : { data }) });
+}
+
+if (agentControlProbe && agentControlProbeNonce && scenario !== "extension-unsupported" &&
+    scenario !== "extension-no-readiness") {
+  send({ type: "extension_ui_request", method: "setStatus", statusKey: "wollipog-agent-control-probe",
+    statusText: agentControlProbeNonce });
+}
+if (scenario === "user-extension-error") {
+  send({ type: "extension_error", extensionPath: "/home/user/.pi/extensions/broken.mjs",
+    event: "session_start", error: "private user error" });
+}
+if (scenario === "agent-control-extension-error" && agentControlExtensionPath) {
+  send({ type: "extension_error", extensionPath: agentControlExtensionPath,
+    event: "session_start", error: "private bridge error" });
+}
+if (agentControlReadyNonce && scenario !== "agent-control-no-readiness" &&
+    scenario !== "agent-control-extension-error") {
+  send({ type: "extension_ui_request", method: "setStatus", statusKey: "wollipog-agent-control",
+    statusText: agentControlReadyNonce });
 }
 
 function settleNormal() {
@@ -111,6 +135,9 @@ function handle(request) {
       return response("get_commands", request, { commands: [
         { name: "skill:review", description: "Review code", source: "skill", location: "user" },
         { name: "ship", description: "Ship it", source: "prompt", location: "user" },
+        ...(agentControlProbe && scenario !== "extension-unsupported"
+          ? [{ name: "wollipog-agent-control-probe", description: "probe", source: "extension" }]
+          : []),
       ] });
     case "get_entries":
       if (scenario === "legacy-no-entries") {

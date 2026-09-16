@@ -43,7 +43,7 @@ export function supportsNativeOrchestratorBoundary(
   if (driver === "codex" || driver === "codex-app-server") {
     return platform === "linux" || platform === "darwin";
   }
-  if (driver !== "claude-code" && driver !== "acp") return false;
+  if (driver !== "claude-code" && driver !== "acp" && driver !== "pi") return false;
   return (platform === "linux" && isolationMode === "bwrap") ||
     (platform === "darwin" && isolationMode === "seatbelt");
 }
@@ -179,7 +179,12 @@ export function withOrchestratorPreset(
       ["claude-code", "codex", "codex-app-server"].includes(agent.driver ?? "acp");
     const codexApprovalSupported = agent.driver !== "codex" && agent.driver !== "codex-app-server" ||
       agent.codexAppServer?.orchestratorApproval?.status === "supported";
+    const piSupported = agent.driver !== "pi" || agent.piAgentControl?.protocolVersion === 1;
     if (!codexApprovalSupported && agent.capabilities?.permissionModes?.includes(ORCHESTRATOR_PRESET)) {
+      return { ...agent, capabilities: { ...agent.capabilities,
+        permissionModes: agent.capabilities.permissionModes.filter((mode) => mode !== ORCHESTRATOR_PRESET) } };
+    }
+    if (!piSupported && agent.capabilities?.permissionModes?.includes(ORCHESTRATOR_PRESET)) {
       return { ...agent, capabilities: { ...agent.capabilities,
         permissionModes: agent.capabilities.permissionModes.filter((mode) => mode !== ORCHESTRATOR_PRESET) } };
     }
@@ -187,9 +192,9 @@ export function withOrchestratorPreset(
       return { ...agent, capabilities: { ...agent.capabilities,
         permissionModes: agent.capabilities.permissionModes.filter((mode) => mode !== ORCHESTRATOR_PRESET) } };
     }
-    if (!codexApprovalSupported || (contextKind !== "native" && !wslSupported) ||
-        (!acpSupported && !["claude-code", "codex", "codex-app-server"].includes(agent.driver ?? "acp"))) return agent;
-    const nativeBoundaryRequired = acpSupported || agent.driver === "codex" || agent.driver === "codex-app-server";
+    if (!codexApprovalSupported || !piSupported || (contextKind !== "native" && !wslSupported) ||
+        (!acpSupported && !["claude-code", "codex", "codex-app-server", "pi"].includes(agent.driver ?? "acp"))) return agent;
+    const nativeBoundaryRequired = acpSupported || ["codex", "codex-app-server", "pi"].includes(agent.driver ?? "acp");
     if (contextKind === "native" && nativeBoundaryRequired && !supportsNativeOrchestratorBoundary(
       agent.driver ?? "acp", host.platform ?? process.platform, host.isolationMode ?? host.wslIsolationMode,
     )) {
@@ -281,6 +286,13 @@ export function orchestratorLaunchArgs(
       ...projectPaths.flatMap((path) => ["--add-dir", path]),
       "--setting-sources", "", "--settings", '{"disableAllHooks":true}'];
   }
+  if (driver === "pi") {
+    return [
+      "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files",
+      "--exclude-tools", "bash,edit,write",
+      "--append-system-prompt", instructions,
+    ];
+  }
   if (driver !== "codex" && driver !== "codex-app-server") {
     throw new Error("the orchestrator preset requires a native harness that can enforce its planning boundary");
   }
@@ -313,6 +325,20 @@ export function orchestratorLaunchArgs(
 /** Replace controlled launch flags on every resume, including stale persisted provisioning. */
 export function stripOrchestratorLaunchArgs(args: string[], driver: SessionLaunchSpec["driver"]): string[] {
   const result: string[] = [];
+  if (driver === "pi") {
+    const valueFlags = new Set(["--tools", "--exclude-tools", "--append-system-prompt", "--extension", "-e"]);
+    const booleanFlags = new Set(["--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-builtin-tools"]);
+    for (let i = 0; i < args.length; i++) {
+      const flag = args[i]!.split("=")[0]!;
+      if (booleanFlags.has(flag)) continue;
+      if (valueFlags.has(flag)) {
+        if (!args[i]!.includes("=")) i++;
+        continue;
+      }
+      result.push(args[i]!);
+    }
+    return result;
+  }
   // Retire the old misspelling too: persisted launch arguments may predate the fix.
   const claudeFlags = new Set(["--tools", "--allowedTools", "--disallowedTools", "--mcp-config", "--settings", "--setting-sources", "--settings-sources", "--permission-mode", "--append-system-prompt", "--add-dir"]);
   for (let i = 0; i < args.length; i++) {
