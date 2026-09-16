@@ -796,8 +796,10 @@ function SessionDetailLoaded({
     rightPanel.show("requests");
     if (mode === "preview") onExpand?.();
   }, [mode, onExpand, rightPanel]);
-  useEffect(() => {
-    if (requestPanelOpen && !ownStandaloneApproval && descendantRequests.length === 0) rightPanel.close();
+  useLayoutEffect(() => {
+    if (!requestPanelOpen || ownStandaloneApproval || descendantRequests.length > 0) return;
+    rightPanel.setMode("launcher");
+    rightPanel.close();
   }, [descendantRequests.length, ownStandaloneApproval, requestPanelOpen, rightPanel]);
   const anchorRecoveryPending = eventHistory?.refreshing === true ||
     (conn === "online" && eventHistory?.everComplete !== true && eventHistory?.error == null);
