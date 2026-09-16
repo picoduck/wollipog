@@ -73,8 +73,9 @@ evidence required before deleting fallback support is defined in
 macOS bundles are **signed and notarized** with a Developer ID Application certificate when the
 six `APPLE_*` repository secrets are present (certificate, certificate password, signing identity,
 Apple ID, app-specific password, Team ID). The workflow exports them only on the macOS legs and only
-when the certificate secret is non-empty, so a fork or a secret-less dispatch still produces an
-unsigned bundle instead of failing. When they are present, the Tauri bundler signs the app and both
+when the certificate secret is non-empty. A branch test dispatch without it still produces an
+unsigned throwaway bundle instead of failing; a tag run without it fails, so a missing or deleted
+secret cannot publish an unsigned release. When they are present, the Tauri bundler signs the app and both
 Node sidecars with the hardened runtime and
 [`entitlements.plist`](../apps/desktop/src-tauri/entitlements.plist) (the JIT subset V8 needs),
 notarizes, and staples; a post-build step then requires `codesign --verify --deep --strict`,
