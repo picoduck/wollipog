@@ -1409,7 +1409,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         ...(msg.runnerHistoryEpoch !== undefined ? { runnerHistoryEpoch: msg.runnerHistoryEpoch } : {}),
         ...(msg.actionProviderThreadId ? { actionProviderThreadId: msg.actionProviderThreadId } : {}),
         ...(msg.actionProviderTurnId ? { actionProviderTurnId: msg.actionProviderTurnId } : {}),
-      }).then((reconciled) => {
+      }, controlPlaneProtocolVersion).then((reconciled) => {
         sendUp({
           type: "workflow_action_reconciliation_result",
           requestId: msg.requestId,

@@ -2113,6 +2113,25 @@ export class SessionStore {
     return this.projectedSeq(this.refreshEventProjectionIndex(id, protocolVersion), localSeq);
   }
 
+  /** Resolve one exact peer-facing history coordinate back into the runner's local append-only
+   * sequence space. Both the encoded epoch and dense event sequence must still identify the
+   * current local generation; a stale or differently projected coordinate fails closed. */
+  resolveProjectedHistoryCoordinate(
+    id: string,
+    projectedEpoch: number,
+    projectedSeq: number,
+    protocolVersion: number | null | undefined,
+  ): { logEpoch: number; seq: number } | null {
+    const meta = this.readMeta(id);
+    if (!meta) return null;
+    const logEpoch = meta.logEpoch ?? 0;
+    if (this.projectedHistoryEpoch(logEpoch, protocolVersion) !== projectedEpoch) return null;
+    const index = this.refreshEventProjectionIndex(id, protocolVersion);
+    if (index.logEpoch !== logEpoch) return null;
+    const seq = this.localSeqForProjected(index, projectedSeq);
+    return this.projectedSeq(index, seq) === projectedSeq ? { logEpoch, seq } : null;
+  }
+
   /** Project an exact local snapshot at the negotiated socket boundary. */
   projectSnapshotForProtocol(
     snapshot: SessionSnapshot,

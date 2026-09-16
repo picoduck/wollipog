@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { RunnerToControlPlane, SessionConfig } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, type RunnerToControlPlane, type SessionConfig } from "@wollipog/protocol";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { claudeProjectPathKey } from "./claude-background-work.js";
@@ -315,6 +315,76 @@ test("durable command completion survives provider history loss after restart", 
   }
 });
 
+test("retained PR #1165 receipt resolves projected runner history coordinates", async () => {
+  const h = harness({}, true);
+  try {
+    const command = "gh pr merge https://github.com/picoduck/wollipog/pull/1165 --squash " +
+      "--match-head-commit 741a0563a21c25b59560e75ef846dc5c4f3dcc64";
+    const commandDigest = createHash("sha256").update(command, "utf8").digest("hex");
+    const arm = h.store.appendEvent("s_governance", {
+      kind: "workflow_action_admission_armed",
+      occurrenceId: "workflow-retained-1165",
+      commandDigest,
+      sessionTurnId: "session-turn-retained",
+      providerTurnId: "app-server-request-retained",
+    });
+    assert.ok(arm);
+    h.store.appendEvent("s_governance", {
+      kind: "tool_call",
+      toolCallId: "command-retained",
+      title: "merge",
+      toolKind: "execute",
+      status: "in_progress",
+    });
+    const receipt = h.store.appendEvent("s_governance", {
+      kind: "review_decision",
+      reviewId: "review-retained",
+      reviewer: { kind: "agent", id: "codex-guardian" },
+      outcome: "allowed",
+      approvalReviewReceipt: {
+        transport: "codex-app-server",
+        threadId: "thread-exact",
+        turnId: "provider-turn-retained",
+        itemId: "command-retained",
+        toolName: "commandExecution",
+        input: command,
+        inputSha256: commandDigest,
+      },
+    });
+    assert.ok(receipt);
+    const completion = h.store.appendEvent("s_governance", {
+      kind: "tool_call_update",
+      toolCallId: "command-retained",
+      status: "completed",
+    });
+    assert.ok(completion);
+    (h.entry.client as any).reconcileCompletedCommand = async () => null;
+    (h.sm as any).resolveWorktreePullRequestState = async () => ({
+      state: "merged", headOid: "741a0563a21c25b59560e75ef846dc5c4f3dcc64",
+    });
+
+    const result = await h.sm.reconcileWorkflowAction("s_governance", {
+      occurrenceId: "workflow-retained-1165",
+      command,
+      commandDigest,
+      pullRequestUrl: "https://github.com/picoduck/wollipog/pull/1165",
+      expectedHeadSha: "741a0563a21c25b59560e75ef846dc5c4f3dcc64",
+      armedAfterEventSeq: h.store.projectedEventSeq("s_governance", arm.seq, PROTOCOL_VERSION),
+      runnerHistoryEpoch: h.store.projectedHistoryEpoch(0, PROTOCOL_VERSION),
+      actionProviderThreadId: "thread-exact",
+      actionProviderTurnId: "app-server-request-retained",
+    }, PROTOCOL_VERSION);
+    assert.equal(result.accepted, true);
+    assert.equal(result.providerItemId, "command-retained");
+    assert.equal(result.providerReviewEventSeq,
+      h.store.projectedEventSeq("s_governance", receipt.seq, PROTOCOL_VERSION));
+    assert.equal(result.providerCompletionEventSeq,
+      h.store.projectedEventSeq("s_governance", completion.seq, PROTOCOL_VERSION));
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("durable command completion rejects missing starts and missing, failed, misordered, or replayed terminals", async () => {
   const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1165 --squash --match-head-commit ${"c".repeat(40)}`;
   const commandDigest = createHash("sha256").update(command, "utf8").digest("hex");
@@ -375,11 +445,11 @@ test("durable command completion rejects missing starts and missing, failed, mis
         commandDigest: "d".repeat(64),
         pullRequestUrl: "https://github.com/picoduck/wollipog/pull/1165",
         expectedHeadSha: "c".repeat(40),
-        armedAfterEventSeq: arm.seq,
-        runnerHistoryEpoch: 0,
+        armedAfterEventSeq: h.store.projectedEventSeq("s_governance", arm.seq, PROTOCOL_VERSION),
+        runnerHistoryEpoch: h.store.projectedHistoryEpoch(0, PROTOCOL_VERSION),
         actionProviderThreadId: "thread-exact",
         actionProviderTurnId: "provider-turn-before-restart",
-      });
+      }, PROTOCOL_VERSION);
       assert.equal(result.accepted, false, mismatch);
       assert.equal(result.error, "provider history did not contain one exact successful command");
     } finally {
@@ -452,13 +522,20 @@ test("durable reconciliation rejects missing, misordered, duplicated, and cross-
         commandDigest: "d".repeat(64),
         pullRequestUrl: "https://github.com/picoduck/wollipog/pull/1162",
         expectedHeadSha: "c".repeat(40),
-        armedAfterEventSeq: arm.seq,
-        runnerHistoryEpoch: mismatch === "epoch" ? 1 : 0,
+        armedAfterEventSeq: h.store.projectedEventSeq("s_governance", arm.seq, PROTOCOL_VERSION),
+        runnerHistoryEpoch: mismatch === "epoch"
+          ? h.store.projectedHistoryEpoch(0, PROTOCOL_VERSION) + 1
+          : h.store.projectedHistoryEpoch(0, PROTOCOL_VERSION),
         actionProviderThreadId: "thread-exact",
         actionProviderTurnId: "legacy-session-turn-stored-as-provider",
-      });
+      }, PROTOCOL_VERSION);
       assert.equal(result.accepted, false, `${mismatch} must fail closed`);
-      assert.equal(receivedFence, undefined, `${mismatch} cannot mint a runner receipt fence`);
+      if (mismatch === "epoch") {
+        assert.equal(result.error, "reconciliation runner fence is stale or mismatched");
+        assert.equal(receivedFence, "not-called", "a stale projected epoch cannot consult provider history");
+      } else {
+        assert.equal(receivedFence, undefined, `${mismatch} cannot mint a runner receipt fence`);
+      }
     } finally {
       h.cleanup();
     }
