@@ -7,6 +7,7 @@ import {
   type AgentSlashCommand,
   type CreateSessionRequest,
   type ControlPlaneToUi,
+  type DescendantRequestView,
   type GitStatusInfo,
   type GitSummaryInfo,
   type InvokeSessionCommandRequest,
@@ -826,8 +827,58 @@ function settleSteeringAttempt(
   return structuredClone(attempt);
 }
 
+let descendantRequestRows: DescendantRequestView[] = [];
+let descendantRequestCallCount = 0;
+let deferNextDescendantRequest = false;
+let failNextDescendantRequest = false;
+let pendingDescendantRequestSettlement: (() => void) | null = null;
+
+function descendantRequestFixture(): DescendantRequestView {
+  return {
+    sessionId: "session-descendant-request",
+    sessionTitle: "Descendant Request Fixture",
+    runnerId: runner.runnerId,
+    runnerOnline: true,
+    eventEpoch: 1,
+    createdAt: Date.now(),
+    responseOwner: "human",
+    occurrenceId: "descendant-request-occurrence",
+    request: {
+      requestId: "descendant-request-question",
+      occurrenceId: "descendant-request-occurrence",
+      kind: "question",
+      title: "Question",
+      options: [],
+      questions: [{ id: "next", question: "What should happen next?", options: [] }],
+    },
+  };
+}
+
 const client = {
   ...api,
+  descendantRequests: async (_sessionId: string, signal?: AbortSignal) => {
+    descendantRequestCallCount += 1;
+    if (failNextDescendantRequest) {
+      failNextDescendantRequest = false;
+      throw new Error("Descendant request fixture unavailable");
+    }
+    if (deferNextDescendantRequest) {
+      deferNextDescendantRequest = false;
+      await new Promise<void>((resolve, reject) => {
+        const abort = () => {
+          pendingDescendantRequestSettlement = null;
+          reject(new DOMException("Aborted", "AbortError"));
+        };
+        pendingDescendantRequestSettlement = () => {
+          signal?.removeEventListener("abort", abort);
+          pendingDescendantRequestSettlement = null;
+          resolve();
+        };
+        signal?.addEventListener("abort", abort, { once: true });
+      });
+    }
+    return { requests: structuredClone(descendantRequestRows) };
+  },
   getIdentity: async () => ({
     context: {
       userId: "fixture-user",
@@ -1554,11 +1605,30 @@ declare global {
       cancelTurnCount(): number;
       failNextCancelTurn(): void;
       seedQueuedEditRecovery(sessionId: string, recovery: QueuedPromptEditRecovery): void;
+      setDescendantRequests(state: "one" | "empty"): void;
+      deferNextDescendantRequests(): void;
+      settleDeferredDescendantRequests(): void;
+      failNextDescendantRequests(): void;
+      descendantRequestCallCount(): number;
     };
   }
 }
 
 window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
+  setDescendantRequests(state) {
+    descendantRequestRows = state === "one" ? [descendantRequestFixture()] : [];
+  },
+  deferNextDescendantRequests() {
+    deferNextDescendantRequest = true;
+  },
+  settleDeferredDescendantRequests() {
+    if (!pendingDescendantRequestSettlement) throw new Error("no deferred descendant request");
+    pendingDescendantRequestSettlement();
+  },
+  failNextDescendantRequests() {
+    failNextDescendantRequest = true;
+  },
+  descendantRequestCallCount: () => descendantRequestCallCount,
   failNextProjectUpdate(message = "Could not save Project settings. Please retry.") { nextProjectUpdateError = message; },
   updateProject(id, patch) {
     const value = model.projects.find((candidate) => candidate.id === id);

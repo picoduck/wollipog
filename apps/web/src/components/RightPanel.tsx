@@ -33,7 +33,7 @@ import { AgentsPanel } from "./AgentsPanel.js";
 import { focusSessionRequest, standaloneApprovalForReview } from "./SessionApproval.js";
 import { BackgroundWorkPanel } from "./BackgroundWorkPanel.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
-import { SessionRequestPanel } from "./SessionRequestPanel.js";
+import { SessionRequestPanel, type DescendantRequestStatus } from "./SessionRequestPanel.js";
 
 /** Viewport-aware width ceiling: the panel may take at most ~40% of the window, so the
  * transcript + composer always keep a usable share on narrow/split-screen windows. */
@@ -211,6 +211,7 @@ export function RightPanel({
   backgroundInventoryError = null,
   onRetryBackgroundInventory,
   descendantRequests = [],
+  descendantRequestStatus = "idle",
   selectedRequestKey = null,
   onSelectedRequestKeyChange = () => undefined,
   onSessionUpdate,
@@ -247,6 +248,7 @@ export function RightPanel({
   backgroundInventoryError?: string | null;
   onRetryBackgroundInventory?: () => void;
   descendantRequests?: readonly DescendantRequestView[];
+  descendantRequestStatus?: DescendantRequestStatus;
   selectedRequestKey?: string | null;
   onSelectedRequestKeyChange?: (key: string | null) => void;
   onSessionUpdate?: (session: SessionView) => void;
@@ -458,6 +460,7 @@ export function RightPanel({
                 session={session}
                 runnerOnline={runnerOnline}
                 descendants={descendantRequests}
+                descendantStatus={descendantRequestStatus}
                 selectedKey={selectedRequestKey}
                 onSelectedKeyChange={onSelectedRequestKeyChange}
                 onSessionUpdate={onSessionUpdate}

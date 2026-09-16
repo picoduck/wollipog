@@ -165,6 +165,26 @@ for (const viewport of [
 }
 
 for (const viewport of [
+  { name: "mobile", width: 390, height: 844 },
+  { name: "split pane", width: 900, height: 800 },
+  { name: "desktop", width: 1280, height: 800 },
+]) {
+  test(`descendant polling states remain readable on ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/request-surfaces-e2e.html?scenario=polling&pollStatus=loading");
+    await page.getByRole("button", { name: "Needs Your Input: 1 Requests" }).click();
+    await expect(page.getByRole("heading", { name: "Loading Requests" })).toBeVisible();
+    await assertNoHorizontalOverflow(page, "#right-panel");
+
+    await page.goto("/request-surfaces-e2e.html?scenario=polling&pollStatus=unavailable");
+    await page.getByRole("button", { name: "Needs Your Input: 1 Requests" }).click();
+    await expect(page.getByRole("heading", { name: "Requests Unavailable" })).toBeVisible();
+    await expect(page.locator(".request-panel-empty button")).toHaveCount(0);
+    await assertNoHorizontalOverflow(page, "#right-panel");
+  });
+}
+
+for (const viewport of [
   { name: "mobile breakpoint", width: 760, height: 800 },
   { name: "desktop breakpoint", width: 761, height: 800 },
   { name: "split pane", width: 900, height: 800 },

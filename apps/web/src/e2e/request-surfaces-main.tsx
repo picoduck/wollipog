@@ -7,7 +7,10 @@ import { CampaignContinuationNotice } from "../components/SessionDetail.js";
 import { RightPanel, type RightPanelState } from "../components/RightPanel.js";
 import { SessionApprovalRegion } from "../components/SessionApproval.js";
 import { EventTimeline } from "../components/EventTimeline.js";
-import { sessionRequestPanelKey } from "../components/SessionRequestPanel.js";
+import {
+  sessionRequestPanelKey,
+  type DescendantRequestStatus,
+} from "../components/SessionRequestPanel.js";
 import { SessionStatusIndicators } from "../components/common.js";
 import type { RightPanelMode } from "../right-panel.js";
 import type { TimelineItem } from "../timeline.js";
@@ -27,6 +30,9 @@ const scenario = new URLSearchParams(window.location.search).get("scenario") ?? 
 const evidenceCount = Number(new URLSearchParams(window.location.search).get("items")) || 8;
 const includeDescendants = scenario === "descendants" ||
   new URLSearchParams(window.location.search).get("children") === "1";
+const requestedPollStatus = new URLSearchParams(window.location.search).get("pollStatus");
+const descendantRequestStatus: DescendantRequestStatus = requestedPollStatus === "loading" ||
+  requestedPollStatus === "unavailable" ? requestedPollStatus : "ready";
 let openedChild: DescendantRequestView | null = null;
 const submissions: unknown[] = [];
 let workerReviewOpened = false;
@@ -233,12 +239,14 @@ function continuationSession(): SessionView {
 function Fixture() {
   const [session, setSession] = useState(() => scenario === "continuation"
     ? continuationSession()
-    : scenario === "descendants" ? {
+    : scenario === "descendants" || scenario === "polling" ? {
         ...evidenceSession(),
         status: "running",
         pendingApproval: null,
         orchestratorCampaign: {
-          pendingRequests: { human: 8, orchestrator: 4 },
+          pendingRequests: scenario === "descendants"
+            ? { human: 8, orchestrator: 4 }
+            : { human: 1, orchestrator: 0 },
         } as SessionView["orchestratorCampaign"],
       } as SessionView
     : scenario === "standalone" || scenario === "worker"
@@ -319,7 +327,7 @@ function Fixture() {
         <section className="session-detail expanded" style={{ height: "100%" }}>
           <header className="detail-head" style={{ justifyContent: "space-between" }}>
             <h1 className="detail-title">{session.title}</h1>
-            {scenario === "descendants" ? (
+            {scenario === "descendants" || scenario === "polling" ? (
               <SessionStatusIndicators
                 session={session}
                 onOpenAttention={() => setOpen(true)}
@@ -415,6 +423,7 @@ function Fixture() {
               onInsertSideChatDraft={() => {}}
               items={[]}
               descendantRequests={descendants}
+              descendantRequestStatus={descendantRequestStatus}
               selectedRequestKey={selectedKey}
               onSelectedRequestKeyChange={setSelectedKey}
               onSessionUpdate={setSession}

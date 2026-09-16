@@ -407,8 +407,12 @@ test("descendant polling coalesces intervals and rejects superseded responses", 
   });
   let requestReferenceChanges = 0;
   let exposedRefreshAfterResolution: (() => void) | undefined;
-  function Harness({ sessionId, enabled }: { sessionId: string; enabled: boolean }) {
-    const polling = useDescendantRequestPolling({ sessionId, enabled });
+  function Harness({ sessionId, enabled, available }: {
+    sessionId: string;
+    enabled: boolean;
+    available: boolean;
+  }) {
+    const polling = useDescendantRequestPolling({ sessionId, enabled, available });
     exposedRefreshAfterResolution = polling.refreshAfterResolution;
     const priorRequests = React.useRef(polling.requests);
     React.useEffect(() => {
@@ -416,7 +420,7 @@ test("descendant polling coalesces intervals and rejects superseded responses", 
       requestReferenceChanges += 1;
       priorRequests.current = polling.requests;
     }, [polling.requests]);
-    return <div>
+    return <div data-poll-status={polling.status}>
       <button onClick={polling.refreshAfterResolution}>Refresh After Resolution</button>
       <span>{polling.requests.map((request) => request.sessionTitle).join(",")}</span>
     </div>;
@@ -424,11 +428,15 @@ test("descendant polling coalesces intervals and rejects superseded responses", 
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  const render = (sessionId: string, enabled: boolean) => root.render(
-    <ApiProvider client={client}><Harness sessionId={sessionId} enabled={enabled} /></ApiProvider>,
+  const render = (sessionId: string, enabled: boolean, available = true) => root.render(
+    <ApiProvider client={client}>
+      <Harness sessionId={sessionId} enabled={enabled} available={available} />
+    </ApiProvider>,
   );
   try {
     await act(async () => render("parent-a", true));
+    assert.equal(container.firstElementChild?.getAttribute("data-poll-status"), "loading",
+      "the first request remains visibly non-authoritative while it is pending");
     assert.equal(requests.length, 1);
     await act(async () => intervalHandler?.());
     assert.equal(requests.length, 1, "a slow request coalesces the next interval poll");
@@ -441,6 +449,7 @@ test("descendant polling coalesces intervals and rejects superseded responses", 
       await requests[1]!.promise;
     });
     assert.equal(container.querySelector("span")?.textContent, "new");
+    assert.equal(container.firstElementChild?.getAttribute("data-poll-status"), "ready");
     await act(async () => {
       requests[0]!.resolve({ requests: [descendantRequest("stale")] });
       await requests[0]!.promise;
@@ -478,6 +487,8 @@ test("descendant polling coalesces intervals and rejects superseded responses", 
     });
     assert.equal(container.querySelector("span")?.textContent, "",
       "a current request failure clears stale request controls");
+    assert.equal(container.firstElementChild?.getAttribute("data-poll-status"), "unavailable",
+      "a current request failure is not mistaken for an authoritative empty result");
 
     await act(async () => fireDomEvent.click(container.querySelector("button")!));
     await act(async () => {
@@ -488,6 +499,8 @@ test("descendant polling coalesces intervals and rejects superseded responses", 
     });
     assert.equal(container.querySelector("span")?.textContent, "",
       "mixed-version rows without exact routing metadata fail closed");
+    assert.equal(container.firstElementChild?.getAttribute("data-poll-status"), "unavailable",
+      "an incompatible response is not treated as an authoritative empty result");
 
     await act(async () => fireDomEvent.click(container.querySelector("button")!));
     await act(async () => render("parent-b", true));
@@ -495,16 +508,26 @@ test("descendant polling coalesces intervals and rejects superseded responses", 
     assert.equal(requests.length, 9);
     assert.equal(requests[8]!.sessionId, "parent-b");
     assert.equal(container.querySelector("span")?.textContent, "");
+    assert.equal(container.firstElementChild?.getAttribute("data-poll-status"), "loading",
+      "switching sessions cannot reuse the prior session's authoritative state");
     const enabledRefresh = exposedRefreshAfterResolution;
     await act(async () => render("parent-b", false));
     assert.equal(requests[8]!.signal?.aborted, true, "disabling Parent Control aborts the request");
     assert.equal(container.querySelector("span")?.textContent, "");
+    assert.equal(container.firstElementChild?.getAttribute("data-poll-status"), "idle");
     await act(async () => enabledRefresh?.());
     assert.equal(requests.length, 9, "a stale resolution callback cannot restart disabled polling");
     await act(async () => render("parent-b", true));
     assert.equal(requests.length, 10);
+    await act(async () => render("parent-b", true, false));
+    assert.equal(requests[9]!.signal?.aborted, true, "disconnecting aborts the active request");
+    assert.equal(container.firstElementChild?.getAttribute("data-poll-status"), "unavailable");
+    assert.equal(container.querySelector("span")?.textContent, "");
+    await act(async () => render("parent-b", true, true));
+    assert.equal(requests.length, 11, "reconnecting retries without reopening the panel");
+    assert.equal(container.firstElementChild?.getAttribute("data-poll-status"), "loading");
     await act(async () => root.unmount());
-    assert.equal(requests[9]!.signal?.aborted, true, "unmounting aborts the active request");
+    assert.equal(requests[10]!.signal?.aborted, true, "unmounting aborts the active request");
   } finally {
     if (container.isConnected) await act(async () => root.unmount());
     container.remove();
@@ -564,8 +587,10 @@ test("descendant polling keeps replacement deadlines when expired timer ids are 
     active.handler();
   };
   function Harness() {
-    const polling = useDescendantRequestPolling({ sessionId: "parent", enabled: true });
-    return <span>{polling.requests.map((request) => request.sessionTitle).join(",")}</span>;
+    const polling = useDescendantRequestPolling({ sessionId: "parent", enabled: true, available: true });
+    return <span data-poll-status={polling.status}>
+      {polling.requests.map((request) => request.sessionTitle).join(",")}
+    </span>;
   }
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
@@ -588,11 +613,14 @@ test("descendant polling keeps replacement deadlines when expired timer ids are 
 
     await act(async () => fireActiveTimeout());
     assert.equal(requests[1]!.signal?.aborted, true, "the deadline aborts the hung request");
+    assert.equal(container.querySelector("span")?.getAttribute("data-poll-status"), "unavailable");
+    assert.equal(container.querySelector("span")?.textContent, "",
+      "timed-out request controls fail closed without reporting an authoritative empty result");
     await act(async () => {
       requests[1]!.resolve({ requests: [descendantRequest("late-success")] });
       await requests[1]!.promise;
     });
-    assert.equal(container.querySelector("span")?.textContent, "current");
+    assert.equal(container.querySelector("span")?.textContent, "");
     assert.equal(requests.length, 2,
       "a timed-out success remains harmless before the next interval starts");
 
@@ -604,7 +632,7 @@ test("descendant polling keeps replacement deadlines when expired timer ids are 
       requests[2]!.reject(new Error("late timeout failure"));
       await requests[2]!.promise.catch(() => {});
     });
-    assert.equal(container.querySelector("span")?.textContent, "current");
+    assert.equal(container.querySelector("span")?.textContent, "");
     assert.equal(requests.length, 3,
       "a timed-out failure remains harmless before the next interval starts");
 
