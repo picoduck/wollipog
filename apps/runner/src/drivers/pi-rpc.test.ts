@@ -19,6 +19,10 @@ function options(scenario = "normal", resumeId?: string): DriverOptions {
     config: {},
     context: { kind: "native" },
     resumeId,
+    capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: false,
+      supportsConversationFork: true,
+    },
   };
 }
 
@@ -90,6 +94,36 @@ test("Pi RPC rejects a mismatched fork leaf without initialization and removes i
   );
   assert.equal(existsSync(sessionRoot), true);
   assert.deepEqual(readdirSync(sessionRoot), [], "a failed provider-mode fork leaves no orphaned Pi transcript");
+});
+
+test("Pi RPC drains an oversized optional entry response without killing the live session", async (t) => {
+  const exits: Array<number | null> = [];
+  const driver = new PiRpcDriver(options("oversized-entries"), callbacks([], {
+    onExit: (code) => exits.push(code),
+  }));
+  t.after(() => driver.dispose());
+  await driver.initialize();
+  await driver.newSession(process.cwd());
+  assert.equal(await driver.prompt("large transcript"), "end_turn");
+  assert.equal(driver.agentTurnId(), null, "an oversized advisory response omits the fork checkpoint");
+  assert.deepEqual(exits, [], "the oversized optional response does not close the Pi transport");
+  assert.equal(await driver.prompt("still alive"), "end_turn", "later turns continue on the same process");
+  assert.equal(driver.agentSessionId(), "pi-session-1");
+});
+
+test("Pi RPC skips entry refresh for capability-disabled older versions", async (t) => {
+  const stderr: string[] = [];
+  const legacy = options("legacy-hanging-entries");
+  legacy.capabilities = { ...legacy.capabilities!, supportsConversationFork: false };
+  const driver = new PiRpcDriver(legacy, callbacks([], { onStderr: (text) => stderr.push(text) }));
+  t.after(() => driver.dispose());
+  await driver.initialize();
+  await driver.newSession(process.cwd());
+  const startedAt = Date.now();
+  assert.equal(await driver.prompt("legacy prompt"), "end_turn");
+  assert.ok(Date.now() - startedAt < 1_000, "an unsupported optional command never delays turn settlement");
+  assert.equal(driver.agentTurnId(), null);
+  assert.deepEqual(stderr, []);
 });
 
 test("Pi RPC tool-only stages do not emit empty assistant messages", async (t) => {

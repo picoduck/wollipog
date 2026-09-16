@@ -7,7 +7,12 @@ import {
   type PromptImage,
   type SessionConfig,
 } from "@wollipog/protocol";
-import { PiRpcPeer, PiRpcResponseError, PiRpcTransportError } from "../pi-rpc-peer.js";
+import {
+  PiRpcOversizedResponseError,
+  PiRpcPeer,
+  PiRpcResponseError,
+  PiRpcTransportError,
+} from "../pi-rpc-peer.js";
 import { runContextCommand } from "../context-command.js";
 import { killTree, spawnAgent, terminateDescendantBoundaries, type AgentProcess } from "../spawn.js";
 import type {
@@ -94,6 +99,7 @@ export class PiRpcDriver implements Driver {
   private sessionId: string | null = null;
   private sessionFile: string | null = null;
   private completedTurnId: string | null = null;
+  private checkpointRefreshDisabled = false;
   private turnId: string | null = null;
   private promptBusy = false;
   private promptAccepted = false;
@@ -224,7 +230,14 @@ export class PiRpcDriver implements Driver {
     if (!sourceSessionId || this.disposed) throw new PiRpcTransportError("Pi RPC has no resumable source session");
     if (this.promptBusy) throw new Error("Pi cannot clone while a turn is running");
     if (peer) {
-      const sourceEntries = object((await peer.request<Json>({ type: "get_entries" })).data);
+      if (this.completedTurnId !== lastTurnId) {
+        throw new Error("Pi can clone only its latest completed conversation checkpoint");
+      }
+      const sourceEntries = object((await peer.request<Json>(
+        { type: "get_entries", since: lastTurnId },
+        5_000,
+        { discardOversizedResponse: true },
+      )).data);
       if (string(sourceEntries?.leafId) !== lastTurnId) {
         throw new Error("Pi can clone only its latest completed conversation checkpoint");
       }
@@ -275,7 +288,11 @@ export class PiRpcDriver implements Driver {
       if (safelyAttributedSessionFile(
         this.sessionFile, sessionFile, forkedSessionId, this.opts.context.kind === "wsl",
       )) this.forkedSessionFiles.set(forkedSessionId, sessionFile);
-      const forkedEntries = object((await forkPeer.request<Json>({ type: "get_entries" })).data);
+      const forkedEntries = object((await forkPeer.request<Json>(
+        { type: "get_entries", since: lastTurnId },
+        5_000,
+        { discardOversizedResponse: true },
+      )).data);
       if (string(forkedEntries?.leafId) !== lastTurnId) {
         throw new Error("Pi fork did not preserve the requested completed checkpoint");
       }
@@ -674,13 +691,25 @@ export class PiRpcDriver implements Driver {
   }
 
   private async refreshCompletedTurnId(): Promise<void> {
+    if (this.opts.capabilities?.supportsConversationFork !== true || this.checkpointRefreshDisabled) {
+      this.completedTurnId = null;
+      return;
+    }
     try {
-      const response = await this.peer?.request<Json>({ type: "get_entries" });
+      const response = await this.peer?.request<Json>(
+        { type: "get_entries", ...(this.completedTurnId ? { since: this.completedTurnId } : {}) },
+        5_000,
+        { discardOversizedResponse: true },
+      );
       const leafId = string(object(response?.data)?.leafId);
       this.completedTurnId = leafId ?? null;
       if (!leafId) this.cb.onStderr("Pi RPC did not report a completed conversation leaf; fork checkpoint omitted");
     } catch (error) {
       this.completedTurnId = null;
+      if (error instanceof PiRpcOversizedResponseError) {
+        this.checkpointRefreshDisabled = true;
+        return;
+      }
       this.cb.onStderr(`Pi RPC could not read the completed conversation leaf: ${(error as Error).message}`);
     }
   }

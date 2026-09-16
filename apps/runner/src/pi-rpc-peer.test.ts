@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import { PiRpcPeer } from "./pi-rpc-peer.js";
+import { PiRpcOversizedResponseError, PiRpcPeer } from "./pi-rpc-peer.js";
 
 test("Pi RPC framing splits only on LF and accepts CRLF", async () => {
   const input = new PassThrough();
@@ -42,6 +42,37 @@ test("Pi RPC correlates command responses without consuming events", async () =>
   output.write(`${JSON.stringify({ type: "agent_start" })}\n${JSON.stringify({ type: "response", id: request.id, command: "get_state", success: true, data: { sessionId: "one" } })}\n`);
   const result = await pending;
   assert.deepEqual(result.data, { sessionId: "one" });
+  assert.deepEqual(events, [{ type: "agent_start" }]);
+  peer.dispose();
+});
+
+test("Pi RPC can drain one opted-in oversized response and preserve later frames", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const events: Record<string, unknown>[] = [];
+  const errors: Error[] = [];
+  const peer = new PiRpcPeer(input, output, (event) => events.push(event), (error) => errors.push(error), 96);
+  let written = "";
+  input.on("data", (chunk) => { written += String(chunk); });
+  const pending = peer.request(
+    { type: "get_entries" },
+    15_000,
+    { discardOversizedResponse: true },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  const request = JSON.parse(written.trim()) as { id: string };
+  const oversized = JSON.stringify({
+    id: request.id,
+    type: "response",
+    command: "get_entries",
+    success: true,
+    data: { entries: [{ data: "x".repeat(200) }], leafId: "leaf" },
+  });
+  output.write(oversized.slice(0, 120));
+  await assert.rejects(pending, PiRpcOversizedResponseError);
+  output.write(`${oversized.slice(120)}\n${JSON.stringify({ type: "agent_start" })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(errors, []);
   assert.deepEqual(events, [{ type: "agent_start" }]);
   peer.dispose();
 });

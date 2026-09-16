@@ -18,8 +18,16 @@ export class PiRpcResponseError extends Error {
   }
 }
 
+export class PiRpcOversizedResponseError extends PiRpcResponseError {
+  constructor(command: string) {
+    super(`Pi RPC ${command} response exceeded the configured size limit`, command);
+    this.name = "PiRpcOversizedResponseError";
+  }
+}
+
 interface PendingRequest {
   command: string;
+  discardOversizedResponse: boolean;
   resolve: (value: Record<string, unknown>) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
@@ -29,6 +37,7 @@ interface PendingRequest {
  * Unicode separators inside JSON strings and makes the frame-size boundary unambiguous. */
 export class PiRpcPeer {
   private buffer = Buffer.alloc(0);
+  private discardingOversizedFrame = false;
   private nextId = 0;
   private disposed = false;
   private readonly pending = new Map<string, PendingRequest>();
@@ -48,6 +57,7 @@ export class PiRpcPeer {
   request<T extends Record<string, unknown> = Record<string, unknown>>(
     command: Record<string, unknown> & { type: string },
     timeoutMs = 15_000,
+    options: { discardOversizedResponse?: boolean } = {},
   ): Promise<T> {
     if (this.disposed) return Promise.reject(new PiRpcTransportError("Pi RPC transport is closed"));
     const id = `wollipog-${++this.nextId}`;
@@ -59,6 +69,7 @@ export class PiRpcPeer {
       timer.unref?.();
       this.pending.set(id, {
         command: command.type,
+        discardOversizedResponse: options.discardOversizedResponse === true,
         resolve: resolve as (value: Record<string, unknown>) => void,
         reject,
         timer,
@@ -108,16 +119,31 @@ export class PiRpcPeer {
 
   private onData(chunk: Buffer | string): void {
     if (this.disposed) return;
-    this.buffer = Buffer.concat([this.buffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8")]);
+    let incoming = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8");
+    if (this.discardingOversizedFrame) {
+      const newline = incoming.indexOf(0x0a);
+      if (newline < 0) return;
+      this.discardingOversizedFrame = false;
+      incoming = incoming.subarray(newline + 1);
+    }
+    this.buffer = Buffer.concat([this.buffer, incoming]);
     while (true) {
       const newline = this.buffer.indexOf(0x0a);
       if (newline < 0) {
         if (this.buffer.length > this.maxFrameBytes) {
-          this.fail(new PiRpcTransportError("Pi RPC frame exceeded the configured size limit"));
+          if (this.rejectDiscardableOversizedResponse(this.buffer)) {
+            this.buffer = Buffer.alloc(0);
+            this.discardingOversizedFrame = true;
+          } else {
+            this.fail(new PiRpcTransportError("Pi RPC frame exceeded the configured size limit"));
+          }
         }
         return;
       }
       if (newline > this.maxFrameBytes) {
+        const oversized = this.buffer.subarray(0, newline);
+        this.buffer = this.buffer.subarray(newline + 1);
+        if (this.rejectDiscardableOversizedResponse(oversized)) continue;
         this.fail(new PiRpcTransportError("Pi RPC frame exceeded the configured size limit"));
         return;
       }
@@ -138,6 +164,24 @@ export class PiRpcPeer {
       }
       this.route(message as Record<string, unknown>);
     }
+  }
+
+  /** Some optional Pi introspection commands can serialize the entire transcript. A caller may
+   * opt into rejecting and draining only its own oversized response while every unsolicited or
+   * non-opted-in oversized frame still closes the transport. */
+  private rejectDiscardableOversizedResponse(framePrefix: Buffer): boolean {
+    const prefix = framePrefix.subarray(0, Math.min(framePrefix.length, 4_096)).toString("utf8");
+    for (const [id, pending] of this.pending) {
+      if (!pending.discardOversizedResponse) continue;
+      const idFirst = `{"id":"${id}","type":"response","command":"${pending.command}",`;
+      const typeFirst = `{"type":"response","id":"${id}","command":"${pending.command}",`;
+      if (!prefix.startsWith(idFirst) && !prefix.startsWith(typeFirst)) continue;
+      this.pending.delete(id);
+      clearTimeout(pending.timer);
+      pending.reject(new PiRpcOversizedResponseError(pending.command));
+      return true;
+    }
+    return false;
   }
 
   private route(message: Record<string, unknown>): void {

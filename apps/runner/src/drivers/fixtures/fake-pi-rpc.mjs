@@ -32,6 +32,13 @@ let entries = forkedAt >= 0 ? [
   { type: "message", id: "pi-entry-1", parentId: "pi-user-1", message: { role: "assistant", content: "Hello from Pi" } },
 ] : [];
 let leafId = forkedAt >= 0 ? "pi-entry-1" : null;
+if (scenario === "fork-leaf-mismatch" && forkedAt >= 0) {
+  entries = [
+    { type: "message", id: "expected-leaf", parentId: null, message: { role: "assistant", content: "Expected" } },
+    { type: "message", id: "different-leaf", parentId: "expected-leaf", message: { role: "assistant", content: "Later" } },
+  ];
+  leafId = "different-leaf";
+}
 
 function send(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -109,8 +116,19 @@ function handle(request) {
         return;
       }
       if (scenario === "legacy-hanging-entries") return;
-      if (scenario === "fork-leaf-mismatch" && forkedAt >= 0) {
-        return response("get_entries", request, { entries, leafId: "different-leaf" });
+      if (scenario === "oversized-entries") {
+        return response("get_entries", request, {
+          entries: [{ type: "custom", id: "huge-entry", data: "x".repeat(4 * 1024 * 1024 + 1024) }],
+          leafId: "huge-entry",
+        });
+      }
+      if (request.since !== undefined) {
+        const sinceIndex = entries.findIndex((entry) => entry.id === request.since);
+        if (sinceIndex < 0) {
+          send({ type: "response", id: request.id, command: request.type, success: false, error: `Entry not found: ${request.since}` });
+          return;
+        }
+        return response("get_entries", request, { entries: entries.slice(sinceIndex + 1), leafId });
       }
       return response("get_entries", request, { entries, leafId });
     case "get_session_stats":
