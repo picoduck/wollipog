@@ -41,6 +41,14 @@ is a capability-floor entry with no reader at any version — a `RUNNER_CAPABILI
 that nothing passes to `runnerSupportsProtocol` or reads directly — so put the protocol budget
 there. (Two runs confirmed the absent window; the second found exactly such an unread floor.)
 
+A capability floor whose only non-definition references are assertions in
+`packages/protocol/src/index.test.ts` is a floor awaiting its consumer, not a stale one, when its
+line falls inside the 7-day window: the protocol key lands first and the reader follows in the
+next slice. Record it for the next run rather than reporting it. Three of the last four protocol
+candidates (`contextWindowVariants` twice, `orchestratorCampaignManagement` once) were exactly
+this shape. Once the line is outside the window and still has no production reader, it is the
+unread-floor finding above.
+
 ## Report
 
 For each finding: the flag or key, every definition and reader, the evidence it is fully resolved,
