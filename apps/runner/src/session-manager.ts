@@ -12144,6 +12144,7 @@ export class SessionManager {
   async reconcileWorkflowAction(
     sessionId: string,
     value: unknown,
+    protocolVersion?: number | null,
   ): Promise<{
     accepted: boolean;
     occurrenceId: string;
@@ -12182,6 +12183,23 @@ export class SessionManager {
         !bounded(raw.actionProviderTurnId, 512))) {
       return fail(occurrenceId, "reconciliation runner fence is invalid");
     }
+    let localRunnerHistoryEpoch = raw.runnerHistoryEpoch as number | undefined;
+    let localArmedAfterEventSeq = raw.armedAfterEventSeq as number | undefined;
+    if (hasRunnerFence && protocolVersion !== undefined) {
+      try {
+        const coordinate = this.store.resolveProjectedHistoryCoordinate(
+          sessionId,
+          raw.runnerHistoryEpoch as number,
+          raw.armedAfterEventSeq as number,
+          protocolVersion,
+        );
+        if (!coordinate) return fail(occurrenceId, "reconciliation runner fence is stale or mismatched");
+        localRunnerHistoryEpoch = coordinate.logEpoch;
+        localArmedAfterEventSeq = coordinate.seq;
+      } catch {
+        return fail(occurrenceId, "reconciliation runner fence is stale or mismatched");
+      }
+    }
     const meta = this.store.readMeta(sessionId);
     const active = this.active.get(sessionId);
     if (!meta || meta.driver !== "codex-app-server" || !active ||
@@ -12198,9 +12216,9 @@ export class SessionManager {
       reviewEventSeq: number;
       completionEventSeq?: number;
     } | undefined;
-    if (hasRunnerFence && (meta.logEpoch ?? 0) === raw.runnerHistoryEpoch) {
+    if (hasRunnerFence && (meta.logEpoch ?? 0) === localRunnerHistoryEpoch) {
       const events = this.store.readEvents(sessionId);
-      const arm = events.find((event) => event.seq === raw.armedAfterEventSeq);
+      const arm = events.find((event) => event.seq === localArmedAfterEventSeq);
       if (arm?.payload.kind === "workflow_action_admission_armed" &&
           arm.payload.occurrenceId === occurrenceId && arm.payload.commandDigest === raw.commandDigest &&
           arm.payload.providerTurnId === raw.actionProviderTurnId) {
@@ -12208,7 +12226,7 @@ export class SessionManager {
         const receipts = events.filter((event) => {
           const payload = event.payload;
           const receipt = payload.kind === "review_decision" ? payload.approvalReviewReceipt : undefined;
-          return event.seq > (raw.armedAfterEventSeq as number) && payload.kind === "review_decision" &&
+          return event.seq > localArmedAfterEventSeq! && payload.kind === "review_decision" &&
             payload.outcome === "allowed" && payload.reviewer?.kind === "agent" &&
             payload.reviewer.id === "codex-guardian" && receipt?.transport === "codex-app-server" &&
             receipt.threadId === raw.actionProviderThreadId && receipt.toolName === "commandExecution" &&
@@ -12216,13 +12234,13 @@ export class SessionManager {
             bounded(receipt.turnId, 512) && bounded(receipt.itemId, 512);
         });
         if (receipts.length === 1) {
-          const interveningArm = events.some((event) => event.seq > (raw.armedAfterEventSeq as number) &&
+          const interveningArm = events.some((event) => event.seq > localArmedAfterEventSeq! &&
             event.seq < receipts[0]!.seq && event.payload.kind === "workflow_action_admission_armed" &&
             event.payload.commandDigest === raw.commandDigest);
           const receipt = receipts[0]!.payload.kind === "review_decision"
             ? receipts[0]!.payload.approvalReviewReceipt : undefined;
           if (receipt && !interveningArm) {
-            const starts = events.filter((event) => event.seq > (raw.armedAfterEventSeq as number) &&
+            const starts = events.filter((event) => event.seq > localArmedAfterEventSeq! &&
               event.seq < receipts[0]!.seq && event.payload.kind === "tool_call" &&
               event.payload.toolCallId === receipt.itemId && event.payload.status === "in_progress");
             const terminal = events.filter((event) => event.seq > receipts[0]!.seq &&
@@ -12294,9 +12312,14 @@ export class SessionManager {
       ...(durableAdmission && durableReceipt ? {
         runnerHistoryEpoch: raw.runnerHistoryEpoch as number,
         armedAfterEventSeq: raw.armedAfterEventSeq as number,
-        providerReviewEventSeq: durableReceipt.reviewEventSeq,
+        providerReviewEventSeq: protocolVersion === undefined
+          ? durableReceipt.reviewEventSeq
+          : this.store.projectedEventSeq(sessionId, durableReceipt.reviewEventSeq, protocolVersion),
         ...(durableReceipt.completionEventSeq !== undefined
-          ? { providerCompletionEventSeq: durableReceipt.completionEventSeq } : {}),
+          ? { providerCompletionEventSeq: protocolVersion === undefined
+              ? durableReceipt.completionEventSeq
+              : this.store.projectedEventSeq(sessionId, durableReceipt.completionEventSeq, protocolVersion) }
+          : {}),
       } : {}),
       forgeHeadSha: forge.headOid.toLowerCase(),
     };
