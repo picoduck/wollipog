@@ -1,6 +1,12 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import type { AddBoxRequest, ControlPlaneToUi, RunnerView, UiSnapshotMessage } from "@wollipog/protocol";
+import {
+  PROTOCOL_VERSION,
+  type AddBoxRequest,
+  type ControlPlaneToUi,
+  type RunnerView,
+  type UiSnapshotMessage,
+} from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
@@ -70,7 +76,7 @@ let runner: RunnerView | null = {
   workspaces: [{ id: "home", name: "Home", path: "C:\\Users\\misko" }],
   connectedAt: 1,
   lastSeen: 1,
-  protocolVersion: 135,
+  protocolVersion: PROTOCOL_VERSION,
   agentsRefreshed: true,
   canManage: identityRole !== "viewer",
   capacity: {
@@ -252,6 +258,7 @@ declare global {
     __WOLLIPOG_MACHINE_E2E__: {
       lastRegisteredWorkspace(): { name: string; path: string } | null;
       lastAddBoxRequest(): AddBoxRequest | null;
+      setAgentAvailabilityScenario(scenario: "legacy-unverified" | "verified-unavailable"): void;
       setRunnerStatus(status: RunnerView["status"]): void;
     };
   }
@@ -260,6 +267,37 @@ declare global {
 window.__WOLLIPOG_MACHINE_E2E__ = {
   lastRegisteredWorkspace: () => structuredClone(lastRegisteredWorkspace),
   lastAddBoxRequest: () => structuredClone(lastAddBoxRequest),
+  setAgentAvailabilityScenario: (scenario) => {
+    if (!runner) return;
+    if (scenario === "legacy-unverified") {
+      runner.protocolVersion = 153;
+      runner.agents = [{
+        id: "legacy-acp",
+        name: "Legacy Unverified ACP",
+        command: "legacy-acp",
+        args: [],
+        env: {},
+        driver: "acp",
+        context: { kind: "native" },
+        source: "config",
+      }];
+    } else {
+      runner.protocolVersion = 154;
+      runner.agents = [{
+        id: "missing-acp",
+        name: "Missing ACP",
+        command: "missing-acp",
+        args: [],
+        env: {},
+        driver: "acp",
+        context: { kind: "native" },
+        source: "config",
+        available: false,
+        unavailableReason: "The configured command was not found or could not be started in this execution context.",
+      }];
+    }
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+  },
   setRunnerStatus: (status) => {
     if (!runner) return;
     runner.status = status;
