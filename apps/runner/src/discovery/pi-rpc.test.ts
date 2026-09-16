@@ -59,6 +59,21 @@ test("Pi discovery does not advertise forks without authoritative entry cursors"
   assert.equal(result.capabilities.supportsConversationFork, false);
 });
 
+test("Pi discovery keeps older RPCs available when an unknown entry command never answers", async () => {
+  const result = await probePiRpc(
+    { command: process.execPath, args: [fixture] },
+    { kind: "native" },
+    {
+      cwd: process.cwd(),
+      timeoutMs: 1_000,
+      env: { WOLLIPOG_FAKE_PI_SCENARIO: "legacy-hanging-entries" },
+    },
+  );
+  assert.equal(result.available, true, result.unavailableReason);
+  assert.equal(result.capabilities.supportsConversationFork, false);
+  assert.equal(result.capabilities.models.length, 2, "required model probes still use the remaining budget");
+});
+
 test("Pi discovery uses a Linux working directory for WSL probes", async () => {
   let observedCwd: string | undefined;
   const result = await probePiRpc(

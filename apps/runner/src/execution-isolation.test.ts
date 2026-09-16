@@ -423,6 +423,24 @@ test("native provider state transfer copies the fork result and cleanup removes 
   }
 });
 
+test("native Pi fork verification recognizes timestamped and exact transcript names", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-pi-provider-state-"));
+  const sourceLeaf = join(root, "provider-state", "pi", providerStateKey("source"), "sessions");
+  try {
+    mkdirSync(sourceLeaf, { recursive: true });
+    writeFileSync(join(sourceLeaf, "2026-09-16T12-00-00-000Z_child-123.jsonl"), "child transcript\n");
+    await verifyExecutionIsolationForkState(
+      bwrap, { kind: "native" }, "pi", root, "source", "child-123",
+    );
+    writeFileSync(join(sourceLeaf, "exact-child.jsonl"), "exact transcript\n");
+    await verifyExecutionIsolationForkState(
+      bwrap, { kind: "native" }, "pi", root, "source", "exact-child",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("legacy provider-wide state migrates once into the old session's hashed partition", async () => {
   const copies: unknown[] = [];
   await migrateExecutionIsolationState(

@@ -68,10 +68,14 @@ function promptImages(images: PromptImage[]): Json[] {
 }
 
 function safelyAttributedSessionFile(sourceFile: string | null, targetFile: string, sessionId: string, wsl: boolean): boolean {
-  if (!sourceFile || sourceFile === targetFile) return false;
+  if (sourceFile === targetFile) return false;
   const paths = wsl || process.platform !== "win32" ? posix : win32;
+  if (!paths.isAbsolute(targetFile)) return false;
   const fileName = paths.basename(targetFile);
   if (fileName !== `${sessionId}.jsonl` && !fileName.endsWith(`_${sessionId}.jsonl`)) return false;
+  // The fork id is minted by this driver and passed through --session-id, so an exact filename is
+  // target-owned even when this helper deliberately was not initialized on the copied source.
+  if (!sourceFile) return true;
   const sourceParts = sourceFile.split(paths.sep);
   const piRoot = sourceParts.findIndex((part, index) =>
     part === ".pi" && sourceParts[index + 1] === "agent" && sourceParts[index + 2] === "sessions");
@@ -226,6 +230,7 @@ export class PiRpcDriver implements Driver {
       }
     }
 
+    const expectedForkSessionId = randomUUID();
     const child = this.spawn({
       command: this.opts.command,
       args: [
@@ -233,6 +238,7 @@ export class PiRpcDriver implements Driver {
         "--mode", "rpc",
         "--no-approve",
         "--fork", sourceSessionId,
+        "--session-id", expectedForkSessionId,
       ],
       cwd,
       env: this.opts.env,
@@ -257,12 +263,8 @@ export class PiRpcDriver implements Driver {
     try {
       const state = object((await forkPeer.request<Json>({ type: "get_state" })).data);
       const forkedSessionId = string(state?.sessionId);
-      if (!forkedSessionId || forkedSessionId === sourceSessionId) {
+      if (forkedSessionId !== expectedForkSessionId || forkedSessionId === sourceSessionId) {
         throw new Error("Pi did not establish an independent fork session");
-      }
-      const forkedEntries = object((await forkPeer.request<Json>({ type: "get_entries" })).data);
-      if (string(forkedEntries?.leafId) !== lastTurnId) {
-        throw new Error("Pi fork did not preserve the requested completed checkpoint");
       }
       const sessionFile = string(state?.sessionFile);
       const paths = this.opts.context.kind === "wsl" || process.platform !== "win32" ? posix : win32;
@@ -273,7 +275,18 @@ export class PiRpcDriver implements Driver {
       if (safelyAttributedSessionFile(
         this.sessionFile, sessionFile, forkedSessionId, this.opts.context.kind === "wsl",
       )) this.forkedSessionFiles.set(forkedSessionId, sessionFile);
+      const forkedEntries = object((await forkPeer.request<Json>({ type: "get_entries" })).data);
+      if (string(forkedEntries?.leafId) !== lastTurnId) {
+        throw new Error("Pi fork did not preserve the requested completed checkpoint");
+      }
       return forkedSessionId;
+    } catch (error) {
+      try {
+        await this.archiveSession(expectedForkSessionId);
+      } catch (cleanupError) {
+        this.cb.onStderr(`Pi fork cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+      }
+      throw error;
     } finally {
       forkPeer.dispose("Pi fork helper complete");
       this.kill(child);

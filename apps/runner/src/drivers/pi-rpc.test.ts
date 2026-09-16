@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import type { SessionEventPayload } from "@wollipog/protocol";
@@ -59,12 +62,34 @@ test("Pi RPC clones the latest completed leaf into the target worktree without r
   await driver.initialize();
   await driver.newSession(process.cwd());
   await driver.prompt("hello");
-  assert.equal(await driver.forkSession("pi-entry-1", process.cwd()), "pi-fork-session-1");
+  const forkedSessionId = await driver.forkSession("pi-entry-1", process.cwd());
+  assert.match(forkedSessionId, /^[0-9a-f-]{36}$/u);
   assert.equal(driver.agentSessionId(), "pi-session-1", "the source RPC process keeps its session");
   await assert.rejects(
     driver.forkSession("historical-entry", process.cwd()),
     /latest completed conversation checkpoint/,
   );
+});
+
+test("Pi RPC rejects a mismatched fork leaf without initialization and removes its target file", async (t) => {
+  const sessionRoot = mkdtempSync(join(tmpdir(), "wollipog-pi-fork-"));
+  const driver = new PiRpcDriver({
+    ...options("fork-leaf-mismatch", "persisted-pi-session"),
+    env: {
+      WOLLIPOG_FAKE_PI_SCENARIO: "fork-leaf-mismatch",
+      WOLLIPOG_FAKE_PI_SESSION_ROOT: sessionRoot,
+    },
+  }, callbacks([]));
+  t.after(() => {
+    driver.dispose();
+    rmSync(sessionRoot, { recursive: true, force: true });
+  });
+  await assert.rejects(
+    driver.forkSession("expected-leaf", process.cwd()),
+    /did not preserve the requested completed checkpoint/,
+  );
+  assert.equal(existsSync(sessionRoot), true);
+  assert.deepEqual(readdirSync(sessionRoot), [], "a failed provider-mode fork leaves no orphaned Pi transcript");
 });
 
 test("Pi RPC tool-only stages do not emit empty assistant messages", async (t) => {

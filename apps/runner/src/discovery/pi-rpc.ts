@@ -77,7 +77,10 @@ export async function probePiRpc(
     const available = object(modelsResponse.data)?.models;
     if (!Array.isArray(available)) throw new Error("get_available_models returned no model catalog");
     if (available.length > MAX_DISCOVERED_MODELS) throw new Error("model catalog exceeds the supported bound");
-    const entriesResponse = await peer.request<Json>({ type: "get_entries" }, remaining()).catch(() => undefined);
+    // Entry cursors are an optional, newer capability. Reserve most of the shared deadline for
+    // required model probes so an older RPC that ignores unknown commands stays available.
+    const entriesTimeoutMs = Math.min(2_000, Math.max(1, Math.floor(remaining() / 4)));
+    const entriesResponse = await peer.request<Json>({ type: "get_entries" }, entriesTimeoutMs).catch(() => undefined);
     const entries = object(entriesResponse?.data);
     const supportsConversationFork = Array.isArray(entries?.entries) && entries?.leafId === null;
 

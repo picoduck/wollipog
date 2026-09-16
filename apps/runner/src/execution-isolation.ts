@@ -105,11 +105,15 @@ const defaultDeps: IsolationDeps = {
     return findProviderForkSizeNative(location.leaf, driver, providerSessionId, 0);
   },
   forkSizeWsl: async (context, location, driver, providerSessionId) => {
-    const pattern = driver === "claude-code" ? `${providerSessionId}.jsonl` : `*-${providerSessionId}.jsonl`;
+    const patterns = driver === "claude-code"
+      ? ["-name", `${providerSessionId}.jsonl`]
+      : driver === "pi"
+        ? ["(", "-name", `${providerSessionId}.jsonl`, "-o", "-name", `*_${providerSessionId}.jsonl`, ")"]
+        : ["-name", `*-${providerSessionId}.jsonl`];
     return runContextCommand(
       context,
       "find",
-      [location.leaf, "-maxdepth", "8", "-type", "f", "-name", pattern, "-printf", "%s\\n", "-quit"],
+      [location.leaf, "-maxdepth", "8", "-type", "f", ...patterns, "-printf", "%s\\n", "-quit"],
       { cwd: "/", timeoutMs: 5_000 },
     ).then((result) => {
       const size = Number(result.stdout.trim());
@@ -186,6 +190,9 @@ function legacyProviderStateLocation(base: string, driver: AgentDriverKind): Pro
 
 function providerForkFileMatches(driver: AgentDriverKind, providerSessionId: string, filename: string): boolean {
   if (driver === "claude-code") return filename === `${providerSessionId}.jsonl`;
+  if (driver === "pi") {
+    return filename === `${providerSessionId}.jsonl` || filename.endsWith(`_${providerSessionId}.jsonl`);
+  }
   return (driver === "codex" || driver === "codex-app-server") && filename.endsWith(`-${providerSessionId}.jsonl`);
 }
 

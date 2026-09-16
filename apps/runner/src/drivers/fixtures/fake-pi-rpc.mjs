@@ -1,10 +1,24 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
 const argv = process.argv.slice(2);
 if (!argv.includes("--mode") || !argv.includes("rpc") || !argv.includes("--no-approve")) process.exit(64);
 
 const scenario = process.env.WOLLIPOG_FAKE_PI_SCENARIO ?? "normal";
 const resumedAt = argv.indexOf("--session");
 const forkedAt = argv.indexOf("--fork");
-const sessionId = forkedAt >= 0 ? "pi-fork-session-1" : resumedAt >= 0 ? argv[resumedAt + 1] : "pi-session-1";
+const explicitSessionIdAt = argv.indexOf("--session-id");
+const sessionId = explicitSessionIdAt >= 0
+  ? argv[explicitSessionIdAt + 1]
+  : forkedAt >= 0 ? "pi-fork-session-1" : resumedAt >= 0 ? argv[resumedAt + 1] : "pi-session-1";
+const fakeSessionRoot = process.env.WOLLIPOG_FAKE_PI_SESSION_ROOT;
+const sessionFile = fakeSessionRoot
+  ? join(fakeSessionRoot, `${sessionId}.jsonl`)
+  : `/tmp/.pi/agent/sessions/fake-project/${sessionId}.jsonl`;
+if (forkedAt >= 0 && fakeSessionRoot) {
+  mkdirSync(fakeSessionRoot, { recursive: true });
+  writeFileSync(sessionFile, `${JSON.stringify({ type: "session", id: sessionId })}\n`, { flag: "wx" });
+}
 if (!process.env.WOLLIPOG_FAKE_PI_SCENARIO && !argv.includes("--no-session")) process.exit(64);
 if (resumedAt >= 0 && sessionId !== "persisted-pi-session") process.exit(66);
 const models = [
@@ -69,7 +83,7 @@ function settleToolOnly() {
 function handle(request) {
   switch (request.type) {
     case "get_state":
-      return response("get_state", request, { sessionId, sessionFile: `/tmp/${sessionId}.jsonl`, model: selected,
+      return response("get_state", request, { sessionId, sessionFile, model: selected,
         thinkingLevel: selected.id === "sonnet" ? "high" : "off", isStreaming: false });
     case "get_available_models":
       return response("get_available_models", request, { models });
@@ -93,6 +107,10 @@ function handle(request) {
       if (scenario === "legacy-no-entries") {
         send({ type: "response", id: request.id, command: request.type, success: false, error: "unsupported" });
         return;
+      }
+      if (scenario === "legacy-hanging-entries") return;
+      if (scenario === "fork-leaf-mismatch" && forkedAt >= 0) {
+        return response("get_entries", request, { entries, leafId: "different-leaf" });
       }
       return response("get_entries", request, { entries, leafId });
     case "get_session_stats":
