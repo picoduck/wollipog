@@ -44,6 +44,34 @@ test("Connections distinguish verified, unavailable, and unverified agents", asy
   await expect(page.getByText(/configured command was not found/u)).toBeVisible();
 });
 
+test("Connections ask protocol v153 runners to update before trusting unverified agents", async ({ page }) => {
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("legacy-unverified"));
+  await expect(page.locator(".runner-agents-summary")).toHaveText("0 Available");
+  await page.getByText("Agents", { exact: true }).click();
+
+  await expect(page.locator(".atag.broken", { hasText: "Unverified" })).toHaveCount(1);
+  await expect(page.getByText(
+    "Update this runner to verify its configured agent availability.", { exact: true },
+  )).toBeVisible();
+  await expect(page.getByText("No usable agent CLIs found on this machine — install one:", { exact: true }))
+    .toHaveCount(0);
+  await expect(page.locator(".install-cmd")).toHaveCount(0);
+});
+
+test("Connections show installation guidance for protocol v154 verified-unavailable agents", async ({ page }) => {
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("verified-unavailable"));
+  await expect(page.locator(".runner-agents-summary")).toHaveText("0 Available");
+  await page.getByText("Agents", { exact: true }).click();
+
+  await expect(page.locator(".atag.broken", { hasText: "Unavailable" })).toHaveCount(1);
+  await expect(page.getByText("No usable agent CLIs found on this machine — install one:", { exact: true }))
+    .toBeVisible();
+  await expect(page.locator(".install-cmd").first()).toBeVisible();
+  await expect(page.getByText(
+    "Update this runner to verify its configured agent availability.", { exact: true },
+  )).toHaveCount(0);
+});
+
 test("offline recovery stays stacked and usable in a narrow card on a desktop viewport", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await setOffline(page);
