@@ -128,7 +128,10 @@ requires one completed consume call for the occurrence followed by one exact suc
 the same turn. Rollout lookup,
 thread identity, admission, command, order, success, and uniqueness all fail closed. Raw transcript
 content remains runner-local; only content-safe item coordinates and the command digest cross the
-runner boundary.
+runner boundary. A live `thread/read` projection that retains the successful command but cannot
+express the old CLI admission may be completed by that rollout only when both sources expose the
+same thread, turn, and command item. Any live failure, ambiguity, native admission mismatch, or
+durable fence continues to block the fallback.
 
 Protocol v143 projects exact human-owned and Orchestrator-owned descendant request counts onto the
 root campaign. Human clients may inspect both groups in the parent request surface; session-scoped

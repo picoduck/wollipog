@@ -234,6 +234,10 @@ legacy CLI admission that predates those runner fences may use only the exact Co
 stored provider thread: one successful consume call for the occurrence and one later exact command
 must appear uniquely in the same completed turn. The runner does not relay rollout contents, and
 all existing snapshot, forge, policy, ancestry, authority, and receipt-replay checks still apply.
+If `thread/read` retains the successful command but cannot represent that old CLI admission, the
+rollout proof is accepted only when its thread, turn, and command item exactly match the live
+successful item; a failed, duplicate, partial, fenced, or natively mismatched live item still blocks
+the fallback.
 
 The control plane owns this lifecycle. A generic question answer or provider permission response
 cannot satisfy a typed workflow decision. Authentication, identity, governance-policy changes,
