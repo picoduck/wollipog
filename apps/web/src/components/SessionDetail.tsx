@@ -790,17 +790,17 @@ function SessionDetailLoaded({
     ? ownWorkflowDecision.resourceSnapshot : null;
   const ownEvidenceDecision = ownEvidenceSnapshot ? ownWorkflowDecision! : null;
   const [selectedRequestKey, setSelectedRequestKey] = useState<string | null>(null);
-  const requestPanelOpen = mode === "expanded" && rightPanel.open && rightPanel.mode === "requests";
+  const requestPanelModeActive = mode === "expanded" && rightPanel.mode === "requests";
   const openRequestPanel = useCallback((key: string) => {
     setSelectedRequestKey(key);
     rightPanel.show("requests");
     if (mode === "preview") onExpand?.();
   }, [mode, onExpand, rightPanel]);
   useLayoutEffect(() => {
-    if (!requestPanelOpen || ownStandaloneApproval || descendantRequests.length > 0) return;
+    if (!requestPanelModeActive || ownStandaloneApproval || descendantRequests.length > 0) return;
     rightPanel.setMode("launcher");
-    rightPanel.close();
-  }, [descendantRequests.length, ownStandaloneApproval, requestPanelOpen, rightPanel]);
+    if (rightPanel.open) rightPanel.close();
+  }, [descendantRequests.length, ownStandaloneApproval, requestPanelModeActive, rightPanel]);
   const anchorRecoveryPending = eventHistory?.refreshing === true ||
     (conn === "online" && eventHistory?.everComplete !== true && eventHistory?.error == null);
   const recoveryRevision = useStoreSelector((s) =>

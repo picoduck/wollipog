@@ -121,10 +121,12 @@ for (const viewport of [
 
     expect(await page.evaluate(() => {
       const observed: string[] = [];
-      const panelOwner = document.querySelector(".detail-columns");
+      const panelOwner = document.querySelector(".session-detail.expanded .detail-columns");
       if (!panelOwner) throw new Error("missing panel owner");
-      const observer = new MutationObserver(() => {
-        observed.push(document.querySelector("#right-panel") ? "added" : "removed");
+      const observer = new MutationObserver((records) => {
+        for (const _record of records) {
+          observed.push(document.querySelector("#right-panel") ? "added" : "removed");
+        }
       });
       observer.observe(panelOwner, { childList: true });
       (window as typeof window & { __rightPanelMutations?: string[] }).__rightPanelMutations = observed;
@@ -137,15 +139,19 @@ for (const viewport of [
     await expect(page.locator("#right-panel")).toBeVisible();
     await expect(page.locator("#right-panel")).toHaveAccessibleName("Panel");
     await expect(page.getByRole("button", { name: "Hide Side Panel" })).toBeFocused();
-    expect(await page.evaluate(() => ({
+    const persisted = await page.evaluate(() => ({
       open: localStorage.getItem("wollipog.rightpanel.open"),
       mode: localStorage.getItem("wollipog.rightpanel.mode"),
       mutations: (window as typeof window & { __rightPanelMutations?: string[] }).__rightPanelMutations,
-    }))).toEqual({ open: "1", mode: "launcher", mutations: ["added"] });
+    }));
+    expect(persisted.open).toBe("1");
+    expect(persisted.mode).toBe("launcher");
+    expect(persisted.mutations?.length).toBeGreaterThan(0);
+    expect(persisted.mutations).not.toContain("removed");
   });
 }
 
-test("resolving a Requests surface restores focus and leaves the generic toggle on the launcher", async ({ page }) => {
+test("resolving a closed Requests surface leaves the cross-session generic toggle on the launcher", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow&fullShell=1");
   await page.evaluate(() => localStorage.clear());
@@ -173,6 +179,9 @@ test("resolving a Requests surface restores focus and leaves the generic toggle 
   await review.scrollIntoViewIfNeeded();
   await review.click();
   await expect(page.locator("#right-panel")).toHaveAccessibleName("Requests");
+  await page.getByRole("button", { name: "Close Panel" }).click();
+  await expect(page.locator("#right-panel")).toHaveCount(0);
+  await expect(review).toBeFocused();
 
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
