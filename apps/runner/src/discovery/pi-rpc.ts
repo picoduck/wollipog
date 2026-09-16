@@ -77,6 +77,9 @@ export async function probePiRpc(
     const available = object(modelsResponse.data)?.models;
     if (!Array.isArray(available)) throw new Error("get_available_models returned no model catalog");
     if (available.length > MAX_DISCOVERED_MODELS) throw new Error("model catalog exceeds the supported bound");
+    const entriesResponse = await peer.request<Json>({ type: "get_entries" }, remaining()).catch(() => undefined);
+    const entries = object(entriesResponse?.data);
+    const supportsConversationFork = Array.isArray(entries?.entries) && entries?.leafId === null;
 
     const models: AgentModel[] = [];
     for (const rawModel of available) {
@@ -131,7 +134,10 @@ export async function probePiRpc(
       modelSource: "live",
       supportsImages: models.some((model) => model.inputModalities?.includes("image")),
       supportsApprovals: false,
-      supportsConversationFork: false,
+      // get_entries was added after Pi's persisted-session --fork surface. Requiring its structured
+      // response and an empty no-session leaf prevents older runtimes from advertising a clone
+      // action they cannot bind to an authoritative completed checkpoint.
+      supportsConversationFork,
       supportsSteering: true,
       permissionModes: [],
     };

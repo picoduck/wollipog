@@ -1218,13 +1218,13 @@ export function mergeSessionCapabilities(
 }
 
 /** Rolling-upgrade-safe provider fork gate. Codex app-server shipped before the generic bit;
- * Claude must explicitly prove --fork-session through discovery. */
+ * Claude and Pi must explicitly prove their native fork surfaces through discovery. */
 export function providerSupportsConversationFork(
   driver: AgentDriverKind,
   capabilities?: AgentCapabilities,
 ): boolean {
   return driver === "codex-app-server" ||
-    (driver === "claude-code" && capabilities?.supportsConversationFork === true);
+    ((driver === "claude-code" || driver === "pi") && capabilities?.supportsConversationFork === true);
 }
 
 export type CodexAppServerFailureCode =

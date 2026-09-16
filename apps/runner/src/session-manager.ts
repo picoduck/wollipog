@@ -9934,8 +9934,9 @@ export class SessionManager {
     } else if (this.attributedWorktrees(source).length !== 1) {
       return { ok: false, error: `turn ${turn} predates worktree identity and cannot be forked after a worktree switch` };
     }
-    if (!handoff && source.driver === "claude-code" && turn !== source.turnCount) {
-      return { ok: false, error: "Claude CLI can only fork its current transcript at the matching turn checkpoint" };
+    if (!handoff && (source.driver === "claude-code" || source.driver === "pi") && turn !== source.turnCount) {
+      const provider = source.driver === "pi" ? "Pi RPC" : "Claude CLI";
+      return { ok: false, error: `${provider} can only fork its current transcript at the matching turn checkpoint` };
     }
     const live = this.active.get(sourceSessionId);
     if (handoff && (["queued", "starting", "running", "input_required"].includes(source.status) || source.pendingApproval || this.preLaunchQueues.get(sourceSessionId)?.length)) return { ok: false, error: "the source session is busy or has queued input" };
@@ -10065,9 +10066,11 @@ export class SessionManager {
           source.providerStateVersion !== (source.context.kind === "wsl" ? 3 : 2)) {
         await this.ensureProviderStateLayout(source);
       }
-      client = live?.client;
-      if (!client) {
-        if (!source.agentSessionId) return { ok: false, error: "source session has no provider conversation id" };
+      if (!source.agentSessionId) return { ok: false, error: "source session has no provider conversation id" };
+      // Pi's RPC clone command replaces the process's active session. Never send it to the live
+      // source client; a dedicated helper below resumes a private provider-state copy instead.
+      client = source.driver === "pi" ? undefined : live?.client;
+      if (!client && source.driver !== "pi") {
         const priorCapabilities = source.capabilities;
         const priorSessionSlashCommands = source.sessionSlashCommands;
         const launchPreparation = this.prepareLaunch?.(source);
@@ -10123,7 +10126,6 @@ export class SessionManager {
         await temporary.newSession(source.worktreePath);
         client = temporary;
       }
-      if (!client.forkSession) return { ok: false, error: "this driver build does not support provider forks" };
       // Preserve the source worktree's commit base as well as its exact post-turn files. The new
       // thread gets the target cwd at fork time so it never resumes against the source worktree.
       const worktreeOptions = { context: source.context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash };
@@ -10147,27 +10149,118 @@ export class SessionManager {
         });
         providerStateJournaled = true;
       }
-      forkedThreadId = await client.forkSession(point.agentTurnId, worktree.path);
+      let forkStateOwner = sourceSessionId;
+      let providerStatePrecloned = false;
+      let forkIsolation: SpawnIsolation | undefined;
+      const targetDescendantMarker = this.worktreeProcessMarker(targetSessionId, worktree.path);
+      if (source.driver === "pi") {
+        const priorCapabilities = source.capabilities;
+        const priorSessionSlashCommands = source.sessionSlashCommands;
+        const launchPreparation = this.prepareLaunch?.(source);
+        if (launchPreparation) await launchPreparation;
+        if (sameSlashCommandCatalog(priorSessionSlashCommands, source.sessionSlashCommands)) {
+          source.sessionSlashCommands = priorSessionSlashCommands;
+        }
+        const updated = this.store.patchMeta(sourceSessionId, {
+          args: source.args,
+          config: source.config,
+          capabilities: source.capabilities,
+          sessionSlashCommands: source.sessionSlashCommands,
+          sessionSlashCommandProvenance: source.sessionSlashCommandProvenance,
+        });
+        if (updated && (priorCapabilities !== source.capabilities ||
+            priorSessionSlashCommands !== source.sessionSlashCommands)) {
+          this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+        }
+        const unverified = await this.persistedWorktreeFailure(
+          source, source.worktreePath, source.worktreeBranch,
+        );
+        if (unverified) throw new Error(`source worktree could not be verified before fork: ${unverified}`);
+        // A Pi --fork launch writes its child session beside the source session. Put a private copy
+        // of that source into the target partition first, so rollback can remove every child byte
+        // without mutating or leaking into the source partition.
+        await this.cloneIsolationState(
+          this.executionIsolation,
+          source.context,
+          source.driver,
+          this.stateDir,
+          sourceSessionId,
+          targetSessionId,
+          {},
+          this.runnerOwnerHash,
+        );
+        providerStatePrecloned = this.executionIsolation.mode === "bwrap";
+        if (providerStatePrecloned) forkStateOwner = targetSessionId;
+        const forkMeta: SessionMeta = {
+          ...source,
+          sessionId: targetSessionId,
+          worktreePath: worktree.path,
+          worktreeBranch: worktree.branch,
+          worktrees: [{
+            id: "legacy",
+            path: worktree.path,
+            branch: worktree.branch,
+            baseRef,
+            baseCommit: baseRef,
+            source: "legacy",
+          }],
+        };
+        forkIsolation = await this.resolveLaunchIsolation(forkMeta, worktree.path);
+        this.providerHomeLeases?.acquire({
+          driver: source.driver,
+          command: source.command,
+          context: source.context,
+          env: source.env,
+          isolation: forkIsolation,
+        });
+        temporary = this.createDriver(
+          source.driver,
+          {
+            command: source.command,
+            args: source.args,
+            cwd: worktree.path,
+            env: source.env,
+            config: source.config,
+            context: source.context,
+            capabilities: source.capabilities,
+            resumeId: source.agentSessionId,
+            isolation: forkIsolation,
+            descendantMarker: targetDescendantMarker,
+          },
+          { onEvent: () => {}, onStderr: (text) => this.log(`provider fork: ${text}`), onExit: () => {} },
+        );
+        // Do not open the copied source session in a second process. forkSession launches Pi's
+        // --fork startup path directly from the target partition, avoiding concurrent writers to
+        // the copied JSONL while preserving the source process and source partition untouched.
+        client = temporary;
+      }
+      if (!client?.forkSession) throw new Error("this driver build does not support provider forks");
+      forkedThreadId = await client.forkSession(point.agentTurnId, worktree.path, {
+        isolation: forkIsolation,
+        descendantMarker: targetDescendantMarker,
+      });
       await this.verifyIsolationForkState(
         this.executionIsolation,
         source.context,
         source.driver,
         this.stateDir,
-        sourceSessionId,
+        forkStateOwner,
         forkedThreadId,
         {},
         this.runnerOwnerHash,
       );
-      await this.cloneIsolationState(
-        this.executionIsolation,
-        source.context,
-        source.driver,
-        this.stateDir,
-        sourceSessionId,
-        targetSessionId,
-        {},
-        this.runnerOwnerHash,
-      );
+      if (!providerStatePrecloned) {
+        await this.cloneIsolationState(
+          this.executionIsolation,
+          source.context,
+          source.driver,
+          this.stateDir,
+          sourceSessionId,
+          targetSessionId,
+          {},
+          this.runnerOwnerHash,
+        );
+      }
       await withGitExecutionContext(source.context, () => anchorForkRef(
         worktree!.path, targetSessionId, turn, point.tree, targetCheckpointOwner, "legacy",
       ));
@@ -13384,8 +13477,8 @@ export class SessionManager {
     // thread can exclude it.
     if (meta.providerHistoryRecoveryOf?.mode === "fork") return "handoff";
     if (!providerSupportsConversationFork(meta.driver, meta.capabilities)) return "handoff";
-    // The Claude CLI can only fork its current transcript at the matching turn checkpoint.
-    if (meta.driver === "claude-code" && recoveryTurn !== meta.turnCount) return "handoff";
+    // Claude and Pi expose only their current transcript through their public clone surfaces.
+    if ((meta.driver === "claude-code" || meta.driver === "pi") && recoveryTurn !== meta.turnCount) return "handoff";
     return "fork";
   }
 

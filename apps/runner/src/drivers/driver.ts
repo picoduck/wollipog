@@ -218,7 +218,11 @@ export interface Driver {
   activeSteeringTurnId?(): string | null;
 
   /** Mint a provider-native conversation fork through the completed turn. */
-  forkSession?(lastTurnId: string, cwd: string): Promise<string>;
+  forkSession?(
+    lastTurnId: string,
+    cwd: string,
+    options?: { isolation?: SpawnIsolation; descendantMarker?: string },
+  ): Promise<string>;
 
   /** Best-effort provider cleanup for a fork that failed before becoming a manager session. */
   archiveSession?(threadId: string): Promise<void>;

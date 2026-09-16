@@ -779,7 +779,7 @@ test("durable Project transport is additive to legacy snapshots and session crea
   assert.equal(alternateTarget.projectLocationId, "location-2");
 });
 
-test("provider conversation fork gate preserves Codex compatibility and requires Claude proof", () => {
+test("provider conversation fork gate preserves Codex compatibility and requires Claude or Pi proof", () => {
   assert.equal(providerSupportsConversationFork("codex-app-server"), true);
   assert.equal(providerSupportsConversationFork("codex"), false);
   assert.equal(providerSupportsConversationFork("claude-code"), false);
@@ -788,6 +788,8 @@ test("provider conversation fork gate preserves Codex compatibility and requires
     supportsConversationFork: true,
   };
   assert.equal(providerSupportsConversationFork("claude-code", capabilities), true);
+  assert.equal(providerSupportsConversationFork("pi"), false);
+  assert.equal(providerSupportsConversationFork("pi", capabilities), true);
   assert.equal(providerSupportsConversationFork("acp", capabilities), false);
 });
 

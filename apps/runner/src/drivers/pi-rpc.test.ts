@@ -43,6 +43,7 @@ test("Pi RPC normalizes one multi-stage run without duplicate or empty messages"
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(stop, "end_turn");
   assert.equal(accepted, 1);
+  assert.equal(driver.agentTurnId(), "pi-entry-1", "the durable Pi leaf becomes the fork checkpoint");
   assert.deepEqual(events.filter((event) => event.kind === "agent_message").map((event) => event.text), ["Hello from Pi"]);
   assert.deepEqual(events.filter((event) => event.kind === "agent_thought").map((event) => event.text), ["Reason\u2028carefully"]);
   assert.equal(events.filter((event) => event.kind === "agent_response_completed").length, 1);
@@ -50,6 +51,20 @@ test("Pi RPC normalizes one multi-stage run without duplicate or empty messages"
   assert.equal(events.filter((event) => event.kind === "tool_call_update" && event.status === "completed").length, 1);
   assert.deepEqual(events.filter((event) => event.kind === "token_usage").map((event) => [event.inputTokens, event.outputTokens, event.costUsd]), [[12, 4, 0.02]]);
   assert.deepEqual(context, { contextTokensUsed: 16, contextWindow: 200000 });
+});
+
+test("Pi RPC clones the latest completed leaf into the target worktree without replacing the source", async (t) => {
+  const driver = new PiRpcDriver(options(), callbacks([]));
+  t.after(() => driver.dispose());
+  await driver.initialize();
+  await driver.newSession(process.cwd());
+  await driver.prompt("hello");
+  assert.equal(await driver.forkSession("pi-entry-1", process.cwd()), "pi-fork-session-1");
+  assert.equal(driver.agentSessionId(), "pi-session-1", "the source RPC process keeps its session");
+  await assert.rejects(
+    driver.forkSession("historical-entry", process.cwd()),
+    /latest completed conversation checkpoint/,
+  );
 });
 
 test("Pi RPC tool-only stages do not emit empty assistant messages", async (t) => {

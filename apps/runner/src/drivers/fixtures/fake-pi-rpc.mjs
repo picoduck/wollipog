@@ -3,7 +3,8 @@ if (!argv.includes("--mode") || !argv.includes("rpc") || !argv.includes("--no-ap
 
 const scenario = process.env.WOLLIPOG_FAKE_PI_SCENARIO ?? "normal";
 const resumedAt = argv.indexOf("--session");
-const sessionId = resumedAt >= 0 ? argv[resumedAt + 1] : "pi-session-1";
+const forkedAt = argv.indexOf("--fork");
+const sessionId = forkedAt >= 0 ? "pi-fork-session-1" : resumedAt >= 0 ? argv[resumedAt + 1] : "pi-session-1";
 if (!process.env.WOLLIPOG_FAKE_PI_SCENARIO && !argv.includes("--no-session")) process.exit(64);
 if (resumedAt >= 0 && sessionId !== "persisted-pi-session") process.exit(66);
 const models = [
@@ -12,6 +13,11 @@ const models = [
 ];
 let selected = models[0];
 let buffer = Buffer.alloc(0);
+let entries = forkedAt >= 0 ? [
+  { type: "message", id: "pi-user-1", parentId: null, message: { role: "user", content: "hello" } },
+  { type: "message", id: "pi-entry-1", parentId: "pi-user-1", message: { role: "assistant", content: "Hello from Pi" } },
+] : [];
+let leafId = forkedAt >= 0 ? "pi-entry-1" : null;
 
 function send(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -37,6 +43,11 @@ function settleNormal() {
   send({ type: "turn_start" });
   send({ type: "turn_end", message: {}, toolResults: [] });
   send({ type: "agent_end", messages: [], willRetry: false });
+  entries = [
+    { type: "message", id: "pi-user-1", parentId: null, message: { role: "user", content: "hello" } },
+    { type: "message", id: "pi-entry-1", parentId: "pi-user-1", message: { role: "assistant", content: "Hello from Pi" } },
+  ];
+  leafId = "pi-entry-1";
   send({ type: "agent_settled" });
 }
 
@@ -47,6 +58,11 @@ function settleToolOnly() {
   send({ type: "tool_execution_start", toolCallId: "tool-only", toolName: "bash", args: { command: "true" } });
   send({ type: "tool_execution_end", toolCallId: "tool-only", result: { content: "" }, isError: false });
   send({ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", id: "tool-only", name: "bash" }], stopReason: "toolUse" } });
+  entries = [
+    { type: "message", id: "pi-user-1", parentId: null, message: { role: "user", content: "use a tool" } },
+    { type: "message", id: "pi-entry-1", parentId: "pi-user-1", message: { role: "assistant", content: [] } },
+  ];
+  leafId = "pi-entry-1";
   send({ type: "agent_settled" });
 }
 
@@ -73,6 +89,12 @@ function handle(request) {
         { name: "skill:review", description: "Review code", source: "skill", location: "user" },
         { name: "ship", description: "Ship it", source: "prompt", location: "user" },
       ] });
+    case "get_entries":
+      if (scenario === "legacy-no-entries") {
+        send({ type: "response", id: request.id, command: request.type, success: false, error: "unsupported" });
+        return;
+      }
+      return response("get_entries", request, { entries, leafId });
     case "get_session_stats":
       return response("get_session_stats", request, { sessionId, tokens: { input: 12, output: 4 }, cost: 0.02,
         contextUsage: { tokens: 16, contextWindow: selected.contextWindow, percent: 1 } });
