@@ -155,7 +155,9 @@ async function cpFetch(
       signal: deps.signal ? AbortSignal.any([deps.signal, timeoutSignal]) : timeoutSignal,
     });
   } catch (err) {
-    if (deps.signal?.aborted) return { ok: false, message: "request cancelled" };
+    if (deps.signal?.aborted) return { ok: false, message: method === "GET"
+      ? "request cancelled"
+      : "request cancelled; the control plane may already have applied it — inspect current state before retrying" };
     return { ok: false, message: `control plane request failed: ${(err as Error)?.message ?? String(err)}` };
   }
   let raw = "";

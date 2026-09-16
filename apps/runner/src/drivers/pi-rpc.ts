@@ -15,7 +15,10 @@ import {
   PiRpcTransportError,
 } from "../pi-rpc-peer.js";
 import { runContextCommand } from "../context-command.js";
-import { PI_AGENT_CONTROL_STATUS_KEY } from "../pi-agent-control-extension.js";
+import {
+  PI_AGENT_CONTROL_EXTENSION_SUFFIX,
+  PI_AGENT_CONTROL_STATUS_KEY,
+} from "../pi-agent-control-extension.js";
 import { killTree, spawnAgent, terminateDescendantBoundaries, type AgentProcess } from "../spawn.js";
 import type {
   Driver,
@@ -549,7 +552,9 @@ export class PiRpcDriver implements Driver {
         this.onExtensionUiRequest(event);
         return;
       case "extension_error":
-        this.rejectAgentControlBridge(new Error("Pi Agent Control extension failed during startup"));
+        if (event.extensionPath === this.agentControlExtensionPath()) {
+          this.rejectAgentControlBridge(new Error("Pi Agent Control extension failed during startup"));
+        }
         return;
       case "compaction_end": {
         const result = object(event.result);
@@ -577,6 +582,16 @@ export class PiRpcDriver implements Driver {
     if (pending.timer) clearTimeout(pending.timer);
     this.agentControlBridge = null;
     pending.reject(error);
+  }
+
+  private agentControlExtensionPath(): string | undefined {
+    for (let index = this.opts.args.length - 2; index >= 0; index--) {
+      if ((this.opts.args[index] === "--extension" || this.opts.args[index] === "-e") &&
+          this.opts.args[index + 1]?.endsWith(PI_AGENT_CONTROL_EXTENSION_SUFFIX)) {
+        return this.opts.args[index + 1];
+      }
+    }
+    return undefined;
   }
 
   private onMessageUpdate(update: Json | undefined): void {

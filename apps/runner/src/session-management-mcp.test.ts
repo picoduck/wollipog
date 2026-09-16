@@ -489,6 +489,21 @@ test("MCP cancellation promptly interrupts a long wait_session request", async (
   assert.equal(fetches, 1, "cancellation stops the polling loop before another side effect");
 });
 
+test("cancelling an in-flight mutation reports its potentially committed outcome", async () => {
+  const controller = new AbortController();
+  const fetch: McpFetch = (_url, init) => new Promise((_resolve, reject) => {
+    init?.signal?.addEventListener("abort", () => reject(new Error("aborted after dispatch")), { once: true });
+  });
+  const pending = callTool({
+    fetch, cpUrl: CP_URL, selfSessionId: SELF_ID, token: "", signal: controller.signal,
+  }, "prompt_session", { sessionId: "s_child", text: "continue" });
+  controller.abort();
+  const result = await pending;
+  assert.equal(result.isError, true);
+  assert.match(resultText(result), /may already have applied it/);
+  assert.match(resultText(result), /inspect current state before retrying/);
+});
+
 /* -------------------------------------------------------------------------- */
 /* Per-tool dispatch: exact method + URL + body                                */
 /* -------------------------------------------------------------------------- */

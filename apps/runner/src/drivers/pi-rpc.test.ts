@@ -181,7 +181,10 @@ test("Pi RPC correlates extension dialogs to durable Wollipog questions", async 
 });
 
 test("Pi RPC accepts only the exact Agent Control readiness nonce and fails on extension errors", async () => {
-  const driver = new PiRpcDriver(options(), callbacks([]));
+  const extension = "/tmp/session.pi-agent-control.mjs";
+  const driverOptions = options();
+  driverOptions.args.push("--extension", extension);
+  const driver = new PiRpcDriver(driverOptions, callbacks([]));
   let resolved = false;
   let rejected: Error | undefined;
   const timer = setTimeout(() => {}, 10_000);
@@ -204,7 +207,11 @@ test("Pi RPC accepts only the exact Agent Control readiness nonce and fails on e
     nonce: "another", promise: Promise.resolve(), resolve: () => {},
     reject: (error: Error) => { rejected = error; }, timer: secondTimer,
   };
-  (driver as any).onRpcEvent({ type: "extension_error", message: "secret provider detail" });
+  (driver as any).onRpcEvent({ type: "extension_error", extensionPath: "/home/user/broken.mjs",
+    error: "secret provider detail" });
+  assert.equal(rejected, undefined, "an unrelated user extension cannot fail Agent Control readiness");
+  (driver as any).onRpcEvent({ type: "extension_error", extensionPath: extension,
+    error: "secret provider detail" });
   assert.match(rejected?.message ?? "", /failed during startup/);
   assert.doesNotMatch(rejected?.message ?? "", /secret provider detail/);
 });
@@ -216,6 +223,23 @@ test("Pi RPC initialization waits for the exact Agent Control extension readines
   t.after(() => driver.dispose());
   await driver.initialize();
   assert.equal(await driver.newSession(process.cwd()), "pi-session-1");
+});
+
+test("Pi RPC ignores user extension errors but fails startup for its exact Agent Control extension", async (t) => {
+  const extension = "/tmp/session.pi-agent-control.mjs";
+  const userError = options("user-extension-error");
+  userError.args.push("--extension", extension);
+  userError.env = { ...userError.env, WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE: "ready-after-user-error" };
+  const accepted = new PiRpcDriver(userError, callbacks([]));
+  t.after(() => accepted.dispose());
+  await accepted.initialize();
+
+  const bridgeError = options("agent-control-extension-error");
+  bridgeError.args.push("--extension", extension);
+  bridgeError.env = { ...bridgeError.env, WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE: "never-ready" };
+  const rejected = new PiRpcDriver(bridgeError, callbacks([]));
+  t.after(() => rejected.dispose());
+  await assert.rejects(rejected.initialize(), /Agent Control extension failed during startup/);
 });
 
 test("Pi RPC caps pending extension dialogs and cancels excess requests", async (t) => {

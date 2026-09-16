@@ -11,6 +11,8 @@ const explicitSessionIdAt = argv.indexOf("--session-id");
 const agentControlProbe = argv.includes("--extension");
 const agentControlProbeNonce = process.env.WOLLIPOG_PI_AGENT_CONTROL_PROBE_NONCE;
 const agentControlReadyNonce = process.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE;
+const agentControlExtensionPath = argv.find((arg, index) =>
+  (argv[index - 1] === "--extension" || argv[index - 1] === "-e") && arg.endsWith(".pi-agent-control.mjs"));
 const sessionId = scenario === "fork-ignores-session-id" && forkedAt >= 0
   ? "pi-generated-fork-id"
   : explicitSessionIdAt >= 0
@@ -58,7 +60,16 @@ if (agentControlProbe && agentControlProbeNonce && scenario !== "extension-unsup
   send({ type: "extension_ui_request", method: "setStatus", statusKey: "wollipog-agent-control-probe",
     statusText: agentControlProbeNonce });
 }
-if (agentControlReadyNonce && scenario !== "agent-control-no-readiness") {
+if (scenario === "user-extension-error") {
+  send({ type: "extension_error", extensionPath: "/home/user/.pi/extensions/broken.mjs",
+    event: "session_start", error: "private user error" });
+}
+if (scenario === "agent-control-extension-error" && agentControlExtensionPath) {
+  send({ type: "extension_error", extensionPath: agentControlExtensionPath,
+    event: "session_start", error: "private bridge error" });
+}
+if (agentControlReadyNonce && scenario !== "agent-control-no-readiness" &&
+    scenario !== "agent-control-extension-error") {
   send({ type: "extension_ui_request", method: "setStatus", statusKey: "wollipog-agent-control",
     statusText: agentControlReadyNonce });
 }
