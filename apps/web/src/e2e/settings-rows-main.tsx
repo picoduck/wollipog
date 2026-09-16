@@ -286,13 +286,11 @@ function Harness() {
                 />
               ),
               // The production panel with injected state, like Notifications above. Storage is
-              // deliberately not touched: `disabled` doubles as "no runner advertises a
-              // conductor", which is how production reaches the disabled conductor row.
+              // deliberately not touched.
               experimental: (
                 <ExperimentalPanel
                   flags={experimentFlags}
                   onToggle={(id, enabled) => setExperimentFlags((current) => ({ ...current, [id]: enabled }))}
-                  conductorAvailable={!disabled}
                 />
               ),
               about: <AboutPanel />,

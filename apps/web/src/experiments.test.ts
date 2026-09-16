@@ -161,14 +161,6 @@ test("every surface that exposes a gated feature consults the flags", () => {
   }
 });
 
-test("conductor availability requires an ONLINE runner", () => {
-  // The store keeps a disconnected runner's advertised agents; a row calling the conductor
-  // available on the strength of a runner that cannot start anything would be a false claim.
-  assert.match(read("./App.tsx"),
-    /runner\.status === "online" && conductorAgentId/,
-    "the availability predicate must not count offline runners");
-});
-
 test("the Experimental section is a route like its siblings", () => {
   assert.ok(SETTINGS_SECTIONS.some((section) => section.id === "experimental"),
     "the section must exist in the one list the nav, routes, and palette derive from");

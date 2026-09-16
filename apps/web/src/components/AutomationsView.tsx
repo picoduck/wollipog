@@ -136,13 +136,11 @@ export function AutomationsView() {
   // creating one. An automation that ALREADY uses the action keeps its option so editing it
   // renders truthfully — the flag hides surfaces, it does not orphan stored data.
   const multiAgentEnabled = useExperiments().flags.multiAgent;
-  // The conductor is advertised by every runner that can host one, but it is a feature behind
-  // the device-local Conductor-Led Work experiment. With the switch off it must not be
-  // schedulable here — while an automation ALREADY targeting it keeps its stored agent visible,
-  // the same never-silently-rewrite rule the rest of this form follows.
-  const conductorEnabled = useExperiments().flags.conductor;
+  // The retired conductor must not be schedulable here — while an automation ALREADY targeting
+  // it keeps its stored agent visible, the same never-silently-rewrite rule the rest of this
+  // form follows.
   const automationAgents = (agents: readonly AgentDefinition[] | undefined, keepId: string) =>
-    (agents ?? []).filter((agent) => conductorEnabled || agent.id !== "conductor" || agent.id === keepId);
+    (agents ?? []).filter((agent) => agent.id !== "conductor" || agent.id === keepId);
   const defaultAgentId = (agents: readonly AgentDefinition[] | undefined) =>
     automationAgents(agents, "")[0]?.id ?? "";
   const runners = useStoreSelector((state) => state.runners);

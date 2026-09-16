@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { type BoxView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import { useExperiments } from "../use-experiments.js";
 import { useStore } from "../store.js";
 import { AgentIcon } from "./AgentIcon.js";
 import {
@@ -13,7 +12,6 @@ import {
 } from "./agent-options.js";
 import { Modal } from "./common.js";
 import {
-  conductorAgentId,
   defaultWorkflowBindings,
   workflowAgentRoles,
   workflowBindingsComplete,
@@ -74,9 +72,6 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
 
   const [runnerId, setRunnerId] = useState(projectsSupported ? "" : online[0]?.runnerId ?? "");
   const runner = runners.get(runnerId);
-  // The conductor orchestrator is offered only behind the device-local experiment; the plain
-  // agent lists exclude it via agentOptions' default.
-  const conductorEnabled = useExperiments().flags.conductor;
   const options = useMemo(() => agentOptions(runner?.agents ?? []), [runner?.agents]);
   const primaryOptions = useMemo(() => primaryAgentOptions(options).filter((option) => !option.disabled), [options]);
   const advancedOptions = useMemo(() => advancedAgentOptions(options).filter((option) => !option.disabled), [options]);
@@ -196,17 +191,12 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
   const selectedProjectVisibility = selectedProject
     ? projectAudienceVisibilitySummary(selectedProject.audience)
     : null;
-  const workflowHasExternalConductor = mode === "workflow"
-    && conductorEnabled && conductorAgentId(runner?.agents ?? []) !== undefined
-    && selectedProject?.audience !== "organization";
   const projectVisibilityCopy = projectSelection === NO_PROJECT_SELECTION
     ? "This run will use the selected folder without being added to a Project."
     : !selectedProject
       ? "Choose a Project to organize related run sessions, or choose No Project."
       : selectedProjectVisibility
-        ? `A Project keeps related run sessions together. ${selectedProjectVisibility}. ${workflowHasExternalConductor
-          ? "Worker session transcripts use the Project's visibility. The conductor session runs outside the Project with organization visibility."
-          : "New run session transcripts use the Project's visibility."}`
+        ? `A Project keeps related run sessions together. ${selectedProjectVisibility}. New run session transcripts use the Project's visibility.`
         : "A Project keeps related run sessions together across Locations. This control plane does not report the Project's visibility.";
 
   const submit = async () => {
@@ -243,7 +233,6 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
             title: title.trim() || undefined,
             useWorktree: true,
             agentBindings,
-            orchestratorAgentId: conductorEnabled ? conductorAgentId(runner?.agents ?? []) : undefined,
           });
       navigate({ name: "run", id: run.id });
       onClose();
@@ -295,9 +284,7 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
           <p className="muted">
             {mode === "parallel"
               ? "The same task runs against every selected agent, each in its own isolated worktree, so you can compare results side by side."
-              : conductorEnabled && conductorAgentId(runner?.agents ?? [])
-                ? "Workers start idle. The conductor receives the workflow instance and advances only the graph's ready roles."
-                : "Workers start idle. Use the workflow controls in the run or an existing conductor to advance ready roles."}
+              : "Workers start idle. Use the workflow controls in the run to advance ready roles."}
           </p>
           {projectsSupported && (
             <label className="field">

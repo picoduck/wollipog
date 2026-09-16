@@ -2,10 +2,6 @@ import type { AgentDefinition, WorkflowDefinition } from "@wollipog/protocol";
 
 export type RunWorkMode = "parallel" | "workflow";
 
-export function conductorAgentId(agents: AgentDefinition[]): string | undefined {
-  return agents.find((agent) => agent.id === "conductor" && agent.available === true)?.id;
-}
-
 export function workflowAgentRoles(definition: WorkflowDefinition | undefined): string[] {
   if (!definition) return [];
   return [...new Set(definition.nodes
