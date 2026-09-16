@@ -429,6 +429,7 @@ export class CodexAppServerDriver implements Driver {
     if (!boundedProviderCorrelationId(occurrenceId) ||
         typeof command !== "string" || !command || command.length > 2000 ||
         !boundedProviderCorrelationId(this.threadId)) return null;
+    let liveCompletedCommand: { turnId: string; itemId: string } | undefined;
     if (this.peer) {
       try {
         const read = await this.peer.request<Json>("thread/read", {
@@ -439,6 +440,7 @@ export class CodexAppServerDriver implements Driver {
           const matches: CompletedCommandReconciliationProof[] = [];
           const successfulExactCommands: { turnId: string; itemId: string }[] = [];
           let liveSawExactCommand = false;
+          let liveSawAdmissionCandidate = false;
           for (const turn of read.thread.turns as Json[]) {
             if (!Array.isArray(turn?.items)) continue;
             const items = turn.items as Json[];
@@ -451,7 +453,11 @@ export class CodexAppServerDriver implements Driver {
                   (turn?.itemsView != null && turn.itemsView !== "full") || item?.status !== "completed" ||
                   item?.exitCode !== 0 || !boundedProviderCorrelationId(item?.id)) continue;
               successfulExactCommands.push({ turnId: turn.id, itemId: item.id });
-              const admissions = items.slice(0, index).filter((candidate) =>
+              const admissionCandidates = items.slice(0, index).filter((candidate) =>
+                candidate?.type === "mcpToolCall" && candidate?.server === "wollipog" &&
+                candidate?.tool === "consume_workflow_decision");
+              if (admissionCandidates.length > 0) liveSawAdmissionCandidate = true;
+              const admissions = admissionCandidates.filter((candidate) =>
                 completedWorkflowActionAdmission(candidate, occurrenceId, command));
               if (admissions.length !== 1 || !boundedProviderCorrelationId(admissions[0]?.id)) continue;
               matches.push({
@@ -479,10 +485,15 @@ export class CodexAppServerDriver implements Driver {
               };
             }
           }
-          // Live history is authoritative when it still contains the command. A failed,
-          // interrupted, ambiguous, or otherwise rejected live item cannot be reconsidered by a
-          // differently shaped rollout projection. Rollout is only a missing-history fallback.
-          if (liveSawExactCommand) return null;
+          // A failed, interrupted, ambiguous, fenced, or explicitly mismatched live item remains
+          // authoritative. Old CLI admissions are the one exception: thread/read retains their
+          // successful command but cannot project the admission as an MCP tool call. Let the
+          // append-only rollout independently recover that admission, then require its exact
+          // provider turn/item coordinates to agree with the successful live command below.
+          if (liveSawExactCommand) {
+            if (fence || liveSawAdmissionCandidate || successfulExactCommands.length !== 1) return null;
+            liveCompletedCommand = successfulExactCommands[0];
+          }
         }
       } catch {
         // The append-only rollout below is the restart/compaction-safe provider history source.
@@ -498,7 +509,7 @@ export class CodexAppServerDriver implements Driver {
       : undefined;
     const configuredCodexHome = this.opts.env.CODEX_HOME ?? inheritedCodexHome ??
       defaultCodexHome;
-    return this.readRolloutProof(
+    const proof = await this.readRolloutProof(
       this.opts.context,
       configuredCodexHome,
       this.threadId,
@@ -506,6 +517,14 @@ export class CodexAppServerDriver implements Driver {
       command,
       fence,
     );
+    if (!liveCompletedCommand) return proof;
+    const commandDigest = createHash("sha256").update(command, "utf8").digest("hex");
+    return proof?.commandDigest === commandDigest && proof.providerThreadId === this.threadId &&
+        proof.providerTurnId === liveCompletedCommand.turnId &&
+        proof.providerItemId === liveCompletedCommand.itemId &&
+        boundedProviderCorrelationId(proof.providerAdmissionItemId) &&
+        proof.providerAdmissionItemId !== proof.providerItemId
+      ? proof : null;
   }
 
   agentTurnId(): string | null {

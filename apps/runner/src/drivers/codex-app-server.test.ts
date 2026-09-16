@@ -2527,6 +2527,84 @@ test("historical reconciliation falls back to the durable rollout after App Serv
   ]);
 });
 
+test("historical CLI admission survives a live projection that retained only the successful command", async () => {
+  const h = makeHarness({
+    resumeId: "01a0a2e5-03a9-73e3-bcf9-bc2c857954e9",
+    context: { kind: "native" },
+  });
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1146 --squash --match-head-commit ${"a".repeat(40)}`;
+  const threadId = "01a0a2e5-03a9-73e3-bcf9-bc2c857954e9";
+  const turnId = "01a0a330-d0e4-7491-b4a2-56196e78efcb";
+  const commandItemId = "exec-7153a846-c3dc-427d-b5e0-d1f082a9bb4c";
+  (h.driver as any).threadId = threadId;
+  (h.driver as any).peer = {
+    request: async () => ({
+      thread: {
+        id: threadId,
+        turns: [{
+          id: turnId,
+          status: "completed",
+          itemsView: "full",
+          items: [{
+            id: "exec-c580c084-62e9-447f-9e42-875107743998",
+            type: "commandExecution",
+            command: "legacy CLI action admission",
+            status: "completed",
+            exitCode: 0,
+          }, {
+            id: commandItemId,
+            type: "commandExecution",
+            command,
+            status: "completed",
+            exitCode: 0,
+          }],
+        }],
+      },
+    }),
+  };
+  let fallbackFence: unknown = "not-called";
+  const acceptedProof = {
+    commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
+    providerThreadId: threadId,
+    providerTurnId: turnId,
+    providerAdmissionItemId: "exec-c580c084-62e9-447f-9e42-875107743998",
+    providerItemId: commandItemId,
+  };
+  let rolloutProof: typeof acceptedProof | null = acceptedProof;
+  (h.driver as any).readRolloutProof = async (
+    _context: unknown,
+    _home: unknown,
+    _threadId: unknown,
+    _occurrenceId: unknown,
+    _command: unknown,
+    fence: unknown,
+  ) => {
+    fallbackFence = fence;
+    return rolloutProof;
+  };
+
+  assert.deepEqual(await h.driver.reconcileCompletedCommand?.(
+    "workflow_e80c5fe8343d4c8582e3d3207434ec0f",
+    command,
+  ), acceptedProof);
+  assert.equal(fallbackFence, undefined,
+    "the rollout must independently prove the historical admission rather than inherit a live fence");
+  for (const candidate of [
+    { ...acceptedProof, commandDigest: "f".repeat(64) },
+    { ...acceptedProof, providerThreadId: "thread-other" },
+    { ...acceptedProof, providerTurnId: "turn-other" },
+    { ...acceptedProof, providerItemId: "command-other" },
+    { ...acceptedProof, providerAdmissionItemId: "" },
+    { ...acceptedProof, providerAdmissionItemId: commandItemId },
+  ]) {
+    rolloutProof = candidate;
+    assert.equal(await h.driver.reconcileCompletedCommand?.(
+      "workflow_e80c5fe8343d4c8582e3d3207434ec0f",
+      command,
+    ), null, "every retained rollout coordinate remains mandatory and exact");
+  }
+});
+
 test("historical reconciliation never overrides an exact command rejected by live history", async () => {
   const h = makeHarness({ resumeId: "thread-live", context: { kind: "native" } });
   const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1146 --squash --match-head-commit ${"a".repeat(40)}`;
