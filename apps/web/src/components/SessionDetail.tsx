@@ -579,7 +579,7 @@ export function SessionDetail(props: SessionDetailProps) {
 
 const DESCENDANT_REQUEST_POLL_INTERVAL_MS = 2_000;
 export const DESCENDANT_REQUEST_POLL_TIMEOUT_MS = 10_000;
-const EMPTY_DESCENDANT_REQUESTS: DescendantRequestView[] = [];
+const EMPTY_DESCENDANT_REQUESTS: readonly DescendantRequestView[] = Object.freeze([]);
 
 type ActiveDescendantRequestPoll = {
   controller: AbortController;
@@ -589,7 +589,7 @@ type ActiveDescendantRequestPoll = {
 type DescendantRequestSnapshot = {
   contextKey: string;
   status: DescendantRequestStatus;
-  requests: DescendantRequestView[];
+  requests: readonly DescendantRequestView[];
 };
 
 function transitionToEmptyDescendantRequestSnapshot(
@@ -611,7 +611,7 @@ export function useDescendantRequestPolling({
   enabled: boolean;
   available: boolean;
 }): {
-  requests: DescendantRequestView[];
+  requests: readonly DescendantRequestView[];
   status: DescendantRequestStatus;
   refreshAfterResolution: () => void;
 } {
