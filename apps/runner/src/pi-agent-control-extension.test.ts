@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   PI_AGENT_CONTROL_PROBE_COMMAND,
+  PI_SECURITY_REQUEST_NONCE_ENV,
+  PI_SECURITY_REQUEST_PREFIX,
+  PI_SECURITY_REQUEST_TITLE,
   piAgentControlExtensionSource,
   piAgentControlProbeSource,
 } from "./pi-agent-control-extension.js";
@@ -19,6 +22,10 @@ test("generated Pi Agent Control extensions are standalone valid modules", async
   assert.match(source, /timeoutMs: null, signal/,
     "tool calls remain pending until their durable operation replies or the bridge exits");
   assert.match(source, /notifications\/cancelled/);
+  assert.match(source, /project_trust/);
+  assert.match(source, /tool_call/);
+  assert.match(source, new RegExp(PI_SECURITY_REQUEST_NONCE_ENV));
+  assert.match(source, new RegExp(PI_SECURITY_REQUEST_PREFIX));
   assert.doesNotMatch(source, /failed to start:.*error/u,
     "runner-local startup error detail is not forwarded through Pi notifications");
   assert.doesNotMatch(source, /WOLLIPOG_SESSION_TOKEN_FILE\s*=/,
@@ -27,4 +34,48 @@ test("generated Pi Agent Control extensions are standalone valid modules", async
   assert.match(probeSource, /probe-nonce/);
   assert.match(probeSource, /session_start/);
   assert.match(probeSource, /setStatus/);
+});
+
+test("generated Pi Agent Control extension makes trust durable and blocks tools fail-closed", async (t) => {
+  const originalNonce = process.env[PI_SECURITY_REQUEST_NONCE_ENV];
+  process.env[PI_SECURITY_REQUEST_NONCE_ENV] = "security-nonce";
+  t.after(() => {
+    if (originalNonce === undefined) delete process.env[PI_SECURITY_REQUEST_NONCE_ENV];
+    else process.env[PI_SECURITY_REQUEST_NONCE_ENV] = originalNonce;
+  });
+  const bridge = await import(`data:text/javascript;base64,${Buffer.from(piAgentControlExtensionSource()).toString("base64")}`);
+  const handlers = new Map<string, (...args: any[]) => any>();
+  bridge.default({
+    on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler),
+    registerTool: () => {},
+    getActiveTools: () => [],
+    setActiveTools: () => {},
+  });
+  const messages: Array<{ title: string; message: string }> = [];
+  const ctx = {
+    hasUI: true,
+    ui: {
+      confirm: async (title: string, message: string) => {
+        messages.push({ title, message });
+        return true;
+      },
+    },
+  };
+  assert.deepEqual(await handlers.get("project_trust")?.({ cwd: "/repo" }, ctx), {
+    trusted: "yes",
+    remember: true,
+  });
+  assert.equal(messages[0]?.title, PI_SECURITY_REQUEST_TITLE);
+  assert.match(messages[0]?.message ?? "", new RegExp(`^${PI_SECURITY_REQUEST_PREFIX}security-nonce\\.`));
+  assert.equal(await handlers.get("tool_call")?.({
+    toolCallId: "call-1",
+    toolName: "bash",
+    input: { command: "git status" },
+  }, ctx), undefined);
+
+  delete process.env[PI_SECURITY_REQUEST_NONCE_ENV];
+  assert.deepEqual(await handlers.get("tool_call")?.({ toolCallId: "call-2", toolName: "write" }, ctx), {
+    block: true,
+    reason: "Blocked by Wollipog permission policy.",
+  });
 });

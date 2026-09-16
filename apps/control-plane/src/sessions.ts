@@ -915,16 +915,17 @@ function titleFromPrompt(text: string): string {
   return clean.length > 80 ? clean.slice(0, 79).trimEnd() + "…" : clean;
 }
 
-/** Persist the capability-dependent Claude default at creation time so the selector, stored
+/** Persist capability-dependent harness defaults at creation time so the selector, stored
  * session, and launch argv all describe the same mode. Older sessions with no stored mode keep
  * the driver's compatibility fallback and are deliberately not migrated. */
 export function defaultPermissionModeForNewSession(
   driver: AgentDriverKind,
   capabilities: AgentCapabilities | undefined,
 ): string | undefined {
-  if (driver !== "claude-code") return undefined;
   const modes = capabilities?.permissionModes;
   if (!modes?.length) return undefined;
+  if (driver === "pi") return modes.includes("default") ? "default" : undefined;
+  if (driver !== "claude-code") return undefined;
   if (modes.includes("auto")) return "auto";
   return modes.includes("acceptEdits") ? "acceptEdits" : undefined;
 }

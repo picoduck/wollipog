@@ -175,6 +175,27 @@ test("an active Plan mode remains the one checked state while staying outside se
   assert.match(html, /aria-checked="true" class="cbar-opt permission-mode on"[^>]*>[\s\S]*?Plan Only \(Read-Only\)/);
 });
 
+test("Pi presents its default ask mode once while preserving an explicit stored default", () => {
+  const html = renderToStaticMarkup(React.createElement(ApprovalsMenuChoices, {
+    capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+      permissionModes: ["default", "dontAsk", "bypassPermissions"],
+      elicitation: { default: ["stdio-control"], dontAsk: ["none"], bypassPermissions: ["none"] },
+    },
+    driver: "pi",
+    permModes: ["default", "dontAsk", "bypassPermissions"],
+    permVal: "default",
+    apply: () => {},
+    close: () => {},
+    onDetails: () => {},
+  }));
+  assert.equal((html.match(/aria-checked="true"/g) ?? []).length, 1);
+  assert.equal((html.match(/role="menuitemradio"/g) ?? []).length, 3);
+  assert.doesNotMatch(html, />Ask Every Time</);
+  assert.match(html, />Default</);
+  assert.match(html, /Approvals Available/);
+});
+
 test("the closed permission control identifies the resolved default instead of a transport warning", () => {
   assert.equal(defaultPermissionModeDisplayLabel("claude-code"), "Default (Auto-Accept Edits)");
   assert.equal(

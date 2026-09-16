@@ -72,6 +72,8 @@ test("new Claude sessions choose Auto only when the connected installation adver
   assert.equal(defaultPermissionModeForNewSession("claude-code", { ...base, permissionModes: ["default", "acceptEdits"] }), "acceptEdits");
   assert.equal(defaultPermissionModeForNewSession("claude-code", { ...base, permissionModes: ["default"] }), undefined);
   assert.equal(defaultPermissionModeForNewSession("claude-code", { ...base, permissionModes: [] }), undefined);
+  assert.equal(defaultPermissionModeForNewSession("pi", { ...base, permissionModes: ["default", "dontAsk"] }), "default");
+  assert.equal(defaultPermissionModeForNewSession("pi", { ...base, permissionModes: [] }), undefined);
   assert.equal(defaultPermissionModeForNewSession("claude-code", undefined), undefined);
   assert.equal(defaultPermissionModeForNewSession("codex-app-server", { ...base, permissionModes: ["auto-review"] }), undefined);
 });

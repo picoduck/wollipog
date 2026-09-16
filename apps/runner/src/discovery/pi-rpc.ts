@@ -169,13 +169,20 @@ export async function probePiRpc(
       slashCommands,
       modelSource: "live",
       supportsImages: models.some((model) => model.inputModalities?.includes("image")),
-      supportsApprovals: false,
+      supportsApprovals: piAgentControlSupported,
       // get_entries was added after Pi's persisted-session --fork surface. Requiring its structured
       // response and an empty no-session leaf prevents older runtimes from advertising a clone
       // action they cannot bind to an authoritative completed checkpoint.
       supportsConversationFork,
       supportsSteering: true,
-      permissionModes: [],
+      permissionModes: piAgentControlSupported ? ["default", "dontAsk", "bypassPermissions"] : [],
+      ...(piAgentControlSupported ? {
+        elicitation: {
+          default: ["stdio-control"],
+          dontAsk: ["none"],
+          bypassPermissions: ["none"],
+        },
+      } : {}),
     };
     if (!models.length) {
       return {

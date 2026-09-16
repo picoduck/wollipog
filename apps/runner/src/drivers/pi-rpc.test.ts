@@ -5,6 +5,11 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import type { SessionEventPayload } from "@wollipog/protocol";
+import {
+  PI_SECURITY_REQUEST_NONCE_ENV,
+  PI_SECURITY_REQUEST_PREFIX,
+  PI_SECURITY_REQUEST_TITLE,
+} from "../pi-agent-control-extension.js";
 import { PiRpcDriver } from "./pi-rpc.js";
 import type { DriverCallbacks, DriverOptions } from "./driver.js";
 
@@ -32,6 +37,16 @@ function callbacks(events: SessionEventPayload[], extra: Partial<DriverCallbacks
     onStderr: () => {},
     onExit: () => {},
     ...extra,
+  };
+}
+
+function securityRequest(nonce: string, id: string, payload: Record<string, unknown>) {
+  return {
+    type: "extension_ui_request",
+    id,
+    method: "confirm",
+    title: PI_SECURITY_REQUEST_TITLE,
+    message: `${PI_SECURITY_REQUEST_PREFIX}${nonce}.${Buffer.from(JSON.stringify(payload)).toString("base64url")}`,
   };
 }
 
@@ -180,6 +195,81 @@ test("Pi RPC correlates extension dialogs to durable Wollipog questions", async 
   assert.equal(events.some((event) => event.kind === "agent_message" && event.text === "Selected Stable"), true);
 });
 
+test("Pi RPC separates durable project trust from ordinary extension questions", () => {
+  const events: SessionEventPayload[] = [];
+  const sent: Record<string, unknown>[] = [];
+  const nonce = "project-trust-nonce";
+  const driverOptions = options();
+  driverOptions.env[PI_SECURITY_REQUEST_NONCE_ENV] = nonce;
+  const driver = new PiRpcDriver(driverOptions, callbacks(events));
+  (driver as any).peer = {
+    send: (message: Record<string, unknown>) => { sent.push(message); return true; },
+    dispose: () => {},
+  };
+  (driver as any).onRpcEvent(securityRequest(nonce, "trust-1", {
+    kind: "project_trust",
+    cwd: "/workspace/project",
+  }));
+  const request = events.find((event): event is Extract<SessionEventPayload, { kind: "permission_request" }> =>
+    event.kind === "permission_request")!;
+  assert.equal(request.title, "Trust Pi Project Resources?");
+  assert.equal(request.context?.toolName, "pi.project_trust");
+  assert.equal(request.context?.input, "/workspace/project");
+  assert.deepEqual(request.options.map((option) => option.optionId), ["trust", "skip"]);
+  assert.equal(driver.resolvePermission("trust-1", "trust"), true);
+  assert.deepEqual(sent, [{ type: "extension_ui_response", id: "trust-1", confirmed: true }]);
+
+  (driver as any).onRpcEvent({
+    type: "extension_ui_request",
+    id: "ordinary-1",
+    method: "confirm",
+    title: PI_SECURITY_REQUEST_TITLE,
+    message: "ordinary extension text",
+  });
+  assert.equal(events.some((event) => event.kind === "question_request" && event.requestId === "ordinary-1"), true);
+  driver.dispose();
+});
+
+test("Pi RPC enforces live pre-execution permission modes before answering the extension", async () => {
+  const events: SessionEventPayload[] = [];
+  const sent: Record<string, unknown>[] = [];
+  const nonce = "tool-policy-nonce";
+  const driverOptions = options();
+  driverOptions.env[PI_SECURITY_REQUEST_NONCE_ENV] = nonce;
+  driverOptions.config = { permissionMode: "default" };
+  const driver = new PiRpcDriver(driverOptions, callbacks(events));
+  (driver as any).peer = {
+    send: (message: Record<string, unknown>) => { sent.push(message); return true; },
+    dispose: () => {},
+  };
+  (driver as any).onRpcEvent(securityRequest(nonce, "tool-1", {
+    kind: "tool_call",
+    toolCallId: "provider-tool-1",
+    toolName: "bash",
+    input: JSON.stringify({ command: "git status" }),
+  }));
+  const request = events.find((event): event is Extract<SessionEventPayload, { kind: "permission_request" }> =>
+    event.kind === "permission_request")!;
+  assert.equal(request.title, "bash requires approval.");
+  assert.equal(request.ownerToolUseId, "provider-tool-1");
+  assert.match(request.context?.input ?? "", /git status/);
+  assert.equal(driver.resolvePermission("tool-1", "deny"), true);
+  assert.deepEqual(sent.pop(), { type: "extension_ui_response", id: "tool-1", confirmed: false });
+
+  await driver.setConfig({ permissionMode: "bypassPermissions" });
+  (driver as any).onRpcEvent(securityRequest(nonce, "tool-2", {
+    kind: "tool_call", toolCallId: "provider-tool-2", toolName: "write", input: "{}",
+  }));
+  assert.deepEqual(sent.pop(), { type: "extension_ui_response", id: "tool-2", confirmed: true });
+
+  await driver.setConfig({ permissionMode: "dontAsk" });
+  (driver as any).onRpcEvent(securityRequest(nonce, "tool-3", {
+    kind: "tool_call", toolCallId: "provider-tool-3", toolName: "write", input: "{}",
+  }));
+  assert.deepEqual(sent.pop(), { type: "extension_ui_response", id: "tool-3", confirmed: false });
+  driver.dispose();
+});
+
 test("Pi RPC accepts only the exact Agent Control readiness nonce and fails on extension errors", async () => {
   const extension = "/tmp/session.pi-agent-control.mjs";
   const driverOptions = options();
@@ -217,26 +307,71 @@ test("Pi RPC accepts only the exact Agent Control readiness nonce and fails on e
 });
 
 test("Pi RPC initialization waits for the exact Agent Control extension readiness event", async (t) => {
-  const ready = options();
-  ready.env = { ...ready.env, WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE: "expected-ready-nonce" };
+  const ready = options("verified-launch");
+  ready.env = {
+    ...ready.env,
+    WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE: "expected-ready-nonce",
+    [PI_SECURITY_REQUEST_NONCE_ENV]: "expected-security-nonce",
+  };
   const driver = new PiRpcDriver(ready, callbacks([]));
   t.after(() => driver.dispose());
   await driver.initialize();
   assert.equal(await driver.newSession(process.cwd()), "pi-session-1");
 });
 
+test("Pi RPC keeps project resources disabled unless both bridge nonces are present", async (t) => {
+  const incomplete = options();
+  incomplete.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE = "ready-without-security-bridge";
+  const driver = new PiRpcDriver(incomplete, callbacks([]));
+  t.after(() => driver.dispose());
+  await driver.initialize();
+  assert.equal(await driver.newSession(process.cwd()), "pi-session-1");
+});
+
+test("Pi RPC can resolve project trust while provider initialization is waiting", async (t) => {
+  const events: SessionEventPayload[] = [];
+  const startup = options("startup-trust");
+  startup.env = {
+    ...startup.env,
+    WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE: "startup-ready-nonce",
+    [PI_SECURITY_REQUEST_NONCE_ENV]: "startup-security-nonce",
+  };
+  let driver!: PiRpcDriver;
+  driver = new PiRpcDriver(startup, callbacks(events, {
+    onEvent: (event) => {
+      events.push(event);
+      if (event.kind === "permission_request") {
+        setImmediate(() => driver.resolvePermission(event.requestId, "trust"));
+      }
+    },
+  }));
+  t.after(() => driver.dispose());
+  await driver.initialize();
+  assert.equal(await driver.newSession(process.cwd()), "pi-session-1");
+  assert.equal(events.some((event) => event.kind === "permission_request" &&
+    event.context?.toolName === "pi.project_trust"), true);
+});
+
 test("Pi RPC ignores user extension errors but fails startup for its exact Agent Control extension", async (t) => {
   const extension = "/tmp/session.pi-agent-control.mjs";
   const userError = options("user-extension-error");
   userError.args.push("--extension", extension);
-  userError.env = { ...userError.env, WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE: "ready-after-user-error" };
+  userError.env = {
+    ...userError.env,
+    WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE: "ready-after-user-error",
+    [PI_SECURITY_REQUEST_NONCE_ENV]: "security-after-user-error",
+  };
   const accepted = new PiRpcDriver(userError, callbacks([]));
   t.after(() => accepted.dispose());
   await accepted.initialize();
 
   const bridgeError = options("agent-control-extension-error");
   bridgeError.args.push("--extension", extension);
-  bridgeError.env = { ...bridgeError.env, WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE: "never-ready" };
+  bridgeError.env = {
+    ...bridgeError.env,
+    WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE: "never-ready",
+    [PI_SECURITY_REQUEST_NONCE_ENV]: "security-never-ready",
+  };
   const rejected = new PiRpcDriver(bridgeError, callbacks([]));
   t.after(() => rejected.dispose());
   await assert.rejects(rejected.initialize(), /Agent Control extension failed during startup/);

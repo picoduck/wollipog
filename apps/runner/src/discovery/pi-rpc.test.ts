@@ -31,7 +31,13 @@ test("Pi discovery derives models, thinking levels, images, commands, and skills
     { name: "skill:review", description: "Review code", source: "user" },
     { name: "ship", description: "Ship it", source: "user" },
   ]);
-  assert.deepEqual(result.capabilities.permissionModes, []);
+  assert.equal(result.capabilities.supportsApprovals, true);
+  assert.deepEqual(result.capabilities.permissionModes, ["default", "dontAsk", "bypassPermissions"]);
+  assert.deepEqual(result.capabilities.elicitation, {
+    default: ["stdio-control"],
+    dontAsk: ["none"],
+    bypassPermissions: ["none"],
+  });
 });
 
 test("Pi discovery fails closed when the RPC contract is not compatible", async () => {
@@ -68,6 +74,8 @@ test("Pi discovery keeps RPC available without advertising an unproved extension
   );
   assert.equal(result.available, true, result.unavailableReason);
   assert.equal(result.piAgentControl, undefined);
+  assert.equal(result.capabilities.supportsApprovals, false);
+  assert.deepEqual(result.capabilities.permissionModes, []);
 });
 
 test("Pi discovery requires the extension's session-start readiness proof", async () => {

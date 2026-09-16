@@ -50,6 +50,7 @@ import {
   PI_AGENT_CONTROL_ENV_KEYS,
   PI_AGENT_CONTROL_EXTENSION_SUFFIX,
   PI_AGENT_CONTROL_PROTOCOL,
+  PI_SECURITY_REQUEST_NONCE_ENV,
   piAgentControlExtensionSource,
 } from "./pi-agent-control-extension.js";
 
@@ -419,6 +420,7 @@ export function provisionAgentControl(
     spec.env.WOLLIPOG_PI_AGENT_CONTROL_COMMAND = mcp.command;
     spec.env.WOLLIPOG_PI_AGENT_CONTROL_ARGS = JSON.stringify(mcp.args);
     spec.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE = randomBytes(24).toString("base64url");
+    spec.env[PI_SECURITY_REQUEST_NONCE_ENV] = randomBytes(24).toString("base64url");
     for (let i = spec.args.length - 2; i >= 0; i--) {
       if ((spec.args[i] === "--extension" || spec.args[i] === "-e") && spec.args[i + 1] === file) spec.args.splice(i, 2);
     }

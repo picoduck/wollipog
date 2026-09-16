@@ -614,8 +614,16 @@ export function ApprovalsMenuChoices({
     defaultOutcome,
     defaultMode ? capabilities?.elicitation?.[defaultMode] : undefined,
   ) ?? defaultOutcome.description;
-  const unlistedMode = permVal && !permModes.includes(permVal) ? permVal : undefined;
-  const displayedModes = unlistedMode ? [unlistedMode, ...permModes] : permModes;
+  // Pi's named `default` mode is also Wollipog's empty-selection fallback. Present that semantic
+  // choice once; clearing the explicit value still launches the same ask-before-tool behavior.
+  const collapsedDefault = driver === "pi" ? defaultMode : undefined;
+  const selectableModes = collapsedDefault
+    ? permModes.filter((mode) => mode !== collapsedDefault)
+    : permModes;
+  const unlistedMode = permVal && permVal !== collapsedDefault && !selectableModes.includes(permVal)
+    ? permVal
+    : undefined;
+  const displayedModes = unlistedMode ? [unlistedMode, ...selectableModes] : selectableModes;
 
   return (
     <>
@@ -624,7 +632,7 @@ export function ApprovalsMenuChoices({
         label={defaultPermissionModeDisplayLabel(driver)}
         description={defaultDescription}
         outcome={defaultOutcome}
-        checked={!permVal}
+        checked={!permVal || permVal === collapsedDefault}
         onSelect={() => {
           apply({ permissionMode: "" });
           close();

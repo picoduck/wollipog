@@ -7,11 +7,15 @@ export const PI_AGENT_CONTROL_EXTENSION_SUFFIX = ".pi-agent-control.mjs";
 export const PI_AGENT_CONTROL_PROBE_COMMAND = "wollipog-agent-control-probe";
 export const PI_AGENT_CONTROL_PROBE_STATUS_KEY = "wollipog-agent-control-probe";
 export const PI_AGENT_CONTROL_PROBE_NONCE_ENV = "WOLLIPOG_PI_AGENT_CONTROL_PROBE_NONCE";
+export const PI_SECURITY_REQUEST_TITLE = "Wollipog Security Approval";
+export const PI_SECURITY_REQUEST_PREFIX = "wollipog-security-v1:";
+export const PI_SECURITY_REQUEST_NONCE_ENV = "WOLLIPOG_PI_SECURITY_REQUEST_NONCE";
 
 export const PI_AGENT_CONTROL_ENV_KEYS = [
   "WOLLIPOG_PI_AGENT_CONTROL_COMMAND",
   "WOLLIPOG_PI_AGENT_CONTROL_ARGS",
   "WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE",
+  PI_SECURITY_REQUEST_NONCE_ENV,
 ] as const;
 
 export function piAgentControlProbeSource(nonce: string): string {
@@ -52,6 +56,15 @@ const MAX_FRAME_BYTES = 1024 * 1024;
 const MAX_TOOLS = 128;
 const HANDSHAKE_TIMEOUT_MS = 35_000;
 const STATUS_KEY = ${JSON.stringify(PI_AGENT_CONTROL_STATUS_KEY)};
+const SECURITY_TITLE = ${JSON.stringify(PI_SECURITY_REQUEST_TITLE)};
+const SECURITY_PREFIX = ${JSON.stringify(PI_SECURITY_REQUEST_PREFIX)};
+
+async function securityApproval(ctx, payload) {
+  const nonce = process.env.${PI_SECURITY_REQUEST_NONCE_ENV};
+  if (!nonce || !ctx?.hasUI || typeof ctx.ui?.confirm !== "function") return undefined;
+  const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  return ctx.ui.confirm(SECURITY_TITLE, SECURITY_PREFIX + nonce + "." + encoded);
+}
 
 function text(message) {
   return { content: [{ type: "text", text: String(message).slice(0, 16000) }], details: {} };
@@ -107,6 +120,33 @@ export default function (pi) {
   let buffer = "";
   let starting;
   const pending = new Map();
+
+  // This CLI-supplied extension loads before project-local code. Pi persists the returned
+  // canonical-directory decision in its own trust store, while Wollipog presents the decision as
+  // a security approval instead of an ordinary extension question.
+  pi.on("project_trust", async (event, ctx) => {
+    const approved = await securityApproval(ctx, {
+      kind: "project_trust",
+      cwd: typeof event?.cwd === "string" ? event.cwd.slice(0, 4096) : "",
+    });
+    if (approved === true) return { trusted: "yes", remember: true };
+    if (approved === false) return { trusted: "no", remember: true };
+    return { trusted: "no" };
+  });
+
+  // tool_call is Pi's documented pre-execution interception point. A missing/cancelled bridge
+  // blocks rather than falling through to execution; the driver applies the selected live mode.
+  pi.on("tool_call", async (event, ctx) => {
+    let input = "";
+    try { input = JSON.stringify(event?.input ?? {}).slice(0, 16000); } catch { input = "{}"; }
+    const approved = await securityApproval(ctx, {
+      kind: "tool_call",
+      toolCallId: typeof event?.toolCallId === "string" ? event.toolCallId.slice(0, 512) : "",
+      toolName: typeof event?.toolName === "string" ? event.toolName.slice(0, 256) : "Pi Tool",
+      input,
+    });
+    if (approved !== true) return { block: true, reason: "Blocked by Wollipog permission policy." };
+  });
 
   const failPending = (error) => {
     for (const request of pending.values()) {

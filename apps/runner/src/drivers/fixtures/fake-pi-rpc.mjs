@@ -2,9 +2,14 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const argv = process.argv.slice(2);
-if (!argv.includes("--mode") || !argv.includes("rpc") || !argv.includes("--no-approve")) process.exit(64);
-
 const scenario = process.env.WOLLIPOG_FAKE_PI_SCENARIO ?? "normal";
+const verifiedTrustBridge = Boolean(
+  process.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE && process.env.WOLLIPOG_PI_SECURITY_REQUEST_NONCE,
+);
+if (!argv.includes("--mode") || !argv.includes("rpc") ||
+    (!argv.includes("--no-approve") && !verifiedTrustBridge)) process.exit(64);
+if (scenario === "verified-launch" && argv.includes("--no-approve")) process.exit(65);
+
 const resumedAt = argv.indexOf("--session");
 const forkedAt = argv.indexOf("--fork");
 const explicitSessionIdAt = argv.indexOf("--session-id");
@@ -39,6 +44,7 @@ let entries = forkedAt >= 0 ? [
   { type: "message", id: "pi-entry-1", parentId: "pi-user-1", message: { role: "assistant", content: "Hello from Pi" } },
 ] : [];
 let leafId = forkedAt >= 0 ? "pi-entry-1" : null;
+let startupTrustStateRequest;
 if (scenario === "fork-leaf-mismatch" && forkedAt >= 0) {
   entries = [
     { type: "message", id: "expected-leaf", parentId: null, message: { role: "assistant", content: "Expected" } },
@@ -116,6 +122,14 @@ function settleToolOnly() {
 function handle(request) {
   switch (request.type) {
     case "get_state":
+      if (scenario === "startup-trust" && !startupTrustStateRequest) {
+        startupTrustStateRequest = request;
+        const nonce = process.env.WOLLIPOG_PI_SECURITY_REQUEST_NONCE;
+        const encoded = Buffer.from(JSON.stringify({ kind: "project_trust", cwd: process.cwd() })).toString("base64url");
+        send({ type: "extension_ui_request", id: "startup-trust", method: "confirm",
+          title: "Wollipog Security Approval", message: `wollipog-security-v1:${nonce}.${encoded}` });
+        return;
+      }
       return response("get_state", request, { sessionId, sessionFile, model: selected,
         thinkingLevel: selected.id === "sonnet" ? "high" : "off", isStreaming: false });
     case "get_available_models":
@@ -185,6 +199,12 @@ function handle(request) {
       send({ type: "agent_settled" });
       return;
     case "extension_ui_response":
+      if (scenario === "startup-trust" && request.id === "startup-trust" && startupTrustStateRequest) {
+        response("get_state", startupTrustStateRequest, { sessionId, sessionFile, model: selected,
+          thinkingLevel: selected.id === "sonnet" ? "high" : "off", isStreaming: false });
+        startupTrustStateRequest = undefined;
+        return;
+      }
       send({ type: "message_start", message: { role: "assistant" } });
       send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: `Selected ${request.value}` }], stopReason: "stop" } });
       send({ type: "agent_settled" });
