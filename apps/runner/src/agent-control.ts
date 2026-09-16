@@ -309,10 +309,10 @@ export function provisionAgentControl(
       throw new Error("the Orchestrator preset requires the exact audited Claude Agent ACP adapter");
     }
   }
-  if (spec.driver === "pi" && config.orchestratorAgent?.piAgentControl?.protocolVersion !== PI_AGENT_CONTROL_PROTOCOL) {
-    removeAgentControlLaunchState(spec, host);
+  const piAgentControlVerified = spec.driver === "pi" &&
+    config.orchestratorAgent?.piAgentControl?.protocolVersion === PI_AGENT_CONTROL_PROTOCOL;
+  if (spec.driver === "pi" && !piAgentControlVerified) {
     log(`agent control ${spec.sessionId}: Pi extension bridge was not discovery-verified`);
-    return;
   }
   if (!supported || (!nativeHostExecution && !wslOrchestrator)) {
     removeAgentControlLaunchState(spec, host);
@@ -398,7 +398,7 @@ export function provisionAgentControl(
     WOLLIPOG_CLI_ARGS: JSON.stringify(cli.args),
   };
   delete spec.env[ORCHESTRATOR_ENV_KEY];
-  if (spec.driver === "pi") {
+  if (piAgentControlVerified) {
     const file = piAgentControlExtensionPath(host.configDir, spec.sessionId);
     const mcp = runnerReentryCommand(host, "--agent-control-mcp");
     protectedWrite(file, piAgentControlExtensionSource());

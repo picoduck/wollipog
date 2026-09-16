@@ -9,6 +9,8 @@ const resumedAt = argv.indexOf("--session");
 const forkedAt = argv.indexOf("--fork");
 const explicitSessionIdAt = argv.indexOf("--session-id");
 const agentControlProbe = argv.includes("--extension");
+const agentControlProbeNonce = process.env.WOLLIPOG_PI_AGENT_CONTROL_PROBE_NONCE;
+const agentControlReadyNonce = process.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE;
 const sessionId = scenario === "fork-ignores-session-id" && forkedAt >= 0
   ? "pi-generated-fork-id"
   : explicitSessionIdAt >= 0
@@ -49,6 +51,16 @@ function send(value) {
 
 function response(command, request, data) {
   send({ type: "response", id: request.id, command, success: true, ...(data === undefined ? {} : { data }) });
+}
+
+if (agentControlProbe && agentControlProbeNonce && scenario !== "extension-unsupported" &&
+    scenario !== "extension-no-readiness") {
+  send({ type: "extension_ui_request", method: "setStatus", statusKey: "wollipog-agent-control-probe",
+    statusText: agentControlProbeNonce });
+}
+if (agentControlReadyNonce && scenario !== "agent-control-no-readiness") {
+  send({ type: "extension_ui_request", method: "setStatus", statusKey: "wollipog-agent-control",
+    statusText: agentControlReadyNonce });
 }
 
 function settleNormal() {

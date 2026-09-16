@@ -5,6 +5,8 @@ export const PI_AGENT_CONTROL_PROTOCOL = 1;
 export const PI_AGENT_CONTROL_STATUS_KEY = "wollipog-agent-control";
 export const PI_AGENT_CONTROL_EXTENSION_SUFFIX = ".pi-agent-control.mjs";
 export const PI_AGENT_CONTROL_PROBE_COMMAND = "wollipog-agent-control-probe";
+export const PI_AGENT_CONTROL_PROBE_STATUS_KEY = "wollipog-agent-control-probe";
+export const PI_AGENT_CONTROL_PROBE_NONCE_ENV = "WOLLIPOG_PI_AGENT_CONTROL_PROBE_NONCE";
 
 export const PI_AGENT_CONTROL_ENV_KEYS = [
   "WOLLIPOG_PI_AGENT_CONTROL_COMMAND",
@@ -12,11 +14,29 @@ export const PI_AGENT_CONTROL_ENV_KEYS = [
   "WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE",
 ] as const;
 
-export function piAgentControlProbeSource(): string {
+export function piAgentControlProbeSource(nonce: string): string {
   return `export default function (pi) {
+  if (typeof pi.registerCommand !== "function" || typeof pi.registerTool !== "function" ||
+      typeof pi.on !== "function" || typeof pi.getActiveTools !== "function" ||
+      typeof pi.setActiveTools !== "function") return;
+  pi.registerTool({
+    name: ${JSON.stringify(PI_AGENT_CONTROL_PROBE_COMMAND)},
+    label: "Wollipog Agent Control Probe",
+    description: "Wollipog Agent Control compatibility probe",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    execute: async () => ({ content: [{ type: "text", text: "ready" }], details: {} }),
+  });
   pi.registerCommand(${JSON.stringify(PI_AGENT_CONTROL_PROBE_COMMAND)}, {
     description: "Wollipog Agent Control compatibility probe",
     handler: async () => {},
+  });
+  pi.on("session_start", async (_event, ctx) => {
+    if (!ctx?.ui || typeof ctx.ui.setStatus !== "function" || typeof ctx.ui.select !== "function" ||
+        typeof ctx.ui.input !== "function") return;
+    const active = pi.getActiveTools();
+    if (!Array.isArray(active)) return;
+    pi.setActiveTools(active);
+    ctx.ui.setStatus(${JSON.stringify(PI_AGENT_CONTROL_PROBE_STATUS_KEY)}, ${JSON.stringify(nonce)});
   });
 }\n`;
 }
@@ -29,7 +49,7 @@ export function piAgentControlExtensionSource(): string {
 
 const MAX_FRAME_BYTES = 1024 * 1024;
 const MAX_TOOLS = 128;
-const REQUEST_TIMEOUT_MS = 35_000;
+const HANDSHAKE_TIMEOUT_MS = 35_000;
 const STATUS_KEY = ${JSON.stringify(PI_AGENT_CONTROL_STATUS_KEY)};
 
 function text(message) {
@@ -89,26 +109,36 @@ export default function (pi) {
 
   const failPending = (error) => {
     for (const request of pending.values()) {
-      clearTimeout(request.timer);
+      if (request.timer) clearTimeout(request.timer);
+      request.signal?.removeEventListener("abort", request.abort);
       request.reject(error);
     }
     pending.clear();
   };
 
-  const send = (method, params, notification = false) => {
+  const send = (method, params, options = {}) => {
     if (!child?.stdin?.writable) return Promise.reject(new Error("Wollipog Agent Control is not running"));
-    if (notification) {
+    if (options.notification) {
       child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method, params }) + "\\n");
       return Promise.resolve(undefined);
     }
     const id = nextId++;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const timeoutMs = options.timeoutMs === undefined ? HANDSHAKE_TIMEOUT_MS : options.timeoutMs;
+      const timer = timeoutMs === null ? undefined : setTimeout(() => {
+        const request = pending.get(id);
+        if (!request) return;
         pending.delete(id);
+        request.signal?.removeEventListener("abort", request.abort);
         reject(new Error("Wollipog Agent Control request timed out"));
-      }, REQUEST_TIMEOUT_MS);
-      timer.unref?.();
-      pending.set(id, { resolve, reject, timer });
+      }, timeoutMs);
+      timer?.unref?.();
+      const abort = () => {
+        if (child?.stdin?.writable) child.stdin.write(JSON.stringify({ jsonrpc: "2.0",
+          method: "notifications/cancelled", params: { requestId: id, reason: "cancelled" } }) + "\\n");
+      };
+      options.signal?.addEventListener("abort", abort, { once: true });
+      pending.set(id, { resolve, reject, timer, signal: options.signal, abort });
       child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\\n");
     });
   };
@@ -120,7 +150,8 @@ export default function (pi) {
     const request = pending.get(message.id);
     if (!request) return;
     pending.delete(message.id);
-    clearTimeout(request.timer);
+    if (request.timer) clearTimeout(request.timer);
+    request.signal?.removeEventListener("abort", request.abort);
     if (message.error) request.reject(new Error(String(message.error.message || "Agent Control error")));
     else request.resolve(message.result);
   };
@@ -158,7 +189,7 @@ export default function (pi) {
       await send("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: {
         name: "wollipog-pi-extension", version: ${JSON.stringify(String(PI_AGENT_CONTROL_PROTOCOL))},
       } });
-      await send("notifications/initialized", {}, true);
+      await send("notifications/initialized", {}, { notification: true });
       const listed = await send("tools/list", {});
       const tools = Array.isArray(listed?.tools) ? listed.tools : [];
       if (!tools.length || tools.length > MAX_TOOLS) throw new Error("Wollipog Agent Control returned an invalid tool catalog");
@@ -174,7 +205,8 @@ export default function (pi) {
           parameters: tool.inputSchema,
           async execute(_id, params, signal) {
             if (signal?.aborted) return text("The tool call was cancelled.");
-            const result = await send("tools/call", { name: tool.name, arguments: params });
+            const result = await send("tools/call", { name: tool.name, arguments: params },
+              { timeoutMs: null, signal });
             const content = Array.isArray(result?.content)
               ? result.content.filter((item) => item?.type === "text" && typeof item.text === "string")
                 .slice(0, 32)
@@ -191,7 +223,7 @@ export default function (pi) {
       }
       ctx.ui.setStatus(STATUS_KEY, nonce);
     })().catch((error) => {
-      ctx.ui.notify("Wollipog Agent Control failed to start: " + String(error?.message || error), "error");
+      ctx.ui.notify("Wollipog Agent Control failed to start.", "error");
       throw error;
     });
     return starting;

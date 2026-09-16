@@ -39,10 +39,11 @@ interface PendingAgentControlBridge {
   promise: Promise<void>;
   resolve(): void;
   reject(error: Error): void;
-  timer: NodeJS.Timeout;
+  timer?: NodeJS.Timeout;
 }
 
 const MAX_PENDING_PI_QUESTIONS = 128;
+const PI_AGENT_CONTROL_READY_TIMEOUT_MS = 30_000;
 
 function object(value: unknown): Json | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Json : undefined;
@@ -169,11 +170,7 @@ export class PiRpcDriver implements Driver {
         resolve = resolvePromise;
         reject = rejectPromise;
       });
-      const timer = setTimeout(() => this.rejectAgentControlBridge(
-        new Error("Pi Agent Control extension did not become ready"),
-      ), 10_000);
-      timer.unref?.();
-      this.agentControlBridge = { nonce: bridgeNonce, promise, resolve, reject, timer };
+      this.agentControlBridge = { nonce: bridgeNonce, promise, resolve, reject };
       bridgeReady = promise;
       void promise.catch(() => {});
     }
@@ -237,6 +234,13 @@ export class PiRpcDriver implements Driver {
       throw new Error(`Pi resumed session ${this.sessionId} instead of ${this.opts.resumeId}`);
     }
     await this.applyConfig(this.config);
+    if (this.agentControlBridge) {
+      const timer = setTimeout(() => this.rejectAgentControlBridge(
+        new Error("Pi Agent Control extension did not become ready"),
+      ), PI_AGENT_CONTROL_READY_TIMEOUT_MS);
+      timer.unref?.();
+      this.agentControlBridge.timer = timer;
+    }
     await bridgeReady;
   }
 
@@ -561,7 +565,7 @@ export class PiRpcDriver implements Driver {
     const pending = this.agentControlBridge;
     if (!pending || event.method !== "setStatus" || event.statusKey !== PI_AGENT_CONTROL_STATUS_KEY ||
         event.statusText !== pending.nonce) return false;
-    clearTimeout(pending.timer);
+    if (pending.timer) clearTimeout(pending.timer);
     this.agentControlBridge = null;
     pending.resolve();
     return true;
@@ -570,7 +574,7 @@ export class PiRpcDriver implements Driver {
   private rejectAgentControlBridge(error: Error): void {
     const pending = this.agentControlBridge;
     if (!pending) return;
-    clearTimeout(pending.timer);
+    if (pending.timer) clearTimeout(pending.timer);
     this.agentControlBridge = null;
     pending.reject(error);
   }

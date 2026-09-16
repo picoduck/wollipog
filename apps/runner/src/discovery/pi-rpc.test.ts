@@ -70,6 +70,16 @@ test("Pi discovery keeps RPC available without advertising an unproved extension
   assert.equal(result.piAgentControl, undefined);
 });
 
+test("Pi discovery requires the extension's session-start readiness proof", async () => {
+  const result = await probePiRpc(
+    { command: process.execPath, args: [fixture] },
+    { kind: "native" },
+    { cwd: process.cwd(), timeoutMs: 2_000, env: { WOLLIPOG_FAKE_PI_SCENARIO: "extension-no-readiness" } },
+  );
+  assert.equal(result.available, true, result.unavailableReason);
+  assert.equal(result.piAgentControl, undefined);
+});
+
 test("Pi discovery keeps older RPCs available when an unknown entry command never answers", async () => {
   const result = await probePiRpc(
     { command: process.execPath, args: [fixture] },

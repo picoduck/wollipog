@@ -209,6 +209,15 @@ test("Pi RPC accepts only the exact Agent Control readiness nonce and fails on e
   assert.doesNotMatch(rejected?.message ?? "", /secret provider detail/);
 });
 
+test("Pi RPC initialization waits for the exact Agent Control extension readiness event", async (t) => {
+  const ready = options();
+  ready.env = { ...ready.env, WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE: "expected-ready-nonce" };
+  const driver = new PiRpcDriver(ready, callbacks([]));
+  t.after(() => driver.dispose());
+  await driver.initialize();
+  assert.equal(await driver.newSession(process.cwd()), "pi-session-1");
+});
+
 test("Pi RPC caps pending extension dialogs and cancels excess requests", async (t) => {
   const events: SessionEventPayload[] = [];
   const sent: Record<string, unknown>[] = [];
