@@ -280,6 +280,9 @@ test("workflow creation ignores a retired conductor even with stale opt-in and a
         .find((label) => label.querySelector(":scope > span")?.textContent === "Project")?.textContent ?? "";
       assert.match(copy, /New run session transcripts use the Project's visibility./);
       assert.doesNotMatch(copy, /conductor session/);
+      const hint = [...fixture.container.querySelectorAll("p.muted")]
+        .find((p) => p.textContent?.startsWith("Workers start idle."))?.textContent;
+      assert.equal(hint, "Workers start idle. Use the workflow controls in the run to advance ready roles.");
     } finally {
       await unmountFixture(fixture);
     }
