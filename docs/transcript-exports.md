@@ -7,7 +7,7 @@ The session detail menu can download a JSON or Markdown point-in-time transcript
 
 These are authenticated, session-scoped reads. Owners, admins, and members who can read the session
 through their user or team ownership can export it. An inaccessible or deleted session returns the
-same `404` as other scoped session reads. The conductor credential is not allowed on this route.
+same `404` as other scoped session reads. Agent session credentials are not allowed on this route.
 The browser sends the paired-device token in the `Authorization` header, receives a `Blob`, downloads
 it through a temporary object URL, and revokes that URL. Tokens never enter an export URL.
 

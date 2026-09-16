@@ -131,13 +131,11 @@ import {
 } from "./auth.js";
 import { reconcilePolicyHooksSafely } from "./policy-hook-maintenance.js";
 import {
-  LEGACY_CONDUCTOR_ACTOR_SESSION_HEADER,
   LEGACY_POLICY_HOOK_POLL_CAPABILITY_HEADER,
   LEGACY_POLICY_HOOK_SESSION_HEADER,
   selectAutomationTriggerHeaders,
   selectCompatibleHeader,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
-  WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER,
   WOLLIPOG_POLICY_HOOK_POLL_CAPABILITY_HEADER,
   WOLLIPOG_POLICY_HOOK_SESSION_HEADER,
 } from "./wire-compat.js";
@@ -583,7 +581,7 @@ function workflowActor(req: FastifyRequest) {
   );
 }
 
-/** Automation definitions are operator-owned. Conductor credentials never gain schedule-write
+/** Automation definitions are operator-owned. Agent session credentials never gain schedule-write
  * attribution; paired devices retain their exact id and authenticated bootstrap remains `local`. */
 function automationActor(req: { headers: { authorization?: string; [key: string]: unknown }; url: string }) {
   const device = authedDevice(req);
@@ -3910,7 +3908,7 @@ app.get("/api/telemetry/drivers", async (req, reply) => {
 });
 
 // Content-free, observation-time usage accounting. Human members see only frozen ownership
-// scopes they may access; conductor credentials are deliberately excluded from this surface.
+// scopes they may access; agent session credentials are deliberately excluded from this surface.
 registerUsageRoutes(app, db, requestPrincipal, hub, {
   status: () => usagePricing.status(),
   ensure: async (force) => {

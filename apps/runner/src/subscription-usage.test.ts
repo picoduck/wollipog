@@ -588,22 +588,6 @@ test("shutdown reaps an in-flight detached probe and refuses new refreshes", asy
   assert.equal(published, 0, "shutdown suppresses late probe publication");
 });
 
-test("conductor observations never create stored subscription sources", () => {
-  let published = 0;
-  const manager = new SubscriptionUsageManager({
-    runnerId: "runner-1",
-    agents: () => [agent({ id: "conductor", driver: "claude-code" })],
-    resolveEnv: () => ({}),
-    publish: () => { published++; },
-  });
-  assert.equal(manager.observe("conductor", "claude-code", { kind: "native" }, {
-    provider: "claude",
-    payload: { rate_limit_info: { status: "allowed", rateLimitType: "five_hour", utilization: 0.1 } },
-  }), null);
-  assert.equal(published, 0);
-  assert.deepEqual(manager.inventory(), []);
-});
-
 test("source synchronization reports auth modes without probing or exposing account identity", async () => {
   let probes = 0;
   const manager = new SubscriptionUsageManager({

@@ -93,11 +93,7 @@ function lifecycleLabel(status: SessionStatus): string {
 }
 
 function metadata(session: ArchiveSessionCandidate): ArchiveSessionMetadata {
-  const conductor = session.agentId === "conductor" ||
-    /^Conductor \((?:Wollipog|Agent Manager)\)$/u.test(session.agentName ?? "");
-  const agent = conductor
-    ? "Conductor (Wollipog)"
-    : session.driver === "codex-app-server"
+  const agent = session.driver === "codex-app-server"
     ? "Codex App Server"
     : session.driver === "codex"
       ? "Codex — Non-Interactive (codex exec)"

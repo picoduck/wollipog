@@ -58,8 +58,8 @@ export function canAdministerIdentity(role: OrganizationRole): boolean {
 }
 
 /**
- * Central organization-role gate for the API surface. Conductors remain limited by their
- * existing exact route allowlist before they reach this function. Human viewers are read-only;
+ * Central organization-role gate for the API surface. Agent session credentials remain limited by
+ * their existing exact route allowlist before they reach this function. Human viewers are read-only;
  * identity/team/device administration additionally requires owner/admin. Trusted loopback is
  * represented as the bootstrap owner, so the personal zero-setup deployment remains compatible.
  */
@@ -100,7 +100,7 @@ export function agentDelegationAuthorizationError(routePath: string, principal: 
   const resourceRoute = routePath === "/api/compatibility" || routePath === "/api/runners" || routePath === "/api/sessions" ||
     routePath.startsWith("/api/sessions/");
   if (resourceRoute || principal.delegatedScope.owner.kind === "organization") return null;
-  return "the conductor session is not delegated organization-wide access to this global resource";
+  return "the agent session is not delegated organization-wide access to this global resource";
 }
 
 export function agentCredentialSessionTargetError(

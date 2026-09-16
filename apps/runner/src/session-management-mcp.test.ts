@@ -2,11 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { PassThrough } from "node:stream";
 import {
-  LEGACY_CONDUCTOR_ACTOR_SESSION_HEADER,
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
-  WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER,
 } from "@wollipog/protocol";
 import {
   dispatch,
@@ -534,7 +532,7 @@ test("list_runners -> GET /api/runners, field-mapped", async () => {
   const data = resultJson(result);
   assert.deepEqual(data.runners[0].workspaces, [{ id: "ws", name: "ws", path: "/repo" }]);
   assert.equal(data.runners[0].agents[0].id, "claude-code");
-  assert.equal(data.runners[0].agents[0].command, undefined, "launch params are not the conductor's business");
+  assert.equal(data.runners[0].agents[0].command, undefined, "launch params are not the calling session's business");
 });
 
 test("get_agent_capabilities projects advertised metadata and exact effort fallback semantics", async () => {
@@ -1404,19 +1402,16 @@ test("workflow authoring and execution tools route exact mutation bodies", async
 /* Auth header + token hygiene                                                 */
 /* -------------------------------------------------------------------------- */
 
-test("every request carries exact conductor provenance and bearer auth when configured", async () => {
+test("every request carries exact session provenance and bearer auth when configured", async () => {
   const { deps, calls } = makeDeps(() => ({ status: 200, body: { sessions: [] } }));
   await callTool(deps, "list_sessions");
   assert.equal(calls[0]!.headers["authorization"], `Bearer ${TOKEN}`);
   assert.equal(calls[0]!.headers[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER], SELF_ID);
-  assert.equal(calls[0]!.headers[WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER], undefined);
-  assert.equal(calls[0]!.headers[LEGACY_CONDUCTOR_ACTOR_SESSION_HEADER], undefined);
 
   const bare = makeDeps(() => ({ status: 200, body: { sessions: [] } }), "");
   await callTool(bare.deps, "list_sessions");
   assert.equal(bare.calls[0]!.headers["authorization"], undefined);
   assert.equal(bare.calls[0]!.headers[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER], SELF_ID);
-  assert.equal(bare.calls[0]!.headers[LEGACY_CONDUCTOR_ACTOR_SESSION_HEADER], undefined);
 });
 
 test("every CP round-trip carries an abort timeout signal (no ~300s undici stall on a half-open link)", async () => {
@@ -1463,10 +1458,9 @@ test("self-targeting mutations refuse with isError and make NO fetch", async () 
   assert.equal(calls.length, 0, "self spend/tool changes must not reach the control plane");
 });
 
-test("create_session refuses conductor recursion, bypassPermissions, and a missing workspace — no fetch", async () => {
+test("create_session refuses bypassPermissions and a missing workspace — no fetch", async () => {
   const base = { runnerId: "r1", agentId: "claude-code", workspaceId: "ws" };
   for (const [args, why] of [
-    [{ ...base, agentId: "conductor" }, /conductor/],
     [{ ...base, permissionMode: "bypassPermissions" }, /bypassPermissions/],
     [{ runnerId: "r1", agentId: "claude-code" }, /workspaceId or workspacePath/],
   ] as const) {
@@ -1476,29 +1470,6 @@ test("create_session refuses conductor recursion, bypassPermissions, and a missi
     assert.match(resultText(result), why);
     assert.equal(calls.length, 0);
   }
-});
-
-test("create_run refuses when agentIds contains 'conductor' — no fetch", async () => {
-  const { deps, calls } = makeDeps();
-  const result = await callTool(deps, "create_run", {
-    runnerId: "r1",
-    workspaceId: "ws",
-    agentIds: ["claude-code", "conductor"],
-    task: "do things",
-  });
-  assert.equal(result.isError, true);
-  assert.equal(calls.length, 0);
-});
-
-test("create_workflow_run refuses a conductor worker binding — no fetch", async () => {
-  const { deps, calls } = makeDeps();
-  const result = await callTool(deps, "create_workflow_run", {
-    runnerId: "r1", workspaceId: "ws", workflowId: "wf", task: "go",
-    agentBindings: { builder: "conductor" },
-  });
-  assert.equal(result.isError, true);
-  assert.match(resultText(result), /must not use the conductor/);
-  assert.equal(calls.length, 0);
 });
 
 test("set_guardrails without either limit refuses — no fetch", async () => {

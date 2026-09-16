@@ -2151,7 +2151,7 @@ export class ClaudeCodeDriver implements Driver {
             });
             return null;
           }
-          // MCP tools (e.g. the conductor's mcp__manager__*) often arrive with no description;
+          // MCP tools (e.g. the session-scoped mcp__wollipog__*) often arrive with no description;
           // fall back to the input JSON so the Allow/Reject card states WHAT will be applied,
           // not just which tool — a blind Allow button defeats confirm-before-apply.
           const detail = req.description ? String(req.description) : JSON.stringify(req.input ?? {});

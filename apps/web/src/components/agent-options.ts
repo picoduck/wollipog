@@ -1,5 +1,4 @@
 import type { AgentDefinition } from "@wollipog/protocol";
-import { GENERATED_CONDUCTOR_DISPLAY_NAME, isGeneratedConductorName } from "../agent-presentation.js";
 import { agentProvider } from "./AgentIcon.js";
 
 /**
@@ -10,10 +9,8 @@ import { agentProvider } from "./AgentIcon.js";
  * The variant is appended only when a family has more than one.
  */
 const FAMILY_ORDER = ["Claude Code", "Codex"];
-const CONDUCTOR_FAMILY = GENERATED_CONDUCTOR_DISPLAY_NAME;
 
 export function agentFamily(a: AgentDefinition): string {
-  if (a.id === "conductor" || isGeneratedConductorName(a.name)) return CONDUCTOR_FAMILY;
   if (a.driver === "claude-code") return "Claude Code";
   if (a.driver === "codex" || a.driver === "codex-app-server") return "Codex";
   return a.name; // Generic ACP agents (Gemini, OpenClaw, …) identify by their own name.
@@ -40,7 +37,6 @@ function variantRank(v: string): number {
 }
 
 function familyRank(f: string): number {
-  if (f === CONDUCTOR_FAMILY) return 9; // always last — it's a special mode, not a plain agent
   const i = FAMILY_ORDER.indexOf(f);
   return i === -1 ? 5 : i;
 }
@@ -60,15 +56,8 @@ export interface AgentOption {
 /** Group → dedup → order → label the runner's agents into flat, cleanly-named dropdown options. */
 export function agentOptions(
   agents: AgentDefinition[],
-  options: { includeProviderAdapters?: boolean; includeConductor?: boolean } = {},
+  options: { includeProviderAdapters?: boolean } = {},
 ): AgentOption[] {
-  // The conductor is a runner-synthesized special mode behind the device-local Conductor-Led
-  // Work experiment, and with the runner env gate removed it is advertised whenever a native
-  // Claude can host it. Excluding it by default keeps that switch the feature's ONLY gate:
-  // a surface lists it only by passing the flag through as includeConductor.
-  if (!options.includeConductor) {
-    agents = agents.filter((a) => agentFamily(a) !== CONDUCTOR_FAMILY);
-  }
   // Hide the generic ACP path for a provider once a USABLE native harness for it exists — it's a
   // weaker duplicate (no model picker / slash commands). ACP stays for providers with no native
   // driver, and an unavailable or unverified native entry must not hide a working ACP fallback.
@@ -266,9 +255,6 @@ export function sessionAgentLabel(
   driver: AgentDefinition["driver"],
   agentId?: string | null,
 ): string {
-  if (agentId === "conductor" || (agentName != null && isGeneratedConductorName(agentName))) {
-    return CONDUCTOR_FAMILY;
-  }
   if (driver === "codex-app-server") return "Codex App Server";
   if (driver === "codex") return "Codex — Non-Interactive (codex exec)";
   return agentName ?? agentId ?? driver ?? "Agent";

@@ -172,7 +172,7 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
     setAgentBindings(defaultWorkflowBindings(workflow, runner?.agents ?? []));
   }, [workflow, runner?.agents]);
 
-  const bindingOptions = options.filter((option) => !option.disabled && option.agent.id !== "conductor");
+  const bindingOptions = options.filter((option) => !option.disabled);
   const workflowReady = Boolean(workflow && workflowBindingsComplete(workflow, agentBindings));
   const projectPlacementIssue = projectRunPlacementIssue(
     projectsSupported,

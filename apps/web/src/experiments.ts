@@ -9,43 +9,28 @@ import type { View } from "./navigation.js";
  * Experimental-feature flags: per device, per control-plane instance, client-side only.
  *
  * These gate UI EXPOSURE, not capability. The control plane keeps serving `/api/runs` and
- * `/api/pods` regardless, the runner always advertises a conductor when a native Claude
- * installation can host one, and a remote instance never inherits this device's choices —
+ * `/api/pods` regardless, and a remote instance never inherits this device's choices —
  * which is why the value is instance-scoped rather than a plain browser key like the theme.
  */
 
-export type ExperimentId = "multiAgent" | "pods" | "conductor";
+export type ExperimentId = "multiAgent" | "pods";
 
 export interface ExperimentFlags {
   /** Multi-Agent Runs and the workflow surfaces reached through them. */
   readonly multiAgent: boolean;
   /** Collaboration Pods. */
   readonly pods: boolean;
-  /** Retired compatibility tombstone. Old saved opt-ins cannot resurrect Conductor. */
-  readonly conductor: boolean;
 }
 
 export const EXPERIMENTS_STORAGE_KEY = "wollipog.experiments";
 
-/**
- * multiAgent/pods default on: the flags EXISTING must not change what current installs render.
- * conductor defaults OFF: its previous default-on was safe only because the runner's
- * WOLLIPOG_CONDUCTOR env gate was the real switch. With that gate removed, off-by-default
- * preserves ADR 0004's opt-in stance — flipping this toggle is now the opt-in.
- */
+/** multiAgent/pods default on: the flags EXISTING must not change what current installs render. */
 export const DEFAULT_EXPERIMENT_FLAGS: ExperimentFlags = {
   multiAgent: true,
   pods: true,
-  conductor: false,
 };
 
-/**
- * Payload schema version. Writes have always serialized EVERY flag, so a legacy (unversioned)
- * payload's `conductor: true` is indistinguishable from the old default and is NOT evidence the
- * user opted in — before v2, toggling any other experiment stored `conductor: true` alongside
- * it. A legacy `conductor: false` was reachable only by an explicit switch-off and is honoured.
- * multiAgent and pods keep their legacy semantics; their defaults never changed.
- */
+/** Payload schema version, written alongside the flags. Unversioned payloads parse the same way. */
 export const EXPERIMENTS_SCHEMA_VERSION = 2;
 
 /** Unknown shapes and unknown keys fall back to the defaults key-by-key, never throw. */
@@ -61,12 +46,9 @@ export function parseExperimentFlags(raw: string | null): ExperimentFlags {
   const record = parsed as Record<string, unknown>;
   const flag = (id: ExperimentId): boolean =>
     typeof record[id] === "boolean" ? (record[id] as boolean) : DEFAULT_EXPERIMENT_FLAGS[id];
-  // A legacy payload can never prove a conductor opt-in: stored true was the old default and
-  // stored false agrees with the new default, so the legacy branch is simply off.
   return {
     multiAgent: flag("multiAgent"),
     pods: flag("pods"),
-    conductor: false,
   };
 }
 
@@ -74,7 +56,6 @@ export function parseExperimentFlags(raw: string | null): ExperimentFlags {
 export const EXPERIMENT_TITLES: Record<ExperimentId, string> = {
   multiAgent: "Multi-Agent Runs",
   pods: "Collaboration Pods",
-  conductor: "Conductor-Led Work",
 };
 
 /**
@@ -111,7 +92,6 @@ export function setExperimentFlag(
   enabled: boolean,
   instanceScope = LOCAL_INSTANCE_SCOPE,
 ): void {
-  if (id === "conductor") return;
   const next = { ...getExperimentFlags(instanceScope), [id]: enabled };
   flagsByScope.set(instanceScope, next);
   // Persistence is best-effort like every other preference; the in-memory value still wins

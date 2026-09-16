@@ -1,5 +1,3 @@
-import { setExperimentFlag } from "../experiments.js";
-import { LOCAL_INSTANCE_SCOPE } from "../instance-storage.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import "./test-dom-events.js";
@@ -692,8 +690,7 @@ test("saved-default recovery buttons name the agent they actually select", async
   }
 });
 
-test("retired Conductor stays hidden and native orchestrator selection is sent at creation", async () => {
-  setExperimentFlag("conductor", true, LOCAL_INSTANCE_SCOPE);
+test("native orchestrator selection is sent at creation", async () => {
   const enabledRunner: RunnerView = {
     ...runner, protocolVersion: PROTOCOL_VERSION,
     agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
@@ -704,7 +701,6 @@ test("retired Conductor stays hidden and native orchestrator selection is sent a
   const fixture = await mountFixture({ runners: [enabledRunner] });
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    assert.equal(fixture.container.textContent?.includes("Conductor-Led Work"), false);
     assert.equal(labelledNumberInput(fixture.container, "Maximum Concurrent Children"), null,
       "ordinary creation does not show an orchestration-only guardrail");
     await choosePermissionPreset(fixture.container, "Orchestrator");

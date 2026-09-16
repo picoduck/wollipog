@@ -23,7 +23,7 @@ Every bucket freezes the session's organization and owner scope at observation t
 
 Team deletion is blocked while retained usage refers to its ID. This prevents a deleted identifier from being recreated with different members who could inherit the former team's history.
 
-The HTTP surface accepts human principals only. Conductor credentials, including organization-wide conductors, receive `403`. Retention changes require an organization owner or admin.
+The HTTP surface accepts human principals only. Agent session credentials, including organization-wide orchestrators, receive `403`. Retention changes require an organization owner or admin.
 
 Stored and returned aggregates deliberately exclude session IDs, prompts, paths, tool inputs, event bodies, environment values, and authentication data. Dimensions are bounded runner, workspace, agent, driver, and model identifiers. Breakdowns return at most 20 named values plus `Other`; time series are capped by the supported retention window. A short-circuiting admission probe bounds matched rows before one materialized SQL pass produces all summaries; queries matching more than 100,000 retained dimensional rows fail with a request to narrow the range or dimensions.
 

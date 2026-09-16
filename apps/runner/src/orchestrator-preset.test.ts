@@ -40,14 +40,13 @@ test("Orchestrator instructions separate delegation from explicit parent impleme
   assert.match(strict, /create branches or worktrees for yourself/);
 });
 
-test("orchestrator capability requires a native harness or discovery-verified WSL bridge and never revives conductor", () => {
+test("orchestrator capability requires a native harness or discovery-verified WSL bridge", () => {
   const agent: AgentDefinition = { id: "agent", name: "Agent", command: "agent", args: [], env: {}, driver: "codex",
     codexAppServer: { status: "supported", appServerAvailable: true,
       orchestratorApproval: { status: "supported" } },
     capabilities: { models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true, permissionModes: ["read-only"] } };
   assert.deepEqual(withOrchestratorPreset([agent], { platform: "linux" })[0]!.capabilities!.permissionModes,
     ["read-only", "orchestrator"]);
-  assert.deepEqual(withOrchestratorPreset([{ ...agent, id: "conductor" }]), []);
   for (const unsupported of [{ ...agent, driver: "acp" as const }, { ...agent, context: { kind: "wsl" as const, distro: "Ubuntu" } }]) {
     assert.equal(withOrchestratorPreset([unsupported])[0]!.capabilities!.permissionModes!.includes("orchestrator"), false);
   }

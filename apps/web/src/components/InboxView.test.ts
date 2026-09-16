@@ -8,16 +8,16 @@ function session(agentName: string): SessionView {
     id: "session",
     title: "Managed Session",
     preview: null,
-    agentId: "conductor",
+    agentId: "codex",
     agentName,
-    driver: "claude-code",
+    driver: "codex-app-server",
   } as SessionView;
 }
 
-test("Inbox search uses the canonical label for either persisted Conductor generation", () => {
-  assert.equal(inboxSessionMatchesQuery(session("Conductor (Agent Manager)"), "wollipog", "Project"), true);
-  assert.equal(inboxSessionMatchesQuery(session("Conductor (Wollipog)"), "wollipog", "Project"), true);
-  assert.equal(inboxSessionMatchesQuery(session("Conductor (Wollipog)"), "unrelated", "Project"), false);
+test("Inbox search matches the canonical transport label as well as the stored agent name", () => {
+  assert.equal(inboxSessionMatchesQuery(session("Codex"), "app server", "Project"), true);
+  assert.equal(inboxSessionMatchesQuery(session("Codex"), "codex", "Project"), true);
+  assert.equal(inboxSessionMatchesQuery(session("Codex"), "unrelated", "Project"), false);
 });
 
 test("preview paging changes follow state before programmatic scrolling", () => {

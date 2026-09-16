@@ -184,12 +184,8 @@ test("persisted Claude config normalization drops stale knobs for every agent", 
     supportsApprovals: true, permissionModes: ["default", "acceptEdits"],
   };
   assert.deepEqual(
-    normalizeClaudePersistedConfig({ model: "opus", effort: "max", permissionMode: "auto" }, caps, AGENT_ID, "claude-code"),
+    normalizeClaudePersistedConfig({ model: "opus", effort: "max", permissionMode: "auto" }, caps, "claude-code"),
     { model: "opus", effort: undefined, permissionMode: undefined },
-  );
-  assert.equal(
-    normalizeClaudePersistedConfig({ permissionMode: "auto" }, caps, CONDUCTOR_ID, "claude-code").permissionMode,
-    undefined,
   );
   const liveCaps = {
     ...caps,
@@ -238,8 +234,6 @@ const AGENT_ID = "claude";
 const CODEX_APP_AGENT_ID = "codex";
 const CODEX_AGENT_ID = "codex-exec";
 const ACP_AGENT_ID = "gemini-acp";
-// The conductor's contract agent id (must match the runner's synthesis + the CP clamp).
-const CONDUCTOR_ID = "conductor";
 
 /** A recording, controllable stand-in for the real connection Hub. */
 class FakeHub {
@@ -589,36 +583,6 @@ function makeTeamOwnedProject(db: ControlPlaneDb): {
   const updated = db.getProject(project.id)!;
   return { project: updated, location: updated.locations[0]!, scope };
 }
-
-test("the retired conductor cannot be advertised, created, or restored through durable creation", () => {
-  const { db, svc, hub } = makeHarness();
-  try {
-    const meta = runnerMeta();
-    meta.agents.push({
-      id: CONDUCTOR_ID,
-      name: "Stale Conductor",
-      command: "claude",
-      args: [],
-      env: {},
-      driver: "claude-code",
-      available: true,
-    });
-    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
-    assert.equal(db.getRunner(RUNNER_ID)!.agents.some((agent) => agent.id === CONDUCTOR_ID), false);
-    for (const permissionMode of [undefined, "default", "acceptEdits"]) {
-      const result = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CONDUCTOR_ID,
-        config: { permissionMode } }, {
-        sessionId: "stale-conductor",
-        stage() { assert.fail("retired agent must not reach staging"); },
-        activate() { assert.fail("retired agent must not launch"); },
-      });
-      assert.equal(result.status, 409);
-      assert.match(result.error!, /retired/);
-    }
-    assert.equal(db.listSessions().length, 0);
-    assert.equal(hub.sentToRunner.length, 0);
-  } finally { db.close(); }
-});
 
 test("orchestrator separates default provider execution from the negotiated strict boundary", () => {
   const { db, svc, hub } = makeHarness();
@@ -9073,15 +9037,11 @@ test("setConfig persists a cost budget without clobbering model/effort, and clea
 });
 
 /* -------------------------------------------------------------------------- */
-/* Conductor permissionMode clamp (three seams)                                */
+/* Permission mode persistence                                                */
 /* -------------------------------------------------------------------------- */
 
-
-
-
-
-test("createSession clamp does not touch non-conductor agents", () => {
-  const { db, hub, svc } = makeHarness();
+test("createSession persists a supported non-default permission mode", () => {
+  const { db, svc } = makeHarness();
   const res = svc.createSession({
     runnerId: RUNNER_ID,
     workspaceId: WORKSPACE_ID,
@@ -9091,10 +9051,6 @@ test("createSession clamp does not touch non-conductor agents", () => {
   assert.ok(res.ok);
   assert.equal(db.getSession(res.data!.id)!.permissionMode, "acceptEdits");
 });
-
-
-
-
 
 test("pods group isolated sessions and manual relay preflights every target before delivery", () => {
   const { db, hub, svc } = makeHarness();
@@ -9510,35 +9466,17 @@ test("pod membership spans runners without conflating their workspace ownership"
   assert.deepEqual(result.data!.sessions.map((session) => session.runnerId), [RUNNER_ID, "runner-2"]);
 });
 
-
-
-test("createRun with a conductor member and an explicit non-default mode -> 409, atomically", () => {
-  const { db, hub, svc } = makeHarness();
-  const res = svc.createRun({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    agentIds: [AGENT_ID, CONDUCTOR_ID],
-    task: "own the manager",
-    config: { permissionMode: "bypassPermissions" },
-  });
-  assert.equal(res.ok, false);
-  assert.equal(res.status, 409);
-  assert.match(res.error ?? "", /conductor/);
-  // Atomic reject: validated pre-persist, so no partial run and no orphan member sessions.
-  assert.equal(db.listSessions({ includeArchived: true }).length, 0);
-  assert.equal(db.listRuns().length, 0);
-  assert.equal(hub.sentToRunner.length, 0);
-
-  // Without the conductor, the same run config is legitimate (workers may use acceptEdits).
-  const workersOnly = svc.createRun({
+test("createRun persists a supported non-default permission mode on its members", () => {
+  const { db, svc } = makeHarness();
+  const run = svc.createRun({
     runnerId: RUNNER_ID,
     workspaceId: WORKSPACE_ID,
     agentIds: [AGENT_ID],
     task: "normal work",
     config: { permissionMode: "acceptEdits" },
   });
-  assert.ok(workersOnly.ok && workersOnly.data);
-  assert.equal(db.getSession(workersOnly.data!.sessions[0]!.id)!.permissionMode, "acceptEdits");
+  assert.ok(run.ok && run.data);
+  assert.equal(db.getSession(run.data!.sessions[0]!.id)!.permissionMode, "acceptEdits");
 });
 
 /* -------------------------------------------------------------------------- */
@@ -13657,12 +13595,6 @@ test("hydrateRunnerSessions inserts a session the cache never had (box is source
   assert.ok(hub.sessionChangedByIdCalls.includes("s_box1"));
 });
 
-test("hydrateRunnerSessions refuses an unissued conductor session from a runner snapshot", () => {
-  const { db, svc } = makeHarness();
-  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id: "forged-conductor", agentId: CONDUCTOR_ID, status: "running" })]);
-  assert.equal(db.getSession("forged-conductor"), null);
-});
-
 test("hydrateRunnerSessions updates an existing cached session without duplicating it", () => {
   const { db, svc } = makeHarness();
   svc.hydrateRunnerSessions(RUNNER_ID, [snapshot()]);
@@ -14725,18 +14657,6 @@ test("v54 reprocess racing an old page continuation schedules one fresh-generati
   ]);
   assert.equal(db.getRunnerHistoryState("s_box1")?.historyEpoch, 2);
   assert.equal(db.getRunnerHistoryState("s_box1")?.complete, true);
-});
-
-test("adoptSession refuses the reserved conductor identity before contacting the runner", async () => {
-  const { hub, svc } = makeHarness();
-  const res = await svc.adoptSession(RUNNER_ID, {
-    ...extDescriptor("/external"),
-    driver: "acp",
-    agentId: CONDUCTOR_ID,
-  }, true);
-  assert.equal(res.ok, false);
-  assert.equal(res.status, 400);
-  assert.equal(hub.sentOfType("adopt_session").length, 0);
 });
 
 test("ACP adoption caches only the exact runner-revalidated descriptor and snapshot", async () => {
@@ -16302,30 +16222,30 @@ test("workflow run preset creates idle role-bound workers and prompts only its o
   assert.equal(result.instance.nodeStates.find((state) => state.nodeId === "build")!.status, "ready");
   assert.equal(db.runMemberSessions(result.run.id, "claude").length, 1);
   assert.equal(db.runMemberSessions(result.run.id, "codex").length, 1);
-  const conductorSession = db.runMemberSessions(result.run.id, "__orchestrator__")[0]!;
-  assert.equal(conductorSession.agentId, "test-orchestrator");
-  const conductorScope = db.sessionScope(conductorSession.id)!;
-  assert.deepEqual(conductorScope.owner, {
+  const orchestratorSession = db.runMemberSessions(result.run.id, "__orchestrator__")[0]!;
+  assert.equal(orchestratorSession.agentId, "test-orchestrator");
+  const orchestratorScope = db.sessionScope(orchestratorSession.id)!;
+  assert.deepEqual(orchestratorScope.owner, {
     kind: "organization", organizationId: local.organizationId,
   });
   for (const worker of result.sessions.filter((session) => session.agentId !== "test-orchestrator")) {
     assert.deepEqual(db.sessionScope(worker.id), userScope);
   }
-  const conductorPrincipal: AgentPrincipal = {
-    kind: "agent", actorId: conductorSession.id, organizationId: local.organizationId,
-    delegatedScope: conductorScope,
+  const orchestratorPrincipal: AgentPrincipal = {
+    kind: "agent", actorId: orchestratorSession.id, organizationId: local.organizationId,
+    delegatedScope: orchestratorScope,
   };
-  assert.equal(agentDelegationAuthorizationError("/api/runs", conductorPrincipal), null);
-  assert.equal(agentDelegationAuthorizationError("/api/workflow-runs", conductorPrincipal), null);
-  assert.equal(agentDelegationAuthorizationError("/api/workflows", conductorPrincipal), null);
-  assert.equal(db.canAccessRunner(conductorPrincipal, RUNNER_ID), true);
+  assert.equal(agentDelegationAuthorizationError("/api/runs", orchestratorPrincipal), null);
+  assert.equal(agentDelegationAuthorizationError("/api/workflow-runs", orchestratorPrincipal), null);
+  assert.equal(agentDelegationAuthorizationError("/api/workflows", orchestratorPrincipal), null);
+  assert.equal(db.canAccessRunner(orchestratorPrincipal, RUNNER_ID), true);
 
   const starts = hub.sentOfType("start_session");
   assert.equal(starts.length, 3);
   assert.equal(starts.filter((message) => message.initialPrompt !== undefined).length, 1);
-  const conductorStart = starts.find((message) => message.spec.agentId === "test-orchestrator")!;
-  assert.match(conductorStart.initialPrompt!, new RegExp(result.instance.instanceId));
-  assert.equal(conductorStart.spec.useWorktree, false);
+  const orchestratorStart = starts.find((message) => message.spec.agentId === "test-orchestrator")!;
+  assert.match(orchestratorStart.initialPrompt!, new RegExp(result.instance.instanceId));
+  assert.equal(orchestratorStart.spec.useWorktree, false);
   for (const worker of starts.filter((message) => message.spec.agentId !== "test-orchestrator")) {
     assert.equal(worker.initialPrompt, undefined, "workers wait for exact graph-node dispatch");
     assert.equal(worker.spec.useWorktree, true);

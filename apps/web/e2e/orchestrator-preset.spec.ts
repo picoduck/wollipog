@@ -94,7 +94,6 @@ for (const theme of ["light", "dark"] as const) {
       const dialog = page.getByRole("dialog", { name: "New Session" });
       const orchestratorCard = presetCard(dialog, /^Orchestrator/);
       await expect(orchestratorCard).toBeVisible();
-      await expect(dialog.getByText("Conductor-Led Work", { exact: true })).toHaveCount(0);
       await orchestratorCard.scrollIntoViewIfNeeded();
       await page.screenshot({ path: testInfo.outputPath("preset-unselected.png") });
       // One click, no popup to open: that IS the fix for #832, whose defect was the second of two

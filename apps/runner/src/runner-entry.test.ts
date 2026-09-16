@@ -15,7 +15,7 @@ test("runner entry resolves only the first SEA or Node application argument", ()
 });
 
 test("later internal-looking values remain CLI data and never select another mode", () => {
-  for (const later of ["--agent-control-mcp", "--policy-hook", "--state-doctor", "--conductor-mcp"]) {
+  for (const later of ["--agent-control-mcp", "--policy-hook", "--state-doctor"]) {
     assert.deepEqual(resolveRunnerEntry(["runner.exe", "--wollipog-cli", "session", "create", later], true), {
       mode: "--wollipog-cli", modeIndex: 1,
     });

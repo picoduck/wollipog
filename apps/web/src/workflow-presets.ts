@@ -14,7 +14,7 @@ export function defaultWorkflowBindings(
   definition: WorkflowDefinition | undefined,
   agents: AgentDefinition[],
 ): Record<string, string> {
-  const available = agents.filter((agent) => agent.available === true && agent.id !== "conductor");
+  const available = agents.filter((agent) => agent.available === true);
   const bindings: Record<string, string> = {};
   for (const role of workflowAgentRoles(definition)) {
     const exact = available.find((agent) => agent.id === role);

@@ -13,7 +13,6 @@ import {
   setExperimentFlag,
   subscribeExperimentFlags,
 } from "./experiments.js";
-import { LOCAL_INSTANCE_SCOPE } from "./instance-storage.js";
 import { instanceStorageKey } from "./instance-storage.js";
 import { GLOBAL_VIEW_ITEMS, SETTINGS_SECTIONS, viewFromPath, viewPath } from "./navigation.js";
 
@@ -41,14 +40,10 @@ test("nothing stored means every experiment stays at its default", () => {
   assert.deepEqual(parseExperimentFlags(null), DEFAULT_EXPERIMENT_FLAGS);
 });
 
-test("defaults: existing surfaces stay on while the conductor and Board review queue stay opt-in", () => {
-  // multiAgent and pods EXISTING must not change what an untouched install shows. The conductor
-  // is the exception by decision, not accident: its old default-on was safe only because the
-  // runner env gate was the real switch, and with that gate removed (ADR 0004 amendment) the
-  // toggle IS the opt-in — defaulting it on would silently enable the feature everywhere.
+test("defaults: existing surfaces stay on", () => {
+  // multiAgent and pods EXISTING must not change what an untouched install shows.
   assert.equal(DEFAULT_EXPERIMENT_FLAGS.multiAgent, true);
   assert.equal(DEFAULT_EXPERIMENT_FLAGS.pods, true);
-  assert.equal(DEFAULT_EXPERIMENT_FLAGS.conductor, false);
 });
 
 test("garbage and non-object payloads fall back to the defaults without throwing", () => {
@@ -61,9 +56,7 @@ test("unknown keys are ignored and missing keys keep their defaults", () => {
   // A DOWNGRADE path: a future release stores a flag this one does not know, alongside one it
   // does. The known flag must be honored and the unknown one must not corrupt the rest.
   const flags = parseExperimentFlags(JSON.stringify({ pods: false, warpDrive: false }));
-  assert.equal(flags.pods, false);
-  assert.equal(flags.multiAgent, true);
-  assert.equal(flags.conductor, false, "a missing conductor key keeps the opt-in default");
+  assert.deepEqual(flags, { multiAgent: true, pods: false });
 });
 
 test("non-boolean values for known keys are rejected key-by-key", () => {
@@ -145,8 +138,6 @@ test("every surface that exposes a gated feature consults the flags", () => {
       "a direct route into a hidden feature must render the notice, not the feature"],
     ["./App.tsx", /flags\.multiAgent[\s\S]{0,200}New Multi-Agent Run/,
       "the topbar create button is a creation surface and gates with its view"],
-    ["./components/NewSessionDialog.tsx", /includeConductor: false/,
-      "New Session must ignore retired Conductor advertisements"],
     ["./components/AutomationsView.tsx", /multiAgentEnabled \|\| form\.actionKind === "workflow_run"/,
       "Automations must not OFFER workflow runs while multi-agent is off, but an automation already using one keeps rendering truthfully"],
     ["./components/Board.tsx", /multiAgentEnabled/,
@@ -166,29 +157,4 @@ test("the Experimental section is a route like its siblings", () => {
     "the section must exist in the one list the nav, routes, and palette derive from");
   assert.equal(viewPath({ name: "settings", section: "experimental" }), "/settings/experimental");
   assert.deepEqual(viewFromPath("/settings/experimental"), { name: "settings", section: "experimental" });
-});
-
-test("a legacy payload's conductor:true is the old default, not an opt-in", () => {
-  // Every legacy write serialized ALL flags, so toggling pods once stored conductor:true for a
-  // user who never chose it. With the runner env gate removed, honouring that value would
-  // silently enable the feature on upgrade for exactly those devices.
-  const legacy = parseExperimentFlags(JSON.stringify({ multiAgent: true, pods: false, conductor: true }));
-  assert.equal(legacy.conductor, false);
-  assert.equal(legacy.pods, false, "other legacy choices stay honoured");
-});
-
-test("a legacy conductor value is never an opt-in, in either direction", () => {
-  assert.equal(parseExperimentFlags(JSON.stringify({ conductor: false })).conductor, false);
-  assert.equal(parseExperimentFlags(JSON.stringify({ conductor: true })).conductor, false);
-});
-
-test("retired conductor ignores even an explicit v2 opt-in", () => {
-  assert.equal(parseExperimentFlags(JSON.stringify({ v: 2, conductor: true })).conductor, false);
-  assert.equal(parseExperimentFlags(JSON.stringify({ v: 2, conductor: false })).conductor, false);
-});
-
-test("attempting to enable the retired conductor flag cannot resurrect it", () => {
-  setExperimentFlag("conductor", true, LOCAL_INSTANCE_SCOPE);
-  resetExperimentFlagsForTest();
-  assert.equal(getExperimentFlags(LOCAL_INSTANCE_SCOPE).conductor, false);
 });

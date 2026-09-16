@@ -170,7 +170,7 @@ export function withOrchestratorPreset(
   host: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv; exists?: typeof existsSync;
     isolationMode?: OrchestratorIsolationMode; wslIsolationMode?: OrchestratorIsolationMode } = {},
 ): AgentDefinition[] {
-  return agents.filter((agent) => agent.id !== "conductor").map((agent) => {
+  return agents.map((agent) => {
     const acpSupported = supportsClaudeAgentAcpOrchestrator(agent);
     const contextKind = agent.context?.kind ?? "native";
     const wslSupported = contextKind === "wsl" && agent.wslAgentControl?.protocolVersion === 1 &&

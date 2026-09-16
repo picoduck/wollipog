@@ -43,7 +43,7 @@ export const SKILL_RECOVERY_SCAN_LIMITS = {
 function directories(agents: AgentDefinition[]): string[] {
   const result = new Set([".agents/skills"]);
   for (const agent of agents) {
-    if (agent.id === "conductor" || (agent.context?.kind ?? "native") !== "native") continue;
+    if ((agent.context?.kind ?? "native") !== "native") continue;
     const directory = SKILL_DIRS[agent.driver ?? "acp"];
     if (directory) result.add(directory);
   }

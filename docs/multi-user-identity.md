@@ -34,12 +34,11 @@ overwrite an existing workspace owner. Human-created sessions receive a server-d
 delegated/internal creations inherit a selected workspace or runner scope, and conversation forks
 preserve the source session owner. A stale or unknown snapshot workspace falls back to the runner's
 scope and never widens access; a runner fork response must preserve the source driver and agent
-identity. Non-admin members cannot submit an arbitrary host path. A conductor session receives only
-its live persisted session scope, and its existing route allowlist remains an additional ceiling.
+identity. Non-admin members cannot submit an arbitrary host path. An agent session credential receives only
+its live persisted session scope, and its route allowlist remains an additional ceiling.
 Workflow-engine orchestrators are explicitly organization-owned even when their worker sessions use
 a user/team-owned project: workflow definitions, runs, artifacts, and policies are still
-organization resources, while each worker keeps the selected project scope. An ordinary conductor
-session does not receive that widening merely because its agent id is `conductor`.
+organization resources, while each worker keeps the selected project scope.
 
 ## Fail-closed transport behavior
 

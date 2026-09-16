@@ -1,6 +1,6 @@
-/** Protected runner credential rotation and cleanup of retired Conductor files. */
+/** Protected runner credential rotation. */
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { scopedRunnerCredentialFile, type RunnerDataDirIdentity } from "./runner-data-dir.js";
 export { deriveControlPlaneHttpUrl as deriveCpHttpUrl } from "./control-plane-transport.js";
@@ -51,21 +51,4 @@ export function stageRunnerCredentialFile(
  * immediate cutover; the runner daemon uses stageRunnerCredentialFile and waits for registration. */
 export function writeRunnerCredentialFile(dataDir: string, token: string): string {
   return stageRunnerCredentialFile(dataDir, token).promote();
-}
-
-
-/** Only sweep the current runner's owned directory; legacy history remains readable. */
-export function sweepConductorMcpConfigs(configDir: string): number {
-  if (!existsSync(configDir)) return 0;
-  let removed = 0;
-  for (const entry of readdirSync(configDir, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith(".mcp.json")) continue;
-    rmSync(join(configDir, entry.name), { force: true });
-    removed++;
-  }
-  return removed;
-}
-
-export function removeConductorMcpConfig(sessionId: string, configDir: string): void {
-  try { rmSync(join(configDir, `${sessionId}.mcp.json`), { force: true }); } catch { /* Best effort legacy cleanup. */ }
 }

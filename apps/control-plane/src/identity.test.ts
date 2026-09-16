@@ -45,10 +45,10 @@ test("organization roles centrally gate mutations while reads remain available",
   assert.equal(mutationAuthorizationError("POST", "/api/identity/users", human("owner")), null);
 });
 
-test("agent mutations pass only after the separate conductor route allowlist authenticates them", () => {
+test("agent mutations pass only after the separate agent-control route allowlist authenticates them", () => {
   assert.equal(mutationAuthorizationError("POST", "/api/workflows", {
     kind: "agent",
-    actorId: "s_conductor",
+    actorId: "s_agent",
     organizationId: "org_1",
     delegatedScope: { organizationId: "org_1", owner: { kind: "organization", organizationId: "org_1" } },
   }), null);
@@ -68,10 +68,10 @@ test("workflow domain actors preserve authenticated agent and human attribution"
   assert.deepEqual(workflowActorForPrincipal(null, "usr_local"), { kind: "human", id: "usr_local" });
 });
 
-test("a user- or team-scoped conductor cannot mutate organization-global resources", () => {
+test("a user- or team-scoped agent session cannot mutate organization-global resources", () => {
   const userAgent: AgentPrincipal = {
     kind: "agent",
-    actorId: "s_conductor",
+    actorId: "s_agent",
     organizationId: "org_1",
     delegatedScope: { organizationId: "org_1", owner: { kind: "user", userId: "usr_1" } },
   };
@@ -139,16 +139,16 @@ test("ordinary credentials retain self worktrees but confine descendant lifecycl
     { ...credential, credentialSessionId: undefined },
     "s_sibling",
   ), null,
-    "a conductor retains its separately reviewed delegated scope");
+    "an agent principal without a session credential retains its separately reviewed delegated scope");
 });
 
-test("a runner cannot turn a normal fork into a privileged conductor session", () => {
+test("a runner cannot change a fork's agent, driver, or workspace identity", () => {
   const source = { agentId: "claude", driver: "claude", workspaceId: "workspace-1" };
   assert.equal(forkSnapshotIdentityError(source, {
     agentId: "claude", driver: "claude", workspaceId: "workspace-1",
   }), null);
   assert.match(forkSnapshotIdentityError(source, {
-    agentId: "conductor", driver: "claude", workspaceId: "workspace-1",
+    agentId: "codex", driver: "claude", workspaceId: "workspace-1",
   })!, /different agent or workspace identity/);
   assert.match(forkSnapshotIdentityError(source, {
     agentId: "claude", driver: "acp", workspaceId: "workspace-1",

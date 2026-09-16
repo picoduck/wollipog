@@ -128,9 +128,6 @@ export function nativeTuiCreationError(
       ),
     };
   }
-  if (request.agentId === "conductor") {
-    return { status: 409, error: "Conductor does not expose a standalone Native TUI" };
-  }
   const launch = db.getAgentLaunch(request.runnerId, request.agentId);
   if (!launch) return { status: 404, error: "agent not found on runner" };
   if (!TUI_DRIVERS.has(launch.driver ?? "acp")) {
@@ -186,9 +183,6 @@ export function nativeTuiSessionError(
         ),
       };
     }
-  }
-  if (session.agentId === "conductor") {
-    return { status: 409, error: "Conductor does not expose a standalone Native TUI" };
   }
   if (!TUI_DRIVERS.has(session.driver)) {
     return { status: 409, error: "this session's agent does not expose a standalone Native TUI" };

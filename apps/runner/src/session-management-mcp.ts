@@ -14,18 +14,14 @@ type Json = any;
 
 const MCP_PROTOCOL_VERSION = "2025-06-18";
 /** Response caps: lists are field-mapped and bounded so a busy manager can't eat the
- * conductor's context window (the MVP mitigation for hundreds of sessions). */
+ * calling session's context window (the MVP mitigation for hundreds of sessions). */
 const MAX_ITEMS = 100;
 const MAX_LINE = 400;
 const DEFAULT_MODEL_PAGE_SIZE = 50;
 
-/** Worker sessions the conductor creates may use any interactive/fixed mode EXCEPT
+/** Worker sessions an orchestrator creates may use any interactive/fixed mode EXCEPT
  * bypassPermissions (and codex danger-full-access) — the human still sees the create card. */
 const WORKER_PERMISSION_MODES = ["default", "auto", "acceptEdits", "plan", "orchestrator"] as const;
-
-/** The conductor's own agent id — a contract constant shared with the runner's agent
- * synthesis + provisioning and the control plane's permissionMode clamp. */
-const CONDUCTOR_AGENT_ID = "conductor";
 
 /** Default cap on one CP round-trip. Without it, a half-open connection (the documented
  * box-tunnel blip) would stall an ordinary call for undici's ~300s header/body timeouts. */
@@ -51,13 +47,13 @@ export interface McpDeps {
   fetch: McpFetch;
   /** Control-plane HTTP base (no trailing slash), e.g. http://127.0.0.1:4317. */
   cpUrl: string;
-  /** The conductor's OWN session id — self-targeting mutations are refused. */
+  /** The calling session's OWN id — self-targeting mutations are refused. */
   selfSessionId: string;
   /** Active runner credential; paired with selfSessionId so the control plane authenticates this
-   * exact live conductor without treating the credential as a general REST credential. */
+   * exact live calling session without treating the credential as a general REST credential. */
   token: string;
-  /** Conductor compatibility uses its historical header; general sessions use the exact-session
-   * credential header. Device-token CLI calls omit actorHeader entirely. */
+  /** Session-scoped calls use the exact-session credential header. Device-token CLI calls omit
+   * actorHeader entirely. */
   actorHeader?: typeof WOLLIPOG_AGENT_ACTOR_SESSION_HEADER | null;
   orchestrator?: boolean;
   /** Deterministic scheduling hooks for wait-session tests. */
@@ -327,7 +323,7 @@ function mapSession(s: Json): Json {
     costCheckpointApprovedUsd: s?.costCheckpointApprovedUsd ?? null,
     maxToolCalls: s?.maxToolCalls ?? null,
     toolCallCount: s?.toolCallCount,
-    // Title only — the options/requestId belong to the human's card, not the conductor.
+    // Title only — the options/requestId belong to the human's card, not the calling session.
     pendingApproval: s?.pendingApproval?.title ?? null,
     updatedAt: s?.updatedAt,
     archived: s?.archived ?? false,
@@ -1412,9 +1408,6 @@ export const TOOLS: McpTool[] = [
           typeof args?.workflowId !== "string" || typeof args?.task !== "string" || !args.task.trim()) {
         return errorResult("runnerId, workspaceId, workflowId, and a non-empty task are required");
       }
-      if (args.agentBindings && Object.values(args.agentBindings).includes(CONDUCTOR_AGENT_ID)) {
-        return errorResult("refusing: workflow workers must not use the conductor agent");
-      }
       const body: Json = {
         runnerId: args.runnerId,
         workspaceId: args.workspaceId,
@@ -1666,9 +1659,6 @@ export const TOOLS: McpTool[] = [
       if (typeof args?.runnerId !== "string" || typeof args?.agentId !== "string") {
         return errorResult("runnerId and agentId are required");
       }
-      if (args.agentId === CONDUCTOR_AGENT_ID) {
-        return errorResult("refusing to start another conductor (the Conductor agent is retired)");
-      }
       if (!args.workspaceId && !args.workspacePath) {
         return errorResult("workspaceId or workspacePath is required — pick one from list_runners");
       }
@@ -1855,9 +1845,6 @@ export const TOOLS: McpTool[] = [
         !args.task.trim()
       ) {
         return errorResult("runnerId, workspaceId, agentIds (non-empty), and task are required");
-      }
-      if (args.agentIds.includes(CONDUCTOR_AGENT_ID)) {
-        return errorResult("refusing: a run must not include the conductor agent");
       }
       const body: Json = {
         runnerId: args.runnerId,

@@ -56,7 +56,7 @@ validation, confirmation, secret-output, JSON, and exit-code behavior. Run `woll
 workflow-oriented overview or `wollipog help <topic>` for complete topic commands and options.
 
 An injected session defaults worktree commands to its own id and cannot override that target.
-Paired-device and conductor callers may supply `--session`. A create without `--base` fetches and
+Paired-device callers may supply `--session`. A create without `--base` fetches and
 resolves the remote default branch. Create, attach, and select return the selected absolute path;
 the already-running provider process keeps its original operating-system cwd, so it must use the
 returned path explicitly during that turn. A later resume or restart launches in the selection.
@@ -306,8 +306,7 @@ sessions, WSL Native TUI, generic ACP, container, and cloud targets remain fail-
 
 ## Authorization and compatibility
 
-The general surface has the same closed method-and-canonical-route allowlist as the conductor
-manager. The control plane converts a valid exact-session claim into an `AgentPrincipal`, applies
+The general surface has a closed method-and-canonical-route allowlist. The control plane converts a valid exact-session claim into an `AgentPrincipal`, applies
 the session's delegated resource scope, and records authorized mutations in the content-free
 mutation audit under that session id. New API routes remain denied until explicitly added.
 
@@ -319,7 +318,6 @@ legacy health version; authentication failures remain fail-closed, including API
 answer 401 before routing the missing endpoint.
 Runners connected to older control planes do not inject the general surface. WSL runners also
 withhold the Orchestrator capability unless both peers negotiate v124 and fresh discovery proves the
-complete target-local launcher contract. Conductor discovery,
-launch gating, default permission-mode clamp, and legacy manager credential remain unchanged.
+complete target-local launcher contract.
 
 See [Using Wollipog](../.agents/skills/using-wollipog/SKILL.md) for the compact agent-facing skill.

@@ -143,11 +143,8 @@ strict native Claude Code and Claude Agent ACP require runner isolation mode `bw
 target-local bwrap launcher. Unsupported strict combinations fail before provider launch with an
 actionable compatibility error rather than silently falling back to provider mode.
 
-On upgrade, a persisted Conductor `--mcp-config` argument is rewritten to the attested runner's
-owned data directory before launch. The former `~/.agent-manager/conductor/*.mcp.json` file is never
-updated or deleted automatically: it has no trustworthy owner metadata and may still be used by an
-older runner. To retire those files, stop every pre-attestation runner for the OS account, run the
-redacted `--state-doctor inventory`, then use the explicit quarantine action. Adoption conditionally
+To adopt legacy runner state, stop every pre-attestation runner for the OS account, run the
+redacted `--state-doctor inventory`, then use the explicit adoption action. Adoption conditionally
 copies legacy checkpoint or WSL provider state and preserves all source bytes; divergent targets fail
 closed. Provider-home bytes remain operator-owned even though native mutable launches are cross-process
 leased. Use a supported native, container, or cloud execution target for concurrent owners.
@@ -226,7 +223,7 @@ claude -p \
   --effort <discovered-level> \                 # from DriverConfig.effort (omit if unset)
 ```
 
-plus per-mode flags (`claudePermissionArgs`). New non-conductor sessions persist `auto` when the
+plus per-mode flags (`claudePermissionArgs`). New sessions persist `auto` when the
 connected installation advertises it, or `acceptEdits` as the compatibility fallback. Existing
 sessions whose persisted `permissionMode` is unset retain the driver's `acceptEdits` fallback and
 are not migrated automatically:
@@ -369,13 +366,13 @@ fixed-rule permission modes (`acceptEdits`, `plan`, and `bypassPermissions`) aft
 control plane acknowledges the required protocol version. Phase 3b does not advertise `hook` as an
 elicitation transport because a matched `ask` cannot reach a user until Phase 4. Interactive
 `default`/`auto` modes retain their stdio-control approval channel. WSL, container, cloud,
-old/unknown control planes, and Conductor sessions do not receive this transport.
+and old/unknown control planes do not receive this transport.
 
 Before session persistence, the runner writes
 `<dataDir>/hooks/<runnerHash>/<sessionId>.settings.json` with mode `0600` and appends
 `--settings <file>`. The file adds `PreToolUse`, `PostToolUse`, and `UserPromptSubmit` command
 hooks that re-enter the same runner executable as `--policy-hook`. SEA and Node/tsx launches share
-the same runner-reentry resolver used by `--conductor-mcp`; secrets never appear on argv. The
+the same runner-reentry resolver used by `--agent-control-mcp`; secrets never appear on argv. The
 runner-wide credential is never exposed to Claude. Instead, the runner creates an independent
 per-session hook token file, sends only its SHA-256 binding over the authenticated runner socket,
 and the settings environment carries that file reference plus bounded control-plane/session paths.
@@ -425,8 +422,7 @@ Per-session binding limits accidental credential reuse and no hook credential au
 API route, but adversarial same-user integrity requires a future sandbox/broker boundary.
 
 Every Claude process boundary checks the exact persisted settings path. A protected template heals
-manual deletion before one-shot first/resume turns, persistent restarts, and fork bootstrap. This
-closes the resume gap that existed in the older Conductor-only provision path.
+manual deletion before one-shot first/resume turns, persistent restarts, and fork bootstrap.
 
 This rollout follows Anthropic's documented Agent SDK streaming-input contract while keeping the
 CLI transport and subscription authentication unchanged. It does not migrate to the TypeScript SDK;

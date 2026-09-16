@@ -68,7 +68,7 @@ const clean = (value: unknown) => String(value).replace(/[\p{Cc}\p{Cf}]+/gu, " "
 function wslBindings(agents: AgentDefinition[], distro: string) {
   return agents.flatMap((agent) => {
     const relDir = SKILL_DIRS[agent.driver ?? "acp"];
-    return agent.id !== "conductor" && agent.context?.kind === "wsl" && agent.context.distro === distro && relDir
+    return agent.context?.kind === "wsl" && agent.context.distro === distro && relDir
       ? [{ agentId: agent.id, driver: agent.driver ?? "acp", relDir }]
       : [];
   });
@@ -221,7 +221,7 @@ export function mergeWslSkillsResult(
 ): ReconcileSkillsResult {
   const wslAgents = new Set(agents.flatMap((agent) => {
     const context = agent.context;
-    return agent.id !== "conductor" && context?.kind === "wsl" && validWslDistroName(context.distro) &&
+    return context?.kind === "wsl" && validWslDistroName(context.distro) &&
       SKILL_DIRS[agent.driver ?? "acp"] ? [agent.id] : [];
   }));
   const rows = new Map(native.deployed.map((row) => [row.name, {

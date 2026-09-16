@@ -4727,8 +4727,6 @@ export class ControlPlaneDb {
     );
     backfillLegacyProjects(db, Date.now());
     db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id, id)");
-    // Retire launch discovery only. Keep definitions and session history for old transcripts.
-    db.exec("DELETE FROM runner_agents WHERE agent_id='conductor'");
     db.exec("UPDATE sessions SET cost_budget_step_usd=cost_budget_usd WHERE cost_budget_step_usd IS NULL AND cost_budget_usd IS NOT NULL");
     db.exec("UPDATE sessions SET max_tool_calls_step=max_tool_calls WHERE max_tool_calls_step IS NULL AND max_tool_calls IS NOT NULL");
     db.exec("UPDATE sessions SET title_source='user' WHERE title_source IS NULL");
@@ -5114,7 +5112,6 @@ export class ControlPlaneDb {
     persistNativeTuiAccounting: boolean,
     persistWslSafeLauncher: boolean,
   ): void {
-    agents = agents.filter((agent) => agent.id !== "conductor");
     this.stmt("DELETE FROM runner_agents WHERE runner_id = ?").run(runnerId);
     const upAgent = this.stmt(
       `INSERT INTO agent_definitions (id, name, created_at) VALUES (?, ?, ?)
@@ -7098,7 +7095,7 @@ export class ControlPlaneDb {
     ).get(runnerId, credentialId));
   }
 
-  /** Read-only active-token verification for conductor REST claims. Pending credentials may be
+  /** Read-only active-token verification for runner REST requests. Pending credentials may be
    * promoted only by the runner registration channel. */
   verifyActiveRunnerCredential(runnerId: string, tokenHash: string): boolean {
     return Boolean(this.stmt(
@@ -8244,8 +8241,6 @@ export class ControlPlaneDb {
     const locationSql = `COALESCE(location.name, workspace_override.display_name, workspace.name,
       workspace_extra.name, session.workspace_id, 'No Location')`;
     const agentSql = `CASE
-      WHEN session.agent_id='conductor' OR COALESCE(agent.name, session.agent_id, '') IN
-        ('Conductor (Wollipog)', 'Conductor (Agent Manager)') THEN 'Conductor (Wollipog)'
       WHEN session.driver='codex-app-server' THEN 'Codex App Server'
       WHEN session.driver='codex' THEN 'Codex — Non-Interactive (codex exec)'
       ELSE COALESCE(agent.name, session.agent_id, session.driver)
@@ -10528,7 +10523,7 @@ export class ControlPlaneDb {
           : agent.driver === "claude-code"
             ? "claude" as const
             : null;
-        if (!provider || agent.id === "conductor") continue;
+        if (!provider) continue;
         const context = agent.context?.kind === "wsl" ? `wsl:${agent.context.distro}` : "native";
         const sourceId = createHash("sha256")
           .update(JSON.stringify({ runnerId: runner.runnerId, agentId: agent.id, provider, context }))

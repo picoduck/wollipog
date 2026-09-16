@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { constants, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { constants, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
@@ -36,21 +36,23 @@ test("Windows state-doctor file fsync uses a write-capable handle", () => {
 
 test("state doctor inventory is redacted, deterministic in shape, and read-only", async (t) => {
   const root = fixture(t);
-  const conductor = join(root, "conductor");
-  mkdirSync(conductor);
-  const legacy = join(conductor, "secret-session.mcp.json");
-  const canary = "mamwhsec_NEVER_PRINT_ME https://private.example/control-plane";
-  writeFileSync(legacy, canary, { mode: 0o600 });
-  const before = readFileSync(legacy, "utf8");
+  const sessionDir = join(root, "sessions", "s_secret");
+  mkdirSync(sessionDir, { recursive: true });
+  const metaPath = join(sessionDir, "meta.json");
+  const canary = "https://private.example/control-plane";
+  writeFileSync(metaPath, `${JSON.stringify({
+    sessionId: "s_secret", repoPath: canary, context: { kind: "native" }, worktreePath: canary,
+  })}\n`, { mode: 0o600 });
+  const before = readFileSync(metaPath, "utf8");
   const output = await capture([
     "runner", "--state-doctor", "inventory", "--data-dir", root,
   ]);
   const report = JSON.parse(output) as Record<string, unknown>;
-  assert.equal(report.legacyConductorConfigs, 1);
+  assert.equal(report.legacyCheckpointSessions, 1);
   assert.equal(output.includes(canary), false);
-  assert.equal(output.includes("secret-session"), false);
+  assert.equal(output.includes("s_secret"), false);
   assert.equal(output.includes(root), false);
-  assert.equal(readFileSync(legacy, "utf8"), before);
+  assert.equal(readFileSync(metaPath, "utf8"), before);
 });
 
 test("state doctor holds an exclusive runner-compatible maintenance lease through inventory", async (t) => {
@@ -79,32 +81,13 @@ test("state doctor holds an exclusive runner-compatible maintenance lease throug
   assert.equal(existsSync(lease), false, "maintenance lease is released only after the command completes");
 });
 
-test("state doctor mutations require offline acknowledgment and quarantine without reading bytes", async (t) => {
+test("state doctor mutations require offline acknowledgment", async (t) => {
   const root = fixture(t);
-  const conductor = join(root, "conductor");
-  mkdirSync(conductor);
-  const legacy = join(conductor, "session.mcp.json");
-  writeFileSync(legacy, "TOKEN_CANARY", { mode: 0o600 });
-  await assert.rejects(runStateDoctor([
-    "runner", "--state-doctor", "quarantine-conductor", "--data-dir", root,
-  ]), /ack-all-legacy-runners-stopped/);
-  const output = await capture([
-    "runner", "--state-doctor", "quarantine-conductor", "--data-dir", root,
-    "--ack-all-legacy-runners-stopped",
-  ]);
-  assert.equal(existsSync(legacy), false);
-  assert.equal(output.includes("TOKEN_CANARY"), false);
-  const result = JSON.parse(output) as { quarantined: number; quarantineId: string };
-  assert.equal(result.quarantined, 1);
-  const target = join(root, "state-quarantine", result.quarantineId, "conductor");
-  const manifest = JSON.parse(readFileSync(join(target, "manifest.json"), "utf8")) as {
-    items: Array<{ itemId: string; originalName: string; storedAs: string }>;
-  };
-  assert.equal(manifest.items.length, 1);
-  assert.equal(manifest.items[0]?.originalName, "session.mcp.json");
-  assert.equal(manifest.items[0]?.storedAs, "0001.mcp.json");
-  assert.match(manifest.items[0]?.itemId ?? "", /^[a-f0-9]{64}$/u);
-  assert.deepEqual(readdirSync(target).sort(), ["0001.mcp.json", "manifest.json"]);
+  for (const command of ["adopt-checkpoints", "adopt-provider-state", "quarantine-wsl"]) {
+    await assert.rejects(runStateDoctor([
+      "runner", "--state-doctor", command, "--data-dir", root,
+    ]), /ack-all-legacy-runners-stopped/, command);
+  }
 });
 
 test("state doctor refuses all work while a runner lease remains", async (t) => {
@@ -233,44 +216,23 @@ test("checkpoint adoption faults leave metadata last and retryable", async (t) =
   assert.equal(JSON.parse(readFileSync(metaPath, "utf8")).checkpointRefVersion, 2);
 });
 
-test("conductor quarantine fsyncs its manifest before moving any secret file", async (t) => {
-  const root = fixture(t);
-  const conductor = join(root, "conductor");
-  mkdirSync(conductor);
-  writeFileSync(join(conductor, "session.mcp.json"), "secret", { mode: 0o600 });
-  const operations: Array<{ operation: string; path: string }> = [];
-  await runStateDoctor([
-    "runner", "--state-doctor", "quarantine-conductor", "--data-dir", root,
-    "--ack-all-legacy-runners-stopped",
-  ], () => {}, {
-    beforeDurabilityOperationForTest: (operation, path) => { operations.push({ operation, path }); },
-  });
-  const manifestFsync = operations.findIndex((entry) =>
-    entry.operation === "fsync-file" && entry.path.endsWith("manifest.json"));
-  const firstMove = operations.findIndex((entry) =>
-    entry.operation === "rename" && entry.path.endsWith("0001.mcp.json"));
-  assert.ok(manifestFsync >= 0 && firstMove > manifestFsync);
-  const afterMove = operations.slice(firstMove + 1).filter((entry) => entry.operation === "fsync-directory");
-  assert.ok(afterMove.some((entry) => entry.path === conductor), "source directory entry is durable");
-  assert.ok(afterMove.some((entry) => entry.path.endsWith("conductor")), "target directory entry is durable");
-});
-
 test("maintenance lease release cannot mask the primary doctor operation failure", async (t) => {
   const root = fixture(t);
-  const conductor = join(root, "conductor");
-  mkdirSync(conductor);
-  writeFileSync(join(conductor, "session.mcp.json"), "secret", { mode: 0o600 });
+  const sessionDir = join(root, "sessions", "s_native");
+  mkdirSync(sessionDir, { recursive: true });
+  writeFileSync(join(sessionDir, "meta.json"), `${JSON.stringify({
+    sessionId: "s_native", repoPath: root, context: { kind: "native" },
+  })}\n`, { mode: 0o600 });
   const lease = join(root, ".wollipog-runner-active-v1.lock");
   await assert.rejects(runStateDoctor([
-    "runner", "--state-doctor", "quarantine-conductor", "--data-dir", root,
-    "--ack-all-legacy-runners-stopped",
+    "runner", "--state-doctor", "adopt-provider-state", "--data-dir", root,
+    "--session-id", "s_native", "--ack-all-legacy-runners-stopped",
   ], () => {}, {
     beforeDurabilityOperationForTest: (operation) => {
-      if (operation !== "rename") return;
+      if (operation !== "maintenance-lease-published") return;
       writeFileSync(lease, "{}\n", { mode: 0o600 });
-      throw new Error("primary quarantine failure");
     },
-  }), /primary quarantine failure/);
+  }), /adopt-provider-state requires a WSL session/);
   assert.equal(existsSync(lease), true, "a replacement lease is never removed");
 });
 

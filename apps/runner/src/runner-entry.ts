@@ -1,7 +1,6 @@
 export type RunnerEntryMode =
   | "--state-doctor"
   | "--policy-hook"
-  | "--conductor-mcp"
   | "--agent-control-mcp"
   | "--wollipog-cli"
   | "daemon";
@@ -9,7 +8,6 @@ export type RunnerEntryMode =
 const INTERNAL_MODES = new Set<RunnerEntryMode>([
   "--state-doctor",
   "--policy-hook",
-  "--conductor-mcp",
   "--agent-control-mcp",
   "--wollipog-cli",
 ]);

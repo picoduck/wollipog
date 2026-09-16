@@ -59,7 +59,7 @@ export class MachineSkillSnapshots {
   private directories(): string[] {
     const dirs = new Set<string>([".agents/skills"]);
     for (const agent of this.options.agents()) {
-      if ((agent.context?.kind ?? "native") !== "native" || agent.id === "conductor") continue;
+      if ((agent.context?.kind ?? "native") !== "native") continue;
       const dir = SKILL_DIRS[agent.driver ?? "acp"];
       if (dir) dirs.add(dir);
     }
@@ -68,7 +68,7 @@ export class MachineSkillSnapshots {
   private wslDirectories(distro: string): string[] {
     const dirs = new Set<string>([".agents/skills"]);
     for (const agent of this.options.agents()) {
-      if (agent.id === "conductor" || agent.context?.kind !== "wsl" || agent.context.distro !== distro) continue;
+      if (agent.context?.kind !== "wsl" || agent.context.distro !== distro) continue;
       const dir = SKILL_DIRS[agent.driver ?? "acp"];
       if (dir) dirs.add(dir);
     }

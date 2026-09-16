@@ -212,7 +212,7 @@ export function NewSessionDialog({
         ? initialProjectLocation.workspaceId
       : runner?.workspaces[0]?.id) ?? "",
   );
-  const initialAgentOptions = agentOptions(runner?.agents ?? [], { includeConductor: false });
+  const initialAgentOptions = agentOptions(runner?.agents ?? []);
   const initialAgentSelection = savedAgentSelection(initialAgentOptions, agentDefaults[runnerId]);
   const [agentId, setAgentId] = useState(initialAgentSelection.agentId);
   const [presetOverride, setPresetOverride] = useState<"default" | "orchestrator">("default");
@@ -335,7 +335,7 @@ export function NewSessionDialog({
     isLaunchableProjectLocation(location, runners)) ?? [];
 
   const agentOpts = useMemo(
-    () => agentOptions(runner?.agents ?? [], { includeConductor: false }),
+    () => agentOptions(runner?.agents ?? []),
     [runner?.agents],
   );
   const agentComboboxOptions = useMemo<SearchableComboboxOption<string>[]>(() => agentOpts.map((option) => {
@@ -596,7 +596,7 @@ export function NewSessionDialog({
     setRunnerId(id);
     const r = runners.get(id);
     setWorkspaceId(r?.workspaces[0]?.id ?? "");
-    const options = agentOptions(r?.agents ?? [], { includeConductor: false });
+    const options = agentOptions(r?.agents ?? []);
     const selection = savedAgentSelection(options, agentDefaults[id]);
     setAgentId(selection.agentId);
     setBrowsedPath(null);
@@ -615,7 +615,7 @@ export function NewSessionDialog({
     if (!r?.workspaces.some((w) => w.id === loc.workspaceId)) return;
     setRunnerId(loc.runnerId);
     setWorkspaceId(loc.workspaceId);
-    const options = agentOptions(r.agents, { includeConductor: false });
+    const options = agentOptions(r.agents);
     const selection = savedAgentSelection(options, agentDefaults[loc.runnerId]);
     setAgentId(selection.agentId);
     setBrowsedPath(null);

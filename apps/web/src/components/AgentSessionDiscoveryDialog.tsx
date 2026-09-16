@@ -12,7 +12,6 @@ import {
   agentDriverDescription,
   agentDriverLabel,
   driverKindLabel,
-  isGeneratedConductorName,
 } from "../agent-presentation.js";
 import { relativeTime, titleCaseLabel } from "../format.js";
 import { adoptAction, externalSessionKey } from "../runners.js";
@@ -33,7 +32,7 @@ function sameContext(left: AgentContext | undefined, right: AgentContext): boole
 }
 
 export function agentSupportsSessionDiscovery(agent: AgentDefinition): boolean {
-  if (agent.available !== true || agent.id === "conductor" || isGeneratedConductorName(agent.name)) return false;
+  if (agent.available !== true) return false;
   const driver = agent.driver ?? "acp";
   if (driver === "claude-code" || driver === "codex" || driver === "codex-app-server") return true;
   return driver === "acp" && agent.acp?.sessionList !== false;
