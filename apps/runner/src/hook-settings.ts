@@ -363,7 +363,7 @@ export function applyClaudeHookCapability(
   log?: (message: string) => void,
 ): AgentDefinition[] {
   return agents.map((agent) => {
-    if (agent.id === "conductor" || agent.driver !== "claude-code" || !agent.capabilities) return agent;
+    if (agent.driver !== "claude-code" || !agent.capabilities) return agent;
     const native = (agent.context?.kind ?? "native") === "native";
     const withoutManagedHook = Object.fromEntries(
       (agent.capabilities.permissionModes ?? []).map((mode) => {
@@ -396,7 +396,7 @@ export function provisionClaudeHooks(
   log: (message: string) => void,
   host: ClaudeHookHost = defaultClaudeHookHost(),
 ): void {
-  if (spec.agentId === "conductor" || spec.driver !== "claude-code") return;
+  if (spec.driver !== "claude-code") return;
   assertSafeSessionFileId(spec.sessionId);
   const expectedFile = claudeHookSettingsPath(host.configDir, spec.sessionId);
   const existingIndex = spec.args.findIndex(

@@ -365,7 +365,7 @@ test("credential acknowledgement creates an exact-hash readiness fence and rejec
   }
 });
 
-test("Claude receives the general MCP config without enabling or synthesizing a conductor", () => {
+test("Claude receives the general MCP config without changing the agent identity", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-agent-control-"));
   try {
     const host: AgentControlHost = {

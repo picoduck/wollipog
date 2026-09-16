@@ -1,6 +1,4 @@
 import { fireDomEvent } from "./test-dom-events.js";
-import { setExperimentFlag } from "../experiments.js";
-import { LOCAL_INSTANCE_SCOPE } from "../instance-storage.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act } from "react";
@@ -255,22 +253,9 @@ test("run Project copy stays neutral before selection and fails closed when audi
   }
 });
 
-test("workflow creation ignores a retired conductor even with stale opt-in and advertisement", async () => {
-  // The conductor orchestrator exists only behind the device-local experiment, which defaults
-  // off; this test is about the disclosure copy, so it opts in first.
-  setExperimentFlag("conductor", true, LOCAL_INSTANCE_SCOPE);
-  const conductorRunner: RunnerView = {
-    ...runner,
-    agents: [
-      ...runner.agents,
-      { id: "conductor", name: "Conductor", command: "claude", args: [], env: {}, driver: "claude-code", available: true },
-    ],
-  };
+test("workflow creation discloses Project visibility and how ready roles advance", async () => {
   for (const audience of ["user", "team"] as const) {
-    const fixture = await mountFixture({
-      projects: [{ ...project, audience }],
-      runners: [conductorRunner],
-    });
+    const fixture = await mountFixture({ projects: [{ ...project, audience }] });
     try {
       await act(async () => {
         selectByLabel(fixture.container, "Project", project.id);
@@ -279,7 +264,6 @@ test("workflow creation ignores a retired conductor even with stale opt-in and a
       const copy = [...fixture.container.querySelectorAll("label")]
         .find((label) => label.querySelector(":scope > span")?.textContent === "Project")?.textContent ?? "";
       assert.match(copy, /New run session transcripts use the Project's visibility./);
-      assert.doesNotMatch(copy, /conductor session/);
       const hint = [...fixture.container.querySelectorAll("p.muted")]
         .find((p) => p.textContent?.startsWith("Workers start idle."))?.textContent;
       assert.equal(hint, "Workers start idle. Use the workflow controls in the run to advance ready roles.");

@@ -31,7 +31,7 @@ the exact id activates the pending credential and persists runner metadata in th
 transaction. Rotation therefore has no planned disconnect: the old credential remains active until
 the replacement registers, then becomes revoked. Pending credentials expire after 24 hours.
 
-Authentication is rechecked against the active digest on every runner WebSocket frame. Conductor
+Authentication is rechecked against the active digest on every runner WebSocket frame. Agent session
 REST claims additionally require an active credential for the exact session runner and the existing
 live-session route allowlist. Revocation, runner deletion, or id reuse cannot inherit a prior secret
 or ownership scope. Cross-organization lifecycle requests return the same not-found response as an
@@ -95,7 +95,7 @@ Completion additionally requires that current-binary proof and the exact credent
 launch. An explicit adoption attempt against a root already owned by another runner fails closed
 instead of recording a migration in that runner's replacement namespace.
 
-## Agent and conductor secrets stay runner-local
+## Agent secrets stay runner-local
 
 An agent `env` entry may be a literal string for compatibility or a host reference:
 
@@ -114,8 +114,7 @@ scrubs pre-v54 environment values from control-plane durable commands, runner me
 session snapshots; commands that have not begun are rejected instead of being replayed with removed
 secrets. Native and WSL launches pass resolved values through the child environment, never argv.
 
-Conductor MCP sessions likewise do not duplicate the active credential. Before opening any mutable
-store, the runner takes an exclusive process lease on `dataDir` and checks a protected owner marker
+Before opening any mutable store, the runner takes an exclusive process lease on `dataDir` and checks a protected owner marker
 bound to the runner id and the control plane's durable instance id. A frozen v1 marker retains the
 normalized endpoint used when that compatibility marker was first published, and both current and
 rollback runners write the shared lease with its v1 hash. A live process therefore fails before a
@@ -138,12 +137,7 @@ and does not expose its current sessions; keep the current binary available to r
 each rollback-sensitive runner its own explicit data root.
 
 The active credential is mode 0600 at
-`<dataDir>/credentials/instances/<owner-hash>/active-runner-token`. Per-session Conductor MCP
-configuration lives under `<dataDir>/conductor/runner-instances/<owner-hash>`, contains only
-`MANAGER_TOKEN_FILE`, and is refreshed before every launch or resume. Startup sweeps only that
-attested leaf; it never removes top-level legacy per-session MCP JSON that may have embedded
-`MANAGER_TOKEN`. The MCP process still understands the legacy environment variable for rolling
-compatibility, but current runner launches use only the protected file reference.
+`<dataDir>/credentials/instances/<owner-hash>/active-runner-token`.
 
 An empty pre-marker data root is claimed automatically. A populated pre-marker root fails before
 publishing a lease or changing any byte because a still-running old binary cannot honor the new
@@ -180,7 +174,7 @@ errors still fail closed. Other durability failures abort startup before mutable
 
 The ownership boundary covers runner-managed sessions, native worktrees, admission records,
 durable-command and session-command receipts, checkpoint ownership, cleanup journals, registry
-approvals, Claude hook launch files, Conductor launch files, and native isolated provider-state
+approvals, Claude hook launch files, and native isolated provider-state
 partitions because their production constructors all receive the claimed data root. Provider CLI
 installation, discovery, and login bytes remain operator-owned files. Mutable native provider,
 Seatbelt, Windows Job, ACP, and Agent TUI launches are serialized across control-plane owners by a
@@ -190,12 +184,8 @@ closed because the Windows relay cannot hold target-local no-follow directory ha
 exec. Use a supported native, container, or cloud execution target. Container and cloud provider
 homes are independent.
 
-The runner scrubs obsolete Conductor configs only inside its owned
-`<dataDir>/conductor/runner-instances/<owner-hash>` directory.
-It deliberately does not sweep the former shared home-level Conductor directory because those files
-cannot be attributed safely while an older runner may still be using them. After stopping every
-pre-migration runner for the account, use `--state-doctor inventory` and the explicit
-`quarantine-conductor` action. The doctor prints redacted counts rather than contents. Its
+After stopping every pre-migration runner for the account, use `--state-doctor inventory` to
+review legacy state. The doctor prints redacted counts rather than contents. Its
 `adopt-checkpoints` and `adopt-provider-state` actions copy legacy state into the attested namespace
 without deleting sources; `quarantine-wsl` atomically moves the ambiguous shared provider/worktree
 roots aside. Mutations require `--ack-all-legacy-runners-stopped` and refuse an active data lease.

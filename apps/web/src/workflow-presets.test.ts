@@ -22,7 +22,6 @@ test("workflow presets dedupe graph roles and bind primary provider-native agent
     agent({ id: "claude-code", name: "Claude", driver: "claude-code" }),
     agent({ id: "codex", name: "Codex", driver: "codex-app-server" }),
     agent({ id: "codex-exec", name: "Codex exec", driver: "codex" }),
-    agent({ id: "conductor", name: "Conductor", driver: "claude-code" }),
   ];
   assert.deepEqual(workflowAgentRoles(definition), ["claude", "codex"]);
   assert.deepEqual(defaultWorkflowBindings(definition, agents), { claude: "claude-code", codex: "codex" });
@@ -32,7 +31,6 @@ test("workflow presets dedupe graph roles and bind primary provider-native agent
 test("workflow preset binding fails closed when a required provider is unavailable", () => {
   const agents = [
     agent({ id: "claude-code", name: "Claude", driver: "claude-code", available: false }),
-    agent({ id: "conductor", name: "Conductor", driver: "claude-code", available: false }),
   ];
   assert.deepEqual(defaultWorkflowBindings(definition, agents), {});
   assert.equal(workflowBindingsComplete(definition, {}), false);

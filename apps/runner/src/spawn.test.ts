@@ -484,7 +484,7 @@ test("spawnAgent scrubs inherited env keys but explicit env still wins", async (
   }
 });
 
-test("spawnAgent always scrubs runner-only conductor and hook policy environment", async () => {
+test("spawnAgent always scrubs runner-only credential and hook policy environment", async () => {
   const keys = [
     "WOLLIPOG_CLAUDE_HOOKS",
     "MAM_CLAUDE_HOOKS",
@@ -505,7 +505,7 @@ test("spawnAgent always scrubs runner-only conductor and hook policy environment
     "MANAGER_TOKEN_FILE",
   ];
   for (const key of keys) process.env[key] = "runner-only";
-  const script = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "wollipog-spawn-conductor-")), "probe.js");
+  const script = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "wollipog-spawn-runner-only-")), "probe.js");
   await fs.writeFile(
     script,
     `process.stdout.write(JSON.stringify(${JSON.stringify(keys)}.map((key) => process.env[key] ?? null)));`,

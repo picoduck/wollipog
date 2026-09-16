@@ -616,7 +616,6 @@ export class SubscriptionUsageManager {
     const result: SubscriptionSource[] = [];
     const seen = new Set<string>();
     for (const agent of this.options.agents()) {
-      if (agent.id === "conductor") continue;
       const provider = agent.driver === "codex-app-server"
         ? "codex"
         : agent.driver === "claude-code"
@@ -740,7 +739,6 @@ export class SubscriptionUsageManager {
     context: AgentContext,
     update: DriverSubscriptionUsageUpdate,
   ): SubscriptionUsageSnapshot | null {
-    if (agentId === "conductor") return null;
     this.syncSources();
     const provider = driver === "codex-app-server" ? "codex" : driver === "claude-code" ? "claude" : null;
     if (!provider || provider !== update.provider) return null;

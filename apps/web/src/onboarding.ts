@@ -151,7 +151,7 @@ export function localRunnerReadiness(runner: RunnerView | undefined): LocalRunne
       agentLabels: [],
     };
   }
-  const agents = runner.agents.filter((agent) => agent.id !== "conductor");
+  const agents = runner.agents;
   const labels = [...new Set(agents.map(agentDriverLabel))];
   const ready = agents.filter(agentVerifiedReady);
   if (ready.length) {

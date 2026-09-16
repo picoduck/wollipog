@@ -136,13 +136,8 @@ export function AutomationsView() {
   // creating one. An automation that ALREADY uses the action keeps its option so editing it
   // renders truthfully — the flag hides surfaces, it does not orphan stored data.
   const multiAgentEnabled = useExperiments().flags.multiAgent;
-  // The retired conductor must not be schedulable here — while an automation ALREADY targeting
-  // it keeps its stored agent visible, the same never-silently-rewrite rule the rest of this
-  // form follows.
-  const automationAgents = (agents: readonly AgentDefinition[] | undefined, keepId: string) =>
-    (agents ?? []).filter((agent) => agent.id !== "conductor" || agent.id === keepId);
   const defaultAgentId = (agents: readonly AgentDefinition[] | undefined) =>
-    automationAgents(agents, "")[0]?.id ?? "";
+    agents?.[0]?.id ?? "";
   const runners = useStoreSelector((state) => state.runners);
   const boxes = useStoreSelector((state) => state.boxes);
   // Passing the correlated Box matters for an SSH Machine left unnamed: runnerDisplay falls back
@@ -465,7 +460,7 @@ export function AutomationsView() {
                   {(selectedRunner?.workspaces ?? []).map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
                 </select></label>
                 {form.actionKind === "create_session" ? <label>Agent<select value={form.agentId} onChange={(event) => setForm((current) => withAgent(current, event.target.value))}>
-                  {automationAgents(selectedRunner?.agents, form.agentId).map((agent) => <option key={agent.id} value={agent.id}>{agentDisplayName(agent)}</option>)}
+                  {(selectedRunner?.agents ?? []).map((agent) => <option key={agent.id} value={agent.id}>{agentDisplayName(agent)}</option>)}
                 </select></label> : <label>Workflow<select value={form.workflowId} onChange={(event) => patch("workflowId", event.target.value)}>
                   {workflows.map((workflow) => <option key={`${workflow.workflowId}:${workflow.version}`} value={workflow.workflowId}>{workflow.name} · v{workflow.version}</option>)}
                 </select></label>}
@@ -518,7 +513,7 @@ export function AutomationsView() {
                 .filter((runner) => runner.runnerId !== form.runnerId && !carriedAlternateRunnerIds.has(runner.runnerId))
                 .map((runner) => <option key={runner.runnerId} value={runner.runnerId}>{machineLabels.get(runner.runnerId)}</option>)}</select></label>
               <label>Alternate Workspace<select value={form.fallbackWorkspaceId} onChange={(event) => patch("fallbackWorkspaceId", event.target.value)}>{(selectedFallback?.workspaces ?? []).map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</select></label>
-              {form.actionKind === "create_session" && <label>Alternate Agent<select value={form.fallbackAgentId} onChange={(event) => patch("fallbackAgentId", event.target.value)}>{automationAgents(selectedFallback?.agents, form.fallbackAgentId).map((agent) => <option key={agent.id} value={agent.id}>{agentDisplayName(agent)}</option>)}</select></label>}
+              {form.actionKind === "create_session" && <label>Alternate Agent<select value={form.fallbackAgentId} onChange={(event) => patch("fallbackAgentId", event.target.value)}>{(selectedFallback?.agents ?? []).map((agent) => <option key={agent.id} value={agent.id}>{agentDisplayName(agent)}</option>)}</select></label>}
               {carriedAlternateRunnerIds.size > 0 && <p className="automation-hint automation-span">
                 Additional stored alternate machines are preserved: {[...carriedAlternateRunnerIds]
                   .map((runnerId) => machineLabels.get(runnerId) ?? runnerId)

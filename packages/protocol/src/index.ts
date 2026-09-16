@@ -510,8 +510,6 @@ export function isControlPlaneService(value: unknown): value is ControlPlaneServ
  * the Wollipog generation while consumers continue accepting both generations. */
 export const LEGACY_TRANSCRIPT_SHARE_AUTH_SCHEME = "MAM-Share" as const;
 export const WOLLIPOG_TRANSCRIPT_SHARE_AUTH_SCHEME = "Wollipog-Share" as const;
-export const LEGACY_CONDUCTOR_ACTOR_SESSION_HEADER = "x-mam-actor-session" as const;
-export const WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER = "x-wollipog-actor-session" as const;
 /** Exact session claim paired with a per-session agent-control credential. */
 export const WOLLIPOG_AGENT_ACTOR_SESSION_HEADER = "x-wollipog-agent-session" as const;
 export const LEGACY_POLICY_HOOK_SESSION_HEADER = "x-mam-hook-session" as const;

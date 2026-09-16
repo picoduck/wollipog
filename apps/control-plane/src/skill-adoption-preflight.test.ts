@@ -11,7 +11,6 @@ const agents: AgentDefinition[] = [
   { id: "app", name: "App", command: "codex", args: [], env: {}, driver: "codex-app-server" },
   { id: "claude", name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code" },
   { id: "pi", name: "Pi", command: "pi", args: [], env: {}, driver: "pi" },
-  { id: "conductor", name: "Conductor", command: "claude", args: [], env: {}, driver: "claude-code" },
   { id: "wsl", name: "WSL", command: "codex", args: [], env: {}, driver: "codex", context: { kind: "wsl", distro: "Ubuntu" } },
 ];
 const candidate = { id: "opaque", name: "alpha", sourceDirectory: ".codex/skills", generation: "one" };
@@ -34,7 +33,7 @@ test("adoption prerequisites use effective targets and pins, and disclose shared
   assert.deepEqual(check().sharedReaders, ["app"]);
   assert.ok(check(".claude/skills").blockers.includes("source_not_targeted"));
   assert.equal(check(".agents/skills").status, "prerequisites_met");
-  assert.deepEqual(check(".agents/skills").sharedReaders, ["app", "claude", "pi"], "non-native contexts and the synthesized conductor are not counted");
+  assert.deepEqual(check(".agents/skills").sharedReaders, ["app", "claude", "pi"], "non-native contexts are not counted");
   db.updateSkillAssignment(assignment.id, { invocation: "manual" });
   assert.ok(check().blockers.includes("invocation_unsupported"));
   db.updateSkillAssignment(assignment.id, { invocation: "agent", enabled: false });

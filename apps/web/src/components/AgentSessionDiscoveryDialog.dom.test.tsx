@@ -85,15 +85,6 @@ const runner: RunnerView = {
         sessionClose: false,
       },
     },
-    {
-      id: "conductor",
-      name: "Conductor",
-      command: "internal",
-      args: [],
-      env: {},
-      driver: "acp",
-      available: true,
-    },
   ],
 };
 
@@ -112,13 +103,6 @@ test("App Server is selectable and its remapped Codex sessions stay scoped to it
   assert.equal(agentSupportsSessionDiscovery(appServer), true);
   assert.equal(sessionMatchesAgent(session, appServer), true);
   assert.equal(sessionMatchesAgent({ ...session, driver: "codex" }, appServer), false);
-});
-
-test("session discovery excludes exact Conductor identities without matching arbitrary names", () => {
-  const appServer = runner.agents.find((agent) => agent.id === "codex-app")!;
-  assert.equal(agentSupportsSessionDiscovery({ ...appServer, id: "legacy", name: "Conductor (Agent Manager)" }), false);
-  assert.equal(agentSupportsSessionDiscovery({ ...appServer, id: "current", name: "Conductor (Wollipog)" }), false);
-  assert.equal(agentSupportsSessionDiscovery({ ...appServer, id: "custom", name: "My Conductor" }), true);
 });
 
 test("an old runner explains why Codex App Server discovery requires an update", async () => {
@@ -228,7 +212,6 @@ test("agent session discovery waits for a selection and scopes the result list",
 
     assert.equal(calls.length, 0, "opening the dialog must not scan before the user selects an agent");
     assert.match(container.textContent ?? "", /Select an Agent/);
-    assert.doesNotMatch(container.textContent ?? "", /Conductor/);
     assert.match(container.textContent ?? "", /Codex App Server/);
     assert.match(container.textContent ?? "", /Codex — Non-Interactive \(codex exec\)/);
     assert.match(container.textContent ?? "", /Uses codex exec to run each turn non-interactively/);

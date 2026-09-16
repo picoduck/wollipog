@@ -9,7 +9,7 @@ the exact session content before issuing a link.
 ## Issuing and managing links
 
 Any human member who can read a session can list its shares. Owners, admins, and scoped operators
-can create and revoke them; viewers remain read-only. Conductors are not allowed to manage shares.
+can create and revoke them; viewers remain read-only. Agent session credentials are not allowed to manage shares.
 The authenticated routes are:
 
 - `GET /api/sessions/:id/transcript-shares`
@@ -37,7 +37,7 @@ the normal store, `/ui` WebSocket, push lifecycle, pairing flow, navigation, or 
 
 The isolated page sends the capability only as `Authorization: Wollipog-Share <capability>` to the exact
 `GET /api/public/transcript-share` route. This is the only API read exempt from paired-device auth;
-`HEAD`, mutations, subpaths, ordinary APIs, and the conductor allowlist remain unchanged. The
+`HEAD`, mutations, subpaths, ordinary APIs, and the agent session allowlist remain unchanged. The
 `Wollipog-Share` scheme cannot authenticate as a device `Bearer` credential. During the
 compatibility window, the exact legacy `MAM-Share` scheme remains accepted for links opened by an
 older dashboard. Unknown, malformed,

@@ -184,7 +184,7 @@ test("registration activates a pending credential and rotation preserves the old
 
   const replacement = issueRunnerCredential(db, { runnerId: "runner-1", scope: organizationScope, now: 300 });
   assert.equal(db.verifyActiveRunnerCredential("runner-1", hashToken(replacement.token)), false,
-    "a conductor check must not promote pending credentials");
+    "a read-only REST credential check must not promote pending credentials");
   assert.equal(db.verifyActiveRunnerCredential("runner-1", hashToken(initial.token)), true,
     "issuing a rotation must leave the current runner working");
 

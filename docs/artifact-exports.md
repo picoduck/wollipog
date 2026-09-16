@@ -10,7 +10,7 @@ other sensitive material; review the preview and provenance before downloading o
 
 `GET /api/artifacts/:artifactId/export` is an authenticated human-only route. Remote dashboards
 send the paired-device credential in `Authorization: Bearer`; the token never appears in the path,
-query, filename, or Blob URL. Conductors cannot use the route. Organization viewers and operators
+query, filename, or Blob URL. Agent session credentials cannot use the route. Organization viewers and operators
 may download an artifact only when its session, or its run's runner/workspace scope, is readable to
 them. Missing and out-of-scope artifacts both return a content-free `404`.
 

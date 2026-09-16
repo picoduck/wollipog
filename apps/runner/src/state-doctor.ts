@@ -5,7 +5,6 @@ import {
   existsSync,
   fstatSync,
   fsyncSync,
-  mkdirSync,
   openSync,
   readFileSync,
   readdirSync,
@@ -30,8 +29,7 @@ const ACTIVE_LEASE = ".wollipog-runner-active-v1.lock";
 const MAX_JSON_BYTES = 256 * 1024;
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 
-type DoctorCommand = "inventory" | "adopt-checkpoints" | "adopt-provider-state" |
-  "quarantine-wsl" | "quarantine-conductor";
+type DoctorCommand = "inventory" | "adopt-checkpoints" | "adopt-provider-state" | "quarantine-wsl";
 
 interface DoctorArgs {
   command: DoctorCommand;
@@ -68,8 +66,8 @@ interface MaintenanceLeaseRecord {
 function parseDoctorArgs(argv: string[]): DoctorArgs {
   const marker = argv.indexOf("--state-doctor");
   const command = argv[marker + 1] as DoctorCommand | undefined;
-  if (!command || !["inventory", "adopt-checkpoints", "adopt-provider-state", "quarantine-wsl", "quarantine-conductor"].includes(command)) {
-    throw new Error("usage: --state-doctor <inventory|adopt-checkpoints|adopt-provider-state|quarantine-wsl|quarantine-conductor> --data-dir <path> [--session-id <id>] [--wsl-distro <name>] [--ack-all-legacy-runners-stopped]");
+  if (!command || !["inventory", "adopt-checkpoints", "adopt-provider-state", "quarantine-wsl"].includes(command)) {
+    throw new Error("usage: --state-doctor <inventory|adopt-checkpoints|adopt-provider-state|quarantine-wsl> --data-dir <path> [--session-id <id>] [--wsl-distro <name>] [--ack-all-legacy-runners-stopped]");
   }
   let dataDir: string | undefined;
   let sessionId: string | undefined;
@@ -153,27 +151,6 @@ function syncDirectory(path: string, options: StateDoctorOptions): void {
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
-}
-
-function createDurableDirectories(path: string, options: StateDoctorOptions): void {
-  const missing: string[] = [];
-  let cursor = path;
-  while (!existsSync(cursor)) {
-    missing.push(cursor);
-    const parent = dirname(cursor);
-    if (parent === cursor) break;
-    cursor = parent;
-  }
-  for (const directory of missing.reverse()) {
-    mkdirSync(directory, { mode: 0o700 });
-    syncDirectory(dirname(directory), options);
-  }
-}
-
-function createDurableFile(path: string, contents: string, options: StateDoctorOptions): void {
-  writeFileSync(path, contents, { flag: "wx", mode: 0o600 });
-  syncFile(path, options);
-  syncDirectory(dirname(path), options);
 }
 
 function replaceMeta(path: string, meta: SessionMeta, options: StateDoctorOptions): void {
@@ -305,15 +282,6 @@ function requireMutation(args: DoctorArgs): void {
   }
 }
 
-function legacyConductorFiles(dataDir: string): string[] {
-  const dir = join(dataDir, "conductor");
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".mcp.json"))
-    .map((entry) => join(dir, entry.name))
-    .sort();
-}
-
 function storedMetas(dataDir: string): { metas: SessionMeta[]; unreadable: number } {
   const root = join(dataDir, "sessions");
   if (!existsSync(root)) return { metas: [], unreadable: 0 };
@@ -358,7 +326,6 @@ export async function runStateDoctor(
         legacyCheckpointSessions: metas.filter((meta) => meta.checkpointRefVersion === undefined && meta.worktreePath).length,
         legacyWslWorktrees: metas.filter((meta) => meta.context.kind === "wsl" && meta.worktreePath && !meta.worktreePath.includes("/runner-instances/")).length,
         legacyWslProviderSessions: metas.filter((meta) => meta.context.kind === "wsl" && meta.providerStateVersion !== 3).length,
-        legacyConductorConfigs: legacyConductorFiles(dataDir).length,
         unreadableSessionMetadata: unreadable,
         ...(wsl ? { wsl } : {}),
       };
@@ -366,36 +333,6 @@ export async function runStateDoctor(
       return;
     }
     requireMutation(args);
-    if (args.command === "quarantine-conductor") {
-      const files = legacyConductorFiles(dataDir);
-      const quarantineId = randomUUID();
-      const sourceDirectory = join(dataDir, "conductor");
-      const target = join(dataDir, "state-quarantine", quarantineId, "conductor");
-      createDurableDirectories(target, options);
-      const manifest = files.map((source, index) => ({
-        itemId: createHash("sha256").update(basename(source)).digest("hex"),
-        originalName: basename(source),
-        storedAs: `${String(index + 1).padStart(4, "0")}.mcp.json`,
-      }));
-      // Publish and sync the rollback map before the first move. Each cross-directory rename then
-      // syncs both directory entries, so every crash prefix remains identifiable and retryable.
-      createDurableFile(
-        join(target, "manifest.json"),
-        `${JSON.stringify({ version: 1, items: manifest }, null, 2)}\n`,
-        options,
-      );
-      for (const [index, source] of files.entries()) {
-        const item = manifest[index];
-        if (!item) throw new Error("conductor quarantine manifest changed unexpectedly");
-        const destination = join(target, item.storedAs);
-        beforeDurabilityOperation(options, "rename", destination);
-        renameSync(source, destination);
-        syncDirectory(sourceDirectory, options);
-        syncDirectory(target, options);
-      }
-      writeOutput(`${JSON.stringify({ quarantined: files.length, quarantineId })}\n`);
-      return;
-    }
     if (args.command === "quarantine-wsl") {
       if (!args.distro) throw new Error("quarantine-wsl requires --wsl-distro");
       const quarantineId = randomUUID();

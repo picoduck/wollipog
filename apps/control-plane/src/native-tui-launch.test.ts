@@ -63,11 +63,10 @@ test("Native TUI preflight rejects every tracked session guardrail", () => {
   } })), null);
 });
 
-test("Native TUI preflight rejects unsupported protocol, OS, driver, conductor, and target", () => {
+test("Native TUI preflight rejects unsupported protocol, OS, driver, and target", () => {
   assert.match(nativeTuiCreationError(fakeDb({ protocolVersion: 57 }), online, request())!.error, /protocol v58/i);
   assert.match(nativeTuiCreationError(fakeDb({ os: "macos" }), online, request())!.error, /Windows or Linux/);
   assert.match(nativeTuiCreationError(fakeDb({ driver: "acp" }), online, request())!.error, /does not expose/);
-  assert.match(nativeTuiCreationError(fakeDb(), online, request({ agentId: "conductor" }))!.error, /Conductor/);
   assert.match(
     nativeTuiCreationError(fakeDb({ targetAdapter: "container" }), online, request({ executionTargetId: "target" }))!.error,
     /host execution target/,

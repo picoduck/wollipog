@@ -180,11 +180,7 @@ export function parseSkillAgentSelector(value: unknown): SkillAgentSelector | nu
 const SKILL_TARGET_DRIVERS = new Set<string>(["claude-code", "codex", "codex-app-server", "pi"]);
 
 function agentEligibleForSkills(agent: AgentDefinition, wslEnabled: boolean, piEnabled: boolean): boolean {
-  // The synthesized conductor shares its donor Claude's harness directory, so as a skills
-  // target it is the same directory twice: "all"/driver selectors would double-target it and
-  // mixed per-agent policies would report a conflict that is really one directory.
-  return agent.id !== "conductor" &&
-    SKILL_TARGET_DRIVERS.has(agent.driver ?? "acp") &&
+  return SKILL_TARGET_DRIVERS.has(agent.driver ?? "acp") &&
     (agent.driver !== "pi" || piEnabled) &&
     ((agent.context?.kind ?? "native") === "native" || (agent.context?.kind === "wsl" && wslEnabled));
 }

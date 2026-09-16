@@ -50,7 +50,7 @@ function record(parent: number, name: string, value: unknown): void {
 export function adoptMachineSkill(options: SkillAdoptionOptions): SkillAdoptionResult {
   if ((options.platform ?? process.platform) !== "linux") return { status: "rejected", error: "Recoverable adoption requires Linux." };
   const { candidate, digest } = options;
-  const allowed = new Set([".agents/skills", ...options.agents.filter((agent) => agent.id !== "conductor" &&
+  const allowed = new Set([".agents/skills", ...options.agents.filter((agent) =>
     (agent.context?.kind ?? "native") === "native").map((agent) => SKILL_DIRS[agent.driver ?? "acp"]).filter(Boolean)]);
   if (!candidate || !validSkillName(candidate.name) || !allowed.has(candidate.sourceDirectory) || !/^[0-9a-f]{64}$/.test(digest)) {
     return { status: "rejected", error: "Invalid adoption source or digest." };

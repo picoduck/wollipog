@@ -756,7 +756,6 @@ export function capabilityConfigError(
 export function normalizeClaudePersistedConfig(
   config: SessionConfig,
   capabilities: AgentCapabilities | undefined,
-  agentId: string | null | undefined,
   driver: string,
 ): SessionConfig {
   if (driver !== "claude-code" || !capabilities) return config;
@@ -916,10 +915,6 @@ function titleFromPrompt(text: string): string {
   return clean.length > 80 ? clean.slice(0, 79).trimEnd() + "…" : clean;
 }
 
-/** The conductor's agent id — a contract constant shared with the runner's agent synthesis and
- * provisioning (apps/runner/src/conductor.ts). Renaming one side breaks the enforcement pairing. */
-const CONDUCTOR_AGENT_ID = "conductor";
-
 /** Persist the capability-dependent Claude default at creation time so the selector, stored
  * session, and launch argv all describe the same mode. Older sessions with no stored mode keep
  * the driver's compatibility fallback and are deliberately not migrated. */
@@ -938,13 +933,11 @@ function workflowMemberCapabilityError(
   agentId: string,
   config: SessionConfig | undefined,
   launch: AgentLaunch,
-  orchestrator: boolean,
 ): string | null {
   if (config?.serviceTier && launch.driver !== "codex-app-server") {
     return `${agentId}: service tier selection is supported only by Codex app-server sessions`;
   }
-  const effectiveConfig = config;
-  const error = capabilityConfigError(effectiveConfig, launch.capabilities);
+  const error = capabilityConfigError(config, launch.capabilities);
   return error ? `${agentId}: ${error}` : null;
 }
 
@@ -975,12 +968,12 @@ export function workflowRunCapabilityError(
     const agentId = Object.hasOwn(bindings, roleId) ? bindings[roleId]! : roleId;
     const launch = db.getAgentLaunch(req.runnerId, agentId);
     if (!launch) continue;
-    const error = workflowMemberCapabilityError(agentId, req.config, launch, false);
+    const error = workflowMemberCapabilityError(agentId, req.config, launch);
     if (error) return error;
   }
   if (req.orchestratorAgentId) {
     const launch = db.getAgentLaunch(req.runnerId, req.orchestratorAgentId);
-    if (launch) return workflowMemberCapabilityError(req.orchestratorAgentId, req.config, launch, true);
+    if (launch) return workflowMemberCapabilityError(req.orchestratorAgentId, req.config, launch);
   }
   return null;
 }
@@ -3046,11 +3039,6 @@ export class SessionsService {
     return gate.ok ? ok(applied) : fail(gate.error!, gate.status);
   }
 
-  private conductorRemovedFromDiscovery(runnerId: string): boolean {
-    return this.db.getRunner(runnerId)?.agentsRefreshed === true &&
-      !this.db.getAgentLaunch(runnerId, CONDUCTOR_AGENT_ID);
-  }
-
   createSession(
     req: CreateSessionRequest,
     delivery?: PreStagedDeliveryOptions,
@@ -3069,9 +3057,6 @@ export class SessionsService {
     const spawnRequest = req;
     const configInputError = sessionGuardrailConfigError(req.config);
     if (configInputError) return fail(configInputError, 400);
-    if (req.agentId === CONDUCTOR_AGENT_ID) {
-      return fail("The Conductor agent is retired; select an ordinary agent to orchestrate child sessions.", 409);
-    }
     const parentSessionId = creationContext?.parentSessionId;
     const parsedOrchestratorOverrides = parseOrchestratorOverrides(req.orchestrator);
     if (req.orchestrator !== undefined && !parsedOrchestratorOverrides) {
@@ -3129,13 +3114,6 @@ export class SessionsService {
     if (snapshotSpec && (snapshotSpec.agentId !== req.agentId ||
         (delivery?.sessionId !== undefined && snapshotSpec.sessionId !== delivery.sessionId))) {
       return fail("pre-staged session command snapshot conflicts with its resources", 409);
-    }
-    // Durable snapshots normally preserve their exact launch across discovery changes. The
-    // conductor is intentionally different: when its runner has stopped advertising the
-    // default-off feature, a pre-flag snapshot must not resurrect it around the normal 404.
-    if (snapshotSpec?.agentId === CONDUCTOR_AGENT_ID &&
-        this.conductorRemovedFromDiscovery(req.runnerId)) {
-      return fail(`unknown agent '${req.agentId}' on runner '${req.runnerId}'`, 404);
     }
     const launch = snapshotSpec ? {
       command: snapshotSpec.command,
@@ -3923,7 +3901,6 @@ export class SessionsService {
         permissionMode: effectiveConfig?.permissionMode ?? session.permissionMode ?? undefined,
       },
       agentCapabilities,
-      session.agentId,
       session.driver,
     );
     const effectiveCostBudgetUsd = effectiveConfig?.costBudgetUsd !== undefined
@@ -4414,7 +4391,7 @@ export class SessionsService {
       effort: config.effort ?? session.effort ?? undefined,
       serviceTier,
       permissionMode: config.permissionMode ?? session.permissionMode ?? undefined,
-    }, agentCapabilities, session.agentId, session.driver);
+    }, agentCapabilities, session.driver);
     const now = Date.now();
     this.db.updateSessionConfig(sessionId, merged, now);
     // Guardrails ride their own columns so config writes never clobber them. Only touch one when
@@ -7772,7 +7749,6 @@ export class SessionsService {
     }
     for (const [index, roleId] of logicalAgentIds.entries()) {
       const agentId = Object.hasOwn(bindings, roleId) ? bindings[roleId]! : roleId;
-      if (agentId === CONDUCTOR_AGENT_ID) return fail("the conductor is reserved for workflow orchestration", 409);
       const snapshot = snapshotStarts?.[index];
       if (snapshot?.type === "start_session" && snapshot.spec.agentId !== agentId) {
         return fail("pre-staged workflow command snapshot conflicts with its role bindings", 409);
@@ -7787,7 +7763,7 @@ export class SessionsService {
         capabilities: snapshot.spec.capabilities,
       } : this.db.getAgentLaunch(req.runnerId, agentId);
       if (!launch) return fail(`workflow role '${roleId}' is bound to unknown agent '${agentId}'`, 404);
-      const configError = workflowMemberCapabilityError(agentId, req.config, launch, false);
+      const configError = workflowMemberCapabilityError(agentId, req.config, launch);
       if (configError) return fail(configError, 409);
       members.push({ roleId, agentId, launch, orchestrator: false });
     }
@@ -7795,11 +7771,6 @@ export class SessionsService {
       const snapshot = snapshotStarts?.[logicalAgentIds.length];
       if (snapshot?.type === "start_session" && snapshot.spec.agentId !== req.orchestratorAgentId) {
         return fail("pre-staged workflow command snapshot conflicts with its orchestrator", 409);
-      }
-      if (snapshot?.type === "start_session" &&
-          req.orchestratorAgentId === CONDUCTOR_AGENT_ID &&
-          this.conductorRemovedFromDiscovery(req.runnerId)) {
-        return fail(`unknown orchestrator agent '${req.orchestratorAgentId}'`, 404);
       }
       const launch = snapshot?.type === "start_session" ? {
         command: snapshot.spec.command,
@@ -7811,12 +7782,12 @@ export class SessionsService {
         capabilities: snapshot.spec.capabilities,
       } : this.db.getAgentLaunch(req.runnerId, req.orchestratorAgentId);
       if (!launch) return fail(`unknown orchestrator agent '${req.orchestratorAgentId}'`, 404);
-      const configError = workflowMemberCapabilityError(req.orchestratorAgentId, req.config, launch, true);
+      const configError = workflowMemberCapabilityError(req.orchestratorAgentId, req.config, launch);
       if (configError) return fail(configError, 409);
       members.push({ roleId: "__orchestrator__", agentId: req.orchestratorAgentId, launch, orchestrator: true });
     }
 
-    // Workflow/run definitions and their conductor-facing MCP tools are organization resources.
+    // Workflow/run definitions and their orchestrator-facing MCP tools are organization resources.
     // Keep worker sessions under the selected workspace owner, but give the trusted orchestrator
     // session an explicit organization scope so a user/team-owned project cannot accidentally
     // disable the workflow routes it was created to drive.
@@ -8887,7 +8858,6 @@ export class SessionsService {
     const resolved: { agentId: string; launch: AgentLaunch }[] = [];
     const unknown: string[] = [];
     for (const agentId of req.agentIds) {
-      if (agentId === CONDUCTOR_AGENT_ID) return fail("the conductor agent is retired", 409);
       const launch = this.db.getAgentLaunch(req.runnerId, agentId);
       const configCapabilityError = capabilityConfigError(req.config, launch?.capabilities);
       if (configCapabilityError) return fail(`${agentId}: ${configCapabilityError}`, 409);
@@ -10046,10 +10016,6 @@ export class SessionsService {
           continue;
         }
       }
-      if (!existing && snap.agentId === CONDUCTOR_AGENT_ID) {
-        this.log.warn(`runner ${runnerId} reported unissued conductor session ${snap.id} — ignored`);
-        continue;
-      }
       if (existing) {
         // Only the owning runner may mutate an existing session row.
         if (existing.runnerId !== runnerId) {
@@ -10656,7 +10622,6 @@ export class SessionsService {
   ): Promise<ServiceResult<SessionView>> {
     if (!this.hub.isRunnerOnline(runnerId)) return fail("runner is offline", 409);
     if (!descriptor.agentSessionId) return fail("descriptor is missing an agent session id", 400);
-    if (descriptor.agentId === CONDUCTOR_AGENT_ID) return fail("the conductor cannot be adopted as an external session", 400);
     const unsupported = this.capabilityFailure(runnerId, "externalSessions", "Adopting agent sessions");
     if (unsupported) return unsupported;
 

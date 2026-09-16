@@ -32,7 +32,7 @@ mkdirSync(outDir, { recursive: true });
 // the Node runtime the SEA is built on.
 const bundle = join(buildDir, "runner.cjs");
 await build({
-  // cli.ts dispatches: `--conductor-mcp` -> the conductor's MCP server, else the daemon.
+  // cli.ts dispatches the internal sidecar modes (see runner-entry.ts), else the daemon.
   entryPoints: [join(runner, "src", "cli.ts")],
   bundle: true,
   platform: "node",

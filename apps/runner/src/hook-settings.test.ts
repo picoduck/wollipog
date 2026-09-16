@@ -138,11 +138,6 @@ test("catalog capability truth does not claim session-scoped hook elicitation be
   assert.deepEqual(native.capabilities, capabilities);
   assert.deepEqual(applyClaudeHookCapability([agent()], false)[0]!.capabilities, capabilities);
   assert.deepEqual(applyClaudeHookCapability([agent({ kind: "wsl", distro: "Ubuntu" })], true)[0]!.capabilities, capabilities);
-  assert.deepEqual(
-    applyClaudeHookCapability([{ ...agent(), id: "conductor" }], true)[0]!.capabilities,
-    capabilities,
-    "Conductor stays on its existing stdio human gate until Phase 4 can resolve hook asks",
-  );
   const stale = agent();
   stale.capabilities = {
     ...capabilities,

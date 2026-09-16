@@ -21,10 +21,7 @@ function agent(p: Partial<AgentDefinition> & { id: string; name: string }): Agen
   return { command: "x", args: [], env: {}, available: true, ...p };
 }
 
-// Conductor-inclusive labels: these presentation tests cover the conductor's family ordering
-// and naming, which a surface sees only after opting in via the experiment flag.
-const labels = (agents: AgentDefinition[]) =>
-  agentOptions(agents, { includeConductor: true }).map((o) => o.label);
+const labels = (agents: AgentDefinition[]) => agentOptions(agents).map((o) => o.label);
 
 test("driver presentation never exposes protocol ids", () => {
   assert.equal(agentDriverLabel(agent({ id: "codex", name: "Codex", driver: "codex-app-server" })), "Codex App Server");
@@ -41,22 +38,12 @@ test("Pi RPC remains distinct in native and WSL choices", () => {
   ]), ["Pi RPC", "Pi RPC · WSL: Ubuntu"]);
 });
 
-test("families group and order: Claude Code, then Codex, then Conductor last", () => {
+test("families group and order: Claude Code, then Codex", () => {
   const out = labels([
-    agent({ id: "conductor", name: "Conductor (agent manager)", driver: "claude-code" }),
     agent({ id: "codex", name: "Codex (native)", driver: "codex" }),
     agent({ id: "claude", name: "Claude Code", driver: "claude-code" }),
   ]);
-  assert.deepEqual(out, ["Claude Code", "Codex — Non-Interactive (codex exec)", "Conductor (Wollipog)"]);
-});
-
-test("both persisted Conductor generations normalize to the current Wollipog label", () => {
-  const out = labels([agent({ id: "persisted-conductor", name: "Conductor (Wollipog)", driver: "claude-code" })]);
-  assert.deepEqual(out, ["Conductor (Wollipog)"]);
-});
-
-test("custom names containing Conductor are not rewritten as the generated identity", () => {
-  assert.deepEqual(labels([agent({ id: "custom", name: "My Conductor", driver: "acp" })]), ["My Conductor"]);
+  assert.deepEqual(out, ["Claude Code", "Codex — Non-Interactive (codex exec)"]);
 });
 
 test("single-variant family drops the redundant 'Native' suffix", () => {
@@ -387,25 +374,5 @@ test("persisted session labels audit the actual Codex driver", () => {
   assert.equal(sessionAgentLabel("Codex", "codex-app-server"), "Codex App Server");
   assert.equal(sessionAgentLabel("Codex", "codex"), "Codex — Non-Interactive (codex exec)");
   assert.equal(sessionAgentLabel("Claude Code", "claude-code"), "Claude Code");
-  assert.equal(sessionAgentLabel("Conductor (Agent Manager)", "claude-code"), "Conductor (Wollipog)");
-  assert.equal(sessionAgentLabel("Conductor (Wollipog)", "claude-code"), "Conductor (Wollipog)");
-  assert.equal(sessionAgentLabel("Configured", "claude-code", "conductor"), "Conductor (Wollipog)");
   assert.equal(sessionAgentLabel(null, "acp", "gemini"), "gemini");
-});
-
-test("the conductor is excluded from generic agent lists unless a surface opts in", () => {
-  const agents = [
-    agent({ id: "claude-native", driver: "claude-code" }),
-    agent({ id: "conductor", name: "Conductor (Wollipog)", driver: "claude-code" }),
-  ];
-  // The runner now advertises the conductor whenever it can host one, so the device-local
-  // experiment switch is the feature's only gate; a list that included it by default would
-  // launch it from ordinary surfaces with the switch off.
-  assert.equal(agentOptions(agents).some((o) => o.agent.id === "conductor"), false);
-  assert.equal(defaultRunAgentIds(agents).includes("conductor"), false);
-  assert.equal(runnableAgentIds(agents).includes("conductor"), false);
-  assert.equal(
-    agentOptions(agents, { includeConductor: true }).some((o) => o.agent.id === "conductor"),
-    true,
-  );
 });

@@ -59,11 +59,7 @@ import {
   resolveRunnerLocalAgentEnvironment,
   type RunnerConfig,
 } from "./config.js";
-import {
-  removeConductorMcpConfig,
-  sweepConductorMcpConfigs,
-  stageRunnerCredentialFile,
-} from "./runner-credential-file.js";
+import { stageRunnerCredentialFile } from "./runner-credential-file.js";
 import {
   applyClaudeHookCapability,
   claudeHookRunnerConfigDir,
@@ -332,17 +328,11 @@ const stagedRunnerCredential = stageRunnerCredentialFile(
   runnerDataIdentity,
 );
 const runnerCredentialFile = stagedRunnerCredential.activePath;
-const conductorHost = {
-  // The pre-attestation default root also used ~/.agent-manager/conductor. Always add an
-  // attested leaf so startup sweeping can never delete unattributable legacy configurations.
-  configDir: resolve(config.dataDir, "conductor", "runner-instances", dataDirLease.ownerHash),
-};
 const claudeHookHost = {
   ...defaultClaudeHookHost(),
   configDir: claudeHookRunnerConfigDir(config.dataDir, config.runnerId),
 };
 const agentControlHost = defaultAgentControlHost(config.dataDir);
-sweepConductorMcpConfigs(conductorHost.configDir);
 sweepClaudeHookFiles(claudeHookHost.configDir);
 sweepAgentControlFiles(agentControlHost.configDir);
 
@@ -350,7 +340,7 @@ const runnerHostname = hostname();
 const sessionNamingCustomModel = new RunnerSessionNamingCustomModel(resolve(config.dataDir, "session-naming"));
 const containerTargets = new ContainerTargetRegistry(config.runnerId, runnerHostname, config.containerTargets);
 const cloudTargets = new CloudTargetRegistry(config.runnerId, runnerHostname, config.cloudTargets);
-const configuredAgentDefinitions = config.agents.filter((a) => a.id !== "conductor").map((a) => {
+const configuredAgentDefinitions = config.agents.map((a) => {
   const driver = a.driver ?? "acp";
   // Git Bash is a non-secret native-provider prerequisite. Project only that one resolved value
   // into runner-local metadata so Windows readiness can honor literal/fromEnv agent config while
@@ -418,15 +408,14 @@ function safeWslLaunchKey(value: Pick<AgentDefinition, "command" | "args" | "dri
   return JSON.stringify([value.context.distro, value.driver ?? "acp", value.command, ...(value.args ?? [])]);
 }
 
-/** Never advertise secret environment data, retired identities, or an orchestration preset
+/** Never advertise secret environment data or an orchestration preset
  * to a control plane that cannot enforce its credential boundary. */
 function agentsForControlPlane() {
   return projectOrchestratorPresetForPeer(metadata.agents, {
     controlPlaneProtocolVersion,
     isolationMode: config.executionIsolation.mode,
   }).filter((agent) =>
-    agent.id !== "conductor" &&
-    (agent.driver !== "pi" || runnerSupportsProtocol(controlPlaneProtocolVersion, "piHarness")))
+    agent.driver !== "pi" || runnerSupportsProtocol(controlPlaneProtocolVersion, "piHarness"))
     .map((agent) => {
       // Account labels are personal display data. Keep Claude's discovery value runner-local and
       // publish it only through the principal-scoped subscription-usage snapshot.
@@ -605,7 +594,6 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
   config.agents.map((agent) => agent.context ?? { kind: "native" as const }),
   async (meta) => {
     meta.env = runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context);
-    if (meta.agentId === "conductor") throw new Error("The Conductor agent is retired; create an ordinary session to orchestrate children.");
     const localAgent = metadata.agents.find((candidate) => candidate.id === meta.agentId);
     provisionClaudeHooks(
       meta,
@@ -1175,8 +1163,7 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
     // labeled cache fallback, codex-exec cache, or Claude aliases), replacing the catalog list.
     metadata.agents = applyClaudeHookCapability(
       await enrichAgentModels(
-        mergeAgents(configAgents, discovered, [...configuredAcpAgents, ...configuredPiAgents])
-          .filter((agent) => agent.id !== "conductor"), {
+        mergeAgents(configAgents, discovered, [...configuredAcpAgents, ...configuredPiAgents]), {
         refresh: refreshModels,
       }),
       claudeHookFeatureEnabled,
@@ -1488,9 +1475,8 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         log("ignored start_session with malformed prompt images");
         break;
       }
-      // Provision managed hooks before persisting launch metadata; refuse retired identities.
+      // Provision managed hooks before persisting launch metadata.
       try {
-        if (msg.spec.agentId === "conductor") throw new Error("The Conductor agent is retired.");
         provisionClaudeHooks(
           msg.spec,
           {
@@ -1604,7 +1590,6 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       const lifecycle = durableLifecycle(claim.handle);
       if (msg.command.type === "start_session") {
         try {
-          if (msg.command.spec.agentId === "conductor") throw new Error("The Conductor agent is retired.");
           provisionClaudeHooks(
             msg.command.spec,
             {
@@ -1716,9 +1701,6 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         log(`session deletion failed for ${msg.sessionId}: ${errText(error)}`);
       });
       shells.closeForSession(msg.sessionId);
-      // Reap the conductor per-session MCP config too. It references the runner credential file;
-      // best-effort removal is a no-op for non-conductor sessions.
-      removeConductorMcpConfig(msg.sessionId, conductorHost.configDir);
       removeClaudeHookFiles(msg.sessionId, claudeHookHost.configDir);
       removeAgentControlFiles(msg.sessionId, agentControlHost.configDir);
       break;

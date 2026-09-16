@@ -4796,12 +4796,12 @@ test("an open policy transport circuit immediately removes the session hook capa
 
 test("a retained session whose launch provisioning throws cannot resume or spawn", async () => {
   const h = harness(
-    { agentId: "conductor", driver: "claude-code", command: "claude", agentSessionId: "claude-session" },
+    { agentId: "claude-code", driver: "claude-code", command: "claude", agentSessionId: "claude-session" },
     Promise.resolve(),
     Promise.resolve(),
     () => {},
     () => {
-      throw new Error("conductor manager MCP provisioning failed: simulated");
+      throw new Error("session MCP provisioning failed: simulated");
     },
   );
   try {

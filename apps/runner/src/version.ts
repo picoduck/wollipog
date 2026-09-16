@@ -1,2 +1,2 @@
-/** Runner version, shared by the daemon banner (index.ts) and the conductor MCP serverInfo. */
+/** Runner version, shared by the daemon banner (index.ts), the CLIs, and the session-management MCP serverInfo. */
 export const VERSION = "0.26.0";

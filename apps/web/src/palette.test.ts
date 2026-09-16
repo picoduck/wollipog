@@ -68,15 +68,3 @@ test("matchSessions: empty query lists recent live and archived sessions", () =>
   assert.match(hits[0]?.detail ?? "", /Awaiting Prompt/, "archive and lifecycle remain independent metadata");
 });
 
-test("matchSessions normalizes both persisted Conductor labels for display and search", () => {
-  const sessions = [
-    s({ id: "legacy", agentId: "conductor", agentName: "Conductor (Agent Manager)" }),
-    s({ id: "current", agentId: "conductor", agentName: "Conductor (Wollipog)" }),
-  ];
-  const hits = matchSessions(sessions, "wollipog", 10);
-  assert.deepEqual(hits.map((hit) => (hit.view as { id: string }).id), ["legacy", "current"]);
-  for (const hit of hits) {
-    assert.match(hit.detail ?? "", /Conductor \(Wollipog\)/);
-    assert.doesNotMatch(hit.detail ?? "", /Agent Manager/);
-  }
-});

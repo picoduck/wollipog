@@ -41,7 +41,7 @@ export function handleSkillAdoption(options: SkillAdoptionCommandOptions): Skill
   if (!desired) return rejected(message, runnerId, "The approved skill version is no longer assigned to this machine.");
 
   const readers = agents.filter((agent) => {
-    if (agent.id === "conductor" || (agent.context?.kind ?? "native") !== "native") return false;
+    if ((agent.context?.kind ?? "native") !== "native") return false;
     const directory = SKILL_DIRS[agent.driver ?? "acp"];
     return directory && (candidate.sourceDirectory === ".agents/skills" || directory === candidate.sourceDirectory);
   });
