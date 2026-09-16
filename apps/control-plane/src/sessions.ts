@@ -3156,8 +3156,9 @@ export class SessionsService {
     if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
     const runner = this.db.getRunner(req.runnerId);
     if (!runner) return fail("runner not found", 404);
-    if (launch.driver === "pi" && !runnerSupportsProtocol(runner.protocolVersion, "piHarness")) {
-      return this.capabilityFailure(req.runnerId, "piHarness", "Pi RPC sessions")!;
+    if (launch.driver === "pi") {
+      const unsupported = this.capabilityFailure(req.runnerId, "piHarness", "Pi RPC sessions");
+      if (unsupported) return unsupported;
     }
     if (!snapshotSpec && req.executionTargetId) {
       const unsupported = this.capabilityFailure(req.runnerId, "executionTargets", "Execution target selection");

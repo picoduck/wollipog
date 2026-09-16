@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { spawnAgent } from "../spawn.js";
 import { probePiRpc } from "./pi-rpc.js";
 
 const fixture = fileURLToPath(new URL("../drivers/fixtures/fake-pi-rpc.mjs", import.meta.url));
@@ -43,3 +44,34 @@ test("Pi discovery fails closed when the RPC contract is not compatible", async 
   assert.deepEqual(result.capabilities.models, []);
 });
 
+test("Pi discovery uses a Linux working directory for WSL probes", async () => {
+  let observedCwd: string | undefined;
+  const result = await probePiRpc(
+    { command: process.execPath, args: [fixture] },
+    { kind: "wsl", distro: "Ubuntu" },
+    {
+      timeoutMs: 2_000,
+      spawn: (options) => {
+        observedCwd = options.cwd;
+        return spawnAgent({ ...options, cwd: process.cwd(), context: { kind: "native" } });
+      },
+    },
+  );
+  assert.equal(result.available, true, result.unavailableReason);
+  assert.equal(observedCwd, "/");
+});
+
+test("Pi discovery enforces one wall-clock deadline across model enumeration", async () => {
+  const startedAt = Date.now();
+  const result = await probePiRpc(
+    { command: process.execPath, args: [fixture] },
+    { kind: "native" },
+    {
+      cwd: process.cwd(),
+      timeoutMs: 55,
+      env: { WOLLIPOG_FAKE_PI_SCENARIO: "slow-discovery" },
+    },
+  );
+  assert.equal(result.available, false);
+  assert.ok(Date.now() - startedAt < 1_000, "the catalog size must not multiply the discovery deadline");
+});

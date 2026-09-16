@@ -105,6 +105,12 @@ test("Pi RPC receipts steering, cancels, and resumes the exact provider session"
   assert.equal(await turn, "cancelled");
 });
 
+test("Pi RPC fails closed when the requested provider session does not exist", async (t) => {
+  const driver = new PiRpcDriver(options("normal", "missing-pi-session"), callbacks([]));
+  t.after(() => driver.dispose());
+  await assert.rejects(driver.initialize());
+});
+
 test("Pi RPC reports process loss after a possibly accepted prompt", async (t) => {
   const events: SessionEventPayload[] = [];
   let exits = 0;
@@ -115,5 +121,5 @@ test("Pi RPC reports process loss after a possibly accepted prompt", async (t) =
   const result = await driver.prompt("possibly delivered").catch(() => "threw" as const);
   assert.ok(result === "refusal" || result === "threw");
   assert.ok(exits >= 1);
+  assert.equal(driver.agentTurnId(), null);
 });
-

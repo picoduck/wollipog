@@ -4,6 +4,8 @@ if (!argv.includes("--mode") || !argv.includes("rpc") || !argv.includes("--no-ap
 const scenario = process.env.WOLLIPOG_FAKE_PI_SCENARIO ?? "normal";
 const resumedAt = argv.indexOf("--session");
 const sessionId = resumedAt >= 0 ? argv[resumedAt + 1] : "pi-session-1";
+if (!process.env.WOLLIPOG_FAKE_PI_SCENARIO && !argv.includes("--no-session")) process.exit(64);
+if (resumedAt >= 0 && sessionId !== "persisted-pi-session") process.exit(66);
 const models = [
   { provider: "anthropic", id: "sonnet", name: "Sonnet", reasoning: true, input: ["text", "image"], contextWindow: 200000 },
   { provider: "openai", id: "mini", name: "Mini", reasoning: false, input: ["text"], contextWindow: 128000 },
@@ -57,6 +59,10 @@ function handle(request) {
       return response("get_available_models", request, { models });
     case "set_model":
       selected = models.find((model) => model.provider === request.provider && model.id === request.modelId) ?? selected;
+      if (scenario === "slow-discovery") {
+        setTimeout(() => response("set_model", request, selected), 40);
+        return;
+      }
       return response("set_model", request, selected);
     case "get_available_thinking_levels":
       return response("get_available_thinking_levels", request, { levels: selected.id === "sonnet" ? ["off", "low", "high"] : ["off"] });
@@ -112,4 +118,3 @@ process.stdin.on("data", (chunk) => {
     if (line.length) handle(JSON.parse(line.toString("utf8")));
   }
 });
-

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentDefinition } from "@wollipog/protocol";
+import { capabilitiesFor } from "../catalog.js";
 import {
   applyAgentModelDiscovery,
   commandDirectoriesForDriver,
@@ -12,6 +13,7 @@ import {
   parseVersion,
   probeConfiguredAcpAgent,
   probeConfiguredAcpAgents,
+  probeConfiguredPiAgents,
   unavailableCodexAgentDefinition,
   unavailableClaudeAgentDefinition,
 } from "./discover.js";
@@ -105,6 +107,63 @@ test("configured ACP discovery sanitizes environment-resolution failures", async
   assert.equal(probed!.available, false);
   assert.match(probed!.unavailableReason!, /environment could not be resolved/u);
   assert.doesNotMatch(probed!.unavailableReason!, /SECRET_ENV_NAME|TOP_SECRET/u);
+});
+
+test("configured Pi discovery uses runner-local environment without publishing it", async () => {
+  let receivedEnv: Record<string, string> | undefined;
+  const configured = cfg({ id: "configured-pi", driver: "pi", command: "pi", capabilities: capabilitiesFor("pi") });
+  const [probed] = await probeConfiguredPiAgents([configured], () => ({ ANTHROPIC_API_KEY: "TOP_SECRET" }), {
+    probe: async (_launch, _context, options) => {
+      receivedEnv = options.env;
+      return {
+        available: true,
+        authStatus: "authenticated",
+        capabilities: {
+          models: [{ id: "anthropic/sonnet" }],
+          effortLevels: ["high"],
+          slashCommands: [],
+          supportsImages: true,
+          supportsApprovals: false,
+          supportsSteering: true,
+          supportsConversationFork: false,
+          permissionModes: [],
+        },
+      };
+    },
+  });
+  assert.deepEqual(receivedEnv, { ANTHROPIC_API_KEY: "TOP_SECRET" });
+  assert.deepEqual(probed!.env, {});
+  assert.equal(probed!.available, true);
+  assert.equal(probed!.capabilities?.models[0]?.id, "anthropic/sonnet");
+});
+
+test("configured Pi discovery adopts the verified resolved launch for a bare command", async () => {
+  let receivedCommand: string | undefined;
+  const configured = cfg({ id: "configured-pi", driver: "pi", command: "pi", capabilities: capabilitiesFor("pi") });
+  const discovered = cfg({
+    id: "pi",
+    driver: "pi",
+    command: "/opt/pi/bin/node",
+    args: ["/opt/pi/lib/cli.js"],
+    bin: "pi",
+    source: "discovered",
+    available: true,
+  });
+  const [probed] = await probeConfiguredPiAgents([configured], () => ({ API_KEY: "secret" }), {
+    discovered: [discovered],
+    probe: async (launch) => {
+      receivedCommand = launch.command;
+      return {
+        available: true,
+        authStatus: "authenticated",
+        capabilities: { models: [], effortLevels: [], slashCommands: [], supportsImages: false,
+          supportsApprovals: false, supportsSteering: true, permissionModes: [] },
+      };
+    },
+  });
+  assert.equal(receivedCommand, "/opt/pi/bin/node");
+  assert.equal(probed!.command, "/opt/pi/bin/node");
+  assert.deepEqual(probed!.args, ["/opt/pi/lib/cli.js"]);
 });
 
 test("Codex prompts and skills are not advertised as slash commands", () => {
@@ -444,6 +503,38 @@ const cfg = (over: Partial<AgentDefinition>): AgentDefinition => ({
   context: { kind: "native" },
   source: "config",
   ...over,
+});
+
+test("configured Pi keeps the complete live RPC capability catalog", () => {
+  const configured = cfg({
+    id: "pi",
+    name: "Pi",
+    command: "pi",
+    driver: "pi",
+    capabilities: capabilitiesFor("pi"),
+  });
+  const discovered = cfg({
+    id: "pi",
+    name: "Pi",
+    command: "/usr/bin/pi",
+    bin: "pi",
+    driver: "pi",
+    source: "discovered",
+    available: true,
+    capabilities: {
+      models: [{ id: "anthropic/sonnet", efforts: ["high"], inputModalities: ["text", "image"] }],
+      effortLevels: ["high"],
+      slashCommands: [{ name: "ship", source: "user" }],
+      supportsImages: true,
+      supportsApprovals: false,
+      supportsSteering: true,
+      supportsConversationFork: false,
+      permissionModes: [],
+    },
+  });
+  const [merged] = mergeAgents([configured], [discovered]);
+  assert.deepEqual(merged!.capabilities, discovered.capabilities);
+  assert.equal(merged!.available, true);
 });
 
 test("mergeAgents appends discovered agents not present in config", () => {

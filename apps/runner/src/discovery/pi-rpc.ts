@@ -38,6 +38,7 @@ export async function probePiRpc(
   options: {
     cwd?: string;
     timeoutMs?: number;
+    env?: Record<string, string>;
     spawn?: typeof spawnAgent;
     kill?: typeof killTree;
   } = {},
@@ -45,27 +46,39 @@ export async function probePiRpc(
   const spawn = options.spawn ?? spawnAgent;
   const kill = options.kill ?? killTree;
   const timeoutMs = options.timeoutMs ?? 12_000;
+  const deadlineAt = Date.now() + timeoutMs;
+  const remaining = (): number => {
+    const value = deadlineAt - Date.now();
+    if (value <= 0) throw new Error("Pi RPC compatibility probe timed out");
+    return value;
+  };
   let child: AgentProcess | null = null;
   let peer: PiRpcPeer | null = null;
+  let activeProvider: string | undefined;
+  let activeModelId: string | undefined;
+  let activeThinkingLevel: string | undefined;
   try {
     child = spawn({
       command: launch.command,
       args: [...launch.args, "--mode", "rpc", "--no-approve", "--no-session"],
-      cwd: options.cwd ?? homedir(),
-      env: { PI_OFFLINE: "1" },
+      cwd: options.cwd ?? (context.kind === "wsl" ? "/" : homedir()),
+      env: { ...options.env, PI_OFFLINE: "1" },
       context,
       trackDescendants: false,
     });
     let transportError: Error | null = null;
     peer = new PiRpcPeer(child.stdin, child.stdout, () => {}, (error) => { transportError = error; });
     const [stateResponse, modelsResponse, commandsResponse] = await Promise.all([
-      peer.request<Json>({ type: "get_state" }, timeoutMs),
-      peer.request<Json>({ type: "get_available_models" }, timeoutMs),
-      peer.request<Json>({ type: "get_commands" }, timeoutMs),
+      peer.request<Json>({ type: "get_state" }, remaining()),
+      peer.request<Json>({ type: "get_available_models" }, remaining()),
+      peer.request<Json>({ type: "get_commands" }, remaining()),
     ]);
     if (transportError) throw transportError;
     const state = object(stateResponse.data);
     const active = object(state?.model);
+    activeProvider = nonempty(active?.provider);
+    activeModelId = nonempty(active?.id);
+    activeThinkingLevel = nonempty(state?.thinkingLevel);
     const available = object(modelsResponse.data)?.models;
     if (!Array.isArray(available)) throw new Error("get_available_models returned no model catalog");
     if (available.length > MAX_DISCOVERED_MODELS) throw new Error("model catalog exceeds the supported bound");
@@ -78,12 +91,12 @@ export async function probePiRpc(
       const id = nonempty(model?.id);
       if (!provider || !id) continue;
       const selection = `${provider}/${id}`;
-      const effortResponse = await peer.request<Json>({ type: "set_model", provider, modelId: id }, timeoutMs);
+      const effortResponse = await peer.request<Json>({ type: "set_model", provider, modelId: id }, remaining());
       const selected = object(effortResponse.data);
       if (nonempty(selected?.provider) !== provider || nonempty(selected?.id) !== id) {
         throw new Error("set_model did not confirm the requested model");
       }
-      const levelsResponse = await peer.request<Json>({ type: "get_available_thinking_levels" }, timeoutMs);
+      const levelsResponse = await peer.request<Json>({ type: "get_available_thinking_levels" }, remaining());
       const rawLevels = object(levelsResponse.data)?.levels;
       if (!Array.isArray(rawLevels)) throw new Error("thinking-level discovery returned no level catalog");
       const efforts = rawLevels.filter((level): level is string => typeof level === "string" && level.length > 0);
@@ -153,6 +166,17 @@ export async function probePiRpc(
       unavailableReason: "The installed Pi CLI did not satisfy Wollipog's RPC compatibility probe. Upgrade `@earendil-works/pi-coding-agent` and rediscover.",
     };
   } finally {
+    // Pi currently persists set_model as the global default even for an in-memory session. Leave
+    // discovery observational by restoring the model that get_state reported before enumeration.
+    if (peer && activeProvider && activeModelId) {
+      const restoreDeadlineAt = Date.now() + 2_000;
+      await peer.request({ type: "set_model", provider: activeProvider, modelId: activeModelId },
+        restoreDeadlineAt - Date.now()).catch(() => {});
+      const restoreRemaining = restoreDeadlineAt - Date.now();
+      if (activeThinkingLevel && restoreRemaining > 0) {
+        await peer.request({ type: "set_thinking_level", level: activeThinkingLevel }, restoreRemaining).catch(() => {});
+      }
+    }
     peer?.dispose("Pi discovery complete");
     if (child) kill(child);
   }

@@ -222,6 +222,11 @@ export class PiRpcDriver implements Driver {
             reject(error);
             this.turnResolve = null;
             this.promptBusy = false;
+            this.promptAccepted = false;
+            this.providerSettled = false;
+            this.settling = false;
+            this.turnId = null;
+            this.cb.onSteeringTurnChanged?.();
           }
         });
     });

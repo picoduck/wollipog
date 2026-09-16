@@ -22,8 +22,8 @@ export const DRIVER_PRESENTATION: Record<AgentDriverKind, { label: string; slot:
   "claude-code": { label: "Claude Code", slot: 1 },
   "codex-app-server": { label: "Codex", slot: 2 },
   codex: { label: "Codex CLI", slot: 3 },
-  pi: { label: "Pi", slot: 4 },
-  acp: { label: "ACP", slot: 5 },
+  acp: { label: "ACP", slot: 4 },
+  pi: { label: "Pi", slot: 5 },
 };
 
 /** Stable reading order across the driver list, chart bands, legend, and hover readout. */

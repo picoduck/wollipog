@@ -139,6 +139,96 @@ export async function probeConfiguredAcpAgents(
   return results;
 }
 
+/** Probe configured Pi entries with their runner-resolved environment. The result is reduced to
+ * metadata before it leaves the runner; credentials and provider diagnostics never cross the
+ * control-plane boundary. */
+export async function probeConfiguredPiAgents(
+  agents: AgentDefinition[],
+  resolveEnv: (agentId: string) => Record<string, string>,
+  options: {
+    cwd?: string;
+    timeoutMs?: number;
+    platform?: NodeJS.Platform;
+    probe?: typeof probePiRpc;
+    discovered?: AgentDefinition[];
+  } = {},
+): Promise<AgentDefinition[]> {
+  const pending = agents.filter((agent) => agent.driver === "pi");
+  const results = new Array<AgentDefinition>(pending.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < pending.length) {
+      const index = next++;
+      const agent = pending[index]!;
+      const context = agent.context ?? { kind: "native" as const };
+      if (context.kind === "wsl" && (options.platform ?? process.platform) !== "win32") {
+        results[index] = {
+          ...agent,
+          env: {},
+          available: false,
+          unavailableReason: "This WSL launch target is incompatible with a non-Windows runner.",
+        };
+        continue;
+      }
+      try {
+        const env = resolveEnv(agent.id);
+        const shapeMatch = options.discovered?.find((candidate) =>
+          launchKeys(agent).some((key) => launchKeys(candidate).includes(key)));
+        const adoptLaunch = Boolean(shapeMatch) && !/[\\/]/.test(agent.command) &&
+          (agent.args?.length ?? 0) === 0 && /[\\/]/.test(shapeMatch!.command);
+        const launchAgent = adoptLaunch ? shapeMatch! : agent;
+        if (shapeMatch && Object.keys(env).length === 0) {
+          results[index] = {
+            ...agent,
+            command: launchAgent.command,
+            args: [...(launchAgent.args ?? [])],
+            env: {},
+            version: agent.version ?? shapeMatch.version,
+            available: shapeMatch.available,
+            authStatus: shapeMatch.authStatus,
+            capabilities: shapeMatch.capabilities,
+            unavailableReason: shapeMatch.unavailableReason,
+          };
+          continue;
+        }
+        const result = await (options.probe ?? probePiRpc)(
+          { command: launchAgent.command, args: [...(launchAgent.args ?? [])] },
+          context,
+          {
+            ...(options.cwd ? { cwd: options.cwd } : {}),
+            ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
+            env,
+          },
+        );
+        results[index] = {
+          ...agent,
+          command: launchAgent.command,
+          args: [...(launchAgent.args ?? [])],
+          env: {},
+          available: result.available,
+          authStatus: result.authStatus,
+          capabilities: result.capabilities,
+          unavailableReason: result.unavailableReason,
+        };
+      } catch {
+        results[index] = {
+          ...agent,
+          env: {},
+          available: false,
+          authStatus: "unknown",
+          capabilities: unavailablePiCapabilities(),
+          unavailableReason: "The configured Pi launch environment could not be resolved or probed on this runner.",
+        };
+      }
+    }
+  };
+  await Promise.all(Array.from(
+    { length: Math.min(MAX_CONCURRENT_CONFIGURED_ACP_PROBES, pending.length) },
+    () => worker(),
+  ));
+  return results;
+}
+
 /** Where each driver keeps user-defined slash commands / prompts ($HOME-relative). */
 const COMMAND_DIRS: Partial<Record<AgentDriverKind, { dir: string; source: AgentSlashCommand["source"] }[]>> = {
   "claude-code": [{ dir: ".claude/commands", source: "user" }],
@@ -714,7 +804,7 @@ function launchKeys(a: AgentDefinition): string[] {
 export function mergeAgents(
   configAgents: AgentDefinition[],
   discovered: AgentDefinition[],
-  configuredAcpProbes: AgentDefinition[] = [],
+  configuredProbes: AgentDefinition[] = [],
 ): AgentDefinition[] {
   // Config selects a driver but cannot attest to live provider contracts. Strip stale steering
   // and Native TUI accounting claims first; only matching discovery may restore them.
@@ -725,13 +815,13 @@ export function mergeAgents(
   for (const d of discovered) {
     for (const k of launchKeys(d)) if (!byKey.has(k)) byKey.set(k, d);
   }
-  // Configured ACP probes are exact evidence for one config identity. They cannot share the
-  // launch-shape index: two rows may intentionally use the same adapter command with different
-  // arguments or environment references, and each probe result must stay attached to its own id.
-  const configuredAcpProbeById = new Map(configuredAcpProbes.map((probe) => [probe.id, probe]));
+  // Configured probes are exact evidence for one config identity. They cannot share the
+  // launch-shape index: two rows may intentionally use the same command with different arguments
+  // or environment references, and each probe result must stay attached to its own id.
+  const configuredProbeById = new Map(configuredProbes.map((probe) => [probe.id, probe]));
   const enriched = safeConfigAgents.map((c) => {
     const shapeMatch = launchKeys(c).map((k) => byKey.get(k)).find(Boolean);
-    const configuredProbe = configuredAcpProbeById.get(c.id);
+    const configuredProbe = configuredProbeById.get(c.id);
     const d = configuredProbe
       ? {
           ...shapeMatch,
@@ -800,7 +890,9 @@ export function mergeAgents(
                   ? { supportsSteering: true as const }
                   : {}),
               }
-            : { ...c.capabilities, slashCommands: d.capabilities?.slashCommands ?? c.capabilities.slashCommands }
+            : c.driver === "pi" && d.capabilities
+              ? d.capabilities
+              : { ...c.capabilities, slashCommands: d.capabilities?.slashCommands ?? c.capabilities.slashCommands }
         : d.capabilities,
     }, c.available !== undefined), c.available !== undefined);
   });
