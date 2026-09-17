@@ -1863,7 +1863,7 @@ const TimelineRow = memo(function TimelineRow({
         </div>
       );
     case "error":
-      return <div className="tl-error">⚠ {item.message}</div>;
+      return <div className="tl-error" role="alert">⚠ {item.message}</div>;
     case "turn_interrupted":
       return (
         <div className="tl-interrupted">
