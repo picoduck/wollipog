@@ -100,6 +100,45 @@ test("session launch passes one resolved isolation boundary to every driver", as
   }
 });
 
+test("an adopted Pi transcript directory is writable inside the session isolation boundary", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-pi-adoption-isolation-"));
+  let manager: SessionManager | undefined;
+  try {
+    const sessionDir = join(root, "sessions", "s1", "pi-adopted-sessions");
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({
+      ...meta(),
+      driver: "pi",
+      agentId: "pi-native",
+      command: "pi",
+      args: ["--session-dir", sessionDir],
+      adoptedProviderState: { driver: "pi", sessionDir },
+    });
+    let state: { additionalWritableRoots?: string[] } | undefined;
+    const factory = () => ({
+      pid: 1, initialize: async () => {}, newSession: async () => "pi-session",
+      prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {},
+      setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "pi-session",
+    });
+    manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, factory as never, join(root, "runner-data"), 1,
+      undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      { mode: "bwrap", network: "deny" }, async (_policy, _context, _deps, options) => {
+        state = options;
+        return { backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "deny" };
+      },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(await internals.acquireAdmission("s1"), true);
+    assert.equal(await internals.launch(store.readMeta("s1")), true);
+    assert.ok(state?.additionalWritableRoots?.includes(sessionDir));
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Seatbelt attach notices keep the live launch roots after HOME or its transcript symlink is retargeted", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-seatbelt-attach-roots-"));
   let manager: SessionManager | undefined;

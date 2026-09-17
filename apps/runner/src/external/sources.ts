@@ -8,9 +8,20 @@
  * best-effort — a missing dir, an unreadable file, or a dead distro yields nothing, never an error.
  */
 
-import { closeSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
+import {
+  closeSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join, posix } from "node:path";
 import type {
   AgentContext,
   AgentDefinition,
@@ -19,11 +30,15 @@ import type {
   SessionEventPayload,
 } from "@wollipog/protocol";
 import { listWslDistros, run } from "../discovery/resolve.js";
+import { runContextCommand } from "../context-command.js";
+import { providerStateKey } from "../execution-isolation.js";
 import {
   parseClaudeSession,
   parseClaudeTranscript,
   parseCodexSession,
   parseCodexTranscript,
+  parsePiSession,
+  parsePiTranscript,
 } from "./parse.js";
 
 /** Most-recent sessions to surface per store per context. */
@@ -37,6 +52,7 @@ const LIST_MAX_BUFFER = 64 * 1024 * 1024;
 const TRANSCRIPT_MAX_BUFFER = 128 * 1024 * 1024;
 
 interface RawFile {
+  path: string;
   fileName: string;
   content: string;
   mtimeMs: number;
@@ -53,7 +69,20 @@ interface StoreSpec {
 const STORES: StoreSpec[] = [
   { driver: "claude-code", subdir: ".claude/projects", parseHead: parseClaudeSession, parseTranscript: parseClaudeTranscript },
   { driver: "codex", subdir: ".codex/sessions", parseHead: parseCodexSession, parseTranscript: parseCodexTranscript },
+  { driver: "pi", subdir: ".pi/agent/sessions", parseHead: parsePiSession, parseTranscript: parsePiTranscript },
 ];
+
+export interface LocatedExternalSession {
+  descriptor: ExternalSessionDescriptor;
+  /** Runner-local source coordinate. Never crosses the control-plane boundary. */
+  path: string;
+}
+
+export interface MaterializedPiSession {
+  descriptor: ExternalSessionDescriptor;
+  sessionDir: string;
+  events: SessionEventPayload[];
+}
 
 /** App Server and `codex exec` share Codex's on-disk rollout store. The selected integration
  * controls how an adopted thread resumes; it does not create a second transcript directory. */
@@ -123,7 +152,7 @@ function nativeRawFiles(subdir: string): RawFile[] {
   const out: RawFile[] = [];
   for (const { path, mtimeMs } of stamped) {
     try {
-      out.push({ fileName: basename(path), content: readSessionHead(path), mtimeMs });
+      out.push({ path, fileName: basename(path), content: readSessionHead(path), mtimeMs });
     } catch {
       /* unreadable — skip */
     }
@@ -159,7 +188,7 @@ async function wslRawFiles(distro: string, subdir: string): Promise<RawFile[]> {
     const parts = header.split("\t").filter((p) => p.length);
     if (parts.length < 2) continue;
     const mtimeMs = Math.round(parseFloat(parts[0]!) * 1000);
-    out.push({ fileName: basename(parts[1]!), content, mtimeMs: Number.isFinite(mtimeMs) ? mtimeMs : 0 });
+    out.push({ path: parts[1]!, fileName: posix.basename(parts[1]!), content, mtimeMs: Number.isFinite(mtimeMs) ? mtimeMs : 0 });
   }
   return out;
 }
@@ -173,6 +202,24 @@ async function wslReadOne(distro: string, subdir: string, agentSessionId: string
     maxBuffer: TRANSCRIPT_MAX_BUFFER, // full transcript for backfill — don't truncate history
   });
   return r.code === 0 ? r.stdout : "";
+}
+
+async function wslReadOneFromRoot(distro: string, root: string, agentSessionId: string): Promise<string> {
+  const id = agentSessionId.replace(/[^0-9a-zA-Z._-]/g, "");
+  if (!id || id !== agentSessionId || !root.startsWith("/")) return "";
+  const context = { kind: "wsl" as const, distro };
+  const found = await runContextCommand(context, "find", [
+    root,
+    "-maxdepth", "8",
+    "-type", "f",
+    "(", "-name", `${id}.jsonl`, "-o", "-name", `*_${id}.jsonl`, "-o", "-name", `*-${id}.jsonl`, ")",
+    "-print", "-quit",
+  ], { cwd: "/", timeoutMs: WSL_TIMEOUT_MS, maxBuffer: 64 * 1024 }).catch(() => null);
+  const path = found?.stdout.split(/\r?\n/u).find(Boolean);
+  if (!path?.startsWith("/")) return "";
+  return runContextCommand(context, "cat", ["--", path], {
+    cwd: "/", timeoutMs: WSL_TIMEOUT_MS, maxBuffer: TRANSCRIPT_MAX_BUFFER,
+  }).then((result) => result.stdout, () => "");
 }
 
 /* ------------------------------- public API ------------------------------- */
@@ -235,10 +282,10 @@ export function resolveLaunchForAgent(
 /** Enumerate external (CLI-started) sessions across the native host + every WSL distro, dedup against
  * sessions Wollipog already owns, sorted most-recent first. A selected agent narrows the scan
  * to one transcript store and execution context. */
-export async function listExternalSessions(
+async function listExternalSessionSources(
   knownAgentSessionIds: Set<string>,
   selected?: { driver: AgentDriverKind; context: AgentContext },
-): Promise<ExternalSessionDescriptor[]> {
+): Promise<LocatedExternalSession[]> {
   const contexts: AgentContext[] = selected ? [selected.context] : [{ kind: "native" }];
   if (!selected) {
     try {
@@ -250,27 +297,39 @@ export async function listExternalSessions(
   const selectedStoreDriver = selected ? externalSessionStoreDriver(selected.driver) : undefined;
   const stores = selected ? STORES.filter((store) => store.driver === selectedStoreDriver) : STORES;
 
-  const all: ExternalSessionDescriptor[] = [];
+  const all: LocatedExternalSession[] = [];
   for (const ctx of contexts) {
     for (const store of stores) {
       const raws = ctx.kind === "native" ? nativeRawFiles(store.subdir) : await wslRawFiles(ctx.distro, store.subdir);
       for (const raw of raws) {
         const d = store.parseHead(raw.content, raw.fileName, raw.mtimeMs, ctx);
         if (d && d.agentSessionId && !knownAgentSessionIds.has(d.agentSessionId)) {
-          all.push(selected?.driver === "codex-app-server" && d.driver === "codex"
-            ? { ...d, driver: "codex-app-server" }
-            : d);
+          all.push({
+            path: raw.path,
+            descriptor: selected?.driver === "codex-app-server" && d.driver === "codex"
+              ? { ...d, driver: "codex-app-server" }
+              : d,
+          });
         }
       }
     }
   }
   // A given id can only appear once; if two contexts somehow surface it, keep the most recent.
-  const byId = new Map<string, ExternalSessionDescriptor>();
-  for (const d of all) {
-    const prev = byId.get(d.agentSessionId);
-    if (!prev || d.updatedAt > prev.updatedAt) byId.set(d.agentSessionId, d);
+  const byId = new Map<string, LocatedExternalSession>();
+  for (const located of all) {
+    const prev = byId.get(located.descriptor.agentSessionId);
+    if (!prev || located.descriptor.updatedAt > prev.descriptor.updatedAt) {
+      byId.set(located.descriptor.agentSessionId, located);
+    }
   }
-  return [...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+  return [...byId.values()].sort((a, b) => b.descriptor.updatedAt - a.descriptor.updatedAt);
+}
+
+export async function listExternalSessions(
+  knownAgentSessionIds: Set<string>,
+  selected?: { driver: AgentDriverKind; context: AgentContext },
+): Promise<ExternalSessionDescriptor[]> {
+  return (await listExternalSessionSources(knownAgentSessionIds, selected)).map((source) => source.descriptor);
 }
 
 /** Re-resolve a single external session from the box's own enumeration, by its resume id. Used at
@@ -278,22 +337,24 @@ export async function listExternalSessions(
 export async function findExternalSession(
   agentSessionId: string,
   knownAgentSessionIds: Set<string>,
-): Promise<ExternalSessionDescriptor | null> {
-  const all = await listExternalSessions(knownAgentSessionIds);
-  return all.find((d) => d.agentSessionId === agentSessionId) ?? null;
+  selected?: { driver: AgentDriverKind; context: AgentContext },
+): Promise<LocatedExternalSession | null> {
+  const all = await listExternalSessionSources(knownAgentSessionIds, selected);
+  return all.find((source) => source.descriptor.agentSessionId === agentSessionId) ?? null;
 }
 
 /** Best-effort parse of one external session's transcript into our event payloads (3c backfill). */
 export async function readExternalTranscript(
   descriptor: ExternalSessionDescriptor,
   homeDirectory = homedir(),
+  sessionRoot?: string,
 ): Promise<SessionEventPayload[]> {
   const store = STORES.find((s) => s.driver === externalSessionStoreDriver(descriptor.driver));
   if (!store) return [];
   let content = "";
   if (descriptor.context.kind === "native") {
     const paths: string[] = [];
-    walkJsonl(join(homeDirectory, store.subdir), paths);
+    walkJsonl(sessionRoot ?? join(homeDirectory, store.subdir), paths);
     const hit = paths.find((p) => basename(p).includes(descriptor.agentSessionId));
     if (hit) {
       try {
@@ -303,7 +364,140 @@ export async function readExternalTranscript(
       }
     }
   } else {
-    content = await wslReadOne(descriptor.context.distro, store.subdir, descriptor.agentSessionId);
+    content = sessionRoot
+      ? await wslReadOneFromRoot(descriptor.context.distro, sessionRoot, descriptor.agentSessionId)
+      : await wslReadOne(descriptor.context.distro, store.subdir, descriptor.agentSessionId);
   }
   return content ? store.parseTranscript(content) : [];
+}
+
+function stableNativePiBytes(source: LocatedExternalSession): Buffer {
+  const file = openSync(source.path, "r");
+  try {
+    const before = fstatSync(file);
+    if (!before.isFile() || before.size <= 0 || before.size > TRANSCRIPT_MAX_BUFFER) {
+      throw new Error("the Pi session transcript is empty or exceeds the supported adoption size");
+    }
+    const bytes = readFileSync(file);
+    const after = fstatSync(file);
+    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size ||
+        before.mtimeMs !== after.mtimeMs || bytes.length !== before.size) {
+      throw new Error("the Pi session changed while it was being adopted; stop that Pi session and retry");
+    }
+    return bytes;
+  } finally {
+    closeSync(file);
+  }
+}
+
+function validatedPiCopy(
+  bytes: Buffer,
+  source: LocatedExternalSession,
+): { descriptor: ExternalSessionDescriptor; content: string } {
+  const content = bytes.toString("utf8");
+  if (!content.endsWith("\n")) {
+    throw new Error("the Pi session does not end at a complete JSONL record; stop that Pi session and retry");
+  }
+  const fileName = source.descriptor.context.kind === "wsl" ? posix.basename(source.path) : basename(source.path);
+  const descriptor = parsePiSession(content, fileName, source.descriptor.updatedAt, source.descriptor.context);
+  if (!descriptor || descriptor.agentSessionId !== source.descriptor.agentSessionId) {
+    throw new Error("the Pi session could not be revalidated from its complete transcript");
+  }
+  return { descriptor, content };
+}
+
+async function wslHome(context: Extract<AgentContext, { kind: "wsl" }>): Promise<string> {
+  const result = await runContextCommand(context, "sh", ["-c", "printf '%s' \"$HOME\""], {
+    cwd: "/", timeoutMs: 5_000, maxBuffer: 64 * 1024,
+  });
+  const home = result.stdout.trim();
+  if (!home.startsWith("/") || home.includes("\0") || home.split("/").includes("..")) {
+    throw new Error("Pi session adoption could not verify the WSL home directory");
+  }
+  return posix.normalize(home);
+}
+
+function safeWslPiAdoptionRoot(sessionDir: string, sessionId: string): string | null {
+  const key = providerStateKey(sessionId);
+  const suffix = `/.agent-manager/wollipog/pi-adopted/${key}/sessions`;
+  if (!sessionDir.startsWith("/") || sessionDir.includes("\0") || sessionDir.split("/").includes("..") ||
+      !sessionDir.endsWith(suffix)) return null;
+  return posix.dirname(sessionDir);
+}
+
+/** Copy an external Pi JSONL file into a runner-owned session directory before adoption. Pi may
+ * migrate or append to the copy later, while the external source remains byte-for-byte untouched. */
+export async function materializePiExternalSession(
+  source: LocatedExternalSession,
+  managerSessionId: string,
+  nativeSessionRoot: string,
+): Promise<MaterializedPiSession> {
+  if (source.descriptor.driver !== "pi") throw new Error("only Pi sessions use managed transcript adoption");
+  if (source.descriptor.context.kind === "native") {
+    const bytes = stableNativePiBytes(source);
+    const validated = validatedPiCopy(bytes, source);
+    const sessionDir = join(nativeSessionRoot, "pi-adopted-sessions");
+    try {
+      mkdirSync(nativeSessionRoot, { recursive: true, mode: 0o700 });
+      mkdirSync(sessionDir, { mode: 0o700 });
+      writeFileSync(join(sessionDir, basename(source.path)), bytes, { flag: "wx", mode: 0o600 });
+      return { descriptor: validated.descriptor, sessionDir, events: parsePiTranscript(validated.content) };
+    } catch (error) {
+      rmSync(nativeSessionRoot, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  const context = source.descriptor.context;
+  const home = await wslHome(context);
+  const key = providerStateKey(managerSessionId);
+  const parent = posix.join(home, ".agent-manager", "wollipog", "pi-adopted");
+  const root = posix.join(parent, key);
+  const sessionDir = posix.join(root, "sessions");
+  const target = posix.join(sessionDir, posix.basename(source.path));
+  try {
+    await runContextCommand(context, "mkdir", ["-p", "--", parent], { cwd: "/", timeoutMs: 5_000 });
+    await runContextCommand(context, "mkdir", ["-m", "700", "--", root], { cwd: "/", timeoutMs: 5_000 });
+    await runContextCommand(context, "mkdir", ["-m", "700", "--", sessionDir], { cwd: "/", timeoutMs: 5_000 });
+    await runContextCommand(context, "cp", ["--", source.path, target], { cwd: "/", timeoutMs: 30_000 });
+    await runContextCommand(context, "chmod", ["600", "--", target], { cwd: "/", timeoutMs: 5_000 });
+    const copied = await runContextCommand(context, "cat", ["--", target], {
+      cwd: "/", timeoutMs: WSL_TIMEOUT_MS, maxBuffer: TRANSCRIPT_MAX_BUFFER,
+    });
+    const validated = validatedPiCopy(Buffer.from(copied.stdout), source);
+    return { descriptor: validated.descriptor, sessionDir, events: parsePiTranscript(validated.content) };
+  } catch (error) {
+    await cleanupPiExternalSession(context, sessionDir, managerSessionId).catch(() => {});
+    throw error;
+  }
+}
+
+export async function cleanupPiExternalSession(
+  context: AgentContext,
+  sessionDir: string,
+  managerSessionId: string,
+): Promise<void> {
+  if (context.kind === "native") {
+    const root = dirname(sessionDir);
+    if (basename(sessionDir) !== "pi-adopted-sessions" || basename(root) !== managerSessionId) {
+      throw new Error("refusing to remove an unrecognized native Pi adoption directory");
+    }
+    rmSync(root, { recursive: true, force: true });
+    return;
+  }
+  const root = safeWslPiAdoptionRoot(sessionDir, managerSessionId);
+  if (!root) throw new Error("refusing to remove an unrecognized WSL Pi adoption directory");
+  const home = await wslHome(context);
+  const expected = posix.join(
+    home,
+    ".agent-manager",
+    "wollipog",
+    "pi-adopted",
+    providerStateKey(managerSessionId),
+    "sessions",
+  );
+  if (sessionDir !== expected) {
+    throw new Error("refusing to remove a WSL Pi adoption directory outside the current distro home");
+  }
+  await runContextCommand(context, "rm", ["-rf", "--", root], { cwd: "/", timeoutMs: 5_000 });
 }

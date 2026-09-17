@@ -10478,6 +10478,14 @@ export class SessionsService {
       );
       if (appServerUnsupported) return appServerUnsupported;
     }
+    if (selectedAgent?.driver === "pi") {
+      const piUnsupported = this.capabilityFailure(
+        runnerId,
+        "piExternalSessions",
+        "Pi session discovery",
+      );
+      if (piUnsupported) return piUnsupported;
+    }
     const requestId = `ext_${randomUUID().slice(0, 8)}`;
     try {
       const res = await this.hub.requestFromRunner(
@@ -10641,6 +10649,10 @@ export class SessionsService {
     if (!descriptor.agentSessionId) return fail("descriptor is missing an agent session id", 400);
     const unsupported = this.capabilityFailure(runnerId, "externalSessions", "Adopting agent sessions");
     if (unsupported) return unsupported;
+    if (descriptor.driver === "pi") {
+      const piUnsupported = this.capabilityFailure(runnerId, "piExternalSessions", "Pi session adoption");
+      if (piUnsupported) return piUnsupported;
+    }
 
     let id = shortId("s_");
     while (this.db.getSession(id) || this.db.isTombstoned(id)) id = shortId("s_");

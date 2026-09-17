@@ -68,6 +68,16 @@ const runner: RunnerView = {
       available: true,
     },
     {
+      id: "pi",
+      name: "Pi",
+      command: "pi",
+      args: [],
+      env: {},
+      driver: "pi",
+      context: { kind: "native" },
+      available: true,
+    },
+    {
       id: "gemini",
       name: "Gemini",
       command: "gemini",
@@ -103,6 +113,38 @@ test("App Server is selectable and its remapped Codex sessions stay scoped to it
   assert.equal(agentSupportsSessionDiscovery(appServer), true);
   assert.equal(sessionMatchesAgent(session, appServer), true);
   assert.equal(sessionMatchesAgent({ ...session, driver: "codex" }, appServer), false);
+});
+
+test("Pi is selectable only when the runner proves source-preserving session adoption", async () => {
+  const pi = runner.agents.find((agent) => agent.id === "pi")!;
+  assert.equal(agentSupportsSessionDiscovery(pi), true);
+  assert.equal(sessionMatchesAgent({
+    agentSessionId: "pi-session",
+    driver: "pi",
+    cwd: "/repos/project",
+    context: { kind: "native" },
+    title: "Pi Session",
+    createdAt: 1,
+    updatedAt: 2,
+    messageCount: 2,
+  }, pi), true);
+
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<AgentSessionDiscoveryDialog runner={{ ...runner, protocolVersion: 155 }} onClose={() => {}} />);
+    });
+    const radio = container.querySelector('input[value="pi"]') as HTMLInputElement;
+    assert.equal(radio.disabled, true);
+    assert.match(container.textContent ?? "", /Pi session discovery/);
+    assert.match(container.textContent ?? "", /requires protocol v156/);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
 });
 
 test("an old runner explains why Codex App Server discovery requires an update", async () => {

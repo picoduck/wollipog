@@ -1556,7 +1556,12 @@ export const TOOLS: McpTool[] = [
       const path = `/api/sessions/${encodeURIComponent(sessionId)}/worktrees`;
       let result = await cpFetch(deps, "POST", path, body, SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS);
       while (result.ok && result.data?.operation?.status === "in_progress") {
-        if (!await cancellableSleep(deps, 1_000)) return errorResult("request cancelled");
+        if (!await cancellableSleep(deps, 1_000)) {
+          return errorResult(
+            "request cancelled after the control plane acknowledged the worktree operation; " +
+            "it may still complete — inspect current state before retrying",
+          );
+        }
         // Repeating the exact coordinates joins the existing v113 operation. Against an older
         // control plane the first response remains the complete legacy result and never loops.
         result = await cpFetch(deps, "POST", path, body, SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS);

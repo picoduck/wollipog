@@ -34,7 +34,7 @@ function sameContext(left: AgentContext | undefined, right: AgentContext): boole
 export function agentSupportsSessionDiscovery(agent: AgentDefinition): boolean {
   if (agent.available !== true) return false;
   const driver = agent.driver ?? "acp";
-  if (driver === "claude-code" || driver === "codex" || driver === "codex-app-server") return true;
+  if (driver === "claude-code" || driver === "codex" || driver === "codex-app-server" || driver === "pi") return true;
   return driver === "acp" && agent.acp?.sessionList !== false;
 }
 
@@ -42,6 +42,13 @@ export function agentSessionDiscoveryUnavailableReason(
   agent: AgentDefinition,
   protocolVersion: number | null | undefined,
 ): string | null {
+  if (agent.driver === "pi" && !runnerSupportsProtocol(protocolVersion, "piExternalSessions")) {
+    return runnerCapabilityRequirement(
+      protocolVersion,
+      "piExternalSessions",
+      "Pi session discovery",
+    );
+  }
   if (agent.driver !== "codex-app-server"
     || runnerSupportsProtocol(protocolVersion, "codexAppServerExternalSessions")) return null;
   return runnerCapabilityRequirement(

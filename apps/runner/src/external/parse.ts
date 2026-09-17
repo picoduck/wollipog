@@ -7,6 +7,7 @@
  *
  *   Claude  ~/.claude/projects/<cwd-slug>/<session-uuid>.jsonl   (filename uuid = --resume id)
  *   Codex   ~/.codex/sessions/<y>/<m>/<d>/rollout-<ts>-<uuid>.jsonl  (session_meta.payload.id = resume id)
+ *   Pi      ~/.pi/agent/sessions/--<cwd>--/<timestamp>_<uuid>.jsonl  (header id = --session id)
  */
 
 import type { AgentContext, ExternalSessionDescriptor, SessionEventPayload } from "@wollipog/protocol";
@@ -36,6 +37,10 @@ function tsToMs(v: unknown, fallback: number): number {
     if (!Number.isNaN(t)) return t;
   }
   return fallback;
+}
+
+function finiteNonNegative(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined;
 }
 
 /** Truncate a value for an event body so a single huge tool output can't bloat the store. */
@@ -450,4 +455,230 @@ export function parseCodexTranscript(content: string): SessionEventPayload[] {
     }
   }
   return foldCodexNarration(out);
+}
+
+/* ----------------------------------- Pi ---------------------------------- */
+
+interface ParsedPiSession {
+  header: Record<string, unknown>;
+  activeEntries: Record<string, unknown>[];
+}
+
+function piSessionIdIsSafe(id: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/u.test(id);
+}
+
+function piCwdIsAbsolute(cwd: string): boolean {
+  return cwd.startsWith("/") || /^[A-Za-z]:[\\/]/u.test(cwd) || cwd.startsWith("\\\\");
+}
+
+/** Pi v2+ stores a tree in one append-only file. Only the branch ending at the last complete entry
+ * is the resumable conversation; importing every line would surface abandoned branches as turns.
+ * Legacy v1 files are linear. A malformed tree is not safely resumable and is rejected rather than
+ * guessed at. Unknown entry types remain in the chain and are ignored by the event mapper. */
+function parsePiStructure(content: string): ParsedPiSession | null {
+  const lines = splitLines(content);
+  if (!lines.length) return null;
+  const header = tryParse(lines[0]!);
+  if (!header || header.type !== "session") return null;
+  const id = asString(header.id);
+  const cwd = asString(header.cwd);
+  const version = header.version === undefined ? 1 : Number(header.version);
+  if (!piSessionIdIsSafe(id) || !piCwdIsAbsolute(cwd) ||
+      !Number.isSafeInteger(version) || version < 1) return null;
+
+  const entries = lines.slice(1).map(tryParse).filter((entry): entry is Record<string, unknown> => entry != null);
+  if (version === 1) return { header, activeEntries: entries };
+  const identified = entries.filter((entry) => typeof entry.id === "string" && entry.id.length > 0);
+  if (!identified.length) return { header, activeEntries: [] };
+  const byId = new Map<string, Record<string, unknown>>();
+  for (const entry of identified) {
+    const entryId = asString(entry.id);
+    if (!piSessionIdIsSafe(entryId) || byId.has(entryId)) return null;
+    byId.set(entryId, entry);
+  }
+  const branch: Record<string, unknown>[] = [];
+  const seen = new Set<string>();
+  let cursor: Record<string, unknown> | undefined = identified.at(-1);
+  while (cursor) {
+    const entryId = asString(cursor.id);
+    if (!entryId || seen.has(entryId)) return null;
+    seen.add(entryId);
+    branch.push(cursor);
+    if (cursor.parentId === null) break;
+    const parentId = asString(cursor.parentId);
+    if (!parentId) return null;
+    cursor = byId.get(parentId);
+    if (!cursor) return null;
+  }
+  return { header, activeEntries: branch.reverse() };
+}
+
+function piText(content: unknown): string {
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content.flatMap((raw) => {
+    const block = raw && typeof raw === "object" ? raw as Record<string, unknown> : null;
+    return block?.type === "text" && typeof block.text === "string" ? [block.text] : [];
+  }).join("").trim();
+}
+
+function piBlocks(content: unknown): Record<string, unknown>[] {
+  if (typeof content === "string") return content.trim() ? [{ type: "text", text: content }] : [];
+  return Array.isArray(content)
+    ? content.filter((block): block is Record<string, unknown> => !!block && typeof block === "object")
+    : [];
+}
+
+function piToolKind(name: string): string | undefined {
+  if (/^(read|ls)$/iu.test(name)) return "read";
+  if (/^(edit|write)$/iu.test(name)) return "edit";
+  if (/^(find|grep|search)$/iu.test(name)) return "search";
+  if (/^(bash|shell|exec|command)$/iu.test(name)) return "execute";
+  if (/^(web|fetch|browse)$/iu.test(name)) return "fetch";
+  return undefined;
+}
+
+function piToolTitle(name: string, args: Record<string, unknown>): string {
+  const command = asString(args.command);
+  if (command) return clip(command, TITLE_CLIP);
+  const path = asString(args.path) || asString(args.file_path) || asString(args.query) || asString(args.pattern);
+  return clip(path ? `${name}: ${path}` : name || "Pi Tool", TITLE_CLIP);
+}
+
+function piUsage(message: Record<string, unknown>): Extract<SessionEventPayload, { kind: "token_usage" }> | null {
+  const usage = message.usage && typeof message.usage === "object"
+    ? message.usage as Record<string, unknown>
+    : null;
+  if (!usage) return null;
+  const cost = usage.cost && typeof usage.cost === "object" ? usage.cost as Record<string, unknown> : null;
+  const provider = asString(message.provider);
+  const model = asString(message.model);
+  const inputTokens = finiteNonNegative(usage.input);
+  const outputTokens = finiteNonNegative(usage.output);
+  const cachedInputTokens = finiteNonNegative(usage.cacheRead);
+  const cacheCreationInputTokens = finiteNonNegative(usage.cacheWrite);
+  const costUsd = finiteNonNegative(cost?.total);
+  if ([inputTokens, outputTokens, cachedInputTokens, cacheCreationInputTokens, costUsd]
+    .every((value) => value === undefined)) return null;
+  return {
+    kind: "token_usage",
+    inputTokens,
+    outputTokens,
+    cachedInputTokens,
+    cacheCreationInputTokens,
+    costUsd,
+    ...(provider && model ? { model: `${provider}/${model}` } : model ? { model } : {}),
+  };
+}
+
+/** Parse a Pi session header plus its active branch into a discovery descriptor. The header id must
+ * agree with the filename so an unrelated JSONL file cannot be adopted through a forged suffix. */
+export function parsePiSession(
+  content: string,
+  fileName: string,
+  mtimeMs: number,
+  context: AgentContext,
+): ExternalSessionDescriptor | null {
+  const parsed = parsePiStructure(content);
+  if (!parsed) return null;
+  const id = asString(parsed.header.id);
+  const stem = fileName.replace(/\.jsonl$/iu, "");
+  if (!fileName.toLowerCase().endsWith(".jsonl") || (stem !== id && !stem.endsWith(`_${id}`))) return null;
+  let title = "";
+  let explicitName = "";
+  let messageCount = 0;
+  for (const entry of parsed.activeEntries) {
+    if (entry.type === "session_info" && typeof entry.name === "string" && entry.name.trim()) {
+      explicitName = entry.name.trim();
+      continue;
+    }
+    if (entry.type !== "message" || !entry.message || typeof entry.message !== "object") continue;
+    const message = entry.message as Record<string, unknown>;
+    if (message.role !== "user" && message.role !== "assistant") continue;
+    messageCount++;
+    if (!title && message.role === "user") title = piText(message.content).slice(0, TITLE_MAX);
+  }
+  return {
+    agentSessionId: id,
+    driver: "pi",
+    cwd: asString(parsed.header.cwd),
+    context,
+    title: (explicitName || title).slice(0, TITLE_MAX),
+    createdAt: tsToMs(parsed.header.timestamp, mtimeMs),
+    updatedAt: mtimeMs,
+    messageCount,
+  };
+}
+
+/** Recover the visible active Pi branch without ever invoking Pi's migrator against the source
+ * file. Tool-only assistant messages deliberately emit no empty agent bubble. */
+export function parsePiTranscript(content: string): SessionEventPayload[] {
+  const parsed = parsePiStructure(content);
+  if (!parsed) return [];
+  const out: SessionEventPayload[] = [];
+  for (const entry of parsed.activeEntries) {
+    if (entry.type !== "message" || !entry.message || typeof entry.message !== "object") continue;
+    const message = entry.message as Record<string, unknown>;
+    const role = asString(message.role);
+    if (role === "user") {
+      const text = piText(message.content);
+      if (text) out.push({ kind: "user_message", text, final: true });
+      continue;
+    }
+    if (role === "assistant") {
+      for (const block of piBlocks(message.content)) {
+        const type = asString(block.type);
+        if (type === "text") {
+          const text = asString(block.text).trim();
+          if (text) out.push({ kind: "agent_message", text, final: true });
+        } else if (type === "thinking") {
+          const text = asString(block.thinking).trim();
+          if (text) out.push({ kind: "agent_thought", text, final: true });
+        } else if (type === "toolCall") {
+          const id = asString(block.id);
+          const name = asString(block.name);
+          const args = block.arguments && typeof block.arguments === "object"
+            ? block.arguments as Record<string, unknown>
+            : {};
+          if (id) out.push({
+            kind: "tool_call",
+            toolCallId: id,
+            title: piToolTitle(name, args),
+            toolKind: piToolKind(name),
+            status: "completed",
+            text: Object.keys(args).length ? clip(JSON.stringify(args), 2_000) : undefined,
+          });
+        }
+      }
+      const usage = piUsage(message);
+      if (usage) out.push(usage);
+      if (message.stopReason === "error" && typeof message.errorMessage === "string" && message.errorMessage.trim()) {
+        out.push({ kind: "error", message: clip(message.errorMessage.trim(), BODY_CLIP) });
+      }
+      continue;
+    }
+    if (role === "toolResult") {
+      const id = asString(message.toolCallId);
+      if (id) out.push({
+        kind: "tool_call_update",
+        toolCallId: id,
+        status: message.isError === true ? "failed" : "completed",
+        text: clip(piText(message.content), BODY_CLIP) || undefined,
+      });
+      continue;
+    }
+    if (role === "bashExecution") {
+      const id = `pi-bash-${asString(entry.id) || out.length + 1}`;
+      const command = asString(message.command);
+      out.push({ kind: "tool_call", toolCallId: id, title: clip(command || "Shell", TITLE_CLIP), toolKind: "execute", status: "completed" });
+      out.push({
+        kind: "tool_call_update",
+        toolCallId: id,
+        status: message.cancelled === true || (typeof message.exitCode === "number" && message.exitCode !== 0) ? "failed" : "completed",
+        text: clip(asString(message.output), BODY_CLIP) || undefined,
+      });
+    }
+  }
+  return out;
 }

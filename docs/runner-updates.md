@@ -148,6 +148,7 @@ bounded privacy-safe inventory through the authorized single-session projection.
 | Track managed background delivery projection and observation | 82 |
 | Inspect the bounded managed background-job inventory | 82 |
 | Classify provider background-work tracking explicitly | 83 |
+| Discover and safely adopt external Pi sessions | 156 |
 
 A missing protocol version is treated as **unknown**, not optimistically supported. Protocol
 metadata itself arrived in v15, so the dashboard cannot prove which earlier commands such a runner

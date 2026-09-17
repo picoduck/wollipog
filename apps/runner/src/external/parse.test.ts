@@ -7,6 +7,8 @@ import {
   parseClaudeTranscript,
   parseCodexSession,
   parseCodexTranscript,
+  parsePiSession,
+  parsePiTranscript,
   stripClaudeNoise,
   stripCodexNoise,
 } from "./parse.js";
@@ -59,6 +61,17 @@ const CODEX = [
   `{"type":"event_msg","payload":{"type":"agent_message","message":"I'll refactor it now."}}`,
 ].join("\n");
 const CODEX_FILE = "rollout-2026-05-21T00-18-49-019e47e6-3480-7e52-ba8a-e97b85ef7857.jsonl";
+
+const PI_ID = "019e47e6-3480-7e52-ba8a-e97b85ef7857";
+const PI = [
+  JSON.stringify({ type: "session", version: 3, id: PI_ID, timestamp: "2026-09-16T12:00:00.000Z", cwd: "/repo/pi" }),
+  JSON.stringify({ type: "message", id: "a1b2c3d4", parentId: null, timestamp: "2026-09-16T12:00:01.000Z", message: { role: "user", content: "Fix Pi adoption" } }),
+  JSON.stringify({ type: "message", id: "b2c3d4e5", parentId: "a1b2c3d4", timestamp: "2026-09-16T12:00:02.000Z", message: { role: "assistant", provider: "anthropic", model: "sonnet", content: [{ type: "thinking", thinking: "Inspect the store." }, { type: "toolCall", id: "tool-1", name: "read", arguments: { path: "/repo/pi/a.ts" } }], usage: { input: 10, output: 4, cacheRead: 3, cacheWrite: 2, cost: { total: 0.02 } }, stopReason: "toolUse" } }),
+  JSON.stringify({ type: "message", id: "c3d4e5f6", parentId: "b2c3d4e5", timestamp: "2026-09-16T12:00:03.000Z", message: { role: "toolResult", toolCallId: "tool-1", toolName: "read", content: [{ type: "text", text: "source" }], isError: false } }),
+  JSON.stringify({ type: "message", id: "d4e5f6a7", parentId: "c3d4e5f6", timestamp: "2026-09-16T12:00:04.000Z", message: { role: "assistant", provider: "anthropic", model: "sonnet", content: [{ type: "text", text: "Implemented safely." }], usage: { input: 5, output: 2, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } }, stopReason: "stop" } }),
+  JSON.stringify({ type: "session_info", id: "e5f6a7b8", parentId: "d4e5f6a7", timestamp: "2026-09-16T12:00:05.000Z", name: "Pi Import" }),
+].join("\n");
+const PI_FILE = `2026-09-16T12-00-00-000Z_${PI_ID}.jsonl`;
 
 test("parseClaudeSession pulls id (from filename), cwd, title, count from the head", () => {
   const d = parseClaudeSession(CLAUDE, CLAUDE_FILE, 5000, NATIVE);
@@ -129,6 +142,72 @@ test("parseCodexTranscript maps agent + real user text, drops the env-context no
     { kind: "user_message", text: "Refactor the parser", final: true },
     { kind: "agent_message", text: "I'll refactor it now.", final: true },
   ]);
+});
+
+test("parsePiSession validates the header identity and prefers the active session name", () => {
+  const descriptor = parsePiSession(PI, PI_FILE, 9_000, NATIVE);
+  assert.ok(descriptor);
+  assert.equal(descriptor.agentSessionId, PI_ID);
+  assert.equal(descriptor.driver, "pi");
+  assert.equal(descriptor.cwd, "/repo/pi");
+  assert.equal(descriptor.title, "Pi Import");
+  assert.equal(descriptor.messageCount, 3, "tool results do not inflate the conversation count");
+  assert.equal(descriptor.createdAt, Date.parse("2026-09-16T12:00:00.000Z"));
+  assert.equal(parsePiSession(PI, `wrong_${PI_ID.slice(0, -1)}0.jsonl`, 9_000, NATIVE), null);
+  assert.equal(parsePiSession(PI.replace('"cwd":"/repo/pi"', '"cwd":"relative"'), PI_FILE, 9_000, NATIVE), null);
+});
+
+test("parsePiTranscript imports the active branch with reasoning, tools, results, and usage", () => {
+  const events = parsePiTranscript(PI);
+  assert.deepEqual(events.map((event) => event.kind), [
+    "user_message",
+    "agent_thought",
+    "tool_call",
+    "token_usage",
+    "tool_call_update",
+    "agent_message",
+    "token_usage",
+  ]);
+  assert.equal(first(events, "user_message").text, "Fix Pi adoption");
+  assert.equal(first(events, "agent_thought").text, "Inspect the store.");
+  assert.deepEqual(first(events, "tool_call"), {
+    kind: "tool_call",
+    toolCallId: "tool-1",
+    title: "read: /repo/pi/a.ts",
+    toolKind: "read",
+    status: "completed",
+    text: '{"path":"/repo/pi/a.ts"}',
+  });
+  assert.equal(first(events, "tool_call_update").text, "source");
+  assert.deepEqual(first(events, "token_usage"), {
+    kind: "token_usage",
+    inputTokens: 10,
+    outputTokens: 4,
+    cachedInputTokens: 3,
+    cacheCreationInputTokens: 2,
+    costUsd: 0.02,
+    model: "anthropic/sonnet",
+  });
+});
+
+test("parsePiTranscript follows only the current tree branch and rejects malformed ancestry", () => {
+  const branched = [
+    JSON.stringify({ type: "session", version: 3, id: PI_ID, timestamp: "2026-09-16T12:00:00.000Z", cwd: "/repo/pi" }),
+    JSON.stringify({ type: "message", id: "root0001", parentId: null, message: { role: "user", content: "root" } }),
+    JSON.stringify({ type: "message", id: "old00001", parentId: "root0001", message: { role: "assistant", content: [{ type: "text", text: "abandoned" }] } }),
+    JSON.stringify({ type: "branch_summary", id: "branch01", parentId: "root0001", fromId: "old00001", summary: "old branch" }),
+    JSON.stringify({ type: "message", id: "new00001", parentId: "branch01", message: { role: "assistant", content: [{ type: "text", text: "current" }] } }),
+  ].join("\n");
+  assert.deepEqual(
+    parsePiTranscript(branched).filter((event) => event.kind === "agent_message").map((event) => event.text),
+    ["current"],
+  );
+  assert.deepEqual(parsePiTranscript(branched.replace('"parentId":"branch01"', '"parentId":"missing0"')), []);
+});
+
+test("parsePiTranscript does not synthesize an empty assistant message for a tool-only step", () => {
+  const events = parsePiTranscript(PI);
+  assert.equal(events.filter((event) => event.kind === "agent_message").length, 1);
 });
 
 test("generated AGENTS context is neither a title, user turn, nor counted message", () => {

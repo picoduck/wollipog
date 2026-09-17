@@ -990,6 +990,29 @@ test("create_worktree polls the same coordinates while a progress-aware operatio
   assert.ok(calls.every((call) => JSON.stringify(call.body) === JSON.stringify(calls[0]!.body)));
 });
 
+test("cancelling an acknowledged create_worktree reports that the operation may still complete", async () => {
+  const controller = new AbortController();
+  const { deps, calls } = makeDeps(() => ({
+    status: 202,
+    body: { operation: { id: "worktree_acknowledged", status: "in_progress", phase: "materializing" } },
+  }));
+  deps.signal = controller.signal;
+  deps.sleep = () => new Promise(() => {});
+
+  const pending = callTool(deps, "create_worktree", { branch: "fix/cancelled-after-ack" });
+  for (let index = 0; index < 50 && calls.length === 0; index += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  controller.abort();
+  const result = await pending;
+
+  assert.equal(result.isError, true);
+  assert.match(resultText(result), /acknowledged the worktree operation/u);
+  assert.match(resultText(result), /may still complete/u);
+  assert.match(resultText(result), /inspect current state before retrying/u);
+  assert.equal(calls.length, 1, "cancellation does not resubmit an already acknowledged operation");
+});
+
 test("create_worktree reports a bounded progress-aware stall as a terminal error", async () => {
   let attempt = 0;
   const { deps } = makeDeps(() => {

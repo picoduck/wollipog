@@ -108,6 +108,7 @@ import { supportsNativeOrchestratorBoundary } from "./orchestrator-preset.js";
 import type { SpawnIsolation } from "./spawn.js";
 import type { SubscriptionUsageProbeAuthorization } from "./subscription-usage.js";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
+import { cleanupPiExternalSession } from "./external/sources.js";
 import {
   ProviderStateCleanupJournal,
   reconcileProviderState,
@@ -4006,6 +4007,7 @@ export class SessionManager {
     descriptor: ExternalSessionDescriptor,
     launch: { command: string; args: string[]; env: Record<string, string> },
     acpCapabilities?: AcpRuntimeCapabilities,
+    adoptedProviderState?: SessionMeta["adoptedProviderState"],
   ): boolean {
     if (this.store.listSessions().some((m) =>
       m.agentSessionId === descriptor.agentSessionId &&
@@ -4038,6 +4040,7 @@ export class SessionManager {
       preview: null,
       pendingApproval: null,
       adopted: true,
+      ...(adoptedProviderState ? { adoptedProviderState } : {}),
       providerStateVersion: descriptor.context.kind === "wsl" ? 3 : 2,
       ...(this.runnerOwnerHash ? { checkpointRefVersion: 2 as const } : {}),
       seq: 0,
@@ -6346,7 +6349,12 @@ export class SessionManager {
       sessionId: meta.sessionId,
       cwd,
       ...(this.strictProjectIsolation(meta) ? { orchestratorScratchOnly: true } : {}),
-      ...(additionalWritableRoots.length ? { additionalWritableRoots } : {}),
+      ...((additionalWritableRoots.length || meta.adoptedProviderState)
+        ? { additionalWritableRoots: [
+            ...additionalWritableRoots,
+            ...(meta.adoptedProviderState ? [meta.adoptedProviderState.sessionDir] : []),
+          ] }
+        : {}),
       ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
     }));
   }
@@ -8364,7 +8372,13 @@ export class SessionManager {
         // The box gained a matching agent since adopt time — the session stops being read-only.
         // The fresh readMeta below picks the patched params up and the normal resume path runs.
         this.log(`read-only session ${sessionId} healed — a ${meta.driver} agent is now available`);
-        this.store.patchMeta(sessionId, { command: launch.command, args: launch.args, env: {} });
+        this.store.patchMeta(sessionId, {
+          command: launch.command,
+          args: meta.adoptedProviderState?.driver === "pi"
+            ? [...launch.args, "--session-dir", meta.adoptedProviderState.sessionDir]
+            : launch.args,
+          env: {},
+        });
       } else {
         const ctx = meta.context.kind === "wsl" ? `wsl:${meta.context.distro}` : "native";
         // SEND-ONLY refusal — deliberately NOT emitEvent/appendEvent: the adopt creates the row
@@ -10952,6 +10966,13 @@ export class SessionManager {
         this.releaseAdmission(sessionId);
       }
       this.clearLock(sessionId);
+      if (meta?.adoptedProviderState?.driver === "pi" && meta.context.kind === "wsl") {
+        try {
+          await cleanupPiExternalSession(meta.context, meta.adoptedProviderState.sessionDir, sessionId);
+        } catch (error) {
+          throw new Error(`managed Pi transcript cleanup failed: ${errText(error)}`);
+        }
+      }
       // The process-local deletion fence and durable tombstone make lookups fail closed while
       // provider retirement settles. Remove the row only after its exact client has retired so
       // a failed attempt remains retryable with complete cleanup provenance.

@@ -428,7 +428,10 @@
 //      omit availability instead of treating an unverified configured launch as runnable.
 // 155: native Pi RPC harness discovery and execution. AgentDriverKind gains `pi`; live discovery
 //      supplies its model/effort/command catalog and only verified v155 runners advertise it.
-export const PROTOCOL_VERSION = 155;
+// 156: external Pi sessions are discovered from their native JSONL store and adopted through a
+//      runner-owned copy. Older runners cannot prove that opening a session leaves its source
+//      history untouched, so clients and control planes keep the action disabled for them.
+export const PROTOCOL_VERSION = 156;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -555,6 +558,7 @@ export interface RunnerControlPlaneAttestation {
  * runner predates v15, so support cannot be proven and callers must fail closed. */
 export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   piHarness: 155,
+  piExternalSessions: 156,
   verifiedAgentAvailability: 154,
   externalSessions: 6,
   /** Correlated adoption results were introduced in v35. The result shape is provider-neutral;

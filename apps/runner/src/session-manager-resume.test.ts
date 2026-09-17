@@ -4536,6 +4536,50 @@ test("adoption surfaces provider task artifacts but waits for explicit user owne
   }
 });
 
+test("Pi adoption persists its managed transcript directory and resumes from that copy", async () => {
+  const h = harness();
+  const managedSessionDir = join(h.root, "managed-pi", "sessions");
+  try {
+    assert.equal(h.manager.adopt("adopted-pi-session", {
+      agentSessionId: "pi-session-id",
+      agentId: "pi-native",
+      driver: "pi",
+      cwd: h.root,
+      context: { kind: "native" },
+      title: "Adopted Pi",
+      createdAt: 1,
+      updatedAt: 2,
+      messageCount: 1,
+    }, {
+      command: "pi",
+      args: ["--session-dir", managedSessionDir],
+      env: {},
+    }, undefined, {
+      driver: "pi",
+      sessionDir: managedSessionDir,
+    }), true);
+
+    const persisted = h.store.readMeta("adopted-pi-session");
+    assert.deepEqual(persisted?.adoptedProviderState, {
+      driver: "pi",
+      sessionDir: managedSessionDir,
+    });
+
+    h.manager.prompt("adopted-pi-session", "continue from the managed copy", []);
+    await shortDelay();
+    await tick();
+
+    const launch = h.launches.at(-1);
+    assert.equal(launch?.kind, "pi");
+    assert.equal(launch?.options.resumeId, "pi-session-id");
+    assert.deepEqual(launch?.options.args, ["--session-dir", managedSessionDir]);
+    assert.equal(h.prompts.at(-1), "continue from the managed copy");
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("real Claude driver shutdown persists live work and a restarted manager resumes it end to end", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-claude-lifetime-e2e-"));
   const store = new SessionStore(root);
