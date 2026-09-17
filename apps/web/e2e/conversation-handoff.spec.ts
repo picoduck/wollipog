@@ -41,7 +41,12 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     await page.screenshot({ path: test.info().outputPath("handoff-tier-chosen.png") });
     await page.getByRole("button", { name: "Create Handoff", exact: true }).click();
     await expect(page.locator(".composer-input")).toHaveValue(/Keep the interface accessible on mobile/);
-    await expect(page.locator(".tl-checkpoint.restored")).toContainText("fresh provider conversation");
+    const handoff = page.getByRole("separator", { name: "Handoff from codex to claude After Turn 1" });
+    await expect(handoff).toBeVisible();
+    const handoffDescriptionId = await handoff.getAttribute("aria-describedby");
+    expect(handoffDescriptionId).toBeTruthy();
+    await expect(page.locator(`[id="${handoffDescriptionId}"]`))
+      .toContainText("Fresh provider conversation");
     expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests())).toEqual([]);
     // The chosen tier is what actually crossed the boundary.
     const handoffs = await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.handoffRequests());
