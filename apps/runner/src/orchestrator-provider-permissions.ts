@@ -33,6 +33,7 @@ const GIT_TAG_MUTATION_ARGUMENTS = new Set([
 const GH_ARGUMENT_DENYLIST = ["--web", "-w", "--repo", "-R", "--hostname"];
 const GH_REPO_VIEW_VALUE_FLAGS = new Set(["--branch", "--json", "--jq", "--template", "-b", "-q", "-t"]);
 const CROSS_REPOSITORY_GH_REFERENCE = /^(?:https?:\/\/|github\.com\/|[^/\s]+\/[^#\s]+#[1-9][0-9]*)/u;
+const CROSS_REPOSITORY_SEARCH_QUALIFIER = /(?:^|\s)(?:repo|org|user):/iu;
 
 interface EnvironmentReference {
   env: string;
@@ -172,6 +173,19 @@ function hasCrossRepositoryGhTarget(operation: string, tokens: ShellToken[]): bo
   return consumesValue;
 }
 
+function hasCrossRepositoryGhSearch(tokens: ShellToken[]): boolean {
+  for (let index = 3; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (!isPlainArgument(token)) continue;
+    const { flag, inlineValue } = splitFlag(token);
+    if (flag !== "--search" && flag !== "-S") continue;
+    const value = inlineValue ?? tokens[index + 1];
+    if (isPlainArgument(value) && CROSS_REPOSITORY_SEARCH_QUALIFIER.test(value)) return true;
+    if (inlineValue === null) index += 1;
+  }
+  return false;
+}
+
 function isRoutineGh(tokens: ShellToken[], context: RoutineContext): boolean {
   if (tokens.length < 3 || tokens[0] !== "gh" || !isPlainArgument(tokens[1]) ||
       !isPlainArgument(tokens[2])) return false;
@@ -179,7 +193,7 @@ function isRoutineGh(tokens: ShellToken[], context: RoutineContext): boolean {
   if (operation === "issue:edit") return isRoutineIssueEdit(tokens, context);
   if (operation === "issue:comment") return isRoutineIssueComment(tokens, context);
   if (!READ_ONLY_GH_OPERATIONS.has(operation)) return false;
-  if (hasCrossRepositoryGhTarget(operation, tokens)) return false;
+  if (hasCrossRepositoryGhTarget(operation, tokens) || hasCrossRepositoryGhSearch(tokens)) return false;
   return tokens.slice(3).every((token) => isPlainArgument(token) || isLoopReference(token, context)) &&
     !tokens.slice(3).some((token) => isPlainArgument(token) &&
       (deniedArgument(token, GH_ARGUMENT_DENYLIST) ||

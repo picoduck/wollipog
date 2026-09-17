@@ -270,14 +270,16 @@ export function claudeStructuredOrchestratorArgs(args: readonly string[], strict
       if (inlineValue === undefined) index += 1;
       continue;
     }
-    const allowedTools = inlineValue ?? value;
-    if (flag === "--allowedTools" && typeof allowedTools === "string") {
-      const tools = allowedTools.split(",").filter((tool) => !tool.startsWith("Bash("));
-      if (tools.length > 0) {
-        if (inlineValue === undefined) result.push(argument, tools.join(","));
-        else result.push(`${flag}=${tools.join(",")}`);
+    if (flag === "--allowedTools") {
+      const allowedTools = inlineValue ?? (value?.startsWith("-") === false ? value : undefined);
+      if (typeof allowedTools === "string") {
+        const tools = allowedTools.split(",").filter((tool) => !tool.startsWith("Bash("));
+        if (tools.length > 0) {
+          if (inlineValue === undefined) result.push(argument, tools.join(","));
+          else result.push(`${flag}=${tools.join(",")}`);
+        }
+        if (inlineValue === undefined) index += 1;
       }
-      if (inlineValue === undefined) index += 1;
       continue;
     }
     result.push(argument);

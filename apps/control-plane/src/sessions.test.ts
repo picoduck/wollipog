@@ -785,6 +785,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
   const { db, svc, hub } = makeHarness();
   try {
     const meta = runnerMeta();
+    meta.workspaces.push({ id: "ws-2", name: "Other Repository", path: "/tmp/other-repository" });
     const planner = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
     planner.capabilities = {
       models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
@@ -936,6 +937,41 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     svc.onSessionStatus(ordinaryChild.data.id, "stopped");
     db.raw().prepare("UPDATE sessions SET archived=1 WHERE id=?").run(ordinaryChild.data.id);
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+
+    assert.ok(parent.projectId);
+    db.addProjectLocation(parent.projectId, { runnerId: RUNNER_ID, workspaceId: "ws-2" });
+    const crossWorkspaceRequest = {
+      runnerId: RUNNER_ID, workspaceId: "ws-2", agentId: CODEX_APP_AGENT_ID,
+      prompt: "Coordinate work in another repository",
+      config: { permissionMode: "orchestrator" as const },
+    };
+    let crossWorkspaceChild = svc.createSession(
+      crossWorkspaceRequest, undefined, undefined, false, false, false, { parentSessionId: parent.id },
+    );
+    if (crossWorkspaceChild.status === 428) {
+      const approval = db.getSession(parent.id)!.pendingApproval!;
+      assert.ok(svc.approve(parent.id, approval.requestId, "allow").ok);
+      crossWorkspaceChild = svc.createSession(
+        crossWorkspaceRequest, undefined, undefined, false, false, false, { parentSessionId: parent.id },
+      );
+    }
+    assert.ok(crossWorkspaceChild.ok && crossWorkspaceChild.data, crossWorkspaceChild.error);
+    const crossWorkspaceStart = hub.sentOfType("start_session").find((message) =>
+      message.spec.sessionId === crossWorkspaceChild.data!.id)!;
+    assert.ok(crossWorkspaceStart.spec.orchestrator,
+      "the nested Orchestrator still inherits campaign behavior in another workspace");
+    assert.equal(crossWorkspaceStart.spec.orchestrator?.issueNumbers, undefined,
+      "issue-write authority stays bound to the campaign's exact runner and workspace");
+    svc.onSessionStatus(crossWorkspaceChild.data.id, "idle");
+    const crossWorkspaceReport = db.appendEvent(crossWorkspaceChild.data.id,
+      { kind: "agent_message", text: "Cross-workspace child completed", final: true }, Date.now());
+    assert.ok(svc.verifyCampaignChild(parent.id, {
+      childSessionId: crossWorkspaceChild.data.id,
+      reportEventSeq: crossWorkspaceReport.seq,
+      followUpsAccounted: true,
+    }).ok);
+    svc.onSessionStatus(crossWorkspaceChild.data.id, "stopped");
+    db.raw().prepare("UPDATE sessions SET archived=1 WHERE id=?").run(crossWorkspaceChild.data.id);
 
     const childRequest = {
       runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,

@@ -3186,6 +3186,7 @@ export class SessionsService {
       : req.workspacePath?.trim();
     const workspacePath = snapshotSpec?.workspacePath ?? (adHoc || this.db.getWorkspacePath(req.runnerId, req.workspaceId));
     if (!workspacePath) return fail(`unknown workspace '${req.workspaceId}' on runner '${req.runnerId}'`, 404);
+    const workspaceId = snapshotSpec ? snapshotSpec.workspaceId : (adHoc ? null : req.workspaceId);
     if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
     const runner = this.db.getRunner(req.runnerId);
     if (!runner) return fail("runner not found", 404);
@@ -3562,8 +3563,13 @@ export class SessionsService {
     const requestedText = snapshotCommand?.type === "start_session"
       ? (snapshotCommand.initialPrompt ?? "")
       : (req.prompt?.trim() ?? "");
+    const campaignIssueNumbers = campaignController?.runnerId === req.runnerId &&
+        campaignController.workspaceId === workspaceId &&
+        (workspaceId !== null || this.db.getAdHocWorkspacePath(campaignController.id) === workspacePath)
+      ? campaignController.orchestratorPolicy?.issueNumbers
+      : undefined;
     const orchestratorIssueNumbers = snapshotSpec?.orchestrator?.issueNumbers ??
-      campaignController?.orchestratorPolicy?.issueNumbers ??
+      campaignIssueNumbers ??
       (orchestratorPolicy && creationContext?.defaultOwnerUserId && !parentSessionId
         ? orchestratorIssueNumbersFromInitialPrompt(requestedText)
         : []);
@@ -3606,7 +3612,6 @@ export class SessionsService {
           : "cloud target cost policy is missing", 400);
       }
     }
-    const workspaceId = snapshotSpec ? snapshotSpec.workspaceId : (adHoc ? null : req.workspaceId);
     const requestedProject = this.requestedProjectAssignment(
       req, req.runnerId, workspaceId, allowProjectWithoutLocation, parentSessionId, workspacePath,
     );
