@@ -200,18 +200,23 @@ if (serviceTierFixture) {
 }
 if (composerFixture) {
   const isClaude = composerFixture === "claude";
+  const isPi = composerFixture === "pi";
   const isOrchestrator = composerFixture === "orchestrator";
-  const driver = isClaude ? "claude-code" : "codex-app-server";
-  const agentName = isOrchestrator ? "Codex Orchestrator" : isClaude ? "Claude Code" : "Codex";
+  const driver = isClaude ? "claude-code" : isPi ? "pi" : "codex-app-server";
+  const agentName = isOrchestrator ? "Codex Orchestrator" : isClaude ? "Claude Code" : isPi ? "Pi" : "Codex";
   const modelName = isClaude
     ? "Claude Opus 5.1 Extended Context Preview"
+    : isPi
+      ? "Pi Sonnet Extended Context Preview"
     : "GPT-6-Astra Extended Context Preview";
   const permissionModes = isOrchestrator
     ? ["orchestrator"]
     : isClaude
       ? ["default", "acceptEdits", "bypassPermissions"]
+      : isPi
+        ? ["default", "dontAsk", "bypassPermissions"]
       : ["auto-review", "danger-full-access"];
-  const serviceTiers = isClaude ? undefined : [{
+  const serviceTiers = isClaude || isPi ? undefined : [{
     id: "fast",
     name: "Fast",
     description: "Faster responses that use more ChatGPT credits.",
@@ -252,9 +257,14 @@ if (composerFixture) {
       supportsImages: true,
       supportsApprovals: true,
       permissionModes,
+      ...(isPi ? { elicitation: {
+        default: ["stdio-control" as const],
+        dontAsk: ["none" as const],
+        bypassPermissions: ["none" as const],
+      } } : {}),
     },
   }] as RunnerView["agents"];
-  session.agentId = isClaude ? "claude" : "codex";
+  session.agentId = isClaude ? "claude" : isPi ? "pi" : "codex";
   session.agentName = agentName;
   session.driver = driver;
   session.model = "long-model[1m]";

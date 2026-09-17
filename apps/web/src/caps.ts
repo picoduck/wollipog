@@ -43,12 +43,14 @@ export function elicitationAvailability(
 
 /** Resolve the real mode used when the composer sends an empty permissionMode patch. ACP
  * provider defaults are dynamic, so they deliberately remain unknown.
- * KEEP IN SYNC with the runner fallbacks in drivers/claude-code.ts, drivers/codex.ts, and
- * drivers/codex-app-server.ts; these packages cannot share runner implementation constants. */
+ * KEEP IN SYNC with the runner fallbacks in drivers/claude-code.ts, drivers/codex.ts,
+ * drivers/codex-app-server.ts, and drivers/pi-rpc.ts; these packages cannot share runner
+ * implementation constants. */
 export function defaultPermissionMode(driver: AgentDriverKind): string | undefined {
   if (driver === "claude-code") return "acceptEdits";
   if (driver === "codex") return "workspace-write";
   if (driver === "codex-app-server") return "auto-review";
+  if (driver === "pi") return "default";
   return undefined;
 }
 

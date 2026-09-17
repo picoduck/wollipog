@@ -30,6 +30,7 @@ import {
   type AgentControlHost,
 } from "./agent-control.js";
 import { CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION } from "./orchestrator-preset.js";
+import { PI_SECURITY_REQUEST_NONCE_ENV } from "./pi-agent-control-extension.js";
 
 function spec(driver: SessionLaunchSpec["driver"] = "codex"): SessionLaunchSpec {
   return {
@@ -169,17 +170,19 @@ test("discovery-verified Pi receives a private Agent Control extension and stric
     };
     provisionAgentControl(ordinary, { ...control, orchestratorAgent: piAgent }, () => {}, host);
     const extension = piAgentControlExtensionPath(root, ordinary.sessionId);
-    assert.equal(statSync(extension).mode & 0o777, 0o600);
+    if (process.platform !== "win32") assert.equal(statSync(extension).mode & 0o777, 0o600);
     assert.match(readFileSync(extension, "utf8"), /registerTool/);
     assert.equal(ordinary.args[ordinary.args.indexOf("--extension") + 1], extension);
     assert.equal(ordinary.env.WOLLIPOG_PI_AGENT_CONTROL_COMMAND, "/opt/runner");
     assert.deepEqual(JSON.parse(ordinary.env.WOLLIPOG_PI_AGENT_CONTROL_ARGS!), ["--agent-control-mcp"]);
     assert.match(ordinary.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE ?? "", /^[A-Za-z0-9_-]{32}$/u);
+    assert.match(ordinary.env[PI_SECURITY_REQUEST_NONCE_ENV] ?? "", /^[A-Za-z0-9_-]{32}$/u);
     provisionAgentControl(ordinary, { ...control,
       orchestratorAgent: { ...piAgent, piAgentControl: undefined },
     }, () => {}, host);
     assert.equal(ordinary.env.WOLLIPOG_CLI, "/opt/runner");
     assert.equal(ordinary.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE, undefined);
+    assert.equal(ordinary.env[PI_SECURITY_REQUEST_NONCE_ENV], undefined);
     assert.equal(ordinary.args.includes("--extension"), false);
     assert.equal(existsSync(extension), false, "lost attestation removes the stale runner-owned extension");
 

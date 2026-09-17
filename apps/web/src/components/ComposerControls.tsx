@@ -43,17 +43,13 @@ function useSessionConfig(session: SessionView) {
   const caps = resolveCaps(runner, session);
   const effectiveCaps = resolveEffectiveCaps(runner, session);
   const listedModels = (caps?.models ?? []).filter((model) => !model.hidden || model.id === session.model);
-  // The orchestration tool boundary is established at process creation and cannot
-  // safely be entered or escaped by changing a live provider permission mode.
-  const permModes = session.permissionMode === "orchestrator" ? ["orchestrator"]
-    : (caps?.permissionModes ?? []).filter((p) => p !== "plan" && p !== "orchestrator");
+  const { permModes, permVal, showDefaultPermissionMode } = sessionPermissionModeControls(session, caps);
 
   const effective = effectiveModelEffortForDisplay(effectiveCaps, session.driver, session.model, session.effort, caps);
   const modelVal = effective.model?.id ?? "";
   const selectedModel = effective.model;
   const modelEfforts = effective.efforts;
   const effortVal = effective.effort ?? "";
-  const permVal = permissionModeForDisplay(session.permissionMode, permModes, session.driver);
   // Context-window variants of one base (`opus` / `opus[1m]`) are one Model entry plus a Context
   // Window group; both come only from provider-stated windows, so most catalogs collapse nothing.
   const models = collapseContextWindowVariants(listedModels, modelVal || session.model);
@@ -69,6 +65,39 @@ function useSessionConfig(session: SessionView) {
     modelEfforts,
     effortVal,
     permVal,
+    showDefaultPermissionMode,
+  };
+}
+
+/** Target-aware permission choices. Pi's approval bridge exists only for host sessions; a stored
+ * safe mode remains visible after capability loss so Full Access can recover the session. */
+export function sessionPermissionModeControls(
+  session: Pick<SessionView, "driver" | "executionTarget" | "permissionMode">,
+  capabilities: AgentCapabilities | undefined,
+): { permModes: string[]; permVal: string; showDefaultPermissionMode: boolean } {
+  // The orchestration tool boundary is established at process creation and cannot safely be
+  // entered or escaped by changing a live provider permission mode.
+  if (session.permissionMode === "orchestrator") {
+    return { permModes: ["orchestrator"], permVal: "orchestrator", showDefaultPermissionMode: true };
+  }
+  const advertised = (capabilities?.permissionModes ?? [])
+    .filter((mode) => mode !== "plan" && mode !== "orchestrator");
+  const piWithoutHostBridge = session.driver === "pi" && session.executionTarget !== undefined &&
+    session.executionTarget.adapter !== "host";
+  let permModes = piWithoutHostBridge ? ["bypassPermissions"] : advertised;
+  const configuredMode = session.permissionMode ?? "";
+  const unavailablePiMode = session.driver === "pi" && !piWithoutHostBridge && !!configuredMode &&
+    configuredMode !== "bypassPermissions" && !advertised.includes(configuredMode);
+  if (unavailablePiMode && !permModes.includes("bypassPermissions")) {
+    permModes = [...permModes, "bypassPermissions"];
+  }
+  const displayedMode = permissionModeForDisplay(configuredMode, permModes, session.driver);
+  return {
+    permModes,
+    permVal: piWithoutHostBridge
+      ? configuredMode || "bypassPermissions"
+      : unavailablePiMode ? configuredMode : displayedMode,
+    showDefaultPermissionMode: !piWithoutHostBridge,
   };
 }
 
@@ -517,6 +546,7 @@ export function approvalControlLabel(
   _status: ElicitationAvailability,
 ): string {
   if (permissionMode) return permissionModeLabel(permissionMode, driver);
+  if (driver === "pi") return permissionModeLabel("default", driver);
   if (driver === "claude-code") return defaultPermissionModeDisplayLabel(driver);
   return permissionModeEmptyLabel(driver);
 }
@@ -595,6 +625,7 @@ export function ApprovalsMenuChoices({
   apply,
   close,
   onDetails,
+  showDefault = true,
 }: {
   capabilities: AgentCapabilities | undefined;
   driver: AgentDriverKind;
@@ -603,6 +634,7 @@ export function ApprovalsMenuChoices({
   apply: Apply;
   close: () => void;
   onDetails: (details: PermissionModeDetails, trigger: HTMLButtonElement) => void;
+  showDefault?: boolean;
 }) {
   const defaultStatus = elicitationAvailability(capabilities, defaultPermissionMode(driver));
   const defaultMode = defaultPermissionMode(driver);
@@ -614,23 +646,31 @@ export function ApprovalsMenuChoices({
     defaultOutcome,
     defaultMode ? capabilities?.elicitation?.[defaultMode] : undefined,
   ) ?? defaultOutcome.description;
-  const unlistedMode = permVal && !permModes.includes(permVal) ? permVal : undefined;
-  const displayedModes = unlistedMode ? [unlistedMode, ...permModes] : permModes;
+  // Pi's named `default` mode is also Wollipog's empty-selection fallback. Present that semantic
+  // choice once; clearing the explicit value still launches the same ask-before-tool behavior.
+  const collapsedDefault = driver === "pi" && showDefault ? defaultMode : undefined;
+  const selectableModes = collapsedDefault
+    ? permModes.filter((mode) => mode !== collapsedDefault)
+    : permModes;
+  const unlistedMode = permVal && permVal !== collapsedDefault && !selectableModes.includes(permVal)
+    ? permVal
+    : undefined;
+  const displayedModes = unlistedMode ? [unlistedMode, ...selectableModes] : selectableModes;
 
   return (
     <>
       <div className="plus-section" role="presentation">Permission Mode</div>
-      <PermissionModeChoice
-        label={defaultPermissionModeDisplayLabel(driver)}
-        description={defaultDescription}
-        outcome={defaultOutcome}
-        checked={!permVal}
-        onSelect={() => {
-          apply({ permissionMode: "" });
-          close();
-        }}
-        onDetails={onDetails}
-      />
+      {showDefault && <PermissionModeChoice
+          label={defaultPermissionModeDisplayLabel(driver)}
+          description={defaultDescription}
+          outcome={defaultOutcome}
+          checked={!permVal || permVal === collapsedDefault}
+          onSelect={() => {
+            apply({ permissionMode: "" });
+            close();
+          }}
+          onDetails={onDetails}
+        />}
       {displayedModes.map((p) => {
         const status = elicitationAvailability(capabilities, p);
         const outcome = permissionModeOutcome(p, status, driver);
@@ -664,7 +704,7 @@ export function ApprovalsMenuChoices({
 export function ApprovalsControl({ session, apply }: { session: SessionView; apply: Apply }) {
   const [details, setDetails] = useState<PermissionModeDetails | null>(null);
   const detailsReturnFocusRef = useRef<HTMLElement | null>(null);
-  const { caps, permModes, permVal } = useSessionConfig(session);
+  const { caps, permModes, permVal, showDefaultPermissionMode } = useSessionConfig(session);
   if (permModes.length === 0) return null;
   const currentMode = permVal || defaultPermissionMode(session.driver);
   const currentStatus = elicitationAvailability(caps, currentMode);
@@ -713,6 +753,7 @@ export function ApprovalsControl({ session, apply }: { session: SessionView; app
               detailsReturnFocusRef.current = trigger;
               setDetails(nextDetails);
             }}
+            showDefault={showDefaultPermissionMode}
           />
         )}
       </BarMenu>

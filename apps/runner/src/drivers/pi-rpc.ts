@@ -18,6 +18,9 @@ import { runContextCommand } from "../context-command.js";
 import {
   PI_AGENT_CONTROL_EXTENSION_SUFFIX,
   PI_AGENT_CONTROL_STATUS_KEY,
+  PI_SECURITY_REQUEST_NONCE_ENV,
+  PI_SECURITY_REQUEST_PREFIX,
+  PI_SECURITY_REQUEST_TITLE,
 } from "../pi-agent-control-extension.js";
 import { killTree, spawnAgent, terminateDescendantBoundaries, type AgentProcess } from "../spawn.js";
 import type {
@@ -45,8 +48,22 @@ interface PendingAgentControlBridge {
   timer?: NodeJS.Timeout;
 }
 
+interface PendingPiPermission {
+  responses: ReadonlyMap<string, Json>;
+  fallback: Json;
+  startupTrust?: boolean;
+}
+
 const MAX_PENDING_PI_QUESTIONS = 128;
 const PI_AGENT_CONTROL_READY_TIMEOUT_MS = 30_000;
+const PI_TRUST_STARTUP_TIMEOUT_MS = 2_000_000_000;
+const PI_STARTUP_PROGRESS_TIMEOUT_MS = 15_000;
+const PI_APPROVAL_INPUT_LIMIT = 16_000;
+const PI_APPROVAL_INPUT_TRUNCATED = "\n… [truncated by Wollipog]";
+
+function permissionModeRequiresAgentControl(mode: string | undefined): boolean {
+  return mode !== undefined && mode !== "bypassPermissions" && mode !== "orchestrator";
+}
 
 function object(value: unknown): Json | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Json : undefined;
@@ -64,6 +81,13 @@ function boundedText(value: unknown, max = 16_000): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function boundedApprovalInput(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value) return undefined;
+  if (value.length <= PI_APPROVAL_INPUT_LIMIT) return value;
+  return value.slice(0, PI_APPROVAL_INPUT_LIMIT - PI_APPROVAL_INPUT_TRUNCATED.length) +
+    PI_APPROVAL_INPUT_TRUNCATED;
 }
 
 function contentText(content: unknown, kind: "text" | "thinking"): string {
@@ -131,9 +155,12 @@ export class PiRpcDriver implements Driver {
   private messageSeq = 0;
   private readonly toolCalls = new Set<string>();
   private readonly pendingQuestions = new Map<string, PendingPiQuestion>();
+  private readonly pendingPermissions = new Map<string, PendingPiPermission>();
   private readonly forkedSessionFiles = new Map<string, string>();
   private readonly descendantOwner = {};
   private agentControlBridge: PendingAgentControlBridge | null = null;
+  private startupStateTimer: NodeJS.Timeout | undefined;
+  private startupStatePending = false;
 
   constructor(
     private readonly opts: DriverOptions,
@@ -165,6 +192,11 @@ export class PiRpcDriver implements Driver {
     if (this.disposed) throw new Error("session disposed before Pi launch");
     this.exitReported = false;
     const bridgeNonce = this.opts.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE;
+    const trustBridgeReady = !!bridgeNonce && !!this.opts.env[PI_SECURITY_REQUEST_NONCE_ENV];
+    const configuredMode = this.config.permissionMode;
+    if (!trustBridgeReady && permissionModeRequiresAgentControl(configuredMode)) {
+      throw new Error(`Pi permission mode ${JSON.stringify(configuredMode || "default")} requires the verified Agent Control bridge`);
+    }
     let bridgeReady: Promise<void> | undefined;
     if (bridgeNonce) {
       let resolve!: () => void;
@@ -180,9 +212,9 @@ export class PiRpcDriver implements Driver {
     const args = [
       ...this.opts.args,
       "--mode", "rpc",
-      // Project-local .pi resources are executable. Until Wollipog has recorded a durable trust
-      // grant, force Pi's documented fail-closed project behavior on every launch.
-      "--no-approve",
+      // Unverified bridges and strict Orchestrators must never load repository-controlled Pi code.
+      // Verified ordinary sessions resolve Pi's project_trust event through a durable approval.
+      ...(!trustBridgeReady || this.config.permissionMode === "orchestrator" ? ["--no-approve"] : []),
       ...(this.opts.resumeId ? ["--session", this.opts.resumeId] : []),
     ];
     const child = this.spawn({
@@ -222,6 +254,7 @@ export class PiRpcDriver implements Driver {
       if (this.peer === peer) this.peer = null;
       if (this.child === child) this.child = null;
       peer.dispose(detail?.message ?? "Pi exited");
+      this.clearStartupStateWatchdog();
       this.dismissQuestions("provider_resolved");
       this.rejectAgentControlBridge(detail ?? new Error("Pi exited before Agent Control became ready"));
       this.reportExit(code);
@@ -230,7 +263,17 @@ export class PiRpcDriver implements Driver {
     child.on("error", (error: Error) => finish(null, error));
     child.on("close", (code) => finish(code));
 
-    const state = await peer.request<Json>({ type: "get_state" });
+    const waitsForProjectTrust = trustBridgeReady && this.config.permissionMode !== "orchestrator";
+    if (waitsForProjectTrust) this.beginStartupStateWatchdog();
+    let state: Json;
+    try {
+      state = await peer.request<Json>(
+        { type: "get_state" },
+        waitsForProjectTrust ? PI_TRUST_STARTUP_TIMEOUT_MS : undefined,
+      );
+    } finally {
+      this.clearStartupStateWatchdog();
+    }
     this.applyState(object(state.data));
     if (!this.sessionId) throw new Error("Pi RPC did not establish a persistent session id");
     if (this.opts.resumeId && this.sessionId !== this.opts.resumeId) {
@@ -444,6 +487,11 @@ export class PiRpcDriver implements Driver {
   }
 
   async setConfig(config: SessionConfig): Promise<void> {
+    const bridgeReady = !!this.opts.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE &&
+      !!this.opts.env[PI_SECURITY_REQUEST_NONCE_ENV];
+    if (!bridgeReady && permissionModeRequiresAgentControl(config.permissionMode)) {
+      throw new Error(`Pi permission mode ${JSON.stringify(config.permissionMode || "default")} requires the verified Agent Control bridge`);
+    }
     this.config = config;
     if (this.peer) await this.applyConfig(config);
   }
@@ -454,8 +502,14 @@ export class PiRpcDriver implements Driver {
     void this.peer.request<Json>({ type: "abort" }).catch(() => {});
   }
 
-  resolvePermission(): boolean {
-    return false;
+  resolvePermission(requestId: string, optionId: string | null): boolean {
+    const pending = this.pendingPermissions.get(requestId);
+    if (!pending || !this.peer) return false;
+    this.pendingPermissions.delete(requestId);
+    const response = optionId == null ? pending.fallback : pending.responses.get(optionId) ?? pending.fallback;
+    const sent = this.peer.send({ type: "extension_ui_response", id: requestId, ...response });
+    if (pending.startupTrust) this.resumeStartupStateWatchdog();
+    return sent;
   }
 
   answerQuestion(
@@ -481,6 +535,7 @@ export class PiRpcDriver implements Driver {
     if (this.disposed) return;
     this.disposed = true;
     this.cancelled = true;
+    this.clearStartupStateWatchdog();
     this.dismissQuestions("replaced");
     this.settleTurn("cancelled");
     this.rejectAgentControlBridge(new Error("Pi driver disposed before Agent Control became ready"));
@@ -549,6 +604,7 @@ export class PiRpcDriver implements Driver {
         return;
       case "extension_ui_request":
         if (this.acceptAgentControlReady(event)) return;
+        if (this.onSecurityApprovalRequest(event)) return;
         this.onExtensionUiRequest(event);
         return;
       case "extension_error":
@@ -582,6 +638,32 @@ export class PiRpcDriver implements Driver {
     if (pending.timer) clearTimeout(pending.timer);
     this.agentControlBridge = null;
     pending.reject(error);
+  }
+
+  private beginStartupStateWatchdog(): void {
+    this.startupStatePending = true;
+    this.resumeStartupStateWatchdog();
+  }
+
+  private pauseStartupStateWatchdog(): void {
+    if (this.startupStateTimer) clearTimeout(this.startupStateTimer);
+    this.startupStateTimer = undefined;
+  }
+
+  private resumeStartupStateWatchdog(): void {
+    if (!this.startupStatePending || [...this.pendingPermissions.values()].some((pending) => pending.startupTrust)) return;
+    this.pauseStartupStateWatchdog();
+    this.startupStateTimer = setTimeout(() => {
+      this.startupStateTimer = undefined;
+      this.peer?.dispose("Pi RPC get_state response timed out");
+      if (this.child) this.kill(this.child);
+    }, PI_STARTUP_PROGRESS_TIMEOUT_MS);
+    this.startupStateTimer.unref?.();
+  }
+
+  private clearStartupStateWatchdog(): void {
+    this.startupStatePending = false;
+    this.pauseStartupStateWatchdog();
   }
 
   private agentControlExtensionPath(): string | undefined {
@@ -709,7 +791,8 @@ export class PiRpcDriver implements Driver {
       return;
     }
     const typedMethod = method as PendingPiQuestion["method"];
-    if (this.pendingQuestions.has(requestId) || this.pendingQuestions.size >= MAX_PENDING_PI_QUESTIONS) {
+    if (this.pendingQuestions.has(requestId) || this.pendingPermissions.has(requestId) ||
+        this.pendingQuestions.size + this.pendingPermissions.size >= MAX_PENDING_PI_QUESTIONS) {
       this.peer?.send({ type: "extension_ui_response", id: requestId, cancelled: true });
       return;
     }
@@ -752,6 +835,117 @@ export class PiRpcDriver implements Driver {
     }
     this.pendingQuestions.set(requestId, pending);
     this.cb.onEvent({ kind: "question_request", requestId, questions: [question] });
+  }
+
+  /** Recognize only the nonce-bound runner extension envelope. Project/user extension dialogs
+   * remain ordinary questions even when they happen to use similar copy. */
+  private onSecurityApprovalRequest(event: Json): boolean {
+    const nonce = this.opts.env[PI_SECURITY_REQUEST_NONCE_ENV];
+    const marker = nonce ? `${PI_SECURITY_REQUEST_PREFIX}${nonce}.` : "";
+    const confirmEnvelope = event.method === "confirm" && event.title === PI_SECURITY_REQUEST_TITLE &&
+      typeof event.message === "string" ? event.message : "";
+    const selectPrefix = `${PI_SECURITY_REQUEST_TITLE}\n`;
+    const selectEnvelope = event.method === "select" && typeof event.title === "string" &&
+      event.title.startsWith(selectPrefix) ? event.title.slice(selectPrefix.length) : "";
+    const envelope = confirmEnvelope || selectEnvelope;
+    if (!marker || !envelope.startsWith(marker)) return false;
+    const requestId = string(event.id);
+    if (!requestId) return true;
+    const blockedResponse = event.method === "select" ? { cancelled: true } : { confirmed: false };
+    let payload: Json | undefined;
+    try {
+      const encoded = envelope.slice(marker.length);
+      if (!encoded || encoded.length > 64_000 || Buffer.from(encoded, "base64url").toString("base64url") !== encoded) {
+        throw new Error("invalid security envelope");
+      }
+      payload = object(JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")));
+    } catch {
+      this.peer?.send({ type: "extension_ui_response", id: requestId, ...blockedResponse });
+      this.cb.onStderr("Pi security approval request was malformed and was blocked.");
+      return true;
+    }
+    if (!payload || this.pendingQuestions.has(requestId) || this.pendingPermissions.has(requestId) ||
+        this.pendingQuestions.size + this.pendingPermissions.size >= MAX_PENDING_PI_QUESTIONS) {
+      this.peer?.send({ type: "extension_ui_response", id: requestId, ...blockedResponse });
+      return true;
+    }
+    if (payload.kind === "project_trust") {
+      if (event.method !== "select" || !Array.isArray(event.options) ||
+          event.options.length !== 2 || event.options[0] !== "Trust This Project" ||
+          event.options[1] !== "Skip Project Resources") {
+        this.peer?.send({ type: "extension_ui_response", id: requestId, cancelled: true });
+        return true;
+      }
+      const cwd = typeof payload.cwd === "string" ? payload.cwd.slice(0, 4096) : "";
+      this.pendingPermissions.set(requestId, {
+        responses: new Map([
+          ["trust", { value: "Trust This Project" }],
+          ["skip", { value: "Skip Project Resources" }],
+        ]),
+        fallback: { cancelled: true },
+        startupTrust: this.startupStatePending,
+      });
+      if (this.startupStatePending) this.pauseStartupStateWatchdog();
+      this.cb.onEvent({
+        kind: "permission_request",
+        requestId,
+        title: "Trust Pi Project Resources?",
+        options: [
+          { optionId: "trust", name: "Trust This Project", kind: "allow_always" },
+          { optionId: "skip", name: "Skip Project Resources", kind: "reject_always" },
+        ],
+        context: { toolName: "pi.project_trust", ...(cwd ? { input: cwd } : {}) },
+      });
+      return true;
+    }
+    if (payload.kind !== "tool_call") {
+      this.peer?.send({ type: "extension_ui_response", id: requestId, ...blockedResponse });
+      return true;
+    }
+    if (event.method !== "confirm") {
+      this.peer?.send({ type: "extension_ui_response", id: requestId, ...blockedResponse });
+      return true;
+    }
+    const mode = this.config.permissionMode || "default";
+    if (mode === "bypassPermissions" || mode === "orchestrator") {
+      this.peer?.send({ type: "extension_ui_response", id: requestId, confirmed: true });
+      return true;
+    }
+    if (mode === "dontAsk") {
+      this.peer?.send({ type: "extension_ui_response", id: requestId, confirmed: false });
+      return true;
+    }
+    if (mode !== "default") {
+      this.peer?.send({ type: "extension_ui_response", id: requestId, confirmed: false });
+      this.cb.onStderr(`Unsupported Pi permission mode ${JSON.stringify(mode)} was blocked.`);
+      return true;
+    }
+    const toolName = typeof payload.toolName === "string" && payload.toolName
+      ? payload.toolName.slice(0, 256)
+      : "Pi Tool";
+    const input = boundedApprovalInput(payload.input);
+    const toolCallId = typeof payload.toolCallId === "string" && payload.toolCallId
+      ? payload.toolCallId.slice(0, 512)
+      : undefined;
+    this.pendingPermissions.set(requestId, {
+      responses: new Map([
+        ["allow", { confirmed: true }],
+        ["deny", { confirmed: false }],
+      ]),
+      fallback: { confirmed: false },
+    });
+    this.cb.onEvent({
+      kind: "permission_request",
+      requestId,
+      title: `${toolName} requires approval.`,
+      options: [
+        { optionId: "allow", name: "Allow", kind: "allow_once" },
+        { optionId: "deny", name: "Reject", kind: "reject_once" },
+      ],
+      context: { toolName, ...(input ? { input } : {}) },
+      ...(toolCallId ? { ownerToolUseId: toolCallId } : {}),
+    });
+    return true;
   }
 
   private async finishSettledTurn(): Promise<void> {
@@ -821,6 +1015,12 @@ export class PiRpcDriver implements Driver {
   }
 
   private dismissQuestions(resolutionReason: "replaced" | "provider_resolved"): void {
+    for (const [requestId] of this.pendingPermissions) {
+      this.peer?.send({ type: "extension_ui_response", id: requestId, cancelled: true });
+      this.cb.onEvent({ kind: "permission_resolved", requestId, optionId: null, resolutionReason });
+    }
+    this.pendingPermissions.clear();
+    this.resumeStartupStateWatchdog();
     for (const [requestId, pending] of this.pendingQuestions) {
       if (pending.timer) clearTimeout(pending.timer);
       this.peer?.send({ type: "extension_ui_response", id: requestId, cancelled: true });

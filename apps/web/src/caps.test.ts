@@ -99,6 +99,7 @@ test("default permission modes match the transport used by each fixed driver", (
   assert.equal(defaultPermissionMode("claude-code"), "acceptEdits");
   assert.equal(defaultPermissionMode("codex"), "workspace-write");
   assert.equal(defaultPermissionMode("codex-app-server"), "auto-review");
+  assert.equal(defaultPermissionMode("pi"), "default");
   assert.equal(defaultPermissionMode("acp"), undefined);
 });
 

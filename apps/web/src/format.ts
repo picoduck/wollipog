@@ -204,7 +204,7 @@ export function formatCost(usd: number): string {
  */
 const PERMISSION_LABELS: Record<string, string> = {
   orchestrator: "Orchestrator",
-  // claude-code permission modes
+  // Shared native-harness permission modes (Claude and Pi advertise supported subsets)
   default: "Ask Every Time",
   auto: "Auto (AI-Reviewed)",
   acceptEdits: "Auto-Accept Edits",

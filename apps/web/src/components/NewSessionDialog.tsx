@@ -361,6 +361,9 @@ export function NewSessionDialog({
   const agent = selectedAgentOption?.agent;
   const nativeTuiAccountingExplanation = nativeTuiAccountingDetail(agent);
   const savedPermissionMode = savedSessionPermissionMode(defaultsReady ? harnessDefaults?.view ?? null : null, agent);
+  const savedPiModeUnavailableForTarget = agent?.driver === "pi" && executionTarget !== undefined &&
+    executionTarget.adapter !== "host" && savedPermissionMode !== undefined &&
+    savedPermissionMode !== "bypassPermissions" && savedPermissionMode !== "orchestrator";
   const orchestrator = presetOverride === "orchestrator" || savedPermissionMode === "orchestrator";
   const parentControlSupported = runnerSupportsProtocol(runner?.protocolVersion, "delegatedParentControl");
   const parentControlUnavailable = runnerCapabilityRequirement(
@@ -1269,9 +1272,12 @@ export function NewSessionDialog({
                 {
                   value: "default",
                   title: !defaultsReady ? "Default (Not Loaded)"
+                    : savedPiModeUnavailableForTarget ? "Target Default — Full Access"
                     : savedPermissionMode ? `Saved Default — ${titleCaseLabel(permissionModeLabel(savedPermissionMode, agent?.driver))}`
                     : "Harness Default",
-                  description: "Use the approval behavior saved for this agent harness.",
+                  description: savedPiModeUnavailableForTarget
+                    ? "This target cannot host Pi's approval bridge, so commands run without interactive approvals."
+                    : "Use the approval behavior saved for this agent harness.",
                 },
                 {
                   value: "orchestrator",

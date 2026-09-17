@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { spawnAgent } from "../spawn.js";
@@ -7,11 +9,25 @@ import { probePiRpc } from "./pi-rpc.js";
 const fixture = fileURLToPath(new URL("../drivers/fixtures/fake-pi-rpc.mjs", import.meta.url));
 
 test("Pi discovery derives models, thinking levels, images, commands, and skills from RPC", async () => {
+  let observedPrivateProbe = false;
   const result = await probePiRpc(
     { command: process.execPath, args: [fixture] },
     { kind: "native" },
-    { cwd: process.cwd(), timeoutMs: 2_000 },
+    {
+      cwd: process.cwd(),
+      timeoutMs: 2_000,
+      spawn: (options) => {
+        assert.notEqual(options.cwd, process.cwd());
+        assert.equal(existsSync(join(options.cwd, ".pi", "settings.json")), true);
+        assert.equal(options.args.includes("--extension"), true);
+        assert.equal(options.args.includes("--no-approve"), false,
+          "the trust hook must run so the probe can prove it declines project resources");
+        observedPrivateProbe = true;
+        return spawnAgent(options);
+      },
+    },
   );
+  assert.equal(observedPrivateProbe, true);
   assert.equal(result.available, true, result.unavailableReason);
   assert.equal(result.authStatus, "authenticated");
   assert.deepEqual(result.capabilities.models.map((model) => ({
@@ -31,7 +47,13 @@ test("Pi discovery derives models, thinking levels, images, commands, and skills
     { name: "skill:review", description: "Review code", source: "user" },
     { name: "ship", description: "Ship it", source: "user" },
   ]);
-  assert.deepEqual(result.capabilities.permissionModes, []);
+  assert.equal(result.capabilities.supportsApprovals, true);
+  assert.deepEqual(result.capabilities.permissionModes, ["default", "dontAsk", "bypassPermissions"]);
+  assert.deepEqual(result.capabilities.elicitation, {
+    default: ["stdio-control"],
+    dontAsk: ["none"],
+    bypassPermissions: ["none"],
+  });
 });
 
 test("Pi discovery fails closed when the RPC contract is not compatible", async () => {
@@ -68,6 +90,8 @@ test("Pi discovery keeps RPC available without advertising an unproved extension
   );
   assert.equal(result.available, true, result.unavailableReason);
   assert.equal(result.piAgentControl, undefined);
+  assert.equal(result.capabilities.supportsApprovals, false);
+  assert.deepEqual(result.capabilities.permissionModes, []);
 });
 
 test("Pi discovery requires the extension's session-start readiness proof", async () => {
@@ -78,6 +102,18 @@ test("Pi discovery requires the extension's session-start readiness proof", asyn
   );
   assert.equal(result.available, true, result.unavailableReason);
   assert.equal(result.piAgentControl, undefined);
+});
+
+test("Pi discovery requires proof that the extension receives project trust before startup", async () => {
+  const result = await probePiRpc(
+    { command: process.execPath, args: [fixture] },
+    { kind: "native" },
+    { cwd: process.cwd(), timeoutMs: 2_000, env: { WOLLIPOG_FAKE_PI_SCENARIO: "project-trust-unsupported" } },
+  );
+  assert.equal(result.available, true, result.unavailableReason);
+  assert.equal(result.piAgentControl, undefined);
+  assert.equal(result.capabilities.supportsApprovals, false);
+  assert.deepEqual(result.capabilities.permissionModes, []);
 });
 
 test("Pi discovery keeps older RPCs available when an unknown entry command never answers", async () => {

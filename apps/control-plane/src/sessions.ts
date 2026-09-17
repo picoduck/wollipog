@@ -915,16 +915,18 @@ function titleFromPrompt(text: string): string {
   return clean.length > 80 ? clean.slice(0, 79).trimEnd() + "…" : clean;
 }
 
-/** Persist the capability-dependent Claude default at creation time so the selector, stored
+/** Persist capability-dependent harness defaults at creation time so the selector, stored
  * session, and launch argv all describe the same mode. Older sessions with no stored mode keep
  * the driver's compatibility fallback and are deliberately not migrated. */
 export function defaultPermissionModeForNewSession(
   driver: AgentDriverKind,
   capabilities: AgentCapabilities | undefined,
+  piAgentControlAvailable = true,
 ): string | undefined {
-  if (driver !== "claude-code") return undefined;
   const modes = capabilities?.permissionModes;
   if (!modes?.length) return undefined;
+  if (driver === "pi") return piAgentControlAvailable && modes.includes("default") ? "default" : undefined;
+  if (driver !== "claude-code") return undefined;
   if (modes.includes("auto")) return "auto";
   return modes.includes("acceptEdits") ? "acceptEdits" : undefined;
 }
@@ -3289,12 +3291,27 @@ export class SessionsService {
           if (preference.model !== undefined) requestedConfig.model = preference.model;
           if (preference.effort !== undefined) requestedConfig.effort = preference.effort;
         }
-        if (requestedConfig.permissionMode === undefined && preference.permissionMode !== undefined) {
-          requestedConfig.permissionMode = preference.permissionMode;
+        const savedPermissionMode = launch.driver === "pi" && executionTarget.adapter !== "host" &&
+            preference.permissionMode !== undefined && preference.permissionMode !== "bypassPermissions" &&
+            preference.permissionMode !== "orchestrator"
+          ? undefined
+          : preference.permissionMode;
+        if (requestedConfig.permissionMode === undefined && savedPermissionMode !== undefined) {
+          requestedConfig.permissionMode = savedPermissionMode;
         }
       }
       if (requestedConfig.permissionMode === undefined) {
-        requestedConfig.permissionMode = defaultPermissionModeForNewSession(launch.driver, agentCapabilities);
+        requestedConfig.permissionMode = defaultPermissionModeForNewSession(
+          launch.driver,
+          agentCapabilities,
+          executionTarget.adapter === "host",
+        );
+      }
+      if (launch.driver === "pi" && executionTarget.adapter !== "host" &&
+          requestedConfig.permissionMode !== undefined &&
+          requestedConfig.permissionMode !== "bypassPermissions" &&
+          requestedConfig.permissionMode !== "orchestrator") {
+        return fail("Pi approval-enforcing permission modes require a host execution target with the verified Agent Control bridge", 409);
       }
       const explicitConfigError = capabilityConfigError(
         claudeModelConfigForValidation(requestedConfig, agentCapabilities, launch.driver), agentCapabilities,

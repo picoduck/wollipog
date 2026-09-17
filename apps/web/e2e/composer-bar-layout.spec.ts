@@ -22,11 +22,24 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-async function openFixture(page: Page, width: number, kind: "claude" | "codex" | "orchestrator", extra = "") {
+async function openFixture(page: Page, width: number, kind: "claude" | "codex" | "orchestrator" | "pi", extra = "") {
   await page.setViewportSize({ width, height: 844 });
   await page.goto(`/session-usage-e2e.html?width=${width}&height=804&composer=${kind}${extra}`);
   await expect(page.locator(".composer-box")).toBeVisible();
 }
+
+test("Pi exposes verified permission choices and their delivery outcomes", async ({ page }) => {
+  await openFixture(page, 900, "pi");
+  await expect(page.locator(".composer-input")).toBeVisible();
+  await page.getByRole("button", { name: "Permission Mode: Ask Every Time" }).click();
+  const menu = page.locator(".permission-mode-pop");
+  await expect(menu).toBeVisible();
+  await expect(menu).toContainText("Permission Mode");
+  await expect(menu.getByRole("menuitemradio", { name: /Default/ })).toContainText("Approvals Available");
+  await expect(menu.getByRole("menuitemradio", { name: /Don't Ask/ })).toContainText("Blocks Requests");
+  await expect(menu.getByRole("menuitemradio", { name: /Full Access/ })).toContainText("No Command Approvals");
+  await page.screenshot({ path: `${EVIDENCE}/after-pi-permission-modes.png` });
+});
 
 async function expandComposer(page: Page) {
   await page.getByRole("button", { name: "Edit Message" }).click();
