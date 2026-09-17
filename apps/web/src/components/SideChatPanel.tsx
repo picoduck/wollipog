@@ -70,6 +70,13 @@ export function SideChatPanel({
   const mountedRef = useRef(true);
   const cursorRef = useRef(0);
   const epochRef = useRef(0);
+  /**
+   * The child the transcript state currently belongs to, tracked synchronously. A poll iteration
+   * for the outgoing child can resolve after the switch but before React commits — and therefore
+   * before the effect cleanup sets its `current` flag — so `current` alone cannot keep it from
+   * writing the retired child's events back over the incoming one's.
+   */
+  const transcriptChildRef = useRef<string | undefined>(undefined);
   const childId = sideChat?.session.id;
 
   useEffect(() => () => { mountedRef.current = false; }, []);
@@ -99,13 +106,16 @@ export function SideChatPanel({
    * composer.
    */
   const resetTranscript = (next: SideChatView | null) => {
+    transcriptChildRef.current = next?.session.id;
     cursorRef.current = 0;
     epochRef.current = next?.session.eventEpoch ?? 0;
     setEvents([]);
   };
 
-  // Backstop for any path that changes the child without going through `resetTranscript`.
+  // Backstop for any path that changes the child without going through `resetTranscript`. It runs
+  // after paint, so it settles state rather than preventing a mismatched frame.
   useEffect(() => {
+    transcriptChildRef.current = childId;
     cursorRef.current = 0;
     epochRef.current = sideChat?.session.eventEpoch ?? 0;
     setEvents([]);
@@ -125,7 +135,7 @@ export function SideChatPanel({
         // good — its recovery action then failed with "the current side chat is still active"
         // forever, because it was still arguing about a child the parent had already let go.
         const { sideChat: latest } = await api.sideChat(session.id);
-        if (!current) return;
+        if (!current || transcriptChildRef.current !== childId) return;
         // A different child means a new generation; this effect re-runs for it rather than merging
         // the two transcripts here.
         if (latest?.session.id !== childId) {
@@ -142,7 +152,7 @@ export function SideChatPanel({
         }
         readingEvents = true;
         const page = await api.getSessionEventPage(childId, cursorRef.current, epoch, PAGE_SIZE);
-        if (!current) return;
+        if (!current || transcriptChildRef.current !== childId) return;
         if (page.events.length) {
           setEvents((prior) => {
             const bySeq = new Map(prior.map((event) => [event.seq, event]));
@@ -153,7 +163,7 @@ export function SideChatPanel({
         cursorRef.current = page.nextAfter ?? page.events.at(-1)?.seq ?? cursorRef.current;
         setError(null);
       } catch (cause) {
-        if (!current) return;
+        if (!current || transcriptChildRef.current !== childId) return;
         if (readingEvents && cause instanceof ApiError && cause.status === 409) {
           // The CP replaced this history generation. The next poll reloads the authoritative
           // session epoch and starts again from zero; never merge across generations. A 409 from
