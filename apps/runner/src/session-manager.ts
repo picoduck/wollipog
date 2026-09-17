@@ -54,6 +54,7 @@ import type {
   SessionStatus,
   SessionWorktreeIsolationNotice,
   SessionWorktreeProgressPhase,
+  SessionWorktreeRetirementResult,
   SessionWorktreeView,
   WorktreePortBlock,
   WorktreeSetupConfigStatus,
@@ -81,6 +82,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { makeDriver, type Driver } from "./drivers/factory.js";
+import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
 import type {
   CompletedCommandReconciliationProof,
   DriverBackgroundWorkUpdate,
@@ -1387,6 +1389,14 @@ export class SessionManager {
       .find((worktree) => sameWorktreePath(meta.context, worktree.path, path));
   }
 
+  /** Every runner-created identity remains protected even while a sibling is selected or its
+   * cleanup is pending. Attached operator worktrees deliberately stay outside this boundary. */
+  private managedWorktreeProtections(meta: SessionMeta): ManagedWorktreeProtection[] {
+    return this.attributedWorktrees(meta)
+      .filter((worktree) => worktree.source !== "attached")
+      .map((worktree) => ({ worktreePath: worktree.path, repoPath: meta.repoPath }));
+  }
+
   private runnerOwnedWorktreeBlocksWorkspaceRemap(
     meta: SessionMeta | null,
     repoPath: string,
@@ -2339,6 +2349,17 @@ export class SessionManager {
       this.cancelActiveTurnWait(sessionId);
       this.releaseActiveTurn(sessionId);
       if (refreshCapacityInventory) this.refreshCapacityInventorySession(sessionId);
+      const deferred = this.cleanupJournal.list().filter((record) =>
+        record.sessionId === sessionId && record.removalMode === "safe");
+      if (deferred.length) {
+        setImmediate(() => {
+          for (const record of deferred) {
+            void this.reapWorktree(record).catch((error) => {
+              this.log(`worktree cleanup for ${boundedSessionIdForLog(sessionId)} needs retry after provider exit: ${errText(error)}`);
+            });
+          }
+        });
+      }
     }
     return deleted;
   }
@@ -2788,11 +2809,61 @@ export class SessionManager {
     }
   }
 
+  private pendingSafeWorktreeCleanup(
+    sessionId: string,
+    worktree: SessionWorktreeView,
+  ): WorktreeCleanupRecord | undefined {
+    return this.cleanupJournal.list().find((record) =>
+      record.sessionId === sessionId && record.removalMode === "safe" &&
+      record.worktreeId === worktree.id && record.worktreePath === worktree.path);
+  }
+
+  private async deferWorktreeRetirement(
+    meta: SessionMeta,
+    worktree: SessionWorktreeView,
+    reason: "provider_active" | "provider_launching" | "cleanup_pending",
+    trigger: "explicit_discard" | "pull_request_reconciliation",
+  ): Promise<{ removed: false; snapshot: SessionSnapshot; retirement: SessionWorktreeRetirementResult }> {
+    let latest = meta;
+    const existing = this.pendingSafeWorktreeCleanup(meta.sessionId, worktree);
+    if (!existing) {
+      try {
+        await this.ensureDurableWorktreeHookSnapshot(meta, worktree);
+        latest = this.store.readMeta(meta.sessionId) ?? meta;
+      } catch (error) {
+        this.log(`worktree cleanup configuration recovery failed for ${boundedSessionIdForLog(meta.sessionId)}: ${errText(error)}`);
+      }
+      const current = this.attributedWorktrees(latest).find((item) =>
+        item.id === worktree.id && sameWorktreePath(latest.context, item.path, worktree.path));
+      if (!current) throw new Error("worktree record changed while retirement was being deferred");
+      this.cleanupJournal.add(this.cleanupRecordForWorktree(latest, current, trigger, "safe"));
+    } else {
+      const verifiedMergedHead = worktree.pullRequest?.state === "merged" &&
+        /^[a-f0-9]{40,64}$/u.test(worktree.pullRequest.headOid ?? "")
+        ? worktree.pullRequest.headOid
+        : undefined;
+      if (verifiedMergedHead && existing.verifiedMergedHead !== verifiedMergedHead) {
+        existing.verifiedMergedHead = verifiedMergedHead;
+        this.cleanupJournal.add(existing);
+      }
+    }
+    return {
+      removed: false,
+      snapshot: this.snapshot(latest),
+      retirement: { status: "deferred", reason: existing ? "cleanup_pending" : reason },
+    };
+  }
+
   private async discardWorktreeLocked(
     sessionId: string,
     path: string,
     options: { refreshMergedHead?: boolean; trigger?: "explicit_discard" | "pull_request_reconciliation" } = {},
-  ): Promise<{ removed: boolean; reason?: string; snapshot?: SessionSnapshot }> {
+  ): Promise<{
+    removed: boolean;
+    reason?: string;
+    snapshot?: SessionSnapshot;
+    retirement?: SessionWorktreeRetirementResult;
+  }> {
     const initialMeta = this.store.readMeta(sessionId);
     if (!initialMeta || !this.sessionCanOpen(sessionId)) {
       return { removed: false, reason: "session is unavailable" };
@@ -2808,13 +2879,7 @@ export class SessionManager {
       sameWorktreePath(meta.context, meta.worktreePath, worktree.path) &&
       (meta.status === "starting" || meta.status === "queued" || meta.worktreePending === true);
     if (initiallySelectedIsLaunching) {
-      return { removed: false, reason: "the worktree is still being launched by a provider process" };
-    }
-    if (this.transitioningProviderUsesPath(sessionId, meta.context, worktree.path)) {
-      return { removed: false, reason: "the worktree is still active in a provider process" };
-    }
-    if (this.providerTurnUsesPath(sessionId, meta.context, worktree.path)) {
-      return { removed: false, reason: "the worktree is still handling a provider turn or queued input" };
+      return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard");
     }
     if (options.refreshMergedHead !== false && !worktree.pullRequest) {
       await this.discoverUnlinkedMergedWorktree(sessionId, worktree.path);
@@ -2876,13 +2941,12 @@ export class SessionManager {
       sameWorktreePath(meta.context, meta.worktreePath, worktree.path) &&
       (meta.status === "starting" || meta.status === "queued" || meta.worktreePending === true);
     if (selectedIsLaunching) {
-      return { removed: false, reason: "the worktree is still being launched by a provider process" };
+      return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard");
     }
-    if (this.transitioningProviderUsesPath(sessionId, meta.context, worktree.path)) {
-      return { removed: false, reason: "the worktree is still active in a provider process" };
-    }
-    if (this.providerTurnUsesPath(sessionId, meta.context, worktree.path)) {
-      return { removed: false, reason: "the worktree is still handling a provider turn or queued input" };
+    if (this.liveWorktreeUsesPath(sessionId, worktree.path) ||
+        this.transitioningProviderUsesPath(sessionId, meta.context, worktree.path) ||
+        this.providerTurnUsesPath(sessionId, meta.context, worktree.path)) {
+      return this.deferWorktreeRetirement(meta, worktree, "provider_active", options.trigger ?? "explicit_discard");
     }
     let teardownIdentityError: string | undefined;
     try {
@@ -2967,8 +3031,17 @@ export class SessionManager {
       cleanup.worktreeRemovedAt = Date.now();
       this.cleanupJournal.add(cleanup);
       const snapshot = await this.forgetRemovedWorktree(cleanup);
+      if (!snapshot) {
+        const retainedMeta = this.store.readMeta(sessionId);
+        if (!retainedMeta) return { removed: false, reason: "worktree metadata cleanup needs retry" };
+        return {
+          removed: false,
+          snapshot: this.snapshot(retainedMeta),
+          retirement: { status: "deferred", reason: "cleanup_pending" },
+        };
+      }
       this.finishWorktreeCleanup(cleanup);
-      return { removed: true, snapshot };
+      return { removed: true, snapshot, retirement: { status: "removed" } };
     } finally {
       const provider = this.active.get(sessionId);
       if (transferredFrom && provider?.worktreeLeaseOwner === transferredFrom) {
@@ -3024,13 +3097,16 @@ export class SessionManager {
 
   /** Destructive session-scoped operation. Safety checks are identical to automatic PR cleanup;
    * explicit intent bypasses only the requirement for a terminal forge state. */
-  async discardWorktree(sessionId: string, path: string): Promise<SessionSnapshot> {
+  async discardWorktree(
+    sessionId: string,
+    path: string,
+  ): Promise<{ snapshot: SessionSnapshot; retirement: SessionWorktreeRetirementResult }> {
     return this.runWorktreeOperation(sessionId, async () => {
       const result = await this.discardWorktreeLocked(sessionId, path);
-      if (!result.removed || !result.snapshot) {
+      if ((!result.removed && result.retirement?.status !== "deferred") || !result.snapshot || !result.retirement) {
         throw new Error(`worktree retained: ${result.reason ?? "cleanup did not complete"}`);
       }
-      return result.snapshot;
+      return { snapshot: result.snapshot, retirement: result.retirement };
     });
   }
 
@@ -6056,7 +6132,23 @@ export class SessionManager {
       });
       client = this.createDriver(
         meta.driver,
-        { command: meta.command, args: meta.args, cwd, env: meta.env, config: meta.config, orchestrator: meta.orchestrator, context: meta.context, capabilities: meta.capabilities, resumeId, acpSessionContext: meta.acpSessionContext, isolation, sessionStateDir: this.store.sessionPath(sessionId), initialBackgroundTaskIds: meta.orphanedWork?.pendingTaskIds ?? meta.pendingBackgroundTaskIds, descendantMarker: worktree ? this.worktreeProcessMarker(sessionId, cwd) : undefined },
+        {
+          command: meta.command,
+          args: meta.args,
+          cwd,
+          env: meta.env,
+          config: meta.config,
+          orchestrator: meta.orchestrator,
+          context: meta.context,
+          capabilities: meta.capabilities,
+          resumeId,
+          acpSessionContext: meta.acpSessionContext,
+          isolation,
+          sessionStateDir: this.store.sessionPath(sessionId),
+          initialBackgroundTaskIds: meta.orphanedWork?.pendingTaskIds ?? meta.pendingBackgroundTaskIds,
+          descendantMarker: worktree ? this.worktreeProcessMarker(sessionId, cwd) : undefined,
+          managedWorktreeProtections: this.managedWorktreeProtections(meta),
+        },
         {
         supportsWorkerAttention: () => runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "workerAttention"),
         onEvent: (p) => this.onDriverEvent(sessionId, p),
@@ -10238,6 +10330,7 @@ export class SessionManager {
             resumeId: source.agentSessionId,
             isolation,
             descendantMarker: this.worktreeProcessMarker(source.sessionId, source.worktreePath),
+            managedWorktreeProtections: this.managedWorktreeProtections(source),
           },
           { onEvent: () => {}, onStderr: (text) => this.log(`provider fork: ${text}`), onExit: () => {} },
         );
@@ -10345,6 +10438,7 @@ export class SessionManager {
             resumeId: source.agentSessionId,
             isolation: forkIsolation,
             descendantMarker: targetDescendantMarker,
+            managedWorktreeProtections: this.managedWorktreeProtections(forkMeta),
           },
           { onEvent: () => {}, onStderr: (text) => this.log(`provider fork: ${text}`), onExit: () => {} },
         );
@@ -11272,7 +11366,18 @@ export class SessionManager {
       record.worktreeRemovedAt = Date.now();
       this.cleanupJournal.add(record);
     }
-    await this.forgetRemovedWorktree(record);
+    const snapshot = await this.forgetRemovedWorktree(record);
+    if (this.store.has(record.sessionId) && !snapshot) {
+      const latest = this.store.readMeta(record.sessionId);
+      const inventoryStillReferencesWorktree = !!latest && this.attributedWorktrees(latest).some((item) =>
+        item.id === record.worktreeId && sameWorktreePath(latest.context, item.path, record.worktreePath));
+      const selectionStillReferencesWorktree = !!latest?.worktreePath &&
+        sameWorktreePath(latest.context, latest.worktreePath, record.worktreePath);
+      if (inventoryStillReferencesWorktree || selectionStillReferencesWorktree) {
+        this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after live metadata cleanup`);
+        return;
+      }
+    }
     this.finishWorktreeCleanup(record);
   }
 
@@ -11290,11 +11395,14 @@ export class SessionManager {
         item.id === record.worktreeId && sameWorktreePath(meta.context, item.path, record.worktreePath) &&
         (!record.branch || item.branch === record.branch));
       if (!worktree) {
-        if (record.worktreeRemovedAt) this.finishWorktreeCleanup(record);
+        const selectionStillTargetsRemovedPath = !!meta.worktreePath &&
+          sameWorktreePath(meta.context, meta.worktreePath, record.worktreePath);
+        if (record.worktreeRemovedAt && !selectionStillTargetsRemovedPath) this.finishWorktreeCleanup(record);
         else this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after live worktree identity changed`);
         return;
       }
-      if (this.providerTurnUsesPath(record.sessionId, meta.context, record.worktreePath) ||
+      if (this.liveWorktreeUsesPath(record.sessionId, record.worktreePath) ||
+          this.providerTurnUsesPath(record.sessionId, meta.context, record.worktreePath) ||
           this.transitioningProviderUsesPath(record.sessionId, meta.context, record.worktreePath)) {
         this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} deferred while a provider turn uses the worktree`);
         return;
@@ -11322,7 +11430,11 @@ export class SessionManager {
           record.worktreeRemovedAt = Date.now();
           this.cleanupJournal.add(record);
         }
-        await this.forgetRemovedWorktree(record);
+        const snapshot = await this.forgetRemovedWorktree(record);
+        if (!snapshot) {
+          this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after live metadata cleanup`);
+          return;
+        }
         this.finishWorktreeCleanup(record);
       } finally {
         const provider = this.active.get(record.sessionId);

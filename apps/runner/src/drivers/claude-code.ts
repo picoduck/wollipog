@@ -25,6 +25,7 @@ import { inspectClaudeBackgroundWork, inspectClaudeBackgroundWorkInContext, type
 import { effectiveClaudePermissionMode } from "../claude-permission.js";
 import { prepareClaudeHookArgs } from "../hook-settings.js";
 import { classifyRoutineClaudeOrchestratorPermission } from "../orchestrator-provider-permissions.js";
+import { commandTargetsManagedWorktree } from "../managed-worktree-protection.js";
 import { killTree, spawnAgent, terminateDescendantBoundaries, trackPendingKill, type AgentProcess, type SpawnAgentOptions } from "../spawn.js";
 import type {
   Driver,
@@ -285,6 +286,13 @@ export function claudeStructuredOrchestratorArgs(args: readonly string[], strict
     result.push(argument);
   }
   return result;
+}
+
+/** Claude's classifier cannot know which paths are runner-owned. Keep automatic review for
+ * ordinary sessions, but route every boundary-crossing tool decision through Wollipog while a
+ * managed worktree is present so the local target veto cannot be auto-overridden. */
+export function protectedClaudePermissionMode(mode: string, protectManagedWorktrees: boolean): string {
+  return protectManagedWorktrees && (mode === "auto" || mode === "bypassPermissions") ? "default" : mode;
 }
 
 /**
@@ -896,7 +904,10 @@ export class ClaudeCodeDriver implements Driver {
       // — no MCP, no side channel). Non-interactive modes pass --permission-mode and pipe
       // the plain-text prompt over stdin so Windows cmd.exe never has to parse user content.
       const perm = claudePermissionArgs(
-        effectiveClaudePermissionMode(cfg, this.opts.orchestrator?.strictProjectIsolation !== false),
+        protectedClaudePermissionMode(
+          effectiveClaudePermissionMode(cfg, this.opts.orchestrator?.strictProjectIsolation !== false),
+          (this.opts.managedWorktreeProtections?.length ?? 0) > 0,
+        ),
         imgs.length > 0,
       );
       this.interactive = perm.interactive;
@@ -1126,8 +1137,12 @@ export class ClaudeCodeDriver implements Driver {
       return;
     }
     const cfg = this.config;
-    const perm = claudePermissionArgs(
+    const permissionMode = protectedClaudePermissionMode(
       effectiveClaudePermissionMode(cfg, this.opts.orchestrator?.strictProjectIsolation !== false),
+      (this.opts.managedWorktreeProtections?.length ?? 0) > 0,
+    );
+    const perm = claudePermissionArgs(
+      permissionMode,
       true,
     );
     const preparedArgs = this.preparedBaseArgs();
@@ -1136,10 +1151,7 @@ export class ClaudeCodeDriver implements Driver {
       cwd: this.cwd,
       model: cfg.model ?? null,
       effort: cfg.effort ?? null,
-      permissionMode: effectiveClaudePermissionMode(
-        cfg,
-        this.opts.orchestrator?.strictProjectIsolation !== false,
-      ),
+      permissionMode,
       args: preparedArgs,
     });
 
@@ -2142,13 +2154,34 @@ export class ClaudeCodeDriver implements Driver {
         if (!this.child) return null;
         const req = msg.request;
         if (req?.subtype === "can_use_tool" && typeof msg.request_id === "string") {
+          const managedRefusal = req.tool_name === "Bash" && typeof req.input?.command === "string"
+            ? commandTargetsManagedWorktree(
+                req.input.command,
+                this.opts.cwd,
+                this.opts.managedWorktreeProtections ?? [],
+              )
+            : null;
+          if (managedRefusal) {
+            try {
+              this.child.stdin.write(JSON.stringify({
+                type: "control_response",
+                response: {
+                  subtype: "success",
+                  request_id: msg.request_id,
+                  response: { behavior: "deny", message: managedRefusal },
+                },
+              }) + "\n");
+            } catch { /* the provider process ended before the refusal could be written */ }
+            return null;
+          }
           const orchestratorDisposition = this.opts.config.permissionMode === "orchestrator" && this.opts.orchestrator
             ? classifyRoutineClaudeOrchestratorPermission(
-            req.tool_name,
-            req.input,
-            this.opts.orchestrator.issueNumbers ?? [],
-            this.opts.cwd,
-          ) : "interactive";
+                req.tool_name,
+                req.input,
+                this.opts.orchestrator.issueNumbers ?? [],
+                this.opts.cwd,
+              )
+            : "interactive";
           if (orchestratorDisposition === "allow") {
             try {
               this.child.stdin.write(JSON.stringify({

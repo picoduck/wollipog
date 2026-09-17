@@ -437,7 +437,9 @@
 // 158: structured Claude Orchestrator launches carry a finite immutable campaign issue scope.
 //      Older runners cannot enforce it, so scoped issue coordination fails with an upgrade
 //      requirement instead of silently reverting to approval cards or strict-mode denial.
-export const PROTOCOL_VERSION = 158;
+// 159: discard_worktree reports whether runner-owned retirement completed immediately or was
+//      durably deferred until the provider releases the managed worktree.
+export const PROTOCOL_VERSION = 159;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -6856,6 +6858,12 @@ export interface SessionWorktreeIsolationNotice {
   writableAtNextLaunch: boolean;
 }
 
+export interface SessionWorktreeRetirementResult {
+  status: "removed" | "deferred";
+  /** Present only while a durable cleanup record waits for the owning provider boundary. */
+  reason?: "provider_active" | "provider_launching" | "cleanup_pending";
+}
+
 export interface SessionWorktreeResultMessage {
   type: "session_worktree_result";
   requestId: string;
@@ -6870,6 +6878,8 @@ export interface SessionWorktreeResultMessage {
   generatedSetup?: { path: ".wollipog.json"; detected: string[] };
   /** Protocol v133+, attach only. */
   isolation?: SessionWorktreeIsolationNotice;
+  /** Protocol v158+, discard only. */
+  retirement?: SessionWorktreeRetirementResult;
 }
 
 /** Control plane asks the runner to re-probe installed agents and push the result. */

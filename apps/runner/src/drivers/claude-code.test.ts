@@ -34,6 +34,7 @@ import {
   LEGACY_CLAUDE_PERSISTENT_FLAG,
   LEGACY_CLAUDE_PERSISTENT_IDLE_MS,
   normalizeQuestions,
+  protectedClaudePermissionMode,
   renderApprovalInput,
   warnLegacyClaudeLifetimeEnvironment,
 } from "./claude-code.js";
@@ -3473,6 +3474,40 @@ test("control_request (can_use_tool) -> permission_request with allow/deny optio
   assert.deepEqual((h.driver as any).pendingApprovals.get("req-1"), { file_path: "notes.md", content: "hi" });
 });
 
+test("managed-worktree shell retirement is denied before Claude permission resolution", () => {
+  const worktreePath = "/runner/worktrees/session/managed";
+  const h = makeHarness({
+    cwd: worktreePath,
+    managedWorktreeProtections: [{ worktreePath, repoPath: "/projects/repo" }],
+  });
+  const writes: string[] = [];
+  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
+
+  h.feed({
+    type: "control_request",
+    request_id: "managed-remove",
+    request: {
+      subtype: "can_use_tool",
+      tool_name: "Bash",
+      input: { command: `rm -rf -- ${worktreePath}` },
+    },
+  });
+
+  assert.deepEqual(h.events, []);
+  assert.equal((h.driver as any).pendingApprovals.size, 0);
+  assert.deepEqual(JSON.parse(writes[0]!), {
+    type: "control_response",
+    response: {
+      subtype: "success",
+      request_id: "managed-remove",
+      response: {
+        behavior: "deny",
+        message: "Wollipog protects this runner-owned worktree. Use discard_worktree so retirement can wait for the provider to exit and then apply the managed safety checks.",
+      },
+    },
+  });
+});
+
 test("provider-mode Claude Orchestrator auto-allows a bounded read-only issue loop", () => {
   const h = makeHarness({
     config: { permissionMode: "orchestrator" },
@@ -3835,6 +3870,14 @@ test("claudePermissionArgs: 'default' uses the stdio prompt tool (interactive, n
   assert.equal(interactive, true);
   assert.deepEqual(args, ["--input-format", "stream-json", "--permission-prompt-tool", "stdio"]);
   assert.equal(args.includes("--permission-mode"), false);
+});
+
+test("managed worktrees retain restrictive Claude modes and narrow bypass modes to runner review", () => {
+  assert.equal(protectedClaudePermissionMode("plan", true), "plan");
+  assert.equal(protectedClaudePermissionMode("acceptEdits", true), "acceptEdits");
+  assert.equal(protectedClaudePermissionMode("auto", true), "default");
+  assert.equal(protectedClaudePermissionMode("bypassPermissions", true), "default");
+  assert.equal(protectedClaudePermissionMode("bypassPermissions", false), "bypassPermissions");
 });
 
 test("claudePermissionArgs: 'auto' is interactive AND passes --permission-mode auto (classifier + UI escalation)", () => {

@@ -1762,6 +1762,28 @@ test("command approvals expose and deliver every stable provider decision", asyn
   assert.deepEqual(await pending, { decision: "acceptForSession" });
 });
 
+test("managed-worktree command approvals are refused before automatic or human authorization", async () => {
+  const worktreePath = "/runner/worktrees/session/managed";
+  const h = makeHarness({
+    cwd: worktreePath,
+    managedWorktreeProtections: [{ worktreePath, repoPath: "/projects/repo" }],
+  });
+  const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any, requestId: number | string) => Promise<any>) =>
+      requests.set(method, handler),
+    onNotification: () => {},
+  });
+
+  const response = await requests.get("item/commandExecution/requestApproval")!({
+    command: `git -C /projects/repo worktree remove ${worktreePath}`,
+    cwd: worktreePath,
+  }, "managed-remove");
+  assert.deepEqual(response, { decision: "decline" });
+  assert.equal(h.events.length, 0, "the non-overridable refusal never creates an approval card");
+  assert.match(h.stderr.at(-1) ?? "", /Use discard_worktree/);
+});
+
 test("Codex tool user input keeps the provider request id and returns native answers", async () => {
   const h = makeHarness();
   const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
@@ -2250,6 +2272,17 @@ test("buildCodexTurnParams: default and 'auto-review' use Guardian with an escap
   assert.equal(d.approvalPolicy, "on-request");
   assert.equal(d.approvalsReviewer, "auto_review");
   assert.deepEqual(d.sandboxPolicy, { type: "workspaceWrite" });
+});
+
+test("buildCodexTurnParams: managed worktrees route escalation through the runner veto", () => {
+  const params = buildCodexTurnParams(cfg("auto-review"), "t1", "/w", [], undefined, true);
+  assert.equal(params.approvalPolicy, "on-request");
+  assert.equal(params.approvalsReviewer, "user");
+  assert.deepEqual(params.sandboxPolicy, { type: "workspaceWrite" });
+
+  const narrowed = buildCodexTurnParams(cfg("danger-full-access"), "t1", "/w", [], undefined, true);
+  assert.equal(narrowed.approvalPolicy, "on-request");
+  assert.deepEqual(narrowed.sandboxPolicy, { type: "workspaceWrite" });
 });
 
 test("buildCodexTurnParams: 'untrusted' asks every tool (no auto reviewer)", () => {
