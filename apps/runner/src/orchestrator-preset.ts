@@ -276,7 +276,8 @@ export function orchestratorLaunchArgs(
   const instructions = orchestratorInstructions(projectPaths, strictProjectIsolation);
   if (driver === "claude-code") {
     if (!strictProjectIsolation) {
-      return ["--strict-mcp-config", "--append-system-prompt", instructions,
+      return ["--strict-mcp-config", "--allowedTools", claudeAllowedTools().join(","),
+        "--append-system-prompt", instructions,
         ...projectPaths.flatMap((path) => ["--add-dir", path])];
     }
     return ["--tools", ORCHESTRATOR_CLAUDE_TOOLS.join(","), "--strict-mcp-config", "--disable-slash-commands",

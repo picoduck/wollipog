@@ -369,12 +369,22 @@ test("native orchestrator flags enable bounded planning while disabling implemen
   assert.throws(() => orchestratorLaunchArgs("acp", mcp), /native harness/);
 });
 
-test("provider-mode Orchestrator keeps implementation tools behind provider approvals", () => {
+test("provider-mode Claude Orchestrator pre-authorizes routine coordination but not implementation", () => {
   const claude = orchestratorLaunchArgs("claude-code", mcp, ["/repo"], false);
   assert.equal(claude.includes("--tools"), false);
   assert.equal(claude.includes("--disallowedTools"), false);
   assert.equal(claude.includes("--permission-mode"), false,
     "the Claude driver supplies its verified interactive Default permission channel");
+  const allowed = (claude[claude.indexOf("--allowedTools") + 1] ?? "").split(",");
+  for (const routine of [
+    "mcp__wollipog__*", "Read", "Grep", "Glob", "WebFetch", "WebSearch",
+    "Bash(git status:*)", "Bash(git worktree list:*)", "Bash(gh issue view:*)",
+    "Bash(gh pr list:*)", "Bash(gh pr view:*)",
+  ]) assert.ok(allowed.includes(routine), `${routine} should not produce a provider permission request`);
+  for (const implementation of ["Write", "Edit", "Bash", "Bash(pnpm test:*)", "Bash(git push:*)", "Bash(gh pr create:*)"]) {
+    assert.equal(allowed.includes(implementation), false,
+      `${implementation} must remain behind the provider permission channel`);
+  }
   assert.match(claude[claude.indexOf("--append-system-prompt") + 1] ?? "", /Strict Project Isolation is disabled/);
   assert.match(claude[claude.indexOf("--append-system-prompt") + 1] ?? "", /dedicated Wollipog worktree/);
   const codex = orchestratorLaunchArgs("codex", mcp, ["/repo"], false);
@@ -395,6 +405,22 @@ test("resume replaces stale safety flags without stacking managed MCP configurat
     "--model", "example", "--no-extensions", "--exclude-tools", "bash", "--extension", "/tmp/old.mjs",
     "--append-system-prompt", "old",
   ], "pi"), ["--model", "example"]);
+});
+
+test("provider-mode Claude resume replaces the routine authorization baseline exactly once", () => {
+  const stale = [
+    "--model", "example", "--allowedTools", "Bash(echo stale)",
+    "--append-system-prompt", "stale", "--add-dir", "/stale",
+  ];
+  const reprovisioned = [
+    ...stripOrchestratorLaunchArgs(stale, "claude-code"),
+    ...orchestratorLaunchArgs("claude-code", mcp, ["/repo"], false),
+  ];
+  assert.equal(reprovisioned.filter((arg) => arg === "--allowedTools").length, 1);
+  assert.equal(reprovisioned.includes("Bash(echo stale)"), false);
+  assert.match(reprovisioned[reprovisioned.indexOf("--allowedTools") + 1] ?? "", /mcp__wollipog__\*/);
+  assert.deepEqual(reprovisioned.flatMap((arg, index) => arg === "--add-dir" ? [reprovisioned[index + 1]] : []),
+    ["/repo"]);
 });
 
 test("Codex MCP isolation disables every ambient server and fails closed on unverifiable output", () => {
