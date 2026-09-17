@@ -813,6 +813,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       workspaceId: WORKSPACE_ID,
       agentId: "test-orchestrator",
       config: { permissionMode: "orchestrator" },
+      prompt: "Claim and orchestrate issues 1209, 1210, and 1211.",
       orchestrator: {
         behavior: { maximumConcurrentChildren: 3, completion: "stop_and_archive" },
         delegation: { decisions: { pr_merge: "orchestrator" } },
@@ -832,6 +833,13 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.equal(parent.orchestratorPolicy?.sources.behavior.maximumConcurrentChildren, "session_override");
     assert.equal(parent.orchestratorPolicy?.sources.delegation.decisions.pr_merge, "session_override");
     assert.equal(parent.parentControlPolicy?.revision, 1);
+    const parentStart = hub.sentOfType("start_session").find((message) => message.spec.sessionId === parent.id)!;
+    assert.deepEqual(parentStart.spec.orchestrator?.issueNumbers, [1209, 1210, 1211]);
+    assert.deepEqual(db.getSession(parent.id)?.orchestratorPolicy?.issueNumbers, [1209, 1210, 1211]);
+    const restartedParent = svc.restart(parent.id);
+    assert.ok(restartedParent.ok, restartedParent.error);
+    assert.deepEqual(hub.sentOfType("start_session").at(-1)?.spec.orchestrator?.issueNumbers,
+      [1209, 1210, 1211], "restart preserves the immutable campaign issue scope");
 
     settings.defaults.behavior.childModel = "changed-later";
     settings.defaults.delegation.decisions.pr_merge = "human";
@@ -888,6 +896,9 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       child = svc.createSession(childRequest, undefined, undefined, false, false, false, { parentSessionId: parent.id });
     }
     assert.ok(child.ok && child.data, child.error);
+    const childStart = hub.sentOfType("start_session").find((message) => message.spec.sessionId === child.data!.id)!;
+    assert.deepEqual(childStart.spec.orchestrator?.issueNumbers, [1209, 1210, 1211],
+      "agent-created nested campaigns inherit the root scope without minting one from their own prompt");
     assert.equal(child.data.model, "text-model");
     assert.equal(child.data.effort, "high");
     assert.equal(child.data.orchestratorPolicy?.behavior.childModel, "text-model");

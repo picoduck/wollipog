@@ -300,7 +300,9 @@ test("Claude ACP orchestrator metadata grants planning tools while preserving th
   assert.deepEqual(meta.claudeCode.options.tools, ["Read", "Grep", "Glob", "WebFetch", "WebSearch", "Bash", "AskUserQuestion"]);
   const allowed = meta.claudeCode.options.allowedTools as string[];
   for (const tool of ["Read", "Grep", "Glob", "WebFetch", "WebSearch", "mcp__wollipog__*",
-    "Bash(git diff:*)", "Bash(gh issue comment:*)"]) assert.ok(allowed.includes(tool));
+    "Bash(git diff:*)"]) assert.ok(allowed.includes(tool));
+  assert.equal(allowed.some((tool) => tool.startsWith("Bash(gh issue edit") ||
+    tool.startsWith("Bash(gh issue comment")), false, "unscoped issue writes are never statically authorized");
   assert.equal(allowed.includes("Bash(git branch:*)"), false, "branch inspection does not permit mutation flags");
   assert.equal(allowed.some((tool) => tool.includes("git push") || tool.includes("gh pr create")), false);
   assert.equal(meta.claudeCode.options.permissionMode, "dontAsk");

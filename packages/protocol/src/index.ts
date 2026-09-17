@@ -1424,6 +1424,13 @@ export interface OrchestratorExecutionDefaults {
   strictProjectIsolation: boolean;
 }
 
+/** Runner launch policy for one Orchestrator session. Issue numbers are admitted only from the
+ * authenticated human's explicit initial campaign request; they are not user defaults and an
+ * agent-created nested session may only inherit, never mint or broaden, the root scope. */
+export interface OrchestratorLaunchPolicy extends OrchestratorExecutionDefaults {
+  issueNumbers?: number[];
+}
+
 export interface OrchestratorDefaults {
   behavior: OrchestratorBehaviorDefaults;
   delegation: OrchestratorDelegationDefaults;
@@ -1467,6 +1474,8 @@ export interface OrchestratorPolicySources {
  * and source; editing user defaults never reaches an existing session. */
 export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   version: 1;
+  /** Immutable GitHub issue-write scope admitted from the root authenticated-human request. */
+  issueNumbers?: number[];
   sources: OrchestratorPolicySources;
 }
 
@@ -6413,7 +6422,7 @@ export interface SessionLaunchSpec {
   context?: AgentContext;
   config?: SessionConfig;
   /** Runner-enforced Orchestrator restrictions. Missing on legacy peers means strict isolation. */
-  orchestrator?: OrchestratorExecutionDefaults;
+  orchestrator?: OrchestratorLaunchPolicy;
   /** ACP-only, additive in protocol v38. Contains references, never resolved secret values. */
   acpSessionContext?: AcpSessionContextConfig;
 }

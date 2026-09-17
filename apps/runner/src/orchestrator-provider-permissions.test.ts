@@ -18,6 +18,14 @@ const inspections = fc.array(fc.constantFrom(
   "gh pr diff $VAR --name-only",
 ), { minLength: 1, maxLength: 8 });
 
+const routineIssueMutations = fc.constantFrom(
+  "gh issue edit $VAR --add-assignee @me",
+  "gh issue edit --remove-assignee @me $VAR",
+  "gh issue edit $VAR --add-label ready",
+  "gh issue edit --remove-label blocked $VAR",
+  "gh issue comment $VAR --body 'Plan posted by the orchestrator.'",
+);
+
 function routineLoop(ids: number[], variable: string, commands: string[]): string {
   const body = commands.map((command) => command.replace("$VAR", `$${variable}`)).join("; echo ----; ");
   return `for ${variable} in ${ids.join(" ")}; do ${body}; done`;
@@ -29,16 +37,70 @@ test("bounded read-only issue and PR loops are accepted across routine input sha
   }));
 });
 
-test("adding any mutation-capable command to a routine loop makes it interactive", () => {
-  const mutation = fc.constantFrom(
-    "gh issue edit $VAR --add-label ready",
+test("routine issue coordination is accepted directly and in bounded loops", () => {
+  assert.equal(isRoutineClaudeOrchestratorBash("gh issue edit 1209 --add-assignee @me", [1209]), true);
+  assert.equal(isRoutineClaudeOrchestratorBash("gh issue edit --add-assignee @me 1209", [1209]), true);
+  assert.equal(isRoutineClaudeOrchestratorBash(
+    "gh issue comment 1209 --body 'Implementation is in progress.'", [1209],
+  ), true);
+  fc.assert(fc.property(issueIds, loopVariables, routineIssueMutations, (ids, variable, mutation) => {
+    assert.equal(isRoutineClaudeOrchestratorBash(routineLoop(ids, variable, [mutation]), ids), true);
+  }));
+});
+
+test("routine issue writes fail closed outside the authenticated campaign scope", () => {
+  assert.equal(isRoutineClaudeOrchestratorBash("gh issue edit 1209 --add-assignee @me"), false);
+  assert.equal(isRoutineClaudeOrchestratorBash("gh issue edit 1210 --add-label ready", [1209]), false);
+  assert.equal(isRoutineClaudeOrchestratorBash(
+    "for n in 1209 1210; do gh issue edit $n --add-assignee @me; done", [1209],
+  ), false);
+});
+
+test("routine inspection accepts semantic Git and GitHub operations across safe argument orderings", () => {
+  for (const command of [
+    "git status --short",
+    "git log --oneline --decorate -20 origin/main",
+    "git diff --stat origin/main...HEAD",
+    "git show --name-only HEAD",
+    "git branch --all --verbose",
+    "git worktree list --porcelain",
+    "git rev-parse --show-toplevel",
+    "git merge-base origin/main HEAD",
+    "gh issue list --state open --json number,title",
+    "gh issue view --json number,title 1209",
+    "gh pr checks --watch 1234",
+    "gh pr diff --name-only 1234",
+    "gh run list --branch main --limit 20",
+    "gh run view --log-failed 123456",
+    "gh repo view --json nameWithOwner",
+    "gh search issues --state open orchestrator",
+  ]) assert.equal(isRoutineClaudeOrchestratorBash(command), true, command);
+});
+
+test("routine leaves compose through separators, conjunctions, loops, and stdout suppression", () => {
+  for (const command of [
+    "gh issue edit 1209 --add-assignee @me >/dev/null && echo claimed 1209",
+    "git status --short; gh issue view 1209 --json number,title",
+    "gh issue view 1209 || gh issue view 1210",
+    "for n in 1209 1210 1211; do gh issue edit $n --add-assignee @me >/dev/null && echo \"claimed $n\"; done",
+  ]) assert.equal(isRoutineClaudeOrchestratorBash(command, [1209, 1210, 1211]), true, command);
+});
+
+test("adding any gated, mutating, or unknown leaf to routine commands prevents auto-authorization", () => {
+  const gated = fc.constantFrom(
     "gh issue close $VAR",
     "gh pr merge $VAR --squash",
+    "gh auth login",
     "git push origin main",
+    "git branch new-branch",
+    "git branch --delete merged-branch",
+    "git branch --edit-description",
+    "git branch -uorigin/main",
+    "git tag --list --delete v1.0.0",
     "rm -rf build",
     "touch changed.txt",
   );
-  fc.assert(fc.property(issueIds, loopVariables, inspections, mutation, (ids, variable, commands, unsafe) => {
+  fc.assert(fc.property(issueIds, loopVariables, inspections, gated, (ids, variable, commands, unsafe) => {
     const injected = [...commands, unsafe];
     assert.equal(isRoutineClaudeOrchestratorBash(routineLoop(ids, variable, injected)), false);
   }));
@@ -55,8 +117,17 @@ test("the loop parser fails closed on shell expansion, redirection, and control-
     "for path in 1; do gh issue view $path; done",
     "for n in one; do gh issue view $n; done",
     "for n in 1\n2; do gh issue view $n; done",
-    "for n in 1; do git status; done",
-    "for n in 1; do gh issue list; done",
+    "gh issue view 1 2>/dev/null",
+    "gh issue view 1 >/tmp/issue.json",
+    "git diff --output=diff.txt HEAD~1",
+    "git show --ext-diff HEAD",
+    "git grep --open-files-in-pager=vim TODO",
+    "git grep -O vim TODO",
+    "git grep -Ovim TODO",
+    "gh issue view 1 --web",
+    "gh issue edit 1 --add-assignee someone-else",
+    "gh issue edit 1 --title replacement",
+    "gh issue comment 1 --body-file /tmp/comment.md",
   ]) assert.equal(isRoutineClaudeOrchestratorBash(command), false, command);
 });
 
@@ -67,4 +138,10 @@ test("permission classification rejects non-Bash and expanded Bash input shapes"
   assert.equal(isRoutineClaudeOrchestratorPermission("Bash", { command, run_in_background: true }), false);
   assert.equal(isRoutineClaudeOrchestratorPermission("Bash", { command, timeout: 120_001 }), false);
   assert.equal(isRoutineClaudeOrchestratorPermission("Bash", { command, timeout: 30_000 }), true);
+  assert.equal(isRoutineClaudeOrchestratorPermission(
+    "Bash", { command: "gh issue edit 1 --add-assignee @me" }, [1],
+  ), true);
+  assert.equal(isRoutineClaudeOrchestratorPermission(
+    "Bash", { command: "gh issue edit 2 --add-assignee @me" }, [1],
+  ), false);
 });

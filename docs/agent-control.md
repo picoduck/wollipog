@@ -166,10 +166,13 @@ the previous session-private scratch directory, project-write refusal, restricte
 host-boundary requirements. Legacy policy snapshots that lack the execution field normalize to
 strict mode, so an upgrade never silently broadens an existing session. The Settings and creation
 interfaces distinguish provider permission controls from OS-enforced read-only filesystem
-isolation. Provider-mode native Claude Code requires interactive Default approval support; strict
-Claude requires `dontAsk` plus `bwrap` on Linux or Seatbelt on macOS. Provider permission checks,
-Parent Control, typed workflow decisions, authentication exclusions, child admission, resource
-limits, and audit provenance are unchanged.
+isolation. Provider-mode native Claude Code requires interactive Default approval support. Strict
+structured Claude also uses that runner control channel inside `bwrap` on Linux or Seatbelt on
+macOS: routine coordination is auto-authorized by the shared semantic contract, and everything else
+is denied. Native TUI and ACP launches without the channel retain `dontAsk`. Provider permission
+checks, Parent Control, typed workflow decisions, authentication exclusions, child admission,
+resource limits, and audit provenance are unchanged. The full operation and campaign issue-scope
+contract is recorded in [ADR 0007](adr/0007-separate-orchestrator-role-from-project-isolation.md).
 
 ## Typed Parent Control Decisions
 

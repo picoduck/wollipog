@@ -182,6 +182,7 @@ import {
   parseOrchestratorOverrides,
   resolveOrchestratorCampaignPolicy,
 } from "./orchestrator-settings.js";
+import { orchestratorIssueNumbersFromInitialPrompt } from "./orchestrator-issue-scope.js";
 import {
   cleanupEventPayloadArtifacts,
   externalizeSessionEventPayload,
@@ -3561,6 +3562,14 @@ export class SessionsService {
     const requestedText = snapshotCommand?.type === "start_session"
       ? (snapshotCommand.initialPrompt ?? "")
       : (req.prompt?.trim() ?? "");
+    const orchestratorIssueNumbers = snapshotSpec?.orchestrator?.issueNumbers ??
+      campaignController?.orchestratorPolicy?.issueNumbers ??
+      (orchestratorPolicy && creationContext?.defaultOwnerUserId && !parentSessionId
+        ? orchestratorIssueNumbersFromInitialPrompt(requestedText)
+        : []);
+    if (orchestratorPolicy && orchestratorIssueNumbers.length) {
+      orchestratorPolicy.issueNumbers = [...orchestratorIssueNumbers];
+    }
     let text = requestedText;
     if (!snapshotCommand && campaignController?.orchestratorPolicy && (requestedText || images.length > 0)) {
       const campaign = this.db.campaignProjection(campaignController.id);
@@ -3647,7 +3656,10 @@ export class SessionsService {
       driver: launch.driver,
       context: launch.context,
       config,
-      ...(orchestratorPolicy ? { orchestrator: { ...orchestratorPolicy.execution } } : {}),
+      ...(orchestratorPolicy ? { orchestrator: {
+        ...orchestratorPolicy.execution,
+        ...(orchestratorIssueNumbers.length ? { issueNumbers: orchestratorIssueNumbers } : {}),
+      } } : {}),
       acpSessionContext,
     };
     const command: DurableSessionCommand = snapshotCommand ?? {
@@ -3757,7 +3769,10 @@ export class SessionsService {
       driver: launch.driver,
       context: launch.context,
       config,
-      ...(orchestratorPolicy ? { orchestrator: { ...orchestratorPolicy.execution } } : {}),
+      ...(orchestratorPolicy ? { orchestrator: {
+        ...orchestratorPolicy.execution,
+        ...(orchestratorIssueNumbers.length ? { issueNumbers: orchestratorIssueNumbers } : {}),
+      } } : {}),
       acpSessionContext,
     };
     if (delivery) {
@@ -5515,7 +5530,12 @@ export class SessionsService {
         maxToolCalls: session.maxToolCalls ?? undefined,
       },
       ...(session.orchestratorPolicy
-        ? { orchestrator: { ...session.orchestratorPolicy.execution } }
+        ? { orchestrator: {
+          ...session.orchestratorPolicy.execution,
+          ...(session.orchestratorPolicy.issueNumbers?.length
+            ? { issueNumbers: session.orchestratorPolicy.issueNumbers }
+            : {}),
+        } }
         : {}),
       acpSessionContext: this.db.getAcpSessionContext(sessionId),
     };

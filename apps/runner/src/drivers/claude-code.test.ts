@@ -2670,15 +2670,49 @@ test("runner-side capability gate rejects stale optional flags and image input",
   };
   assert.match(claudeCapabilityError({ effort: "max" }, [], capabilities)!, /effort/);
   assert.match(claudeCapabilityError({ permissionMode: "auto" }, [], capabilities)!, /permission mode/);
-  assert.match(claudeCapabilityError({ permissionMode: "orchestrator" }, [], capabilities)!, /dontAsk/);
+  assert.match(claudeCapabilityError({ permissionMode: "orchestrator" }, [], capabilities)!, /default/);
   assert.equal(claudeCapabilityError({ permissionMode: "orchestrator" }, [], {
-    ...capabilities, permissionModes: ["dontAsk"],
+    ...capabilities, supportsApprovals: true, permissionModes: ["default"],
   }), null);
   assert.equal(claudeCapabilityError({ permissionMode: "orchestrator" }, [], {
     ...capabilities, supportsApprovals: true, permissionModes: ["default"],
   }, false), null, "provider-mode Orchestrator uses the interactive approval-capable mode");
   assert.match(claudeCapabilityError({}, [{ mimeType: "image/png", data: "x" }], capabilities)!, /image input/);
   assert.equal(claudeCapabilityError({ effort: "low", permissionMode: "acceptEdits" }, [], capabilities), null);
+});
+
+test("strict Claude Orchestrator structured launches replace static dontAsk with the runner control channel", async () => {
+  const child = fakeProcess();
+  const launches: any[] = [];
+  const driver = new ClaudeCodeDriver({
+    ...baseOpts,
+    env: { GH_REPO: "unrelated/repository" },
+    args: [
+      "--tools", "Read,Bash",
+      "--permission-mode", "dontAsk",
+      "--allowedTools", "Read,Bash(git status:*),Bash(gh issue edit --add-assignee:*)",
+    ],
+    config: { permissionMode: "orchestrator" },
+    capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: true,
+      supportsApprovals: true, permissionModes: ["default", "orchestrator"],
+    },
+    orchestrator: { strictProjectIsolation: true },
+  }, noopCb, {
+    spawn: (opts: any) => { launches.push(opts); return child; },
+    kill: () => {},
+  } as any);
+
+  const turn = driver.prompt("coordinate the campaign");
+  await nextTask();
+  const args = launches[0].args as string[];
+  assert.equal(args.includes("dontAsk"), false);
+  assert.equal(launches[0].env.GH_REPO, undefined);
+  assert.equal(args[args.indexOf("--allowedTools") + 1], "Read");
+  assert.deepEqual(args.slice(args.indexOf("--permission-prompt-tool"), args.indexOf("--permission-prompt-tool") + 2),
+    ["--permission-prompt-tool", "stdio"]);
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await turn, "end_turn");
 });
 
 test("agent session id is exposed only after Claude establishes a fresh conversation", () => {
@@ -3457,24 +3491,25 @@ test("provider-mode Claude Orchestrator auto-allows a bounded read-only issue lo
   });
 });
 
-test("provider-mode Claude Orchestrator keeps a mutation-capable loop interactive", () => {
-  const h = makeHarness({ orchestrator: { strictProjectIsolation: false } });
+test("provider-mode Claude Orchestrator auto-allows the observed issue-claiming loop", () => {
+  const h = makeHarness({ orchestrator: { strictProjectIsolation: false, issueNumbers: [1209, 1210, 1211] } });
+  const writes: string[] = [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (h.driver as any).child = { stdin: { write: () => {} } };
+  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
 
   h.feed({
     type: "control_request",
-    request_id: "mutation-loop",
+    request_id: "claim-loop",
     request: {
       subtype: "can_use_tool",
       tool_name: "Bash",
-      description: "Edit issues",
-      input: { command: "for n in 1209 1210 1211; do gh issue edit $n --add-label ready; done" },
+      description: "Assign the three issues to the user",
+      input: { command: "for n in 1209 1210 1211; do gh issue edit $n --add-assignee @me >/dev/null && echo \"claimed $n\"; done" },
     },
   });
 
-  assert.equal(h.events.length, 1);
-  assert.equal(h.events[0]?.kind, "permission_request");
+  assert.deepEqual(h.events, []);
+  assert.equal(JSON.parse(writes[0]!).response.response.behavior, "allow");
 });
 
 test("provider-mode Claude Orchestrator keeps shell-special loop variables interactive", () => {
@@ -3496,19 +3531,66 @@ test("provider-mode Claude Orchestrator keeps shell-special loop variables inter
   assert.equal(h.events[0]?.kind, "permission_request");
 });
 
-test("ordinary and strictly isolated Claude sessions do not use the provider Orchestrator bypass", () => {
+test("strictly isolated Claude Orchestrators share the routine-operation auto-authorization contract", () => {
+  const h = makeHarness({ orchestrator: { strictProjectIsolation: true, issueNumbers: [1209] } });
+  const writes: string[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
+  h.feed({
+    type: "control_request",
+    request_id: "strict-routine",
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: {
+      command: "gh issue edit 1209 --add-assignee @me >/dev/null && echo claimed 1209",
+    } },
+  });
+  assert.deepEqual(h.events, []);
+  assert.equal(JSON.parse(writes[0]!).response.response.behavior, "allow");
+});
+
+test("strictly isolated Claude Orchestrators auto-deny commands outside the routine contract", () => {
+  const h = makeHarness({ orchestrator: { strictProjectIsolation: true } });
+  const writes: string[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
+  h.feed({
+    type: "control_request",
+    request_id: "strict-forbidden",
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "git push origin main" } },
+  });
+  assert.deepEqual(h.events, []);
+  assert.match(JSON.parse(writes[0]!).response.response.message, /Strict Project Isolation/);
+});
+
+test("strictly isolated Claude Orchestrators still surface typed human questions", () => {
+  const h = makeHarness({ orchestrator: { strictProjectIsolation: true, issueNumbers: [1209] } });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (h.driver as any).child = { stdin: { write: () => {} } };
+  h.feed({
+    type: "control_request",
+    request_id: "strict-question",
+    request: {
+      subtype: "can_use_tool",
+      tool_name: "AskUserQuestion",
+      input: {
+        questions: [{ question: "Merge the pull request?", header: "Merge", multiSelect: false,
+          options: [{ label: "Wait", description: "Do not merge yet." }] }],
+      },
+    },
+  });
+  assert.equal(h.events[0]?.kind, "question_request");
+});
+
+test("ordinary Claude sessions do not use the Orchestrator auto-authorization contract", () => {
   const command = "for n in 1209 1210; do gh issue view $n; done";
-  for (const overrides of [{}, { orchestrator: { strictProjectIsolation: true } }]) {
-    const h = makeHarness(overrides);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (h.driver as any).child = { stdin: { write: () => {} } };
-    h.feed({
-      type: "control_request",
-      request_id: "scoped-loop",
-      request: { subtype: "can_use_tool", tool_name: "Bash", input: { command } },
-    });
-    assert.equal(h.events[0]?.kind, "permission_request");
-  }
+  const h = makeHarness();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (h.driver as any).child = { stdin: { write: () => {} } };
+  h.feed({
+    type: "control_request",
+    request_id: "scoped-loop",
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: { command } },
+  });
+  assert.equal(h.events[0]?.kind, "permission_request");
 });
 
 test("control_request without a description falls back to the tool input in the title (MCP card legibility)", () => {
