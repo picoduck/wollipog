@@ -44,6 +44,7 @@ import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { isPartialHistory, isRebuiltEventsArray, useStoreActions, useStoreSelector } from "../store.js";
 import { relativeTime, shortenPath, titleCaseLabel } from "../format.js";
+import { driverKindLabel } from "../agent-presentation.js";
 import { runnerDisplay } from "../runners.js";
 import { DirectoryPicker } from "./DirectoryPicker.js";
 import { type TimelineItem } from "../timeline.js";
@@ -6547,6 +6548,9 @@ export function ComposerPlusMenu({
                     <span className="muted">This campaign keeps its stored policy when account defaults change.</span>
                     <dl>
                       {session.orchestratorCampaign && <div><dt>Campaign Status</dt><dd>{session.orchestratorCampaign.status === "waiting_human" ? "Waiting for Human" : titleCaseLabel(session.orchestratorCampaign.status.replaceAll("_", " "))}<small>Policy Revision {session.orchestratorCampaign.policyRevision}</small></dd></div>}
+                      <div><dt>Child Harness</dt><dd>{session.orchestratorPolicy.behavior.childHarness
+                        ? `${session.orchestratorPolicy.behavior.childHarness.agentId} · ${driverKindLabel(session.orchestratorPolicy.behavior.childHarness.driver)} · ${session.orchestratorPolicy.behavior.childHarness.context.kind === "wsl" ? `WSL ${session.orchestratorPolicy.behavior.childHarness.context.distro}` : "Native"}`
+                        : "Automatic"}<small>{titleCaseLabel((session.orchestratorPolicy.sources.behavior.childHarness ?? "legacy_session").replaceAll("_", " "))}</small></dd></div>
                       <div><dt>Child Model</dt><dd>{session.orchestratorPolicy.behavior.childModel ?? "Automatic"}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.childModel.replaceAll("_", " "))}</small></dd></div>
                       <div><dt>Child Effort</dt><dd>{session.orchestratorPolicy.behavior.childEffort ? titleCaseLabel(session.orchestratorPolicy.behavior.childEffort) : "Automatic"}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.childEffort.replaceAll("_", " "))}</small></dd></div>
                       <div><dt>Maximum Concurrent Children</dt><dd>{session.orchestratorPolicy.behavior.maximumConcurrentChildren}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.maximumConcurrentChildren.replaceAll("_", " "))}</small></dd></div>

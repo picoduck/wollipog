@@ -927,6 +927,16 @@ const client = {
     defaults: structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS),
     source: "user_default" as const,
     capabilities: {
+      harnesses: [{
+        agentId: "codex",
+        driver: "codex-app-server" as const,
+        context: { kind: "native" as const },
+        name: "Codex",
+        models: [{ id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol", efforts: ["low", "high"] }],
+        effortLevels: ["low", "high"],
+        supportedPairs: [{ modelId: "gpt-5.6-sol", effortLevels: ["low", "high"] }],
+        installations: 1,
+      }],
       models: [{ id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol", efforts: ["low", "high"] }],
       effortLevels: ["low", "high"],
       installations: 1,

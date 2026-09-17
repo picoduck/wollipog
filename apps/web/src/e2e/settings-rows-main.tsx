@@ -132,6 +132,16 @@ const harnessDefaultsTransport: ApiTransport = {
         defaults,
         source: "user_default",
         capabilities: {
+          harnesses: [{
+            agentId: "codex-app-server",
+            driver: "codex-app-server",
+            context: { kind: "native" },
+            name: "Codex App Server",
+            models: [{ id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol", efforts: ["low", "high"] }],
+            effortLevels: ["low", "high"],
+            supportedPairs: [{ modelId: "gpt-5.6-sol", effortLevels: ["low", "high"] }],
+            installations: 1,
+          }],
           models: [{ id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol", efforts: ["low", "high"] }],
           effortLevels: ["low", "high"],
           installations: 1,

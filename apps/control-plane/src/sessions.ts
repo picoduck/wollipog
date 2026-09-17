@@ -175,6 +175,7 @@ import { type GuardrailFields, normalizeCostCheckpoints,
 import { executionTargetRef, resolveExecutionTarget } from "./execution-targets.js";
 import {
   agentHarnessIdentityFor,
+  agentHarnessIdentityKey,
   installationSupportsDefault,
 } from "./agent-harness-defaults.js";
 import {
@@ -3007,28 +3008,65 @@ export class SessionsService {
     parentSessionId: string | undefined,
     configs: SessionConfig[],
     request: { title?: string; agentId: string },
+    members: Array<{ agentId: string; launch: AgentLaunch }> = [],
   ): ServiceResult<SessionConfig[]> {
     if (!parentSessionId || configs.length === 0) return ok(configs);
     const parent = this.db.getSession(parentSessionId);
     if (!parent || !["starting", "running", "input_required"].includes(parent.status)) {
       return fail("the creating parent session is no longer active", 409);
     }
+    const campaignBehavior = this.orchestratorCampaignController(parent)?.orchestratorPolicy?.behavior;
     const reserved = { ...this.db.childSessionAllocations(parentSessionId) };
     if (configs.length > (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount) {
       const remaining = Math.max(0, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount);
       return fail(`the parent session has ${remaining} remaining live child slot${remaining === 1 ? "" : "s"}; raise maxChildSessions before creating this run`, 409);
     }
     const applied: SessionConfig[] = [];
-    for (const config of configs) {
-      if (config.maxChildSessions !== undefined && (!Number.isSafeInteger(config.maxChildSessions) ||
-          config.maxChildSessions < 0 || config.maxChildSessions > 64)) {
+    for (const [index, config] of configs.entries()) {
+      const member = members[index];
+      const candidate = { ...config };
+      if (campaignBehavior && member) {
+        const launchHarness = agentHarnessIdentityFor({
+          id: member.agentId,
+          driver: member.launch.driver,
+          context: member.launch.context,
+        });
+        if (campaignBehavior.childHarness &&
+            agentHarnessIdentityKey(launchHarness) !== agentHarnessIdentityKey(campaignBehavior.childHarness)) {
+          const fixed = campaignBehavior.childHarness;
+          return fail(
+            `child harness is fixed by campaign policy at ${fixed.agentId} (${fixed.driver}, ${
+              fixed.context.kind === "wsl" ? `WSL ${fixed.context.distro}` : "native"
+            })`,
+            409,
+          );
+        }
+        if (campaignBehavior.childModel !== null && candidate.model !== undefined &&
+            candidate.model !== campaignBehavior.childModel) {
+          return fail(`child model is fixed by campaign policy at ${campaignBehavior.childModel}`, 409);
+        }
+        if (campaignBehavior.childEffort !== null && candidate.effort !== undefined &&
+            candidate.effort !== campaignBehavior.childEffort) {
+          return fail(`child effort is fixed by campaign policy at ${campaignBehavior.childEffort}`, 409);
+        }
+        if (candidate.model === undefined && campaignBehavior.childModel !== null) {
+          candidate.model = campaignBehavior.childModel;
+        }
+        if (candidate.effort === undefined && campaignBehavior.childEffort !== null) {
+          candidate.effort = campaignBehavior.childEffort;
+        }
+        const capabilityError = workflowMemberCapabilityError(member.agentId, candidate, member.launch);
+        if (capabilityError) return fail(capabilityError, 409);
+      }
+      if (candidate.maxChildSessions !== undefined && (!Number.isSafeInteger(candidate.maxChildSessions) ||
+          candidate.maxChildSessions < 0 || candidate.maxChildSessions > 64)) {
         return fail("maxChildSessions must be an integer from 0 to 64", 400);
       }
       const guarded = childSessionGuardrails({
         ...parent,
         costUsd: (parent.costUsd ?? 0) + reserved.costBudgetUsd,
         toolCallCount: (parent.toolCallCount ?? 0) + reserved.maxToolCalls,
-      }, config, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount,
+      }, candidate, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount,
       parent.projectId ? this.db.projectChildSessionDefaults(parent.projectId) : null);
       if ("error" in guarded) return fail(guarded.error, 409);
       applied.push(guarded.config);
@@ -3127,6 +3165,20 @@ export class SessionsService {
       capabilities: snapshotSpec.capabilities,
     } : this.db.getAgentLaunch(req.runnerId, req.agentId);
     if (!launch) return fail(`unknown agent '${req.agentId}' on runner '${req.runnerId}'`, 404);
+    const launchHarness = agentHarnessIdentityFor({
+      id: req.agentId,
+      driver: launch.driver,
+      context: launch.context,
+    });
+    const fixedChildHarness = campaignController?.orchestratorPolicy?.behavior.childHarness;
+    if (fixedChildHarness && agentHarnessIdentityKey(launchHarness) !== agentHarnessIdentityKey(fixedChildHarness)) {
+      return fail(
+        `child harness is fixed by campaign policy at ${fixedChildHarness.agentId} (${fixedChildHarness.driver}, ${
+          fixedChildHarness.context.kind === "wsl" ? `WSL ${fixedChildHarness.context.distro}` : "native"
+        })`,
+        409,
+      );
+    }
     // An ad-hoc directory chosen via the remote browser overrides the preconfigured workspace.
     const adHoc = snapshotSpec
       ? (snapshotSpec.workspaceId === null ? snapshotSpec.workspacePath : undefined)
@@ -3411,6 +3463,13 @@ export class SessionsService {
         ? creationContext?.validateOrchestratorDefaults?.(orchestratorPolicy)
         : null;
       if (compatibilityError) return fail(compatibilityError, 409);
+      if (orchestratorPolicy.behavior.childHarness &&
+          !runnerSupportsProtocol(runner.protocolVersion, "orchestratorChildHarnessPolicy")) {
+        return fail(
+          "A fixed Child Harness requires a protocol-v157 Orchestrator runner. Update the runner or choose Automatic Harness.",
+          409,
+        );
+      }
       if (!orchestratorPolicy.execution.strictProjectIsolation &&
           !runnerSupportsProtocol(runner.protocolVersion, "orchestratorExecutionPolicy")) {
         return fail("Delegate Implementation without Strict Project Isolation requires a protocol-v144 runner; update the runner or enable Strict Project Isolation.", 409);
@@ -5646,7 +5705,7 @@ export class SessionsService {
       `${category}=${projection.decisionOwners[category]}`).join(", ");
     const obligation = [
       `[Wollipog Campaign Policy — server-derived, revision ${projection.policyRevision}]`,
-      `Campaign ${campaign.id}; Child Model ${policy.behavior.childModel ?? "Automatic"}; Child Effort ${policy.behavior.childEffort ?? "Automatic"}; Follow-Ups ${policy.behavior.followUps}; Completion ${policy.behavior.completion}.`,
+      `Campaign ${campaign.id}; Child Harness ${policy.behavior.childHarness?.agentId ?? "Automatic"}; Child Model ${policy.behavior.childModel ?? "Automatic"}; Child Effort ${policy.behavior.childEffort ?? "Automatic"}; Follow-Ups ${policy.behavior.followUps}; Completion ${policy.behavior.completion}.`,
       `Typed decision owners: ${owners}. This is not blanket approval. For implementation questions, PR merge, merged-branch deletion, follow-up issue publication, and UI evidence approval, create the exact typed request and consume an approval immediately before the matching action. For PR merge, pass and then execute the exact canonical gh pr merge URL --squash --match-head-commit SHA command; its matching one-shot runner permission completes consumption. Ordinary prompts cannot satisfy a typed gate.`,
       "Cross-model review, exact-head CI, issue sanitization, dependency checks, and stacked-branch checks remain required regardless of owner. An enqueued PR is unfinished until merge-group CI passes and the forge reports actual MERGED state. Authentication, secrets, persistent permission grants, governance, budgets, and tool guardrails remain human-only.",
       projection.uiEvidenceReview.status === "available"
@@ -7856,7 +7915,12 @@ export class SessionsService {
     const memberConfig = this.runMemberConfig(req, Boolean(parentSessionId));
     const spawnRequest = { title: req.title, agentId: members.map((member) => member.agentId).join(", "),
       operation: "workflow", request: req, members: members.map((member) => ({ roleId: member.roleId, agentId: member.agentId })) };
-    const admitted = this.admitRunChildren(parentSessionId, members.map(() => ({ ...memberConfig })), spawnRequest);
+    const admitted = this.admitRunChildren(
+      parentSessionId,
+      members.map(() => ({ ...memberConfig })),
+      spawnRequest,
+      members,
+    );
     if (!admitted.ok || !admitted.data) return fail(admitted.error!, admitted.status);
 
     const now = Date.now();
@@ -8895,7 +8959,12 @@ export class SessionsService {
     const memberConfig = this.runMemberConfig(req, Boolean(parentSessionId));
     const spawnRequest = { title: req.title, agentId: resolved.map((member) => member.agentId).join(", "),
       operation: "run", request: req, members: resolved.map((member) => member.agentId) };
-    const admitted = this.admitRunChildren(parentSessionId, resolved.map(() => ({ ...memberConfig })), spawnRequest);
+    const admitted = this.admitRunChildren(
+      parentSessionId,
+      resolved.map(() => ({ ...memberConfig })),
+      spawnRequest,
+      resolved,
+    );
     if (!admitted.ok || !admitted.data) return fail(admitted.error!, admitted.status);
 
     const now = Date.now();

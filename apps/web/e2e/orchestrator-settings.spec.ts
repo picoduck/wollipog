@@ -16,6 +16,13 @@ for (const viewport of [{ width: 1280, height: 1000 }, { width: 390, height: 844
       .getByRole("radio", { name: "Disabled" })).toBeChecked();
     await expect(page.getByText(/does not claim operating-system read-only enforcement/)).toBeVisible();
 
+    const childHarness = page.getByRole("button", { name: /Child Harness: Automatic/ });
+    await childHarness.focus();
+    await page.keyboard.press("ArrowDown");
+    await expect(page.getByRole("listbox", { name: "Child Harness" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(childHarness).toBeFocused();
+
     const childModel = page.getByRole("button", { name: /Child Model: Automatic/ });
     await childModel.focus();
     await page.keyboard.press("ArrowDown");
@@ -26,6 +33,18 @@ for (const viewport of [{ width: 1280, height: 1000 }, { width: 390, height: 844
     const horizontalOverflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     expect(horizontalOverflow).toBeLessThanOrEqual(0);
     await page.screenshot({ path: testInfo.outputPath(`orchestrator-settings-${viewport.width}.png`), fullPage: true });
+
+    await childHarness.click();
+    await page.getByRole("option", { name: /Codex App Server · Codex App Server · Native/ }).click();
+    await page.getByRole("button", { name: /Child Model: Automatic/ }).click();
+    await page.getByRole("option", { name: /GPT-5.6 Sol/ }).click();
+    await page.getByRole("button", { name: /Child Effort: Automatic/ }).click();
+    await page.getByRole("option", { name: /High/ }).click();
+    await expect(page.getByRole("button", { name: /Child Harness: Codex App Server · Codex App Server · Native/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Child Model: GPT-5.6 Sol/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Child Effort: High/ })).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath(`orchestrator-settings-fixed-${viewport.width}.png`), fullPage: true });
+
     await page.getByRole("button", { name: "Save Defaults" }).scrollIntoViewIfNeeded();
     await expect(page.getByText("UI Evidence Approval", { exact: true })).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath(`orchestrator-delegation-${viewport.width}.png`), fullPage: true });

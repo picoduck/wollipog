@@ -2,14 +2,21 @@ import {
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   WORKFLOW_DECISION_CATEGORIES,
   type AgentCapabilities,
+  type AgentHarnessIdentity,
   type AgentModel,
   type OrchestratorCampaignOverrides,
   type OrchestratorCampaignPolicy,
   type OrchestratorDefaults,
   type OrchestratorPolicySource,
   type OrchestratorSettingsCapabilities,
+  type OrchestratorHarnessCapability,
   type OrchestratorSettingsView,
 } from "@wollipog/protocol";
+import {
+  agentHarnessIdentityFor,
+  agentHarnessIdentityKey,
+  parseAgentHarnessIdentity,
+} from "./agent-harness-defaults.js";
 import type { ControlPlaneDb } from "./db.js";
 import type { HumanPrincipal } from "./identity.js";
 
@@ -29,8 +36,12 @@ export function parseOrchestratorDefaults(value: unknown): OrchestratorDefaults 
       !delegation || typeof delegation !== "object" || Array.isArray(delegation) ||
       !execution || typeof execution !== "object" || Array.isArray(execution)) return null;
   if (Object.keys(behavior).some((key) => ![
-    "childModel", "childEffort", "maximumConcurrentChildren", "followUps", "completion",
+    "childHarness", "childModel", "childEffort", "maximumConcurrentChildren", "followUps", "completion",
   ].includes(key)) || Object.keys(delegation).some((key) => !["parentControl", "decisions"].includes(key))) return null;
+  const childHarness = behavior.childHarness === undefined || behavior.childHarness === null
+    ? null
+    : parseAgentHarnessIdentity(behavior.childHarness);
+  if (behavior.childHarness !== undefined && behavior.childHarness !== null && !childHarness) return null;
   if ((behavior.childModel !== null && !identifier(behavior.childModel)) ||
       (behavior.childEffort !== null && !identifier(behavior.childEffort, 64)) ||
       !Number.isSafeInteger(behavior.maximumConcurrentChildren) ||
@@ -48,6 +59,7 @@ export function parseOrchestratorDefaults(value: unknown): OrchestratorDefaults 
         decisions[category] === "human" || decisions[category] === "orchestrator")) return null;
   return {
     behavior: {
+      childHarness,
       childModel: behavior.childModel,
       childEffort: behavior.childEffort,
       maximumConcurrentChildren: behavior.maximumConcurrentChildren as number,
@@ -87,18 +99,39 @@ export function parseOrchestratorOverrides(value: unknown): OrchestratorCampaign
     },
     execution: { ...DEFAULT_ORCHESTRATOR_DEFAULTS.execution, ...(input.execution ?? {}) },
   };
-  if (!parseOrchestratorDefaults(complete)) return null;
+  const normalized = parseOrchestratorDefaults(complete);
+  if (!normalized) return null;
   if (input.behavior && Object.keys(input.behavior).some((key) => ![
-    "childModel", "childEffort", "maximumConcurrentChildren", "followUps", "completion",
+    "childHarness", "childModel", "childEffort", "maximumConcurrentChildren", "followUps", "completion",
   ].includes(key))) return null;
   if (input.delegation && Object.keys(input.delegation).some((key) => !["parentControl", "decisions"].includes(key))) return null;
   if (input.delegation?.decisions && Object.keys(input.delegation.decisions).some((key) =>
     !WORKFLOW_DECISION_CATEGORIES.includes(key as (typeof WORKFLOW_DECISION_CATEGORIES)[number]))) return null;
   if (input.execution && Object.keys(input.execution).some((key) => key !== "strictProjectIsolation")) return null;
-  return input;
+  return {
+    ...(input.behavior ? {
+      behavior: {
+        ...input.behavior,
+        ...(Object.hasOwn(input.behavior, "childHarness")
+          ? { childHarness: normalized.behavior.childHarness }
+          : {}),
+      },
+    } : {}),
+    ...(input.delegation ? { delegation: input.delegation } : {}),
+    ...(input.execution ? { execution: input.execution } : {}),
+  };
 }
 
-function installationSupportsBehavior(capabilities: AgentCapabilities, defaults: OrchestratorDefaults["behavior"]): boolean {
+function sameHarness(left: AgentHarnessIdentity, right: AgentHarnessIdentity): boolean {
+  return agentHarnessIdentityKey(left) === agentHarnessIdentityKey(right);
+}
+
+function installationSupportsBehavior(
+  installation: { identity: AgentHarnessIdentity; capabilities: AgentCapabilities },
+  defaults: OrchestratorDefaults["behavior"],
+): boolean {
+  if (defaults.childHarness && !sameHarness(installation.identity, defaults.childHarness)) return false;
+  const capabilities = installation.capabilities;
   const visible = capabilities.models.filter((model) => model.id !== "default" && !model.hidden);
   const model = defaults.childModel ? visible.find((candidate) => candidate.id === defaults.childModel) : undefined;
   if (defaults.childModel && !model) return false;
@@ -107,6 +140,53 @@ function installationSupportsBehavior(capabilities: AgentCapabilities, defaults:
   if (model) return (model.efforts?.length ? model.efforts : capabilities.effortLevels).includes(effort);
   return capabilities.effortLevels.includes(effort) ||
     visible.some((candidate) => candidate.efforts?.includes(effort));
+}
+
+function harnessCatalogs(installations: Array<{
+  identity: AgentHarnessIdentity;
+  name: string;
+  capabilities: AgentCapabilities;
+}>): OrchestratorHarnessCapability[] {
+  const grouped = new Map<string, OrchestratorHarnessCapability>();
+  for (const installation of installations) {
+    const key = agentHarnessIdentityKey(installation.identity);
+    const visible = installation.capabilities.models.filter((model) => model.id !== "default" && !model.hidden);
+    const pairs = visible.map((model) => ({
+      modelId: model.id,
+      effortLevels: [...new Set(model.efforts?.length
+        ? model.efforts
+        : installation.capabilities.effortLevels)].sort(),
+    }));
+    const current = grouped.get(key);
+    if (!current) {
+      grouped.set(key, {
+        ...installation.identity,
+        name: installation.name,
+        models: mergeModels([installation.capabilities]),
+        effortLevels: [...new Set([
+          ...installation.capabilities.effortLevels,
+          ...visible.flatMap((model) => model.efforts ?? []),
+        ])].sort(),
+        supportedPairs: pairs,
+        installations: 1,
+      });
+      continue;
+    }
+    current.installations += 1;
+    if (installation.name.localeCompare(current.name) < 0) current.name = installation.name;
+    current.models = mergeModels([
+      { ...installation.capabilities, models: current.models },
+      installation.capabilities,
+    ]);
+    current.effortLevels = [...new Set([
+      ...current.effortLevels,
+      ...installation.capabilities.effortLevels,
+      ...visible.flatMap((model) => model.efforts ?? []),
+    ])].sort();
+    current.supportedPairs.push(...pairs);
+  }
+  return [...grouped.values()].sort((left, right) =>
+    left.name.localeCompare(right.name) || agentHarnessIdentityKey(left).localeCompare(agentHarnessIdentityKey(right)));
 }
 
 function mergeModels(installations: AgentCapabilities[]): AgentModel[] {
@@ -174,26 +254,41 @@ export class OrchestratorSettings {
   private capabilities(principal: HumanPrincipal, defaults: OrchestratorDefaults): OrchestratorSettingsCapabilities {
     const installations = this.db.listRunnersForPrincipal(principal).filter((runner) => runner.status === "online").flatMap((runner) =>
       runner.agents.filter((agent) => agent.available === true && agent.capabilities)
-        .map((agent) => agent.capabilities!),
+        .map((agent) => ({
+          identity: agentHarnessIdentityFor(agent),
+          name: agent.name,
+          capabilities: agent.capabilities!,
+        })),
     );
-    const models = mergeModels(installations);
+    const harnesses = harnessCatalogs(installations);
+    if (defaults.behavior.childHarness && !harnesses.some((harness) =>
+      sameHarness(harness, defaults.behavior.childHarness!))) {
+      harnesses.push({
+        ...defaults.behavior.childHarness,
+        name: defaults.behavior.childHarness.agentId,
+        models: [], effortLevels: [], supportedPairs: [], installations: 0,
+      });
+    }
+    const models = mergeModels(installations.map((installation) => installation.capabilities));
     const effortLevels = [...new Set(installations.flatMap((capabilities) => [
-      ...capabilities.effortLevels,
-      ...capabilities.models.flatMap((model) => model.efforts ?? []),
+      ...capabilities.capabilities.effortLevels,
+      ...capabilities.capabilities.models.flatMap((model) => model.efforts ?? []),
     ]))].sort();
     const supportedPairs = installations.flatMap((capabilities) =>
-      capabilities.models.filter((model) => model.id !== "default" && !model.hidden).map((model) => ({
+      capabilities.capabilities.models.filter((model) => model.id !== "default" && !model.hidden).map((model) => ({
         modelId: model.id,
-        effortLevels: [...new Set(model.efforts?.length ? model.efforts : capabilities.effortLevels)].sort(),
+        effortLevels: [...new Set(model.efforts?.length ? model.efforts : capabilities.capabilities.effortLevels)].sort(),
       })),
     );
     const compatibleInstallations = installations.filter((capabilities) =>
       installationSupportsBehavior(capabilities, defaults.behavior)).length;
-    const fixed = defaults.behavior.childModel !== null || defaults.behavior.childEffort !== null;
+    const fixed = defaults.behavior.childHarness !== null || defaults.behavior.childModel !== null ||
+      defaults.behavior.childEffort !== null;
     const status = installations.length > 0 && (!fixed || compatibleInstallations > 0)
       ? "available" as const
       : "unavailable" as const;
     return {
+      harnesses,
       models,
       effortLevels,
       supportedPairs,
@@ -203,7 +298,7 @@ export class OrchestratorSettings {
       ...(status === "unavailable" ? {
         reason: installations.length === 0
           ? "No current Agent Harness installation advertises child model and effort capabilities. Connect or update a runner, then retry."
-          : "The saved fixed child model and effort are not supported together by a current installation. Choose Automatic or another advertised combination.",
+          : "The saved Child Harness, Child Model, and Child Effort are not supported together by a current installation. Choose Automatic or another advertised combination.",
       } : {}),
     };
   }
@@ -229,7 +324,8 @@ export class OrchestratorSettings {
     const defaults = parseOrchestratorDefaults((request as { defaults?: unknown } | null)?.defaults);
     if (!defaults) throw new OrchestratorSettingsInputError("a complete valid Orchestrator default is required");
     const capabilities = this.capabilities(principal, defaults);
-    if ((defaults.behavior.childModel !== null || defaults.behavior.childEffort !== null) &&
+    if ((defaults.behavior.childHarness !== null || defaults.behavior.childModel !== null ||
+        defaults.behavior.childEffort !== null) &&
         capabilities.compatibleInstallations === 0) {
       throw new OrchestratorSettingsUnavailableError(capabilities.reason ?? "The fixed child model and effort are unavailable.");
     }

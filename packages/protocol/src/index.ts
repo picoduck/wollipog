@@ -431,7 +431,10 @@
 // 156: external Pi sessions are discovered from their native JSONL store and adopted through a
 //      runner-owned copy. Older runners cannot prove that opening a session leaves its source
 //      history untouched, so clients and control planes keep the action disabled for them.
-export const PROTOCOL_VERSION = 156;
+// 157: Orchestrator campaign policy binds child harness, model, and effort as one capability-
+//      checked selection. Older Orchestrator runners cannot guide automatic harness resolution,
+//      so fixed-harness campaigns fail with an upgrade requirement instead of dropping the bind.
+export const PROTOCOL_VERSION = 157;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -620,6 +623,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   orchestratorCampaignManagement: 140,
   campaignContinuations: 149,
   orchestratorExecutionPolicy: 144,
+  orchestratorChildHarnessPolicy: 157,
   worktreeSetup: 141,
   worktreeTeardownPorts: 145,
   worktreeSetupConfig: 146,
@@ -1399,8 +1403,9 @@ export const HUMAN_ONLY_PARENT_CONTROL_POLICY: ParentControlDecisionPolicy = {
 };
 
 /** User-owned defaults for how a newly created Orchestrator campaign manages children. `null`
- * means capability-driven automatic selection; model and effort are intentionally independent. */
+ * means capability-driven automatic selection within the preceding fixed level, if any. */
 export interface OrchestratorBehaviorDefaults {
+  childHarness: AgentHarnessIdentity | null;
   childModel: string | null;
   childEffort: string | null;
   maximumConcurrentChildren: number;
@@ -1427,6 +1432,7 @@ export interface OrchestratorDefaults {
 
 export const DEFAULT_ORCHESTRATOR_DEFAULTS: OrchestratorDefaults = {
   behavior: {
+    childHarness: null,
     childModel: null,
     childEffort: null,
     maximumConcurrentChildren: DEFAULT_LIVE_CHILD_LIMIT,
@@ -1578,6 +1584,11 @@ export interface OrchestratorCampaignOverrides {
 }
 
 export interface OrchestratorSettingsCapabilities {
+  /** Harness-scoped catalogs are authoritative. Identical model ids in separate harnesses remain
+   * separate choices and never share effort metadata. */
+  harnesses?: OrchestratorHarnessCapability[];
+  /** Legacy aggregate fields remain additive for rolling web deployments. Current clients use
+   * `harnesses` and never infer cross-harness compatibility from these summaries. */
   models: AgentModel[];
   effortLevels: string[];
   /** Content-free installation/model matrix used to validate an independent fixed pair without
@@ -1587,6 +1598,14 @@ export interface OrchestratorSettingsCapabilities {
   compatibleInstallations: number;
   status: "available" | "unavailable";
   reason?: string;
+}
+
+export interface OrchestratorHarnessCapability extends AgentHarnessIdentity {
+  name: string;
+  models: AgentModel[];
+  effortLevels: string[];
+  supportedPairs: Array<{ modelId: string; effortLevels: string[] }>;
+  installations: number;
 }
 
 export interface OrchestratorSettingsView {
@@ -4114,6 +4133,25 @@ export interface AgentHarnessIdentity {
   agentId: string;
   driver: AgentDriverKind;
   context: AgentContext;
+}
+
+/** Parse the credential-free durable Agent Harness identity shared by settings and campaigns. */
+export function normalizeAgentHarnessIdentity(value: unknown): AgentHarnessIdentity | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const input = value as Partial<AgentHarnessIdentity>;
+  const identifier = (candidate: unknown, maximum = 256): candidate is string =>
+    typeof candidate === "string" && candidate.length > 0 && candidate.length <= maximum &&
+    candidate === candidate.trim() && !/[\0-\x1f\x7f]/u.test(candidate);
+  if (!identifier(input.agentId) ||
+      !["acp", "claude-code", "codex", "codex-app-server", "pi"].includes(input.driver ?? "")) return null;
+  if (!input.context || typeof input.context !== "object" || Array.isArray(input.context)) return null;
+  if (input.context.kind === "native") {
+    return { agentId: input.agentId, driver: input.driver!, context: { kind: "native" } };
+  }
+  if (input.context.kind === "wsl" && identifier(input.context.distro)) {
+    return { agentId: input.agentId, driver: input.driver!, context: { kind: "wsl", distro: input.context.distro } };
+  }
+  return null;
 }
 
 export interface AgentHarnessDefaultConfig {

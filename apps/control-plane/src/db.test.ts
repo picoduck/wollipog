@@ -4301,6 +4301,9 @@ test("legacy Orchestrator sessions gain an inspectable fail-closed campaign snap
     const upgraded = ControlPlaneDb.open(path);
     const policy = upgraded.getSession("sess-1")?.orchestratorPolicy;
     assert.ok(policy);
+    assert.equal(policy.behavior.childHarness, null,
+      "legacy campaigns retain Automatic Harness rather than acquiring a fixed identity");
+    assert.equal(policy.sources.behavior.childHarness, "legacy_session");
     assert.equal(policy.behavior.maximumConcurrentChildren, 9);
     assert.equal(policy.delegation.parentControl, "questions");
     assert.equal(policy.execution.strictProjectIsolation, true,

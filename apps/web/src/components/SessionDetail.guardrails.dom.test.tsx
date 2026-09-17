@@ -235,6 +235,7 @@ test("the Composer exposes human-controlled Parent Control only for Orchestrator
     }, orchestratorPolicy: {
       version: 1,
       behavior: {
+        childHarness: { agentId: "claude", driver: "claude-code", context: { kind: "native" } },
         childModel: "claude-opus-5",
         childEffort: "high",
         maximumConcurrentChildren: 6,
@@ -253,6 +254,7 @@ test("the Composer exposes human-controlled Parent Control only for Orchestrator
       },
       sources: {
         behavior: {
+          childHarness: "user_default",
           childModel: "session_override",
           childEffort: "user_default",
           maximumConcurrentChildren: "user_default",
@@ -308,6 +310,7 @@ test("the Composer exposes human-controlled Parent Control only for Orchestrator
     const select = container.querySelector<HTMLButtonElement>('[aria-label="Parent Control: Human"]');
     assert.ok(select);
     assert.match(container.textContent ?? "", /Campaign Behavior/);
+    assert.match(container.textContent ?? "", /claude · Claude Code Native · Native/);
     assert.match(container.textContent ?? "", /claude-opus-5/);
     assert.match(container.textContent ?? "", /Session Override/);
     assert.match(container.textContent ?? "", /keeps its stored policy when account defaults change/);

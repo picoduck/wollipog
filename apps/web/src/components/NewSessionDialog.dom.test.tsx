@@ -803,6 +803,21 @@ test("new Orchestrator sessions send only explicit overrides after showing effec
     defaults: effective,
     source: "user_default",
     capabilities: {
+      harnesses: [
+        {
+          agentId: "codex", driver: "codex-app-server", context: { kind: "native" }, name: "Codex App Server",
+          models: [{ id: "test-model", displayName: "Test Model", efforts: ["high"] },
+            { id: "sol", displayName: "Sol", efforts: ["high"] }],
+          effortLevels: ["high"],
+          supportedPairs: [{ modelId: "test-model", effortLevels: ["high"] },
+            { modelId: "sol", effortLevels: ["high"] }], installations: 1,
+        },
+        {
+          agentId: "pi", driver: "pi", context: { kind: "native" }, name: "Pi",
+          models: [{ id: "sol", displayName: "Sol", efforts: ["low"] }], effortLevels: ["low"],
+          supportedPairs: [{ modelId: "sol", effortLevels: ["low"] }], installations: 1,
+        },
+      ],
       models: [{ id: "test-model", displayName: "Test Model", efforts: ["high"] }, { id: "sol", displayName: "Sol", efforts: ["high"] }],
       effortLevels: ["high"], installations: 1, compatibleInstallations: 1, status: "available",
     },
@@ -813,12 +828,17 @@ test("new Orchestrator sessions send only explicit overrides after showing effec
     assert.match(fixture.container.querySelector('[aria-label^="Child Model:"]')?.getAttribute("aria-label") ?? "", /Test Model/);
     assert.equal(labelledNumberInput(fixture.container, "Maximum Concurrent Children")?.value, "5");
     assert.match(fixture.container.textContent ?? "", /These effective values are resolved and stored before the campaign's first turn/);
+    await chooseSelectOption(fixture.container, "Child Harness", "Pi · Pi · Native");
     await chooseSelectOption(fixture.container, "Child Model", "Sol");
     await chooseSelectOption(fixture.container, "PR Merge Approval", "Orchestrator");
     assert.match(fixture.container.textContent ?? "", /Session Override/);
     await act(async () => { createButton(fixture.container).click(); });
     assert.deepEqual(fixture.requests[0]?.orchestrator, {
-      behavior: { childModel: "sol" },
+      behavior: {
+        childHarness: { agentId: "pi", driver: "pi", context: { kind: "native" } },
+        childModel: "sol",
+        childEffort: null,
+      },
       delegation: { decisions: { pr_merge: "orchestrator" } },
     });
   } finally {
