@@ -119,3 +119,62 @@ test("a burst of transcript events with an unchanged roster costs no extra regis
     container.remove();
   }
 });
+
+/**
+ * A "Load More" page load or an inventory retry starts its own request without re-running the
+ * refresh effect, so it moves the refresh deadline under an already-armed timer. Firing at the old
+ * deadline would both break the cadence and hand `registryRequest` to the refresh while the page
+ * load is still in flight, silently discarding the page the reader asked for. Exercised on the 1 s
+ * roster tier, which is the same code path as the 15 s idle tier.
+ */
+test("a page load started under an armed timer moves the deadline instead of losing its request", async () => {
+  const calls: Array<{ after: number; kind: "load" | "refresh" }> = [];
+  let served = 0;
+  const childSessions = async (_id: string, _epoch: number, after = 0): Promise<ChildSessionRegistryPage> => {
+    served += 1;
+    const slow = served === 2;
+    calls.push({ after, kind: after === 0 ? "refresh" : "load" });
+    if (slow) await sleep(400);
+    return {
+      children: [{ toolCallId: after === 0 ? "child-a" : "child-b",
+        name: after === 0 ? "Recorded First" : "Recorded Second", status: "running",
+        lifecycle: "running", sourceSeq: after === 0 ? 1 : 2, startedAt: now - 30_000,
+        lastActivityAt: now, toolCount: 1 }],
+      attentionOwners: [], unidentifiedChildren: 0, eventEpoch: 0,
+      nextAfter: after === 0 ? 1 : null, truncated: after === 0,
+    };
+  };
+  const client: ApiClient = { ...api, childSessions };
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const render = (session: SessionView, items: TimelineItem[]) =>
+    root.render(<ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
+      <AgentsPanel session={session} items={items} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
+        requestedId={null} onSelect={() => {}} parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
+    </StoreProvider></FeedbackProvider></ApiProvider>);
+
+  try {
+    const items = [startedTool("child-a", 1)];
+    await act(async () => { render(baseSession, items); });
+    await advance(50);
+
+    // Roster evidence arms the 1 s timer.
+    await act(async () => { render({ ...baseSession, messageCount: 11 }, [...items, startedTool("child-b", 2)]); });
+    await advance(800);
+    assert.equal(calls.length, 1, "the roster refresh is still waiting on its 1 s floor");
+
+    // "Load More" starts its own request 0.8 s in, resetting the deadline to 1.8 s.
+    const loadMore = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent === "Load More Recorded Workers")!;
+    await act(async () => { (loadMore as HTMLButtonElement).click(); });
+    await advance(500);
+    assert.deepEqual(calls, [{ after: 0, kind: "refresh" }, { after: 1, kind: "load" }],
+      "the armed timer re-armed rather than firing at its original deadline and stealing the request slot");
+    assert.match(container.textContent ?? "", /Recorded Second/, "the page the reader asked for was applied");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});

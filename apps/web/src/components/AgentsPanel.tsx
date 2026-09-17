@@ -321,10 +321,20 @@ export function AgentsPanel(props: Props) {
     // without ever moving the deadline: each run reschedules the same absolute wake-up, which lands
     // one idle-cadence refresh after the last request instead of one per event (#1207).
     const rosterChanged = refreshedRosterKey.current !== rosterKey;
-    const timer = setTimeout(() => {
-      refreshedRosterKey.current = rosterKey;
-      refreshRegistry(progressKey);
-    }, childRegistryRefreshDelay(rosterChanged, Date.now() - lastRegistryRefresh.current));
+    const remaining = () => childRegistryRefreshDelay(rosterChanged, Date.now() - lastRegistryRefresh.current);
+    let timer: ReturnType<typeof setTimeout>;
+    const arm = () => {
+      timer = setTimeout(() => {
+        // Load More and the inventory retry start their own request without re-running this effect,
+        // so they move the deadline under an already-armed timer. Fire only once the deadline has
+        // actually passed; otherwise re-arm, or a refresh would both break the cadence and take the
+        // request slot away from the page load still in flight.
+        if (remaining() > 0) return arm();
+        refreshedRosterKey.current = rosterKey;
+        refreshRegistry(progressKey);
+      }, remaining());
+    };
+    arm();
     return () => clearTimeout(timer);
     // Event progress invalidates the durable lifecycle even when its transcript row is not loaded,
     // so it still schedules a refresh — at the idle cadence rather than per event. The generation
