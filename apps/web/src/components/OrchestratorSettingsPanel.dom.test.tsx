@@ -47,6 +47,7 @@ function settings(drifted = false): OrchestratorSettingsView {
     source: "user_default",
     defaults: {
       behavior: {
+        childHarness: null,
         childModel: drifted ? "retired-model" : null,
         childEffort: null,
         maximumConcurrentChildren: 4,
@@ -66,6 +67,18 @@ function settings(drifted = false): OrchestratorSettingsView {
       execution: { strictProjectIsolation: false },
     },
     capabilities: {
+      harnesses: [
+        {
+          agentId: "codex", driver: "codex-app-server", context: { kind: "native" }, name: "Codex App Server",
+          models: [{ id: "sol", displayName: "Sol", efforts: ["high"] }], effortLevels: ["high"],
+          supportedPairs: [{ modelId: "sol", effortLevels: ["high"] }], installations: 1,
+        },
+        {
+          agentId: "pi", driver: "pi", context: { kind: "native" }, name: "Pi",
+          models: [{ id: "sol", displayName: "Sol", efforts: ["low"] }], effortLevels: ["low"],
+          supportedPairs: [{ modelId: "sol", effortLevels: ["low"] }], installations: 1,
+        },
+      ],
       models: [{ id: "sol", displayName: "Sol", efforts: ["high"] }],
       effortLevels: ["high"],
       supportedPairs: [{ modelId: "sol", effortLevels: ["high"] }],
@@ -126,6 +139,102 @@ test("Orchestrator settings separate policy areas, validate accessibly, and pers
   }
 });
 
+test("all-Automatic defaults remain saveable while no Child Harness installation is advertised", async () => {
+  let current = settings();
+  const reason = "No current Agent Harness installation advertises child model and effort capabilities. Connect or update a runner, then retry.";
+  current.capabilities = {
+    harnesses: [], models: [], effortLevels: [], supportedPairs: [],
+    installations: 0, compatibleInstallations: 0, status: "unavailable", reason,
+  };
+  const writes: Array<{ defaults: OrchestratorSettingsView["defaults"] }> = [];
+  const transport: ApiTransport = {
+    instanceId: "test", publicOrigin: "http://localhost", close() {},
+    async request(_path, init) {
+      if (init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as { defaults: OrchestratorSettingsView["defaults"] };
+        writes.push(body);
+        current = { ...current, defaults: body.defaults };
+      }
+      return new Response(JSON.stringify(current), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<ApiProvider client={createApiClient(transport)}><OrchestratorSettingsPanel /></ApiProvider>));
+    await settle();
+    const save = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Save Defaults")!;
+    assert.equal(save.disabled, false, "the absence of installations does not invalidate an all-Automatic policy");
+    assert.equal(container.querySelector('[role="alert"]')?.textContent, reason);
+    assert.doesNotMatch(container.textContent ?? "", /fixed Child Harness.*not supported together/i);
+    await act(async () => save.click());
+    await settle();
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0]?.defaults.behavior.childHarness, null);
+    assert.equal(writes[0]?.defaults.behavior.childModel, null);
+    assert.equal(writes[0]?.defaults.behavior.childEffort, null);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("Child Harness precedes and scopes model and effort while clearing incompatible selections", async () => {
+  let current = settings();
+  current.defaults.behavior.childModel = "sol";
+  current.defaults.behavior.childEffort = "high";
+  const writes: Array<{ defaults: OrchestratorSettingsView["defaults"] }> = [];
+  const transport: ApiTransport = {
+    instanceId: "test", publicOrigin: "http://localhost", close() {},
+    async request(_path, init) {
+      if (init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as { defaults: OrchestratorSettingsView["defaults"] };
+        writes.push(body);
+        current = { ...current, defaults: body.defaults };
+      }
+      return new Response(JSON.stringify(current), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<ApiProvider client={createApiClient(transport)}><OrchestratorSettingsPanel /></ApiProvider>));
+    await settle();
+    const titles = [...container.querySelectorAll(".ui-row-title")].map((node) => node.textContent);
+    assert.ok(titles.indexOf("Child Harness") < titles.indexOf("Child Model"));
+    assert.ok(titles.indexOf("Child Model") < titles.indexOf("Child Effort"));
+
+    const harness = container.querySelector<HTMLButtonElement>('[aria-label^="Child Harness:"]')!;
+    await act(async () => harness.click());
+    const pi = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+      .find((option) => option.textContent?.includes("Pi · Pi · Native"))!;
+    await act(async () => pi.click());
+    assert.match(container.querySelector('[aria-label^="Child Model:"]')?.getAttribute("aria-label") ?? "", /Automatic/);
+    assert.match(container.querySelector('[aria-label^="Child Effort:"]')?.getAttribute("aria-label") ?? "", /Automatic/);
+
+    const effort = container.querySelector<HTMLButtonElement>('[aria-label^="Child Effort:"]')!;
+    await act(async () => effort.click());
+    const effortText = [...container.querySelectorAll('[role="option"]')].map((option) => option.textContent).join(" ");
+    assert.match(effortText, /Low/);
+    assert.doesNotMatch(effortText, /High/);
+    await act(async () => effort.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never));
+
+    const save = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Save Defaults")!;
+    await act(async () => save.click());
+    await settle();
+    assert.equal(writes[0]?.defaults.behavior.childHarness?.driver, "pi");
+    assert.equal(writes[0]?.defaults.behavior.childModel, null);
+    assert.equal(writes[0]?.defaults.behavior.childEffort, null);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("Orchestrator settings preserve and explain a drifted saved model", async () => {
   const transport: ApiTransport = {
     instanceId: "test", publicOrigin: "http://localhost", close() {},
@@ -146,6 +255,8 @@ test("Orchestrator settings preserve and explain a drifted saved model", async (
       "drifted fixed defaults cannot be resaved until the user repairs them");
     await act(async () => trigger.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as never));
     assert.equal(trigger.getAttribute("aria-expanded"), "true", "the shared select remains keyboard operable in drift state");
+    assert.match(container.textContent ?? "", /Choose a Child Harness or return Child Model to Automatic/i);
+    assert.doesNotMatch(container.textContent ?? "", /through the selected Child Harness/i);
   } finally {
     await act(async () => root.unmount());
     container.remove();

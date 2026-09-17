@@ -1,4 +1,4 @@
-import type { AgentDefinition, AgentDriverKind } from "@wollipog/protocol";
+import type { AgentDefinition, AgentDriverKind, AgentHarnessIdentity, OrchestratorHarnessCapability } from "@wollipog/protocol";
 
 export function driverKindLabel(driver: AgentDriverKind, registry = false): string {
   if (driver === "codex-app-server") return "Codex App Server";
@@ -6,6 +6,28 @@ export function driverKindLabel(driver: AgentDriverKind, registry = false): stri
   if (driver === "claude-code") return "Claude Code Native";
   if (driver === "pi") return "Pi RPC";
   return registry ? "ACP Registry Adapter" : "ACP Adapter";
+}
+
+export function agentHarnessDriverLabel(driver: AgentDriverKind): string {
+  if (driver === "codex-app-server") return "Codex App Server";
+  if (driver === "claude-code") return "Claude Code";
+  if (driver === "acp") return "ACP";
+  if (driver === "pi") return "Pi";
+  return "Codex";
+}
+
+export function agentHarnessContextLabel(identity: Pick<AgentHarnessIdentity, "context">): string {
+  return identity.context.kind === "wsl" ? `WSL ${identity.context.distro}` : "Native";
+}
+
+export function agentHarnessOptionLabel(
+  harness: Pick<OrchestratorHarnessCapability, "name" | "driver" | "context">,
+): string {
+  return `${harness.name} · ${agentHarnessDriverLabel(harness.driver)} · ${agentHarnessContextLabel(harness)}`;
+}
+
+export function agentHarnessIdentityLabel(identity: AgentHarnessIdentity): string {
+  return `${identity.agentId} · ${agentHarnessDriverLabel(identity.driver)} · ${agentHarnessContextLabel(identity)}`;
 }
 
 /** Normalize only names emitted by earlier Wollipog onboarding, preserving custom agent names. */

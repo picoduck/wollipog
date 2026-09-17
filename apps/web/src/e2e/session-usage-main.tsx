@@ -289,6 +289,7 @@ if (composerFixture) {
     session.orchestratorPolicy = {
       version: 1,
       behavior: {
+        childHarness: null,
         childModel: "long-model[1m]",
         childEffort: "high",
         maximumConcurrentChildren: 3,
@@ -302,6 +303,7 @@ if (composerFixture) {
       execution: { strictProjectIsolation: false },
       sources: {
         behavior: {
+          childHarness: "user_default",
           childModel: "user_default",
           childEffort: "user_default",
           maximumConcurrentChildren: "session_override",

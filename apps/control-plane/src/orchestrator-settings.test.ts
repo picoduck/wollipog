@@ -17,7 +17,14 @@ import {
 } from "./orchestrator-settings.js";
 import { registerOrchestratorSettingsRoutes } from "./orchestrator-settings-route.js";
 
-function runner(runnerId: string, model: string, efforts: string[]): RunnerMetadata {
+function runner(
+  runnerId: string,
+  model: string,
+  efforts: string[],
+  harness: { id: string; name: string; driver: "codex-app-server" | "pi" } = {
+    id: "codex", name: "Codex App Server", driver: "codex-app-server",
+  },
+): RunnerMetadata {
   return {
     runnerId,
     hostname: runnerId,
@@ -25,10 +32,10 @@ function runner(runnerId: string, model: string, efforts: string[]): RunnerMetad
     version: "1",
     workspaces: [{ id: "workspace", name: "Workspace", path: "/workspace" }],
     agents: [{
-      id: "codex",
-      name: "Codex App Server",
+      id: harness.id,
+      name: harness.name,
       command: "codex",
-      driver: "codex-app-server",
+      driver: harness.driver,
       available: true,
       context: { kind: "native" },
       capabilities: {
@@ -121,12 +128,62 @@ test("Orchestrator defaults persist per authenticated user and preserve capabili
   }
 });
 
+test("Orchestrator capabilities keep identical model ids scoped to stable harness identities", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    const now = Date.now();
+    db.registerRunner(runner("runner-codex", "shared-model", ["high"]), now, PROTOCOL_VERSION);
+    db.registerRunner(runner("runner-pi", "shared-model", ["low"], {
+      id: "pi", name: "Pi", driver: "pi",
+    }), now + 1, PROTOCOL_VERSION);
+    const settings = new OrchestratorSettings(db);
+    const principal = human(db);
+    const initial = settings.view(principal);
+    assert.equal(initial.capabilities.harnesses?.length, 2);
+    const codex = initial.capabilities.harnesses?.find((harness) => harness.driver === "codex-app-server")!;
+    const pi = initial.capabilities.harnesses?.find((harness) => harness.driver === "pi")!;
+    assert.deepEqual(codex.supportedPairs, [{ modelId: "shared-model", effortLevels: ["high"] }]);
+    assert.deepEqual(pi.supportedPairs, [{ modelId: "shared-model", effortLevels: ["low"] }]);
+
+    const fixedPi = defaults({
+      childHarness: { agentId: "pi", driver: "pi", context: { kind: "native" } },
+      childModel: "shared-model",
+      childEffort: "low",
+    });
+    assert.deepEqual(settings.update(principal, { defaults: fixedPi }, now + 2).defaults, fixedPi);
+    assert.throws(() => settings.update(principal, { defaults: defaults({
+      childHarness: fixedPi.behavior.childHarness,
+      childModel: "shared-model",
+      childEffort: "high",
+    }) }), /not supported together/,
+    "Codex effort metadata must not leak into Pi merely because the model id matches");
+
+    db.markOffline("runner-pi", now + 3);
+    const drifted = settings.view(principal);
+    assert.deepEqual(drifted.defaults.behavior.childHarness, fixedPi.behavior.childHarness);
+    assert.equal(drifted.capabilities.status, "unavailable");
+    assert.equal(drifted.capabilities.harnesses?.find((harness) => harness.driver === "pi")?.installations, 0,
+      "a saved unavailable harness remains visible for repair");
+    assert.match(drifted.capabilities.reason ?? "", /Child Harness/);
+  } finally {
+    db.close();
+  }
+});
+
 test("Orchestrator parsing is exact and campaign resolution tracks field-level precedence", () => {
   assert.equal(parseOrchestratorDefaults({ ...defaults(), extra: true }), null);
   assert.equal(parseOrchestratorDefaults({ ...defaults(), behavior: { ...defaults().behavior, childModel: " sol " } }), null);
+  const { childHarness: _legacyChildHarness, ...preV157Behavior } = defaults().behavior;
+  assert.equal(parseOrchestratorDefaults({ ...defaults(), behavior: preV157Behavior }), null,
+    "a stale pre-v157 defaults document cannot silently clear a fixed Child Harness");
   assert.equal(parseOrchestratorOverrides({ behavior: [] }), null);
   assert.equal(parseOrchestratorOverrides({ delegation: { decisions: "all" } }), null);
   assert.equal(parseOrchestratorOverrides({ delegation: { decisions: { unknown: "orchestrator" } } }), null);
+  assert.deepEqual(parseOrchestratorOverrides({ behavior: { childHarness: {
+    agentId: "pi", driver: "pi", context: { kind: "native" }, name: "not durable",
+  } } })?.behavior?.childHarness, {
+    agentId: "pi", driver: "pi", context: { kind: "native" },
+  }, "campaign policy retains only the stable secret-free harness identity");
 
   const policy = resolveOrchestratorCampaignPolicy(defaults(), "user_default", {
     behavior: { childModel: null, completion: "stop_and_archive" },

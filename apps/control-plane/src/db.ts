@@ -34,6 +34,7 @@ import {
   isTerminal,
   pendingRequests,
   parentControlRequestEligible,
+  normalizeAgentHarnessIdentity,
   runnerSupportsProtocol,
   scopeAudienceContained,
   validatePromptImageInputs,
@@ -2154,6 +2155,7 @@ CREATE TABLE IF NOT EXISTS agent_harness_defaults (
 -- default; existing sessions snapshot their own policy and never read through this table.
 CREATE TABLE IF NOT EXISTS orchestrator_settings (
   user_id                     TEXT PRIMARY KEY,
+  child_harness               TEXT,
   child_model                 TEXT,
   child_effort                TEXT,
   maximum_concurrent_children INTEGER NOT NULL,
@@ -4633,6 +4635,11 @@ export class ControlPlaneDb {
     } catch {
       /* column already present */
     }
+    try {
+      db.exec("ALTER TABLE orchestrator_settings ADD COLUMN child_harness TEXT");
+    } catch {
+      /* column already present */
+    }
     if (needsCreationActorBackfill) {
       // Parent attribution is durable CP-owned proof of agent creation. Existing top-level
       // Orchestrators qualify only when their already-persisted campaign snapshot establishes a
@@ -4658,7 +4665,9 @@ export class ControlPlaneDb {
         const policy = orchestratorCampaignPolicyFromJson(row.orchestrator_policy);
         if (!policy) continue;
         const allSources = [
-          ...Object.values(policy.sources.behavior),
+          ...Object.entries(policy.sources.behavior)
+            .filter(([key]) => key !== "childHarness")
+            .map(([, source]) => source),
           policy.sources.delegation.parentControl,
           ...Object.values(policy.sources.delegation.decisions),
         ];
@@ -4705,6 +4714,7 @@ export class ControlPlaneDb {
         execution: { strictProjectIsolation: true },
         sources: {
           behavior: {
+            childHarness: source,
             childModel: source,
             childEffort: source,
             maximumConcurrentChildren: source,
@@ -7832,10 +7842,11 @@ export class ControlPlaneDb {
 
   getOrchestratorDefaults(userId: string): OrchestratorDefaultsRecord | null {
     const row = this.stmt(
-      `SELECT child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
+      `SELECT child_harness, child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
               strict_project_isolation, parent_control, decision_policy, updated_at
        FROM orchestrator_settings WHERE user_id=?`,
     ).get(userId) as {
+      child_harness: string | null;
       child_model: string | null;
       child_effort: string | null;
       maximum_concurrent_children: number;
@@ -7852,6 +7863,7 @@ export class ControlPlaneDb {
     return {
       defaults: {
         behavior: {
+          childHarness: normalizeAgentHarnessIdentity(parseJson<unknown>(row.child_harness)),
           childModel: row.child_model,
           childEffort: row.child_effort,
           maximumConcurrentChildren: row.maximum_concurrent_children,
@@ -7868,11 +7880,11 @@ export class ControlPlaneDb {
   setOrchestratorDefaults(userId: string, defaults: OrchestratorDefaults, now = Date.now()): void {
     this.stmt(
       `INSERT INTO orchestrator_settings
-         (user_id, child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
+         (user_id, child_harness, child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
           strict_project_isolation, parent_control, decision_policy, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id) DO UPDATE SET
-         child_model=excluded.child_model, child_effort=excluded.child_effort,
+         child_harness=excluded.child_harness, child_model=excluded.child_model, child_effort=excluded.child_effort,
          maximum_concurrent_children=excluded.maximum_concurrent_children,
          follow_ups=excluded.follow_ups, completion=excluded.completion,
          strict_project_isolation=excluded.strict_project_isolation,
@@ -7880,6 +7892,7 @@ export class ControlPlaneDb {
          updated_at=excluded.updated_at`,
     ).run(
       userId,
+      defaults.behavior.childHarness ? JSON.stringify(defaults.behavior.childHarness) : null,
       defaults.behavior.childModel,
       defaults.behavior.childEffort,
       defaults.behavior.maximumConcurrentChildren,
@@ -22004,7 +22017,18 @@ function parentControlDecisionPolicyFromJson(raw: string | null): ParentControlD
 
 function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCampaignPolicy | null {
   const value = parseJson<OrchestratorCampaignPolicy>(raw);
-  if (!value || value.version !== 1 || !value.behavior || !value.delegation || !value.sources) return null;
+  if (!value || value.version !== 1 ||
+      typeof value.behavior !== "object" || value.behavior === null || Array.isArray(value.behavior) ||
+      typeof value.delegation !== "object" || value.delegation === null || Array.isArray(value.delegation) ||
+      typeof value.sources !== "object" || value.sources === null || Array.isArray(value.sources) ||
+      typeof value.sources.behavior !== "object" || value.sources.behavior === null ||
+      Array.isArray(value.sources.behavior)) return null;
+  // Pre-v157 policies had no harness bind. Preserve their automatic-harness semantics and mark
+  // the source as legacy rather than silently making a fixed choice during migration.
+  if (value.behavior.childHarness === undefined) value.behavior.childHarness = null;
+  if (value.sources.behavior && value.sources.behavior.childHarness === undefined) {
+    value.sources.behavior.childHarness = "legacy_session";
+  }
   // Policies written before protocol v144 had only one possible execution posture: the enforced
   // scratch-only boundary. Normalize them in memory without broadening the stored session.
   if (!value.execution && !value.sources.execution) {
@@ -22012,7 +22036,9 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
     value.sources.execution = { strictProjectIsolation: "legacy_session" };
   }
   const behavior = value.behavior;
-  if ((behavior.childModel !== null && typeof behavior.childModel !== "string") ||
+  const childHarness = behavior.childHarness === null ? null : normalizeAgentHarnessIdentity(behavior.childHarness);
+  if ((behavior.childHarness !== null && !childHarness) ||
+      (behavior.childModel !== null && typeof behavior.childModel !== "string") ||
       (behavior.childEffort !== null && typeof behavior.childEffort !== "string") ||
       !Number.isSafeInteger(behavior.maximumConcurrentChildren) ||
       behavior.maximumConcurrentChildren < 0 || behavior.maximumConcurrentChildren > 64 ||
@@ -22021,10 +22047,13 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
       !["off", "questions", "questions_and_approvals"].includes(value.delegation.parentControl) ||
       typeof value.execution?.strictProjectIsolation !== "boolean" ||
       !parentControlDecisionPolicyFromJson(JSON.stringify(value.delegation.decisions))) return null;
+  behavior.childHarness = childHarness;
   const validSources = new Set([
     "system_default", "user_default", "session_override", "compatibility_fallback", "legacy_session", "active_campaign",
   ]);
-  const behaviorSourceKeys = ["childModel", "childEffort", "maximumConcurrentChildren", "followUps", "completion"] as const;
+  const behaviorSourceKeys = [
+    "childHarness", "childModel", "childEffort", "maximumConcurrentChildren", "followUps", "completion",
+  ] as const;
   if (!value.sources.behavior || !value.sources.delegation || !value.sources.delegation.decisions ||
       !value.sources.execution ||
       Object.keys(value.sources.behavior).length !== behaviorSourceKeys.length ||

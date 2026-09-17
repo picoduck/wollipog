@@ -803,6 +803,21 @@ test("new Orchestrator sessions send only explicit overrides after showing effec
     defaults: effective,
     source: "user_default",
     capabilities: {
+      harnesses: [
+        {
+          agentId: "codex", driver: "codex-app-server", context: { kind: "native" }, name: "Codex App Server",
+          models: [{ id: "test-model", displayName: "Test Model", efforts: ["high"] },
+            { id: "sol", displayName: "Sol", efforts: ["high"] }],
+          effortLevels: ["high"],
+          supportedPairs: [{ modelId: "test-model", effortLevels: ["high"] },
+            { modelId: "sol", effortLevels: ["high"] }], installations: 1,
+        },
+        {
+          agentId: "pi", driver: "pi", context: { kind: "native" }, name: "Pi",
+          models: [{ id: "sol", displayName: "Sol", efforts: ["low"] }], effortLevels: ["low"],
+          supportedPairs: [{ modelId: "sol", effortLevels: ["low"] }], installations: 1,
+        },
+      ],
       models: [{ id: "test-model", displayName: "Test Model", efforts: ["high"] }, { id: "sol", displayName: "Sol", efforts: ["high"] }],
       effortLevels: ["high"], installations: 1, compatibleInstallations: 1, status: "available",
     },
@@ -813,14 +828,57 @@ test("new Orchestrator sessions send only explicit overrides after showing effec
     assert.match(fixture.container.querySelector('[aria-label^="Child Model:"]')?.getAttribute("aria-label") ?? "", /Test Model/);
     assert.equal(labelledNumberInput(fixture.container, "Maximum Concurrent Children")?.value, "5");
     assert.match(fixture.container.textContent ?? "", /These effective values are resolved and stored before the campaign's first turn/);
+    await chooseSelectOption(fixture.container, "Child Harness", "Pi · Pi · Native");
     await chooseSelectOption(fixture.container, "Child Model", "Sol");
     await chooseSelectOption(fixture.container, "PR Merge Approval", "Orchestrator");
     assert.match(fixture.container.textContent ?? "", /Session Override/);
     await act(async () => { createButton(fixture.container).click(); });
     assert.deepEqual(fixture.requests[0]?.orchestrator, {
-      behavior: { childModel: "sol" },
+      behavior: {
+        childHarness: { agentId: "pi", driver: "pi", context: { kind: "native" } },
+        childModel: "sol",
+        childEffort: null,
+      },
       delegation: { decisions: { pr_merge: "orchestrator" } },
     });
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a fixed Child Harness on an older runner shows the protocol-v157 recovery message", async () => {
+  const olderRunner: RunnerView = {
+    ...runner,
+    protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorChildHarnessPolicy - 1,
+    agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+      models: [{ id: "test-model", efforts: ["high"] }], effortLevels: ["high"], slashCommands: [],
+      supportsImages: false, supportsApprovals: true, permissionModes: ["default", "orchestrator"],
+    } })),
+  };
+  const defaults = structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
+  defaults.behavior.childHarness = { agentId: "claude", driver: "claude-code", context: { kind: "native" } };
+  const fixture = await mountFixture({ runners: [olderRunner] }, undefined, undefined, undefined, undefined, async () => ({
+    defaults,
+    source: "user_default",
+    capabilities: {
+      harnesses: [{
+        agentId: "claude", driver: "claude-code", context: { kind: "native" }, name: "Claude",
+        models: [{ id: "test-model", efforts: ["high"] }], effortLevels: ["high"],
+        supportedPairs: [{ modelId: "test-model", effortLevels: ["high"] }], installations: 1,
+      }],
+      models: [{ id: "test-model", efforts: ["high"] }], effortLevels: ["high"],
+      supportedPairs: [{ modelId: "test-model", effortLevels: ["high"] }],
+      installations: 1, compatibleInstallations: 1, status: "available",
+    },
+  }));
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    const alerts = [...fixture.container.querySelectorAll('[role="alert"]')]
+      .map((node) => node.textContent ?? "").join(" ");
+    assert.match(alerts, /requires a protocol-v157 Orchestrator runner.*choose Automatic/i);
+    assert.doesNotMatch(alerts, /saved Child Model or Child Effort is no longer advertised/i);
+    assert.equal(createButton(fixture.container).disabled, true);
   } finally {
     await unmountFixture(fixture);
   }

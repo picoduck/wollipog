@@ -685,6 +685,20 @@ test("orchestrator separates default provider execution from the negotiated stri
     assert.equal(svc.prompt(created.data!.id, "continue", undefined, undefined, { permissionMode: "default" }).status, 409);
     const ordinary = svc.createSession(request).data!;
     assert.equal(svc.setConfig(ordinary.id, { permissionMode: "orchestrator" }).status, 409);
+    const fixedHarnessDefaults = structuredClone(portableDefaults);
+    fixedHarnessDefaults.defaults.behavior.childHarness = {
+      agentId: AGENT_ID, driver: "claude-code", context: { kind: "native" },
+    };
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorChildHarnessPolicy - 1);
+    const mixedVersion = svc.createSession(
+      { ...request, config: { permissionMode: "orchestrator" } },
+      undefined, undefined, false, false, false,
+      { defaultOwnerUserId: "human", orchestratorDefaults: fixedHarnessDefaults, validateOrchestratorDefaults: () => null },
+    );
+    assert.equal(mixedVersion.status, 409);
+    assert.match(mixedVersion.error ?? "", /protocol-v157.*Automatic Harness/,
+      "mixed-version campaigns fail actionably instead of dropping a fixed harness");
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     const advertised = agent.capabilities;
     delete agent.capabilities;
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
@@ -766,6 +780,11 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       source: "user_default",
       defaults: {
         behavior: {
+          childHarness: {
+            agentId: CODEX_APP_AGENT_ID,
+            driver: "codex-app-server",
+            context: { kind: "native" },
+          },
           childModel: "text-model",
           childEffort: "high",
           maximumConcurrentChildren: 6,
@@ -806,6 +825,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.ok(created.ok && created.data, created.error);
     const parent = created.data;
     assert.equal(parent.maxChildSessions, 3);
+    assert.equal(parent.orchestratorPolicy?.behavior.childHarness?.agentId, CODEX_APP_AGENT_ID);
     assert.equal(parent.orchestratorPolicy?.behavior.childModel, "text-model");
     assert.equal(parent.orchestratorPolicy?.behavior.completion, "stop_and_archive");
     assert.equal(parent.orchestratorPolicy?.sources.behavior.childModel, "user_default");
@@ -820,6 +840,31 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       "editing account defaults cannot mutate an active campaign snapshot");
 
     db.updateSessionStatus(parent.id, "running", Date.now());
+    const wrongHarness = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID,
+      config: { model: "text-model", effort: "high" },
+    }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    assert.equal(wrongHarness.status, 409);
+    assert.match(wrongHarness.error ?? "", /child harness is fixed by campaign policy/,
+      "the complete fixed harness/model/effort policy is checked before child launch");
+    const wrongRunHarness = svc.createRun({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "Bypass through a run",
+    }, { parentSessionId: parent.id });
+    assert.equal(wrongRunHarness.status, 409);
+    assert.match(wrongRunHarness.error ?? "", /child harness is fixed by campaign policy/);
+    const wrongWorkflowHarness = svc.createWorkflowRun({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, workflowId: "builtin:build-review",
+      task: "Bypass through a workflow", agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID },
+    }, { kind: "agent", id: parent.id }, undefined, { parentSessionId: parent.id });
+    assert.equal(wrongWorkflowHarness.status, 409);
+    assert.match(wrongWorkflowHarness.error ?? "", /child harness is fixed by campaign policy/);
+    const wrongRunPair = svc.createRun({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [CODEX_APP_AGENT_ID],
+      task: "Bypass the fixed pair", config: { model: "image-model", effort: "low" },
+    }, { parentSessionId: parent.id });
+    assert.equal(wrongRunPair.status, 409);
+    assert.match(wrongRunPair.error ?? "", /child model is fixed by campaign policy/);
+    assert.equal(db.listRuns().length, 0, "rejected campaign fan-outs are atomic");
     assert.equal(svc.createSession({
       runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
       config: { model: "image-model", effort: "low" },
@@ -846,11 +891,13 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.equal(child.data.model, "text-model");
     assert.equal(child.data.effort, "high");
     assert.equal(child.data.orchestratorPolicy?.behavior.childModel, "text-model");
+    assert.equal(child.data.orchestratorPolicy?.behavior.childHarness?.agentId, CODEX_APP_AGENT_ID);
     assert.equal(child.data.orchestratorPolicy?.behavior.childEffort, "high");
     assert.equal(child.data.orchestratorPolicy?.delegation.decisions.pr_merge, "orchestrator");
     assert.equal(child.data.orchestratorPolicy?.sources.behavior.childModel, "active_campaign");
     const assignment = hub.sentOfType("start_session").find((message) => message.spec.sessionId === child.data!.id)?.initialPrompt ?? "";
     assert.match(assignment, /Wollipog Campaign Policy — server-derived, revision 1/);
+    assert.match(assignment, new RegExp(`Child Harness ${CODEX_APP_AGENT_ID}`));
     assert.match(assignment, /This is not blanket approval/);
     assert.match(assignment, /exact-head CI/);
     assert.match(assignment, /UI evidence remains human-owned/);

@@ -2,10 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   MAX_LIVE_CHILD_LIMIT,
   WORKFLOW_DECISION_CATEGORIES,
+  agentHarnessIdentityKey,
   type OrchestratorDefaults,
   type OrchestratorSettingsView,
   type WorkflowDecisionCategory,
 } from "@wollipog/protocol";
+import { agentHarnessOptionLabel } from "../agent-presentation.js";
 import { useApi } from "../api-context.js";
 import { effortLabel } from "../format.js";
 import { SettingsGroup } from "./SettingsView.js";
@@ -96,37 +98,121 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
     } : current);
   };
 
+  const harnessPolicySupported = view?.capabilities.harnesses !== undefined;
+  const harnesses = view?.capabilities.harnesses ?? [];
+  const selectedHarness = draft?.behavior.childHarness ?? null;
+  const selectedModel = draft?.behavior.childModel ?? null;
+  const selectedEffort = draft?.behavior.childEffort ?? null;
+  const selectedHarnessCapability = selectedHarness
+    ? harnesses.find((harness) => agentHarnessIdentityKey(harness) === agentHarnessIdentityKey(selectedHarness))
+    : undefined;
+  const candidateHarnesses = selectedHarness ? (selectedHarnessCapability ? [selectedHarnessCapability] : []) : harnesses;
+  const harnessOptions = useMemo(() => {
+    const options = [{
+      value: AUTO,
+      label: "Automatic",
+      description: harnessPolicySupported
+        ? "Choose one compatible Agent Harness with the selected model and effort at child creation."
+        : "Update the control plane to configure a fixed Child Harness.",
+    }];
+    for (const harness of harnesses) {
+      options.push({
+        value: agentHarnessIdentityKey(harness),
+        label: harness.installations > 0 ? agentHarnessOptionLabel(harness) : `${agentHarnessOptionLabel(harness)} (Unavailable)`,
+        description: harness.installations > 0
+          ? `${harness.installations} current installation${harness.installations === 1 ? "" : "s"}.`
+          : "No current installation advertises this saved Agent Harness. Connect it or choose Automatic.",
+      });
+    }
+    return options;
+  }, [harnessPolicySupported, harnesses]);
   const modelOptions = useMemo(() => {
     const options = [{ value: AUTO, label: "Automatic", description: "Choose from live child capabilities at creation time." }];
-    for (const model of view?.capabilities.models ?? []) {
-      options.push({ value: model.id, label: model.displayName ?? model.id, description: `Use ${model.displayName ?? model.id} for children by default.` });
+    const models = new Map<string, { names: Set<string>; displayName: string }>();
+    for (const harness of selectedHarness ? candidateHarnesses : []) {
+      for (const model of harness.models) {
+        const current = models.get(model.id) ?? { names: new Set<string>(), displayName: model.displayName ?? model.id };
+        current.names.add(harness.name);
+        models.set(model.id, current);
+      }
     }
-    const selected = draft?.behavior.childModel;
+    if (!harnessPolicySupported) {
+      for (const model of view?.capabilities.models ?? []) {
+        models.set(model.id, { names: new Set<string>(), displayName: model.displayName ?? model.id });
+      }
+    }
+    for (const [modelId, model] of models) {
+      options.push({
+        value: modelId,
+        label: model.displayName,
+        description: selectedHarness
+          ? `Use ${model.displayName} through the selected Child Harness.`
+          : `Resolve ${model.displayName} through a compatible harness: ${[...model.names].sort().join(", ")}.`,
+      });
+    }
+    const selected = selectedModel;
     if (selected && !options.some((option) => option.value === selected)) {
-      options.push({ value: selected, label: `${selected} (Unavailable)`, description: "No current installation advertises this saved model." });
+      const advertised = candidateHarnesses.flatMap((harness) => harness.models)
+        .find((model) => model.id === selected);
+      options.push({
+        value: selected,
+        label: advertised && !selectedHarness
+          ? `${advertised.displayName ?? advertised.id} (Legacy Automatic Harness)`
+          : `${selected} (Unavailable)`,
+        description: advertised && !selectedHarness
+          ? "This legacy fixed model retains automatic harness resolution. Choose a fixed Child Harness before selecting a different model."
+          : selectedHarness
+            ? "No current installation advertises this saved model through the selected Child Harness."
+            : "No current installation advertises this saved model. Choose a Child Harness or return Child Model to Automatic.",
+      });
     }
     return options;
-  }, [draft?.behavior.childModel, view?.capabilities.models]);
+  }, [candidateHarnesses, harnessPolicySupported, selectedHarness, selectedModel, view?.capabilities.models]);
   const effortOptions = useMemo(() => {
     const options = [{ value: AUTO, label: "Automatic", description: "Let the selected child model choose its default effort." }];
-    for (const effort of view?.capabilities.effortLevels ?? []) {
+    const efforts = new Set(harnessPolicySupported
+      ? (selectedHarness ? candidateHarnesses : []).flatMap((harness) => selectedModel
+        ? harness.supportedPairs.filter((pair) => pair.modelId === selectedModel)
+          .flatMap((pair) => pair.effortLevels)
+        : harness.effortLevels)
+      : view?.capabilities.effortLevels ?? []);
+    for (const effort of [...efforts].sort()) {
       options.push({ value: effort, label: effortLabel(effort), description: `Use ${effortLabel(effort)} effort for children by default.` });
     }
-    const selected = draft?.behavior.childEffort;
+    const selected = selectedEffort;
     if (selected && !options.some((option) => option.value === selected)) {
-      options.push({ value: selected, label: `${effortLabel(selected)} (Unavailable)`, description: "No current installation advertises this saved effort." });
+      const advertised = candidateHarnesses.some((harness) => selectedModel
+        ? harness.supportedPairs.some((pair) => pair.modelId === selectedModel && pair.effortLevels.includes(selected))
+        : harness.effortLevels.includes(selected));
+      options.push({
+        value: selected,
+        label: advertised && !selectedHarness
+          ? `${effortLabel(selected)} (Legacy Automatic Harness)`
+          : `${effortLabel(selected)} (Unavailable)`,
+        description: advertised && !selectedHarness
+          ? "This legacy fixed effort retains automatic harness resolution. Choose a fixed Child Harness before selecting a different effort."
+          : "No current installation advertises this saved effort for the selected combination.",
+      });
     }
     return options;
-  }, [draft?.behavior.childEffort, view?.capabilities.effortLevels]);
+  }, [candidateHarnesses, harnessPolicySupported, selectedEffort, selectedHarness, selectedModel, view?.capabilities.effortLevels]);
   const limitValid = !!draft && Number.isSafeInteger(draft.behavior.maximumConcurrentChildren) &&
     draft.behavior.maximumConcurrentChildren >= 0 && draft.behavior.maximumConcurrentChildren <= MAX_LIVE_CHILD_LIMIT;
-  const fixedPairValid = !draft || (!draft.behavior.childModel && !draft.behavior.childEffort) ||
-    (view?.capabilities.supportedPairs
-      ? draft.behavior.childModel
-        ? view.capabilities.supportedPairs.some((pair) => pair.modelId === draft.behavior.childModel &&
-          (!draft.behavior.childEffort || pair.effortLevels.includes(draft.behavior.childEffort)))
-        : view.capabilities.supportedPairs.some((pair) =>
-          pair.effortLevels.includes(draft.behavior.childEffort!))
+  const fixedPairValid = (!selectedHarness && !selectedModel && !selectedEffort) || (harnessPolicySupported
+    ? candidateHarnesses.some((harness) => harness.installations > 0 &&
+      (selectedModel
+        ? harness.supportedPairs.some((pair) => pair.modelId === selectedModel &&
+          (!selectedEffort || pair.effortLevels.includes(selectedEffort)))
+        : selectedEffort
+          ? harness.effortLevels.includes(selectedEffort)
+          : true))
+    : view?.capabilities.supportedPairs
+      ? selectedModel
+        ? view.capabilities.supportedPairs.some((pair) => pair.modelId === selectedModel &&
+          (!selectedEffort || pair.effortLevels.includes(selectedEffort)))
+        : selectedEffort
+          ? view.capabilities.effortLevels.includes(selectedEffort)
+          : view.capabilities.installations > 0
       : view?.capabilities.status === "available");
 
   const save = async () => {
@@ -164,15 +250,49 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         Defaults apply to new campaigns only. Each campaign stores its own effective policy.
       </p>
       <SelectRow
+        title="Child Harness"
+        description={harnessPolicySupported
+          ? "Automatic or a fixed stable Agent Harness identity. Execution context is part of the identity."
+          : "Fixed Child Harness policy is unavailable on this control plane. Update or restart it to enable this control."}
+        options={harnessOptions}
+        value={selectedHarness ? agentHarnessIdentityKey(selectedHarness) : AUTO}
+        disabled={!harnessPolicySupported}
+        onChange={(value) => {
+          const childHarness = value === AUTO
+            ? null
+            : (() => {
+              const harness = harnesses.find((candidate) => agentHarnessIdentityKey(candidate) === value);
+              return harness ? { agentId: harness.agentId, driver: harness.driver, context: harness.context } : null;
+            })();
+          draftDirty.current = true;
+          setDraft((current) => current ? {
+            ...current,
+            behavior: { ...current.behavior, childHarness, childModel: null, childEffort: null },
+          } : current);
+        }}
+      />
+      <SelectRow
         title="Child Model"
-        description="Automatic or a fixed capability-discovered model. Model and effort resolve independently."
+        description="Automatic or a model advertised through a compatible Child Harness."
         options={modelOptions}
         value={draft.behavior.childModel ?? AUTO}
-        onChange={(value) => updateBehavior("childModel", value === AUTO ? null : value)}
+        onChange={(value) => {
+          const childModel = value === AUTO ? null : value;
+          const effortCompatible = !draft.behavior.childEffort || candidateHarnesses.some((harness) =>
+            childModel
+              ? harness.supportedPairs.some((pair) => pair.modelId === childModel &&
+                pair.effortLevels.includes(draft.behavior.childEffort!))
+              : harness.effortLevels.includes(draft.behavior.childEffort!));
+          draftDirty.current = true;
+          setDraft((current) => current ? {
+            ...current,
+            behavior: { ...current.behavior, childModel, ...(!effortCompatible ? { childEffort: null } : {}) },
+          } : current);
+        }}
       />
       <SelectRow
         title="Child Effort"
-        description="Automatic or a fixed advertised effort, independently of Child Model."
+        description="Automatic or an effort advertised for the selected harness and model combination."
         options={effortOptions}
         value={draft.behavior.childEffort ?? AUTO}
         onChange={(value) => updateBehavior("childEffort", value === AUTO ? null : value)}
@@ -282,7 +402,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
     </SettingsGroup>
 
     {!fixedPairValid && <p className="form-error" role="alert">
-      The fixed Child Model and Child Effort are not supported together by a current installation. Choose Automatic or another advertised combination.
+      The fixed Child Harness, Child Model, and Child Effort are not supported together by a current installation. Choose Automatic or another advertised combination.
     </p>}
     {fixedPairValid && capabilities.status === "unavailable" && <p className="form-error" role="alert">{capabilities.reason}</p>}
     {error && <p className="form-error" role="alert">{error}</p>}

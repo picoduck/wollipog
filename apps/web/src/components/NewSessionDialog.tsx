@@ -12,6 +12,7 @@ import {
   DEFAULT_LIVE_CHILD_LIMIT,
   MAX_LIVE_CHILD_LIMIT,
   WORKFLOW_DECISION_CATEGORIES,
+  agentHarnessIdentityKey,
   type ProjectLocationView,
   type ProjectView,
   runnerCapabilityRequirement,
@@ -24,6 +25,7 @@ import {
   type SessionConfig,
   type WorkflowDecisionCategory,
 } from "@wollipog/protocol";
+import { agentHarnessOptionLabel } from "../agent-presentation.js";
 import { useApi } from "../api-context.js";
 import { ApiError } from "../api.js";
 import { useStore } from "../store.js";
@@ -437,20 +439,86 @@ export function NewSessionDialog({
   });
   const orchestratorSupported = orchestratorUnavailable === undefined;
   const orchestratorCapabilities = orchestratorSettings?.view?.capabilities;
+  const harnessPolicyAvailable = orchestratorCapabilities?.harnesses !== undefined;
+  const childHarnessPolicySupported = runnerSupportsProtocol(runner?.protocolVersion, "orchestratorChildHarnessPolicy");
+  const childHarnesses = orchestratorCapabilities?.harnesses ?? [];
+  const fixedChildHarness = orchestratorDraft.behavior.childHarness;
+  const fixedChildHarnessCapability = fixedChildHarness
+    ? childHarnesses.find((harness) => agentHarnessIdentityKey(harness) === agentHarnessIdentityKey(fixedChildHarness))
+    : undefined;
+  const candidateChildHarnesses = fixedChildHarness
+    ? (fixedChildHarnessCapability ? [fixedChildHarnessCapability] : [])
+    : childHarnesses;
+  const childHarnessOptions = [
+    {
+      value: AUTOMATIC_ORCHESTRATOR_VALUE,
+      label: "Automatic",
+      description: harnessPolicyAvailable
+        ? "Choose a compatible Agent Harness, model, and effort together at child creation."
+        : "Update the control plane to configure a fixed Child Harness.",
+    },
+    ...childHarnesses.map((harness) => ({
+      value: agentHarnessIdentityKey(harness),
+      label: harness.installations > 0
+        ? agentHarnessOptionLabel(harness)
+        : `${agentHarnessOptionLabel(harness)} (Unavailable)`,
+      description: harness.installations > 0
+        ? `${harness.installations} current installation${harness.installations === 1 ? "" : "s"}.`
+        : "No current installation advertises this saved Agent Harness.",
+    })),
+  ];
+  const scopedModels = new Map<string, { displayName: string; harnessNames: Set<string> }>();
+  if (harnessPolicyAvailable) {
+    for (const harness of candidateChildHarnesses) {
+      for (const model of harness.models) {
+        const current = scopedModels.get(model.id) ?? {
+          displayName: model.displayName ?? model.id,
+          harnessNames: new Set<string>(),
+        };
+        current.harnessNames.add(harness.name);
+        scopedModels.set(model.id, current);
+      }
+    }
+  } else {
+    for (const model of orchestratorCapabilities?.models ?? []) {
+      scopedModels.set(model.id, { displayName: model.displayName ?? model.id, harnessNames: new Set() });
+    }
+  }
+  const scopedEfforts = new Set(harnessPolicyAvailable
+    ? candidateChildHarnesses.flatMap((harness) => orchestratorDraft.behavior.childModel
+      ? harness.supportedPairs.filter((pair) => pair.modelId === orchestratorDraft.behavior.childModel)
+        .flatMap((pair) => pair.effortLevels)
+      : harness.effortLevels)
+    : orchestratorCapabilities?.effortLevels ?? []);
+  const fixedHarnessAvailable = !fixedChildHarness || (fixedChildHarnessCapability?.installations ?? 0) > 0;
+  const fixedHarnessSupported = !fixedChildHarness || childHarnessPolicySupported;
   const fixedModelAvailable = !orchestratorDraft.behavior.childModel ||
-    !!orchestratorCapabilities?.models.some((model) => model.id === orchestratorDraft.behavior.childModel);
+    scopedModels.has(orchestratorDraft.behavior.childModel);
   const fixedEffortAvailable = !orchestratorDraft.behavior.childEffort ||
-    !!orchestratorCapabilities?.effortLevels.includes(orchestratorDraft.behavior.childEffort);
-  const fixedPairAvailable = orchestratorCapabilities?.supportedPairs
-    ? orchestratorDraft.behavior.childModel
-      ? orchestratorCapabilities.supportedPairs.some((pair) =>
-        pair.modelId === orchestratorDraft.behavior.childModel &&
-        (!orchestratorDraft.behavior.childEffort || pair.effortLevels.includes(orchestratorDraft.behavior.childEffort)))
-      : orchestratorDraft.behavior.childEffort
-        ? orchestratorCapabilities.effortLevels.includes(orchestratorDraft.behavior.childEffort)
-        : orchestratorCapabilities.installations > 0
-    : orchestratorCapabilities?.status === "available";
-  const orchestratorCapabilitiesValid = !!fixedPairAvailable && fixedModelAvailable && fixedEffortAvailable;
+    scopedEfforts.has(orchestratorDraft.behavior.childEffort);
+  const fixedPairAvailable = harnessPolicyAvailable
+    ? candidateChildHarnesses.some((harness) => harness.installations > 0 &&
+      (orchestratorDraft.behavior.childModel
+        ? harness.supportedPairs.some((pair) => pair.modelId === orchestratorDraft.behavior.childModel &&
+          (!orchestratorDraft.behavior.childEffort || pair.effortLevels.includes(orchestratorDraft.behavior.childEffort)))
+        : orchestratorDraft.behavior.childEffort
+          ? harness.effortLevels.includes(orchestratorDraft.behavior.childEffort)
+          : true))
+    : orchestratorCapabilities?.supportedPairs
+      ? orchestratorDraft.behavior.childModel
+        ? orchestratorCapabilities.supportedPairs.some((pair) =>
+          pair.modelId === orchestratorDraft.behavior.childModel &&
+          (!orchestratorDraft.behavior.childEffort || pair.effortLevels.includes(orchestratorDraft.behavior.childEffort)))
+        : orchestratorDraft.behavior.childEffort
+          ? orchestratorCapabilities.effortLevels.includes(orchestratorDraft.behavior.childEffort)
+          : orchestratorCapabilities.installations > 0
+      : orchestratorCapabilities?.status === "available";
+  const orchestratorCapabilitiesValid = !!fixedPairAvailable && fixedHarnessAvailable && fixedHarnessSupported &&
+    fixedModelAvailable && fixedEffortAvailable;
+  const orchestratorCapabilitiesError = fixedChildHarness && !fixedHarnessSupported
+    ? "Fixed Child Harness policy requires a protocol-v157 Orchestrator runner. Update the selected runner or choose Automatic."
+    : orchestratorCapabilities?.reason ??
+      "A saved Child Harness, Child Model, or Child Effort is no longer advertised. Choose an available value.";
   const orchestratorDelegationValid =
     (effectiveParentControl === "off" || parentControlSupported) &&
     (!WORKFLOW_DECISION_CATEGORIES.some((category) => effectiveDecision(category) === "orchestrator") ||
@@ -485,11 +553,20 @@ export function NewSessionDialog({
       : "Provider-mode orchestration requires a native Codex or approval-capable Claude Code harness.";
   const childModelOptions = [
     { value: AUTOMATIC_ORCHESTRATOR_VALUE, label: "Automatic", description: "Resolve from live child capabilities." },
-    ...(orchestratorCapabilities?.models ?? []).map((model) => ({
-      value: model.id,
-      label: model.displayName ?? model.id,
-      description: `Use ${model.displayName ?? model.id} for child sessions.`,
+    ...(fixedChildHarness || !harnessPolicyAvailable ? [...scopedModels.entries()] : []).map(([modelId, model]) => ({
+      value: modelId,
+      label: model.displayName,
+      description: fixedChildHarness
+        ? `Use ${model.displayName} through the selected Child Harness.`
+        : model.harnessNames.size > 0
+          ? `Resolve through a compatible harness: ${[...model.harnessNames].sort().join(", ")}.`
+          : `Use ${model.displayName} for child sessions.`,
     })),
+    ...(!fixedChildHarness && harnessPolicyAvailable && orchestratorDraft.behavior.childModel && fixedModelAvailable ? [{
+      value: orchestratorDraft.behavior.childModel,
+      label: `${scopedModels.get(orchestratorDraft.behavior.childModel)?.displayName ?? orchestratorDraft.behavior.childModel} (Legacy Automatic Harness)`,
+      description: "This legacy fixed model retains automatic harness resolution. Choose a fixed Child Harness before selecting a different model.",
+    }] : []),
     ...(!fixedModelAvailable && orchestratorDraft.behavior.childModel ? [{
       value: orchestratorDraft.behavior.childModel,
       label: `${orchestratorDraft.behavior.childModel} (Unavailable)`,
@@ -500,11 +577,16 @@ export function NewSessionDialog({
   ];
   const childEffortOptions = [
     { value: AUTOMATIC_ORCHESTRATOR_VALUE, label: "Automatic", description: "Use the child model's advertised default effort." },
-    ...(orchestratorCapabilities?.effortLevels ?? []).map((effort) => ({
+    ...(fixedChildHarness || !harnessPolicyAvailable ? [...scopedEfforts].sort() : []).map((effort) => ({
       value: effort,
       label: titleCaseLabel(effort),
       description: `Use ${titleCaseLabel(effort)} effort for child sessions.`,
     })),
+    ...(!fixedChildHarness && harnessPolicyAvailable && orchestratorDraft.behavior.childEffort && fixedEffortAvailable ? [{
+      value: orchestratorDraft.behavior.childEffort,
+      label: `${titleCaseLabel(orchestratorDraft.behavior.childEffort)} (Legacy Automatic Harness)`,
+      description: "This legacy fixed effort retains automatic harness resolution. Choose a fixed Child Harness before selecting a different effort.",
+    }] : []),
     ...(!fixedEffortAvailable && orchestratorDraft.behavior.childEffort ? [{
       value: orchestratorDraft.behavior.childEffort,
       label: `${titleCaseLabel(orchestratorDraft.behavior.childEffort)} (Unavailable)`,
@@ -890,6 +972,7 @@ export function NewSessionDialog({
       const executionOverridden = orchestratorOverrides.has("execution.strictProjectIsolation");
       const orchestratorRequest = orchestrator ? {
         behavior: {
+          ...(orchestratorOverrides.has("behavior.childHarness") ? { childHarness: orchestratorDraft.behavior.childHarness } : {}),
           ...(orchestratorOverrides.has("behavior.childModel") ? { childModel: orchestratorDraft.behavior.childModel } : {}),
           ...(orchestratorOverrides.has("behavior.childEffort") ? { childEffort: orchestratorDraft.behavior.childEffort } : {}),
           ...(orchestratorOverrides.has("behavior.maximumConcurrentChildren") ? { maximumConcurrentChildren: liveChildLimit } : {}),
@@ -1322,12 +1405,54 @@ export function NewSessionDialog({
                 <legend>Behavior</legend>
                 <p className="muted">These effective values are resolved and stored before the campaign's first turn.</p>
                 <div className="orchestrator-policy-control">
+                  <span>Child Harness <small aria-hidden="true">{orchestratorSource("behavior.childHarness")}</small></span>
+                  <Select<string>
+                    label="Child Harness"
+                    value={fixedChildHarness ? agentHarnessIdentityKey(fixedChildHarness) : AUTOMATIC_ORCHESTRATOR_VALUE}
+                    options={childHarnessOptions}
+                    disabled={!harnessPolicyAvailable}
+                    onChange={(value) => {
+                      const childHarness = value === AUTOMATIC_ORCHESTRATOR_VALUE
+                        ? null
+                        : (() => {
+                          const harness = childHarnesses.find((candidate) => agentHarnessIdentityKey(candidate) === value);
+                          return harness ? { agentId: harness.agentId, driver: harness.driver, context: harness.context } : null;
+                        })();
+                      setOrchestratorDraft((current) => ({
+                        ...current,
+                        behavior: { ...current.behavior, childHarness, childModel: null, childEffort: null },
+                      }));
+                      setOrchestratorOverrides((current) => new Set(current)
+                        .add("behavior.childHarness").add("behavior.childModel").add("behavior.childEffort"));
+                    }}
+                  />
+                  {!harnessPolicyAvailable && <small className="muted">Update or restart the control plane to configure fixed Child Harness policy.</small>}
+                  {fixedChildHarness && !childHarnessPolicySupported && <small className="form-error">
+                    Fixed Child Harness policy requires a protocol-v157 Orchestrator runner. Update the selected runner or choose Automatic.
+                  </small>}
+                </div>
+                <div className="orchestrator-policy-control">
                   <span>Child Model <small aria-hidden="true">{orchestratorSource("behavior.childModel")}</small></span>
                   <Select<string>
                     label="Child Model"
                     value={orchestratorDraft.behavior.childModel ?? AUTOMATIC_ORCHESTRATOR_VALUE}
                     options={childModelOptions}
-                    onChange={(value) => setOrchestratorBehavior("childModel", value === AUTOMATIC_ORCHESTRATOR_VALUE ? null : value)}
+                    onChange={(value) => {
+                      const childModel = value === AUTOMATIC_ORCHESTRATOR_VALUE ? null : value;
+                      const effortCompatible = !orchestratorDraft.behavior.childEffort || (harnessPolicyAvailable
+                        ? candidateChildHarnesses.some((harness) => childModel
+                          ? harness.supportedPairs.some((pair) => pair.modelId === childModel &&
+                            pair.effortLevels.includes(orchestratorDraft.behavior.childEffort!))
+                          : harness.effortLevels.includes(orchestratorDraft.behavior.childEffort!))
+                        : orchestratorCapabilities?.supportedPairs
+                          ? childModel
+                            ? orchestratorCapabilities.supportedPairs.some((pair) => pair.modelId === childModel &&
+                              pair.effortLevels.includes(orchestratorDraft.behavior.childEffort!))
+                            : orchestratorCapabilities.effortLevels.includes(orchestratorDraft.behavior.childEffort)
+                          : true);
+                      setOrchestratorBehavior("childModel", childModel);
+                      if (!effortCompatible) setOrchestratorBehavior("childEffort", null);
+                    }}
                   />
                 </div>
                 <div className="orchestrator-policy-control">
@@ -1450,7 +1575,7 @@ export function NewSessionDialog({
                 <p className="muted">Secrets, authentication, persistent permission grants, governance changes, cost budgets, and tool guardrails stay human-only.</p>
               </fieldset>
               {!orchestratorCapabilitiesValid && <p className="form-error" role="alert">
-                {orchestratorCapabilities?.reason ?? "A saved Child Model or Child Effort is no longer advertised. Choose an available value."}
+                {orchestratorCapabilitiesError}
               </p>}
               {!orchestratorDelegationValid && <p className="form-error" role="alert">
                 {effectiveParentControl !== "off" && !parentControlSupported

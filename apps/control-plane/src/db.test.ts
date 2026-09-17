@@ -4301,6 +4301,9 @@ test("legacy Orchestrator sessions gain an inspectable fail-closed campaign snap
     const upgraded = ControlPlaneDb.open(path);
     const policy = upgraded.getSession("sess-1")?.orchestratorPolicy;
     assert.ok(policy);
+    assert.equal(policy.behavior.childHarness, null,
+      "legacy campaigns retain Automatic Harness rather than acquiring a fixed identity");
+    assert.equal(policy.sources.behavior.childHarness, "legacy_session");
     assert.equal(policy.behavior.maximumConcurrentChildren, 9);
     assert.equal(policy.delegation.parentControl, "questions");
     assert.equal(policy.execution.strictProjectIsolation, true,
@@ -4314,6 +4317,75 @@ test("legacy Orchestrator sessions gain an inspectable fail-closed campaign snap
     upgraded.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("stored campaign harness identities discard presentation and credential-adjacent fields on read", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    db.registerRunner(meta(), 500);
+    db.createSession(newSession());
+    const policy = {
+      version: 1,
+      behavior: {
+        childHarness: {
+          agentId: "codex", driver: "codex-app-server", context: { kind: "native" },
+          name: "Presentation Only", credentialHint: "must-not-surface",
+        },
+        childModel: null, childEffort: null, maximumConcurrentChildren: 4,
+        followUps: "recommend_only", completion: "retain",
+      },
+      delegation: {
+        parentControl: "off",
+        decisions: {
+          implementation_question: "human", pr_merge: "human", merged_branch_deletion: "human",
+          follow_up_issue_publication: "human", ui_evidence_approval: "human",
+        },
+      },
+      execution: { strictProjectIsolation: false },
+      sources: {
+        behavior: {
+          childHarness: "session_override", childModel: "system_default", childEffort: "system_default",
+          maximumConcurrentChildren: "system_default", followUps: "system_default", completion: "system_default",
+        },
+        delegation: {
+          parentControl: "system_default",
+          decisions: {
+            implementation_question: "system_default", pr_merge: "system_default",
+            merged_branch_deletion: "system_default", follow_up_issue_publication: "system_default",
+            ui_evidence_approval: "system_default",
+          },
+        },
+        execution: { strictProjectIsolation: "system_default" },
+      },
+    };
+    db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?")
+      .run(JSON.stringify(policy), "sess-1");
+    assert.deepEqual(db.getSession("sess-1")?.orchestratorPolicy?.behavior.childHarness, {
+      agentId: "codex", driver: "codex-app-server", context: { kind: "native" },
+    });
+  } finally {
+    db.close();
+  }
+});
+
+test("malformed campaign policy containers fail closed during legacy normalization", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    db.registerRunner(meta(), 500);
+    db.createSession(newSession());
+    const malformedPolicies = [
+      { version: 1, behavior: "invalid", delegation: {}, sources: { behavior: {} } },
+      { version: 1, behavior: {}, delegation: {}, sources: { behavior: "invalid" } },
+      { version: 1, behavior: {}, delegation: {}, sources: "invalid" },
+    ];
+    for (const policy of malformedPolicies) {
+      db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?")
+        .run(JSON.stringify(policy), "sess-1");
+      assert.equal(db.getSession("sess-1")?.orchestratorPolicy, undefined);
+    }
+  } finally {
+    db.close();
   }
 });
 

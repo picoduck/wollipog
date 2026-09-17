@@ -9,12 +9,10 @@ import type {
   AgentModel,
   UpdateAgentHarnessDefaultRequest,
 } from "@wollipog/protocol";
-import { installationSupportsDefault } from "@wollipog/protocol";
-export { installationSupportsDefault } from "@wollipog/protocol";
+import { agentHarnessIdentityKey, installationSupportsDefault, normalizeAgentHarnessIdentity } from "@wollipog/protocol";
+export { agentHarnessIdentityKey, installationSupportsDefault } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import type { HumanPrincipal } from "./identity.js";
-
-const DRIVERS = new Set(["acp", "codex", "codex-app-server", "claude-code", "pi"]);
 
 function boundedIdentifier(value: unknown, maximum = 256): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= maximum &&
@@ -22,15 +20,7 @@ function boundedIdentifier(value: unknown, maximum = 256): value is string {
 }
 
 export function parseAgentHarnessIdentity(value: unknown): AgentHarnessIdentity | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const input = value as Partial<AgentHarnessIdentity>;
-  if (!boundedIdentifier(input.agentId) || typeof input.driver !== "string" || !DRIVERS.has(input.driver)) return null;
-  if (!input.context || typeof input.context !== "object" || Array.isArray(input.context)) return null;
-  if (input.context.kind === "native") return { agentId: input.agentId, driver: input.driver, context: { kind: "native" } };
-  if (input.context.kind === "wsl" && boundedIdentifier(input.context.distro)) {
-    return { agentId: input.agentId, driver: input.driver, context: { kind: "wsl", distro: input.context.distro } };
-  }
-  return null;
+  return normalizeAgentHarnessIdentity(value);
 }
 
 export function parseAgentHarnessDefaultConfig(value: unknown): AgentHarnessDefaultConfig | null {
@@ -61,15 +51,6 @@ export function agentHarnessIdentityFor(agent: Pick<AgentDefinition, "id" | "dri
       ? { kind: "wsl", distro: agent.context.distro }
       : { kind: "native" },
   };
-}
-
-export function agentHarnessIdentityKey(identity: AgentHarnessIdentity): string {
-  return JSON.stringify([
-    identity.agentId,
-    identity.driver,
-    identity.context.kind,
-    identity.context.kind === "wsl" ? identity.context.distro : "",
-  ]);
 }
 
 function visibleModels(capabilities: AgentCapabilities | undefined): AgentModel[] {
