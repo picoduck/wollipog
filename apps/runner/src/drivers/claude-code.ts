@@ -2178,7 +2178,7 @@ export class ClaudeCodeDriver implements Driver {
           const managedRefusal = req.tool_name === "Bash" && typeof req.input?.command === "string"
             ? commandTargetsManagedWorktree(
                 req.input.command,
-                this.opts.cwd,
+                this.cwd,
                 protections,
               )
             : null;

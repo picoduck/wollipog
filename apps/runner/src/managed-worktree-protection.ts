@@ -35,8 +35,20 @@ function withinProtectedRoot(path: string, protections: readonly ManagedWorktree
   return protections.some(({ worktreePath }) => pathContains(worktreePath, path));
 }
 
+function protectedAdministrativeRoots(
+  protection: ManagedWorktreeProtection,
+): string[] {
+  return [
+    resolve(protection.worktreePath, ".git"),
+    resolve(protection.repoPath, ".git", "worktrees"),
+  ];
+}
+
 function protectedTarget(path: string, protections: readonly ManagedWorktreeProtection[]): boolean {
-  return protections.some(({ worktreePath }) => pathContains(path, worktreePath));
+  return protections.some((protection) =>
+    pathContains(path, protection.worktreePath) ||
+    protectedAdministrativeRoots(protection).some((root) =>
+      pathContains(path, root) || pathContains(root, path)));
 }
 
 function protectionRepository(path: string, protections: readonly ManagedWorktreeProtection[]): boolean {
@@ -85,8 +97,20 @@ function globTargetsProtected(
   const absolutePattern = normalize(isAbsolute(pattern) ? pattern : resolve(cwd, pattern));
   const foldCase = process.platform === "win32" || process.platform === "darwin";
   const comparablePattern = foldCase ? absolutePattern.toLowerCase() : absolutePattern;
-  return protections.some(({ worktreePath }) => ancestors(worktreePath).some((candidate) =>
-    matchesGlob(foldCase ? candidate.toLowerCase() : candidate, comparablePattern)));
+  const firstMeta = absolutePattern.search(/[*?\[\]{}]/u);
+  const literalPrefix = firstMeta < 0 ? absolutePattern : absolutePattern.slice(0, firstMeta);
+  const staticParent = normalize(literalPrefix.endsWith(sep)
+    ? literalPrefix.slice(0, -1)
+    : dirname(literalPrefix));
+  return protections.some((protection) => {
+    const matchesRootOrAncestor = ancestors(protection.worktreePath).some((candidate) =>
+      matchesGlob(foldCase ? candidate.toLowerCase() : candidate, comparablePattern));
+    if (matchesRootOrAncestor) return true;
+    return protectedAdministrativeRoots(protection).some((root) =>
+      pathContains(root, staticParent) ||
+      ancestors(root).some((candidate) =>
+        matchesGlob(foldCase ? candidate.toLowerCase() : candidate, comparablePattern)));
+  });
 }
 
 function operandTargetsProtected(
@@ -126,25 +150,52 @@ function commandWords(
     index += 1;
   }
   let executable = word(tokens[index], cwd, environment);
-  if (!executable) return null;
-  if (executableName(executable) === "command" || executableName(executable) === "sudo") {
-    index += 1;
-    while (typeof tokens[index] === "string" && (tokens[index] as string).startsWith("-")) index += 1;
-    executable = word(tokens[index], cwd, environment);
-  } else if (executableName(executable) === "env") {
-    index += 1;
-    while (typeof tokens[index] === "string") {
-      const value = tokens[index] as string;
-      if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(value)) {
-        const equals = value.indexOf("=");
-        environment.set(value.slice(0, equals), value.slice(equals + 1));
-        index += 1;
-        continue;
-      }
-      if (value.startsWith("-")) { index += 1; continue; }
-      break;
+  while (executable) {
+    const name = executableName(executable);
+    if (["command", "sudo", "nohup", "setsid"].includes(name)) {
+      index += 1;
+      while (typeof word(tokens[index], cwd, environment) === "string" &&
+          word(tokens[index], cwd, environment)!.startsWith("-")) index += 1;
+      executable = word(tokens[index], cwd, environment);
+      continue;
     }
-    executable = word(tokens[index], cwd, environment);
+    if (name === "env") {
+      index += 1;
+      while (typeof tokens[index] === "string") {
+        const value = tokens[index] as string;
+        if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(value)) {
+          const equals = value.indexOf("=");
+          environment.set(value.slice(0, equals), value.slice(equals + 1));
+          index += 1;
+          continue;
+        }
+        if (value.startsWith("-")) { index += 1; continue; }
+        break;
+      }
+      executable = word(tokens[index], cwd, environment);
+      continue;
+    }
+    if (name === "nice") {
+      index += 1;
+      const option = word(tokens[index], cwd, environment);
+      if (option === "-n" || option === "--adjustment") index += 2;
+      else if (option && (/^-\d+$/u.test(option) || option.startsWith("--adjustment="))) index += 1;
+      executable = word(tokens[index], cwd, environment);
+      continue;
+    }
+    if (name === "timeout") {
+      index += 1;
+      while (true) {
+        const option = word(tokens[index], cwd, environment);
+        if (!option?.startsWith("-")) break;
+        if (["-k", "--kill-after", "-s", "--signal"].includes(option)) index += 2;
+        else index += 1;
+      }
+      if (word(tokens[index], cwd, environment)) index += 1; // duration
+      executable = word(tokens[index], cwd, environment);
+      continue;
+    }
+    break;
   }
   if (!executable) return null;
   return { words: tokens.slice(index + 1), executable: executableName(executable) };
@@ -192,9 +243,16 @@ function segmentRefusal(
   if (!command) return false;
   const { executable, words } = command;
   if (["sh", "bash", "zsh", "dash", "fish", "cmd"].includes(executable) && depth < 3) {
-    const flag = words.findIndex((token) => ["-c", "/c"].includes(word(token, cwd, environment)?.toLowerCase() ?? ""));
+    const flag = words.findIndex((token) => {
+      const value = word(token, cwd, environment)?.toLowerCase() ?? "";
+      return value === "/c" || /^-[a-z]*c[a-z]*$/u.test(value);
+    });
     const script = flag >= 0 ? word(words[flag + 1], cwd, environment) : null;
     return script ? commandTargetsManagedWorktree(script, cwd, protections, depth + 1) != null : false;
+  }
+  if (executable === "eval" && depth < 3) {
+    const script = words.map((token) => word(token, cwd, environment) ?? "").join(" ");
+    return commandTargetsManagedWorktree(script, cwd, protections, depth + 1) != null;
   }
   if (executable === "git") return gitWorktreeRefusal(words, cwd, environment, protections);
   if (["rm", "rmdir", "unlink", "trash", "trash-put", "remove-item", "del", "rd"].includes(executable)) {
@@ -253,7 +311,8 @@ export function commandTargetsManagedWorktree(
       const target = resolvedOperand(parsed.words[0], currentCwd, localEnvironment);
       // Claude's Bash tool keeps its shell directory between calls. Refuse an escape from every
       // managed root so a later relative removal cannot be resolved against an unobservable cwd.
-      if (target && !withinProtectedRoot(target, protections)) return true;
+      if (target && withinProtectedRoot(currentCwd, protections) &&
+          !withinProtectedRoot(target, protections)) return true;
       if (target) currentCwd = target;
       for (const [key, value] of localEnvironment) environment.set(key, value);
       return false;

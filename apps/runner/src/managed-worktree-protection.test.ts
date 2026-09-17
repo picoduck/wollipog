@@ -33,6 +33,15 @@ test("raw Git and filesystem retirement forms are refused with managed-discard g
     "rm -rf /runner/worktrees/session/requested/manage*",
     `rm -rf ./*.tmp ${protectedPath}`,
     "rm -rf /runner/worktrees/session/requested/{managed,other}",
+    "rm -rf .git",
+    "rm -rf /projects/repo/.git/worktrees",
+    "rm -rf /projects/repo/.git/worktrees/*",
+    "bash -lc 'rm -rf .'",
+    "nohup rm -rf .",
+    "setsid rm -rf .",
+    "nice -n 5 rm -rf .",
+    "timeout 30 rm -rf .",
+    "eval 'rm -rf .'",
   ]) {
     assert.equal(commandTargetsManagedWorktree(command, protectedPath, protection), MANAGED_WORKTREE_REFUSAL, command);
   }
@@ -50,6 +59,8 @@ test("normal work inside a managed worktree and unmanaged retirement remain avai
     "rm -rf /user/worktrees/unmanaged",
     "mv src/old.ts src/new.ts",
   ]) assert.equal(commandTargetsManagedWorktree(command, protectedPath, protection), null, command);
+  assert.equal(commandTargetsManagedWorktree("cd apps/web", "/projects/repo", protection), null,
+    "a provider still outside its newly selected worktree may navigate in the original repository");
 });
 
 test("all literal spellings of the protected root stay refused while descendants stay editable", () => {
