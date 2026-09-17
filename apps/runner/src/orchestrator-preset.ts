@@ -251,7 +251,7 @@ export function projectOrchestratorPresetForPeer(
       agent.driver,
       host.platform ?? process.platform,
       host.isolationMode,
-    ) && permissionModes.includes("dontAsk");
+    ) && agent.capabilities?.supportsApprovals === true && permissionModes.includes("default");
     if (legacyStrictSupported) return agent;
     return {
       ...agent,

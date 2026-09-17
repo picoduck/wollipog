@@ -673,6 +673,24 @@ test("orchestrator separates default provider execution from the negotiated stri
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     const automated = svc.createSession({ ...request, config: { permissionMode: "orchestrator" } });
     assert.equal(automated.data!.parentControl, "off", "non-human creation does not gain delegated authority");
+    agent.capabilities.permissionModes = ["default", "orchestrator"];
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" },
+      orchestrator: { execution: { strictProjectIsolation: true } } }).ok, true,
+    "managed strict Claude needs the runner control channel, not dontAsk");
+    assert.match(svc.createSession({ ...request, launchSurface: "native_tui",
+      config: { permissionMode: "orchestrator" },
+      orchestrator: { execution: { strictProjectIsolation: true } } }).error ?? "", /dontAsk/,
+    "strict Native TUI still needs its static fixed-rule mode");
+    agent.capabilities.permissionModes = ["default", "dontAsk", "orchestrator"];
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION - 1);
+    const outdatedScope = svc.createSession({ ...request, prompt: "Claim and orchestrate issue 1245.",
+      config: { permissionMode: "orchestrator" } },
+    undefined, undefined, false, false, false, { defaultOwnerUserId: "human" });
+    assert.equal(outdatedScope.status, 409);
+    assert.match(outdatedScope.error ?? "", /protocol-v158/,
+      "an older runner fails actionably instead of silently losing the issue scope");
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     assert.equal(svc.createSession({ ...request, launchSurface: "native_tui",
       config: { permissionMode: "orchestrator" } }).ok, true);
     db.registerRunner(meta, Date.now(), 111);

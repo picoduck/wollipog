@@ -2686,11 +2686,11 @@ test("strict Claude Orchestrator structured launches replace static dontAsk with
   const launches: any[] = [];
   const driver = new ClaudeCodeDriver({
     ...baseOpts,
-    env: { GH_REPO: "unrelated/repository" },
+    env: { GH_REPO: "unrelated/repository", GH_HOST: "github.example.invalid" },
     args: [
       "--tools", "Read,Bash",
-      "--permission-mode", "dontAsk",
-      "--allowedTools", "Read,Bash(git status:*),Bash(gh issue edit --add-assignee:*)",
+      "--permission-mode=dontAsk",
+      "--allowedTools=Read,Bash(git status:*),Bash(gh issue edit --add-assignee:*)",
     ],
     config: { permissionMode: "orchestrator" },
     capabilities: {
@@ -2708,7 +2708,10 @@ test("strict Claude Orchestrator structured launches replace static dontAsk with
   const args = launches[0].args as string[];
   assert.equal(args.includes("dontAsk"), false);
   assert.equal(launches[0].env.GH_REPO, undefined);
-  assert.equal(args[args.indexOf("--allowedTools") + 1], "Read");
+  assert.equal(launches[0].env.GH_HOST, undefined);
+  assert.ok(launches[0].scrubInheritedEnv.includes("GH_REPO"));
+  assert.ok(launches[0].scrubInheritedEnv.includes("GH_HOST"));
+  assert.ok(args.includes("--allowedTools=Read"));
   assert.deepEqual(args.slice(args.indexOf("--permission-prompt-tool"), args.indexOf("--permission-prompt-tool") + 2),
     ["--permission-prompt-tool", "stdio"]);
   child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");

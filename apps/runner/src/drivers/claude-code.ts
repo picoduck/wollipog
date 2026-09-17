@@ -220,6 +220,7 @@ export function createPersistentSettingWarningEmitter(): PersistentSettingWarnin
 }
 
 const emitPersistentSettingWarnings = createPersistentSettingWarningEmitter();
+const ORCHESTRATOR_REPOSITORY_OVERRIDE_ENV = ["GH_REPO", "GH_HOST"] as const;
 
 /**
  * Map a Claude permission mode to CLI flags. Exported for tests.
@@ -262,15 +263,21 @@ export function claudeStructuredOrchestratorArgs(args: readonly string[], strict
   const result: string[] = [];
   for (let index = 0; index < args.length; index++) {
     const argument = args[index]!;
+    const flag = argument.split("=", 1)[0]!;
+    const inlineValue = argument.includes("=") ? argument.slice(argument.indexOf("=") + 1) : undefined;
     const value = args[index + 1];
-    if (strictProjectIsolation && argument === "--permission-mode" && value === "dontAsk") {
-      index += 1;
+    if (strictProjectIsolation && flag === "--permission-mode" && (inlineValue ?? value) === "dontAsk") {
+      if (inlineValue === undefined) index += 1;
       continue;
     }
-    if (argument === "--allowedTools" && typeof value === "string") {
-      const tools = value.split(",").filter((tool) => !tool.startsWith("Bash("));
-      if (tools.length > 0) result.push(argument, tools.join(","));
-      index += 1;
+    const allowedTools = inlineValue ?? value;
+    if (flag === "--allowedTools" && typeof allowedTools === "string") {
+      const tools = allowedTools.split(",").filter((tool) => !tool.startsWith("Bash("));
+      if (tools.length > 0) {
+        if (inlineValue === undefined) result.push(argument, tools.join(","));
+        else result.push(`${flag}=${tools.join(",")}`);
+      }
+      if (inlineValue === undefined) index += 1;
       continue;
     }
     result.push(argument);
@@ -632,6 +639,7 @@ export class ClaudeCodeDriver implements Driver {
           LEGACY_CLAUDE_PERSISTENT_FLAG,
           LEGACY_CLAUDE_PERSISTENT_IDLE_MS,
           LEGACY_CLAUDE_PENDING_MAX_MS,
+          ...(this.opts.orchestrator ? ORCHESTRATOR_REPOSITORY_OVERRIDE_ENV : []),
         ],
         isolation: this.opts.isolation,
         containerAgentLaunch: true,
@@ -915,6 +923,7 @@ export class ClaudeCodeDriver implements Driver {
             LEGACY_CLAUDE_PERSISTENT_FLAG,
             LEGACY_CLAUDE_PERSISTENT_IDLE_MS,
             LEGACY_CLAUDE_PENDING_MAX_MS,
+            ...(this.opts.orchestrator ? ORCHESTRATOR_REPOSITORY_OVERRIDE_ENV : []),
           ],
           isolation: this.opts.isolation,
           containerAgentLaunch: true,
@@ -1177,6 +1186,7 @@ export class ClaudeCodeDriver implements Driver {
             LEGACY_CLAUDE_PERSISTENT_FLAG,
             LEGACY_CLAUDE_PERSISTENT_IDLE_MS,
             LEGACY_CLAUDE_PENDING_MAX_MS,
+            ...(this.opts.orchestrator ? ORCHESTRATOR_REPOSITORY_OVERRIDE_ENV : []),
           ],
           isolation: this.opts.isolation,
           containerAgentLaunch: true,
@@ -1918,7 +1928,9 @@ export class ClaudeCodeDriver implements Driver {
     delete env[LEGACY_CLAUDE_PENDING_MAX_MS];
     // Keep campaign-scoped `gh issue` writes bound to the selected repository. The semantic
     // classifier also rejects `--repo`/`-R`; removing GH_REPO closes the ambient override path.
-    if (this.opts.orchestrator) delete env.GH_REPO;
+    if (this.opts.orchestrator) {
+      for (const name of ORCHESTRATOR_REPOSITORY_OVERRIDE_ENV) delete env[name];
+    }
     if (env.CLAUDE_CODE_OAUTH_TOKEN) delete env.ANTHROPIC_API_KEY;
     return env;
   }

@@ -62,6 +62,8 @@ The campaign issue scope is extracted only from an authenticated human's explici
 the form “claim/orchestrate/coordinate/manage issue(s) …”, is capped at 100 unique positive safe
 integers, persists in the campaign policy and runner launch metadata, and is inherited without
 broadening by nested Orchestrators. Ambiguous prose and agent-authored prompts produce no scope.
+Protocol peers older than v158 cannot enforce this field, so scoped issue coordination fails at
+admission with an upgrade requirement instead of silently degrading to approval cards or denial.
 
 Provider-mode operations outside the contract use the ordinary visible approval path. Strictly
 isolated sessions deny them without creating a futile human approval because the filesystem boundary

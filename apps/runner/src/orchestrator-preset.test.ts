@@ -175,8 +175,8 @@ test("provider-only native Claude Orchestrator is hidden from control planes tha
     controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorExecutionPolicy - 1,
     platform: "linux",
     isolationMode: "bwrap",
-  })[0]!.capabilities!.permissionModes!.includes("orchestrator"), false,
-  "an old peer cannot launch strict Claude when dontAsk was not verified");
+  })[0]!.capabilities!.permissionModes!.includes("orchestrator"), true,
+  "managed strict Claude uses the verified runner control channel rather than dontAsk");
 });
 
 test("Codex MCP isolation probes an in-distro WSL binary through exact argv", () => {

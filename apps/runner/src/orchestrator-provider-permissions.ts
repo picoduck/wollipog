@@ -29,7 +29,7 @@ const GIT_TAG_MUTATION_ARGUMENTS = new Set([
   "-d", "--delete", "-a", "--annotate", "-s", "--sign", "-u", "--local-user", "-f", "--force",
   "-m", "-F",
 ]);
-const GH_ARGUMENT_DENYLIST = ["--web", "--repo", "-R", "--hostname"];
+const GH_ARGUMENT_DENYLIST = ["--web", "-w", "--repo", "-R", "--hostname"];
 
 interface EnvironmentReference {
   env: string;
@@ -61,8 +61,10 @@ function isLoopReference(token: ShellToken | undefined, context: RoutineContext)
 }
 
 function deniedArgument(argument: string, denylist: readonly string[]): boolean {
-  return denylist.some((denied) => argument === denied || argument.startsWith(`${denied}=`) ||
-    (denied.startsWith("-") && !denied.startsWith("--") && denied.length === 2 && argument.startsWith(denied)));
+  const flag = argument.split("=", 1)[0]!;
+  return denylist.some((denied) => flag === denied ||
+    (denied.startsWith("--") && flag.startsWith("--") && flag.length > 2 && denied.startsWith(flag)) ||
+    (denied.startsWith("-") && !denied.startsWith("--") && denied.length === 2 && flag.startsWith(denied)));
 }
 
 function containsShortOption(argument: string, options: ReadonlySet<string>): boolean {
@@ -81,12 +83,12 @@ function isReadOnlyGit(tokens: ShellToken[]): boolean {
   }
   if (command === "branch") {
     return args.every((arg) => arg.startsWith("-") &&
-      !GIT_BRANCH_MUTATION_ARGUMENTS.has(arg.split("=")[0]!) &&
+      !deniedArgument(arg, [...GIT_BRANCH_MUTATION_ARGUMENTS]) &&
       !containsShortOption(arg, GIT_BRANCH_MUTATION_ARGUMENTS));
   }
   return command === "tag" && (args.length === 0 ||
     (args.some((arg) => arg === "--list" || arg === "-l") &&
-      args.every((arg) => arg.startsWith("-") && !GIT_TAG_MUTATION_ARGUMENTS.has(arg.split("=")[0]!) &&
+      args.every((arg) => arg.startsWith("-") && !deniedArgument(arg, [...GIT_TAG_MUTATION_ARGUMENTS]) &&
         !containsShortOption(arg, GIT_TAG_MUTATION_ARGUMENTS))));
 }
 
@@ -152,7 +154,9 @@ function isRoutineGh(tokens: ShellToken[], context: RoutineContext): boolean {
   if (operation === "issue:comment") return isRoutineIssueComment(tokens, context);
   if (!READ_ONLY_GH_OPERATIONS.has(operation)) return false;
   return tokens.slice(3).every((token) => isPlainArgument(token) || isLoopReference(token, context)) &&
-    !tokens.slice(3).some((token) => isPlainArgument(token) && deniedArgument(token, GH_ARGUMENT_DENYLIST));
+    !tokens.slice(3).some((token) => isPlainArgument(token) &&
+      (deniedArgument(token, GH_ARGUMENT_DENYLIST) ||
+        (token.startsWith("-") && !token.startsWith("--") && token.length > 2)));
 }
 
 function isRoutineLeaf(tokens: ShellToken[], context: RoutineContext): boolean {

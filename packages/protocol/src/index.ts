@@ -434,7 +434,10 @@
 // 157: Orchestrator campaign policy binds child harness, model, and effort as one capability-
 //      checked selection. Older Orchestrator runners cannot guide automatic harness resolution,
 //      so fixed-harness campaigns fail with an upgrade requirement instead of dropping the bind.
-export const PROTOCOL_VERSION = 157;
+// 158: structured Claude Orchestrator launches carry a finite immutable campaign issue scope.
+//      Older runners cannot enforce it, so scoped issue coordination fails with an upgrade
+//      requirement instead of silently reverting to approval cards or strict-mode denial.
+export const PROTOCOL_VERSION = 158;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -624,6 +627,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   campaignContinuations: 149,
   orchestratorExecutionPolicy: 144,
   orchestratorChildHarnessPolicy: 157,
+  orchestratorIssueScope: 158,
   worktreeSetup: 141,
   worktreeTeardownPorts: 145,
   worktreeSetupConfig: 146,

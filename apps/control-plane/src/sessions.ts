@@ -3500,10 +3500,10 @@ export class SessionsService {
           !["linux", "macos"].includes(runner.os)) {
         return fail("Provider-mode Codex Orchestrator requires its audited Linux or macOS sandbox.", 409);
       }
-      if (!strictProjectIsolation && launch.driver === "claude-code" &&
+      if (launch.driver === "claude-code" && req.launchSurface !== "native_tui" &&
           (!agentCapabilities?.supportsApprovals ||
             !agentCapabilities.permissionModes?.includes("default"))) {
-        return fail("Provider-mode Claude Orchestrator requires the verified interactive approval channel and Default permission mode.", 409);
+        return fail("Structured Claude Orchestrator requires the verified interactive approval channel and Default permission mode.", 409);
       }
       if (strictProjectIsolation && contextKind === "native") {
         const isolationMode = this.db.getRunner(req.runnerId)?.runtime?.executionIsolation?.mode;
@@ -3515,9 +3515,9 @@ export class SessionsService {
         if (!strictBoundary) {
           return fail("Strict Project Isolation requires an attested provider sandbox for Codex or runner bubblewrap/Seatbelt isolation for Claude Code.", 409);
         }
-        if (launch.driver === "claude-code" &&
+        if (launch.driver === "claude-code" && req.launchSurface === "native_tui" &&
             !agentCapabilities?.permissionModes?.includes("dontAsk")) {
-          return fail("Strict Project Isolation for Claude Code requires the verified dontAsk permission mode inside the operating-system boundary.", 409);
+          return fail("Strict Claude Orchestrator Native TUI requires the verified dontAsk permission mode inside the operating-system boundary.", 409);
         }
       }
       const wslDirect = contextKind === "wsl" && req.launchSurface !== "native_tui" &&
@@ -3567,6 +3567,10 @@ export class SessionsService {
       (orchestratorPolicy && creationContext?.defaultOwnerUserId && !parentSessionId
         ? orchestratorIssueNumbersFromInitialPrompt(requestedText)
         : []);
+    if (orchestratorIssueNumbers.length &&
+        !runnerSupportsProtocol(runner.protocolVersion, "orchestratorIssueScope")) {
+      return fail("Campaign issue coordination requires a protocol-v158 Orchestrator runner; update the runner and retry.", 409);
+    }
     if (orchestratorPolicy && orchestratorIssueNumbers.length) {
       orchestratorPolicy.issueNumbers = [...orchestratorIssueNumbers];
     }
