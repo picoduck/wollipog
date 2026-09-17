@@ -17,6 +17,9 @@ test("raw Git and filesystem retirement forms are refused with managed-discard g
   for (const command of [
     `git -C /projects/repo worktree remove ${protectedPath}`,
     `git worktree remove --force ${protectedPath}`,
+    `git -c gc.auto=0 worktree remove ${protectedPath}`,
+    `git --git-dir /projects/repo/.git worktree remove ${protectedPath}`,
+    `git -C "$(git rev-parse --show-toplevel)" worktree remove ${protectedPath}`,
     `git worktree move ${protectedPath} /tmp/moved`,
     "git -C /projects/repo worktree prune",
     `rm -rf -- ${protectedPath}`,

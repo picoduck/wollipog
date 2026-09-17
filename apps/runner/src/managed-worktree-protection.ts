@@ -208,22 +208,38 @@ function gitWorktreeRefusal(
   protections: readonly ManagedWorktreeProtection[],
 ): boolean {
   let cwd = initialCwd;
+  const actionIndex = words.findIndex((token, index) =>
+    word(token, cwd, environment) === "worktree" &&
+    ["remove", "move", "prune"].includes(word(words[index + 1], cwd, environment) ?? ""));
+  if (actionIndex < 0) return false;
   let index = 0;
-  while (index < words.length) {
+  while (index < actionIndex) {
     const value = word(words[index], cwd, environment);
     if (value === "-C") {
       const next = resolvedOperand(words[index + 1], cwd, environment);
-      if (!next) return false;
-      cwd = next;
+      // A dynamic -C cannot make an absolute protected removal operand safe. Retain the last
+      // known cwd and continue scanning so the worktree subcommand and target still reach the veto.
+      if (next) cwd = next;
+      index += 2;
+      continue;
+    }
+    if (["-c", "--config-env", "--git-dir", "--work-tree", "--namespace",
+      "--super-prefix"].includes(value ?? "")) {
       index += 2;
       continue;
     }
     if (value?.startsWith("-")) { index += 1; continue; }
-    break;
+    // shell-quote represents an unresolved command substitution as an environment placeholder
+    // followed by its parenthesized source. It is opaque for cwd resolution but not a reason to
+    // lose an absolute protected removal operand later in the same Git invocation.
+    if (!value || (value.startsWith("(") && value.endsWith(")"))) {
+      index += 1;
+      continue;
+    }
+    return false;
   }
-  if (word(words[index], cwd, environment) !== "worktree") return false;
-  const action = word(words[index + 1], cwd, environment);
-  const operands = words.slice(index + 2).filter((token) => {
+  const action = word(words[actionIndex + 1], cwd, environment);
+  const operands = words.slice(actionIndex + 2).filter((token) => {
     const value = word(token, cwd, environment);
     return value !== "--" && !value?.startsWith("-");
   });

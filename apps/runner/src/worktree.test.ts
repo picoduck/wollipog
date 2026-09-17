@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedWorktreePullRequestForBranch, parseWorktreePullRequestState, readRepositoryDefaultBranch, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
+import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedWorktreePullRequestForBranch, parseWorktreePullRequestState, readRepositoryDefaultBranch, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type WorktreeCleanupRecord } from "./worktree.js";
 import { createHash, randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
@@ -2822,6 +2822,68 @@ test("launch finalization cannot overwrite a worktree selected while launch is p
       "provider construction uses the mutation lane's winning selection");
   } finally {
     releaseFinalization();
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a launching retirement journaled after failed-launch finalization still reaps", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-launch-retirement-race-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  let releaseSnapshot = () => {};
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_launch_retirement_race", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "cleanup",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const selected = await manager.requestWorktree("s_launch_retirement_race", {
+      baseRef: "HEAD", branch: "fix/launch-retirement-race",
+    });
+    store.patchMeta("s_launch_retirement_race", {
+      status: "starting",
+      worktreePending: true,
+    });
+
+    const internals = manager as unknown as {
+      launchGenerations: Map<string, number>;
+      ensureDurableWorktreeHookSnapshot: (...args: unknown[]) => Promise<void>;
+      finishLaunchGeneration: (sessionId: string, generation: number) => void;
+      reapWorktree: (record: WorktreeCleanupRecord) => Promise<void>;
+    };
+    internals.launchGenerations.set("s_launch_retirement_race", 42);
+    const originalEnsureSnapshot = internals.ensureDurableWorktreeHookSnapshot.bind(manager);
+    let signalSnapshotReady!: () => void;
+    const snapshotReady = new Promise<void>((resolve) => { signalSnapshotReady = resolve; });
+    const snapshotGate = new Promise<void>((resolve) => { releaseSnapshot = resolve; });
+    internals.ensureDurableWorktreeHookSnapshot = async (...args) => {
+      await originalEnsureSnapshot(...args);
+      signalSnapshotReady();
+      await snapshotGate;
+    };
+    let signalReaped!: (record: WorktreeCleanupRecord) => void;
+    const reaped = new Promise<WorktreeCleanupRecord>((resolve) => { signalReaped = resolve; });
+    internals.reapWorktree = async (record) => { signalReaped(record); };
+
+    const discard = manager.discardWorktree("s_launch_retirement_race", selected.worktree.path);
+    await snapshotReady;
+    internals.finishLaunchGeneration("s_launch_retirement_race", 42);
+    releaseSnapshot();
+    assert.deepEqual((await discard).retirement, { status: "deferred", reason: "provider_launching" });
+    assert.equal((await reaped).worktreePath, selected.worktree.path,
+      "journal creation schedules the replay missed by failed-launch finalization");
+  } finally {
+    releaseSnapshot();
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }

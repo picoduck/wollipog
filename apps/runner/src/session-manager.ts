@@ -2850,11 +2850,14 @@ export class SessionManager {
         this.cleanupJournal.add(existing);
       }
     }
-    // A provider may exit while the durable hook snapshot above is being captured. In that case
-    // its exit scan cannot see this journal row, so arrange the missed reap now. A launch deferral
-    // is different: no active entry exists yet, but launch finalization still owns the worktree.
-    if (reason === "provider_active" && deferredRecord &&
-        !this.active.has(meta.sessionId) && !this.worktreeRebindings.has(meta.sessionId)) {
+    // A provider may exit, or a failed launch may finalize, while the durable hook snapshot above
+    // is being captured. Their scans cannot see this journal row, so arrange the missed reap once
+    // neither an active provider nor a launch/rebind generation still owns the worktree.
+    const providerBoundaryGone = !this.active.has(meta.sessionId) &&
+      !this.worktreeRebindings.has(meta.sessionId);
+    const missedBoundary = reason === "provider_active" ||
+      (reason === "provider_launching" && !this.launchGenerations.has(meta.sessionId));
+    if (deferredRecord && providerBoundaryGone && missedBoundary) {
       setImmediate(() => void this.reapWorktree(deferredRecord!).catch((error) => {
         this.log(`worktree cleanup for ${boundedSessionIdForLog(meta.sessionId)} needs retry after deferred retirement was recorded: ${errText(error)}`);
       }));
