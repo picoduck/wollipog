@@ -59,6 +59,10 @@ const PI_AGENT_CONTROL_READY_TIMEOUT_MS = 30_000;
 const PI_TRUST_STARTUP_TIMEOUT_MS = 2_000_000_000;
 const PI_STARTUP_PROGRESS_TIMEOUT_MS = 15_000;
 
+function permissionModeRequiresAgentControl(mode: string | undefined): boolean {
+  return mode !== undefined && mode !== "bypassPermissions" && mode !== "orchestrator";
+}
+
 function object(value: unknown): Json | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Json : undefined;
 }
@@ -181,8 +185,7 @@ export class PiRpcDriver implements Driver {
     const bridgeNonce = this.opts.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE;
     const trustBridgeReady = !!bridgeNonce && !!this.opts.env[PI_SECURITY_REQUEST_NONCE_ENV];
     const configuredMode = this.config.permissionMode;
-    if (!trustBridgeReady && configuredMode !== undefined &&
-        configuredMode !== "bypassPermissions" && configuredMode !== "orchestrator") {
+    if (!trustBridgeReady && permissionModeRequiresAgentControl(configuredMode)) {
       throw new Error(`Pi permission mode ${JSON.stringify(configuredMode || "default")} requires the verified Agent Control bridge`);
     }
     let bridgeReady: Promise<void> | undefined;
@@ -475,6 +478,11 @@ export class PiRpcDriver implements Driver {
   }
 
   async setConfig(config: SessionConfig): Promise<void> {
+    const bridgeReady = !!this.opts.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE &&
+      !!this.opts.env[PI_SECURITY_REQUEST_NONCE_ENV];
+    if (!bridgeReady && permissionModeRequiresAgentControl(config.permissionMode)) {
+      throw new Error(`Pi permission mode ${JSON.stringify(config.permissionMode || "default")} requires the verified Agent Control bridge`);
+    }
     this.config = config;
     if (this.peer) await this.applyConfig(config);
   }

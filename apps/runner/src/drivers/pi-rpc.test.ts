@@ -254,6 +254,7 @@ test("Pi RPC enforces live pre-execution permission modes before answering the e
   const nonce = "tool-policy-nonce";
   const driverOptions = options();
   driverOptions.env[PI_SECURITY_REQUEST_NONCE_ENV] = nonce;
+  driverOptions.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE = "tool-policy-ready";
   driverOptions.config = { permissionMode: "default" };
   const driver = new PiRpcDriver(driverOptions, callbacks(events));
   (driver as any).peer = {
@@ -368,6 +369,18 @@ test("Pi RPC refuses safe permission modes when the Agent Control bridge is inco
     await driver.initialize();
     driver.dispose();
   }
+
+  const legacy = new PiRpcDriver(options(), callbacks([]));
+  await legacy.initialize();
+  for (const permissionMode of ["default", "dontAsk", ""] as const) {
+    await assert.rejects(
+      legacy.setConfig({ permissionMode }),
+      /requires the verified Agent Control bridge/,
+      `a live switch to ${JSON.stringify(permissionMode)} must not claim protections the process lacks`,
+    );
+  }
+  await legacy.setConfig({ permissionMode: "bypassPermissions" });
+  legacy.dispose();
 });
 
 test("Pi RPC can resolve project trust while provider initialization is waiting", async (t) => {
@@ -398,17 +411,20 @@ test("Pi RPC startup watchdog pauses only for a pending project-trust decision",
   t.mock.timers.enable({ apis: ["setTimeout"] });
   let disposedWith: string | undefined;
   let kills = 0;
-  const driver = new PiRpcDriver(options(), callbacks([]), undefined, (() => { kills++; }) as any);
-  (driver as any).peer = { dispose: (reason: string) => { disposedWith = reason; } };
+  const driverOptions = options();
+  driverOptions.env[PI_SECURITY_REQUEST_NONCE_ENV] = "watchdog-nonce";
+  const driver = new PiRpcDriver(driverOptions, callbacks([]), undefined, (() => { kills++; }) as any);
+  (driver as any).peer = {
+    dispose: (reason: string) => { disposedWith = reason; },
+    send: () => true,
+  };
   (driver as any).child = {};
   try {
     (driver as any).beginStartupStateWatchdog();
-    t.mock.timers.tick(14_999);
-    assert.equal(disposedWith, undefined);
-    (driver as any).pauseStartupStateWatchdog();
+    (driver as any).onRpcEvent(trustRequest("watchdog-nonce", "startup-trust", "/workspace/project"));
     t.mock.timers.tick(15_000);
-    assert.equal(disposedWith, undefined, "a human trust decision is not timed out");
-    (driver as any).resumeStartupStateWatchdog();
+    assert.equal(disposedWith, undefined, "a pending human trust decision is not timed out");
+    assert.equal(driver.resolvePermission("startup-trust", "trust"), true);
     t.mock.timers.tick(15_000);
     assert.equal(disposedWith, "Pi RPC get_state response timed out");
     assert.equal(kills, 1);

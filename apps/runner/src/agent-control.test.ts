@@ -170,7 +170,7 @@ test("discovery-verified Pi receives a private Agent Control extension and stric
     };
     provisionAgentControl(ordinary, { ...control, orchestratorAgent: piAgent }, () => {}, host);
     const extension = piAgentControlExtensionPath(root, ordinary.sessionId);
-    assert.equal(statSync(extension).mode & 0o777, 0o600);
+    if (process.platform !== "win32") assert.equal(statSync(extension).mode & 0o777, 0o600);
     assert.match(readFileSync(extension, "utf8"), /registerTool/);
     assert.equal(ordinary.args[ordinary.args.indexOf("--extension") + 1], extension);
     assert.equal(ordinary.env.WOLLIPOG_PI_AGENT_CONTROL_COMMAND, "/opt/runner");

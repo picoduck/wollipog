@@ -73,6 +73,7 @@ test("new Claude sessions choose Auto only when the connected installation adver
   assert.equal(defaultPermissionModeForNewSession("claude-code", { ...base, permissionModes: ["default"] }), undefined);
   assert.equal(defaultPermissionModeForNewSession("claude-code", { ...base, permissionModes: [] }), undefined);
   assert.equal(defaultPermissionModeForNewSession("pi", { ...base, permissionModes: ["default", "dontAsk"] }), "default");
+  assert.equal(defaultPermissionModeForNewSession("pi", { ...base, permissionModes: ["default", "dontAsk"] }, false), undefined);
   assert.equal(defaultPermissionModeForNewSession("pi", { ...base, permissionModes: [] }), undefined);
   assert.equal(defaultPermissionModeForNewSession("claude-code", undefined), undefined);
   assert.equal(defaultPermissionModeForNewSession("codex-app-server", { ...base, permissionModes: ["auto-review"] }), undefined);
@@ -6008,6 +6009,45 @@ test("createSession selects and persists an exact compatible container environme
   });
   assert.equal(hostContext.ok, false);
   assert.match(hostContext.error ?? "", /do not permit ACP/);
+});
+
+test("container Pi sessions do not claim host-only approval enforcement", () => {
+  const { db, hub, svc } = makeHarness();
+  const piAgentId = "pi-container";
+  const container = {
+    id: `runner:${RUNNER_ID}:container:pi-tools`, runnerId: RUNNER_ID, name: "host · Pi tools",
+    kind: "container" as const, workspaceStrategy: "worktree" as const, adapter: "container" as const,
+    boundaries: { filesystem: "container" as const, network: "deny" as const, secrets: "none" as const, billing: "none" as const },
+    environment: { id: "pi-tools", revision: 1, image: `example/pi@sha256:${"7".repeat(64)}`, setupCheckDigest: "8".repeat(64) },
+    compatibleAgentIds: [piAgentId], available: true,
+  };
+  const metadata = runnerMeta();
+  db.registerRunner({
+    ...metadata,
+    agents: [...metadata.agents, {
+      id: piAgentId, name: "Pi", command: "pi", args: [], env: {}, driver: "pi" as const,
+      available: true, context: { kind: "native" as const },
+      capabilities: {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+        permissionModes: ["default", "dontAsk", "bypassPermissions"],
+      },
+    }],
+    executionTargets: [container],
+  }, Date.now(), PROTOCOL_VERSION);
+
+  const created = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: piAgentId,
+    executionTargetId: container.id, useWorktree: true,
+  });
+  assert.ok(created.ok && created.data, created.error);
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.config.permissionMode, undefined);
+
+  const misleading = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: piAgentId,
+    executionTargetId: container.id, useWorktree: true, config: { permissionMode: "dontAsk" },
+  });
+  assert.equal(misleading.ok, false);
+  assert.match(misleading.error ?? "", /host execution target/);
 });
 
 test("createSession resolves cloud artifact provenance and enforces the target cost budget", () => {

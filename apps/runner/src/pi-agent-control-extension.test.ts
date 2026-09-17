@@ -36,6 +36,29 @@ test("generated Pi Agent Control extensions are standalone valid modules", async
   assert.match(probeSource, /setStatus/);
 });
 
+test("Pi Agent Control probe reports readiness only after the pre-load trust hook", async () => {
+  const probe = await import(`data:text/javascript;base64,${Buffer.from(piAgentControlProbeSource("probe-nonce")).toString("base64")}`);
+  const handlers = new Map<string, (...args: any[]) => any>();
+  const statuses: Array<[string, string]> = [];
+  probe.default({
+    on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler),
+    registerCommand: () => {},
+    registerTool: () => {},
+    getActiveTools: () => [PI_AGENT_CONTROL_PROBE_COMMAND],
+    setActiveTools: () => {},
+  });
+  const ctx = { ui: {
+    setStatus: (key: string, value: string) => statuses.push([key, value]),
+    select: () => {},
+    input: () => {},
+  } };
+  await handlers.get("session_start")?.({}, ctx);
+  assert.deepEqual(statuses, [], "session startup alone does not prove the trust hook exists");
+  assert.deepEqual(await handlers.get("project_trust")?.(), { trusted: "no" });
+  await handlers.get("session_start")?.({}, ctx);
+  assert.deepEqual(statuses, [["wollipog-agent-control-probe", "probe-nonce"]]);
+});
+
 test("generated Pi Agent Control extension makes trust durable and blocks tools fail-closed", async (t) => {
   const originalNonce = process.env[PI_SECURITY_REQUEST_NONCE_ENV];
   process.env[PI_SECURITY_REQUEST_NONCE_ENV] = "security-nonce";

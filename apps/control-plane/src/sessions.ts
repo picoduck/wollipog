@@ -921,10 +921,11 @@ function titleFromPrompt(text: string): string {
 export function defaultPermissionModeForNewSession(
   driver: AgentDriverKind,
   capabilities: AgentCapabilities | undefined,
+  piAgentControlAvailable = true,
 ): string | undefined {
   const modes = capabilities?.permissionModes;
   if (!modes?.length) return undefined;
-  if (driver === "pi") return modes.includes("default") ? "default" : undefined;
+  if (driver === "pi") return piAgentControlAvailable && modes.includes("default") ? "default" : undefined;
   if (driver !== "claude-code") return undefined;
   if (modes.includes("auto")) return "auto";
   return modes.includes("acceptEdits") ? "acceptEdits" : undefined;
@@ -3295,7 +3296,17 @@ export class SessionsService {
         }
       }
       if (requestedConfig.permissionMode === undefined) {
-        requestedConfig.permissionMode = defaultPermissionModeForNewSession(launch.driver, agentCapabilities);
+        requestedConfig.permissionMode = defaultPermissionModeForNewSession(
+          launch.driver,
+          agentCapabilities,
+          executionTarget.adapter === "host",
+        );
+      }
+      if (launch.driver === "pi" && executionTarget.adapter !== "host" &&
+          requestedConfig.permissionMode !== undefined &&
+          requestedConfig.permissionMode !== "bypassPermissions" &&
+          requestedConfig.permissionMode !== "orchestrator") {
+        return fail("Pi approval-enforcing permission modes require a host execution target with the verified Agent Control bridge", 409);
       }
       const explicitConfigError = capabilityConfigError(
         claudeModelConfigForValidation(requestedConfig, agentCapabilities, launch.driver), agentCapabilities,
