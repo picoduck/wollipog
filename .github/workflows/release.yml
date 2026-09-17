@@ -84,7 +84,10 @@ jobs:
     name: ${{ matrix.label }}
     needs: preflight
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    # macOS legs wait on the notary service (tauri passes --wait with no cap of its own). A
+    # first submission from a newly enrolled team has sat in Apple's queue for over 40 minutes;
+    # later ones normally clear in minutes. Keep the other platforms on the tighter budget.
+    timeout-minutes: ${{ startsWith(matrix.os, 'macos') && 120 || 45 }}
     strategy:
       fail-fast: false # one platform failing must not cancel the others
       matrix:

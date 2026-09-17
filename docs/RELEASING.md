@@ -85,7 +85,9 @@ Node sidecars with the hardened runtime and
 [`entitlements.plist`](../apps/desktop/src-tauri/entitlements.plist) (the JIT subset V8 needs),
 notarizes, and staples; a post-build step then requires `codesign --verify --deep --strict`,
 `spctl --assess`, and a stapled ticket, so a signing or notarization failure fails the release rather
-than publishing an unsigned macOS bundle. Windows bundles are still unsigned (SmartScreen warns on
+than publishing an unsigned macOS bundle. The macOS legs run under a 120-minute timeout (other
+platforms 45) because the notary wait is unbounded on Tauri's side and a first submission has taken
+over 40 minutes. Windows bundles are still unsigned (SmartScreen warns on
 first launch); Authenticode is configured separately via `tauri.conf.json` `bundle.windows`.
 
 ## One-line install
