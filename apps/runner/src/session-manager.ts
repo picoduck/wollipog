@@ -651,6 +651,9 @@ const PROVIDER_HISTORY_QUARANTINE_GUIDANCE =
   "conversation history, so every prompt is refused before the model runs. Retrying and /compact " +
   "cannot repair it, because both resend the same history. This prompt was not submitted. " +
   "Recover the session to continue from the last safe checkpoint in a new conversation.";
+const RECOVERED_ANSWER_REPLAY_REFUSED_GUIDANCE =
+  "The recovered answer was not submitted after authentication. The question remains available; " +
+  "resolve the blocking session state, then submit the answer again.";
 const HISTORY_MAINTENANCE_MS = 5 * 60 * 1_000;
 const WORKTREE_PR_RECONCILIATION_MS = 5 * 60 * 1_000;
 /** Periodic missing-upstream discovery is deliberately smaller than the historical backlog. The
@@ -6820,7 +6823,7 @@ export class SessionManager {
     // adoption authorization, no user event. Retain the attempt so its text is not lost.
     const quarantined = this.store.readMeta(sessionId);
     if (quarantined?.providerHistoryBlock) {
-      if (!syntheticRecovery && !quarantined.providerHistoryBlock.retry) {
+      if (!syntheticRecovery && !recoveredQuestion && !quarantined.providerHistoryBlock.retry) {
         this.store.patchMeta(sessionId, {
           providerHistoryBlock: {
             ...quarantined.providerHistoryBlock,
@@ -13708,6 +13711,10 @@ export class SessionManager {
     this.store.flush(sessionId);
     const entry = this.active.get(sessionId);
     if (entry) entry.authenticationBlocked = false;
+    let refusedRecoveredQuestion: {
+      commandId: string;
+      question: NonNullable<QueuedPrompt["recoveredQuestion"]>;
+    } | undefined;
     for (const retry of retries) {
       if ("commandId" in retry) this.providerAuthDurables.delete(retry.commandId);
       try {
@@ -13721,7 +13728,7 @@ export class SessionManager {
           });
           this.store.flush(sessionId);
         }
-        this.prompt(
+        const accepted = this.prompt(
           sessionId,
           retry.text,
           retry.images,
@@ -13734,6 +13741,9 @@ export class SessionManager {
           undefined,
           "recoveredQuestion" in retry ? retry.recoveredQuestion : undefined,
         );
+        if (!accepted && "commandId" in retry && retry.recoveredQuestion) {
+          refusedRecoveredQuestion = { commandId: retry.commandId, question: retry.recoveredQuestion };
+        }
       } catch (error) {
         if ("durable" in retry) {
           retry.durable.failed(
@@ -13741,11 +13751,54 @@ export class SessionManager {
             "INVALID_COMMAND",
           );
         }
+        if ("commandId" in retry && retry.recoveredQuestion) {
+          refusedRecoveredQuestion = { commandId: retry.commandId, question: retry.recoveredQuestion };
+        }
         this.log(`retained authentication prompt replay failed for ${sessionId}: ${errText(error)}`);
       }
     }
-    if (!retries.length) this.emitStatus(sessionId, "idle");
+    if (refusedRecoveredQuestion) {
+      this.restoreQuestionAfterAuthenticationReplayRefusal(
+        sessionId,
+        refusedRecoveredQuestion.commandId,
+        refusedRecoveredQuestion.question,
+      );
+    } else if (!retries.length) {
+      this.emitStatus(sessionId, "idle");
+    }
     this.surfaceProviderAuthentication(block.credentialScopeId);
+  }
+
+  /** A proven pre-submission refusal terminalizes the old durable command identity. Mint a new
+   * question occurrence so the control plane can stage a fresh retry without weakening the
+   * command-correlated question_resolved marker that prevents duplicate provider turns. */
+  private restoreQuestionAfterAuthenticationReplayRefusal(
+    sessionId: string,
+    commandId: string,
+    recoveredQuestion: NonNullable<QueuedPrompt["recoveredQuestion"]>,
+  ): void {
+    try {
+      const resolved = this.store.readEvents(sessionId).some((event) =>
+        event.payload.kind === "question_resolved" &&
+        event.payload.commandId === commandId);
+      if (resolved) return;
+      this.store.patchMeta(sessionId, {
+        pendingApproval: {
+          ...recoveredQuestion.pendingQuestion,
+          recoveryId: `question-retry:${randomUUID()}`,
+        },
+        status: "input_required",
+      });
+      this.store.flush(sessionId);
+      this.emitEvent(sessionId, { kind: "stderr", text: RECOVERED_ANSWER_REPLAY_REFUSED_GUIDANCE });
+      this.emitStatus(sessionId, "input_required", RECOVERED_ANSWER_REPLAY_REFUSED_GUIDANCE);
+      const current = this.store.readMeta(sessionId);
+      if (current) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(current) });
+    } catch (error) {
+      this.log(
+        `recovered question could not be restored after authentication replay refusal for ${sessionId}: ${errText(error)}`,
+      );
+    }
   }
 
   /** Settle known-undelivered retained commands before a lifecycle boundary removes their replay
