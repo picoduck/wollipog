@@ -4385,6 +4385,20 @@ export class SessionManager {
     const priorResumeId = prior?.driver === driver && (driver === "codex-app-server" || driver === "pi")
       ? prior.agentSessionId
       : null;
+    const priorAdoptedPiState = prior?.driver === "pi" && prior.adoptedProviderState?.driver === "pi"
+      ? prior.adoptedProviderState
+      : undefined;
+    const adoptedProviderState = priorResumeId && driver === "pi" && priorAdoptedPiState &&
+      agentContextKey(prior!.context) === agentContextKey(context)
+      ? priorAdoptedPiState
+      : undefined;
+    if (priorResumeId && driver === "pi" && priorAdoptedPiState && !adoptedProviderState) {
+      const message = "an adopted Pi session cannot move execution contexts while retaining its managed transcript";
+      this.emitEvent(spec.sessionId, { kind: "error", message });
+      this.emitStatus(spec.sessionId, "stopped", message);
+      durable?.failed(message, "INVALID_COMMAND");
+      return false;
+    }
     if (priorResumeId && !this.acquireResumeLock(spec.sessionId, launchGeneration)) {
       this.emitEvent(spec.sessionId, { kind: "error", message: "this session is being restarted by another runner — retry shortly" });
       this.emitStatus(spec.sessionId, "idle");
@@ -4415,7 +4429,9 @@ export class SessionManager {
       cloudAdapterHandoffKey: spec.executionTarget?.id === prior?.executionTarget?.id ? prior?.cloudAdapterHandoffKey : undefined,
       driver,
       command: spec.command,
-      args: spec.args,
+      args: adoptedProviderState
+        ? [...spec.args, "--session-dir", adoptedProviderState.sessionDir]
+        : spec.args,
       // Protocol v54: launch env is resolved from runner-local agent config immediately before
       // spawn and is never written to session metadata, even if an older CP sends values.
       env: {},
@@ -4438,6 +4454,7 @@ export class SessionManager {
       // Manager-driven: a continued session is no longer a pristine transcript, so it isn't
       // reprocessable (re-reading the original transcript would drop the continuation).
       adopted: false,
+      ...(adoptedProviderState ? { adoptedProviderState } : {}),
       providerStateVersion: prior ? prior.providerStateVersion : (context.kind === "wsl" ? 3 : 2),
       checkpointRefVersion: prior
         ? prior.checkpointRefVersion

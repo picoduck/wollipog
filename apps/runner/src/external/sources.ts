@@ -16,6 +16,7 @@ import {
   readdirSync,
   readFileSync,
   readSync,
+  rmdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -425,6 +426,17 @@ function safeWslPiAdoptionRoot(sessionDir: string, sessionId: string): string | 
   return posix.dirname(sessionDir);
 }
 
+export function resolveWslPiSourcePath(home: string, sourcePath: string): string {
+  const storeRoot = posix.join(home, ".pi", "agent", "sessions");
+  const resolved = posix.normalize(sourcePath.startsWith("/") ? sourcePath : posix.join(home, sourcePath));
+  const relative = posix.relative(storeRoot, resolved);
+  if (!home.startsWith("/") || sourcePath.includes("\0") || !relative ||
+      relative === ".." || relative.startsWith("../") || posix.isAbsolute(relative)) {
+    throw new Error("Pi session adoption refused a source outside the WSL Pi session store");
+  }
+  return resolved;
+}
+
 /** Copy an external Pi JSONL file into a runner-owned session directory before adoption. Pi may
  * migrate or append to the copy later, while the external source remains byte-for-byte untouched. */
 export async function materializePiExternalSession(
@@ -437,13 +449,18 @@ export async function materializePiExternalSession(
     const bytes = stableNativePiBytes(source);
     const validated = validatedPiCopy(bytes, source);
     const sessionDir = join(nativeSessionRoot, "pi-adopted-sessions");
+    let createdSessionDir = false;
     try {
       mkdirSync(nativeSessionRoot, { recursive: true, mode: 0o700 });
       mkdirSync(sessionDir, { mode: 0o700 });
+      createdSessionDir = true;
       writeFileSync(join(sessionDir, basename(source.path)), bytes, { flag: "wx", mode: 0o600 });
       return { descriptor: validated.descriptor, sessionDir, events: parsePiTranscript(validated.content) };
     } catch (error) {
-      rmSync(nativeSessionRoot, { recursive: true, force: true });
+      if (createdSessionDir) {
+        rmSync(sessionDir, { recursive: true, force: true });
+        try { rmdirSync(nativeSessionRoot); } catch { /* retain any concurrently persisted state */ }
+      }
       throw error;
     }
   }
@@ -454,12 +471,15 @@ export async function materializePiExternalSession(
   const parent = posix.join(home, ".agent-manager", "wollipog", "pi-adopted");
   const root = posix.join(parent, key);
   const sessionDir = posix.join(root, "sessions");
-  const target = posix.join(sessionDir, posix.basename(source.path));
+  const sourcePath = resolveWslPiSourcePath(home, source.path);
+  const target = posix.join(sessionDir, posix.basename(sourcePath));
+  let createdRoot = false;
   try {
     await runContextCommand(context, "mkdir", ["-p", "--", parent], { cwd: "/", timeoutMs: 5_000 });
     await runContextCommand(context, "mkdir", ["-m", "700", "--", root], { cwd: "/", timeoutMs: 5_000 });
+    createdRoot = true;
     await runContextCommand(context, "mkdir", ["-m", "700", "--", sessionDir], { cwd: "/", timeoutMs: 5_000 });
-    await runContextCommand(context, "cp", ["--", source.path, target], { cwd: "/", timeoutMs: 30_000 });
+    await runContextCommand(context, "cp", ["--", sourcePath, target], { cwd: "/", timeoutMs: 30_000 });
     await runContextCommand(context, "chmod", ["600", "--", target], { cwd: "/", timeoutMs: 5_000 });
     const copied = await runContextCommand(context, "cat", ["--", target], {
       cwd: "/", timeoutMs: WSL_TIMEOUT_MS, maxBuffer: TRANSCRIPT_MAX_BUFFER,
@@ -467,7 +487,9 @@ export async function materializePiExternalSession(
     const validated = validatedPiCopy(Buffer.from(copied.stdout), source);
     return { descriptor: validated.descriptor, sessionDir, events: parsePiTranscript(validated.content) };
   } catch (error) {
-    await cleanupPiExternalSession(context, sessionDir, managerSessionId).catch(() => {});
+    if (createdRoot) {
+      await cleanupPiExternalSession(context, sessionDir, managerSessionId).catch(() => {});
+    }
     throw error;
   }
 }
@@ -482,7 +504,8 @@ export async function cleanupPiExternalSession(
     if (basename(sessionDir) !== "pi-adopted-sessions" || basename(root) !== managerSessionId) {
       throw new Error("refusing to remove an unrecognized native Pi adoption directory");
     }
-    rmSync(root, { recursive: true, force: true });
+    rmSync(sessionDir, { recursive: true, force: true });
+    try { rmdirSync(root); } catch { /* the session store owns any remaining state */ }
     return;
   }
   const root = safeWslPiAdoptionRoot(sessionDir, managerSessionId);

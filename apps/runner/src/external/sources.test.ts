@@ -10,6 +10,7 @@ import {
   materializePiExternalSession,
   readExternalTranscript,
   readSessionHead,
+  resolveWslPiSourcePath,
   resolveLaunchForAgent,
   resolveLaunchForDriver,
   retargetExternalSession,
@@ -112,6 +113,33 @@ test("Pi adoption rejects an incomplete trailing JSONL record and removes its st
     },
   }, "s_pi", sessionRoot), /complete JSONL record/u);
   assert.equal(existsSync(sessionRoot), false);
+});
+
+test("Pi adoption cleanup never removes sibling runner session state", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-pi-adopt-cleanup-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const sessionRoot = join(root, "s_pi");
+  const sessionDir = join(sessionRoot, "pi-adopted-sessions");
+  mkdirSync(sessionDir, { recursive: true });
+  writeFileSync(join(sessionRoot, "meta.json"), "retained", "utf8");
+  await cleanupPiExternalSession({ kind: "native" }, sessionDir, "s_pi");
+  assert.equal(existsSync(sessionDir), false);
+  assert.equal(readFileSync(join(sessionRoot, "meta.json"), "utf8"), "retained");
+});
+
+test("WSL Pi adoption resolves listed paths under the verified distro session store", () => {
+  assert.equal(
+    resolveWslPiSourcePath("/home/demo", ".pi/agent/sessions/--repo--/session_pi-id.jsonl"),
+    "/home/demo/.pi/agent/sessions/--repo--/session_pi-id.jsonl",
+  );
+  assert.throws(
+    () => resolveWslPiSourcePath("/home/demo", ".pi/agent/sessions/../../outside.jsonl"),
+    /outside the WSL Pi session store/u,
+  );
+  assert.throws(
+    () => resolveWslPiSourcePath("/home/demo", "/tmp/session_pi-id.jsonl"),
+    /outside the WSL Pi session store/u,
+  );
 });
 
 test("Pi cleanup rejects an unrecognized WSL path before invoking the distro", async () => {

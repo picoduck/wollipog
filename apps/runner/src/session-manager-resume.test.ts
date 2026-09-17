@@ -5664,6 +5664,69 @@ test("explicit Pi restart resumes the exact persisted RPC session", async () => 
   }
 });
 
+test("explicit restart preserves an adopted Pi session's managed transcript directory", async () => {
+  const managedSessionDir = "/runner/sessions/resume-session/pi-adopted-sessions";
+  const h = harness({
+    agentId: "pi",
+    driver: "pi",
+    command: "pi",
+    args: ["--session-dir", managedSessionDir],
+    agentSessionId: "pi-session-persisted",
+    adoptedProviderState: { driver: "pi", sessionDir: managedSessionDir },
+  });
+  try {
+    await h.manager.start({
+      ...launchSpec(h.root),
+      agentId: "pi",
+      driver: "pi",
+      command: "pi",
+      args: ["--model", "sonnet"],
+    });
+    assert.equal(h.launches[0]!.kind, "pi");
+    assert.equal(h.launches[0]!.options.resumeId, "pi-session-persisted");
+    assert.deepEqual(h.launches[0]!.options.args, [
+      "--model", "sonnet", "--session-dir", managedSessionDir,
+    ]);
+    assert.deepEqual(h.store.readMeta("resume-session")?.adoptedProviderState, {
+      driver: "pi",
+      sessionDir: managedSessionDir,
+    });
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("explicit restart refuses to detach an adopted Pi session from its managed transcript context", async () => {
+  const managedSessionDir = "/home/demo/.agent-manager/wollipog/pi-adopted/key/sessions";
+  const h = harness({
+    agentId: "pi",
+    driver: "pi",
+    command: "pi",
+    context: { kind: "wsl", distro: "Ubuntu" },
+    agentSessionId: "pi-session-persisted",
+    adoptedProviderState: { driver: "pi", sessionDir: managedSessionDir },
+  });
+  try {
+    assert.equal(await h.manager.start({
+      ...launchSpec(h.root),
+      agentId: "pi",
+      driver: "pi",
+      command: "pi",
+      context: { kind: "native" },
+    }), false);
+    assert.equal(h.launches.length, 0);
+    const error = h.sent.find(
+      (message) => message.type === "session_event" && message.payload.kind === "error",
+    );
+    assert.ok(error && error.type === "session_event" && error.payload.kind === "error");
+    assert.match(error.payload.message, /cannot move execution contexts/u);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("explicit restart keeps legacy exec Codex fresh while its process-loss resume path stays unchanged", async () => {
   const h = harness({ driver: "codex", agentSessionId: "exec-thread", tokensIn: 40, tokensOut: 10 });
   try {
