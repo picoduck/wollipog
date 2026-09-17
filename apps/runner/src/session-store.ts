@@ -242,6 +242,10 @@ export interface SessionMeta {
   /** True for sessions adopted from an external CLI transcript (vs. manager-created). Gates reprocess
    * so a normal session's rich event log is never replaced by a best-effort transcript reparse. */
   adopted?: boolean;
+  /** Runner-owned copy used to resume an adopted Pi conversation without loading, migrating, or
+   * appending to the external CLI's original JSONL file. The path is runner-local and is never
+   * projected in SessionSnapshot. */
+  adoptedProviderState?: { driver: "pi"; sessionDir: string };
   /** External Claude adoption must not run an unattended recovery turn until a user explicitly
    * continues it; this durable bit records that the manager may own later automatic recovery. */
   adoptedBackgroundRecoveryAuthorized?: boolean;

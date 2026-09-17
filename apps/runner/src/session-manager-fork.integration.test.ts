@@ -518,6 +518,29 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     assert.equal(historicalPi.ok, false);
     assert.match(historicalPi.error ?? "", /current transcript/);
     assert.equal(store.has("s_pi_historical"), false);
+    const adoptedPiSource: SessionMeta = {
+      ...piSource,
+      sessionId: "s_pi_adopted",
+      adoptedProviderState: {
+        driver: "pi",
+        sessionDir: join(storeRoot, "s_pi_adopted", "pi-adopted-sessions"),
+      },
+    };
+    store.create(adoptedPiSource);
+    const adoptedPiFork = await manager.forkConversation(
+      adoptedPiSource.sessionId,
+      "s_pi_adopted_target",
+      2,
+      "Unsafe adopted Pi fork",
+    );
+    assert.equal(adoptedPiFork.ok, false);
+    assert.match(adoptedPiFork.error ?? "", /unavailable for an adopted Pi session/u);
+    assert.equal(store.has("s_pi_adopted_target"), false);
+    assert.equal(
+      stateTransfers.some((transfer) => transfer.target === "s_pi_adopted_target"),
+      false,
+      "the refusal happens before provider-state cloning",
+    );
     const piFork = await manager.forkConversation(piSource.sessionId, "s_pi_target", 2, "Pi fork");
     assert.equal(piFork.ok, true, piFork.error);
     assert.equal(store.readMeta("s_pi_target")?.driver, "pi");

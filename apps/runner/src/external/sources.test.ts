@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AgentDefinition } from "@wollipog/protocol";
 import {
+  cleanupPiExternalSession,
   externalSessionStoreDriver,
+  materializePiExternalSession,
   readExternalTranscript,
   readSessionHead,
+  resolveWslPiSourcePath,
   resolveLaunchForAgent,
   resolveLaunchForDriver,
   retargetExternalSession,
@@ -46,6 +49,108 @@ test("Codex App Server discovers the shared Codex rollout store", () => {
   assert.equal(externalSessionStoreDriver("codex-app-server"), "codex");
   assert.equal(externalSessionStoreDriver("codex"), "codex");
   assert.equal(externalSessionStoreDriver("claude-code"), "claude-code");
+  assert.equal(externalSessionStoreDriver("pi"), "pi");
+});
+
+test("native Pi adoption copies a validated snapshot without changing the external JSONL", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-pi-adopt-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const sourceDir = join(root, "external");
+  const sessionRoot = join(root, "manager", "s_pi");
+  mkdirSync(sourceDir, { recursive: true });
+  const id = "019e47e6-3480-7e52-ba8a-e97b85ef7857";
+  const fileName = `2026-09-16T12-00-00-000Z_${id}.jsonl`;
+  const sourcePath = join(sourceDir, fileName);
+  const transcript = [
+    JSON.stringify({ type: "session", version: 3, id, timestamp: "2026-09-16T12:00:00.000Z", cwd: "/repo/pi" }),
+    JSON.stringify({ type: "message", id: "a1b2c3d4", parentId: null, message: { role: "user", content: "Continue safely" } }),
+  ].join("\n") + "\n";
+  writeFileSync(sourcePath, transcript, "utf8");
+
+  const materialized = await materializePiExternalSession({
+    path: sourcePath,
+    descriptor: {
+      agentSessionId: id,
+      driver: "pi",
+      cwd: "/repo/pi",
+      context: { kind: "native" },
+      title: "Continue safely",
+      createdAt: 1,
+      updatedAt: 2,
+      messageCount: 1,
+    },
+  }, "s_pi", sessionRoot);
+
+  assert.equal(readFileSync(sourcePath, "utf8"), transcript, "the external Pi history remains byte-identical");
+  assert.equal(readFileSync(join(materialized.sessionDir, fileName), "utf8"), transcript);
+  assert.equal(materialized.descriptor.agentSessionId, id);
+  assert.deepEqual(materialized.events, [{ kind: "user_message", text: "Continue safely", final: true }]);
+  assert.deepEqual(
+    await readExternalTranscript(materialized.descriptor, root, materialized.sessionDir),
+    materialized.events,
+    "reprocessing follows the runner-owned copy instead of the external source",
+  );
+});
+
+test("Pi adoption rejects an incomplete trailing JSONL record and removes its staging directory", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-pi-adopt-incomplete-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const id = "019e47e6-3480-7e52-ba8a-e97b85ef7857";
+  const sourcePath = join(root, `2026-09-16_${id}.jsonl`);
+  const sessionRoot = join(root, "manager", "s_pi");
+  writeFileSync(sourcePath, JSON.stringify({ type: "session", version: 3, id, cwd: "/repo/pi" }), "utf8");
+  await assert.rejects(materializePiExternalSession({
+    path: sourcePath,
+    descriptor: {
+      agentSessionId: id,
+      driver: "pi",
+      cwd: "/repo/pi",
+      context: { kind: "native" },
+      title: "",
+      createdAt: 1,
+      updatedAt: 2,
+      messageCount: 0,
+    },
+  }, "s_pi", sessionRoot), /complete JSONL record/u);
+  assert.equal(existsSync(sessionRoot), false);
+});
+
+test("Pi adoption cleanup never removes sibling runner session state", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-pi-adopt-cleanup-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const sessionRoot = join(root, "s_pi");
+  const sessionDir = join(sessionRoot, "pi-adopted-sessions");
+  mkdirSync(sessionDir, { recursive: true });
+  writeFileSync(join(sessionRoot, "meta.json"), "retained", "utf8");
+  await cleanupPiExternalSession({ kind: "native" }, sessionDir, "s_pi");
+  assert.equal(existsSync(sessionDir), false);
+  assert.equal(readFileSync(join(sessionRoot, "meta.json"), "utf8"), "retained");
+});
+
+test("WSL Pi adoption resolves listed paths under the verified distro session store", () => {
+  assert.equal(
+    resolveWslPiSourcePath("/home/demo", ".pi/agent/sessions/--repo--/session_pi-id.jsonl"),
+    "/home/demo/.pi/agent/sessions/--repo--/session_pi-id.jsonl",
+  );
+  assert.throws(
+    () => resolveWslPiSourcePath("/home/demo", ".pi/agent/sessions/../../outside.jsonl"),
+    /outside the WSL Pi session store/u,
+  );
+  assert.throws(
+    () => resolveWslPiSourcePath("/home/demo", "/tmp/session_pi-id.jsonl"),
+    /outside the WSL Pi session store/u,
+  );
+});
+
+test("Pi cleanup rejects an unrecognized WSL path before invoking the distro", async () => {
+  await assert.rejects(
+    cleanupPiExternalSession(
+      { kind: "wsl", distro: "Ubuntu" },
+      "/home/user/.pi/agent/sessions",
+      "s_pi",
+    ),
+    /refusing to remove an unrecognized WSL Pi adoption directory/u,
+  );
 });
 
 test("an explicit App Server selection retargets only the matching Codex context", () => {

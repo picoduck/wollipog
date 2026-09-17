@@ -14833,6 +14833,43 @@ test("capability gates reject old/unknown runners before requests or cache mutat
   assert.match(files.error ?? "", /requires protocol v16/i);
 });
 
+test("Pi discovery and adoption fail closed until the runner supports managed transcript copies", async () => {
+  const { db, hub, svc } = makeHarness();
+  const metadata = runnerMeta();
+  metadata.agents.push({
+    id: "pi-native",
+    name: "Pi",
+    command: "pi",
+    args: [],
+    env: {},
+    driver: "pi",
+    available: true,
+    context: { kind: "native" },
+  });
+  db.registerRunner(metadata, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.piExternalSessions - 1);
+
+  const before = db.listSessions().length;
+  const listed = await svc.listExternalSessions(RUNNER_ID, "pi-native");
+  assert.equal(listed.status, 409);
+  assert.match(listed.error ?? "", /Pi session discovery requires protocol v156/i);
+
+  const adopted = await svc.adoptSession(RUNNER_ID, {
+    agentSessionId: "pi-external-session",
+    driver: "pi",
+    cwd: "/repo/pi",
+    context: { kind: "native" },
+    title: "External Pi",
+    createdAt: 1,
+    updatedAt: 2,
+    messageCount: 1,
+  }, true);
+  assert.equal(adopted.status, 409);
+  assert.match(adopted.error ?? "", /Pi session adoption requires protocol v156/i);
+  assert.equal(db.listSessions().length, before, "unsupported adoption cannot seed a cache row");
+  assert.equal(hub.sentOfType("list_external_sessions").length, 0);
+  assert.equal(hub.sentOfType("adopt_session").length, 0);
+});
+
 /* -------------------------------------------------------------------------- */
 /* Adopted sessions → projects: auto-match by cwd + "Move to project"         */
 /* -------------------------------------------------------------------------- */

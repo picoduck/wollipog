@@ -108,6 +108,7 @@ import { supportsNativeOrchestratorBoundary } from "./orchestrator-preset.js";
 import type { SpawnIsolation } from "./spawn.js";
 import type { SubscriptionUsageProbeAuthorization } from "./subscription-usage.js";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
+import { cleanupPiExternalSession } from "./external/sources.js";
 import {
   ProviderStateCleanupJournal,
   reconcileProviderState,
@@ -4006,6 +4007,7 @@ export class SessionManager {
     descriptor: ExternalSessionDescriptor,
     launch: { command: string; args: string[]; env: Record<string, string> },
     acpCapabilities?: AcpRuntimeCapabilities,
+    adoptedProviderState?: SessionMeta["adoptedProviderState"],
   ): boolean {
     if (this.store.listSessions().some((m) =>
       m.agentSessionId === descriptor.agentSessionId &&
@@ -4038,6 +4040,7 @@ export class SessionManager {
       preview: null,
       pendingApproval: null,
       adopted: true,
+      ...(adoptedProviderState ? { adoptedProviderState } : {}),
       providerStateVersion: descriptor.context.kind === "wsl" ? 3 : 2,
       ...(this.runnerOwnerHash ? { checkpointRefVersion: 2 as const } : {}),
       seq: 0,
@@ -4382,6 +4385,31 @@ export class SessionManager {
     const priorResumeId = prior?.driver === driver && (driver === "codex-app-server" || driver === "pi")
       ? prior.agentSessionId
       : null;
+    const priorAdoptedPiState = prior?.driver === "pi" && prior.adoptedProviderState?.driver === "pi"
+      ? prior.adoptedProviderState
+      : undefined;
+    if (priorAdoptedPiState && driver !== "pi") {
+      try {
+        await cleanupPiExternalSession(prior!.context, priorAdoptedPiState.sessionDir, spec.sessionId);
+      } catch (error) {
+        const message = `managed Pi transcript cleanup failed before changing drivers: ${errText(error)}`;
+        this.emitEvent(spec.sessionId, { kind: "error", message });
+        this.emitStatus(spec.sessionId, "stopped", message);
+        durable?.failed(message, "COMMAND_CANCELLED");
+        return false;
+      }
+    }
+    const adoptedProviderState = priorResumeId && driver === "pi" && priorAdoptedPiState &&
+      agentContextKey(prior!.context) === agentContextKey(context)
+      ? priorAdoptedPiState
+      : undefined;
+    if (priorResumeId && driver === "pi" && priorAdoptedPiState && !adoptedProviderState) {
+      const message = "an adopted Pi session cannot move execution contexts while retaining its managed transcript";
+      this.emitEvent(spec.sessionId, { kind: "error", message });
+      this.emitStatus(spec.sessionId, "stopped", message);
+      durable?.failed(message, "INVALID_COMMAND");
+      return false;
+    }
     if (priorResumeId && !this.acquireResumeLock(spec.sessionId, launchGeneration)) {
       this.emitEvent(spec.sessionId, { kind: "error", message: "this session is being restarted by another runner — retry shortly" });
       this.emitStatus(spec.sessionId, "idle");
@@ -4412,7 +4440,9 @@ export class SessionManager {
       cloudAdapterHandoffKey: spec.executionTarget?.id === prior?.executionTarget?.id ? prior?.cloudAdapterHandoffKey : undefined,
       driver,
       command: spec.command,
-      args: spec.args,
+      args: adoptedProviderState
+        ? [...spec.args, "--session-dir", adoptedProviderState.sessionDir]
+        : spec.args,
       // Protocol v54: launch env is resolved from runner-local agent config immediately before
       // spawn and is never written to session metadata, even if an older CP sends values.
       env: {},
@@ -4435,6 +4465,7 @@ export class SessionManager {
       // Manager-driven: a continued session is no longer a pristine transcript, so it isn't
       // reprocessable (re-reading the original transcript would drop the continuation).
       adopted: false,
+      ...(adoptedProviderState ? { adoptedProviderState } : {}),
       providerStateVersion: prior ? prior.providerStateVersion : (context.kind === "wsl" ? 3 : 2),
       checkpointRefVersion: prior
         ? prior.checkpointRefVersion
@@ -6346,7 +6377,12 @@ export class SessionManager {
       sessionId: meta.sessionId,
       cwd,
       ...(this.strictProjectIsolation(meta) ? { orchestratorScratchOnly: true } : {}),
-      ...(additionalWritableRoots.length ? { additionalWritableRoots } : {}),
+      ...((additionalWritableRoots.length || meta.adoptedProviderState)
+        ? { additionalWritableRoots: [
+            ...additionalWritableRoots,
+            ...(meta.adoptedProviderState ? [meta.adoptedProviderState.sessionDir] : []),
+          ] }
+        : {}),
       ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
     }));
   }
@@ -8364,7 +8400,13 @@ export class SessionManager {
         // The box gained a matching agent since adopt time — the session stops being read-only.
         // The fresh readMeta below picks the patched params up and the normal resume path runs.
         this.log(`read-only session ${sessionId} healed — a ${meta.driver} agent is now available`);
-        this.store.patchMeta(sessionId, { command: launch.command, args: launch.args, env: {} });
+        this.store.patchMeta(sessionId, {
+          command: launch.command,
+          args: meta.adoptedProviderState?.driver === "pi"
+            ? [...launch.args, "--session-dir", meta.adoptedProviderState.sessionDir]
+            : launch.args,
+          env: {},
+        });
       } else {
         const ctx = meta.context.kind === "wsl" ? `wsl:${meta.context.distro}` : "native";
         // SEND-ONLY refusal — deliberately NOT emitEvent/appendEvent: the adopt creates the row
@@ -9906,6 +9948,12 @@ export class SessionManager {
     }
     const supportsFork = providerSupportsConversationFork(source.driver, source.capabilities);
     if (!supportsFork && !handoff) return { ok: false, error: "this provider session does not support conversation fork" };
+    if (!handoff && source.driver === "pi" && source.adoptedProviderState?.driver === "pi") {
+      return {
+        ok: false,
+        error: "conversation fork is unavailable for an adopted Pi session with a managed transcript",
+      };
+    }
     if (handoff) {
       const error = handoffDestinationError(handoff.agent, source.driver, handoff.config, { allowSameProvider: recovery });
       if (error) return { ok: false, error };
@@ -10952,6 +11000,13 @@ export class SessionManager {
         this.releaseAdmission(sessionId);
       }
       this.clearLock(sessionId);
+      if (meta?.adoptedProviderState?.driver === "pi" && meta.context.kind === "wsl") {
+        try {
+          await cleanupPiExternalSession(meta.context, meta.adoptedProviderState.sessionDir, sessionId);
+        } catch (error) {
+          throw new Error(`managed Pi transcript cleanup failed: ${errText(error)}`);
+        }
+      }
       // The process-local deletion fence and durable tombstone make lookups fail closed while
       // provider retirement settles. Remove the row only after its exact client has retired so
       // a failed attempt remains retryable with complete cleanup provenance.

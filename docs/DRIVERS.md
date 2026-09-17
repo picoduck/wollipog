@@ -866,6 +866,14 @@ before trusting cwd/title or persisting launch state. The control plane waits fo
 runner result before creating its cache row. Resumability comes from that live adapter's negotiated
 resume/load bits; provider `_meta` and raw list errors stay runner-local.
 
+Pi sessions are discovered from `~/.pi/agent/sessions` on the native host or selected WSL distro.
+Discovery reconstructs only the active parent-linked branch and rejects malformed ancestry. A
+resumable adoption first copies the complete JSONL transcript into a runner-owned directory, then
+passes that directory explicitly to Pi; migration and later appends therefore affect the managed
+copy, never the external session. Reprocessing follows the copy, and deleting the Wollipog session
+removes only that validated runner-owned directory. Protocol v156 gates this safety contract during
+rolling upgrades.
+
 ACP session modes and stable select config options are also session-scoped. New/resume/load responses
 plus `current_mode_update` and `config_option_update` map model, thought level, and mode into the
 existing controls. Writes use `session/set_config_option` / `session/set_mode` and are awaited before

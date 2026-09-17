@@ -161,6 +161,42 @@ test("a read-only adopt HEALS once the box gains a matching agent: resume re-res
   }
 });
 
+test("a read-only Pi adopt heals only through its runner-owned transcript copy", async () => {
+  const managedSessionDir = "/runner/sessions/s1/pi-adopted-sessions";
+  const { mgr, store, root } = harness(() => ({ command: "pi", args: ["--model", "sonnet"], env: {} }));
+  const launches: SessionMeta[] = [];
+  (mgr as unknown as { launch: (meta: SessionMeta) => Promise<boolean> }).launch = async (meta) => {
+    launches.push(meta);
+    return false;
+  };
+  try {
+    mgr.adopt("s1", {
+      ...DESCRIPTOR,
+      driver: "pi",
+      agentSessionId: "pi-external-session",
+    }, {
+      command: "",
+      args: ["--session-dir", managedSessionDir],
+      env: {},
+    }, undefined, {
+      driver: "pi",
+      sessionDir: managedSessionDir,
+    });
+
+    mgr.prompt("s1", "continue safely");
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(store.readMeta("s1")?.command, "pi");
+    assert.deepEqual(store.readMeta("s1")?.args, [
+      "--model", "sonnet", "--session-dir", managedSessionDir,
+    ]);
+    assert.deepEqual(launches[0]?.args, ["--model", "sonnet", "--session-dir", managedSessionDir]);
+    assert.equal(launches[0]?.agentSessionId, "pi-external-session");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a sentinel prompt still refuses when the live resolver ALSO finds no matching agent", async () => {
   const { mgr, store, root, sent } = harness(() => null);
   try {

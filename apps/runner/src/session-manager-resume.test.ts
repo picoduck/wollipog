@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -4536,6 +4536,50 @@ test("adoption surfaces provider task artifacts but waits for explicit user owne
   }
 });
 
+test("Pi adoption persists its managed transcript directory and resumes from that copy", async () => {
+  const h = harness();
+  const managedSessionDir = join(h.root, "managed-pi", "sessions");
+  try {
+    assert.equal(h.manager.adopt("adopted-pi-session", {
+      agentSessionId: "pi-session-id",
+      agentId: "pi-native",
+      driver: "pi",
+      cwd: h.root,
+      context: { kind: "native" },
+      title: "Adopted Pi",
+      createdAt: 1,
+      updatedAt: 2,
+      messageCount: 1,
+    }, {
+      command: "pi",
+      args: ["--session-dir", managedSessionDir],
+      env: {},
+    }, undefined, {
+      driver: "pi",
+      sessionDir: managedSessionDir,
+    }), true);
+
+    const persisted = h.store.readMeta("adopted-pi-session");
+    assert.deepEqual(persisted?.adoptedProviderState, {
+      driver: "pi",
+      sessionDir: managedSessionDir,
+    });
+
+    h.manager.prompt("adopted-pi-session", "continue from the managed copy", []);
+    await shortDelay();
+    await tick();
+
+    const launch = h.launches.at(-1);
+    assert.equal(launch?.kind, "pi");
+    assert.equal(launch?.options.resumeId, "pi-session-id");
+    assert.deepEqual(launch?.options.args, ["--session-dir", managedSessionDir]);
+    assert.equal(h.prompts.at(-1), "continue from the managed copy");
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("real Claude driver shutdown persists live work and a restarted manager resumes it end to end", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-claude-lifetime-e2e-"));
   const store = new SessionStore(root);
@@ -5614,6 +5658,99 @@ test("explicit Pi restart resumes the exact persisted RPC session", async () => 
     });
     assert.equal(h.launches[0]!.kind, "pi");
     assert.equal(h.launches[0]!.options.resumeId, "pi-session-persisted");
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("explicit restart preserves an adopted Pi session's managed transcript directory", async () => {
+  const managedSessionDir = "/runner/sessions/resume-session/pi-adopted-sessions";
+  const h = harness({
+    agentId: "pi",
+    driver: "pi",
+    command: "pi",
+    args: ["--session-dir", managedSessionDir],
+    agentSessionId: "pi-session-persisted",
+    adoptedProviderState: { driver: "pi", sessionDir: managedSessionDir },
+  });
+  try {
+    await h.manager.start({
+      ...launchSpec(h.root),
+      agentId: "pi",
+      driver: "pi",
+      command: "pi",
+      args: ["--model", "sonnet"],
+    });
+    assert.equal(h.launches[0]!.kind, "pi");
+    assert.equal(h.launches[0]!.options.resumeId, "pi-session-persisted");
+    assert.deepEqual(h.launches[0]!.options.args, [
+      "--model", "sonnet", "--session-dir", managedSessionDir,
+    ]);
+    assert.deepEqual(h.store.readMeta("resume-session")?.adoptedProviderState, {
+      driver: "pi",
+      sessionDir: managedSessionDir,
+    });
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("explicit restart refuses to detach an adopted Pi session from its managed transcript context", async () => {
+  const managedSessionDir = "/home/demo/.agent-manager/wollipog/pi-adopted/key/sessions";
+  const h = harness({
+    agentId: "pi",
+    driver: "pi",
+    command: "pi",
+    context: { kind: "wsl", distro: "Ubuntu" },
+    agentSessionId: "pi-session-persisted",
+    adoptedProviderState: { driver: "pi", sessionDir: managedSessionDir },
+  });
+  try {
+    assert.equal(await h.manager.start({
+      ...launchSpec(h.root),
+      agentId: "pi",
+      driver: "pi",
+      command: "pi",
+      context: { kind: "native" },
+    }), false);
+    assert.equal(h.launches.length, 0);
+    const error = h.sent.find(
+      (message) => message.type === "session_event" && message.payload.kind === "error",
+    );
+    assert.ok(error && error.type === "session_event" && error.payload.kind === "error");
+    assert.match(error.payload.message, /cannot move execution contexts/u);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("changing away from an adopted Pi driver removes its managed native transcript", async () => {
+  const h = harness({
+    agentId: "pi",
+    driver: "pi",
+    command: "pi",
+    agentSessionId: "pi-session-persisted",
+  });
+  const managedSessionDir = join(h.root, "resume-session", "pi-adopted-sessions");
+  mkdirSync(managedSessionDir, { recursive: true });
+  writeFileSync(join(managedSessionDir, "pi-session-persisted.jsonl"), "managed", "utf8");
+  h.store.patchMeta("resume-session", {
+    args: ["--session-dir", managedSessionDir],
+    adoptedProviderState: { driver: "pi", sessionDir: managedSessionDir },
+  });
+  try {
+    assert.equal(await h.manager.start({
+      ...launchSpec(h.root),
+      agentId: "codex-native",
+      driver: "codex",
+      command: "codex",
+    }), true);
+    assert.equal(existsSync(managedSessionDir), false);
+    assert.equal(h.store.readMeta("resume-session")?.adoptedProviderState, undefined);
+    assert.equal(h.launches[0]?.kind, "codex");
   } finally {
     h.manager.shutdownAll();
     h.cleanup();

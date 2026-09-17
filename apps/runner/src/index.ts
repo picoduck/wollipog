@@ -114,8 +114,10 @@ import {
   waitForPendingKills,
 } from "./spawn.js";
 import {
+  cleanupPiExternalSession,
   findExternalSession,
   listExternalSessions,
+  materializePiExternalSession,
   readExternalTranscript,
   retargetExternalSession,
   resolveLaunchForAgent,
@@ -2357,7 +2359,11 @@ async function handleReprocess(msg: ReprocessSessionMessage): Promise<void> {
     messageCount: 0,
   };
   try {
-    const events = await readExternalTranscript(descriptor);
+    const events = await readExternalTranscript(
+      descriptor,
+      undefined,
+      meta.adoptedProviderState?.driver === "pi" ? meta.adoptedProviderState.sessionDir : undefined,
+    );
     if (!events.length) return replyFail("the original CLI transcript could not be read (it may have been deleted)");
     const updated = sessions.reprocess(sessionId, events);
     if (!updated) return replyFail("the session is busy — try again when it's idle");
@@ -2394,6 +2400,15 @@ async function handleListExternal(requestId: string, agentId?: string): Promise<
     }
     const selectedDriver = selectedAgent?.driver ?? (selectedAgent ? "acp" : undefined);
     const selectedContext = selectedAgent?.context ?? { kind: "native" as const };
+    if (selectedDriver === "pi" && !runnerSupportsProtocol(controlPlaneProtocolVersion, "piExternalSessions")) {
+      sendUp({
+        type: "list_external_sessions_result",
+        requestId,
+        ok: false,
+        error: "Pi session discovery requires a control-plane update",
+      });
+      return;
+    }
     const stored = store.listSessions();
     const knownNative = new Set(
       stored.filter((m) => m.driver !== "acp").map((m) => m.agentSessionId).filter((id): id is string => id != null),
@@ -2411,10 +2426,13 @@ async function handleListExternal(requestId: string, agentId?: string): Promise<
         : listExternalSessions(
           knownNative,
           selectedDriver ? { driver: selectedDriver, context: selectedContext } : undefined,
-        ).then((listed) => listed.map((d) => ({
-          ...d,
-          resumable: resolveLaunchForDriver(metadata.agents, d.driver, d.context) != null,
-        }))),
+        ).then((listed) => listed
+          .filter((descriptor) => descriptor.driver !== "pi" ||
+            runnerSupportsProtocol(controlPlaneProtocolVersion, "piExternalSessions"))
+          .map((d) => ({
+            ...d,
+            resumable: resolveLaunchForDriver(metadata.agents, d.driver, d.context) != null,
+          }))),
       selectedDriver && selectedDriver !== "acp"
         ? Promise.resolve([])
         : listAcpExternalSessions(
@@ -2442,6 +2460,9 @@ async function handleAdopt(msg: AdoptSessionMessage): Promise<void> {
   const fail = (detail: string) => requestId
     ? sendUp({ type: "adopt_session_result", requestId, ok: false, error: detail })
     : sendUp({ type: "session_status", sessionId, status: "failed", detail });
+  if (claimed.driver === "pi" && !runnerSupportsProtocol(controlPlaneProtocolVersion, "piExternalSessions")) {
+    return fail("Pi session adoption requires a control-plane update");
+  }
 
   // Never trust the client-supplied descriptor for execution state. ACP is re-queried through the
   // exact configured adapter; native sessions are re-read from box-owned transcript stores.
@@ -2449,6 +2470,8 @@ async function handleAdopt(msg: AdoptSessionMessage): Promise<void> {
   let descriptor: ExternalSessionDescriptor;
   let launch: { command: string; args: string[]; env: Record<string, string> };
   let acpCapabilities: AcpRuntimeCapabilities | undefined;
+  let adoptedProviderState: SessionMeta["adoptedProviderState"];
+  let adoptionEvents: SessionEventPayload[] | undefined;
   if (claimedAcpAgentId) {
     const agent = configuredAcpAgent(metadata.agents, claimedAcpAgentId);
     if (!agent) return fail("that ACP agent is not configured or available on this box");
@@ -2462,11 +2485,30 @@ async function handleAdopt(msg: AdoptSessionMessage): Promise<void> {
     const known = new Set(
       store.listSessions().filter((m) => m.driver !== "acp").map((m) => m.agentSessionId).filter((id): id is string => id != null),
     );
-    const found = await findExternalSession(claimed.agentSessionId, known);
+    const found = await findExternalSession(claimed.agentSessionId, known, {
+      driver: claimed.driver,
+      context: claimed.context,
+    });
     if (!found) return fail("that external session was not found on this box (it may already be adopted)");
-    descriptor = retargetExternalSession(found, claimed);
+    descriptor = retargetExternalSession(found.descriptor, claimed);
     launch = resolveLaunchForDriver(metadata.agents, descriptor.driver, descriptor.context) ??
       { command: "", args: [], env: {} };
+    if (descriptor.driver === "pi") {
+      try {
+        const materialized = await materializePiExternalSession(found, sessionId, store.sessionPath(sessionId));
+        descriptor = materialized.descriptor;
+        adoptionEvents = materialized.events;
+        adoptedProviderState = { driver: "pi", sessionDir: materialized.sessionDir };
+        launch = {
+          ...launch,
+          // Pi gives the explicit CLI option precedence over environment/settings. The managed
+          // directory contains the immutable adoption copy, never the external source file.
+          args: [...launch.args, "--session-dir", materialized.sessionDir],
+        };
+      } catch (error) {
+        return fail(`the Pi session could not be copied safely: ${errText(error)}`);
+      }
+    }
   }
 
   // No native agent on this box for the session's driver+context (e.g. a Claude *Desktop* session
@@ -2479,7 +2521,27 @@ async function handleAdopt(msg: AdoptSessionMessage): Promise<void> {
 
   // Create the store row BEFORE the (possibly slow) transcript read, so a prompt sent the moment the
   // UI shows the session isn't lost to a missing row.
-  if (!sessions.adopt(sessionId, descriptor, launch, acpCapabilities)) {
+  let adopted = false;
+  try {
+    adopted = sessions.adopt(sessionId, descriptor, launch, acpCapabilities, adoptedProviderState);
+  } catch (error) {
+    if (adoptedProviderState) {
+      await cleanupPiExternalSession(
+        descriptor.context,
+        adoptedProviderState.sessionDir,
+        sessionId,
+      ).catch(() => {});
+    }
+    return fail(`the session could not be persisted: ${errText(error)}`);
+  }
+  if (!adopted) {
+    if (adoptedProviderState) {
+      await cleanupPiExternalSession(
+        descriptor.context,
+        adoptedProviderState.sessionDir,
+        sessionId,
+      ).catch(() => {});
+    }
     return fail("this session has already been adopted");
   }
   if (requestId) {
@@ -2496,7 +2558,7 @@ async function handleAdopt(msg: AdoptSessionMessage): Promise<void> {
 
   if (backfill) {
     try {
-      const events: SessionEventPayload[] = await readExternalTranscript(descriptor);
+      const events: SessionEventPayload[] = adoptionEvents ?? await readExternalTranscript(descriptor);
       sessions.backfillTranscript(sessionId, events);
       sessions.recoverOrphanedWork(sessionId, false);
     } catch {
