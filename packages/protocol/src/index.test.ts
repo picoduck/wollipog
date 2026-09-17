@@ -256,6 +256,9 @@ test("PROTOCOL_VERSION is 158", () => {
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeDiscard, 102);
   assert.equal(runnerSupportsProtocol(101, "sessionWorktreeDiscard"), false);
   assert.equal(runnerSupportsProtocol(102, "sessionWorktreeDiscard"), true);
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRetirement, 158);
+  assert.equal(runnerSupportsProtocol(157, "sessionWorktreeRetirement"), false);
+  assert.equal(runnerSupportsProtocol(158, "sessionWorktreeRetirement"), true);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.managedBackgroundInventory, 82);
   assert.equal(runnerSupportsProtocol(81, "managedBackgroundInventory"), false);
   assert.equal(runnerSupportsProtocol(82, "managedBackgroundInventory"), true);

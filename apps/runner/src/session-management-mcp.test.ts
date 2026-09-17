@@ -922,6 +922,7 @@ test("worktree tools use the canonical routes and default to the calling session
       retirement: { status: "deferred", reason: "provider_active" },
     },
   }));
+  deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
   await callTool(deps, "create_worktree", { branch: "fix/one", baseRef: "origin/main" });
   await callTool(deps, "attach_worktree", { sessionId: "s_child", path: "/repo/attached" });
   await callTool(deps, "select_worktree", { sessionId: "s_child", path: "/repo/wt" });
@@ -934,6 +935,15 @@ test("worktree tools use the canonical routes and default to the calling session
   assert.equal(calls[3]!.url, `${CP_URL}/api/sessions/s_child/worktrees/discard`);
   assert.deepEqual(calls[3]!.body, { path: "/repo/old" });
   assert.deepEqual(resultJson(discarded).retirement, { status: "deferred", reason: "provider_active" });
+});
+
+test("discard_worktree refuses peers that cannot report deferred retirement", async () => {
+  const { deps, calls } = makeDeps();
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRetirement - 1;
+  const result = await callTool(deps, "discard_worktree", { path: "/repo/old" });
+  assert.equal(result.isError, true);
+  assert.match(resultText(result), /requires control plane protocol v158/);
+  assert.equal(calls.length, 0);
 });
 
 test("create_worktree can finish after the ordinary control-plane request deadline", async () => {

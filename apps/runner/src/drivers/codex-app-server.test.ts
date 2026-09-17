@@ -1766,7 +1766,7 @@ test("managed-worktree command approvals are refused before automatic or human a
   const worktreePath = "/runner/worktrees/session/managed";
   const h = makeHarness({
     cwd: worktreePath,
-    managedWorktreeProtections: [{ worktreePath, repoPath: "/projects/repo" }],
+    managedWorktreeProtections: () => [{ worktreePath, repoPath: "/projects/repo" }],
   });
   const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
   (h.driver as any).registerHandlers({
@@ -1777,11 +1777,15 @@ test("managed-worktree command approvals are refused before automatic or human a
 
   const response = await requests.get("item/commandExecution/requestApproval")!({
     command: `git -C /projects/repo worktree remove ${worktreePath}`,
-    cwd: worktreePath,
   }, "managed-remove");
   assert.deepEqual(response, { decision: "decline" });
   assert.equal(h.events.length, 0, "the non-overridable refusal never creates an approval card");
   assert.match(h.stderr.at(-1) ?? "", /Use discard_worktree/);
+
+  const argvResponse = await requests.get("item/commandExecution/requestApproval")!({
+    command: ["rm", "-rf", worktreePath],
+  }, "managed-remove-argv");
+  assert.deepEqual(argvResponse, { decision: "decline" });
 });
 
 test("Codex tool user input keeps the provider request id and returns native answers", async () => {

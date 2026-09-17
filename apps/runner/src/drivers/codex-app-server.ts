@@ -197,6 +197,12 @@ export function approvalResponse(method: string, params: Json, choice: string | 
   return { decision };
 }
 
+function approvalCommand(value: Json): string | null {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value) || value.some((part) => typeof part !== "string")) return null;
+  return value.map((part) => `'${part.replaceAll("'", `'\\''`)}'`).join(" ");
+}
+
 /**
  * Build the turn/start params for a permission mode. Exported for tests.
  * - default / "auto-review": on-request + approvalsReviewer=auto_review (Guardian model review).
@@ -825,7 +831,7 @@ export class CodexAppServerDriver implements Driver {
         this.cwd,
         input,
         this.opts.capabilities,
-        (this.opts.managedWorktreeProtections?.length ?? 0) > 0,
+        (this.opts.managedWorktreeProtections?.().length ?? 0) > 0,
       );
 
       this.peer!.request("turn/start", params).then((response: Json) => {
@@ -1213,11 +1219,14 @@ export class CodexAppServerDriver implements Driver {
         if (this.disposed || this.cancelled) {
           return resolve(approvalResponse(method, params, null));
         }
-        const refusal = method === "item/commandExecution/requestApproval" && typeof params?.command === "string"
+        const command = method === "item/commandExecution/requestApproval"
+          ? approvalCommand(params?.command)
+          : null;
+        const refusal = command
           ? commandTargetsManagedWorktree(
-              params.command,
+              command,
               typeof params?.cwd === "string" ? params.cwd : this.cwd,
-              this.opts.managedWorktreeProtections ?? [],
+              this.opts.managedWorktreeProtections?.() ?? [],
             )
           : null;
         if (refusal) {

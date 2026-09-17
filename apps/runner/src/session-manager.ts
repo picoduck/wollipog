@@ -2811,11 +2811,12 @@ export class SessionManager {
 
   private pendingSafeWorktreeCleanup(
     sessionId: string,
+    context: AgentContext,
     worktree: SessionWorktreeView,
   ): WorktreeCleanupRecord | undefined {
     return this.cleanupJournal.list().find((record) =>
       record.sessionId === sessionId && record.removalMode === "safe" &&
-      record.worktreeId === worktree.id && record.worktreePath === worktree.path);
+      record.worktreeId === worktree.id && sameWorktreePath(context, record.worktreePath, worktree.path));
   }
 
   private async deferWorktreeRetirement(
@@ -2825,7 +2826,8 @@ export class SessionManager {
     trigger: "explicit_discard" | "pull_request_reconciliation",
   ): Promise<{ removed: false; snapshot: SessionSnapshot; retirement: SessionWorktreeRetirementResult }> {
     let latest = meta;
-    const existing = this.pendingSafeWorktreeCleanup(meta.sessionId, worktree);
+    const existing = this.pendingSafeWorktreeCleanup(meta.sessionId, meta.context, worktree);
+    let deferredRecord = existing;
     if (!existing) {
       try {
         await this.ensureDurableWorktreeHookSnapshot(meta, worktree);
@@ -2836,7 +2838,8 @@ export class SessionManager {
       const current = this.attributedWorktrees(latest).find((item) =>
         item.id === worktree.id && sameWorktreePath(latest.context, item.path, worktree.path));
       if (!current) throw new Error("worktree record changed while retirement was being deferred");
-      this.cleanupJournal.add(this.cleanupRecordForWorktree(latest, current, trigger, "safe"));
+      deferredRecord = this.cleanupRecordForWorktree(latest, current, trigger, "safe");
+      this.cleanupJournal.add(deferredRecord);
     } else {
       const verifiedMergedHead = worktree.pullRequest?.state === "merged" &&
         /^[a-f0-9]{40,64}$/u.test(worktree.pullRequest.headOid ?? "")
@@ -2846,6 +2849,15 @@ export class SessionManager {
         existing.verifiedMergedHead = verifiedMergedHead;
         this.cleanupJournal.add(existing);
       }
+    }
+    // A provider may exit while the durable hook snapshot above is being captured. In that case
+    // its exit scan cannot see this journal row, so arrange the missed reap now. A launch deferral
+    // is different: no active entry exists yet, but launch finalization still owns the worktree.
+    if (reason === "provider_active" && deferredRecord &&
+        !this.active.has(meta.sessionId) && !this.worktreeRebindings.has(meta.sessionId)) {
+      setImmediate(() => void this.reapWorktree(deferredRecord!).catch((error) => {
+        this.log(`worktree cleanup for ${boundedSessionIdForLog(meta.sessionId)} needs retry after deferred retirement was recorded: ${errText(error)}`);
+      }));
     }
     return {
       removed: false,
@@ -5187,7 +5199,21 @@ export class SessionManager {
   }
 
   private finishLaunchGeneration(sessionId: string, generation: number): void {
-    if (this.launchGenerations.get(sessionId) === generation) this.launchGenerations.delete(sessionId);
+    if (this.launchGenerations.get(sessionId) !== generation) return;
+    this.launchGenerations.delete(sessionId);
+    // A deferred retirement recorded before provider admission has no ActiveSession exit to drive
+    // replay when launch fails. Once the generation is finished, it is safe to resume the journal.
+    if (this.active.has(sessionId) || this.worktreeRebindings.has(sessionId)) return;
+    const deferred = this.cleanupJournal.list().filter((record) =>
+      record.sessionId === sessionId && record.removalMode === "safe");
+    if (!deferred.length) return;
+    setImmediate(() => {
+      for (const record of deferred) {
+        void this.reapWorktree(record).catch((error) => {
+          this.log(`worktree cleanup for ${boundedSessionIdForLog(sessionId)} needs retry after provider launch finished: ${errText(error)}`);
+        });
+      }
+    });
   }
 
   private invalidateLaunchGeneration(sessionId: string): boolean {
@@ -6147,7 +6173,9 @@ export class SessionManager {
           sessionStateDir: this.store.sessionPath(sessionId),
           initialBackgroundTaskIds: meta.orphanedWork?.pendingTaskIds ?? meta.pendingBackgroundTaskIds,
           descendantMarker: worktree ? this.worktreeProcessMarker(sessionId, cwd) : undefined,
-          managedWorktreeProtections: this.managedWorktreeProtections(meta),
+          managedWorktreeProtections: () => this.managedWorktreeProtections(
+            this.store.readMeta(sessionId) ?? meta,
+          ),
         },
         {
         supportsWorkerAttention: () => runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "workerAttention"),
@@ -10330,7 +10358,9 @@ export class SessionManager {
             resumeId: source.agentSessionId,
             isolation,
             descendantMarker: this.worktreeProcessMarker(source.sessionId, source.worktreePath),
-            managedWorktreeProtections: this.managedWorktreeProtections(source),
+            managedWorktreeProtections: () => this.managedWorktreeProtections(
+              this.store.readMeta(source.sessionId) ?? source,
+            ),
           },
           { onEvent: () => {}, onStderr: (text) => this.log(`provider fork: ${text}`), onExit: () => {} },
         );
@@ -10438,7 +10468,9 @@ export class SessionManager {
             resumeId: source.agentSessionId,
             isolation: forkIsolation,
             descendantMarker: targetDescendantMarker,
-            managedWorktreeProtections: this.managedWorktreeProtections(forkMeta),
+            managedWorktreeProtections: () => this.managedWorktreeProtections(
+              this.store.readMeta(forkMeta.sessionId) ?? forkMeta,
+            ),
           },
           { onEvent: () => {}, onStderr: (text) => this.log(`provider fork: ${text}`), onExit: () => {} },
         );

@@ -192,8 +192,8 @@ export interface DriverOptions {
   isolation?: SpawnIsolation;
   /** Runner-private durable descendant marker for one managed worktree. */
   descendantMarker?: string;
-  /** Runner-owned roots whose retirement must stay behind the managed discard lifecycle. */
-  managedWorktreeProtections?: ManagedWorktreeProtection[];
+  /** Live runner-owned roots whose retirement must stay behind the managed discard lifecycle. */
+  managedWorktreeProtections?: () => ManagedWorktreeProtection[];
 }
 
 export interface Driver {

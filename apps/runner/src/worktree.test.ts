@@ -4700,12 +4700,6 @@ test("post-merge cleanup durably defers selected-worktree retirement until provi
       client: { dispose: () => {} },
     });
 
-    const deferred = await manager.discardWorktree("s_selected_cleanup", merged.worktree.path);
-    assert.deepEqual(deferred.retirement, { status: "deferred", reason: "provider_active" });
-    assert.equal(existsSync(merged.worktree.path), true);
-    assert.equal(activeEntries.has("s_selected_cleanup"), true, "discard does not interrupt the provider");
-    assert.equal(JSON.parse(readFileSync(join(dataDir, "worktree-cleanup.json"), "utf8")).length, 1,
-      "the deferred retirement is durable before returning");
     const originalPatchMeta = store.patchMeta.bind(store);
     let failFinalMetadataCommit = true;
     store.patchMeta = (sessionId, patch) => {
@@ -4716,13 +4710,34 @@ test("post-merge cleanup durably defers selected-worktree retirement until provi
       }
       return originalPatchMeta(sessionId, patch);
     };
-    const selectedEntry = activeEntries.get("s_selected_cleanup");
-    assert.equal((manager as unknown as {
+    const retirementInternals = manager as unknown as {
+      ensureDurableWorktreeHookSnapshot: (...args: unknown[]) => Promise<void>;
       deleteActiveSession: (sessionId: string, expected: unknown) => boolean;
-    }).deleteActiveSession("s_selected_cleanup", selectedEntry), true);
+    };
+    const originalEnsureSnapshot = retirementInternals.ensureDurableWorktreeHookSnapshot.bind(manager);
+    let signalSnapshotReady!: () => void;
+    let releaseSnapshot!: () => void;
+    const snapshotReady = new Promise<void>((resolve) => { signalSnapshotReady = resolve; });
+    const snapshotGate = new Promise<void>((resolve) => { releaseSnapshot = resolve; });
+    retirementInternals.ensureDurableWorktreeHookSnapshot = async (...args) => {
+      await originalEnsureSnapshot(...args);
+      signalSnapshotReady();
+      await snapshotGate;
+    };
+    const discard = manager.discardWorktree("s_selected_cleanup", merged.worktree.path);
+    await snapshotReady;
+    const selectedEntry = activeEntries.get("s_selected_cleanup");
+    assert.equal(retirementInternals.deleteActiveSession("s_selected_cleanup", selectedEntry), true,
+      "provider exit can race the journal write");
+    releaseSnapshot();
+    const deferred = await discard;
+    retirementInternals.ensureDurableWorktreeHookSnapshot = originalEnsureSnapshot;
+    assert.deepEqual(deferred.retirement, { status: "deferred", reason: "provider_active" });
+    assert.equal(JSON.parse(readFileSync(join(dataDir, "worktree-cleanup.json"), "utf8")).length, 1,
+      "the deferred retirement is durable before returning");
     await waitForCondition(() => !existsSync(merged.worktree.path) &&
       store.readWorktreeLease("s_selected_cleanup") === null,
-      "deferred selected-worktree cleanup did not complete after provider exit");
+      "a retirement journaled just after provider exit still completes automatically");
     assert.equal(store.readWorktreeLease("s_selected_cleanup"), null);
     assert.equal(store.readMeta("s_selected_cleanup")?.worktreePath, merged.worktree.path,
       "a failed metadata commit clears neither selection nor inventory");

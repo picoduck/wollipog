@@ -392,7 +392,7 @@ export async function runWollipogCli(
   const requiredProtocol = parsed.tool === "create_session" && typeof parsed.input.effort === "string"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControlReasoningEffort
     : parsed.tool === "discard_worktree"
-    ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeDiscard
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRetirement
     : worktreeTools.has(parsed.tool)
       ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktrees
       : RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControl;

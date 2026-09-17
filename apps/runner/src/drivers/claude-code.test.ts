@@ -3478,7 +3478,7 @@ test("managed-worktree shell retirement is denied before Claude permission resol
   const worktreePath = "/runner/worktrees/session/managed";
   const h = makeHarness({
     cwd: worktreePath,
-    managedWorktreeProtections: [{ worktreePath, repoPath: "/projects/repo" }],
+    managedWorktreeProtections: () => [{ worktreePath, repoPath: "/projects/repo" }],
   });
   const writes: string[] = [];
   (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
@@ -3506,6 +3506,36 @@ test("managed-worktree shell retirement is denied before Claude permission resol
       },
     },
   });
+});
+
+test("managed bypass mode keeps ordinary Claude tools autonomous while retaining the retirement veto", () => {
+  const worktreePath = "/runner/worktrees/session/managed";
+  let protections: Array<{ worktreePath: string; repoPath: string }> = [];
+  const h = makeHarness({
+    cwd: worktreePath,
+    config: { permissionMode: "bypassPermissions" } as DriverOptions["config"],
+    managedWorktreeProtections: () => protections,
+  });
+  const writes: string[] = [];
+  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
+
+  protections = [{ worktreePath, repoPath: "/projects/repo" }];
+  h.feed({
+    type: "control_request",
+    request_id: "ordinary-command",
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "pnpm test" } },
+  });
+  h.feed({
+    type: "control_request",
+    request_id: "managed-remove-after-refresh",
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: `rm -rf ${worktreePath}` } },
+  });
+
+  assert.equal(h.events.length, 0);
+  assert.deepEqual(writes.map((value) => JSON.parse(value).response.response), [
+    { behavior: "allow", updatedInput: { command: "pnpm test" } },
+    { behavior: "deny", message: "Wollipog protects this runner-owned worktree. Use discard_worktree so retirement can wait for the provider to exit and then apply the managed safety checks." },
+  ]);
 });
 
 test("provider-mode Claude Orchestrator auto-allows a bounded read-only issue loop", () => {
@@ -3874,9 +3904,10 @@ test("claudePermissionArgs: 'default' uses the stdio prompt tool (interactive, n
 
 test("managed worktrees retain restrictive Claude modes and narrow bypass modes to runner review", () => {
   assert.equal(protectedClaudePermissionMode("plan", true), "plan");
-  assert.equal(protectedClaudePermissionMode("acceptEdits", true), "acceptEdits");
+  assert.equal(protectedClaudePermissionMode("acceptEdits", true), "default");
   assert.equal(protectedClaudePermissionMode("auto", true), "default");
   assert.equal(protectedClaudePermissionMode("bypassPermissions", true), "default");
+  assert.equal(protectedClaudePermissionMode("dontAsk", true), "default");
   assert.equal(protectedClaudePermissionMode("bypassPermissions", false), "bypassPermissions");
 });
 

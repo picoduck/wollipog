@@ -1811,18 +1811,24 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               : msg.operation === "generate_setup"
                 ? sessions.generateWorktreeSetupConfig(msg.sessionId)
                 : sessions.discardWorktree(msg.sessionId, msg.path);
-      void operation.then((result) => sendUp({
-        type: "session_worktree_result",
-        requestId: msg.requestId,
-        sessionId: msg.sessionId,
-        operation: msg.operation,
-        ok: true,
-        snapshot: result.snapshot,
-        ...(result.worktree ? { worktree: result.worktree } : {}),
-        ...(result.isolation ? { isolation: result.isolation } : {}),
-        ...(result.retirement ? { retirement: result.retirement } : {}),
-        ...(result.path && result.detected ? { generatedSetup: { path: result.path, detected: result.detected } } : {}),
-      })).catch((error) => sendUp({
+      void operation.then((result) => {
+        if (result.retirement?.status === "deferred" &&
+            !runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionWorktreeRetirement")) {
+          throw new Error("worktree retirement was durably deferred; update Wollipog to observe and report pending retirement");
+        }
+        sendUp({
+          type: "session_worktree_result",
+          requestId: msg.requestId,
+          sessionId: msg.sessionId,
+          operation: msg.operation,
+          ok: true,
+          snapshot: result.snapshot,
+          ...(result.worktree ? { worktree: result.worktree } : {}),
+          ...(result.isolation ? { isolation: result.isolation } : {}),
+          ...(result.retirement ? { retirement: result.retirement } : {}),
+          ...(result.path && result.detected ? { generatedSetup: { path: result.path, detected: result.detected } } : {}),
+        });
+      }).catch((error) => sendUp({
         type: "session_worktree_result",
         requestId: msg.requestId,
         sessionId: msg.sessionId,

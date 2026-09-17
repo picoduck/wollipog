@@ -684,6 +684,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   resumableQuestionAnswers: 107,
   sessionWorktrees: 101,
   sessionWorktreeDiscard: 102,
+  /** v158 reports durable deferred retirement instead of silently treating it as removal. */
+  sessionWorktreeRetirement: 158,
   progressAwareSessionWorktrees: 113,
   /** `GET /api/admin/status` and `pairing.publicOrigin` on device creation (`wollipog admin`). */
   hostAdministration: 114,

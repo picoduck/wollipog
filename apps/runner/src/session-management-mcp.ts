@@ -220,6 +220,25 @@ async function explicitEffortCompatibilityError(deps: McpDeps): Promise<ToolResu
   return null;
 }
 
+async function worktreeRetirementCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRetirement;
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const result = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!result.ok) {
+      return errorResult(
+        `Managed worktree retirement requires control plane protocol v${required}, but compatibility could not be verified: ${result.message}`,
+      );
+    }
+    actual = result.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= required
+    ? null
+    : errorResult(
+        `Managed worktree retirement requires control plane protocol v${required}; connected control plane reports v${String(actual ?? "unknown")}. Update Wollipog before discarding a runner-owned worktree.`,
+      );
+}
+
 async function workflowDecisionActionCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
   const required = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionAdmission;
   let actual = deps.controlPlaneProtocolVersion;
@@ -1635,6 +1654,8 @@ export const TOOLS: McpTool[] = [
       if (typeof args?.path !== "string" || !args.path) return errorResult("path is required");
       const sessionId = worktreeTarget(args, deps);
       if (typeof sessionId !== "string") return sessionId;
+      const compatibilityError = await worktreeRetirementCompatibilityError(deps);
+      if (compatibilityError) return compatibilityError;
       const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(sessionId)}/worktrees/discard`, { path: args.path });
       if (!r.ok) return errorResult(r.message);
       return textResult(mapWorktreeResult(r.data));

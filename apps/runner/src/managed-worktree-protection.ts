@@ -1,4 +1,4 @@
-import { isAbsolute, normalize, resolve, sep } from "node:path";
+import { dirname, isAbsolute, matchesGlob, normalize, resolve, sep } from "node:path";
 import { parse, type ParseEntry } from "shell-quote";
 
 const MAX_COMMAND_LENGTH = 32_768;
@@ -18,15 +18,21 @@ function environmentReference(token: ShellToken | undefined): token is Environme
 }
 
 function operator(token: ShellToken | undefined): string | null {
-  return token != null && typeof token === "object" && "op" in token && typeof token.op === "string"
+  return token != null && typeof token === "object" && "op" in token && token.op !== "glob" &&
+      typeof token.op === "string"
     ? token.op
     : null;
 }
 
 function pathContains(parent: string, child: string): boolean {
-  const normalizedParent = normalize(parent);
-  const normalizedChild = normalize(child);
+  const foldCase = process.platform === "win32" || process.platform === "darwin";
+  const normalizedParent = foldCase ? normalize(parent).toLowerCase() : normalize(parent);
+  const normalizedChild = foldCase ? normalize(child).toLowerCase() : normalize(child);
   return normalizedChild === normalizedParent || normalizedChild.startsWith(`${normalizedParent}${sep}`);
+}
+
+function withinProtectedRoot(path: string, protections: readonly ManagedWorktreeProtection[]): boolean {
+  return protections.some(({ worktreePath }) => pathContains(worktreePath, path));
 }
 
 function protectedTarget(path: string, protections: readonly ManagedWorktreeProtection[]): boolean {
@@ -44,9 +50,53 @@ function word(
   environment: ReadonlyMap<string, string>,
 ): string | null {
   if (typeof token === "string" && !token.includes("`")) return token;
+  if (token != null && typeof token === "object" && "op" in token && token.op === "glob" &&
+      "pattern" in token && typeof token.pattern === "string") return token.pattern;
   if (!environmentReference(token)) return null;
   if (token.env === "PWD" || token.env === "CWD") return cwd;
   return environment.get(token.env) ?? null;
+}
+
+function globPattern(token: ShellToken | undefined): string | null {
+  if (token != null && typeof token === "object" && "op" in token && token.op === "glob" &&
+      "pattern" in token && typeof token.pattern === "string") return token.pattern;
+  if (typeof token === "string" && /[*?\[\]{}]/u.test(token)) return token;
+  return null;
+}
+
+function ancestors(path: string): string[] {
+  const values: string[] = [];
+  let current = normalize(path);
+  for (;;) {
+    values.push(current);
+    const parent = dirname(current);
+    if (parent === current) return values;
+    current = parent;
+  }
+}
+
+function globTargetsProtected(
+  token: ShellToken | undefined,
+  cwd: string,
+  protections: readonly ManagedWorktreeProtection[],
+): boolean {
+  const pattern = globPattern(token);
+  if (!pattern || pattern.includes("\0")) return false;
+  const absolutePattern = normalize(isAbsolute(pattern) ? pattern : resolve(cwd, pattern));
+  const foldCase = process.platform === "win32" || process.platform === "darwin";
+  const comparablePattern = foldCase ? absolutePattern.toLowerCase() : absolutePattern;
+  return protections.some(({ worktreePath }) => ancestors(worktreePath).some((candidate) =>
+    matchesGlob(foldCase ? candidate.toLowerCase() : candidate, comparablePattern)));
+}
+
+function operandTargetsProtected(
+  token: ShellToken | undefined,
+  cwd: string,
+  environment: ReadonlyMap<string, string>,
+  protections: readonly ManagedWorktreeProtection[],
+): boolean {
+  const target = resolvedOperand(token, cwd, environment);
+  return target != null ? protectedTarget(target, protections) : globTargetsProtected(token, cwd, protections);
 }
 
 function resolvedOperand(
@@ -100,22 +150,6 @@ function commandWords(
   return { words: tokens.slice(index + 1), executable: executableName(executable) };
 }
 
-function filesystemRemovalTargets(
-  words: ShellToken[],
-  cwd: string,
-  environment: ReadonlyMap<string, string>,
-): Array<string | null> {
-  const targets: Array<string | null> = [];
-  let options = true;
-  for (const token of words) {
-    const value = word(token, cwd, environment);
-    if (options && value === "--") { options = false; continue; }
-    if (options && value?.startsWith("-")) continue;
-    targets.push(resolvedOperand(token, cwd, environment));
-  }
-  return targets;
-}
-
 function gitWorktreeRefusal(
   words: ShellToken[],
   initialCwd: string,
@@ -144,8 +178,7 @@ function gitWorktreeRefusal(
   });
   if (action === "prune") return protectionRepository(cwd, protections);
   if (action !== "remove" && action !== "move") return false;
-  const target = resolvedOperand(operands[0], cwd, environment);
-  return target != null && protectedTarget(target, protections);
+  return operandTargetsProtected(operands[0], cwd, environment, protections);
 }
 
 function segmentRefusal(
@@ -165,22 +198,22 @@ function segmentRefusal(
   }
   if (executable === "git") return gitWorktreeRefusal(words, cwd, environment, protections);
   if (["rm", "rmdir", "unlink", "trash", "trash-put", "remove-item", "del", "rd"].includes(executable)) {
-    return filesystemRemovalTargets(words, cwd, environment)
-      .some((target) => target != null && protectedTarget(target, protections));
+    return words.some((token) => operandTargetsProtected(token, cwd, environment, protections));
   }
   if (executable === "gio" && word(words[0], cwd, environment) === "trash") {
-    return filesystemRemovalTargets(words.slice(1), cwd, environment)
-      .some((target) => target != null && protectedTarget(target, protections));
+    return words.slice(1).some((token) => operandTargetsProtected(token, cwd, environment, protections));
   }
   if (["mv", "move", "rename-item"].includes(executable)) {
-    const source = filesystemRemovalTargets(words, cwd, environment)[0];
-    return source != null && protectedTarget(source, protections);
+    const source = words.find((token) => {
+      const value = word(token, cwd, environment);
+      return value !== "--" && !value?.startsWith("-");
+    });
+    return operandTargetsProtected(source, cwd, environment, protections);
   }
   if (executable === "find" && words.some((token) => word(token, cwd, environment) === "-delete")) {
     const roots = words.slice(0, words.findIndex((token) => word(token, cwd, environment)?.startsWith("-") === true));
     return roots.some((token) => {
-      const target = resolvedOperand(token, cwd, environment);
-      return target != null && protectedTarget(target, protections);
+      return operandTargetsProtected(token, cwd, environment, protections);
     });
   }
   if (["python", "python3", "node", "perl", "ruby", "pwsh", "powershell"].includes(executable)) {
@@ -216,8 +249,11 @@ export function commandTargetsManagedWorktree(
     if (!segment.length) return false;
     const localEnvironment = new Map(environment);
     const parsed = commandWords(segment, currentCwd, localEnvironment);
-    if (parsed?.executable === "cd") {
+    if (parsed?.executable === "cd" || parsed?.executable === "pushd") {
       const target = resolvedOperand(parsed.words[0], currentCwd, localEnvironment);
+      // Claude's Bash tool keeps its shell directory between calls. Refuse an escape from every
+      // managed root so a later relative removal cannot be resolved against an unobservable cwd.
+      if (target && !withinProtectedRoot(target, protections)) return true;
       if (target) currentCwd = target;
       for (const [key, value] of localEnvironment) environment.set(key, value);
       return false;
@@ -236,4 +272,3 @@ export function commandTargetsManagedWorktree(
   }
   return evaluate() ? MANAGED_WORKTREE_REFUSAL : null;
 }
-
