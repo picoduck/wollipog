@@ -83,8 +83,9 @@ test("side chat starts separately, prompts only the child, and inserts output ex
   const prompted: Array<{ id: string; text: string }> = [];
   const inserted: string[] = [];
   let eventServed = false;
-  api.sideChat = async () => ({ sideChat: null });
-  api.createSideChat = async () => relation;
+  let related: SideChatView | null = null;
+  api.sideChat = async () => ({ sideChat: related });
+  api.createSideChat = async () => { related = relation; return relation; };
   api.session = async () => ({ session: child });
   api.getSessionEventPage = async () => {
     if (eventServed) return { events: [], eventEpoch: 0, nextAfter: 1, cacheComplete: true };
@@ -169,10 +170,12 @@ test("a terminal side chat offers a working replacement and a link to the ended 
   const createCalls: Array<{ id: string; replaceEnded: boolean }> = [];
   const pushed: View[] = [];
   const sessions = new Map([[ended.id, ended], [replacement.id, replacement]]);
-  api.sideChat = async () => ({ sideChat: { ...relation, session: ended } });
+  let related: SideChatView = { ...relation, session: ended };
+  api.sideChat = async () => ({ sideChat: related });
   api.createSideChat = async (id: string, replaceEnded = false) => {
     createCalls.push({ id, replaceEnded });
-    return { parentSessionId: parent.id, session: replacement, createdAt: 2 };
+    if (replaceEnded) related = { parentSessionId: parent.id, session: replacement, createdAt: 2 };
+    return related;
   };
   api.session = async (id: string) => ({ session: sessions.get(id)! });
   api.getSessionEventPage = async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true });
@@ -239,6 +242,81 @@ test("a terminal side chat cannot be replaced while the runner is offline", asyn
     assert.match(container.textContent ?? "", /runner must be online to start a new side chat/);
     assert.match(container.textContent ?? "", /This side chat's session failed/,
       "both closures are reported, because they have different remedies");
+  } finally {
+    await act(async () => { root.unmount(); });
+    Object.assign(api, originals);
+    container.remove();
+  }
+});
+
+/**
+ * Cross-model review CR-1.1. Two panels can show the same ended child. When one replaces it, the
+ * other used to keep polling its own retired child forever: its recovery action then failed with
+ * "the current side chat is still active" every time, because the parent had already moved on.
+ * Polling the relationship rather than the child is what lets the second panel catch up.
+ */
+test("a side chat replaced by another client is picked up by the polling panel", async () => {
+  const originals = { sideChat: api.sideChat, session: api.session, getSessionEventPage: api.getSessionEventPage };
+  const ended = { ...child, status: "stopped" } as SessionView;
+  const replacement = { ...child, id: "side-session-elsewhere", status: "idle" } as SessionView;
+  let related: SideChatView = { ...relation, session: ended };
+  api.sideChat = async () => ({ sideChat: related });
+  api.session = async () => ({ session: ended });
+  api.getSessionEventPage = async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true });
+
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(mount(<SideChatPanel session={parent} runnerOnline onInsertDraft={() => {}} />, []));
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    });
+    assert.match(container.textContent ?? "", /can no longer receive messages/);
+
+    // Somebody else replaces it. Only the control plane's answer changes.
+    related = { parentSessionId: parent.id, session: replacement, createdAt: 3 };
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1_800)); });
+
+    assert.equal((container.querySelector("textarea") as HTMLTextAreaElement).disabled, false,
+      "the panel follows the parent's current side chat instead of arguing about a retired one");
+    assert.doesNotMatch(container.textContent ?? "", /can no longer receive messages/);
+  } finally {
+    await act(async () => { root.unmount(); });
+    Object.assign(api, originals);
+    container.remove();
+  }
+});
+
+/**
+ * Cross-model review CR-1.2. `src/e2e/request-surfaces-main.tsx` renders `RightPanel` — and so this
+ * panel — under an `ApiProvider` with no store. An unconditional `useStoreActions()` crashed that
+ * tracked fixture the moment the Side Chat destination was opened.
+ */
+test("the panel still renders where no store is mounted, minus the store-backed link", async () => {
+  const originals = { sideChat: api.sideChat, session: api.session, getSessionEventPage: api.getSessionEventPage };
+  const ended = { ...child, status: "stopped" } as SessionView;
+  api.sideChat = async () => ({ sideChat: { ...relation, session: ended } });
+  api.session = async () => ({ session: ended });
+  api.getSessionEventPage = async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true });
+
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      // Deliberately no StoreProvider.
+      root.render(<SideChatPanel session={parent} runnerOnline onInsertDraft={() => {}} />);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    });
+    assert.match(container.textContent ?? "", /separate worktree and transcript/);
+    assert.equal(Array.from(container.querySelectorAll("button"))
+      .some((button) => button.textContent === "Open Side Chat Session"), false);
+    assert.equal(Array.from(container.querySelectorAll("button"))
+      .some((button) => button.textContent === "Start a New Side Chat"), true,
+      "the recovery action needs no store and stays available");
   } finally {
     await act(async () => { root.unmount(); });
     Object.assign(api, originals);

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
 import { isTerminal, type SessionEvent, type SessionStatus, type SessionView, type SideChatView } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
-import { useStoreActions } from "../store.js";
+import { useHasStore, useStoreActions } from "../store.js";
 import { EventTimeline } from "./EventTimeline.js";
 import { useTimeline } from "./useTimeline.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
@@ -33,6 +33,22 @@ export function sideChatComposerUnavailable(
   return null;
 }
 
+/**
+ * Harness pages render `RightPanel` under an `ApiProvider` with no store (see
+ * `src/e2e/request-surfaces-main.tsx`), and `useStoreActions` throws there. Keeping the one
+ * store-backed control in its own component means adding this link cannot make the whole panel
+ * un-renderable on those pages.
+ */
+function OpenSideChatSession({ childSessionId }: { childSessionId: string }) {
+  const { navigate } = useStoreActions();
+  return (
+    <button type="button" className="btn sidechat-open-child"
+      onClick={() => navigate({ name: "session", id: childSessionId })}>
+      Open Side Chat Session
+    </button>
+  );
+}
+
 export function SideChatPanel({
   session,
   runnerOnline,
@@ -44,7 +60,7 @@ export function SideChatPanel({
   onInsertDraft: (text: string) => void;
 }) {
   const api = useApi();
-  const { navigate } = useStoreActions();
+  const hasStore = useHasStore();
   const [sideChat, setSideChat] = useState<SideChatView | null>();
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [text, setText] = useState("");
@@ -88,16 +104,25 @@ export function SideChatPanel({
     const poll = async () => {
       if (!current || inFlight) return;
       inFlight = true;
+      let readingEvents = false;
       try {
-        const { session: latest } = await api.session(childId);
+        // Poll the RELATIONSHIP, not just this child. Any other client can replace an ended side
+        // chat, and a panel that watched only its own child stayed on the retired transcript for
+        // good — its recovery action then failed with "the current side chat is still active"
+        // forever, because it was still arguing about a child the parent had already let go.
+        const { sideChat: latest } = await api.sideChat(session.id);
         if (!current) return;
-        setSideChat((prior) => prior?.session.id === childId ? { ...prior, session: latest } : prior);
-        const epoch = latest.eventEpoch ?? 0;
+        setSideChat(latest);
+        // A different child means a new generation; this effect re-runs for it rather than merging
+        // the two transcripts here.
+        if (latest?.session.id !== childId) return;
+        const epoch = latest.session.eventEpoch ?? 0;
         if (epochRef.current !== epoch) {
           epochRef.current = epoch;
           cursorRef.current = 0;
           setEvents([]);
         }
+        readingEvents = true;
         const page = await api.getSessionEventPage(childId, cursorRef.current, epoch, PAGE_SIZE);
         if (!current) return;
         if (page.events.length) {
@@ -111,9 +136,10 @@ export function SideChatPanel({
         setError(null);
       } catch (cause) {
         if (!current) return;
-        if (cause instanceof ApiError && cause.status === 409) {
+        if (readingEvents && cause instanceof ApiError && cause.status === 409) {
           // The CP replaced this history generation. The next poll reloads the authoritative
-          // session epoch and starts again from zero; never merge across generations.
+          // session epoch and starts again from zero; never merge across generations. A 409 from
+          // the relationship lookup is a different, reportable condition and must not land here.
           cursorRef.current = 0;
           setEvents([]);
         } else {
@@ -129,7 +155,7 @@ export function SideChatPanel({
       current = false;
       window.clearInterval(timer);
     };
-  }, [api, childId]);
+  }, [api, childId, session.id]);
 
   const items = useTimeline(childId ?? "side-chat", events);
   const latestResponse = useMemo(() => {
@@ -209,10 +235,7 @@ export function SideChatPanel({
       <div className="sidechat-boundary" role="note">
         <strong>Isolated Side Chat</strong>
         <span>{sideChat.session.status} · separate worktree and transcript</span>
-        <button type="button" className="btn sidechat-open-child"
-          onClick={() => navigate({ name: "session", id: sideChat.session.id })}>
-          Open Side Chat Session
-        </button>
+        {hasStore && <OpenSideChatSession childSessionId={sideChat.session.id} />}
       </div>
       <div className="sidechat-timeline" aria-label="Side Chat Transcript">
         {items.length ? (
