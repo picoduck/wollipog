@@ -255,6 +255,8 @@ test("Orchestrator settings preserve and explain a drifted saved model", async (
       "drifted fixed defaults cannot be resaved until the user repairs them");
     await act(async () => trigger.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as never));
     assert.equal(trigger.getAttribute("aria-expanded"), "true", "the shared select remains keyboard operable in drift state");
+    assert.match(container.textContent ?? "", /Choose a Child Harness or return Child Model to Automatic/i);
+    assert.doesNotMatch(container.textContent ?? "", /through the selected Child Harness/i);
   } finally {
     await act(async () => root.unmount());
     container.remove();

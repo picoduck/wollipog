@@ -173,6 +173,9 @@ test("Orchestrator capabilities keep identical model ids scoped to stable harnes
 test("Orchestrator parsing is exact and campaign resolution tracks field-level precedence", () => {
   assert.equal(parseOrchestratorDefaults({ ...defaults(), extra: true }), null);
   assert.equal(parseOrchestratorDefaults({ ...defaults(), behavior: { ...defaults().behavior, childModel: " sol " } }), null);
+  const { childHarness: _legacyChildHarness, ...preV157Behavior } = defaults().behavior;
+  assert.equal(parseOrchestratorDefaults({ ...defaults(), behavior: preV157Behavior }), null,
+    "a stale pre-v157 defaults document cannot silently clear a fixed Child Harness");
   assert.equal(parseOrchestratorOverrides({ behavior: [] }), null);
   assert.equal(parseOrchestratorOverrides({ delegation: { decisions: "all" } }), null);
   assert.equal(parseOrchestratorOverrides({ delegation: { decisions: { unknown: "orchestrator" } } }), null);

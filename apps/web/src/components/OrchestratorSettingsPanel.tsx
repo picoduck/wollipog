@@ -161,7 +161,9 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
           : `${selected} (Unavailable)`,
         description: advertised && !selectedHarness
           ? "This legacy fixed model retains automatic harness resolution. Choose a fixed Child Harness before selecting a different model."
-          : "No current installation advertises this saved model through the selected Child Harness.",
+          : selectedHarness
+            ? "No current installation advertises this saved model through the selected Child Harness."
+            : "No current installation advertises this saved model. Choose a Child Harness or return Child Model to Automatic.",
       });
     }
     return options;

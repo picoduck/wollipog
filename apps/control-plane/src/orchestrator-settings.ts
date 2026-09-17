@@ -38,10 +38,11 @@ export function parseOrchestratorDefaults(value: unknown): OrchestratorDefaults 
   if (Object.keys(behavior).some((key) => ![
     "childHarness", "childModel", "childEffort", "maximumConcurrentChildren", "followUps", "completion",
   ].includes(key)) || Object.keys(delegation).some((key) => !["parentControl", "decisions"].includes(key))) return null;
-  const childHarness = behavior.childHarness === undefined || behavior.childHarness === null
+  if (!Object.hasOwn(behavior, "childHarness")) return null;
+  const childHarness = behavior.childHarness === null
     ? null
     : parseAgentHarnessIdentity(behavior.childHarness);
-  if (behavior.childHarness !== undefined && behavior.childHarness !== null && !childHarness) return null;
+  if (behavior.childHarness !== null && !childHarness) return null;
   if ((behavior.childModel !== null && !identifier(behavior.childModel)) ||
       (behavior.childEffort !== null && !identifier(behavior.childEffort, 64)) ||
       !Number.isSafeInteger(behavior.maximumConcurrentChildren) ||
