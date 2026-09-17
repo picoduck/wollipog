@@ -22031,7 +22031,8 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
     value.sources.execution = { strictProjectIsolation: "legacy_session" };
   }
   const behavior = value.behavior;
-  if ((behavior.childHarness !== null && !normalizeAgentHarnessIdentity(behavior.childHarness)) ||
+  const childHarness = behavior.childHarness === null ? null : normalizeAgentHarnessIdentity(behavior.childHarness);
+  if ((behavior.childHarness !== null && !childHarness) ||
       (behavior.childModel !== null && typeof behavior.childModel !== "string") ||
       (behavior.childEffort !== null && typeof behavior.childEffort !== "string") ||
       !Number.isSafeInteger(behavior.maximumConcurrentChildren) ||
@@ -22041,6 +22042,7 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
       !["off", "questions", "questions_and_approvals"].includes(value.delegation.parentControl) ||
       typeof value.execution?.strictProjectIsolation !== "boolean" ||
       !parentControlDecisionPolicyFromJson(JSON.stringify(value.delegation.decisions))) return null;
+  behavior.childHarness = childHarness;
   const validSources = new Set([
     "system_default", "user_default", "session_override", "compatibility_fallback", "legacy_session", "active_campaign",
   ]);

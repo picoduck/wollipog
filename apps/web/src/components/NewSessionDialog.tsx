@@ -12,20 +12,20 @@ import {
   DEFAULT_LIVE_CHILD_LIMIT,
   MAX_LIVE_CHILD_LIMIT,
   WORKFLOW_DECISION_CATEGORIES,
+  agentHarnessIdentityKey,
   type ProjectLocationView,
   type ProjectView,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type BoxView,
-  type AgentHarnessIdentity,
   type AgentHarnessDefaultsView,
-  type OrchestratorHarnessCapability,
   type ParentControlMode,
   type OrchestratorDefaults,
   type OrchestratorSettingsView,
   type SessionConfig,
   type WorkflowDecisionCategory,
 } from "@wollipog/protocol";
+import { agentHarnessOptionLabel } from "../agent-presentation.js";
 import { useApi } from "../api-context.js";
 import { ApiError } from "../api.js";
 import { useStore } from "../store.js";
@@ -80,30 +80,6 @@ const ORCHESTRATOR_DECISION_LABELS: Record<WorkflowDecisionCategory, string> = {
   follow_up_issue_publication: "Follow-Up Issue Publication",
   ui_evidence_approval: "UI Evidence Approval",
 };
-
-function orchestratorHarnessKey(harness: AgentHarnessIdentity): string {
-  return JSON.stringify([
-    harness.agentId,
-    harness.driver,
-    harness.context.kind,
-    harness.context.kind === "wsl" ? harness.context.distro : "",
-  ]);
-}
-
-function orchestratorHarnessContext(harness: Pick<AgentHarnessIdentity, "context">): string {
-  return harness.context.kind === "wsl" ? `WSL ${harness.context.distro}` : "Native";
-}
-
-function orchestratorHarnessLabel(
-  harness: Pick<OrchestratorHarnessCapability, "name" | "driver" | "context">,
-): string {
-  const driver = harness.driver === "codex-app-server" ? "Codex App Server"
-    : harness.driver === "claude-code" ? "Claude Code"
-    : harness.driver === "acp" ? "ACP"
-    : harness.driver === "pi" ? "Pi"
-    : "Codex";
-  return `${harness.name} · ${driver} · ${orchestratorHarnessContext(harness)}`;
-}
 
 function cloneOrchestratorDefaults(defaults: OrchestratorDefaults): OrchestratorDefaults {
   return {
@@ -468,7 +444,7 @@ export function NewSessionDialog({
   const childHarnesses = orchestratorCapabilities?.harnesses ?? [];
   const fixedChildHarness = orchestratorDraft.behavior.childHarness;
   const fixedChildHarnessCapability = fixedChildHarness
-    ? childHarnesses.find((harness) => orchestratorHarnessKey(harness) === orchestratorHarnessKey(fixedChildHarness))
+    ? childHarnesses.find((harness) => agentHarnessIdentityKey(harness) === agentHarnessIdentityKey(fixedChildHarness))
     : undefined;
   const candidateChildHarnesses = fixedChildHarness
     ? (fixedChildHarnessCapability ? [fixedChildHarnessCapability] : [])
@@ -482,10 +458,10 @@ export function NewSessionDialog({
         : "Update the control plane to configure a fixed Child Harness.",
     },
     ...childHarnesses.map((harness) => ({
-      value: orchestratorHarnessKey(harness),
+      value: agentHarnessIdentityKey(harness),
       label: harness.installations > 0
-        ? orchestratorHarnessLabel(harness)
-        : `${orchestratorHarnessLabel(harness)} (Unavailable)`,
+        ? agentHarnessOptionLabel(harness)
+        : `${agentHarnessOptionLabel(harness)} (Unavailable)`,
       description: harness.installations > 0
         ? `${harness.installations} current installation${harness.installations === 1 ? "" : "s"}.`
         : "No current installation advertises this saved Agent Harness.",
@@ -539,6 +515,10 @@ export function NewSessionDialog({
       : orchestratorCapabilities?.status === "available";
   const orchestratorCapabilitiesValid = !!fixedPairAvailable && fixedHarnessAvailable && fixedHarnessSupported &&
     fixedModelAvailable && fixedEffortAvailable;
+  const orchestratorCapabilitiesError = fixedChildHarness && !fixedHarnessSupported
+    ? "Fixed Child Harness policy requires a protocol-v157 Orchestrator runner. Update the selected runner or choose Automatic."
+    : orchestratorCapabilities?.reason ??
+      "A saved Child Harness, Child Model, or Child Effort is no longer advertised. Choose an available value.";
   const orchestratorDelegationValid =
     (effectiveParentControl === "off" || parentControlSupported) &&
     (!WORKFLOW_DECISION_CATEGORIES.some((category) => effectiveDecision(category) === "orchestrator") ||
@@ -1428,14 +1408,14 @@ export function NewSessionDialog({
                   <span>Child Harness <small aria-hidden="true">{orchestratorSource("behavior.childHarness")}</small></span>
                   <Select<string>
                     label="Child Harness"
-                    value={fixedChildHarness ? orchestratorHarnessKey(fixedChildHarness) : AUTOMATIC_ORCHESTRATOR_VALUE}
+                    value={fixedChildHarness ? agentHarnessIdentityKey(fixedChildHarness) : AUTOMATIC_ORCHESTRATOR_VALUE}
                     options={childHarnessOptions}
                     disabled={!harnessPolicyAvailable}
                     onChange={(value) => {
                       const childHarness = value === AUTOMATIC_ORCHESTRATOR_VALUE
                         ? null
                         : (() => {
-                          const harness = childHarnesses.find((candidate) => orchestratorHarnessKey(candidate) === value);
+                          const harness = childHarnesses.find((candidate) => agentHarnessIdentityKey(candidate) === value);
                           return harness ? { agentId: harness.agentId, driver: harness.driver, context: harness.context } : null;
                         })();
                       setOrchestratorDraft((current) => ({
@@ -1595,7 +1575,7 @@ export function NewSessionDialog({
                 <p className="muted">Secrets, authentication, persistent permission grants, governance changes, cost budgets, and tool guardrails stay human-only.</p>
               </fieldset>
               {!orchestratorCapabilitiesValid && <p className="form-error" role="alert">
-                {orchestratorCapabilities?.reason ?? "A saved Child Model or Child Effort is no longer advertised. Choose an available value."}
+                {orchestratorCapabilitiesError}
               </p>}
               {!orchestratorDelegationValid && <p className="form-error" role="alert">
                 {effectiveParentControl !== "off" && !parentControlSupported

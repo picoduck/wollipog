@@ -139,6 +139,48 @@ test("Orchestrator settings separate policy areas, validate accessibly, and pers
   }
 });
 
+test("all-Automatic defaults remain saveable while no Child Harness installation is advertised", async () => {
+  let current = settings();
+  const reason = "No current Agent Harness installation advertises child model and effort capabilities. Connect or update a runner, then retry.";
+  current.capabilities = {
+    harnesses: [], models: [], effortLevels: [], supportedPairs: [],
+    installations: 0, compatibleInstallations: 0, status: "unavailable", reason,
+  };
+  const writes: Array<{ defaults: OrchestratorSettingsView["defaults"] }> = [];
+  const transport: ApiTransport = {
+    instanceId: "test", publicOrigin: "http://localhost", close() {},
+    async request(_path, init) {
+      if (init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as { defaults: OrchestratorSettingsView["defaults"] };
+        writes.push(body);
+        current = { ...current, defaults: body.defaults };
+      }
+      return new Response(JSON.stringify(current), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<ApiProvider client={createApiClient(transport)}><OrchestratorSettingsPanel /></ApiProvider>));
+    await settle();
+    const save = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Save Defaults")!;
+    assert.equal(save.disabled, false, "the absence of installations does not invalidate an all-Automatic policy");
+    assert.equal(container.querySelector('[role="alert"]')?.textContent, reason);
+    assert.doesNotMatch(container.textContent ?? "", /fixed Child Harness.*not supported together/i);
+    await act(async () => save.click());
+    await settle();
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0]?.defaults.behavior.childHarness, null);
+    assert.equal(writes[0]?.defaults.behavior.childModel, null);
+    assert.equal(writes[0]?.defaults.behavior.childEffort, null);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("Child Harness precedes and scopes model and effort while clearing incompatible selections", async () => {
   let current = settings();
   current.defaults.behavior.childModel = "sol";

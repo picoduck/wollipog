@@ -4135,6 +4135,16 @@ export interface AgentHarnessIdentity {
   context: AgentContext;
 }
 
+/** Canonical comparison key for a stable Agent Harness identity. */
+export function agentHarnessIdentityKey(identity: AgentHarnessIdentity): string {
+  return JSON.stringify([
+    identity.agentId,
+    identity.driver,
+    identity.context.kind,
+    identity.context.kind === "wsl" ? identity.context.distro : "",
+  ]);
+}
+
 /** Parse the credential-free durable Agent Harness identity shared by settings and campaigns. */
 export function normalizeAgentHarnessIdentity(value: unknown): AgentHarnessIdentity | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;

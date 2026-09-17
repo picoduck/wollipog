@@ -846,6 +846,44 @@ test("new Orchestrator sessions send only explicit overrides after showing effec
   }
 });
 
+test("a fixed Child Harness on an older runner shows the protocol-v157 recovery message", async () => {
+  const olderRunner: RunnerView = {
+    ...runner,
+    protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorChildHarnessPolicy - 1,
+    agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+      models: [{ id: "test-model", efforts: ["high"] }], effortLevels: ["high"], slashCommands: [],
+      supportsImages: false, supportsApprovals: true, permissionModes: ["default", "orchestrator"],
+    } })),
+  };
+  const defaults = structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
+  defaults.behavior.childHarness = { agentId: "claude", driver: "claude-code", context: { kind: "native" } };
+  const fixture = await mountFixture({ runners: [olderRunner] }, undefined, undefined, undefined, undefined, async () => ({
+    defaults,
+    source: "user_default",
+    capabilities: {
+      harnesses: [{
+        agentId: "claude", driver: "claude-code", context: { kind: "native" }, name: "Claude",
+        models: [{ id: "test-model", efforts: ["high"] }], effortLevels: ["high"],
+        supportedPairs: [{ modelId: "test-model", effortLevels: ["high"] }], installations: 1,
+      }],
+      models: [{ id: "test-model", efforts: ["high"] }], effortLevels: ["high"],
+      supportedPairs: [{ modelId: "test-model", effortLevels: ["high"] }],
+      installations: 1, compatibleInstallations: 1, status: "available",
+    },
+  }));
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    const alerts = [...fixture.container.querySelectorAll('[role="alert"]')]
+      .map((node) => node.textContent ?? "").join(" ");
+    assert.match(alerts, /requires a protocol-v157 Orchestrator runner.*choose Automatic/i);
+    assert.doesNotMatch(alerts, /saved Child Model or Child Effort is no longer advertised/i);
+    assert.equal(createButton(fixture.container).disabled, true);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("unsupported control-plane combinations explain the upgrade and block Orchestrator creation", async () => {
   const enabledRunner: RunnerView = {
     ...runner,

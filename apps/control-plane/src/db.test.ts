@@ -4320,6 +4320,55 @@ test("legacy Orchestrator sessions gain an inspectable fail-closed campaign snap
   }
 });
 
+test("stored campaign harness identities discard presentation and credential-adjacent fields on read", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    db.registerRunner(meta(), 500);
+    db.createSession(newSession());
+    const policy = {
+      version: 1,
+      behavior: {
+        childHarness: {
+          agentId: "codex", driver: "codex-app-server", context: { kind: "native" },
+          name: "Presentation Only", credentialHint: "must-not-surface",
+        },
+        childModel: null, childEffort: null, maximumConcurrentChildren: 4,
+        followUps: "recommend_only", completion: "retain",
+      },
+      delegation: {
+        parentControl: "off",
+        decisions: {
+          implementation_question: "human", pr_merge: "human", merged_branch_deletion: "human",
+          follow_up_issue_publication: "human", ui_evidence_approval: "human",
+        },
+      },
+      execution: { strictProjectIsolation: false },
+      sources: {
+        behavior: {
+          childHarness: "session_override", childModel: "system_default", childEffort: "system_default",
+          maximumConcurrentChildren: "system_default", followUps: "system_default", completion: "system_default",
+        },
+        delegation: {
+          parentControl: "system_default",
+          decisions: {
+            implementation_question: "system_default", pr_merge: "system_default",
+            merged_branch_deletion: "system_default", follow_up_issue_publication: "system_default",
+            ui_evidence_approval: "system_default",
+          },
+        },
+        execution: { strictProjectIsolation: "system_default" },
+      },
+    };
+    db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?")
+      .run(JSON.stringify(policy), "sess-1");
+    assert.deepEqual(db.getSession("sess-1")?.orchestratorPolicy?.behavior.childHarness, {
+      agentId: "codex", driver: "codex-app-server", context: { kind: "native" },
+    });
+  } finally {
+    db.close();
+  }
+});
+
 test("established human Orchestrator provenance survives the creation-actor migration", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-orchestrator-creator-migration-"));
   const path = join(root, "control-plane.db");

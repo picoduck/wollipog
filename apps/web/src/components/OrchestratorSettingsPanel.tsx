@@ -2,12 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   MAX_LIVE_CHILD_LIMIT,
   WORKFLOW_DECISION_CATEGORIES,
-  type AgentHarnessIdentity,
-  type OrchestratorHarnessCapability,
+  agentHarnessIdentityKey,
   type OrchestratorDefaults,
   type OrchestratorSettingsView,
   type WorkflowDecisionCategory,
 } from "@wollipog/protocol";
+import { agentHarnessOptionLabel } from "../agent-presentation.js";
 import { useApi } from "../api-context.js";
 import { effortLabel } from "../format.js";
 import { SettingsGroup } from "./SettingsView.js";
@@ -21,28 +21,6 @@ const DECISION_LABELS: Record<WorkflowDecisionCategory, string> = {
   follow_up_issue_publication: "Follow-Up Issue Publication",
   ui_evidence_approval: "UI Evidence Approval",
 };
-
-function harnessKey(harness: AgentHarnessIdentity): string {
-  return JSON.stringify([
-    harness.agentId,
-    harness.driver,
-    harness.context.kind,
-    harness.context.kind === "wsl" ? harness.context.distro : "",
-  ]);
-}
-
-function harnessContext(harness: Pick<AgentHarnessIdentity, "context">): string {
-  return harness.context.kind === "wsl" ? `WSL ${harness.context.distro}` : "Native";
-}
-
-function harnessLabel(harness: Pick<OrchestratorHarnessCapability, "name" | "driver" | "context">): string {
-  const driver = harness.driver === "codex-app-server" ? "Codex App Server"
-    : harness.driver === "claude-code" ? "Claude Code"
-    : harness.driver === "acp" ? "ACP"
-    : harness.driver === "pi" ? "Pi"
-    : "Codex";
-  return `${harness.name} · ${driver} · ${harnessContext(harness)}`;
-}
 
 function unavailableError(caught: unknown): string {
   return caught instanceof Error && "status" in caught && (caught as Error & { status?: unknown }).status === 404
@@ -126,7 +104,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   const selectedModel = draft?.behavior.childModel ?? null;
   const selectedEffort = draft?.behavior.childEffort ?? null;
   const selectedHarnessCapability = selectedHarness
-    ? harnesses.find((harness) => harnessKey(harness) === harnessKey(selectedHarness))
+    ? harnesses.find((harness) => agentHarnessIdentityKey(harness) === agentHarnessIdentityKey(selectedHarness))
     : undefined;
   const candidateHarnesses = selectedHarness ? (selectedHarnessCapability ? [selectedHarnessCapability] : []) : harnesses;
   const harnessOptions = useMemo(() => {
@@ -139,8 +117,8 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
     }];
     for (const harness of harnesses) {
       options.push({
-        value: harnessKey(harness),
-        label: harness.installations > 0 ? harnessLabel(harness) : `${harnessLabel(harness)} (Unavailable)`,
+        value: agentHarnessIdentityKey(harness),
+        label: harness.installations > 0 ? agentHarnessOptionLabel(harness) : `${agentHarnessOptionLabel(harness)} (Unavailable)`,
         description: harness.installations > 0
           ? `${harness.installations} current installation${harness.installations === 1 ? "" : "s"}.`
           : "No current installation advertises this saved Agent Harness. Connect it or choose Automatic.",
@@ -218,7 +196,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   }, [candidateHarnesses, harnessPolicySupported, selectedEffort, selectedHarness, selectedModel, view?.capabilities.effortLevels]);
   const limitValid = !!draft && Number.isSafeInteger(draft.behavior.maximumConcurrentChildren) &&
     draft.behavior.maximumConcurrentChildren >= 0 && draft.behavior.maximumConcurrentChildren <= MAX_LIVE_CHILD_LIMIT;
-  const fixedPairValid = harnessPolicySupported
+  const fixedPairValid = (!selectedHarness && !selectedModel && !selectedEffort) || (harnessPolicySupported
     ? candidateHarnesses.some((harness) => harness.installations > 0 &&
       (selectedModel
         ? harness.supportedPairs.some((pair) => pair.modelId === selectedModel &&
@@ -233,7 +211,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         : selectedEffort
           ? view.capabilities.effortLevels.includes(selectedEffort)
           : view.capabilities.installations > 0
-      : view?.capabilities.status === "available";
+      : view?.capabilities.status === "available");
 
   const save = async () => {
     if (!draft || busy || !limitValid || !fixedPairValid) return;
@@ -275,13 +253,13 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
           ? "Automatic or a fixed stable Agent Harness identity. Execution context is part of the identity."
           : "Fixed Child Harness policy is unavailable on this control plane. Update or restart it to enable this control."}
         options={harnessOptions}
-        value={selectedHarness ? harnessKey(selectedHarness) : AUTO}
+        value={selectedHarness ? agentHarnessIdentityKey(selectedHarness) : AUTO}
         disabled={!harnessPolicySupported}
         onChange={(value) => {
           const childHarness = value === AUTO
             ? null
             : (() => {
-              const harness = harnesses.find((candidate) => harnessKey(candidate) === value);
+              const harness = harnesses.find((candidate) => agentHarnessIdentityKey(candidate) === value);
               return harness ? { agentId: harness.agentId, driver: harness.driver, context: harness.context } : null;
             })();
           draftDirty.current = true;

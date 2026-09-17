@@ -310,7 +310,7 @@ test("the Composer exposes human-controlled Parent Control only for Orchestrator
     const select = container.querySelector<HTMLButtonElement>('[aria-label="Parent Control: Human"]');
     assert.ok(select);
     assert.match(container.textContent ?? "", /Campaign Behavior/);
-    assert.match(container.textContent ?? "", /claude · Claude Code Native · Native/);
+    assert.match(container.textContent ?? "", /claude · Claude Code · Native/);
     assert.match(container.textContent ?? "", /claude-opus-5/);
     assert.match(container.textContent ?? "", /Session Override/);
     assert.match(container.textContent ?? "", /keeps its stored policy when account defaults change/);

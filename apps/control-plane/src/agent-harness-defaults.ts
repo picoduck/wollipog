@@ -9,8 +9,8 @@ import type {
   AgentModel,
   UpdateAgentHarnessDefaultRequest,
 } from "@wollipog/protocol";
-import { installationSupportsDefault, normalizeAgentHarnessIdentity } from "@wollipog/protocol";
-export { installationSupportsDefault } from "@wollipog/protocol";
+import { agentHarnessIdentityKey, installationSupportsDefault, normalizeAgentHarnessIdentity } from "@wollipog/protocol";
+export { agentHarnessIdentityKey, installationSupportsDefault } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import type { HumanPrincipal } from "./identity.js";
 
@@ -51,15 +51,6 @@ export function agentHarnessIdentityFor(agent: Pick<AgentDefinition, "id" | "dri
       ? { kind: "wsl", distro: agent.context.distro }
       : { kind: "native" },
   };
-}
-
-export function agentHarnessIdentityKey(identity: AgentHarnessIdentity): string {
-  return JSON.stringify([
-    identity.agentId,
-    identity.driver,
-    identity.context.kind,
-    identity.context.kind === "wsl" ? identity.context.distro : "",
-  ]);
 }
 
 function visibleModels(capabilities: AgentCapabilities | undefined): AgentModel[] {
