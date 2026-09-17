@@ -848,6 +848,62 @@ test("a durable recovered answer rejects a mismatched question occurrence", () =
   }
 });
 
+test("a durable recovered answer rejects a non-primary pending question before queueing", () => {
+  const { sm, store, cleanup } = makeHarness(false);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    entry.running = false;
+    entry.client.agentSessionId = () => "claude-session-1";
+    store.patchMeta("s_perm", {
+      agentSessionId: "claude-session-1",
+      status: "input_required",
+      pendingApproval: {
+        requestId: "primary-recovered-question",
+        recoveryId: "question:3:40",
+        title: "Primary question",
+        options: [],
+        kind: "question",
+        questions: [{ id: "primary", question: "Primary question?", options: [{ label: "Yes" }] }],
+        recoveryReason: "provider_restart",
+        recoveryAction: "resume_answer",
+        additionalRequests: [{
+          requestId: "additional-recovered-question",
+          recoveryId: "question:3:41",
+          title: "Additional question",
+          options: [],
+          kind: "question",
+          questions: [{ id: "additional", question: "Additional question?", options: [{ label: "Yes" }] }],
+          recoveryReason: "provider_restart",
+          recoveryAction: "resume_answer",
+        }],
+      },
+    });
+    const transitions: string[] = [];
+    const lifecycle: DurableCommandLifecycle = {
+      commandId: "answer_non_primary_question",
+      queued: () => { transitions.push("queued"); },
+      started: () => { transitions.push("started"); },
+      completed: () => { transitions.push("completed"); },
+      failed: (error) => { transitions.push(`failed:${error}`); },
+      uncertain: (error) => { transitions.push(`uncertain:${error}`); },
+    };
+
+    sm.answerRecoveredQuestion(
+      "s_perm",
+      "additional-recovered-question",
+      "question:3:41",
+      { additional: "Yes" },
+      lifecycle,
+    );
+
+    assert.deepEqual(transitions, ["failed:the recovered question is no longer pending"]);
+    assert.equal(entry.queue.length, 0);
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.requestId, "primary-recovered-question");
+  } finally {
+    cleanup();
+  }
+});
+
 test("startup retries historical question recovery after a transient history read failure", () => {
   const { sm, store, cleanup } = makeHarness("none");
   try {

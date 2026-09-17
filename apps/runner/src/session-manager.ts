@@ -11548,8 +11548,10 @@ export class SessionManager {
     const retained = meta.providerAuthBlock?.durableRetries?.find((retry) =>
       retry.commandId === durable.commandId && retry.recoveredQuestion);
     const retainedQuestion = retained?.recoveredQuestion;
-    const pending = pendingRequests(meta.pendingApproval).find((request) =>
-      request.kind === "question" && request.requestId === requestId && request.recoveryId === recoveryId);
+    const pending = meta.pendingApproval?.kind === "question" &&
+      meta.pendingApproval.requestId === requestId && meta.pendingApproval.recoveryId === recoveryId
+      ? meta.pendingApproval
+      : undefined;
     let recoveredQuestion: NonNullable<QueuedPrompt["recoveredQuestion"]>;
     if (retainedQuestion) {
       if (retainedQuestion.requestId !== requestId || retainedQuestion.recoveryId !== recoveryId ||
