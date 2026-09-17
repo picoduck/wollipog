@@ -34,6 +34,14 @@ is taken. One run's four top-ranked "security" candidates by line percentage wer
 artifact, and ranking by branch misses surfaced all three real findings and none of the noise.
 Confirm a line-coverage gap against `BRDA` records before reading the source.
 
+When a finding rests on a mutation probe (the real module against a copy with one guard removed),
+write the probe files in the run's scratch directory with the `.mts` extension and run them from
+the repository root: `node --import tsx <scratch>/probe.mts`. Two things fail otherwise and cost a
+run its probe budget: `tsx` cannot be resolved when the working directory is the scratch
+directory, and top-level `await` is rejected in a `.ts` file that sits outside the repository's
+module scope. The probe must import production modules from the repository and copy only the
+code under mutation; the working tree stays untouched.
+
 Coverage numbers are the candidate list, not the finding. Low coverage on a trivial getter matters
 less than a single uncovered branch in credential validation. Rank candidates by consequence:
 
