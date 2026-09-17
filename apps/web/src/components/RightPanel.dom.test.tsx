@@ -6,6 +6,8 @@ import { Window } from "happy-dom";
 import type { SessionView } from "@wollipog/protocol";
 import type { TimelineItem } from "../timeline.js";
 import { panelReturnFocusTarget, RightPanel, useRightPanelState, type RightPanelState } from "./RightPanel.js";
+import type { GovernanceDecision } from "../governance.js";
+import { saveBrowserStorageValue } from "../instance-storage.js";
 import type { GitStatus } from "./useGitStatus.js";
 import { StoreProvider } from "../store.js";
 import { api, ApiError, type ApiClient } from "../api.js";
@@ -97,13 +99,27 @@ const git: GitStatus = {
   mutationRevision: 0,
 };
 
+const governanceDecision: GovernanceDecision = {
+  auditId: "audit-1",
+  requestId: "req-1",
+  decidedBy: "You · device-1",
+  label: "Allowed by Policy",
+  detail: "The matched policy allowed this tool.",
+  tone: "allowed",
+  timestamp: 1_700_000_000_000,
+};
+
 function PanelHarness({
   initialSession = liveSession,
   initialRunnerOnline = true,
+  governanceDecisions,
+  governanceHasMore,
   onState,
 }: {
   initialSession?: SessionView;
   initialRunnerOnline?: boolean;
+  governanceDecisions?: readonly GovernanceDecision[];
+  governanceHasMore?: boolean;
   onState: (state: RightPanelState) => void;
 }) {
   const state = useRightPanelState();
@@ -138,6 +154,9 @@ function PanelHarness({
         runnerProtocolVersion={null}
         git={git}
         items={agentItems}
+        governanceDecisions={governanceDecisions}
+        governanceHasMore={governanceHasMore}
+        onLoadOlderGovernance={() => {}}
         onOpenSourceLocation={() => {}}
         onClearSourceLocation={() => {}}
         onOpenTerminal={() => {}}
@@ -236,5 +255,91 @@ test("an adopted session that is online and running reports Current Activity", a
   } finally {
     await act(async () => root.unmount());
     container.remove();
+  }
+});
+
+async function mountPanel(element: React.ReactElement) {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  await act(async () => root.render(element));
+  return {
+    container,
+    async dispose() {
+      await act(async () => root.unmount());
+      container.remove();
+    },
+  };
+}
+
+test("Governance History renders only its list, empty state, and paging control", async () => {
+  // Every state the mode can reach must be free of the placeholder hint that used to trail the
+  // panel body for any mode outside a hard-coded allow list (#1201).
+  for (const [name, props] of [
+    ["populated", { governanceDecisions: [governanceDecision], governanceHasMore: false }],
+    ["empty page with more available", { governanceDecisions: [], governanceHasMore: true }],
+    ["empty", { governanceDecisions: [], governanceHasMore: false }],
+  ] as const) {
+    let state!: RightPanelState;
+    const panel = await mountPanel(<PanelHarness {...props} onState={(next) => { state = next; }} />);
+    try {
+      await act(async () => state.show("governance"));
+      const body = panel.container.querySelector(".rp-body")!;
+      assert.doesNotMatch(body.textContent ?? "", /Coming soon/, `${name} must not render a placeholder hint`);
+      if (name === "populated") {
+        assert.match(body.textContent ?? "", /Allowed by Policy/);
+        assert.equal(body.querySelector(".governance-history-more"), null, "no paging control without more pages");
+      } else if (name === "empty page with more available") {
+        assert.match(body.textContent ?? "", /No governance decisions are visible in this page yet\./);
+        assert.equal(body.querySelector(".governance-history-more")?.textContent, "Load Older Decisions");
+      } else {
+        assert.match(body.textContent ?? "", /No governance decisions have been recorded for this session\./);
+        assert.equal(body.querySelector(".governance-history-more"), null);
+      }
+    } finally {
+      await panel.dispose();
+    }
+  }
+});
+
+test("a persisted terminal mode restores the launcher instead of an empty panel", async () => {
+  // Older builds reserved a "terminal" panel mode that nothing could open; the value can still
+  // sit in localStorage, and restoring it must land on the launcher (#1201).
+  saveBrowserStorageValue("wollipog.rightpanel.mode", "terminal");
+  saveBrowserStorageValue("wollipog.rightpanel.open", "1");
+  let state!: RightPanelState;
+  const panel = await mountPanel(<PanelHarness onState={(next) => { state = next; }} />);
+  try {
+    assert.equal(state.mode, "launcher");
+    assert.equal(panel.container.querySelector(".rp-launcher") != null, true, "the launcher list is restored");
+    assert.equal(panel.container.querySelector(".rp-body"), null, "no mode body renders for a retired mode");
+    assert.doesNotMatch(panel.container.querySelector(".right-panel")?.textContent ?? "", /Coming soon/);
+    assert.equal(panel.container.querySelector(".rp-title")?.textContent, "Panel");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("every launcher row carries a distinct icon", async () => {
+  // Review used the terminal prompt glyph and Background Work duplicated Terminal's (#1205).
+  let state!: RightPanelState;
+  const panel = await mountPanel(<PanelHarness onState={(next) => { state = next; }} />);
+  try {
+    await act(async () => state.show("launcher"));
+    const rows = [...panel.container.querySelectorAll<HTMLElement>(".rp-launcher .rp-row")];
+    assert.ok(rows.length >= 9, `expected every launcher destination, saw ${rows.length}`);
+    const glyphs = rows.map((row) => {
+      const label = row.querySelector("span:nth-of-type(2)")?.textContent ?? "";
+      const svg = row.querySelector(".rp-row-icon svg");
+      assert.ok(svg, `${label} must render an icon`);
+      return [label, svg!.innerHTML] as const;
+    });
+    const byGlyph = new Map<string, string[]>();
+    for (const [label, glyph] of glyphs) byGlyph.set(glyph, [...(byGlyph.get(glyph) ?? []), label]);
+    const duplicates = [...byGlyph.values()].filter((labels) => labels.length > 1);
+    assert.deepEqual(duplicates, [], "two launcher rows must never share a glyph");
+  } finally {
+    await panel.dispose();
   }
 });

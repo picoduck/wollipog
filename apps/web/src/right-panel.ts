@@ -1,6 +1,6 @@
 /**
  * Pure sizing + mode logic for the right side panel ( a toggleable
- * column hosting Review / Terminal / Browser / Files / Side chat). The React wiring
+ * column hosting Review / Browser / Files / Side chat). The React wiring
  * (pointer capture, localStorage, shortcuts) lives in App.tsx / RightPanel.tsx;
  * everything that can be unit-tested without a DOM lives here.
  */
@@ -14,8 +14,12 @@ export const RIGHT_PANEL_SNAP_CLOSE_WIDTH = 240;
 /** Keyboard resize step for the separator's arrow keys. */
 export const RIGHT_PANEL_KEY_STEP = 16;
 
-/** Panel contents. "launcher" is the empty state listing the other modes. */
-export const RIGHT_PANEL_MODES = ["launcher", "requests", "review", "files", "terminal", "browser", "sidechat", "subagents", "background", "governance"] as const;
+/**
+ * Panel contents. "launcher" is the empty state listing the other modes. Every entry here owns a
+ * body in RightPanel.tsx; the terminal lives in the bottom dock, so there is deliberately no
+ * "terminal" panel mode to restore into an empty column.
+ */
+export const RIGHT_PANEL_MODES = ["launcher", "requests", "review", "files", "browser", "sidechat", "subagents", "background", "governance"] as const;
 export type RightPanelMode = (typeof RIGHT_PANEL_MODES)[number];
 
 /** Clamp a panel width. `max` lets callers pass a viewport-aware ceiling (e.g. 40% of the
@@ -42,7 +46,9 @@ export function parseStoredRightPanelWidth(raw: string | null): number {
 /**
  * Parse a persisted mode. Requests are session-scoped and may disappear while the panel is
  * closed or the browser is reloading, so they are restored through the stable launcher rather
- * than poisoning the generic toggle with a transient destination.
+ * than poisoning the generic toggle with a transient destination. Values this build no longer
+ * knows — including "terminal", which older builds could persist — fall back the same way, so a
+ * stale preference can never restore a panel with nothing in it.
  */
 export function parseStoredRightPanelMode(raw: string | null): RightPanelMode {
   return raw !== "requests" && (RIGHT_PANEL_MODES as readonly string[]).includes(raw ?? "")

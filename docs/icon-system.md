@@ -84,6 +84,8 @@ exports.
 | `ThreadForkIcon` | Lucide | `GitFork` | Conversation fork. |
 | `DialIcon` | Lucide | `CircleGauge` | Model or effort setting. |
 | `PullRequestIcon` | Lucide | `GitPullRequest` | Pull request. |
+| `DiffIcon` | Lucide | `FileDiff` | Changed files in the Review panel. |
+| `JobsIcon` | Lucide | `ListChecks` | Background job list with per-job state. |
 
 The Visual Studio Code mark comes from Microsoft's
 [official SVG asset bundle](https://code.visualstudio.com/assets/branding/visual-studio-code-icons.zip)

@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import { ChevronLeftIcon, CommandLineIcon, FolderIcon, GlobeIcon, HelpIcon, InboxIcon, LockIcon, TeamIcon, TerminalIcon } from "./Icons.js";
+import { ChevronLeftIcon, CommandLineIcon, DiffIcon, FolderIcon, GlobeIcon, HelpIcon, InboxIcon, JobsIcon, LockIcon, TeamIcon } from "./Icons.js";
 import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
@@ -171,7 +171,6 @@ const MODE_TITLES: Record<RightPanelMode, string> = {
   requests: "Requests",
   review: "Review",
   files: "Files",
-  terminal: "Terminal",
   browser: "Browser",
   sidechat: "Side Chat",
   subagents: "Agents",
@@ -377,6 +376,117 @@ export function RightPanel({
     e.preventDefault();
   };
 
+  /**
+   * Every non-launcher mode owns a body. The switch is exhaustive on purpose: adding a mode to
+   * RIGHT_PANEL_MODES without a body here is a compile error, which is what replaced the old
+   * trailing "Coming soon." fallback that leaked a placeholder hint into real modes (#1201).
+   */
+  const modeBody = (mode: Exclude<RightPanelMode, "launcher">): ReactNode => {
+    switch (mode) {
+      case "files":
+        return filesSupported ? (
+          <FilesBrowser
+            session={session}
+            runnerOnline={runnerOnline}
+            runnerProtocolVersion={runnerProtocolVersion}
+            location={sourceLocation}
+            onOpenLocation={onOpenSourceLocation}
+            onClearLocation={onClearSourceLocation}
+            onAttachWorkspaceReference={onAttachWorkspaceReference}
+          />
+        ) : (
+          <div className="hint warn">{filesHint}</div>
+        );
+      case "requests":
+        return onSessionUpdate ? (
+          <SessionRequestPanel
+            session={session}
+            runnerOnline={runnerOnline}
+            descendants={descendantRequests}
+            descendantStatus={descendantRequestStatus}
+            selectedKey={selectedRequestKey}
+            onSelectedKeyChange={onSelectedRequestKeyChange}
+            onSessionUpdate={onSessionUpdate}
+            onDescendantsUpdate={onDescendantsUpdate}
+            onOpenChild={onOpenChildRequest}
+          />
+        ) : null;
+      case "review":
+        return (
+          <ReviewPanel
+            session={session}
+            runnerOnline={runnerOnline}
+            runnerProtocolVersion={runnerProtocolVersion}
+            git={git}
+            forge={forge}
+            onOpenSourceLocation={onOpenSourceLocation}
+            onAttachWorkspaceReference={onAttachWorkspaceReference}
+          />
+        );
+      case "governance":
+        return (
+          <GovernanceHistoryPanel
+            decisions={governanceDecisions}
+            hasMore={governanceHasMore}
+            loadingOlder={governanceLoadingOlder}
+            onLoadOlder={onLoadOlderGovernance}
+          />
+        );
+      case "browser":
+        return <BrowserPanel session={session} />;
+      case "sidechat":
+        return <SideChatPanel session={session} runnerOnline={runnerOnline} onInsertDraft={onInsertSideChatDraft} />;
+      case "subagents":
+        return (
+          <AgentsPanel
+            attentionTarget={attentionTarget}
+            key={`${session.id}:${sessionEventEpoch}`}
+            onOpenPrimaryRequest={(requestId) => {
+              state.close();
+              window.requestAnimationFrame(() => focusSessionRequest(session.id, requestId));
+            }}
+            runnerProtocolVersion={runnerProtocolVersion}
+            parentTurnEventIds={parentTurnEventIds}
+            onOpenParentTurn={onOpenParentTurn}
+            inventoryError={backgroundInventoryError}
+            onRetryInventory={onRetryBackgroundInventory}
+            session={session}
+            items={items}
+            runnerOnline={runnerOnline}
+            earlierActivityUnloaded={earlierActivityUnloaded}
+            requestedId={state.subagentTarget?.sessionId === session.id &&
+              state.subagentTarget.eventEpoch === sessionEventEpoch
+              ? state.subagentTarget.subagentId
+              : null}
+            focusRequest={state.subagentTarget?.sessionId === session.id &&
+              state.subagentTarget.eventEpoch === sessionEventEpoch
+              ? state.subagentTarget.focusRequest
+              : undefined}
+            onFocusRequestHandled={(request) => {
+              state.consumeSubagentFocusRequest(session.id, sessionEventEpoch, request);
+            }}
+            onSelect={(subagentId) => state.selectSubagent(session.id, sessionEventEpoch, subagentId)}
+          />
+        );
+      case "background":
+        return (
+          <BackgroundWorkPanel
+            session={session}
+            runnerOnline={runnerOnline}
+            runnerProtocolVersion={runnerProtocolVersion}
+            parentTurnEventIds={parentTurnEventIds}
+            onOpenParentTurn={onOpenParentTurn}
+            inventoryError={backgroundInventoryError}
+            onRetryInventory={onRetryBackgroundInventory}
+          />
+        );
+      default: {
+        const unhandled: never = mode;
+        throw new Error(`right panel mode without a body: ${String(unhandled)}`);
+      }
+    }
+  };
+
   return (
     <>
       <div
@@ -440,103 +550,7 @@ export function RightPanel({
               standaloneApprovalForReview(session.pendingApproval) !== null}
           />
         ) : (
-          <div className="rp-body">
-            {state.mode === "files" &&
-              (filesSupported ? (
-                <FilesBrowser
-                  session={session}
-                  runnerOnline={runnerOnline}
-                  runnerProtocolVersion={runnerProtocolVersion}
-                  location={sourceLocation}
-                  onOpenLocation={onOpenSourceLocation}
-                  onClearLocation={onClearSourceLocation}
-                  onAttachWorkspaceReference={onAttachWorkspaceReference}
-                />
-              ) : (
-                <div className="hint warn">{filesHint}</div>
-              ))}
-            {state.mode === "requests" && onSessionUpdate && (
-              <SessionRequestPanel
-                session={session}
-                runnerOnline={runnerOnline}
-                descendants={descendantRequests}
-                descendantStatus={descendantRequestStatus}
-                selectedKey={selectedRequestKey}
-                onSelectedKeyChange={onSelectedRequestKeyChange}
-                onSessionUpdate={onSessionUpdate}
-                onDescendantsUpdate={onDescendantsUpdate}
-                onOpenChild={onOpenChildRequest}
-              />
-            )}
-            {state.mode === "review" && (
-              <ReviewPanel
-                session={session}
-                runnerOnline={runnerOnline}
-                runnerProtocolVersion={runnerProtocolVersion}
-                git={git}
-                forge={forge}
-                onOpenSourceLocation={onOpenSourceLocation}
-                onAttachWorkspaceReference={onAttachWorkspaceReference}
-              />
-            )}
-            {state.mode === "governance" && (
-              <GovernanceHistoryPanel
-                decisions={governanceDecisions}
-                hasMore={governanceHasMore}
-                loadingOlder={governanceLoadingOlder}
-                onLoadOlder={onLoadOlderGovernance}
-              />
-            )}
-            {state.mode === "browser" && <BrowserPanel session={session} />}
-            {state.mode === "sidechat" && (
-              <SideChatPanel session={session} runnerOnline={runnerOnline} onInsertDraft={onInsertSideChatDraft} />
-            )}
-            {state.mode === "subagents" && (
-              <AgentsPanel
-                attentionTarget={attentionTarget}
-                key={`${session.id}:${sessionEventEpoch}`}
-                onOpenPrimaryRequest={(requestId) => {
-                  state.close();
-                  window.requestAnimationFrame(() => focusSessionRequest(session.id, requestId));
-                }}
-                runnerProtocolVersion={runnerProtocolVersion}
-                parentTurnEventIds={parentTurnEventIds}
-                onOpenParentTurn={onOpenParentTurn}
-                inventoryError={backgroundInventoryError}
-                onRetryInventory={onRetryBackgroundInventory}
-                session={session}
-                items={items}
-                runnerOnline={runnerOnline}
-                earlierActivityUnloaded={earlierActivityUnloaded}
-                requestedId={state.subagentTarget?.sessionId === session.id &&
-                  state.subagentTarget.eventEpoch === sessionEventEpoch
-                  ? state.subagentTarget.subagentId
-                  : null}
-                focusRequest={state.subagentTarget?.sessionId === session.id &&
-                  state.subagentTarget.eventEpoch === sessionEventEpoch
-                  ? state.subagentTarget.focusRequest
-                  : undefined}
-                onFocusRequestHandled={(request) => {
-                  state.consumeSubagentFocusRequest(session.id, sessionEventEpoch, request);
-                }}
-                onSelect={(subagentId) => state.selectSubagent(session.id, sessionEventEpoch, subagentId)}
-              />
-            )}
-            {state.mode === "background" && (
-              <BackgroundWorkPanel
-                session={session}
-                runnerOnline={runnerOnline}
-                runnerProtocolVersion={runnerProtocolVersion}
-                parentTurnEventIds={parentTurnEventIds}
-                onOpenParentTurn={onOpenParentTurn}
-                inventoryError={backgroundInventoryError}
-                onRetryInventory={onRetryBackgroundInventory}
-              />
-            )}
-            {state.mode !== "requests" && state.mode !== "files" && state.mode !== "review" && state.mode !== "browser" &&
-              state.mode !== "sidechat" && state.mode !== "subagents" && state.mode !== "background" &&
-              <div className="hint">Coming soon.</div>}
-          </div>
+          <div className="rp-body">{modeBody(state.mode)}</div>
         )}
       </aside>
     </>
@@ -609,14 +623,14 @@ function Launcher({
         disabled={!backgroundAvailable}
         hint="No background-work capability or history is available for this session."
         onClick={() => onPick("background")}
-        icon={<CommandLineIcon size={14} />}
+        icon={<JobsIcon size={14} />}
       />
       <LauncherRow
         label="Review"
         kbd={shortcutDisplay("open-review")}
         onClick={() => onPick("review")}
         icon={
-          <TerminalIcon size={14} />
+          <DiffIcon size={14} />
         }
       />
       <LauncherRow

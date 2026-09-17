@@ -15,6 +15,7 @@ import {
   CornerUpLeft as LucideCornerUpLeft,
   Ellipsis as LucideEllipsis,
   EllipsisVertical as LucideEllipsisVertical,
+  FileDiff as LucideFileDiff,
   Folder as LucideFolder,
   FolderKanban as LucideFolderKanban,
   GitBranch as LucideGitBranch,
@@ -28,6 +29,7 @@ import {
   Info as LucideInfo,
   Keyboard as LucideKeyboard,
   List as LucideList,
+  ListChecks as LucideListChecks,
   Lock as LucideLock,
   MessageCircleQuestion as LucideMessageCircleQuestion,
   Mic as LucideMic,
@@ -492,4 +494,12 @@ export function DialIcon(props: IconProps) {
 
 export function PullRequestIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideGitPullRequest} {...props} />;
+}
+
+export function DiffIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideFileDiff} {...props} />;
+}
+
+export function JobsIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideListChecks} {...props} />;
 }
