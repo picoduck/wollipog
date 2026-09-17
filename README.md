@@ -5,7 +5,7 @@
 Wollipog is a local-first control plane for running and supervising coding agents across development machines. It gives you one browser or desktop interface for sessions, approvals, worktrees, terminals, diffs, reviews, automations, and remote runners while execution stays on the machine that owns each repository and toolchain.
 
 > [!IMPORTANT]
-> Wollipog is under active development. Release binaries are currently unsigned, and remote access should be limited to trusted tailnet devices.
+> Wollipog is under active development. macOS bundles are signed and notarized; Windows and Linux binaries are currently unsigned, and remote access should be limited to trusted tailnet devices.
 
 ## Architecture
 

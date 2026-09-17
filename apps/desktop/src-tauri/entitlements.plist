@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Applied by the Tauri bundler to every executable it signs: the app binary and the
+      control-plane and runner sidecars. The sidecars are Node single-executables, and V8
+      needs JIT and unsigned-executable-memory under the hardened runtime, the same subset
+      Node's own release builds request. `get-task-allow` is deliberately absent: the notary
+      service rejects it for Developer ID distribution.
+    -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-executable-page-protection</key>
+    <true/>
+</dict>
+</plist>

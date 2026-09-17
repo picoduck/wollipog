@@ -5,7 +5,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/picoduck/wollipog/main/scripts/install.sh | sh
 #
 # macOS: downloads the .dmg and copies Wollipog.app to /Applications (falls back to
-#        ~/Applications). The app is unsigned — first launch: right-click -> Open.
+#        ~/Applications). The app is Developer ID signed and notarized.
 # Linux: downloads the portable .AppImage to ~/.local/bin.
 #
 # Assets are matched by ARCH SUFFIX (…_x64.dmg, …_amd64.AppImage), so this script works
@@ -121,7 +121,7 @@ case "$os" in
     fi
     # An upgrade across the rename would otherwise leave the obsolete app launchable.
     rm -rf "$dest/Agent Manager.app" 2>/dev/null || true
-    echo "Installed to $dest. First launch: right-click the app -> Open (unsigned build)."
+    echo "Installed to $dest."
     ;;
   Linux)
     asset_record=$(pick "_${appimg}.AppImage")

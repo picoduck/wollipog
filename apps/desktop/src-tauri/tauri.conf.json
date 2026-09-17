@@ -29,6 +29,10 @@
     "active": true,
     "targets": "all",
     "externalBin": ["binaries/control-plane", "binaries/runner"],
+    "macOS": {
+      "hardenedRuntime": true,
+      "entitlements": "entitlements.plist"
+    },
     "resources": {
       "../../web/dist/": "web/"
     },

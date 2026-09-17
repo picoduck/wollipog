@@ -70,8 +70,25 @@ silent, and the long-running control-plane path persists its own release-scoped 
 evidence required before deleting fallback support is defined in
 [Legacy Asset Removal Gate](./runner-updates.md#legacy-asset-removal-gate).
 
-Bundles are currently **unsigned** (first launch shows an "unidentified developer" warning).
-Signing/notarization slots are stubbed in the workflow `env:` for later.
+macOS bundles are **signed and notarized** with a Developer ID Application certificate when the
+`APPLE_*` repository secrets are present: `APPLE_CERTIFICATE` (base64 p12), `APPLE_CERTIFICATE_PASSWORD`,
+and `APPLE_SIGNING_IDENTITY` for signing, plus one notarization method. Preferred: an App Store
+Connect API key as `APPLE_API_KEY_ID`, `APPLE_API_ISSUER_ID`, and `APPLE_API_KEY_P8` (base64 of the
+`.p8`). Fallback: the Apple ID trio `APPLE_ID`, `APPLE_PASSWORD` (app-specific password), and
+`APPLE_TEAM_ID`. The key is preferred because the notary service has answered app-specific-password
+submissions with HTTP 500 for accounts that notarize fine with a key, and Apple's guidance for that
+error is key-based authentication. The workflow exports the secrets only on the macOS legs and only
+when the certificate secret is non-empty. A branch test dispatch without it still produces an
+unsigned throwaway bundle instead of failing; a tag run without it fails, so a missing or deleted
+secret cannot publish an unsigned release. When they are present, the Tauri bundler signs the app and both
+Node sidecars with the hardened runtime and
+[`entitlements.plist`](../apps/desktop/src-tauri/entitlements.plist) (the JIT subset V8 needs),
+notarizes, and staples; a post-build step then requires `codesign --verify --deep --strict`,
+`spctl --assess`, and a stapled ticket, so a signing or notarization failure fails the release rather
+than publishing an unsigned macOS bundle. The macOS legs run under a 120-minute timeout (other
+platforms 45) because the notary wait is unbounded on Tauri's side and a first submission has taken
+over 40 minutes. Windows bundles are still unsigned (SmartScreen warns on
+first launch); Authenticode is configured separately via `tauri.conf.json` `bundle.windows`.
 
 ## One-line install
 

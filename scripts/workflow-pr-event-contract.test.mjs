@@ -462,6 +462,15 @@ test("every workflow job bounds its own runtime", () => {
   // finishes in under 20 minutes, so any bound here is a large improvement; the ceiling
   // below just keeps a future edit from restoring the default in all but name.
   const MAX_TIMEOUT_MINUTES = 60;
+  // The release build job is the one measured exception: its macOS legs wait on Apple's
+  // notary service, which held a first submission for 39 minutes (run 35182251227), and Tauri
+  // passes --wait with no cap of its own. That job may select a per-platform bound with a
+  // `startsWith(matrix.os, 'macos') && <macos> || <other>` expression; the macOS value is
+  // capped separately and every other platform stays under the general ceiling.
+  const RELEASE_BUILD_JOB = "build";
+  const MAX_RELEASE_MACOS_TIMEOUT_MINUTES = 120;
+  const PLATFORM_TIMEOUT_EXPRESSION =
+    /^ {4}timeout-minutes: \$\{\{ startsWith\(matrix\.os, 'macos'\) && (\d+) \|\| (\d+) \}\}$/m;
 
   for (const path of [...WORKFLOWS, RELEASE_WORKFLOW]) {
     const text = readFileSync(resolve(process.cwd(), path), "utf8");
@@ -475,6 +484,23 @@ test("every workflow job bounds its own runtime", () => {
     for (const [index, heading] of jobHeadings.entries()) {
       const end = jobHeadings[index + 1]?.index ?? jobsBlock.length;
       const body = jobsBlock.slice(heading.index, end);
+
+      if (path === RELEASE_WORKFLOW && heading[1] === RELEASE_BUILD_JOB) {
+        const platformTimeout = body.match(PLATFORM_TIMEOUT_EXPRESSION);
+        if (platformTimeout) {
+          const [, macos, other] = platformTimeout.map(Number);
+          assert.ok(
+            macos <= MAX_RELEASE_MACOS_TIMEOUT_MINUTES,
+            `${path}: job "${heading[1]}" macOS timeout-minutes ${macos} exceeds ${MAX_RELEASE_MACOS_TIMEOUT_MINUTES}`,
+          );
+          assert.ok(
+            other <= MAX_TIMEOUT_MINUTES,
+            `${path}: job "${heading[1]}" non-macOS timeout-minutes ${other} exceeds ${MAX_TIMEOUT_MINUTES}`,
+          );
+          continue;
+        }
+      }
+
       const timeout = body.match(/^ {4}timeout-minutes: (\d+)$/m);
 
       assert.ok(timeout, `${path}: job "${heading[1]}" must set timeout-minutes`);
