@@ -3477,6 +3477,25 @@ test("provider-mode Claude Orchestrator keeps a mutation-capable loop interactiv
   assert.equal(h.events[0]?.kind, "permission_request");
 });
 
+test("provider-mode Claude Orchestrator keeps shell-special loop variables interactive", () => {
+  const h = makeHarness({ orchestrator: { strictProjectIsolation: false } });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (h.driver as any).child = { stdin: { write: () => {} } };
+
+  h.feed({
+    type: "control_request",
+    request_id: "special-variable-loop",
+    request: {
+      subtype: "can_use_tool",
+      tool_name: "Bash",
+      input: { command: "for path in 1209; do gh issue view $path; done" },
+    },
+  });
+
+  assert.equal(h.events.length, 1);
+  assert.equal(h.events[0]?.kind, "permission_request");
+});
+
 test("ordinary and strictly isolated Claude sessions do not use the provider Orchestrator bypass", () => {
   const command = "for n in 1209 1210; do gh issue view $n; done";
   for (const overrides of [{}, { orchestrator: { strictProjectIsolation: true } }]) {

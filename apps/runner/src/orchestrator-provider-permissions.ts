@@ -2,7 +2,9 @@ import { parse, type ParseEntry } from "shell-quote";
 
 const MAX_COMMAND_LENGTH = 16_384;
 const MAX_LOOP_ITEMS = 100;
-const LOOP_IDENTIFIER = /^[a-z][a-z0-9_]{0,31}$/u;
+// Some shells expose lowercase special parameters: in zsh, assigning `path` also changes PATH.
+// A fixed list prevents loop setup from changing command resolution before the audited `gh` call.
+const LOOP_IDENTIFIERS = new Set(["n", "i", "id", "num", "issue", "pr"]);
 const ISSUE_OR_PR_NUMBER = /^[1-9][0-9]{0,15}$/u;
 const INPUT_KEYS = new Set(["command", "description", "timeout"]);
 
@@ -74,7 +76,7 @@ export function isRoutineClaudeOrchestratorBash(command: string): boolean {
     return false;
   }
 
-  if (tokens[0] !== "for" || !isPlainArgument(tokens[1]) || !LOOP_IDENTIFIER.test(tokens[1]) ||
+  if (tokens[0] !== "for" || !isPlainArgument(tokens[1]) || !LOOP_IDENTIFIERS.has(tokens[1]) ||
       tokens[2] !== "in") return false;
   const loopVariable = tokens[1];
   const listEnd = tokens.findIndex((token, index) => index >= 3 && isOperator(token, ";"));

@@ -10,7 +10,7 @@ const issueIds = fc.uniqueArray(fc.integer({ min: 1, max: 999_999_999 }), {
   minLength: 1,
   maxLength: 30,
 });
-const loopVariables = fc.stringMatching(/^[a-z][a-z0-9_]{0,7}$/u);
+const loopVariables = fc.constantFrom("n", "i", "id", "num", "issue", "pr");
 const inspections = fc.array(fc.constantFrom(
   "gh issue view $VAR --json number,title,state",
   "gh pr view $VAR --json number,title,state",
@@ -52,6 +52,7 @@ test("the loop parser fails closed on shell expansion, redirection, and control-
     "for n in 1; do gh issue view $(touch changed.txt); done",
     "for n in 1; do gh issue view `touch changed.txt`; done",
     "for n in 1; do gh issue view $other; done",
+    "for path in 1; do gh issue view $path; done",
     "for n in one; do gh issue view $n; done",
     "for n in 1\n2; do gh issue view $n; done",
     "for n in 1; do git status; done",
