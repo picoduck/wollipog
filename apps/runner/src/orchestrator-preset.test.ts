@@ -376,6 +376,15 @@ test("provider-mode Claude Orchestrator pre-authorizes routine coordination but 
   assert.equal(claude.includes("--permission-mode"), false,
     "the Claude driver supplies its verified interactive Default permission channel");
   const allowed = (claude[claude.indexOf("--allowedTools") + 1] ?? "").split(",");
+  assert.deepEqual(allowed.filter((tool) => tool.startsWith("Bash(")), [
+    "Bash(git log)", "Bash(git diff)", "Bash(git show)", "Bash(git status)", "Bash(git status:*)",
+    "Bash(git worktree list)", "Bash(git worktree list:*)",
+    "Bash(git branch)", "Bash(git branch -a)", "Bash(git branch -r)", "Bash(git branch -v)",
+    "Bash(git branch -vv)", "Bash(git branch --show-current)",
+    "Bash(gh issue list)", "Bash(gh issue list:*)", "Bash(gh issue view:*)", "Bash(gh issue status)",
+    "Bash(gh issue status:*)", "Bash(gh pr list)", "Bash(gh pr list:*)", "Bash(gh pr view:*)",
+    "Bash(gh pr checks:*)", "Bash(gh pr diff:*)", "Bash(gh pr status)", "Bash(gh pr status:*)",
+  ], "provider-mode Bash permissions stay at the audited read-only coordination surface");
   for (const routine of [
     "mcp__wollipog__*", "Read", "Grep", "Glob", "WebFetch", "WebSearch",
     "Bash(git log)", "Bash(git diff)", "Bash(git show)",

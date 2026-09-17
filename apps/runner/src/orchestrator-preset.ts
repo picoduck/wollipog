@@ -39,8 +39,6 @@ const PROVIDER_ORCHESTRATOR_CLAUDE_BASH_RULES = [
   "git worktree list", "git worktree list:*",
   "git branch", "git branch -a", "git branch -r", "git branch -v", "git branch -vv", "git branch --show-current",
   "gh issue list", "gh issue list:*", "gh issue view:*", "gh issue status", "gh issue status:*",
-  "gh issue edit --add-assignee:*", "gh issue edit --remove-assignee:*",
-  "gh issue edit --add-label:*", "gh issue edit --remove-label:*", "gh issue comment:*",
   "gh pr list", "gh pr list:*", "gh pr view:*", "gh pr checks:*", "gh pr diff:*", "gh pr status",
   "gh pr status:*",
 ];
