@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   RIGHT_PANEL_DEFAULT_WIDTH,
+  RIGHT_PANEL_MODES,
   RIGHT_PANEL_MAX_WIDTH,
   RIGHT_PANEL_MIN_WIDTH,
   RIGHT_PANEL_SNAP_CLOSE_WIDTH,
@@ -45,15 +46,22 @@ test("parseStoredRightPanelWidth: numeric strings parse and clamp", () => {
 });
 
 test("parseStoredRightPanelMode: valid modes pass through", () => {
-  for (const m of ["launcher", "review", "files", "terminal", "browser", "sidechat", "subagents", "background", "governance"] as const) {
+  for (const m of ["launcher", "review", "files", "browser", "sidechat", "subagents", "background", "governance"] as const) {
     assert.equal(parseStoredRightPanelMode(m), m);
   }
 });
 
-test("parseStoredRightPanelMode: transient, missing, and invalid modes fall back to the launcher", () => {
-  for (const raw of ["requests", null, "", "shell", "Files", "0"]) {
+test("parseStoredRightPanelMode: transient, retired, missing, and invalid modes fall back to the launcher", () => {
+  // "terminal" is the retired reserved mode (#1201): older builds could persist it, and it must
+  // restore the launcher rather than a panel with no body.
+  for (const raw of ["requests", "terminal", null, "", "shell", "Files", "0"]) {
     assert.equal(parseStoredRightPanelMode(raw), "launcher", `raw=${JSON.stringify(raw)}`);
   }
+});
+
+test("every panel mode is a real destination — no reserved placeholder survives", () => {
+  assert.equal(RIGHT_PANEL_MODES.includes("terminal" as never), false,
+    "the terminal lives in the bottom dock; the panel must not reserve an unreachable mode");
 });
 
 test("resolveRightPanelDrag: dragging the left edge leftward grows the panel", () => {
