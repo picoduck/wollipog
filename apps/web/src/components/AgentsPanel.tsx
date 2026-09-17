@@ -327,9 +327,10 @@ export function AgentsPanel(props: Props) {
     }, childRegistryRefreshDelay(rosterChanged, Date.now() - lastRegistryRefresh.current));
     return () => clearTimeout(timer);
     // Event progress invalidates the durable lifecycle even when its transcript row is not loaded,
-    // so it still schedules a refresh — at the idle cadence rather than per event.
+    // so it still schedules a refresh — at the idle cadence rather than per event. The generation
+    // stays a dependency so a session or epoch change still cancels a timer armed for the old one.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rosterKey, progressKey]);
+  }, [rosterKey, progressKey, registryGeneration]);
   const compactAttentionOwners = useMemo(() => mergeCompactAttentionOwners(
     attentionOwners, session.attentionOwners ?? [],
   ), [attentionOwners, session.attentionOwners]);
