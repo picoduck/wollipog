@@ -58,6 +58,8 @@ const MAX_PENDING_PI_QUESTIONS = 128;
 const PI_AGENT_CONTROL_READY_TIMEOUT_MS = 30_000;
 const PI_TRUST_STARTUP_TIMEOUT_MS = 2_000_000_000;
 const PI_STARTUP_PROGRESS_TIMEOUT_MS = 15_000;
+const PI_APPROVAL_INPUT_LIMIT = 16_000;
+const PI_APPROVAL_INPUT_TRUNCATED = "\n… [truncated by Wollipog]";
 
 function permissionModeRequiresAgentControl(mode: string | undefined): boolean {
   return mode !== undefined && mode !== "bypassPermissions" && mode !== "orchestrator";
@@ -79,6 +81,13 @@ function boundedText(value: unknown, max = 16_000): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function boundedApprovalInput(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value) return undefined;
+  if (value.length <= PI_APPROVAL_INPUT_LIMIT) return value;
+  return value.slice(0, PI_APPROVAL_INPUT_LIMIT - PI_APPROVAL_INPUT_TRUNCATED.length) +
+    PI_APPROVAL_INPUT_TRUNCATED;
 }
 
 function contentText(content: unknown, kind: "text" | "thinking"): string {
@@ -914,7 +923,7 @@ export class PiRpcDriver implements Driver {
     const toolName = typeof payload.toolName === "string" && payload.toolName
       ? payload.toolName.slice(0, 256)
       : "Pi Tool";
-    const input = typeof payload.input === "string" && payload.input ? payload.input.slice(0, 16_000) : undefined;
+    const input = boundedApprovalInput(payload.input);
     const toolCallId = typeof payload.toolCallId === "string" && payload.toolCallId
       ? payload.toolCallId.slice(0, 512)
       : undefined;

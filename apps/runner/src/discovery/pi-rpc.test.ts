@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { spawnAgent } from "../spawn.js";
@@ -7,11 +9,25 @@ import { probePiRpc } from "./pi-rpc.js";
 const fixture = fileURLToPath(new URL("../drivers/fixtures/fake-pi-rpc.mjs", import.meta.url));
 
 test("Pi discovery derives models, thinking levels, images, commands, and skills from RPC", async () => {
+  let observedPrivateProbe = false;
   const result = await probePiRpc(
     { command: process.execPath, args: [fixture] },
     { kind: "native" },
-    { cwd: process.cwd(), timeoutMs: 2_000 },
+    {
+      cwd: process.cwd(),
+      timeoutMs: 2_000,
+      spawn: (options) => {
+        assert.notEqual(options.cwd, process.cwd());
+        assert.equal(existsSync(join(options.cwd, ".pi", "settings.json")), true);
+        assert.equal(options.args.includes("--extension"), true);
+        assert.equal(options.args.includes("--no-approve"), false,
+          "the trust hook must run so the probe can prove it declines project resources");
+        observedPrivateProbe = true;
+        return spawnAgent(options);
+      },
+    },
   );
+  assert.equal(observedPrivateProbe, true);
   assert.equal(result.available, true, result.unavailableReason);
   assert.equal(result.authStatus, "authenticated");
   assert.deepEqual(result.capabilities.models.map((model) => ({

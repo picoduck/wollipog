@@ -3291,8 +3291,13 @@ export class SessionsService {
           if (preference.model !== undefined) requestedConfig.model = preference.model;
           if (preference.effort !== undefined) requestedConfig.effort = preference.effort;
         }
-        if (requestedConfig.permissionMode === undefined && preference.permissionMode !== undefined) {
-          requestedConfig.permissionMode = preference.permissionMode;
+        const savedPermissionMode = launch.driver === "pi" && executionTarget.adapter !== "host" &&
+            preference.permissionMode !== undefined && preference.permissionMode !== "bypassPermissions" &&
+            preference.permissionMode !== "orchestrator"
+          ? undefined
+          : preference.permissionMode;
+        if (requestedConfig.permissionMode === undefined && savedPermissionMode !== undefined) {
+          requestedConfig.permissionMode = savedPermissionMode;
         }
       }
       if (requestedConfig.permissionMode === undefined) {

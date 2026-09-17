@@ -11,6 +11,7 @@ const verifiedTrustBridge = Boolean(
 if (!argv.includes("--mode") || !argv.includes("rpc") ||
     (!argv.includes("--no-approve") && !verifiedTrustBridge && !(agentControlProbe && agentControlProbeNonce))) process.exit(64);
 if (scenario === "verified-launch" && argv.includes("--no-approve")) process.exit(65);
+if (scenario === "orchestrator-launch" && !argv.includes("--no-approve")) process.exit(67);
 
 const resumedAt = argv.indexOf("--session");
 const forkedAt = argv.indexOf("--fork");

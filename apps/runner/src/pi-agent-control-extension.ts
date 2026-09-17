@@ -64,6 +64,15 @@ const HANDSHAKE_TIMEOUT_MS = 35_000;
 const STATUS_KEY = ${JSON.stringify(PI_AGENT_CONTROL_STATUS_KEY)};
 const SECURITY_TITLE = ${JSON.stringify(PI_SECURITY_REQUEST_TITLE)};
 const SECURITY_PREFIX = ${JSON.stringify(PI_SECURITY_REQUEST_PREFIX)};
+const APPROVAL_INPUT_LIMIT = 16000;
+const APPROVAL_INPUT_TRUNCATED = "\\n… [truncated by Wollipog]";
+
+function approvalInput(value) {
+  let serialized;
+  try { serialized = JSON.stringify(value ?? {}); } catch { serialized = "{}"; }
+  if (serialized.length <= APPROVAL_INPUT_LIMIT) return serialized;
+  return serialized.slice(0, APPROVAL_INPUT_LIMIT - APPROVAL_INPUT_TRUNCATED.length) + APPROVAL_INPUT_TRUNCATED;
+}
 
 async function securityApproval(ctx, payload) {
   const nonce = process.env.${PI_SECURITY_REQUEST_NONCE_ENV};
@@ -150,13 +159,11 @@ export default function (pi) {
   // tool_call is Pi's documented pre-execution interception point. A missing/cancelled bridge
   // blocks rather than falling through to execution; the driver applies the selected live mode.
   pi.on("tool_call", async (event, ctx) => {
-    let input = "";
-    try { input = JSON.stringify(event?.input ?? {}).slice(0, 16000); } catch { input = "{}"; }
     const approved = await securityApproval(ctx, {
       kind: "tool_call",
       toolCallId: typeof event?.toolCallId === "string" ? event.toolCallId.slice(0, 512) : "",
       toolName: typeof event?.toolName === "string" ? event.toolName.slice(0, 256) : "Pi Tool",
-      input,
+      input: approvalInput(event?.input),
     });
     if (approved !== true) return { block: true, reason: "Blocked by Wollipog permission policy." };
   });

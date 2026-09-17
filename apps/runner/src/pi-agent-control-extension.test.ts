@@ -111,6 +111,17 @@ test("generated Pi Agent Control extension makes trust durable and blocks tools 
     input: { command: "git status" },
   }, ctx), undefined);
 
+  await handlers.get("tool_call")?.({
+    toolCallId: "call-long",
+    toolName: "bash",
+    input: { command: "x".repeat(20_000) },
+  }, ctx);
+  const longEnvelope = messages.at(-1)?.message ?? "";
+  const encoded = longEnvelope.slice(`${PI_SECURITY_REQUEST_PREFIX}security-nonce.`.length);
+  const longPayload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+  assert.equal(longPayload.input.length, 16_000);
+  assert.match(longPayload.input, /… \[truncated by Wollipog\]$/);
+
   delete process.env[PI_SECURITY_REQUEST_NONCE_ENV];
   assert.deepEqual(await handlers.get("tool_call")?.({ toolCallId: "call-2", toolName: "write" }, ctx), {
     block: true,

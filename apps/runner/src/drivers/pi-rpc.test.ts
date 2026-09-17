@@ -275,6 +275,15 @@ test("Pi RPC enforces live pre-execution permission modes before answering the e
   assert.equal(driver.resolvePermission("tool-1", "deny"), true);
   assert.deepEqual(sent.pop(), { type: "extension_ui_response", id: "tool-1", confirmed: false });
 
+  (driver as any).onRpcEvent(securityRequest(nonce, "tool-long", {
+    kind: "tool_call", toolCallId: "provider-tool-long", toolName: "bash", input: "x".repeat(20_000),
+  }));
+  const longRequest = events.find((event): event is Extract<SessionEventPayload, { kind: "permission_request" }> =>
+    event.kind === "permission_request" && event.requestId === "tool-long")!;
+  assert.equal(longRequest.context?.input?.length, 16_000);
+  assert.match(longRequest.context?.input ?? "", /… \[truncated by Wollipog\]$/);
+  assert.equal(driver.resolvePermission("tool-long", "deny"), true);
+
   await driver.setConfig({ permissionMode: "bypassPermissions" });
   (driver as any).onRpcEvent(securityRequest(nonce, "tool-2", {
     kind: "tool_call", toolCallId: "provider-tool-2", toolName: "write", input: "{}",
@@ -363,7 +372,7 @@ test("Pi RPC refuses safe permission modes when the Agent Control bridge is inco
     driver.dispose();
   }
   for (const permissionMode of [undefined, "bypassPermissions", "orchestrator"] as const) {
-    const permitted = options();
+    const permitted = options(permissionMode === "orchestrator" ? "orchestrator-launch" : "normal");
     permitted.config = permissionMode === undefined ? {} : { permissionMode };
     const driver = new PiRpcDriver(permitted, callbacks([]));
     await driver.initialize();

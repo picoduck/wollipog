@@ -6042,6 +6042,24 @@ test("container Pi sessions do not claim host-only approval enforcement", () => 
   assert.ok(created.ok && created.data, created.error);
   assert.equal(hub.sentOfType("start_session").at(-1)?.spec.config.permissionMode, undefined);
 
+  const userId = db.localIdentityContext().userId;
+  db.setAgentHarnessDefault(userId, {
+    agentId: piAgentId, driver: "pi", context: { kind: "native" },
+  }, { permissionMode: "default" });
+  const savedDefault = svc.createSession(
+    {
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: piAgentId,
+      executionTargetId: container.id, useWorktree: true,
+    },
+    undefined, undefined, false, false, false, { defaultOwnerUserId: userId },
+  );
+  assert.ok(savedDefault.ok && savedDefault.data, savedDefault.error);
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.config.permissionMode, undefined,
+    "a host-only saved default is omitted without rewriting the user's preference");
+  assert.equal(db.getAgentHarnessDefault(userId, {
+    agentId: piAgentId, driver: "pi", context: { kind: "native" },
+  })?.config.permissionMode, "default");
+
   const misleading = svc.createSession({
     runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: piAgentId,
     executionTargetId: container.id, useWorktree: true, config: { permissionMode: "dontAsk" },

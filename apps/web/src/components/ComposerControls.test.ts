@@ -12,6 +12,7 @@ import {
   permissionModeOutcome,
   serviceTierChoices,
   ServiceTierMenuChoices,
+  sessionPermissionModeControls,
 } from "./ComposerControls.js";
 
 test("model and reasoning effort are separately labelled menu-radio groups", () => {
@@ -210,6 +211,51 @@ test("the closed permission control identifies the resolved default instead of a
     approvalControlLabel("claude-code", "default", "available"),
     "Ask Every Time",
   );
+  assert.equal(
+    approvalControlLabel("pi", "", "available"),
+    "Ask Every Time",
+  );
+});
+
+test("Pi permission controls reflect target support and retain a Full Access recovery path", () => {
+  const capabilities = {
+    models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+    permissionModes: ["default", "dontAsk", "bypassPermissions"],
+  };
+  assert.deepEqual(sessionPermissionModeControls({
+    driver: "pi", permissionMode: null,
+    executionTarget: {
+      id: "container", runnerId: "runner", kind: "container", adapter: "container",
+      workspaceStrategy: "worktree",
+      boundaries: { filesystem: "container", network: "deny", secrets: "none", billing: "none" },
+    },
+  }, capabilities), {
+    permModes: ["bypassPermissions"],
+    permVal: "bypassPermissions",
+    showDefaultPermissionMode: false,
+  });
+  assert.deepEqual(sessionPermissionModeControls({
+    driver: "pi", permissionMode: "default",
+    executionTarget: {
+      id: "host", runnerId: "runner", kind: "local", adapter: "host",
+      workspaceStrategy: "worktree",
+      boundaries: { filesystem: "host", network: "inherit", secrets: "runner_local", billing: "agent_account" },
+    },
+  }, undefined), {
+    permModes: ["bypassPermissions"],
+    permVal: "default",
+    showDefaultPermissionMode: true,
+  });
+  const nonHostMenu = renderToStaticMarkup(React.createElement(ApprovalsMenuChoices, {
+    capabilities,
+    driver: "pi",
+    permModes: ["bypassPermissions"],
+    permVal: "bypassPermissions",
+    apply: () => {}, close: () => {}, onDetails: () => {}, showDefault: false,
+  }));
+  assert.doesNotMatch(nonHostMenu, />Default</);
+  assert.match(nonHostMenu, /Full Access/);
+  assert.equal((nonHostMenu.match(/role="menuitemradio"/g) ?? []).length, 1);
 });
 
 test("legacy approval choices remain unknown rather than unsupported", () => {
