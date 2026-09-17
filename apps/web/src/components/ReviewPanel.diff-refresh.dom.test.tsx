@@ -123,6 +123,24 @@ function diffOf(seed: string, files: GitDiffFile[]): GitDiffInfo {
   };
 }
 
+/**
+ * A diff carrying the canonical staged/unstaged panes, where `src/b.ts` is byte-identical in both.
+ * That identity is the point: it is the only shape in which per-hunk selections could survive a
+ * pane switch, so it is what pins the lineage reset.
+ */
+function panedDiff(seed: string): GitDiffInfo {
+  const shared = [fileA(), fileB()];
+  return {
+    ...diffOf(seed, shared),
+    stagedFiles: [fileB()],
+    unstagedFiles: [fileB()],
+    stagedDiffHash: hash("5"),
+    unstagedDiffHash: hash("6"),
+    stagedStats: { filesChanged: 1, insertions: 1, deletions: 1 },
+    unstagedStats: { filesChanged: 1, insertions: 1, deletions: 1 },
+  };
+}
+
 function statusOf(over: Partial<GitStatusInfo> = {}): GitStatusInfo {
   return {
     branch: "agent/session-1",
@@ -219,6 +237,8 @@ interface Harness {
   serveDiff: (diff: GitDiffInfo) => void;
   /** Fail the next `api.gitDiff` calls until `serveDiff` is called again. */
   failDiff: (message: string) => void;
+  /** Hold every subsequent `api.gitDiff` open; the returned function releases them all. */
+  holdDiff: () => () => Promise<void>;
   /** Hold the next stage reply, returning a resolver for it. */
   holdStage: () => (reply: { diff?: GitDiffInfo; status?: GitStatusInfo }) => Promise<void>;
   render: (over?: { status?: GitStatusInfo | null; sessionStatus?: SessionView["status"] }) => Promise<void>;
@@ -241,11 +261,14 @@ async function mountPanel(options: {
   const diffCalls: string[] = [];
   const installed: GitStatusInfo[] = [];
   let stageGate: ((reply: { diff?: GitDiffInfo; status?: GitStatusInfo }) => void) | null = null;
+  let diffHeld = false;
+  let heldDiffs: Array<() => void> = [];
 
   const client = {
     ...api,
     gitDiff: async (_id: string, scope: string) => {
       diffCalls.push(scope);
+      if (diffHeld) await new Promise<void>((resolve) => heldDiffs.push(resolve));
       if (failure) throw new Error(failure);
       return { diff: served! };
     },
@@ -296,6 +319,15 @@ async function mountPanel(options: {
     diffCalls,
     installed,
     serveDiff: (diff) => { served = diff; failure = null; },
+    holdDiff: () => {
+      diffHeld = true;
+      return async () => {
+        diffHeld = false;
+        const waiting = heldDiffs;
+        heldDiffs = [];
+        await act(async () => { for (const resolve of waiting) resolve(); });
+      };
+    },
     failDiff: (message) => { failure = message; },
     holdStage: () => {
       // A sentinel so `gitStageHunk` takes the gated path; it is replaced by the real resolver the
@@ -332,6 +364,34 @@ function stageButton(container: HTMLElement, path: string): HTMLElement {
   const found = [...card(container, path).querySelectorAll<HTMLElement>("button.hunk-act")]
     .find((button) => (button.textContent ?? "").trim() === "Stage");
   if (!found) throw new Error(`no Stage control on ${path}`);
+  return found;
+}
+
+/** One option of the index-pane segmented control ("All Changes" / "Unstaged" / "Staged"). */
+function paneButton(container: HTMLElement, label: string): HTMLElement {
+  const group = container.querySelector<HTMLElement>('[aria-label="Index Pane"]');
+  if (!group) throw new Error("the index-pane control is not rendered");
+  const found = [...group.querySelectorAll<HTMLElement>("button")]
+    .find((button) => (button.textContent ?? "").trim() === label);
+  if (!found) throw new Error(`no pane option labelled ${label}`);
+  return found;
+}
+
+/** How many lines the visible hunks report as selected, read off the Stage/Unstage Selected labels. */
+function selectedCount(container: HTMLElement): number {
+  let total = 0;
+  for (const button of container.querySelectorAll<HTMLElement>("button.hunk-act")) {
+    const found = /Selected \((\d+)\)/.exec(button.textContent ?? "");
+    if (found) total += Number(found[1]);
+  }
+  return total;
+}
+
+/** The diff pane's refresh control, matched on its current label so busy state is asserted, not assumed. */
+function refreshDiffButton(container: HTMLElement, label: string): HTMLElement {
+  const found = [...container.querySelectorAll<HTMLElement>(".git-diff-controls button")]
+    .find((button) => (button.textContent ?? "").trim() === label);
+  if (!found) throw new Error(`no diff refresh control labelled ${label}`);
   return found;
 }
 
@@ -515,6 +575,88 @@ test("a finding goes stale once its own anchored line changes", async () => {
   }
 });
 
+test("a draft editor in an untouched hunk is not rebuilt when another hunk of its file changes", async () => {
+  // Node identity is the assertion: the text surviving proves the store works, but only the same
+  // DOM node proves the editor was never remounted — which is what keeps focus and the caret where
+  // the reviewer left them while the agent edits the rest of the file every 10 seconds (#1204).
+  const harness = await mountPanel({ diff: diffOf("1", [fileA(), fileB({ extraHunks: 1 })]) });
+  try {
+    await act(async () => {
+      fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
+    });
+    const textarea = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
+    await act(async () => {
+      textarea.value = "mid-sentence";
+      fireDomEvent.change(textarea);
+    });
+
+    // The file's SECOND hunk is rewritten. The drafted hunk is untouched.
+    const rewrittenTail = fileB({ extraHunks: 1 });
+    rewrittenTail.hunks[1]!.lines = [{ status: "+", text: "rewritten-tail" }];
+    harness.serveDiff(diffOf("2", [fileA(), rewrittenTail]));
+    await harness.render({ status: statusOf({ addedLines: 6 }) });
+    assert.ok(harness.container.textContent?.includes("rewritten-tail"), "the reload landed");
+
+    assert.equal(
+      field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea"),
+      textarea,
+      "the same textarea node, so focus and caret were never disturbed",
+    );
+    assert.equal(textarea.value, "mid-sentence");
+  } finally {
+    await harness.unmount();
+  }
+});
+
+test("a draft that outlived the line it targets says so instead of submitting silently", async () => {
+  const harness = await mountPanel();
+  try {
+    await act(async () => {
+      fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
+    });
+    await act(async () => {
+      const body = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
+      body.value = "this context line is wrong";
+      fireDomEvent.change(body);
+    });
+    assert.ok(!harness.container.textContent?.includes("This line changed after you started writing"));
+
+    // The agent rewrites the very line the draft is aimed at. Line 10 still exists, so the draft
+    // must survive (#1203) — but its text was written about content that is no longer there.
+    harness.serveDiff(diffOf("2", [fileA(), fileB({ context: "keep-rewritten" })]));
+    await harness.render({ status: statusOf({ addedLines: 8 }) });
+
+    const editor = requiredEditor(harness.container, "src/b.ts");
+    assert.equal(field<HTMLTextAreaElement>(editor, "textarea").value, "this context line is wrong",
+      "the typed text still survives, as the criterion requires");
+    assert.ok(editor.textContent?.includes("This line changed after you started writing"),
+      "and the editor admits the anchor moved");
+  } finally {
+    await harness.unmount();
+  }
+});
+
+test("per-hunk line selections do not survive a pane switch, even where the file is identical", async () => {
+  // Pane-local anchor identity: a selection made against the unstaged pane must not be reusable in
+  // the staged pane, where the same line numbers carry a different anchor identity — and where
+  // Attach would emit the other pane's `diffHash` for it.
+  const harness = await mountPanel({ diff: panedDiff("1") });
+  try {
+    await act(async () => { fireDomEvent.click(paneButton(harness.container, "Unstaged")); });
+    const selectable = harness.container.querySelectorAll<HTMLInputElement>(
+      'input[type="checkbox"][aria-label^="Select removed line"], input[type="checkbox"][aria-label^="Select added line"]',
+    );
+    assert.ok(selectable.length > 0, "the unstaged pane offers line staging");
+    await act(async () => { fireDomEvent.change(selectable[0]!, { target: { checked: true } }); });
+    assert.ok(selectedCount(harness.container) > 0, "a line is selected");
+
+    await act(async () => { fireDomEvent.click(paneButton(harness.container, "Staged")); });
+    assert.equal(selectedCount(harness.container), 0, "the other pane starts from no selection");
+  } finally {
+    await harness.unmount();
+  }
+});
+
 /* -------------------------------------------------------------------------- */
 /* #1204 — the diff follows the status reader's observation                    */
 /* -------------------------------------------------------------------------- */
@@ -550,13 +692,99 @@ test("a status observation that changes the change set reloads the diff, with st
   }
 });
 
-test("a first status observation after the diff loaded does not spend a redundant read", async () => {
+test("a diff read against no observation is verified by the first real one, not assumed current", async () => {
+  // The status read completes AFTER this diff read, so it can legitimately describe a change set the
+  // diff does not have. Adopting it unverified would leave the header ahead of the diff in silence;
+  // one extra read on panel open is the cheaper mistake.
   const harness = await mountPanel({ status: null });
   try {
     assert.deepEqual(harness.diffCalls, ["uncommitted"]);
     await harness.render({ status: statusOf() });
-    assert.deepEqual(harness.diffCalls, ["uncommitted"],
-      "the diff was read at least as recently as this status, so it is adopted rather than re-proven");
+    assert.deepEqual(harness.diffCalls, ["uncommitted", "uncommitted"]);
+    // And it settles there rather than re-reading on every subsequent render.
+    await harness.render({ status: statusOf() });
+    assert.deepEqual(harness.diffCalls, ["uncommitted", "uncommitted"], "one verifying read, then quiet");
+  } finally {
+    await harness.unmount();
+  }
+});
+
+test("a background reload that supersedes a manual refresh still releases the busy control", async () => {
+  // The stuck-forever bug: the background request takes the request token, so the superseded
+  // foreground read is barred from clearing `diffBusy`, and the background winner never sets it.
+  // Refresh then sits disabled on "Loading…" for the life of the panel.
+  const harness = await mountPanel();
+  try {
+    const releaseForeground = harness.holdDiff();
+    await act(async () => { fireDomEvent.click(refreshDiffButton(harness.container, "↻ Refresh")); });
+    assert.equal(refreshDiffButton(harness.container, "Loading…").hasAttribute("disabled"), true);
+
+    // A status observation lands while that read is still out, triggering a background reload that
+    // takes the request token — so the foreground read's result will be discarded.
+    await harness.render({ status: statusOf({ addedLines: 5 }) });
+    // Mount, the manual refresh, then the background reload that supersedes it.
+    assert.equal(harness.diffCalls.length, 3, "the background reload superseded the manual one");
+    // Released at supersession, not at the discarded response: the manual read can no longer render
+    // anything, so leaving the control on "Loading…" would be reporting work that is already void.
+    assert.equal(
+      refreshDiffButton(harness.container, "↻ Refresh").hasAttribute("disabled"),
+      false,
+      "ownership of the busy flag moves with the request token",
+    );
+
+    await releaseForeground();
+    assert.equal(
+      refreshDiffButton(harness.container, "↻ Refresh").hasAttribute("disabled"),
+      false,
+      "and it certainly must not stay disabled once both reads have landed",
+    );
+  } finally {
+    await harness.unmount();
+  }
+});
+
+test("the active-turn cadence never runs two reads at once, however slow the runner is", async () => {
+  // A read slower than the interval would otherwise have every response superseded by the next
+  // request — the pane would never update — and in-flight reads would pile up for the whole turn.
+  mock.timers.enable({ apis: ["setInterval"] });
+  const harness = await mountPanel({ sessionStatus: "running" });
+  try {
+    const release = harness.holdDiff();
+    await act(async () => { mock.timers.tick(10_000); });
+    assert.equal(harness.diffCalls.length, 2, "one cadence read launched");
+    await act(async () => { mock.timers.tick(10_000); });
+    await act(async () => { mock.timers.tick(10_000); });
+    assert.equal(harness.diffCalls.length, 2, "and no second read while the first is still out");
+    await release();
+    await act(async () => { mock.timers.tick(10_000); });
+    assert.equal(harness.diffCalls.length, 3, "the cadence resumes once the read lands");
+  } finally {
+    await harness.unmount();
+    mock.timers.reset();
+  }
+});
+
+test("a successful stage reply answers an earlier failed-refresh warning", async () => {
+  const harness = await mountPanel();
+  try {
+    harness.failDiff("runner is unreachable");
+    await harness.render({ status: statusOf({ addedLines: 7 }) });
+    assert.ok(harness.container.textContent?.includes("The last automatic refresh of this diff did not land"));
+
+    // The reply carries BOTH halves of a fresh read, and its status is the observation already on
+    // screen — so nothing else will re-read, and only the reply itself can answer the warning. A
+    // reply without a status would leave the observation unread and a later background read would
+    // clear the warning instead, which would not test this at all.
+    const settled = statusOf({ addedLines: 7, stagedCount: 1 });
+    const resolveStage = harness.holdStage();
+    await harness.render({ status: settled });
+    const before = harness.diffCalls.length;
+    await act(async () => { fireDomEvent.click(stageButton(harness.container, "src/a.ts")); });
+    await resolveStage({ diff: diffOf("2", [fileA({ staged: true }), fileB()]), status: settled });
+
+    assert.equal(harness.diffCalls.length, before, "no further read happened, so the reply is what answered it");
+    assert.ok(!harness.container.textContent?.includes("The last automatic refresh of this diff did not land"),
+      "a stale warning must not outlive the read that answered it");
   } finally {
     await harness.unmount();
   }

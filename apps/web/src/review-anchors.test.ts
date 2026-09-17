@@ -5,7 +5,9 @@ import {
   buildDiffAnchorIndex,
   changeSetSignature,
   diffAnchorKey,
-  diffFileContentKey,
+  diffHunkContentKey,
+  EMPTY_FINDING_ANCHOR_STORE,
+  reanchorFindingStore,
   reanchorFindings,
 } from "./review-anchors.js";
 
@@ -87,39 +89,43 @@ test("anchor keys distinguish files whose paths differ only where the key is joi
 });
 
 /* -------------------------------------------------------------------------- */
-/* Per-file content keys (file card identity)                                 */
+/* Per-hunk content keys (hunk identity)                                      */
 /* -------------------------------------------------------------------------- */
 
-test("a file's content key ignores staging, so staging a hunk cannot reset the card it is in", () => {
-  // The bug this pins: `staged` flips on a hunk without a single line of the combined diff changing,
-  // and keying the card on anything that sees the flag collapses the card mid-interaction (#1203).
-  const unstaged = file({ hunks: [hunk({ staged: false })] });
-  const staged = file({ hunks: [hunk({ staged: true })] });
-  assert.equal(diffFileContentKey(unstaged), diffFileContentKey(staged));
+test("a hunk's content key ignores staging, so staging it cannot rebuild the hunk in hand", () => {
+  // The bug this pins: `staged` flips without a single line of the combined diff changing, and
+  // keying on anything that sees the flag rebuilds the hunk mid-interaction (#1203).
+  assert.equal(diffHunkContentKey(hunk({ staged: false })), diffHunkContentKey(hunk({ staged: true })));
 });
 
-test("a file's content key changes for every edit that renumbers or rewrites its hunks", () => {
-  const base = diffFileContentKey(file());
-  const cases: Array<[string, GitDiffFile]> = [
-    ["line text", file({ hunks: [hunk({ lines: [{ status: "+", text: "different" }] })] })],
-    ["line status", file({ hunks: [hunk({ lines: [{ status: "-", text: "context" }] })] })],
-    ["hunk header", file({ hunks: [hunk({ header: "@@ -99,3 +99,3 @@" })] })],
-    ["hunk count", file({ hunks: [hunk(), hunk()] })],
-    ["change kind", file({ status: "added" })],
-    ["rename source", file({ oldPath: "src/old.ts" })],
-    ["binary flag", file({ binary: true })],
+test("a hunk's content key changes for every edit that renumbers or rewrites it", () => {
+  const base = diffHunkContentKey(hunk());
+  const cases: Array<[string, GitHunk]> = [
+    ["line text", hunk({ lines: [{ status: "+", text: "different" }] })],
+    ["line status", hunk({ lines: [{ status: "-", text: "context" }] })],
+    ["header", hunk({ header: "@@ -99,3 +99,3 @@" })],
+    ["line count", hunk({ lines: [{ status: " ", text: "context" }] })],
   ];
   for (const [label, changed] of cases) {
-    assert.notEqual(diffFileContentKey(changed), base, label);
+    assert.notEqual(diffHunkContentKey(changed), base, label);
   }
 });
 
-test("a file's content key cannot be re-cut across its fields", () => {
-  // Folding fields without a terminator makes "ab"+"c" and "a"+"bc" the same digest, which would let
-  // a rename to a suffix of the old path reuse the card.
+test("distinct hunks of one file never share a content key, because the header carries their span", () => {
+  // React keys only need to be unique among siblings, and siblings are one file's hunks. Two hunks
+  // with identical BODIES still differ, because `@@ -a,b +c,d @@` differs.
+  const body = [{ status: "+" as const, text: "same" }];
   assert.notEqual(
-    diffFileContentKey(file({ hunks: [hunk({ lines: [{ status: " ", text: "ab" }, { status: " ", text: "c" }] })] })),
-    diffFileContentKey(file({ hunks: [hunk({ lines: [{ status: " ", text: "a" }, { status: " ", text: "bc" }] })] })),
+    diffHunkContentKey(hunk({ header: "@@ -1,1 +1,1 @@", lines: body })),
+    diffHunkContentKey(hunk({ header: "@@ -9,1 +9,1 @@", lines: body })),
+  );
+});
+
+test("a hunk's content key cannot be re-cut across its fields", () => {
+  // Folding fields without a terminator makes "ab"+"c" and "a"+"bc" the same digest.
+  assert.notEqual(
+    diffHunkContentKey(hunk({ lines: [{ status: " ", text: "ab" }, { status: " ", text: "c" }] })),
+    diffHunkContentKey(hunk({ lines: [{ status: " ", text: "a" }, { status: " ", text: "bc" }] })),
   );
 });
 
@@ -217,6 +223,71 @@ test("a finding created after a refresh anchors without resurrecting a stale sib
     finding({ findingId: "f2", diffHash: HASH_B, line: 10 }),
   ]);
   assert.deepEqual([...withNew.anchored], ["f2"], "the new finding anchors; the stale one stays stale");
+});
+
+/* -------------------------------------------------------------------------- */
+/* Per-lineage anchor store                                                   */
+/* -------------------------------------------------------------------------- */
+
+const COMBINED = "uncommitted:combined";
+const STAGED = "uncommitted:staged";
+
+test("a lineage keeps what it carried while the reviewer is away in another pane", () => {
+  // The single-slot bug: combined@H1 -> combined@H2 -> staged -> combined@H2. With one slot, the
+  // staged visit overwrites the carry, and returning to an UNCHANGED H2 reports the finding stale
+  // because its own authoring hash is H1.
+  let store = reanchorFindingStore(EMPTY_FINDING_ANCHOR_STORE, diff(), COMBINED, [finding()]);
+  const h2 = diff({ diffHash: HASH_B });
+  store = reanchorFindingStore(store, h2, COMBINED, [finding()]);
+  assert.deepEqual([...store.get(COMBINED)!.anchored], ["f1"]);
+
+  store = reanchorFindingStore(store, diff({ diffHash: "c".repeat(64) }), STAGED, [finding()]);
+  assert.deepEqual([...store.get(STAGED)!.anchored], [], "the other pane never adopts it");
+
+  store = reanchorFindingStore(store, h2, COMBINED, [finding()]);
+  assert.deepEqual([...store.get(COMBINED)!.anchored], ["f1"],
+    "returning to an unchanged lineage must not invent a stale anchor");
+});
+
+test("the store is returned unchanged when nothing observable moved, so render-time commits settle", () => {
+  // Load-bearing for the caller: it derives this during render and commits it with setState, so a
+  // fresh Map for an unchanged result would re-render forever.
+  const first = reanchorFindingStore(EMPTY_FINDING_ANCHOR_STORE, diff(), COMBINED, [finding()]);
+  assert.notEqual(first, EMPTY_FINDING_ANCHOR_STORE);
+  assert.equal(reanchorFindingStore(first, diff(), COMBINED, [finding()]), first);
+  // Same for a lineage that has carried an anchor across a hash change and is then re-derived.
+  const moved = reanchorFindingStore(first, diff({ diffHash: HASH_B }), COMBINED, [finding()]);
+  assert.notEqual(moved, first);
+  assert.equal(reanchorFindingStore(moved, diff({ diffHash: HASH_B }), COMBINED, [finding()]), moved);
+});
+
+test("the store changes identity whenever a finding's anchoring actually changes", () => {
+  const first = reanchorFindingStore(EMPTY_FINDING_ANCHOR_STORE, diff(), COMBINED, [finding()]);
+  const rewritten = diff({
+    diffHash: HASH_B,
+    files: [file({ hunks: [hunk({ lines: [{ status: "+", text: "rewritten" }] })] })],
+  });
+  const stale = reanchorFindingStore(first, rewritten, COMBINED, [finding()]);
+  assert.notEqual(stale, first);
+  assert.deepEqual([...stale.get(COMBINED)!.anchored], []);
+  // And a new finding appearing under an unchanged diff must still be picked up.
+  const withNew = reanchorFindingStore(stale, rewritten, COMBINED, [
+    finding(),
+    finding({ findingId: "f2", diffHash: HASH_B, line: 1 }),
+  ]);
+  assert.notEqual(withNew, stale);
+  assert.deepEqual([...withNew.get(COMBINED)!.anchored], ["f2"]);
+});
+
+test("each lineage in the store is independent, and lineages are bounded by scope times pane", () => {
+  let store: ReturnType<typeof reanchorFindingStore> = EMPTY_FINDING_ANCHOR_STORE;
+  for (const lineage of [COMBINED, STAGED, "uncommitted:unstaged", "all_branch:combined", "last_turn:combined"]) {
+    store = reanchorFindingStore(store, diff(), lineage, [finding()]);
+  }
+  assert.equal(store.size, 5);
+  for (const lineage of store.keys()) {
+    assert.equal(store.get(lineage)!.lineage, lineage);
+  }
 });
 
 /* -------------------------------------------------------------------------- */

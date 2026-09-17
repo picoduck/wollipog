@@ -27,7 +27,12 @@ import {
   type StagingControls,
 } from "./GitDiffViewer.js";
 import type { GitStatus } from "./useGitStatus.js";
-import { changeSetSignature, reanchorFindings, type FindingAnchorState } from "../review-anchors.js";
+import {
+  changeSetSignature,
+  reanchorFindingStore,
+  EMPTY_FINDING_ANCHOR_STORE,
+  type FindingAnchorStore,
+} from "../review-anchors.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { sessionAgentLabel } from "./agent-options.js";
@@ -95,6 +100,9 @@ export function ReviewPanel({
   // either, or the diff below would keep contradicting the header with nothing to say why. This
   // drives the manual refresh affordance instead.
   const [autoReloadFailed, setAutoReloadFailed] = useState(false);
+  // Which findings are still attached to the line they were written against, per lineage (#1203).
+  // One slot per scope+pane, so leaving a lineage and coming back does not lose what it carried.
+  const [anchors, setAnchors] = useState<FindingAnchorStore>(EMPTY_FINDING_ANCHOR_STORE);
   const [findings, setFindings] = useState<ReviewFinding[]>([]);
   const [findingSummary, setFindingSummary] = useState<ReviewFindingSummary | null>(null);
   const [selectedFindings, setSelectedFindings] = useState<Set<string>>(new Set());
@@ -120,10 +128,15 @@ export function ReviewPanel({
   // as unobserved and schedules another pass.
   const diffSignatureRef = useRef<string | null>(null);
   const statusSignatureRef = useRef<string | null>(null);
-  // Findings carried across refreshes by anchor rather than by diff hash (#1203). Recomputed during
-  // render, not in an effect: `reanchorFindings` is idempotent in its own output, and an effect
-  // would paint one frame of wrongly-stale findings before correcting itself.
-  const anchorStateRef = useRef<FindingAnchorState | null>(null);
+  // The busy flag belongs to the newest FOREGROUND read. Any newer request takes ownership away,
+  // and whoever takes it must clear the flag: a background reload that superseded a pending
+  // foreground one would otherwise leave Refresh stuck on "Loading…" forever, because the
+  // superseded request is barred from clearing it and the background winner never sets it.
+  const busyOwnerRef = useRef<number | null>(null);
+  // How many diff reads are in flight. The active-turn cadence skips a tick while one is pending,
+  // so a read slower than the interval cannot have every response superseded by the next request
+  // (the pane would never update) or pile up unbounded for the length of the turn.
+  const pendingDiffReadsRef = useRef(0);
   const statusSignature = useMemo(() => changeSetSignature(status), [status]);
   statusSignatureRef.current = statusSignature;
   const uid = useId();
@@ -164,10 +177,19 @@ export function ReviewPanel({
     const background = options?.background === true;
     const observed = statusSignatureRef.current;
     const reqId = ++diffReqRef.current;
-    if (!background) {
+    if (background) {
+      // This request just superseded whatever the foreground read was going to render, so the
+      // foreground read's busy flag has no owner left to clear it.
+      if (busyOwnerRef.current !== null) {
+        busyOwnerRef.current = null;
+        setDiffBusy(false);
+      }
+    } else {
+      busyOwnerRef.current = reqId;
       setDiffBusy(true);
       setDiffError(null);
     }
+    pendingDiffReadsRef.current += 1;
     try {
       const { diff: d } = await api.gitDiff(session.id, scopeRef.current);
       if (diffReqRef.current !== reqId) return; // superseded by a newer scope/refresh
@@ -185,8 +207,13 @@ export function ReviewPanel({
       setDiff(null);
       setDiffError((e as Error).message);
     } finally {
-      // Only the latest request owns the busy flag; a superseded one must not clear it.
-      if (diffReqRef.current === reqId && !background) setDiffBusy(false);
+      pendingDiffReadsRef.current -= 1;
+      // Only the request that set the flag clears it, so a superseded foreground read cannot report
+      // "done" while a newer foreground read is still loading.
+      if (busyOwnerRef.current === reqId) {
+        busyOwnerRef.current = null;
+        setDiffBusy(false);
+      }
     }
   };
 
@@ -206,9 +233,13 @@ export function ReviewPanel({
     // pane on "Loading diff…").
     diffReqRef.current += 1;
     if (payload.status) diffSignatureRef.current = changeSetSignature(payload.status);
+    busyOwnerRef.current = null;
     setDiffBusy(false);
     setDiff(payload.diff);
     setDiffError(null);
+    // This reply IS a successful paired read of both halves, so any earlier warning that the diff
+    // had fallen behind the file list is now answered.
+    setAutoReloadFailed(false);
   };
 
   const installFindings = (next: { findings: ReviewFinding[]; summary: ReviewFindingSummary }) => {
@@ -360,8 +391,12 @@ export function ReviewPanel({
   // it. Defer instead: every deferring condition is a dependency of the watcher below, which runs
   // again the moment the mutation settles (#1204).
   const reloadDeferred = hunkBusy !== null || busy !== null;
-  const observationUnread = statusSignature !== null && diffSignatureRef.current !== null &&
-    statusSignature !== diffSignatureRef.current;
+  // A diff read that finished before the status reader had reported anything is recorded against a
+  // null observation, and stays unread until a real one confirms it. Adopting that first observation
+  // instead would be unverified: the status read completes AFTER the diff read, so it can legitimately
+  // describe a change set the diff does not have, and the header would sit ahead of the diff in
+  // silence. One extra read on panel open is the cheaper mistake.
+  const observationUnread = statusSignature !== null && statusSignature !== diffSignatureRef.current;
 
   // #1204: the branch line, changed-file count, and file list come from the shared status reader;
   // the diff came from its own mount-and-turn-boundary schedule, so an edit from an editor, the
@@ -370,12 +405,6 @@ export function ReviewPanel({
   // describe, re-read it in the background.
   useEffect(() => {
     if (!diffEnabled || !diff) return;
-    if (statusSignature !== null && diffSignatureRef.current === null) {
-      // First correlation. The diff was read at least as recently as this status, so adopt the
-      // observation rather than spending a request to prove the pane is already current.
-      diffSignatureRef.current = statusSignature;
-      return;
-    }
     if (!observationUnread || reloadDeferred) return;
     void loadDiff({ background: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -389,7 +418,8 @@ export function ReviewPanel({
   useEffect(() => {
     if (!diffEnabled || !turnActive) return;
     const reload = () => {
-      if (reloadDeferredRef.current || document.visibilityState !== "visible") return;
+      if (reloadDeferredRef.current || pendingDiffReadsRef.current > 0) return;
+      if (document.visibilityState !== "visible") return;
       void loadDiff({ background: true });
     };
     const timer = setInterval(reload, ACTIVE_TURN_DIFF_RELOAD_MS);
@@ -563,12 +593,19 @@ export function ReviewPanel({
   // lineage even at the same line number: pane-local anchor identities exist so a finding authored
   // against the staged pane is never re-attached to the unstaged one.
   const diffLineage = `${scope}:${scope === "uncommitted" && fineDiffSupported ? pane : "combined"}`;
-  let anchorState = anchorStateRef.current;
-  if (shownDiff) {
-    anchorState = reanchorFindings(anchorState, shownDiff, diffLineage, findings);
-    anchorStateRef.current = anchorState;
-  }
-  const anchoredFindingIds = shownDiff && anchorState ? anchorState.anchored : NO_ANCHORED_FINDINGS;
+  // Derived during render and committed with `setState`, the sanctioned way to adjust state when
+  // the inputs change: React discards this render and re-runs it immediately, so no frame of
+  // wrongly-stale findings is ever painted — and because it is state rather than a ref, an
+  // interrupted render's conclusions are abandoned with it instead of becoming the starting point
+  // for a render of a diff that was never replaced. `reanchorFindingStore` returns the same store
+  // when nothing observable moved, which is what terminates this.
+  const nextAnchors = shownDiff
+    ? reanchorFindingStore(anchors, shownDiff, diffLineage, findings)
+    : anchors;
+  if (nextAnchors !== anchors) setAnchors(nextAnchors);
+  const anchoredFindingIds = shownDiff
+    ? nextAnchors.get(diffLineage)?.anchored ?? NO_ANCHORED_FINDINGS
+    : NO_ANCHORED_FINDINGS;
 
   // Automatic reloads cover the ordinary cases; this is the escape hatch for the two they cannot.
   // Either a reload is deferred behind a mutation reply that owns the pane, or the last automatic

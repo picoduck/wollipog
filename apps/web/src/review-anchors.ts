@@ -5,8 +5,8 @@
  * The runner's `diffHash` is a whole-change-set identity — staging a hunk in one file, discarding
  * another, or the agent touching anything at all produces a new hash for every file. Comparing a
  * finding's `diffHash` to the current one therefore detaches findings whose own lines never moved,
- * and keying file cards on it throws away collapse state and unsent drafts across an unrelated
- * refresh (#1203). These helpers give both questions a per-anchor answer instead.
+ * and keying the rendered cards on it throws away collapse state and unsent drafts across an
+ * unrelated refresh (#1203). These helpers answer both questions per hunk and per anchor instead.
  *
  * {@link changeSetSignature} answers the third identity question in the same pane: whether the
  * shared status reader has observed a change set the loaded diff does not describe yet (#1204).
@@ -15,8 +15,8 @@
  */
 
 import type {
-  GitDiffFile,
   GitDiffInfo,
+  GitHunk,
   GitStatusInfo,
   ReviewFinding,
   ReviewFindingSide,
@@ -107,35 +107,33 @@ function foldField(hash: number, field: string): number {
 }
 
 /**
- * A digest of everything a file card renders from its own content — its change kind, rename source,
- * and every hunk header and patch line.
+ * A digest of one hunk's rendered content — its `@@` header and every patch line.
  *
- * Used as the file card's React key so that a refresh which did not touch this file reuses the same
- * card, preserving its collapse state, "show all hunks" toggle, and per-hunk line selections, while
- * a file whose content really did change still gets a fresh card (its hunks were renumbered, so a
- * carried-over line selection would point at different text).
+ * Used as the hunk's React key, which is the level the reset actually belongs at. The state that
+ * *must* die when content moves is per-hunk: `selectedLines` indexes into `hunk.lines`, and
+ * `selectedReferenceLines` holds line numbers from this hunk's gutters. Keying a whole file card on
+ * a file-wide digest would throw that away correctly but would also rebuild every other hunk of the
+ * file, including an open draft editor — which then loses focus and caret every time the agent
+ * touches any other part of the same file. Per-hunk keys reset exactly what moved.
+ *
+ * Two hunks of one file can never collide: `header` carries `@@ -a,b +c,d @@`, so distinct hunks
+ * differ in it by construction, and React keys only need to be unique among siblings.
  *
  * `staged` is deliberately excluded: staging a hunk flips that flag without changing a single line
- * of the combined diff, and it must not collapse the card the user is working in. The canonical
- * staged/unstaged panes carry the same movement as an actual content change, which this digest does
- * see, so nothing is lost by ignoring the flag.
+ * of the combined diff, and it must not rebuild the hunk the user is working in. The canonical
+ * staged/unstaged panes carry real content movement, which this digest does see.
  */
-export function diffFileContentKey(file: GitDiffFile): string {
-  let hash = foldField(0x811c9dc5, file.status);
-  hash = foldField(hash, file.oldPath ?? "");
-  hash = foldField(hash, file.binary ? "binary" : "text");
+export function diffHunkContentKey(hunk: GitHunk): string {
+  let hash = foldField(0x811c9dc5, hunk.header);
   let lines = 0;
-  for (const hunk of file.hunks) {
-    hash = foldField(hash, hunk.header);
-    for (const line of hunk.lines) {
-      hash = foldField(hash, line.status);
-      hash = foldField(hash, line.text);
-      lines += 1;
-    }
+  for (const line of hunk.lines) {
+    hash = foldField(hash, line.status);
+    hash = foldField(hash, line.text);
+    lines += 1;
   }
-  // Length fields alongside the digest: a 32-bit hash is ample for picking React keys apart, and
-  // the counts make the common shape-changing edits collision-proof rather than merely unlikely.
-  return `${hash.toString(16)}.${file.hunks.length}.${lines}`;
+  // A length field alongside the digest: a 32-bit hash is ample for picking React keys apart, and
+  // the count makes the common shape-changing edits collision-proof rather than merely unlikely.
+  return `${hash.toString(16)}.${lines}`;
 }
 
 /**
@@ -163,9 +161,10 @@ export interface FindingAnchorState {
  * makes "Stale Diff Anchor" mean what it says — the anchored content actually changed — instead of
  * firing on every unrelated hash change (#1203).
  *
- * Idempotent in `previous`: re-running it on its own output returns the same set, so it is safe to
- * call during render (where React may invoke the render twice) rather than in an effect that would
- * paint one frame of wrongly-stale findings first.
+ * Idempotent in `previous`: re-running it on its own output returns the same set. That is what lets
+ * the caller derive it during render — avoiding an effect that would paint one frame of
+ * wrongly-stale findings first — while {@link reanchorFindingStore} keeps the result in React state
+ * so an interrupted render cannot leave a conclusion behind.
  */
 export function reanchorFindings(
   previous: FindingAnchorState | null,
@@ -189,4 +188,47 @@ export function reanchorFindings(
     if (before !== undefined && before === index.get(key)) anchored.add(finding.findingId);
   }
   return { lineage, hash: diff.diffHash, index, anchored };
+}
+
+/**
+ * Every lineage's anchor state, retained side by side.
+ *
+ * One slot per lineage rather than one slot overall, because a lineage the user leaves and comes
+ * back to must still know what it had carried. With a single slot, `combined@H1 → combined@H2 →
+ * staged → combined@H2` loses the carry when the staged pane overwrites it, and a finding authored
+ * against `H1` is reported stale on returning to an unchanged `H2`. Bounded by construction: three
+ * scopes times three panes.
+ */
+export type FindingAnchorStore = ReadonlyMap<string, FindingAnchorState>;
+
+export const EMPTY_FINDING_ANCHOR_STORE: FindingAnchorStore = new Map<string, FindingAnchorState>();
+
+function sameMembers(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  if (left.size !== right.size) return false;
+  for (const member of left) if (!right.has(member)) return false;
+  return true;
+}
+
+/**
+ * Re-anchor one lineage inside `store`, returning `store` itself when nothing observable moved.
+ *
+ * Referential stability is the contract: the caller derives this during render and commits it with
+ * `setState`, so returning a fresh Map for an unchanged result would loop forever. Keeping this in
+ * React state rather than a ref is also what makes it safe under an interrupted render — an
+ * abandoned render's conclusions are abandoned with it, instead of persisting in a ref and being
+ * read as the starting point for a render of a diff that was never replaced.
+ */
+export function reanchorFindingStore(
+  store: FindingAnchorStore,
+  diff: GitDiffInfo,
+  lineage: string,
+  findings: readonly ReviewFinding[],
+): FindingAnchorStore {
+  const previous = store.get(lineage) ?? null;
+  const next = reanchorFindings(previous, diff, lineage, findings);
+  if (previous && previous.hash === next.hash && previous.index === next.index &&
+    sameMembers(previous.anchored, next.anchored)) return store;
+  const updated = new Map(store);
+  updated.set(lineage, next);
+  return updated;
 }
