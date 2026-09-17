@@ -4388,6 +4388,17 @@ export class SessionManager {
     const priorAdoptedPiState = prior?.driver === "pi" && prior.adoptedProviderState?.driver === "pi"
       ? prior.adoptedProviderState
       : undefined;
+    if (priorAdoptedPiState && driver !== "pi") {
+      try {
+        await cleanupPiExternalSession(prior!.context, priorAdoptedPiState.sessionDir, spec.sessionId);
+      } catch (error) {
+        const message = `managed Pi transcript cleanup failed before changing drivers: ${errText(error)}`;
+        this.emitEvent(spec.sessionId, { kind: "error", message });
+        this.emitStatus(spec.sessionId, "stopped", message);
+        durable?.failed(message, "COMMAND_CANCELLED");
+        return false;
+      }
+    }
     const adoptedProviderState = priorResumeId && driver === "pi" && priorAdoptedPiState &&
       agentContextKey(prior!.context) === agentContextKey(context)
       ? priorAdoptedPiState
@@ -9937,6 +9948,12 @@ export class SessionManager {
     }
     const supportsFork = providerSupportsConversationFork(source.driver, source.capabilities);
     if (!supportsFork && !handoff) return { ok: false, error: "this provider session does not support conversation fork" };
+    if (!handoff && source.driver === "pi" && source.adoptedProviderState?.driver === "pi") {
+      return {
+        ok: false,
+        error: "conversation fork is unavailable for an adopted Pi session with a managed transcript",
+      };
+    }
     if (handoff) {
       const error = handoffDestinationError(handoff.agent, source.driver, handoff.config, { allowSameProvider: recovery });
       if (error) return { ok: false, error };

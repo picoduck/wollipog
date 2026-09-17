@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -5721,6 +5721,36 @@ test("explicit restart refuses to detach an adopted Pi session from its managed 
     );
     assert.ok(error && error.type === "session_event" && error.payload.kind === "error");
     assert.match(error.payload.message, /cannot move execution contexts/u);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("changing away from an adopted Pi driver removes its managed native transcript", async () => {
+  const h = harness({
+    agentId: "pi",
+    driver: "pi",
+    command: "pi",
+    agentSessionId: "pi-session-persisted",
+  });
+  const managedSessionDir = join(h.root, "resume-session", "pi-adopted-sessions");
+  mkdirSync(managedSessionDir, { recursive: true });
+  writeFileSync(join(managedSessionDir, "pi-session-persisted.jsonl"), "managed", "utf8");
+  h.store.patchMeta("resume-session", {
+    args: ["--session-dir", managedSessionDir],
+    adoptedProviderState: { driver: "pi", sessionDir: managedSessionDir },
+  });
+  try {
+    assert.equal(await h.manager.start({
+      ...launchSpec(h.root),
+      agentId: "codex-native",
+      driver: "codex",
+      command: "codex",
+    }), true);
+    assert.equal(existsSync(managedSessionDir), false);
+    assert.equal(h.store.readMeta("resume-session")?.adoptedProviderState, undefined);
+    assert.equal(h.launches[0]?.kind, "codex");
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
