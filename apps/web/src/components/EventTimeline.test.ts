@@ -363,6 +363,21 @@ test("completed turn messages own compact rewind, fork, and handoff actions", ()
     "checkpoint dividers no longer own heavy text actions");
 });
 
+test("checkpoint dividers expose symmetric turn boundary labels", () => {
+  const html = renderToStaticMarkup(React.createElement(EventTimeline, {
+    items: [
+      { kind: "checkpoint", id: 1, turn: 19 },
+      { kind: "conversation_checkpoint", id: 2, turn: 19 },
+    ],
+  }));
+
+  assert.match(html, /role="separator" aria-label="Start Turn 19" title="Files snapshot taken at the start of turn 19"/);
+  assert.match(html, /<span class="checkpoint-label">Start Turn 19<\/span>/);
+  assert.match(html, /role="separator" aria-label="End Turn 19" title="Conversation and files saved at the end of turn 19"/);
+  assert.match(html, /<span class="checkpoint-label">End Turn 19<\/span>/);
+  assert.doesNotMatch(html, />after turn 19<|>Turn 19</);
+});
+
 test("checkpoint projection maps only the owning canonical user message", () => {
   assert.deepEqual([...userRewindTurns([
     { kind: "user_message", id: 1, text: "first" },

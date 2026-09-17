@@ -1632,9 +1632,14 @@ const TimelineRow = memo(function TimelineRow({
   switch (item.kind) {
     case "checkpoint":
       return (
-        <div className="tl-checkpoint" title={`Files snapshot taken at the start of turn ${item.turn}`}>
+        <div
+          className="tl-checkpoint"
+          role="separator"
+          aria-label={`Start Turn ${item.turn}`}
+          title={`Files snapshot taken at the start of turn ${item.turn}`}
+        >
           <span className="checkpoint-line" />
-          <span className="checkpoint-label">Turn {item.turn}</span>
+          <span className="checkpoint-label">Start Turn {item.turn}</span>
           <span className="checkpoint-line" />
         </div>
       );
@@ -1648,9 +1653,14 @@ const TimelineRow = memo(function TimelineRow({
       );
     case "conversation_checkpoint":
       return (
-        <div className="tl-checkpoint conversation" title={`Conversation and files after turn ${item.turn}`}>
+        <div
+          className="tl-checkpoint conversation"
+          role="separator"
+          aria-label={`End Turn ${item.turn}`}
+          title={`Conversation and files saved at the end of turn ${item.turn}`}
+        >
           <span className="checkpoint-line" />
-          <span className="checkpoint-label">after turn {item.turn}</span>
+          <span className="checkpoint-label">End Turn {item.turn}</span>
           <span className="checkpoint-line" />
         </div>
       );
