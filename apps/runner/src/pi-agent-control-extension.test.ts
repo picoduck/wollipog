@@ -51,7 +51,8 @@ test("generated Pi Agent Control extension makes trust durable and blocks tools 
     getActiveTools: () => [],
     setActiveTools: () => {},
   });
-  const messages: Array<{ title: string; message: string }> = [];
+  const messages: Array<{ title: string; message?: string; options?: string[] }> = [];
+  let trustChoice: string | undefined = "Trust This Project";
   const ctx = {
     hasUI: true,
     ui: {
@@ -59,14 +60,28 @@ test("generated Pi Agent Control extension makes trust durable and blocks tools 
         messages.push({ title, message });
         return true;
       },
+      select: async (title: string, options: string[]) => {
+        messages.push({ title, options });
+        return trustChoice;
+      },
     },
   };
   assert.deepEqual(await handlers.get("project_trust")?.({ cwd: "/repo" }, ctx), {
     trusted: "yes",
     remember: true,
   });
-  assert.equal(messages[0]?.title, PI_SECURITY_REQUEST_TITLE);
-  assert.match(messages[0]?.message ?? "", new RegExp(`^${PI_SECURITY_REQUEST_PREFIX}security-nonce\\.`));
+  assert.match(messages[0]?.title ?? "",
+    new RegExp(`^${PI_SECURITY_REQUEST_TITLE}\\n${PI_SECURITY_REQUEST_PREFIX}security-nonce\\.`));
+  assert.deepEqual(messages[0]?.options, ["Trust This Project", "Skip Project Resources"]);
+  trustChoice = "Skip Project Resources";
+  assert.deepEqual(await handlers.get("project_trust")?.({ cwd: "/repo" }, ctx), {
+    trusted: "no",
+    remember: true,
+  });
+  trustChoice = undefined;
+  assert.deepEqual(await handlers.get("project_trust")?.({ cwd: "/repo" }, ctx), {
+    trusted: "no",
+  }, "cancelling trust fails closed without persisting a decision");
   assert.equal(await handlers.get("tool_call")?.({
     toolCallId: "call-1",
     toolName: "bash",

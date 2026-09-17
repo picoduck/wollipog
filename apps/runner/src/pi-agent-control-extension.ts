@@ -20,6 +20,7 @@ export const PI_AGENT_CONTROL_ENV_KEYS = [
 
 export function piAgentControlProbeSource(nonce: string): string {
   return `export default function (pi) {
+  let projectTrustObserved = false;
   if (typeof pi.registerCommand !== "function" || typeof pi.registerTool !== "function" ||
       typeof pi.on !== "function" || typeof pi.getActiveTools !== "function" ||
       typeof pi.setActiveTools !== "function") return;
@@ -27,7 +28,12 @@ export function piAgentControlProbeSource(nonce: string): string {
     description: "Wollipog Agent Control compatibility probe",
     handler: async () => {},
   });
+  pi.on("project_trust", async () => {
+    projectTrustObserved = true;
+    return { trusted: "no" };
+  });
   pi.on("session_start", async (_event, ctx) => {
+    if (!projectTrustObserved) return;
     if (!ctx?.ui || typeof ctx.ui.setStatus !== "function" || typeof ctx.ui.select !== "function" ||
         typeof ctx.ui.input !== "function") return;
     await Promise.resolve();
@@ -64,6 +70,13 @@ async function securityApproval(ctx, payload) {
   if (!nonce || !ctx?.hasUI || typeof ctx.ui?.confirm !== "function") return undefined;
   const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
   return ctx.ui.confirm(SECURITY_TITLE, SECURITY_PREFIX + nonce + "." + encoded);
+}
+
+async function securityChoice(ctx, payload, options) {
+  const nonce = process.env.${PI_SECURITY_REQUEST_NONCE_ENV};
+  if (!nonce || !ctx?.hasUI || typeof ctx.ui?.select !== "function") return undefined;
+  const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  return ctx.ui.select(SECURITY_TITLE + "\\n" + SECURITY_PREFIX + nonce + "." + encoded, options);
 }
 
 function text(message) {
@@ -125,12 +138,12 @@ export default function (pi) {
   // canonical-directory decision in its own trust store, while Wollipog presents the decision as
   // a security approval instead of an ordinary extension question.
   pi.on("project_trust", async (event, ctx) => {
-    const approved = await securityApproval(ctx, {
+    const choice = await securityChoice(ctx, {
       kind: "project_trust",
       cwd: typeof event?.cwd === "string" ? event.cwd.slice(0, 4096) : "",
-    });
-    if (approved === true) return { trusted: "yes", remember: true };
-    if (approved === false) return { trusted: "no", remember: true };
+    }, ["Trust This Project", "Skip Project Resources"]);
+    if (choice === "Trust This Project") return { trusted: "yes", remember: true };
+    if (choice === "Skip Project Resources") return { trusted: "no", remember: true };
     return { trusted: "no" };
   });
 

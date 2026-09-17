@@ -50,6 +50,17 @@ function securityRequest(nonce: string, id: string, payload: Record<string, unkn
   };
 }
 
+function trustRequest(nonce: string, id: string, cwd: string) {
+  const encoded = Buffer.from(JSON.stringify({ kind: "project_trust", cwd })).toString("base64url");
+  return {
+    type: "extension_ui_request",
+    id,
+    method: "select",
+    title: `${PI_SECURITY_REQUEST_TITLE}\n${PI_SECURITY_REQUEST_PREFIX}${nonce}.${encoded}`,
+    options: ["Trust This Project", "Skip Project Resources"],
+  };
+}
+
 test("Pi RPC normalizes one multi-stage run without duplicate or empty messages", async (t) => {
   const events: SessionEventPayload[] = [];
   let accepted = 0;
@@ -206,10 +217,7 @@ test("Pi RPC separates durable project trust from ordinary extension questions",
     send: (message: Record<string, unknown>) => { sent.push(message); return true; },
     dispose: () => {},
   };
-  (driver as any).onRpcEvent(securityRequest(nonce, "trust-1", {
-    kind: "project_trust",
-    cwd: "/workspace/project",
-  }));
+  (driver as any).onRpcEvent(trustRequest(nonce, "trust-1", "/workspace/project"));
   const request = events.find((event): event is Extract<SessionEventPayload, { kind: "permission_request" }> =>
     event.kind === "permission_request")!;
   assert.equal(request.title, "Trust Pi Project Resources?");
@@ -217,7 +225,17 @@ test("Pi RPC separates durable project trust from ordinary extension questions",
   assert.equal(request.context?.input, "/workspace/project");
   assert.deepEqual(request.options.map((option) => option.optionId), ["trust", "skip"]);
   assert.equal(driver.resolvePermission("trust-1", "trust"), true);
-  assert.deepEqual(sent, [{ type: "extension_ui_response", id: "trust-1", confirmed: true }]);
+  assert.deepEqual(sent, [{ type: "extension_ui_response", id: "trust-1", value: "Trust This Project" }]);
+
+  (driver as any).onRpcEvent(trustRequest(nonce, "trust-2", "/workspace/project"));
+  assert.equal(driver.resolvePermission("trust-2", "skip"), true);
+  assert.deepEqual(sent.pop(), {
+    type: "extension_ui_response", id: "trust-2", value: "Skip Project Resources",
+  });
+
+  (driver as any).onRpcEvent(trustRequest(nonce, "trust-3", "/workspace/project"));
+  assert.equal(driver.resolvePermission("trust-3", null), true);
+  assert.deepEqual(sent.pop(), { type: "extension_ui_response", id: "trust-3", cancelled: true });
 
   (driver as any).onRpcEvent({
     type: "extension_ui_request",
@@ -267,6 +285,12 @@ test("Pi RPC enforces live pre-execution permission modes before answering the e
     kind: "tool_call", toolCallId: "provider-tool-3", toolName: "write", input: "{}",
   }));
   assert.deepEqual(sent.pop(), { type: "extension_ui_response", id: "tool-3", confirmed: false });
+
+  await driver.setConfig({ permissionMode: "" });
+  (driver as any).onRpcEvent(securityRequest(nonce, "tool-4", {
+    kind: "tool_call", toolCallId: "provider-tool-4", toolName: "write", input: "{}",
+  }));
+  assert.equal(events.some((event) => event.kind === "permission_request" && event.requestId === "tool-4"), true);
   driver.dispose();
 });
 
@@ -328,6 +352,24 @@ test("Pi RPC keeps project resources disabled unless both bridge nonces are pres
   assert.equal(await driver.newSession(process.cwd()), "pi-session-1");
 });
 
+test("Pi RPC refuses safe permission modes when the Agent Control bridge is incomplete", async () => {
+  for (const permissionMode of ["default", "dontAsk", ""] as const) {
+    const incomplete = options();
+    incomplete.config = { permissionMode };
+    incomplete.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE = "ready-without-security-bridge";
+    const driver = new PiRpcDriver(incomplete, callbacks([]));
+    await assert.rejects(driver.initialize(), /requires the verified Agent Control bridge/);
+    driver.dispose();
+  }
+  for (const permissionMode of [undefined, "bypassPermissions", "orchestrator"] as const) {
+    const permitted = options();
+    permitted.config = permissionMode === undefined ? {} : { permissionMode };
+    const driver = new PiRpcDriver(permitted, callbacks([]));
+    await driver.initialize();
+    driver.dispose();
+  }
+});
+
 test("Pi RPC can resolve project trust while provider initialization is waiting", async (t) => {
   const events: SessionEventPayload[] = [];
   const startup = options("startup-trust");
@@ -350,6 +392,30 @@ test("Pi RPC can resolve project trust while provider initialization is waiting"
   assert.equal(await driver.newSession(process.cwd()), "pi-session-1");
   assert.equal(events.some((event) => event.kind === "permission_request" &&
     event.context?.toolName === "pi.project_trust"), true);
+});
+
+test("Pi RPC startup watchdog pauses only for a pending project-trust decision", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let disposedWith: string | undefined;
+  let kills = 0;
+  const driver = new PiRpcDriver(options(), callbacks([]), undefined, (() => { kills++; }) as any);
+  (driver as any).peer = { dispose: (reason: string) => { disposedWith = reason; } };
+  (driver as any).child = {};
+  try {
+    (driver as any).beginStartupStateWatchdog();
+    t.mock.timers.tick(14_999);
+    assert.equal(disposedWith, undefined);
+    (driver as any).pauseStartupStateWatchdog();
+    t.mock.timers.tick(15_000);
+    assert.equal(disposedWith, undefined, "a human trust decision is not timed out");
+    (driver as any).resumeStartupStateWatchdog();
+    t.mock.timers.tick(15_000);
+    assert.equal(disposedWith, "Pi RPC get_state response timed out");
+    assert.equal(kills, 1);
+  } finally {
+    (driver as any).clearStartupStateWatchdog();
+    t.mock.timers.reset();
+  }
 });
 
 test("Pi RPC ignores user extension errors but fails startup for its exact Agent Control extension", async (t) => {

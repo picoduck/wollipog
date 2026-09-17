@@ -3,18 +3,18 @@ import { join } from "node:path";
 
 const argv = process.argv.slice(2);
 const scenario = process.env.WOLLIPOG_FAKE_PI_SCENARIO ?? "normal";
+const agentControlProbe = argv.includes("--extension");
+const agentControlProbeNonce = process.env.WOLLIPOG_PI_AGENT_CONTROL_PROBE_NONCE;
 const verifiedTrustBridge = Boolean(
   process.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE && process.env.WOLLIPOG_PI_SECURITY_REQUEST_NONCE,
 );
 if (!argv.includes("--mode") || !argv.includes("rpc") ||
-    (!argv.includes("--no-approve") && !verifiedTrustBridge)) process.exit(64);
+    (!argv.includes("--no-approve") && !verifiedTrustBridge && !(agentControlProbe && agentControlProbeNonce))) process.exit(64);
 if (scenario === "verified-launch" && argv.includes("--no-approve")) process.exit(65);
 
 const resumedAt = argv.indexOf("--session");
 const forkedAt = argv.indexOf("--fork");
 const explicitSessionIdAt = argv.indexOf("--session-id");
-const agentControlProbe = argv.includes("--extension");
-const agentControlProbeNonce = process.env.WOLLIPOG_PI_AGENT_CONTROL_PROBE_NONCE;
 const agentControlReadyNonce = process.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE;
 const agentControlExtensionPath = argv.find((arg, index) =>
   (argv[index - 1] === "--extension" || argv[index - 1] === "-e") && arg.endsWith(".pi-agent-control.mjs"));
@@ -62,7 +62,7 @@ function response(command, request, data) {
 }
 
 if (agentControlProbe && agentControlProbeNonce && scenario !== "extension-unsupported" &&
-    scenario !== "extension-no-readiness") {
+    scenario !== "extension-no-readiness" && scenario !== "project-trust-unsupported") {
   send({ type: "extension_ui_request", method: "setStatus", statusKey: "wollipog-agent-control-probe",
     statusText: agentControlProbeNonce });
 }
@@ -126,8 +126,9 @@ function handle(request) {
         startupTrustStateRequest = request;
         const nonce = process.env.WOLLIPOG_PI_SECURITY_REQUEST_NONCE;
         const encoded = Buffer.from(JSON.stringify({ kind: "project_trust", cwd: process.cwd() })).toString("base64url");
-        send({ type: "extension_ui_request", id: "startup-trust", method: "confirm",
-          title: "Wollipog Security Approval", message: `wollipog-security-v1:${nonce}.${encoded}` });
+        send({ type: "extension_ui_request", id: "startup-trust", method: "select",
+          title: `Wollipog Security Approval\nwollipog-security-v1:${nonce}.${encoded}`,
+          options: ["Trust This Project", "Skip Project Resources"] });
         return;
       }
       return response("get_state", request, { sessionId, sessionFile, model: selected,

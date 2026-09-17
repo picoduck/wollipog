@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentCapabilities, AgentContext, AgentModel, AgentSlashCommand } from "@wollipog/protocol";
@@ -41,8 +41,9 @@ export interface PiRpcDiscoveryResult {
 }
 
 /** Prove the installed Pi process speaks the required RPC contract and derive every selectable
- * model, thinking level, command, and skill from that exact runtime. The ephemeral probe uses
- * Pi's fail-closed project-trust flag, so repository-controlled resources cannot execute. */
+ * model, thinking level, command, and skill from that exact runtime. The native probe runs in a
+ * private project and proves its extension receives project_trust before declining all project
+ * resources, so repository-controlled resources cannot execute. */
 export async function probePiRpc(
   launch: ResolvedLaunch,
   context: AgentContext,
@@ -73,14 +74,18 @@ export async function probePiRpc(
     if (context.kind === "native") {
       probeRoot = mkdtempSync(join(tmpdir(), "wollipog-pi-probe-"));
       const extension = join(probeRoot, "agent-control-probe.mjs");
+      const projectConfig = join(probeRoot, ".pi");
+      mkdirSync(projectConfig, { recursive: true });
+      writeFileSync(join(projectConfig, "settings.json"), "{}\n", { flag: "wx", mode: 0o600 });
       probeNonce = randomBytes(24).toString("base64url");
       writeFileSync(extension, piAgentControlProbeSource(probeNonce), { flag: "wx", mode: 0o600 });
       extensionArgs.push("--extension", extension);
     }
     child = spawn({
       command: launch.command,
-      args: [...launch.args, ...extensionArgs, "--mode", "rpc", "--no-approve", "--no-session"],
-      cwd: options.cwd ?? (context.kind === "wsl" ? "/" : homedir()),
+      args: [...launch.args, ...extensionArgs, "--mode", "rpc",
+        ...(probeNonce ? [] : ["--no-approve"]), "--no-session"],
+      cwd: probeRoot ?? options.cwd ?? (context.kind === "wsl" ? "/" : homedir()),
       env: {
         ...options.env,
         PI_OFFLINE: "1",
