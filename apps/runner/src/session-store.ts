@@ -175,6 +175,15 @@ export interface SessionMeta {
       images: PromptImageInput[];
       slashCommand?: string;
       config?: SessionConfig;
+      /** Complete recovered-question continuation state. Authentication temporarily replaces the
+       * visible question card, so replay cannot reconstruct this correlation from pendingApproval. */
+      recoveredQuestion?: {
+        requestId: string;
+        recoveryId: string;
+        answers: Record<string, string | string[]>;
+        resolvedByParentSessionId?: string;
+        pendingQuestion: PendingApproval;
+      };
     }>;
     /** Recovery can settle before a restarted runner has reclaimed every durable command handle.
      * Keep the decision durable and content-free until the control plane replays those commands. */

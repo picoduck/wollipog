@@ -30,6 +30,7 @@ import type {
   GovernanceTrippedMessage,
   InvokeSessionCommandMessage,
   InterruptTurnResultReason,
+  PendingApproval,
   PromptImage,
   PromptImageInput,
   PromptImageReference,
@@ -78,6 +79,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { makeDriver, type Driver } from "./drivers/factory.js";
 import type {
   CompletedCommandReconciliationProof,
@@ -349,6 +351,9 @@ interface QueuedPrompt {
     recoveryId: string;
     answers: Record<string, string | string[]>;
     resolvedByParentSessionId?: string;
+    /** Exact recovered card validated when the answer entered the queue. Authentication recovery
+     * may project its own card until replay reaches the durable no-replay boundary. */
+    pendingQuestion: PendingApproval;
   };
 }
 
@@ -6871,6 +6876,7 @@ export class SessionManager {
           effectiveConfig,
           durable,
           reservedOrdinal,
+          recoveredQuestion,
         );
       }
       this.emitEvent(sessionId, {
@@ -8303,6 +8309,18 @@ export class SessionManager {
     for (const prompt of queue) this.failQueuedPrompt(prompt, error, "COMMAND_CANCELLED");
   }
 
+  /** Authentication recovery has durably accepted this command. Remove its in-memory copy from
+   * the launch owner's cleanup set before that owner rejects the rest of the failed launch FIFO. */
+  private transferPreLaunchPromptToAuthentication(sessionId: string, commandId: string): void {
+    const queue = this.preLaunchQueues.get(sessionId);
+    if (!queue) return;
+    const retained = queue.filter((prompt) => prompt.durable?.commandId !== commandId);
+    if (retained.length === queue.length) return;
+    if (retained.length) this.preLaunchQueues.set(sessionId, retained);
+    else this.preLaunchQueues.delete(sessionId);
+    this.emitQueue(sessionId);
+  }
+
   /** Terminalize and remove a pre-admission queue, then clear its live dashboard projection. */
   private rejectPreLaunchQueue(sessionId: string, error: string): boolean {
     const queue = this.preLaunchQueues.get(sessionId);
@@ -8579,7 +8597,13 @@ export class SessionManager {
           config,
           durable,
           reservedOrdinal,
+          recoveredQuestion,
         );
+        if (retainedDurable && queueBeforeLaunch) {
+          // Persistence transfers ownership first; cleanup can then reject only work that auth
+          // recovery did not take. No await separates the two sides of this handoff.
+          this.transferPreLaunchPromptToAuthentication(sessionId, durable.commandId);
+        }
       } else if (blocked?.providerAuthBlock?.delivery === "not_delivered" &&
           blocked.providerAuthRetryAttemptedRecoveryId !== blocked.providerAuthBlock.recoveryId &&
           !blocked.providerAuthBlock.retry && !syntheticRecovery && !durable && images.length === 0) {
@@ -11518,33 +11542,55 @@ export class SessionManager {
       durable.failed("session is not active on this runner", "SESSION_NOT_FOUND");
       return;
     }
-    const pending = meta.pendingApproval;
-    if (pending?.kind !== "question" || pending.requestId !== requestId || pending.recoveryId !== recoveryId ||
-        pending.recoveryReason !== "provider_restart" || pending.recoveryAction !== "resume_answer") {
-      durable.failed("the recovered question is no longer pending", "COMMAND_CANCELLED");
-      return;
-    }
-    if (!canResumeRecoveredQuestion(meta, pending)) {
-      durable.failed("the provider conversation cannot safely resume this question", "INVALID_COMMAND");
-      return;
-    }
-    const invalid = validateQuestionAnswers(pending.questions ?? [], answers, "submit");
-    if (invalid) {
-      durable.failed(`invalid recovered answers: ${invalid}`, "INVALID_COMMAND");
-      return;
+    const retained = meta.providerAuthBlock?.durableRetries?.find((retry) =>
+      retry.commandId === durable.commandId && retry.recoveredQuestion);
+    const retainedQuestion = retained?.recoveredQuestion;
+    const pending = pendingRequests(meta.pendingApproval).find((request) =>
+      request.kind === "question" && request.requestId === requestId && request.recoveryId === recoveryId);
+    let recoveredQuestion: NonNullable<QueuedPrompt["recoveredQuestion"]>;
+    if (retainedQuestion) {
+      if (retainedQuestion.requestId !== requestId || retainedQuestion.recoveryId !== recoveryId ||
+          retainedQuestion.resolvedByParentSessionId !== resolvedByParentSessionId ||
+          !isDeepStrictEqual(retainedQuestion.answers, answers)) {
+        durable.failed("the retained recovered answer does not match this durable command", "INVALID_COMMAND");
+        return;
+      }
+      recoveredQuestion = retainedQuestion;
+    } else {
+      if (pending?.recoveryReason !== "provider_restart" || pending.recoveryAction !== "resume_answer") {
+        durable.failed("the recovered question is no longer pending", "COMMAND_CANCELLED");
+        return;
+      }
+      if (!canResumeRecoveredQuestion(meta, pending)) {
+        durable.failed("the provider conversation cannot safely resume this question", "INVALID_COMMAND");
+        return;
+      }
+      const invalid = validateQuestionAnswers(pending.questions ?? [], answers, "submit");
+      if (invalid) {
+        durable.failed(`invalid recovered answers: ${invalid}`, "INVALID_COMMAND");
+        return;
+      }
+      const { additionalRequests: _additionalRequests, ...pendingQuestion } = pending;
+      recoveredQuestion = {
+        requestId,
+        recoveryId,
+        answers,
+        ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
+        pendingQuestion,
+      };
     }
     this.prompt(
       sessionId,
-      recoveredQuestionContinuationText(requestId, pending, answers),
-      [],
-      undefined,
-      undefined,
+      retained?.text ?? recoveredQuestionContinuationText(requestId, recoveredQuestion.pendingQuestion, answers),
+      retained?.images ?? [],
+      retained?.slashCommand,
+      retained?.config,
       durable,
       false,
-      undefined,
+      retained?.ordinal,
       true,
       undefined,
-      { requestId, recoveryId, answers, ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}) },
+      recoveredQuestion,
     );
   }
 
@@ -13548,6 +13594,7 @@ export class SessionManager {
     config: SessionConfig | undefined,
     durable: DurableCommandLifecycle,
     reservedOrdinal: number | undefined,
+    recoveredQuestion?: QueuedPrompt["recoveredQuestion"],
   ): boolean {
     const block = meta.providerAuthBlock;
     if (!block || block.delivery !== "not_delivered") return false;
@@ -13576,6 +13623,7 @@ export class SessionManager {
         images,
         ...(slashCommand ? { slashCommand } : {}),
         ...(config ? { config } : {}),
+        ...(recoveredQuestion ? { recoveredQuestion } : {}),
       };
       this.ensureQueueOrdinal(meta.sessionId, retry);
       this.store.patchMeta(meta.sessionId, {
@@ -13663,6 +13711,16 @@ export class SessionManager {
     for (const retry of retries) {
       if ("commandId" in retry) this.providerAuthDurables.delete(retry.commandId);
       try {
+        if ("recoveredQuestion" in retry && retry.recoveredQuestion) {
+          // The authentication card displaced this recovered question while provider launch was
+          // blocked. Restore the exact validated occurrence so runPrompt can clear it only after
+          // writing the command-correlated question_resolved no-replay marker.
+          this.store.patchMeta(sessionId, {
+            pendingApproval: retry.recoveredQuestion.pendingQuestion,
+            status: "input_required",
+          });
+          this.store.flush(sessionId);
+        }
         this.prompt(
           sessionId,
           retry.text,
@@ -13673,6 +13731,8 @@ export class SessionManager {
           false,
           retry.ordinal,
           true,
+          undefined,
+          "recoveredQuestion" in retry ? retry.recoveredQuestion : undefined,
         );
       } catch (error) {
         if ("durable" in retry) {

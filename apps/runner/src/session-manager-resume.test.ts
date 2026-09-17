@@ -1267,6 +1267,137 @@ test("durable image prompts remain queued through pre-launch authentication and 
   }
 });
 
+test("a recovered answer survives pre-launch authentication and runner restart exactly once", async () => {
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "scope-a", provider: "claude", canStartLogin: false, configuredCredential: false }),
+    revalidate: async () => ({ status: "authenticated", identityId: "account-b" }),
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  const question = {
+    requestId: "recovered-through-auth",
+    recoveryId: "question:4:12",
+    title: "Which target?",
+    options: [],
+    kind: "question" as const,
+    questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+    recoveryReason: "provider_restart" as const,
+    recoveryAction: "resume_answer" as const,
+  };
+  const h = harness({
+    driver: "claude-code",
+    command: "claude",
+    agentId: "claude-native",
+    providerCredentialIdentityId: "account-a",
+    status: "input_required",
+    pendingApproval: question,
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  h.store.appendEvent("resume-session", {
+    kind: "question_request",
+    requestId: question.requestId,
+    questions: question.questions,
+  });
+  const originalTransitions: string[] = [];
+  const original: DurableCommandLifecycle = {
+    commandId: "recovered-auth-command",
+    queued: () => originalTransitions.push("queued"),
+    started: () => originalTransitions.push("started"),
+    completed: () => originalTransitions.push("completed"),
+    failed: (error) => originalTransitions.push(`failed:${error}`),
+    uncertain: (error) => originalTransitions.push(`uncertain:${error}`),
+  };
+  let replacement: SessionManager | undefined;
+  try {
+    h.manager.answerRecoveredQuestion(
+      "resume-session",
+      question.requestId,
+      question.recoveryId,
+      { target: "Production" },
+      original,
+      "parent-session",
+    );
+    for (let index = 0; index < 12 && !h.store.readMeta("resume-session")?.providerAuthBlock; index += 1) {
+      await tick();
+    }
+
+    const blocked = h.store.readMeta("resume-session")!;
+    const retained = blocked.providerAuthBlock?.durableRetries?.[0];
+    assert.equal(blocked.providerAuthBlock?.delivery, "not_delivered");
+    assert.deepEqual(originalTransitions, ["queued"]);
+    assert.equal(retained?.commandId, original.commandId);
+    assert.deepEqual(retained?.recoveredQuestion, {
+      requestId: question.requestId,
+      recoveryId: question.recoveryId,
+      answers: { target: "Production" },
+      resolvedByParentSessionId: "parent-session",
+      pendingQuestion: question,
+    });
+    assert.deepEqual(h.prompts, []);
+    assert.equal(h.store.readEvents("resume-session").some((event) =>
+      event.payload.kind === "user_message" || event.payload.kind === "question_resolved"), false);
+
+    h.manager.shutdownAll();
+    replacement = new SessionManager(
+      (message) => h.sent.push(message), () => {}, h.store, "runner-restarted", undefined,
+      h.factory, undefined, 4, (agentId, update) => h.authStatuses.push([agentId, update]),
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, [],
+      undefined, undefined, undefined, undefined, undefined, undefined, controller,
+    );
+    replacement.reconcileStore();
+    const replayTransitions: string[] = [];
+    const replay: DurableCommandLifecycle = {
+      commandId: original.commandId,
+      queued: () => replayTransitions.push("queued"),
+      started: () => replayTransitions.push("started"),
+      completed: () => replayTransitions.push("completed"),
+      failed: (error) => replayTransitions.push(`failed:${error}`),
+      uncertain: (error) => replayTransitions.push(`uncertain:${error}`),
+    };
+    replacement.answerRecoveredQuestion(
+      "resume-session",
+      question.requestId,
+      question.recoveryId,
+      { target: "Production" },
+      replay,
+      "parent-session",
+    );
+    assert.deepEqual(replayTransitions, ["queued"]);
+
+    const authRequestId = h.store.readMeta("resume-session")!.pendingApproval!.requestId;
+    replacement.resolvePermission("resume-session", authRequestId, "auth:accept-current");
+    for (let index = 0; index < 60 && !replayTransitions.includes("completed"); index += 1) {
+      await shortDelay();
+    }
+    replacement.resolvePermission("resume-session", authRequestId, "auth:accept-current");
+    for (let index = 0; index < 4; index += 1) await tick();
+
+    assert.deepEqual(replayTransitions, ["queued", "started", "completed"]);
+    assert.equal(h.prompts.length, 1);
+    assert.match(h.prompts[0]!, /"answer":"Production"/u);
+    const events = h.store.readEvents("resume-session");
+    assert.equal(events.filter((event) => event.payload.kind === "question_resolved" &&
+      event.payload.requestId === question.requestId).length, 1);
+    assert.equal(events.filter((event) => event.payload.kind === "user_message" &&
+      event.payload.commandId === original.commandId).length, 0);
+    assert.deepEqual(events.find((event) => event.payload.kind === "question_resolved" &&
+      event.payload.requestId === question.requestId)?.payload, {
+      kind: "question_resolved",
+      requestId: question.requestId,
+      answered: true,
+      resolutionReason: "submitted",
+      resolvedByParentSessionId: "parent-session",
+      commandId: original.commandId,
+    });
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
+    assert.equal(h.store.readMeta("resume-session")?.status, "idle");
+  } finally {
+    replacement?.shutdownAll();
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("approved durable authentication recovery waits for command redelivery after runner restart", async () => {
   const observations = [
     { status: "unauthenticated" as const },
