@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { SubagentDescriptor } from "../subagents.js";
 import type { ChildSessionRegistryEntry, SessionView } from "@wollipog/protocol";
-import { childRegistryProgressKey, mergeCompactAttentionOwners, mergeDurableAgents,
-  mergeRegistrySnapshotPages, shouldOpenPrimaryRequestInSession } from "./AgentsPanel.js";
+import { childRegistryProgressKey, childRegistryRefreshDelay, childRegistryRosterKey,
+  mergeCompactAttentionOwners, mergeDurableAgents, mergeRegistrySnapshotPages,
+  shouldOpenPrimaryRequestInSession } from "./AgentsPanel.js";
 
 const child = (id: string, lifecycle: SubagentDescriptor["lifecycle"], sourceIndex: number): SubagentDescriptor => ({
   id,
@@ -106,6 +107,33 @@ test("message progress invalidates the registry even inside one timestamp millis
     pendingApproval: null } as unknown as SessionView;
   const next = { ...session, messageCount: 21 };
   assert.notEqual(childRegistryProgressKey(session), childRegistryProgressKey(next));
+});
+
+test("the roster fingerprint moves only on evidence that the child roster itself changed", () => {
+  const session = { status: "running", pendingApproval: null, attentionOwners: [] } as unknown as SessionView;
+  const roster = [child("alpha", "working", 1)];
+  const key = childRegistryRosterKey(session, roster);
+  assert.equal(childRegistryRosterKey(session, [{ ...roster[0]!, toolCount: 9, lastActivityAt: 900 }]), key,
+    "activity counters on an unchanged child are rendered from the loaded projection, not the registry");
+  assert.notEqual(childRegistryRosterKey(session, [...roster, child("beta", "working", 2)]), key,
+    "a new subagent tool call is roster-affecting");
+  assert.notEqual(childRegistryRosterKey(session, [child("alpha", "completed", 1)]), key,
+    "a child lifecycle transition is roster-affecting");
+  assert.notEqual(childRegistryRosterKey({ ...session, status: "idle" } as SessionView, roster), key,
+    "the parent reaching a new status is roster-affecting");
+  assert.notEqual(childRegistryRosterKey({ ...session,
+    attentionOwners: [{ requestId: "ask", toolCallId: "alpha", resolved: false }] } as SessionView, roster), key,
+    "a child request appearing is roster-affecting");
+});
+
+test("evidence-free event progress waits for the idle cadence, roster evidence does not", () => {
+  assert.equal(childRegistryRefreshDelay(false, 0), 15_000);
+  assert.equal(childRegistryRefreshDelay(false, 3_000), 12_000,
+    "the cadence is an absolute deadline measured from the last request, so a burst cannot push it out");
+  assert.equal(childRegistryRefreshDelay(false, 20_000), 0);
+  assert.equal(childRegistryRefreshDelay(true, 0), 1_000, "roster evidence is still coalesced to one refresh per second");
+  assert.equal(childRegistryRefreshDelay(true, 1_500), 0);
+  assert.equal(childRegistryRefreshDelay(true, -5), 1_000, "a clock that went backwards never yields a negative wait");
 });
 
 test("a worker-owned primary approval stays actionable in the Agents panel", () => {

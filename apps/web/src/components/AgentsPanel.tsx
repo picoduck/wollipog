@@ -19,6 +19,16 @@ const STATE_LABELS: Record<WorkerState, string> = {
 };
 const PAGE_SIZE = 50;
 const REGISTRY_AUTO_RETRY_LIMIT = 2;
+/**
+ * Transcript progress alone is weak evidence that the child roster moved: a streaming turn bumps
+ * `lastEventAt`/`messageCount` on every event, and refreshing on each one re-read every loaded page
+ * about once a second for the whole turn (#1207). It is not *no* evidence either — a child whose
+ * tool row sits outside the loaded window changes its durable lifecycle without anything observable
+ * in `items` — so progress keeps driving refreshes, at this bounded idle cadence instead.
+ */
+const REGISTRY_IDLE_REFRESH_MS = 15_000;
+/** Roster-affecting evidence refreshes promptly, coalesced to at most one refresh per second. */
+const REGISTRY_ACTIVE_REFRESH_MS = 1_000;
 type RegistryRetry = { generation: string; after: number; attempt: number };
 
 export function mergeDurableAgents(
@@ -97,6 +107,30 @@ export function childRegistryProgressKey(
   return JSON.stringify([session.messageCount, session.lastEventAt, session.status,
     pendingRequests(session.pendingApproval).map((request) => request.requestId)]);
 }
+
+/**
+ * The observable evidence that the child roster itself may have moved: a new or re-stated subagent
+ * tool call, a child lifecycle transition, a request appearing or resolving, and the parent's own
+ * status. Deliberately excludes per-call counters such as `toolCount` and `lastActivityAt`, which
+ * the loaded projection already renders without consulting the registry.
+ */
+export function childRegistryRosterKey(
+  session: Pick<SessionView, "status" | "pendingApproval" | "attentionOwners">,
+  agents: readonly Pick<SubagentDescriptor, "id" | "toolStatus" | "lifecycle">[],
+): string {
+  return JSON.stringify([
+    session.status,
+    pendingRequests(session.pendingApproval).map((request) => request.requestId),
+    (session.attentionOwners ?? []).map((owner) => [owner.toolCallId, owner.resolved]),
+    agents.map((agent) => [agent.id, agent.toolStatus, agent.lifecycle]),
+  ]);
+}
+
+/** Milliseconds to wait before the next registry refresh, measured from the last one. */
+export function childRegistryRefreshDelay(rosterChanged: boolean, sinceLastRefresh: number): number {
+  const floor = rosterChanged ? REGISTRY_ACTIVE_REFRESH_MS : REGISTRY_IDLE_REFRESH_MS;
+  return Math.max(0, floor - Math.max(0, sinceLastRefresh));
+}
 type Props = ComponentProps<typeof SubagentsPanel> & Pick<ComponentProps<typeof BackgroundWorkPanel>,
   "runnerProtocolVersion" | "parentTurnEventIds" | "onOpenParentTurn" | "inventoryError" | "onRetryInventory"> & {
     onOpenPrimaryRequest?: (requestId: string) => void;
@@ -140,6 +174,15 @@ export function AgentsPanel(props: Props) {
     sessionStatus: session.status, runnerOnline,
     availability: runnerOnline ? "live" : "recorded",
   }), [items, runnerOnline, session.status]);
+  const rosterKey = useMemo(() => childRegistryRosterKey(session, projection.descriptors),
+    // The whole point is a fingerprint that ignores the rest of `session`; listing it would rebuild
+    // this on every streamed event, which is the cost being removed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [session.status, session.pendingApproval, session.attentionOwners, projection.descriptors]);
+  const progressKey = useMemo(() => childRegistryProgressKey(session),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [session.messageCount, session.lastEventAt, session.status, session.pendingApproval]);
+  const refreshedRosterKey = useRef(rosterKey);
   const [registry, setRegistry] = useState<ChildSessionRegistryEntry[] | null>(null);
   const [attentionOwners, setAttentionOwners] = useState<ChildSessionAttentionOwner[]>([]);
   const [registryAfter, setRegistryAfter] = useState<number | null>(0);
@@ -158,6 +201,7 @@ export function AgentsPanel(props: Props) {
     const key = `${registryGeneration}:${after}:attempt:${attempt}`;
     if (registryRequest.current === key) return;
     registryRequest.current = key;
+    lastRegistryRefresh.current = Date.now();
     setRegistryLoading(true);
     void api.childSessions(session.id, session.eventEpoch ?? 0, after, PAGE_SIZE).then((page) => {
       if (registryRequest.current !== key) return;
@@ -206,6 +250,7 @@ export function AgentsPanel(props: Props) {
     const key = `${session.id}:${session.eventEpoch ?? 0}:refresh:${progress}`;
     if (registryRequest.current === key) return;
     registryRequest.current = key;
+    lastRegistryRefresh.current = Date.now();
     setRegistryLoading(true);
     const pageCount = Math.max(1, Math.ceil((registryRef.current?.length ?? 0) / PAGE_SIZE));
     void (async () => {
@@ -251,6 +296,7 @@ export function AgentsPanel(props: Props) {
     setRegistryRetryAfter(null);
     setRegistryRetryExhausted(false);
     registryRequest.current = null;
+    refreshedRosterKey.current = rosterKey;
     loadRegistry(0);
     // Registry generations are scoped by exact session + event epoch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -271,16 +317,30 @@ export function AgentsPanel(props: Props) {
   }, [registryRetry, registryGeneration, session.messageCount]);
   useEffect(() => {
     if (registryRef.current === null) return;
-    const progress = childRegistryProgressKey(session);
-    const delay = Math.max(0, 1_000 - (Date.now() - lastRegistryRefresh.current));
-    const timer = setTimeout(() => {
-      lastRegistryRefresh.current = Date.now();
-      refreshRegistry(progress);
-    }, delay);
+    // Both keys are strings, so a burst of events that leaves the roster alone re-runs this effect
+    // without ever moving the deadline: each run reschedules the same absolute wake-up, which lands
+    // one idle-cadence refresh after the last request instead of one per event (#1207).
+    const rosterChanged = refreshedRosterKey.current !== rosterKey;
+    const remaining = () => childRegistryRefreshDelay(rosterChanged, Date.now() - lastRegistryRefresh.current);
+    let timer: ReturnType<typeof setTimeout>;
+    const arm = () => {
+      timer = setTimeout(() => {
+        // Load More and the inventory retry start their own request without re-running this effect,
+        // so they move the deadline under an already-armed timer. Fire only once the deadline has
+        // actually passed; otherwise re-arm, or a refresh would both break the cadence and take the
+        // request slot away from the page load still in flight.
+        if (remaining() > 0) return arm();
+        refreshedRosterKey.current = rosterKey;
+        refreshRegistry(progressKey);
+      }, remaining());
+    };
+    arm();
     return () => clearTimeout(timer);
-    // Event progress invalidates the durable lifecycle even when its transcript row is not loaded.
+    // Event progress invalidates the durable lifecycle even when its transcript row is not loaded,
+    // so it still schedules a refresh — at the idle cadence rather than per event. The generation
+    // stays a dependency so a session or epoch change still cancels a timer armed for the old one.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.id, session.eventEpoch, session.messageCount, session.lastEventAt, session.status, session.pendingApproval]);
+  }, [rosterKey, progressKey, registryGeneration]);
   const compactAttentionOwners = useMemo(() => mergeCompactAttentionOwners(
     attentionOwners, session.attentionOwners ?? [],
   ), [attentionOwners, session.attentionOwners]);
