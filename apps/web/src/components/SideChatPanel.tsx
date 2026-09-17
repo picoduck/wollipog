@@ -1,13 +1,37 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { isTerminal, type SessionEvent, type SessionView, type SideChatView } from "@wollipog/protocol";
+import { isTerminal, type SessionEvent, type SessionStatus, type SessionView, type SideChatView } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
+import { useStoreActions } from "../store.js";
 import { EventTimeline } from "./EventTimeline.js";
 import { useTimeline } from "./useTimeline.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
 
 const POLL_MS = 1_500;
 const PAGE_SIZE = 200;
+
+/** Prose, so sentence case: these complete the sentence "This side chat's session …". */
+const ENDED_PHRASE: Partial<Record<SessionStatus, string>> = {
+  completed: "has finished",
+  failed: "failed",
+  stopped: "was stopped",
+};
+
+/**
+ * Why the composer is unavailable, or null when it is usable. An ended child and an offline runner
+ * are different problems with different remedies, so they never share one message (#1206).
+ */
+export function sideChatComposerUnavailable(
+  status: SessionStatus,
+  runnerOnline: boolean,
+): string | null {
+  if (isTerminal(status)) {
+    return `This side chat's session ${ENDED_PHRASE[status] ?? "ended"}, so it can no longer receive ` +
+      "messages. Start a new side chat to continue; the ended transcript stays open at the link above.";
+  }
+  if (!runnerOnline) return "The runner is offline, so this side chat cannot send messages until it reconnects.";
+  return null;
+}
 
 export function SideChatPanel({
   session,
@@ -20,6 +44,7 @@ export function SideChatPanel({
   onInsertDraft: (text: string) => void;
 }) {
   const api = useApi();
+  const { navigate } = useStoreActions();
   const [sideChat, setSideChat] = useState<SideChatView | null>();
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [text, setText] = useState("");
@@ -115,12 +140,12 @@ export function SideChatPanel({
     return null;
   }, [items]);
 
-  const create = async () => {
+  const create = async (replaceEnded = false) => {
     if (creating) return;
     setCreating(true);
     setError(null);
     try {
-      const created = await api.createSideChat(session.id);
+      const created = await api.createSideChat(session.id, replaceEnded);
       if (mountedRef.current) setSideChat(created);
     } catch (cause) {
       if (mountedRef.current) setError((cause as Error).message);
@@ -172,12 +197,22 @@ export function SideChatPanel({
     );
   }
 
-  const canSend = runnerOnline && !isTerminal(sideChat.session.status) && Boolean(text.trim()) && !sending;
+  const childEnded = isTerminal(sideChat.session.status);
+  const unavailable = sideChatComposerUnavailable(sideChat.session.status, runnerOnline);
+  // Starting the replacement launches a child on the runner, so it needs the runner even though the
+  // ended child is the reason the composer is closed.
+  const replacementBlocked = childEnded && !runnerOnline
+    ? "The runner must be online to start a new side chat." : null;
+  const canSend = !unavailable && Boolean(text.trim()) && !sending;
   return (
     <div className="sidechat-panel">
       <div className="sidechat-boundary" role="note">
         <strong>Isolated Side Chat</strong>
         <span>{sideChat.session.status} · separate worktree and transcript</span>
+        <button type="button" className="btn sidechat-open-child"
+          onClick={() => navigate({ name: "session", id: sideChat.session.id })}>
+          Open Side Chat Session
+        </button>
       </div>
       <div className="sidechat-timeline" aria-label="Side Chat Transcript">
         {items.length ? (
@@ -196,6 +231,14 @@ export function SideChatPanel({
           Insert Latest Response into Primary Draft
         </button>
       )}
+      {unavailable && <div className="hint warn" role="status">{unavailable}</div>}
+      {replacementBlocked && <div className="hint warn" role="status">{replacementBlocked}</div>}
+      {childEnded && (
+        <button type="button" className="btn primary sidechat-restart"
+          disabled={creating || Boolean(replacementBlocked)} onClick={() => void create(true)}>
+          {creating ? "Starting…" : "Start a New Side Chat"}
+        </button>
+      )}
       {error && <div className="error-box" role="alert">{error}</div>}
       <div className="sidechat-composer">
         <textarea
@@ -205,7 +248,7 @@ export function SideChatPanel({
           placeholder="Ask without sharing the primary transcript…"
           aria-label="Side Chat Message"
           rows={3}
-          disabled={!runnerOnline || isTerminal(sideChat.session.status)}
+          disabled={Boolean(unavailable)}
         />
         <button type="button" className="btn primary" disabled={!canSend} onClick={() => void send()}>
           {sending ? "Sending…" : "Send"}

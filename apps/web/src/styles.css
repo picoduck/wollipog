@@ -2863,7 +2863,9 @@ textarea {
   overflow: auto;
   padding: 2px;
 }
-.sidechat-insert { align-self: stretch; }
+.sidechat-boundary .sidechat-open-child { align-self: flex-start; margin-top: 4px; }
+.sidechat-insert,
+.sidechat-restart { align-self: stretch; }
 .sidechat-composer { display: flex; align-items: flex-end; gap: 8px; }
 .sidechat-composer textarea {
   min-width: 0;
@@ -2890,6 +2892,8 @@ textarea {
   .sidechat-composer { flex-wrap: wrap; }
   .sidechat-composer textarea { flex-basis: 100%; min-height: 88px; }
   .sidechat-composer .btn,
+  .sidechat-restart,
+  .sidechat-open-child,
   .sidechat-insert { min-height: 44px; }
 }
 

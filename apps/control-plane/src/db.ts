@@ -16403,15 +16403,29 @@ export class ControlPlaneDb {
       : null;
   }
 
-  recordSideChat(parentSessionId: string, childSessionId: string, now: number): void {
+  /**
+   * `replaceExisting` unlinks whatever child currently holds the parent's row and installs the new
+   * one in the same transaction, so the parent is never briefly left with no side chat at all. The
+   * unlinked child is not touched: it remains an ordinary archived session with its transcript,
+   * worktree, and accounting intact.
+   */
+  recordSideChat(parentSessionId: string, childSessionId: string, now: number, replaceExisting = false): void {
     if (!parentSessionId || !childSessionId || parentSessionId === childSessionId ||
         !Number.isSafeInteger(now) || now < 0) {
       throw new Error("side chat relationship is invalid");
     }
-    this.stmt(
-      `INSERT INTO session_side_chats (parent_session_id, child_session_id, created_at)
-       VALUES (?, ?, ?)`,
-    ).run(parentSessionId, childSessionId, now);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (replaceExisting) this.clearSideChat(parentSessionId);
+      this.stmt(
+        `INSERT INTO session_side_chats (parent_session_id, child_session_id, created_at)
+         VALUES (?, ?, ?)`,
+      ).run(parentSessionId, childSessionId, now);
+      this.db.exec("COMMIT");
+    } catch (cause) {
+      this.db.exec("ROLLBACK");
+      throw cause;
+    }
   }
 
   getSideChat(parentSessionId: string): { parentSessionId: string; childSessionId: string; createdAt: number } | null {
@@ -16428,6 +16442,16 @@ export class ControlPlaneDb {
       childSessionId: row.child_session_id,
       createdAt: row.created_at,
     } : null;
+  }
+
+  /**
+   * Unlink a parent from its side chat without touching either session. The child keeps its
+   * transcript, worktree, and accounting and simply stops being the parent's current side chat, so
+   * a replacement can be recorded against the parent's primary-key row.
+   */
+  clearSideChat(parentSessionId: string): boolean {
+    return this.stmt("DELETE FROM session_side_chats WHERE parent_session_id=?")
+      .run(parentSessionId).changes > 0;
   }
 
   sideChatParent(childSessionId: string): string | null {

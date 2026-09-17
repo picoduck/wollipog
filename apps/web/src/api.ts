@@ -99,6 +99,7 @@ import type {
   SteeringAttemptView,
   SetProjectRequest,
   SetSessionReminderRequest,
+  CreateSideChatRequest,
   SideChatResponse,
   SideChatView,
   ShellHistoryPage,
@@ -648,8 +649,12 @@ export function createApiClient(transport: ApiTransport) {
   sideChat: (id: string) =>
     req<SideChatResponse>(`/api/sessions/${encodeURIComponent(id)}/side-chat`),
 
-  createSideChat: (id: string) =>
-    req<SideChatView>(`/api/sessions/${encodeURIComponent(id)}/side-chat`, { method: "POST" }),
+  /** `replaceEnded` unlinks a terminal child and starts a fresh one; the ended child is retained. */
+  createSideChat: (id: string, replaceEnded = false) =>
+    req<SideChatView>(`/api/sessions/${encodeURIComponent(id)}/side-chat`, {
+      method: "POST",
+      body: JSON.stringify({ replaceEnded } satisfies CreateSideChatRequest),
+    }),
 
   getSessionEventPage: (id: string, after: number, eventEpoch: number, limit = 200) => {
     const query = new URLSearchParams({

@@ -7586,17 +7586,24 @@ export class SessionsService {
     return ok({ parentSessionId, session: child, createdAt: relation.createdAt });
   }
 
-  createSideChat(parentSessionId: string): ServiceResult<SideChatView> {
+  /**
+   * Idempotent by default. `replaceEnded` is the recovery path for a child that reached a terminal
+   * state: the relationship row is dropped so a fresh child can take the parent's primary-key slot,
+   * while the ended child itself is retained untouched — transcript, worktree, and accounting stay
+   * addressable by its own session id. Replacing a live child is refused; stop it first.
+   */
+  createSideChat(parentSessionId: string, replaceEnded = false): ServiceResult<SideChatView> {
     const parent = this.db.getSession(parentSessionId);
     if (!parent) return fail("session not found", 404);
     if (this.db.sideChatParent(parentSessionId)) return fail("nested side chats are not supported", 409);
     const existing = this.db.getSideChat(parentSessionId);
     if (existing) {
       const child = this.db.getSession(existing.childSessionId);
-      return child
-        ? ok({ parentSessionId, session: child, createdAt: existing.createdAt })
-        : fail("side chat session is unavailable", 409);
+      if (!child) return fail("side chat session is unavailable", 409);
+      if (!replaceEnded) return ok({ parentSessionId, session: child, createdAt: existing.createdAt });
+      if (!isTerminal(child.status)) return fail("the current side chat is still active", 409);
     }
+    const replacing = Boolean(existing && replaceEnded);
     if (!parent.agentId) return fail("this session has no reusable agent", 409);
     const workspacePath = parent.workspaceId === null ? this.db.getAdHocWorkspacePath(parentSessionId) : null;
     if (parent.workspaceId === null && !workspacePath) return fail("this session has no reusable workspace", 409);
@@ -7649,7 +7656,7 @@ export class SessionsService {
 
     const now = Date.now();
     try {
-      this.db.recordSideChat(parentSessionId, created.data.id, now);
+      this.db.recordSideChat(parentSessionId, created.data.id, now, replacing);
     } catch {
       // The runner may already have received start_session, so delete from both durable stores.
       this.delete(created.data.id);

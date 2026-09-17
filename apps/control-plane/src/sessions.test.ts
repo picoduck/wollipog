@@ -5221,6 +5221,34 @@ test("deleting a primary session also tombstones and removes its side chat", () 
   );
 });
 
+test("an ended side chat is replaceable, and replacing it retains the ended transcript", () => {
+  const { db, hub, svc } = makeHarness();
+  const parentId = seedSession(svc, hub, { title: "Primary investigation" });
+  const first = svc.createSideChat(parentId).data!.session;
+
+  assert.equal(svc.createSideChat(parentId, true).status, 409,
+    "a live side chat is never replaced out from under the reader");
+  assert.equal(db.getSideChat(parentId)?.childSessionId, first.id);
+
+  db.updateSessionStatus(first.id, "stopped", Date.now());
+  const startsBefore = hub.sentOfType("start_session").length;
+
+  const replaced = svc.createSideChat(parentId, true);
+
+  assert.ok(replaced.ok && replaced.data, replaced.error);
+  assert.equal(replaced.status, 201);
+  const second = replaced.data!.session;
+  assert.notEqual(second.id, first.id);
+  assert.equal(hub.sentOfType("start_session").length, startsBefore + 1);
+  assert.equal(db.getSideChat(parentId)?.childSessionId, second.id, "the parent points at the replacement");
+  assert.equal(db.getSession(first.id)?.status, "stopped",
+    "the ended child is retained, not deleted: its transcript and worktree stay addressable");
+  assert.equal(db.sideChatParent(first.id), null, "the ended child is no longer the parent's side chat");
+  assert.equal(svc.sideChat(parentId).data!.session.id, second.id);
+  assert.equal(svc.createSideChat(parentId).data!.session.id, second.id,
+    "creation without the replace flag stays idempotent");
+});
+
 test("side chat creation is driver-neutral across Codex app-server, Claude, and ACP", () => {
   for (const [agentId, driver] of [
     [CODEX_APP_AGENT_ID, "codex-app-server"],
