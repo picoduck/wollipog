@@ -31,6 +31,20 @@ const ORCHESTRATOR_CLAUDE_BASH_RULES = [
   "gh pr status:*",
 ];
 
+// Provider mode has no runner-owned filesystem boundary. Keep Git commands whose option space can
+// write files (for example `git log --output=...`) exact; broader inspection remains available
+// through the interactive provider approval channel.
+const PROVIDER_ORCHESTRATOR_CLAUDE_BASH_RULES = [
+  "git log", "git diff", "git show", "git status", "git status:*",
+  "git worktree list", "git worktree list:*",
+  "git branch", "git branch -a", "git branch -r", "git branch -v", "git branch -vv", "git branch --show-current",
+  "gh issue list", "gh issue list:*", "gh issue view:*", "gh issue status", "gh issue status:*",
+  "gh issue edit --add-assignee:*", "gh issue edit --remove-assignee:*",
+  "gh issue edit --add-label:*", "gh issue edit --remove-label:*", "gh issue comment:*",
+  "gh pr list", "gh pr list:*", "gh pr view:*", "gh pr checks:*", "gh pr diff:*", "gh pr status",
+  "gh pr status:*",
+];
+
 export type OrchestratorIsolationMode = "provider" | "bwrap" | "seatbelt" | "windows-job";
 
 /** Whether a native harness can enforce the optional Strict Project Isolation boundary. Provider
@@ -86,11 +100,11 @@ export function orchestratorInstructions(
   ].join(" ");
 }
 
-function claudeAllowedTools(): string[] {
+function claudeAllowedTools(bashRules: readonly string[] = ORCHESTRATOR_CLAUDE_BASH_RULES): string[] {
   return [
     "mcp__wollipog__*",
     ...ORCHESTRATOR_CLAUDE_TOOLS.filter((tool) => tool !== "Bash"),
-    ...ORCHESTRATOR_CLAUDE_BASH_RULES.map((rule) => `Bash(${rule})`),
+    ...bashRules.map((rule) => `Bash(${rule})`),
   ];
 }
 
@@ -276,7 +290,8 @@ export function orchestratorLaunchArgs(
   const instructions = orchestratorInstructions(projectPaths, strictProjectIsolation);
   if (driver === "claude-code") {
     if (!strictProjectIsolation) {
-      return ["--strict-mcp-config", "--allowedTools", claudeAllowedTools().join(","),
+      return ["--strict-mcp-config", "--allowedTools",
+        claudeAllowedTools(PROVIDER_ORCHESTRATOR_CLAUDE_BASH_RULES).join(","),
         "--append-system-prompt", instructions,
         ...projectPaths.flatMap((path) => ["--add-dir", path])];
     }

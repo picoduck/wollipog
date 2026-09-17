@@ -378,10 +378,14 @@ test("provider-mode Claude Orchestrator pre-authorizes routine coordination but 
   const allowed = (claude[claude.indexOf("--allowedTools") + 1] ?? "").split(",");
   for (const routine of [
     "mcp__wollipog__*", "Read", "Grep", "Glob", "WebFetch", "WebSearch",
+    "Bash(git log)", "Bash(git diff)", "Bash(git show)",
     "Bash(git status:*)", "Bash(git worktree list:*)", "Bash(gh issue view:*)",
     "Bash(gh pr list:*)", "Bash(gh pr view:*)",
   ]) assert.ok(allowed.includes(routine), `${routine} should not produce a provider permission request`);
-  for (const implementation of ["Write", "Edit", "Bash", "Bash(pnpm test:*)", "Bash(git push:*)", "Bash(gh pr create:*)"]) {
+  for (const implementation of [
+    "Write", "Edit", "Bash", "Bash(pnpm test:*)", "Bash(git push:*)", "Bash(gh pr create:*)",
+    "Bash(git log:*)", "Bash(git diff:*)", "Bash(git show:*)", "Bash(git blame:*)",
+  ]) {
     assert.equal(allowed.includes(implementation), false,
       `${implementation} must remain behind the provider permission channel`);
   }
