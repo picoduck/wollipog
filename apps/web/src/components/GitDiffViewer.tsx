@@ -1,4 +1,4 @@
-import { Fragment, useState } from "react";
+import { Fragment, useMemo, useRef, useState } from "react";
 import { normalizeSourcePath } from "@wollipog/protocol";
 import type {
   CreateReviewFindingRequest,
@@ -7,6 +7,7 @@ import type {
   GitDiffInfo,
   GitHunk,
   ReviewFinding,
+  ReviewFindingSeverity,
   ReviewFindingStatus,
   SourceLocation,
 } from "@wollipog/protocol";
@@ -19,6 +20,7 @@ import {
   type DiffWordSegment,
   type DisplayFile,
 } from "../diff-view.js";
+import { diffAnchorKey, diffFileContentKey, type DiffAnchor } from "../review-anchors.js";
 import { titleCaseLabel } from "../format.js";
 import { Spinner } from "./common.js";
 import { Checkbox } from "./ui/ChoiceControls.js";
@@ -50,10 +52,57 @@ export interface StagingControls {
 
 export interface DiffReviewControls {
   findings: ReviewFinding[];
+  /**
+   * `findingId`s still attached to the line they were written against, from
+   * {@link reanchorFindings}. A finding whose own line is untouched keeps rendering inline across
+   * an unrelated refresh, which a `diffHash` comparison could not express (#1203).
+   */
+  anchoredFindingIds: ReadonlySet<string>;
+  /**
+   * Identity of the change-set on screen — diff scope plus index pane. Unsent drafts are namespaced
+   * by it so switching panes cannot re-target typed-but-unsent text at the other pane's same-numbered
+   * line, which carries a different anchor identity.
+   */
+  lineage: string;
   creating: boolean;
   busyFindingId: string | null;
   onCreate: (finding: CreateReviewFindingRequest) => Promise<boolean>;
   onStatus: (finding: ReviewFinding, status: Exclude<ReviewFindingStatus, "sent">) => Promise<void>;
+}
+
+/** The fields of one unsent inline finding. */
+export interface DiffDraft {
+  body: string;
+  severity: ReviewFindingSeverity;
+  required: boolean;
+}
+
+/** Frozen: every editor with no stored draft seeds its state from this one object. */
+const EMPTY_DRAFT: DiffDraft = Object.freeze({ body: "", severity: "major", required: true });
+
+/**
+ * Unsent inline-finding drafts, owned by the viewer root instead of by the hunk that renders them.
+ *
+ * A diff refresh remounts the file cards below (their content changed, or a whole new diff arrived),
+ * and per-hunk draft state died with them — staging a hunk in one file discarded a finding being
+ * typed in another (#1203). Holding drafts here outlives every such remount.
+ *
+ * Typed text lives in a ref, not in state: `open` changes identity only when an editor opens or
+ * closes, so a keystroke re-renders the one editor rather than the entire diff. Each editor seeds
+ * its own local state from {@link read} on mount, which is what restores the text after a remount.
+ */
+interface DraftStore {
+  /** Anchor keys with an open editor. */
+  open: ReadonlySet<string>;
+  keyFor: (anchor: DiffAnchor) => string;
+  read: (key: string) => DiffDraft;
+  write: (key: string, draft: DiffDraft) => void;
+  /** The + control: open the editor for this anchor, or close it if already open. */
+  toggle: (key: string) => void;
+  /** Cancel — closes the editor but keeps the text, so a mis-click cannot destroy it. */
+  dismiss: (key: string) => void;
+  /** Submitted successfully — the draft is now a finding, so drop it. */
+  clear: (key: string) => void;
 }
 
 /** Only plain text changes can be staged per-hunk: a rename's header block would stage the whole
@@ -89,7 +138,43 @@ export function GitDiffViewer({
   onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
   layout?: DiffLayout;
 }) {
-  const files = groupHunksForDisplay(diff.files, COLLAPSE_THRESHOLD);
+  // Both passes are O(diff), so they are memoized on the diff object rather than repeated for every
+  // re-render the surrounding panel causes (typing a commit message, a status poll landing).
+  const files = useMemo(
+    () => groupHunksForDisplay(diff.files, COLLAPSE_THRESHOLD)
+      .map((display) => ({ display, contentKey: diffFileContentKey(display.file) })),
+    [diff],
+  );
+
+  const lineage = review?.lineage ?? "";
+  const draftValues = useRef(new Map<string, DiffDraft>());
+  const [openDrafts, setOpenDrafts] = useState<ReadonlySet<string>>(() => new Set<string>());
+  const drafts: DraftStore = {
+    open: openDrafts,
+    keyFor: (anchor) => `${lineage}\u0000${diffAnchorKey(anchor)}`,
+    read: (key) => draftValues.current.get(key) ?? EMPTY_DRAFT,
+    write: (key, draft) => void draftValues.current.set(key, draft),
+    toggle: (key) => setOpenDrafts((prior) => {
+      const next = new Set(prior);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    }),
+    dismiss: (key) => setOpenDrafts((prior) => {
+      if (!prior.has(key)) return prior;
+      const next = new Set(prior);
+      next.delete(key);
+      return next;
+    }),
+    clear: (key) => {
+      draftValues.current.delete(key);
+      setOpenDrafts((prior) => {
+        if (!prior.has(key)) return prior;
+        const next = new Set(prior);
+        next.delete(key);
+        return next;
+      });
+    },
+  };
 
   if (files.length === 0) {
     return (
@@ -106,16 +191,18 @@ export function GitDiffViewer({
         {diff.stats.insertions > 0 && <span className="diff-ins"> +{diff.stats.insertions}</span>}
         {diff.stats.deletions > 0 && <span className="diff-del"> −{diff.stats.deletions}</span>}
       </div>
-      {files.map((df) => (
-        // Key on the diff hash so a file's ephemeral collapse state (expand / "show all")
-        // resets whenever the underlying diff changes — otherwise a same-path file returning
-        // with a different hunk count across a scope switch or refresh would keep a stale
-        // showAll toggle. A byte-identical refetch reuses the same hash, preserving state.
+      {files.map(({ display, contentKey }) => (
+        // Key on the file's OWN content, not the whole-change-set `diffHash`: a card whose file did
+        // not change must keep its collapse state, "show all hunks" toggle, and line selections
+        // across a refresh caused by another file (#1203), while a file that really did change still
+        // gets a fresh card — its hunks were renumbered, so a carried-over selection would point at
+        // different text. Unsent drafts survive either way; the viewer root owns them.
         <DiffFileCard
-          key={`${diff.diffHash}:${df.file.path}`}
-          display={df}
+          key={`${contentKey}:${display.file.path}`}
+          display={display}
           staging={staging}
           review={review}
+          drafts={drafts}
           onOpenSourceLocation={onOpenSourceLocation}
           onAttachWorkspaceReference={onAttachWorkspaceReference}
           diffHash={diff.diffHash}
@@ -131,6 +218,7 @@ function DiffFileCard({
   display,
   staging,
   review,
+  drafts,
   onOpenSourceLocation,
   onAttachWorkspaceReference,
   diffHash,
@@ -140,6 +228,7 @@ function DiffFileCard({
   display: DisplayFile;
   staging?: StagingControls;
   review?: DiffReviewControls;
+  drafts: DraftStore;
   onOpenSourceLocation?: (location: SourceLocation) => void;
   onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
   diffHash: string;
@@ -230,6 +319,7 @@ function DiffFileCard({
                     index={h.index}
                     staging={stageEligible(file) ? staging : undefined}
                     review={review}
+                    drafts={drafts}
                     onOpenSourceLocation={onOpenSourceLocation}
                     onAttachWorkspaceReference={onAttachWorkspaceReference}
                     diffHash={diffHash}
@@ -250,6 +340,87 @@ function DiffFileCard({
   );
 }
 
+/**
+ * The inline finding editor for one anchor.
+ *
+ * Its own component, holding the fields in local state and mirroring every change into the viewer's
+ * draft store. That keeps a keystroke's re-render to this editor — the store's typed text is a ref —
+ * while the store is what survives a file card remount, reseeding this state on mount.
+ */
+function DiffCommentEditor({
+  anchorKey,
+  drafts,
+  review,
+  scope,
+  diffHash,
+  filePath,
+  anchor,
+}: {
+  anchorKey: string;
+  drafts: DraftStore;
+  review: DiffReviewControls;
+  scope: GitDiffInfo["scope"];
+  diffHash: string;
+  filePath: string;
+  anchor: DiffAnchor;
+}) {
+  const [draft, setDraft] = useState<DiffDraft>(() => drafts.read(anchorKey));
+  const update = (changes: Partial<DiffDraft>) => {
+    const next = { ...draft, ...changes };
+    setDraft(next);
+    drafts.write(anchorKey, next);
+  };
+  const submit = async () => {
+    if (!draft.body.trim()) return;
+    const created = await review.onCreate({
+      scope,
+      diffHash,
+      filePath,
+      side: anchor.side,
+      line: anchor.line,
+      body: draft.body,
+      severity: draft.severity,
+      required: draft.required,
+    });
+    if (created) drafts.clear(anchorKey);
+  };
+
+  return (
+    <div className="diff-comment-editor">
+      <textarea
+        value={draft.body}
+        onChange={(event) => update({ body: event.target.value })}
+        rows={3}
+        maxLength={4000}
+        placeholder="Describe the concrete issue and expected fix"
+        autoFocus
+      />
+      <div className="diff-comment-editor-controls">
+        <label>
+          Severity
+          <select
+            value={draft.severity}
+            onChange={(event) => update({ severity: event.target.value as ReviewFindingSeverity })}
+          >
+            <option value="blocker">Blocker</option>
+            <option value="major">Major</option>
+            <option value="minor">Minor</option>
+            <option value="nit">Nit</option>
+          </select>
+        </label>
+        <label className="review-required-toggle">
+          <input type="checkbox" checked={draft.required} onChange={(event) => update({ required: event.target.checked })} />
+          Must Resolve Before Publish
+        </label>
+        <button className="btn sm" disabled={review.creating || !draft.body.trim()} onClick={() => void submit()}>
+          {review.creating ? "Adding…" : "Add Finding"}
+        </button>
+        <button className="btn ghost sm" disabled={review.creating} onClick={() => drafts.dismiss(anchorKey)}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
 function HunkView({
   hunk,
   filePath,
@@ -257,6 +428,7 @@ function HunkView({
   index,
   staging,
   review,
+  drafts,
   onOpenSourceLocation,
   onAttachWorkspaceReference,
   diffHash,
@@ -269,6 +441,7 @@ function HunkView({
   index: number;
   staging?: StagingControls;
   review?: DiffReviewControls;
+  drafts: DraftStore;
   onOpenSourceLocation?: (location: SourceLocation) => void;
   onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
   diffHash: string;
@@ -280,10 +453,6 @@ function HunkView({
   const inFlight = staging?.busyKey === key || staging?.busyKey === `${key}:lines`;
   // One mutation at a time — every hunk button disables while any one is in flight.
   const disabled = staging?.busyKey != null;
-  const [draftTarget, setDraftTarget] = useState<{ side: "left" | "right"; line: number } | null>(null);
-  const [body, setBody] = useState("");
-  const [severity, setSeverity] = useState<CreateReviewFindingRequest["severity"]>("major");
-  const [required, setRequired] = useState(true);
   const [selectedLines, setSelectedLines] = useState<Set<number>>(new Set());
   const [selectedReferenceLines, setSelectedReferenceLines] = useState<{ side: "left" | "right"; lines: Set<number> } | null>(null);
   const [attachBusy, setAttachBusy] = useState(false);
@@ -338,25 +507,6 @@ function HunkView({
       onChange={() => toggleReferenceLine(row)}
     />
   ) : null;
-  const submitFinding = async () => {
-    if (!review || !draftTarget || !body.trim()) return;
-    const created = await review.onCreate({
-      scope,
-      diffHash,
-      filePath,
-      side: draftTarget.side,
-      line: draftTarget.line,
-      body,
-      severity,
-      required,
-    });
-    if (created) {
-      setDraftTarget(null);
-      setBody("");
-      setSeverity("major");
-      setRequired(true);
-    }
-  };
 
   const syntax = (text: string) => highlightDiffLine(filePath, text).map((segment, segmentIndex) => (
     <span className={`diff-syntax-${segment.kind}`} key={segmentIndex}>{segment.text}</span>
@@ -368,11 +518,13 @@ function HunkView({
     : syntax(row.text);
   const reviewExtras = (row: DiffHunkRow, prefix: string) => {
     const target = row.anchor;
+    // Anchored by finding identity, not by `diffHash` equality: a finding whose own line is
+    // byte-identical stays inline through a refresh caused by anything else (#1203).
     const anchored = review?.findings.filter((finding) =>
-      finding.diffHash === diffHash && finding.filePath === filePath &&
+      review.anchoredFindingIds.has(finding.findingId) && finding.filePath === filePath &&
       finding.side === target.side && finding.line === target.line,
     ) ?? [];
-    const drafting = draftTarget?.side === target.side && draftTarget.line === target.line;
+    const anchorKey = drafts.keyFor({ filePath, ...target });
     return (
       <Fragment key={`${prefix}-extras`}>
         {anchored.map((finding) => (
@@ -395,29 +547,17 @@ function HunkView({
             </div>
           </div>
         ))}
-        {drafting && review && (
-          <div className="diff-comment-editor">
-            <textarea value={body} onChange={(event) => setBody(event.target.value)} rows={3} maxLength={4000} placeholder="Describe the concrete issue and expected fix" autoFocus />
-            <div className="diff-comment-editor-controls">
-              <label>
-                Severity
-                <select value={severity} onChange={(event) => setSeverity(event.target.value as CreateReviewFindingRequest["severity"])}>
-                  <option value="blocker">Blocker</option>
-                  <option value="major">Major</option>
-                  <option value="minor">Minor</option>
-                  <option value="nit">Nit</option>
-                </select>
-              </label>
-              <label className="review-required-toggle">
-                <input type="checkbox" checked={required} onChange={(event) => setRequired(event.target.checked)} />
-                Must Resolve Before Publish
-              </label>
-              <button className="btn sm" disabled={review.creating || !body.trim()} onClick={() => void submitFinding()}>
-                {review.creating ? "Adding…" : "Add Finding"}
-              </button>
-              <button className="btn ghost sm" disabled={review.creating} onClick={() => setDraftTarget(null)}>Cancel</button>
-            </div>
-          </div>
+        {drafts.open.has(anchorKey) && review && (
+          <DiffCommentEditor
+            key={anchorKey}
+            anchorKey={anchorKey}
+            drafts={drafts}
+            review={review}
+            scope={scope}
+            diffHash={diffHash}
+            filePath={filePath}
+            anchor={{ filePath, ...target }}
+          />
         )}
       </Fragment>
     );
@@ -429,9 +569,7 @@ function HunkView({
       className="diff-comment-add"
       aria-label={`Comment on ${filePath} ${row.anchor.side} line ${row.anchor.line}`}
       title="Add inline review finding"
-      onClick={() => setDraftTarget(
-        draftTarget?.side === row.anchor.side && draftTarget.line === row.anchor.line ? null : row.anchor,
-      )}
+      onClick={() => drafts.toggle(drafts.keyFor({ filePath, ...row.anchor }))}
     >
       +
     </button>
