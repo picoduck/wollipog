@@ -5244,6 +5244,8 @@ test("an ended side chat is replaceable, and replacing it retains the ended tran
   assert.equal(db.getSession(first.id)?.status, "stopped",
     "the ended child is retained, not deleted: its transcript and worktree stay addressable");
   assert.equal(db.sideChatParent(first.id), null, "the ended child is no longer the parent's side chat");
+  assert.ok(db.listSessions({ includeArchived: true }).some((session) => session.id === first.id),
+    "retention is reachable, not just undeleted: the ended child is an ordinary archived session");
   assert.equal(svc.sideChat(parentId).data!.session.id, second.id);
   assert.equal(svc.createSideChat(parentId).data!.session.id, second.id,
     "creation without the replace flag stays idempotent");

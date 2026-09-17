@@ -323,3 +323,65 @@ test("the panel still renders where no store is mounted, minus the store-backed 
     container.remove();
   }
 });
+
+/**
+ * Cross-model review CR-2.1. Switching children used to commit the new child while `events` still
+ * held the old one's, so for one render the retired transcript sat under the new child's header —
+ * and its "Insert Latest Response into Primary Draft" was live, which is the one action that crosses
+ * back into the primary composer. The fix resets the transcript in the same commit as the switch;
+ * that sub-frame window is not observable from happy-dom (a MutationObserver batches its records and
+ * reports only the settled text), so this test pins the settled outcome and the insert boundary,
+ * and the same-commit guarantee rests on `resetTranscript` being called beside every `setSideChat`
+ * that changes the child.
+ */
+test("a replaced child carries neither the retired transcript nor its insert action", async () => {
+  const originals = {
+    sideChat: api.sideChat, createSideChat: api.createSideChat,
+    session: api.session, getSessionEventPage: api.getSessionEventPage,
+  };
+  const ended = { ...child, status: "stopped" } as SessionView;
+  const replacement = { ...child, id: "side-session-fresh", status: "idle" } as SessionView;
+  const inserted: string[] = [];
+  let related: SideChatView = { ...relation, session: ended };
+  api.sideChat = async () => ({ sideChat: related });
+  api.createSideChat = async (_id: string, replaceEnded = false) => {
+    if (replaceEnded) related = { parentSessionId: parent.id, session: replacement, createdAt: 3 };
+    return related;
+  };
+  api.session = async () => ({ session: related.session });
+  api.getSessionEventPage = async (id: string) => ({
+    events: id === ended.id ? [responseEvent] : [], eventEpoch: 0, nextAfter: 1, cacheComplete: true,
+  });
+
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const button = (label: string) => Array.from(container.querySelectorAll("button"))
+    .find((candidate) => candidate.textContent === label) as HTMLButtonElement | undefined;
+  try {
+    await act(async () => {
+      root.render(mount(<SideChatPanel session={parent} runnerOnline
+        onInsertDraft={(text) => inserted.push(text)} />, []));
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    });
+    assert.match(container.textContent ?? "", /Selected side-chat answer/, "the retired transcript is loaded");
+    assert.ok(button("Insert Latest Response into Primary Draft"));
+
+    await act(async () => {
+      button("Start a New Side Chat")!.click();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    assert.match(container.textContent ?? "", /idle · separate worktree and transcript/);
+    assert.doesNotMatch(container.textContent ?? "", /Selected side-chat answer/,
+      "the fresh child does not inherit the retired child's transcript");
+    assert.equal(button("Insert Latest Response into Primary Draft"), undefined,
+      "nor its route back into the primary composer");
+    assert.deepEqual(inserted, []);
+  } finally {
+    await act(async () => { root.unmount(); });
+    Object.assign(api, originals);
+    container.remove();
+  }
+});

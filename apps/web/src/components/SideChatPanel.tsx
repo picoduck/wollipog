@@ -91,6 +91,20 @@ export function SideChatPanel({
     return () => { current = false; };
   }, [api, session.id]);
 
+  /**
+   * Drop the transcript belonging to whichever child we are leaving. Call this in the SAME commit as
+   * the switch: React batches the two updates, so the incoming child never renders for a frame with
+   * the retired child's events beneath it — which would also, briefly, offer that child's text to
+   * "Insert Latest Response into Primary Draft", the one action that crosses back into the primary
+   * composer.
+   */
+  const resetTranscript = (next: SideChatView | null) => {
+    cursorRef.current = 0;
+    epochRef.current = next?.session.eventEpoch ?? 0;
+    setEvents([]);
+  };
+
+  // Backstop for any path that changes the child without going through `resetTranscript`.
   useEffect(() => {
     cursorRef.current = 0;
     epochRef.current = sideChat?.session.eventEpoch ?? 0;
@@ -112,10 +126,14 @@ export function SideChatPanel({
         // forever, because it was still arguing about a child the parent had already let go.
         const { sideChat: latest } = await api.sideChat(session.id);
         if (!current) return;
-        setSideChat(latest);
         // A different child means a new generation; this effect re-runs for it rather than merging
         // the two transcripts here.
-        if (latest?.session.id !== childId) return;
+        if (latest?.session.id !== childId) {
+          resetTranscript(latest);
+          setSideChat(latest);
+          return;
+        }
+        setSideChat(latest);
         const epoch = latest.session.eventEpoch ?? 0;
         if (epochRef.current !== epoch) {
           epochRef.current = epoch;
@@ -172,7 +190,9 @@ export function SideChatPanel({
     setError(null);
     try {
       const created = await api.createSideChat(session.id, replaceEnded);
-      if (mountedRef.current) setSideChat(created);
+      if (!mountedRef.current) return;
+      if (created.session.id !== childId) resetTranscript(created);
+      setSideChat(created);
     } catch (cause) {
       if (mountedRef.current) setError((cause as Error).message);
     } finally {
