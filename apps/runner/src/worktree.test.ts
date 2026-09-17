@@ -4705,7 +4705,7 @@ test("a worktree removed between turns fails the resume instead of spawning a pr
   try {
     const { repo } = initRepoWithOrigin(root);
     const store = new SessionStore(join(dataDir, "sessions"));
-    const messages: Array<{ type: string; status?: string; payload?: { kind?: string; message?: string } }> = [];
+    const messages: Array<{ type: string; status?: string; detail?: string; payload?: { kind?: string; message?: string } }> = [];
     const launchedCwds: string[] = [];
     const prompts: string[] = [];
     const factory = (_driver: unknown, launch: { cwd: string }) => {
@@ -4742,8 +4742,8 @@ test("a worktree removed between turns fails the resume instead of spawning a pr
     const before = launchedCwds.length;
     manager.prompt(spec.sessionId, "second");
     await waitForCondition(
-      () => messages.some((message) => message.payload?.kind === "error" &&
-        /could not be verified before provider launch/.test(message.payload.message ?? "")),
+      () => messages.some((message) => message.type === "session_status" && message.status === "failed" &&
+        /could not be verified before provider launch/.test(message.detail ?? "")),
       "the resume never reported the invalid worktree",
     );
     assert.equal(launchedCwds.length, before, "no provider process was created for the removed worktree");
@@ -4767,7 +4767,7 @@ test("queued app-server recovery refuses to relaunch into a removed worktree", {
   try {
     const { repo } = initRepoWithOrigin(root);
     const store = new SessionStore(join(dataDir, "sessions"));
-    const messages: Array<{ type: string; status?: string; payload?: { kind?: string; message?: string } }> = [];
+    const messages: Array<{ type: string; status?: string; detail?: string; payload?: { kind?: string; message?: string } }> = [];
     const launchedCwds: string[] = [];
     const factory = (_driver: unknown, launch: { cwd: string }) => {
       launchedCwds.push(launch.cwd);
@@ -4801,9 +4801,9 @@ test("queued app-server recovery refuses to relaunch into a removed worktree", {
     await internals.recoverQueuedAppServer("s_recovery_wt");
 
     assert.deepEqual(launchedCwds, [], "recovery never spawned a provider in the removed worktree");
-    assert.equal(messages.some((message) => message.payload?.kind === "error" &&
-      /could not be verified before provider launch/.test(message.payload.message ?? "")), true,
-      "recovery reported the invalid worktree state");
+    assert.equal(messages.some((message) => message.type === "session_status" && message.status === "failed" &&
+      /could not be verified before provider launch/.test(message.detail ?? "")), true,
+      "recovery reported the invalid worktree state through actionable status detail");
     assert.equal(internals.recoveryQueues.get("s_recovery_wt"), queued, "the queued prompts stay held");
     assert.equal(messages.some((message) => message.payload?.kind === "error" &&
       /queued prompt\(s\) remain held/.test(message.payload.message ?? "")), true,
@@ -4876,7 +4876,7 @@ test("a non-host execution target verifies its host worktree before the adapter 
   try {
     const { repo } = initRepoWithOrigin(root);
     const store = new SessionStore(join(dataDir, "sessions"));
-    const messages: Array<{ type: string; status?: string; payload?: { kind?: string; message?: string } }> = [];
+    const messages: Array<{ type: string; status?: string; detail?: string; payload?: { kind?: string; message?: string } }> = [];
     const launchedCwds: string[] = [];
     const factory = (_driver: unknown, launch: { cwd: string }) => {
       launchedCwds.push(launch.cwd);
@@ -4918,8 +4918,8 @@ test("a non-host execution target verifies its host worktree before the adapter 
     await internals.recoverQueuedAppServer("s_container_wt");
 
     assert.deepEqual(launchedCwds, [], "no driver was constructed for the removed mount source");
-    assert.equal(messages.some((message) => message.payload?.kind === "error" &&
-      /could not be verified before provider launch/.test(message.payload.message ?? "")), true,
+    assert.equal(messages.some((message) => message.type === "session_status" && message.status === "failed" &&
+      /could not be verified before provider launch/.test(message.detail ?? "")), true,
       "the worktree is proved before any adapter-specific preparation runs");
   } finally {
     manager?.shutdownAll();
@@ -4978,7 +4978,7 @@ test("a legacy row without a recorded branch still fails closed when its worktre
   try {
     const { repo } = initRepoWithOrigin(root);
     const store = new SessionStore(join(dataDir, "sessions"));
-    const messages: Array<{ type: string; status?: string; payload?: { kind?: string; message?: string } }> = [];
+    const messages: Array<{ type: string; status?: string; detail?: string; payload?: { kind?: string; message?: string } }> = [];
     const launchedCwds: string[] = [];
     const factory = (_driver: unknown, launch: { cwd: string }) => {
       launchedCwds.push(launch.cwd);
@@ -5015,9 +5015,9 @@ test("a legacy row without a recorded branch still fails closed when its worktre
     await internals.recoverQueuedAppServer("s_legacy_branch");
 
     assert.deepEqual(launchedCwds, [], "a switched legacy worktree never reaches a provider");
-    assert.equal(messages.some((message) => message.payload?.kind === "error" &&
-      /instead of agent\/s_legacy_branch/.test(message.payload.message ?? "")), true,
-      "and the error names the identity the legacy row implies");
+    assert.equal(messages.some((message) => message.type === "session_status" && message.status === "failed" &&
+      /instead of agent\/s_legacy_branch/.test(message.detail ?? "")), true,
+      "and the status detail names the identity the legacy row implies");
 
     // An owner-hashed runner derives the prefixed name only for a WSL owner root. Switching a
     // native legacy tree to that form is still a switch, not an alternative spelling of itself.
@@ -5027,8 +5027,8 @@ test("a legacy row without a recorded branch still fails closed when its worktre
     internals.recoveryQueues.set("s_legacy_branch", [{ id: "q2", text: "held", images: [], queuedAt: 2 }]);
     await internals.recoverQueuedAppServer("s_legacy_branch");
     assert.deepEqual(launchedCwds, [], "the owner-prefixed form is not accepted for a native row");
-    assert.equal(messages.some((message) => message.payload?.kind === "error" &&
-      message.payload.message?.includes(`now on branch ${ownerBranch} instead of agent/s_legacy_branch`)), true,
+    assert.equal(messages.some((message) => message.type === "session_status" && message.status === "failed" &&
+      message.detail?.includes(`now on branch ${ownerBranch} instead of agent/s_legacy_branch`)), true,
       "and the refusal names the one branch the path's creation mode implies");
   } finally {
     manager?.shutdownAll();

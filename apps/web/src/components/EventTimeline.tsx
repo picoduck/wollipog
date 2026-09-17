@@ -70,6 +70,58 @@ export interface TimelineApprovalContext {
   onOpenRequest: () => void;
 }
 
+/**
+ * Announces only errors appended after the opening transcript window has settled. Keeping the
+ * live region outside the virtualized rows prevents history paging, reconnect hydration, and row
+ * remounts from announcing durable errors again.
+ */
+export function TranscriptErrorAlert({
+  historyKey,
+  items,
+  ready,
+}: {
+  historyKey: string;
+  items: readonly TimelineItem[];
+  ready: boolean;
+}) {
+  const cursorRef = useRef({ historyKey, initialized: false, maxEventId: 0 });
+  const [announcement, setAnnouncement] = useState<{ eventId: number; message: string } | null>(null);
+
+  useEffect(() => {
+    const cursor = cursorRef.current;
+    if (cursor.historyKey !== historyKey) {
+      cursor.historyKey = historyKey;
+      cursor.initialized = false;
+      cursor.maxEventId = 0;
+      setAnnouncement(null);
+    }
+    if (!ready) return;
+
+    const maxEventId = items.reduce((maximum, item) => Math.max(maximum, item.id), 0);
+    if (!cursor.initialized) {
+      cursor.initialized = true;
+      cursor.maxEventId = maxEventId;
+      return;
+    }
+
+    const appendedErrors = items.filter(
+      (item): item is Extract<TimelineItem, { kind: "error" }> =>
+        item.kind === "error" && item.id > cursor.maxEventId,
+    );
+    cursor.maxEventId = Math.max(cursor.maxEventId, maxEventId);
+    const latestError = appendedErrors.at(-1);
+    if (latestError) {
+      setAnnouncement({ eventId: latestError.id, message: latestError.message });
+    }
+  }, [historyKey, items, ready]);
+
+  return (
+    <span className="sr-only" data-transcript-error-alert aria-live="assertive" aria-atomic="true">
+      {announcement && <span key={announcement.eventId}>{announcement.message}</span>}
+    </span>
+  );
+}
+
 export function timelineFileSourceLocation(path: string): SourceLocation | null {
   const normalized = normalizeSourcePath(path);
   return normalized ? { path: normalized } : null;

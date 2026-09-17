@@ -59,7 +59,7 @@ import {
   Spinner,
   SessionStatusIndicators,
 } from "./common.js";
-import { EventTimeline, type TimelineRevealRequest } from "./EventTimeline.js";
+import { EventTimeline, TranscriptErrorAlert, type TimelineRevealRequest } from "./EventTimeline.js";
 import { ConversationHandoffDialog } from "./ConversationHandoffDialog.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
 import { RightPanel, type RightPanelState } from "./RightPanel.js";
@@ -4732,6 +4732,11 @@ function SessionDetailLoaded({
                 />
               )}
               {transcript.body !== "timeline" && standaloneRequestCard}
+              <TranscriptErrorAlert
+                historyKey={timelineHistoryKey}
+                items={items}
+                ready={openingHistoryFillSettled}
+              />
               {transcript.body === "skeleton" ? (
                 <TranscriptSkeleton />
               ) : transcript.body === "unavailable" ? (

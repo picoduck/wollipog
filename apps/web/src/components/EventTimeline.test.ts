@@ -184,6 +184,14 @@ test("turn interruption renders a timestamped Interrupted outcome without error 
   assert.doesNotMatch(html, /tl-error/);
 });
 
+test("historical transcript error rows are not assertive live regions", () => {
+  const html = renderToStaticMarkup(React.createElement(EventTimeline, {
+    items: [{ kind: "error", id: 1, message: "Worktree verification failed" }],
+  }));
+  assert.equal((html.match(/role="alert"/g) ?? []).length, 0);
+  assert.match(html, /Worktree verification failed/);
+});
+
 test("canonical accepted steering messages render one compact Steered marker", () => {
   const html = renderToStaticMarkup(React.createElement(EventTimeline, {
     items: [

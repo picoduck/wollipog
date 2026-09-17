@@ -5880,7 +5880,9 @@ export class SessionManager {
         this.store.readMeta(meta.sessionId)?.status === "stopped") return false;
     const message = `the selected worktree could not be verified before provider launch: ${detail}` +
       ` — restore ${worktree.path} or select another worktree for this session`;
-    this.emitEvent(meta.sessionId, { kind: "error", message });
+    // Failed-status detail is the canonical transport for this refusal. The control plane turns
+    // that detail into the single transcript error while retaining it for summaries and
+    // notifications; emitting an error here as well would create a duplicate card and alert.
     this.emitStatus(meta.sessionId, "failed", message);
     return false;
   }
