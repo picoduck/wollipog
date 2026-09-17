@@ -13,6 +13,7 @@ function Fixture() {
             { kind: "user_message", id: 1, text: "Inspect the checkpoint controls." },
             { kind: "checkpoint", id: 2, turn: 4 },
             { kind: "agent_message", id: 3, text: "The checkpoint is ready." },
+            { kind: "conversation_checkpoint", id: 4, turn: 4 },
           ]}
           onRewind={setRewoundTurn}
         />
