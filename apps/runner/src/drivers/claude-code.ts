@@ -24,6 +24,7 @@ import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import { inspectClaudeBackgroundWork, inspectClaudeBackgroundWorkInContext, type ClaudeBackgroundWorkInspection } from "../claude-background-work.js";
 import { effectiveClaudePermissionMode } from "../claude-permission.js";
 import { prepareClaudeHookArgs } from "../hook-settings.js";
+import { isRoutineClaudeOrchestratorPermission } from "../orchestrator-provider-permissions.js";
 import { killTree, spawnAgent, terminateDescendantBoundaries, trackPendingKill, type AgentProcess, type SpawnAgentOptions } from "../spawn.js";
 import type {
   Driver,
@@ -2097,6 +2098,23 @@ export class ClaudeCodeDriver implements Driver {
         if (!this.child) return null;
         const req = msg.request;
         if (req?.subtype === "can_use_tool" && typeof msg.request_id === "string") {
+          if (this.opts.orchestrator?.strictProjectIsolation === false &&
+              isRoutineClaudeOrchestratorPermission(req.tool_name, req.input)) {
+            try {
+              this.child.stdin.write(JSON.stringify({
+                type: "control_response",
+                response: {
+                  subtype: "success",
+                  request_id: msg.request_id,
+                  response: { behavior: "allow", updatedInput: req.input },
+                },
+              }) + "\n");
+              return null;
+            } catch {
+              // Fall through to the visible approval path if the bounded response could not be
+              // written. That path retains the request instead of silently parking the provider.
+            }
+          }
           if (!this.pendingApprovals.has(msg.request_id) && this.pendingApprovals.size >= 128) {
             try {
               this.child.stdin.write(JSON.stringify({

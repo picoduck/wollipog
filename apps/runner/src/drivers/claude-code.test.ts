@@ -59,7 +59,7 @@ interface Harness {
   feed: (msg: unknown) => unknown;
 }
 
-function makeHarness(): Harness {
+function makeHarness(overrides: Partial<DriverOptions> = {}): Harness {
   const events: SessionEventPayload[] = [];
   const stderr: string[] = [];
   const resolvedModels: string[] = [];
@@ -85,6 +85,7 @@ function makeHarness(): Harness {
     // Only the fields the mapper might touch matter; cast keeps the test minimal.
     config: {} as DriverOptions["config"],
     context: {} as DriverOptions["context"],
+    ...overrides,
   };
   const driver = new ClaudeCodeDriver(opts, cb);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -3429,6 +3430,66 @@ test("control_request (can_use_tool) -> permission_request with allow/deny optio
   // the tool input is stashed so resolvePermission can echo it back on allow
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   assert.deepEqual((h.driver as any).pendingApprovals.get("req-1"), { file_path: "notes.md", content: "hi" });
+});
+
+test("provider-mode Claude Orchestrator auto-allows a bounded read-only issue loop", () => {
+  const h = makeHarness({ orchestrator: { strictProjectIsolation: false } });
+  const writes: string[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
+  const command = "for n in 1209 1210 1211; do gh issue view $n --json number,title,body,labels,assignees,state,comments --jq '{number,title,state,labels:[.labels[].name],assignees:[.assignees[].login],body,comments:[.comments[]|{author:.author.login,body}]}'; echo ----; done";
+
+  h.feed({
+    type: "control_request",
+    request_id: "routine-loop",
+    request: { subtype: "can_use_tool", tool_name: "Bash", description: "Read issues", input: { command } },
+  });
+
+  assert.deepEqual(h.events, [], "routine coordination must not surface a permission card");
+  assert.equal((h.driver as any).pendingApprovals.size, 0);
+  assert.deepEqual(JSON.parse(writes[0]!), {
+    type: "control_response",
+    response: {
+      subtype: "success",
+      request_id: "routine-loop",
+      response: { behavior: "allow", updatedInput: { command } },
+    },
+  });
+});
+
+test("provider-mode Claude Orchestrator keeps a mutation-capable loop interactive", () => {
+  const h = makeHarness({ orchestrator: { strictProjectIsolation: false } });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (h.driver as any).child = { stdin: { write: () => {} } };
+
+  h.feed({
+    type: "control_request",
+    request_id: "mutation-loop",
+    request: {
+      subtype: "can_use_tool",
+      tool_name: "Bash",
+      description: "Edit issues",
+      input: { command: "for n in 1209 1210 1211; do gh issue edit $n --add-label ready; done" },
+    },
+  });
+
+  assert.equal(h.events.length, 1);
+  assert.equal(h.events[0]?.kind, "permission_request");
+});
+
+test("ordinary and strictly isolated Claude sessions do not use the provider Orchestrator bypass", () => {
+  const command = "for n in 1209 1210; do gh issue view $n; done";
+  for (const overrides of [{}, { orchestrator: { strictProjectIsolation: true } }]) {
+    const h = makeHarness(overrides);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (h.driver as any).child = { stdin: { write: () => {} } };
+    h.feed({
+      type: "control_request",
+      request_id: "scoped-loop",
+      request: { subtype: "can_use_tool", tool_name: "Bash", input: { command } },
+    });
+    assert.equal(h.events[0]?.kind, "permission_request");
+  }
 });
 
 test("control_request without a description falls back to the tool input in the title (MCP card legibility)", () => {
