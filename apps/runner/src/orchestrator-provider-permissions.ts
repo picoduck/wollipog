@@ -11,7 +11,7 @@ const COMPOSITION_OPERATORS = new Set([";", "&&", "||"]);
 const READ_ONLY_GH_OPERATIONS = new Set([
   "issue:list", "issue:view", "issue:status",
   "pr:list", "pr:view", "pr:checks", "pr:diff", "pr:status",
-  "run:list", "run:view", "run:watch", "repo:view", "search:issues", "search:prs",
+  "run:list", "run:view", "run:watch", "repo:view",
 ]);
 const READ_ONLY_GIT_COMMANDS = new Set([
   "status", "log", "show", "diff", "blame", "rev-parse", "merge-base", "range-diff",
@@ -21,6 +21,7 @@ const READ_ONLY_GIT_COMMANDS = new Set([
 const GIT_ARGUMENT_DENYLIST = [
   "--ext-diff", "--textconv", "--output", "--exec", "--open-files-in-pager", "-O", "--filters",
 ];
+const GIT_CLUSTERED_SHORT_DENYLIST = new Set(["-O"]);
 const GIT_BRANCH_MUTATION_ARGUMENTS = new Set([
   "-d", "-D", "-m", "-M", "-c", "-C", "--delete", "--move", "--copy", "--edit-description",
   "--set-upstream-to", "--unset-upstream", "--create-reflog", "--force", "-f", "-u", "-t",
@@ -30,6 +31,8 @@ const GIT_TAG_MUTATION_ARGUMENTS = new Set([
   "-m", "-F",
 ]);
 const GH_ARGUMENT_DENYLIST = ["--web", "-w", "--repo", "-R", "--hostname"];
+const GH_REPO_VIEW_VALUE_FLAGS = new Set(["--branch", "--json", "--jq", "--template", "-b", "-q", "-t"]);
+const CROSS_REPOSITORY_GH_REFERENCE = /^(?:https?:\/\/|github\.com\/|[^/\s]+\/[^#\s]+#[1-9][0-9]*)/u;
 
 interface EnvironmentReference {
   env: string;
@@ -76,7 +79,8 @@ function isReadOnlyGit(tokens: ShellToken[]): boolean {
   if (tokens.length < 2 || tokens[0] !== "git" || !tokens.every(isPlainArgument)) return false;
   const command = tokens[1] as string;
   const args = tokens.slice(2) as string[];
-  if (args.some((arg) => deniedArgument(arg, GIT_ARGUMENT_DENYLIST))) return false;
+  if (args.some((arg) => deniedArgument(arg, GIT_ARGUMENT_DENYLIST) ||
+      containsShortOption(arg, GIT_CLUSTERED_SHORT_DENYLIST))) return false;
   if (READ_ONLY_GIT_COMMANDS.has(command)) return true;
   if (command === "worktree") {
     return args[0] === "list" && args.slice(1).every((arg) => arg.startsWith("-"));
@@ -146,6 +150,28 @@ function isRoutineIssueComment(tokens: ShellToken[], context: RoutineContext): b
   return targetCount === 1 && bodyCount === 1;
 }
 
+function hasCrossRepositoryGhTarget(operation: string, tokens: ShellToken[]): boolean {
+  if (operation !== "repo:view") {
+    return tokens.slice(3).some((token) => isPlainArgument(token) &&
+      CROSS_REPOSITORY_GH_REFERENCE.test(token));
+  }
+  let consumesValue = false;
+  for (const token of tokens.slice(3)) {
+    if (consumesValue) {
+      consumesValue = false;
+      continue;
+    }
+    if (!isPlainArgument(token)) return true;
+    const { flag, inlineValue } = splitFlag(token);
+    if (GH_REPO_VIEW_VALUE_FLAGS.has(flag)) {
+      consumesValue = inlineValue === null;
+      continue;
+    }
+    if (!token.startsWith("-")) return true;
+  }
+  return consumesValue;
+}
+
 function isRoutineGh(tokens: ShellToken[], context: RoutineContext): boolean {
   if (tokens.length < 3 || tokens[0] !== "gh" || !isPlainArgument(tokens[1]) ||
       !isPlainArgument(tokens[2])) return false;
@@ -153,6 +179,7 @@ function isRoutineGh(tokens: ShellToken[], context: RoutineContext): boolean {
   if (operation === "issue:edit") return isRoutineIssueEdit(tokens, context);
   if (operation === "issue:comment") return isRoutineIssueComment(tokens, context);
   if (!READ_ONLY_GH_OPERATIONS.has(operation)) return false;
+  if (hasCrossRepositoryGhTarget(operation, tokens)) return false;
   return tokens.slice(3).every((token) => isPlainArgument(token) || isLoopReference(token, context)) &&
     !tokens.slice(3).some((token) => isPlainArgument(token) &&
       (deniedArgument(token, GH_ARGUMENT_DENYLIST) ||

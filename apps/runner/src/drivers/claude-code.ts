@@ -2140,7 +2140,8 @@ export class ClaudeCodeDriver implements Driver {
         if (!this.child) return null;
         const req = msg.request;
         if (req?.subtype === "can_use_tool" && typeof msg.request_id === "string") {
-          if (this.opts.orchestrator && isRoutineClaudeOrchestratorPermission(
+          if (this.opts.config.permissionMode === "orchestrator" && this.opts.orchestrator &&
+              isRoutineClaudeOrchestratorPermission(
             req.tool_name,
             req.input,
             this.opts.orchestrator.issueNumbers ?? [],
@@ -2160,7 +2161,8 @@ export class ClaudeCodeDriver implements Driver {
               // through to its fail-closed denial path; neither silently parks the provider.
             }
           }
-          if (this.opts.orchestrator?.strictProjectIsolation && req.tool_name !== "AskUserQuestion") {
+          if (this.opts.config.permissionMode === "orchestrator" &&
+              this.opts.orchestrator?.strictProjectIsolation && req.tool_name !== "AskUserQuestion") {
             try {
               this.child.stdin.write(JSON.stringify({
                 type: "control_response",

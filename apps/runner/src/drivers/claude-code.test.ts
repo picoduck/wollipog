@@ -3470,7 +3470,10 @@ test("control_request (can_use_tool) -> permission_request with allow/deny optio
 });
 
 test("provider-mode Claude Orchestrator auto-allows a bounded read-only issue loop", () => {
-  const h = makeHarness({ orchestrator: { strictProjectIsolation: false } });
+  const h = makeHarness({
+    config: { permissionMode: "orchestrator" },
+    orchestrator: { strictProjectIsolation: false },
+  });
   const writes: string[] = [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
@@ -3495,7 +3498,10 @@ test("provider-mode Claude Orchestrator auto-allows a bounded read-only issue lo
 });
 
 test("provider-mode Claude Orchestrator auto-allows the observed issue-claiming loop", () => {
-  const h = makeHarness({ orchestrator: { strictProjectIsolation: false, issueNumbers: [1209, 1210, 1211] } });
+  const h = makeHarness({
+    config: { permissionMode: "orchestrator" },
+    orchestrator: { strictProjectIsolation: false, issueNumbers: [1209, 1210, 1211] },
+  });
   const writes: string[] = [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
@@ -3516,7 +3522,10 @@ test("provider-mode Claude Orchestrator auto-allows the observed issue-claiming 
 });
 
 test("provider-mode Claude Orchestrator keeps shell-special loop variables interactive", () => {
-  const h = makeHarness({ orchestrator: { strictProjectIsolation: false } });
+  const h = makeHarness({
+    config: { permissionMode: "orchestrator" },
+    orchestrator: { strictProjectIsolation: false },
+  });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (h.driver as any).child = { stdin: { write: () => {} } };
 
@@ -3535,7 +3544,10 @@ test("provider-mode Claude Orchestrator keeps shell-special loop variables inter
 });
 
 test("strictly isolated Claude Orchestrators share the routine-operation auto-authorization contract", () => {
-  const h = makeHarness({ orchestrator: { strictProjectIsolation: true, issueNumbers: [1209] } });
+  const h = makeHarness({
+    config: { permissionMode: "orchestrator" },
+    orchestrator: { strictProjectIsolation: true, issueNumbers: [1209] },
+  });
   const writes: string[] = [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
@@ -3551,7 +3563,10 @@ test("strictly isolated Claude Orchestrators share the routine-operation auto-au
 });
 
 test("strictly isolated Claude Orchestrators auto-deny commands outside the routine contract", () => {
-  const h = makeHarness({ orchestrator: { strictProjectIsolation: true } });
+  const h = makeHarness({
+    config: { permissionMode: "orchestrator" },
+    orchestrator: { strictProjectIsolation: true },
+  });
   const writes: string[] = [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
@@ -3564,8 +3579,30 @@ test("strictly isolated Claude Orchestrators auto-deny commands outside the rout
   assert.match(JSON.parse(writes[0]!).response.response.message, /Strict Project Isolation/);
 });
 
+test("stale Orchestrator metadata is inert outside Orchestrator permission mode", () => {
+  const h = makeHarness({
+    config: { permissionMode: "default" },
+    orchestrator: { strictProjectIsolation: true, issueNumbers: [1209] },
+  });
+  const writes: string[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
+  h.feed({
+    type: "control_request",
+    request_id: "stale-policy",
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: {
+      command: "gh issue edit 1209 --add-assignee @me",
+    } },
+  });
+  assert.equal(writes.length, 0);
+  assert.equal(h.events[0]?.kind, "permission_request");
+});
+
 test("strictly isolated Claude Orchestrators still surface typed human questions", () => {
-  const h = makeHarness({ orchestrator: { strictProjectIsolation: true, issueNumbers: [1209] } });
+  const h = makeHarness({
+    config: { permissionMode: "orchestrator" },
+    orchestrator: { strictProjectIsolation: true, issueNumbers: [1209] },
+  });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (h.driver as any).child = { stdin: { write: () => {} } };
   h.feed({

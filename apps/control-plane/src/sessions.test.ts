@@ -858,6 +858,12 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.ok(restartedParent.ok, restartedParent.error);
     assert.deepEqual(hub.sentOfType("start_session").at(-1)?.spec.orchestrator?.issueNumbers,
       [1209, 1210, 1211], "restart preserves the immutable campaign issue scope");
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION - 1);
+    const outdatedRestart = svc.restart(parent.id);
+    assert.equal(outdatedRestart.status, 409);
+    assert.match(outdatedRestart.error ?? "", /protocol-v158/,
+      "restart fails actionably rather than dropping a persisted campaign issue scope");
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
 
     settings.defaults.behavior.childModel = "changed-later";
     settings.defaults.delegation.decisions.pr_merge = "human";
@@ -901,6 +907,35 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       orchestrator: { behavior: { childModel: "image-model" } },
     }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
     assert.equal(denied.status, 403, "agents cannot set or broaden campaign policy");
+
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION - 1);
+    const ordinaryChildRequest = {
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
+      prompt: "Implement one campaign issue",
+    };
+    let ordinaryChild = svc.createSession(
+      ordinaryChildRequest, undefined, undefined, false, false, false, { parentSessionId: parent.id },
+    );
+    if (ordinaryChild.status === 428) {
+      const approval = db.getSession(parent.id)!.pendingApproval!;
+      assert.ok(svc.approve(parent.id, approval.requestId, "allow").ok);
+      ordinaryChild = svc.createSession(
+        ordinaryChildRequest, undefined, undefined, false, false, false, { parentSessionId: parent.id },
+      );
+    }
+    assert.ok(ordinaryChild.ok && ordinaryChild.data, ordinaryChild.error);
+    assert.equal(hub.sentOfType("start_session").find((message) =>
+      message.spec.sessionId === ordinaryChild.data!.id)?.spec.orchestrator, undefined,
+    "an ordinary campaign child does not require or receive the issue-scope protocol field");
+    svc.onSessionStatus(ordinaryChild.data.id, "idle");
+    const ordinaryReport = db.appendEvent(ordinaryChild.data.id,
+      { kind: "agent_message", text: "Ordinary child completed", final: true }, Date.now());
+    assert.ok(svc.verifyCampaignChild(parent.id, {
+      childSessionId: ordinaryChild.data.id, reportEventSeq: ordinaryReport.seq, followUpsAccounted: true,
+    }).ok);
+    svc.onSessionStatus(ordinaryChild.data.id, "stopped");
+    db.raw().prepare("UPDATE sessions SET archived=1 WHERE id=?").run(ordinaryChild.data.id);
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
 
     const childRequest = {
       runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
