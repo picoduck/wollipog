@@ -6,6 +6,14 @@ test("rewind stays compact on its user turn across pointer interactions", async 
     .toHaveAttribute("title", "Files snapshot taken at the start of turn 4");
   await expect(page.getByRole("separator", { name: "End Turn 4" }))
     .toHaveAttribute("title", "Conversation and files saved at the end of turn 4");
+  await expect(page.getByRole("separator", { name: "Files Rewound to Before Turn 4" })).toBeVisible();
+  await expect(page.getByRole("separator", { name: "Forked from Turn 4" })).toBeVisible();
+  const handoff = page.getByRole("separator", { name: "Handoff from Claude Code to Codex After Turn 4" });
+  await expect(handoff).toBeVisible();
+  const handoffDescriptionId = await handoff.getAttribute("aria-describedby");
+  expect(handoffDescriptionId).toBeTruthy();
+  await expect(page.locator(`[id="${handoffDescriptionId}"]`))
+    .toHaveText("Fresh provider conversation. Tool output and reasoning were omitted.");
   const button = page.getByRole("button", { name: "Rewind Files to Before This Turn" });
   await expect(button).toBeVisible();
   await expect(button).toHaveCSS("opacity", "1");

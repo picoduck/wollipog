@@ -14,6 +14,16 @@ function Fixture() {
             { kind: "checkpoint", id: 2, turn: 4 },
             { kind: "agent_message", id: 3, text: "The checkpoint is ready." },
             { kind: "conversation_checkpoint", id: 4, turn: 4 },
+            { kind: "checkpoint_restored", id: 5, turn: 4 },
+            { kind: "conversation_forked", id: 6, sourceSessionId: "source", turn: 4 },
+            {
+              kind: "conversation_forked", id: 7, sourceSessionId: "source", turn: 4,
+              handoff: {
+                sourceAgent: "Claude Code",
+                destinationAgent: "Codex",
+                disclosure: "Tool output and reasoning were omitted.",
+              },
+            },
           ]}
           onRewind={setRewoundTurn}
         />

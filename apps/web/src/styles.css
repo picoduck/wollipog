@@ -11817,6 +11817,19 @@ body.shell-dock-dragging * {
 .tl-checkpoint.restored .checkpoint-label {
   color: var(--teal);
 }
+.tl-checkpoint-event {
+  margin: 10px 0;
+}
+.tl-checkpoint-event .tl-checkpoint {
+  margin: 0;
+}
+.checkpoint-description {
+  margin: 4px 24px 0;
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  text-align: center;
+}
 
 /* --------- Cmd+K search palette ---------- */
 .palette-backdrop {

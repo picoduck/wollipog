@@ -378,6 +378,53 @@ test("checkpoint dividers expose symmetric turn boundary labels", () => {
   assert.doesNotMatch(html, />after turn 19<|>Turn 19</);
 });
 
+test("rewind, fork, and handoff dividers expose concise accessible semantics", () => {
+  const html = renderToStaticMarkup(React.createElement(EventTimeline, {
+    items: [
+      { kind: "checkpoint_restored", id: 1, turn: 7 },
+      { kind: "conversation_forked", id: 2, sourceSessionId: "source", turn: 8 },
+      {
+        kind: "conversation_forked", id: 3, sourceSessionId: "source", turn: 9,
+        handoff: {
+          sourceAgent: "Claude Code",
+          destinationAgent: "Codex",
+          disclosure: "Tool output and reasoning were omitted.",
+        },
+      },
+    ],
+  }));
+
+  assert.match(html, /role="separator" aria-label="Files Rewound to Before Turn 7" title="Files restored to the checkpoint before turn 7"/);
+  assert.match(html, /<span class="checkpoint-label"><span aria-hidden="true">⤺ <\/span>Files Rewound to Before Turn 7<\/span>/);
+  assert.match(html, /role="separator" aria-label="Forked from Turn 8" title="Conversation forked from turn 8"/);
+  assert.match(html, /<span class="checkpoint-label">Forked from Turn 8<\/span>/);
+  const descriptionId = html.match(/aria-label="Handoff from Claude Code to Codex After Turn 9" aria-describedby="([^"]+)"/)?.[1];
+  assert.ok(descriptionId, "the concise handoff separator names its visible secondary description");
+  assert.ok(html.includes(`<p id="${descriptionId}" class="checkpoint-description">Fresh provider conversation. Tool output and reasoning were omitted.</p>`));
+  assert.doesNotMatch(html, /aria-label="[^"]*Tool output and reasoning/,
+    "the longer handoff disclosure does not overload the separator name");
+});
+
+test("handoff dividers reserve space for their visible secondary description", () => {
+  assert.equal(estimateTimelineRow({
+    kind: "item",
+    key: "handoff",
+    item: {
+      kind: "conversation_forked", id: 1, sourceSessionId: "source", turn: 4,
+      handoff: { sourceAgent: "Claude Code", destinationAgent: "Codex", disclosure: "Bounded context." },
+    },
+    inWork: false,
+    depth: 0,
+  }), 76);
+  assert.equal(estimateTimelineRow({
+    kind: "item",
+    key: "fork",
+    item: { kind: "conversation_forked", id: 2, sourceSessionId: "source", turn: 4 },
+    inWork: false,
+    depth: 0,
+  }), 52);
+});
+
 test("checkpoint projection maps only the owning canonical user message", () => {
   assert.deepEqual([...userRewindTurns([
     { kind: "user_message", id: 1, text: "first" },

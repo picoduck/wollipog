@@ -147,6 +147,7 @@ export const estimateTimelineRow = (row: TimelineRenderRow, pendingQuestionReque
     case "command_output":
     case "stderr": return 96;
     case "tool_call": return 72;
+    case "conversation_forked": return row.item.handoff ? 76 : 52;
     default: return 52;
   }
 };
@@ -1645,9 +1646,14 @@ const TimelineRow = memo(function TimelineRow({
       );
     case "checkpoint_restored":
       return (
-        <div className="tl-checkpoint restored">
+        <div
+          className="tl-checkpoint restored"
+          role="separator"
+          aria-label={`Files Rewound to Before Turn ${item.turn}`}
+          title={`Files restored to the checkpoint before turn ${item.turn}`}
+        >
           <span className="checkpoint-line" />
-          <span className="checkpoint-label">⤺ files rewound to before turn {item.turn}</span>
+          <span className="checkpoint-label"><span aria-hidden="true">⤺ </span>Files Rewound to Before Turn {item.turn}</span>
           <span className="checkpoint-line" />
         </div>
       );
@@ -1664,14 +1670,42 @@ const TimelineRow = memo(function TimelineRow({
           <span className="checkpoint-line" />
         </div>
       );
-    case "conversation_forked":
+    case "conversation_forked": {
+      if (!item.handoff) {
+        const label = `Forked from Turn ${item.turn}`;
+        return (
+          <div
+            className="tl-checkpoint restored"
+            role="separator"
+            aria-label={label}
+            title={`Conversation forked from turn ${item.turn}`}
+          >
+            <span className="checkpoint-line" />
+            <span className="checkpoint-label">{label}</span>
+            <span className="checkpoint-line" />
+          </div>
+        );
+      }
+      const label = `Handoff from ${item.handoff.sourceAgent} to ${item.handoff.destinationAgent} After Turn ${item.turn}`;
+      const descriptionId = `${timingDescriptionId}-handoff`;
       return (
-        <div className="tl-checkpoint restored">
-          <span className="checkpoint-line" />
-          <span className="checkpoint-label">{item.handoff ? `Handoff from ${item.handoff.sourceAgent} to ${item.handoff.destinationAgent} after turn ${item.turn}: fresh provider conversation. ${item.handoff.disclosure}` : `forked from turn ${item.turn}`}</span>
-          <span className="checkpoint-line" />
+        <div className="tl-checkpoint-event">
+          <div
+            className="tl-checkpoint restored"
+            role="separator"
+            aria-label={label}
+            aria-describedby={descriptionId}
+          >
+            <span className="checkpoint-line" />
+            <span className="checkpoint-label">{label}</span>
+            <span className="checkpoint-line" />
+          </div>
+          <p id={descriptionId} className="checkpoint-description">
+            Fresh provider conversation. {item.handoff.disclosure}
+          </p>
         </div>
       );
+    }
     case "user_message":
       return (
         <div className="tl-row user">
