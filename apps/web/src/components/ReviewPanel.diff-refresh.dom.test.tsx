@@ -113,6 +113,40 @@ function fileB(over: { context?: string; extraHunks?: number } = {}): GitDiffFil
   return { path: "src/b.ts", status: "modified", binary: false, hunks: [primary, ...extras] };
 }
 
+/**
+ * `src/b.ts` with its old-side line 11 as a DELETION (`deleted`) or as unchanged CONTEXT
+ * (`context`), the text identical either way.
+ *
+ * The pair is the point: re-anchoring keys on file, side, and line content, so a finding written on
+ * the deleted line stays legitimately anchored once that line becomes context — and must therefore
+ * still render somewhere.
+ */
+function fileBOldSide(shape: "deleted" | "context"): GitDiffFile {
+  return {
+    path: "src/b.ts",
+    status: "modified",
+    binary: false,
+    hunks: [{
+      header: "@@ -10,3 +10,3 @@",
+      oldStart: 10,
+      oldCount: 3,
+      newStart: 10,
+      newCount: 3,
+      lines: shape === "deleted"
+        ? [
+            { status: " ", text: "keep" },
+            { status: "-", text: "old-side-line" },
+            { status: "+", text: "replacement" },
+          ]
+        : [
+            { status: " ", text: "keep" },
+            { status: " ", text: "old-side-line" },
+            { status: " ", text: "tail" },
+          ],
+    }],
+  };
+}
+
 function diffOf(seed: string, files: GitDiffFile[]): GitDiffInfo {
   return {
     scope: "uncommitted",
@@ -364,6 +398,16 @@ function stageButton(container: HTMLElement, path: string): HTMLElement {
   const found = [...card(container, path).querySelectorAll<HTMLElement>("button.hunk-act")]
     .find((button) => (button.textContent ?? "").trim() === "Stage");
   if (!found) throw new Error(`no Stage control on ${path}`);
+  return found;
+}
+
+/** One option of the layout segmented control ("Unified" / "Side by Side"). */
+function layoutButton(container: HTMLElement, label: string): HTMLElement {
+  const group = container.querySelector<HTMLElement>('[aria-label="Diff Layout"]');
+  if (!group) throw new Error("the layout control is not rendered");
+  const found = [...group.querySelectorAll<HTMLElement>("button")]
+    .find((button) => (button.textContent ?? "").trim() === label);
+  if (!found) throw new Error(`no layout option labelled ${label}`);
   return found;
 }
 
@@ -652,6 +696,70 @@ test("per-hunk line selections do not survive a pane switch, even where the file
 
     await act(async () => { fireDomEvent.click(paneButton(harness.container, "Staged")); });
     assert.equal(selectedCount(harness.container), 0, "the other pane starts from no selection");
+  } finally {
+    await harness.unmount();
+  }
+});
+
+test("a finding carried onto an unchanged old-side line still renders inline", async () => {
+  // The gap this closes: re-anchoring keys on file/side/line CONTENT, so a finding written on a
+  // deleted line is correctly still anchored once that line becomes unchanged context — it bore no
+  // stale marker. But a context row anchors RIGHT in the unified layout, so nothing rendered it: the
+  // finding existed, was not stale, and was invisible.
+  const harness = await mountPanel({
+    diff: diffOf("1", [fileA(), fileBOldSide("deleted")]),
+    findings: [findingOnB({ side: "left", line: 11, body: "this deletion is wrong" })],
+  });
+  try {
+    assert.deepEqual(inlineFindingBodies(harness.container), ["this deletion is wrong"]);
+    assert.equal(staleMarkers(harness.container), 0);
+
+    harness.serveDiff(diffOf("2", [fileA(), fileBOldSide("context")]));
+    await harness.render({ status: statusOf({ addedLines: 3 }) });
+    assert.ok(harness.container.textContent?.includes("tail"), "the reload landed");
+
+    assert.equal(staleMarkers(harness.container), 0, "the old-side line 11 content never moved");
+    assert.deepEqual(inlineFindingBodies(harness.container), ["this deletion is wrong"],
+      "and a finding that is not stale must not be invisible");
+  } finally {
+    await harness.unmount();
+  }
+});
+
+test("a draft on an old-side line that became context is still reachable", async () => {
+  const harness = await mountPanel({ diff: diffOf("1", [fileA(), fileBOldSide("deleted")]) });
+  try {
+    await act(async () => {
+      fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts left line 11"));
+    });
+    await act(async () => {
+      const body = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
+      body.value = "why remove this";
+      fireDomEvent.change(body);
+    });
+
+    harness.serveDiff(diffOf("2", [fileA(), fileBOldSide("context")]));
+    await harness.render({ status: statusOf({ addedLines: 3 }) });
+
+    assert.equal(
+      field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea").value,
+      "why remove this",
+      "a surviving draft the reviewer cannot see is the same as a lost one",
+    );
+  } finally {
+    await harness.unmount();
+  }
+});
+
+test("the split layout renders extras for an old-side context anchor too", async () => {
+  const harness = await mountPanel({
+    diff: diffOf("1", [fileA(), fileBOldSide("context")]),
+    findings: [findingOnB({ side: "left", line: 11, body: "old-side note" })],
+  });
+  try {
+    assert.deepEqual(inlineFindingBodies(harness.container), ["old-side note"], "unified");
+    await act(async () => { fireDomEvent.click(layoutButton(harness.container, "Side by Side")); });
+    assert.deepEqual(inlineFindingBodies(harness.container), ["old-side note"], "side by side");
   } finally {
     await harness.unmount();
   }

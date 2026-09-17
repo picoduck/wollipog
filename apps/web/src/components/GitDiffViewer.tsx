@@ -153,6 +153,19 @@ export function GitDiffViewer({
   const files = useMemo(() => groupHunksForDisplay(diff.files, COLLAPSE_THRESHOLD), [diff]);
 
   const lineage = review?.lineage ?? "";
+  // Anchored findings grouped by their anchor, once per diff instead of a scan per rendered row.
+  // Rows ask about two anchors each now (a context row carries both a left and a right one), and a
+  // filter per row per anchor is the wrong shape for a diff of any size.
+  const findingsByAnchor = useMemo(() => {
+    const grouped = new Map<string, ReviewFinding[]>();
+    for (const finding of review?.findings ?? []) {
+      if (!review?.anchoredFindingIds.has(finding.findingId)) continue;
+      const key = diffAnchorKey(finding);
+      const bucket = grouped.get(key);
+      if (bucket) bucket.push(finding); else grouped.set(key, [finding]);
+    }
+    return grouped;
+  }, [review?.findings, review?.anchoredFindingIds]);
   const draftValues = useRef(new Map<string, DiffDraft>());
   const [openDrafts, setOpenDrafts] = useState<ReadonlySet<string>>(() => new Set<string>());
   const drafts: DraftStore = {
@@ -213,6 +226,7 @@ export function GitDiffViewer({
           display={display}
           staging={staging}
           review={review}
+          findingsByAnchor={findingsByAnchor}
           drafts={drafts}
           onOpenSourceLocation={onOpenSourceLocation}
           onAttachWorkspaceReference={onAttachWorkspaceReference}
@@ -229,6 +243,7 @@ function DiffFileCard({
   display,
   staging,
   review,
+  findingsByAnchor,
   drafts,
   onOpenSourceLocation,
   onAttachWorkspaceReference,
@@ -239,6 +254,7 @@ function DiffFileCard({
   display: DisplayFile;
   staging?: StagingControls;
   review?: DiffReviewControls;
+  findingsByAnchor: ReadonlyMap<string, ReviewFinding[]>;
   drafts: DraftStore;
   onOpenSourceLocation?: (location: SourceLocation) => void;
   onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
@@ -336,6 +352,7 @@ function DiffFileCard({
                     index={h.index}
                     staging={stageEligible(file) ? staging : undefined}
                     review={review}
+                    findingsByAnchor={findingsByAnchor}
                     drafts={drafts}
                     onOpenSourceLocation={onOpenSourceLocation}
                     onAttachWorkspaceReference={onAttachWorkspaceReference}
@@ -457,6 +474,7 @@ function HunkView({
   index,
   staging,
   review,
+  findingsByAnchor,
   drafts,
   onOpenSourceLocation,
   onAttachWorkspaceReference,
@@ -470,6 +488,7 @@ function HunkView({
   index: number;
   staging?: StagingControls;
   review?: DiffReviewControls;
+  findingsByAnchor: ReadonlyMap<string, ReviewFinding[]>;
   drafts: DraftStore;
   onOpenSourceLocation?: (location: SourceLocation) => void;
   onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
@@ -545,14 +564,19 @@ function HunkView({
         <span className={part.changed ? "diff-word-changed" : undefined} key={partIndex}>{syntax(part.text)}</span>
       ))
     : syntax(row.text);
-  const reviewExtras = (row: DiffHunkRow, prefix: string) => {
-    const target = row.anchor;
+  /**
+   * The inline findings and open draft editor belonging to ONE anchor, rendered under its row.
+   *
+   * Takes the anchor explicitly rather than reading `row.anchor`, because a row can carry two. A
+   * context row anchors right in the unified layout and additionally left (from the old gutter) in
+   * the split one, and re-anchoring can legitimately carry a finding onto the left side of a line
+   * that used to be a deletion and is now unchanged context. With only `row.anchor` such a finding
+   * was anchored — correctly, and so bore no stale marker — yet rendered nowhere at all.
+   */
+  const reviewExtras = (target: { side: "left" | "right"; line: number }, text: string, prefix: string) => {
     // Anchored by finding identity, not by `diffHash` equality: a finding whose own line is
     // byte-identical stays inline through a refresh caused by anything else (#1203).
-    const anchored = review?.findings.filter((finding) =>
-      review.anchoredFindingIds.has(finding.findingId) && finding.filePath === filePath &&
-      finding.side === target.side && finding.line === target.line,
-    ) ?? [];
+    const anchored = findingsByAnchor.get(diffAnchorKey({ filePath, ...target })) ?? [];
     const anchorKey = drafts.keyFor({ filePath, ...target });
     return (
       <Fragment key={`${prefix}-extras`}>
@@ -580,7 +604,7 @@ function HunkView({
           <DiffCommentEditor
             key={anchorKey}
             anchorKey={anchorKey}
-            anchorText={row.text}
+            anchorText={text}
             drafts={drafts}
             review={review}
             scope={scope}
@@ -677,7 +701,10 @@ function HunkView({
               <span className="diff-text">{lineText(row)}</span>
               {commentButton(row)}
             </div>
-            {reviewExtras(row, `unified-${i}`)}
+            {reviewExtras(row.anchor, row.text, `unified-${i}`)}
+            {/* A context row is anchorable from the old side too, and a carried finding or draft can
+                sit there — see `buildDiffAnchorIndex`, which indexes exactly this anchor. */}
+            {row.status === " " && reviewExtras({ side: "left", line: Number(row.oldNo) }, row.text, `unified-${i}-left`)}
           </Fragment>
         )) : buildSplitDiffRows(hunk).map((pair, pairIndex) => (
           <Fragment key={pairIndex}>
@@ -697,8 +724,10 @@ function HunkView({
                 </div>
               ) : <div className="diff-split-cell diff-split-empty" key={sideIndex} />)}
             </div>
-            {pair.left && pair.left.status !== " " && reviewExtras(pair.left, `split-left-${pairIndex}`)}
-            {pair.right && reviewExtras(pair.right, `split-right-${pairIndex}`)}
+            {/* No `status !== " "` guard: `buildSplitDiffRows` gives a context row a left anchor at
+                its old line number, and that anchor can hold a carried finding or draft. */}
+            {pair.left && reviewExtras(pair.left.anchor, pair.left.text, `split-left-${pairIndex}`)}
+            {pair.right && reviewExtras(pair.right.anchor, pair.right.text, `split-right-${pairIndex}`)}
           </Fragment>
         ))}
         {hunk.noNewlineAtEof && <div className="diff-line diff-nonl muted">\ No newline at end of file</div>}
