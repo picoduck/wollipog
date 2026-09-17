@@ -56,7 +56,12 @@ Hard rules:
 
 6. Follow-up work in this session. A human may reply to the report with "publish", then "claim
    and fix" — that is their call, and it converts this session into a fixing session for the
-   rest of its life. Two things must happen before any fix work starts:
+   rest of its life. Three things must happen before any fix work starts:
+   - Never print the process environment to find anything — no `env`, `printenv`, `set`, or
+     `cat /proc/self/environ`, filtered or not. Agent sessions inherit the runner's environment,
+     and on 2026-09-17 an `env | grep -i token` wrote the live runner credential into a session
+     transcript. The budget is stated in the prompt or readable through the `get_session` tool;
+     a value that is in neither is not yours to look for.
    - State the remaining budget first, on its own line: this session's `costBudgetUsd` caps the
      WHOLE session, sweep and follow-up alike, and a sweep budget is not sized for a fix. "$6.33
      of $8.00 remaining" at the top of the turn is what lets the human raise it before the
