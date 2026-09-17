@@ -4369,6 +4369,26 @@ test("stored campaign harness identities discard presentation and credential-adj
   }
 });
 
+test("malformed campaign policy containers fail closed during legacy normalization", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    db.registerRunner(meta(), 500);
+    db.createSession(newSession());
+    const malformedPolicies = [
+      { version: 1, behavior: "invalid", delegation: {}, sources: { behavior: {} } },
+      { version: 1, behavior: {}, delegation: {}, sources: { behavior: "invalid" } },
+      { version: 1, behavior: {}, delegation: {}, sources: "invalid" },
+    ];
+    for (const policy of malformedPolicies) {
+      db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?")
+        .run(JSON.stringify(policy), "sess-1");
+      assert.equal(db.getSession("sess-1")?.orchestratorPolicy, undefined);
+    }
+  } finally {
+    db.close();
+  }
+});
+
 test("established human Orchestrator provenance survives the creation-actor migration", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-orchestrator-creator-migration-"));
   const path = join(root, "control-plane.db");

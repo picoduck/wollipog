@@ -22017,7 +22017,12 @@ function parentControlDecisionPolicyFromJson(raw: string | null): ParentControlD
 
 function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCampaignPolicy | null {
   const value = parseJson<OrchestratorCampaignPolicy>(raw);
-  if (!value || value.version !== 1 || !value.behavior || !value.delegation || !value.sources) return null;
+  if (!value || value.version !== 1 ||
+      typeof value.behavior !== "object" || value.behavior === null || Array.isArray(value.behavior) ||
+      typeof value.delegation !== "object" || value.delegation === null || Array.isArray(value.delegation) ||
+      typeof value.sources !== "object" || value.sources === null || Array.isArray(value.sources) ||
+      typeof value.sources.behavior !== "object" || value.sources.behavior === null ||
+      Array.isArray(value.sources.behavior)) return null;
   // Pre-v157 policies had no harness bind. Preserve their automatic-harness semantics and mark
   // the source as legacy rather than silently making a fixed choice during migration.
   if (value.behavior.childHarness === undefined) value.behavior.childHarness = null;
