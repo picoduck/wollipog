@@ -363,7 +363,7 @@ test("retained-prompt Retry and Dismiss are described by the message and the rec
   };
   const button = (label: string) =>
     [...container.querySelectorAll("button")].find((candidate) => candidate.textContent === label)!;
-  const described = (control: Element) =>
+  const described = (control: { getAttribute(name: string): string | null }) =>
     (control.getAttribute("aria-describedby") ?? "").split(/\s+/u).filter(Boolean).map((id) => {
       const target = domWindow.document.getElementById(id);
       assert.ok(target && container.contains(target as never), `aria-describedby target ${id} is rendered`);
