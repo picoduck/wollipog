@@ -15,6 +15,8 @@ const LABELS: Record<PendingPromptState, string> = {
   uncertain: "Delivery Uncertain",
 };
 
+const RECOVERY_BLOCKS_RETRY_REASON = "Recover the selected worktree before retrying this message.";
+
 export function pendingPromptLabel(prompt: PendingPromptView): string {
   if (prompt.state === "failed" && prompt.errorCode === "WORKTREE_RECOVERY_REQUIRED") return "Not Sent";
   return prompt.state === "failed" && prompt.errorCode === "COMMAND_CANCELLED"
@@ -83,6 +85,10 @@ export function PendingPromptBubbles({
     // failure is blocked just the same, so enablement follows the live recovery state alone —
     // keying it off the receipt's code offers an action the server answers with HTTP 409.
     const recoveryBlocksRetry = worktreeRecoveryPending;
+    // A disabled control's tooltip is announced by nothing, so the blocking reason is carried as a
+    // programmatic description alongside the retained message itself.
+    const recoveryReasonId = `pending-prompt-recovery-${prompt.commandId}`;
+    const retryDescribedBy = recoveryBlocksRetry ? `${detailsId} ${recoveryReasonId}` : detailsId;
     return (
       <div
         className="tl-row user"
@@ -103,6 +109,9 @@ export function PendingPromptBubbles({
             {prompt.text && <div className="bubble-text">{prompt.text}</div>}
             {prompt.error && <div className="pending-prompt-error">{prompt.error}</div>}
           </div>
+          {prompt.canRetry && recoveryBlocksRetry && (
+            <p className="sr-only" id={recoveryReasonId}>{RECOVERY_BLOCKS_RETRY_REASON}</p>
+          )}
           {(cancelPending || cancelLive || prompt.canDismiss || prompt.canRetry) && (
             <div className="pending-prompt-actions" aria-busy={busy || undefined}>
               {(cancelPending || cancelLive) && (
@@ -136,9 +145,9 @@ export function PendingPromptBubbles({
                   type="button"
                   className="btn ghost sm"
                   disabled={actionPending || recoveryBlocksRetry}
-                  title={recoveryBlocksRetry ? "Recover the selected worktree before retrying this message." : undefined}
+                  title={recoveryBlocksRetry ? RECOVERY_BLOCKS_RETRY_REASON : undefined}
                   aria-label={busy && !prompt.canDismiss ? "Retrying Message" : "Retry Message"}
-                  aria-describedby={detailsId}
+                  aria-describedby={retryDescribedBy}
                   onClick={() => onRetry(prompt.commandId)}
                 >
                   {busy && !prompt.canDismiss ? "Retrying…" : "Retry"}
