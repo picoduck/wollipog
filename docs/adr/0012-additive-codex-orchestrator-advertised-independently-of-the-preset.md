@@ -52,10 +52,16 @@ The control plane's "audited Linux or macOS sandbox" gate now applies only to th
 - **Restart** drops it. That check sat inside the block reached only by a session with independent
   provider permissions, so it had no preset case to protect.
 
-The New Session dialog derives non-strict availability from the shape the launch will actually use:
-the coupled preset keeps the Claude-Code-or-Codex harness rule and Codex's platform rule, while the
-additive shape reads `advertisesOrchestratorAdditiveRole` — the same predicate creation and restart
-read, so the dialog cannot offer a launch the control plane refuses.
+The New Session dialog derives non-strict availability from the shape the launch will actually use.
+The additive shape reads `advertisesOrchestratorAdditiveRole`, the same predicate creation and
+restart read. The coupled-preset shape keeps the Claude-Code-or-Codex harness rule and Codex's
+platform rule, and additionally requires the **preset** advertisement, because a preset launch
+submits `permissionMode: "orchestrator"` and `capabilityConfigError` refuses that mode from an
+installation that does not advertise it. That last condition is load-bearing only because of this
+change: the two advertisements now diverge for real, so a Codex CLI without granular approvals
+offers the additive role and not the preset, and a control plane too old to request the role — which
+forces every Orchestrator onto the preset — would otherwise have had the dialog submit a launch that
+installation cannot run.
 
 No protocol bump. Nothing new is communicated: the control plane already consults
 `orchestratorAdditive`, and every disagreement between a new and an old peer fails closed. A new

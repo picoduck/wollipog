@@ -589,9 +589,15 @@ export function NewSessionDialog({
   }) !== undefined;
   const providerExecutionAvailable = executionPolicySupported && orchestratorContext === "native" &&
     (nonStrictPresetPermissions
-      // The non-strict COUPLED preset. Pi (#1294) has no such shape, and Codex's preset still
-      // forces `sandbox_mode="workspace-write"`, which is audited on Linux and macOS only.
-      ? ["codex", "codex-app-server", "claude-code"].includes(agent?.driver ?? "acp") &&
+      // The non-strict COUPLED preset. It requires the PRESET advertisement, because a preset launch
+      // submits `permissionMode: "orchestrator"` and the control plane refuses that mode from an
+      // installation that does not advertise it. The two advertisements diverge for real since
+      // #1308 — a Codex CLI without granular approvals now offers the additive role and not the
+      // preset — so reading the additive one here would submit a launch creation answers with 409.
+      // Pi (#1294) has no non-strict preset shape at all, and Codex's preset still forces
+      // `sandbox_mode="workspace-write"`, which is audited on Linux and macOS only.
+      ? agentOffersOrchestratorPreset &&
+        ["codex", "codex-app-server", "claude-code"].includes(agent?.driver ?? "acp") &&
         (agent?.driver === "claude-code" || runner?.os === "linux" || runner?.os === "macos")
       // The ADDITIVE role: exactly the runner's own attestation, which is also what the control
       // plane checks, so the dialog cannot offer a launch creation refuses. Read that attestation

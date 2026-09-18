@@ -1942,6 +1942,74 @@ test("an additive Codex Orchestrator is offered where the audited sandbox is una
   } finally { await unmountFixture(strict); }
 });
 
+/**
+ * A native Linux Codex installation whose CLI predates granular approvals. Since #1308 the runner
+ * advertises the additive role for it — the additive launch imposes no approval policy — while
+ * `withOrchestratorPreset` still withholds the coupled preset's permission mode, which is exactly
+ * what that approval capability is a precondition of.
+ */
+const approvalLessCodexRunner: RunnerView = {
+  ...runner, protocolVersion: PROTOCOL_VERSION,
+  agents: [{
+    id: "codex", name: "Codex App Server", command: "codex", args: [], env: {},
+    driver: "codex-app-server", available: true, context: { kind: "native" },
+    codexAppServer: {
+      status: "supported", appServerAvailable: true,
+      orchestratorApproval: {
+        status: "unsupported", failure: "Update the Codex CLI for granular approvals.",
+      },
+    },
+    capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["auto-review", "read-only", "on-request"],
+      orchestratorAdditive: true,
+    },
+  }],
+};
+
+test("an installation that offers only the additive role never submits the coupled preset it cannot launch", async () => {
+  // A control plane too old to request the role forces every Orchestrator back onto the coupled
+  // preset, which submits `permissionMode: "orchestrator"`. `capabilityConfigError` refuses that
+  // mode from an installation that does not advertise it, so the dialog must block rather than
+  // submit a request creation would answer with 409.
+  const legacy = await mountFixture({ runners: [approvalLessCodexRunner] });
+  try {
+    await act(async () => { await selectProject(legacy.container, project.id); });
+    await choosePermissionPreset(legacy.container, "Orchestrator");
+    assert.match(legacy.container.textContent!, /Update the control plane/);
+    assert.equal(createButton(legacy.container).disabled, true,
+      "the coupled preset this control plane would force is not launchable by this installation");
+    assert.equal(legacy.requests.length, 0);
+  } finally { await unmountFixture(legacy); }
+
+  // With nothing forcing the preset, the additive shape is offered and submitted. A saved
+  // Orchestrator harness default cannot force the preset here either: the mode is absent from this
+  // installation, so `savedSessionPermissionMode` discards the preference rather than selecting an
+  // unlaunchable shape.
+  const savedPreset = async (): Promise<AgentHarnessDefaultsView> => ({ defaults: [{
+    agentId: "codex", driver: "codex-app-server", context: { kind: "native" },
+    name: "Codex App Server", installations: [], compatibleInstallations: 1,
+    preference: { permissionMode: "orchestrator" },
+  }] });
+  for (const [label, defaults] of [
+    ["no saved default", undefined],
+    ["a saved Orchestrator harness default this installation cannot honour", savedPreset],
+  ] as const) {
+    const additive = await mountFixture({ runners: [approvalLessCodexRunner], capabilities: {
+      sessionSubscriptions: false, projects: true, orchestratorRole: true,
+    } }, undefined, undefined, defaults);
+    try {
+      await act(async () => { await selectProject(additive.container, project.id); });
+      await choosePermissionPreset(additive.container, "Orchestrator");
+      assert.equal(createButton(additive.container).disabled, false, label);
+      await act(async () => { createButton(additive.container).click(); });
+      assert.equal(additive.requests[0]?.role, "orchestrator", label);
+      assert.equal(additive.requests[0]?.config?.permissionMode, undefined,
+        `${label}: granular approval support is the preset's precondition, not the additive launch's`);
+    } finally { await unmountFixture(additive); }
+  }
+});
+
 test("choosing Normal explicitly overrides a saved Orchestrator harness default on a current control plane", async () => {
   const claudeRunner: RunnerView = {
     ...runner, protocolVersion: PROTOCOL_VERSION,
