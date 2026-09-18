@@ -143,6 +143,7 @@ import {
 } from "./session-files.js";
 import { ShellManager } from "./shell-manager.js";
 import { prepareAgentTuiLaunch } from "./agent-tui.js";
+import { provisionAgentTuiManagedWorktreeGuard } from "./agent-tui-guard.js";
 import { capabilitiesFor } from "./catalog.js";
 import { createPromptImageFetcher } from "./prompt-image-fetch.js";
 import {
@@ -2172,6 +2173,21 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             // Even the no-turn MCP configuration probe may initialize provider HOME.
             sessions.acquireAgentTuiProviderHome(prepared);
           },
+          // The TUI is a spawn like any other: it gets the same fresh settings document and the
+          // same live protection list a runner-driven launch gets (#1337).
+          provisionManagedWorktreeGuard: (prepared) => provisionAgentTuiManagedWorktreeGuard(
+            prepared,
+            {
+              controlPlaneUrl: config.controlPlaneUrl,
+              controlPlaneProtocolVersion,
+              enabled: claudeHookFeatureEnabled,
+              allowInsecureTransport,
+              registerCredential: registerPolicyHookCredential,
+              protections: sessions.managedWorktreeProtections(prepared),
+            },
+            log,
+            claudeHookHost,
+          ),
         }),
         open: (message, target, launch, cleanupBoundary) => {
           if (launch) sessions.acquireAgentTuiProviderHome({ ...target.meta, env: launch.env ?? {} });
