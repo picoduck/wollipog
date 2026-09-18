@@ -381,6 +381,37 @@ test("storage that refuses every write leaves the panel exactly as it was", () =
     "a storage that comes back is used again");
 });
 
+test("a refused write leaves no older record behind to restore instead", () => {
+  // A refusal after something was already stored is the dangerous one: the record left in place
+  // describes a map the page has moved past. Restoring it would hand back superseded text — and in
+  // the worst case a message the user already sent, back in the box, inviting a second send.
+  const scope = panelScratchScopeKey("session-1");
+  writePanelScratch(scope, "sidechat.draft", "on its way", "draft");
+  // A second value, so the scope outlives the send and the mirror has a record to write rather than
+  // an empty map to remove — the refusal has to be what clears it.
+  writePanelScratch(scope, "files.directory", "apps/web");
+  assert.ok(backing.get(PERSIST_KEY), "the first writes were stored");
+
+  denyWrites = true;
+  clearPanelScratchIf(scope, "sidechat.draft", "on its way", panelScratchRevision(scope, "sidechat.draft"));
+  assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined, "memory is right either way");
+  assert.equal(backing.get(PERSIST_KEY), undefined,
+    "the record that could only tell the older story is gone with it");
+
+  reload();
+  assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined,
+    "no restore, rather than a restore of the sent message");
+  assert.equal(readPanelScratch(scope, "files.directory"), undefined,
+    "the whole record went, because the record is only ever written whole");
+
+  // The next write that is allowed through puts the whole map back, so the gap is one mutation wide.
+  denyWrites = false;
+  writePanelScratch(scope, "files.directory", "apps");
+  reload();
+  assert.equal(readPanelScratch(scope, "files.directory"), "apps");
+  assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined);
+});
+
 test("the stored record is bounded even where the map deliberately is not", () => {
   // Unsent text is exempt from the scope bound, and a form that keeps its text after submitting
   // holds its scope for as long as it is mounted (#1375). In memory that overshoot ends with the

@@ -28,6 +28,15 @@
  * to this origin's storage can read it. That is the bargain the composer beside it already makes
  * for prompt drafts, under the same scoping and the same eviction rules.
  *
+ * Every tab on the origin shares the one record and writes the whole of its own map into it, so a
+ * tab that never saw another's scope drops that scope when it writes. With two tabs open, a reload
+ * therefore restores what the tab that wrote last knew about. That is under-delivery, never a
+ * regression — none of this survived a reload at all before — and it is deliberately left alone,
+ * because the obvious repairs are wrong. Adopting the other tab's scopes on a `storage` event, or
+ * merging the stored record in on every write, makes this tab re-persist text the other tab has
+ * since sent: the resurrection problem composer-drafts.ts carries a tombstone layer to solve.
+ * Reconciling tabs honestly means that layer, and it is a change of its own.
+ *
  * The scope key is instance-qualified, because a remote control plane can reuse a local session id
  * (see instance-storage.ts) and one session's drafts must never surface under another's. That
  * qualification is also what makes one flat record safe to share between instances.
@@ -261,9 +270,14 @@ function persist(): void {
   // Assembled from the pieces that were measured, so the ceiling holds for the string actually
   // written. Restored in stored order, which is why it goes back least-recently-used first.
   stored.reverse();
-  // A refusal (private mode, a full quota) is not an error here. The map is authoritative for as
-  // long as this page lives; only the reload after it loses anything.
-  saveBrowserStorageValue(PERSIST_KEY, `{"version":1,"scopes":[${stored.join(",")}]}`);
+  // A refusal (private mode, a full quota, a restricted webview) is not an error here — but the
+  // record already in storage is now a lie. It describes a map this one has moved past, so a reload
+  // would restore older text, including a draft this very mutation cleared after sending it.
+  // Degrading to no restore is the honest failure; the next mutation that is allowed to write puts
+  // the whole map back, so the exposure is one mutation wide.
+  if (!saveBrowserStorageValue(PERSIST_KEY, `{"version":1,"scopes":[${stored.join(",")}]}`)) {
+    removeBrowserStorageValue(PERSIST_KEY);
+  }
 }
 
 /** Read one remembered value, or undefined when the session never stored it. */
