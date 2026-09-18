@@ -1,5 +1,5 @@
 import { Fragment, useMemo, useRef, useState } from "react";
-import { normalizeSourcePath } from "@wollipog/protocol";
+import { normalizeSourcePath, REVIEW_ANCHOR_TEXT_MAX_LENGTH } from "@wollipog/protocol";
 import type {
   CreateReviewFindingRequest,
   CreateWorkspaceReferenceRequest,
@@ -419,6 +419,12 @@ function DiffCommentEditor({
       filePath,
       side: anchor.side,
       line: anchor.line,
+      // The line as it reads right now, not as it read when the draft was opened: the finding is
+      // filed against the diff on screen, and `anchorMoved` above is what tells the reviewer the two
+      // diverged. Stored so the finding can prove its own line is untouched after a reload, with no
+      // client-side anchor history to consult (#1286) — omitted past the ceiling rather than
+      // rejected there, which leaves such a finding on the pre-#1286 hash fallback.
+      ...(anchorText.length <= REVIEW_ANCHOR_TEXT_MAX_LENGTH ? { anchorText } : {}),
       body: draft.body,
       severity: draft.severity,
       required: draft.required,

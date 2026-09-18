@@ -226,6 +226,130 @@ test("a finding created after a refresh anchors without resurrecting a stale sib
 });
 
 /* -------------------------------------------------------------------------- */
+/* Re-anchoring with no client-side history (#1286)                           */
+/* -------------------------------------------------------------------------- */
+
+/** What a reload leaves behind: the stored findings, the current diff, and no carried state. */
+const RELOADED = null;
+
+test("a reloaded client re-anchors a finding from the line text stored on it", () => {
+  // The reported failure: after a reload the client holds no previous index, so the carry chain of
+  // #1203 has nothing to walk and every finding falls back to hash equality. The line the finding
+  // was written against is byte-identical here, so it must stay anchored (#1286).
+  const state = reanchorFindings(RELOADED, diff({ diffHash: HASH_B }), "uncommitted:combined", [
+    finding({ anchorText: "after" }),
+  ]);
+  assert.deepEqual([...state.anchored], ["f1"]);
+});
+
+test("a reloaded client still calls a rewritten line stale", () => {
+  const rewritten = diff({
+    diffHash: HASH_B,
+    files: [file({ hunks: [hunk({ lines: [
+      { status: " ", text: "context" },
+      { status: "-", text: "before" },
+      { status: "+", text: "rewritten" },
+      { status: " ", text: "tail" },
+    ] })] })],
+  });
+  const state = reanchorFindings(RELOADED, rewritten, "uncommitted:combined", [finding({ anchorText: "after" })]);
+  assert.deepEqual([...state.anchored], [], "line 11 no longer holds the reviewed text");
+});
+
+test("stored line text is matched at the finding's own anchor, never wherever the text turns up", () => {
+  // Same content, different line: re-attaching there would move the comment onto code nobody
+  // reviewed. File, side and line stay part of the identity; the text only proves it is unchanged.
+  const moved = diff({
+    diffHash: HASH_B,
+    files: [file({ hunks: [hunk({
+      header: "@@ -40,3 +40,3 @@", oldStart: 40, newStart: 40,
+      lines: [{ status: " ", text: "context" }, { status: "+", text: "after" }],
+    })] })],
+  });
+  const state = reanchorFindings(RELOADED, moved, "uncommitted:combined", [finding({ anchorText: "after" })]);
+  assert.deepEqual([...state.anchored], []);
+});
+
+test("an empty anchored line is anchorable content, not a missing anchor", () => {
+  const blank = diff({
+    diffHash: HASH_B,
+    files: [file({ hunks: [hunk({ lines: [{ status: " ", text: "context" }, { status: "+", text: "" }] })] })],
+  });
+  assert.deepEqual(
+    [...reanchorFindings(RELOADED, blank, "uncommitted:combined", [finding({ anchorText: "" })]).anchored],
+    ["f1"],
+  );
+  // And a stored blank must not anchor onto a line that simply is not in the diff at all.
+  assert.deepEqual(
+    [...reanchorFindings(RELOADED, diff({ diffHash: HASH_B, files: [] }), "uncommitted:combined", [
+      finding({ anchorText: "" }),
+    ]).anchored],
+    [],
+  );
+});
+
+test("a finding written before the field existed keeps the carried-history behaviour", () => {
+  // Existing findings have no stored text. They must keep working exactly as they did: anchored
+  // while this client can carry the chain, stale after a reload that leaves it nothing to carry.
+  const carried = reanchorFindings(
+    reanchorFindings(null, diff(), "uncommitted:combined", [finding()]),
+    diff({ diffHash: HASH_B }), "uncommitted:combined", [finding()],
+  );
+  assert.deepEqual([...carried.anchored], ["f1"]);
+  const reloaded = reanchorFindings(RELOADED, diff({ diffHash: HASH_B }), "uncommitted:combined", [finding()]);
+  assert.deepEqual([...reloaded.anchored], [], "today's behaviour, unchanged, for a finding with no stored text");
+});
+
+test("the verdict on a stored anchor is the same with and without client-side history", () => {
+  // The invariant that makes a reload boring: stored text is asked of the diff directly, so a
+  // carried chain can neither rescue a changed line nor condemn an unchanged one.
+  const stored = [finding({ anchorText: "after" })];
+  const rewritten = diff({
+    diffHash: HASH_B,
+    files: [file({ hunks: [hunk({ lines: [
+      { status: " ", text: "context" },
+      { status: "+", text: "rewritten" },
+    ] })] })],
+  });
+  const carried = reanchorFindings(null, diff(), "uncommitted:combined", stored);
+  for (const [label, next] of [["unchanged", diff({ diffHash: HASH_B })], ["rewritten", rewritten]] as const) {
+    assert.deepEqual(
+      [...reanchorFindings(carried, next, "uncommitted:combined", stored).anchored],
+      [...reanchorFindings(RELOADED, next, "uncommitted:combined", stored).anchored],
+      label,
+    );
+  }
+  // A line edited and then restored is once again the reviewed content, so it anchors again — which
+  // is the only verdict a reloaded client could reach, and therefore the one both must reach. The
+  // restored change set needs its own hash: an unchanged hash legitimately reuses the cached index.
+  const away = reanchorFindings(carried, rewritten, "uncommitted:combined", stored);
+  const restored = diff({ diffHash: "c".repeat(64) });
+  assert.deepEqual([...reanchorFindings(away, restored, "uncommitted:combined", stored).anchored], ["f1"]);
+  assert.deepEqual([...reanchorFindings(RELOADED, restored, "uncommitted:combined", stored).anchored], ["f1"]);
+});
+
+test("for a stored anchor, identical content replaces pane-locality as the guard", () => {
+  // Pane-locality existed because a line NUMBER means different content in different panes. A
+  // stored anchor compares the content itself, so a pane that shows byte-identical text at the same
+  // file, side and line is showing exactly what was reviewed, and the finding renders there.
+  //
+  // This is not an optional relaxation: after a reload the pane resets to combined, and a finding
+  // authored in the staged pane has no pane recorded to restrict it to. Restricting by pane would
+  // reinstate the reported bug on the very view the reviewer lands on.
+  const first = reanchorFindings(null, diff(), "uncommitted:unstaged", [finding({ anchorText: "after" })]);
+  const other = reanchorFindings(first, diff({ diffHash: HASH_B }), "uncommitted:staged", [
+    finding({ anchorText: "after" }),
+  ]);
+  assert.deepEqual([...other.anchored], ["f1"]);
+  // A different scope is still never adopted: `scope` is recorded on the finding, and the lineage
+  // it is being asked about is not the one it belongs to.
+  const crossScope = reanchorFindings(null, diff(), "uncommitted:combined", [
+    finding({ scope: "all_branch", diffHash: HASH_B, anchorText: "after" }),
+  ]);
+  assert.deepEqual([...crossScope.anchored], []);
+});
+
+/* -------------------------------------------------------------------------- */
 /* Per-lineage anchor store                                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -277,6 +401,18 @@ test("the store changes identity whenever a finding's anchoring actually changes
   ]);
   assert.notEqual(withNew, stale);
   assert.deepEqual([...withNew.get(COMBINED)!.anchored], ["f2"]);
+});
+
+test("a freshly loaded store anchors stored findings on its very first derivation", () => {
+  // What the panel actually does after a reload: it starts from the empty store and derives during
+  // its first render. Nothing is carried, so this is the path #1286 reported as broken — and the
+  // one that must now anchor without ever painting a stale frame to correct afterwards.
+  const stored = [finding({ anchorText: "after" }), finding({ findingId: "f2", line: 10, anchorText: "context" })];
+  const store = reanchorFindingStore(EMPTY_FINDING_ANCHOR_STORE, diff({ diffHash: HASH_B }), COMBINED, stored);
+  assert.deepEqual([...store.get(COMBINED)!.anchored].sort(), ["f1", "f2"]);
+  // And it settles immediately: the caller commits this with setState during render, so a second
+  // derivation of the same inputs has to return the same store or the render loops.
+  assert.equal(reanchorFindingStore(store, diff({ diffHash: HASH_B }), COMBINED, stored), store);
 });
 
 test("each lineage in the store is independent, and lineages are bounded by scope times pane", () => {

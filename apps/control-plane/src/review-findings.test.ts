@@ -25,6 +25,30 @@ test("review finding creation validates an exact, line-anchored snapshot", () =>
     { body: " " },
     { extra: true },
   ]) assert.equal(parseCreateReviewFinding({ ...create, ...patch }).ok, false);
+  for (const key of ["scope", "diffHash", "filePath", "side", "line", "body", "severity", "required"]) {
+    const missing: Record<string, unknown> = { ...create };
+    delete missing[key];
+    assert.equal(parseCreateReviewFinding(missing).ok, false, `${key} is required`);
+  }
+});
+
+test("the anchored line's text is optional, size-capped, and empty-string-valid", () => {
+  // #1286 stores the line a finding was written against so it can re-anchor with no client-side
+  // history. Absent is the pre-#1286 shape and must keep parsing — an older web client still posts
+  // it, and so does a current one on a line past the ceiling.
+  const withText = parseCreateReviewFinding({ ...create, anchorText: "  const x = 1;" });
+  assert.equal(withText.ok, true);
+  if (withText.ok) assert.equal(withText.value.anchorText, "  const x = 1;");
+  // A blank line is real, anchorable content: `""` must survive as itself rather than be dropped.
+  const blank = parseCreateReviewFinding({ ...create, anchorText: "" });
+  assert.equal(blank.ok, true);
+  if (blank.ok) assert.equal(blank.value.anchorText, "");
+  const absent = parseCreateReviewFinding(create);
+  assert.equal(absent.ok && "anchorText" in absent.value, false);
+  assert.equal(parseCreateReviewFinding({ ...create, anchorText: "x".repeat(4_000) }).ok, true);
+  for (const anchorText of ["x".repeat(4_001), 12, null, ["x"], "has a \u0000 byte"]) {
+    assert.equal(parseCreateReviewFinding({ ...create, anchorText }).ok, false, String(anchorText).slice(0, 20));
+  }
 });
 
 test("review finding updates and bundles require stale-safe exact identities", () => {

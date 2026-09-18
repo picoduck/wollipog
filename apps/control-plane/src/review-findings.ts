@@ -1,3 +1,4 @@
+import { REVIEW_ANCHOR_TEXT_MAX_LENGTH } from "@wollipog/protocol";
 import type {
   BundleReviewFindingsRequest,
   CreateReviewFindingRequest,
@@ -113,16 +114,23 @@ export function validateForgeReviewSync(input: unknown): input is ForgeReviewSyn
 }
 
 export function parseCreateReviewFinding(input: unknown): Parsed<CreateReviewFindingRequest> {
-  const keys = ["scope", "diffHash", "filePath", "side", "line", "body", "severity", "required"] as const;
-  if (!exactObject(input, keys) || Object.keys(input).length !== keys.length) {
+  // `anchorText` is optional: an older web client omits it, and so does a current one on a line
+  // longer than the stored ceiling. Both cases stay creatable and fall back to hash anchoring.
+  const keys = ["scope", "diffHash", "filePath", "side", "line", "anchorText", "body", "severity", "required"] as const;
+  // `exactObject` rejects unknown keys; this rejects missing ones. Only `anchorText` may be absent.
+  if (!exactObject(input, keys) || keys.some((key) => key !== "anchorText" && !(key in input))) {
     return { ok: false, error: "review finding request is malformed" };
   }
   const body = typeof input.body === "string" ? input.body.trim() : "";
+  // Empty string is a real blank line, so presence is the test, never truthiness.
+  const anchorText = input.anchorText;
   if (!SCOPES.has(input.scope as string) ||
       typeof input.diffHash !== "string" || !/^[a-f0-9]{64}$/.test(input.diffHash) ||
       typeof input.filePath !== "string" || !validFilePath(input.filePath) ||
       !SIDES.has(input.side as string) ||
       !Number.isSafeInteger(input.line) || (input.line as number) < 1 || (input.line as number) > 10_000_000 ||
+      (anchorText !== undefined &&
+        (typeof anchorText !== "string" || anchorText.length > REVIEW_ANCHOR_TEXT_MAX_LENGTH || anchorText.includes("\0"))) ||
       !body || body.length > 4_000 ||
       !SEVERITIES.has(input.severity as string) || typeof input.required !== "boolean") {
     return { ok: false, error: "review finding request is invalid" };
@@ -135,6 +143,7 @@ export function parseCreateReviewFinding(input: unknown): Parsed<CreateReviewFin
       filePath: input.filePath,
       side: input.side as CreateReviewFindingRequest["side"],
       line: input.line as number,
+      ...(anchorText !== undefined ? { anchorText: anchorText as string } : {}),
       body,
       severity: input.severity as CreateReviewFindingRequest["severity"],
       required: input.required,

@@ -3486,6 +3486,16 @@ export type ReviewFindingStatus = "open" | "sent" | "resolved" | "dismissed";
 export type ReviewFindingSide = "left" | "right";
 export type ReviewFindingSource = "local" | "github" | "gitlab";
 
+/**
+ * The longest anchored line a finding stores verbatim.
+ *
+ * A diff line has no length ceiling of its own — a minified bundle is one very long line — so the
+ * durable copy needs one. Clients omit {@link ReviewFinding.anchorText} past this length rather
+ * than failing the create: such a finding simply falls back to hash-equality anchoring, exactly as
+ * findings written before the field existed do.
+ */
+export const REVIEW_ANCHOR_TEXT_MAX_LENGTH = 4_000;
+
 /** Durable line-anchored review feedback. `diffHash` makes a comment's source snapshot explicit;
  * comments whose hash no longer matches the visible diff remain in the findings list as stale
  * instead of being silently attached to a different line. */
@@ -3497,6 +3507,18 @@ export interface ReviewFinding {
   filePath: string;
   side: ReviewFindingSide;
   line: number;
+  /**
+   * The exact text of the anchored line, as it read when the finding was written.
+   *
+   * `diffHash` is a whole-change-set identity, so it stops matching the moment anything else in the
+   * worktree moves. Carrying the anchored line's own content makes "did this finding's line change?"
+   * answerable from the finding alone — across a page reload, a second tab, or another device, none
+   * of which hold the client-side anchor history that used to be the only answer (#1286).
+   *
+   * Optional and empty-string-valid: absent means the finding predates the field or its line
+   * exceeded {@link REVIEW_ANCHOR_TEXT_MAX_LENGTH}; `""` is a real, anchorable blank line.
+   */
+  anchorText?: string;
   body: string;
   severity: ReviewFindingSeverity;
   /** Required unresolved findings block review completion and publish readiness. */
@@ -3543,6 +3565,8 @@ export interface CreateReviewFindingRequest {
   filePath: string;
   side: ReviewFindingSide;
   line: number;
+  /** See {@link ReviewFinding.anchorText}; omitted when the line is longer than the stored ceiling. */
+  anchorText?: string;
   body: string;
   severity: ReviewFindingSeverity;
   required: boolean;
