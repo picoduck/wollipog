@@ -28,6 +28,7 @@ import { effectiveClaudePermissionMode } from "../claude-permission.js";
 import { prepareClaudeHookArgs } from "../hook-settings.js";
 import {
   commandTargetsGuardState,
+  commandMayMoveShell,
   commandTargetsManagedWorktree,
   shellCwdAfterCommand,
   toolTargetsGuardState,
@@ -731,9 +732,10 @@ export class ClaudeCodeDriver implements Driver {
         if (block?.type !== "tool_use" || block.name !== "Bash" || typeof block.id !== "string") continue;
         const command = (block.input as { command?: unknown } | undefined)?.command;
         if (typeof command !== "string") continue;
-        // A command that provably leaves the directory alone never needs tracking.
-        if (this.toolShellCwd !== null && shellCwdAfterCommand(command, this.toolShellCwd) === this.toolShellCwd) continue;
-        if (this.toolShellCwd === null && shellCwdAfterCommand(command, null) === null) continue;
+        // Only a command with no directory-changing word at all is left untracked. Predicting
+        // where a `cd` lands proves nothing before it runs: the command can retarget a symlink
+        // first and walk through it afterwards.
+        if (!commandMayMoveShell(command)) continue;
         const overlapped = this.inflightShellMovers.size > 0;
         if (overlapped) for (const mover of this.inflightShellMovers.values()) mover.overlapped = true;
         this.inflightShellMovers.set(block.id, { command, subagent, overlapped });

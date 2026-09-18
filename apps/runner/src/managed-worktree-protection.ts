@@ -654,22 +654,26 @@ export function commandTargetsManagedWorktree(
  * session directory, and an unknown directory stays unknown until an absolute `cd` re-establishes
  * it. A `cwd` of null means the directory is already unknown.
  */
-export function shellCwdAfterCommand(command: string, cwd: string | null): string | null {
-  if (!command || command.length > MAX_COMMAND_LENGTH || command.includes("\0")) return cwd;
+function walkShellCwd(command: string, cwd: string | null): { cwd: string | null; mayMove: boolean } {
+  if (!command) return { cwd, mayMove: false };
+  if (command.length > MAX_COMMAND_LENGTH || command.includes("\0")) return { cwd: null, mayMove: true };
   // The tokenizer reads a newline as whitespace, so `cd apps\ncd ..` would collapse into one
   // segment. A multi-line command that mentions anything able to move the shell is unknown; one
   // that does not cannot have moved it. A line continuation is joined first: `c\<newline>d` is `cd`.
   if (/[\r\n]/u.test(command)) {
     const joined = command.replace(/\\\r?\n/gu, "");
-    return /(^|[^\w-])(cd|pushd|popd|dirs|eval|builtin|command|exec|source|trap|\.)(?![\w-])/u.test(joined) ? null : cwd;
+    return /(^|[^\w-])(cd|pushd|popd|dirs|eval|builtin|command|exec|source|trap|\.)(?![\w-])/u.test(joined)
+      ? { cwd: null, mayMove: true }
+      : { cwd, mayMove: false };
   }
   let tokens: ShellToken[];
   try {
     tokens = parse<EnvironmentReference>(command, (env) => ({ env }));
   } catch {
-    return null;
+    return { cwd: null, mayMove: true };
   }
   let current = cwd;
+  let sawCd = false;
   let segment: ShellToken[] = [];
   let piped = false;
   const environment = new Map<string, string>();
@@ -683,6 +687,7 @@ export function shellCwdAfterCommand(command: string, cwd: string | null): strin
     } catch {
       return false;
     }
+    if (parsed?.executable === "cd") sawCd = true;
     if (parsed?.executable !== "cd") {
       // Anything that can move the shell without spelling `cd` at the top level: the directory
       // stack (`pushd -n` moves the stack, not the shell), indirect evaluation, sourced files,
@@ -741,20 +746,37 @@ export function shellCwdAfterCommand(command: string, cwd: string | null): strin
       segment.push(token);
       continue;
     }
-    if (op !== "&&" && op !== ";" && op !== "||" && op !== "|") return null;
+    if (op !== "&&" && op !== ";" && op !== "||" && op !== "|") return { cwd: null, mayMove: true };
     // Both sides of a `|` are pipeline members.
     if (op === "|") piped = true;
-    if (!evaluate()) return null;
+    if (!evaluate()) return { cwd: null, mayMove: true };
     segment = [];
     piped = op === "|";
   }
-  if (!evaluate()) return null;
+  if (!evaluate()) return { cwd: null, mayMove: true };
+  // A command with no directory change at all cannot have moved the shell.
+  if (!sawCd) return { cwd, mayMove: false };
   // Claude ends every successful command with `pwd -P` and starts the next shell there, so at the
   // start of each command the logical and physical directories are the same one. Mirror that:
   // resolve the final logical position NOW, while the filesystem is as the command left it. A
   // symlink retargeted later does not move a shell that is already inside the old target, and a
   // physical directory makes a later `git -C ../..` or `rm ../x` resolve the way the kernel does.
-  return current === null || current === cwd ? current : canonicalPath(current);
+  // Always re-resolve after a `cd`, even one that lands on the same spelling: an earlier segment
+  // of the same command may have retargeted a symlink the `cd` then walked through.
+  return { cwd: current === null ? null : canonicalPath(current), mayMove: true };
+}
+
+export function shellCwdAfterCommand(command: string, cwd: string | null): string | null {
+  return walkShellCwd(command, cwd).cwd;
+}
+
+/**
+ * Whether `command` contains anything that can move the shell. Decided from the text alone and
+ * BEFORE it runs: comparing a predicted directory with the current one proves nothing, because
+ * the command can retarget a symlink first and `cd` through it afterwards.
+ */
+export function commandMayMoveShell(command: string): boolean {
+  return walkShellCwd(command, null).mayMove;
 }
 
 /* ---------------------------------------------------------------------------------------------

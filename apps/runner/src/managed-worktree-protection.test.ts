@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  commandMayMoveShell,
   commandTargetsManagedWorktree,
   MANAGED_WORKTREE_REFUSAL,
   shellCwdAfterCommand,
@@ -352,4 +353,23 @@ test("on POSIX a backslash is a filename character, not a separator", { skip: pr
   assert.equal(commandTargetsManagedWorktree("rm -rf '\\alias/../managed'", join(base, "sibling"), protections),
     MANAGED_WORKTREE_REFUSAL);
   assert.equal(commandTargetsManagedWorktree("rm -rf '\\alias/../scratch'", join(base, "sibling"), protections), null);
+});
+
+test("a command may move the shell whenever it mentions a mover, whatever the predicted landing", (t) => {
+  for (const command of ["cd .", "cd ../runner", "rm back && ln -s ../.. back && cd back", "cd $X", "pushd x",
+    "eval 'cd ..'", "trap 'cd ..' EXIT", "ls\ncd ..", "(cd ..)", "cd x | cat"]) {
+    assert.equal(commandMayMoveShell(command), true, command);
+  }
+  for (const command of ["ls", "pnpm typecheck && git status", "rm -rf build; ls", "cat <<'EOF'\nhello\nEOF", "echo cdrom"]) {
+    assert.equal(commandMayMoveShell(command), false, command);
+  }
+  // The landing is resolved when the result arrives, after the command retargeted the link.
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-cwd-")));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const runner = join(base, "wt", "apps", "runner");
+  mkdirSync(runner, { recursive: true });
+  symlinkSync(join("..", ".."), join(runner, "back"));
+  assert.equal(shellCwdAfterCommand("rm back && ln -s ../.. back && cd back", runner), join(base, "wt"));
+  const protections = [{ worktreePath: join(base, "wt"), repoPath: join(base, "repo") }];
+  assert.equal(commandTargetsManagedWorktree("rm -rf .", join(base, "wt"), protections), MANAGED_WORKTREE_REFUSAL);
 });

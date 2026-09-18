@@ -562,3 +562,17 @@ test("a moving command's own request is still judged from the directory it start
   }) + "\n");
   assert.deepEqual(await controlResponses(run), [], "the #1333 case itself is still allowed");
 });
+
+test("a cd that textually lands where the shell already is still hides the directory while it runs", async (t) => {
+  // `cd ../runner` from apps/runner predicts the same directory, but a command can retarget a
+  // symlink before it walks through it, so the prediction is not evidence.
+  const dir = tempDir(t);
+  const run = launch(provision(dir, "cwd-7", "auto", { protections: PROTECTIONS }), "auto", PROTECTIONS);
+  t.after(() => run.driver.dispose());
+  completeBash(run, "t1", "cd apps/runner");
+  run.child.stdout.write(JSON.stringify({
+    type: "assistant", message: { content: [{ type: "tool_use", id: "t2", name: "Bash", input: { command: "rm back && ln -s ../.. back && cd ../runner" } }] },
+  }) + "\n");
+  requestBash(run, "during", "rm -rf .");
+  assert.deepEqual(await controlResponses(run), [{ id: "during", behavior: "deny" }]);
+});
