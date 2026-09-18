@@ -143,7 +143,7 @@ session and only gains the campaign tools on the general Agent Control MCP serve
 `mcp__wollipog__*` pre-authorization, the Orchestrator instructions, and Project Location read
 access; hooks, settings sources, the built-in tool inventory, and configured MCP servers are left
 untouched. `permissionMode: "orchestrator"` now names the coupled Orchestrator preset, which remains
-the only shape for Strict Project Isolation, Native TUI, Pi, ACP, and pre-v160 peers. The
+the only shape for Strict Project Isolation, Native TUI, ACP, and pre-v160 peers. The
 control plane refuses the independent combination on older runners instead of degrading silently.
 
 Protocol v162 extends the additive role to native Codex and Codex App Server (ADR 0009). A
@@ -158,6 +158,32 @@ session, exactly as today's coupled preset already does. Strict Project Isolatio
 restricted Codex preset and its MCP isolation probe. Each harness carries its own capability gate:
 `orchestratorAdditiveRole` (v160) for Claude Code, `orchestratorAdditiveCodex` (v162) for the Codex
 drivers; creation and restart refuse a combination the runner cannot enforce, naming the version.
+
+Protocol v162 extends the additive role to native Pi (ADR 0010), gated by `orchestratorAdditivePi`.
+A non-strict Pi Orchestrator keeps its selected permission mode, extensions, skills, prompt
+templates, context files, and built-in tool inventory; the launch adds only `--append-system-prompt
+<the Orchestrator instructions>` plus the `WOLLIPOG_PERMISSION_PRESET` agent-environment marker that
+exposes the campaign tools on the Agent Control extension every verified Pi session already loads.
+Nothing else is injected — no `--no-extensions`, `--no-skills`, `--no-prompt-templates`,
+`--no-context-files`, or `--exclude-tools`. Crucially the approval path is the ordinary one: every
+permission branch in `pi-rpc.ts` keys on the coupled preset literal, so an additive Orchestrator
+waits for Pi's `project_trust` event, receives `--no-approve` only when a normal session of that
+mode would, and is **never** blanket auto-confirmed — the preset's auto-confirm is safe only because
+the preset also excludes `bash`, `edit`, and `write`. Measured against pi 0.85.0, repeated
+`--append-system-prompt` values accumulate rather than displace one another, and the flag is matched
+by exact equality (so `--append-system-prompt=TEXT` is an extension flag, not an append, and the
+resume strip leaves it alone). The Pi bridge requirement reaches the control plane as the advertised
+`orchestrator` permission mode, which the runner publishes only for a discovery-verified bridge;
+`piAgentControl` itself is not persisted. The control plane has never admitted a coupled-preset Pi
+Orchestrator, so the additive shape is the only Pi Orchestrator there is.
+
+ACP deliberately has no additive shape. The audited `claude-agent-acp` 0.75.1 resolves its
+permission mode from the user's own settings and ignores `_meta.claudeCode.options.permissionMode`,
+so Wollipog can neither choose nor observe the posture an additive ACP Orchestrator would run under;
+and `AcpClient`'s single `orchestrator` flag couples the exact-adapter identity assertion with the
+`_meta` injection, the client fs/terminal refusal, and permission-request cancellation, so clearing
+it for an additive launch would silently drop the identity check. ADR 0010 records what an audit
+must establish before that changes.
 
 Strict Project Isolation preserves the scratch-only boundary. Claude Bash-prefix rules alone are
 insufficient because an otherwise read-only command can redirect output into a Project Location, so
