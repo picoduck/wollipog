@@ -1,16 +1,20 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "@wollipog/test-support/bounded-child-process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { EventEmitter } from "node:events";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { test } from "node:test";
+import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import {
   PROTOCOL_VERSION,
   type AgentCapabilities,
   type ControlPlaneToRunner,
   type RunnerMetadata,
+  type RunnerToControlPlane,
   type SessionEventPayload,
   type SessionLaunchSpec,
+  type SessionWorktreeResultMessage,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "../../control-plane/src/db.js";
 import type { Hub } from "../../control-plane/src/hub.js";
@@ -25,34 +29,43 @@ import {
   provisionAgentControl,
   type AgentControlHost,
 } from "./agent-control.js";
-import { effectiveClaudePermissionMode } from "./claude-permission.js";
-import { ClaudeCodeDriver, claudePermissionArgs } from "./drivers/claude-code.js";
+import { ClaudeCodeDriver } from "./drivers/claude-code.js";
 import type { DriverCallbacks, DriverOptions } from "./drivers/driver.js";
 import {
   applyClaudeHookCapability,
-  claudeHookSettingsPath,
   provisionClaudeHooks,
   type ClaudeHookHost,
 } from "./hook-settings.js";
-import { createRequestedWorktree, pathWithin, sameWorktreePath } from "./worktree.js";
+import { SessionManager } from "./session-manager.js";
+import { SessionStore } from "./session-store.js";
+import { pathWithin, sameWorktreePath } from "./worktree.js";
 
 /**
  * One non-strict native Claude Orchestrator campaign (ADR 0008 / protocol v160), threaded through
- * the REAL control-plane service, the REAL runner provisioning, and the REAL Claude driver.
+ * the REAL control-plane service, the REAL runner `SessionManager` (with the REAL launch
+ * provisioning wired to `prepareLaunch`, exactly as `apps/runner/src/index.ts` does), and the REAL
+ * `ClaudeCodeDriver` whose only stub is the spawned provider process.
  *
- * Every layer consumes the previous layer's own output: the launch spec the service sends to the
- * runner is the object `provisionAgentControl`/`provisionClaudeHooks` mutate, and the driver runs
- * on the argv/env those produced. Three separate fixtures could drift apart; this cannot.
+ * Every layer consumes the previous layer's own output: the `start_session` message the service
+ * sends is delivered to `SessionManager.start`, the driver options are the ones SessionManager
+ * built from the persisted meta, the child's question is the event the runner emitted, and the
+ * answer is the frame the control plane produced. Separate fixtures could drift apart; this cannot.
  *
- * No provider process, credentials, or network are involved. The only external tool is `git`,
- * used for the parent's own dedicated worktree.
+ * No provider process, credentials, or network are involved. The only external tool is `git`.
+ *
+ * Permission mode: the scenario selects `auto`, a normal (non-preset) mode. It has to be an
+ * interactive one — `claudePermissionArgs` gives only `default`/`auto` the
+ * `--permission-prompt-tool stdio` channel, so a `can_use_tool` control request is unreachable for
+ * a fixed-rule mode such as `acceptEdits`, and an approval card could not arise there at all.
  */
 
 const RUNNER_ID = "runner-additive";
 const WORKSPACE_ID = "ws-additive";
 const AGENT_ID = "claude";
-/** The user's own MCP server configuration, carried by the catalog agent definition. */
+/** The user's own MCP server configuration and settings (their hooks), from the agent catalog. */
 const USER_MCP_CONFIG = "/home/user/servers.mcp.json";
+const USER_SETTINGS = "/home/user/settings.json";
+const CONTROL_PLANE_URL = "ws://127.0.0.1:4317/runner";
 
 const CLAUDE_CAPABILITIES: AgentCapabilities = {
   models: [],
@@ -60,7 +73,6 @@ const CLAUDE_CAPABILITIES: AgentCapabilities = {
   slashCommands: [],
   supportsImages: false,
   supportsApprovals: true,
-  supportsSteering: true,
   permissionModes: ["default", "auto", "acceptEdits", "plan", "orchestrator"],
   elicitation: {
     default: ["stdio-control"],
@@ -82,8 +94,9 @@ function runnerMeta(workspacePath: string): RunnerMetadata {
       id: AGENT_ID,
       name: "Claude",
       command: "claude",
-      // The user's configured MCP servers and extra directory ride the catalog launch arguments.
-      args: ["--mcp-config", USER_MCP_CONFIG, "--add-dir", "/home/user/notes"],
+      // The user's configured MCP servers, settings (their hooks), and extra directory ride the
+      // catalog launch arguments, exactly as an operator-configured agent would carry them.
+      args: ["--mcp-config", USER_MCP_CONFIG, "--settings", USER_SETTINGS, "--add-dir", "/home/user/notes"],
       env: { PROVIDER_SETTING: "kept" },
       driver: "claude-code",
       available: true,
@@ -105,16 +118,46 @@ function runnerMeta(workspacePath: string): RunnerMetadata {
   };
 }
 
-/** Minimal recording stand-in for the connection Hub: only what this campaign exercises. */
+/**
+ * Recording stand-in for the connection Hub. `requestFromRunner` dispatches the one runner request
+ * this scenario uses into the real SessionManager, mirroring the `session_worktree` case of the
+ * runner message switch in `apps/runner/src/index.ts`.
+ */
 class RecordingHub {
   sent: ControlPlaneToRunner[] = [];
+  manager?: SessionManager;
 
   isRunnerOnline(): boolean { return true; }
   sendToRunner(_runnerId: string, msg: ControlPlaneToRunner): boolean {
     this.sent.push(msg);
     return true;
   }
-  async requestFromRunner(): Promise<never> { throw new Error("runner did not respond in time"); }
+
+  async requestFromRunner(
+    _runnerId: string,
+    _requestId: string,
+    msg: ControlPlaneToRunner,
+  ): Promise<SessionWorktreeResultMessage> {
+    this.sent.push(msg);
+    if (msg.type !== "session_worktree" || msg.operation !== "create") {
+      throw new Error(`unexpected runner request ${msg.type}`);
+    }
+    // The runner message switch calls exactly this SessionManager method for a create operation.
+    const result = await this.manager!.requestWorktree(msg.sessionId, {
+      branch: msg.branch,
+      ...(msg.baseRef ? { baseRef: msg.baseRef } : {}),
+    });
+    return {
+      type: "session_worktree_result",
+      requestId: msg.requestId,
+      sessionId: msg.sessionId,
+      operation: "create",
+      ok: true,
+      snapshot: result.snapshot,
+      worktree: result.worktree,
+    };
+  }
+
   async waitForRunnerRequest(): Promise<never> { throw new Error("runner request is no longer in flight"); }
   resolveRunnerRequest(): boolean { return false; }
   activeTurnIdForSession(): string | undefined { return undefined; }
@@ -139,10 +182,54 @@ class RecordingHub {
   }
 }
 
-function launchSpecFor(hub: RecordingHub, sessionId: string): SessionLaunchSpec {
-  const spec = hub.sentOfType("start_session").find((msg) => msg.spec.sessionId === sessionId)?.spec;
-  assert.ok(spec, "the control plane sent a launch spec for this session");
-  return spec;
+/** Stand-in for the spawned `claude` process: real streams, no real binary. */
+interface FakeProvider extends EventEmitter {
+  pid: number;
+  stdin: PassThrough;
+  stdout: PassThrough;
+  stderr: PassThrough;
+  kill: () => boolean;
+}
+
+interface ProviderLaunch {
+  sessionId: string;
+  opts: DriverOptions;
+  argv: string[];
+  env: Record<string, string>;
+  cwd: string;
+  child: FakeProvider;
+  /** Every control frame the driver wrote back to the provider. */
+  writes: Record<string, unknown>[];
+}
+
+function fakeProvider(writes: Record<string, unknown>[]): FakeProvider {
+  const child = new EventEmitter() as FakeProvider;
+  child.pid = 4321;
+  child.stdin = new PassThrough();
+  child.stdin.setEncoding("utf8");
+  let buffered = "";
+  child.stdin.on("data", (chunk: string) => {
+    buffered += chunk;
+    const lines = buffered.split("\n");
+    buffered = lines.pop() ?? "";
+    for (const line of lines) {
+      if (line.trim()) writes.push(JSON.parse(line) as Record<string, unknown>);
+    }
+  });
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.kill = () => true;
+  return child;
+}
+
+interface ControlResponseFrame {
+  type: string;
+  response: { request_id: string; response: { behavior?: string; updatedInput?: { answers?: unknown } } };
+}
+
+/** Only the control-protocol replies; the same stdin also carries stream-json user messages. */
+function controlResponses(launch: ProviderLaunch): ControlResponseFrame[] {
+  return launch.writes.filter((frame) => frame.type === "control_response") as unknown as ControlResponseFrame[];
 }
 
 function valuesOf(args: readonly string[], flag: string): string[] {
@@ -153,86 +240,44 @@ function hasFlag(args: readonly string[], flag: string): boolean {
   return args.some((arg) => arg === flag || arg.startsWith(`${flag}=`));
 }
 
-interface DriverHarness {
-  driver: ClaudeCodeDriver;
-  events: SessionEventPayload[];
-  writes: unknown[];
-  feed: (msg: unknown) => unknown;
-  baseArgs: () => string[];
+async function waitFor(predicate: () => boolean, message: string): Promise<void> {
+  for (let attempt = 0; attempt < 2_000 && !predicate(); attempt++) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 1));
+  }
+  assert.equal(predicate(), true, message);
 }
 
-function driverFor(spec: SessionLaunchSpec, cwd: string): DriverHarness {
-  const events: SessionEventPayload[] = [];
-  const writes: unknown[] = [];
-  const cb: DriverCallbacks = {
-    onEvent: (payload) => events.push(payload),
-    onStderr: () => {},
-    onModelResolved: () => {},
-    onExit: () => {},
-  };
-  const opts: DriverOptions = {
-    command: spec.command,
-    args: [...spec.args],
-    cwd,
-    env: { ...spec.env },
-    config: spec.config ?? {},
-    context: spec.context ?? { kind: "native" },
-    ...(spec.capabilities ? { capabilities: spec.capabilities } : {}),
-    ...(spec.orchestrator ? { orchestrator: spec.orchestrator } : {}),
-  };
-  const driver = new ClaudeCodeDriver(opts, cb);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const internals = driver as any;
-  internals.child = { stdin: { write: (value: string) => writes.push(JSON.parse(value)) } };
-  return {
-    driver,
-    events,
-    writes,
-    feed: (msg: unknown) => internals.handleEvent(msg),
-    baseArgs: () => internals.preparedBaseArgs() as string[],
-  };
-}
+/** No developer signing, hook, or template configuration may run in this fixture. */
+const HERMETIC_GIT = ["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "-c", "init.templateDir="];
 
-function gitInit(repo: string): void {
-  execFileSync("git", ["init", "-q", repo]);
-  execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
-  execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
-  execFileSync("git", ["-C", repo, "commit", "-q", "--allow-empty", "-m", "base"]);
+function git(args: string[]): string {
+  return execFileSync("git", [...HERMETIC_GIT, ...args], { encoding: "utf8" });
 }
 
 test("a non-strict Claude Orchestrator campaign runs end to end as an additive role", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-additive-campaign-"));
   const repo = join(root, "repo");
   const runnerData = join(root, "runner-data");
+  const sessionsRoot = join(root, "sessions");
   const configDir = join(root, "agent-control");
   const hookDir = join(root, "hooks");
   const db = ControlPlaneDb.open(":memory:");
+  const priorGitConfig = { global: process.env.GIT_CONFIG_GLOBAL, system: process.env.GIT_CONFIG_SYSTEM };
+  // Also applies to the product git calls the runner makes below: ambient user/system config
+  // (signing, hooks, templates) must not participate in this scenario.
+  process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+  process.env.GIT_CONFIG_SYSTEM = "/dev/null";
+  let manager: SessionManager | undefined;
   try {
-    gitInit(repo);
-    const hub = new RecordingHub();
-    db.registerRunner(runnerMeta(repo), Date.now(), PROTOCOL_VERSION);
-    const svc = new SessionsService(db, hub as unknown as Hub, { info() {}, warn() {}, error() {} });
+    git(["init", "-q", "-b", "main", repo]);
+    git(["-C", repo, "config", "user.email", "test@example.com"]);
+    git(["-C", repo, "config", "user.name", "Test"]);
+    git(["-C", repo, "commit", "-q", "--allow-empty", "-m", "base"]);
 
-    // ---------------------------------------------------------------- 1. creation (control plane)
-    // A human creates an Orchestrator that keeps an ordinary provider permission mode.
-    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
-    const created = svc.createSession(
-      { ...request, role: "orchestrator", config: { permissionMode: "acceptEdits" } },
-      undefined, undefined, false, false, false, { defaultOwnerUserId: "human" },
-    );
-    assert.ok(created.ok && created.data, created.error ?? "session creation failed");
-    const parent = created.data;
-    assert.equal(parent.role, "orchestrator");
-    assert.equal(parent.permissionMode, "acceptEdits", "the role never consumes the permission-mode selection");
-    assert.equal(parent.parentControl, "questions_and_approvals", "a human creation context defaults Parent Control on");
-
-    // ------------------------------------------------- 2. the exact launch spec sent to the runner
-    const spec = launchSpecFor(hub, parent.id);
-    assert.equal(spec.config?.permissionMode, "acceptEdits", "the launch carries the selected permission mode");
-    assert.deepEqual(spec.orchestrator, { strictProjectIsolation: false }, "the launch policy carries the role");
-    assert.ok(spec.args.includes(USER_MCP_CONFIG), "the launch carries the user's configured MCP servers");
-
-    // ------------------------------------------------------- 3. real runner launch provisioning
+    // ------------------------------------------------------------------ the runner side, for real
+    const runnerSent: RunnerToControlPlane[] = [];
+    const launches: ProviderLaunch[] = [];
+    const store = new SessionStore(sessionsRoot);
     const controlHost: AgentControlHost = {
       isSea: true, execPath: "/opt/runner", execArgv: [], configDir, platform: "linux",
     };
@@ -240,107 +285,237 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
       isSea: false, execPath: "/usr/bin/node", execArgv: ["--import", "tsx"],
       scriptPath: "/repo/apps/runner/src/index.ts", configDir: hookDir,
     };
-    const controlPlaneUrl = "ws://127.0.0.1:4317/runner";
-    provisionAgentControl(spec, {
-      controlPlaneUrl,
-      controlPlaneProtocolVersion: PROTOCOL_VERSION,
-      executionIsolationMode: "provider",
-      orchestratorProjectPaths: [repo],
-    }, () => {}, controlHost);
-    provisionClaudeHooks(spec, {
-      controlPlaneUrl, controlPlaneProtocolVersion: PROTOCOL_VERSION, enabled: true,
-    }, () => {}, hookHost);
+    const driverFactory = (_kind: unknown, opts: DriverOptions, cb: DriverCallbacks) => {
+      const writes: Record<string, unknown>[] = [];
+      const child = fakeProvider(writes);
+      return new ClaudeCodeDriver(opts, cb, {
+        spawn: ((options: { args: string[]; env: Record<string, string>; cwd: string }) => {
+          launches.push({
+            sessionId: opts.env.WOLLIPOG_SESSION_ID ?? "unknown",
+            opts, argv: options.args, env: options.env, cwd: options.cwd, child, writes,
+          });
+          return child;
+        }) as never,
+        kill: () => {},
+      });
+    };
+    // The runner's outbound messages travel back into the control plane exactly as the /runner
+    // socket handler in apps/control-plane/src/index.ts routes them.
+    let svc: SessionsService | undefined;
+    const relay = (message: RunnerToControlPlane): void => {
+      runnerSent.push(message);
+      if (!svc) return;
+      if (message.type === "session_status") {
+        svc.onSessionStatus(message.sessionId, message.status, message.detail, message.worktreePath,
+          RUNNER_ID, message.controlPlaneLaunchId, message.capacityWait);
+      } else if (message.type === "session_event") {
+        svc.onSessionEvent(message.sessionId, message.payload, message.seq, message.ts, RUNNER_ID);
+      } else if (message.type === "session_runtime_updated") {
+        svc.applySessionRuntimeUpdate(RUNNER_ID, message.snapshot);
+      }
+    };
+    manager = new SessionManager(
+      relay,
+      () => {},
+      store,
+      RUNNER_ID,
+      undefined,
+      driverFactory as never,
+      runnerData,
+      4,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      // prepareLaunch: the same two provisioning calls index.ts wires, on the persisted meta.
+      async (meta) => {
+        provisionClaudeHooks(meta, {
+          controlPlaneUrl: CONTROL_PLANE_URL, controlPlaneProtocolVersion: PROTOCOL_VERSION, enabled: true,
+        }, () => {}, hookHost);
+        await provisionAgentControl(meta, {
+          controlPlaneUrl: CONTROL_PLANE_URL,
+          controlPlaneProtocolVersion: PROTOCOL_VERSION,
+          executionIsolationMode: "provider",
+          orchestratorProjectPaths: [repo],
+        }, () => {}, controlHost);
+      },
+    );
 
-    // The additive role is visible: campaign tools, instructions, a scoped credential — nothing else.
-    assert.equal(spec.env.WOLLIPOG_PERMISSION_PRESET, "orchestrator",
-      "the campaign tool surface is marked on the launch environment");
-    const wollipogMcp = agentControlMcpConfigPath(configDir, spec.sessionId);
-    assert.ok(spec.args.includes(wollipogMcp), "Wollipog's MCP config sits beside the user's own");
+    const hub = new RecordingHub();
+    hub.manager = manager;
+    db.registerRunner(runnerMeta(repo), Date.now(), PROTOCOL_VERSION);
+    svc = new SessionsService(db, hub as unknown as Hub, { info() {}, warn() {}, error() {} });
+    const service = svc;
+
+    /** Deliver a control-plane launch the way the runner's `start_session` case does. */
+    const deliver = async (
+      sessionId: string,
+      prompt: string,
+      repair: (spec: SessionLaunchSpec) => void = () => {},
+    ): Promise<ProviderLaunch> => {
+      const message = hub.sentOfType("start_session").filter((msg) => msg.spec.sessionId === sessionId).at(-1);
+      assert.ok(message, `the control plane sent a launch for ${sessionId}`);
+      const spec: SessionLaunchSpec = structuredClone(message.spec);
+      repair(spec);
+      provisionClaudeHooks(spec, {
+        controlPlaneUrl: CONTROL_PLANE_URL, controlPlaneProtocolVersion: PROTOCOL_VERSION, enabled: true,
+      }, () => {}, hookHost);
+      const before = launches.length;
+      assert.equal(await manager!.start(spec, prompt), true, `the runner launched ${sessionId}`);
+      await waitFor(() => launches.length > before, `the provider process started for ${sessionId}`);
+      const launch = launches.at(-1)!;
+      assert.equal(launch.sessionId, sessionId, "the launch carries this session's scoped credential");
+      // Every real `claude` process opens its stream with system/init; the runner needs it to
+      // record the resumable provider conversation.
+      const providerSessionId = valuesOf(launch.argv, "--session-id")[0] ?? valuesOf(launch.argv, "--resume")[0]!;
+      launch.child.stdout.write(JSON.stringify({
+        type: "system", subtype: "init", session_id: providerSessionId, model: "claude-test",
+      }) + "\n");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      return launch;
+    };
+    /** Settle the open provider turn so a later launch is not racing a live one. */
+    const settleTurn = async (launch: ProviderLaunch): Promise<void> => {
+      launch.child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    };
+    const eventsFor = (sessionId: string): SessionEventPayload[] => runnerSent.flatMap((message) =>
+      message.type === "session_event" && message.sessionId === sessionId ? [message.payload] : []);
+
+    // ---------------------------------------------------------------- 1. creation (control plane)
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+    const created = service.createSession(
+      { ...request, role: "orchestrator", config: { permissionMode: "auto" } },
+      undefined, undefined, false, false, false, { defaultOwnerUserId: "human" },
+    );
+    assert.ok(created.ok && created.data, created.error ?? "session creation failed");
+    const parent = created.data;
+    assert.equal(parent.role, "orchestrator");
+    assert.equal(parent.permissionMode, "auto", "the role never consumes the permission-mode selection");
+    assert.equal(parent.parentControl, "questions_and_approvals", "a human creation context defaults Parent Control on");
+
+    const startMessage = hub.sentOfType("start_session").find((msg) => msg.spec.sessionId === parent.id);
+    assert.ok(startMessage, "the control plane sent a launch spec");
+    assert.equal(startMessage.spec.config?.permissionMode, "auto", "the launch carries the selected permission mode");
+    assert.deepEqual(startMessage.spec.orchestrator, { strictProjectIsolation: false },
+      "the launch policy carries the role to the runner");
+    assert.ok(startMessage.spec.args.includes(USER_MCP_CONFIG), "the launch carries the user's configured MCP servers");
+
+    // ------------------------------------------- 2. the runner launch, through the real pipeline
+    const first = await deliver(parent.id, "plan the campaign");
+    assert.deepEqual(first.opts.orchestrator, { strictProjectIsolation: false },
+      "SessionManager hands the driver the launch policy that carries the role");
+    assert.equal(first.opts.config.permissionMode, "auto",
+      "the driver runs under the selected provider permission mode");
+    assert.equal(first.cwd, repo, "the first launch runs in the workspace, with no scratch directory");
+
+    // The additive role is visible in the real argv: campaign tools, instructions, scoped
+    // credential — and nothing the coupled preset injects.
+    assert.equal(first.env.WOLLIPOG_PERMISSION_PRESET, "orchestrator",
+      "the campaign tool surface is marked on the provider environment");
+    const wollipogMcp = agentControlMcpConfigPath(configDir, parent.id);
     assert.equal(
       JSON.parse(readFileSync(wollipogMcp, "utf8")).mcpServers.wollipog.env.WOLLIPOG_PERMISSION_PRESET,
       "orchestrator",
       "the general Agent Control MCP server exposes the campaign tools",
     );
-    assert.ok(spec.args.includes(USER_MCP_CONFIG), "the user's configured MCP servers survive provisioning");
-    assert.deepEqual(valuesOf(spec.args, "--allowedTools"), ["mcp__wollipog__*"],
+    assert.deepEqual(valuesOf(first.argv, "--mcp-config"), [USER_MCP_CONFIG, wollipogMcp],
+      "Wollipog's MCP config sits beside the user's own, which survives untouched");
+    assert.deepEqual(valuesOf(first.argv, "--settings"), [USER_SETTINGS],
+      "the user's own settings (their hooks) survive, and no hook-disabling settings are injected");
+    assert.deepEqual(valuesOf(first.argv, "--allowedTools"), ["mcp__wollipog__*"],
       "only Wollipog's own tools are pre-authorized");
-    const instructions = spec.args[spec.args.indexOf("--append-system-prompt") + 1]!;
+    const instructions = first.argv[first.argv.indexOf("--append-system-prompt") + 1]!;
     assert.match(instructions, /^You are running with the Wollipog Orchestrator role/);
     assert.match(instructions, /Strict Project Isolation is disabled/);
-    assert.ok(valuesOf(spec.args, "--add-dir").includes("/home/user/notes"), "the user's own --add-dir survives");
-    assert.ok(valuesOf(spec.args, "--add-dir").includes(repo), "Project Locations are readable");
-    // Nothing the coupled preset injects may appear.
-    for (const flag of ["--strict-mcp-config", "--tools", "--disallowedTools", "--permission-mode",
+    assert.deepEqual(valuesOf(first.argv, "--add-dir"), ["/home/user/notes", repo],
+      "the user's own --add-dir survives and Project Locations are readable");
+    for (const flag of ["--strict-mcp-config", "--tools", "--disallowedTools",
       "--setting-sources", "--disable-slash-commands"]) {
-      assert.equal(hasFlag(spec.args, flag), false, `${flag} is never injected for the additive role`);
+      assert.equal(hasFlag(first.argv, flag), false, `${flag} is never injected for the additive role`);
     }
-    // Manager hooks provision exactly as for any ordinary Claude session (the preset removes them).
-    const hookSettings = claudeHookSettingsPath(hookDir, spec.sessionId);
-    assert.ok(existsSync(hookSettings), "manager hooks are provisioned, as for a normal session");
-    assert.deepEqual(valuesOf(spec.args, "--settings"), [hookSettings],
-      "the only injected --settings is the managed hook file, never a hook-disabling literal");
-    assert.deepEqual(spec.capabilities?.elicitation?.acceptEdits, ["hook"],
-      "the selected mode keeps its managed hook elicitation transport");
+    // The selected mode reaches the provider AND keeps the stdio control channel, which is what
+    // makes the tool-approval frames below reachable for this launch at all.
+    assert.deepEqual(valuesOf(first.argv, "--permission-mode"), ["auto"]);
+    assert.deepEqual(valuesOf(first.argv, "--permission-prompt-tool"), ["stdio"]);
 
-    // ------------------------------------------- 4. the Claude argv the driver would actually run
-    const parentDriverCwd = repo;
-    const argvHarness = driverFor(spec, parentDriverCwd);
-    const mode = effectiveClaudePermissionMode(spec.config ?? {}, false);
-    assert.equal(mode, "acceptEdits", "the driver resolves the user's selected mode, not the preset's default");
-    const argv = [...argvHarness.baseArgs(), ...claudePermissionArgs(mode, true).args];
-    assert.deepEqual(valuesOf(argv, "--permission-mode"), ["acceptEdits"],
-      "the provider runs under the selected permission mode");
-    assert.ok(argv.includes(USER_MCP_CONFIG), "the user's MCP servers reach the provider argv");
-    assert.ok(argv.includes(wollipogMcp) && argv.includes(hookSettings));
-    assert.equal(argv.includes("--strict-mcp-config"), false);
-
-    // ------------------------------------------------ 5. the child raises an eligible question
-    db.updateSessionStatus(parent.id, "running", Date.now());
-    let childResult = svc.createSession(
-      { ...request, title: "Child" }, undefined, undefined, false, false, false, { parentSessionId: parent.id },
+    // ------------------------------------------------ 3. the child raises an eligible question
+    let childResult = service.createSession(
+      { ...request, title: "Child", config: { permissionMode: "auto" } },
+      undefined, undefined, false, false, false, { parentSessionId: parent.id },
     );
     if (childResult.status === 428) {
       const spawnApproval = db.getSession(parent.id)!.pendingApproval!;
-      assert.ok(svc.approve(parent.id, spawnApproval.requestId, "allow").ok);
-      childResult = svc.createSession(
-        { ...request, title: "Child" }, undefined, undefined, false, false, false, { parentSessionId: parent.id },
+      assert.ok(service.approve(parent.id, spawnApproval.requestId, "allow").ok);
+      childResult = service.createSession(
+        { ...request, title: "Child", config: { permissionMode: "auto" } },
+        undefined, undefined, false, false, false, { parentSessionId: parent.id },
       );
     }
     assert.ok(childResult.ok && childResult.data, childResult.error ?? "child creation failed");
     const child = childResult.data;
-    db.updateSessionStatus(child.id, "running", Date.now());
-    svc.onSessionEvent(child.id, {
-      kind: "question_request",
-      requestId: "child-question",
-      occurrenceId: "request_child_question",
-      questions: [{ id: "q", header: "Next", question: "Which branch should I base on?",
-        options: [{ label: "main" }, { label: "release" }] }],
-    });
+    const childLaunch = await deliver(child.id, "investigate the failing test");
 
-    // Ownership resolves through the persisted role, not the preset literal.
+    // The question originates in the child's provider and travels the real runner event path.
+    childLaunch.child.stdout.write(JSON.stringify({
+      type: "control_request",
+      request_id: "child-question",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "AskUserQuestion",
+        input: { questions: [{ question: "Which branch should I base on?", header: "Base",
+          multiSelect: false, options: [{ label: "main" }, { label: "release" }] }] },
+      },
+    }) + "\n");
+    await waitFor(() => eventsFor(child.id).some((event) => event.kind === "question_request"),
+      "the runner published the child's question");
+    const question = eventsFor(child.id).find((event) => event.kind === "question_request")!;
+    assert.equal(question.kind === "question_request" ? question.requestId : null, "child-question");
+    // The relay above already carried this exact event into the control plane.
+
+    const occurrenceId = question.kind === "question_request" ? question.occurrenceId! : "";
     assert.deepEqual(db.getSession(child.id)?.pendingRequestOwners, {
       human: 0,
       orchestrator: 1,
-      requests: [{ requestId: "child-question", occurrenceId: "request_child_question", owner: "orchestrator" }],
-    }, "the child's question is owned by the Orchestrator");
-    const listed = svc.descendantRequests(parent.id, () => true);
+      requests: [{ requestId: "child-question", occurrenceId, owner: "orchestrator" }],
+    }, "the child's question is owned by the Orchestrator, resolved through the persisted role");
+    const listed = service.descendantRequests(parent.id, () => true);
     assert.ok(listed.ok && listed.data, listed.error ?? "descendant requests unavailable");
     assert.deepEqual(listed.data.requests.map((req) => ({ sessionId: req.sessionId, owner: req.responseOwner })),
       [{ sessionId: child.id, owner: "orchestrator" }]);
 
-    const answered = svc.resolveDescendantRequest(parent.id, child.id, "request_child_question", {
-      action: "answer", answers: { q: "main" },
+    const questionId = question.kind === "question_request" ? question.questions[0]!.id : "";
+    const resolved = service.resolveDescendantRequest(parent.id, child.id, occurrenceId, {
+      action: "answer", answers: { [questionId]: "main" },
     }, () => true);
-    assert.ok(answered.ok, answered.error ?? "resolution failed");
-    assert.deepEqual(hub.sentOfType("answer_question").at(-1), {
-      type: "answer_question", sessionId: child.id, requestId: "child-question",
-      answers: { q: "main" }, action: "submit", resolvedByParentSessionId: parent.id,
-    }, "the Orchestrator resolved the child's question");
-    assert.ok(svc.governanceAudit(child.id).some((entry) =>
+    assert.ok(resolved.ok, resolved.error ?? "resolution failed");
+    const answer = hub.sentOfType("answer_question").at(-1)!;
+    assert.equal(answer.resolvedByParentSessionId, parent.id, "the Orchestrator is the resolver");
+    assert.ok(service.governanceAudit(child.id).some((entry) =>
       entry.stage === "resolution" && entry.actor.kind === "agent" && entry.actor.id === parent.id),
     "the governance audit records the parent as the resolving agent");
 
-    // --------------------------- 6. explicitly requested parent implementation in its own worktree
+    // Deliver the answer to the runner. `index.ts`'s `answer_question` case calls exactly this.
+    manager.answerQuestion(answer.sessionId, answer.requestId, answer.answers, answer.action,
+      answer.resolvedByParentSessionId);
+    const delivered = controlResponses(childLaunch)
+      .find((frame) => frame.response.request_id === "child-question");
+    assert.ok(delivered, "the child's provider received the answer");
+    assert.equal(delivered.response.response.behavior, "allow");
+    assert.deepEqual(delivered.response.response.updatedInput?.answers, { [questionId]: "main" },
+      "the answers the Orchestrator chose reached the child's provider");
+    const resolvedEvent = eventsFor(child.id).find((event) => event.kind === "question_resolved");
+    assert.equal(resolvedEvent?.kind === "question_resolved" ? resolvedEvent.resolvedByParentSessionId : null,
+      parent.id, "the runner records the Orchestrator as the resolving agent");
+    await settleTurn(childLaunch);
+
+    // --------------------------- 4. explicitly requested parent implementation in its own worktree
     const principal: AgentPrincipal = {
       kind: "agent",
       actorId: `agent:${parent.id}`,
@@ -357,48 +532,97 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
       principal, parent.id, persisted.orchestratorPolicy?.execution.strictProjectIsolation !== false,
     ), null, "a non-strict Orchestrator is authorized to create a worktree for itself");
 
-    const parentWorktree = await createRequestedWorktree(repo, parent.id, {
-      baseRef: "HEAD", branch: `agent/${parent.id}-implementation`,
-    }, { dataDir: runnerData });
-    const childWorktree = await createRequestedWorktree(repo, child.id, {
-      baseRef: "HEAD", branch: `agent/${child.id}-work`,
-    }, { dataDir: runnerData });
-    const native = { kind: "native" as const };
-    assert.equal(parentWorktree.created, true);
-    assert.equal(sameWorktreePath(native, parentWorktree.path, childWorktree.path), false,
-      "the parent implements in a worktree of its own");
-    assert.equal(pathWithin(native, parentWorktree.path, childWorktree.path), false);
-    assert.equal(pathWithin(native, childWorktree.path, parentWorktree.path), false);
-    assert.equal(pathWithin(native, parentWorktree.path, repo), false,
-      "the dedicated worktree never overlaps the primary checkout");
-    assert.equal(
-      execFileSync("git", ["-C", parentWorktree.path, "branch", "--show-current"], { encoding: "utf8" }).trim(),
-      `agent/${parent.id}-implementation`,
-    );
+    // The two hops the worktree route performs below Fastify: request the runner operation, then
+    // apply the runner's snapshot. Only the Fastify handler body itself (argument parsing, runner
+    // capability check, pod-reconciliation gate, create-coordinator dedupe) is not exercised.
+    const createWorktree = async (sessionId: string, branch: string): Promise<string> => {
+      const result = await hub.requestFromRunner(RUNNER_ID, `req-${sessionId}`, {
+        type: "session_worktree", operation: "create", requestId: `req-${sessionId}`,
+        sessionId, branch, baseRef: "main",
+      });
+      assert.equal(result.ok, true, result.error ?? "worktree creation failed");
+      db.updateSessionFromSnapshot(sessionId, result.snapshot!, Date.now());
+      return result.worktree!.path;
+    };
+    const parentWorktree = await createWorktree(parent.id, `agent/${parent.id}-implementation`);
+    const childWorktree = await createWorktree(child.id, `agent/${child.id}-work`);
 
-    // The edit itself behaves exactly as for a normal acceptEdits session.
-    const h = driverFor(spec, parentWorktree.path);
-    h.feed({
+    assert.equal(db.getSession(parent.id)?.worktreePath, parentWorktree,
+      "the control-plane session view shows the new worktree selected for the parent");
+    const native = { kind: "native" as const };
+    assert.equal(sameWorktreePath(native, parentWorktree, childWorktree), false,
+      "the parent implements in a worktree of its own");
+    assert.equal(pathWithin(native, parentWorktree, childWorktree), false);
+    assert.equal(pathWithin(native, childWorktree, parentWorktree), false);
+    assert.equal(pathWithin(native, parentWorktree, repo), false,
+      "the dedicated worktree never overlaps the primary checkout");
+    assert.equal(git(["-C", parentWorktree, "branch", "--show-current"]).trim(),
+      `agent/${parent.id}-implementation`);
+
+    // The parent's NEXT launch runs in that worktree.
+    await settleTurn(first);
+    assert.ok(service.restart(parent.id).ok, "the Orchestrator restarts into its worktree");
+    // PRE-EXISTING DEFECT, reported separately and unrelated to the additive role: the runner
+    // snapshot reports `useWorktree: worktreePath != null` (apps/runner/src/session-store.ts:2876),
+    // the control plane persists that but never recomputes `execution_target`, and its restart spec
+    // therefore pairs `useWorktree: true` with the creation-time `...:host:in_place` target, which
+    // `validateHostExecutionTarget` (apps/runner/src/execution-target.ts:15) refuses. Repair only
+    // that one field here — the way a recomputing control plane would — so this scenario can still
+    // assert the launch coordinate. Nothing about the Orchestrator role is adjusted.
+    const second = await deliver(parent.id, "make the requested edit", (spec) => {
+      spec.executionTarget = {
+        ...spec.executionTarget!,
+        id: `runner:${RUNNER_ID}:host:worktree`,
+        workspaceStrategy: "worktree",
+        boundaries: { ...spec.executionTarget!.boundaries, filesystem: "worktree" },
+      };
+    });
+    assert.equal(second.cwd, parentWorktree, "the parent's next launch uses its dedicated worktree as cwd");
+    assert.deepEqual(second.opts.orchestrator, { strictProjectIsolation: false });
+    assert.equal(store.readMeta(parent.id)?.config.permissionMode, "auto",
+      "the user's permission-mode selection is untouched by the worktree");
+    // A linked runner-owned worktree routes automatic review through Wollipog
+    // (`protectedClaudePermissionMode`), so `auto` mediates to the interactive mode. That is
+    // ordinary managed-worktree behavior, not an Orchestrator rule: the stdio channel remains.
+    assert.deepEqual(valuesOf(second.argv, "--permission-prompt-tool"), ["stdio"]);
+    assert.equal(hasFlag(second.argv, "--strict-mcp-config"), false);
+
+    // ------------------ 5. the implementation itself behaves exactly as for a normal Session
+    second.child.stdout.write(JSON.stringify({
       type: "control_request",
       request_id: "coordination",
       request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "gh pr view 1296" } },
-    });
-    assert.equal(h.events.length, 0, "routine coordination never becomes an approval card");
-    assert.deepEqual((h.writes[0] as { response: { response: { behavior: string } } }).response.response.behavior,
-      "allow", "the classifier auto-allows routine coordination");
-    h.feed({
+    }) + "\n");
+    await waitFor(() => controlResponses(second).length > 0, "the classifier answered the routine command");
+    assert.deepEqual(
+      controlResponses(second).map((frame) => [frame.response.request_id, frame.response.response.behavior]),
+      [["coordination", "allow"]],
+      "a routine coordination command is auto-allowed by the classifier",
+    );
+    assert.equal(eventsFor(parent.id).some((event) => event.kind === "permission_request"), false,
+      "routine coordination never becomes an approval card");
+
+    second.child.stdout.write(JSON.stringify({
       type: "control_request",
       request_id: "implementation-edit",
       request: { subtype: "can_use_tool", tool_name: "Edit", description: "notes.md",
-        input: { file_path: join(parentWorktree.path, "notes.md"), old_string: "a", new_string: "b" } },
-    });
-    assert.equal(h.writes.length, 1, "the edit is neither auto-allowed nor auto-denied");
-    assert.equal(h.events.at(-1)?.kind, "permission_request",
-      "an edit uses the ordinary provider approval path, with no Orchestrator-specific card");
-    const card = h.events.at(-1)!;
-    assert.equal(card.kind === "permission_request" ? card.title : null, "Edit: notes.md");
+        input: { file_path: join(parentWorktree, "notes.md"), old_string: "a", new_string: "b" } },
+    }) + "\n");
+    await waitFor(() => eventsFor(parent.id).some((event) => event.kind === "permission_request"),
+      "the edit uses the ordinary provider approval path");
+    assert.equal(controlResponses(second).length, 1,
+      "the edit is neither auto-allowed nor auto-denied by the runner");
+    const card = eventsFor(parent.id).find((event) => event.kind === "permission_request")!;
+    assert.equal(card.kind === "permission_request" ? card.title : null, "Edit: notes.md",
+      "an ordinary approval card, with no Orchestrator-specific handling");
+    await settleTurn(second);
   } finally {
+    manager?.shutdownAll();
     db.close();
+    if (priorGitConfig.global === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = priorGitConfig.global;
+    if (priorGitConfig.system === undefined) delete process.env.GIT_CONFIG_SYSTEM;
+    else process.env.GIT_CONFIG_SYSTEM = priorGitConfig.system;
     rmSync(root, { recursive: true, force: true });
   }
 });
