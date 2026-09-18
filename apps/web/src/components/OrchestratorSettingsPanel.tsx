@@ -391,6 +391,9 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         // it implies is shown here rather than the stored one, and the control cannot contradict it.
         value={integrationIsolationImplied || draft.execution.integrationIsolation ? "enabled" : "disabled"}
         disabled={integrationIsolationImplied}
+        disabledReason={integrationIsolationImplied
+          ? "Strict Project Isolation already launches without provider integrations."
+          : undefined}
         onChange={(value) => updateExecution("integrationIsolation", value === "enabled")}
       />
       <StaticRow

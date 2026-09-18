@@ -1980,3 +1980,64 @@ test("an agent offering neither Orchestrator advertisement still says the agent 
     assert.match(fixture.container.textContent!, /does not offer the Orchestrator role/);
   } finally { await unmountFixture(fixture); }
 });
+
+test("Integration Isolation is an independent control that discloses what it removes", async () => {
+  const fixture = await mountFixture({ runners: [piAdditiveRunner], capabilities: {
+    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+  } });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    // Off by default, and the dialog says integrations load as they would for a normal session.
+    assert.match(fixture.container.textContent!,
+      /Hooks, plugins, extensions, skills, and configured MCP servers load exactly as they would/);
+    await chooseSelectOption(fixture.container, "Integration Isolation", "Enabled");
+    assert.match(fixture.container.textContent!, /Removes user-configured MCP servers, hooks, plugins/);
+    assert.match(fixture.container.textContent!,
+      /provider permission mode, built-in tool inventory, sandbox and approval behavior, and the project boundary are unchanged/);
+    assert.equal(createButton(fixture.container).disabled, false);
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests[0]?.orchestrator?.execution?.integrationIsolation, true);
+    assert.equal(fixture.requests[0]?.orchestrator?.execution?.strictProjectIsolation, false,
+      "the integration policy is sent without dragging the project boundary with it");
+    assert.equal(fixture.requests[0]?.config?.permissionMode, undefined,
+      "and without consuming the provider permission mode");
+  } finally { await unmountFixture(fixture); }
+});
+
+test("an older runner blocks Integration Isolation rather than letting it be submitted", async () => {
+  const oldPi: RunnerView = {
+    ...piAdditiveRunner,
+    protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation - 1,
+  };
+  const fixture = await mountFixture({ runners: [oldPi], capabilities: {
+    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+  } });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    await chooseSelectOption(fixture.container, "Integration Isolation", "Enabled");
+    assert.match(fixture.container.textContent!, /Integration Isolation/);
+    assert.equal(createButton(fixture.container).disabled, true,
+      "the dialog never advertises a shape the control plane refuses");
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests.length, 0);
+  } finally { await unmountFixture(fixture); }
+});
+
+test("Strict Project Isolation shows Integration Isolation as implied and not separately selectable", async () => {
+  const fixture = await mountFixture({ runners: [piAdditiveRunner], capabilities: {
+    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+  } }, undefined, undefined, undefined, undefined, strictOrchestratorDefaults);
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    const trigger = fixture.container.querySelector<HTMLButtonElement>('[aria-label^="Integration Isolation:"]');
+    assert.ok(trigger, "the control is still shown, so the effective value is visible");
+    assert.equal(trigger.getAttribute("aria-disabled"), "true",
+      "it is implied rather than independently selectable");
+    assert.match(trigger.getAttribute("aria-label")!, /Enabled/);
+    assert.match(fixture.container.textContent!,
+      /already launches without provider integrations, so this policy is implied and cannot be disabled/);
+  } finally { await unmountFixture(fixture); }
+});

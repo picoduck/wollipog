@@ -292,3 +292,56 @@ test("runner discovery refreshes capabilities without discarding unsaved default
     container.remove();
   }
 });
+
+test("Integration Isolation is a separate saved default, implied by Strict Project Isolation", async () => {
+  let current = settings();
+  const writes: Array<{ defaults: OrchestratorSettingsView["defaults"] }> = [];
+  const transport: ApiTransport = {
+    instanceId: "test", publicOrigin: "http://localhost", close() {},
+    async request(_path, init) {
+      if (init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as { defaults: OrchestratorSettingsView["defaults"] };
+        writes.push(body);
+        current = { ...current, defaults: body.defaults };
+      }
+      return new Response(JSON.stringify(current), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const pill = (group: string, label: string) => {
+    const row = [...container.querySelectorAll('[role="radiogroup"]')]
+      .find((node) => node.getAttribute("aria-label") === group);
+    assert.ok(row, `${group} is rendered as its own control`);
+    return [...row.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+      .find((button) => button.textContent?.trim() === label);
+  };
+  try {
+    await act(async () => root.render(<ApiProvider client={createApiClient(transport)}><OrchestratorSettingsPanel /></ApiProvider>));
+    await settle();
+    assert.match(container.textContent ?? "",
+      /Hooks, plugins, extensions, skills, and configured MCP servers load exactly as they would/);
+    const enable = pill("Integration Isolation", "Enabled")!;
+    assert.equal(enable.getAttribute("aria-disabled"), null,
+      "the policy is independently configurable while the project boundary is off");
+    await act(async () => enable.click());
+    assert.match(container.textContent ?? "", /Removes user-configured MCP servers, hooks, plugins/);
+    const save = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Save Defaults")!;
+    await act(async () => save.click());
+    await settle();
+    assert.equal(writes[0]?.defaults.execution.integrationIsolation, true);
+    assert.equal(writes[0]?.defaults.execution.strictProjectIsolation, false,
+      "the two execution policies are saved independently");
+
+    // Turning the project boundary on makes the integration policy implied, not merely selected.
+    await act(async () => { pill("Strict Project Isolation", "Enabled")!.click(); });
+    assert.equal(pill("Integration Isolation", "Disabled")!.getAttribute("aria-disabled"), "true");
+    assert.match(container.textContent ?? "",
+      /Strict Project Isolation already launches without provider integrations/);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
