@@ -60,7 +60,12 @@ export function supportsNativeOrchestratorBoundary(
 }
 
 /** Every Orchestrator system-prompt append starts with this sentence, so runner-injected
- * instructions can be recognised and replaced on resume without touching user-supplied text. */
+ * instructions can be recognised and replaced on resume without touching user-supplied text.
+ *
+ * The sentence is reserved: a strip matches it as a PREFIX, never the whole generated value, because
+ * persisted launch arguments may carry instructions written by an older runner whose wording
+ * differed, and those must still be replaced rather than duplicated on resume. A user-supplied
+ * prompt that begins with this exact sentence is therefore treated as runner-owned. */
 export const ORCHESTRATOR_INSTRUCTIONS_PREFIX = "You are running with the Wollipog Orchestrator role.";
 
 export function orchestratorInstructions(
