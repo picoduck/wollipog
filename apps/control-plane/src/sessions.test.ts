@@ -673,6 +673,24 @@ test("orchestrator separates default provider execution from the negotiated stri
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     const automated = svc.createSession({ ...request, config: { permissionMode: "orchestrator" } });
     assert.equal(automated.data!.parentControl, "off", "non-human creation does not gain delegated authority");
+    agent.capabilities.permissionModes = ["default", "orchestrator"];
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" },
+      orchestrator: { execution: { strictProjectIsolation: true } } }).ok, true,
+    "managed strict Claude needs the runner control channel, not dontAsk");
+    assert.match(svc.createSession({ ...request, launchSurface: "native_tui",
+      config: { permissionMode: "orchestrator" },
+      orchestrator: { execution: { strictProjectIsolation: true } } }).error ?? "", /dontAsk/,
+    "strict Native TUI still needs its static fixed-rule mode");
+    agent.capabilities.permissionModes = ["default", "dontAsk", "orchestrator"];
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION - 1);
+    const outdatedScope = svc.createSession({ ...request, prompt: "Claim and orchestrate issue 1245.",
+      config: { permissionMode: "orchestrator" } },
+    undefined, undefined, false, false, false, { defaultOwnerUserId: "human" });
+    assert.equal(outdatedScope.status, 409);
+    assert.match(outdatedScope.error ?? "", /protocol-v158/,
+      "an older runner fails actionably instead of silently losing the issue scope");
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     assert.equal(svc.createSession({ ...request, launchSurface: "native_tui",
       config: { permissionMode: "orchestrator" } }).ok, true);
     db.registerRunner(meta, Date.now(), 111);
@@ -767,6 +785,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
   const { db, svc, hub } = makeHarness();
   try {
     const meta = runnerMeta();
+    meta.workspaces.push({ id: "ws-2", name: "Other Repository", path: "/tmp/other-repository" });
     const planner = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
     planner.capabilities = {
       models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
@@ -813,6 +832,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       workspaceId: WORKSPACE_ID,
       agentId: "test-orchestrator",
       config: { permissionMode: "orchestrator" },
+      prompt: "Claim and orchestrate issues 1209, 1210, and 1211.",
       orchestrator: {
         behavior: { maximumConcurrentChildren: 3, completion: "stop_and_archive" },
         delegation: { decisions: { pr_merge: "orchestrator" } },
@@ -832,6 +852,19 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.equal(parent.orchestratorPolicy?.sources.behavior.maximumConcurrentChildren, "session_override");
     assert.equal(parent.orchestratorPolicy?.sources.delegation.decisions.pr_merge, "session_override");
     assert.equal(parent.parentControlPolicy?.revision, 1);
+    const parentStart = hub.sentOfType("start_session").find((message) => message.spec.sessionId === parent.id)!;
+    assert.deepEqual(parentStart.spec.orchestrator?.issueNumbers, [1209, 1210, 1211]);
+    assert.deepEqual(db.getSession(parent.id)?.orchestratorPolicy?.issueNumbers, [1209, 1210, 1211]);
+    const restartedParent = svc.restart(parent.id);
+    assert.ok(restartedParent.ok, restartedParent.error);
+    assert.deepEqual(hub.sentOfType("start_session").at(-1)?.spec.orchestrator?.issueNumbers,
+      [1209, 1210, 1211], "restart preserves the immutable campaign issue scope");
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION - 1);
+    const outdatedRestart = svc.restart(parent.id);
+    assert.equal(outdatedRestart.status, 409);
+    assert.match(outdatedRestart.error ?? "", /protocol-v158/,
+      "restart fails actionably rather than dropping a persisted campaign issue scope");
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
 
     settings.defaults.behavior.childModel = "changed-later";
     settings.defaults.delegation.decisions.pr_merge = "human";
@@ -876,6 +909,70 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
     assert.equal(denied.status, 403, "agents cannot set or broaden campaign policy");
 
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION - 1);
+    const ordinaryChildRequest = {
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
+      prompt: "Implement one campaign issue",
+    };
+    let ordinaryChild = svc.createSession(
+      ordinaryChildRequest, undefined, undefined, false, false, false, { parentSessionId: parent.id },
+    );
+    if (ordinaryChild.status === 428) {
+      const approval = db.getSession(parent.id)!.pendingApproval!;
+      assert.ok(svc.approve(parent.id, approval.requestId, "allow").ok);
+      ordinaryChild = svc.createSession(
+        ordinaryChildRequest, undefined, undefined, false, false, false, { parentSessionId: parent.id },
+      );
+    }
+    assert.ok(ordinaryChild.ok && ordinaryChild.data, ordinaryChild.error);
+    assert.equal(hub.sentOfType("start_session").find((message) =>
+      message.spec.sessionId === ordinaryChild.data!.id)?.spec.orchestrator, undefined,
+    "an ordinary campaign child does not require or receive the issue-scope protocol field");
+    svc.onSessionStatus(ordinaryChild.data.id, "idle");
+    const ordinaryReport = db.appendEvent(ordinaryChild.data.id,
+      { kind: "agent_message", text: "Ordinary child completed", final: true }, Date.now());
+    assert.ok(svc.verifyCampaignChild(parent.id, {
+      childSessionId: ordinaryChild.data.id, reportEventSeq: ordinaryReport.seq, followUpsAccounted: true,
+    }).ok);
+    svc.onSessionStatus(ordinaryChild.data.id, "stopped");
+    db.raw().prepare("UPDATE sessions SET archived=1 WHERE id=?").run(ordinaryChild.data.id);
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+
+    assert.ok(parent.projectId);
+    db.addProjectLocation(parent.projectId, { runnerId: RUNNER_ID, workspaceId: "ws-2" });
+    const crossWorkspaceRequest = {
+      runnerId: RUNNER_ID, workspaceId: "ws-2", agentId: CODEX_APP_AGENT_ID,
+      prompt: "Coordinate work in another repository",
+      config: { permissionMode: "orchestrator" as const },
+    };
+    let crossWorkspaceChild = svc.createSession(
+      crossWorkspaceRequest, undefined, undefined, false, false, false, { parentSessionId: parent.id },
+    );
+    if (crossWorkspaceChild.status === 428) {
+      const approval = db.getSession(parent.id)!.pendingApproval!;
+      assert.ok(svc.approve(parent.id, approval.requestId, "allow").ok);
+      crossWorkspaceChild = svc.createSession(
+        crossWorkspaceRequest, undefined, undefined, false, false, false, { parentSessionId: parent.id },
+      );
+    }
+    assert.ok(crossWorkspaceChild.ok && crossWorkspaceChild.data, crossWorkspaceChild.error);
+    const crossWorkspaceStart = hub.sentOfType("start_session").find((message) =>
+      message.spec.sessionId === crossWorkspaceChild.data!.id)!;
+    assert.ok(crossWorkspaceStart.spec.orchestrator,
+      "the nested Orchestrator still inherits campaign behavior in another workspace");
+    assert.equal(crossWorkspaceStart.spec.orchestrator?.issueNumbers, undefined,
+      "issue-write authority stays bound to the campaign's exact runner and workspace");
+    svc.onSessionStatus(crossWorkspaceChild.data.id, "idle");
+    const crossWorkspaceReport = db.appendEvent(crossWorkspaceChild.data.id,
+      { kind: "agent_message", text: "Cross-workspace child completed", final: true }, Date.now());
+    assert.ok(svc.verifyCampaignChild(parent.id, {
+      childSessionId: crossWorkspaceChild.data.id,
+      reportEventSeq: crossWorkspaceReport.seq,
+      followUpsAccounted: true,
+    }).ok);
+    svc.onSessionStatus(crossWorkspaceChild.data.id, "stopped");
+    db.raw().prepare("UPDATE sessions SET archived=1 WHERE id=?").run(crossWorkspaceChild.data.id);
+
     const childRequest = {
       runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
       prompt: "Coordinate the bounded child campaign",
@@ -888,6 +985,9 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       child = svc.createSession(childRequest, undefined, undefined, false, false, false, { parentSessionId: parent.id });
     }
     assert.ok(child.ok && child.data, child.error);
+    const childStart = hub.sentOfType("start_session").find((message) => message.spec.sessionId === child.data!.id)!;
+    assert.deepEqual(childStart.spec.orchestrator?.issueNumbers, [1209, 1210, 1211],
+      "agent-created nested campaigns inherit the root scope without minting one from their own prompt");
     assert.equal(child.data.model, "text-model");
     assert.equal(child.data.effort, "high");
     assert.equal(child.data.orchestratorPolicy?.behavior.childModel, "text-model");

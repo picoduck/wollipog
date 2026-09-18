@@ -434,7 +434,10 @@
 // 157: Orchestrator campaign policy binds child harness, model, and effort as one capability-
 //      checked selection. Older Orchestrator runners cannot guide automatic harness resolution,
 //      so fixed-harness campaigns fail with an upgrade requirement instead of dropping the bind.
-export const PROTOCOL_VERSION = 157;
+// 158: structured Claude Orchestrator launches carry a finite immutable campaign issue scope.
+//      Older runners cannot enforce it, so scoped issue coordination fails with an upgrade
+//      requirement instead of silently reverting to approval cards or strict-mode denial.
+export const PROTOCOL_VERSION = 158;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -624,6 +627,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   campaignContinuations: 149,
   orchestratorExecutionPolicy: 144,
   orchestratorChildHarnessPolicy: 157,
+  orchestratorIssueScope: 158,
   worktreeSetup: 141,
   worktreeTeardownPorts: 145,
   worktreeSetupConfig: 146,
@@ -1424,6 +1428,13 @@ export interface OrchestratorExecutionDefaults {
   strictProjectIsolation: boolean;
 }
 
+/** Runner launch policy for one Orchestrator session. Issue numbers are admitted only from the
+ * authenticated human's explicit initial campaign request; they are not user defaults and an
+ * agent-created nested session may only inherit, never mint or broaden, the root scope. */
+export interface OrchestratorLaunchPolicy extends OrchestratorExecutionDefaults {
+  issueNumbers?: number[];
+}
+
 export interface OrchestratorDefaults {
   behavior: OrchestratorBehaviorDefaults;
   delegation: OrchestratorDelegationDefaults;
@@ -1467,6 +1478,8 @@ export interface OrchestratorPolicySources {
  * and source; editing user defaults never reaches an existing session. */
 export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   version: 1;
+  /** Immutable GitHub issue-write scope admitted from the root authenticated-human request. */
+  issueNumbers?: number[];
   sources: OrchestratorPolicySources;
 }
 
@@ -6413,7 +6426,7 @@ export interface SessionLaunchSpec {
   context?: AgentContext;
   config?: SessionConfig;
   /** Runner-enforced Orchestrator restrictions. Missing on legacy peers means strict isolation. */
-  orchestrator?: OrchestratorExecutionDefaults;
+  orchestrator?: OrchestratorLaunchPolicy;
   /** ACP-only, additive in protocol v38. Contains references, never resolved secret values. */
   acpSessionContext?: AcpSessionContextConfig;
 }

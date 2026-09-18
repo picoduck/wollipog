@@ -182,6 +182,7 @@ import {
   parseOrchestratorOverrides,
   resolveOrchestratorCampaignPolicy,
 } from "./orchestrator-settings.js";
+import { orchestratorIssueNumbersFromInitialPrompt } from "./orchestrator-issue-scope.js";
 import {
   cleanupEventPayloadArtifacts,
   externalizeSessionEventPayload,
@@ -3185,6 +3186,7 @@ export class SessionsService {
       : req.workspacePath?.trim();
     const workspacePath = snapshotSpec?.workspacePath ?? (adHoc || this.db.getWorkspacePath(req.runnerId, req.workspaceId));
     if (!workspacePath) return fail(`unknown workspace '${req.workspaceId}' on runner '${req.runnerId}'`, 404);
+    const workspaceId = snapshotSpec ? snapshotSpec.workspaceId : (adHoc ? null : req.workspaceId);
     if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
     const runner = this.db.getRunner(req.runnerId);
     if (!runner) return fail("runner not found", 404);
@@ -3499,10 +3501,10 @@ export class SessionsService {
           !["linux", "macos"].includes(runner.os)) {
         return fail("Provider-mode Codex Orchestrator requires its audited Linux or macOS sandbox.", 409);
       }
-      if (!strictProjectIsolation && launch.driver === "claude-code" &&
+      if (launch.driver === "claude-code" && req.launchSurface !== "native_tui" &&
           (!agentCapabilities?.supportsApprovals ||
             !agentCapabilities.permissionModes?.includes("default"))) {
-        return fail("Provider-mode Claude Orchestrator requires the verified interactive approval channel and Default permission mode.", 409);
+        return fail("Structured Claude Orchestrator requires the verified interactive approval channel and Default permission mode.", 409);
       }
       if (strictProjectIsolation && contextKind === "native") {
         const isolationMode = this.db.getRunner(req.runnerId)?.runtime?.executionIsolation?.mode;
@@ -3514,9 +3516,9 @@ export class SessionsService {
         if (!strictBoundary) {
           return fail("Strict Project Isolation requires an attested provider sandbox for Codex or runner bubblewrap/Seatbelt isolation for Claude Code.", 409);
         }
-        if (launch.driver === "claude-code" &&
+        if (launch.driver === "claude-code" && req.launchSurface === "native_tui" &&
             !agentCapabilities?.permissionModes?.includes("dontAsk")) {
-          return fail("Strict Project Isolation for Claude Code requires the verified dontAsk permission mode inside the operating-system boundary.", 409);
+          return fail("Strict Claude Orchestrator Native TUI requires the verified dontAsk permission mode inside the operating-system boundary.", 409);
         }
       }
       const wslDirect = contextKind === "wsl" && req.launchSurface !== "native_tui" &&
@@ -3561,6 +3563,23 @@ export class SessionsService {
     const requestedText = snapshotCommand?.type === "start_session"
       ? (snapshotCommand.initialPrompt ?? "")
       : (req.prompt?.trim() ?? "");
+    const campaignIssueNumbers = campaignController?.runnerId === req.runnerId &&
+        campaignController.workspaceId === workspaceId &&
+        (workspaceId !== null || this.db.getAdHocWorkspacePath(campaignController.id) === workspacePath)
+      ? campaignController.orchestratorPolicy?.issueNumbers
+      : undefined;
+    const orchestratorIssueNumbers = snapshotSpec?.orchestrator?.issueNumbers ??
+      campaignIssueNumbers ??
+      (orchestratorPolicy && creationContext?.defaultOwnerUserId && !parentSessionId
+        ? orchestratorIssueNumbersFromInitialPrompt(requestedText)
+        : []);
+    if (orchestratorPolicy && orchestratorIssueNumbers.length &&
+        !runnerSupportsProtocol(runner.protocolVersion, "orchestratorIssueScope")) {
+      return fail("Campaign issue coordination requires a protocol-v158 Orchestrator runner; update the runner and retry.", 409);
+    }
+    if (orchestratorPolicy && orchestratorIssueNumbers.length) {
+      orchestratorPolicy.issueNumbers = [...orchestratorIssueNumbers];
+    }
     let text = requestedText;
     if (!snapshotCommand && campaignController?.orchestratorPolicy && (requestedText || images.length > 0)) {
       const campaign = this.db.campaignProjection(campaignController.id);
@@ -3593,7 +3612,6 @@ export class SessionsService {
           : "cloud target cost policy is missing", 400);
       }
     }
-    const workspaceId = snapshotSpec ? snapshotSpec.workspaceId : (adHoc ? null : req.workspaceId);
     const requestedProject = this.requestedProjectAssignment(
       req, req.runnerId, workspaceId, allowProjectWithoutLocation, parentSessionId, workspacePath,
     );
@@ -3647,7 +3665,10 @@ export class SessionsService {
       driver: launch.driver,
       context: launch.context,
       config,
-      ...(orchestratorPolicy ? { orchestrator: { ...orchestratorPolicy.execution } } : {}),
+      ...(orchestratorPolicy ? { orchestrator: {
+        ...orchestratorPolicy.execution,
+        ...(orchestratorIssueNumbers.length ? { issueNumbers: orchestratorIssueNumbers } : {}),
+      } } : {}),
       acpSessionContext,
     };
     const command: DurableSessionCommand = snapshotCommand ?? {
@@ -3757,7 +3778,10 @@ export class SessionsService {
       driver: launch.driver,
       context: launch.context,
       config,
-      ...(orchestratorPolicy ? { orchestrator: { ...orchestratorPolicy.execution } } : {}),
+      ...(orchestratorPolicy ? { orchestrator: {
+        ...orchestratorPolicy.execution,
+        ...(orchestratorIssueNumbers.length ? { issueNumbers: orchestratorIssueNumbers } : {}),
+      } } : {}),
       acpSessionContext,
     };
     if (delivery) {
@@ -5456,6 +5480,10 @@ export class SessionsService {
       (session.workspaceId ? this.db.getWorkspacePath(session.runnerId, session.workspaceId) : null);
     if (!workspacePath) return fail("session has no resolvable workspace directory to restart from", 400);
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
+    if (session.orchestratorPolicy?.issueNumbers?.length &&
+        !runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "orchestratorIssueScope")) {
+      return fail("Campaign issue coordination requires a protocol-v158 Orchestrator runner; update the runner and retry.", 409);
+    }
     const hasStopIntent = this.db.hasSessionStopIntent(sessionId);
     if (hasStopIntent) {
       const capabilityFailure = this.capabilityFailure(
@@ -5515,7 +5543,12 @@ export class SessionsService {
         maxToolCalls: session.maxToolCalls ?? undefined,
       },
       ...(session.orchestratorPolicy
-        ? { orchestrator: { ...session.orchestratorPolicy.execution } }
+        ? { orchestrator: {
+          ...session.orchestratorPolicy.execution,
+          ...(session.orchestratorPolicy.issueNumbers?.length
+            ? { issueNumbers: session.orchestratorPolicy.issueNumbers }
+            : {}),
+        } }
         : {}),
       acpSessionContext: this.db.getAcpSessionContext(sessionId),
     };

@@ -22038,6 +22038,9 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
   const behavior = value.behavior;
   const childHarness = behavior.childHarness === null ? null : normalizeAgentHarnessIdentity(behavior.childHarness);
   if ((behavior.childHarness !== null && !childHarness) ||
+      (value.issueNumbers !== undefined && (!Array.isArray(value.issueNumbers) ||
+        value.issueNumbers.length > 100 || value.issueNumbers.some((number) =>
+          !Number.isSafeInteger(number) || number <= 0))) ||
       (behavior.childModel !== null && typeof behavior.childModel !== "string") ||
       (behavior.childEffort !== null && typeof behavior.childEffort !== "string") ||
       !Number.isSafeInteger(behavior.maximumConcurrentChildren) ||
@@ -22048,6 +22051,7 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
       typeof value.execution?.strictProjectIsolation !== "boolean" ||
       !parentControlDecisionPolicyFromJson(JSON.stringify(value.delegation.decisions))) return null;
   behavior.childHarness = childHarness;
+  if (value.issueNumbers) value.issueNumbers = [...new Set(value.issueNumbers)];
   const validSources = new Set([
     "system_default", "user_default", "session_override", "compatibility_fallback", "legacy_session", "active_campaign",
   ]);

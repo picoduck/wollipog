@@ -220,6 +220,7 @@ export function createPersistentSettingWarningEmitter(): PersistentSettingWarnin
 }
 
 const emitPersistentSettingWarnings = createPersistentSettingWarningEmitter();
+const ORCHESTRATOR_REPOSITORY_OVERRIDE_ENV = ["GH_REPO", "GH_HOST"] as const;
 
 /**
  * Map a Claude permission mode to CLI flags. Exported for tests.
@@ -254,6 +255,36 @@ export function claudePermissionArgs(
     return { interactive: false, streamInput: true, args: ["--input-format", "stream-json", "--permission-mode", mode] };
   }
   return { interactive: false, streamInput: false, args: ["--permission-mode", mode] };
+}
+
+/** Structured Orchestrators route every Bash ask through the runner's semantic contract. Native
+ * TUI launches keep the preset's static rules because no runner control channel exists there. */
+export function claudeStructuredOrchestratorArgs(args: readonly string[], strictProjectIsolation: boolean): string[] {
+  const result: string[] = [];
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index]!;
+    const flag = argument.split("=", 1)[0]!;
+    const inlineValue = argument.includes("=") ? argument.slice(argument.indexOf("=") + 1) : undefined;
+    const value = args[index + 1];
+    if (strictProjectIsolation && flag === "--permission-mode" && (inlineValue ?? value) === "dontAsk") {
+      if (inlineValue === undefined) index += 1;
+      continue;
+    }
+    if (flag === "--allowedTools") {
+      const allowedTools = inlineValue ?? (value?.startsWith("-") === false ? value : undefined);
+      if (typeof allowedTools === "string") {
+        const tools = allowedTools.split(",").filter((tool) => !tool.startsWith("Bash("));
+        if (tools.length > 0) {
+          if (inlineValue === undefined) result.push(argument, tools.join(","));
+          else result.push(`${flag}=${tools.join(",")}`);
+        }
+        if (inlineValue === undefined) index += 1;
+      }
+      continue;
+    }
+    result.push(argument);
+  }
+  return result;
 }
 
 /**
@@ -610,6 +641,7 @@ export class ClaudeCodeDriver implements Driver {
           LEGACY_CLAUDE_PERSISTENT_FLAG,
           LEGACY_CLAUDE_PERSISTENT_IDLE_MS,
           LEGACY_CLAUDE_PENDING_MAX_MS,
+          ...(this.opts.orchestrator ? ORCHESTRATOR_REPOSITORY_OVERRIDE_ENV : []),
         ],
         isolation: this.opts.isolation,
         containerAgentLaunch: true,
@@ -893,6 +925,7 @@ export class ClaudeCodeDriver implements Driver {
             LEGACY_CLAUDE_PERSISTENT_FLAG,
             LEGACY_CLAUDE_PERSISTENT_IDLE_MS,
             LEGACY_CLAUDE_PENDING_MAX_MS,
+            ...(this.opts.orchestrator ? ORCHESTRATOR_REPOSITORY_OVERRIDE_ENV : []),
           ],
           isolation: this.opts.isolation,
           containerAgentLaunch: true,
@@ -1155,6 +1188,7 @@ export class ClaudeCodeDriver implements Driver {
             LEGACY_CLAUDE_PERSISTENT_FLAG,
             LEGACY_CLAUDE_PERSISTENT_IDLE_MS,
             LEGACY_CLAUDE_PENDING_MAX_MS,
+            ...(this.opts.orchestrator ? ORCHESTRATOR_REPOSITORY_OVERRIDE_ENV : []),
           ],
           isolation: this.opts.isolation,
           containerAgentLaunch: true,
@@ -1894,6 +1928,11 @@ export class ClaudeCodeDriver implements Driver {
     delete env[LEGACY_CLAUDE_PERSISTENT_FLAG];
     delete env[LEGACY_CLAUDE_PERSISTENT_IDLE_MS];
     delete env[LEGACY_CLAUDE_PENDING_MAX_MS];
+    // Keep campaign-scoped `gh issue` writes bound to the selected repository. The semantic
+    // classifier also rejects `--repo`/`-R`; removing GH_REPO closes the ambient override path.
+    if (this.opts.orchestrator) {
+      for (const name of ORCHESTRATOR_REPOSITORY_OVERRIDE_ENV) delete env[name];
+    }
     if (env.CLAUDE_CODE_OAUTH_TOKEN) delete env.ANTHROPIC_API_KEY;
     return env;
   }
@@ -1930,7 +1969,12 @@ export class ClaudeCodeDriver implements Driver {
       this.hookCircuitOpenedAt = null;
     }
     if (prepared.healed) this.cb.onStderr("Claude manager hook settings were restored before launch.");
-    return prepared.args;
+    return this.opts.orchestrator
+      ? claudeStructuredOrchestratorArgs(
+        prepared.args,
+        this.opts.orchestrator.strictProjectIsolation,
+      )
+      : prepared.args;
   }
 
   cancel(): void {
@@ -2098,8 +2142,12 @@ export class ClaudeCodeDriver implements Driver {
         if (!this.child) return null;
         const req = msg.request;
         if (req?.subtype === "can_use_tool" && typeof msg.request_id === "string") {
-          if (this.opts.orchestrator?.strictProjectIsolation === false &&
-              isRoutineClaudeOrchestratorPermission(req.tool_name, req.input)) {
+          if (this.opts.config.permissionMode === "orchestrator" && this.opts.orchestrator &&
+              isRoutineClaudeOrchestratorPermission(
+            req.tool_name,
+            req.input,
+            this.opts.orchestrator.issueNumbers ?? [],
+          )) {
             try {
               this.child.stdin.write(JSON.stringify({
                 type: "control_response",
@@ -2111,9 +2159,26 @@ export class ClaudeCodeDriver implements Driver {
               }) + "\n");
               return null;
             } catch {
-              // Fall through to the visible approval path if the bounded response could not be
-              // written. That path retains the request instead of silently parking the provider.
+              // Provider mode retains the request on the visible approval path. Strict mode falls
+              // through to its fail-closed denial path; neither silently parks the provider.
             }
+          }
+          if (this.opts.config.permissionMode === "orchestrator" &&
+              this.opts.orchestrator?.strictProjectIsolation && req.tool_name !== "AskUserQuestion") {
+            try {
+              this.child.stdin.write(JSON.stringify({
+                type: "control_response",
+                response: {
+                  subtype: "success",
+                  request_id: msg.request_id,
+                  response: {
+                    behavior: "deny",
+                    message: "Strict Project Isolation denied an operation outside the Orchestrator routine-operation contract.",
+                  },
+                },
+              }) + "\n");
+            } catch { /* the provider process ended before the denial could be written */ }
+            return null;
           }
           if (!this.pendingApprovals.has(msg.request_id) && this.pendingApprovals.size >= 128) {
             try {

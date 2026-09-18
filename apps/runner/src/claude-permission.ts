@@ -1,11 +1,12 @@
 import type { SessionConfig } from "@wollipog/protocol";
 
-/** One source of truth for the provider mode used when the session leaves the picker unset. */
+/** One source of truth for structured-driver permission transport. Orchestrators always use the
+ * runner-owned Default control channel; strict isolation is enforced by the sandbox and handler. */
 export function effectiveClaudePermissionMode(
   config: Pick<SessionConfig, "permissionMode">,
-  strictProjectIsolation = true,
+  _strictProjectIsolation = true,
 ): string {
   return config.permissionMode === "orchestrator"
-    ? strictProjectIsolation ? "dontAsk" : "default"
+    ? "default"
     : config.permissionMode || "acceptEdits";
 }

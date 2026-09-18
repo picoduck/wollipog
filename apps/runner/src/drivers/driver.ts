@@ -177,7 +177,7 @@ export interface DriverOptions {
   cwd: string;
   env: Record<string, string>;
   config: SessionConfig;
-  orchestrator?: { strictProjectIsolation: boolean };
+  orchestrator?: { strictProjectIsolation: boolean; issueNumbers?: number[] };
   context: AgentContext;
   /** Optional discovery-verified flags/modes. Absent only for legacy runners/sessions. */
   capabilities?: AgentCapabilities;
