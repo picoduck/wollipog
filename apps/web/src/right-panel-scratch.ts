@@ -282,7 +282,7 @@ function persist(): void {
     // Removing is this tab writing its empty map, which is what any successful mutation does to the
     // shared record. The refusal path below is the one that must not presume to speak for it.
     removeBrowserStorageValue(PERSIST_KEY);
-    lastWritten = null;
+    lastWritten = readBackAfterRemoval();
     return;
   }
   // Assembled from the pieces that were measured, so the ceiling holds for the string actually
@@ -305,8 +305,21 @@ function persist(): void {
   const abandoned = loadBrowserStorageValue(PERSIST_KEY);
   if (abandoned !== null && abandoned === lastWritten) {
     removeBrowserStorageValue(PERSIST_KEY);
-    lastWritten = null;
+    lastWritten = readBackAfterRemoval();
   }
+}
+
+/**
+ * What this tab still owns after a best-effort removal: nothing when the record is gone, and the
+ * record itself when the removal did not take.
+ *
+ * `removeBrowserStorageValue` reports no outcome, and a storage that is refusing writes can refuse
+ * a removal too. Assuming it worked would hand back ownership of a record that is still sitting
+ * there, and the next refused write would no longer recognise it as this tab's to take back —
+ * leaving exactly the obsolete record the retraction exists to prevent.
+ */
+function readBackAfterRemoval(): string | null {
+  return loadBrowserStorageValue(PERSIST_KEY);
 }
 
 /** Read one remembered value, or undefined when the session never stored it. */

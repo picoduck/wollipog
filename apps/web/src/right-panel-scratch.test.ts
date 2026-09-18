@@ -19,13 +19,17 @@ const PERSIST_KEY = "wollipog.right-panel-scratch.v1";
 
 const backing = new Map<string, string>();
 let denyWrites = false;
+let denyRemovals = false;
 (globalThis as { localStorage?: unknown }).localStorage = {
   getItem: (key: string) => backing.get(key) ?? null,
   setItem: (key: string, value: string) => {
     if (denyWrites) throw new DOMException("Storage quota exceeded", "QuotaExceededError");
     backing.set(key, value);
   },
-  removeItem: (key: string) => void backing.delete(key),
+  removeItem: (key: string) => {
+    if (denyRemovals) throw new DOMException("Storage is not available", "SecurityError");
+    backing.delete(key);
+  },
 };
 
 /** A page reload, as far as this module is concerned: memory goes, storage stays. */
@@ -35,6 +39,7 @@ function reload(): void {
 
 beforeEach(() => {
   denyWrites = false;
+  denyRemovals = false;
   clearPanelScratch();
   backing.clear();
 });
@@ -435,6 +440,31 @@ test("a refused write takes back only this tab's own record, never another's", (
   reload();
   assert.equal(readPanelScratch(panelScratchScopeKey("session-theirs"), "review.requestBody"),
     "the other tab's unsent draft", "and it is still there to be restored from");
+});
+
+test("a removal that did not take leaves the record still this tab's to take back", () => {
+  // Removal is best-effort and reports nothing, so a storage refusing writes can refuse the removal
+  // too. Assuming it worked would hand back ownership of a record still sitting there, and the next
+  // refused write would no longer recognise it — leaving the obsolete record to be restored.
+  const scope = panelScratchScopeKey("session-1");
+  writePanelScratch(scope, "sidechat.draft", "on its way", "draft");
+  writePanelScratch(scope, "files.directory", "apps/web");
+  const stale = backing.get(PERSIST_KEY);
+
+  denyWrites = true;
+  denyRemovals = true;
+  clearPanelScratchIf(scope, "sidechat.draft", "on its way", panelScratchRevision(scope, "sidechat.draft"));
+  assert.equal(backing.get(PERSIST_KEY), stale, "nothing could be written and nothing could be removed");
+
+  // Removals come back while writes are still refused — a quota that eased, a permission that did
+  // not. The record is still the one this tab left, so this write is the one that retracts it.
+  denyRemovals = false;
+  writePanelScratch(scope, "files.directory", "apps");
+  assert.equal(backing.get(PERSIST_KEY), undefined, "taken back on the first chance to do it");
+
+  reload();
+  assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined,
+    "the sent message never comes back");
 });
 
 test("the stored record is bounded even where the map deliberately is not", () => {
