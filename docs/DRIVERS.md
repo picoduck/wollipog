@@ -176,6 +176,29 @@ resume strip leaves it alone). The Pi bridge requirement reaches the control pla
 runner attestation published only for a discovery-verified bridge; `piAgentControl` itself is
 cleared before publication and never persisted.
 
+Protocol v164 adds a second, independent execution policy: **Integration Isolation** (ADR 0011),
+gated by `orchestratorIntegrationIsolation`. It is configurable on its own in Orchestrator defaults
+and per session, and it changes only the integration surface — the permission mode, built-in tool
+inventory, sandbox and approval behaviour, and the project boundary are exactly those of the ordinary
+additive launch, and with the policy disabled the launch is byte-identical to v163's. It removes
+integrations the environment supplies implicitly; an integration named explicitly in the agent
+definition's launch arguments is part of the harness installation and remains.
+
+| harness | removed when enabled | deliberately not removed |
+| --- | --- | --- |
+| Claude Code | `--strict-mcp-config` (only `--mcp-config` servers, i.e. Wollipog's) and `--setting-sources ""` (user/project/local settings: hooks, enabled plugins, marketplaces, status lines) | Wollipog's own managed policy-hook `--settings` file, which carries the approval elicitation transport; the built-in tool inventory; `--permission-mode` |
+| Codex / Codex App Server | `--disable apps --disable plugins --disable hooks`, plus the live `codex mcp list --json` probe that emits `-c mcp_servers.<name>.enabled=false` for every non-Wollipog server | `multi_agent`, `browser_use`, `computer_use`, `image_generation` (built-in tool inventory, not user-configured integrations); `--strict-config`; sandbox, approval, and reviewer settings |
+| Pi | `--no-extensions --no-skills --no-prompt-templates --no-context-files` | `--exclude-tools` (tool inventory); the discovery-verified Wollipog Agent Control extension, which still loads because `--no-extensions` disables DISCOVERY and explicit `-e` paths still work |
+
+Claude's one residual: permission RULES (`permissions.allow`/`ask`/`deny`, `defaultMode`) declared in
+the ignored settings files are dropped with them, because Claude has no per-source hook switch and a
+second `--settings` replaces the first rather than merging. The permission MODE is unaffected — the
+driver always passes an explicit `--permission-mode`. Strict Project Isolation and every coupled
+preset already launch without integrations, so their effective value is `true`, shown as implied and
+recorded with the provenance of the policy that implied it. An older runner would launch WITH the
+integrations the human removed, so creation and restart refuse rather than degrade — for a saved
+account default as well as an explicit override, because dropping this policy broadens the launch.
+
 That flag is deliberately separate from the `"orchestrator"` entry in `permissionModes`. The latter
 says the COUPLED PRESET is launchable, boundary requirements included; the former says the ROLE is
 launchable with ordinary provider permissions. They diverge whenever a harness can do the second but
