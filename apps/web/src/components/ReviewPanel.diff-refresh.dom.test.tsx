@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { after, before, mock, test } from "node:test";
+import { after, before, beforeEach, mock, test } from "node:test";
 import React, { act } from "react";
 import { fireDomEvent } from "./test-dom-events.js";
 import { createRoot } from "react-dom/client";
@@ -17,6 +17,7 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { ReviewPanel } from "./ReviewPanel.js";
+import { clearPanelScratch } from "../right-panel-scratch.js";
 import type { GitStatus } from "./useGitStatus.js";
 
 /**
@@ -59,6 +60,12 @@ after(() => {
   }
   domWindow.close();
 });
+
+/**
+ * Panel scratch survives unmount on purpose (#1202), and these cases share one session id — so
+ * without this each test would start holding whatever the previous one typed or chose.
+ */
+beforeEach(() => clearPanelScratch());
 
 /* -------------------------------------------------------------------------- */
 /* Fixtures                                                                   */

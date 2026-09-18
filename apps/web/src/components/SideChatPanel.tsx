@@ -6,8 +6,15 @@ import { useHasStore, useStoreActions } from "../store.js";
 import { EventTimeline } from "./EventTimeline.js";
 import { useTimeline } from "./useTimeline.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
+import {
+  clearPanelScratchIf,
+  panelScratchRevision,
+  usePanelScratchScope,
+  usePanelScratchText,
+} from "../right-panel-scratch.js";
 
 const POLL_MS = 1_500;
+const SIDE_CHAT_DRAFT_KEY = "sidechat.draft";
 const PAGE_SIZE = 200;
 
 /** Prose, so sentence case: these complete the sentence "This side chat's session …". */
@@ -63,7 +70,10 @@ export function SideChatPanel({
   const hasStore = useHasStore();
   const [sideChat, setSideChat] = useState<SideChatView | null>();
   const [events, setEvents] = useState<SessionEvent[]>([]);
-  const [text, setText] = useState("");
+  // The unsent message belongs to the person typing it, not to the child: it survives the panel
+  // being switched away and closed (#1202), and the transcript resets around it.
+  const panelScratch = usePanelScratchScope(session.id);
+  const [text, setText] = usePanelScratchText(panelScratch, SIDE_CHAT_DRAFT_KEY);
   const [creating, setCreating] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -213,10 +223,19 @@ export function SideChatPanel({
   const send = async () => {
     const outgoing = text.trim();
     if (!sideChat || !outgoing || sending || !runnerOnline || isTerminal(sideChat.session.status)) return;
+    const sent = text;
+    const sentRevision = panelScratchRevision(panelScratch, SIDE_CHAT_DRAFT_KEY);
     setSending(true);
     setError(null);
     try {
       const updated = await api.prompt(sideChat.session.id, outgoing);
+      // The send landed, so the draft it consumed must not come back — switching modes mid-flight
+      // unmounts this panel before `setText("")` runs, and a restored copy of an already-sent
+      // message invites sending it twice. Guarded on the revision as well as the text: a draft that
+      // a remounted panel has since written — including a retry of the very same message — is a
+      // different draft, and deleting it would take text the user can no longer see out from under
+      // a live composer.
+      clearPanelScratchIf(panelScratch, SIDE_CHAT_DRAFT_KEY, sent, sentRevision);
       if (!mountedRef.current) return;
       setSideChat((prior) => prior ? { ...prior, session: updated } : prior);
       setText("");
