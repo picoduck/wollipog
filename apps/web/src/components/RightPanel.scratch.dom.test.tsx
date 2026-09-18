@@ -17,7 +17,11 @@ import { ApiProvider } from "../api-context.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime } from "../ui-transport.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
-import { PANEL_SCRATCH_SESSION_LIMIT, clearPanelScratch } from "../right-panel-scratch.js";
+import {
+  PANEL_SCRATCH_SESSION_LIMIT,
+  clearPanelScratch,
+  dropPanelScratchMemory,
+} from "../right-panel-scratch.js";
 import { RightPanel, useRightPanelState, type RightPanelState } from "./RightPanel.js";
 import type { GitStatus } from "./useGitStatus.js";
 
@@ -27,6 +31,10 @@ import type { GitStatus } from "./useGitStatus.js";
  * the issue describes and assert the round trips its acceptance criteria name — the Review drafts
  * and view choices, and the Files directory — plus the boundary that makes the feature safe: one
  * session never shows another session's drafts.
+ *
+ * A page reload destroyed them too, until scratch was mirrored into browser storage (#1282). A
+ * reload is driven here by unmounting the panel and dropping the module's memory: that is exactly
+ * what a browser does to a tab, and it leaves the stored record as the only thing to resume from.
  */
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -381,6 +389,103 @@ test("the Side Chat draft and the Browser address survive a mode switch", async 
     assert.equal(addressBar(panel).value, "http://localhost:4174/preview");
     assert.equal(panel.container.querySelector(".browser-web-frame")?.getAttribute("src"),
       "http://localhost:4174/preview", "the page it had open is still open");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+/** Everything the browser keeps survives; everything the page held in memory does not. */
+async function reload(panel: Panel): Promise<void> {
+  await panel.dispose();
+  dropPanelScratchMemory();
+}
+
+test("every mode resumes where it was left after a page reload", async () => {
+  const before = await mountPanel();
+  await before.show("review");
+  await type(commitInput(before), "fix: keep the panel's drafts");
+  await type(field(before, "PR Title")!, "Persist right panel scratch");
+  await type(field(before, "PR Description")!, "Written over an hour, not to be spent on a reload.");
+  await type(field(before, "Branch Name")!, "fix/issue-1282");
+  await act(async () => fireDomEvent.click(choice(before, "Diff Layout", "Side by Side")));
+
+  await before.show("files");
+  await act(async () => fireDomEvent.click(before.container.querySelector<HTMLButtonElement>(".files-entry")!));
+  assert.equal(crumbs(before), "root/apps");
+
+  await before.show("browser");
+  await act(async () => fireDomEvent.click(choice(before, "Browser Content", "Web URL")));
+  await type(addressBar(before), "http://localhost:4174/preview");
+  await act(async () => fireDomEvent.submit(before.container.querySelector(".browser-address")!));
+
+  await before.show("sidechat");
+  await type(field(before, "Side Chat Message") as HTMLTextAreaElement, "unsent when the tab went");
+
+  await reload(before);
+
+  const after = await mountPanel();
+  try {
+    await after.show("review");
+    assert.equal(commitInput(after).value, "fix: keep the panel's drafts");
+    assert.equal(field(after, "PR Title")!.value, "Persist right panel scratch");
+    assert.equal(field(after, "PR Description")!.value,
+      "Written over an hour, not to be spent on a reload.");
+    assert.equal(field(after, "Branch Name")!.value, "fix/issue-1282");
+    assert.equal(choice(after, "Diff Layout", "Side by Side").getAttribute("aria-checked"), "true",
+      "the view choices come back with the drafts they were made beside");
+
+    await after.show("files");
+    assert.equal(crumbs(after), "root/apps");
+
+    await after.show("browser");
+    assert.equal(choice(after, "Browser Content", "Web URL").getAttribute("aria-checked"), "true");
+    assert.equal(addressBar(after).value, "http://localhost:4174/preview");
+    assert.equal(after.container.querySelector(".browser-web-frame")?.getAttribute("src"),
+      "http://localhost:4174/preview", "the page it had open is open again");
+
+    await after.show("sidechat");
+    assert.equal((field(after, "Side Chat Message") as HTMLTextAreaElement).value,
+      "unsent when the tab went", "the message nobody else has a copy of is the point of all this");
+  } finally {
+    await after.dispose();
+  }
+});
+
+test("a reload restores each session only under itself", async () => {
+  const before = await mountPanel();
+  await before.show("review");
+  await type(field(before, "PR Description")!, "session one only");
+  await before.switchSession("session-2");
+  await type(field(before, "PR Description")!, "session two only");
+
+  await reload(before);
+
+  const after = await mountPanel();
+  try {
+    await after.show("review");
+    assert.equal(field(after, "PR Description")!.value, "session one only");
+    await after.switchSession("session-2");
+    assert.equal(field(after, "PR Description")!.value, "session two only");
+    await after.switchSession("session-3");
+    assert.equal(field(after, "PR Description")!.value, "",
+      "a session that was never written to has nothing restored to it");
+  } finally {
+    await after.dispose();
+  }
+});
+
+test("a reload with nothing stored is the ordinary first visit", async () => {
+  // The panel has to open on a browser that refuses storage, or has none yet, exactly as it did
+  // before any of this: with its defaults, not with an error.
+  dropPanelScratchMemory();
+  domWindow.localStorage.clear();
+  const panel = await mountPanel();
+  try {
+    await panel.show("review");
+    assert.equal(commitInput(panel).value, "Panel Scratch Fixture", "the default is the session title");
+    assert.equal(field(panel, "PR Description")!.value, "");
+    await panel.show("files");
+    assert.equal(crumbs(panel), "root");
   } finally {
     await panel.dispose();
   }

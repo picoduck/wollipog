@@ -7,23 +7,47 @@
  * module parks those values outside the React tree, keyed by the session they describe, and hands
  * them back when the body mounts again.
  *
- * In memory only, deliberately. These are scratch values rather than preferences: reloading the
- * app is a far stronger "start over" signal than switching modes, and keeping them out of browser
- * storage means nothing here can outlive the tab or accumulate in localStorage with nobody to
- * clean it up. The scope key is still instance-qualified, because a remote control plane can reuse
- * a local session id (see instance-storage.ts) and one session's drafts must never surface under
- * another's.
+ * Held in memory and mirrored into one localStorage record, so a reload resumes where the panel was
+ * left rather than starting over (#1282). A reload is not the deliberate "start over" it was once
+ * taken for: it is also what a crash, an update, and a mistyped Cmd-R look like, and the half
+ * written pull request description those destroyed was not recoverable from anywhere else.
+ *
+ * The record is a mirror, never a second source of truth. Memory stays authoritative while the page
+ * lives, every mutation rewrites the record, and the record obeys the same eviction rule the map
+ * obeys plus a hard character ceiling — so what survives a reload can never outgrow what survives a
+ * mode switch. Storage that is absent, denied, full, or corrupt costs exactly the persistence: the
+ * panel then behaves as it did before any of this existed.
+ *
+ * Reuse rather than a second mechanism. The record is written through instance-storage.ts, the same
+ * layer composer-drafts.ts persists its durable fallback through, so a quota refusal or a
+ * restricted webview degrades identically for both. There are no tombstones here because there is
+ * nothing to reconcile: composer-drafts.ts needs them to stop one record's two stores (IndexedDB
+ * and its localStorage fallback) resurrecting each other, and this has one store.
+ *
+ * Unsent text consequently reaches browser storage, which is a real widening — anything with access
+ * to this origin's storage can read it. That is the bargain the composer beside it already makes
+ * for prompt drafts, under the same scoping and the same eviction rules.
+ *
+ * The scope key is instance-qualified, because a remote control plane can reuse a local session id
+ * (see instance-storage.ts) and one session's drafts must never surface under another's. That
+ * qualification is also what makes one flat record safe to share between instances.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { LOCAL_INSTANCE_SCOPE, instanceResourceKey } from "./instance-storage.js";
+import {
+  LOCAL_INSTANCE_SCOPE,
+  instanceResourceKey,
+  loadBrowserStorageValue,
+  removeBrowserStorageValue,
+  saveBrowserStorageValue,
+} from "./instance-storage.js";
 import { useInstanceScope } from "./instance-scope.js";
 
 /**
  * How many sessions are remembered at once. Panel scratch is unbounded input (drafts, paths) held
- * for as long as the tab lives, so the oldest session's scratch is dropped rather than letting a
- * long navigation session grow the map forever. Well past the handful of sessions anyone switches
- * between while writing one pull request.
+ * for as long as the browser will keep it, so the oldest session's scratch is dropped rather than
+ * letting a long navigation session grow the map forever. Well past the handful of sessions anyone
+ * switches between while writing one pull request.
  *
  * It bounds recreatable scratch only. A scope still holding unsent text the user wrote is exempt,
  * because evicting it destroys that text with nothing to recover it from (#1283) — so the map's
@@ -112,8 +136,139 @@ function evictDisposableScopes(keep: string): void {
   }
 }
 
+/**
+ * The one localStorage record the whole map is mirrored into. Flat and shared between instances:
+ * scope keys are already instance-qualified, so nothing inside can be read under another instance's
+ * session, and a single record is what makes the stored size bounded by construction — an index of
+ * per-session records could be orphaned by a crash or another tab and grow with nobody to collect
+ * it. `wollipog.rightpanel.mode` beside it is stored the same way, for the same panel.
+ */
+const PERSIST_KEY = "wollipog.right-panel-scratch.v1";
+
+/**
+ * The hard ceiling, in characters of serialized JSON, on what is mirrored to storage.
+ *
+ * `PANEL_SCRATCH_SESSION_LIMIT` bounds the scope count but deliberately exempts scopes holding
+ * unsent text, and a form that keeps its text after submitting holds its scope for as long as it is
+ * mounted (#1375). In memory that overshoot ends with the tab; persisted, it would not, so the
+ * record needs a bound that does not depend on anyone releasing anything. Scopes are mirrored
+ * most-recently-used first and whatever no longer fits is simply not written — it is still in
+ * memory for the life of this page, and the newest state is what a reload most wants back.
+ *
+ * Generous against real use (a few kilobytes per session) and small against the ~5MB localStorage
+ * gets, which composer drafts and panel preferences also live in.
+ */
+export const PANEL_SCRATCH_PERSIST_CHAR_LIMIT = 256 * 1024;
+
+/** `{"version":1,"scopes":[]}` — what a record costs before any scope is in it. */
+const PERSIST_ENVELOPE_CHARS = 25;
+
+/**
+ * Whether the persisted record has been read into the map yet. Read lazily rather than at import,
+ * so a module graph that pulls this in outside a browser costs nothing, and so tests can drive a
+ * reload by dropping memory alone.
+ */
+let hydrated = false;
+
+/** One scope as it is stored: the values, without the revisions, which are page-local. */
+interface PersistedValue {
+  value: string;
+  retention: PanelScratchRetention;
+}
+
+/**
+ * Read back one stored scope, dropping anything malformed rather than the record around it.
+ *
+ * Corruption here is a hand-edited value or a record from a build that stored something else, and
+ * the loss it should cause is exactly the values it touched. Returning null for the whole record on
+ * one bad key would let a single stale entry wipe every other session's drafts on every reload.
+ */
+function parsePersistedValues(raw: unknown): Map<string, ScratchValue> {
+  const values = new Map<string, ScratchValue>();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return values;
+  for (const [key, held] of Object.entries(raw as Record<string, unknown>)) {
+    if (!held || typeof held !== "object") continue;
+    const { value, retention } = held as Partial<PersistedValue>;
+    if (typeof value !== "string") continue;
+    if (retention !== "draft" && retention !== "disposable") continue;
+    // A fresh revision, never a stored one. Revisions answer "has this been touched since I looked
+    // at it", and every caller that could have looked went away with the previous page.
+    values.set(key, { value, revision: nextRevision++, retention });
+  }
+  return values;
+}
+
+/** Fill the map from storage exactly once. Anything unreadable leaves it empty. */
+function hydrate(): void {
+  if (hydrated) return;
+  // Set before reading: a parse that throws must not re-run on every subsequent read.
+  hydrated = true;
+  const raw = loadBrowserStorageValue(PERSIST_KEY);
+  if (raw === null) return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    // Unreadable as a whole, so there is nothing to salvage and no reason to keep paying for it.
+    removeBrowserStorageValue(PERSIST_KEY);
+    return;
+  }
+  const record = parsed as { version?: unknown; scopes?: unknown };
+  if (record?.version !== 1 || !Array.isArray(record.scopes)) {
+    removeBrowserStorageValue(PERSIST_KEY);
+    return;
+  }
+  for (const entry of record.scopes) {
+    if (!entry || typeof entry !== "object") continue;
+    const { scope, values } = entry as { scope?: unknown; values?: unknown };
+    if (typeof scope !== "string" || scope === "") continue;
+    const held = parsePersistedValues(values);
+    if (held.size > 0) scratch.set(scope, held);
+  }
+  // Stored order is least-recently-used first, so the map is already in eviction order. A record
+  // written under a larger bound still has to obey this build's: nothing here is spared as "just
+  // touched", because nothing here has been.
+  evictDisposableScopes("");
+}
+
+/**
+ * Mirror the map into storage. Called by every mutation, including the removals and evictions that
+ * shrink it, so the record never holds a value the map has let go of.
+ *
+ * Reads are not mirrored even though they reorder the map: a mount reading its scratch back would
+ * otherwise write to storage, and the only thing at stake is which scope a later eviction takes
+ * first — settled by the next mutation, which is the thing that can evict anyway.
+ */
+function persist(): void {
+  const stored: string[] = [];
+  let size = PERSIST_ENVELOPE_CHARS;
+  // Most-recently-used first so the ceiling spends itself on the freshest state, and skipping
+  // rather than stopping so one outsized draft costs only itself.
+  for (const [scope, values] of [...scratch].reverse()) {
+    const entry = JSON.stringify({
+      scope,
+      values: Object.fromEntries([...values].map(([key, held]): [string, PersistedValue] =>
+        [key, { value: held.value, retention: held.retention }])),
+    });
+    if (size + entry.length + 1 > PANEL_SCRATCH_PERSIST_CHAR_LIMIT) continue;
+    stored.push(entry);
+    size += entry.length + 1;
+  }
+  if (stored.length === 0) {
+    removeBrowserStorageValue(PERSIST_KEY);
+    return;
+  }
+  // Assembled from the pieces that were measured, so the ceiling holds for the string actually
+  // written. Restored in stored order, which is why it goes back least-recently-used first.
+  stored.reverse();
+  // A refusal (private mode, a full quota) is not an error here. The map is authoritative for as
+  // long as this page lives; only the reload after it loses anything.
+  saveBrowserStorageValue(PERSIST_KEY, `{"version":1,"scopes":[${stored.join(",")}]}`);
+}
+
 /** Read one remembered value, or undefined when the session never stored it. */
 export function readPanelScratch(scope: string, key: string): string | undefined {
+  hydrate();
   const values = scratch.get(scope);
   if (!values) return undefined;
   touch(scope, values);
@@ -122,6 +277,7 @@ export function readPanelScratch(scope: string, key: string): string | undefined
 
 /** The stamp of the value currently held, or 0 when nothing is. */
 export function panelScratchRevision(scope: string, key: string): number {
+  hydrate();
   return scratch.get(scope)?.get(key)?.revision ?? 0;
 }
 
@@ -135,6 +291,7 @@ export function writePanelScratch(
   value: string | null,
   retention: PanelScratchRetention = "disposable",
 ): void {
+  hydrate();
   const values = scratch.get(scope);
   if (value === null) {
     if (!values) return;
@@ -142,12 +299,14 @@ export function writePanelScratch(
     if (values.size === 0) scratch.delete(scope);
     else touch(scope, values);
     evictDisposableScopes(scope);
+    persist();
     return;
   }
   const next = values ?? new Map<string, ScratchValue>();
   next.set(key, { value, revision: nextRevision++, retention });
   touch(scope, next);
   evictDisposableScopes(scope);
+  persist();
 }
 
 /** Restore a value, falling back whenever the stored one is missing or the caller rejects it. */
@@ -181,13 +340,26 @@ export function clearPanelScratchIf(
   if (readPanelScratch(scope, key) === expected) writePanelScratch(scope, key, null);
 }
 
-/** Forget everything. Test-only: module state would otherwise leak between cases. */
+/** Forget everything, persisted included. Test-only: state would otherwise leak between cases. */
 export function clearPanelScratch(): void {
   scratch.clear();
+  hydrated = false;
+  removeBrowserStorageValue(PERSIST_KEY);
+}
+
+/**
+ * Forget what is in memory while leaving the stored record alone — the half of a page reload a test
+ * process cannot perform on itself. The next read hydrates from storage, exactly as a fresh page
+ * would. Test-only.
+ */
+export function dropPanelScratchMemory(): void {
+  scratch.clear();
+  hydrated = false;
 }
 
 /** How many sessions currently hold scratch. Test-only. */
 export function panelScratchScopeCount(): number {
+  hydrate();
   return scratch.size;
 }
 
@@ -261,6 +433,10 @@ export function usePanelScratchText(
  * fields of a submitted commit or pull request exactly as the user left them, so that session keeps
  * its scope for as long as the text is still in the box. That is the same bargain as any other
  * unsent text: the map grows only where someone typed, and only while what they typed is on screen.
+ *
+ * Persistence does not widen that bargain, but it does remove the closing of the tab as the thing
+ * that eventually ends it (#1375), which is why the stored record has a ceiling of its own rather
+ * than trusting the exemption to be released.
  */
 export function usePanelScratchDraft(
   scope: string,
