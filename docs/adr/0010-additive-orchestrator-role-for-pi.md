@@ -207,13 +207,13 @@ adapter implements all of it:
 - **Observed.** `createSession` returns `{ sessionId, modes, configOptions }`, `modes` being
   `{ currentModeId, availableModes }` from `SessionModeManager.initialize` (6214). That is the
   `session/new` response, and `getOrCreateSession` (5708) returns it for `session/load` and
-  `session/resume` too. `AcpClient` *already* reads it — `acceptSessionState(res.modes, …)` at
-  `acp.ts:261/286/295`.
+  `session/resume` too. `AcpClient` *already* reads it, via `acceptSessionState`, from the responses to
+  `newSession`, `resumeSession`, and `loadSession`.
 - **Constrained.** `session/set_mode` is wired to `setSessionMode` (8202), which calls
   `query.setPermissionMode()` and throws on refusal (`session-mode.js:98-129`). `AcpClient` already
-  drives it — `setMode` at `acp.ts:435`, via `setConfig`/`restoreInitialConfig`.
-- **Tracked.** Changes arrive as `current_mode_update`, which `AcpClient` already consumes
-  (`acp.ts:740`).
+  drives it — `AcpClient.setMode`, reached from `setConfig` and `restoreInitialConfig`.
+- **Tracked.** Changes arrive as `current_mode_update`, which `AcpClient` already consumes in its
+  `handleUpdate` switch.
 - **Not unilaterally escalatable by the model.** Every `setMode` update originates in
   `applyClaudePermissionSelection` (`permissions/effects.js:140`), which is driven by the
   `optionId` *the client itself selected* in its `session/request_permission` response. Even the
@@ -249,18 +249,19 @@ Two residual gaps remain, and they are why this answer is "yes, but":
 mode: "Claude Code applies bypassPermissions before invoking canUseTool; a request that still
 reaches this callback is deliberately bypass-immune" (5273-5278). So requests that arrive are safety
 checks that survived the provider's own mode, and cancelling them — which `AcpClient` does today for
-every preset session (`acp.ts:824`) — is right for the preset (cancel reads as deny, fail-closed)
+every preset session (`AcpClient.handlePermission`) — is right for the preset (cancel reads as deny, fail-closed)
 and wrong for an additive session.
 
-The transport for doing better already exists: with the preset flag clear, `handlePermission`
-(`acp.ts:823-847`) surfaces the request to the Wollipog UI exactly as it does for any ordinary ACP
+The transport for doing better already exists: with the preset flag clear,
+`AcpClient.handlePermission` surfaces the request to the Wollipog UI exactly as it does for any ordinary ACP
 session. What is *not* settled is the policy: an Orchestrator is an autonomous session holding a
 scoped control-plane credential, and this ADR does not decide who answers a bypass-immune safety
 prompt on its behalf, or what a timeout means. That is a design decision, not a reading of 0.75.1.
 
 ### Answer 3 — client-side fs/terminal services
 
-**Not answered; genuinely undecided.** The current blanket refusal (`acp.ts:851-901`) is defense in
+**Not answered; genuinely undecided.** The current blanket refusal
+(`AcpClient.assertOrchestratorClientServiceRefused`) is defense in
 depth for the preset, and an ordinary ACP session allows these services. Which of them an additive
 ACP Orchestrator should expose depends on the answer to Question 2 and on the execution-isolation
 policy, and cannot be derived from the adapter. Left open deliberately.
@@ -268,10 +269,11 @@ policy, and cannot be derived from the adapter. Left open deliberately.
 ### Answer 4 — splitting `AcpClient.orchestrator`
 
 **Answered, and the identity half is delivered in this change.** The boolean couples *five*
-concerns in `AcpClient`, not the four counted above — identity assertion (`acp.ts:236`), runner-owned
-`_meta` injection (324), permission cancellation (824), client fs/terminal refusal (851-901), and
-slash-command suppression (150, 737) — plus two more in `AcpDriver`: provider-command refusal and the
-`providerConfig` permission-mode strip.
+concerns in `AcpClient`, not the four counted above — the identity assertion in `initialize`, the
+runner-owned `_meta` injection in `newSession`, permission cancellation in `handlePermission`,
+client fs/terminal refusal via `assertOrchestratorClientServiceRefused`, and slash-command
+suppression in the constructor and `handleUpdate` — plus two more in `AcpDriver`: the
+provider-command refusal in `prepareCommand` and the `providerConfig` permission-mode strip.
 
 The identity concern is now separated. `AcpClient` takes an `orchestratorRole` flag distinct from
 the preset `orchestrator` flag, and the exact-adapter assertion keys on the role. `AcpDriver` derives

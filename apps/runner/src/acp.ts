@@ -140,8 +140,9 @@ export class AcpClient {
       orchestrator?: boolean;
       /** The Orchestrator ROLE, however it is expressed. The exact-adapter identity assertion keys
        * on this rather than on `orchestrator` (the coupled preset), so a session that carries the
-       * role without the preset permission-mode literal cannot silently drop the assertion.
-       * Defaults to `orchestrator` so an omitted value is never weaker than the preset alone. */
+       * role without the preset permission-mode literal cannot silently drop the assertion. It is
+       * OR-ed with `orchestrator`, so omitting it — or passing `false` — is never weaker than the
+       * preset alone. */
       orchestratorRole?: boolean;
       descendantMarker?: string;
       /** Discovery probes negotiate only the ACP initialize response and must not expose client
@@ -152,7 +153,9 @@ export class AcpClient {
     deps: Partial<AcpClientDeps> = {},
   ) {
     this.orchestrator = opts.orchestrator === true;
-    this.orchestratorRole = opts.orchestratorRole ?? this.orchestrator;
+    // `||`, not `??`: the role can only ever widen the assertion. An explicit `false` alongside the
+    // coupled preset must not be able to switch the pinned-identity check off.
+    this.orchestratorRole = opts.orchestratorRole === true || this.orchestrator;
     this.commands = this.orchestrator ? [] : normalizeAcpCommands(opts.initialCommands);
     this.sessionContext = opts.sessionContext;
     this.mcpEnvironment = { ...process.env, ...opts.env };

@@ -219,13 +219,20 @@ flag. An installation offering only the additive role cannot provide Strict Proj
 Orchestrator Native TUI, which still require the preset, and the dialog blocks both with a reason. The control plane has never admitted a coupled-preset Pi
 Orchestrator, so the additive shape is the only Pi Orchestrator there is.
 
-ACP deliberately has no additive shape. The audited `claude-agent-acp` 0.75.1 resolves its
-permission mode from the user's own settings and ignores `_meta.claudeCode.options.permissionMode`,
-so Wollipog can neither choose nor observe the posture an additive ACP Orchestrator would run under;
-and `AcpClient`'s single `orchestrator` flag couples the exact-adapter identity assertion with the
-`_meta` injection, the client fs/terminal refusal, and permission-request cancellation, so clearing
-it for an additive launch would silently drop the identity check. ADR 0010 records what an audit
-must establish before that changes.
+ACP deliberately has no additive shape. #1306 audited the provider-mode permission contract against
+`claude-agent-acp` 0.75.1 and found it not sound; ADR 0010 records the full result. The adapter does
+ignore `_meta.claudeCode.options.permissionMode`, but the mode is still observable and settable over
+the standard ACP session-mode channel — `session/new` returns `modes`, `session/set_mode` applies
+one, and `current_mode_update` reports changes — which `AcpClient` already speaks. What remains
+unsound is that nothing can read the mode back on demand while the adapter's internal
+query-recreation paths re-derive it from the user's settings without notifying the client, and that
+who answers a bypass-immune permission request for an autonomous Orchestrator, and which client
+fs/terminal services it should expose, are both still undecided.
+
+The identity risk this paragraph used to describe is closed. `AcpClient`'s `orchestrator` flag still
+couples the `_meta` injection, the client fs/terminal refusal, and permission-request cancellation,
+but the exact-adapter identity assertion now keys on a separate `orchestratorRole` signal, so no
+future additive shape can silently drop it.
 
 Strict Project Isolation preserves the scratch-only boundary. Claude Bash-prefix rules alone are
 insufficient because an otherwise read-only command can redirect output into a Project Location, so
