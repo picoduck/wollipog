@@ -713,10 +713,12 @@ export function resetManagedWorktreeGuardVerification(): void {
  * carries the manager hooks is left for the manager path to rewrite.
  */
 function discardGuardArtifacts(file: string): void {
+  // A protections file can also be left behind by a failed launch self-test, which writes it
+  // before the guard is committed to.
+  rmSync(claudeHookProtectionsPath(file), { force: true });
   const described = describeManagedSettings(file);
   if (!described?.guard) return;
   rmSync(claudeHookGuardPath(file), { force: true });
-  rmSync(claudeHookProtectionsPath(file), { force: true });
   if (!described.manager) {
     rmSync(file, { force: true });
     rmSync(claudeHookTemplatePath(file), { force: true });
