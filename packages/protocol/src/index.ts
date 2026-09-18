@@ -466,7 +466,7 @@
 //      combination is refused with upgrade guidance rather than degraded. The ACP harness is
 //      deliberately excluded: its provider-mode permission contract is still unaudited, so an ACP
 //      Orchestrator keeps the coupled preset.
-export const PROTOCOL_VERSION = 162;
+export const PROTOCOL_VERSION = 163;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**

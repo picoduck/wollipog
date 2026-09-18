@@ -3514,13 +3514,9 @@ export class SessionsService {
         // Independent provider permissions: the harness launches exactly as an equivalent normal
         // session and gains only Wollipog's orchestration tools, instructions, and credential. An
         // older runner would launch this as an ordinary session, so refuse rather than degrade.
-<<<<<<< HEAD
-        // Each harness carries its own gate: Claude Code since v160, the Codex drivers since v162.
-=======
-        // Each harness carries its own gate: Claude Code since v160, the Codex drivers since v161,
-        // Pi since v162. ACP is absent from the map: its provider-mode permission contract has not
+        // Each harness carries its own gate: Claude Code since v160, the Codex drivers since v162,
+        // Pi since v163. ACP is absent from the map: its provider-mode permission contract has not
         // been audited, so an ACP Orchestrator still uses the coupled preset.
->>>>>>> 1f0a3f45 (WIP: gate additive Pi through the control plane and web dialog)
         const additiveCapability = orchestratorAdditiveCapability(launch.driver);
         if (!additiveCapability || contextKind !== "native" || executionTarget.adapter !== "host") {
           return fail(launch.driver === "acp"

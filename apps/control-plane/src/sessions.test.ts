@@ -17473,7 +17473,7 @@ test("a non-strict Pi Orchestrator keeps its provider permission mode and is gat
     const outdated = svc.createSession({ ...request, role: "orchestrator", config: { permissionMode: "default" } },
       undefined, undefined, false, false, false, human);
     assert.equal(outdated.status, 409);
-    assert.match(outdated.error ?? "", /protocol-v162 runner/);
+    assert.match(outdated.error ?? "", /protocol-v163 runner/);
     // Pre-existing limitation, unchanged by #1294: the control plane has never admitted a coupled
     // Orchestrator preset for Pi, so the additive shape is the only Pi Orchestrator there is.
     const preset = svc.createSession({ ...request, role: "orchestrator", config: { permissionMode: "orchestrator" } },

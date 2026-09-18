@@ -18,7 +18,7 @@ and supplied Wollipog as the sole MCP server.
 
 ## Decision: Pi Becomes Additive
 
-Protocol v162 adds `RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi` and a `pi` entry in
+Protocol v163 adds `RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi` and a `pi` entry in
 `ORCHESTRATOR_ADDITIVE_CAPABILITY`. The control plane, the runner, and the New Session dialog all
 read it through `orchestratorAdditiveCapability()`, so no caller re-derives the mapping.
 
@@ -135,7 +135,7 @@ A Pi Orchestrator now keeps the permission mode, extensions, skills, prompt temp
 files, and tool inventory of a normal Pi session, and its approvals behave identically. Strict
 Project Isolation, Native TUI, ACP, and every pre-existing `permission_mode='orchestrator'` session
 keep the coupled preset. No database migration is needed. Creation and restart refuse an additive Pi
-launch when the runner predates v162, when the agent no longer advertises the Orchestrator role
+launch when the runner predates v163, when the agent no longer advertises the Orchestrator role
 (which is how the loss of the verified bridge reaches the control plane, since `piAgentControl` is
 not persisted), when the context is not native on the host, when Strict Project Isolation is
 enabled, or for a Native TUI launch. An explicit integration-isolation policy (#1295) and the ACP

@@ -154,14 +154,14 @@ test("the Orchestrator preset applies only where independent provider permission
     assert.match(orchestratorPresetPermissionsReason({ ...additive, driver, contextKind: "wsl" }) ?? "",
       /native Claude Code, Codex, or Pi harness on the host/);
   }
-  // Pi gained the additive shape in v162 (#1294); ACP still has no audited provider-mode contract.
+  // Pi gained the additive shape in v163 (#1294); ACP still has no audited provider-mode contract.
   assert.equal(orchestratorPresetPermissionsReason({ ...additive, driver: "pi" }), undefined,
     "a non-strict Pi Orchestrator keeps ordinary provider permissions");
   assert.match(
     orchestratorPresetPermissionsReason({
       ...additive, driver: "pi", runnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi - 1,
     }) ?? "",
-    /protocol v162/,
+    /protocol v163/,
     "Pi names its own runner requirement",
   );
   assert.match(orchestratorPresetPermissionsReason({ ...additive, driver: "pi", contextKind: "wsl" }) ?? "",

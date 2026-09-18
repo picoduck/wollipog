@@ -334,7 +334,7 @@ test("a non-strict Pi Orchestrator launches as a normal session plus only the Or
       ...control,
       controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi - 1,
       orchestratorAgent: piAgent,
-    }, () => {}, host), /protocol-v162 control plane/);
+    }, () => {}, host), /protocol-v163 control plane/);
 
     // The verified bridge is still required for the additive shape.
     assert.throws(() => provisionAgentControl(build("s_pi_nobridge", {
@@ -782,7 +782,7 @@ test("an Orchestrator with independent provider permissions keeps the ordinary C
     strict.orchestrator = { strictProjectIsolation: true };
     assert.throws(() => provisionAgentControl(strict, control, () => {}, host),
       /Strict Project Isolation requires the Orchestrator preset/);
-    // Pi gained the additive shape in v162 (#1294), so it is no longer refused for its harness —
+    // Pi gained the additive shape in v163 (#1294), so it is no longer refused for its harness —
     // but it still requires the discovery-verified bridge that enforces its permission mode.
     const pi = spec("pi");
     pi.sessionId = "s_pi_independent";
@@ -810,13 +810,8 @@ test("an Orchestrator with independent provider permissions keeps the ordinary C
     outdatedCodex.orchestrator = { strictProjectIsolation: false };
     assert.throws(() => provisionAgentControl(outdatedCodex, {
       ...control, controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex - 1,
-<<<<<<< HEAD
     }, () => {}, host), /protocol-v162/);
-    for (const refused of [strict, pi, outdated, outdatedCodex]) {
-=======
-    }, () => {}, host), /protocol-v161/);
     for (const refused of [strict, pi, acp, outdated, outdatedCodex]) {
->>>>>>> 6ab9c3ff (Prove the additive Pi launch shape and its ordinary approval path)
       assert.equal(existsSync(agentControlTokenPath(root, refused.sessionId)), false, "refusal precedes credential minting");
     }
   } finally { rmSync(root, { recursive: true, force: true }); }

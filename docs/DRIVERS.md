@@ -159,7 +159,7 @@ restricted Codex preset and its MCP isolation probe. Each harness carries its ow
 `orchestratorAdditiveRole` (v160) for Claude Code, `orchestratorAdditiveCodex` (v162) for the Codex
 drivers; creation and restart refuse a combination the runner cannot enforce, naming the version.
 
-Protocol v162 extends the additive role to native Pi (ADR 0010), gated by `orchestratorAdditivePi`.
+Protocol v163 extends the additive role to native Pi (ADR 0010), gated by `orchestratorAdditivePi`.
 A non-strict Pi Orchestrator keeps its selected permission mode, extensions, skills, prompt
 templates, context files, and built-in tool inventory; the launch adds only `--append-system-prompt
 <the Orchestrator instructions>` plus the `WOLLIPOG_PERMISSION_PRESET` agent-environment marker that
