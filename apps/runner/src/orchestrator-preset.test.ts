@@ -670,10 +670,7 @@ test("the additive Orchestrator role is advertised independently of the coupled 
     ...(piAgentControl ? { piAgentControl } : {}),
   });
   const advertise = (agents: AgentDefinition[], isolationMode: OrchestratorIsolationMode) =>
-    withOrchestratorAdditiveRole(
-      withOrchestratorPreset(agents, { platform: "linux", isolationMode }),
-      { platform: "linux", isolationMode },
-    );
+    withOrchestratorAdditiveRole(withOrchestratorPreset(agents, { platform: "linux", isolationMode }));
 
   // The case #1294 fixes: the default runner isolation cannot host the preset's filesystem
   // boundary, but the additive role never needed one. The role is advertised; the preset is not.
@@ -708,14 +705,16 @@ test("the additive Orchestrator role is advertised independently of the coupled 
     "Claude still needs its Default mode and approval channel");
   assert.equal(advertise([claude(["default"], false)], "bwrap")[0]!.capabilities?.orchestratorAdditive, undefined);
 
-  // Codex deliberately keeps today's effective requirement; this PR does not widen it.
+  // Codex's additive role carries neither of the preset's preconditions (#1308); the matrix below
+  // covers the platform axis as well.
   const codex = (approval?: "supported"): AgentDefinition => ({
     id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex",
     context: { kind: "native" }, capabilities: caps(["on-request"]),
     ...(approval ? { codexAppServer: { orchestratorApproval: { status: approval } } } : {}),
   });
   assert.equal(advertise([codex("supported")], "bwrap")[0]!.capabilities?.orchestratorAdditive, true);
-  assert.equal(advertise([codex()], "bwrap")[0]!.capabilities?.orchestratorAdditive, undefined);
+  assert.equal(advertise([codex()], "bwrap")[0]!.capabilities?.orchestratorAdditive, true,
+    "granular approval support is the coupled preset's precondition, not the additive launch's");
 
   // Never for a non-native context, and never for ACP, which has no additive shape at all.
   const wslPi: AgentDefinition = { ...pi({ protocolVersion: 1 }), context: { kind: "wsl", distro: "Ubuntu" } };
@@ -737,6 +736,68 @@ test("the additive Orchestrator role is advertised independently of the coupled 
     "pre-v163 Claude and Codex runners keep working from the preset advertisement");
   assert.equal(advertisesOrchestratorAdditiveRole("codex", caps(["orchestrator"])), true);
   assert.equal(advertisesOrchestratorAdditiveRole("acp", caps(["orchestrator"])), false);
+});
+
+test("the additive Codex advertisement matches the additive launch, and leaves the preset's preconditions alone", () => {
+  const capabilities = () => ({
+    models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+    permissionModes: ["on-request", "never"],
+  });
+  const codex = (
+    driver: "codex" | "codex-app-server",
+    approval: "supported" | "unsupported",
+  ): AgentDefinition => ({
+    id: driver, name: driver, command: driver, args: [], env: {}, driver,
+    context: { kind: "native" }, capabilities: capabilities(),
+    codexAppServer: { orchestratorApproval: approval === "supported"
+      ? { status: "supported" }
+      : { status: "unsupported", failure: "Update the Codex CLI for granular approvals." } },
+  });
+
+  // Every axis the two advertisements could depend on. The additive launch adds Wollipog's MCP
+  // entry and the instructions to the ordinary launch and injects no sandbox, approval, or reviewer
+  // setting, so `provisionAgentControl` accepts it for a native Codex installation on the host
+  // whatever the platform, the runner's execution isolation, or the granular-approval probe says.
+  // The coupled preset needs both, and this change leaves that answer exactly as it was.
+  for (const driver of ["codex", "codex-app-server"] as const) {
+    for (const platform of ["linux", "darwin", "win32"] as const) {
+      for (const isolationMode of ["provider", "bwrap", "seatbelt", "windows-job"] as const) {
+        for (const approval of ["supported", "unsupported"] as const) {
+          const where = `${driver} ${platform} ${isolationMode} approval=${approval}`;
+          const [advertised] = withOrchestratorAdditiveRole(
+            withOrchestratorPreset([codex(driver, approval)], { platform, isolationMode }),
+          );
+          assert.equal(advertised!.capabilities?.orchestratorAdditive, true,
+            `the additive role is advertised: ${where}`);
+          assert.equal(advertisesOrchestratorAdditiveRole(driver, advertised!.capabilities), true, where);
+          assert.equal(
+            advertised!.capabilities?.permissionModes?.includes("orchestrator"),
+            approval === "supported" && (platform === "linux" || platform === "darwin"),
+            `the coupled preset keeps its granular-approval and audited-sandbox preconditions: ${where}`,
+          );
+          assert.deepEqual(advertised!.capabilities?.permissionModes?.slice(0, 2), ["on-request", "never"],
+            `the ordinary permission modes are untouched: ${where}`);
+        }
+      }
+    }
+  }
+
+  // The conditions the additive launch genuinely does impose are still enforced.
+  const wsl: AgentDefinition = {
+    ...codex("codex", "supported"), context: { kind: "wsl", distro: "Ubuntu" },
+  };
+  assert.equal(
+    withOrchestratorAdditiveRole(withOrchestratorPreset([wsl], { platform: "linux", isolationMode: "bwrap" }))[0]!
+      .capabilities?.orchestratorAdditive,
+    undefined,
+    "the additive Codex launch still requires native host execution",
+  );
+  const undiscovered: AgentDefinition = { ...codex("codex", "supported"), capabilities: undefined };
+  assert.equal(
+    withOrchestratorAdditiveRole([undiscovered])[0]!.capabilities?.orchestratorAdditive,
+    undefined,
+    "an installation with no discovered capabilities advertises nothing",
+  );
 });
 
 test("projectOrchestratorPresetForPeer keeps the additive role advertisement", () => {

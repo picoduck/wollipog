@@ -255,6 +255,64 @@ for (const scenario of [
   { name: "desktop light", viewport: { width: 1280, height: 1000 }, theme: "light" },
   { name: "mobile dark", viewport: { width: 390, height: 844 }, theme: "dark" },
 ] as const) {
+  test(`Codex offers the additive Orchestrator role without its audited sandbox ${scenario.name}`, async ({ page }, testInfo) => {
+    await page.setViewportSize(scenario.viewport);
+    await page.evaluate(({ theme, protocolVersion }) => {
+      document.documentElement.dataset.theme = theme;
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(protocolVersion);
+      // A current Codex installation on a platform without Codex's audited sandbox (#1308). The
+      // runner attests the additive role, whose launch injects no sandbox, approval, or reviewer
+      // setting, and correctly withholds the coupled preset's "orchestrator" permission mode.
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.setOrchestratorAgentFixture({
+        context: "native",
+        permissionModes: ["untrusted", "on-request"],
+        driver: "codex-app-server",
+        orchestratorAdditive: true,
+        controlPlaneRole: true,
+        os: "windows",
+      });
+    }, { theme: scenario.theme, protocolVersion: PROTOCOL_VERSION });
+    await page.getByRole("tab", { name: /Alpha/ }).click();
+    await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+    await page.getByRole("menuitem", { name: "New Session Here" }).click();
+    const dialog = page.getByRole("dialog", { name: "New Session" });
+    const providerPermissions = dialog.getByRole("group", { name: "Provider Permissions" });
+    const orchestratorCard = presetCard(dialog, /^Orchestrator/);
+    await expect(orchestratorCard).not.toHaveAttribute("aria-disabled", "true");
+    await orchestratorCard.click();
+    await expect(orchestratorCard).toHaveAttribute("aria-checked", "true");
+    await expect(providerPermissions).toContainText("Harness Default");
+    await expect(providerPermissions).not.toContainText("Orchestrator Preset");
+    // Parity with a normal Codex session here, not a new boundary: no platform sentence is shown,
+    // because the additive launch has no platform condition to state a reason for.
+    await expect(dialog.getByText(/Provider-mode orchestration requires/)).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "Create Session" })).toBeEnabled();
+    await providerPermissions.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath("codex-additive-without-audited-sandbox.png"), fullPage: true });
+
+    // The preset's own precondition is untouched, so Strict Project Isolation still blocks here.
+    await dialog.getByRole("button", { name: /Strict Project Isolation: Disabled/ }).click();
+    await dialog.getByRole("option", { name: /^Enabled/ }).click();
+    const blocked = dialog.getByText(/Strict Project Isolation is delivered by the Orchestrator preset, which this agent installation cannot launch here/);
+    await expect(blocked).toBeVisible();
+    await blocked.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath("codex-strict-blocked-without-audited-sandbox.png"), fullPage: true });
+    await expect(dialog.getByRole("button", { name: "Create Session" })).toBeDisabled();
+
+    await dialog.getByRole("button", { name: /Strict Project Isolation: Enabled/ }).click();
+    await dialog.getByRole("option", { name: /^Disabled/ }).click();
+    await dialog.getByRole("button", { name: "Create Session" }).click();
+    await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
+      .toMatchObject({ role: "orchestrator" });
+    expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()?.config?.permissionMode))
+      .toBeUndefined();
+  });
+}
+
+for (const scenario of [
+  { name: "desktop light", viewport: { width: 1280, height: 1000 }, theme: "light" },
+  { name: "mobile dark", viewport: { width: 390, height: 844 }, theme: "dark" },
+] as const) {
   test(`Integration Isolation is its own disclosed control ${scenario.name}`, async ({ page }, testInfo) => {
     await page.setViewportSize(scenario.viewport);
     await page.evaluate(({ theme, protocolVersion }) => {

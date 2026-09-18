@@ -573,26 +573,40 @@ export function NewSessionDialog({
             (runner?.os === "macos" && runner?.runtime?.executionIsolation?.mode === "seatbelt")
           : false
   )));
-  // Pi (#1294) has no non-strict coupled-preset shape, so the server admits a non-strict Pi
-  // Orchestrator only through the additive role. Read the runner's own attestation of that role
-  // rather than `agent.piAgentControl`, which `agentsForControlPlane` deliberately clears before
-  // publishing and the control-plane database never persists — so it is always absent here.
-  const piAdditiveExecutionAvailable = agent?.driver === "pi" && agentOffersAdditiveRole &&
-    orchestratorPresetPermissionsReason({
-      controlPlaneSupportsRole: orchestratorRoleSupported,
-      runnerProtocolVersion: runner?.protocolVersion,
-      driver: "pi",
-      contextKind: orchestratorContext,
-      hostExecutionTarget,
-      nativeTui: launchSurface === "native_tui",
-      strictProjectIsolation: false,
-      savedOrchestratorDefault,
-    }) === undefined;
+  // Which shape a non-strict Orchestrator would actually launch with. `orchestratorPresetReason`
+  // below asks the same question for the draft's own isolation setting; this one forces Strict
+  // Project Isolation off, because that is the only setting under which the availability derived
+  // from it is consulted, and the two non-strict shapes have genuinely different preconditions.
+  const nonStrictPresetPermissions = orchestratorPresetPermissionsReason({
+    controlPlaneSupportsRole: orchestratorRoleSupported,
+    runnerProtocolVersion: runner?.protocolVersion,
+    driver: agent?.driver ?? "acp",
+    contextKind: orchestratorContext,
+    hostExecutionTarget,
+    nativeTui: launchSurface === "native_tui",
+    strictProjectIsolation: false,
+    savedOrchestratorDefault,
+  }) !== undefined;
   const providerExecutionAvailable = executionPolicySupported && orchestratorContext === "native" &&
-    (["codex", "codex-app-server", "claude-code"].includes(agent?.driver ?? "acp") ||
-      piAdditiveExecutionAvailable) &&
-    (agent?.driver !== "codex" && agent?.driver !== "codex-app-server" ||
-      runner?.os === "linux" || runner?.os === "macos") &&
+    (nonStrictPresetPermissions
+      // The non-strict COUPLED preset. It requires the PRESET advertisement, because a preset launch
+      // submits `permissionMode: "orchestrator"` and the control plane refuses that mode from an
+      // installation that does not advertise it. The two advertisements diverge for real since
+      // #1308 — a Codex CLI without granular approvals now offers the additive role and not the
+      // preset — so reading the additive one here would submit a launch creation answers with 409.
+      // Pi (#1294) has no non-strict preset shape at all, and Codex's preset still forces
+      // `sandbox_mode="workspace-write"`, which is audited on Linux and macOS only.
+      ? agentOffersOrchestratorPreset &&
+        ["codex", "codex-app-server", "claude-code"].includes(agent?.driver ?? "acp") &&
+        (agent?.driver === "claude-code" || runner?.os === "linux" || runner?.os === "macos")
+      // The ADDITIVE role: exactly the runner's own attestation, which is also what the control
+      // plane checks, so the dialog cannot offer a launch creation refuses. Read that attestation
+      // rather than `agent.piAgentControl`, which `agentsForControlPlane` deliberately clears
+      // before publishing and the control-plane database never persists. It carries no platform
+      // condition for Codex (#1308): the additive launch injects no sandbox, approval, or reviewer
+      // setting, so the session keeps whatever its selected permission mode gives a normal Codex
+      // session on that platform.
+      : agentOffersAdditiveRole) &&
     (agent?.driver !== "claude-code" ||
       (agent.capabilities?.supportsApprovals === true &&
         agent.capabilities.permissionModes?.includes("default") === true));

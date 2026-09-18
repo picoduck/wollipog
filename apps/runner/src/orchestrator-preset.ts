@@ -251,11 +251,14 @@ export function withOrchestratorPreset(
  *
  * This sets `orchestratorAdditive` exactly when `provisionAgentControl` would accept the additive
  * launch: an additive-capable driver, a native context, and the per-harness precondition.
+ *
+ * No host platform or execution-isolation argument is taken, because no branch below needs one
+ * (#1308). Both remaining per-harness preconditions — Pi's verified bridge and Claude's approval
+ * channel — are properties of the installation, and `provisionAgentControl` imposes no platform
+ * condition on any additive launch: the platform rules it does have belong to Strict Project
+ * Isolation, which the additive role never enables.
  */
-export function withOrchestratorAdditiveRole(
-  agents: AgentDefinition[],
-  host: { platform?: NodeJS.Platform; isolationMode?: OrchestratorIsolationMode } = {},
-): AgentDefinition[] {
+export function withOrchestratorAdditiveRole(agents: AgentDefinition[]): AgentDefinition[] {
   return agents.map((agent) => {
     const driver = agent.driver ?? "acp";
     // WSL and every other non-native context is excluded: the additive launch requires host
@@ -274,11 +277,29 @@ export function withOrchestratorAdditiveRole(
       supported = agent.capabilities.supportsApprovals === true &&
         agent.capabilities.permissionModes?.includes("default") === true;
     } else {
-      // Codex keeps today's effective requirement — the preset advertisement conditions, which
-      // include the granular-approval capability and the audited sandbox. Codex's additive role
-      // does not strictly need either; widening it is deliberately out of scope for #1294.
-      supported = agent.codexAppServer?.orchestratorApproval?.status === "supported" &&
-        supportsNativeOrchestratorBoundary(driver, host.platform ?? process.platform, host.isolationMode);
+      // Codex and Codex App Server. Nothing further: `additiveOrchestratorLaunchArgs` adds only
+      // Wollipog's MCP entry and the instructions, so `provisionAgentControl` accepts this launch
+      // for any additive-capable Codex installation running natively on the host (#1308).
+      //
+      // The two conditions this branch used to carry are the COUPLED preset's, and only the
+      // preset's. Granular approval support is what lets the preset impose its fixed
+      // `approval_policy` reviewed by Guardian; the audited Linux or macOS sandbox is what makes
+      // the preset's forced `sandbox_mode="workspace-write"` enforceable. The additive launch
+      // injects neither setting, so neither is a precondition of it: on any other platform the
+      // session runs with whatever sandbox and approval behavior its selected permission mode
+      // already gives a normal Codex session. That is parity with a normal session, not a new
+      // boundary, so there is no platform restriction left to state a reason for.
+      //
+      // `withOrchestratorPreset` above is untouched and still withdraws the coupled preset's
+      // permission mode in both of those cases.
+      //
+      // One launch-argument-level refusal is deliberately NOT mirrored here: a definition whose own
+      // arguments already claim the reserved `mcp_servers.wollipog` name is refused by
+      // `provisionAgentControl` with an exact rename instruction. Withdrawing the advertisement
+      // would replace that actionable message with a generic "this installation does not offer the
+      // role", and the same asymmetry already exists for Pi, whose exact-argument identity check is
+      // likewise not re-derived from the catalog definition.
+      supported = true;
     }
     if (!supported) return agent;
     return { ...agent, capabilities: { ...agent.capabilities, orchestratorAdditive: true } };

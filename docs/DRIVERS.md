@@ -134,7 +134,9 @@ The Orchestrator role is advertised separately from optional Strict Project Isol
 native Claude Code is eligible, including on Windows, only when discovery proves interactive Default
 approval support and the session-scoped management tools are available. It keeps ordinary provider
 edit and shell permissions, approval routing, and governance; this does not claim an OS read-only
-filesystem boundary. Native Codex remains limited to platforms with its audited provider sandbox.
+filesystem boundary. The Codex drivers' *coupled preset* remains limited to platforms with Codex's
+audited provider sandbox, because that preset forces `sandbox_mode="workspace-write"`; their
+additive role does not (see the v162 section below).
 
 Since protocol v160 the role is also independent of the provider permission mode
 (`CreateSessionRequest.role`, ADR 0008). A non-strict native Claude Code Orchestrator with an
@@ -160,6 +162,18 @@ session, exactly as today's coupled preset already does. Strict Project Isolatio
 restricted Codex preset and its MCP isolation probe. Each harness carries its own capability gate:
 `orchestratorAdditiveRole` (v160) for Claude Code, `orchestratorAdditiveCodex` (v162) for the Codex
 drivers; creation and restart refuse a combination the runner cannot enforce, naming the version.
+
+The additive Codex advertisement is independent of the preset's preconditions (ADR 0012, #1308). The
+runner publishes `capabilities.orchestratorAdditive` for any native Codex or Codex App Server
+installation on the host, whatever the platform, the runner's execution isolation, or the
+granular-approval probe reports — those two are what the coupled preset needs to impose its fixed
+`approval_policy` and its forced sandbox, and the additive launch injects neither setting. Creation
+and restart apply the audited Linux-or-macOS sandbox rule only to the coupled preset. On a platform
+without that sandbox an additive Codex Orchestrator runs with exactly the sandbox and approval
+behaviour its selected permission mode gives a normal Codex session there: parity with a normal
+session, not a new boundary, and no platform restriction remains on the additive launch to state a
+reason for. `withOrchestratorPreset` is untouched and still withholds the preset's permission mode
+in both cases.
 
 Protocol v163 extends the additive role to native Pi (ADR 0010), gated by `orchestratorAdditivePi`.
 A non-strict Pi Orchestrator keeps its selected permission mode, extensions, skills, prompt
