@@ -118,6 +118,13 @@ export function integrationIsolationDisclosure(driver: AgentDriverKind | undefin
   };
 }
 
+/** What a coupled Orchestrator preset launch carries. The preset replaces the provider surface
+ * rather than trimming it, so the additive per-harness disclosure above would overstate what is
+ * kept: the preset also fixes the tool inventory and disables every MCP server but Wollipog's,
+ * including ones the agent definition declares. */
+export const ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE =
+  "This session uses the harness-owned Orchestrator preset, which replaces the provider surface: Wollipog's management tools are the only integration, and the preset also fixes the tool inventory and approval behavior.";
+
 /**
  * Whether the CONTROL PLANE understands the Integration Isolation policy at all.
  *

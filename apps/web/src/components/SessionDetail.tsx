@@ -48,7 +48,7 @@ import { isPartialHistory, isRebuiltEventsArray, useStoreActions, useStoreSelect
 import { relativeTime, shortenPath, titleCaseLabel } from "../format.js";
 import { agentHarnessIdentityLabel } from "../agent-presentation.js";
 import { runnerDisplay } from "../runners.js";
-import { integrationIsolationDisclosure } from "../session-preset-defaults.js";
+import { integrationIsolationDisclosure, ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE } from "../session-preset-defaults.js";
 import { DirectoryPicker } from "./DirectoryPicker.js";
 import { type TimelineItem } from "../timeline.js";
 import { useTimeline } from "./useTimeline.js";
@@ -6603,8 +6603,13 @@ export function ComposerPlusMenu({
                         const enabled = session.orchestratorPolicy!.execution?.integrationIsolation ??
                           (usesOrchestratorPresetPermissions(session) ||
                             (session.orchestratorPolicy!.execution?.strictProjectIsolation ?? true));
+                        // A preset launch is not the additive launch minus integrations, so it
+                        // gets its own sentence instead of the per-harness "kept" list.
                         const copy = integrationIsolationDisclosure(session.driver);
-                        return <div title={enabled ? `${copy.removed} ${copy.kept}` : undefined}>
+                        const disclosure = usesOrchestratorPresetPermissions(session)
+                          ? ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE
+                          : `${copy.removed} ${copy.kept}`;
+                        return <div title={enabled ? disclosure : undefined}>
                           <dt>Integration Isolation</dt>
                           <dd>{enabled ? "Enabled" : "Disabled"}<small>{titleCaseLabel(
                             (session.orchestratorPolicy!.sources.execution?.integrationIsolation ?? "legacy_session")

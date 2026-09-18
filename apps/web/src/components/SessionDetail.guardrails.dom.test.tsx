@@ -776,6 +776,12 @@ test("a legacy campaign payload derives Integration Isolation from the preset be
     assert.match(row(), /^Enabled/,
       "a non-strict coupled preset removed integrations, so strictness must not be read first");
     assert.match(row(), /Legacy Session/, "and the derived value is attributed as legacy provenance");
+    const disclosure = () => [...container.querySelectorAll("dt")]
+      .find((node) => node.textContent === "Integration Isolation")!.parentElement!.getAttribute("title") ?? "";
+    // A preset launch replaces the provider surface, so it must not borrow the additive launch's
+    // "kept" list: a Claude preset keeps neither configured hooks' settings sources nor any MCP server.
+    assert.match(disclosure(), /harness-owned Orchestrator preset/);
+    assert.doesNotMatch(disclosure(), /are all kept|are kept/);
 
     // An additive legacy session is the opposite: ordinary provider mode, integrations intact.
     await open("acceptEdits", false);
@@ -783,6 +789,9 @@ test("a legacy campaign payload derives Integration Isolation from the preset be
     // A strict legacy session is Enabled through the boundary rather than the preset literal.
     await open("acceptEdits", true);
     assert.match(row(), /^Enabled/);
+    // An additive-shaped session keeps the per-harness disclosure.
+    assert.match(disclosure(), /Removes configured MCP servers/);
+    assert.doesNotMatch(disclosure(), /harness-owned Orchestrator preset/);
   } finally {
     await act(async () => root.unmount());
     container.remove();
