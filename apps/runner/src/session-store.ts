@@ -254,7 +254,14 @@ export interface SessionMeta {
   /** Runner-owned copy used to resume an adopted Pi conversation without loading, migrating, or
    * appending to the external CLI's original JSONL file. The path is runner-local and is never
    * projected in SessionSnapshot. */
-  adoptedProviderState?: { driver: "pi"; sessionDir: string };
+  adoptedProviderState?: {
+    driver: "pi";
+    sessionDir: string;
+    /** Present only after a different-driver transition has committed and until the abandoned
+     * managed copy is removed. It preserves the copy's original execution context across crashes
+     * and context changes so cleanup remains safe and retryable. */
+    cleanupContext?: AgentContext;
+  };
   /** External Claude adoption must not run an unattended recovery turn until a user explicitly
    * continues it; this durable bit records that the manager may own later automatic recovery. */
   adoptedBackgroundRecoveryAuthorized?: boolean;

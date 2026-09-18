@@ -6003,6 +6003,138 @@ test("changing away from an adopted Pi driver removes its managed native transcr
   }
 });
 
+test("restart retries a committed managed Pi cleanup before launching", async () => {
+  const h = harness({
+    driver: "codex",
+    command: "codex",
+    agentSessionId: null,
+  });
+  const managedSessionDir = join(h.root, "resume-session", "pi-adopted-sessions");
+  mkdirSync(managedSessionDir, { recursive: true });
+  writeFileSync(join(managedSessionDir, "pi-session-persisted.jsonl"), "managed", "utf8");
+  h.store.patchMeta("resume-session", {
+    adoptedProviderState: {
+      driver: "pi",
+      sessionDir: managedSessionDir,
+      cleanupContext: { kind: "native" },
+    },
+  });
+  try {
+    assert.equal(await h.manager.start({ ...launchSpec(h.root), driver: "codex" }), true);
+    assert.equal(existsSync(managedSessionDir), false);
+    assert.equal(h.store.readMeta("resume-session")?.adoptedProviderState, undefined);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("failed managed Pi cleanup retains its original context for retry", async () => {
+  const h = harness({
+    agentId: "pi",
+    driver: "pi",
+    command: "pi",
+    agentSessionId: "pi-session-persisted",
+  });
+  const originalContext = { kind: "native" as const };
+  h.store.patchMeta("resume-session", {
+    adoptedProviderState: { driver: "pi", sessionDir: join(h.root, "unrecognized") },
+  });
+  try {
+    assert.equal(await h.manager.start({
+      ...launchSpec(h.root),
+      agentId: "codex-native",
+      driver: "codex",
+      command: "codex",
+      useWorktree: true,
+    }), false);
+    const persisted = h.store.readMeta("resume-session")!;
+    assert.equal(persisted.driver, "codex");
+    assert.equal(persisted.status, "stopped");
+    assert.equal(persisted.worktreePending, false);
+    assert.deepEqual(persisted.adoptedProviderState?.cleanupContext, originalContext);
+    const error = h.sent.find(
+      (message) => message.type === "session_event" && message.payload.kind === "error" &&
+        /managed Pi transcript cleanup failed/u.test(message.payload.message),
+    );
+    assert.ok(error);
+    h.manager.prompt("resume-session", "must not bypass pending cleanup");
+    await shortDelay();
+    await tick();
+    assert.equal(h.launches.length, 0);
+    const promptError = h.sent.findLast(
+      (message) => message.type === "session_event" && message.payload.kind === "error",
+    );
+    assert.ok(promptError && promptError.type === "session_event" && promptError.payload.kind === "error");
+    assert.match(promptError.payload.message, /Restart this session to retry cleanup/u);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("a superseding Pi restart preserves managed state before a driver switch commits", async () => {
+  const h = harness({
+    agentId: "pi",
+    driver: "pi",
+    command: "pi",
+    agentSessionId: "pi-session-persisted",
+  });
+  const managedSessionDir = join(h.root, "resume-session", "pi-adopted-sessions");
+  mkdirSync(managedSessionDir, { recursive: true });
+  writeFileSync(join(managedSessionDir, "pi-session-persisted.jsonl"), "managed", "utf8");
+  h.store.patchMeta("resume-session", {
+    args: ["--session-dir", managedSessionDir],
+    adoptedProviderState: { driver: "pi", sessionDir: managedSessionDir },
+  });
+  const lane = h.manager as unknown as {
+    runWorktreeOperation: <T>(sessionId: string, operation: () => Promise<T>) => Promise<T>;
+  };
+  const originalLane = lane.runWorktreeOperation.bind(h.manager);
+  const transitionReached = deferred<void>();
+  const releaseTransition = deferred<void>();
+  let laneCalls = 0;
+  lane.runWorktreeOperation = async (sessionId, operation) => {
+    laneCalls++;
+    if (laneCalls === 2) {
+      transitionReached.resolve();
+      await releaseTransition.promise;
+    }
+    return originalLane(sessionId, operation);
+  };
+  try {
+    const abandonedSwitch = h.manager.start({
+      ...launchSpec(h.root),
+      agentId: "codex-native",
+      driver: "codex",
+      command: "codex",
+    });
+    await transitionReached.promise;
+    const winningRestart = h.manager.start({
+      ...launchSpec(h.root),
+      agentId: "pi",
+      driver: "pi",
+      command: "pi",
+    });
+    assert.equal(await winningRestart, true);
+    releaseTransition.resolve();
+    assert.equal(await abandonedSwitch, false);
+
+    assert.equal(existsSync(managedSessionDir), true);
+    assert.equal(h.launches.length, 1);
+    assert.equal(h.launches[0]?.kind, "pi");
+    assert.equal(h.launches[0]?.options.resumeId, "pi-session-persisted");
+    assert.deepEqual(h.store.readMeta("resume-session")?.adoptedProviderState, {
+      driver: "pi",
+      sessionDir: managedSessionDir,
+    });
+  } finally {
+    releaseTransition.resolve();
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("explicit restart keeps legacy exec Codex fresh while its process-loss resume path stays unchanged", async () => {
   const h = harness({ driver: "codex", agentSessionId: "exec-thread", tokensIn: 40, tokensOut: 10 });
   try {
