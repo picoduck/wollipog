@@ -782,11 +782,7 @@ function guardStateCandidates(path: string, cwd: string): string[] {
  * two: a walk that descends no further than that names the directory at most, and never enumerates
  * what is in it.
  */
-export type GuardStateRelation = { kind: "inside" } | { kind: "ancestor"; separation: number };
-
-function pathComponents(path: string): number {
-  return normalize(path).split(sep).filter((part) => part && part !== ".").length;
-}
+export type GuardStateRelation = { kind: "inside" } | { kind: "ancestor" };
 
 /**
  * Where a spelling sits relative to the guard-state directory, or `null` when the two are
@@ -801,18 +797,16 @@ export function guardStateRelation(
   if (!directory || !path || path.includes("\0")) return null;
   const root = resolve(directory);
   let realRoot: string | null = null;
-  const separations: number[] = [];
+  let ancestor = false;
   for (const resolved of guardStateCandidates(path, cwd)) {
     if (pathContains(root, resolved)) return { kind: "inside" };
-    if (pathContains(resolved, root)) separations.push(pathComponents(root) - pathComponents(resolved));
+    if (pathContains(resolved, root)) ancestor = true;
     realRoot ??= canonicalPath(root);
     const realResolved = canonicalPath(resolved);
     if (pathContains(realRoot, realResolved)) return { kind: "inside" };
-    if (pathContains(realResolved, realRoot)) {
-      separations.push(pathComponents(realRoot) - pathComponents(realResolved));
-    }
+    if (pathContains(realResolved, realRoot)) ancestor = true;
   }
-  return separations.length === 0 ? null : { kind: "ancestor", separation: Math.min(...separations) };
+  return ancestor ? { kind: "ancestor" } : null;
 }
 
 /** A path is out of bounds when it is inside the guard-state directory, or contains it. */
@@ -826,17 +820,21 @@ export function pathTargetsGuardState(path: string, cwd: string, directory: stri
  * Refusing every operand that CONTAINS the hook directory also refused `ls /home` and a listing of
  * the home directory in every session whose data directory lives under it (#1334), though neither
  * reads anything the guard owns. The carve-out below is deliberately narrow and fails closed: an
- * operand that is a strict ancestor is allowed only when the WHOLE command is recognisable as
- * bounded inspection of directories, and everything this classifier cannot model keeps the refusal.
- * A recursive removal or a recursive search rooted at an ancestor is refused as before.
+ * operand that is a strict ancestor is allowed only for `ls` without a recursive option, `du`, and
+ * `stat`, and only when the WHOLE command is such an inspection and nothing else. A recursive
+ * removal or a recursive search rooted at an ancestor is refused as before.
+ *
+ * `find` is deliberately NOT here, though #1334 lists `find -maxdepth 1` among the commands that
+ * should be allowed. Supporting it means arithmetic on how far a walk may descend before it reaches
+ * the hook directory, and three of the bypasses found while reviewing this change came out of that
+ * arithmetic. The remaining commands need no depth reasoning at all: none of them descends. A
+ * depth-bounded `find` is worth its own change, with that arithmetic as the whole subject.
  *
  * What disqualifies a command, and why each one has to:
  *
  * - Every command in the list has to be an inspection, not merely the one holding the operand. The
  *   shell carries state across `;` and `&&`: `hash -p /bin/rm ls; ls -rf <ancestor>` runs `rm`, and
- *   a bare `PATH=` assignment or a function definition rebinds a later name the same way. Each one
- *   is judged against the ancestor IT names, so two `find`s at different depths in one list are
- *   each held to their own bound rather than to the tightest in the list.
+ *   a bare `PATH=` assignment or a function definition rebinds a later name the same way.
  * - Anything that routes one command's output into another, or nests a command inside another:
  *   `|`, `|&`, `( )`, `<( )`, `>( )`, a backtick, or an operator not modelled here. A listing piped
  *   into `xargs rm -rf` is not an inspection, and neither is a removal whose operand is a command
@@ -846,18 +844,15 @@ export function pathTargetsGuardState(path: string, cwd: string, directory: stri
  *   command of its own, and a backslash-newline would split `-R` into `-` and `R`.
  * - A redirection does NOT start a new command, so its target is kept out of the classification and
  *   is judged as a location only. Treating it as a command word let a leading `>ls` pass a removal
- *   off as an `ls`. An IO number belongs to the redirection that follows it, not to the command.
+ *   off as an `ls`. A LEADING IO number belongs to the redirection that follows it.
  * - A glob or brace metacharacter anywhere in the command: the shell expands `--recurs{ive,}` into
  *   `--recursive` long before this classifier would see it.
  * - A `NAME=value` assignment: a `PATH=` prefix decides what the command name resolves to.
  * - A command word that is not a bare name: `./ls` and `/tmp/ls` are whatever was planted there.
  * - An option word carrying a path, in any spelling. `du --exclude-from=<path>`, `-X<path>`, and
  *   `--files0-from=<path>` all OPEN that file, and an option's value is not an operand, so it is
- *   not compared against the guard state. No bounded inspection needs a path inside an option.
- *
- * A command that names no ancestor of its own is judged against the WORKING DIRECTORY, which is
- * where an operand-less `find` starts. That can sit closer to the guard state than anything the
- * command list names.
+ *   not compared against the guard state. No inspection needs a path inside an option.
+ * - A working directory inside the guard state, since a command with no operand acts there.
  *
  * It over-refuses where the safe direction is to do so. A short-option cluster is scanned for `R`
  * without modelling which options take an attached value, so GNU's `ls -IREADME` reads as recursive
@@ -873,14 +868,6 @@ export function pathTargetsGuardState(path: string, cwd: string, directory: stri
 const SEGMENT_SEPARATORS = new Set([";", ";;", "&&", "||", "&"]);
 /** Operators that attach a target to the CURRENT command rather than starting a new one. */
 const REDIRECTIONS = new Set([">", ">>", "<", ">&"]);
-/**
- * `find` options and actions that walk, act on what they find, or read a directory's entries
- * without regard to `-maxdepth`. `-empty` is here because deciding a directory is empty means
- * opening it, which at the bound would read the hook directory itself.
- */
-const FIND_UNBOUNDED_WORDS = new Set([
-  "-L", "-follow", "-delete", "-empty", "-exec", "-execdir", "-ok", "-okdir",
-]);
 
 function tokenText(token: ShellToken): string | null {
   if (typeof token === "string") return token;
@@ -899,8 +886,8 @@ interface CommandSegment { operands: Array<string | null>; words: string[] | nul
 
 /**
  * Split a parsed command into segments, or `null` when it contains a construct this classifier does
- * not model — in which case nothing in it is bounded inspection and the caller refuses every
- * related operand, exactly as it did before #1334.
+ * not model — in which case nothing in it is an inspection and the caller refuses every related
+ * operand, exactly as it did before #1334.
  */
 function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null {
   const segments: CommandSegment[] = [];
@@ -931,8 +918,8 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
     }
     if (!REDIRECTIONS.has(op)) return null;
     // `2>file`: the IO number is a word of its own here, but it belongs to the redirection. Only a
-    // LEADING one is claimed: `shell-quote` drops the adjacency that separates `2>x` from a spaced
-    // numeric argument, and claiming that one ate the value of `-maxdepth`.
+    // LEADING one is claimed, because `shell-quote` drops the adjacency that separates `2>x` from
+    // an ordinary numeric argument.
     if (words !== null && words.length === 1 && previousWord !== null &&
         words[0] === previousWord && /^\d+$/u.test(previousWord)) words.pop();
     redirected = true;
@@ -951,26 +938,12 @@ function recursiveListing(word: string): boolean {
   return /^-[^-]/u.test(word) && word.includes("R");
 }
 
-/** The deepest level `find` visits, or `null` when the walk is unbounded or acts on what it finds. */
-function findWalkBound(words: readonly string[]): number | null {
-  let bound: number | null = null;
-  for (const [index, word] of words.entries()) {
-    if (FIND_UNBOUNDED_WORDS.has(word)) return null;
-    if (word !== "-maxdepth") continue;
-    const value = words[index + 1];
-    if (value === undefined || !/^\d+$/u.test(value)) return null;
-    bound = Math.max(bound ?? 0, Number(value));
-  }
-  return bound;
-}
-
 /**
- * Whether this segment merely inspects the directories it names, reaching no deeper than
- * `separation` components below them: it may name the hook directory, but must not enumerate what
- * is inside it. An empty segment — a stray separator, or a bare redirection — commands nothing and
- * can rebind nothing, so it qualifies vacuously.
+ * Whether this segment only inspects the directories it names, without enumerating what is inside
+ * them. An empty segment — a stray separator, or a bare redirection — commands nothing and can
+ * rebind nothing, so it qualifies vacuously.
  */
-function inspectsAncestorOnly(words: readonly string[], separation: number): boolean {
+function inspectsAncestorOnly(words: readonly string[]): boolean {
   if (words.length === 0) return true;
   // The shell expands these into words this classifier never sees.
   if (words.some((word) => /[*?[\]{}]/u.test(word))) return false;
@@ -988,10 +961,6 @@ function inspectsAncestorOnly(words: readonly string[], separation: number): boo
     case "du":
     case "stat":
       return true;
-    case "find": {
-      const bound = findWalkBound(words);
-      return bound !== null && bound <= separation;
-    }
     default:
       return false;
   }
@@ -1000,8 +969,8 @@ function inspectsAncestorOnly(words: readonly string[], separation: number): boo
 /**
  * Refuse a shell command that references the guard-state directory in any form. Unparsable input
  * is refused rather than allowed: this is the state the veto itself depends on. An operand that is
- * a strict ancestor of the directory is refused too, unless its command segment is bounded
- * inspection — see "Bounded inspection of an ancestor" above.
+ * a strict ancestor of the directory is refused too, unless the whole command is inspection — see
+ * "Bounded inspection of an ancestor" above.
  */
 export function commandTargetsGuardState(
   command: string,
@@ -1035,40 +1004,23 @@ export function commandTargetsGuardState(
     }
     return null;
   }
-  // Relate every operand first. `inside` refuses outright, and each segment keeps the tightest
-  // ancestor IT names, which is the depth its own walk has to respect. Classifying afterwards, once
-  // per segment, keeps a long command list linear rather than quadratic.
-  const bounds: Array<number | null> = [];
-  let tightest: number | null = null;
+  let namesAncestor = false;
   for (const { operands } of segments) {
-    let bound: number | null = null;
     for (const value of operands) {
       if (value === null) continue;
       const relation = guardStateRelation(value, cwd, root);
       if (relation === null) continue;
       if (relation.kind === "inside") return GUARD_STATE_REFUSAL;
-      bound = Math.min(bound ?? relation.separation, relation.separation);
+      namesAncestor = true;
     }
-    if (bound !== null) tightest = Math.min(tightest ?? bound, bound);
-    bounds.push(bound);
   }
-  if (tightest === null) return null;
-  // A command that names no ancestor of its own still acts SOMEWHERE: `find` with no path searches
-  // the working directory, which no operand mentions. That directory, not the tightest operand in
-  // the list, is the depth such a command has to respect — it can sit closer to the guard state
-  // than anything named, which is how `ls /; find -maxdepth 3` reached the hook directory. From
-  // inside the guard state there is no bounded form at all.
-  const here = guardStateRelation(cwd, cwd, root);
-  const implicit = here === null
-    ? Number.POSITIVE_INFINITY
-    : here.kind === "inside" ? null : here.separation;
+  if (!namesAncestor) return null;
+  // A command with no operand acts on the working directory, so from inside the guard state there
+  // is no inspection-only form of one.
+  if (guardStateRelation(cwd, cwd, root)?.kind === "inside") return GUARD_STATE_REFUSAL;
   // Every command in the list has to be an inspection, not only the ones naming an ancestor: an
   // earlier `hash -p`, `PATH=`, or function definition decides what a later `ls` runs.
-  const inspection = segments.every(({ words }, index) => {
-    if (words === null) return false;
-    const bound = bounds[index] ?? implicit;
-    return bound !== null && inspectsAncestorOnly(words, bound);
-  });
+  const inspection = segments.every(({ words }) => words !== null && inspectsAncestorOnly(words));
   return inspection ? null : GUARD_STATE_REFUSAL;
 }
 

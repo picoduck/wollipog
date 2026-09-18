@@ -633,9 +633,6 @@ test("a directory that merely contains the guard state can be inspected without 
     `ls /`,
     `du -sh ${home}`,
     `stat ${data}`,
-    `find ${home} -maxdepth 1 -type d`,
-    // A bound that stops above the hook directory is fine even from its own parent.
-    `find ${data} -maxdepth 1`,
     // A list of inspections is still an inspection; a stray separator commands nothing.
     `ls ${home} && du -sh ${home}`,
     `ls ${home}; stat ${data}`,
@@ -645,10 +642,6 @@ test("a directory that merely contains the guard state can be inspected without 
     `ls ${home} > ${join(project, "listing.txt")}`,
     `ls ${home} 2>/dev/null`,
     `2>/dev/null ls ${home}`,
-    // A spaced numeric argument is not an IO number: this one is the depth bound.
-    `find ${home} -maxdepth 2 > ${join(project, "listing.txt")}`,
-    // Each command is held to the ancestor IT names, not to the tightest one in the list.
-    `find ${home} -maxdepth 2; find ${data} -maxdepth 1`,
   ]) {
     assert.equal(commandTargetsGuardState(command, project, directory), null, command);
   }
@@ -673,12 +666,12 @@ test("recursive or unclassifiable work on an ancestor of the guard state stays r
     `ls -R ${home}`,
     `ls -laR ${home}`,
     `ls --recursive ${home}`,
-    // `find` without a depth bound, or with one deep enough to enumerate the hook directory.
+    // `find` is outside the carve-out altogether: bounding its walk needs depth arithmetic, which
+    // this change deliberately does not take on. Every form of it on an ancestor is refused.
+    `find ${home} -maxdepth 1`,
+    `find ${data} -maxdepth 1`,
     `find ${home} -name '*.json'`,
-    `find ${home} -maxdepth 3`,
-    `find ${data} -maxdepth 2`,
     `find ${home} -maxdepth 1 -delete`,
-    `find ${home} -maxdepth 1 -exec cat {} ;`,
     `find -L ${home} -maxdepth 1`,
     // An unexpanded variable could be a recursion flag or another operand.
     `ls $FLAGS ${home}`,
@@ -693,7 +686,7 @@ test("recursive or unclassifiable work on an ancestor of the guard state stays r
   }
   // The directory itself and everything in it stay refused for every command, inspection included.
   for (const command of [`ls ${directory}`, `du -sh ${directory}`, `stat ${directory}`,
-    `find ${directory} -maxdepth 1`]) {
+    `cat ${join(directory, "s1.protections.json")}`]) {
     assert.equal(commandTargetsGuardState(command, project, directory), GUARD_STATE_REFUSAL, command);
   }
 });
@@ -741,8 +734,6 @@ test("a command cannot launder itself into the ancestor carve-out", (t) => {
     `PATH=${project}; ls ${home}`,
     `ls ${home} && echo done`,
     `cd ${project} && ls ${home}`,
-    // Deciding a directory is empty means opening it, which at the bound is the hook directory.
-    `find ${home} -maxdepth 2 -empty`,
     // An option carrying a path OPENS that file without ever naming it as an operand.
     `du --exclude-from=../.wollipog-data/hooks/s1.protections.json ${home}`,
     `du -X../.wollipog-data/hooks/s1.protections.json ${home}`,
@@ -759,37 +750,31 @@ test("a command cannot launder itself into the ancestor carve-out", (t) => {
 test("a command with no operand is judged against the directory it would run in", (t) => {
   const home = mkdtempSync(join(tmpdir(), "wollipog-guard-home-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
-  const data = join(home, ".wollipog-data");
-  const directory = join(data, "hooks");
+  const directory = join(home, ".wollipog-data", "hooks");
   mkdirSync(directory, { recursive: true });
   const elsewhere = mkdtempSync(join(tmpdir(), "wollipog-guard-away-"));
   t.after(() => rmSync(elsewhere, { recursive: true, force: true }));
-  // From the home directory the hook directory is two components down, so a walk that deep or
-  // deeper enumerates it even though the only operand named is the filesystem root.
-  assert.equal(commandTargetsGuardState("ls /; find -maxdepth 3", home, directory), GUARD_STATE_REFUSAL);
-  assert.equal(commandTargetsGuardState("ls /; find -maxdepth 2", data, directory), GUARD_STATE_REFUSAL);
-  // At or above that depth the walk names the hook directory without entering it.
-  assert.equal(commandTargetsGuardState("ls /; find -maxdepth 1", home, directory), null);
-  assert.equal(commandTargetsGuardState("ls /; find -maxdepth 2", home, directory), null);
-  // From a working directory that is not an ancestor at all, the same walk reaches nothing.
-  assert.equal(commandTargetsGuardState(`ls ${home}; find -maxdepth 999`, elsewhere, directory), null);
-  // From INSIDE the guard state there is no bounded form of an operand-less command.
+  // From INSIDE the guard state there is no inspection-only form of an operand-less command: the
+  // bare `ls` lists the hook directory, and the bare `du` walks it.
   assert.equal(commandTargetsGuardState(`ls ${home}; ls`, directory, directory), GUARD_STATE_REFUSAL);
   assert.equal(commandTargetsGuardState(`ls ${home}; du`, directory, directory), GUARD_STATE_REFUSAL);
+  // From anywhere else the same list is an inspection of an ancestor and nothing more.
+  assert.equal(commandTargetsGuardState(`ls ${home}; ls`, elsewhere, directory), null);
+  assert.equal(commandTargetsGuardState(`ls ${home}; ls`, home, directory), null);
 });
 
 test("the reported home-directory listings are allowed while the file tools stay closed", () => {
   const directory = join(homedir(), ".wollipog-test-data", "hooks");
-  for (const command of ["ls ~", "ls -la ~/", "ls /", "du -sh ~", "stat ~", "find ~ -maxdepth 1"]) {
+  for (const command of ["ls ~", "ls -la ~/", "ls /", "du -sh ~", "stat ~"]) {
     assert.equal(commandTargetsGuardState(command, WORKTREE, directory), null, command);
   }
-  for (const command of ["rm -rf ~", "grep -r secret ~", "find ~ -maxdepth 3", "ls -R ~"]) {
+  for (const command of ["rm -rf ~", "grep -r secret ~", "find ~ -maxdepth 1", "ls -R ~"]) {
     assert.equal(commandTargetsGuardState(command, WORKTREE, directory), GUARD_STATE_REFUSAL, command);
   }
   // The path-level predicate is unchanged: an ancestor is still "related", and the file tools,
   // which have no notion of a bounded walk, keep failing closed on it.
   assert.equal(pathTargetsGuardState("~", WORKTREE, directory), true);
-  assert.deepEqual(guardStateRelation("~", WORKTREE, directory), { kind: "ancestor", separation: 2 });
+  assert.deepEqual(guardStateRelation("~", WORKTREE, directory), { kind: "ancestor" });
   assert.deepEqual(guardStateRelation(join(directory, "s1.protections.json"), WORKTREE, directory),
     { kind: "inside" });
   assert.equal(guardStateRelation("~/projects/readme.md", WORKTREE, directory), null);
@@ -799,7 +784,7 @@ test("the guard hook allows an ancestor listing and still refuses an ancestor sw
   const f = fixture();
   t.after(f.cleanup);
   const above = dirname(f.dir);
-  for (const command of [`ls ${above}`, `du -sh ${above}`, `stat ${above}`, `find ${above} -maxdepth 1`]) {
+  for (const command of [`ls ${above}`, `du -sh ${above}`, `stat ${above}`]) {
     assert.deepEqual(
       runManagedWorktreeGuardDecision(hookInput({ tool_input: { command } }), f.protectionsFile),
       { stdout: "", stderr: "", exitCode: 0 },
@@ -807,7 +792,7 @@ test("the guard hook allows an ancestor listing and still refuses an ancestor sw
     );
   }
   for (const command of [`rm -rf ${above}`, `ls -R ${above}`, `grep -r x ${above}`,
-    `find ${above} -maxdepth 2`]) {
+    `find ${above} -maxdepth 1`]) {
     const outcome = runManagedWorktreeGuardDecision(hookInput({ tool_input: { command } }), f.protectionsFile);
     assert.ok(outcome.stdout.includes(GUARD_STATE_REFUSAL), `refused: ${command}`);
   }
@@ -830,17 +815,16 @@ test("a long list of inspections is classified in linear time", () => {
   assert.ok(large / small < 25, `12x the input took ${(large / small).toFixed(1)}x the time`);
 });
 
-test("every ancestor is separated by its own depth, and every descendant is inside", () => {
+test("every strict ancestor is an ancestor, and every descendant is inside", () => {
   const segment = fc.constantFrom("a", "b", "state", "data", "hooks");
   const trunk = fc.array(segment, { minLength: 1, maxLength: 5 });
   const cwd = "/wollipog-fc-cwd";
   fc.assert(fc.property(trunk, fc.nat({ max: 5 }), fc.nat({ max: 5 }), (tail, cut, extra) => {
     const root = ["/wollipog-fc-root", ...tail].join("/");
-    // A strict ancestor: the root with `depth` trailing components removed.
     const depth = 1 + (cut % tail.length);
     const ancestor = ["/wollipog-fc-root", ...tail.slice(0, tail.length - depth)].join("/") || "/";
-    assert.deepEqual(guardStateRelation(ancestor, cwd, root), { kind: "ancestor", separation: depth },
-      `${ancestor} is ${depth} above ${root}`);
+    assert.deepEqual(guardStateRelation(ancestor, cwd, root), { kind: "ancestor" },
+      `${ancestor} contains ${root}`);
     assert.deepEqual(guardStateRelation(root, cwd, root), { kind: "inside" });
     const descendant = [root, ...Array.from({ length: extra }, (_, index) => `deep${index}`)].join("/");
     assert.deepEqual(guardStateRelation(descendant, cwd, root), { kind: "inside" }, descendant);
@@ -850,25 +834,24 @@ test("every ancestor is separated by its own depth, and every descendant is insi
   }));
 });
 
-test("a bounded inspection never reaches into the guard state, whatever the command", () => {
+test("an inspection never reaches into the guard state, whatever the command", () => {
   const root = "/wollipog-fc-root/data/hooks";
   const cwd = "/wollipog-fc-cwd";
   const ancestors = fc.constantFrom("/wollipog-fc-root", "/wollipog-fc-root/data", "/");
-  const bounded = fc.constantFrom("ls", "ls -la", "du -sh", "stat");
-  const unbounded = fc.constantFrom("rm -rf", "rm -r", "grep -r pattern", "ls -R", "cp -r", "mv");
-  fc.assert(fc.property(bounded, ancestors, (prefix, target) => {
+  const inspection = fc.constantFrom("ls", "ls -la", "du -sh", "stat");
+  const reaching = fc.constantFrom("rm -rf", "rm -r", "grep -r pattern", "ls -R", "cp -r", "mv",
+    "find", "find -maxdepth 1");
+  fc.assert(fc.property(inspection, ancestors, (prefix, target) => {
     assert.equal(commandTargetsGuardState(`${prefix} ${target}`, cwd, root), null);
   }));
-  fc.assert(fc.property(unbounded, ancestors, (prefix, target) => {
+  fc.assert(fc.property(reaching, ancestors, (prefix, target) => {
     assert.equal(commandTargetsGuardState(`${prefix} ${target}`, cwd, root), GUARD_STATE_REFUSAL);
   }));
-  // A depth bound is honoured exactly: it may name the hook directory, never enumerate it.
-  fc.assert(fc.property(fc.nat({ max: 6 }), (bound) => {
-    const separation = 2;
-    assert.equal(
-      commandTargetsGuardState(`find /wollipog-fc-root -maxdepth ${bound}`, cwd, root),
-      bound <= separation ? null : GUARD_STATE_REFUSAL,
-      `-maxdepth ${bound}`,
-    );
+  // A second command in the list is held to the same standard as the first, whichever order.
+  fc.assert(fc.property(inspection, reaching, ancestors, (good, bad, target) => {
+    assert.equal(commandTargetsGuardState(`${good} ${target}; ${bad} ${target}`, cwd, root),
+      GUARD_STATE_REFUSAL);
+    assert.equal(commandTargetsGuardState(`${bad} ${target}; ${good} ${target}`, cwd, root),
+      GUARD_STATE_REFUSAL);
   }));
 });

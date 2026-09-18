@@ -126,12 +126,16 @@ What is done instead:
   nearest existing ancestor is passed through `realpath`, so a home-relative spelling or a symlink
   planted in the workspace is judged by where it lands. Third-party MCP filesystem tools are not
   classifiable by name and remain outside the veto, like any other indirection.
-- **One carve-out: bounded inspection of an ancestor.** A Bash operand that merely CONTAINS the
-  directory is allowed when its command is recognisably an inspection of that directory and nothing
-  more (#1334): `ls` without a recursive option, `du`, `stat`, or a `find` whose `-maxdepth` stops
-  at or above the hook directory and which neither follows symlinks nor acts on what it finds. Such
-  a command may NAME the hook directory; it never enumerates what is in it. The file tools have no
-  bounded form and stay refused on an ancestor, so the path-level predicate keeps its old meaning.
+- **One carve-out: inspecting an ancestor.** A Bash operand that merely CONTAINS the directory is
+  allowed when the whole command is `ls` without a recursive option, `du`, or `stat`, and nothing
+  else (#1334). Such a command may NAME the hook directory; it never enumerates what is in it. The
+  file tools stay refused on an ancestor, so the path-level predicate keeps its old meaning.
+
+  `find` is deliberately outside the carve-out, though #1334 lists `find -maxdepth 1` among the
+  commands that should be allowed. Supporting it means arithmetic on how far a walk may descend
+  before it reaches the hook directory, and three of the bypasses found while reviewing #1334 came
+  out of that arithmetic. The commands that remain need no depth reasoning at all: none of them
+  descends. A depth-bounded `find` belongs in its own change, with that arithmetic as the subject.
 
   The carve-out fails closed, because a command-text classifier is easy to talk past. EVERY command
   in the list has to be an inspection, not merely the one holding the ancestor operand: the shell
@@ -141,16 +145,15 @@ What is done instead:
   substitution, a backtick, or an operator the classifier does not model — so a listing piped into
   `xargs rm -rf` is not an inspection. A newline disqualifies it, because the tokenizer treats one
   as whitespace and would join two commands into one. A redirection does not start a new command, so
-  its target is judged as a location and never mistaken for the command word, and an IO number
-  belongs to the redirection rather than to the command. A glob or brace metacharacter disqualifies
-  the command, because the shell expands `--recurs{ive,}` into `--recursive` first. So does a
-  `NAME=value` assignment, and a command word that is not a bare name, since `./ls` is whatever was
-  planted there, and an option word carrying a path in any spelling, since `du --exclude-from=<path>`
-  opens that file while an option's value is never compared as an operand. Long options are matched
-  as GNU `getopt_long` accepts them, so `ls --recurs` counts as recursive. A command that names no
-  ancestor of its own is judged against the WORKING DIRECTORY, which is where an operand-less `find`
-  starts and which can sit closer to the guard state than anything the list names; from inside the
-  guard state there is no bounded form at all.
+  its target is judged as a location and never mistaken for the command word, and a leading IO
+  number belongs to the redirection rather than to the command. A glob or brace metacharacter
+  disqualifies the command, because the shell expands `--recurs{ive,}` into `--recursive` first. So
+  does a `NAME=value` assignment, a command word that is not a bare name, since `./ls` is whatever
+  was planted there, and an option word carrying a path in any spelling, since
+  `du --exclude-from=<path>` opens that file while an option's value is never compared as an
+  operand. Long options are matched as GNU `getopt_long` accepts them, so `ls --recurs` counts as
+  recursive. A working directory inside the guard state disqualifies the command too, since one
+  with no operand acts there.
 
   Where the two directions conflict, it over-refuses. A short-option cluster is scanned for `R`
   without modelling which options take an attached value, so GNU's `ls -IREADME` reads as recursive
@@ -159,6 +162,7 @@ What is done instead:
   `du` is the accepted exception inside the carve-out: it walks the tree it is given, so it learns
   the hook directory's shape and the size of what is in it, though it reads no file contents. #1334
   lists it among the commands that must be allowed.
+
 - **No free advertising.** The protections path is not exported in the settings `env` block (which
   reaches every tool process); it travels only in the hook command inside the 0600 settings file,
   and the guard accepts it only from there — never from the environment.
