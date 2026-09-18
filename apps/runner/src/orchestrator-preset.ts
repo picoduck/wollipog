@@ -349,6 +349,12 @@ const ADDITIVE_CODEX_MCP_KEY = "mcp_servers.wollipog";
 /** The role marker is present in every runner-built Wollipog MCP entry and never in a user's own. */
 const ADDITIVE_CODEX_MCP_MARKER = ORCHESTRATOR_ENV_KEY;
 
+/** Exactly `mcp_servers.wollipog` (the whole entry or one of its fields), never a server whose
+ * name merely starts with it, such as `mcp_servers.wollipog-helper`. */
+function namesReservedCodexMcpServer(setting: string): boolean {
+  return setting.startsWith(`${ADDITIVE_CODEX_MCP_KEY}=`) || setting.startsWith(`${ADDITIVE_CODEX_MCP_KEY}.`);
+}
+
 /** A user-supplied launch argument that configures an MCP server under Wollipog's reserved name.
  * The additive launch names its single entry by that key, so it would silently replace it. */
 export function reservedCodexMcpNameCollision(args: readonly string[]): boolean {
@@ -356,7 +362,7 @@ export function reservedCodexMcpNameCollision(args: readonly string[]): boolean 
     const flag = arg.split("=", 1)[0]!;
     if (flag !== "-c" && flag !== "--config") return false;
     const value = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : args[index + 1];
-    return typeof value === "string" && value.startsWith(ADDITIVE_CODEX_MCP_KEY) &&
+    return typeof value === "string" && namesReservedCodexMcpServer(value) &&
       !value.includes(ADDITIVE_CODEX_MCP_MARKER);
   });
 }
@@ -434,7 +440,7 @@ export function stripAdditiveOrchestratorLaunchArgs(
       // `-c mcp_servers.wollipog=...` or `-c developer_instructions=...` is left where it was;
       // provisioning refuses the former as a reserved-name collision instead of deleting it.
       : (flag === "-c" || flag === "--config") && typeof value === "string" &&
-        ((value.startsWith(ADDITIVE_CODEX_MCP_KEY) && value.includes(ADDITIVE_CODEX_MCP_MARKER)) ||
+        ((namesReservedCodexMcpServer(value) && value.includes(ADDITIVE_CODEX_MCP_MARKER)) ||
           (value.startsWith("developer_instructions=") && value.includes(ORCHESTRATOR_INSTRUCTIONS_PREFIX)));
     if (injected) {
       if (inline === undefined) i++;

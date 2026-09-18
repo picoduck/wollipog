@@ -5555,7 +5555,11 @@ export class SessionsService {
       const restartingAgentId = session.agentId;
       const advertised = runner?.agents.find((agent) => agent.id === restartingAgentId)?.capabilities;
       const target = session.executionTarget;
-      if (!additiveCapability || !advertised?.permissionModes?.includes("orchestrator") ||
+      // A reused agent id can now resolve to another additive-capable harness. The persisted
+      // provider permission mode belongs to the harness the session was created with, so a driver
+      // change is refused rather than reinterpreted under the new harness's mode vocabulary.
+      if (!additiveCapability || launch.driver !== session.driver ||
+          !advertised?.permissionModes?.includes("orchestrator") ||
           (launch.context?.kind ?? "native") !== "native" || (target && target.adapter !== "host")) {
         return fail("An Orchestrator with independent provider permissions requires a native Claude Code or Codex harness on the host that advertises the Orchestrator role; the agent definition no longer matches. Start a new session or choose the Orchestrator preset permission mode.", 409);
       }

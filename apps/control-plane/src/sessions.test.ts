@@ -17364,6 +17364,16 @@ test("Orchestrator is an additive role independent of the provider permission mo
     assert.equal(redefinedRestart.status, 409, "a redefined agent fails at the control plane rather than at the runner");
     assert.match(redefinedRestart.error ?? "", /native Claude Code or Codex harness/);
     assert.equal(hub.sentOfType("start_session").length, startsBefore, "no launch is sent for the refused restart");
+    const crossHarness = runnerMeta();
+    const crossHarnessAgent = crossHarness.agents.find((item) => item.id === AGENT_ID)!;
+    crossHarnessAgent.driver = "codex-app-server";
+    crossHarnessAgent.capabilities = { ...agent.capabilities!, permissionModes: ["on-request", "orchestrator"] };
+    db.registerRunner(crossHarness, Date.now(), PROTOCOL_VERSION);
+    const crossHarnessRestart = svc.restart(view.id);
+    assert.equal(crossHarnessRestart.status, 409,
+      "a Claude permission mode is never reinterpreted by a Codex harness that reused the agent id");
+    assert.match(crossHarnessRestart.error ?? "", /agent definition no longer matches/);
+    assert.equal(hub.sentOfType("start_session").length, startsBefore);
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
 
     db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole - 1);

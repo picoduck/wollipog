@@ -581,5 +581,10 @@ test("a user's own MCP server named wollipog is never deleted by the additive Co
     env: { WOLLIPOG_SESSION_TOKEN_FILE: "/run/token", WOLLIPOG_PERMISSION_PRESET: "orchestrator" },
   }, ["/repo"]);
   assert.equal(reservedCodexMcpNameCollision(injected), false, "the runner's own entry is not a collision");
+  const similar = ["-c", 'mcp_servers.wollipog-helper={ command = "x", env = { WOLLIPOG_PERMISSION_PRESET = "orchestrator" } }',
+    "-c", 'mcp_servers.wollipog2.command="y"'];
+  assert.equal(reservedCodexMcpNameCollision(similar), false, "only the exact reserved name collides");
+  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(similar, "codex", []), similar,
+    "a similarly named server is never stripped, even if its value mentions the marker");
   assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(injected, "codex-app-server", ["/repo"]), []);
 });
