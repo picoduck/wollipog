@@ -1184,6 +1184,55 @@ test("a config change with pending work delivers the prompt and defers the resta
   driver.dispose();
 });
 
+test("a deferred permission-mode change leaves the running Orchestrator child's approvals alone", async () => {
+  // The restart that would apply a new mode is deferred while background work runs, so the child
+  // keeps the argv — and the approval semantics — it was launched with. Answering from the new
+  // configuration would silently deny an escalation the running `auto` child still surfaces.
+  const child = fakeProcess();
+  const events: SessionEventPayload[] = [];
+  const stderr: string[] = [];
+  const writes: string[] = [];
+  child.stdin.on("data", (chunk: Buffer) => writes.push(chunk.toString("utf8")));
+  const driver = new ClaudeCodeDriver(
+    {
+      ...baseOpts,
+      env: { [CLAUDE_PERSISTENT_FLAG]: "1" },
+      config: { permissionMode: "auto" },
+      orchestrator: { strictProjectIsolation: false, issueNumbers: [1305] },
+    },
+    { ...noopCb, onEvent: (payload) => events.push(payload), onStderr: (text) => stderr.push(text) },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    { spawn: () => child, kill: () => {} } as any,
+  );
+  const first = driver.prompt("start the campaign");
+  await nextTask();
+  child.stdout.write(JSON.stringify({ type: "system", subtype: "task_started", task_id: "watcher" }) + "\n");
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await first, "end_turn");
+
+  driver.setConfig({ permissionMode: "acceptEdits" });
+  const second = driver.prompt("keep coordinating");
+  await nextTask();
+  assert.ok(stderr.some((text) => /configuration change deferred/.test(text)));
+  child.stdout.write(JSON.stringify({
+    type: "control_request",
+    request_id: "escalation-on-the-auto-child",
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "pnpm build" } },
+  }) + "\n");
+  await nextTask();
+  assert.equal(events.at(-1)?.kind, "permission_request",
+    "the still-running auto child keeps its escalation path");
+  assert.equal(writes.some((write) => write.includes("escalation-on-the-auto-child")), false,
+    "the runner does not answer for a supplement this child never carried");
+
+  child.stdout.write(JSON.stringify({
+    type: "system", subtype: "task_notification", task_id: "watcher", status: "completed",
+  }) + "\n");
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await second, "end_turn");
+  driver.dispose();
+});
+
 test("an idle terminal notification preserves launch metadata and requests one continuation", async () => {
   const child = fakeProcess();
   const background: Parameters<NonNullable<DriverCallbacks["onBackgroundWork"]>>[0][] = [];
@@ -3798,8 +3847,7 @@ test("an Orchestrator with independent provider permissions keeps the routine-op
     orchestrator: { strictProjectIsolation: false, issueNumbers: [1209] },
   });
   const writes: string[] = [];
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
+  attachLaunchedChild(h, writes);
   h.feed({
     type: "control_request",
     request_id: "routine-claim",
@@ -3821,6 +3869,18 @@ test("an Orchestrator with independent provider permissions keeps the routine-op
     "the fixed rule blocks what it does not allow rather than escalating it to a human");
 });
 
+/**
+ * Attach a child the way a spawn does. The handler answers for the argv the RUNNING child was
+ * launched with, so the supplement is bound here from the same configuration the launch reads —
+ * never recomputed per request, which is what lets a deferred config change diverge.
+ */
+function attachLaunchedChild(h: Harness, writes: string[]): void {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const driver = h.driver as any;
+  driver.child = { stdin: { write: (value: string) => writes.push(value) } };
+  driver.launchedRoutineControlChannelMode = driver.routineControlChannelMode();
+}
+
 /** One routine claim, fed to an Orchestrator in whichever permission mode the case names. */
 function feedOrchestratorRoutineCommand(permissionMode: string): { writes: string[]; events: unknown[] } {
   const h = makeHarness({
@@ -3828,8 +3888,7 @@ function feedOrchestratorRoutineCommand(permissionMode: string): { writes: strin
     orchestrator: { strictProjectIsolation: false, issueNumbers: [1305] },
   });
   const writes: string[] = [];
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
+  attachLaunchedChild(h, writes);
   h.feed({
     type: "control_request",
     request_id: `routine-${permissionMode}`,
@@ -3861,8 +3920,7 @@ test("a supplemented fixed rule adds nothing beyond the routine-operation contra
     orchestrator: { strictProjectIsolation: false, issueNumbers: [1305] },
   });
   const writes: string[] = [];
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
+  attachLaunchedChild(h, writes);
   // A build is ordinary project work, not campaign coordination: Accept Edits refuses it headlessly
   // today, and the supplemented channel returns that same refusal instead of an approval card.
   h.feed({
@@ -3885,8 +3943,7 @@ test("a supplemented fixed rule still surfaces the Orchestrator's typed human qu
     orchestrator: { strictProjectIsolation: false, issueNumbers: [1305] },
   });
   const writes: string[] = [];
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
+  attachLaunchedChild(h, writes);
   h.feed({
     type: "control_request",
     request_id: "campaign-question",
@@ -3910,8 +3967,7 @@ test("an unverified approval channel withholds the fixed-rule supplement", () =>
     },
   });
   const writes: string[] = [];
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
+  attachLaunchedChild(h, writes);
   h.feed({
     type: "control_request",
     request_id: "unverified-channel",
@@ -3924,8 +3980,7 @@ test("an unverified approval channel withholds the fixed-rule supplement", () =>
 test("an ordinary Claude session's fixed rule is never supplemented", () => {
   const h = makeHarness({ config: { permissionMode: "acceptEdits" } });
   const writes: string[] = [];
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
+  attachLaunchedChild(h, writes);
   // Without the role there is no control channel to answer on, so a request that arrives anyway
   // (a channel mode, or a managed-worktree mediation) keeps the ordinary approval path.
   h.feed({

@@ -543,6 +543,10 @@ export class ClaudeCodeDriver implements Driver {
   private readonly auxiliaryChildren = new Set<AgentProcess>();
   /** True for the turn when permissionMode === "default" (interactive ask). */
   private interactive = false;
+  /** The fixed rule the RUNNING child's argv supplements with the runner's control channel, or null
+   * when it carries no supplement. Bound at spawn because the configuration it came from is
+   * mutable: a change deferred behind background work leaves this child on its original argv. */
+  private launchedRoutineControlChannelMode: string | null = null;
   /** requestId -> the tool input to echo back on allow (stdio control protocol). */
   private readonly pendingApprovals = new Map<string, Json>();
   private readonly pendingAttentionOwners = new Map<string, { owner: string; question: boolean }>();
@@ -630,13 +634,17 @@ export class ClaudeCodeDriver implements Driver {
     return protectedClaudePermissionMode(this.effectivePermissionMode(), this.managedProtections().length > 0);
   }
 
-  /** Non-null while this session's launched fixed rule is supplemented by the runner's control
-   * channel — see claudeRoutineControlChannelMode for what that means for a denied request.
+  /** The supplement the CURRENT configuration would launch with — see
+   * claudeRoutineControlChannelMode for what a supplement means for a denied request.
    *
    * A capability overlay that did not verify this installation's approval channel withholds the
    * supplement: the coupled preset is refused for the same reason, and a `--permission-prompt-tool`
    * the installation cannot honor would cost the session its whole fixed-rule launch to buy an
-   * authorization it would never receive. Without an overlay there is no gate, as elsewhere. */
+   * authorization it would never receive. Without an overlay there is no gate, as elsewhere.
+   *
+   * Answer a live request from `launchedRoutineControlChannelMode` instead: a configuration change
+   * deferred behind background work, or a managed worktree linked mid-session, moves this value
+   * while the running child keeps the argv — and the permission semantics — it was launched with. */
   private routineControlChannelMode(): string | null {
     if (this.opts.capabilities && this.opts.capabilities.supportsApprovals !== true) return null;
     return claudeRoutineControlChannelMode(this.launchedPermissionMode(), this.opts.orchestrator != null);
@@ -970,12 +978,14 @@ export class ClaudeCodeDriver implements Driver {
       // the plain-text prompt over stdin so Windows cmd.exe never has to parse user content.
       const configuredPermissionMode = this.effectivePermissionMode();
       this.reportManagedPermissionMediation(configuredPermissionMode);
+      const routineChannelMode = this.routineControlChannelMode();
       const perm = claudePermissionArgs(
         this.launchedPermissionMode(),
         imgs.length > 0,
-        this.routineControlChannelMode() !== null,
+        routineChannelMode !== null,
       );
       this.interactive = perm.interactive;
+      this.launchedRoutineControlChannelMode = routineChannelMode;
       args.push(...perm.args);
 
       // Auth precedence (DRIVERS.md §2.1 + README): an EXPLICITLY-configured ANTHROPIC_API_KEY
@@ -1205,10 +1215,11 @@ export class ClaudeCodeDriver implements Driver {
     const configuredPermissionMode = this.effectivePermissionMode();
     this.reportManagedPermissionMediation(configuredPermissionMode);
     const permissionMode = this.launchedPermissionMode();
+    const routineChannelMode = this.routineControlChannelMode();
     const perm = claudePermissionArgs(
       permissionMode,
       true,
-      this.routineControlChannelMode() !== null,
+      routineChannelMode !== null,
     );
     const preparedArgs = this.preparedBaseArgs();
     this.interactive = perm.interactive;
@@ -1234,6 +1245,9 @@ export class ClaudeCodeDriver implements Driver {
     }
 
     if (!this.child) {
+      // Only a spawn rebinds the permission semantics: the deferred branch above deliberately keeps
+      // the running child's argv, so its supplement (or absence of one) must survive this turn.
+      this.launchedRoutineControlChannelMode = routineChannelMode;
       const args = [
         ...preparedArgs,
         "-p",
@@ -2329,7 +2343,7 @@ export class ClaudeCodeDriver implements Driver {
           // with that same refusal so the mode keeps its ordinary behavior and nothing beyond the
           // routine contract is newly allowed. A question is not a tool authorization, so
           // AskUserQuestion still reaches the human as it does in every other mode.
-          const routineChannelMode = this.routineControlChannelMode();
+          const routineChannelMode = this.launchedRoutineControlChannelMode;
           if (routineChannelMode && req.tool_name !== "AskUserQuestion") {
             try {
               this.child.stdin.write(JSON.stringify({
