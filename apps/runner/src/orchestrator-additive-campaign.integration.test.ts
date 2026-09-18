@@ -181,16 +181,16 @@ function driverFor(spec: SessionLaunchSpec, cwd: string): DriverHarness {
     ...(spec.orchestrator ? { orchestrator: spec.orchestrator } : {}),
   };
   const driver = new ClaudeCodeDriver(opts, cb);
-  /* eslint-disable @typescript-eslint/no-explicit-any */
-  (driver as any).child = { stdin: { write: (value: string) => writes.push(JSON.parse(value)) } };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const internals = driver as any;
+  internals.child = { stdin: { write: (value: string) => writes.push(JSON.parse(value)) } };
   return {
     driver,
     events,
     writes,
-    feed: (msg: unknown) => (driver as any).handleEvent(msg),
-    baseArgs: () => (driver as any).preparedBaseArgs() as string[],
+    feed: (msg: unknown) => internals.handleEvent(msg),
+    baseArgs: () => internals.preparedBaseArgs() as string[],
   };
-  /* eslint-enable @typescript-eslint/no-explicit-any */
 }
 
 function gitInit(repo: string): void {
@@ -220,7 +220,7 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
       { ...request, role: "orchestrator", config: { permissionMode: "acceptEdits" } },
       undefined, undefined, false, false, false, { defaultOwnerUserId: "human" },
     );
-    assert.ok(created.ok && created.data, created.error);
+    assert.ok(created.ok && created.data, created.error ?? "session creation failed");
     const parent = created.data;
     assert.equal(parent.role, "orchestrator");
     assert.equal(parent.permissionMode, "acceptEdits", "the role never consumes the permission-mode selection");
@@ -306,7 +306,7 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
         { ...request, title: "Child" }, undefined, undefined, false, false, false, { parentSessionId: parent.id },
       );
     }
-    assert.ok(childResult.ok && childResult.data, childResult.error);
+    assert.ok(childResult.ok && childResult.data, childResult.error ?? "child creation failed");
     const child = childResult.data;
     db.updateSessionStatus(child.id, "running", Date.now());
     svc.onSessionEvent(child.id, {
@@ -324,14 +324,14 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
       requests: [{ requestId: "child-question", occurrenceId: "request_child_question", owner: "orchestrator" }],
     }, "the child's question is owned by the Orchestrator");
     const listed = svc.descendantRequests(parent.id, () => true);
-    assert.ok(listed.ok && listed.data, listed.error);
+    assert.ok(listed.ok && listed.data, listed.error ?? "descendant requests unavailable");
     assert.deepEqual(listed.data.requests.map((req) => ({ sessionId: req.sessionId, owner: req.responseOwner })),
       [{ sessionId: child.id, owner: "orchestrator" }]);
 
     const answered = svc.resolveDescendantRequest(parent.id, child.id, "request_child_question", {
       action: "answer", answers: { q: "main" },
     }, () => true);
-    assert.ok(answered.ok, answered.error);
+    assert.ok(answered.ok, answered.error ?? "resolution failed");
     assert.deepEqual(hub.sentOfType("answer_question").at(-1), {
       type: "answer_question", sessionId: child.id, requestId: "child-question",
       answers: { q: "main" }, action: "submit", resolvedByParentSessionId: parent.id,
