@@ -53,3 +53,11 @@ A Codex Orchestrator now holds the same external credentials, integrations, and 
 capabilities as a normal Codex session, and the New Session dialog says so rather than implying that
 typed workflow decisions govern integrations they cannot intercept. Pi and ACP (#1294) and an
 explicit integration-isolation policy (#1295) remain follow-ups.
+
+### Reserved MCP Server Name
+
+The additive launch names its single entry `mcp_servers.wollipog`. A launch whose own arguments
+already configure a server under that name is refused with guidance rather than having the user's
+server silently replaced or stripped on resume. A server of that name defined only in the user's
+Codex configuration file is not detected before launch and is overridden for the Orchestrator
+session; `wollipog` is therefore a reserved server name for Orchestrator harnesses.
