@@ -188,9 +188,14 @@ test("a sent draft releases its scope to the bound on the spot", () => {
   }
   assert.equal(panelScratchScopeCount(), scopes.length, "every scope is holding a message");
 
+  // The scope this send released is now the most recently used one, so it is not what a
+  // least-recently-used bound takes: collecting it would discard the browsed directory of the
+  // session the user is looking at while eight idle ones keep theirs. Every other scope is still
+  // holding text, so this send deliberately leaves the map one over the bound.
   writePanelScratch(scopes[1]!, "sidechat.draft", null);
-  assert.equal(panelScratchScopeCount(), scopes.length,
-    "one send leaves nothing else evictable: every other scope is still holding text");
+  assert.equal(panelScratchScopeCount(), scopes.length);
+  assert.equal(readPanelScratch(scopes[1]!, "files.directory"), "apps/web",
+    "the session being used keeps its directory");
 
   writePanelScratch(scopes[0]!, "sidechat.draft", null);
   assert.equal(panelScratchScopeCount(), PANEL_SCRATCH_SESSION_LIMIT,

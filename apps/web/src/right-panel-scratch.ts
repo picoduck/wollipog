@@ -96,6 +96,13 @@ function holdsUnsentText(values: Map<string, ScratchValue>): boolean {
  * Every mutation runs this, removals included: a draft that is sent releases its scope, and if that
  * scope is still holding a directory the map would otherwise stay over the limit until the next
  * unrelated write happened to collect it.
+ *
+ * `keep` is the scope the mutation just touched, and it is spared on removals for the same reason
+ * as on writes: it is by definition the most recently used, which is never what least-recently-used
+ * eviction takes. Collecting it here would mean sending a side chat message also discards that same
+ * session's browsed directory while eight idle sessions keep theirs — a visible loss in the session
+ * someone is looking at, to settle a soft bound one mutation earlier. The next mutation touching
+ * any other scope collects it.
  */
 function evictDisposableScopes(keep: string): void {
   for (const [candidate, values] of scratch) {
