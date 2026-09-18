@@ -198,6 +198,10 @@ function isSettledRegistryEntry(child: ChildSessionRegistryEntry): boolean {
  * - It is the last page, where a newly spawned child lands and where the `nextAfter` cursor behind
  *   "Load More" is read from.
  *
+ * A changed child the registry has not placed defeats all three: it has no page, and the tail
+ * cursor cannot return it if the control plane sorted it in mid-registry. That case reads every
+ * page rather than losing the child.
+ *
  * Cursors are `after` values taken from the caller's own `sourceSeq` ordering, and responses merge
  * by id over the ranges they cover, so an entry inserted mid-registry shifts pages without being
  * lost: it is added where it belongs, and the entry it displaces is already held.
@@ -209,15 +213,24 @@ export function registryRefreshCursors(
   pageSize: number = PAGE_SIZE,
 ): number[] {
   if (registry.length === 0) return [0];
-  const cursors: number[] = [];
   const pageCount = Math.ceil(registry.length / pageSize);
+  const cursorFor = (page: number) => page === 0 ? 0 : registry[page * pageSize - 1]!.sourceSeq;
+  // A child the registry has not placed has no page to target, and the tail cursor cannot reach it
+  // if the control plane recovered its pre-spawn evidence and sorted it in behind entries already
+  // held. Without a map, read the whole map: the alternative is a worker that never appears at all,
+  // since `mergeDurableAgents` renders the registry's children rather than the transcript's.
+  const placed = new Set(registry.map((child) => child.toolCallId));
+  for (const id of changedIds) {
+    if (!placed.has(id)) return Array.from({ length: pageCount }, (_value, page) => cursorFor(page));
+  }
+  const cursors: number[] = [];
   for (let page = 0; page < pageCount; page += 1) {
     const start = page * pageSize;
     const children = registry.slice(start, start + pageSize);
     const worthReading = page === pageCount - 1 || children.some((child) =>
       changedIds.has(child.toolCallId) ||
       (!isSettledRegistryEntry(child) && !loadedIds.has(child.toolCallId)));
-    if (worthReading) cursors.push(start === 0 ? 0 : registry[start - 1]!.sourceSeq);
+    if (worthReading) cursors.push(cursorFor(page));
   }
   return cursors;
 }
@@ -283,7 +296,7 @@ export function AgentsPanel(props: Props) {
   const loadedAgentIds = useMemo(() => new Set(projection.descriptors.map((agent) => agent.id)),
     [projection.descriptors]);
   const refreshedRosterKey = useRef(rosterKey);
-  const refreshedFingerprints = useRef(agentFingerprints);
+  const refreshedFingerprints = useRef<ReadonlyMap<string, string>>(agentFingerprints);
   const [registry, setRegistry] = useState<ChildSessionRegistryEntry[] | null>(null);
   const [attentionOwners, setAttentionOwners] = useState<ChildSessionAttentionOwner[]>([]);
   const [registryAfter, setRegistryAfter] = useState<number | null>(0);
@@ -347,7 +360,13 @@ export function AgentsPanel(props: Props) {
       }
     });
   };
-  const refreshRegistry = (progress: string, changedIds: ReadonlySet<string>, loadedIds: ReadonlySet<string>) => {
+  const refreshRegistry = (
+    progress: string, changedIds: ReadonlySet<string>, loadedIds: ReadonlySet<string>,
+    // Banked only once the pages are merged: a refresh that fails or is abandoned must leave the
+    // evidence it was chasing unspent, or its pages are never selected again and the panel keeps
+    // showing what it failed to re-read.
+    refreshedTo: ReadonlyMap<string, string>,
+  ) => {
     const key = `${session.id}:${session.eventEpoch ?? 0}:refresh:${progress}`;
     if (registryRequest.current === key) return;
     registryRequest.current = key;
@@ -370,6 +389,7 @@ export function AgentsPanel(props: Props) {
         nextAfter = page.nextAfter;
       }
       if (registryRequest.current !== key) return;
+      refreshedFingerprints.current = refreshedTo;
       setRegistry(mergeRefreshedRegistryPages(held, fetched));
       setAttentionOwners(latestOwners);
       setUnidentifiedChildren(latestUnidentified);
@@ -434,9 +454,9 @@ export function AgentsPanel(props: Props) {
         // request slot away from the page load still in flight.
         if (remaining() > 0) return arm();
         refreshedRosterKey.current = rosterKey;
-        const changedIds = changedRosterIds(refreshedFingerprints.current, agentFingerprints);
-        refreshedFingerprints.current = agentFingerprints;
-        refreshRegistry(progressKey, changedIds, loadedAgentIds);
+        refreshRegistry(progressKey,
+          changedRosterIds(refreshedFingerprints.current, agentFingerprints), loadedAgentIds,
+          agentFingerprints);
       }, remaining());
     };
     arm();

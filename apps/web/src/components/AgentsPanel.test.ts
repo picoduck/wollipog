@@ -170,6 +170,29 @@ test("a single child's change re-reads its own page and the tail, not every load
  * loaded transcript (#1207). Only an unsettled child outside that window can do so, so only its
  * page keeps costing an idle request.
  */
+/**
+ * The control plane can sort a child in behind entries the panel already holds: a newly observed
+ * spawn recovers its own pre-spawn evidence from seq 0, so its `sourceSeq` can precede the tail.
+ * A changed child with no page therefore cannot be chased by the tail cursor, and a child absent
+ * from the registry is absent from the roster entirely, because `mergeDurableAgents` renders the
+ * registry's children rather than the transcript's.
+ */
+test("a changed child the registry has not placed re-reads every page rather than losing it", () => {
+  const settled = (index: number): ChildSessionRegistryEntry => ({
+    toolCallId: `child-${index}`, name: `Child ${index}`, status: "completed", lifecycle: "completed",
+    sourceSeq: index, startedAt: 100, lastActivityAt: 200, completedAt: 200, toolCount: 1,
+  });
+  const registry = Array.from({ length: 150 }, (_value, index) => settled(index + 1));
+  const loaded = new Set(registry.map((entry) => entry.toolCallId));
+
+  assert.deepEqual(registryRefreshCursors(registry, new Set(["not-yet-placed"]), loaded, 50), [0, 50, 100],
+    "with no page to target, the whole registry is re-read");
+  assert.deepEqual(registryRefreshCursors(registry, new Set(["child-60", "not-yet-placed"]), loaded, 50),
+    [0, 50, 100], "one unplaced child is enough: the others cannot be targeted around it");
+  assert.deepEqual(registryRefreshCursors(registry, new Set(["child-60"]), loaded, 50), [50, 100],
+    "a placed child is still targeted");
+});
+
 test("only an unsettled child outside the loaded transcript keeps its page in the idle sweep", () => {
   const entry = (index: number, settled: boolean): ChildSessionRegistryEntry => ({
     toolCallId: `child-${index}`, name: `Child ${index}`, status: settled ? "completed" : "running",

@@ -357,3 +357,78 @@ test("a single child's change costs two requests against a five-page registry, n
     container.remove();
   }
 });
+
+/**
+ * The evidence a refresh is chasing is spent only when the pages come back. A refresh that rejects
+ * merges nothing, so banking its fingerprints at scheduling time would retire the change with it:
+ * the page holding the child would never be selected again, and the panel would keep showing what
+ * it failed to re-read. Before #1290 this healed by accident, because the next refresh re-read
+ * every page regardless.
+ */
+test("a rejected refresh leaves its evidence unspent, so the next one still reads that page", async () => {
+  const settled = (index: number): ChildSessionRegistryEntry => ({
+    toolCallId: `child-${index}`, name: `Child ${index}`,
+    status: index === 1 ? "in_progress" : "completed",
+    lifecycle: index === 1 ? "running" : "completed",
+    sourceSeq: index, startedAt: now - 30_000, lastActivityAt: now - 20_000,
+    ...(index === 1 ? {} : { completedAt: now - 20_000 }),
+    toolCount: 1,
+  });
+  const all = Array.from({ length: 150 }, (_value, index) => settled(index + 1));
+  const cursors: number[] = [];
+  let rejectNext = false;
+  const childSessions = async (
+    _id: string, _epoch: number, after = 0, limit = 50,
+  ): Promise<ChildSessionRegistryPage> => {
+    cursors.push(after);
+    if (rejectNext) { rejectNext = false; throw new Error("registry unavailable"); }
+    const eligible = all.filter((child) => child.sourceSeq > after);
+    const children = eligible.slice(0, limit);
+    const truncated = eligible.length > children.length;
+    return { children, attentionOwners: [], unidentifiedChildren: 0, eventEpoch: 0,
+      nextAfter: truncated ? children.at(-1)!.sourceSeq : null, truncated };
+  };
+  const client: ApiClient = { ...api, childSessions };
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const render = (session: SessionView, items: TimelineItem[]) =>
+    root.render(<ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
+      <AgentsPanel session={session} items={items} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
+        requestedId={null} onSelect={() => {}} parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
+    </StoreProvider></FeedbackProvider></ApiProvider>);
+
+  try {
+    await act(async () => { render(baseSession, [startedTool("child-1", 1)]); });
+    await advance(50);
+    for (let page = 1; page < 3; page += 1) {
+      const loadMore = Array.from(container.querySelectorAll("button"))
+        .find((button) => button.textContent === "Load More Recorded Workers")!;
+      await act(async () => { (loadMore as HTMLButtonElement).click(); });
+      await advance(60);
+    }
+    assert.deepEqual(cursors, [0, 50, 100], "three pages loaded");
+
+    // `child-1` settles, on the first page, and the refresh that goes to fetch it rejects.
+    rejectNext = true;
+    await act(async () => {
+      render({ ...baseSession, messageCount: 11, lastEventAt: now + 1_000 }, [settledTool("child-1", 1)]);
+    });
+    await advance(1_200);
+    assert.deepEqual(cursors.slice(3), [0], "the refresh reached for the first page and failed");
+
+    // A later change to a child on the tail page. Its own evidence points only at the tail, so the
+    // first page is requested again solely because the failed refresh never banked what it chased.
+    await act(async () => {
+      render({ ...baseSession, messageCount: 12, lastEventAt: now + 2_000 },
+        [settledTool("child-1", 1), startedTool("child-140", 2)]);
+    });
+    await advance(1_200);
+    assert.deepEqual(cursors.slice(4), [0, 100],
+      "the unspent first-page evidence is retried alongside the tail page the new change points at");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
