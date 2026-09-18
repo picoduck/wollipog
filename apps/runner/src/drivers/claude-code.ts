@@ -10,7 +10,9 @@
  * stdio control protocol — which the runner owns — so each request surfaces as Allow/Reject
  * in the UI. "auto" adds --permission-mode auto: a classifier model auto-approves safe
  * actions and blocks risky ones inline (the agent is told and adapts; it does not prompt).
- * "acceptEdits"/"plan"/"bypassPermissions" run non-interactively by a fixed rule.
+ * "acceptEdits"/"plan"/"bypassPermissions" run non-interactively by a fixed rule — except for a
+ * structured Orchestrator, which keeps the control channel in every mode so the routine-operation
+ * contract stays reachable (see claudePermissionArgs).
  *
  * See docs/DRIVERS.md §2 for the stream-json → SessionEventPayload mapping.
  */
@@ -231,6 +233,13 @@ const ORCHESTRATOR_REPOSITORY_OVERRIDE_ENV = ["GH_REPO", "GH_HOST"] as const;
  *   channel open so the headless turn streams and settles gracefully on a block rather
  *   than aborting.
  * - everything else: a fixed-rule mode passed straight through as --permission-mode.
+ * - `routineControlChannel` (a structured Orchestrator): the fixed rule is still passed, and the
+ *   stdio control channel is added on top of it. The CLI keeps deciding everything its own rule
+ *   covers — an `acceptEdits` file edit or a common file command is allowed without ever reaching
+ *   the runner — and consults the channel only where a headless fixed-rule turn would otherwise
+ *   refuse the call for want of a human ("This command requires approval"). That is the only way
+ *   the routine-operation contract can run in those modes; without the channel the classifier is
+ *   unreachable and routine coordination is blocked (#1305).
  *
  * `interactive` modes stream the prompt over stdin (to answer approvals). `streamInput`
  * means the prompt is delivered as a stream-json user message rather than plain-text
@@ -239,6 +248,7 @@ const ORCHESTRATOR_REPOSITORY_OVERRIDE_ENV = ["GH_REPO", "GH_HOST"] as const;
 export function claudePermissionArgs(
   mode: string,
   hasImages = false,
+  routineControlChannel = false,
 ): { interactive: boolean; streamInput: boolean; args: string[] } {
   if (mode === "default") {
     return { interactive: true, streamInput: true, args: ["--input-format", "stream-json", "--permission-prompt-tool", "stdio"] };
@@ -248,6 +258,13 @@ export function claudePermissionArgs(
       interactive: true,
       streamInput: true,
       args: ["--input-format", "stream-json", "--permission-prompt-tool", "stdio", "--permission-mode", "auto"],
+    };
+  }
+  if (routineControlChannel) {
+    return {
+      interactive: true,
+      streamInput: true,
+      args: ["--input-format", "stream-json", "--permission-prompt-tool", "stdio", "--permission-mode", mode],
     };
   }
   // Fixed-rule modes normally use plain-text stdin; switch to stream-json input when images
@@ -293,6 +310,20 @@ export function claudeStructuredOrchestratorArgs(args: readonly string[], strict
  * managed worktree is present so the local target veto cannot be auto-overridden. */
 export function protectedClaudePermissionMode(mode: string, protectManagedWorktrees: boolean): string {
   return protectManagedWorktrees && mode !== "plan" ? "default" : mode;
+}
+
+/**
+ * The launched fixed rule a structured Orchestrator supplements with the runner's control channel,
+ * or null when no supplement applies — an ordinary session (the mode alone governs it, exactly as
+ * the user chose) or an Orchestrator already on a channel mode.
+ *
+ * Non-null is also the signal for how an unauthorized request must be answered: the CLI consults
+ * the channel only for decisions its own rule cannot make, and a headless fixed-rule turn refuses
+ * exactly those. So everything the routine-operation contract does not authorize is denied, never
+ * turned into an approval card the mode would not have produced.
+ */
+export function claudeRoutineControlChannelMode(mode: string, orchestrator: boolean): string | null {
+  return orchestrator && mode !== "default" && mode !== "auto" ? mode : null;
 }
 
 /**
@@ -512,6 +543,10 @@ export class ClaudeCodeDriver implements Driver {
   private readonly auxiliaryChildren = new Set<AgentProcess>();
   /** True for the turn when permissionMode === "default" (interactive ask). */
   private interactive = false;
+  /** The fixed rule the RUNNING child's argv supplements with the runner's control channel, or null
+   * when it carries no supplement. Bound at spawn because the configuration it came from is
+   * mutable: a change deferred behind background work leaves this child on its original argv. */
+  private launchedRoutineControlChannelMode: string | null = null;
   /** requestId -> the tool input to echo back on allow (stdio control protocol). */
   private readonly pendingApprovals = new Map<string, Json>();
   private readonly pendingAttentionOwners = new Map<string, { owner: string; question: boolean }>();
@@ -592,6 +627,27 @@ export class ClaudeCodeDriver implements Driver {
 
   private effectivePermissionMode(): string {
     return effectiveClaudePermissionMode(this.config, this.opts.orchestrator?.strictProjectIsolation !== false);
+  }
+
+  /** The mode actually passed to the CLI: managed-worktree protection can replace it. */
+  private launchedPermissionMode(): string {
+    return protectedClaudePermissionMode(this.effectivePermissionMode(), this.managedProtections().length > 0);
+  }
+
+  /** The supplement the CURRENT configuration would launch with — see
+   * claudeRoutineControlChannelMode for what a supplement means for a denied request.
+   *
+   * A capability overlay that did not verify this installation's approval channel withholds the
+   * supplement: the coupled preset is refused for the same reason, and a `--permission-prompt-tool`
+   * the installation cannot honor would cost the session its whole fixed-rule launch to buy an
+   * authorization it would never receive. Without an overlay there is no gate, as elsewhere.
+   *
+   * Answer a live request from `launchedRoutineControlChannelMode` instead: a configuration change
+   * deferred behind background work, or a managed worktree linked mid-session, moves this value
+   * while the running child keeps the argv — and the permission semantics — it was launched with. */
+  private routineControlChannelMode(): string | null {
+    if (this.opts.capabilities && this.opts.capabilities.supportsApprovals !== true) return null;
+    return claudeRoutineControlChannelMode(this.launchedPermissionMode(), this.opts.orchestrator != null);
   }
 
   private reportManagedPermissionMediation(mode: string): void {
@@ -921,13 +977,15 @@ export class ClaudeCodeDriver implements Driver {
       // — no MCP, no side channel). Non-interactive modes pass --permission-mode and pipe
       // the plain-text prompt over stdin so Windows cmd.exe never has to parse user content.
       const configuredPermissionMode = this.effectivePermissionMode();
-      const managedProtections = this.managedProtections();
       this.reportManagedPermissionMediation(configuredPermissionMode);
+      const routineChannelMode = this.routineControlChannelMode();
       const perm = claudePermissionArgs(
-        protectedClaudePermissionMode(configuredPermissionMode, managedProtections.length > 0),
+        this.launchedPermissionMode(),
         imgs.length > 0,
+        routineChannelMode !== null,
       );
       this.interactive = perm.interactive;
+      this.launchedRoutineControlChannelMode = routineChannelMode;
       args.push(...perm.args);
 
       // Auth precedence (DRIVERS.md §2.1 + README): an EXPLICITLY-configured ANTHROPIC_API_KEY
@@ -1155,15 +1213,13 @@ export class ClaudeCodeDriver implements Driver {
     }
     const cfg = this.config;
     const configuredPermissionMode = this.effectivePermissionMode();
-    const managedProtections = this.managedProtections();
     this.reportManagedPermissionMediation(configuredPermissionMode);
-    const permissionMode = protectedClaudePermissionMode(
-      configuredPermissionMode,
-      managedProtections.length > 0,
-    );
+    const permissionMode = this.launchedPermissionMode();
+    const routineChannelMode = this.routineControlChannelMode();
     const perm = claudePermissionArgs(
       permissionMode,
       true,
+      routineChannelMode !== null,
     );
     const preparedArgs = this.preparedBaseArgs();
     this.interactive = perm.interactive;
@@ -1189,6 +1245,9 @@ export class ClaudeCodeDriver implements Driver {
     }
 
     if (!this.child) {
+      // Only a spawn rebinds the permission semantics: the deferred branch above deliberately keeps
+      // the running child's argv, so its supplement (or absence of one) must survive this turn.
+      this.launchedRoutineControlChannelMode = routineChannelMode;
       const args = [
         ...preparedArgs,
         "-p",
@@ -2273,6 +2332,28 @@ export class ClaudeCodeDriver implements Driver {
                   response: {
                     behavior: "deny",
                     message: "Strict Project Isolation denied an operation outside the Orchestrator routine-operation contract.",
+                  },
+                },
+              }) + "\n");
+            } catch { /* the provider process ended before the denial could be written */ }
+            return null;
+          }
+          // The runner's channel is a supplement in a fixed-rule mode, not a new ask: the CLI
+          // consulted it only because its own rule would have refused this call headlessly. Reply
+          // with that same refusal so the mode keeps its ordinary behavior and nothing beyond the
+          // routine contract is newly allowed. A question is not a tool authorization, so
+          // AskUserQuestion still reaches the human as it does in every other mode.
+          const routineChannelMode = this.launchedRoutineControlChannelMode;
+          if (routineChannelMode && req.tool_name !== "AskUserQuestion") {
+            try {
+              this.child.stdin.write(JSON.stringify({
+                type: "control_response",
+                response: {
+                  subtype: "success",
+                  request_id: msg.request_id,
+                  response: {
+                    behavior: "deny",
+                    message: `Claude permission mode ${routineChannelMode} does not authorize this operation, and it is outside the Orchestrator routine-operation contract. Only that contract is added in a fixed-rule mode; a different provider permission mode is a human decision.`,
                   },
                 },
               }) + "\n");
