@@ -8,6 +8,7 @@ import { useCommandPaletteFocus } from "./CommandPalette.js";
 import { EventTimeline } from "./EventTimeline.js";
 import { SessionApprovalRegion } from "./SessionApproval.js";
 import { handleMenuKeyDown, useAccessibleMenu } from "./interactions.js";
+import { Select } from "./ui/ChoiceControls.js";
 import { clearQuestionDrafts } from "../question-response.js";
 import { setQuestionResponseStyle } from "../question-response-style.js";
 import { api } from "../api.js";
@@ -24,6 +25,8 @@ for (const [name, value] of Object.entries({
   Node: domWindow.Node,
   Event: domWindow.Event,
   KeyboardEvent: domWindow.KeyboardEvent,
+  requestAnimationFrame: domWindow.requestAnimationFrame.bind(domWindow),
+  cancelAnimationFrame: domWindow.cancelAnimationFrame.bind(domWindow),
   IS_REACT_ACT_ENVIRONMENT: true,
 })) {
   Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
@@ -124,6 +127,108 @@ test("collection-owned menus skip disabled rows and restore on Escape", async ()
   });
   assert.equal(container.querySelector('[data-testid="collection-menu"]'), null);
   assert.equal(domWindow.document.activeElement, trigger);
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+const CHOICES = [{ value: "a", label: "Alpha" }, { value: "b", label: "Beta" }] as const;
+
+function TwoSelectHarness() {
+  const [first, setFirst] = useState<"a" | "b">("a");
+  const [second, setSecond] = useState<"a" | "b">("a");
+  return (
+    <>
+      <Select label="First" options={CHOICES} value={first} onChange={setFirst} />
+      <Select label="Second" options={CHOICES} value={second} onChange={setSecond} />
+    </>
+  );
+}
+
+/**
+ * Run `body` with zero-delay timers captured instead of scheduled, and hand back a function that
+ * fires what it caught.
+ *
+ * The trigger-focus restore runs on a zero-delay timer, so whether it lands before or after the
+ * next interaction is a race a test can only lose intermittently — which is the flake #1307
+ * reported. Capturing the callback makes the interleaving the assertion rather than the weather.
+ *
+ * The override is installed for the duration of `body` and removed in a `finally`, never left for a
+ * later caller to unwind. `tick()` above is itself a zero-delay timer, so an override that outlived
+ * a thrown assertion would leave every subsequent test in this shared process awaiting a promise
+ * that can no longer settle: one failure became a hung file, cancelled at the test timeout.
+ */
+async function withCapturedZeroDelayTimers(body: () => Promise<void>): Promise<() => void> {
+  const timers = domWindow as unknown as {
+    setTimeout: (handler: () => void, delay?: number) => unknown;
+  };
+  const scheduled: Array<() => void> = [];
+  const original = timers.setTimeout;
+  timers.setTimeout = (handler, delay) => {
+    if (delay !== 0) return original.call(domWindow, handler, delay);
+    scheduled.push(handler);
+    return 0;
+  };
+  try {
+    await body();
+  } finally {
+    timers.setTimeout = original;
+  }
+  return () => { for (const handler of scheduled.splice(0)) handler(); };
+}
+
+async function openFirstAndCommit(container: HTMLDivElement) {
+  const first = container.querySelector<HTMLButtonElement>('[aria-label="First: Alpha"]')!;
+  await act(async () => { first.click(); });
+  const beta = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+    .find((option) => option.textContent === "Beta")!;
+  const restore = await withCapturedZeroDelayTimers(async () => {
+    await act(async () => { beta.click(); });
+  });
+  assert.equal(container.querySelector('[role="listbox"][aria-label="First"]'), null,
+    "committing an option closes the list it was chosen from");
+  return { first, restore };
+}
+
+test("a deferred trigger restore yields to a control that took focus while the panel closed", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  await act(async () => { root.render(<TwoSelectHarness />); });
+  const { restore } = await openFirstAndCommit(container);
+
+  const second = container.querySelector<HTMLButtonElement>('[aria-label="Second: Alpha"]')!;
+  await act(async () => {
+    second.dispatchEvent(
+      new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as unknown as Event,
+    );
+  });
+  assert.ok(container.querySelector('[role="listbox"][aria-label="Second"]'), "ArrowDown opens the second list");
+
+  // The first Select's restore now fires with the second list already open. Pulling focus back to
+  // the first trigger would read to the second Select's outside-focus dismisser as a click-away,
+  // closing a list the user had just opened — issue #1307's intermittent failure.
+  await act(async () => { restore(); });
+  assert.ok(container.querySelector('[role="listbox"][aria-label="Second"]'),
+    "the late restore does not dismiss the list that took focus after it was scheduled");
+  assert.equal(second.getAttribute("aria-expanded"), "true");
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("a deferred trigger restore still returns focus when nothing else claimed it", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  await act(async () => { root.render(<TwoSelectHarness />); });
+  const { first, restore } = await openFirstAndCommit(container);
+
+  await act(async () => { restore(); });
+  assert.equal(domWindow.document.activeElement, first,
+    "closing a list with nowhere else for focus to go puts it back on the trigger");
+
   await act(async () => { root.unmount(); });
   container.remove();
 });

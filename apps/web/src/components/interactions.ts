@@ -258,6 +258,30 @@ export function handleMenuKeyDown(
   }
 }
 
+/**
+ * Return focus to the trigger after its panel closes — unless something else already has it.
+ *
+ * The restore is deferred because the panel is still mounted, and focus inside it, at the moment
+ * close() runs: focusing the trigger before React unmounts the panel puts focus back where the
+ * teardown then takes it away. A timeout is the only hook that lands after the unmount.
+ *
+ * Deferring it means the DOM may have moved on by the time it fires, and an UNCONDITIONAL restore
+ * then steals focus from whatever claimed it in the meantime. That is not theoretical: choosing an
+ * option in one Select and opening a second one before the timer fires pulled focus back to the
+ * first trigger, and the second Select's own outside-focus dismisser read that as a click-away and
+ * closed the list the user had just opened.
+ *
+ * So the restore applies only when the closing panel's focus is still unclaimed — the body (where a
+ * browser parks focus after the focused element is removed) or nothing at all.
+ */
+function restoreTriggerFocus(triggerRef: RefObject<HTMLButtonElement | null>): void {
+  window.setTimeout(() => {
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== triggerRef.current) return;
+    triggerRef.current?.focus();
+  }, 0);
+}
+
 export interface AccessibleMenuController {
   menuId: string;
   triggerRef: RefObject<HTMLButtonElement | null>;
@@ -290,7 +314,7 @@ export function useDismissiblePopover(
   const panelRef = useRef<HTMLDivElement>(null);
   const close = useCallback((restoreFocus = true) => {
     setOpen(false);
-    if (restoreFocus) window.setTimeout(() => triggerRef.current?.focus(), 0);
+    if (restoreFocus) restoreTriggerFocus(triggerRef);
   }, [setOpen]);
   const toggle = useCallback(() => setOpen((value) => !value), [setOpen]);
   useEffect(() => {
@@ -332,7 +356,7 @@ export function useAccessibleMenu(
     typeahead.current = "";
     if (typeaheadTimer.current != null) window.clearTimeout(typeaheadTimer.current);
     typeaheadTimer.current = null;
-    if (restoreFocus) window.setTimeout(() => triggerRef.current?.focus(), 0);
+    if (restoreFocus) restoreTriggerFocus(triggerRef);
   }, [setOpen]);
 
   useEffect(() => {
