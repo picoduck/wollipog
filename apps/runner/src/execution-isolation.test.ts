@@ -621,3 +621,118 @@ test("relative HOME overrides fail closed instead of mounting the wrong state pa
     }),
   }, { driver: "claude-code", dataDir: "/var/lib/wollipog", env: { HOME: "/home/u/../../etc" }, sessionId: "s1", cwd: "/work" }), /traversal-free/);
 });
+
+test("bwrap binds a managed worktree's link file read-only over the writable worktree", async () => {
+  const linuxDeps = {
+    platform: "linux" as const,
+    uid: () => 1000,
+    mkdirNative: async () => {},
+    resolveNative: async (name: string) => name === "bwrap" ? {
+      path: "/usr/bin/bwrap", via: "path" as const, launch: { command: "/usr/bin/bwrap", args: [] },
+    } : null,
+  };
+  const linkFiles = new Set(["/work/tree/.git", "/work/sibling/.git"]);
+  const resolved = await resolveExecutionIsolation(bwrap, { kind: "native" }, {
+    ...linuxDeps,
+    isRunnerOwnedEntryNative: async (path) => linkFiles.has(path),
+  }, {
+    driver: "claude-code",
+    dataDir: "/var/lib/wollipog",
+    env: { HOME: "/home/me" },
+    sessionId: "s1",
+    cwd: "/work/tree",
+    additionalWritableRoots: ["/work"],
+    readOnlyPaths: ["/work/tree/.git", "/work/sibling/.git"],
+  });
+  assert.equal(resolved?.backend, "bwrap");
+  assert.deepEqual(
+    resolved?.backend === "bwrap" ? resolved.readOnlyBinds : undefined,
+    ["/work/tree/.git", "/work/sibling/.git"],
+  );
+
+  // A `.git` DIRECTORY is a real repository whose administrative writes must keep working, and a
+  // missing source would fail the whole launch rather than protect anything. Both are dropped.
+  const filtered = await resolveExecutionIsolation(bwrap, { kind: "native" }, {
+    ...linuxDeps,
+    isRunnerOwnedEntryNative: async () => false,
+  }, {
+    driver: "claude-code",
+    dataDir: "/var/lib/wollipog",
+    env: { HOME: "/home/me" },
+    sessionId: "s1",
+    cwd: "/work/tree",
+    readOnlyPaths: ["/work/tree/.git"],
+  });
+  assert.equal(filtered?.backend === "bwrap" ? filtered.readOnlyBinds : "absent", undefined);
+});
+
+test("Seatbelt denies the managed link file after the writable roots that contain it", async () => {
+  const resolved = await resolveExecutionIsolation(
+    { mode: "seatbelt", network: "deny" }, { kind: "native" }, {
+      platform: "darwin",
+      nativeHome: () => "/Users/me",
+      nativeTmp: () => "/private/var/folders/tmp",
+      realpathNative: async (path) => path === "/Users/me/Work/tree/.git"
+        ? "/Volumes/work/tree/.git"
+        : path,
+      mkdirNative: async () => {},
+      isRunnerOwnedEntryNative: async (path) => path === "/Users/me/Work/tree/.git",
+      resolveNative: async (name) => name === "sandbox-exec" ? {
+        path: "/usr/bin/sandbox-exec", via: "path", launch: { command: "/usr/bin/sandbox-exec", args: [] },
+      } : null,
+    }, {
+      driver: "claude-code",
+      dataDir: "/Users/me/Library/Application Support/Wollipog",
+      env: {},
+      sessionId: "s1",
+      cwd: "/Users/me/Work/tree",
+      readOnlyPaths: ["/Users/me/Work/tree/.git"],
+    },
+  );
+  assert.equal(resolved?.backend, "seatbelt");
+  const profile = resolved?.backend === "seatbelt" ? resolved.profile : "";
+  // Seatbelt takes the LAST matching rule, so the deny has to come after the allow that grants the
+  // containing worktree. A deny rendered first would grant the write it is meant to refuse.
+  const allowIndex = profile.indexOf('(subpath "/Users/me/Work/tree")');
+  const denyIndex = profile.indexOf("(deny file-write*");
+  assert.ok(allowIndex > 0 && denyIndex > allowIndex, `deny must follow the writable roots:\n${profile}`);
+  // The pathname and its realpath are both denied: a link whose canonical target sits elsewhere
+  // must not be writable under either spelling.
+  assert.match(profile, new RegExp([
+    "\\(deny file-write\\*",
+    '    \\(literal "/Users/me/Work/tree/\\.git"\\)',
+    '    \\(subpath "/Users/me/Work/tree/\\.git"\\)',
+    '    \\(literal "/Volumes/work/tree/\\.git"\\)',
+    '    \\(subpath "/Volumes/work/tree/\\.git"\\)',
+    "\\)",
+  ].join("\n")));
+  assert.deepEqual(
+    resolved?.backend === "seatbelt" ? resolved.readOnlyPaths : undefined,
+    ["/Users/me/Work/tree/.git", "/Volumes/work/tree/.git"],
+  );
+});
+
+test("sessions without a managed worktree keep exactly today's sandbox boundary", async () => {
+  const linux = await resolveExecutionIsolation(bwrap, { kind: "native" }, {
+    platform: "linux", uid: () => 1000, mkdirNative: async () => {},
+    resolveNative: async (name) => name === "bwrap" ? {
+      path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] },
+    } : null,
+    isRunnerOwnedEntryNative: async () => { throw new Error("unreachable"); },
+  }, { driver: "claude-code", dataDir: "/var/lib/wollipog", env: { HOME: "/home/me" }, sessionId: "s1", cwd: "/work" });
+  assert.equal(linux?.backend === "bwrap" ? linux.readOnlyBinds : "absent", undefined);
+
+  const mac = await resolveExecutionIsolation({ mode: "seatbelt", network: "deny" }, { kind: "native" }, {
+    platform: "darwin",
+    nativeHome: () => "/Users/me",
+    nativeTmp: () => "/private/var/folders/tmp",
+    realpathNative: async (path) => path,
+    mkdirNative: async () => {},
+    isRunnerOwnedEntryNative: async () => { throw new Error("unreachable"); },
+    resolveNative: async (name) => name === "sandbox-exec" ? {
+      path: "/usr/bin/sandbox-exec", via: "path", launch: { command: "/usr/bin/sandbox-exec", args: [] },
+    } : null,
+  }, { driver: "claude-code", dataDir: "/Users/me/data", env: {}, sessionId: "s1", cwd: "/Users/me/Work/repo" });
+  assert.equal(mac?.backend === "seatbelt" ? mac.readOnlyPaths : "absent", undefined);
+  assert.doesNotMatch(mac?.backend === "seatbelt" ? mac.profile : "", /deny file-write\*/);
+});

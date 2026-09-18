@@ -316,7 +316,7 @@ test("workflow actions use immutable commit pins", () => {
 test("real WSL isolation CI keeps automatic PE/binfmt interop out of the provider boundary", () => {
   const platform = readFileSync(resolve(process.cwd(), WORKFLOWS[2]), "utf8");
 
-  assert.match(platform, /os: \[windows-latest, windows-2025, macos-latest\]/u);
+  assert.match(platform, /os: \[ubuntu-22\.04, windows-latest, windows-2025, macos-latest\]/u);
   assert.match(platform, /Verify WSL Boundaries Stay Fail-Closed/u);
   assert.match(platform, /WOLLIPOG_WSL_FAIL_CLOSED_DISTRO = "Ubuntu-24\.04"/u);
   assert.match(platform, /node --import tsx --test --test-reporter=tap apps\/runner\/src\/wsl-bwrap-fail-closed\.integration\.test\.ts/u,
@@ -357,6 +357,17 @@ test("real WSL isolation CI keeps automatic PE/binfmt interop out of the provide
     "libc execvp may fall back to a shell after ENOEXEC, so denial is behavioral rather than stderr-textual");
   assert.doesNotMatch(platform, /--bind[^\n]*\/init|--ro-bind[^\n]*\/init/u,
     "CI must never add a dedicated WSL /init bind inside bwrap");
+});
+
+test("native Linux isolation CI proves the managed-worktree read-only rule against a real kernel", () => {
+  const platform = readFileSync(resolve(process.cwd(), WORKFLOWS[2]), "utf8");
+
+  assert.match(platform, /apt-get install -y bubblewrap\r?$/mu,
+    "the Linux leg must install the sandbox it claims to enforce");
+  assert.match(platform, /node --import tsx --test --test-reporter=tap apps\/runner\/src\/managed-worktree-sandbox\.integration\.test\.ts < \/dev\/null/u,
+    "the enforcement test must run with stdin closed so a sandboxed child cannot block the job");
+  assert.match(platform, /grep -q '\^# skipped 0\$'/u,
+    "a host that cannot create a user namespace must fail the job rather than report skipped coverage");
 });
 
 test("desktop Rust verification enforces the lockfile and runs one pinned audit", () => {

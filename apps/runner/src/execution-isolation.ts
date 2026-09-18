@@ -42,6 +42,7 @@ interface IsolationDeps {
   prepareWslIsolation: (context: AgentContext, request: WslBwrapPrepareRequest) => Promise<WslBwrapPreparation>;
   existsNative: (path: string) => Promise<boolean>;
   existsWsl: (context: Extract<AgentContext, { kind: "wsl" }>, path: string) => Promise<boolean>;
+  isRunnerOwnedEntryNative: (path: string) => Promise<boolean>;
   forkSizeNative: (location: ProviderStateLocation, driver: AgentDriverKind, providerSessionId: string) => Promise<number | null>;
   forkSizeWsl: (context: Extract<AgentContext, { kind: "wsl" }>, location: ProviderStateLocation, driver: AgentDriverKind, providerSessionId: string) => Promise<number | null>;
   wait: (ms: number) => Promise<void>;
@@ -101,6 +102,7 @@ const defaultDeps: IsolationDeps = {
   existsWsl: async (context, path) => runContextCommand(
     context, "test", ["-d", path], { cwd: "/", timeoutMs: 5_000 },
   ).then(() => true, () => false),
+  isRunnerOwnedEntryNative: async (path) => stat(path).then((value) => value.isFile(), () => false),
   forkSizeNative: async (location, driver, providerSessionId) => {
     return findProviderForkSizeNative(location.leaf, driver, providerSessionId, 0);
   },
@@ -135,6 +137,10 @@ export interface IsolationStateOptions {
   additionalWritableRoots?: string[];
   /** Keep the provider's writable filesystem to its private cwd and transcript state. */
   orchestratorScratchOnly?: boolean;
+  /** Runner-owned administrative entries that sit inside an otherwise writable session root and
+   * must stay read-only to the provider. Sandbox modes that can express a per-path rule apply it;
+   * the modes that cannot are documented as unenforcing rather than silently assumed safe. */
+  readOnlyPaths?: string[];
   /** Stable attested runner/control-plane owner for state outside dataDir (currently WSL). */
   ownerHash?: string;
   /** Canonical shared provider leaf used by Seatbelt when a home component is symlinked. */
@@ -265,10 +271,14 @@ export function buildSeatbeltProfile(
   network: "inherit" | "deny",
   nativeTmp = tmpdir(),
 ): string {
-  return renderSeatbeltProfile(seatbeltWritableRoots(state, home, nativeTmp), network);
+  return renderSeatbeltProfile(seatbeltWritableRoots(state, home, nativeTmp), network, state.readOnlyPaths ?? []);
 }
 
-function renderSeatbeltProfile(writableRoots: string[], network: "inherit" | "deny"): string {
+function renderSeatbeltProfile(
+  writableRoots: string[],
+  network: "inherit" | "deny",
+  readOnlyPaths: readonly string[] = [],
+): string {
   const writeRules = writableRoots
     .map((path) => `    (subpath ${seatbeltLiteral(path)})`).join("\n");
   return [
@@ -285,9 +295,54 @@ function renderSeatbeltProfile(writableRoots: string[], network: "inherit" | "de
     '    (literal "/dev/tty")',
     writeRules,
     ")",
+    // Seatbelt resolves a profile in order and the last matching rule wins, so the runner-owned
+    // entries carve their exception out of the writable roots above rather than fighting them.
+    // Each entry is denied as both a literal and a subpath: `literal` is the exact-pathname match
+    // that a regular link file needs, and `subpath` additionally covers anything beneath it. This
+    // repository's only enforcing macOS host is CI, so the redundant form is deliberate — a filter
+    // that silently matched nothing would leave the rule looking applied and doing nothing.
+    ...(readOnlyPaths.length
+      ? [
+        "(deny file-write*",
+        ...readOnlyPaths.flatMap((path) => [
+          `    (literal ${seatbeltLiteral(path)})`,
+          `    (subpath ${seatbeltLiteral(path)})`,
+        ]),
+        ")",
+      ]
+      : []),
     ...(network === "inherit" ? ["(allow network*)"] : []),
     "",
   ].join("\n");
+}
+
+/** Deny rules are monotone: an extra entry only ever removes access. Keeping the pathname next to
+ * its realpath means an entry whose canonical form cannot be resolved is still denied by name,
+ * and a realpath that leaves the granted subpath is denied on both spellings. */
+async function seatbeltReadOnlyPaths(
+  paths: readonly string[] | undefined,
+  isRunnerOwnedEntry: IsolationDeps["isRunnerOwnedEntryNative"],
+  realpathNative: IsolationDeps["realpathNative"],
+): Promise<string[]> {
+  const denied = new Set<string>();
+  for (const path of paths ?? []) {
+    if (!await isRunnerOwnedEntry(path)) continue;
+    denied.add(path);
+    try { denied.add(await realpathNative(path)); } catch { /* denied by pathname alone */ }
+  }
+  return [...denied];
+}
+
+/** A bind mount needs a source that exists, and only a worktree's link FILE is runner-owned: a
+ * `.git` directory is a real repository whose administrative writes must keep working. Anything
+ * else is dropped rather than bound, because a missing or wrong source fails the whole launch. */
+async function bwrapReadOnlyBinds(
+  paths: readonly string[] | undefined,
+  isRunnerOwnedEntry: IsolationDeps["isRunnerOwnedEntryNative"],
+): Promise<string[]> {
+  const binds = new Set<string>();
+  for (const path of paths ?? []) if (await isRunnerOwnedEntry(path)) binds.add(path);
+  return [...binds];
 }
 
 async function canonicalizeSeatbeltAdditionalWritableRoots(
@@ -407,13 +462,19 @@ export async function resolveExecutionIsolation(
       home,
       await runtime.realpathNative(runtime.nativeTmp()),
     );
+    const readOnlyPaths = await seatbeltReadOnlyPaths(
+      state.readOnlyPaths,
+      runtime.isRunnerOwnedEntryNative,
+      runtime.realpathNative,
+    );
     return {
       backend: "seatbelt",
       command: binary.launch.command,
       args: binary.launch.args,
       network: policy.network,
-      profile: renderSeatbeltProfile(writableRoots, policy.network),
+      profile: renderSeatbeltProfile(writableRoots, policy.network, readOnlyPaths),
       writableRoots,
+      ...(readOnlyPaths.length ? { readOnlyPaths } : {}),
     };
   }
   if (policy.mode === "windows-job") {
@@ -448,12 +509,16 @@ export async function resolveExecutionIsolation(
   })() : [];
   for (const root of state?.additionalWritableRoots ?? []) writableBinds.push({ source: root, target: root });
   if (writableBinds.length) await runtime.mkdirNative(writableBinds.flatMap((bind) => [bind.source, bind.target]));
+  // Resolved after the writable binds are materialized: the entries live inside those roots, and
+  // the launcher renders them last so the narrower read-only rule wins over the containing mount.
+  const readOnlyBinds = await bwrapReadOnlyBinds(state?.readOnlyPaths, runtime.isRunnerOwnedEntryNative);
   return {
     backend: "bwrap",
     command: binary.launch.command,
     args: binary.launch.args,
     network: policy.network,
     ...(writableBinds.length ? { writableBinds } : {}),
+    ...(readOnlyBinds.length ? { readOnlyBinds } : {}),
   };
 }
 
