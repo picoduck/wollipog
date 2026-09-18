@@ -443,6 +443,62 @@ test("an in-flight Retry does not make the composer row's Dismiss claim to be di
   }
 });
 
+test("a terminal receipt listed beside a held live queue stays dismissible and is not marked held", async () => {
+  const HELD_TITLE = "Waiting for the active turn or control-plane decision to settle; resolve any visible prompt to continue";
+  const fixture = await mountFixture({
+    sessionPatch: {
+      status: "running",
+      queueHeld: true,
+      activeTurnId: "turn-a",
+      // The shape the control plane now broadcasts while the runner holds prompts: the undismissed
+      // terminal receipt kept ahead of the live FIFO instead of being replaced by it.
+      queued: [
+        ...terminalQueueEntry("failed")!,
+        { id: "queue-live", text: "still waiting behind the turn", steerable: true, liveQueueObserved: true },
+      ],
+      pendingPrompts: terminalPendingPrompt("failed", 1),
+    },
+    eventPayloads: [{ kind: "user_message", text: TEXT, images: [] }],
+  });
+  try {
+    assert.equal(
+      fixture.container.querySelector(`[data-testid="pending-prompt-${COMMAND_ID}"]`),
+      null,
+      "the recovery card is suppressed, so the composer row is the receipt's only dismissal surface",
+    );
+
+    const receiptRow = fixture.container.querySelector<HTMLElement>(`[data-testid="queued-prompt-${COMMAND_ID}"]`);
+    assert.ok(receiptRow, "the terminal receipt is listed while the live queue is shown");
+    const receiptBadge = receiptRow.querySelector<HTMLElement>(".queued-badge");
+    assert.equal(receiptBadge?.textContent, "Delivery Failed");
+    assert.equal(receiptBadge?.classList.contains("held"), false, "a settled receipt is not paused by the held FIFO");
+    assert.notEqual(receiptBadge?.getAttribute("title"), HELD_TITLE);
+    const dismiss = receiptRow.querySelector<HTMLButtonElement>('button[aria-label="Dismiss Failed Message"]');
+    assert.ok(dismiss);
+    assert.equal(dismiss.disabled, false);
+    assert.equal(receiptRow.querySelector('button[aria-label="Cancel Queued Message"]'), null);
+
+    const liveRow = fixture.container.querySelector<HTMLElement>('[data-testid="queued-prompt-queue-live"]');
+    assert.ok(liveRow);
+    const liveBadge = liveRow.querySelector<HTMLElement>(".queued-badge");
+    assert.equal(liveBadge?.textContent, "Held", "the live entry keeps its held presentation");
+    assert.equal(liveBadge?.classList.contains("held"), true);
+    assert.equal(liveBadge?.getAttribute("title"), HELD_TITLE);
+    const cancel = liveRow.querySelector<HTMLButtonElement>('button[aria-label="Cancel Queued Message"]');
+    assert.ok(cancel, "the live entry keeps its cancellation control");
+    assert.equal(cancel.disabled, false);
+    assert.equal(liveRow.querySelector(".queued-dismiss"), null);
+
+    await act(async () => fireDomEvent.click(dismiss));
+    assert.deepEqual(fixture.calls.resolvePendingPrompt, [
+      { sessionId: fixture.sessionId, commandId: COMMAND_ID, action: "dismiss" },
+    ], "dismissal targets the durable command identity");
+    assert.deepEqual(fixture.calls.cancelQueuedPrompt, [], "dismissing the receipt never touches the live queue");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("a nonterminal durable entry keeps the existing pre-admission cancellation semantics", async () => {
   const fixture = await mountFixture({
     sessionPatch: {

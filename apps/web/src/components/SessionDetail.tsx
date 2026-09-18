@@ -5108,6 +5108,9 @@ function SessionDetailLoaded({
                     q.durableDeliveryState === "uncertain";
                   const dismissBusy = pendingPromptAction?.commandId === q.id &&
                     pendingPromptAction.action === "dismiss";
+                  // A held queue pauses the live FIFO. A settled receipt listed beside it is waiting
+                  // on nothing, so it must not borrow the held styling or explanation.
+                  const heldBadge = session.queueHeld === true && !terminalDurable;
                   return (
                     <div
                       className={`queued-item${queuedEdit?.promptId === q.id ? " is-editing" : ""}`}
@@ -5116,8 +5119,8 @@ function SessionDetailLoaded({
                       aria-current={queuedEdit?.promptId === q.id ? "true" : undefined}
                     >
                       <span
-                        className={`queued-badge${session.queueHeld ? " held" : ""}`}
-                        title={session.queueHeld
+                        className={`queued-badge${heldBadge ? " held" : ""}`}
+                        title={heldBadge
                           ? "Waiting for the active turn or control-plane decision to settle; resolve any visible prompt to continue"
                           : queueTitle}
                       >
