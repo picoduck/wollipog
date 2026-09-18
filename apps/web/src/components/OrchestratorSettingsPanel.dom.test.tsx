@@ -351,3 +351,59 @@ test("Integration Isolation is a separate saved default, implied by Strict Proje
     container.remove();
   }
 });
+
+test("an older control plane blocks Integration Isolation and still round-trips a save without it", async () => {
+  // This control plane predates the policy: its own default shape has no
+  // `execution.integrationIsolation`, and its update parser rejects a payload carrying it.
+  let current = settings();
+  delete (current.defaults.execution as Partial<typeof current.defaults.execution>).integrationIsolation;
+  const writes: Array<{ defaults: OrchestratorSettingsView["defaults"] }> = [];
+  const transport: ApiTransport = {
+    instanceId: "test", publicOrigin: "http://localhost", close() {},
+    async request(_path, init) {
+      if (init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as { defaults: OrchestratorSettingsView["defaults"] };
+        // Model the older parser exactly: an unknown execution key is a hard rejection.
+        if (Object.hasOwn(body.defaults.execution, "integrationIsolation")) {
+          return new Response(JSON.stringify({ error: "a complete valid Orchestrator default is required" }),
+            { status: 400, headers: { "content-type": "application/json" } });
+        }
+        writes.push(body);
+        current = { ...current, defaults: body.defaults };
+      }
+      return new Response(JSON.stringify(current), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<ApiProvider client={createApiClient(transport)}><OrchestratorSettingsPanel /></ApiProvider>));
+    await settle();
+    const row = [...container.querySelectorAll('[role="radiogroup"]')]
+      .find((node) => node.getAttribute("aria-label") === "Integration Isolation");
+    assert.ok(row, "the setting is shown rather than hidden, so it can explain itself");
+    for (const pill of row.querySelectorAll<HTMLButtonElement>('[role="radio"]')) {
+      assert.equal(pill.getAttribute("aria-disabled"), "true");
+    }
+    assert.match(container.textContent ?? "", /Update the control plane to configure Integration Isolation/);
+
+    // Changing an UNRELATED default must still save; otherwise this feature would break every
+    // Orchestrator settings save against an older control plane.
+    const limit = container.querySelector<HTMLInputElement>("#orchestrator-max-children")!;
+    await act(async () => { fireDomEvent.change(limit, { target: { value: "9" } }); });
+    const save = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Save Defaults")!;
+    await act(async () => save.click());
+    await settle();
+    assert.equal(writes.length, 1, "the save succeeded against the older parser");
+    assert.equal(writes[0]?.defaults.behavior.maximumConcurrentChildren, 9);
+    assert.equal(Object.hasOwn(writes[0]!.defaults.execution, "integrationIsolation"), false,
+      "the payload round-trips without gaining a field this control plane rejects");
+    assert.equal(writes[0]?.defaults.execution.strictProjectIsolation, false,
+      "and the execution policy it does know is preserved");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

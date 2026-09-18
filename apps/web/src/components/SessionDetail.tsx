@@ -37,6 +37,7 @@ import {
   type SessionReminderView,
   sessionRole,
   type SessionView,
+  usesOrchestratorPresetPermissions,
   type SourceLocation,
   type WorkspaceReference,
   type WorkspaceReferenceCandidate,
@@ -6593,8 +6594,15 @@ export function ComposerPlusMenu({
                           policy is only ever delivered by a preset launch, which carries no user
                           integration. */}
                       {(() => {
+                        // A pre-v164 payload has no field. Derive it in the same order the
+                        // control-plane migration does, and for the same reason: EVERY coupled
+                        // preset launch replaces the provider surface and so carries no user
+                        // integration, including the non-strict Claude and Codex preset shapes,
+                        // where `strictProjectIsolation` is false. Reading strictness first would
+                        // report those as Disabled even though they removed the integrations.
                         const enabled = session.orchestratorPolicy!.execution?.integrationIsolation ??
-                          session.orchestratorPolicy!.execution?.strictProjectIsolation ?? true;
+                          (usesOrchestratorPresetPermissions(session) ||
+                            (session.orchestratorPolicy!.execution?.strictProjectIsolation ?? true));
                         const copy = integrationIsolationDisclosure(session.driver);
                         return <div title={enabled ? `${copy.removed} ${copy.kept}` : undefined}>
                           <dt>Integration Isolation</dt>

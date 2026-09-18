@@ -476,29 +476,73 @@ const ADDITIVE_CODEX_MCP_KEY = "mcp_servers.wollipog";
 /** The role marker is present in every runner-built Wollipog MCP entry and never in a user's own. */
 const ADDITIVE_CODEX_MCP_MARKER = ORCHESTRATOR_ENV_KEY;
 
+/**
+ * The MCP server a `-c`/`--config` SETTING names, or `null` when it names something else.
+ *
+ * Measured against codex-cli 0.154.0: the key is trimmed as a whole and then split on dots, but
+ * segments are neither trimmed nor unquoted. `mcp_servers.wollipog = {...}` therefore configures the
+ * server named `wollipog`, while `mcp_servers."wollipog"` names a server literally called
+ * `"wollipog"` (quotes included), and `mcp_servers . wollipog` and `mcp_servers.wollipog .command`
+ * each name something else again. A dotted sub-key such as `mcp_servers.foo.command=...` still
+ * declares `foo`.
+ *
+ * This is the single parser for that grammar; every caller reads server names through it so a second
+ * spelling of the rule cannot drift from the measured one.
+ */
+export function codexMcpServerNameFromSetting(setting: string): string | null {
+  const assignment = setting.indexOf("=");
+  if (assignment < 0) return null;
+  const segments = setting.slice(0, assignment).trim().split(".");
+  if (segments[0] !== "mcp_servers" || segments.length < 2) return null;
+  return segments[1]!;
+}
+
 /** Exactly `mcp_servers.wollipog` (the whole entry or one of its fields), never a server whose
  * name merely starts with it, such as `mcp_servers.wollipog-helper`. */
 function namesReservedCodexMcpServer(setting: string): boolean {
-  const assignment = setting.indexOf("=");
-  if (assignment < 0) return false;
-  // Measured against codex-cli 0.154.0: the key is trimmed as a whole and then split on dots, but
-  // segments are neither trimmed nor unquoted. `mcp_servers.wollipog = {...}` therefore configures
-  // the server named `wollipog`, while `mcp_servers."wollipog"`, `mcp_servers . wollipog`, and
-  // `mcp_servers.wollipog .command` each name a different server and are not collisions.
-  const segments = setting.slice(0, assignment).trim().split(".");
-  return segments[0] === "mcp_servers" && segments[1] === "wollipog";
+  return codexMcpServerNameFromSetting(setting) === "wollipog";
+}
+
+/** Walk the `-c key=value` / `--config key=value` / `--config=key=value` forms in a launch argument
+ * list, yielding each setting value exactly once. */
+function* codexConfigSettings(args: readonly string[]): Generator<string> {
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    const flag = arg.split("=", 1)[0]!;
+    if (flag !== "-c" && flag !== "--config") continue;
+    const value = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : args[index + 1];
+    if (typeof value === "string") yield value;
+  }
+}
+
+/**
+ * MCP server names the agent definition's own launch arguments declare.
+ *
+ * Integration Isolation removes integrations the environment supplies implicitly; an integration
+ * named explicitly in the launch arguments is part of the harness installation an operator
+ * configured, and ADR 0011 keeps it. The isolation probe enumerates the EFFECTIVE inventory, which
+ * includes these, so without this exemption the probe's `enabled=false` would override the very
+ * catalog argument that declared the server.
+ *
+ * Wollipog's own reserved entry is never returned: it is the one server isolation always keeps, and
+ * `reservedCodexMcpNameCollision` already refuses a launch that tries to claim that name.
+ */
+export function declaredCodexMcpServerNames(args: readonly string[]): Set<string> {
+  const names = new Set<string>();
+  for (const setting of codexConfigSettings(args)) {
+    const name = codexMcpServerNameFromSetting(setting);
+    if (name !== null && name !== "wollipog") names.add(name);
+  }
+  return names;
 }
 
 /** A user-supplied launch argument that configures an MCP server under Wollipog's reserved name.
  * The additive launch names its single entry by that key, so it would silently replace it. */
 export function reservedCodexMcpNameCollision(args: readonly string[]): boolean {
-  return args.some((arg, index) => {
-    const flag = arg.split("=", 1)[0]!;
-    if (flag !== "-c" && flag !== "--config") return false;
-    const value = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : args[index + 1];
-    return typeof value === "string" && namesReservedCodexMcpServer(value) &&
-      !value.includes(ADDITIVE_CODEX_MCP_MARKER);
-  });
+  for (const setting of codexConfigSettings(args)) {
+    if (namesReservedCodexMcpServer(setting) && !setting.includes(ADDITIVE_CODEX_MCP_MARKER)) return true;
+  }
+  return false;
 }
 
 export function additiveCodexMcpServerArg(
@@ -715,10 +759,16 @@ export function stripOrchestratorLaunchArgs(args: string[], driver: SessionLaunc
   return result;
 }
 
-/** Codex merges MCP tables, even when the CLI supplies an empty table. Enumerate the
- * effective configuration at the actual launch cwd and explicitly disable every other
- * server. Never include probe output (which may contain credentials) in errors/logs. */
-export function isolateCodexMcpServers(output: string): string[] {
+/**
+ * Codex merges MCP tables, even when the CLI supplies an empty table. Enumerate the effective
+ * configuration at the actual launch cwd and explicitly disable every other server. Never include
+ * probe output (which may contain credentials) in errors/logs.
+ *
+ * `exempt` is the ADDITIVE Integration Isolation shape's list of servers the agent definition itself
+ * declares, which ADR 0011 keeps. It is ALWAYS empty for the coupled preset: that shape's audited
+ * behaviour is to disable everything but Wollipog's entry, and this issue must not change it.
+ */
+export function isolateCodexMcpServers(output: string, exempt: ReadonlySet<string> = new Set()): string[] {
   let servers: unknown;
   try { servers = JSON.parse(output); } catch { throw new Error("cannot verify orchestrator MCP isolation"); }
   if (!Array.isArray(servers) || !servers.some((server) => server?.name === "wollipog" && server?.enabled === true)) {
@@ -728,7 +778,9 @@ export function isolateCodexMcpServers(output: string): string[] {
     if (!server || typeof server.name !== "string" || !/^[A-Za-z0-9_-]+$/.test(server.name)) {
       throw new Error("cannot verify orchestrator MCP isolation");
     }
-    return server.name === "wollipog" ? [] : ["-c", `mcp_servers.${server.name}.enabled=false`];
+    return server.name === "wollipog" || exempt.has(server.name)
+      ? []
+      : ["-c", `mcp_servers.${server.name}.enabled=false`];
   });
 }
 
@@ -818,17 +870,25 @@ async function runIsolatedCodexMcpProbe(
   });
 }
 
+/**
+ * @param exemptDeclaredServers Additive Integration Isolation only. The coupled preset must never
+ * set it: exempting a declared server there would weaken the audited planning boundary.
+ */
 export async function codexOrchestratorMcpArgs(
   opts: CodexOrchestratorProbeOptions,
   cwd: string,
   dependencies: CodexOrchestratorProbeDependencies = {},
+  exemptDeclaredServers = false,
 ): Promise<string[]> {
+  // Derived here from the launch arguments rather than accepted as a caller-supplied list, so a
+  // caller cannot exempt a name the agent definition never declared.
+  const exempt = exemptDeclaredServers ? declaredCodexMcpServerNames(opts.args) : new Set<string>();
   try {
     if (opts.isolation?.backend === "wsl-bwrap") {
       if (opts.context?.kind !== "wsl") throw new Error("target-local WSL isolation context mismatch");
       const probeArgs = [...opts.args.filter((arg) => arg !== "--strict-config"), "mcp", "list", "--json"];
       const stdout = await (dependencies.runIsolated ?? runIsolatedCodexMcpProbe)(opts, cwd, probeArgs);
-      return isolateCodexMcpServers(stdout);
+      return isolateCodexMcpServers(stdout, exempt);
     }
     const { probe, env, nativeCwd } = codexOrchestratorMcpProbe(opts, cwd);
     const { stdout } = await execFileAsync(probe.file, probe.args, {
@@ -836,7 +896,7 @@ export async function codexOrchestratorMcpArgs(
       windowsHide: true,
       ...(probe.windowsVerbatimArguments ? { windowsVerbatimArguments: true, argv0: probe.argv0 } : {}),
     });
-    return isolateCodexMcpServers(stdout);
+    return isolateCodexMcpServers(stdout, exempt);
   } catch {
     throw new Error("Orchestrator launch refused: unable to isolate Codex MCP servers.");
   }

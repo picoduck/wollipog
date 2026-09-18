@@ -46,7 +46,9 @@ import {
 import { machineOptionLabels, runnerDisplay } from "../runners.js";
 import { shortenPath, permissionModeLabel, titleCaseLabel } from "../format.js";
 import {
+  INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED,
   INTEGRATION_ISOLATION_PRESERVED,
+  controlPlaneSupportsIntegrationIsolation,
   integrationIsolationDisclosure,
   orchestratorPresetPermissionsReason,
   orchestratorUnavailableReason,
@@ -614,19 +616,29 @@ export function NewSessionDialog({
     providerPermissionsPreset;
   const effectiveIntegrationIsolation = integrationIsolationImplied ||
     orchestratorDraft.execution.integrationIsolation;
+  // BOTH peers have to know the policy, and they upgrade independently: a v164 runner can sit behind
+  // a v163 control plane, whose override parser rejects `execution.integrationIsolation` outright.
+  // The runner's protocol version cannot answer that, so the control plane's own settings payload
+  // does — it echoes the field only if it knows it.
+  const integrationIsolationControlPlane = controlPlaneSupportsIntegrationIsolation(
+    orchestratorSettings?.view?.defaults,
+  );
   // Only the additive shape needs anything new from the runner; the preset isolates on every
   // runner. The additive gate itself already requires a native Claude Code, Codex, or Pi harness on
   // the host, which is exactly the set that can enforce this policy, so no separate harness rule is
   // needed here — only the protocol gate the control plane will apply.
   const integrationIsolationSupported = integrationIsolationImplied ||
-    runnerSupportsProtocol(runner?.protocolVersion, "orchestratorIntegrationIsolation");
+    (integrationIsolationControlPlane &&
+      runnerSupportsProtocol(runner?.protocolVersion, "orchestratorIntegrationIsolation"));
   // The policy differs by harness, so the copy follows the agent this session will actually launch.
   const integrationIsolationCopy = integrationIsolationDisclosure(agent?.driver);
-  const integrationIsolationUnavailable = runnerCapabilityRequirement(
-    runner?.protocolVersion,
-    "orchestratorIntegrationIsolation",
-    "Integration Isolation",
-  );
+  const integrationIsolationUnavailable = !integrationIsolationControlPlane
+    ? INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED
+    : runnerCapabilityRequirement(
+      runner?.protocolVersion,
+      "orchestratorIntegrationIsolation",
+      "Integration Isolation",
+    );
   const orchestratorExecutionValid = (orchestratorDraft.execution.strictProjectIsolation
     ? strictProjectBoundaryAvailable
     : providerExecutionAvailable) &&
@@ -1092,7 +1104,9 @@ export function NewSessionDialog({
           ...(orchestratorOverrides.has("execution.strictProjectIsolation")
             ? { strictProjectIsolation: orchestratorDraft.execution.strictProjectIsolation }
             : {}),
-          ...(orchestratorOverrides.has("execution.integrationIsolation") && !integrationIsolationImplied
+          // An older control plane rejects this key outright, so it is never sent there.
+          ...(orchestratorOverrides.has("execution.integrationIsolation") &&
+            !integrationIsolationImplied && integrationIsolationControlPlane
             ? { integrationIsolation: orchestratorDraft.execution.integrationIsolation }
             : {}),
         } } : {}),
@@ -1673,7 +1687,7 @@ export function NewSessionDialog({
                   <Select<"disabled" | "enabled">
                     label="Integration Isolation"
                     value={effectiveIntegrationIsolation ? "enabled" : "disabled"}
-                    disabled={integrationIsolationImplied}
+                    disabled={integrationIsolationImplied || !integrationIsolationControlPlane}
                     options={[
                       {
                         value: "disabled",
@@ -1692,7 +1706,9 @@ export function NewSessionDialog({
                 <p className="muted">
                   {integrationIsolationImplied
                     ? `${orchestratorDraft.execution.strictProjectIsolation ? "Strict Project Isolation" : "The Orchestrator preset"} already launches without provider integrations, so this policy is implied and cannot be disabled. ${INTEGRATION_ISOLATION_PRESERVED}`
-                    : effectiveIntegrationIsolation
+                    : !integrationIsolationControlPlane
+                      ? INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED
+                      : effectiveIntegrationIsolation
                       ? `${integrationIsolationCopy.removed} ${integrationIsolationCopy.kept} ${INTEGRATION_ISOLATION_PRESERVED}`
                       : "Hooks, plugins, extensions, skills, and configured MCP servers load exactly as they would for a normal session with this harness."}
                 </p>

@@ -187,7 +187,7 @@ definition's launch arguments is part of the harness installation and remains.
 | harness | removed when enabled | deliberately not removed |
 | --- | --- | --- |
 | Claude Code | `--strict-mcp-config` only: configured MCP servers (user-scope and project `.mcp.json`, both measured) are not loaded, so Wollipog's `--mcp-config` server is the only MCP integration | Hooks — the user's **and** Wollipog's managed policy hooks — plugins enabled in settings, skills, and the user's `permissions.allow`/`ask`/`deny` rules; the built-in tool inventory; `--permission-mode`. Claude Code cannot drop hooks without also dropping either the permission rules or Wollipog's own governance hooks, so it under-delivers and says so |
-| Codex / Codex App Server | `--disable apps --disable plugins --disable hooks`, plus the live `codex mcp list --json` probe that emits `-c mcp_servers.<name>.enabled=false` for every non-Wollipog server | `multi_agent`, `browser_use`, `computer_use`, `image_generation` (built-in tool inventory, not user-configured integrations); `--strict-config`; sandbox, approval, and reviewer settings |
+| Codex / Codex App Server | `--disable apps --disable plugins --disable hooks`, plus the live `codex mcp list --json` probe that emits `-c mcp_servers.<name>.enabled=false` for every non-Wollipog server the agent definition does not itself declare | `multi_agent`, `browser_use`, `computer_use`, `image_generation` (built-in tool inventory, not user-configured integrations); MCP servers the launch arguments declare (the coupled preset still disables those); `--strict-config`; sandbox, approval, and reviewer settings |
 | Pi | `--no-extensions --no-skills --no-prompt-templates --no-context-files` | `--exclude-tools` (tool inventory); the discovery-verified Wollipog Agent Control extension, which still loads because `--no-extensions` disables DISCOVERY and explicit `-e` paths still work |
 
 Because the policy genuinely differs by harness, so does the disclosure: the dialog control, the
@@ -196,7 +196,10 @@ Provider Permissions summary, and the session detail row all read
 account-level Orchestrator settings panel — which has no selected harness — states the three
 differences compactly. Plugin-contributed MCP servers are deliberately NOT claimed to be removed on
 Claude: that case could not be measured (see ADR 0011), so the copy says "configured MCP servers".
-Strict Project Isolation and every coupled
+Both peers must know the policy and they upgrade independently, so the dialog and the Orchestrator
+settings panel additionally gate on the control plane: the Orchestrator settings payload echoes
+`execution.integrationIsolation` only if the control plane knows it, and when it is absent the
+control is disabled and the field is never sent. Strict Project Isolation and every coupled
 preset already launch without integrations, so their effective value is `true`, shown as implied and
 recorded with the provenance of the policy that implied it. An older runner would launch WITH the
 integrations the human removed, so creation and restart refuse rather than degrade — for a saved

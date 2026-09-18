@@ -12,6 +12,7 @@ import {
   CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION,
   codexOrchestratorMcpArgs,
   codexOrchestratorMcpProbe,
+  declaredCodexMcpServerNames,
   isolateCodexMcpServers,
   orchestratorAcpSessionMeta,
   orchestratorInstructions,
@@ -862,4 +863,53 @@ test("the Integration Isolation strip leaves user arguments alone and is exact a
     stripAdditiveOrchestratorLaunchArgs(
       ["--no-extensions", "-ns", "--no-builtin-tools", "--extension", "/user.js"], "pi", [], true),
     ["--no-builtin-tools", "--extension", "/user.js"]);
+});
+
+test("Integration Isolation keeps Codex MCP servers the agent definition declares, and the preset keeps none", () => {
+  const inventory = JSON.stringify([
+    { name: "wollipog", enabled: true },
+    { name: "declared", enabled: true },
+    { name: "ambient", enabled: true },
+  ]);
+  // The coupled preset's audited boundary is unchanged: everything but Wollipog's entry is disabled,
+  // whether or not the launch declared it.
+  assert.deepEqual(isolateCodexMcpServers(inventory), [
+    "-c", "mcp_servers.declared.enabled=false",
+    "-c", "mcp_servers.ambient.enabled=false",
+  ]);
+  // The additive isolated shape removes only the ambient one. A server the operator named in the
+  // agent definition is part of the harness installation (ADR 0011), and disabling it would
+  // override the very launch argument that declared it.
+  assert.deepEqual(
+    isolateCodexMcpServers(inventory, declaredCodexMcpServerNames([
+      "-c", "mcp_servers.declared.command=\"/usr/bin/declared\"",
+    ])),
+    ["-c", "mcp_servers.ambient.enabled=false"]);
+});
+
+test("declared Codex MCP names are parsed exactly as codex-cli 0.154.0 parses -c keys", () => {
+  // All three argument forms, and a dotted sub-key, declare the server.
+  assert.deepEqual([...declaredCodexMcpServerNames(["-c", "mcp_servers.a=\"x\""])], ["a"]);
+  assert.deepEqual([...declaredCodexMcpServerNames(["--config", "mcp_servers.b.command=\"x\""])], ["b"]);
+  assert.deepEqual([...declaredCodexMcpServerNames(["--config=mcp_servers.c.env.TOKEN=\"x\""])], ["c"]);
+  // Measured grammar: the key is trimmed as a WHOLE and split on dots, with no per-segment trimming
+  // or unquoting. Each of these therefore names a different server than the bare spelling would.
+  assert.deepEqual([...declaredCodexMcpServerNames(["-c", "  mcp_servers.d=\"x\""])], ["d"],
+    "leading whitespace on the whole key is trimmed");
+  assert.deepEqual([...declaredCodexMcpServerNames(["-c", "mcp_servers.\"e\"=\"x\""])], ["\"e\""],
+    "a quoted segment is the literal name including its quotes");
+  assert.deepEqual([...declaredCodexMcpServerNames(["-c", "mcp_servers . f=\"x\""])], [],
+    "a spaced segment does not parse as the mcp_servers table at all");
+  assert.deepEqual([...declaredCodexMcpServerNames(["-c", "mcp_servers.g .command=\"x\""])], ["g "],
+    "an inner segment keeps its trailing space");
+  // Non-MCP settings, valueless keys, and Wollipog's own reserved entry are never declarations.
+  assert.deepEqual([...declaredCodexMcpServerNames([
+    "-c", "model=\"o3\"", "-c", "mcp_servers", "-c", "mcp_servers.wollipog.enabled=true",
+    "--model", "mcp_servers.h=\"x\"",
+  ])], [], "only -c/--config settings under mcp_servers, and never the reserved Wollipog name");
+  // The exemption cannot resurrect Wollipog's reserved name, which isolation always keeps anyway.
+  assert.deepEqual(
+    isolateCodexMcpServers(JSON.stringify([{ name: "wollipog", enabled: true }, { name: "z", enabled: true }]),
+      declaredCodexMcpServerNames(["-c", "mcp_servers.wollipog=\"x\""])),
+    ["-c", "mcp_servers.z.enabled=false"]);
 });

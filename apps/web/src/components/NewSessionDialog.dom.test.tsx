@@ -2078,3 +2078,41 @@ test("the Claude Integration Isolation copy says MCP servers go and hooks, plugi
       "the Codex wording must not leak into a Claude launch");
   } finally { await unmountFixture(fixture); }
 });
+
+/** An Orchestrator settings payload from a control plane that predates the policy: its own default
+ * shape has no `execution.integrationIsolation`, and its override parser rejects the key. */
+async function preIntegrationIsolationDefaults(): Promise<OrchestratorSettingsView> {
+  const defaults = structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
+  delete (defaults.execution as Partial<typeof defaults.execution>).integrationIsolation;
+  return {
+    defaults,
+    source: "system_default",
+    capabilities: {
+      models: [{ id: "test-model", efforts: ["high"] }], effortLevels: ["high"],
+      installations: 1, compatibleInstallations: 1, status: "available",
+    },
+  };
+}
+
+test("an older control plane blocks Integration Isolation even when the runner supports it", async () => {
+  // The peers upgrade independently: this runner is current, the control plane is not.
+  const fixture = await mountFixture({ runners: [piAdditiveRunner], capabilities: {
+    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+  } }, undefined, undefined, undefined, undefined, preIntegrationIsolationDefaults);
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    const trigger = fixture.container.querySelector<HTMLButtonElement>('[aria-label^="Integration Isolation:"]');
+    assert.ok(trigger, "the setting is still shown rather than hidden");
+    assert.equal(trigger.getAttribute("aria-disabled"), "true");
+    assert.match(fixture.container.textContent!, /Update the control plane to configure Integration Isolation/);
+    // An unrelated Orchestrator session must still be creatable, and the request must not carry a
+    // key this control plane would reject as an unknown override.
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests.length, 1);
+    assert.equal(fixture.requests[0]?.role, "orchestrator");
+    assert.equal(
+      Object.hasOwn(fixture.requests[0]?.orchestrator?.execution ?? {}, "integrationIsolation"), false,
+      "the field is never sent to a control plane that does not know it");
+  } finally { await unmountFixture(fixture); }
+});

@@ -711,3 +711,80 @@ test("descendant polling keeps replacement deadlines when expired timer ids are 
     Object.defineProperty(domWindow, "clearTimeout", { configurable: true, value: originalClearTimeout });
   }
 });
+
+test("a legacy campaign payload derives Integration Isolation from the preset before strictness", async () => {
+  const humanOnly = {
+    implementation_question: "human",
+    pr_merge: "human",
+    merged_branch_deletion: "human",
+    follow_up_issue_publication: "human",
+    ui_evidence_approval: "human",
+  } as const;
+  // A v144–v163 control plane: the execution block exists but has no `integrationIsolation`.
+  const legacyPolicy = (strictProjectIsolation: boolean) => ({
+    version: 1 as const,
+    behavior: {
+      childHarness: null, childModel: null, childEffort: null,
+      maximumConcurrentChildren: 4, followUps: "recommend_only" as const, completion: "retain" as const,
+    },
+    delegation: { parentControl: "off" as const, decisions: { ...humanOnly } },
+    execution: { strictProjectIsolation },
+    sources: {
+      behavior: {
+        childHarness: "legacy_session" as const, childModel: "legacy_session" as const,
+        childEffort: "legacy_session" as const, maximumConcurrentChildren: "legacy_session" as const,
+        followUps: "legacy_session" as const, completion: "legacy_session" as const,
+      },
+      delegation: {
+        parentControl: "legacy_session" as const,
+        decisions: Object.fromEntries(Object.keys(humanOnly).map((key) => [key, "legacy_session"])),
+      },
+      execution: { strictProjectIsolation: "legacy_session" as const },
+    },
+  });
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const render = (permissionMode: string, strictProjectIsolation: boolean) => root.render(<ComposerPlusMenu
+    session={{
+      // The role is explicit, so the additive cases below reach the panel too: only
+      // `usesOrchestratorPresetPermissions` distinguishes them, which is what this test is about.
+      permissionMode, role: "orchestrator", driver: "claude-code", parentControl: "off",
+      orchestratorPolicy: legacyPolicy(strictProjectIsolation),
+      costBudgetUsd: null, costCheckpointsUsd: null, maxToolCalls: null,
+    } as unknown as SessionView}
+    planActive={false} planSupported={false} onTogglePlan={() => {}} onApply={() => {}}
+    onSetParentControl={() => {}} onSetParentControlPolicy={() => {}}
+    disabled={false} imageMimeTypes={[]} onAttachImages={() => {}}
+  />);
+  const row = () => {
+    const term = [...container.querySelectorAll("dt")].find((node) => node.textContent === "Integration Isolation");
+    assert.ok(term, "the Campaign Behavior panel shows the stored value");
+    return term.nextElementSibling!.textContent ?? "";
+  };
+  const open = async (permissionMode: string, strictProjectIsolation: boolean) => {
+    await act(async () => render(permissionMode, strictProjectIsolation));
+    const toggle = container.querySelector<HTMLButtonElement>('[aria-label="Add and Modes"]')!;
+    if (!container.querySelector('[aria-label="Active Campaign Behavior"]')) {
+      await act(async () => fireDomEvent.click(toggle));
+    }
+  };
+  try {
+    // The case the review caught: a NON-strict coupled preset. Its stored strictness is false, but
+    // the preset still replaced the whole provider surface, so it launched without integrations.
+    await open("orchestrator", false);
+    assert.match(row(), /^Enabled/,
+      "a non-strict coupled preset removed integrations, so strictness must not be read first");
+    assert.match(row(), /Legacy Session/, "and the derived value is attributed as legacy provenance");
+
+    // An additive legacy session is the opposite: ordinary provider mode, integrations intact.
+    await open("acceptEdits", false);
+    assert.match(row(), /^Disabled/);
+    // A strict legacy session is Enabled through the boundary rather than the preset literal.
+    await open("acceptEdits", true);
+    assert.match(row(), /^Enabled/);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

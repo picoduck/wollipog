@@ -6,6 +6,7 @@ import {
   type AgentDefinition,
   type AgentDriverKind,
   type AgentHarnessDefaultsView,
+  type OrchestratorDefaults,
 } from "@wollipog/protocol";
 
 /** Match the server's exact harness identity and whole-preference capability check. */
@@ -116,6 +117,26 @@ export function integrationIsolationDisclosure(driver: AgentDriverKind | undefin
     kept: "Hooks, plugins enabled in settings, skills, and your permission rules are all kept, because Claude Code cannot drop hooks without also dropping either your permission rules or Wollipog's own governance hooks.",
   };
 }
+
+/**
+ * Whether the CONTROL PLANE understands the Integration Isolation policy at all.
+ *
+ * A v164 runner can sit behind a v163 control plane. That control plane's override parser rejects
+ * `execution.integrationIsolation` as an unknown key and its settings update parser rejects a
+ * defaults payload carrying it, so the runner's protocol version says nothing about whether the
+ * field may be sent. The Orchestrator settings view is served by the control plane and echoes its
+ * own default shape, so the presence of the field there is the capability: it can only be present
+ * if the control plane knows the field.
+ */
+export function controlPlaneSupportsIntegrationIsolation(
+  defaults: OrchestratorDefaults | undefined,
+): boolean {
+  return defaults !== undefined && defaults.execution !== undefined &&
+    Object.hasOwn(defaults.execution, "integrationIsolation");
+}
+
+export const INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED =
+  "Update the control plane to configure Integration Isolation.";
 
 /** The account-level settings panel has no selected harness, so it states the differences compactly
  * rather than picking one harness's wording and being wrong about the other two. */

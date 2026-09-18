@@ -6707,13 +6707,19 @@ test("existing campaigns migrate to the Integration Isolation their current laun
     // A coupled-preset campaign and an additive one, created the way each shape records itself.
     db.createSession(newSession({ id: "preset", config: { permissionMode: "orchestrator" } }));
     db.createSession(newSession({ id: "additive", config: { permissionMode: "default" } }));
+    // The case that makes the derivation ORDER matter: a NON-strict coupled preset. Its stored
+    // `strictProjectIsolation` is false, but the preset still replaces the whole provider surface,
+    // so it launches without integrations. Reading strictness first would report it as `false`.
+    db.createSession(newSession({ id: "preset-non-strict", config: { permissionMode: "orchestrator" } }));
     const policy = (strictProjectIsolation: boolean): OrchestratorCampaignPolicy =>
       resolveOrchestratorCampaignPolicy(
         { ...structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS),
           execution: { strictProjectIsolation, integrationIsolation: false } },
         "user_default",
       );
-    for (const [id, strict] of [["preset", true], ["additive", false]] as const) {
+    for (const [id, strict] of [
+      ["preset", true], ["additive", false], ["preset-non-strict", false],
+    ] as const) {
       db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?")
         .run(JSON.stringify(policy(strict)), id);
     }
@@ -6728,7 +6734,7 @@ test("existing campaigns migrate to the Integration Isolation their current laun
     // Reopen as a pre-v164 database: strip the settings column and the stored policy field.
     const legacy = new DatabaseSync(path);
     legacy.exec("ALTER TABLE orchestrator_settings DROP COLUMN integration_isolation");
-    for (const id of ["preset", "additive"]) {
+    for (const id of ["preset", "additive", "preset-non-strict"]) {
       const row = legacy.prepare("SELECT orchestrator_policy FROM sessions WHERE id=?")
         .get(id) as { orchestrator_policy: string };
       const stored = JSON.parse(row.orchestrator_policy);
@@ -6748,6 +6754,11 @@ test("existing campaigns migrate to the Integration Isolation their current laun
     assert.equal(preset.sources.execution.integrationIsolation, "legacy_session");
     assert.equal(preset.execution.strictProjectIsolation, true,
       "the boundary policy is untouched by the migration");
+    const nonStrictPreset = db!.sessionOrchestratorPolicy("preset-non-strict")!;
+    assert.equal(nonStrictPreset.execution.integrationIsolation, true,
+      "the preset permission mode is read BEFORE strictness: a non-strict preset still removed integrations");
+    assert.equal(nonStrictPreset.execution.strictProjectIsolation, false,
+      "and its project boundary is untouched by the migration");
     const additive = db!.sessionOrchestratorPolicy("additive")!;
     assert.equal(additive.execution.integrationIsolation, false);
     assert.equal(additive.sources.execution.integrationIsolation, "legacy_session");

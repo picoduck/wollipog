@@ -105,6 +105,16 @@ isolation probe, which enumerates the effective MCP inventory at the real launch
 `-c mcp_servers.<name>.enabled=false` for everything but Wollipog's entry. `--disable <feature>` is
 exactly `-c features.<name>=false` (`codex --help`, codex-cli 0.154.0).
 
+The probe enumerates the EFFECTIVE inventory, which includes servers the agent definition's own
+launch arguments declare. Those are exempted for the additive isolated shape, so the probe cannot
+emit an `enabled=false` that overrides the very catalog argument that configured the server — that
+would contradict the scope rule above. The exemption is derived inside `codexOrchestratorMcpArgs`
+from `opts.args`, never from a caller-supplied list, and the coupled preset never sets it: its
+audited boundary is that nothing but Wollipog's entry survives, and this issue must not change it.
+Declared names are read through `codexMcpServerNameFromSetting`, the single parser for the measured
+codex-cli 0.154.0 `-c` key grammar (trim the whole key, split on dots, no per-segment trimming or
+unquoting), across the `-c key=value`, `--config key=value`, and `--config=key=value` forms.
+
 `multi_agent`, `browser_use`, `computer_use`, and `image_generation` are deliberately **not**
 disabled. They are Codex's own built-in tool inventory, not integrations the user configured, and the
 additive contract preserves the tool inventory exactly; the issue's list is "hooks, plugins,
@@ -150,6 +160,15 @@ delegation only *narrows* what a session may do. Silently dropping this policy w
 launch's reach into the user's credentials and tools, so it fails closed for a saved user default
 exactly as it does for an explicit per-session override.
 
+The two peers upgrade independently, so the web gates on BOTH. A v164 runner can sit behind a v163
+control plane, whose override parser rejects `execution.integrationIsolation` as an unknown key and
+whose settings update parser rejects a defaults payload carrying it. The runner's protocol version
+cannot answer that, so the control plane's own Orchestrator settings payload does: it echoes
+`execution.integrationIsolation` only if it knows the field. When it is absent the dialog and the
+settings panel disable the control with "Update the control plane to configure Integration
+Isolation.", never send the field in a create request, and round-trip a settings save without adding
+it — otherwise saving any unrelated Orchestrator default would start failing.
+
 The coupled preset needs nothing new: every preset launch — Native TUI, ACP, legacy, and the
 non-strict Claude/Codex preset shapes — already replaces the provider surface, on every runner ever
 shipped. Its effective and stored value is `true`, attributed to the provenance of the boundary that
@@ -170,9 +189,15 @@ durable record of which shape a session was created with: a coupled-preset sessi
 additive session created since v160 becomes `false`. The provenance is `legacy_session`. The
 per-user settings column defaults to 0.
 
+The preset permission mode is read BEFORE strictness, and both the migration and the web's
+session-detail fallback order it that way. A non-strict coupled preset — the Claude and Codex
+non-strict preset shapes — stores `strictProjectIsolation: false` yet still replaced the whole
+provider surface, so reading strictness first would report it as `false` and under-state what that
+session actually launched with.
+
 `orchestratorCampaignPolicyFromJson` carries a read-time derivation for rows an older control plane
-writes after that migration has run; it falls back to `strictProjectIsolation`, because a strict
-policy is only ever delivered by a preset launch.
+writes after that migration has run. It cannot see `permission_mode`, so it falls back to
+`strictProjectIsolation` alone; the migration, which can, is what makes every existing row accurate.
 
 ## Consequences
 

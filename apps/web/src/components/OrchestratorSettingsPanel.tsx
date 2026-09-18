@@ -12,7 +12,9 @@ import { useApi } from "../api-context.js";
 import { effortLabel } from "../format.js";
 import {
   INTEGRATION_ISOLATION_BY_HARNESS,
+  INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED,
   INTEGRATION_ISOLATION_PRESERVED,
+  controlPlaneSupportsIntegrationIsolation,
 } from "../session-preset-defaults.js";
 import { SettingsGroup } from "./SettingsView.js";
 import { SegmentedRow, SelectRow, StaticRow } from "./ui/SettingsRows.js";
@@ -108,6 +110,10 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   // Strict Project Isolation's harness shapes carry no user integration at all, so the settings
   // panel shows the value those launches actually have rather than the one stored underneath it.
   const integrationIsolationImplied = draft?.execution.strictProjectIsolation === true;
+  // An older control plane's update parser rejects a defaults payload carrying this key, so the
+  // control is disabled there. The draft is a plain spread of the served payload, so a save from
+  // this panel round-trips WITHOUT the field and every unrelated default stays saveable.
+  const integrationIsolationSupported = controlPlaneSupportsIntegrationIsolation(view?.defaults);
   const harnessPolicySupported = view?.capabilities.harnesses !== undefined;
   const harnesses = view?.capabilities.harnesses ?? [];
   const selectedHarness = draft?.behavior.childHarness ?? null;
@@ -392,15 +398,19 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         // Strict Project Isolation already launches without any provider integration, so the value
         // it implies is shown here rather than the stored one, and the control cannot contradict it.
         value={integrationIsolationImplied || draft.execution.integrationIsolation ? "enabled" : "disabled"}
-        disabled={integrationIsolationImplied}
+        disabled={integrationIsolationImplied || !integrationIsolationSupported}
         disabledReason={integrationIsolationImplied
           ? "Strict Project Isolation already launches without provider integrations."
-          : undefined}
+          : !integrationIsolationSupported
+            ? INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED
+            : undefined}
         onChange={(value) => updateExecution("integrationIsolation", value === "enabled")}
       />
       <StaticRow
         title="Effective Integrations"
-        description={integrationIsolationImplied
+        description={!integrationIsolationSupported
+          ? INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED
+          : integrationIsolationImplied
           ? `Strict Project Isolation already launches without provider integrations, so Integration Isolation is implied and cannot be disabled. ${INTEGRATION_ISOLATION_PRESERVED}`
           : draft.execution.integrationIsolation
             ? `${INTEGRATION_ISOLATION_BY_HARNESS} ${INTEGRATION_ISOLATION_PRESERVED}`

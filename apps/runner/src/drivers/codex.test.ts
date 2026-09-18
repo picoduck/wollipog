@@ -550,3 +550,46 @@ test("disposed driver: handleEvent short-circuits to null", () => {
   assert.equal(threadIdOf(driver), null, "thread id not set when disposed");
   assert.equal(events.length, 0);
 });
+
+test("only the additive isolated Codex shape exempts MCP servers its launch arguments declare", async () => {
+  const calls: Array<{ args: string[]; exempt: boolean }> = [];
+  const run = async (
+    config: { permissionMode: string },
+    orchestrator: { strictProjectIsolation: boolean; integrationIsolation?: boolean } | undefined,
+  ) => {
+    const child = fakeAgentProcess();
+    const args = ["-c", 'mcp_servers.declared.command="/usr/bin/declared"'];
+    const driver = new CodexDriver({
+      command: "codex", args, cwd: "/repo", env: {}, config, context: { kind: "native" },
+      ...(orchestrator ? { orchestrator } : {}),
+    }, { onEvent() {}, onStderr() {}, onExit() {} }, {
+      spawn() { return child; },
+      kill() {},
+      orchestratorMcpArgs: async (_opts, _cwd, _deps, exemptDeclaredServers) => {
+        calls.push({ args, exempt: exemptDeclaredServers === true });
+        return [];
+      },
+    });
+    try {
+      const turn = driver.prompt("go");
+      await nextTask();
+      child.stdout.emit("data", JSON.stringify({ type: "turn.completed" }) + "\n");
+      child.emit("close", 0);
+      await turn;
+    } finally { driver.dispose(); }
+  };
+
+  // The coupled preset's audited boundary disables everything but Wollipog's entry, declared or not.
+  await run({ permissionMode: "orchestrator" }, { strictProjectIsolation: true });
+  assert.deepEqual(calls.map((call) => call.exempt), [false],
+    "the coupled preset never exempts a declared server");
+
+  // The additive isolated shape keeps what the agent definition itself configured (ADR 0011).
+  await run({ permissionMode: "on-request" },
+    { strictProjectIsolation: false, integrationIsolation: true });
+  assert.deepEqual(calls.map((call) => call.exempt), [false, true]);
+
+  // And with the policy off there is no probe at all.
+  await run({ permissionMode: "on-request" }, { strictProjectIsolation: false });
+  assert.equal(calls.length, 2, "a non-isolated additive launch never probes");
+});
