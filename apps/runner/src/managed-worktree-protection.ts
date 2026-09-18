@@ -851,6 +851,9 @@ export function pathTargetsGuardState(path: string, cwd: string, directory: stri
  *   `--recursive` long before this classifier would see it.
  * - A `NAME=value` assignment: a `PATH=` prefix decides what the command name resolves to.
  * - A command word that is not a bare name: `./ls` and `/tmp/ls` are whatever was planted there.
+ * - An option word carrying a path, in any spelling. `du --exclude-from=<path>`, `-X<path>`, and
+ *   `--files0-from=<path>` all OPEN that file, and an option's value is not an operand, so it is
+ *   not compared against the guard state. No bounded inspection needs a path inside an option.
  *
  * It over-refuses where the safe direction is to do so. A short-option cluster is scanned for `R`
  * without modelling which options take an attached value, so GNU's `ls -IREADME` reads as recursive
@@ -969,6 +972,10 @@ function inspectsAncestorOnly(words: readonly string[], separation: number): boo
   if (words.some((word) => /[*?[\]{}]/u.test(word))) return false;
   // An assignment decides what the command name resolves to.
   if (words.some((word) => /^[A-Za-z_][A-Za-z0-9_]*=/u.test(word))) return false;
+  // An option carrying a path reads that file without ever naming it as an operand.
+  if (words.some((word) => word.startsWith("-") && (word.includes("/") || word.includes("\\")))) {
+    return false;
+  }
   const name = words[0];
   if (name === undefined || name === "" || name.includes("/") || name.includes("\\")) return false;
   switch (name) {
@@ -1027,25 +1034,28 @@ export function commandTargetsGuardState(
   // Relate every operand first. `inside` refuses outright, and each segment keeps the tightest
   // ancestor IT names, which is the depth its own walk has to respect. Classifying afterwards, once
   // per segment, keeps a long command list linear rather than quadratic.
-  const bounds: number[] = [];
-  let namesAncestor = false;
+  const bounds: Array<number | null> = [];
+  let tightest: number | null = null;
   for (const { operands } of segments) {
-    let bound = Number.POSITIVE_INFINITY;
+    let bound: number | null = null;
     for (const value of operands) {
       if (value === null) continue;
       const relation = guardStateRelation(value, cwd, root);
       if (relation === null) continue;
       if (relation.kind === "inside") return GUARD_STATE_REFUSAL;
-      namesAncestor = true;
-      bound = Math.min(bound, relation.separation);
+      bound = Math.min(bound ?? relation.separation, relation.separation);
     }
+    if (bound !== null) tightest = Math.min(tightest ?? bound, bound);
     bounds.push(bound);
   }
-  if (!namesAncestor) return null;
+  if (tightest === null) return null;
   // Every command in the list has to be an inspection, not only the ones naming an ancestor: an
-  // earlier `hash -p`, `PATH=`, or function definition decides what a later `ls` runs.
+  // earlier `hash -p`, `PATH=`, or function definition decides what a later `ls` runs. One that
+  // names no ancestor of its own is held to the tightest bound in the list, because its implicit
+  // target is the working directory, which no operand mentions: `find -maxdepth 999` beside a
+  // listing of an ancestor would otherwise walk the hook directory from an ancestor `cwd`.
   const inspection = segments.every(({ words }, index) =>
-    words !== null && inspectsAncestorOnly(words, bounds[index] ?? 0));
+    words !== null && inspectsAncestorOnly(words, bounds[index] ?? tightest));
   return inspection ? null : GUARD_STATE_REFUSAL;
 }
 

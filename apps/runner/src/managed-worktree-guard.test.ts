@@ -743,6 +743,13 @@ test("a command cannot launder itself into the ancestor carve-out", (t) => {
     `cd ${project} && ls ${home}`,
     // Deciding a directory is empty means opening it, which at the bound is the hook directory.
     `find ${home} -maxdepth 2 -empty`,
+    // `find` with no path searches the working directory, which no operand mentions, so a command
+    // that names no ancestor of its own is held to the tightest bound in the list.
+    `ls ${home}; find -maxdepth 999`,
+    // An option carrying a path OPENS that file without ever naming it as an operand.
+    `du --exclude-from=../.wollipog-data/hooks/s1.protections.json ${home}`,
+    `du -X../.wollipog-data/hooks/s1.protections.json ${home}`,
+    `ls ${home}; du --files0-from=../.wollipog-data/hooks/s1.protections.json`,
     // Accepted over-refusal: a short-option cluster is scanned for `R` without modelling which
     // options take an attached value, so GNU's `ls -IREADME` reads as recursive. The alternative,
     // a hard-coded list of value-taking options, fails OPEN the day that list is wrong.

@@ -145,8 +145,11 @@ What is done instead:
   belongs to the redirection rather than to the command. A glob or brace metacharacter disqualifies
   the command, because the shell expands `--recurs{ive,}` into `--recursive` first. So does a
   `NAME=value` assignment, and a command word that is not a bare name, since `./ls` is whatever was
-  planted there. Long options are matched as GNU `getopt_long` accepts them, so `ls --recurs` counts
-  as recursive.
+  planted there, and an option word carrying a path in any spelling, since `du --exclude-from=<path>`
+  opens that file while an option's value is never compared as an operand. Long options are matched
+  as GNU `getopt_long` accepts them, so `ls --recurs` counts as recursive. A command that names no
+  ancestor of its own is held to the tightest bound in the list, because its implicit target is the
+  working directory, which no operand mentions.
 
   Where the two directions conflict, it over-refuses. A short-option cluster is scanned for `R`
   without modelling which options take an attached value, so GNU's `ls -IREADME` reads as recursive
