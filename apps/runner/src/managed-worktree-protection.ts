@@ -139,6 +139,23 @@ function globTargetsProtected(
   });
 }
 
+/**
+ * The protections as the kernel sees them: a worktree registered through a symlinked prefix is
+ * the same directory as its physical path, and the physical reading below must compare like with
+ * like or every relative operand beneath such a worktree would read as an escape.
+ */
+function physicalProtections(protections: readonly ManagedWorktreeProtection[]): ManagedWorktreeProtection[] {
+  return protections.map((protection) => ({
+    worktreePath: canonicalPath(normalize(protection.worktreePath)),
+    repoPath: canonicalPath(normalize(protection.repoPath)),
+  }));
+}
+
+/** Where an external command finds `cwd`: symlinks resolved, as the kernel resolves `..` from it. */
+function physicalCwd(cwd: string): string {
+  return canonicalPath(normalize(cwd));
+}
+
 function operandTargetsProtected(
   token: ShellToken | undefined,
   cwd: string,
@@ -146,7 +163,16 @@ function operandTargetsProtected(
   protections: readonly ManagedWorktreeProtection[],
 ): boolean {
   const target = resolvedOperand(token, cwd, environment);
-  return target != null ? protectedTarget(target, protections) : globTargetsProtected(token, cwd, protections);
+  if (target == null) {
+    return globTargetsProtected(token, cwd, protections) ||
+      globTargetsProtected(token, physicalCwd(cwd), physicalProtections(protections));
+  }
+  if (protectedTarget(target, protections)) return true;
+  // The shell's `cd` is logical, but the command this operand belongs to is external and the
+  // kernel resolves it from the PHYSICAL directory: `..` beneath a symlink lands where the link
+  // points, not where the shell prints. Judge that reading too, against the physical protections.
+  const physical = resolvedOperand(token, physicalCwd(cwd), environment);
+  return physical != null && protectedTarget(canonicalPath(physical), physicalProtections(protections));
 }
 
 function resolvedOperand(
@@ -399,7 +425,10 @@ function gitWorktreeRefusal(
     const value = word(token, cwd, environment);
     return value !== "--" && !value?.startsWith("-");
   });
-  if (action === "prune") return protectionRepository(cwd, protections);
+  if (action === "prune") {
+    return protectionRepository(cwd, protections) ||
+      protectionRepository(physicalCwd(cwd), physicalProtections(protections));
+  }
   if (action !== "remove" && action !== "move") return false;
   return operandTargetsProtected(operands[0], cwd, environment, protections);
 }
@@ -539,7 +568,8 @@ function commandTargetsManagedWorktreeUnsafe(
       // Claude's Bash tool keeps its shell directory between calls. Refuse an escape from every
       // managed root so a later relative removal cannot be resolved against an unobservable cwd.
       if (target && withinProtectedRoot(currentCwd, protections) &&
-          !withinProtectedRoot(target, protections)) return true;
+          (!withinProtectedRoot(target, protections) ||
+            !withinProtectedRoot(canonicalPath(target), physicalProtections(protections)))) return true;
       if (target) currentCwd = target;
       for (const [key, value] of localEnvironment) environment.set(key, value);
       return false;
@@ -594,9 +624,10 @@ export function shellCwdAfterCommand(command: string, cwd: string | null): strin
   if (!command || command.length > MAX_COMMAND_LENGTH || command.includes("\0")) return cwd;
   // The tokenizer reads a newline as whitespace, so `cd apps\ncd ..` would collapse into one
   // segment. A multi-line command that mentions anything able to move the shell is unknown; one
-  // that does not cannot have moved it.
+  // that does not cannot have moved it. A line continuation is joined first: `c\<newline>d` is `cd`.
   if (/[\r\n]/u.test(command)) {
-    return /(^|[^\w-])(cd|pushd|popd|dirs|eval|builtin|command|exec|source|\.)(?![\w-])/u.test(command) ? null : cwd;
+    const joined = command.replace(/\\\r?\n/gu, "");
+    return /(^|[^\w-])(cd|pushd|popd|dirs|eval|builtin|command|exec|source|\.)(?![\w-])/u.test(joined) ? null : cwd;
   }
   let tokens: ShellToken[];
   try {
@@ -631,16 +662,21 @@ export function shellCwdAfterCommand(command: string, cwd: string | null): strin
     // The tokenizer unwraps launcher prefixes (`nice cd x`, `env cd x`, `sudo cd x`) to their
     // executable, but those run an EXTERNAL cd that never moves the shell — and exits 0 where one
     // is installed. Only a segment that literally starts with the builtin is followed.
-    const first = segment.find((token) => typeof token === "string");
-    if (first !== "cd" && first !== "command") return false;
-    // Only `cd`'s own resolution options are understood (`cd -P dir`, `cd -- dir`) — both end at
-    // the same physical directory, which is what gets recorded; any other option, and a lone `-`
-    // (the previous directory), is unknown.
+    const literal = segment.filter((token): token is string => typeof token === "string");
+    const first = literal[0];
+    // `command cd x` and `command -p cd x` execute the builtin; any other `command` form is a
+    // lookup (`command -v cd`) that moves nothing, or something this walk does not model.
+    if (first === "command") {
+      const runsBuiltin = literal[1] === "cd" || (literal[1] === "-p" && literal[2] === "cd");
+      if (!runsBuiltin) return false;
+    } else if (first !== "cd") return false;
+    // Only `cd -L` and `--` are understood; `-P` changes what the shell records for later `..`
+    // steps, so it and every other option, and a lone `-` (the previous directory), are unknown.
     let index = 0;
     while (typeof parsed.words[index] === "string" && (parsed.words[index] as string).startsWith("-") &&
         parsed.words[index] !== "-") {
       if (parsed.words[index] === "--") { index += 1; break; }
-      if (!["-L", "-P", "-e", "-@"].includes(parsed.words[index] as string)) return false;
+      if (parsed.words[index] !== "-L") return false;
       index += 1;
     }
     const operand = parsed.words[index];
@@ -651,16 +687,17 @@ export function shellCwdAfterCommand(command: string, cwd: string | null): strin
       return true;
     }
     if (typeof operand !== "string") return false;
-    if (operand === "-" || operand.startsWith("~")) return false;
-    // Record the PHYSICAL directory. The shell's own `cd` is logical, but every external command
-    // the veto judges resolves `..` through the kernel, so a symlink beneath the worktree must not
-    // leave the tracked directory lexically inside it while the shell is physically elsewhere.
+    // Only a plain literal path is followed: no previous-directory, tilde, brace, glob, or escape
+    // forms, each of which the shell expands to something the text does not spell out.
+    if (operand === "-" || /^~|[{}*?[\]\\$`]/u.test(operand)) return false;
+    // Record the LOGICAL directory, as the shell keeps it: a later `cd ..` in the same shell is
+    // logical too. External operands are resolved from its physical form by the matcher itself.
     if (isAbsolute(operand)) {
-      current = canonicalPath(normalize(operand));
+      current = normalize(operand);
       return true;
     }
     if (current === null) return false;
-    current = canonicalPath(normalize(resolve(current, operand)));
+    current = normalize(resolve(current, operand));
     return true;
   };
   for (const token of tokens) {
