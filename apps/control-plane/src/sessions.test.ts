@@ -683,7 +683,7 @@ test("orchestrator separates default provider execution from the negotiated stri
       orchestrator: { execution: { strictProjectIsolation: true } } }).error ?? "", /dontAsk/,
     "strict Native TUI still needs its static fixed-rule mode");
     agent.capabilities.permissionModes = ["default", "dontAsk", "orchestrator"];
-    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION - 1);
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1);
     const outdatedScope = svc.createSession({ ...request, prompt: "Claim and orchestrate issue 1245.",
       config: { permissionMode: "orchestrator" } },
     undefined, undefined, false, false, false, { defaultOwnerUserId: "human" });
@@ -867,7 +867,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       kind: "user_message",
       text: "Claim and delegate issue 1209 through 1211.",
     }, Date.now());
-    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION - 1);
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1);
     const legacyRunnerRestart = svc.restart(parent.id);
     assert.equal(legacyRunnerRestart.status, 409);
     assert.match(legacyRunnerRestart.error ?? "", /protocol-v158/);
@@ -879,7 +879,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.deepEqual(hub.sentOfType("start_session").at(-1)?.spec.orchestrator?.issueNumbers,
       [1209, 1210, 1211], "restart safely backfills pre-v158 human campaign scope from its first prompt");
     assert.deepEqual(db.getSession(parent.id)?.orchestratorPolicy?.issueNumbers, [1209, 1210, 1211]);
-    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION - 1);
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1);
     const outdatedRestart = svc.restart(parent.id);
     assert.equal(outdatedRestart.status, 409);
     assert.match(outdatedRestart.error ?? "", /protocol-v158/,
@@ -929,7 +929,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
     assert.equal(denied.status, 403, "agents cannot set or broaden campaign policy");
 
-    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION - 1);
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1);
     const ordinaryChildRequest = {
       runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
       prompt: "Implement one campaign issue",
