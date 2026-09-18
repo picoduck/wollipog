@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import {
   PROTOCOL_VERSION,
+  sessionRole,
   type AgentCapabilities,
   type ControlPlaneToRunner,
   type RunnerMetadata,
@@ -16,6 +17,11 @@ import {
   type SessionLaunchSpec,
   type SessionWorktreeResultMessage,
 } from "@wollipog/protocol";
+import {
+  hashToken,
+  isAgentControlApiRouteAllowed,
+  isAuthenticatedAgentControlClaim,
+} from "../../control-plane/src/auth.js";
 import { ControlPlaneDb } from "../../control-plane/src/db.js";
 import type { Hub } from "../../control-plane/src/hub.js";
 import {
@@ -26,6 +32,10 @@ import {
 import { SessionsService } from "../../control-plane/src/sessions.js";
 import {
   agentControlMcpConfigPath,
+  agentControlReadyPath,
+  agentControlTokenPath,
+  markAgentControlCredentialReady,
+  markAgentControlCredentialRejected,
   provisionAgentControl,
   type AgentControlHost,
 } from "./agent-control.js";
@@ -302,6 +312,7 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
     // The runner's outbound messages travel back into the control plane exactly as the /runner
     // socket handler in apps/control-plane/src/index.ts routes them.
     let svc: SessionsService | undefined;
+    const credentialAcks: { sessionId: string; tokenHash: string; accepted: boolean }[] = [];
     const relay = (message: RunnerToControlPlane): void => {
       runnerSent.push(message);
       if (!svc) return;
@@ -312,6 +323,15 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
         svc.onSessionEvent(message.sessionId, message.payload, message.seq, message.ts, RUNNER_ID);
       } else if (message.type === "session_runtime_updated") {
         svc.applySessionRuntimeUpdate(RUNNER_ID, message.snapshot);
+      } else if (message.type === "agent_control_credential") {
+        // Control plane /runner socket handler, apps/control-plane/src/index.ts:1191-1200: bind the
+        // hash to the exact session row and answer with the acknowledgement.
+        const accepted = db.setAgentControlCredential(message.sessionId, RUNNER_ID, message.tokenHash, Date.now());
+        credentialAcks.push({ sessionId: message.sessionId, tokenHash: message.tokenHash, accepted });
+        // Runner message switch, apps/runner/src/index.ts:1441-1455: an accepted acknowledgement
+        // publishes the ready file; a rejected one retires the credential.
+        if (accepted) markAgentControlCredentialReady(configDir, message.sessionId, message.tokenHash);
+        else markAgentControlCredentialRejected(configDir, message.sessionId);
       }
     };
     manager = new SessionManager(
@@ -343,6 +363,10 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
           controlPlaneProtocolVersion: PROTOCOL_VERSION,
           executionIsolationMode: "provider",
           orchestratorProjectPaths: [repo],
+          // apps/runner/src/index.ts:618 passes `registerAgentControlCredential`, which is the
+          // `agent_control_credential` message of apps/runner/src/index.ts:523-524.
+          registerCredential: (sessionId, tokenHash) =>
+            relay({ type: "agent_control_credential", sessionId, tokenHash }),
         }, () => {}, controlHost);
       },
     );
@@ -352,6 +376,43 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
     db.registerRunner(runnerMeta(repo), Date.now(), PROTOCOL_VERSION);
     svc = new SessionsService(db, hub as unknown as Hub, { info() {}, warn() {}, error() {} });
     const service = svc;
+
+    /**
+     * `authedApiPrincipal`/`authedAgentControl` are module-private closures in
+     * apps/control-plane/src/index.ts (importing that module boots Fastify), so this reproduces
+     * their derivation (index.ts:466-528) with the real exported helpers and the real DB: the
+     * bearer is hashed and checked against the session's binding, the claim is authenticated, the
+     * exact route is checked against the credential session's role, and the role — never the
+     * permission-mode literal — decides `orchestrator`.
+     */
+    const agentControlPrincipal = (
+      sessionId: string,
+      bearer: string,
+      method: string,
+      routePath: string,
+    ): AgentPrincipal | null => {
+      const session = db.getSession(sessionId);
+      const authenticated = isAuthenticatedAgentControlClaim({
+        credentialValid: Boolean(session &&
+          db.agentControlCredentialValid(session.id, session.runnerId, hashToken(bearer))),
+        claimedSessionId: sessionId,
+        session,
+      });
+      if (!authenticated || !session) return null;
+      if (!isAgentControlApiRouteAllowed(method, routePath, sessionRole(session))) return null;
+      const delegatedScope = db.sessionScope(session.id);
+      if (!delegatedScope) return null;
+      return {
+        kind: "agent",
+        actorId: session.id,
+        credentialSessionId: session.id,
+        ...(sessionRole(session) === "orchestrator" ? { orchestrator: true } : {}),
+        organizationId: delegatedScope.organizationId,
+        delegatedScope,
+      };
+    };
+    const scopedToken = (sessionId: string): string =>
+      readFileSync(agentControlTokenPath(configDir, sessionId), "utf8").trim();
 
     /** Deliver a control-plane launch the way the runner's `start_session` case does. */
     const deliver = async (sessionId: string, prompt: string): Promise<ProviderLaunch> => {
@@ -440,6 +501,39 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
     assert.deepEqual(valuesOf(first.argv, "--permission-mode"), ["auto"]);
     assert.deepEqual(valuesOf(first.argv, "--permission-prompt-tool"), ["stdio"]);
 
+    // --------------------------------- 2b. the scoped Agent Control credential, round-tripped
+    const parentToken = scopedToken(parent.id);
+    const parentHash = hashToken(parentToken);
+    assert.equal(first.env.WOLLIPOG_SESSION_TOKEN_FILE, agentControlTokenPath(configDir, parent.id),
+      "the provider is pointed at this session's own credential file");
+    assert.deepEqual(credentialAcks.filter((ack) => ack.sessionId === parent.id),
+      [{ sessionId: parent.id, tokenHash: parentHash, accepted: true }],
+      "the runner registered the minted credential and the control plane accepted the binding");
+    assert.equal(readFileSync(agentControlReadyPath(configDir, parent.id), "utf8"), parentHash,
+      "the acknowledgement published the matching ready-file hash");
+    assert.equal(db.agentControlCredentialValid(parent.id, RUNNER_ID, parentHash), true,
+      "the control plane accepts the exact minted token for this session");
+    assert.equal(db.agentControlCredentialValid(parent.id, RUNNER_ID, hashToken(`${parentToken}x`)), false,
+      "a wrong token is refused");
+    assert.equal(isAuthenticatedAgentControlClaim({
+      credentialValid: db.agentControlCredentialValid(parent.id, RUNNER_ID, parentHash),
+      claimedSessionId: parent.id,
+      session: db.getSession(parent.id),
+    }), true, "the running session's claim authenticates");
+    assert.equal(isAuthenticatedAgentControlClaim({
+      credentialValid: db.agentControlCredentialValid(parent.id, RUNNER_ID, hashToken(`${parentToken}x`)),
+      claimedSessionId: parent.id,
+      session: db.getSession(parent.id),
+    }), false, "a wrong token never authenticates a claim");
+    // The additive role decides the route surface, even though the permission mode is `auto`.
+    assert.equal(db.getSession(parent.id)?.permissionMode, "auto");
+    const campaignRoute = "/api/sessions/:id/orchestrator-campaign";
+    const parentPrincipal = agentControlPrincipal(parent.id, parentToken, "GET", campaignRoute);
+    assert.equal(parentPrincipal?.orchestrator, true,
+      "the Orchestrator role is derived from the session role, not the preset literal");
+    assert.ok(agentControlPrincipal(parent.id, parentToken, "POST", "/api/sessions"),
+      "an Orchestrator may create child sessions with its scoped credential");
+
     // ------------------------------------------------ 3. the child raises an eligible question
     let childResult = service.createSession(
       { ...request, title: "Child", config: { permissionMode: "auto" } },
@@ -456,6 +550,17 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
     assert.ok(childResult.ok && childResult.data, childResult.error ?? "child creation failed");
     const child = childResult.data;
     const childLaunch = await deliver(child.id, "investigate the failing test");
+    // The ordinary child gets its own scoped credential and the ordinary route surface.
+    const childToken = scopedToken(child.id);
+    assert.notEqual(childToken, parentToken, "each session gets its own credential");
+    assert.equal(db.agentControlCredentialValid(child.id, RUNNER_ID, hashToken(childToken)), true);
+    assert.equal(db.agentControlCredentialValid(parent.id, RUNNER_ID, hashToken(childToken)), false,
+      "a child credential is not valid for the Orchestrator's session");
+    assert.equal(agentControlPrincipal(child.id, childToken, "GET", campaignRoute), null,
+      "an ordinary session's credential is refused on an Orchestrator-only route");
+    const childPrincipal = agentControlPrincipal(child.id, childToken, "GET", "/api/sessions/:id");
+    assert.ok(childPrincipal, "the child keeps the ordinary Agent Control route surface");
+    assert.equal(childPrincipal.orchestrator, undefined);
 
     // The question originates in the child's provider and travels the real runner event path.
     childLaunch.child.stdout.write(JSON.stringify({
@@ -511,14 +616,10 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
     await settleTurn(childLaunch);
 
     // --------------------------- 4. explicitly requested parent implementation in its own worktree
-    const principal: AgentPrincipal = {
-      kind: "agent",
-      actorId: `agent:${parent.id}`,
-      credentialSessionId: parent.id,
-      orchestrator: true,
-      organizationId: db.localIdentityContext().organizationId,
-      delegatedScope: db.sessionScope(parent.id)!,
-    };
+    // The principal is the authenticated one derived above from the scoped credential — never a
+    // hand-built claim.
+    const principal = agentControlPrincipal(parent.id, parentToken, "POST", "/api/sessions/:id/worktrees");
+    assert.ok(principal, "the Orchestrator's scoped credential authenticates on the worktree route");
     const persisted = db.getSession(parent.id)!;
     assert.equal(persisted.orchestratorPolicy?.execution.strictProjectIsolation, false);
     assert.equal(agentCredentialSessionTargetError("/api/sessions/:id/worktrees", principal, parent.id), null,
