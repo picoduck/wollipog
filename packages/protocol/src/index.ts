@@ -7044,7 +7044,13 @@ export type SessionWorktreeCreateOperationView =
  * yet consumed. Completion carries no snapshot here; the session record already holds the result. */
 export type SessionWorktreeCreateOperationSummary =
   & SessionWorktreeCreateOperationView
-  & { branch: string; baseRef?: string };
+  & {
+    branch: string;
+    baseRef?: string;
+    /** The worktree-recovery incident the session was in when this create started, if any. A
+     * recovery client reconciles only its own incident's creates, never an earlier incident's. */
+    recoveryId?: string;
+  };
 
 /** Content-free phase heartbeat for one exact runner request. */
 export interface SessionWorktreeProgressMessage {

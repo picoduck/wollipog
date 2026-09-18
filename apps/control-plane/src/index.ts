@@ -3963,6 +3963,7 @@ async function runSessionWorktreeRequest(
       sessionId,
       branch: request.branch,
       ...(request.baseRef ? { baseRef: request.baseRef } : {}),
+      ...(session.worktreeRecovery ? { recoveryId: session.worktreeRecovery.recoveryId } : {}),
     }, async (requestId) => {
       const res = await hub.requestFromRunner(
         session.runnerId,

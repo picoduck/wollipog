@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { renderToStaticMarkup } from "react-dom/server";
 import { Window } from "happy-dom";
 import type {
   SessionView,
@@ -236,9 +237,9 @@ test("a reloaded page rejoins a running create and keeps it non-actionable", asy
   const clock = manualClock();
   const { api, calls } = fakeApi({
     reads: [
-      [{ id: "op1", status: "in_progress", phase: "materializing", branch: "fix/other", baseRef: "origin/release" }],
-      [{ id: "op1", status: "in_progress", phase: "activating", branch: "fix/other", baseRef: "origin/release" }],
-      [{ id: "op1", status: "completed", branch: "fix/other", baseRef: "origin/release" }],
+      [{ id: "op1", status: "in_progress", phase: "materializing", branch: "fix/other", baseRef: "origin/release", recoveryId: RECOVERY_ID }],
+      [{ id: "op1", status: "in_progress", phase: "activating", branch: "fix/other", baseRef: "origin/release", recoveryId: RECOVERY_ID }],
+      [{ id: "op1", status: "completed", branch: "fix/other", baseRef: "origin/release", recoveryId: RECOVERY_ID }],
     ],
   });
   const view = await render(api, clock.sleep);
@@ -260,7 +261,7 @@ test("a reloaded page shows an unconsumed failure with its phase", async () => {
   const { api } = fakeApi({
     reads: [[{
       id: "op1", status: "failed", phase: "fetching_remote", error: "could not read from remote",
-      branch: "fix/missing-recovery",
+      branch: "fix/missing-recovery", recoveryId: RECOVERY_ID,
     }]],
   });
   const view = await render(api, manualClock().sleep);
@@ -353,7 +354,7 @@ test("the card offers no create until it has checked for one already running", a
   const { api, calls } = fakeApi({
     reads: [
       pending.promise,
-      [{ id: "op1", status: "in_progress", phase: "running_setup", branch: "fix/edited", baseRef: "origin/release" }],
+      [{ id: "op1", status: "in_progress", phase: "running_setup", branch: "fix/edited", baseRef: "origin/release", recoveryId: RECOVERY_ID }],
     ],
   });
   const view = await render(api, clock.sleep);
@@ -362,7 +363,7 @@ test("the card offers no create until it has checked for one already running", a
     assert.equal(view.createButton().disabled, true,
       "a reloaded page must not propose default coordinates while an edited create may be running");
     await flushAct(() => pending.resolve([
-      { id: "op1", status: "in_progress", phase: "materializing", branch: "fix/edited", baseRef: "origin/release" },
+      { id: "op1", status: "in_progress", phase: "materializing", branch: "fix/edited", baseRef: "origin/release", recoveryId: RECOVERY_ID },
     ]));
     assert.equal(view.progress(), "Creating WorktreeStep 2 of 4");
     assert.equal(view.createButton().disabled, true);
@@ -379,7 +380,7 @@ test("a transient check failure is retried before the form is offered", async ()
   const { api, calls } = fakeApi({
     reads: [
       new Error("network down"),
-      [{ id: "op1", status: "in_progress", phase: "fetching_remote", branch: "fix/edited" }],
+      [{ id: "op1", status: "in_progress", phase: "fetching_remote", branch: "fix/edited", recoveryId: RECOVERY_ID }],
     ],
   });
   const view = await render(api, clock.sleep);
@@ -411,7 +412,7 @@ test("a check that keeps failing gives the form back after a bounded retry", asy
 });
 
 test("a create that completed while the page was away settles the session", async () => {
-  const { api, calls } = fakeApi({ reads: [[{ id: "op1", status: "completed", branch: "fix/edited" }]] });
+  const { api, calls } = fakeApi({ reads: [[{ id: "op1", status: "completed", branch: "fix/edited", recoveryId: RECOVERY_ID }]] });
   const view = await render(api, manualClock().sleep);
   try {
     await flushAct();
@@ -443,6 +444,57 @@ test("a poll answering after a new incident cannot republish the old create's pr
     ]));
     assert.equal(view.progress(), null);
     assert.equal(view.createButton().disabled, false, "a stale poll must not lock the new incident's card");
+  } finally {
+    await act(async () => view.root.unmount());
+  }
+});
+
+test("the very first render already withholds both actions until the incident is checked", () => {
+  const { api } = fakeApi({});
+  function FirstRender() {
+    const session = recoverySession();
+    const { creation, create } = useRecoveryWorktreeCreation({ api: api as never, session, onSession: () => {} });
+    return <WorktreeRecoveryCard session={session} runnerOnline creation={creation} onCreate={create} onSelect={async () => {}} />;
+  }
+  // Server rendering runs no effects, so this is exactly what a click could hit before they flush.
+  const markup = renderToStaticMarkup(<FirstRender />);
+  assert.match(markup, /<button[^>]*disabled=""[^>]*>Checking…<\/button>/u);
+  assert.match(markup, /<button[^>]*disabled=""[^>]*>Select Worktree<\/button>/u);
+});
+
+test("creates from an earlier recovery incident neither hide nor impersonate this one", async () => {
+  const earlier = "worktree-recovery:earlier";
+  const { api, calls } = fakeApi({
+    reads: [[
+      { id: "old-done", status: "completed", branch: "fix/a-recovery", recoveryId: earlier },
+      { id: "old-failed", status: "failed", phase: "fetching_remote", error: "old failure", branch: "fix/b", recoveryId: earlier },
+      { id: "untracked", status: "failed", error: "not a recovery create", branch: "fix/c" },
+      {
+        id: "current", status: "failed", phase: "running_setup", error: "setup exited 1",
+        branch: "fix/missing-recovery", recoveryId: RECOVERY_ID,
+      },
+    ]],
+  });
+  const view = await render(api, manualClock().sleep);
+  try {
+    assert.equal(calls.sessions, 0, "an earlier incident's completion does not stand in for this one");
+    assert.equal(view.alert(), "Creation Failed: Running Setup setup exited 1");
+  } finally {
+    await act(async () => view.root.unmount());
+  }
+});
+
+test("only an earlier incident's failure leaves this incident's form clean", async () => {
+  const { api } = fakeApi({
+    reads: [[{
+      id: "old-failed", status: "failed", phase: "fetching_remote", error: "old failure",
+      branch: "fix/b", recoveryId: "worktree-recovery:earlier",
+    }]],
+  });
+  const view = await render(api, manualClock().sleep);
+  try {
+    assert.equal(view.alert(), null);
+    assert.equal(view.createButton().disabled, false);
   } finally {
     await act(async () => view.root.unmount());
   }

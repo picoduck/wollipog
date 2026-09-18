@@ -208,7 +208,7 @@ function fixtureOperation(): SessionWorktreeCreateOperationSummary | null {
   const raw = sessionStorage.getItem(OPERATION_KEY);
   if (!raw) return null;
   const { startedAt, branch, baseRef } = JSON.parse(raw) as { startedAt: number; branch: string; baseRef?: string };
-  const coordinates = { branch, ...(baseRef ? { baseRef } : {}) };
+  const coordinates = { branch, ...(baseRef ? { baseRef } : {}), recoveryId: "worktree-recovery:e2e" };
   const index = Math.floor((Date.now() - startedAt) / phaseMs);
   const failAt = FIXTURE_PHASES.indexOf("running_setup");
   if (createProgress === "fail" && index > failAt) {

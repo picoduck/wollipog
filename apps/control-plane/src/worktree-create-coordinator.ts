@@ -12,6 +12,8 @@ export interface WorktreeCreateCoordinates {
   sessionId: string;
   branch: string;
   baseRef?: string;
+  /** Recovery incident current when the create started. Metadata only; not part of the key. */
+  recoveryId?: string;
 }
 
 export interface WorktreeCreateCompletion {
@@ -129,6 +131,7 @@ export class WorktreeCreateCoordinator {
         ...(operation.status === "completed" ? { id: operation.id, status: "completed" as const } : operation),
         branch: entry.branch,
         ...(entry.baseRef ? { baseRef: entry.baseRef } : {}),
+        ...(entry.recoveryId ? { recoveryId: entry.recoveryId } : {}),
       });
     }
     return result;

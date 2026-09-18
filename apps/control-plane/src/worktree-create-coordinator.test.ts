@@ -182,3 +182,14 @@ test("listing a session's creates is read-only and omits snapshots and supersede
   assert.deepEqual(coordinator.listForSession("session-1"), [],
     "a superseded create is not offered to a rejoining client");
 });
+
+test("a listed create carries the recovery incident it started under", async () => {
+  const coordinator = new WorktreeCreateCoordinator(60_000, () => "worktree_incident");
+  coordinator.startOrJoin({ ...coordinates, recoveryId: "worktree-recovery:1" }, () => new Promise(() => {}));
+  assert.deepEqual(coordinator.listForSession("session-1"), [{
+    id: "worktree_incident", status: "in_progress", branch: "fix/one", baseRef: "origin/main",
+    recoveryId: "worktree-recovery:1",
+  }]);
+  assert.equal(coordinator.startOrJoin(coordinates, async () => ({ snapshot })).id, "worktree_incident",
+    "the incident is metadata, not part of the join identity");
+});

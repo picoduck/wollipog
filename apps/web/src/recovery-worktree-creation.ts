@@ -91,12 +91,16 @@ export function useRecoveryWorktreeCreation({
   sleep?: (ms: number) => Promise<void>;
 }) {
   const [creation, setCreation] = useState<RecoveryWorktreeCreation | null>(null);
+  // The incident whose running or failed create has been looked up. Until it matches the current
+  // one the card reports `checking` from the very first render, not from a later passive effect.
+  const [reconciledKey, setReconciledKey] = useState<string | null>(null);
   const runRef = useRef(0);
   // Terminal operations this client has shown but not consumed. The first create request that
   // repeats their coordinates only consumes the stale result, so it is sent once more.
   const shownTerminalRef = useRef(new Set<string>());
   const sessionId = session.id;
   const recoveryId = session.worktreeRecovery?.recoveryId;
+  const incidentKey = recoveryId ? JSON.stringify([session.id, recoveryId]) : null;
   const recoveryIdRef = useRef(recoveryId);
   recoveryIdRef.current = recoveryId;
 
@@ -200,7 +204,9 @@ export function useRecoveryWorktreeCreation({
     if (!recoveryId) return;
     const run = ++runRef.current;
     const live = () => runRef.current === run;
-    setCreation({ status: "checking" });
+    const key = JSON.stringify([sessionId, recoveryId]);
+    const settle = () => setReconciledKey(key);
+    setCreation(null);
     void (async () => {
       for (let attempt = 1; ; attempt += 1) {
         let operations: SessionWorktreeCreateOperationSummary[];
@@ -211,7 +217,7 @@ export function useRecoveryWorktreeCreation({
           // An older control plane has no route and nothing to rejoin. A read that keeps failing
           // must not hold the card hostage either; after a bounded retry it offers the form again.
           if (missingRoute(cause) || attempt >= RECONCILE_READ_ATTEMPTS) {
-            setCreation(null);
+            settle();
             return;
           }
           await sleepRef.current(POLL_INTERVAL_MS * 2 ** (attempt - 1));
@@ -219,6 +225,9 @@ export function useRecoveryWorktreeCreation({
           continue;
         }
         if (!live()) return;
+        // Terminal results are retained per session for minutes and can outlive their incident.
+        operations = operations.filter((operation) => operation.recoveryId === recoveryId);
+        settle();
         const running = operations.find((operation) => operation.status === "in_progress");
         if (running) {
           const coordinates = { branch: running.branch, ...(running.baseRef ? { baseRef: running.baseRef } : {}) };
@@ -240,8 +249,6 @@ export function useRecoveryWorktreeCreation({
         if (failed?.status === "failed") {
           shownTerminalRef.current.add(failed.id);
           setCreation({ status: "failed", error: failed.error, ...(failed.phase ? { phase: failed.phase } : {}) });
-        } else {
-          setCreation(null);
         }
         return;
       }
@@ -255,5 +262,6 @@ export function useRecoveryWorktreeCreation({
     setCreation(null);
   }, [recoveryId, sessionId]);
 
-  return { creation, create };
+  const checking = incidentKey !== null && reconciledKey !== incidentKey && creation === null;
+  return { creation: checking ? { status: "checking" as const } : creation, create };
 }
