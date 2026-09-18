@@ -112,7 +112,12 @@ interface Launch { argv: string[]; stderr: string[]; writes: string[]; child: Re
   driver: ClaudeCodeDriver }
 
 /** Run one turn with the given launch args and capture the argv the driver spawned. */
-function launch(args: string[], mode: string, protections: typeof PROTECTIONS | []): Launch {
+function launch(
+  args: string[],
+  mode: string,
+  protections: typeof PROTECTIONS | [],
+  orchestrator?: DriverOptions["orchestrator"],
+): Launch {
   const child = fakeProcess();
   const writes: string[] = [];
   child.stdin.setEncoding("utf8");
@@ -132,6 +137,7 @@ function launch(args: string[], mode: string, protections: typeof PROTECTIONS | 
     config: { permissionMode: mode },
     context: { kind: "native" },
     managedWorktreeProtections: () => [...protections],
+    ...(orchestrator ? { orchestrator } : {}),
   } as unknown as DriverOptions;
   const driver = new ClaudeCodeDriver(opts, cb, {
     spawn: (options: { args: string[] }) => { argv.push(...options.args); return child; },
@@ -245,6 +251,34 @@ test("the control-channel refusal survives as defense in depth even with the gua
   assert.equal(responses.length, 1);
   assert.equal(responses[0]!.response?.response?.behavior, "deny");
   assert.equal(responses[0]!.response?.response?.message, MANAGED_WORKTREE_REFUSAL);
+});
+
+test("a guarded Orchestrator in a fixed-rule mode keeps the routine-contract channel of its selected mode", async (t) => {
+  // The routine-operation supplement (#1305) is derived from the LAUNCHED mode. With the guard
+  // active that is the mode the user selected, so the supplement must match a worktree-less launch.
+  const dir = tempDir(t);
+  const orchestrator = { issueNumbers: [1313], strictProjectIsolation: false } as DriverOptions["orchestrator"];
+  const guarded = launch(
+    provision(dir, "orch-ae", "acceptEdits", { protections: PROTECTIONS }), "acceptEdits", PROTECTIONS, orchestrator,
+  );
+  const plain = launch([], "acceptEdits", [], orchestrator);
+  t.after(() => { guarded.driver.dispose(); plain.driver.dispose(); });
+  assert.deepEqual(permissionArgv(guarded.argv), permissionArgv(plain.argv));
+  assert.ok(permissionArgv(guarded.argv).join(" ").includes("--permission-mode acceptEdits"));
+  assert.ok(permissionArgv(guarded.argv).join(" ").includes("--permission-prompt-tool stdio"));
+
+  guarded.child.stdout.write(JSON.stringify({
+    type: "control_request",
+    request_id: "outside-contract",
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "curl https://example.com" } },
+  }) + "\n");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const responses = guarded.writes.join("").split("\n").filter(Boolean)
+    .map((line) => JSON.parse(line) as { type?: string; response?: { response?: { behavior?: string; message?: string } } })
+    .filter((frame) => frame.type === "control_response");
+  assert.equal(responses.length, 1, "the mode's refusal answers it; no approval card and no emulated allow");
+  assert.equal(responses[0]!.response?.response?.behavior, "deny");
+  assert.match(responses[0]!.response?.response?.message ?? "", /permission mode acceptEdits/);
 });
 
 test("without a provisionable guard the launch falls back to EXACTLY today's mediation", (t) => {
