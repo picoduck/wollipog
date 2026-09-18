@@ -19,6 +19,12 @@ export function BrowserPanel({ session }: { session: SessionView }) {
   const [mode, setMode] = usePanelScratchChoice<BrowserMode>(
     panelScratch, "browser.mode", "artifacts", (raw) => raw === "artifacts" || raw === "web",
   );
+  // Recreatable, still, now that scratch survives a reload (#1282). An address is user-authored
+  // text, but it is not unsent text: the field keeps whatever was opened, so classifying it as a
+  // draft would exempt every session anyone ever browsed from eviction permanently — the shape of
+  // #1375, spread across sessions. It survives a reload either way; what the classification buys is
+  // only exemption from the scope bound, and a short address someone has not opened yet is the one
+  // thing here cheap enough to retype.
   const [urlInput, setUrlInput] = usePanelScratchText(panelScratch, "browser.address");
   // Re-validated on restore: everything downstream (the iframe, `new URL(url).host`) assumes this
   // already passed `normalizeBrowserUrl`, and a value that had not would throw during render.
