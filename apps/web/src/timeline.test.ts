@@ -612,6 +612,9 @@ test("stream start + authoritative tool call upsert by id instead of duplicating
     parentToolUseId: "outer",
     startedAt: (items[0] as Extract<TimelineItem, { kind: "tool_call" }>).startedAt,
     lastActivityAt: (items[0] as Extract<TimelineItem, { kind: "tool_call" }>).lastActivityAt,
+    // The upsert is invisible in every other field, so the row keeps the count of statements that
+    // produced it — the only trace a consumer has that the provider stated this call twice (#1289).
+    statementCount: 2,
     subagentRollup: undefined,
   });
 });

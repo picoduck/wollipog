@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { SubagentDescriptor } from "../subagents.js";
-import type { ChildSessionRegistryEntry, SessionView } from "@wollipog/protocol";
+import { deriveSubagentDescriptors, type SubagentDescriptor } from "../subagents.js";
+import { MAX_TRACKED_TOOL_CALL_STATEMENTS, TimelineBuilder } from "../timeline.js";
+import type { ChildSessionRegistryEntry, SessionEventPayload, SessionView } from "@wollipog/protocol";
 import { childRegistryProgressKey, childRegistryRefreshDelay, childRegistryRosterKey,
   mergeCompactAttentionOwners, mergeDurableAgents, mergeRegistrySnapshotPages,
   shouldOpenPrimaryRequestInSession } from "./AgentsPanel.js";
@@ -124,6 +125,45 @@ test("the roster fingerprint moves only on evidence that the child roster itself
   assert.notEqual(childRegistryRosterKey({ ...session,
     attentionOwners: [{ requestId: "ask", toolCallId: "alpha", resolved: false }] } as SessionView, roster), key,
     "a child request appearing is roster-affecting");
+  assert.equal(childRegistryRosterKey(session, [{ ...roster[0]!, statementCount: 1 }]), key,
+    "one statement is the ordinary case the absent field already means");
+  assert.notEqual(childRegistryRosterKey(session, [{ ...roster[0]!, statementCount: 2 }]), key,
+    "a folded re-statement can change the control plane's classification and is roster-affecting");
+  assert.notEqual(childRegistryRosterKey(session, [{ ...roster[0]!, statementCount: 3 }]),
+    childRegistryRosterKey(session, [{ ...roster[0]!, statementCount: 2 }]),
+    "the second re-statement is the one that makes the id permanently ambiguous");
+});
+
+test("the re-statement signal saturates, so it can never become a per-event refresh", () => {
+  const builder = new TimelineBuilder();
+  const spawn = { kind: "tool_call", toolCallId: "child", title: "Agent: Audit",
+    toolKind: "agent", status: "in_progress" } as const;
+  const keys = new Set<string>();
+  const session = { status: "running", pendingApproval: null, attentionOwners: [] } as unknown as SessionView;
+  for (let statement = 1; statement <= 20; statement += 1) {
+    builder.push({ id: statement, sessionId: "orchestrator", seq: statement, ts: 1_000 + statement, payload: spawn });
+    keys.add(childRegistryRosterKey(session, deriveSubagentDescriptors(builder.snapshot(), {
+      sessionStatus: "running", runnerOnline: true, availability: "live",
+    })));
+  }
+  assert.equal(keys.size, MAX_TRACKED_TOOL_CALL_STATEMENTS,
+    "twenty identical statements can move the fingerprint at most as often as the registry can reclassify");
+});
+
+test("only a re-stated tool call counts, never the updates a streaming turn emits freely", () => {
+  const builder = new TimelineBuilder();
+  const push = (seq: number, payload: SessionEventPayload) =>
+    builder.push({ id: seq, sessionId: "orchestrator", seq, ts: 1_000 + seq, payload });
+  // An update that arrives before any statement creates the row; the first real statement after it
+  // must still read as one statement, not as a re-statement of a row nobody stated.
+  push(1, { kind: "tool_call_update", toolCallId: "child", status: "in_progress" });
+  push(2, { kind: "tool_call", toolCallId: "child", title: "Agent: Audit", toolKind: "agent", status: "in_progress" });
+  for (let tick = 3; tick <= 10; tick += 1) {
+    push(tick, { kind: "tool_call_update", toolCallId: "child", status: "in_progress" });
+  }
+  const folded = builder.snapshot().find((item) => item.kind === "tool_call")!;
+  assert.equal("statementCount" in folded ? folded.statementCount : undefined, undefined,
+    "one statement plus any number of updates is the ordinary single-observation case");
 });
 
 test("evidence-free event progress waits for the idle cadence, roster evidence does not", () => {

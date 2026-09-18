@@ -113,16 +113,22 @@ export function childRegistryProgressKey(
  * tool call, a child lifecycle transition, a request appearing or resolving, and the parent's own
  * status. Deliberately excludes per-call counters such as `toolCount` and `lastActivityAt`, which
  * the loaded projection already renders without consulting the registry.
+ *
+ * `statementCount` is the re-statement half of "new or re-stated": `TimelineBuilder` folds an
+ * identical repeated `tool_call` into the row it already has, leaving `toolStatus` and `lifecycle`
+ * equal while the control plane counts one more observation and may stop identifying the child at
+ * all (#1289). It saturates at `MAX_TRACKED_TOOL_CALL_STATEMENTS`, so unlike `lastActivityAt` it
+ * cannot move more than twice per child over a session — a bounded signal, not a per-event one.
  */
 export function childRegistryRosterKey(
   session: Pick<SessionView, "status" | "pendingApproval" | "attentionOwners">,
-  agents: readonly Pick<SubagentDescriptor, "id" | "toolStatus" | "lifecycle">[],
+  agents: readonly Pick<SubagentDescriptor, "id" | "toolStatus" | "lifecycle" | "statementCount">[],
 ): string {
   return JSON.stringify([
     session.status,
     pendingRequests(session.pendingApproval).map((request) => request.requestId),
     (session.attentionOwners ?? []).map((owner) => [owner.toolCallId, owner.resolved]),
-    agents.map((agent) => [agent.id, agent.toolStatus, agent.lifecycle]),
+    agents.map((agent) => [agent.id, agent.toolStatus, agent.lifecycle, agent.statementCount ?? 1]),
   ]);
 }
 
