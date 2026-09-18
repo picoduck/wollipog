@@ -1,6 +1,7 @@
 /** Provider TUI launch policy. A TUI shares cwd and runner-local provider credentials with the
  * manager session, but never the structured driver's process, stdio, or provider session id. */
 
+import { existsSync } from "node:fs";
 import type { SessionMeta } from "./session-store.js";
 import type { ShellProcessLaunch } from "./shell-manager.js";
 import { windowsCommandLine } from "./windows-conpty.js";
@@ -80,6 +81,26 @@ function scrubInheritedEnv(driver: SessionMeta["driver"]): string[] {
     : ["OPENAI_API_KEY"];
 }
 
+/**
+ * `claude` refuses to start when `--settings` names a file that does not exist ("Settings file not
+ * found"). A TUI launch replays the session's PERSISTED args without re-running launch
+ * provisioning, so a runner-owned settings file that the startup sweep removed would break the
+ * launch outright. Drop only the pairs whose file is gone: the TUI then behaves exactly as it did
+ * before the managed-worktree guard existed.
+ */
+function withoutMissingSettingsFiles(args: readonly string[]): string[] {
+  const result: string[] = [];
+  for (let index = 0; index < args.length; index++) {
+    const value = args[index + 1];
+    if (args[index] === "--settings" && value !== undefined && !existsSync(value)) {
+      index += 1;
+      continue;
+    }
+    result.push(args[index]!);
+  }
+  return result;
+}
+
 export function agentTuiLaunch(
   meta: SessionMeta,
   host: { platform: NodeJS.Platform; comspec?: string } = {
@@ -89,6 +110,7 @@ export function agentTuiLaunch(
 ): ShellProcessLaunch | null {
   if (!meta.command || !TUI_DRIVERS.has(meta.driver)) return null;
   const scrub = scrubInheritedEnv(meta.driver);
+  meta = { ...meta, args: withoutMissingSettingsFiles(meta.args) };
   if (host.platform === "win32" && meta.context.kind === "native") {
     // Configured CLIs may be .cmd shims. ConPTY calls CreateProcess directly, so route the exact
     // non-prompt argv through cmd.exe with a single, cmd-specific quoting pass.

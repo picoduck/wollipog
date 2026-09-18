@@ -268,3 +268,22 @@ test("an Orchestrator with independent provider permissions has no Native TUI fo
     /independent provider permissions/,
   );
 });
+
+test("a TUI launch drops a persisted --settings file that no longer exists, and keeps one that does", () => {
+  // `claude` refuses to start with "Settings file not found", and a TUI replays the persisted args
+  // without re-running launch provisioning, so a swept runner-owned settings file must not break it
+  // (issue #1313: guarded sessions now persist such an argument).
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-tui-"));
+  try {
+    const present = join(dir, "s1.settings.json");
+    writeFileSync(present, "{}", "utf8");
+    const missing = join(dir, "gone.settings.json");
+    const launch = agentTuiLaunch(
+      meta({ driver: "claude-code", args: ["--settings", missing, "--add-dir", "/notes", "--settings", present] }),
+      { platform: "linux" },
+    );
+    assert.deepEqual(launch?.args, ["--add-dir", "/notes", "--settings", present]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
