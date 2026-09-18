@@ -38,6 +38,7 @@ import { useFeedback } from "./FeedbackProvider.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { safeExternalHref } from "../external-href.js";
 import { sourceKind } from "../pinned-summary.js";
+import { usePanelScratchChoice, usePanelScratchScope, usePanelScratchText } from "../right-panel-scratch.js";
 
 /** No diff on screen means nothing is anchored; one shared empty set keeps that allocation-free. */
 const NO_ANCHORED_FINDINGS: ReadonlySet<string> = new Set<string>();
@@ -78,17 +79,33 @@ export function ReviewPanel({
   const [busy, setBusy] = useState<null | "commit" | "pr">(null);
   const [error, setError] = useState<string | null>(null);
   const status = git.status;
-  const [commitMsg, setCommitMsg] = useState(session.title || "Agent changes");
-  const [prTitle, setPrTitle] = useState(session.title || "Agent changes");
-  const [prBody, setPrBody] = useState("");
-  const [branch, setBranch] = useState("");
+  // Everything the reviewer typed or chose outlives this mount: the panel is unmounted by any
+  // mode switch and by closing the panel, and losing a pull request description to a glance at
+  // Files is exactly the defect in #1202.
+  const panelScratch = usePanelScratchScope(session.id);
+  const defaultMessage = session.title || "Agent changes";
+  const [commitMsg, setCommitMsg] = usePanelScratchText(panelScratch, "review.commitMessage", defaultMessage);
+  const [prTitle, setPrTitle] = usePanelScratchText(panelScratch, "review.requestTitle", defaultMessage);
+  const [prBody, setPrBody] = usePanelScratchText(panelScratch, "review.requestBody");
+  const [branch, setBranch] = usePanelScratchText(panelScratch, "review.branch");
   const [commit, setCommit] = useState<GitCommitInfo | null>(null);
   const [pr, setPr] = useState<GitPrInfo | null>(null);
   // Rich-diff pane (Phase 2, PR-A). Branch-relative scopes only make sense for worktree sessions;
-  // a WSL in-place session has no session branch to diff, so it gets Uncommitted only.
-  const [scope, setScope] = useState<GitDiffScope>("uncommitted");
-  const [pane, setPane] = useState<DiffPane>("combined");
-  const [layout, setLayout] = useState<DiffLayout>("unified");
+  // a WSL in-place session has no session branch to diff, so it gets Uncommitted only — which is
+  // also why restoring a remembered scope re-checks that this session still offers it.
+  const [scope, setScope] = usePanelScratchChoice<GitDiffScope>(
+    panelScratch,
+    "review.diffScope",
+    "uncommitted",
+    (raw) => raw === "uncommitted" || (session.useWorktree === true && (raw === "all_branch" || raw === "last_turn")),
+  );
+  const [pane, setPane] = usePanelScratchChoice<DiffPane>(
+    panelScratch, "review.indexPane", "combined",
+    (raw) => raw === "combined" || raw === "unstaged" || raw === "staged",
+  );
+  const [layout, setLayout] = usePanelScratchChoice<DiffLayout>(
+    panelScratch, "review.diffLayout", "unified", (raw) => raw === "unified" || raw === "split",
+  );
   const [diff, setDiff] = useState<GitDiffInfo | null>(null);
   const [diffBusy, setDiffBusy] = useState(false);
   const [diffError, setDiffError] = useState<string | null>(null);

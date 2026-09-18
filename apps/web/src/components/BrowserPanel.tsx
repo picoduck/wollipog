@@ -6,27 +6,41 @@ import { formatBytes } from "../files-panel.js";
 import { titleCaseLabel } from "../format.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
 import { ArtifactPreview } from "./ArtifactPreview.js";
+import { usePanelScratchChoice, usePanelScratchScope, usePanelScratchText } from "../right-panel-scratch.js";
 
 type BrowserMode = "artifacts" | "web";
 
 export function BrowserPanel({ session }: { session: SessionView }) {
   const api = useApi();
-  const [mode, setMode] = useState<BrowserMode>("artifacts");
-  const [urlInput, setUrlInput] = useState("");
-  const [url, setUrl] = useState<string | null>(null);
+  // Where this session's browsing was left. The panel unmounts on every mode switch, so without
+  // this the tab, the address, and the artifact being read are gone on return (#1202). The empty
+  // string is "nothing opened yet" throughout.
+  const panelScratch = usePanelScratchScope(session.id);
+  const [mode, setMode] = usePanelScratchChoice<BrowserMode>(
+    panelScratch, "browser.mode", "artifacts", (raw) => raw === "artifacts" || raw === "web",
+  );
+  const [urlInput, setUrlInput] = usePanelScratchText(panelScratch, "browser.address");
+  // Re-validated on restore: everything downstream (the iframe, `new URL(url).host`) assumes this
+  // already passed `normalizeBrowserUrl`, and a value that had not would throw during render.
+  const [openUrl, setOpenUrl] = usePanelScratchText(
+    panelScratch, "browser.openUrl", "", (raw) => normalizeBrowserUrl(raw).ok,
+  );
+  const url = openUrl || null;
   const [urlError, setUrlError] = useState<string | null>(null);
   const [artifacts, setArtifacts] = useState<WorkflowArtifactView[]>([]);
   const [cursor, setCursor] = useState<string | undefined>();
   const [listBusy, setListBusy] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<WorkflowArtifactView | null>(null);
+  // The artifact is remembered by id and re-resolved against the list this mount loaded: an id the
+  // reloaded pages no longer carry simply returns the list, never a stale preview.
+  const [selectedId, setSelectedId] = usePanelScratchText(panelScratch, "browser.artifactId");
+  const selected = artifacts.find((artifact) => artifact.artifactId === selectedId) ?? null;
   const generationRef = useRef(0);
 
   useEffect(() => {
     const generation = ++generationRef.current;
     setArtifacts([]);
     setCursor(undefined);
-    setSelected(null);
     setListBusy(true);
     setListError(null);
     void api.sessionWorkflowArtifacts(session.id).then((page) => {
@@ -69,7 +83,7 @@ export function BrowserPanel({ session }: { session: SessionView }) {
       setUrlError(normalized.error);
       return;
     }
-    setUrl(normalized.url);
+    setOpenUrl(normalized.url);
     setUrlInput(normalized.url);
     setUrlError(null);
   };
@@ -129,7 +143,7 @@ export function BrowserPanel({ session }: { session: SessionView }) {
       ) : selected ? (
         <div className="browser-artifact-detail">
           <div className="browser-artifact-head">
-            <button className="icon-btn" type="button" aria-label="Back to Artifact List" onClick={() => setSelected(null)}>‹</button>
+            <button className="icon-btn" type="button" aria-label="Back to Artifact List" onClick={() => setSelectedId("")}>‹</button>
             <strong>{selected.name}</strong>
           </div>
           <ArtifactPreview artifact={selected} />
@@ -141,7 +155,7 @@ export function BrowserPanel({ session }: { session: SessionView }) {
           <ul className="browser-artifact-list" aria-busy={listBusy}>
             {artifacts.map((artifact) => (
               <li key={artifact.artifactId}>
-                <button type="button" className="browser-artifact-row" onClick={() => setSelected(artifact)}>
+                <button type="button" className="browser-artifact-row" onClick={() => setSelectedId(artifact.artifactId)}>
                   <span><strong>{artifact.name}</strong><small>{titleCaseLabel(artifact.kind.replaceAll("_", " "))}</small></span>
                   <span className="muted sm">{formatBytes(artifact.sizeBytes)}</span>
                 </button>

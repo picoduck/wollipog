@@ -8,6 +8,7 @@ import type { TimelineItem } from "../timeline.js";
 import { panelReturnFocusTarget, RightPanel, useRightPanelState, type RightPanelState } from "./RightPanel.js";
 import type { GovernanceDecision } from "../governance.js";
 import { saveBrowserStorageValue } from "../instance-storage.js";
+import { clearPanelScratch } from "../right-panel-scratch.js";
 import type { GitStatus } from "./useGitStatus.js";
 import { StoreProvider } from "../store.js";
 import { api, ApiError, type ApiClient } from "../api.js";
@@ -62,7 +63,11 @@ before(() => {
   }
 });
 
-beforeEach(() => domWindow.localStorage.clear());
+beforeEach(() => {
+  domWindow.localStorage.clear();
+  // Panel scratch survives unmount on purpose (#1202); these cases share one session id.
+  clearPanelScratch();
+});
 
 after(() => {
   for (const [name, value] of Object.entries(prior)) {

@@ -1,6 +1,6 @@
 import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { beforeEach, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
@@ -11,6 +11,13 @@ import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime } from "../ui-transport.js";
 import type { View, ViewNavigation } from "../navigation.js";
 import { SideChatPanel, sideChatComposerUnavailable } from "./SideChatPanel.js";
+import { clearPanelScratch } from "../right-panel-scratch.js";
+
+/**
+ * Panel scratch survives unmount on purpose (#1202), and these cases share one session id — so
+ * without this each test would start holding whatever the previous one typed or chose.
+ */
+beforeEach(() => clearPanelScratch());
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({

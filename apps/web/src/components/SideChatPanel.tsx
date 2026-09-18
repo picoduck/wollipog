@@ -6,6 +6,7 @@ import { useHasStore, useStoreActions } from "../store.js";
 import { EventTimeline } from "./EventTimeline.js";
 import { useTimeline } from "./useTimeline.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
+import { usePanelScratchScope, usePanelScratchText } from "../right-panel-scratch.js";
 
 const POLL_MS = 1_500;
 const PAGE_SIZE = 200;
@@ -63,7 +64,10 @@ export function SideChatPanel({
   const hasStore = useHasStore();
   const [sideChat, setSideChat] = useState<SideChatView | null>();
   const [events, setEvents] = useState<SessionEvent[]>([]);
-  const [text, setText] = useState("");
+  // The unsent message belongs to the person typing it, not to the child: it survives the panel
+  // being switched away and closed (#1202), and the transcript resets around it.
+  const panelScratch = usePanelScratchScope(session.id);
+  const [text, setText] = usePanelScratchText(panelScratch, "sidechat.draft");
   const [creating, setCreating] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);

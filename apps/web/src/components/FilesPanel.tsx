@@ -17,6 +17,7 @@ import { Markdown } from "./Markdown.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
 import { Spinner } from "./common.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
+import { usePanelScratchScope, usePanelScratchText } from "../right-panel-scratch.js";
 
 interface FileView {
   path: string;
@@ -65,7 +66,10 @@ export function FilesBrowser({
 }) {
   const api = useApi();
   const instances = useInstances();
-  const [path, setPath] = useState(""); // current directory, root-relative ("" = root)
+  // Current directory, root-relative ("" = root). Remembered per session so switching the panel to
+  // another mode and back resumes where the browsing left off instead of at the root (#1202).
+  const panelScratch = usePanelScratchScope(session.id);
+  const [path, setPath] = usePanelScratchText(panelScratch, "files.directory");
   const [entries, setEntries] = useState<SessionFileEntry[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -85,25 +89,31 @@ export function FilesBrowser({
   const reqRef = useRef(0);
   const viewerRef = useRef<HTMLDivElement>(null);
   const pendingDirectoryRef = useRef<string | null>(null);
+  // Consumed by the first listing this mount performs. Later listings — clearing a source location,
+  // arriving from Back/Forward — keep their established meaning of returning to the root.
+  const restoredDirectoryRef = useRef<string | null>(path || null);
   const runner = useStoreSelector((state) => state.runners.get(session.runnerId));
   const isRemote = useStoreSelector((state) => [...state.boxes.values()].some((box) => box.runnerId === session.runnerId));
 
-  const loadDir = useCallback(async (dir: string) => {
+  /** Reports the outcome so a caller can react to a listing that failed rather than one it lost. */
+  const loadDir = useCallback(async (dir: string): Promise<"listed" | "failed" | "superseded"> => {
     const reqId = ++reqRef.current;
     setBusy(true);
     setError(null);
     try {
       const d = await api.listSessionFiles(session.id, dir);
-      if (reqRef.current !== reqId) return;
+      if (reqRef.current !== reqId) return "superseded";
       setPath(d.path);
       setEntries(d.entries);
+      return "listed";
     } catch (e) {
-      if (reqRef.current !== reqId) return;
+      if (reqRef.current !== reqId) return "superseded";
       setError((e as Error).message);
+      return "failed";
     } finally {
       if (reqRef.current === reqId) setBusy(false);
     }
-  }, [api, session.id]);
+  }, [api, session.id, setPath]);
 
   const openFile = useCallback(async (p: string, requested?: SourceLocation) => {
     const reqId = ++reqRef.current;
@@ -126,6 +136,8 @@ export function FilesBrowser({
   // The canonical route owns file selection. Back/Forward therefore reloads the exact target,
   // while the plain session route returns to a root listing.
   useEffect(() => {
+    const restoredDirectory = restoredDirectoryRef.current;
+    restoredDirectoryRef.current = null;
     if (location) {
       if (file?.path === location.path) {
         setRendered(!(location.line !== undefined || location.symbol !== undefined));
@@ -137,9 +149,15 @@ export function FilesBrowser({
     else {
       setFile(null);
       setSymbolDraft("");
-      const nextDirectory = pendingDirectoryRef.current ?? "";
+      const nextDirectory = pendingDirectoryRef.current ?? restoredDirectory ?? "";
       pendingDirectoryRef.current = null;
-      void loadDir(nextDirectory);
+      const resumed = nextDirectory !== "" && nextDirectory === restoredDirectory;
+      void loadDir(nextDirectory).then((outcome) => {
+        // A remembered directory can be gone by the time the panel reopens (a branch switch, the
+        // agent deleting it). Fall back to the root listing rather than stranding the browser on
+        // an error with nothing to navigate from.
+        if (resumed && outcome === "failed") void loadDir("");
+      });
     }
   }, [file?.path, loadDir, location, openFile]);
 
