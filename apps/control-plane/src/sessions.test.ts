@@ -7698,6 +7698,23 @@ test("idle worktree prompts use durable delivery before a possible provider rela
   assert.equal(db.getSessionPromptCommand(delivery.commandId)?.state, "sent");
 });
 
+test("a human prompt during a live worktree turn keeps the existing non-durable delivery path", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+    id,
+    status: "running",
+    worktreePath: "/repos/demo/.agent-worktrees/live",
+  })]);
+  hub.sentToRunner.length = 0;
+
+  const result = svc.promptFromUser(db.localIdentityContext().userId, id, "steer the live turn");
+
+  assert.ok(result.ok, result.error);
+  assert.equal(hub.sentOfType("durable_session_command").length, 0);
+  assert.equal(hub.sentOfType("prompt_session").length, 1);
+});
+
 test("terminal hydration and runtime snapshots fence every durable prompt from replay", () => {
   for (const source of ["hydration", "runtime"] as const) {
     const { db, hub, svc } = makeHarness();

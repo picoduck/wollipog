@@ -3,8 +3,10 @@ import type { SessionView } from "@wollipog/protocol";
 import { Select } from "./ui/ChoiceControls.js";
 
 function replacementBranch(expectedBranch: string): string {
-  const base = expectedBranch.replace(/-recovery(?:-\d+)?$/u, "").slice(0, 220);
-  return `${base}-recovery`;
+  const prior = /^(.*)-recovery(?:-(\d+))?$/u.exec(expectedBranch);
+  if (!prior) return `${expectedBranch.slice(0, 220)}-recovery`;
+  const suffix = Number(prior[2] ?? 1) + 1;
+  return `${prior[1]!.slice(0, 218)}-recovery-${suffix}`;
 }
 
 export function WorktreeRecoveryCard({
@@ -20,11 +22,15 @@ export function WorktreeRecoveryCard({
 }) {
   const recovery = session.worktreeRecovery;
   const broken = session.worktrees?.find((worktree) => worktree.path === recovery?.selectedPath);
-  const candidates = useMemo(() => (session.worktrees ?? []).filter(
-    (worktree) => worktree.path !== recovery?.selectedPath &&
+  const candidates = useMemo(() => {
+    const eligible = (session.worktrees ?? []).filter((worktree) =>
       worktree.setup?.status !== "failed" && worktree.setup?.status !== "running" &&
-      worktree.setup?.status !== "awaiting_trust",
-  ), [recovery?.selectedPath, session.worktrees]);
+      worktree.setup?.status !== "awaiting_trust");
+    // Keep healthy alternatives first, but retain the selected coordinate as a restore option.
+    // The runner re-proves it before activation, so a path that is still broken fails precisely.
+    return [...eligible.filter((worktree) => worktree.path !== recovery?.selectedPath),
+      ...eligible.filter((worktree) => worktree.path === recovery?.selectedPath)];
+  }, [recovery?.selectedPath, session.worktrees]);
   const [branch, setBranch] = useState(() => replacementBranch(recovery?.expectedBranch ?? "recovered-worktree"));
   const [baseRef, setBaseRef] = useState(() => broken?.baseRef ?? "");
   const [selectedPath, setSelectedPath] = useState(() => candidates[0]?.path ?? "");
@@ -38,7 +44,9 @@ export function WorktreeRecoveryCard({
     setSelectedPath(candidates[0]?.path ?? "");
     setAction(null);
     setError(null);
-  }, [broken?.baseRef, candidates, recovery?.recoveryId]);
+    // A fresh incident resets the form. Ordinary session broadcasts must preserve typed input and
+    // the in-flight action guard even when they re-materialize the worktrees array.
+  }, [recovery?.recoveryId]);
 
   if (!recovery) return null;
   const disabled = action !== null || !runnerOnline;
@@ -102,7 +110,12 @@ export function WorktreeRecoveryCard({
               value={selectedPath || null}
               disabled={disabled || candidates.length === 0}
               emptyLabel="No Other Linked Worktrees"
-              options={candidates.map((worktree) => ({ value: worktree.path, label: worktree.branch }))}
+              options={candidates.map((worktree) => ({
+                value: worktree.path,
+                label: worktree.path === recovery.selectedPath
+                  ? `${worktree.branch} (Restore Selected)`
+                  : worktree.branch,
+              }))}
               onChange={setSelectedPath}
             />
           </label>

@@ -4116,11 +4116,12 @@ export class SessionsService {
       this.db.updateSessionCostCheckpoints(sessionId, normalizeCostCheckpoints(effectiveConfig.costCheckpointsUsd), now);
     }
     // Admission-queued prompts always need a durable FIFO identity. Protocol-v161 runners also
-    // route human-submitted prompts for a worktree-backed session through this lane: an idle
+    // route human-submitted prompts for a worktree-backed session through this lane when an idle
     // provider may need to relaunch, and verification can then prove that the prompt was not sent.
     // Persisting before that attempt retains attachments/workspace references and gives recovery
     // a stable idempotency identity instead of relying on a browser-local draft.
     const durablePrompt = admissionQueuedPrompt || (retainAcrossWorktreeRecovery && !delivery &&
+      session.status === "idle" &&
       session.worktreePath != null &&
       runnerSupportsProtocol(
         this.db.getRunner(session.runnerId)?.protocolVersion,

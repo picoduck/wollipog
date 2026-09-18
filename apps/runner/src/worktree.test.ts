@@ -4892,6 +4892,26 @@ test("a worktree removed between turns fails the resume instead of spawning a pr
       error: `${meta?.worktreeRecovery?.detail}; this message was not sent`,
       code: "WORKTREE_RECOVERY_REQUIRED",
     }], "the exact command identity receives one known-not-delivered terminal receipt");
+
+    const restoredBranch = meta?.worktreeBranch;
+    assert.ok(restoredBranch);
+    execFileSync("git", ["-C", repo, "worktree", "add", worktreePath, restoredBranch]);
+    const internals = manager as unknown as {
+      beginLaunchGeneration(sessionId: string): number;
+      verifySelectedWorktreeBeforeLaunch(
+        meta: NonNullable<ReturnType<SessionStore["readMeta"]>>,
+        worktree: { path: string; branch: string },
+        generation: number,
+      ): Promise<boolean>;
+    };
+    const launchGeneration = internals.beginLaunchGeneration(spec.sessionId);
+    assert.equal(await internals.verifySelectedWorktreeBeforeLaunch(
+      store.readMeta(spec.sessionId)!,
+      { path: worktreePath, branch: restoredBranch },
+      launchGeneration,
+    ), true);
+    assert.equal(store.readMeta(spec.sessionId)?.worktreeRecovery, undefined,
+      "a positive proof retires the matching incident before a restored-path relaunch");
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });

@@ -3806,7 +3806,7 @@ export class SessionManager {
         // No provider owns an approval while launch is blocked on a missing or mismatched tree.
         // Preserve the first-class recovery state across runner restart without emitting another
         // transcript event; browser and control-plane hydration read the same durable coordinates.
-        this.store.patchMeta(m.sessionId, { status: "input_required", pendingApproval: null });
+        this.store.patchMeta(m.sessionId, { status: "input_required" });
       } else if (terminal) {
         if (reconciled.pendingApproval) this.store.patchMeta(m.sessionId, { pendingApproval: null });
       } else if (pendingRequests(reconciled.pendingApproval).some((request) => request.ownerToolUseId)) {
@@ -6024,7 +6024,21 @@ export class SessionManager {
     launchGeneration: number,
   ): Promise<boolean> {
     const detail = await this.persistedWorktreeFailure(meta, worktree.path, meta.worktreeBranch);
-    if (!detail) return true;
+    if (!detail) {
+      // A user may restore the exact selected path and branch instead of choosing a replacement.
+      // The positive proof is authoritative: retire the matching incident before launch so a
+      // restart cannot succeed and then re-park the healthy session from stale recovery metadata.
+      const latest = this.store.readMeta(meta.sessionId);
+      const recovery = latest?.worktreeRecovery;
+      if (latest && recovery &&
+          sameWorktreePath(latest.context, recovery.selectedPath, worktree.path) &&
+          recovery.expectedBranch === worktree.branch &&
+          this.launchIsCurrent(meta.sessionId, launchGeneration) && latest.status !== "stopped") {
+        const updated = this.store.patchMeta(meta.sessionId, { worktreeRecovery: undefined });
+        if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+      }
+      return true;
+    }
     // Whatever now occupies that path is not provably this launch's own materialization, so the
     // initial-start cleanup must not force-remove it. Record the refusal before reporting: a stop
     // arriving in the window below still has to reach the retention decision.

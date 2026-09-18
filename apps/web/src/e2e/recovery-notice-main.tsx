@@ -49,7 +49,7 @@ const runner = {
   workspaces: [],
   connectedAt: 1,
   lastSeen: 1,
-  protocolVersion: worktreeRecoveryFixture ? 158 : 67,
+  protocolVersion: worktreeRecoveryFixture ? 159 : 67,
 } as RunnerView;
 
 const session: SessionView = {
@@ -155,6 +155,19 @@ class FixtureSocket implements UiSocket {
   }
   send() {}
   close() {}
+}
+
+if (worktreeRecoveryFixture) {
+  (window as typeof window & { emitWorktreeRecoveryUpdate?: () => void }).emitWorktreeRecoveryUpdate = () => {
+    fixtureSocket?.onmessage?.({ data: JSON.stringify({
+      type: "session_upsert",
+      session: {
+        ...session,
+        updatedAt: session.updatedAt + 1,
+        worktrees: session.worktrees?.map((worktree) => ({ ...worktree })),
+      },
+    } satisfies ControlPlaneToUi) });
+  };
 }
 
 const connection: UiConnectionRuntime = {

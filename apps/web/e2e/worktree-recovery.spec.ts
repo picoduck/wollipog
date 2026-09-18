@@ -32,6 +32,13 @@ test("desktop recovery selects a verified session-linked worktree before Retry i
   await expect(page.locator(".composer-input")).toBeDisabled();
   await saveEvidence(page, testInfo, "desktop-recovery-required");
 
+  const branch = card.getByLabel("Branch");
+  await branch.fill("fix/my-restored-work");
+  await page.evaluate(() => {
+    (window as typeof window & { emitWorktreeRecoveryUpdate?: () => void }).emitWorktreeRecoveryUpdate?.();
+  });
+  await expect(branch).toHaveValue("fix/my-restored-work");
+
   await evidencePause(page, 2500);
   await card.getByRole("button", { name: "Worktree: fix/recovered-worktree" }).click();
   await evidencePause(page, 1200);
