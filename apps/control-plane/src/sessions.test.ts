@@ -17153,8 +17153,30 @@ test("Orchestrator is an additive role independent of the provider permission mo
     assert.equal(spec?.config?.permissionMode, "acceptEdits");
     assert.ok(svc.setConfig(view.id, { permissionMode: "default" }).ok, "ordinary modes keep their normal live semantics");
     assert.equal(svc.setConfig(view.id, { permissionMode: "orchestrator" }).status, 409, "the preset cannot be entered later");
-    assert.ok(svc.setParentControl(view.id, "questions").ok, "Parent Control is governed by the role");
+    assert.ok(svc.setParentControl(view.id, "questions_and_approvals").ok, "Parent Control is governed by the role");
     assert.ok(svc.campaignProjection(view.id).ok, "campaign state is available to the additive role");
+    db.updateSessionStatus(view.id, "running", Date.now());
+    const childRequest = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, title: "Child" };
+    let child = svc.createSession(childRequest, undefined, undefined, false, false, false, { parentSessionId: view.id });
+    if (child.status === 428) {
+      const spawnApproval = db.getSession(view.id)!.pendingApproval!;
+      assert.ok(svc.approve(view.id, spawnApproval.requestId, "allow").ok);
+      child = svc.createSession(childRequest, undefined, undefined, false, false, false, { parentSessionId: view.id });
+    }
+    assert.ok(child.ok && child.data, child.error);
+    db.updateSessionStatus(child.data.id, "running", Date.now());
+    svc.onSessionEvent(child.data.id, {
+      kind: "permission_request", requestId: "permission", occurrenceId: "request_additive_owner",
+      title: "Run Command", context: { toolName: "Bash" }, options: [
+        { optionId: "once", name: "Allow Once", kind: "allow_once" },
+        { optionId: "deny", name: "Deny", kind: "reject_once" },
+      ],
+    });
+    assert.deepEqual(db.getSession(child.data.id)?.pendingRequestOwners, {
+      human: 0,
+      orchestrator: 1,
+      requests: [{ requestId: "permission", occurrenceId: "request_additive_owner", owner: "orchestrator" }],
+    }, "descendant request ownership resolves through the persisted role, not the preset literal");
 
     const defaulted = svc.createSession({ ...request, role: "orchestrator" }, undefined, undefined, false, false, false, human);
     const normal = svc.createSession({ ...request, role: "normal" }, undefined, undefined, false, false, false, human);
@@ -17218,6 +17240,9 @@ test("Orchestrator is an additive role independent of the provider permission mo
     );
     assert.equal(outdated.status, 409, "an older runner would launch this as an ordinary session");
     assert.match(outdated.error ?? "", /protocol-v159/);
+    const outdatedRestart = svc.restart(view.id);
+    assert.equal(outdatedRestart.status, 409, "restart after a runner downgrade fails the same way");
+    assert.match(outdatedRestart.error ?? "", /protocol-v159/);
     const legacyOnOlderRunner = svc.createSession(
       { ...request, role: "orchestrator", config: { permissionMode: "orchestrator" } },
       undefined, undefined, false, false, false, human,

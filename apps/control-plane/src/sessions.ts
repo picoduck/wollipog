@@ -5516,6 +5516,12 @@ export class SessionsService {
       (session.workspaceId ? this.db.getWorkspacePath(session.runnerId, session.workspaceId) : null);
     if (!workspacePath) return fail("session has no resolvable workspace directory to restart from", 400);
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
+    // A runner that predates the independent role would relaunch this Orchestrator as an ordinary
+    // session while the control plane still granted it orchestrator routes; refuse instead.
+    if (sessionRole(session) === "orchestrator" && !usesOrchestratorPresetPermissions(session) &&
+        !runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "orchestratorAdditiveRole")) {
+      return fail("An Orchestrator with independent provider permissions requires a protocol-v159 runner; update the runner and retry.", 409);
+    }
     const agentId = session.agentId;
     const supportsIssueScope = runnerSupportsProtocol(
       this.db.getRunner(session.runnerId)?.protocolVersion,

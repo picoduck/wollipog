@@ -16789,18 +16789,18 @@ export class ControlPlaneDb {
     const seen = new Set<string>([row.id]);
     let parentId: string | null = row.parent_session_id;
     let controller: Pick<SessionRow,
-      "id" | "parent_session_id" | "permission_mode" | "orchestrator_policy" | "parent_control"
+      "id" | "parent_session_id" | "permission_mode" | "session_role" | "orchestrator_policy" | "parent_control"
     > | null = null;
     for (let depth = 0; parentId && depth < 64 && !seen.has(parentId); depth += 1) {
       seen.add(parentId);
       const parent = this.stmt(
-        `SELECT id, parent_session_id, permission_mode, orchestrator_policy, parent_control
+        `SELECT id, parent_session_id, permission_mode, session_role, orchestrator_policy, parent_control
          FROM sessions WHERE id=?`,
       ).get(parentId) as unknown as Pick<SessionRow,
-        "id" | "parent_session_id" | "permission_mode" | "orchestrator_policy" | "parent_control"
+        "id" | "parent_session_id" | "permission_mode" | "session_role" | "orchestrator_policy" | "parent_control"
       > | undefined;
       if (!parent) return undefined;
-      if (parent.permission_mode === "orchestrator" &&
+      if (sessionRole({ role: parent.session_role as SessionRole | null, permissionMode: parent.permission_mode }) === "orchestrator" &&
           orchestratorCampaignPolicyFromJson(parent.orchestrator_policy)) controller = parent;
       parentId = parent.parent_session_id;
     }
