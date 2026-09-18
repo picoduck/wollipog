@@ -155,8 +155,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 161", () => {
-  assert.equal(PROTOCOL_VERSION, 161);
+test("PROTOCOL_VERSION is 162", () => {
+  assert.equal(PROTOCOL_VERSION, 162);
   assert.equal(runnerSupportsProtocol(136, "capacityLockDiagnostics"), false);
   assert.equal(runnerSupportsProtocol(137, "capacityLockDiagnostics"), true);
   assert.equal(runnerSupportsProtocol(137, "sessionAgentControlReasoningEffort"), false);
@@ -183,6 +183,8 @@ test("PROTOCOL_VERSION is 161", () => {
   assert.equal(runnerSupportsProtocol(160, "orchestratorAdditiveRole"), true);
   assert.equal(runnerSupportsProtocol(160, "worktreeRecovery"), false);
   assert.equal(runnerSupportsProtocol(161, "worktreeRecovery"), true);
+  assert.equal(runnerSupportsProtocol(161, "orchestratorAdditiveCodex"), false);
+  assert.equal(runnerSupportsProtocol(162, "orchestratorAdditiveCodex"), true);
   assert.equal(runnerSupportsProtocol(145, "worktreeSetupConfig"), false);
   assert.equal(runnerSupportsProtocol(146, "worktreeSetupConfig"), true);
   assert.equal(runnerSupportsProtocol(134, "runnerCapacityDimensions"), false);
@@ -1292,7 +1294,8 @@ test("scope audience containment is conservative and organization-bounded", () =
 });
 
 test("the Orchestrator role is independent of the provider permission mode", async () => {
-  const { isOrchestratorLaunch, sessionRole, usesOrchestratorPresetPermissions } = await import("./index.js");
+  const { isOrchestratorLaunch, orchestratorAdditiveCapability, sessionRole, usesOrchestratorPresetPermissions } =
+    await import("./index.js");
   assert.equal(sessionRole({ role: "orchestrator", permissionMode: "acceptEdits" }), "orchestrator");
   assert.equal(sessionRole({ role: "normal", permissionMode: "orchestrator" }), "normal",
     "an explicit role wins over the legacy preset literal");
@@ -1307,4 +1310,11 @@ test("the Orchestrator role is independent of the provider permission mode", asy
   assert.equal(usesOrchestratorPresetPermissions({ permissionMode: "orchestrator" }), true);
   assert.equal(usesOrchestratorPresetPermissions({ permissionMode: "acceptEdits" }), false);
   assert.equal(usesOrchestratorPresetPermissions(undefined), false);
+  assert.equal(orchestratorAdditiveCapability("claude-code"), "orchestratorAdditiveRole");
+  assert.equal(orchestratorAdditiveCapability("codex"), "orchestratorAdditiveCodex");
+  assert.equal(orchestratorAdditiveCapability("codex-app-server"), "orchestratorAdditiveCodex");
+  for (const coupled of ["acp", "pi", undefined, null]) {
+    assert.equal(orchestratorAdditiveCapability(coupled), undefined,
+      "every other harness still requires the coupled preset");
+  }
 });

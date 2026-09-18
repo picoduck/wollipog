@@ -137,6 +137,48 @@ test("an Orchestrator resume explicitly re-pins scratch cwd and sandbox", async 
   } finally { driver.dispose(); }
 });
 
+test("an additive Codex Orchestrator spawns exactly the normal turn for its selected mode", async () => {
+  // The additive shape is an ordinary permission mode plus the runner's launch arguments. Nothing
+  // in the driver may key off it: no MCP isolation probe, no forced sandbox, no re-pinned cwd.
+  for (const permissionMode of ["read-only", "on-request", "danger-full-access"]) {
+    const spawned: string[][] = [];
+    let probes = 0;
+    const launchArgs = ["-c", 'mcp_servers.wollipog={ "command" = "/runner" }'];
+    const run = async (args: string[], resumeId?: string) => {
+      const child = fakeAgentProcess();
+      const driver = new CodexDriver({
+        command: "codex", args, cwd: "/repo", env: {},
+        config: { permissionMode }, context: { kind: "native" },
+        ...(resumeId ? { resumeId } : {}),
+      }, { onEvent() {}, onStderr() {}, onExit() {} }, {
+        spawn(options) { spawned.push(options.args); return child; },
+        kill() {}, orchestratorMcpArgs: async () => { probes++; return ["-c", "mcp_servers.other.enabled=false"]; },
+      });
+      try {
+        const turn = driver.prompt("go");
+        await nextTask();
+        child.stdout.emit("data", JSON.stringify({ type: "turn.completed" }) + "\n");
+        child.emit("close", 0);
+        await turn;
+      } finally { driver.dispose(); }
+    };
+    await run([]);
+    await run(launchArgs);
+    await run([], "thread-1");
+    await run(launchArgs, "thread-1");
+    assert.equal(probes, 0, `${permissionMode}: the Orchestrator MCP isolation probe never runs`);
+    assert.deepEqual(spawned[1], [...launchArgs, ...spawned[0]!],
+      `${permissionMode}: a first turn differs from a normal session only by the launch arguments`);
+    assert.deepEqual(spawned[3], [...launchArgs, ...spawned[2]!],
+      `${permissionMode}: a resumed turn differs from a normal session only by the launch arguments`);
+    assert.equal(spawned[1]![spawned[1]!.indexOf("-s") + 1],
+      permissionMode === "on-request" ? "workspace-write" : permissionMode,
+      `${permissionMode}: the sandbox follows the selected mode, not the preset's fixed policy`);
+    assert.equal(spawned[3]!.filter((arg) => arg === "-s").length, 0,
+      `${permissionMode}: a resume never re-pins cwd and sandbox the way the preset does`);
+  }
+});
+
 test("thread.started without thread_id leaves threadId unchanged", () => {
   const { driver } = makeDriver();
   handleEvent(driver, { type: "thread.started", thread_id: "first" });

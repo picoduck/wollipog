@@ -140,18 +140,24 @@ for (const scenario of [
   { name: "desktop light", viewport: { width: 1280, height: 1000 }, theme: "light" },
   { name: "mobile dark", viewport: { width: 390, height: 844 }, theme: "dark" },
 ] as const) {
-  test(`native Claude Orchestrator keeps ordinary provider permissions ${scenario.name}`, async ({ page }, testInfo) => {
+  for (const harness of [
+    { label: "Claude", driver: "claude-code" },
+    { label: "Codex", driver: "codex-app-server" },
+  ] as const) {
+  test(`native ${harness.label} Orchestrator keeps ordinary provider permissions ${scenario.name}`, async ({ page }, testInfo) => {
     await page.setViewportSize(scenario.viewport);
-    await page.evaluate(({ theme, protocolVersion }) => {
+    await page.evaluate(({ theme, protocolVersion, driver }) => {
       document.documentElement.dataset.theme = theme;
       window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(protocolVersion);
       window.__WOLLIPOG_PROJECT_INBOX_E2E__.setOrchestratorAgentFixture({
         context: "native",
-        permissionModes: ["default", "acceptEdits", "orchestrator"],
-        driver: "claude-code",
+        permissionModes: driver === "claude-code"
+          ? ["default", "acceptEdits", "orchestrator"]
+          : ["untrusted", "on-request", "orchestrator"],
+        driver,
         controlPlaneRole: true,
       });
-    }, { theme: scenario.theme, protocolVersion: PROTOCOL_VERSION });
+    }, { theme: scenario.theme, protocolVersion: PROTOCOL_VERSION, driver: harness.driver });
     await page.getByRole("tab", { name: /Alpha/ }).click();
     await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
     await page.getByRole("menuitem", { name: "New Session Here" }).click();
@@ -168,7 +174,7 @@ for (const scenario of [
     // #1281: the role is additive. The provider permission summary is unchanged by the role and
     // the harness keeps its ordinary modes, so no preset is announced.
     await expect(providerPermissions).toContainText("Harness Default");
-    await expect(providerPermissions).toContainText(/same permission modes as a normal session/);
+    await expect(providerPermissions).toContainText(/same permission modes, integrations, and credentials as a normal session/);
     await expect(providerPermissions).not.toContainText("Orchestrator Preset");
     await providerPermissions.scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath("role-orchestrator-independent.png"), fullPage: true });
@@ -189,4 +195,5 @@ for (const scenario of [
     expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()?.config?.permissionMode))
       .toBeUndefined();
   });
+  }
 }

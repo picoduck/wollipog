@@ -16,6 +16,7 @@ import {
   orchestratorInstructions,
   orchestratorLaunchArgs,
   projectOrchestratorPresetForPeer,
+  reservedCodexMcpNameCollision,
   stripAdditiveOrchestratorLaunchArgs,
   stripOrchestratorLaunchArgs,
   supportsClaudeAgentAcpOrchestrator,
@@ -505,7 +506,7 @@ test("additive Orchestrator launch arguments are injected and removed without to
     "--add-dir", "/home/user/notes", "--allowedTools", "Bash(npm test:*)",
     "--append-system-prompt", "Be terse.", "--mcp-config", "/home/user/mcp.json", "--settings", "/home/user/settings.json",
   ];
-  const added = additiveOrchestratorLaunchArgs("claude-code", ["/repo"]);
+  const added = additiveOrchestratorLaunchArgs("claude-code", mcp, ["/repo"]);
   assert.deepEqual(added.slice(0, 2), ["--allowedTools", "mcp__wollipog__*"]);
   assert.equal(added[2], "--append-system-prompt");
   assert.match(added[3]!, /^You are running with the Wollipog Orchestrator role/);
@@ -514,12 +515,96 @@ test("additive Orchestrator launch arguments are injected and removed without to
   for (const flag of ["--tools", "--strict-mcp-config", "--permission-mode", "--disallowedTools", "--setting-sources", "--settings"]) {
     assert.equal(added.includes(flag), false, `${flag} would narrow the ordinary launch`);
   }
-  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs([...user, ...added], ["/repo"]), user);
-  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(user, ["/repo"]), user, "user flags are never mistaken for injected ones");
+  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs([...user, ...added], "claude-code", ["/repo"]), user);
+  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(user, "claude-code", ["/repo"]), user, "user flags are never mistaken for injected ones");
   const inline = [
     "--allowedTools=mcp__wollipog__*", "--add-dir=/repo",
     `--append-system-prompt=${orchestratorInstructions(["/repo"], false)}`,
   ];
-  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs([...inline, ...user], ["/repo"]), user);
-  assert.throws(() => additiveOrchestratorLaunchArgs("codex", []), /native Claude Code/);
+  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs([...inline, ...user], "claude-code", ["/repo"]), user);
+  assert.throws(() => additiveOrchestratorLaunchArgs("pi", mcp, []), /native Claude Code and Codex/);
+  assert.throws(() => additiveOrchestratorLaunchArgs("acp", mcp, []), /native Claude Code and Codex/);
+});
+
+test("the additive Codex Orchestrator adds only Wollipog's MCP server and instructions", () => {
+  for (const driver of ["codex", "codex-app-server"] as const) {
+    const added = additiveOrchestratorLaunchArgs(driver, mcp, ["/repo"]);
+    // Exactly two settings: nothing else may reach the provider for the Orchestrator role.
+    assert.equal(added.length, 4, `${driver} injects only two -c settings`);
+    assert.deepEqual(added.filter((arg) => arg === "-c").length, 2);
+    const settings = added.filter((_, index) => index % 2 === 1);
+    // A dotted single-entry override merges into the user's table; the preset's whole-table form
+    // merges too, which is why the preset additionally needs --strict-config and the probe.
+    const server = settings.find((setting) => setting.startsWith("mcp_servers."))!;
+    assert.match(server, /^mcp_servers\.wollipog=\{/, "only the wollipog entry is named");
+    assert.match(server, /"command" = "\/runner"/);
+    assert.match(server, /"WOLLIPOG_PERMISSION_PRESET" = "orchestrator"/, "the campaign tools stay exposed");
+    assert.match(server, /"enabled" = true/);
+    const instructions = settings.find((setting) => setting.startsWith("developer_instructions="))!;
+    assert.match(instructions, /You are running with the Wollipog Orchestrator role/);
+    assert.match(instructions, /Strict Project Isolation is disabled/);
+    // Every coupled-preset restriction must be absent: the selected mode owns sandbox and approvals.
+    for (const forbidden of ["--strict-config", "--disable", "--enable", "-s", "--sandbox", "-a",
+      "--ask-for-approval", "--add-dir"]) {
+      assert.equal(added.includes(forbidden), false, `${driver} never injects ${forbidden}`);
+    }
+    for (const forbidden of ["sandbox_mode=", "sandbox_workspace_write.", "approval_policy=",
+      "approvals_reviewer=", "web_search=", "features."]) {
+      assert.equal(settings.some((setting) => setting.startsWith(forbidden)), false,
+        `${driver} never overrides ${forbidden}`);
+    }
+
+    const user = [
+      "-c", "model_reasoning_effort=high", "--disable", "apps",
+      "-c", 'mcp_servers.mine={ "command" = "/mine" }',
+      "-c", 'developer_instructions="my own instructions"', "-s", "read-only",
+    ];
+    assert.deepEqual(stripAdditiveOrchestratorLaunchArgs([...user, ...added], driver), user,
+      `${driver} resume removes exactly what it injected`);
+    assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(user, driver), user,
+      `${driver} never mistakes a user setting for an injected one`);
+    const inline = added.flatMap((arg, index) => index % 2 === 0 ? [] : [`--config=${arg}`]);
+    assert.deepEqual(stripAdditiveOrchestratorLaunchArgs([...inline, ...user], driver), user,
+      `${driver} strips the inline --config=key=value form too`);
+  }
+});
+
+test("a user's own MCP server named wollipog is never deleted by the additive Codex strip", () => {
+  const userServer = ["-c", 'mcp_servers.wollipog={ command = "my-server", args = [] }'];
+  const userInline = ['--config=mcp_servers.wollipog.command="my-server"'];
+  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(userServer, "codex-app-server", []), userServer);
+  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(userInline, "codex", []), userInline);
+  assert.equal(reservedCodexMcpNameCollision(userServer), true);
+  assert.equal(reservedCodexMcpNameCollision(userInline), true);
+  const injected = additiveOrchestratorLaunchArgs("codex-app-server", {
+    command: "/opt/runner", args: ["--agent-control-mcp"],
+    env: { WOLLIPOG_SESSION_TOKEN_FILE: "/run/token", WOLLIPOG_PERMISSION_PRESET: "orchestrator" },
+  }, ["/repo"]);
+  assert.equal(reservedCodexMcpNameCollision(injected), false, "the runner's own entry is not a collision");
+  const similar = ["-c", 'mcp_servers.wollipog-helper={ command = "x", env = { WOLLIPOG_PERMISSION_PRESET = "orchestrator" } }',
+    "-c", 'mcp_servers.wollipog2.command="y"'];
+  assert.equal(reservedCodexMcpNameCollision(similar), false, "only the exact reserved name collides");
+  // Spellings measured against codex-cli 0.154.0 (`codex -c <setting> mcp list`).
+  for (const spelling of [
+    'mcp_servers.wollipog = { command = "mine" }',
+    ' mcp_servers.wollipog={ command = "mine" }',
+    'mcp_servers.wollipog.command = "mine"',
+  ]) {
+    assert.equal(reservedCodexMcpNameCollision(["-c", spelling]), true, `codex names this server wollipog: ${spelling}`);
+    assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(["-c", spelling], "codex", []), ["-c", spelling]);
+  }
+  for (const spelling of [
+    'mcp_servers."wollipog"={ command = "mine" }',
+    "mcp_servers.'wollipog'={ command = \"mine\" }",
+    'mcp_servers . wollipog = { command = "mine" }',
+    'mcp_servers.wollipog .command = "mine"',
+  ]) {
+    assert.equal(reservedCodexMcpNameCollision(["-c", spelling]), false, `codex names a different server: ${spelling}`);
+    assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(["-c", spelling], "codex", []), ["-c", spelling]);
+  }
+  assert.equal(reservedCodexMcpNameCollision(["-c", 'model="mcp_servers.wollipog=x"']), false,
+    "a value that merely mentions the key is not a collision");
+  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(similar, "codex", []), similar,
+    "a similarly named server is never stripped, even if its value mentions the marker");
+  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(injected, "codex-app-server", ["/repo"]), []);
 });

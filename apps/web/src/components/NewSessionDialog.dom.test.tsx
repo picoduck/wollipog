@@ -1788,7 +1788,7 @@ test("Orchestrator is an additive role that keeps the harness's ordinary provide
     await choosePermissionPreset(fixture.container, "Orchestrator");
     assert.match(providerPermissions.textContent!, /Saved Default — Auto-?Accept Edits/i,
       "selecting Orchestrator does not consume the provider permission-mode selection");
-    assert.match(providerPermissions.textContent!, /same permission modes as a normal session/);
+    assert.match(providerPermissions.textContent!, /same permission modes, integrations, and credentials as a normal session/);
     assert.doesNotMatch(providerPermissions.textContent!, /Orchestrator Preset/);
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests.length, 1);
@@ -1820,6 +1820,67 @@ test("Orchestrator is an additive role that keeps the harness's ordinary provide
     assert.equal(legacyControlPlane.requests[0]?.config?.permissionMode, "orchestrator",
       "the coupled preset remains the only encoding an older control plane understands");
   } finally { await unmountFixture(legacyControlPlane); }
+});
+
+test("a non-strict Codex Orchestrator shows the saved harness default rather than the preset", async () => {
+  const codexRunner: RunnerView = {
+    ...runner, protocolVersion: PROTOCOL_VERSION,
+    agents: [{
+      id: "codex", name: "Codex App Server", command: "codex", args: [], env: {},
+      driver: "codex-app-server", available: true, context: { kind: "native" },
+      capabilities: {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+        permissionModes: ["auto-review", "read-only", "on-request", "orchestrator"],
+      },
+    }],
+  };
+  const savedReadOnly = async (): Promise<AgentHarnessDefaultsView> => ({ defaults: [{
+    agentId: "codex", driver: "codex-app-server", context: { kind: "native" }, name: "Codex App Server",
+    installations: [], compatibleInstallations: 1, preference: { permissionMode: "read-only" },
+  }] });
+  const fixture = await mountFixture({ runners: [codexRunner], capabilities: {
+    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+  } }, undefined, undefined, savedReadOnly);
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    const providerPermissions = fixture.container.querySelector('[role="group"][aria-label="Provider Permissions"]')!;
+    const normalSummary = providerPermissions.textContent!;
+    assert.match(normalSummary, /Saved Default —/);
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    assert.match(providerPermissions.textContent!, /Saved Default —/,
+      "a non-strict Codex Orchestrator shows the saved harness default");
+    assert.match(providerPermissions.textContent!, /same permission modes, integrations, and credentials as a normal session/);
+    assert.doesNotMatch(providerPermissions.textContent!, /Orchestrator Preset/);
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests.length, 1);
+    assert.equal(fixture.requests[0]?.role, "orchestrator");
+    assert.equal(fixture.requests[0]?.config?.permissionMode, undefined,
+      "the provider mode is resolved by the server exactly as for a normal session");
+  } finally { await unmountFixture(fixture); }
+
+  const strict = await mountFixture({ runners: [codexRunner], capabilities: {
+    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+  } }, undefined, undefined, savedReadOnly, undefined, strictOrchestratorDefaults);
+  try {
+    await act(async () => { await selectProject(strict.container, project.id); });
+    await choosePermissionPreset(strict.container, "Orchestrator");
+    const providerPermissions = strict.container.querySelector('[role="group"][aria-label="Provider Permissions"]')!;
+    assert.match(providerPermissions.textContent!, /Orchestrator Preset — Harness-Enforced/);
+    assert.match(providerPermissions.textContent!, /Strict Project Isolation is enforced/);
+  } finally { await unmountFixture(strict); }
+
+  const outdatedRunner = await mountFixture({
+    runners: [{ ...codexRunner, protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex - 1 }],
+    capabilities: { sessionSubscriptions: false, projects: true, orchestratorRole: true },
+  }, undefined, undefined, savedReadOnly);
+  try {
+    await act(async () => { await selectProject(outdatedRunner.container, project.id); });
+    await choosePermissionPreset(outdatedRunner.container, "Orchestrator");
+    const providerPermissions = outdatedRunner.container.querySelector('[role="group"][aria-label="Provider Permissions"]')!;
+    assert.match(providerPermissions.textContent!, /Orchestrator Preset — Harness-Enforced/);
+    assert.match(providerPermissions.textContent!, /protocol v162/,
+      "the runner requirement names the Codex gate, not the Claude one");
+  } finally { await unmountFixture(outdatedRunner); }
 });
 
 test("choosing Normal explicitly overrides a saved Orchestrator harness default on a current control plane", async () => {

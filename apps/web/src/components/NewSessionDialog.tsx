@@ -820,9 +820,9 @@ export function NewSessionDialog({
     : projectSelection === NO_PROJECT_SELECTION
       ? !!runnerId && (!!workspaceId || !!browsedPath)
       : !!selectedProject && projectLocationLaunchable;
-  // Independent provider permissions (#1281): a non-strict native Claude Code Orchestrator keeps
-  // the same permission mode, tools, hooks, and MCP servers as a normal session. The sentence
-  // that explains why the preset still applies is also what decides that it applies.
+  // Independent provider permissions (#1281, #1293): a non-strict native Claude Code or Codex
+  // Orchestrator keeps the same permission mode, tools, hooks, and MCP servers as a normal session.
+  // The sentence that explains why the preset still applies is also what decides that it applies.
   const orchestratorPresetReason = orchestrator
     ? orchestratorPresetPermissionsReason({
       controlPlaneSupportsRole: orchestratorRoleSupported,
@@ -1420,7 +1420,7 @@ export function NewSessionDialog({
                   : savedPiModeUnavailableForTarget
                     ? "This target cannot host Pi's approval bridge, so commands run without interactive approvals."
                     : orchestrator
-                      ? "The same permission modes as a normal session apply, and the Orchestrator role only adds Wollipog's orchestration tools. Change the mode in the composer after creation."
+                      ? "The same permission modes, integrations, and credentials as a normal session apply, and the Orchestrator role only adds Wollipog's orchestration tools. Typed workflow decisions do not govern integrations they cannot intercept. Change the mode in the composer after creation."
                       : "Use the approval behavior saved for this agent harness. Change it in the composer after creation."}
               </span>
             </div>

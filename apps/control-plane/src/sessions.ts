@@ -146,6 +146,8 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   SESSION_NAMING_RUNNER_BUDGET_MS,
   SESSION_NAMING_SUPERVISION_MARGIN_MS,
   sessionRole,
+  orchestratorAdditiveCapability,
+  RUNNER_CAPABILITY_MIN_PROTOCOL,
   usesOrchestratorPresetPermissions,
   type SessionRole,
 } from "@wollipog/protocol";
@@ -3512,14 +3514,17 @@ export class SessionsService {
         // Independent provider permissions: the harness launches exactly as an equivalent normal
         // session and gains only Wollipog's orchestration tools, instructions, and credential. An
         // older runner would launch this as an ordinary session, so refuse rather than degrade.
-        if (!runnerSupportsProtocol(runner.protocolVersion, "orchestratorAdditiveRole")) {
-          return fail("An Orchestrator with independent provider permissions requires a protocol-v160 runner; update the runner or choose the Orchestrator preset permission mode.", 409);
+        // Each harness carries its own gate: Claude Code since v160, the Codex drivers since v162.
+        const additiveCapability = orchestratorAdditiveCapability(launch.driver);
+        if (!additiveCapability || contextKind !== "native" || executionTarget.adapter !== "host") {
+          return fail("Independent provider permissions for an Orchestrator are supported only by a native Claude Code or Codex harness on the host; other harnesses still use the Orchestrator preset permission mode.", 409);
+        }
+        if (!runnerSupportsProtocol(runner.protocolVersion, additiveCapability)) {
+          return fail(`An Orchestrator with independent provider permissions requires a protocol-v${
+            RUNNER_CAPABILITY_MIN_PROTOCOL[additiveCapability]} runner for this harness; update the runner or choose the Orchestrator preset permission mode.`, 409);
         }
         if (!agentCapabilities?.permissionModes?.includes("orchestrator")) {
           return fail("the Orchestrator role requires explicit support from this agent installation", 409);
-        }
-        if (contextKind !== "native" || launch.driver !== "claude-code" || executionTarget.adapter !== "host") {
-          return fail("Independent provider permissions for an Orchestrator are supported only by a native Claude Code harness on the host; other harnesses still use the Orchestrator preset permission mode.", 409);
         }
         if (strictProjectIsolation) {
           return fail("Strict Project Isolation is enforced through the Orchestrator preset permission mode; choose it or disable Strict Project Isolation.", 409);
@@ -5544,17 +5549,29 @@ export class SessionsService {
     // session while the control plane still granted it orchestrator routes; refuse instead.
     if (sessionRole(session) === "orchestrator" && !usesOrchestratorPresetPermissions(session)) {
       const runner = this.db.getRunner(session.runnerId);
-      if (!runnerSupportsProtocol(runner?.protocolVersion, "orchestratorAdditiveRole")) {
-        return fail("An Orchestrator with independent provider permissions requires a protocol-v160 runner; update the runner and retry.", 409);
-      }
       // Discovery can redefine the agent id between launches. Mirror the creation-time shape
       // check so a changed definition fails here with guidance instead of at the runner.
+      const additiveCapability = orchestratorAdditiveCapability(launch.driver);
       const restartingAgentId = session.agentId;
       const advertised = runner?.agents.find((agent) => agent.id === restartingAgentId)?.capabilities;
       const target = session.executionTarget;
-      if (!advertised?.permissionModes?.includes("orchestrator") || launch.driver !== "claude-code" ||
+      // A reused agent id can now resolve to another additive-capable harness. The persisted
+      // provider permission mode belongs to the harness the session was created with, so a driver
+      // change is refused rather than reinterpreted under the new harness's mode vocabulary.
+      if (!additiveCapability || launch.driver !== session.driver ||
+          !advertised?.permissionModes?.includes("orchestrator") ||
           (launch.context?.kind ?? "native") !== "native" || (target && target.adapter !== "host")) {
-        return fail("An Orchestrator with independent provider permissions requires a native Claude Code harness on the host that advertises the Orchestrator role; the agent definition no longer matches. Start a new session or choose the Orchestrator preset permission mode.", 409);
+        return fail("An Orchestrator with independent provider permissions requires a native Claude Code or Codex harness on the host that advertises the Orchestrator role; the agent definition no longer matches. Start a new session or choose the Orchestrator preset permission mode.", 409);
+      }
+      if (!runnerSupportsProtocol(runner?.protocolVersion, additiveCapability)) {
+        return fail(`An Orchestrator with independent provider permissions requires a protocol-v${
+          RUNNER_CAPABILITY_MIN_PROTOCOL[additiveCapability]} runner for this harness; update the runner and retry.`, 409);
+      }
+      // Creation admits a non-strict Codex Orchestrator only on platforms with Codex's audited
+      // sandbox; a runner re-registered on another platform must not bypass that on restart.
+      if ((launch.driver === "codex" || launch.driver === "codex-app-server") &&
+          !["linux", "macos"].includes(runner?.os ?? "")) {
+        return fail("Provider-mode Codex Orchestrator requires its audited Linux or macOS sandbox.", 409);
       }
     }
     const agentId = session.agentId;

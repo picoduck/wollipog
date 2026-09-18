@@ -447,7 +447,15 @@
 // 161: pre-launch worktree verification publishes a durable, content-free recovery block and a
 //      distinct known-not-delivered prompt receipt. Older peers receive the conservative cancelled
 //      receipt and never see recovery state they cannot act on.
-export const PROTOCOL_VERSION = 161;
+// 162: the additive Orchestrator role extends to the native Codex and Codex App Server harnesses.
+//      A non-strict Codex Orchestrator keeps the selected permission mode's sandbox and approval
+//      semantics, its apps, plugins, hooks, multi-agent and multimodal tools, and every configured
+//      MCP server, and gains only Wollipog's MCP server and the Orchestrator instructions. A v160
+//      runner recognises the launch policy block but has no additive Codex shape for it: it refuses
+//      the launch outright, and an even older runner would start an ordinary Codex session with no
+//      orchestration surface while the control plane still granted orchestrator routes and a scoped
+//      credential. The combination is therefore refused with upgrade guidance rather than degraded.
+export const PROTOCOL_VERSION = 162;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -639,6 +647,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   orchestratorChildHarnessPolicy: 157,
   orchestratorIssueScope: 158,
   orchestratorAdditiveRole: 160,
+  orchestratorAdditiveCodex: 162,
   worktreeSetup: 141,
   worktreeTeardownPorts: 145,
   worktreeSetupConfig: 146,
@@ -1440,6 +1449,23 @@ export function usesOrchestratorPresetPermissions(
   config: { permissionMode?: string | null } | null | undefined,
 ): boolean {
   return config?.permissionMode === ORCHESTRATOR_PRESET_PERMISSION_MODE;
+}
+
+/** Harnesses whose Orchestrator role can be additive, each with the capability gate that carries
+ * its launch shape. Claude Code landed in v160; the Codex drivers in v162. Every other driver
+ * still requires the coupled preset, so it has no entry here. */
+export const ORCHESTRATOR_ADDITIVE_CAPABILITY = {
+  "claude-code": "orchestratorAdditiveRole",
+  codex: "orchestratorAdditiveCodex",
+  "codex-app-server": "orchestratorAdditiveCodex",
+} as const satisfies Partial<Record<string, keyof typeof RUNNER_CAPABILITY_MIN_PROTOCOL>>;
+
+/** The runner capability a driver needs to launch the Orchestrator role additively, or `undefined`
+ * when that harness only supports the coupled preset. */
+export function orchestratorAdditiveCapability(
+  driver: string | null | undefined,
+): keyof typeof RUNNER_CAPABILITY_MIN_PROTOCOL | undefined {
+  return (ORCHESTRATOR_ADDITIVE_CAPABILITY as Record<string, keyof typeof RUNNER_CAPABILITY_MIN_PROTOCOL>)[driver ?? ""];
 }
 
 /** Human-owned delegation level for an eligible supervising session. */

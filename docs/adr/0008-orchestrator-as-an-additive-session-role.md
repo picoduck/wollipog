@@ -52,3 +52,7 @@ Isolation or a not-yet-decoupled harness selects the preset, and the interface s
 and ACP Orchestrators keep their audited preset launches until each harness has an equivalent
 additive contract; that work, Native TUI parity, and an explicit integration-isolation policy are
 follow-ups rather than inferred from the role.
+
+Superseded in part by [ADR 0009](0009-additive-orchestrator-role-for-codex.md), which gives native
+Codex and Codex App Server their own additive contract behind a separate protocol v162 capability
+gate. Pi, ACP, and Native TUI still select the coupled preset.
