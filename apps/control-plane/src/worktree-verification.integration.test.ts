@@ -150,6 +150,11 @@ test("pre-launch worktree verification produces one control-plane transcript err
     sessions.onSessionEvent(sessionId, earlier.payload, earlier.seq, earlier.ts, RUNNER_ID);
     const internals = manager as unknown as {
       launchGenerations: Map<string, number>;
+      persistedWorktreeFailure(
+        current: SessionMeta,
+        path: string,
+        expectedBranch: string | undefined,
+      ): Promise<string | null>;
       verifySelectedWorktreeBeforeLaunch(
         current: SessionMeta,
         worktree: { path: string; branch: string },
@@ -181,18 +186,41 @@ test("pre-launch worktree verification produces one control-plane transcript err
       failure.detail,
     ], "a distinct earlier lifecycle failure remains visible");
 
-    deliver(failure);
+    const persistedWorktreeFailure = internals.persistedWorktreeFailure.bind(manager);
+    internals.persistedWorktreeFailure = async () => "x".repeat(4_096);
     internals.launchGenerations.set(sessionId, 2);
     assert.equal(await internals.verifySelectedWorktreeBeforeLaunch(
       runnerStore.readMeta(sessionId)!,
       { path: worktreePath, branch: meta.worktreeBranch! },
       2,
     ), false);
+    assert.equal(runnerStore.readMeta(sessionId)?.worktreeRecovery?.detail.length, 4_096,
+      "an extreme Git failure cannot invalidate the durable recovery projection");
+    assert.ok(db.getSession(sessionId)?.worktreeRecovery,
+      "the control plane retains the bounded recovery card instead of re-enabling Retry");
+    internals.persistedWorktreeFailure = persistedWorktreeFailure;
+
+    deliver(failure);
+    internals.launchGenerations.set(sessionId, 3);
+    assert.equal(await internals.verifySelectedWorktreeBeforeLaunch(
+      runnerStore.readMeta(sessionId)!,
+      { path: worktreePath, branch: meta.worktreeBranch! },
+      3,
+    ), false);
     const hydrated = snapshot(sessionId, repoPath, worktreePath, "input_required");
     hydrated.worktreeRecovery = runnerStore.readMeta(sessionId)!.worktreeRecovery;
     sessions.hydrateRunnerSessions(RUNNER_ID, [hydrated]);
     assert.equal(verificationErrors().length, 1,
       "duplicate status delivery, repeated verification, and reconnect hydration do not append another card");
+    const recoveryBeforeLegacySnapshot = db.getSession(sessionId)?.worktreeRecovery;
+    sessions.hydrateRunnerSessions(RUNNER_ID, [snapshot(
+      sessionId,
+      repoPath,
+      worktreePath,
+      "input_required",
+    )]);
+    assert.deepEqual(db.getSession(sessionId)?.worktreeRecovery, recoveryBeforeLegacySnapshot,
+      "an older snapshot that omits recovery preserves the last runner-owned value");
 
     const recoveredPath = join(root, "recovered-worktree");
     execFileSync("git", ["-C", repoPath, "worktree", "add", "-b", "fix/recovered", recoveredPath]);

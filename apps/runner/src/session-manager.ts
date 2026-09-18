@@ -6061,6 +6061,10 @@ export class SessionManager {
         this.store.readMeta(meta.sessionId)?.status === "stopped") return false;
     const message = `the selected worktree could not be verified before provider launch: ${detail}` +
       ` — restore ${worktree.path} or select another worktree for this session`;
+    // The status and transcript keep their independently bounded actionable text, but the durable
+    // recovery projection has a 4 KiB validation limit. A near-PATH_MAX coordinate must not make
+    // the control plane discard the whole recovery record and accidentally re-enable Retry.
+    const recoveryDetail = message.slice(0, 4_096);
     const latest = this.store.readMeta(meta.sessionId);
     if (!latest || latest.status === "stopped") return false;
     const existingRecovery = latest.worktreeRecovery;
@@ -6068,13 +6072,13 @@ export class SessionManager {
       sameWorktreePath(latest.context, existingRecovery.selectedPath, worktree.path) &&
       existingRecovery.expectedBranch === worktree.branch;
     const recovery = sameIncident
-      ? { ...existingRecovery, detail: message }
+      ? { ...existingRecovery, detail: recoveryDetail }
       : {
           recoveryId: `worktree-recovery:${randomUUID()}`,
           detectedAt: Date.now(),
           selectedPath: worktree.path,
           expectedBranch: worktree.branch,
-          detail: message,
+          detail: recoveryDetail,
         };
     const updated = this.store.patchMeta(meta.sessionId, { worktreeRecovery: recovery });
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
