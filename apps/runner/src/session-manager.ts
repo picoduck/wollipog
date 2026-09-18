@@ -4385,20 +4385,12 @@ export class SessionManager {
     const priorResumeId = prior?.driver === driver && (driver === "codex-app-server" || driver === "pi")
       ? prior.agentSessionId
       : null;
-    const priorAdoptedPiState = prior?.driver === "pi" && prior.adoptedProviderState?.driver === "pi"
+    const priorManagedPiState = prior?.adoptedProviderState?.driver === "pi"
       ? prior.adoptedProviderState
       : undefined;
-    if (priorAdoptedPiState && driver !== "pi") {
-      try {
-        await cleanupPiExternalSession(prior!.context, priorAdoptedPiState.sessionDir, spec.sessionId);
-      } catch (error) {
-        const message = `managed Pi transcript cleanup failed before changing drivers: ${errText(error)}`;
-        this.emitEvent(spec.sessionId, { kind: "error", message });
-        this.emitStatus(spec.sessionId, "stopped", message);
-        durable?.failed(message, "COMMAND_CANCELLED");
-        return false;
-      }
-    }
+    const priorAdoptedPiState = prior?.driver === "pi" && !priorManagedPiState?.cleanupContext
+      ? priorManagedPiState
+      : undefined;
     const adoptedProviderState = priorResumeId && driver === "pi" && priorAdoptedPiState &&
       agentContextKey(prior!.context) === agentContextKey(context)
       ? priorAdoptedPiState
@@ -4410,6 +4402,12 @@ export class SessionManager {
       durable?.failed(message, "INVALID_COMMAND");
       return false;
     }
+    const managedPiStateToCleanup = priorManagedPiState && !adoptedProviderState
+      ? {
+          ...priorManagedPiState,
+          cleanupContext: priorManagedPiState.cleanupContext ?? prior!.context,
+        }
+      : undefined;
     if (priorResumeId && !this.acquireResumeLock(spec.sessionId, launchGeneration)) {
       this.emitEvent(spec.sessionId, { kind: "error", message: "this session is being restarted by another runner — retry shortly" });
       this.emitStatus(spec.sessionId, "idle");
@@ -4465,7 +4463,9 @@ export class SessionManager {
       // Manager-driven: a continued session is no longer a pristine transcript, so it isn't
       // reprocessable (re-reading the original transcript would drop the continuation).
       adopted: false,
-      ...(adoptedProviderState ? { adoptedProviderState } : {}),
+      ...((adoptedProviderState ?? managedPiStateToCleanup)
+        ? { adoptedProviderState: adoptedProviderState ?? managedPiStateToCleanup }
+        : {}),
       providerStateVersion: prior ? prior.providerStateVersion : (context.kind === "wsl" ? 3 : 2),
       checkpointRefVersion: prior
         ? prior.checkpointRefVersion
@@ -4496,6 +4496,7 @@ export class SessionManager {
     };
     // create() upserts meta.json (refreshing launch params) but preserves any existing event log,
     // so a restart keeps the timeline while re-spawning a fresh agent.
+    let managedPiCleanupError: string | undefined;
     await this.runWorktreeOperation(spec.sessionId, async () => {
       if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) return;
       // A worktree request may have committed after the launch captured `prior` but before this
@@ -4521,12 +4522,42 @@ export class SessionManager {
         meta.checkpointWorktreeIds = latest.checkpointWorktreeIds;
         meta.worktreePending = shouldUseWorktree;
       }
+      // The serialized row transition is the cleanup linearization point. A Restart that
+      // supersedes us before this callback preserves the adopted Pi row and copy; after this write,
+      // later launches see cleanup-pending state rather than inheriting a directory we may remove.
       this.store.create(meta);
+      if (managedPiStateToCleanup) {
+        try {
+          await cleanupPiExternalSession(
+            managedPiStateToCleanup.cleanupContext,
+            managedPiStateToCleanup.sessionDir,
+            spec.sessionId,
+          );
+          delete meta.adoptedProviderState;
+          this.store.patchMeta(spec.sessionId, { adoptedProviderState: undefined });
+        } catch (error) {
+          managedPiCleanupError = `managed Pi transcript cleanup failed while changing drivers: ${errText(error)}`;
+          meta.status = "stopped";
+          this.store.patchMeta(spec.sessionId, { status: "stopped" });
+          this.refreshCapacityInventorySession(spec.sessionId);
+          return;
+        }
+      }
       // Publish the replacement driver before releasing its predecessor's app-server lock. A
       // sibling process must never observe the old resumable row and an unlocked store together.
       if (!priorResumeId) this.releaseSupersededResumeLock(spec.sessionId, launchGeneration);
       this.refreshCapacityInventorySession(spec.sessionId);
     });
+    if (managedPiCleanupError) {
+      if (this.launchIsCurrent(spec.sessionId, launchGeneration)) {
+        this.emitEvent(spec.sessionId, { kind: "error", message: managedPiCleanupError });
+        this.emitStatus(spec.sessionId, "stopped", managedPiCleanupError);
+        durable?.failed(managedPiCleanupError, "COMMAND_CANCELLED");
+      } else {
+        durable?.failed("session launch was superseded by a replacement", "COMMAND_CANCELLED");
+      }
+      return false;
+    }
     if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) {
       const superseded = this.launchWasSuperseded(spec.sessionId, launchGeneration);
       if (priorResumeId) this.releaseResumeLock(spec.sessionId, launchGeneration);
@@ -11000,9 +11031,10 @@ export class SessionManager {
         this.releaseAdmission(sessionId);
       }
       this.clearLock(sessionId);
-      if (meta?.adoptedProviderState?.driver === "pi" && meta.context.kind === "wsl") {
+      const managedPiCleanupContext = meta?.adoptedProviderState?.cleanupContext ?? meta?.context;
+      if (meta?.adoptedProviderState?.driver === "pi" && managedPiCleanupContext?.kind === "wsl") {
         try {
-          await cleanupPiExternalSession(meta.context, meta.adoptedProviderState.sessionDir, sessionId);
+          await cleanupPiExternalSession(managedPiCleanupContext, meta.adoptedProviderState.sessionDir, sessionId);
         } catch (error) {
           throw new Error(`managed Pi transcript cleanup failed: ${errText(error)}`);
         }
