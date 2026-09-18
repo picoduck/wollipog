@@ -92,6 +92,10 @@ function holdsUnsentText(values: Map<string, ScratchValue>): boolean {
  * the user wrote, oldest first. Scopes with unsent text are skipped rather than counted out, so a
  * tour of eight other sessions costs the drafts nothing; when every scope is holding a draft there
  * is simply nothing to evict and the map stays over the limit until one of them is sent.
+ *
+ * Every mutation runs this, removals included: a draft that is sent releases its scope, and if that
+ * scope is still holding a directory the map would otherwise stay over the limit until the next
+ * unrelated write happened to collect it.
  */
 function evictDisposableScopes(keep: string): void {
   for (const [candidate, values] of scratch) {
@@ -130,6 +134,7 @@ export function writePanelScratch(
     values.delete(key);
     if (values.size === 0) scratch.delete(scope);
     else touch(scope, values);
+    evictDisposableScopes(scope);
     return;
   }
   const next = values ?? new Map<string, ScratchValue>();
@@ -243,6 +248,12 @@ export function usePanelScratchText(
  *
  * No `accept`: prose has no closed set to refuse it against, and a draft degraded to its default
  * would be the very loss this exemption exists to prevent.
+ *
+ * The exemption follows the text, not the form's fate. A body that consumes its draft says so —
+ * Side Chat clears the message it sent, which releases the scope — while Review leaves the four
+ * fields of a submitted commit or pull request exactly as the user left them, so that session keeps
+ * its scope for as long as the text is still in the box. That is the same bargain as any other
+ * unsent text: the map grows only where someone typed, and only while what they typed is on screen.
  */
 export function usePanelScratchDraft(
   scope: string,

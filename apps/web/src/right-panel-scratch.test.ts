@@ -176,6 +176,30 @@ test("when every scope holds unsent text nothing is discarded, and the bound ret
   }
 });
 
+test("a sent draft releases its scope to the bound on the spot", () => {
+  // Eviction used to run only on writes, so a scope released by a send that still held a browsed
+  // directory sat above the limit until some unrelated write happened to collect it. Removal is a
+  // mutation like any other and reasserts the bound itself.
+  const scopes = Array.from({ length: PANEL_SCRATCH_SESSION_LIMIT + 1 },
+    (_unused, index) => panelScratchScopeKey(`session-${index}`));
+  for (const scope of scopes) {
+    writePanelScratch(scope, "sidechat.draft", "unsent", "draft");
+    writePanelScratch(scope, "files.directory", "apps/web");
+  }
+  assert.equal(panelScratchScopeCount(), scopes.length, "every scope is holding a message");
+
+  writePanelScratch(scopes[1]!, "sidechat.draft", null);
+  assert.equal(panelScratchScopeCount(), scopes.length,
+    "one send leaves nothing else evictable: every other scope is still holding text");
+
+  writePanelScratch(scopes[0]!, "sidechat.draft", null);
+  assert.equal(panelScratchScopeCount(), PANEL_SCRATCH_SESSION_LIMIT,
+    "the second send collects the scope released by the first, without waiting for a later write");
+  assert.equal(readPanelScratch(scopes[1]!, "files.directory"), undefined,
+    "the least recently used released scope is the one the bound takes");
+  assert.equal(readPanelScratch(scopes[0]!, "files.directory"), "apps/web");
+});
+
 test("blank text is not a draft, so an untouched composer cannot pin a scope", () => {
   const blank = panelScratchScopeKey("session-blank");
   writePanelScratch(blank, "review.requestBody", "   \n  ", "draft");
