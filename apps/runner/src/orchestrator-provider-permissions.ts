@@ -304,10 +304,6 @@ function isRoutineSequence(tokens: ShellToken[], context: RoutineContext): boole
   let command: ShellToken[] = [];
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index];
-    if (token === "2" && isOperator(tokens[index + 1], ">") && tokens[index + 2] === "/dev/null") {
-      index += 2;
-      continue;
-    }
     if (isOperator(token, ">")) {
       if (command.length === 0 || tokens[index + 1] !== "/dev/null") return false;
       index += 1;
@@ -337,7 +333,7 @@ export function isRoutineClaudeOrchestratorBash(
   workspacePath?: string,
 ): boolean {
   if (command.length === 0 || command.length > MAX_COMMAND_LENGTH || /[\r\n]/u.test(command) ||
-      /(?:^|[\s;&|])2[ \t]+>/u.test(command)) return false;
+      /(?:^|[\s;&|])2[ \t]*>/u.test(command)) return false;
   let tokens: ShellToken[];
   try {
     tokens = parse<EnvironmentReference>(command, (env) => ({ env }));
@@ -417,6 +413,71 @@ function hasMutatingGhApiAttempt(command: string): boolean {
   return false;
 }
 
+const REFORMULATABLE_LOCAL_COMMANDS = new Set([
+  "find", "grep", "sed", "ls", "head", "tail", "wc", "awk", "echo", "[",
+]);
+
+function isKnownGitCoordinationAttempt(tokens: ShellToken[], index: number): boolean {
+  let commandIndex = index + 1;
+  if (tokens[commandIndex] === "-C") commandIndex += 2;
+  const command = tokens[commandIndex];
+  return isPlainArgument(command) &&
+    (READ_ONLY_GIT_COMMANDS.has(command) || ["fetch", "ls-remote", "branch"].includes(command));
+}
+
+function isKnownGhCoordinationAttempt(tokens: ShellToken[], index: number): boolean {
+  const group = tokens[index + 1];
+  const action = tokens[index + 2];
+  if (!isPlainArgument(group) || !isPlainArgument(action)) return false;
+  const operation = `${group}:${action}`;
+  return READ_ONLY_GH_OPERATIONS.has(operation) ||
+    ["issue:edit", "issue:comment", "search:issues", "search:prs", "search:repos", "api:user", "api:graphql"].includes(operation);
+}
+
+/** Reformulation is an invisible denial, so every executable stage must belong to a vocabulary
+ * with a known canonical read/coordination equivalent. A harmless-looking filter later in an
+ * unknown or mutating pipeline must not suppress the ordinary human approval path. */
+function hasOnlyKnownCoordinationCommands(command: string): boolean {
+  let tokens: ShellToken[];
+  try {
+    tokens = parse<EnvironmentReference>(command, (env) => ({ env }));
+  } catch {
+    return false;
+  }
+  let expectsCommand = true;
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (isOperator(token)) {
+      if ([";", "&&", "||", "|", "("].includes(token.op)) expectsCommand = true;
+      else if (token.op === ")") expectsCommand = false;
+      continue;
+    }
+    if (!expectsCommand || isEnvironmentReference(token)) continue;
+    if (!isPlainArgument(token)) return false;
+    if (token.length === 0 || /^[A-Za-z_][A-Za-z0-9_]*=/u.test(token)) continue;
+    if (token === "for") {
+      expectsCommand = false;
+      continue;
+    }
+    if (token === "do" || token === "{") continue;
+    if (token === "done" || token === "}") {
+      expectsCommand = false;
+      continue;
+    }
+    if (token === "git") {
+      if (!isKnownGitCoordinationAttempt(tokens, index)) return false;
+    } else if (token === "gh") {
+      if (!isKnownGhCoordinationAttempt(tokens, index)) return false;
+    } else if (token === "node") {
+      if (!/\bnode\s+-p\s+["']require\(["']\.\/package\.json["']\)\.version["']/u.test(command)) return false;
+    } else if (!REFORMULATABLE_LOCAL_COMMANDS.has(token)) {
+      return false;
+    }
+    expectsCommand = false;
+  }
+  return !expectsCommand;
+}
+
 function isRoutineCoordinationAttempt(command: string, allowedIssueNumbers: readonly number[]): boolean {
   if (command.length === 0 || command.length > MAX_COMMAND_LENGTH) return false;
   if (/\b(?:rm|mv|cp|touch|chmod|chown|kill|pkill|sudo)\b/u.test(command) ||
@@ -436,7 +497,7 @@ function isRoutineCoordinationAttempt(command: string, allowedIssueNumbers: read
       !/(?:--body|-b)(?:=|\s)/u.test(command)) return false;
   if (/\bgh\s+issue\s+(?:edit|comment)\b/u.test(command) &&
       !hasOnlyScopedIssueWriteTargets(command, allowedIssueNumbers)) return false;
-  return /(?:^|[;&|()\s])(?:git\s+(?:status|log|show|diff|blame|rev-parse|merge-base|range-diff|ls-files|grep|cat-file|name-rev|describe|show-ref|for-each-ref|shortlog|diff-tree|diff-index|diff-files|rev-list|whatchanged|fetch|ls-remote)|gh\s+(?:issue\s+(?:list|view|status|edit|comment)|pr\s+(?:list|view|checks|diff|status)|run\s+(?:list|view|watch)|repo\s+view|label\s+list|search\s+(?:issues|prs|repos)|api\s+(?:user|graphql))|find|grep|sed|ls|head|tail|wc|awk)(?:\s|$)/u.test(command);
+  return hasOnlyKnownCoordinationCommands(command);
 }
 
 export function classifyRoutineClaudeOrchestratorPermission(

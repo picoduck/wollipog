@@ -105,7 +105,6 @@ test("routine leaves compose through separators, conjunctions, loops, and stdout
     "gh issue edit 1209 --add-assignee @me >/dev/null && echo claimed 1209",
     "git status --short; gh issue view 1209 --json number,title",
     "gh issue view 1209 || gh issue view 1210",
-    "gh issue view 1209 2>/dev/null",
     "for n in 1209 1210 1211; do gh issue edit $n --add-assignee @me >/dev/null && echo \"claimed $n\"; done",
   ]) assert.equal(isRoutineClaudeOrchestratorBash(command, [1209, 1210, 1211]), true, command);
 });
@@ -172,6 +171,10 @@ test("the loop parser fails closed on shell expansion, redirection, and control-
     "git -C /other/repository status --short",
     "git branch 2 >/dev/null",
     "git tag 2 >/dev/null",
+    "git branch \"2\" >/dev/null",
+    "git tag '2' >/dev/null",
+    "git branch \"2\">/dev/null",
+    "gh issue view 1 2>/dev/null",
     "gh issue view 1 | tee issue.json",
     "gh issue view 1 | head 20",
     "gh api user --method DELETE",
@@ -210,6 +213,9 @@ test("observed routine inspection attempts are reformulated instead of becoming 
     "git branch new-branch",
     "git branch --delete merged-branch",
     "gh api graphql -f query='mutation{ deleteProjectV2(input:{projectV2Id:\"PVT_x\"}){ clientMutationId } }'",
+    "pnpm test 2>&1 | tail -40",
+    "gh release create v1 -n x; ls",
+    "gh workflow run ci.yml && gh run list | head -5",
   ]) {
     assert.equal(
       classifyRoutineClaudeOrchestratorPermission("Bash", { command }, [1201, 1202]),

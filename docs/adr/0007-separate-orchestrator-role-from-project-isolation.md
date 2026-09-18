@@ -52,8 +52,8 @@ The classifier automatically authorizes:
 - read-only Git state, history, diff, reference, worktree-list, and search operations, bounded
   `fetch origin main`, repository-local `git -C`, and `ls-remote origin` after rejecting output-file,
   external-diff, text-conversion, pager-launch, branch mutation, and tag mutation flags;
-- read-only GitHub issue, pull-request, check, run, repository, and search inspection, excluding web
-  launches and cross-repository overrides;
+- read-only GitHub issue, pull-request, check, run, repository, and label inspection plus the current
+  authenticated GitHub user, excluding global search, web launches, and cross-repository overrides;
 - self-assignment/unassignment, label additions/removals, and `--body` plan or status comments only
   for issue numbers in the immutable campaign issue scope; and
 - bounded numeric loops, `;`, `&&`, `||`, harmless `echo`, output discard to `/dev/null`, and
