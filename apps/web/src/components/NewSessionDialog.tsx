@@ -544,8 +544,26 @@ export function NewSessionDialog({
             (runner?.os === "macos" && runner?.runtime?.executionIsolation?.mode === "seatbelt")
           : false
   ));
+  // Pi (#1294) has no non-strict coupled-preset shape, so the server admits a non-strict Pi
+  // Orchestrator only through the additive role. Ask the shared helper whether that role is
+  // actually available here instead of restating its conditions: offering the choice when it is
+  // not would submit a preset non-strict Pi launch, which the control plane refuses.
+  const piAdditiveExecutionAvailable = agent?.driver === "pi" &&
+    Boolean(agent.piAgentControl?.protocolVersion) &&
+    agent.capabilities?.permissionModes?.includes("orchestrator") === true &&
+    orchestratorPresetPermissionsReason({
+      controlPlaneSupportsRole: orchestratorRoleSupported,
+      runnerProtocolVersion: runner?.protocolVersion,
+      driver: "pi",
+      contextKind: orchestratorContext,
+      hostExecutionTarget,
+      nativeTui: launchSurface === "native_tui",
+      strictProjectIsolation: false,
+      savedOrchestratorDefault,
+    }) === undefined;
   const providerExecutionAvailable = executionPolicySupported && orchestratorContext === "native" &&
-    ["codex", "codex-app-server", "claude-code"].includes(agent?.driver ?? "acp") &&
+    (["codex", "codex-app-server", "claude-code"].includes(agent?.driver ?? "acp") ||
+      piAdditiveExecutionAvailable) &&
     (agent?.driver !== "codex" && agent?.driver !== "codex-app-server" ||
       runner?.os === "linux" || runner?.os === "macos") &&
     (agent?.driver !== "claude-code" ||
@@ -558,7 +576,7 @@ export function NewSessionDialog({
     ? "Strict Project Isolation needs an audited Codex sandbox, Direct WSL bubblewrap, or runner bubblewrap/Seatbelt isolation with the required Claude mode."
     : !executionPolicySupported
       ? "Delegate Implementation without Strict Project Isolation requires a protocol-v144 runner. Update the runner or enable Strict Project Isolation."
-      : "Provider-mode orchestration requires a native Codex or approval-capable Claude Code harness.";
+      : "Provider-mode orchestration requires a native Codex, approval-capable Claude Code, or bridge-verified Pi harness.";
   const childModelOptions = [
     { value: AUTOMATIC_ORCHESTRATOR_VALUE, label: "Automatic", description: "Resolve from live child capabilities." },
     ...(fixedChildHarness || !harnessPolicyAvailable ? [...scopedModels.entries()] : []).map(([modelId, model]) => ({

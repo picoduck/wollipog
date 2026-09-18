@@ -3514,10 +3514,26 @@ export class SessionsService {
         // Independent provider permissions: the harness launches exactly as an equivalent normal
         // session and gains only Wollipog's orchestration tools, instructions, and credential. An
         // older runner would launch this as an ordinary session, so refuse rather than degrade.
+<<<<<<< HEAD
         // Each harness carries its own gate: Claude Code since v160, the Codex drivers since v162.
+=======
+        // Each harness carries its own gate: Claude Code since v160, the Codex drivers since v161,
+        // Pi since v162. ACP is absent from the map: its provider-mode permission contract has not
+        // been audited, so an ACP Orchestrator still uses the coupled preset.
+>>>>>>> 1f0a3f45 (WIP: gate additive Pi through the control plane and web dialog)
         const additiveCapability = orchestratorAdditiveCapability(launch.driver);
         if (!additiveCapability || contextKind !== "native" || executionTarget.adapter !== "host") {
-          return fail("Independent provider permissions for an Orchestrator are supported only by a native Claude Code or Codex harness on the host; other harnesses still use the Orchestrator preset permission mode.", 409);
+          return fail("Independent provider permissions for an Orchestrator are supported only by a native Claude Code, Codex, or Pi harness on the host; other harnesses still use the Orchestrator preset permission mode.", 409);
+        }
+        // Mirrors the ordinary-session rule above: every Pi permission mode that enforces approvals
+        // does so through the verified Agent Control bridge, and the additive launch keeps that
+        // mode. `withOrchestratorPreset` advertises "orchestrator" for Pi only once discovery has
+        // verified `piAgentControl`, so the capability check below already implies the bridge;
+        // re-assert it against the live agent row when there is one, so a pre-staged snapshot
+        // cannot outlive the bridge that authorized it.
+        const liveAgent = this.db.getRunner(req.runnerId)?.agents.find((agent) => agent.id === req.agentId);
+        if (launch.driver === "pi" && liveAgent && !liveAgent.piAgentControl?.protocolVersion) {
+          return fail("An Orchestrator with independent provider permissions requires the discovery-verified Pi Agent Control bridge on the host; update Pi or choose the Orchestrator preset permission mode.", 409);
         }
         if (!runnerSupportsProtocol(runner.protocolVersion, additiveCapability)) {
           return fail(`An Orchestrator with independent provider permissions requires a protocol-v${
@@ -3533,9 +3549,17 @@ export class SessionsService {
           return fail("Orchestrator Native TUI requires the Orchestrator preset permission mode.", 409);
         }
       }
+      // Pi has no non-strict coupled-preset launch shape: its preset arguments are the same
+      // restricted launch either way, so a non-strict Pi Orchestrator is supported only through the
+      // additive role. Claude Code and Codex have an audited non-strict preset shape as well.
+      const nonStrictHarnesses = presetPermissions
+        ? ["codex", "codex-app-server", "claude-code"]
+        : ["codex", "codex-app-server", "claude-code", "pi"];
       if (!strictProjectIsolation && (contextKind !== "native" ||
-          !["codex", "codex-app-server", "claude-code"].includes(launch.driver))) {
-        return fail("Delegate Implementation without Strict Project Isolation requires a supported native Codex or Claude Code harness.", 409);
+          !nonStrictHarnesses.includes(launch.driver))) {
+        return fail(presetPermissions
+          ? "Delegate Implementation without Strict Project Isolation requires a supported native Codex or Claude Code harness."
+          : "Delegate Implementation without Strict Project Isolation requires a supported native Codex, Claude Code, or Pi harness.", 409);
       }
       if (!strictProjectIsolation && (launch.driver === "codex" || launch.driver === "codex-app-server") &&
           !["linux", "macos"].includes(runner.os)) {
@@ -5561,7 +5585,7 @@ export class SessionsService {
       if (!additiveCapability || launch.driver !== session.driver ||
           !advertised?.permissionModes?.includes("orchestrator") ||
           (launch.context?.kind ?? "native") !== "native" || (target && target.adapter !== "host")) {
-        return fail("An Orchestrator with independent provider permissions requires a native Claude Code or Codex harness on the host that advertises the Orchestrator role; the agent definition no longer matches. Start a new session or choose the Orchestrator preset permission mode.", 409);
+        return fail("An Orchestrator with independent provider permissions requires a native Claude Code, Codex, or Pi harness on the host that advertises the Orchestrator role; the agent definition no longer matches. Start a new session or choose the Orchestrator preset permission mode.", 409);
       }
       if (!runnerSupportsProtocol(runner?.protocolVersion, additiveCapability)) {
         return fail(`An Orchestrator with independent provider permissions requires a protocol-v${
@@ -5572,6 +5596,14 @@ export class SessionsService {
       if ((launch.driver === "codex" || launch.driver === "codex-app-server") &&
           !["linux", "macos"].includes(runner?.os ?? "")) {
         return fail("Provider-mode Codex Orchestrator requires its audited Linux or macOS sandbox.", 409);
+      }
+      // Creation requires the discovery-verified Pi bridge, because the retained permission mode
+      // enforces its approvals through it. Rediscovery can drop that bridge (a Pi downgrade, a
+      // removed extension host) while the agent id still resolves, so re-assert it here rather than
+      // letting the runner fail the launch after the session has already been marked starting.
+      if (launch.driver === "pi" && !runner?.agents.find((agent) => agent.id === restartingAgentId)
+          ?.piAgentControl?.protocolVersion) {
+        return fail("An Orchestrator with independent provider permissions requires the discovery-verified Pi Agent Control bridge on the host; update Pi and retry.", 409);
       }
     }
     const agentId = session.agentId;
