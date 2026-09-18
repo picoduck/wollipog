@@ -3963,6 +3963,7 @@ async function runSessionWorktreeRequest(
       sessionId,
       branch: request.branch,
       ...(request.baseRef ? { baseRef: request.baseRef } : {}),
+      ...(session.worktreeRecovery ? { recoveryId: session.worktreeRecovery.recoveryId } : {}),
     }, async (requestId) => {
       const res = await hub.requestFromRunner(
         session.runnerId,
@@ -4043,6 +4044,14 @@ app.post("/api/sessions/:id/worktrees", async (req, reply) => {
     ...(typeof body.baseRef === "string" ? { baseRef: body.baseRef } : {}),
     ...(body.progress === true ? { progress: true } : {}),
   }, requestPrincipal(req), reply);
+});
+
+// Read-only view of this session's unconsumed progress-aware creates, so a reloaded client can
+// rejoin one by repeating its exact coordinates. It never starts, retries, or releases work.
+app.get("/api/sessions/:id/worktrees/operations", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  if (!db.getSession(id)) return reply.code(404).send({ error: "session not found" });
+  return { operations: worktreeCreates.listForSession(id) };
 });
 
 app.post("/api/sessions/:id/worktrees/attach", async (req, reply) => {

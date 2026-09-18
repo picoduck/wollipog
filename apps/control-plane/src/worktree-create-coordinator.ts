@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type {
   SessionSnapshot,
+  SessionWorktreeCreateOperationSummary,
   SessionWorktreeProgressMessage,
   SessionWorktreeProgressPhase,
   SessionWorktreeView,
@@ -11,6 +12,8 @@ export interface WorktreeCreateCoordinates {
   sessionId: string;
   branch: string;
   baseRef?: string;
+  /** Recovery incident current when the create started. Metadata only; not part of the key. */
+  recoveryId?: string;
 }
 
 export interface WorktreeCreateCompletion {
@@ -21,11 +24,14 @@ export interface WorktreeCreateCompletion {
 export type WorktreeCreateOperation =
   | { id: string; status: "in_progress"; phase?: SessionWorktreeProgressPhase }
   | ({ id: string; status: "completed" } & WorktreeCreateCompletion)
-  | { id: string; status: "failed"; error: string };
+  | { id: string; status: "failed"; error: string; phase?: SessionWorktreeProgressPhase };
+
 
 interface Entry extends WorktreeCreateCoordinates {
   key: string;
   operation: WorktreeCreateOperation;
+  /** Set when a later selection turned a completed create into a failure for its own poller. */
+  superseded?: boolean;
   expiry?: ReturnType<typeof setTimeout>;
 }
 
@@ -67,7 +73,14 @@ export class WorktreeCreateCoordinator {
       coordinates.branch,
     ]);
     const existing = this.entriesByKey.get(key);
-    if (existing) return existing.operation;
+    // A running create is always joined, whatever incident started it: a second would duplicate it.
+    // A retained result is replaced only for a request made under a different recovery incident.
+    // A request under no incident still joins: a successful create clears the incident, so that is
+    // exactly how its own poller arrives to collect the result, and restarting would duplicate it.
+    const staleForIncident = existing !== undefined && existing.operation.status !== "in_progress" &&
+      coordinates.recoveryId !== undefined && existing.recoveryId !== coordinates.recoveryId;
+    if (existing && !staleForIncident) return existing.operation;
+    if (existing) this.deleteEntry(existing);
 
     const id = this.createId();
     const entry: Entry = {
@@ -88,10 +101,13 @@ export class WorktreeCreateCoordinator {
       })
       .catch((error: unknown) => {
         if (this.entriesById.get(id) !== entry) return;
+        // Keep the last reported phase so a caller can say where creation stopped, not only why.
+        const phase = entry.operation.status === "in_progress" ? entry.operation.phase : undefined;
         entry.operation = {
           id,
           status: "failed",
           error: error instanceof Error ? error.message : String(error),
+          ...(phase ? { phase } : {}),
         };
         this.retainTerminal(entry);
       });
@@ -108,6 +124,26 @@ export class WorktreeCreateCoordinator {
     return true;
   }
 
+  /**
+   * Running and unconsumed terminal operations for one session. Completion omits its snapshot: the
+   * session record already holds the result. Reading never starts, retries, or releases work, so a
+   * polling client cannot turn a finished create into a second one.
+   */
+  listForSession(sessionId: string): SessionWorktreeCreateOperationSummary[] {
+    const result: SessionWorktreeCreateOperationSummary[] = [];
+    for (const entry of this.entriesById.values()) {
+      if (entry.sessionId !== sessionId || entry.superseded) continue;
+      const { operation } = entry;
+      result.push({
+        ...(operation.status === "completed" ? { id: operation.id, status: "completed" as const } : operation),
+        branch: entry.branch,
+        ...(entry.baseRef ? { baseRef: entry.baseRef } : {}),
+        ...(entry.recoveryId ? { recoveryId: entry.recoveryId } : {}),
+      });
+    }
+    return result;
+  }
+
   releaseTerminal(id: string): void {
     const entry = this.entriesById.get(id);
     if (!entry || entry.operation.status === "in_progress") return;
@@ -120,6 +156,7 @@ export class WorktreeCreateCoordinator {
       // A later attach/select/discard has superseded the create-and-select result. Preserve a
       // terminal acknowledgement for its polling caller instead of deleting the entry: deletion
       // would make that poll start a new create and silently undo the newer operator choice.
+      entry.superseded = true;
       entry.operation = {
         id: entry.operation.id,
         status: "failed",

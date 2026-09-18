@@ -1,5 +1,7 @@
 import type {
   AddBoxRequest,
+  SessionWorktreeCreateOperationSummary,
+  SessionWorktreeCreateOperationView,
   AccessScopeChangePreview,
   AddPodMemberRequest,
   AppendPodContextRequest,
@@ -782,10 +784,18 @@ export function createApiClient(transport: ApiTransport) {
 
   restart: (id: string) => req<SessionView>(`/api/sessions/${id}/restart`, { method: "POST" }),
 
-  createSessionWorktree: (id: string, input: { branch: string; baseRef?: string }) =>
-    req<{ session: SessionView; worktree?: SessionWorktreeView }>(
+  /** Progress-aware create. A current control plane acknowledges with an `in_progress` operation
+   * that repeating the exact coordinates joins; an older one ignores `progress` and answers with
+   * the complete synchronous result. */
+  createSessionWorktreeWithProgress: (id: string, input: { branch: string; baseRef?: string }) =>
+    req<{ session?: SessionView; worktree?: SessionWorktreeView; operation?: SessionWorktreeCreateOperationView }>(
       `/api/sessions/${encodeURIComponent(id)}/worktrees`,
-      { method: "POST", body: JSON.stringify(input) },
+      { method: "POST", body: JSON.stringify({ ...input, progress: true }) },
+    ),
+
+  sessionWorktreeOperations: (id: string) =>
+    req<{ operations: SessionWorktreeCreateOperationSummary[] }>(
+      `/api/sessions/${encodeURIComponent(id)}/worktrees/operations`,
     ),
 
   selectSessionWorktree: (id: string, path: string) =>
