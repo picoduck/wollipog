@@ -1018,3 +1018,16 @@ test("a driver-internal spawn whose protection list has vanished is mediated", (
   rmSync(protections, { force: true });
   assert.equal(prepareClaudeHookArgs(launch.args).guardActive, false);
 }));
+
+test("an invalidated guard does not make an open manager-hook circuit look recovered", () => temp((dir) => {
+  const launch = provisionGuarded(dir);
+  const { file } = settingsOf(dir);
+  writeHookCircuitState(claudeHookCircuitPath(file), { consecutiveFailures: 3, open: true, openedAt: 100 });
+  assert.equal(prepareClaudeHookArgs(launch.args, 101).circuitOpen, true);
+  assert.equal(refreshClaudeGuardProtections("sess_hook_1", [], dir).state, "invalidated");
+  const prepared = prepareClaudeHookArgs(launch.args, 102);
+  assert.equal(prepared.guardActive, false);
+  assert.deepEqual(prepared.args, []);
+  assert.equal(prepared.circuitOpen, true, "the persisted circuit is still open");
+  assert.equal(prepared.circuitOpenedAt, 100);
+}));

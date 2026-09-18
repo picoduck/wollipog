@@ -110,7 +110,7 @@ What is done instead:
   tools (`Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Read`) and the search tools (`Grep`, `Glob`,
   whose absent `path` means the working directory, and whose glob pattern contributes its static
   prefix) are matched on their resolved path and are part of the hook matcher. Reads are refused
-  too: the provider has no need of them. "Resolved" means `~` and `$HOME` are expanded and the
+  too: the provider has no need of them. "Resolved" means `~`, `~name`, `~+`, and `$HOME` are expanded and the
   nearest existing ancestor is passed through `realpath`, so a home-relative spelling or a symlink
   planted in the workspace is judged by where it lands. Third-party MCP filesystem tools are not
   classifiable by name and remain outside the veto, like any other indirection.

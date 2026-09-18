@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -539,4 +539,20 @@ test("a symlink into the guard state is refused for what it points at", (t) => {
     f.protectionsFile,
   );
   assert.ok(viaShell.stdout.includes(GUARD_STATE_REFUSAL));
+});
+
+test("named-user and working-directory tilde forms are expanded before the comparison", () => {
+  const directory = join(homedir(), ".wollipog-test-data", "hooks");
+  const me = userInfo().username;
+  assert.equal(
+    commandTargetsGuardState(`printf x > ~${me}/.wollipog-test-data/hooks/s1.protections.json`, WORKTREE, directory),
+    GUARD_STATE_REFUSAL,
+  );
+  assert.equal(pathTargetsGuardState(`~${me}/.wollipog-test-data/hooks`, WORKTREE, directory), true);
+  assert.equal(pathTargetsGuardState(`~${me}/projects/readme.md`, WORKTREE, directory), false);
+  // Another user's home is a sibling of ours; it is not the guard state.
+  assert.equal(pathTargetsGuardState("~someone-else/.wollipog-test-data/hooks", WORKTREE, directory), false);
+  // `~+` is the working directory, not a literal path component beneath it.
+  assert.equal(pathTargetsGuardState("~+/hooks/s1.protections.json", dirname(directory), directory), true);
+  assert.equal(pathTargetsGuardState("~+/src/index.ts", WORKTREE, directory), false);
 });

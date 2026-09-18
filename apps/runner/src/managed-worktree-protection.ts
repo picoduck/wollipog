@@ -1,5 +1,5 @@
 import { realpathSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { basename, dirname, isAbsolute, matchesGlob, normalize, resolve, sep } from "node:path";
 import { parse, type ParseEntry } from "shell-quote";
 
@@ -608,10 +608,32 @@ export const GUARD_STATE_FILE_TOOLS: Readonly<Record<string, GuardStateToolPath>
   Glob: { key: "path", optional: true, pattern: "pattern" },
 };
 
-/** `~` and `~/...` as the shell (and Claude's file tools) spell the home directory. */
-function expandHome(path: string): string {
-  if (path === "~") return homedir();
-  return path.startsWith("~/") || path.startsWith(`~${sep}`) ? resolve(homedir(), path.slice(2)) : path;
+/**
+ * Tilde forms as the shell (and Claude's file tools) spell a home directory: `~`, `~/x`, the
+ * named-user `~name/x`, and `~+` for the working directory. There is no passwd lookup here, so a
+ * named user resolves to the current home when it is the current user and to a sibling of it
+ * otherwise, which is where every conventional layout puts it. `~-` (OLDPWD) is unknowable.
+ */
+function expandHome(path: string, cwd = ""): string {
+  if (!path.startsWith("~")) return path;
+  const end = path.search(/[\\/]/u);
+  const head = end < 0 ? path : path.slice(0, end);
+  const rest = end < 0 ? "" : path.slice(end + 1);
+  let base: string;
+  if (head === "~") base = homedir();
+  else if (head === "~+") base = cwd || ".";
+  else if (head === "~-") return path;
+  else {
+    const name = head.slice(1);
+    let current = "";
+    try {
+      current = userInfo().username;
+    } catch {
+      /* no passwd entry for this uid: fall through to the sibling layout */
+    }
+    base = name === current ? homedir() : resolve(dirname(homedir()), name);
+  }
+  return resolve(base, rest);
 }
 
 /**
@@ -638,7 +660,7 @@ function canonicalPath(path: string): string {
 /** A path is out of bounds when it is inside the guard-state directory, or contains it. */
 export function pathTargetsGuardState(path: string, cwd: string, directory: string): boolean {
   if (!directory || !path || path.includes("\0")) return false;
-  const expanded = expandHome(path);
+  const expanded = expandHome(path, cwd);
   const resolved = isAbsolute(expanded) ? resolve(expanded) : resolve(cwd || ".", expanded);
   const root = resolve(directory);
   if (pathContains(root, resolved) || pathContains(resolved, root)) return true;

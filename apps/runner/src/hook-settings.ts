@@ -1000,23 +1000,26 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
   const described = describeManagedSettings(file);
   const hasGuard = described?.guard === true;
   const hookAskCapable = managedSettingsAskCapable(file);
+  const circuit = readHookCircuitState(claudeHookCircuitPath(file));
+  const reprobePending = circuit.open && circuit.openedAt != null &&
+    now - circuit.openedAt >= CLAUDE_HOOK_CIRCUIT_COOLDOWN_MS;
   if (hasGuard && !claudeGuardStateTrusted(file)) {
     // The settings document carries a guard hook that can no longer be relied on. Launching with
     // it would either block every matched tool or trust a foreign list, so the whole document is
     // dropped for this spawn and the driver mediates, exactly as when no guard was provisionable.
+    // The manager transport's own state is reported as it is: dropping the document must not read
+    // as a recovered circuit, and no reprobe is started by a spawn that carries no hooks.
     return {
       args: [...args.slice(0, index), ...args.slice(index + 2)],
-      circuitOpen: false,
+      circuitOpen: circuit.open,
       circuitReprobePending: false,
+      ...(circuit.open && circuit.openedAt != null ? { circuitOpenedAt: circuit.openedAt } : {}),
       hookAskCapable: false,
       healed: false,
       guardActive: false,
       guardStateDirectory: dirname(resolve(file)),
     };
   }
-  const circuit = readHookCircuitState(claudeHookCircuitPath(file));
-  const reprobePending = circuit.open && circuit.openedAt != null &&
-    now - circuit.openedAt >= CLAUDE_HOOK_CIRCUIT_COOLDOWN_MS;
   if ((circuit.open && !reprobePending) || circuit.probeStartedAt != null) {
     if (hasGuard) {
       // The manager policy transport is out for this spawn, but the managed-worktree veto is a
