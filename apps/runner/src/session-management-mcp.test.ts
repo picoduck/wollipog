@@ -942,7 +942,7 @@ test("discard_worktree refuses peers that cannot report deferred retirement", as
   deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRetirement - 1;
   const result = await callTool(deps, "discard_worktree", { path: "/repo/old" });
   assert.equal(result.isError, true);
-  assert.match(resultText(result), /requires control plane protocol v158/);
+  assert.match(resultText(result), /requires control plane protocol v159/);
   assert.equal(calls.length, 0);
 });
 

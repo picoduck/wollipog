@@ -684,8 +684,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   resumableQuestionAnswers: 107,
   sessionWorktrees: 101,
   sessionWorktreeDiscard: 102,
-  /** v158 reports durable deferred retirement instead of silently treating it as removal. */
-  sessionWorktreeRetirement: 158,
+  /** v159 reports durable deferred retirement instead of silently treating it as removal. */
+  sessionWorktreeRetirement: 159,
   progressAwareSessionWorktrees: 113,
   /** `GET /api/admin/status` and `pairing.publicOrigin` on device creation (`wollipog admin`). */
   hostAdministration: 114,
@@ -6880,7 +6880,7 @@ export interface SessionWorktreeResultMessage {
   generatedSetup?: { path: ".wollipog.json"; detected: string[] };
   /** Protocol v133+, attach only. */
   isolation?: SessionWorktreeIsolationNotice;
-  /** Protocol v158+, discard only. */
+  /** Protocol v159+, discard only. */
   retirement?: SessionWorktreeRetirementResult;
 }
 

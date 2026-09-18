@@ -495,7 +495,7 @@ test("CLI keeps v100 core commands compatible while gating worktree commands on 
   ]);
 });
 
-test("CLI gates deferred worktree retirement on v158 without disabling v101 selection", async () => {
+test("CLI gates deferred worktree retirement on v159 without disabling v101 selection", async () => {
   const requests: string[] = [];
   const fetch: McpFetch = async (url) => {
     requests.push(url);
@@ -521,7 +521,7 @@ test("CLI gates deferred worktree retirement on v158 without disabling v101 sele
     { stdout: (text) => { output += text; }, stderr: () => {} },
     fetch,
   ), 1);
-  assert.match(JSON.parse(output).error, /requires v158/);
+  assert.match(JSON.parse(output).error, /requires v159/);
   assert.deepEqual(requests, [
     "http://cp/api/compatibility",
     "http://cp/api/sessions/s1/worktrees/select",
