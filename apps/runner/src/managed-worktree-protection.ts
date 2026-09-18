@@ -2,6 +2,8 @@ import { dirname, isAbsolute, matchesGlob, normalize, resolve, sep } from "node:
 import { parse, type ParseEntry } from "shell-quote";
 
 const MAX_COMMAND_LENGTH = 32_768;
+const MAX_GLOB_METACHARACTERS = 64;
+const MAX_GLOB_BRACE_GROUPS = 8;
 export const MANAGED_WORKTREE_REFUSAL =
   "Wollipog protects this runner-owned worktree. Use discard_worktree so retirement can wait for the provider to exit and then apply the managed safety checks.";
 
@@ -94,6 +96,11 @@ function globTargetsProtected(
 ): boolean {
   const pattern = globPattern(token);
   if (!pattern || pattern.includes("\0")) return false;
+  const metacharacters = pattern.match(/[*?\[\]{}]/gu)?.length ?? 0;
+  const braceGroups = pattern.match(/\{/gu)?.length ?? 0;
+  // Destructive glob targets are provider-controlled input. Bound expansion complexity before
+  // asking Node's matcher to interpret them; an over-complex target fails closed below.
+  if (metacharacters > MAX_GLOB_METACHARACTERS || braceGroups > MAX_GLOB_BRACE_GROUPS) return true;
   const absolutePattern = normalize(isAbsolute(pattern) ? pattern : resolve(cwd, pattern));
   const foldCase = process.platform === "win32" || process.platform === "darwin";
   const comparablePattern = foldCase ? absolutePattern.toLowerCase() : absolutePattern;
@@ -103,13 +110,23 @@ function globTargetsProtected(
     ? literalPrefix.slice(0, -1)
     : dirname(literalPrefix));
   return protections.some((protection) => {
-    const matchesRootOrAncestor = ancestors(protection.worktreePath).some((candidate) =>
-      matchesGlob(foldCase ? candidate.toLowerCase() : candidate, comparablePattern));
+    const matchesRootOrAncestor = ancestors(protection.worktreePath).some((candidate) => {
+      try {
+        return matchesGlob(foldCase ? candidate.toLowerCase() : candidate, comparablePattern);
+      } catch {
+        return true;
+      }
+    });
     if (matchesRootOrAncestor) return true;
     return protectedAdministrativeRoots(protection).some((root) =>
       pathContains(root, staticParent) ||
-      ancestors(root).some((candidate) =>
-        matchesGlob(foldCase ? candidate.toLowerCase() : candidate, comparablePattern)));
+      ancestors(root).some((candidate) => {
+        try {
+          return matchesGlob(foldCase ? candidate.toLowerCase() : candidate, comparablePattern);
+        } catch {
+          return true;
+        }
+      }));
   });
 }
 
@@ -152,7 +169,22 @@ function commandWords(
   let executable = word(tokens[index], cwd, environment);
   while (executable) {
     const name = executableName(executable);
-    if (["command", "sudo", "nohup", "setsid"].includes(name)) {
+    if (name === "sudo") {
+      index += 1;
+      while (true) {
+        const option = word(tokens[index], cwd, environment);
+        if (!option?.startsWith("-")) break;
+        if (["-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt",
+          "-C", "--close-from", "-R", "--chroot", "-T", "--command-timeout"].includes(option)) {
+          index += 2;
+        } else {
+          index += 1;
+        }
+      }
+      executable = word(tokens[index], cwd, environment);
+      continue;
+    }
+    if (["command", "nohup", "setsid"].includes(name)) {
       index += 1;
       while (typeof word(tokens[index], cwd, environment) === "string" &&
           word(tokens[index], cwd, environment)!.startsWith("-")) index += 1;
@@ -270,6 +302,25 @@ function segmentRefusal(
     const script = words.map((token) => word(token, cwd, environment) ?? "").join(" ");
     return commandTargetsManagedWorktree(script, cwd, protections, depth + 1) != null;
   }
+  if (executable === "xargs" && depth < 3) {
+    let commandIndex = 0;
+    while (commandIndex < words.length) {
+      const option = word(words[commandIndex], cwd, environment);
+      if (option === "--") { commandIndex += 1; break; }
+      if (!option?.startsWith("-")) break;
+      if (["-a", "--arg-file", "-d", "--delimiter", "-E", "--eof", "-I", "--replace",
+        "-L", "--max-lines", "-n", "--max-args", "-P", "--max-procs", "-s", "--max-chars"].includes(option)) {
+        commandIndex += 2;
+      } else {
+        commandIndex += 1;
+      }
+    }
+    const nested = words.slice(commandIndex);
+    if (segmentRefusal(nested, cwd, new Map(environment), protections, depth + 1)) return true;
+    const nestedExecutable = commandWords(nested, cwd, new Map(environment))?.executable ?? "";
+    return withinProtectedRoot(cwd, protections) &&
+      ["rm", "rmdir", "unlink", "trash", "trash-put", "mv", "move"].includes(nestedExecutable);
+  }
   if (executable === "git") return gitWorktreeRefusal(words, cwd, environment, protections);
   if (["rm", "rmdir", "unlink", "trash", "trash-put", "remove-item", "del", "rd"].includes(executable)) {
     return words.some((token) => operandTargetsProtected(token, cwd, environment, protections));
@@ -284,11 +335,27 @@ function segmentRefusal(
     });
     return operandTargetsProtected(source, cwd, environment, protections);
   }
-  if (executable === "find" && words.some((token) => word(token, cwd, environment) === "-delete")) {
-    const roots = words.slice(0, words.findIndex((token) => word(token, cwd, environment)?.startsWith("-") === true));
-    return roots.some((token) => {
-      return operandTargetsProtected(token, cwd, environment, protections);
-    });
+  if (executable === "find") {
+    const actionIndex = words.findIndex((token) =>
+      ["-delete", "-exec", "-execdir", "-ok", "-okdir"].includes(word(token, cwd, environment) ?? ""));
+    if (actionIndex >= 0) {
+      let rootStart = 0;
+      while (["-H", "-L", "-P"].includes(word(words[rootStart], cwd, environment) ?? "") ||
+          /^-(?:O|D)/u.test(word(words[rootStart], cwd, environment) ?? "")) rootStart += 1;
+      const expressionStart = words.findIndex((token, index) => index >= rootStart &&
+        (word(token, cwd, environment)?.startsWith("-") === true || operator(token) === "(" ||
+          word(token, cwd, environment) === "!"));
+      const roots = words.slice(rootStart, expressionStart < 0 ? actionIndex : expressionStart);
+      const effectiveRoots = roots.length ? roots : ["."];
+      if (effectiveRoots.some((token) => operandTargetsProtected(token, cwd, environment, protections))) return true;
+      const action = word(words[actionIndex], cwd, environment);
+      if (action !== "-delete" && depth < 3) {
+        const end = words.findIndex((token, index) => index > actionIndex &&
+          [";", "+"].includes(word(token, cwd, environment) ?? ""));
+        const nested = words.slice(actionIndex + 1, end < 0 ? undefined : end);
+        if (segmentRefusal(nested, cwd, new Map(environment), protections, depth + 1)) return true;
+      }
+    }
   }
   if (["python", "python3", "node", "perl", "ruby", "pwsh", "powershell"].includes(executable)) {
     const rendered = words.map((token) => word(token, cwd, environment) ?? "").join(" ");
@@ -303,13 +370,12 @@ function segmentRefusal(
  * Ordinary mutations beneath that root remain allowed; retirement of the root itself belongs to
  * the managed discard lifecycle. The parser is deliberately shared by every provider boundary.
  */
-export function commandTargetsManagedWorktree(
+function commandTargetsManagedWorktreeUnsafe(
   command: string,
   cwd: string,
   protections: readonly ManagedWorktreeProtection[],
   depth = 0,
 ): string | null {
-  if (!protections.length || !command || command.length > MAX_COMMAND_LENGTH || command.includes("\0")) return null;
   let tokens: ShellToken[];
   try {
     tokens = parse<EnvironmentReference>(command, (env) => ({ env }));
@@ -346,4 +412,20 @@ export function commandTargetsManagedWorktree(
     }
   }
   return evaluate() ? MANAGED_WORKTREE_REFUSAL : null;
+}
+
+export function commandTargetsManagedWorktree(
+  command: string,
+  cwd: string,
+  protections: readonly ManagedWorktreeProtection[],
+  depth = 0,
+): string | null {
+  if (!protections.length || !command || command.length > MAX_COMMAND_LENGTH || command.includes("\0")) return null;
+  try {
+    return commandTargetsManagedWorktreeUnsafe(command, cwd, protections, depth);
+  } catch {
+    // Provider-controlled syntax must never escape the guard or crash the runner. If a bounded
+    // destructive target cannot be classified safely, retain the managed worktree.
+    return MANAGED_WORKTREE_REFUSAL;
+  }
 }

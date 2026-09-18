@@ -3082,14 +3082,21 @@ export class SessionManager {
     const removed = this.attributedWorktrees(latest).find((item) =>
       item.id === record.worktreeId && sameWorktreePath(latest.context, item.path, record.worktreePath) &&
       (!record.branch || item.branch === record.branch));
-    if (!removed) return undefined;
-    const worktrees = this.attributedWorktrees(latest).filter((item) => item.id !== removed.id);
+    const conflicting = !removed && (latest.worktrees ?? []).some((item) =>
+      sameWorktreePath(latest.context, item.path, record.worktreePath));
+    // A crash can leave the external worktree removed after its inventory row was committed away
+    // but before selection, hooks, and markers were cleared. Repair that partial transaction only
+    // with the durable removal proof and never across a replacement identity at the same path.
+    if (!removed && (!record.worktreeRemovedAt || conflicting)) return undefined;
+    const worktrees = removed
+      ? this.attributedWorktrees(latest).filter((item) => item.id !== removed.id)
+      : latest.worktrees ?? [];
     const worktreeHooks = { ...(latest.worktreeHooks ?? {}) };
-    delete worktreeHooks[removed.id];
+    if (record.worktreeId) delete worktreeHooks[record.worktreeId];
     const worktreeProcessMarkers = { ...(latest.worktreeProcessMarkers ?? {}) };
-    delete worktreeProcessMarkers[removed.id];
+    if (record.worktreeId) delete worktreeProcessMarkers[record.worktreeId];
     const removedActiveSelection = !!latest.worktreePath &&
-      sameWorktreePath(latest.context, latest.worktreePath, removed.path);
+      sameWorktreePath(latest.context, latest.worktreePath, record.worktreePath);
     const updated = this.store.patchMeta(record.sessionId, {
       worktrees,
       worktreeHooks: Object.keys(worktreeHooks).length ? worktreeHooks : undefined,
@@ -11430,10 +11437,13 @@ export class SessionManager {
         item.id === record.worktreeId && sameWorktreePath(meta.context, item.path, record.worktreePath) &&
         (!record.branch || item.branch === record.branch));
       if (!worktree) {
-        const selectionStillTargetsRemovedPath = !!meta.worktreePath &&
-          sameWorktreePath(meta.context, meta.worktreePath, record.worktreePath);
-        if (record.worktreeRemovedAt && !selectionStillTargetsRemovedPath) this.finishWorktreeCleanup(record);
-        else this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after live worktree identity changed`);
+        if (record.worktreeRemovedAt) {
+          const repaired = await this.forgetRemovedWorktree(record);
+          if (repaired) this.finishWorktreeCleanup(record);
+          else this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after live metadata cleanup`);
+        } else {
+          this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after live worktree identity changed`);
+        }
         return;
       }
       if (this.liveWorktreeUsesPath(record.sessionId, record.worktreePath) ||

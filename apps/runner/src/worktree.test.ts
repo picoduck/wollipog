@@ -4807,13 +4807,18 @@ test("post-merge cleanup durably defers selected-worktree retirement until provi
     const pending = new WorktreeCleanupJournal(dataDir).list().find((item) => item.worktreeId === merged.worktree.id);
     assert.ok(pending, "the cleanup journal remains retryable after a metadata commit failure");
     store.patchMeta = originalPatchMeta;
+    originalPatchMeta("s_selected_cleanup", {
+      worktrees: store.readMeta("s_selected_cleanup")?.worktrees?.filter((item) => item.id !== merged.worktree.id),
+    });
+    assert.equal(store.readMeta("s_selected_cleanup")?.worktreePath, merged.worktree.path,
+      "a crash-shaped partial commit can leave a stale selection after inventory is gone");
     await (manager as unknown as {
       reapLiveSafeWorktree: (record: NonNullable<typeof pending>) => Promise<void>;
     }).reapLiveSafeWorktree(pending);
     assert.equal(store.readMeta("s_selected_cleanup")?.worktreePath, null,
       "the managed path clears the selection with the directory, leaving no dangling reference");
     assert.equal(store.readMeta("s_selected_cleanup")?.worktrees?.some((item) => item.id === merged.worktree.id), false,
-      "selection and worktree inventory are cleared by the same metadata update");
+      "idempotent cleanup preserves the already-cleared inventory while repairing selection");
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });

@@ -45,6 +45,13 @@ test("raw Git and filesystem retirement forms are refused with managed-discard g
     "nice -n 5 rm -rf .",
     "timeout 30 rm -rf .",
     "eval 'rm -rf .'",
+    "sudo -u root rm -rf .",
+    "find -L . -delete",
+    "find . -exec rm -rf {} +",
+    `find ${protectedPath} -execdir rm -rf {} +`,
+    "printf '.\\0' | xargs -0 rm -rf",
+    "printf '.\\0' | xargs -0 sudo -u root rm -rf",
+    "rm -rf /runner/worktrees/session/requested/{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{managed,other}",
   ]) {
     assert.equal(commandTargetsManagedWorktree(command, protectedPath, protection), MANAGED_WORKTREE_REFUSAL, command);
   }
