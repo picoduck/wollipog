@@ -152,8 +152,10 @@ What is done instead:
   its target is judged as a location and never mistaken for the command word, and a leading IO
   number belongs to the redirection rather than to the command. A glob or brace metacharacter
   disqualifies the command, because the shell expands `--recurs{ive,}` into `--recursive` first. So
-  does a `NAME=value` assignment, and a command word that is not a bare name, since `./ls` is
-  whatever was planted there. Long options are matched as GNU `getopt_long` accepts them, so `ls --recurs` counts as
+  does a `NAME=value` assignment, a command word that is not a bare name, since `./ls` is whatever
+  was planted there, and an option word carrying a path separator: neither `ls` nor `stat` has an
+  option that opens a file, so that refuses nothing either needs, and a path inside an option is
+  never waved through. Long options are matched as GNU `getopt_long` accepts them, so `ls --recurs` counts as
   recursive. A working directory inside the guard state disqualifies the command too, since one
   with no operand acts there.
 

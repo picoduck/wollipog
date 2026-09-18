@@ -850,6 +850,9 @@ export function pathTargetsGuardState(path: string, cwd: string, directory: stri
  *   `--recursive` long before this classifier would see it.
  * - A `NAME=value` assignment: a `PATH=` prefix decides what the command name resolves to.
  * - A command word that is not a bare name: `./ls` and `/tmp/ls` are whatever was planted there.
+ * - An option word carrying a path separator. Neither `ls` nor `stat` has an option that opens a
+ *   file, so this refuses nothing either needs to read; it is kept so that a path inside an option
+ *   is never the one thing the classifier waves through, whatever the option turns out to mean.
  * - A working directory inside the guard state, since a command with no operand acts there.
  *
  * It over-refuses where the safe direction is to do so. A short-option cluster is scanned for `R`
@@ -943,6 +946,10 @@ function inspectsAncestorOnly(words: readonly string[]): boolean {
   if (words.some((word) => /[*?[\]{}]/u.test(word))) return false;
   // An assignment decides what the command name resolves to.
   if (words.some((word) => /^[A-Za-z_][A-Za-z0-9_]*=/u.test(word))) return false;
+  // A path inside an option is never waved through, whatever the option turns out to mean.
+  if (words.some((word) => word.startsWith("-") && (word.includes("/") || word.includes("\\")))) {
+    return false;
+  }
   const name = words[0];
   if (name === undefined || name === "" || name.includes("/") || name.includes("\\")) return false;
   switch (name) {

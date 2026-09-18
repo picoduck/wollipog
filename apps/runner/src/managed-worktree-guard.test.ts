@@ -742,6 +742,10 @@ test("a command cannot launder itself into the ancestor carve-out", (t) => {
     `du --exclude-from=../.wollipog-data/hooks/s1.protections.json ${home}`,
     `du -X../.wollipog-data/hooks/s1.protections.json ${home}`,
     `ls ${home}; du --files0-from=../.wollipog-data/hooks/s1.protections.json`,
+    // Accepted over-refusal: an option word carrying a path separator disqualifies the command,
+    // although neither `ls` nor `stat` has an option that opens a file.
+    `ls -l --time-style=+%Y/%m/%d ${home}`,
+    `stat --format=%n/%s ${home}`,
     // Accepted over-refusal: a short-option cluster is scanned for `R` without modelling which
     // options take an attached value, so GNU's `ls -IREADME` reads as recursive. The alternative,
     // a hard-coded list of value-taking options, fails OPEN the day that list is wrong.
