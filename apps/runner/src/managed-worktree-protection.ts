@@ -657,17 +657,32 @@ function canonicalPath(path: string): string {
   return path;
 }
 
+/**
+ * Every location a spelling can name. A tilde form is ambiguous without a passwd lookup: the shell
+ * expands `~name` only when that user exists and otherwise leaves a literal path component, so
+ * both readings are candidates and either one landing in the guard state refuses the call.
+ */
+function guardStateCandidates(path: string, cwd: string): string[] {
+  const literal = isAbsolute(path) ? resolve(path) : resolve(cwd || ".", path);
+  const expanded = expandHome(path, cwd);
+  if (expanded === path) return [literal];
+  const home = isAbsolute(expanded) ? resolve(expanded) : resolve(cwd || ".", expanded);
+  return home === literal ? [literal] : [literal, home];
+}
+
 /** A path is out of bounds when it is inside the guard-state directory, or contains it. */
 export function pathTargetsGuardState(path: string, cwd: string, directory: string): boolean {
   if (!directory || !path || path.includes("\0")) return false;
-  const expanded = expandHome(path, cwd);
-  const resolved = isAbsolute(expanded) ? resolve(expanded) : resolve(cwd || ".", expanded);
   const root = resolve(directory);
-  if (pathContains(root, resolved) || pathContains(resolved, root)) return true;
-  // The lexical spelling is only half of it: a symlink anywhere along either path lands elsewhere.
-  const realResolved = canonicalPath(resolved);
-  const realRoot = canonicalPath(root);
-  return pathContains(realRoot, realResolved) || pathContains(realResolved, realRoot);
+  let realRoot: string | null = null;
+  for (const resolved of guardStateCandidates(path, cwd)) {
+    if (pathContains(root, resolved) || pathContains(resolved, root)) return true;
+    // The lexical spelling is only half of it: a symlink anywhere along either path lands elsewhere.
+    realRoot ??= canonicalPath(root);
+    const realResolved = canonicalPath(resolved);
+    if (pathContains(realRoot, realResolved) || pathContains(realResolved, realRoot)) return true;
+  }
+  return false;
 }
 
 /**
@@ -734,9 +749,13 @@ export function toolTargetsGuardState(
       // Only the static prefix of a glob is a location; the rest is matched beneath it.
       const wildcard = pattern.search(/[*?[{]/u);
       const prefix = wildcard < 0 ? pattern : pattern.slice(0, pattern.lastIndexOf("/", wildcard) + 1);
-      const base = absent ? cwd : value as string;
-      const anchored = isAbsolute(expandHome(prefix)) ? prefix : resolve(expandHome(base), prefix || ".");
-      if (pathTargetsGuardState(anchored, cwd, directory)) return GUARD_STATE_REFUSAL;
+      // The prefix is a location of its own when it is absolute or a tilde form; otherwise it
+      // hangs beneath every reading of the search base, resolved against the EVENT's cwd.
+      const bases = absent ? [resolve(cwd || ".")] : guardStateCandidates(value as string, cwd);
+      const anchors = isAbsolute(prefix) || prefix.startsWith("~")
+        ? [prefix, ...bases.map((base) => resolve(base, prefix))]
+        : bases.map((base) => resolve(base, prefix || "."));
+      if (anchors.some((anchor) => pathTargetsGuardState(anchor, cwd, directory))) return GUARD_STATE_REFUSAL;
     }
   }
   return null;

@@ -556,3 +556,41 @@ test("named-user and working-directory tilde forms are expanded before the compa
   assert.equal(pathTargetsGuardState("~+/hooks/s1.protections.json", dirname(directory), directory), true);
   assert.equal(pathTargetsGuardState("~+/src/index.ts", WORKTREE, directory), false);
 });
+
+test("a tilde form that may be a literal directory is judged under both readings", (t) => {
+  // The shell expands `~name` only for a user that exists; otherwise it is a path component, and
+  // `..` from inside it walks back out of the working directory.
+  const base = mkdtempSync(join(tmpdir(), "wollipog-guard-tilde-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const project = join(base, "project");
+  const directory = join(base, ".wollipog", "hooks");
+  mkdirSync(project);
+  mkdirSync(directory, { recursive: true });
+  assert.equal(
+    commandTargetsGuardState("cat ~missing/../../.wollipog/hooks/s1.protections.json", project, directory),
+    GUARD_STATE_REFUSAL,
+  );
+  assert.equal(pathTargetsGuardState("~missing/../../.wollipog/hooks", project, directory), true);
+  assert.equal(pathTargetsGuardState("~missing/notes.md", project, directory), false);
+});
+
+test("a Glob base of ~+ is resolved against the event's working directory, not the runner's", (t) => {
+  const base = mkdtempSync(join(tmpdir(), "wollipog-guard-glob-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const project = join(base, "project");
+  mkdirSync(project);
+  const directory = join(base, ".wollipog", "hooks");
+  mkdirSync(directory, { recursive: true });
+  const protectionsFile = join(directory, "s1.protections.json");
+  writeManagedWorktreeGuardProtections(protectionsFile, [{ worktreePath: WORKTREE, repoPath: REPO }]);
+  const refused = runManagedWorktreeGuardDecision(
+    hookInput({ cwd: project, tool_name: "Glob", tool_input: { path: "~+", pattern: "../.wollipog/hooks/**" } }),
+    protectionsFile,
+  );
+  assert.ok(refused.stdout.includes(GUARD_STATE_REFUSAL));
+  const allowed = runManagedWorktreeGuardDecision(
+    hookInput({ cwd: project, tool_name: "Glob", tool_input: { path: "~+", pattern: "src/**" } }),
+    protectionsFile,
+  );
+  assert.deepEqual(allowed, { stdout: "", stderr: "", exitCode: 0 });
+});
