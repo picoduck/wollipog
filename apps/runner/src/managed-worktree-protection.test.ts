@@ -154,7 +154,7 @@ test("shellCwdAfterCommand follows literal directory changes and gives up on inv
     ["cd -P apps && ls", root, `${root}/apps`],
     ["cd -- apps", root, `${root}/apps`],
     ["cd /tmp/elsewhere", root, "/tmp/elsewhere"],
-    ["pushd apps", root, `${root}/apps`],
+    ["cd -L apps", root, `${root}/apps`],
     // Unknown after these: the text does not say where the shell ends up.
     ["cd $DIR", root, null],
     // Exit 0 does not prove a `cd` beside `;` or `||` ran or succeeded; unknown, never deeper.
@@ -166,6 +166,16 @@ test("shellCwdAfterCommand follows literal directory changes and gives up on inv
     ["cd -", root, null],
     ["cd ~", root, null],
     ["popd", root, null],
+    // The directory stack and indirect evaluation move the shell without a top-level `cd`.
+    ["pushd apps", root, null],
+    ["pushd -n apps", root, null],
+    ["cd apps && eval 'cd ..'", root, null],
+    ["cd apps && builtin cd ..", root, null],
+    ["cd apps && command cd ..", root, root],
+    ["cd apps && source ./env.sh", root, null],
+    ["cd apps && . ./env.sh", root, null],
+    ["cd apps && exec sh", root, null],
+    ["cd -q apps", root, null],
     ["(cd apps && ls)", root, null],
     ["cd apps | cat", root, null],
     ["ls && cd apps | cat", root, null],

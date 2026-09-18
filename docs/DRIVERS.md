@@ -578,7 +578,7 @@ harmless because Claude never reaches the control channel for a command the hook
   `tool_use` records its command, and its successful `tool_result` — the moment Claude commits the
   directory — advances the tracked directory through `shellCwdAfterCommand`. Only a `cd` in an
   all-`&&` chain counts, because exit 0 of such a chain proves the `cd` ran and succeeded; a `cd`
-  beside `;` or `||` (`cd x; ls` exits 0 with the `cd` failed), `cd $DIR`, `cd -`, `popd`, a
+  beside `;` or `||` (`cd x; ls` exits 0 with the `cd` failed), `cd $DIR`, `cd -`, the directory stack, `eval`/`builtin`/`source`, a
   pipeline member, or a subshell makes the directory unknown, and a failed command leaves it in
   place. Unknown falls back to the session directory — the pre-#1333 behavior, never less strict,
   and never deeper than the truth — until an absolute `cd` re-establishes it. Every spawn starts at
