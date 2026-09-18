@@ -867,6 +867,13 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       kind: "user_message",
       text: "Claim and delegate issue 1209 through 1211.",
     }, Date.now());
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION - 1);
+    const legacyRunnerRestart = svc.restart(parent.id);
+    assert.equal(legacyRunnerRestart.status, 409);
+    assert.match(legacyRunnerRestart.error ?? "", /protocol-v158/);
+    assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.issueNumbers, undefined,
+      "an old runner cannot make recovered scope durable before it can enforce that scope");
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     const upgradedParent = svc.restart(parent.id);
     assert.ok(upgradedParent.ok, upgradedParent.error);
     assert.deepEqual(hub.sentOfType("start_session").at(-1)?.spec.orchestrator?.issueNumbers,

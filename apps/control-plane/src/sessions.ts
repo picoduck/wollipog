@@ -5481,16 +5481,23 @@ export class SessionsService {
     if (!workspacePath) return fail("session has no resolvable workspace directory to restart from", 400);
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
     const agentId = session.agentId;
+    const supportsIssueScope = runnerSupportsProtocol(
+      this.db.getRunner(session.runnerId)?.protocolVersion,
+      "orchestratorIssueScope",
+    );
     if (session.orchestratorPolicy && !session.orchestratorPolicy.issueNumbers?.length &&
         this.db.sessionWasHumanCreatedOrchestrator(sessionId)) {
       const initialPrompt = this.db.initialUserMessageText(sessionId);
       const recovered = initialPrompt ? orchestratorIssueNumbersFromInitialPrompt(initialPrompt) : [];
-      if (recovered.length && this.db.backfillSessionOrchestratorIssueNumbers(sessionId, recovered, Date.now())) {
+      if (recovered.length && !supportsIssueScope) {
+        return fail("Campaign issue coordination requires a protocol-v158 Orchestrator runner; update the runner and retry.", 409);
+      }
+      if (recovered.length &&
+          this.db.backfillSessionOrchestratorIssueNumbers(sessionId, recovered, Date.now())) {
         session = this.db.getSession(sessionId)!;
       }
     }
-    if (session.orchestratorPolicy?.issueNumbers?.length &&
-        !runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "orchestratorIssueScope")) {
+    if (session.orchestratorPolicy?.issueNumbers?.length && !supportsIssueScope) {
       return fail("Campaign issue coordination requires a protocol-v158 Orchestrator runner; update the runner and retry.", 409);
     }
     const hasStopIntent = this.db.hasSessionStopIntent(sessionId);

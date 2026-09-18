@@ -14,7 +14,6 @@ const READ_ONLY_GH_OPERATIONS = new Set([
   "label:list",
   "pr:list", "pr:view", "pr:checks", "pr:diff", "pr:status",
   "run:list", "run:view", "run:watch", "repo:view",
-  "search:issues", "search:prs", "search:repos",
 ]);
 const READ_ONLY_GIT_COMMANDS = new Set([
   "status", "log", "show", "diff", "blame", "rev-parse", "merge-base", "range-diff",
@@ -251,8 +250,12 @@ function isReadOnlyPipelineFilter(tokens: ShellToken[]): boolean {
   if (!tokens.every(isPlainArgument) || tokens.length === 0) return false;
   const args = tokens.slice(1) as string[];
   if (tokens[0] === "head" || tokens[0] === "tail") {
-    return args.every((arg) => /^-(?:[0-9]+|n)$/u.test(arg) || /^[0-9]+$/u.test(arg)) &&
-      !args.some((arg) => arg === "-f");
+    for (let index = 0; index < args.length; index++) {
+      const arg = args[index]!;
+      if (/^-[0-9]+$/u.test(arg)) continue;
+      if (arg !== "-n" || !/^[0-9]+$/u.test(args[++index] ?? "")) return false;
+    }
+    return true;
   }
   if (tokens[0] === "wc") return args.every((arg) => /^-[lwcm]+$/u.test(arg));
   if (tokens[0] === "tr") return args.length === 2;
@@ -333,7 +336,8 @@ export function isRoutineClaudeOrchestratorBash(
   allowedIssueNumbers: readonly number[] = [],
   workspacePath?: string,
 ): boolean {
-  if (command.length === 0 || command.length > MAX_COMMAND_LENGTH || /[\r\n]/u.test(command)) return false;
+  if (command.length === 0 || command.length > MAX_COMMAND_LENGTH || /[\r\n]/u.test(command) ||
+      /(?:^|[\s;&|])2[ \t]+>/u.test(command)) return false;
   let tokens: ShellToken[];
   try {
     tokens = parse<EnvironmentReference>(command, (env) => ({ env }));
@@ -367,18 +371,72 @@ export type RoutineClaudeOrchestratorPermissionDisposition = "allow" | "reformul
 /** Read-only coordination attempts that cannot be proven safe are returned to Claude for a
  * canonical retry instead of becoming repetitive human approval cards. Mutations and unknown
  * tools retain the ordinary interactive path. */
-function isRoutineCoordinationAttempt(command: string): boolean {
+function hasOnlyScopedIssueWriteTargets(command: string, allowedIssueNumbers: readonly number[]): boolean {
+  const allowed = new Set(allowedIssueNumbers.map(String));
+  let writes = 0;
+  for (const match of command.matchAll(/\bgh\s+issue\s+(?:edit|comment)\s+(?:['"])?([1-9][0-9]{0,15}|\$[A-Za-z_][A-Za-z0-9_]*)(?:['"])?/gu)) {
+    writes += 1;
+    const target = match[1]!;
+    if (!target.startsWith("$")) {
+      if (!allowed.has(target)) return false;
+      continue;
+    }
+    const variable = target.slice(1);
+    const loop = new RegExp(
+      `\\bfor\\s+${variable}\\s+in\\s+([1-9][0-9]{0,15}(?:\\s+[1-9][0-9]{0,15})*)\\s*;`,
+      "u",
+    ).exec(command);
+    const numbers = loop?.[1]?.trim().split(/\s+/u) ?? [];
+    if (numbers.length === 0 || numbers.some((number) => !allowed.has(number))) return false;
+  }
+  return writes > 0;
+}
+
+function hasMutatingGitBranchAttempt(command: string): boolean {
+  for (const match of command.matchAll(/\bgit\s+branch(?:\s+([^;&|]*))?/gu)) {
+    const args = match[1]?.trim() ?? "";
+    if (args.length === 0) continue;
+    if (/(?:^|\s)(?:-d|-D|-m|-M|-c|-C|-f|--delete|--move|--copy|--force|--edit-description|--set-upstream-to|--unset-upstream|--create-reflog)(?:=|\s|$)/u.test(args)) {
+      return true;
+    }
+    const first = args.split(/\s+/u)[0]!;
+    if (!first.startsWith("-")) return true;
+  }
+  return false;
+}
+
+function hasMutatingGhApiAttempt(command: string): boolean {
+  for (const match of command.matchAll(/\bgh\s+api\s+([^;&|]*)/gu)) {
+    const args = match[1] ?? "";
+    if (!/(?:^|\s)(?:--method|-X|--field|-F|--raw-field|-f|--input)(?:=|\s|$)/u.test(args)) continue;
+    const readOnlyGraphQl = /^graphql\b/u.test(args.trim()) &&
+      /(?:^|\s)(?:--field|-F|--raw-field|-f)\s+query=(?:['"])?query\b/u.test(args) &&
+      !/\bmutation\b/iu.test(args);
+    if (!readOnlyGraphQl) return true;
+  }
+  return false;
+}
+
+function isRoutineCoordinationAttempt(command: string, allowedIssueNumbers: readonly number[]): boolean {
   if (command.length === 0 || command.length > MAX_COMMAND_LENGTH) return false;
   if (/\b(?:rm|mv|cp|touch|chmod|chown|kill|pkill|sudo)\b/u.test(command) ||
       /\bgit\s+(?:push|commit|reset|clean|checkout|switch|merge|rebase|cherry-pick)\b/u.test(command) ||
       /\bgh\s+pr\s+(?:merge|close|reopen|create|edit)\b/u.test(command) ||
       /\bgh\s+issue\s+(?:close|reopen|create|delete)\b/u.test(command)) return false;
+  if (/\bgit\s+(?:add|am|apply|bisect|bundle|checkout|cherry-pick|clone|commit|config|gc|init|merge|mv|notes|pull|push|rebase|remote|restore|revert|rm|stash|submodule|switch|tag|worktree)\b/u.test(command) ||
+      hasMutatingGitBranchAttempt(command)) {
+    return false;
+  }
+  if (/\bgh\s+pr\s+(?!list\b|view\b|checks\b|diff\b|status\b)/u.test(command) ||
+      /\bgh\s+label\s+(?!list\b)/u.test(command) ||
+      hasMutatingGhApiAttempt(command)) return false;
   if (/\bgh\s+issue\s+edit\b/u.test(command) &&
       !/--(?:add|remove)-(?:assignee|label)(?:=|\s)/u.test(command)) return false;
   if (/\bgh\s+issue\s+comment\b/u.test(command) &&
       !/(?:--body|-b)(?:=|\s)/u.test(command)) return false;
-  return /(?:^|[;&|()\s])(?:git|gh\s+(?:issue|pr|run|repo|api)|find|grep|sed|ls|head|tail|wc|awk)(?:\s|$)/u
-    .test(command);
+  if (/\bgh\s+issue\s+(?:edit|comment)\b/u.test(command) &&
+      !hasOnlyScopedIssueWriteTargets(command, allowedIssueNumbers)) return false;
+  return /(?:^|[;&|()\s])(?:git\s+(?:status|log|show|diff|blame|rev-parse|merge-base|range-diff|ls-files|grep|cat-file|name-rev|describe|show-ref|for-each-ref|shortlog|diff-tree|diff-index|diff-files|rev-list|whatchanged|fetch|ls-remote)|gh\s+(?:issue\s+(?:list|view|status|edit|comment)|pr\s+(?:list|view|checks|diff|status)|run\s+(?:list|view|watch)|repo\s+view|label\s+list|search\s+(?:issues|prs|repos)|api\s+(?:user|graphql))|find|grep|sed|ls|head|tail|wc|awk)(?:\s|$)/u.test(command);
 }
 
 export function classifyRoutineClaudeOrchestratorPermission(
@@ -396,7 +454,7 @@ export function classifyRoutineClaudeOrchestratorPermission(
     return "interactive";
   }
   if (isRoutineClaudeOrchestratorBash(record.command, allowedIssueNumbers, workspacePath)) return "allow";
-  return isRoutineCoordinationAttempt(record.command) ? "reformulate" : "interactive";
+  return isRoutineCoordinationAttempt(record.command, allowedIssueNumbers) ? "reformulate" : "interactive";
 }
 
 /** Auto-approval is confined to Orchestrator Bash asks with a bounded input and issue scope. */

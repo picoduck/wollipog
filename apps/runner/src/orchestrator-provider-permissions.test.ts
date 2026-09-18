@@ -69,7 +69,6 @@ test("routine inspection accepts semantic Git and GitHub operations across safe 
     "git merge-base origin/main HEAD",
     "gh issue list --state open --json number,title",
     "gh issue list --search 'is:open bug' --json number,title",
-    "gh search issues orchestrator --state open --json number,title",
     "gh label list --limit 40 --json name --jq '.[].name' | tr '\\n' ' '",
     "gh api user --jq .login",
     "gh api user --jq .login && gh issue view 1216 --json assignees,labels",
@@ -160,6 +159,9 @@ test("the loop parser fails closed on shell expansion, redirection, and control-
     "gh repo view other/private-repo",
     "gh issue view https://github.com/other/private/issues/3",
     "gh pr view other/private-repo#3",
+    "gh search issues --state open orchestrator",
+    "gh search issues 'repo:other/private is:open'",
+    "gh search repos --owner other-org",
     "gh issue list --search 'repo:other/private is:open'",
     "gh pr list --search='org:other is:open'",
     "gh issue list -S 'user:other is:open'",
@@ -168,7 +170,10 @@ test("the loop parser fails closed on shell expansion, redirection, and control-
     "gh issue comment 1 --body-file /tmp/comment.md",
     "git fetch origin feature/untrusted",
     "git -C /other/repository status --short",
+    "git branch 2 >/dev/null",
+    "git tag 2 >/dev/null",
     "gh issue view 1 | tee issue.json",
+    "gh issue view 1 | head 20",
     "gh api user --method DELETE",
     "gh api user -f name=attacker",
     "gh label create unsafe",
@@ -184,6 +189,8 @@ test("observed routine inspection attempts are reformulated instead of becoming 
     "grep -rl --include=ledger.md '#1256' /workspace/.git /tmp 2>/dev/null | head",
     "find / -xdev -name ledger.md -mmin -300 2>/dev/null | head",
     "d=/tmp/cross-model-review; ls $d; sed -n '1,20p' $d/ledger.md",
+    "git fetch origin main --quiet 2>&1 | head -3; git branch -r --contains deadbeef 2>&1 | head -5; gh pr view 1248 --json state",
+    "gh api graphql -f query='query{ repository(owner:\"picoduck\",name:\"wollipog\"){ pullRequest(number:1256){ mergeQueueEntry{ state } } } }' --jq .data",
   ];
   for (const command of observed) {
     assert.equal(
@@ -194,6 +201,21 @@ test("observed routine inspection attempts are reformulated instead of becoming 
   }
   for (const command of ["git push origin main", "gh pr merge 1255 --squash", "rm -rf build"]) {
     assert.equal(classifyRoutineClaudeOrchestratorPermission("Bash", { command }), "interactive", command);
+  }
+  for (const command of [
+    "gh issue edit 1300 --add-assignee @me",
+    "gh pr comment 1255 --body status",
+    "git worktree remove /tmp/worktree",
+    "git add -A",
+    "git branch new-branch",
+    "git branch --delete merged-branch",
+    "gh api graphql -f query='mutation{ deleteProjectV2(input:{projectV2Id:\"PVT_x\"}){ clientMutationId } }'",
+  ]) {
+    assert.equal(
+      classifyRoutineClaudeOrchestratorPermission("Bash", { command }, [1201, 1202]),
+      "interactive",
+      command,
+    );
   }
 });
 
