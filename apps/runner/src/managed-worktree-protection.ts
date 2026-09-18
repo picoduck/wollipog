@@ -174,6 +174,34 @@ function longOption(
   return { attached: equals < 0 ? null : value.slice(equals + 1) };
 }
 
+const MOVE_SHORT_OPTIONS = "bfinuvZTtS";
+const MOVE_VALUE_SHORT_OPTIONS = "tS";
+const ENV_SHORT_OPTIONS = "i0vuCS";
+const ENV_VALUE_SHORT_OPTIONS = "uCS";
+
+/**
+ * Decompose a GNU short-option cluster (`-ft/dst`, `-iS'rm -rf .'`). Scanning stops at the first
+ * option taking a value; the rest of the word is that value, or null when the value is the following
+ * word. A letter outside `options` means the word is not a GNU cluster at all — PowerShell's
+ * `Move-Item` aliases (`mv`, `move`) name their arguments the same way, and `-LiteralPath` must not
+ * be read as GNU `-t` — so the word reports null and the caller leaves it and its neighbour alone.
+ */
+function shortCluster(
+  value: string,
+  options: string,
+  valueTaking: string,
+): { option: string; attached: string | null } | null {
+  if (value.startsWith("--")) return null;
+  for (let index = 1; index < value.length; index += 1) {
+    const option = value[index] ?? "";
+    if (valueTaking.includes(option)) {
+      return { option, attached: index === value.length - 1 ? null : value.slice(index + 1) };
+    }
+    if (!options.includes(option)) return null;
+  }
+  return null;
+}
+
 /**
  * Classify one GNU `mv` option word. The target directory may be named as `-t /dst`, `-t/dst`,
  * `-ft/dst` in a short-option cluster, or `--target-directory=/dst`, and `--target-directory` is the
@@ -188,12 +216,11 @@ function moveOption(value: string): { targetDirectory: boolean; consumesNext: bo
     const suffix = longOption(value, "--suffix", 4);
     return { targetDirectory: false, consumesNext: suffix != null && suffix.attached == null };
   }
-  for (let index = 1; index < value.length; index += 1) {
-    const option = value[index];
-    if (option !== "t" && option !== "S") continue;
-    return { targetDirectory: option === "t", consumesNext: index === value.length - 1 };
-  }
-  return { targetDirectory: false, consumesNext: false };
+  const cluster = shortCluster(value, MOVE_SHORT_OPTIONS, MOVE_VALUE_SHORT_OPTIONS);
+  return {
+    targetDirectory: cluster?.option === "t",
+    consumesNext: cluster != null && cluster.attached == null,
+  };
 }
 
 function executableName(value: string): string {
@@ -258,11 +285,13 @@ function commandWords(
           index += 1;
           continue;
         }
-        // `env` takes the split-string value attached (`-Srm -rf x`, `--split-string=rm -rf x`) as
-        // readily as separated, and accepts any unambiguous long-option abbreviation — no other
-        // `env` long option begins with `s`. Every spelling has to expand the same way.
-        const splitString = value.startsWith("-S")
-          ? { attached: value.length > 2 ? value.slice(2) : null }
+        // `env` takes an option value attached (`-Srm -rf x`, `-iSrm -rf x`, `--split-string=rm -rf x`)
+        // as readily as separated, and accepts any unambiguous long-option abbreviation — no other
+        // `env` long option begins with `s`, `u`, or `c`. Every spelling has to consume the same way,
+        // or a skipped value is mistaken for the command being wrapped.
+        const cluster = shortCluster(value, ENV_SHORT_OPTIONS, ENV_VALUE_SHORT_OPTIONS);
+        const splitString = cluster
+          ? (cluster.option === "S" ? cluster : null)
           : longOption(value, "--split-string", 3);
         if (splitString) {
           if (splitString.attached != null) {
@@ -273,8 +302,9 @@ function commandWords(
           tokens.splice(index, 2, ...(script == null ? [] : expandSplitString(script)));
           continue;
         }
-        if (["-u", "--unset", "-C", "--chdir"].includes(value)) {
-          index += 2;
+        const valued = cluster ?? longOption(value, "--unset", 3) ?? longOption(value, "--chdir", 3);
+        if (valued) {
+          index += valued.attached == null ? 2 : 1;
           continue;
         }
         if (value.startsWith("-")) { index += 1; continue; }
@@ -405,9 +435,6 @@ function segmentRefusal(
     return words.slice(1).some((token) => operandTargetsProtected(token, cwd, environment, protections));
   }
   if (["mv", "move", "rename-item"].includes(executable)) {
-    // PowerShell's Rename-Item names its arguments (-Path, -NewName) instead of clustering GNU
-    // short options, so only the GNU movers have their option words decomposed.
-    const gnuOptions = executable !== "rename-item";
     let targetDirectory = false;
     const operands: ShellToken[] = [];
     for (let index = 0; index < words.length; index += 1) {
@@ -419,7 +446,6 @@ function segmentRefusal(
         break;
       }
       if (value?.startsWith("-")) {
-        if (!gnuOptions) continue;
         const option = moveOption(value);
         if (option.targetDirectory) targetDirectory = true;
         if (option.consumesNext) index += 1;
