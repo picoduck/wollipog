@@ -636,13 +636,15 @@ test("a directory that merely contains the guard state can be inspected without 
     `find ${home} -maxdepth 1 -type d`,
     // A bound that stops above the hook directory is fine even from its own parent.
     `find ${data} -maxdepth 1`,
-    // Each segment is judged on its own; an ordinary second command changes nothing.
-    `ls ${home} && echo done`,
-    `cd ${project} && ls ${home}`,
+    // A list of inspections is still an inspection; a stray separator commands nothing.
+    `ls ${home} && du -sh ${home}`,
     `ls ${home}; stat ${data}`,
-    // A redirection belongs to the command it follows; its target is judged as a location only.
+    `ls ${home};`,
+    // A redirection belongs to the command it follows; its target is judged as a location only,
+    // and an IO number belongs to the redirection rather than to the command.
     `ls ${home} > ${join(project, "listing.txt")}`,
     `ls ${home} 2>/dev/null`,
+    `2>/dev/null ls ${home}`,
   ]) {
     assert.equal(commandTargetsGuardState(command, project, directory), null, command);
   }
@@ -726,6 +728,21 @@ test("a command cannot launder itself into the ancestor carve-out", (t) => {
     // A subshell and a process substitution are not modelled, so nothing in them is inspectable.
     `(rm -rf ${home})`,
     `cat <(rm -rf ${home})`,
+    // An unescaped newline is whitespace to the tokenizer, so the second command would otherwise
+    // join the first one's words; a backslash-newline would split `-R` into `-` and `R`.
+    `ls ${home}\nrm -rf ${home}`,
+    `ls -\\\nR ${home}`,
+    // The shell carries state across a list: an earlier command decides what a later name runs.
+    `hash -p /bin/rm ls; ls -rf ${home}`,
+    `PATH=${project}; ls ${home}`,
+    `ls ${home} && echo done`,
+    `cd ${project} && ls ${home}`,
+    // Deciding a directory is empty means opening it, which at the bound is the hook directory.
+    `find ${home} -maxdepth 2 -empty`,
+    // Accepted over-refusal: a short-option cluster is scanned for `R` without modelling which
+    // options take an attached value, so GNU's `ls -IREADME` reads as recursive. The alternative,
+    // a hard-coded list of value-taking options, fails OPEN the day that list is wrong.
+    `ls -IREADME ${home}`,
   ]) {
     assert.equal(commandTargetsGuardState(command, project, directory), GUARD_STATE_REFUSAL, command);
   }

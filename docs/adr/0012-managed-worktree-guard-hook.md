@@ -133,15 +133,24 @@ What is done instead:
   a command may NAME the hook directory; it never enumerates what is in it. The file tools have no
   bounded form and stay refused on an ancestor, so the path-level predicate keeps its old meaning.
 
-  The carve-out fails closed, because a command-text classifier is easy to talk past. A command is
-  disqualified wholesale when it routes or nests commands — a pipe, a command substitution, a
-  subshell, a process substitution, a backtick, or an operator the classifier does not model — so a
-  listing piped into `xargs rm -rf` is not an inspection. A redirection does not start a new
-  command, so its target is judged as a location and never mistaken for the command word. A glob or
-  brace metacharacter disqualifies the command, because the shell expands `--recurs{ive,}` into
-  `--recursive` first. So does a `NAME=value` assignment, which decides what the name resolves to,
-  and a command word that is not a bare name, since `./ls` is whatever was planted there. Long
-  options are matched as GNU `getopt_long` accepts them, so `ls --recurs` counts as recursive.
+  The carve-out fails closed, because a command-text classifier is easy to talk past. EVERY command
+  in the list has to be an inspection, not merely the one holding the ancestor operand: the shell
+  carries state across `;` and `&&`, so `hash -p /bin/rm ls; ls -rf <ancestor>` runs `rm`, and a
+  bare `PATH=` assignment rebinds a later name the same way. Beyond that, a command is disqualified
+  wholesale when it routes or nests commands — a pipe, a command substitution, a subshell, a process
+  substitution, a backtick, or an operator the classifier does not model — so a listing piped into
+  `xargs rm -rf` is not an inspection. A newline disqualifies it, because the tokenizer treats one
+  as whitespace and would join two commands into one. A redirection does not start a new command, so
+  its target is judged as a location and never mistaken for the command word, and an IO number
+  belongs to the redirection rather than to the command. A glob or brace metacharacter disqualifies
+  the command, because the shell expands `--recurs{ive,}` into `--recursive` first. So does a
+  `NAME=value` assignment, and a command word that is not a bare name, since `./ls` is whatever was
+  planted there. Long options are matched as GNU `getopt_long` accepts them, so `ls --recurs` counts
+  as recursive.
+
+  Where the two directions conflict, it over-refuses. A short-option cluster is scanned for `R`
+  without modelling which options take an attached value, so GNU's `ls -IREADME` reads as recursive
+  and is refused; a hard-coded list of value-taking options would fail OPEN the day it is wrong.
 
   `du` is the accepted exception inside the carve-out: it walks the tree it is given, so it learns
   the hook directory's shape and the size of what is in it, though it reads no file contents. #1334

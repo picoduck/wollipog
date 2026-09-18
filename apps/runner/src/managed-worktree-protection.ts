@@ -826,35 +826,52 @@ export function pathTargetsGuardState(path: string, cwd: string, directory: stri
  * Refusing every operand that CONTAINS the hook directory also refused `ls /home` and a listing of
  * the home directory in every session whose data directory lives under it (#1334), though neither
  * reads anything the guard owns. The carve-out below is deliberately narrow and fails closed: an
- * operand that is a strict ancestor is allowed only when the command it belongs to is recognisable
- * as a bounded inspection of that directory, and everything this classifier cannot model keeps the
- * refusal. A recursive removal or a recursive search rooted at an ancestor is refused as before.
+ * operand that is a strict ancestor is allowed only when the WHOLE command is recognisable as
+ * bounded inspection of directories, and everything this classifier cannot model keeps the refusal.
+ * A recursive removal or a recursive search rooted at an ancestor is refused as before.
  *
  * What disqualifies a command, and why each one has to:
  *
+ * - Every command in the list has to be an inspection, not merely the one holding the operand. The
+ *   shell carries state across `;` and `&&`: `hash -p /bin/rm ls; ls -rf <ancestor>` runs `rm`, and
+ *   a bare `PATH=` assignment or a function definition rebinds a later name the same way.
  * - Anything that routes one command's output into another, or nests a command inside another:
  *   `|`, `|&`, `( )`, `<( )`, `>( )`, a backtick, or an operator not modelled here. A listing piped
  *   into `xargs rm -rf` is not an inspection, and neither is a removal whose operand is a command
  *   substitution, though each contains one.
+ * - A newline or carriage return anywhere in the command. `shell-quote` treats an unescaped newline
+ *   as whitespace, so a second line would join the first command's words rather than starting a
+ *   command of its own, and a backslash-newline would split `-R` into `-` and `R`.
  * - A redirection does NOT start a new command, so its target is kept out of the classification and
  *   is judged as a location only. Treating it as a command word let a leading `>ls` pass a removal
- *   off as an `ls`.
+ *   off as an `ls`. An IO number belongs to the redirection that follows it, not to the command.
  * - A glob or brace metacharacter anywhere in the command: the shell expands `--recurs{ive,}` into
  *   `--recursive` long before this classifier would see it.
  * - A `NAME=value` assignment: a `PATH=` prefix decides what the command name resolves to.
  * - A command word that is not a bare name: `./ls` and `/tmp/ls` are whatever was planted there.
+ *
+ * It over-refuses where the safe direction is to do so. A short-option cluster is scanned for `R`
+ * without modelling which options take an attached value, so GNU's `ls -IREADME` reads as recursive
+ * and is refused; the alternative, a hard-coded list of value-taking options, fails OPEN the day
+ * that list is wrong.
  *
  * `du` is the accepted exception among the commands themselves: it walks the whole tree it is
  * given, so it learns the hook directory's shape and the size of what is in it. It reads no file
  * contents, and #1334 lists it among the commands that must be allowed.
  * ------------------------------------------------------------------------------------------ */
 
-/** Operators that end one command and begin another. Each segment is classified on its own. */
+/** Operators that end one command and begin another. */
 const SEGMENT_SEPARATORS = new Set([";", ";;", "&&", "||", "&"]);
 /** Operators that attach a target to the CURRENT command rather than starting a new one. */
 const REDIRECTIONS = new Set([">", ">>", "<", ">&"]);
-/** `find` options and actions that walk, or act on what they find, without regard to `-maxdepth`. */
-const FIND_UNBOUNDED_WORDS = new Set(["-L", "-follow", "-delete", "-exec", "-execdir", "-ok", "-okdir"]);
+/**
+ * `find` options and actions that walk, act on what they find, or read a directory's entries
+ * without regard to `-maxdepth`. `-empty` is here because deciding a directory is empty means
+ * opening it, which at the bound would read the hook directory itself.
+ */
+const FIND_UNBOUNDED_WORDS = new Set([
+  "-L", "-follow", "-delete", "-empty", "-exec", "-execdir", "-ok", "-okdir",
+]);
 
 function tokenText(token: ShellToken): string | null {
   if (typeof token === "string") return token;
@@ -881,6 +898,7 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
   let operands: Array<string | null> = [];
   let words: string[] | null = [];
   let redirected = false;
+  let previousWord: string | null = null;
   for (const token of tokens) {
     const op = operator(token);
     if (op === null) {
@@ -891,6 +909,7 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
         if (text === null) words = null;
         else words.push(text);
       }
+      previousWord = text;
       continue;
     }
     if (SEGMENT_SEPARATORS.has(op)) {
@@ -898,10 +917,15 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
       operands = [];
       words = [];
       redirected = false;
+      previousWord = null;
       continue;
     }
     if (!REDIRECTIONS.has(op)) return null;
+    // `2>file`: the IO number is a word of its own here, but it belongs to the redirection.
+    if (words !== null && previousWord !== null && /^\d+$/u.test(previousWord) &&
+        words[words.length - 1] === previousWord) words.pop();
     redirected = true;
+    previousWord = null;
   }
   segments.push({ operands, words });
   return segments;
@@ -930,10 +954,13 @@ function findWalkBound(words: readonly string[]): number | null {
 }
 
 /**
- * Whether this segment merely inspects an operand sitting `separation` components above the guard
- * state: it may name the hook directory, but must not enumerate what is inside it.
+ * Whether this segment merely inspects the directories it names, reaching no deeper than
+ * `separation` components below them: it may name the hook directory, but must not enumerate what
+ * is inside it. An empty segment — a stray separator, or a bare redirection — commands nothing and
+ * can rebind nothing, so it qualifies vacuously.
  */
 function inspectsAncestorOnly(words: readonly string[], separation: number): boolean {
+  if (words.length === 0) return true;
   // The shell expands these into words this classifier never sees.
   if (words.some((word) => /[*?[\]{}]/u.test(word))) return false;
   // An assignment decides what the command name resolves to.
@@ -983,8 +1010,9 @@ export function commandTargetsGuardState(
   } catch {
     return GUARD_STATE_REFUSAL;
   }
-  // A backtick nests a command the tokenizer does not separate; nothing inside one is inspectable.
-  const segments = command.includes("`") ? null : commandSegments(tokens);
+  // A backtick nests a command the tokenizer does not separate, and a newline would silently join
+  // two commands into one; nothing in either is inspectable.
+  const segments = /[`\n\r]/u.test(command) ? null : commandSegments(tokens);
   if (segments === null) {
     for (const token of tokens) {
       const value = tokenText(token);
@@ -992,13 +1020,17 @@ export function commandTargetsGuardState(
     }
     return null;
   }
-  for (const { operands, words } of segments) {
+  for (const { operands } of segments) {
     for (const value of operands) {
       if (value === null) continue;
       const relation = guardStateRelation(value, cwd, root);
       if (relation === null) continue;
-      if (relation.kind === "inside" || words === null) return GUARD_STATE_REFUSAL;
-      if (!inspectsAncestorOnly(words, relation.separation)) return GUARD_STATE_REFUSAL;
+      if (relation.kind === "inside") return GUARD_STATE_REFUSAL;
+      // Every command in the list has to be an inspection, not just the one holding this operand:
+      // an earlier `hash -p`, `PATH=`, or function definition decides what a later `ls` runs.
+      const bounded = segments.every(({ words }) =>
+        words !== null && inspectsAncestorOnly(words, relation.separation));
+      if (!bounded) return GUARD_STATE_REFUSAL;
     }
   }
   return null;
