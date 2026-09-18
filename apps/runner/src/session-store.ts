@@ -123,8 +123,9 @@ export interface SessionMeta {
   titleSource?: SessionTitleSource;
   providerUpdatedAt?: string;
   config: SessionConfig;
-  /** Effective Orchestrator restriction. Missing legacy metadata remains strict at launch. */
-  orchestrator?: { strictProjectIsolation: boolean; issueNumbers?: number[] };
+  /** Effective Orchestrator restriction. Missing legacy metadata remains strict at launch, and a
+   * missing `integrationIsolation` matches that: a strict launch never carried user integrations. */
+  orchestrator?: { strictProjectIsolation: boolean; integrationIsolation?: boolean; issueNumbers?: number[] };
   /** Exact provider model resolved from the selected alias for the active session. */
   resolvedModel?: string | null;
   /** Secret references only; actual MCP credentials are never written to meta.json. */

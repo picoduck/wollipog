@@ -253,7 +253,11 @@ function removePiAgentControlLaunchState(
  * socket and are scrubbed from durable session metadata by the existing env policy. */
 export function provisionAgentControl(
   spec: Pick<SessionLaunchSpec, "sessionId" | "driver" | "context" | "executionTarget" | "command" | "args" | "env"> &
-    Partial<Pick<SessionLaunchSpec, "config" | "orchestrator" | "acpSessionContext" | "workspacePath">> &
+    Partial<Pick<SessionLaunchSpec, "config" | "acpSessionContext" | "workspacePath">> &
+    // Persisted session metadata written before protocol v164 has no `integrationIsolation`, and a
+    // resume re-provisions from exactly that metadata. Accept its absence here and resolve it to the
+    // conservative value for the shape below, rather than forcing callers to invent one.
+    { orchestrator?: { strictProjectIsolation: boolean; integrationIsolation?: boolean; issueNumbers?: number[] } } &
     { repoPath?: string; worktreePath?: string | null },
   config: {
     controlPlaneUrl: string;
