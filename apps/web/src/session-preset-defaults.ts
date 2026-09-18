@@ -87,6 +87,18 @@ export function orchestratorUnavailableReason(input: {
  * uses the coupled preset — notably ACP, whose provider-mode permission contract is unaudited — and
  * the sentence names which condition selects it so the user can change the one they control.
  */
+/** The exact list of what Integration Isolation removes, used by every surface that discloses it so
+ * the dialog, the settings panel, and the session detail cannot describe the policy differently. */
+export const INTEGRATION_ISOLATION_REMOVED =
+  "Removes user-configured MCP servers, hooks, plugins, apps, extensions, skills, prompt templates, " +
+  "and ambient context files, leaving only Wollipog's management tools. Integrations named explicitly " +
+  "in the agent definition's launch arguments are part of the harness installation and remain.";
+
+/** Companion sentence: the two things this policy deliberately does not touch. */
+export const INTEGRATION_ISOLATION_PRESERVED =
+  "The provider permission mode, built-in tool inventory, sandbox and approval behavior, and the " +
+  "project boundary are unchanged.";
+
 export function orchestratorPresetPermissionsReason(input: {
   controlPlaneSupportsRole: boolean;
   runnerProtocolVersion: number | null | undefined;

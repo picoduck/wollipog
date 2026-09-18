@@ -64,7 +64,7 @@ function settings(drifted = false): OrchestratorSettingsView {
           ui_evidence_approval: "human",
         },
       },
-      execution: { strictProjectIsolation: false },
+      execution: { strictProjectIsolation: false, integrationIsolation: false },
     },
     capabilities: {
       harnesses: [
