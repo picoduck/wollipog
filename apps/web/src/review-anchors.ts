@@ -54,9 +54,12 @@ export function diffAnchorKey(anchor: DiffAnchor): string {
  * file list is capped for transport: two different truncated sets share a length, and the counts
  * around them are what distinguish them.
  *
- * Best-effort by construction: an in-place edit that keeps a file's path, status, and line totals
- * identical is invisible here, exactly as it is invisible in the header this keeps the diff
- * agreeing with.
+ * Every one of those facts describes the change set's SHAPE, so together they still could not see
+ * an in-place edit that rewrites a line without adding, removing, or staging anything (#1285).
+ * `contentSignature` is the runner's content identity for the same uncommitted diff and closes
+ * that gap. A pre-v165 runner omits it and a v165 runner reports null when it declined to hash a
+ * very large change set; both fold to a constant here, leaving the shape-only comparison the
+ * signature has always made rather than a wrong answer.
  */
 export function changeSetSignature(status: GitStatusInfo | null | undefined): string | null {
   if (!status) return null;
@@ -68,6 +71,7 @@ export function changeSetSignature(status: GitStatusInfo | null | undefined): st
     status.stagedCount ?? "",
     status.addedLines ?? "",
     status.deletedLines ?? "",
+    status.contentSignature ?? "",
     status.filesTruncated ? "1" : "0",
     status.files.length,
     ...status.files.map((file) => `${file.status}${SEP}${file.path}`),

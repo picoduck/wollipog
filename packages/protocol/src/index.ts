@@ -476,7 +476,16 @@
 //      ambient integration the human asked to remove, so the control plane refuses the combination
 //      with upgrade guidance rather than silently broadening the launch. When the policy is
 //      disabled nothing new is required of the runner and the launch is byte-identical to v163's.
-export const PROTOCOL_VERSION = 164;
+// 165: the git status read publishes a content identity for the uncommitted tracked diff.
+//      GitStatusInfo gains contentSignature — a digest of `git diff HEAD --unified=0`, whose
+//      per-file headers carry git's own object ids for the worktree content. Every other status
+//      fact describes the SHAPE of the change set, so an in-place edit that rewrites a line
+//      without adding, removing, or staging anything left them all identical and the Review diff
+//      could silently lag the working tree. A present null means the runner checked and did not
+//      compute it (the change set exceeds the read's hashing budget, or HEAD is unborn); an
+//      absent field means a pre-v165 runner, and clients fall back to the status entries exactly
+//      as before. Additive + optional; no new runner behaviour is required of it.
+export const PROTOCOL_VERSION = 165;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -7778,6 +7787,18 @@ export interface GitStatusInfo extends GitRepositoryFacts {
    * files only — binary rows don't count). Omitted by pre-v20 runners. */
   addedLines?: number;
   deletedLines?: number;
+  /**
+   * Content identity of the uncommitted tracked diff this status describes — HEAD versus the
+   * worktree together with the index-versus-HEAD partition, so it covers both the content the
+   * diff renders and which pane each hunk falls in. Every other field here describes the change
+   * set's shape, so this is the only one that moves when an in-place edit rewrites a line, or an
+   * external `git add` restages one of several hunks, without changing any status entry.
+   *
+   * A present null means the runner checked and did not compute it — the change set is larger
+   * than the status read's hashing budget, or HEAD is unborn. Omitted by pre-v165 runners. Both
+   * degrade to shape-only comparison rather than to a wrong answer.
+   */
+  contentSignature?: string | null;
 }
 
 export interface GitCommitInfo {

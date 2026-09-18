@@ -472,6 +472,26 @@ test("the signature moves for every change the header or the file list would sho
   }
 });
 
+test("an in-place edit moves the signature even though every shape fact is identical", () => {
+  // #1285: the reproduction is an edit that adds and removes nothing. Path, porcelain status,
+  // staged count, and both line totals stay exactly where they were, so the runner's content
+  // identity is the only thing that can report that the diff moved.
+  const before = status({ contentSignature: "a".repeat(64) });
+  const after = status({ contentSignature: "b".repeat(64) });
+  assert.deepEqual({ ...before, contentSignature: null }, { ...after, contentSignature: null });
+  assert.notEqual(changeSetSignature(after), changeSetSignature(before));
+  // And a repeated observation of the same content still costs nothing.
+  assert.equal(changeSetSignature(status({ contentSignature: "a".repeat(64) })), changeSetSignature(before));
+});
+
+test("a runner that cannot report content identity leaves shape-only comparison intact", () => {
+  // A pre-v165 runner omits the field; a v165 runner declining a very large change set reports
+  // null. Neither may look like movement on its own, and neither may suppress movement in shape.
+  const omitted = changeSetSignature(status());
+  assert.equal(changeSetSignature(status({ contentSignature: null })), omitted);
+  assert.notEqual(changeSetSignature(status({ contentSignature: null, addedLines: 4 })), omitted);
+});
+
 test("the signature cannot be forged across the file list join", () => {
   assert.notEqual(
     changeSetSignature(status({ files: [{ status: "M", path: "a" }, { status: "M", path: "b" }] })),
