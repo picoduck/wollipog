@@ -571,6 +571,17 @@ no mode emulation and emits no mediation notice. The control-channel refusal in 
 `control_request` handler is retained as defense in depth for `default`/`auto`; a double refusal is
 harmless because Claude never reaches the control channel for a command the hook already denied.
 
+- **Relative operands are resolved where the Bash tool's shell is.** Claude's Bash tool keeps its
+  own directory between calls and the `can_use_tool` request carries no cwd (measured on 2.1.270:
+  the request has `tool_use_id`, `input`, and permission metadata only, while the hook payload's
+  `cwd` follows the tool). The driver therefore follows the directory itself: each top-level Bash
+  `tool_use` records its command, and its successful `tool_result` — the moment Claude commits the
+  directory — advances the tracked directory through `shellCwdAfterCommand`. A failed command leaves
+  it in place, a change the text cannot follow (`cd $DIR`, `cd -`, `popd`, a pipeline or subshell)
+  makes it unknown, and an unknown directory falls back to the session directory — the pre-#1333
+  behavior, never less strict — until an absolute `cd` re-establishes it. Every spawn starts at the
+  session directory again, and subagents are not tracked (#1333).
+
 - **The guard's own state is vetoed.** The provider runs as the runner's OS user, so it could
   rewrite the protection list. Every tool call that references the runner hook state directory is
   refused — Bash by raw text and by every `cwd`-resolved operand, and `Edit`/`MultiEdit`/`Write`/

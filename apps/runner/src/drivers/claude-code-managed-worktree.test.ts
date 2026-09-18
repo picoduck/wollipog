@@ -418,3 +418,93 @@ test("an ordinary edit outside the guard's state still reaches the normal approv
     .filter((frame) => frame.type === "control_response");
   assert.deepEqual(responses, [], "the runner holds no opinion; it becomes an ordinary approval");
 });
+
+/** Feed one completed Bash tool call through the stream, the way Claude reports it. */
+function completeBash(run: Launch, id: string, command: string, ok = true): void {
+  run.child.stdout.write(JSON.stringify({
+    type: "assistant", message: { content: [{ type: "tool_use", id, name: "Bash", input: { command } }] },
+  }) + "\n");
+  run.child.stdout.write(JSON.stringify({
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: id, is_error: !ok, content: ok ? "" : "Exit code 1" }] },
+  }) + "\n");
+}
+
+function requestBash(run: Launch, requestId: string, command: string): void {
+  run.child.stdout.write(JSON.stringify({
+    type: "control_request",
+    request_id: requestId,
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: { command }, tool_use_id: `use-${requestId}` },
+  }) + "\n");
+}
+
+async function controlResponses(run: Launch): Promise<Array<{ id: string; behavior?: string }>> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  return run.writes.join("").split("\n").filter(Boolean)
+    .map((line) => JSON.parse(line) as { type?: string; response?: { request_id?: string; response?: { behavior?: string } } })
+    .filter((frame) => frame.type === "control_response")
+    .map((frame) => ({ id: frame.response?.request_id ?? "", behavior: frame.response?.response?.behavior }));
+}
+
+test("a relative Bash request is resolved where the tool's shell is, not at the session directory (#1333)", async (t) => {
+  const dir = tempDir(t);
+  const run = launch(provision(dir, "cwd-1", "auto", { protections: PROTECTIONS }), "auto", PROTECTIONS);
+  t.after(() => run.driver.dispose());
+  // Before any directory change, leaving the worktree root is refused.
+  requestBash(run, "root", "cd ..");
+  // The shell moves into a subdirectory and the command succeeds: Claude commits that directory.
+  completeBash(run, "t1", "cd apps/runner");
+  requestBash(run, "sub", "cd .. && pnpm typecheck");
+  // A change that FAILED leaves the shell where it was: still two levels down, so `cd ..` is fine.
+  completeBash(run, "t2", "cd ../.. && false", false);
+  requestBash(run, "still-sub", "cd ..");
+  // Back at the root through a successful change, leaving is refused again.
+  completeBash(run, "t3", "cd ../..");
+  requestBash(run, "root-again", "cd ..");
+  // A change the text cannot follow makes the directory unknown, and the session directory is
+  // the fallback — exactly the pre-#1333 behavior, never less strict.
+  completeBash(run, "t4", "cd $SOMEWHERE");
+  requestBash(run, "unknown", "cd ..");
+  const responses = await controlResponses(run);
+  assert.deepEqual(responses, [
+    { id: "root", behavior: "deny" },
+    { id: "root-again", behavior: "deny" },
+    { id: "unknown", behavior: "deny" },
+  ], "only the requests issued at the worktree root (or from an unknown directory) are refused");
+});
+
+test("a subagent's directory changes do not move the top-level shell", async (t) => {
+  const dir = tempDir(t);
+  const run = launch(provision(dir, "cwd-2", "auto", { protections: PROTECTIONS }), "auto", PROTECTIONS);
+  t.after(() => run.driver.dispose());
+  run.child.stdout.write(JSON.stringify({
+    type: "assistant", parent_tool_use_id: "task-1",
+    message: { content: [{ type: "tool_use", id: "s1", name: "Bash", input: { command: "cd apps" } }] },
+  }) + "\n");
+  run.child.stdout.write(JSON.stringify({
+    type: "user", parent_tool_use_id: "task-1",
+    message: { content: [{ type: "tool_result", tool_use_id: "s1", is_error: false, content: "" }] },
+  }) + "\n");
+  requestBash(run, "root", "cd ..");
+  assert.deepEqual(await controlResponses(run), [{ id: "root", behavior: "deny" }]);
+});
+
+test("a new spawn starts the tracked shell directory at the session directory again", async (t) => {
+  const dir = tempDir(t);
+  const run = launch(provision(dir, "cwd-3", "auto", { protections: PROTECTIONS }), "auto", PROTECTIONS);
+  t.after(() => run.driver.dispose());
+  completeBash(run, "t1", "cd apps/runner");
+  requestBash(run, "sub", "cd ..");
+  assert.deepEqual(await controlResponses(run), []);
+  // End the turn and start another: the driver spawns a fresh process.
+  run.child.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "" }) + "\n");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  run.child.emit("close", 0);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const spawns = run.argv.length;
+  void run.driver.prompt("again");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.ok(run.argv.length > spawns, "a second process was spawned");
+  requestBash(run, "root", "cd ..");
+  assert.deepEqual((await controlResponses(run)).map((r) => r.id), ["root"]);
+});

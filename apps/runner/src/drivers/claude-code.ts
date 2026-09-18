@@ -29,6 +29,7 @@ import { prepareClaudeHookArgs } from "../hook-settings.js";
 import {
   commandTargetsGuardState,
   commandTargetsManagedWorktree,
+  shellCwdAfterCommand,
   toolTargetsGuardState,
   type ManagedWorktreeProtection,
 } from "../managed-worktree-protection.js";
@@ -577,6 +578,14 @@ export class ClaudeCodeDriver implements Driver {
   private hookCircuitReported = false;
   private hookCircuitOpenedAt: number | null = null;
   private managedPermissionMediationReported = false;
+  /**
+   * The directory Claude's Bash tool is in right now, or null when a command moved it somewhere
+   * the text did not spell out. Relative operands in a Bash permission request are resolved here,
+   * not at the session directory: the control request carries no cwd, and the tool keeps its own
+   * directory between calls (#1333). Reset to the session directory at every spawn.
+   */
+  private toolShellCwd: string | null = null;
+  private readonly pendingBashCommands = new Map<string, string>();
   /** Established by the last `preparedBaseArgs()`: the managed-worktree guard hook is in the
    * settings file this spawn launches with, so the runner does NOT have to mediate the mode. */
   private managedWorktreeGuardActive = false;
@@ -687,6 +696,39 @@ export class ClaudeCodeDriver implements Driver {
     return claudeRoutineControlChannelMode(this.launchedPermissionMode(), this.opts.orchestrator != null);
   }
 
+  /** Where a Bash command from the provider will run; the session directory when unknown. */
+  private bashToolCwd(): string {
+    return this.toolShellCwd ?? this.cwd;
+  }
+
+  /**
+   * Follow the Bash tool's directory through the stream: a `tool_use` records the command, and its
+   * successful `tool_result` is when Claude commits the directory the command ended in. A failed
+   * command leaves the directory where it was. Subagents have directories of their own and are
+   * not tracked; their permission requests are resolved at the session directory as before.
+   */
+  private observeToolShellCwd(msg: Json): void {
+    if (typeof msg?.parent_tool_use_id === "string" && msg.parent_tool_use_id) return;
+    const blocks: Json[] = Array.isArray(msg?.message?.content) ? msg.message.content : [];
+    if (msg?.type === "assistant") {
+      for (const block of blocks) {
+        if (block?.type !== "tool_use" || block.name !== "Bash" || typeof block.id !== "string") continue;
+        const command = (block.input as { command?: unknown } | undefined)?.command;
+        if (typeof command === "string") this.pendingBashCommands.set(block.id, command);
+      }
+      return;
+    }
+    if (msg?.type !== "user") return;
+    for (const block of blocks) {
+      if (block?.type !== "tool_result" || typeof block.tool_use_id !== "string") continue;
+      const command = this.pendingBashCommands.get(block.tool_use_id);
+      if (command === undefined) continue;
+      this.pendingBashCommands.delete(block.tool_use_id);
+      if (block.is_error === true) continue;
+      this.toolShellCwd = shellCwdAfterCommand(command, this.toolShellCwd);
+    }
+  }
+
   /**
    * The guard keeps its protection list in a runner-owned file, and the provider runs as the same
    * OS user, so any tool call that names that directory — read or write — is refused. This is
@@ -705,7 +747,7 @@ export class ClaudeCodeDriver implements Driver {
       ? (input as { command?: unknown }).command
       : undefined;
     return toolName === "Bash" && typeof command === "string"
-      ? commandTargetsGuardState(command, this.cwd, directory)
+      ? commandTargetsGuardState(command, this.bashToolCwd(), directory)
       : null;
   }
 
@@ -1091,6 +1133,8 @@ export class ClaudeCodeDriver implements Driver {
         return resolve("refusal");
       }
       this.child = child;
+      this.toolShellCwd = this.cwd;
+      this.pendingBashCommands.clear();
       const turnId = ++this.providerTurnSeq;
       this.activeOneShotTurnId = turnId;
 
@@ -1363,6 +1407,8 @@ export class ClaudeCodeDriver implements Driver {
         return;
       }
       this.child = child;
+      this.toolShellCwd = this.cwd;
+      this.pendingBashCommands.clear();
       this.persistentTransport = true;
       this.persistentFingerprint = fingerprint;
       this.persistentBuffer = new BoundedNdjsonBuffer(
@@ -1482,6 +1528,7 @@ export class ClaudeCodeDriver implements Driver {
     }
     if (!turn) {
       this.observeBackgroundLifecycle(msg);
+      this.observeToolShellCwd(msg);
       if (msg.type === "rate_limit_event") {
         this.cb.onSubscriptionUsage?.({ provider: "claude", kind: "sparse", payload: msg });
       } else if (msg.type !== "system") {
@@ -2268,6 +2315,7 @@ export class ClaudeCodeDriver implements Driver {
   private handleEvent(msg: Json): StopReason | null {
     if (this.disposed) return null;
     this.observeBackgroundLifecycle(msg);
+    this.observeToolShellCwd(msg);
     // Claude tags every assistant/user/stream_event message that originated inside a subagent
     // with `parent_tool_use_id` = the id of the spawning Task tool call (top-level ⇒ null). We
     // carry it onto the emitted events so the UI can nest a subagent's work under its Task block.
@@ -2314,7 +2362,7 @@ export class ClaudeCodeDriver implements Driver {
             (req.tool_name === "Bash" && typeof req.input?.command === "string"
               ? commandTargetsManagedWorktree(
                   req.input.command,
-                  this.cwd,
+                  this.bashToolCwd(),
                   protections,
                 )
               : null);

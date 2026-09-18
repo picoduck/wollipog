@@ -4,6 +4,7 @@ import fc from "fast-check";
 import {
   commandTargetsManagedWorktree,
   MANAGED_WORKTREE_REFUSAL,
+  shellCwdAfterCommand,
   type ManagedWorktreeProtection,
 } from "./managed-worktree-protection.js";
 
@@ -137,4 +138,43 @@ test("all literal spellings of the protected root stay refused while descendants
   fc.assert(fc.property(remover, safeSegment, (prefix, child) => {
     assert.equal(commandTargetsManagedWorktree(`${prefix} -- ${child}`, protectedPath, protection), null);
   }));
+});
+
+test("shellCwdAfterCommand follows literal directory changes and gives up on invisible ones", () => {
+  const root = protectedPath;
+  const cases: Array<[string, string | null, string | null]> = [
+    ["ls", root, root],
+    ["cd apps/runner", root, `${root}/apps/runner`],
+    ["cd apps/runner && pnpm typecheck", root, `${root}/apps/runner`],
+    ["cd apps && cd runner; ls", root, `${root}/apps/runner`],
+    ["cd ..", `${root}/apps/runner`, `${root}/apps`],
+    ["cd .. && cd ..", `${root}/apps/runner`, root],
+    ["cd -P apps && ls", root, `${root}/apps`],
+    ["cd -- apps", root, `${root}/apps`],
+    ["cd /tmp/elsewhere", root, "/tmp/elsewhere"],
+    ["pushd apps", root, `${root}/apps`],
+    // Unknown after these: the text does not say where the shell ends up.
+    ["cd $DIR", root, null],
+    ["cd -", root, null],
+    ["cd ~", root, null],
+    ["popd", root, null],
+    ["(cd apps && ls)", root, null],
+    ["cd apps | cat", root, null],
+    ["ls && cd apps | cat", root, null],
+    // An unknown directory stays unknown until an absolute change re-establishes it.
+    ["ls", null, null],
+    ["cd apps", null, null],
+    ["cd /tmp/known", null, "/tmp/known"],
+    ["cd /tmp/known && cd sub", null, "/tmp/known/sub"],
+  ];
+  for (const [command, cwd, expected] of cases) {
+    assert.equal(shellCwdAfterCommand(command, cwd), expected, `${cwd} + \`${command}\``);
+  }
+});
+
+test("a relative removal is judged from where the shell actually is", () => {
+  // From a subdirectory, `cd ..` stays inside the worktree; from the root it leaves it.
+  assert.equal(commandTargetsManagedWorktree("cd ..", `${protectedPath}/apps/runner`, protection), null);
+  assert.equal(commandTargetsManagedWorktree("cd ..", protectedPath, protection), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("rm -rf ../..", `${protectedPath}/apps/runner`, protection), MANAGED_WORKTREE_REFUSAL);
 });

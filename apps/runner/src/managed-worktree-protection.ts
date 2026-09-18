@@ -575,6 +575,84 @@ export function commandTargetsManagedWorktree(
   }
 }
 
+/**
+ * The shell directory Claude's Bash tool will keep after `command` succeeds, or null when it cannot
+ * be known from the text alone.
+ *
+ * Claude Code runs each Bash call in a shell started in the directory the previous successful call
+ * ended in, and records that directory only when the whole command exits 0 — so a caller must feed
+ * this only successful commands. The walk is deliberately literal: `cd`/`pushd` at the top level of
+ * an `&&`, `;`, or `||` chain moves the directory; anything else that can move it invisibly (a
+ * pipeline, a subshell, `popd`, `cd -`, an operand the text does not spell out) makes the answer
+ * unknown, and an unknown directory stays unknown until an absolute `cd` re-establishes it. A `cwd`
+ * of null means the directory is already unknown.
+ */
+export function shellCwdAfterCommand(command: string, cwd: string | null): string | null {
+  if (!command || command.length > MAX_COMMAND_LENGTH || command.includes("\0")) return cwd;
+  let tokens: ShellToken[];
+  try {
+    tokens = parse<EnvironmentReference>(command, (env) => ({ env }));
+  } catch {
+    return null;
+  }
+  let current = cwd;
+  let segment: ShellToken[] = [];
+  let piped = false;
+  const environment = new Map<string, string>();
+  const evaluate = (): boolean => {
+    if (!segment.length) return true;
+    let parsed: ReturnType<typeof commandWords>;
+    try {
+      parsed = commandWords(segment, current ?? ".", environment);
+    } catch {
+      return false;
+    }
+    if (parsed?.executable !== "cd" && parsed?.executable !== "pushd") {
+      if (parsed?.executable === "popd") return false;
+      return true;
+    }
+    // A directory change inside a pipeline runs in a subshell in some shells and not others.
+    if (piped) return false;
+    // Skip the builtin's own options (`cd -P dir`, `cd -- dir`); a lone `-` is the previous directory.
+    let index = 0;
+    while (typeof parsed.words[index] === "string" && (parsed.words[index] as string).startsWith("-") &&
+        parsed.words[index] !== "-") {
+      if (parsed.words[index] === "--") { index += 1; break; }
+      index += 1;
+    }
+    const operand = parsed.words[index];
+    if (operand === undefined) {
+      const home = environment.get("HOME") ?? process.env.HOME;
+      if (!home) return false;
+      current = normalize(home);
+      return true;
+    }
+    if (typeof operand !== "string") return false;
+    if (operand === "-" || operand.startsWith("~")) return false;
+    if (isAbsolute(operand)) {
+      current = normalize(operand);
+      return true;
+    }
+    if (current === null) return false;
+    current = normalize(resolve(current, operand));
+    return true;
+  };
+  for (const token of tokens) {
+    const op = operator(token);
+    if (op === null) {
+      segment.push(token);
+      continue;
+    }
+    if (op !== "&&" && op !== ";" && op !== "||" && op !== "|") return null;
+    // Both sides of a `|` are pipeline members.
+    if (op === "|") piped = true;
+    if (!evaluate()) return null;
+    segment = [];
+    piped = op === "|";
+  }
+  return evaluate() ? current : null;
+}
+
 /* ---------------------------------------------------------------------------------------------
  * Guard-state boundary.
  *
