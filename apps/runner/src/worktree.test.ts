@@ -4875,7 +4875,7 @@ test("a worktree removed between turns fails the resume instead of spawning a pr
       completed() {},
       failed(error, code) { durableFailures.push({ error, code }); },
       uncertain() {},
-    });
+    }, false, undefined, true);
     await waitForCondition(
       () => durableFailures.length === 1,
       "the resume never reported the invalid worktree",
@@ -4891,7 +4891,7 @@ test("a worktree removed between turns fails the resume instead of spawning a pr
     assert.deepEqual(durableFailures, [{
       error: `${meta?.worktreeRecovery?.detail}; this message was not sent`,
       code: "WORKTREE_RECOVERY_REQUIRED",
-    }], "the exact command identity receives one known-not-delivered terminal receipt");
+    }], "an authentication-retained pre-launch command keeps one known-not-delivered receipt");
 
     const restoredBranch = meta?.worktreeBranch;
     assert.ok(restoredBranch);

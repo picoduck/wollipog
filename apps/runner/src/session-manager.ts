@@ -8534,9 +8534,9 @@ export class SessionManager {
     for (const prompt of queue) this.failQueuedPrompt(prompt, error, "COMMAND_CANCELLED");
   }
 
-  /** Authentication recovery has durably accepted this command. Remove its in-memory copy from
+  /** Another durable recovery path has terminalized this command. Remove its in-memory copy from
    * the launch owner's cleanup set before that owner rejects the rest of the failed launch FIFO. */
-  private transferPreLaunchPromptToAuthentication(sessionId: string, commandId: string): void {
+  private transferPreLaunchPromptOwnership(sessionId: string, commandId: string): void {
     const queue = this.preLaunchQueues.get(sessionId);
     if (!queue) return;
     const retained = queue.filter((prompt) => prompt.durable?.commandId !== commandId);
@@ -8834,7 +8834,7 @@ export class SessionManager {
         if (retainedDurable && queueBeforeLaunch) {
           // Persistence transfers ownership first; cleanup can then reject only work that auth
           // recovery did not take. No await separates the two sides of this handoff.
-          this.transferPreLaunchPromptToAuthentication(sessionId, durable.commandId);
+          this.transferPreLaunchPromptOwnership(sessionId, durable.commandId);
         }
       } else if (blocked?.providerAuthBlock?.delivery === "not_delivered" &&
           blocked.providerAuthRetryAttemptedRecoveryId !== blocked.providerAuthBlock.recoveryId &&
@@ -8866,6 +8866,12 @@ export class SessionManager {
           `${blocked.worktreeRecovery.detail}; this message was not sent`,
           "WORKTREE_RECOVERY_REQUIRED",
         );
+        if (durable && queueBeforeLaunch) {
+          // Authentication recovery can own this same pre-launch prompt before worktree
+          // verification discovers a newer refusal. Preserve the more specific durable receipt;
+          // generic launch cleanup must reject only the remaining FIFO entries.
+          this.transferPreLaunchPromptOwnership(sessionId, durable.commandId);
+        }
       } else {
         durable?.failed("provider session could not be resumed", "INVALID_COMMAND");
       }
