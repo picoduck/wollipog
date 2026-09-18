@@ -354,15 +354,10 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
     const service = svc;
 
     /** Deliver a control-plane launch the way the runner's `start_session` case does. */
-    const deliver = async (
-      sessionId: string,
-      prompt: string,
-      repair: (spec: SessionLaunchSpec) => void = () => {},
-    ): Promise<ProviderLaunch> => {
+    const deliver = async (sessionId: string, prompt: string): Promise<ProviderLaunch> => {
       const message = hub.sentOfType("start_session").filter((msg) => msg.spec.sessionId === sessionId).at(-1);
       assert.ok(message, `the control plane sent a launch for ${sessionId}`);
       const spec: SessionLaunchSpec = structuredClone(message.spec);
-      repair(spec);
       provisionClaudeHooks(spec, {
         controlPlaneUrl: CONTROL_PLANE_URL, controlPlaneProtocolVersion: PROTOCOL_VERSION, enabled: true,
       }, () => {}, hookHost);
@@ -559,33 +554,51 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
     assert.equal(git(["-C", parentWorktree, "branch", "--show-current"]).trim(),
       `agent/${parent.id}-implementation`);
 
-    // The parent's NEXT launch runs in that worktree.
+    // The parent's NEXT PROMPT relaunches it inside the selected worktree: `activateWorktree`
+    // records `pendingWorktreeRebind` (apps/runner/src/session-manager.ts:1932) and the drain
+    // performs the rebind once the live turn ends. No control-plane restart is involved.
     await settleTurn(first);
-    assert.ok(service.restart(parent.id).ok, "the Orchestrator restarts into its worktree");
-    // PRE-EXISTING DEFECT, reported separately and unrelated to the additive role: the runner
-    // snapshot reports `useWorktree: worktreePath != null` (apps/runner/src/session-store.ts:2876),
-    // the control plane persists that but never recomputes `execution_target`, and its restart spec
-    // therefore pairs `useWorktree: true` with the creation-time `...:host:in_place` target, which
-    // `validateHostExecutionTarget` (apps/runner/src/execution-target.ts:15) refuses. Repair only
-    // that one field here — the way a recomputing control plane would — so this scenario can still
-    // assert the launch coordinate. Nothing about the Orchestrator role is adjusted.
-    const second = await deliver(parent.id, "make the requested edit", (spec) => {
-      spec.executionTarget = {
-        ...spec.executionTarget!,
-        id: `runner:${RUNNER_ID}:host:worktree`,
-        workspaceStrategy: "worktree",
-        boundaries: { ...spec.executionTarget!.boundaries, filesystem: "worktree" },
-      };
-    });
+    const promptResult = service.prompt(parent.id, "make the requested edit");
+    assert.ok(promptResult.ok, promptResult.error ?? "prompt failed");
+    const promptCommand = hub.sent.flatMap((msg) => msg.type === "prompt_session"
+      ? [msg]
+      : msg.type === "durable_session_command" && msg.command.type === "prompt_session"
+        ? [msg.command]
+        : []).at(-1);
+    assert.ok(promptCommand && promptCommand.sessionId === parent.id, "the control plane sent the prompt");
+    const launchesBeforePrompt = launches.length;
+    // The runner's `prompt_session` case calls exactly this.
+    manager.prompt(promptCommand.sessionId, promptCommand.text, promptCommand.images,
+      promptCommand.slashCommand, promptCommand.config);
+    await waitFor(() => launches.length > launchesBeforePrompt, "the next prompt relaunched the provider");
+    const second = launches.at(-1)!;
+    assert.equal(second.sessionId, parent.id);
+    const rebindSessionId = valuesOf(second.argv, "--session-id")[0] ?? valuesOf(second.argv, "--resume")[0]!;
+    second.child.stdout.write(JSON.stringify({
+      type: "system", subtype: "init", session_id: rebindSessionId, model: "claude-test",
+    }) + "\n");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
     assert.equal(second.cwd, parentWorktree, "the parent's next launch uses its dedicated worktree as cwd");
-    assert.deepEqual(second.opts.orchestrator, { strictProjectIsolation: false });
+    assert.deepEqual(second.opts.orchestrator, { strictProjectIsolation: false },
+      "the role survives the worktree rebind");
     assert.equal(store.readMeta(parent.id)?.config.permissionMode, "auto",
       "the user's permission-mode selection is untouched by the worktree");
     // A linked runner-owned worktree routes automatic review through Wollipog
-    // (`protectedClaudePermissionMode`), so `auto` mediates to the interactive mode. That is
-    // ordinary managed-worktree behavior, not an Orchestrator rule: the stdio channel remains.
+    // (`protectedClaudePermissionMode`, apps/runner/src/drivers/claude-code.ts:294), so the
+    // selected `auto` mediates to the interactive mode for this launch. That is ordinary
+    // managed-worktree behavior, not an Orchestrator rule, and the stdio channel remains.
+    assert.deepEqual(valuesOf(second.argv, "--permission-mode"), []);
     assert.deepEqual(valuesOf(second.argv, "--permission-prompt-tool"), ["stdio"]);
     assert.equal(hasFlag(second.argv, "--strict-mcp-config"), false);
+    // Resume idempotence: re-provisioning the same session adds the additive arguments once.
+    assert.deepEqual(valuesOf(second.argv, "--allowedTools"), ["mcp__wollipog__*"]);
+    assert.equal(second.argv.filter((arg) => arg === "--append-system-prompt").length, 1);
+    // The session's own worktree joins the readable Project Locations on this launch; every
+    // value still appears exactly once.
+    assert.deepEqual(valuesOf(second.argv, "--add-dir"), ["/home/user/notes", repo, parentWorktree]);
+    assert.deepEqual(valuesOf(second.argv, "--mcp-config"), [USER_MCP_CONFIG, wollipogMcp]);
+    assert.deepEqual(valuesOf(second.argv, "--settings"), [USER_SETTINGS]);
 
     // ------------------ 5. the implementation itself behaves exactly as for a normal Session
     second.child.stdout.write(JSON.stringify({
