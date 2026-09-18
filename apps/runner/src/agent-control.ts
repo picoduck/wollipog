@@ -483,7 +483,7 @@ export function provisionAgentControl(
   if (additiveOrchestrator) {
     spec.env[ORCHESTRATOR_ENV_KEY] = "orchestrator";
     spec.args = stripAdditiveOrchestratorLaunchArgs(spec.args, spec.driver, orchestratorProjectPaths);
-    if (spec.driver !== "claude-code" && reservedCodexMcpNameCollision(spec.args)) {
+    if ((spec.driver === "codex" || spec.driver === "codex-app-server") && reservedCodexMcpNameCollision(spec.args)) {
       throw new Error("the agent launch configures an MCP server named \"wollipog\", which is reserved for Wollipog's orchestration tools; rename that server to use the Orchestrator role");
     }
     // The general MCP config is re-appended below; removing it first keeps resume argv identical.

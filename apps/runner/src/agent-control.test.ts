@@ -260,6 +260,21 @@ test("a non-strict Pi Orchestrator launches as a normal session plus only the Or
     });
     provisionAgentControl(additive, { ...control, orchestratorAgent: piAgent }, () => {}, host);
 
+    // Pi's `-c` is its boolean Continue flag, not a Codex config override, so a following token
+    // that happens to read like `mcp_servers.wollipog=...` is a prompt, never a reserved-name
+    // collision. The Codex guard must not reach a Pi launch.
+    const continued = ["-c", 'mcp_servers.wollipog={ command = "mine" }'];
+    const continuedAgent: AgentDefinition = { ...piAgent, args: [...continued] };
+    const continuedLaunch = build("s_pi_continue", {
+      config: { permissionMode: "default" },
+      orchestrator: { strictProjectIsolation: false },
+    });
+    continuedLaunch.args = [...continued];
+    assert.doesNotThrow(() => provisionAgentControl(
+      continuedLaunch, { ...control, orchestratorAgent: continuedAgent }, () => {}, host,
+    ));
+    assert.deepEqual(continuedLaunch.args.slice(0, 2), continued, "the user's Pi arguments are untouched");
+
     // The two launches differ by exactly the Orchestrator instructions.
     assert.deepEqual(normalized(additive).slice(0, normalized(ordinary).length), normalized(ordinary),
       "the additive Pi launch extends the ordinary one without rewriting it");
