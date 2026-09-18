@@ -695,6 +695,63 @@ test("a draft that outlived the line it targets says so instead of submitting si
   }
 });
 
+test("Cancel keeps the whole draft for the next open, while submitting it starts the next one fresh", async () => {
+  // Cancel and submit both close the editor, and only what reopens tells them apart: a mis-clicked
+  // Cancel must not destroy a half-written finding (#1203), and a sent finding must not come back as
+  // a draft. Severity and the required flag are part of the draft, so both are held to the same rule.
+  const harness = await mountPanel();
+  const editorState = () => {
+    const editor = requiredEditor(harness.container, "src/b.ts");
+    return {
+      body: field<HTMLTextAreaElement>(editor, "textarea").value,
+      severity: field<HTMLSelectElement>(editor, "select").value,
+      required: field<HTMLInputElement>(editor, ".review-required-toggle input").checked,
+    };
+  };
+  const open = async () => {
+    await act(async () => {
+      fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
+    });
+  };
+  try {
+    await open();
+    await act(async () => {
+      const body = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
+      body.value = "not finished yet";
+      fireDomEvent.change(body);
+    });
+    await act(async () => {
+      const severity = field<HTMLSelectElement>(requiredEditor(harness.container, "src/b.ts"), "select");
+      severity.value = "nit";
+      fireDomEvent.change(severity);
+    });
+    await act(async () => {
+      fireDomEvent.change(
+        field<HTMLInputElement>(requiredEditor(harness.container, "src/b.ts"), ".review-required-toggle input"),
+        { target: { checked: false } },
+      );
+    });
+
+    await act(async () => {
+      fireDomEvent.click(editorButton(harness.container, "src/b.ts", "Cancel"));
+    });
+    assert.equal(editorIn(harness.container, "src/b.ts"), null, "cancel closed the editor");
+    await open();
+    assert.deepEqual(editorState(), { body: "not finished yet", severity: "nit", required: false },
+      "cancel only closed the editor; the draft was still there to reopen");
+
+    await act(async () => {
+      fireDomEvent.click(editorButton(harness.container, "src/b.ts", "Add Finding"));
+    });
+    assert.equal(editorIn(harness.container, "src/b.ts"), null, "submitting closed the editor");
+    await open();
+    assert.deepEqual(editorState(), { body: "", severity: "major", required: true },
+      "the submitted draft became a finding, so the next one on this line starts from the defaults");
+  } finally {
+    await harness.unmount();
+  }
+});
+
 /* -------------------------------------------------------------------------- */
 /* #1287 — the caret survives a rebuild the same way the text does             */
 /* -------------------------------------------------------------------------- */
@@ -1117,6 +1174,71 @@ test("during an active turn the diff re-reads on a bounded cadence", async () =>
   } finally {
     await harness.unmount();
     mock.timers.reset();
+  }
+});
+
+test("foregrounding the tab mid-turn catches the diff up at once instead of waiting out a tick", async () => {
+  // A hidden tab skips its cadence reads, so without the catch-up the reviewer would come back to a
+  // diff up to a whole interval behind the agent's edits.
+  const ownVisibility = Object.getOwnPropertyDescriptor(domWindow.document, "visibilityState");
+  const setVisibility = (value: "hidden" | "visible") => {
+    Object.defineProperty(domWindow.document, "visibilityState", { configurable: true, value });
+  };
+  mock.timers.enable({ apis: ["setInterval"] });
+  const harness = await mountPanel({ sessionStatus: "running" });
+  try {
+    assert.deepEqual(harness.diffCalls, ["uncommitted"]);
+    setVisibility("hidden");
+    harness.serveDiff(diffOf("2", [fileA({ text: "written-while-hidden" }), fileB()]));
+    await act(async () => { mock.timers.tick(10_000); });
+    await act(async () => { domWindow.document.dispatchEvent(new domWindow.Event("visibilitychange")); });
+    assert.deepEqual(harness.diffCalls, ["uncommitted"], "a hidden tab spends nothing, on a tick or on the event");
+
+    setVisibility("visible");
+    await act(async () => { domWindow.document.dispatchEvent(new domWindow.Event("visibilitychange")); });
+    assert.deepEqual(harness.diffCalls, ["uncommitted", "uncommitted"],
+      "the catch-up read ran on foregrounding, with no tick in between");
+    assert.ok(harness.container.textContent?.includes("written-while-hidden"), "and its diff is rendered");
+  } finally {
+    await harness.unmount();
+    mock.timers.reset();
+    if (ownVisibility) Object.defineProperty(domWindow.document, "visibilityState", ownVisibility);
+    else Reflect.deleteProperty(domWindow.document, "visibilityState");
+  }
+});
+
+test("a stage reply that lands after a scope switch leaves the new scope's read in charge", async () => {
+  // The reply describes the Uncommitted scope the reviewer has since left. Installing it would render
+  // nothing (the viewer gates on the response's own scope), and superseding the new scope's pending
+  // read would discard the one response that could — wedging the pane on "Loading diff…".
+  const harness = await mountPanel();
+  try {
+    // The reply's status is already the observation on screen, as it is once the real status reader
+    // installs it — so the observation watcher has nothing unread and cannot re-read its way out of a
+    // wedged pane. Only the reply's own handling decides the outcome.
+    const staged = statusOf({ stagedCount: 1 });
+    await harness.render({ status: staged });
+    const resolveStage = harness.holdStage();
+    await act(async () => { fireDomEvent.click(stageButton(harness.container, "src/a.ts")); });
+
+    const releaseBranch = harness.holdDiff();
+    const branchButton = [...harness.container.querySelectorAll<HTMLElement>('[aria-label="Diff Scope"] button')]
+      .find((button) => (button.textContent ?? "").trim() === "Branch");
+    if (!branchButton) throw new Error("no Branch scope option");
+    await act(async () => { fireDomEvent.click(branchButton); });
+    // Mount, the watcher's read of the staged observation, then the Branch read.
+    assert.deepEqual(harness.diffCalls, ["uncommitted", "uncommitted", "all_branch"], "the Branch read is in flight");
+
+    await resolveStage({ diff: diffOf("2", [fileA({ staged: true }), fileB()]), status: staged });
+    assert.deepEqual(harness.installed, [staged], "the reply's status is still installed — it is scope-free");
+
+    harness.serveDiff({ ...diffOf("3", [fileA({ text: "branch-only" })]), scope: "all_branch" });
+    await releaseBranch();
+    assert.equal(harness.diffCalls.length, 3, "no further read, so the pending Branch read is what rendered");
+    assert.ok(harness.container.textContent?.includes("branch-only"), "the Branch read rendered");
+    assert.ok(!harness.container.textContent?.includes("Loading diff…"), "and the pane is not wedged loading");
+  } finally {
+    await harness.unmount();
   }
 });
 
