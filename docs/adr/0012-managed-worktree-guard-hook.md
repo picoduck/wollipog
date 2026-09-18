@@ -124,15 +124,28 @@ What is done instead:
   prefix) are matched on their resolved path and are part of the hook matcher. Reads are refused
   too: the provider has no need of them. "Resolved" means `~`, `~name`, `~+`, and `$HOME` are expanded and the
   nearest existing ancestor is passed through `realpath`, so a home-relative spelling or a symlink
-  planted in the workspace is judged by where it lands. A Bash operand that merely CONTAINS the
-  directory is the one carve-out (#1334): `ls`, `du`, `stat`, and a `find` whose `-maxdepth` stops
-  at or above it may inspect an ancestor, because they name the hook directory at most and never
-  enumerate it. Everything else on an ancestor stays refused — `rm -rf ~`, `grep -r`, `ls -R`, an
-  unbounded `find`, a wrapper such as `sudo`, and any segment carrying an unexpanded variable — as
-  do the file tools, which have no bounded form. `du` is the accepted exception within the
-  carve-out: it walks the tree it is given, so it learns the hook directory's shape and size, but
-  it reads no file contents. Third-party MCP filesystem tools are not classifiable by name and
-  remain outside the veto, like any other indirection.
+  planted in the workspace is judged by where it lands. Third-party MCP filesystem tools are not
+  classifiable by name and remain outside the veto, like any other indirection.
+- **One carve-out: bounded inspection of an ancestor.** A Bash operand that merely CONTAINS the
+  directory is allowed when its command is recognisably an inspection of that directory and nothing
+  more (#1334): `ls` without a recursive option, `du`, `stat`, or a `find` whose `-maxdepth` stops
+  at or above the hook directory and which neither follows symlinks nor acts on what it finds. Such
+  a command may NAME the hook directory; it never enumerates what is in it. The file tools have no
+  bounded form and stay refused on an ancestor, so the path-level predicate keeps its old meaning.
+
+  The carve-out fails closed, because a command-text classifier is easy to talk past. A command is
+  disqualified wholesale when it routes or nests commands — a pipe, a command substitution, a
+  subshell, a process substitution, a backtick, or an operator the classifier does not model — so a
+  listing piped into `xargs rm -rf` is not an inspection. A redirection does not start a new
+  command, so its target is judged as a location and never mistaken for the command word. A glob or
+  brace metacharacter disqualifies the command, because the shell expands `--recurs{ive,}` into
+  `--recursive` first. So does a `NAME=value` assignment, which decides what the name resolves to,
+  and a command word that is not a bare name, since `./ls` is whatever was planted there. Long
+  options are matched as GNU `getopt_long` accepts them, so `ls --recurs` counts as recursive.
+
+  `du` is the accepted exception inside the carve-out: it walks the tree it is given, so it learns
+  the hook directory's shape and the size of what is in it, though it reads no file contents. #1334
+  lists it among the commands that must be allowed.
 - **No free advertising.** The protections path is not exported in the settings `env` block (which
   reaches every tool process); it travels only in the hook command inside the 0600 settings file,
   and the guard accepts it only from there — never from the environment.

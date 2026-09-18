@@ -639,8 +639,10 @@ test("a directory that merely contains the guard state can be inspected without 
     // Each segment is judged on its own; an ordinary second command changes nothing.
     `ls ${home} && echo done`,
     `cd ${project} && ls ${home}`,
-    // A leading assignment is stripped the way a shell strips it.
-    `LC_ALL=C ls ${home}`,
+    `ls ${home}; stat ${data}`,
+    // A redirection belongs to the command it follows; its target is judged as a location only.
+    `ls ${home} > ${join(project, "listing.txt")}`,
+    `ls ${home} 2>/dev/null`,
   ]) {
     assert.equal(commandTargetsGuardState(command, project, directory), null, command);
   }
@@ -686,6 +688,45 @@ test("recursive or unclassifiable work on an ancestor of the guard state stays r
   // The directory itself and everything in it stay refused for every command, inspection included.
   for (const command of [`ls ${directory}`, `du -sh ${directory}`, `stat ${directory}`,
     `find ${directory} -maxdepth 1`]) {
+    assert.equal(commandTargetsGuardState(command, project, directory), GUARD_STATE_REFUSAL, command);
+  }
+});
+
+test("a command cannot launder itself into the ancestor carve-out", (t) => {
+  // Every form here reaches the hook directory while containing something that looks like a
+  // bounded inspection. Each was allowed by the first cut of the #1334 carve-out.
+  const home = mkdtempSync(join(tmpdir(), "wollipog-guard-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const project = join(home, "project");
+  const data = join(home, ".wollipog-data");
+  const directory = join(data, "hooks");
+  mkdirSync(project);
+  mkdirSync(directory, { recursive: true });
+  for (const command of [
+    // A leading redirection does not start a new command: the shell runs `rm`, not `ls`.
+    `>ls rm -rf ${home}`,
+    // GNU getopt_long takes any unambiguous abbreviation, so these all recurse.
+    `ls --recurs ${home}`,
+    `ls --recursi ${home}`,
+    `ls --r ${home}`,
+    // Brace expansion produces `--recursive` before the command ever runs.
+    `ls --recurs{ive,} ${home}`,
+    // An assignment prefix decides what the name resolves to.
+    `PATH=${project} ls ${home}`,
+    `LC_ALL=C ls ${home}`,
+    // Only a bare name is the program it looks like.
+    `${join(project, "ls")} ${home}`,
+    `./ls ${home}`,
+    // A pipe hands the listing to a command the classifier never vouched for.
+    `ls ${home} | xargs rm -rf`,
+    `find ${home} -maxdepth 1 | xargs rm -rf`,
+    `du -sh ${home} | sh`,
+    // A command substitution nests the inspection inside a removal.
+    `rm -rf $(ls ${home})`,
+    // A subshell and a process substitution are not modelled, so nothing in them is inspectable.
+    `(rm -rf ${home})`,
+    `cat <(rm -rf ${home})`,
+  ]) {
     assert.equal(commandTargetsGuardState(command, project, directory), GUARD_STATE_REFUSAL, command);
   }
 });

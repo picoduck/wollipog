@@ -823,19 +823,36 @@ export function pathTargetsGuardState(path: string, cwd: string, directory: stri
 /* ---------------------------------------------------------------------------------------------
  * Bounded inspection of an ancestor.
  *
- * Refusing every operand that CONTAINS the hook directory also refused `ls /home` and `ls ~` in
- * every session whose data directory lives under the home directory (#1334), though neither reads
- * anything the guard owns. The carve-out below is deliberately narrow and fails closed: an operand
- * that is a strict ancestor is allowed only for a short list of commands whose walk is bounded, and
- * only in a segment whose every word is known text. An unexpanded variable, a wrapper such as
- * `sudo`, a recursive flag, or a `find` without a usable depth bound all keep the refusal, as does
- * every other command — `rm -rf ~` and `grep -r . ~` are refused exactly as before.
+ * Refusing every operand that CONTAINS the hook directory also refused `ls /home` and a listing of
+ * the home directory in every session whose data directory lives under it (#1334), though neither
+ * reads anything the guard owns. The carve-out below is deliberately narrow and fails closed: an
+ * operand that is a strict ancestor is allowed only when the command it belongs to is recognisable
+ * as a bounded inspection of that directory, and everything this classifier cannot model keeps the
+ * refusal. A recursive removal or a recursive search rooted at an ancestor is refused as before.
  *
- * `du` is the accepted exception: it walks the whole tree it is given, so it learns the hook
- * directory's shape and the size of what is in it. It reads no file contents, and #1334 lists it
- * among the commands that must be allowed.
+ * What disqualifies a command, and why each one has to:
+ *
+ * - Anything that routes one command's output into another, or nests a command inside another:
+ *   `|`, `|&`, `( )`, `<( )`, `>( )`, a backtick, or an operator not modelled here. A listing piped
+ *   into `xargs rm -rf` is not an inspection, and neither is a removal whose operand is a command
+ *   substitution, though each contains one.
+ * - A redirection does NOT start a new command, so its target is kept out of the classification and
+ *   is judged as a location only. Treating it as a command word let a leading `>ls` pass a removal
+ *   off as an `ls`.
+ * - A glob or brace metacharacter anywhere in the command: the shell expands `--recurs{ive,}` into
+ *   `--recursive` long before this classifier would see it.
+ * - A `NAME=value` assignment: a `PATH=` prefix decides what the command name resolves to.
+ * - A command word that is not a bare name: `./ls` and `/tmp/ls` are whatever was planted there.
+ *
+ * `du` is the accepted exception among the commands themselves: it walks the whole tree it is
+ * given, so it learns the hook directory's shape and the size of what is in it. It reads no file
+ * contents, and #1334 lists it among the commands that must be allowed.
  * ------------------------------------------------------------------------------------------ */
 
+/** Operators that end one command and begin another. Each segment is classified on its own. */
+const SEGMENT_SEPARATORS = new Set([";", ";;", "&&", "||", "&"]);
+/** Operators that attach a target to the CURRENT command rather than starting a new one. */
+const REDIRECTIONS = new Set([">", ">>", "<", ">&"]);
 /** `find` options and actions that walk, or act on what they find, without regard to `-maxdepth`. */
 const FIND_UNBOUNDED_WORDS = new Set(["-L", "-follow", "-delete", "-exec", "-execdir", "-ok", "-okdir"]);
 
@@ -847,34 +864,56 @@ function tokenText(token: ShellToken): string | null {
     : null;
 }
 
-/** Split a parsed command at every shell operator, so each run of words is classified on its own. */
-function commandSegments(tokens: readonly ShellToken[]): ShellToken[][] {
-  const segments: ShellToken[][] = [];
-  let current: ShellToken[] = [];
+/**
+ * One command out of a list: every word that names a location, and separately the words that decide
+ * what the command DOES. `words` is null when the segment carries an unexpanded variable, since one
+ * opaque word could be a recursion flag or another operand.
+ */
+interface CommandSegment { operands: Array<string | null>; words: string[] | null }
+
+/**
+ * Split a parsed command into segments, or `null` when it contains a construct this classifier does
+ * not model — in which case nothing in it is bounded inspection and the caller refuses every
+ * related operand, exactly as it did before #1334.
+ */
+function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null {
+  const segments: CommandSegment[] = [];
+  let operands: Array<string | null> = [];
+  let words: string[] | null = [];
+  let redirected = false;
   for (const token of tokens) {
-    if (operator(token) === null) {
-      current.push(token);
+    const op = operator(token);
+    if (op === null) {
+      const text = tokenText(token);
+      operands.push(text);
+      if (redirected) redirected = false;
+      else if (words !== null) {
+        if (text === null) words = null;
+        else words.push(text);
+      }
       continue;
     }
-    segments.push(current);
-    current = [];
+    if (SEGMENT_SEPARATORS.has(op)) {
+      segments.push({ operands, words });
+      operands = [];
+      words = [];
+      redirected = false;
+      continue;
+    }
+    if (!REDIRECTIONS.has(op)) return null;
+    redirected = true;
   }
-  segments.push(current);
+  segments.push({ operands, words });
   return segments;
 }
 
-/** The program a segment runs, ignoring the leading `NAME=value` assignments a shell strips first. */
-function segmentCommand(words: readonly string[]): string | null {
-  for (const word of words) {
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(word)) continue;
-    return basename(word);
-  }
-  return null;
-}
-
-/** `-R` (bundled or long) turns a listing into a walk. */
+/** `-R`, or any abbreviation of `--recursive` that GNU `getopt_long` accepts. */
 function recursiveListing(word: string): boolean {
-  return word === "--recursive" || (/^-[^-]/u.test(word) && word.includes("R"));
+  if (word.startsWith("--")) {
+    const name = word.slice(2).split("=")[0] ?? "";
+    return name.length > 0 && "recursive".startsWith(name);
+  }
+  return /^-[^-]/u.test(word) && word.includes("R");
 }
 
 /** The deepest level `find` visits, or `null` when the walk is unbounded or acts on what it finds. */
@@ -895,7 +934,13 @@ function findWalkBound(words: readonly string[]): number | null {
  * state: it may name the hook directory, but must not enumerate what is inside it.
  */
 function inspectsAncestorOnly(words: readonly string[], separation: number): boolean {
-  switch (segmentCommand(words)) {
+  // The shell expands these into words this classifier never sees.
+  if (words.some((word) => /[*?[\]{}]/u.test(word))) return false;
+  // An assignment decides what the command name resolves to.
+  if (words.some((word) => /^[A-Za-z_][A-Za-z0-9_]*=/u.test(word))) return false;
+  const name = words[0];
+  if (name === undefined || name === "" || name.includes("/") || name.includes("\\")) return false;
+  switch (name) {
     case "ls":
       return !words.some(recursiveListing);
     case "du":
@@ -938,17 +983,22 @@ export function commandTargetsGuardState(
   } catch {
     return GUARD_STATE_REFUSAL;
   }
-  for (const segment of commandSegments(tokens)) {
-    const words = segment.map(tokenText);
-    // A single opaque word (an unexpanded variable) could be a recursion flag or another operand,
-    // so a segment carrying one never qualifies as bounded inspection.
-    const known = words.includes(null) ? null : words as string[];
-    for (const value of words) {
+  // A backtick nests a command the tokenizer does not separate; nothing inside one is inspectable.
+  const segments = command.includes("`") ? null : commandSegments(tokens);
+  if (segments === null) {
+    for (const token of tokens) {
+      const value = tokenText(token);
+      if (value !== null && pathTargetsGuardState(value, cwd, root)) return GUARD_STATE_REFUSAL;
+    }
+    return null;
+  }
+  for (const { operands, words } of segments) {
+    for (const value of operands) {
       if (value === null) continue;
       const relation = guardStateRelation(value, cwd, root);
       if (relation === null) continue;
-      if (relation.kind === "inside" || known === null) return GUARD_STATE_REFUSAL;
-      if (!inspectsAncestorOnly(known, relation.separation)) return GUARD_STATE_REFUSAL;
+      if (relation.kind === "inside" || words === null) return GUARD_STATE_REFUSAL;
+      if (!inspectsAncestorOnly(words, relation.separation)) return GUARD_STATE_REFUSAL;
     }
   }
   return null;
