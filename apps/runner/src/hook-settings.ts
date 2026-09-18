@@ -285,9 +285,10 @@ function claudeSettingsDocument(
  * Write the live settings file, its heal template, and (when a guard is present) the guard-only
  * copy the driver falls back to while the manager hook circuit is open.
  *
- * `preserveGuardState` leaves an existing guard's protection list and guard-only copy alone when
- * no guard is written: a provisioning call that does not know the live worktree set must not
- * retire the guard a running provider is still consulting.
+ * `preserveGuardState` never touches the guard's protection list: a provisioning call that does
+ * not know the live worktree set must neither retire the guard a running provider still consults
+ * nor rewrite (and so launder) the list the tamper tripwire compares. With no guard given, the
+ * guard-only copy is left alone too.
  */
 export function writeClaudeSettingsSet(
   file: string,
@@ -296,7 +297,7 @@ export function writeClaudeSettingsSet(
   preserveGuardState = false,
 ): void {
   if (guard) {
-    writeManagedWorktreeGuardProtections(guard.protectionsFile, guard.protections);
+    if (!preserveGuardState) writeManagedWorktreeGuardProtections(guard.protectionsFile, guard.protections);
     protectedWrite(claudeHookGuardPath(file), claudeSettingsDocument(file, null, guard));
   } else if (!preserveGuardState) {
     rmSync(claudeHookGuardPath(file), { force: true });
@@ -690,6 +691,21 @@ export function provisionClaudeHooks(
   }
 
   validateInjectedArg(file);
+  // A call that does not know the live worktree set rewrites the manager documents below; it must
+  // carry an already-declared, still-trusted guard into them (CR-4.1). Otherwise a restart that
+  // authorization then rejects leaves the RUNNING driver's next spawn reading a guard-less
+  // template, and a worktree created in that turn would go unprotected. Its list is not rewritten.
+  const carriedGuard: ClaudeGuardHookOptions | null = !guardRequested &&
+      !compromisedGuardSessions.has(spec.sessionId) &&
+      describeManagedSettings(file)?.guard === true &&
+      guardStatePresent(claudeHookProtectionsPath(file))
+    ? {
+      launch: runnerReentryCommand(host, MANAGED_WORKTREE_GUARD_MODE),
+      protectionsFile: claudeHookProtectionsPath(file),
+      // Never written: `preserveGuardState` leaves the live list exactly as the runner last wrote it.
+      protections: [],
+    }
+    : null;
   // `managerHooksBlocked` already rejected a null/too-old control plane.
   const protocolVersion = config.controlPlaneProtocolVersion ?? 0;
   const circuit = readHookCircuitState(claudeHookCircuitPath(file));
@@ -711,7 +727,7 @@ export function provisionClaudeHooks(
             askCapable: protocolVersion >= 66,
           }
           : null,
-        guard,
+        guard ?? carriedGuard,
         !guardRequested,
       );
     }
@@ -751,7 +767,7 @@ export function provisionClaudeHooks(
     cpHttpUrl: deriveCpHttpUrl(config.controlPlaneUrl, config.allowInsecureTransport),
     tokenFile,
     askCapable: protocolVersion >= 66,
-  }, guard, !guardRequested);
+  }, guard ?? carriedGuard, !guardRequested);
   if (!hasCurrentSettings) {
     validateInjectedArg(file);
     spec.args.push("--settings", file);

@@ -913,9 +913,30 @@ test("a provisioning call that does not know the worktree set leaves a running g
       { stdout: "", stderr: "", exitCode: 0 },
       `manager hooks ${enabled ? "on" : "off"}: ordinary work is still evaluated, not failed closed`,
     );
-    // And the tripwire baseline survives, so a mid-turn refresh still succeeds.
+    // The RUNNING launch's next driver-internal spawn is still guarded (CR-4.1): the rewritten
+    // settings and template carry the guard declaration forward.
+    assert.equal(prepareClaudeHookArgs(running.args).guardActive, true,
+      `manager hooks ${enabled ? "on" : "off"}: the next spawn keeps the guard`);
+    // And the tripwire baseline survives, so mid-turn refreshes still succeed — from empty to a
+    // newly created worktree included — and the spawn after that is still guarded.
     assert.deepEqual(refreshClaudeGuardProtections(sessionId, [], dir), { state: "refreshed" });
+    assert.deepEqual(refreshClaudeGuardProtections(sessionId, PROTECTIONS, dir), { state: "refreshed" });
+    assert.equal(prepareClaudeHookArgs(running.args).guardActive, true);
   }
+}));
+
+test("carrying a guard forward never launders a tampered protection list", () => temp((dir) => {
+  const running = spec();
+  resetClaudeGuardState();
+  provisionClaudeHooks(running, {
+    ...config, managedWorktreeProtections: [], verifyGuardLaunch: guardVerifies,
+  }, () => {}, host(dir));
+  const protections = claudeHookSettingsPath(dir, "sess_hook_1").replace(/\.settings\.json$/u, ".protections.json");
+  writeFileSync(protections, JSON.stringify({ version: 1, protections: [{ worktreePath: "/x", repoPath: "/repo" }] }), "utf8");
+  provisionClaudeHooks(spec(), { ...config, verifyGuardLaunch: guardVerifies }, () => {}, host(dir));
+  assert.deepEqual(JSON.parse(readFileSync(protections, "utf8")).protections, [{ worktreePath: "/x", repoPath: "/repo" }],
+    "the foreign list is left as evidence, not rewritten");
+  assert.equal(prepareClaudeHookArgs(running.args).guardActive, false, "and the tripwire still rejects it");
 }));
 
 test("a launch with its own --settings and no worktree is not guarded, so nothing it sets is shadowed", () => temp((dir) => {
