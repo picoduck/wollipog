@@ -35,8 +35,14 @@ export interface AgentTuiGuardConfig {
   enabled: boolean;
   allowInsecureTransport?: boolean;
   registerCredential?: (sessionId: string, tokenHash: string) => void;
-  /** The live runner-owned worktree set, from the same source the driver's veto reads. */
-  protections: readonly ManagedWorktreeProtection[];
+  /**
+   * The live runner-owned worktree set, from the same source the driver's veto reads. It is a
+   * callback because it must be resolved HERE, after the launch's awaited preparation: the launch
+   * snapshot predates the worktree proof and the Orchestrator's scratch and credential work, and
+   * writing a stale inventory would overwrite the live refresh and leave a worktree created in
+   * that window unprotected for the running provider as well.
+   */
+  protections: () => readonly ManagedWorktreeProtection[];
   /** Seam for tests: prove the guard sidecar actually refuses before relying on it. */
   verifyGuardLaunch?: typeof verifyManagedWorktreeGuardLaunch;
 }
@@ -51,8 +57,20 @@ export function provisionAgentTuiManagedWorktreeGuard(
   log: (message: string) => void,
   host: ClaudeHookHost = defaultClaudeHookHost(),
 ): AgentTuiGuardProvisioning {
-  const { protections, ...hookConfig } = config;
-  provisionClaudeHooks(spec, { ...hookConfig, managedWorktreeProtections: protections }, log, host);
+  const { protections: resolveProtections, ...hookConfig } = config;
+  const protections = resolveProtections();
+  provisionClaudeHooks(
+    spec,
+    {
+      ...hookConfig,
+      managedWorktreeProtections: protections,
+      // A TUI does not replace the session's structured provider; both run against the same
+      // per-session documents. So this provisioning may refresh the guard but never retire it.
+      concurrentLaunch: true,
+    },
+    log,
+    host,
+  );
   // The same per-spawn heal, circuit check, and tripwire re-check the driver runs before every
   // Claude process it starts. A TUI is one more such spawn.
   const prepared = prepareClaudeHookArgs(spec.args);

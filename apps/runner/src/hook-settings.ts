@@ -541,6 +541,14 @@ export function provisionClaudeHooks(
      * would reject every ordinary launch as a command mismatch.
      */
     managedWorktreeProtections?: readonly ManagedWorktreeProtection[];
+    /**
+     * This launch runs ALONGSIDE the session's existing provider instead of being the spawn that
+     * provider's state is prepared for — a native TUI (#1337). It may write and refresh the
+     * guard, never retire it: the running provider's already-loaded hook reads the protection
+     * list on every matched tool call, so removing that list, or stripping the guard from the
+     * document its next spawn heals from, is a live regression it cannot recover from on its own.
+     */
+    concurrentLaunch?: boolean;
     /** Seam for tests: prove the guard sidecar actually refuses before relying on it. */
     verifyGuardLaunch?: typeof verifyManagedWorktreeGuardLaunch;
   },
@@ -567,6 +575,7 @@ export function provisionClaudeHooks(
   const native = (spec.context?.kind ?? "native") === "native";
   const file = persistedFile ?? expectedFile;
   const guardRequested = config.managedWorktreeProtections !== undefined;
+  const concurrentLaunch = config.concurrentLaunch === true;
   const protections = config.managedWorktreeProtections ?? [];
 
   // "Guard active" is established here, at provisioning time, and is observable in the argv the
@@ -655,8 +664,9 @@ export function provisionClaudeHooks(
       // A call that does not know the live worktree set (the pre-authorization start_session
       // provisioning) must not retire a guard a running provider still consults: if that restart
       // is rejected, the provider would fail closed on every matched tool. The post-authorization
-      // pre-spawn provisioning decides the guard's fate.
-      if (guardRequested) {
+      // pre-spawn provisioning decides the guard's fate. Neither may a concurrent launch (#1337),
+      // which does not replace the running provider at all.
+      if (guardRequested && !concurrentLaunch) {
         discardGuardArtifacts(file);
         guardStateDigests.delete(spec.sessionId);
       }
@@ -695,7 +705,11 @@ export function provisionClaudeHooks(
   // carry an already-declared, still-trusted guard into them (CR-4.1). Otherwise a restart that
   // authorization then rejects leaves the RUNNING driver's next spawn reading a guard-less
   // template, and a worktree created in that turn would go unprotected. Its list is not rewritten.
-  const carriedGuard: ClaudeGuardHookOptions | null = !guardRequested &&
+  // A concurrent launch that could not provision a guard of its own carries the declared one the
+  // same way (#1337): it is not the spawn the running provider's state belongs to, so it may not
+  // take that provider's guard away from it.
+  const preserveGuardState = !guardRequested || (concurrentLaunch && !guard);
+  const carriedGuard: ClaudeGuardHookOptions | null = preserveGuardState &&
       !compromisedGuardSessions.has(spec.sessionId) &&
       describeManagedSettings(file)?.guard === true &&
       guardStatePresent(claudeHookProtectionsPath(file))
@@ -728,7 +742,7 @@ export function provisionClaudeHooks(
           }
           : null,
         guard ?? carriedGuard,
-        !guardRequested,
+        preserveGuardState,
       );
     }
     if (!hasCurrentSettings && (managedSettingsExist || guard)) {
@@ -767,7 +781,7 @@ export function provisionClaudeHooks(
     cpHttpUrl: deriveCpHttpUrl(config.controlPlaneUrl, config.allowInsecureTransport),
     tokenFile,
     askCapable: protocolVersion >= 66,
-  }, guard ?? carriedGuard, !guardRequested);
+  }, guard ?? carriedGuard, preserveGuardState);
   if (!hasCurrentSettings) {
     validateInjectedArg(file);
     spec.args.push("--settings", file);

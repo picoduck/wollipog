@@ -216,6 +216,15 @@ control-channel veto keeps reading the live inventory.
   managed worktree that carries its own `--settings` is not guarded, and is not refused either,
   because there is nothing to protect.
 
+  A TUI is also the first launch that provisions ALONGSIDE a running provider rather than
+  replacing it, and both read the same per-session documents. So its provisioning is marked
+  `concurrentLaunch`: it may write and refresh the guard, never retire it. Retiring is what the
+  ordinary path does when it knows the live worktree set and can produce no guard — and doing that
+  under a running provider removes the very list its loaded hook reads, which fails every matched
+  tool call of the turn it is in. The protection list it writes is likewise resolved when
+  provisioning runs, not from the launch snapshot, which predates the awaited worktree proof and
+  the Orchestrator's scratch and credential work.
+
   Non-Claude TUI launches remain unprotected. Codex's worktree protection is carried in the turn
   parameters its driver sends, so it has no TUI form at all and nothing to provision; only a
   refusal could cover it, which would withdraw the TUI from every worktree session. That is left

@@ -2183,7 +2183,14 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               enabled: claudeHookFeatureEnabled,
               allowInsecureTransport,
               registerCredential: registerPolicyHookCredential,
-              protections: sessions.managedWorktreeProtections(prepared),
+              // Resolved from the CURRENT stored metadata when provisioning runs, never from the
+              // launch snapshot: that snapshot predates the awaited worktree proof and the
+              // Orchestrator's scratch and credential preparation, and writing a stale inventory
+              // would overwrite the live refresh — leaving a worktree created in that window
+              // unprotected for the running provider too.
+              protections: () => sessions.managedWorktreeProtections(
+                store.readMeta(prepared.sessionId) ?? prepared,
+              ),
             },
             log,
             claudeHookHost,

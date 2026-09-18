@@ -20,6 +20,7 @@ import {
   claudeHookProtectionsPath,
   claudeHookSettingsPath,
   describeManagedSettings,
+  refreshClaudeGuardProtections,
   resetClaudeGuardState,
   type ClaudeHookHost,
 } from "./hook-settings.js";
@@ -32,6 +33,8 @@ import type { SessionMeta } from "./session-store.js";
 
 const REPO = "/repo";
 const WORKTREE = "/repo-worktrees/s1337";
+
+type Protection = { worktreePath: string; repoPath: string };
 
 function hookHost(configDir: string): ClaudeHookHost {
   return {
@@ -74,7 +77,7 @@ function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
 /** Exactly the wiring `index.ts` gives `prepareAgentTuiLaunch`, against a temp hook directory. */
 function dependencies(
   configDir: string,
-  protections: { worktreePath: string; repoPath: string }[],
+  protections: { worktreePath: string; repoPath: string }[] | (() => Protection[]),
   logs: string[] = [],
 ) {
   return {
@@ -88,7 +91,7 @@ function dependencies(
         controlPlaneUrl: "ws://127.0.0.1:4317/runner",
         controlPlaneProtocolVersion: PROTOCOL_VERSION,
         enabled: false,
-        protections,
+        protections: typeof protections === "function" ? protections : () => protections,
         // The real sidecar self-test spawns a process; managed-worktree-guard.test.ts runs the
         // real launch probe.
         verifyGuardLaunch: () => ({ ok: true as const }),
@@ -237,6 +240,77 @@ test("a TUI launch keeps an agent's own settings when the session owns no manage
     );
     assert.ok(launch);
     assert.deepEqual(launch.args, ["--settings", agentSettings]);
+  } finally {
+    resetClaudeGuardState();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("opening a TUI never retires guard state the running provider still reads", async () => {
+  // CR-1.2. A TUI runs ALONGSIDE the session's structured provider. The running provider's loaded
+  // hook reads the protection list on every matched tool call, so a TUI open that retired that
+  // list would make every one of them fail closed — for a session that merely discarded its last
+  // worktree (the list is deliberately kept empty, #1303) and carries its own `--settings`, which
+  // is every Claude Orchestrator preset launch.
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-tui-guard-"));
+  resetClaudeGuardState();
+  try {
+    const own = join(dir, "agent.json");
+    writeFileSync(own, "{}", "utf8");
+    const args = ["--settings", own];
+    const guarded = await prepareAgentTuiLaunch(
+      meta({ args }),
+      dependencies(dir, [{ worktreePath: WORKTREE, repoPath: REPO }]),
+    );
+    assert.ok(guarded);
+    const settings = settingsArgument(guarded.args)!;
+    const protectionsFile = claudeHookProtectionsPath(settings);
+    assert.equal(describeManagedSettings(settings)?.guard, true);
+
+    // The session discards its last worktree: the live refresh keeps the running provider's guard
+    // over an empty list rather than retiring it (#1303). Now its TUI is opened.
+    assert.equal(refreshClaudeGuardProtections("s1337", [], dir).state, "refreshed");
+    const afterDiscard = await prepareAgentTuiLaunch(meta({ args }), dependencies(dir, []));
+    assert.ok(afterDiscard);
+    // The TUI itself is unguarded here (guarding it would shadow the agent's own settings), but
+    // the running provider's state is untouched and its guard still decides.
+    assert.equal(describeManagedSettings(settings)?.guard, true);
+    assert.deepEqual(readManagedWorktreeGuardProtections(protectionsFile), []);
+    assert.deepEqual(
+      runManagedWorktreeGuardDecision(bashCall("git status", REPO), protectionsFile),
+      { stdout: "", stderr: "", exitCode: 0 },
+    );
+  } finally {
+    resetClaudeGuardState();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the protection list is resolved when provisioning runs, not from the launch snapshot", async () => {
+  // CR-1.1. The launch snapshot predates the awaited preparation an Orchestrator TUI performs. A
+  // worktree created in that window must reach the list this launch writes; writing the stale
+  // snapshot instead would also overwrite the live refresh the running provider depends on.
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-tui-guard-"));
+  resetClaudeGuardState();
+  try {
+    const live: Protection[] = [];
+    const source = meta({
+      sessionId: "s1337orc",
+      args: [],
+      config: { permissionMode: "orchestrator" },
+    });
+    const launch = await prepareAgentTuiLaunch(source, {
+      ...dependencies(dir, () => [...live]),
+      executionIsolationMode: "bwrap" as const,
+      // The worktree appears while the TUI is still preparing its scratch directory.
+      prepareScratch: async () => { live.push({ worktreePath: WORKTREE, repoPath: REPO }); return "/scratch"; },
+      provision: () => {},
+    });
+    assert.ok(launch);
+    const settings = settingsArgument(launch.args)!;
+    assert.deepEqual(readManagedWorktreeGuardProtections(claudeHookProtectionsPath(settings)), [
+      { worktreePath: WORKTREE, repoPath: REPO },
+    ]);
   } finally {
     resetClaudeGuardState();
     rmSync(dir, { recursive: true, force: true });
