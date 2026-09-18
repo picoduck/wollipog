@@ -123,7 +123,7 @@ export function integrationIsolationDisclosure(driver: AgentDriverKind | undefin
  * kept: the preset also fixes the tool inventory and disables every MCP server but Wollipog's,
  * including ones the agent definition declares. */
 export const ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE =
-  "This session uses the harness-owned Orchestrator preset, which replaces the provider surface: Wollipog's management tools are the only integration, and the preset also fixes the tool inventory and approval behavior.";
+  "The harness-owned Orchestrator preset replaces the provider surface: Wollipog's management tools are the only integration, and the preset also fixes the tool inventory and approval behavior.";
 
 /**
  * Whether the CONTROL PLANE understands the Integration Isolation policy at all.

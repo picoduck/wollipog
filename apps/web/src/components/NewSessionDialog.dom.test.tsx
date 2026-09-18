@@ -2044,6 +2044,10 @@ test("Strict Project Isolation shows Integration Isolation as implied and not se
     assert.match(trigger.getAttribute("aria-label")!, /Enabled/);
     assert.match(fixture.container.textContent!,
       /already launches without provider integrations, so this policy is implied and cannot be disabled/);
+    // A strict launch is a coupled preset, which fixes the tool inventory and approval behavior,
+    // so the additive launch's "everything else is unchanged" promise must not appear here.
+    assert.match(fixture.container.textContent!, /harness-owned Orchestrator preset replaces the provider surface/);
+    assert.doesNotMatch(fixture.container.textContent!, /sandbox and approval behavior, and the project boundary are unchanged/);
   } finally { await unmountFixture(fixture); }
 });
 

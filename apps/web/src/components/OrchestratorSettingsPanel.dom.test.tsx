@@ -346,6 +346,8 @@ test("Integration Isolation is a separate saved default, implied by Strict Proje
     assert.equal(pill("Integration Isolation", "Disabled")!.getAttribute("aria-disabled"), "true");
     assert.match(container.textContent ?? "",
       /Strict Project Isolation already launches without provider integrations/);
+    assert.match(container.textContent ?? "", /harness-owned Orchestrator preset replaces the provider surface/);
+    assert.doesNotMatch(container.textContent ?? "", /sandbox and approval behavior, and the project boundary are unchanged/);
   } finally {
     await act(async () => root.unmount());
     container.remove();

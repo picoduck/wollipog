@@ -48,6 +48,7 @@ import { shortenPath, permissionModeLabel, titleCaseLabel } from "../format.js";
 import {
   INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED,
   INTEGRATION_ISOLATION_PRESERVED,
+  ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE,
   controlPlaneSupportsIntegrationIsolation,
   integrationIsolationDisclosure,
   orchestratorPresetPermissionsReason,
@@ -1705,7 +1706,7 @@ export function NewSessionDialog({
                 </div>
                 <p className="muted">
                   {integrationIsolationImplied
-                    ? `${orchestratorDraft.execution.strictProjectIsolation ? "Strict Project Isolation" : "The Orchestrator preset"} already launches without provider integrations, so this policy is implied and cannot be disabled. ${INTEGRATION_ISOLATION_PRESERVED}`
+                    ? `${orchestratorDraft.execution.strictProjectIsolation ? "Strict Project Isolation" : "The Orchestrator preset"} already launches without provider integrations, so this policy is implied and cannot be disabled. ${ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE}`
                     : !integrationIsolationControlPlane
                       ? INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED
                       : effectiveIntegrationIsolation

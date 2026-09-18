@@ -11,6 +11,7 @@ import { agentHarnessOptionLabel } from "../agent-presentation.js";
 import { useApi } from "../api-context.js";
 import { effortLabel } from "../format.js";
 import {
+  ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE,
   INTEGRATION_ISOLATION_BY_HARNESS,
   INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED,
   INTEGRATION_ISOLATION_PRESERVED,
@@ -411,7 +412,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         description={!integrationIsolationSupported
           ? INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED
           : integrationIsolationImplied
-          ? `Strict Project Isolation already launches without provider integrations, so Integration Isolation is implied and cannot be disabled. ${INTEGRATION_ISOLATION_PRESERVED}`
+          ? `Strict Project Isolation already launches without provider integrations, so Integration Isolation is implied and cannot be disabled. ${ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE}`
           : draft.execution.integrationIsolation
             ? `${INTEGRATION_ISOLATION_BY_HARNESS} ${INTEGRATION_ISOLATION_PRESERVED}`
             : "Hooks, plugins, extensions, skills, and configured MCP servers load exactly as they would for a normal session."}
