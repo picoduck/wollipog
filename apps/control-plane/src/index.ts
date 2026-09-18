@@ -4045,6 +4045,14 @@ app.post("/api/sessions/:id/worktrees", async (req, reply) => {
   }, requestPrincipal(req), reply);
 });
 
+// Read-only view of this session's unconsumed progress-aware creates, so a reloaded client can
+// rejoin one by repeating its exact coordinates. It never starts, retries, or releases work.
+app.get("/api/sessions/:id/worktrees/operations", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  if (!db.getSession(id)) return reply.code(404).send({ error: "session not found" });
+  return { operations: worktreeCreates.listForSession(id) };
+});
+
 app.post("/api/sessions/:id/worktrees/attach", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const path = (req.body as { path?: unknown })?.path;

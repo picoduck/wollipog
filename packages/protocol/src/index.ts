@@ -7030,6 +7030,22 @@ export type SessionWorktreeProgressPhase =
   | "running_setup"
   | "activating";
 
+/**
+ * A progress-aware session worktree create as the control plane reports it over HTTP. `phase` is
+ * the runner's last reported phase; on failure it names where creation stopped. Control planes
+ * predating the failing phase omit it on `failed`.
+ */
+export type SessionWorktreeCreateOperationView =
+  | { id: string; status: "in_progress"; phase?: SessionWorktreeProgressPhase }
+  | { id: string; status: "completed" }
+  | { id: string; status: "failed"; error: string; phase?: SessionWorktreeProgressPhase };
+
+/** A create listed by `GET /api/sessions/:id/worktrees/operations`: running, or terminal and not
+ * yet consumed. Completion carries no snapshot here; the session record already holds the result. */
+export type SessionWorktreeCreateOperationSummary =
+  & SessionWorktreeCreateOperationView
+  & { branch: string; baseRef?: string };
+
 /** Content-free phase heartbeat for one exact runner request. */
 export interface SessionWorktreeProgressMessage {
   type: "session_worktree_progress";
