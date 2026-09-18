@@ -54,5 +54,5 @@ additive contract; that work, Native TUI parity, and an explicit integration-iso
 follow-ups rather than inferred from the role.
 
 Superseded in part by [ADR 0009](0009-additive-orchestrator-role-for-codex.md), which gives native
-Codex and Codex App Server their own additive contract behind a separate protocol v161 capability
+Codex and Codex App Server their own additive contract behind a separate protocol v162 capability
 gate. Pi, ACP, and Native TUI still select the coupled preset.

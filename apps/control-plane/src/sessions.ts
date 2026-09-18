@@ -3514,7 +3514,7 @@ export class SessionsService {
         // Independent provider permissions: the harness launches exactly as an equivalent normal
         // session and gains only Wollipog's orchestration tools, instructions, and credential. An
         // older runner would launch this as an ordinary session, so refuse rather than degrade.
-        // Each harness carries its own gate: Claude Code since v160, the Codex drivers since v161.
+        // Each harness carries its own gate: Claude Code since v160, the Codex drivers since v162.
         const additiveCapability = orchestratorAdditiveCapability(launch.driver);
         if (!additiveCapability || contextKind !== "native" || executionTarget.adapter !== "host") {
           return fail("Independent provider permissions for an Orchestrator are supported only by a native Claude Code or Codex harness on the host; other harnesses still use the Orchestrator preset permission mode.", 409);

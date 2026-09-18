@@ -381,7 +381,7 @@ export function additiveCodexMcpServerArg(
 }
 
 /**
- * Independent provider permissions (protocol v160 for Claude Code, v161 for the Codex drivers): the
+ * Independent provider permissions (protocol v160 for Claude Code, v162 for the Codex drivers): the
  * harness launches exactly as an equivalent normal session and only gains Wollipog's orchestration
  * tools, instructions, and — for Claude — project read locations. Nothing here narrows the
  * permission mode, sandbox, approval policy, built-in tool inventory, apps, plugins, hooks,

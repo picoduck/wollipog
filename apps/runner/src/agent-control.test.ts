@@ -657,7 +657,7 @@ test("an Orchestrator with independent provider permissions keeps the ordinary C
     outdatedCodex.orchestrator = { strictProjectIsolation: false };
     assert.throws(() => provisionAgentControl(outdatedCodex, {
       ...control, controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex - 1,
-    }, () => {}, host), /protocol-v161/);
+    }, () => {}, host), /protocol-v162/);
     for (const refused of [strict, pi, outdated, outdatedCodex]) {
       assert.equal(existsSync(agentControlTokenPath(root, refused.sessionId)), false, "refusal precedes credential minting");
     }

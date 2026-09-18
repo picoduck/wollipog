@@ -17,7 +17,7 @@ Orchestrator with the permission mode and integrations they use for a normal Cod
 
 Extend the additive role to the native Codex drivers, gated separately from Claude Code.
 
-- Protocol v161 adds `RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex`. The per-harness
+- Protocol v162 adds `RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex`. The per-harness
   mapping lives in `orchestratorAdditiveCapability()`, which the control plane, the runner, and the
   New Session dialog all read, so no caller re-derives which driver needs which version. Harnesses
   with no entry (Pi, ACP, and anything new) still require the coupled preset.
@@ -42,7 +42,7 @@ Extend the additive role to the native Codex drivers, gated separately from Clau
   the runner's resume strip removes only the value carrying its own instructions prefix.
 - Strict Project Isolation, Native TUI, and every pre-existing `permission_mode='orchestrator'`
   session keep the coupled preset. No database migration is needed.
-- Creation and restart refuse the combination when the runner predates v161, when the harness is not
+- Creation and restart refuse the combination when the runner predates v162, when the harness is not
   a native Codex or Claude Code agent on the host, when the agent does not advertise the Orchestrator
   role, when Strict Project Isolation is enabled, or for a Native TUI launch, each naming the
   required protocol version or the preset as the alternative.

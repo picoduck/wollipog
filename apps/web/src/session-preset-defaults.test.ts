@@ -148,7 +148,7 @@ test("the Orchestrator preset applies only where independent provider permission
       orchestratorPresetPermissionsReason({
         ...additive, driver, runnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex - 1,
       }) ?? "",
-      /protocol v161/,
+      /protocol v162/,
       "each harness names its own runner requirement",
     );
     assert.match(orchestratorPresetPermissionsReason({ ...additive, driver, contextKind: "wsl" }) ?? "",

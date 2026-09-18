@@ -1452,7 +1452,7 @@ export function usesOrchestratorPresetPermissions(
 }
 
 /** Harnesses whose Orchestrator role can be additive, each with the capability gate that carries
- * its launch shape. Claude Code landed in v160; the Codex drivers in v161. Every other driver
+ * its launch shape. Claude Code landed in v160; the Codex drivers in v162. Every other driver
  * still requires the coupled preset, so it has no entry here. */
 export const ORCHESTRATOR_ADDITIVE_CAPABILITY = {
   "claude-code": "orchestratorAdditiveRole",

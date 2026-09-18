@@ -1878,7 +1878,7 @@ test("a non-strict Codex Orchestrator shows the saved harness default rather tha
     await choosePermissionPreset(outdatedRunner.container, "Orchestrator");
     const providerPermissions = outdatedRunner.container.querySelector('[role="group"][aria-label="Provider Permissions"]')!;
     assert.match(providerPermissions.textContent!, /Orchestrator Preset — Harness-Enforced/);
-    assert.match(providerPermissions.textContent!, /protocol v161/,
+    assert.match(providerPermissions.textContent!, /protocol v162/,
       "the runner requirement names the Codex gate, not the Claude one");
   } finally { await unmountFixture(outdatedRunner); }
 });

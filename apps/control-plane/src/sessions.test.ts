@@ -17398,7 +17398,7 @@ test("Orchestrator is an additive role independent of the provider permission mo
       undefined, undefined, false, false, false, human,
     );
     assert.equal(codexOnV160.status, 409, "a v160 runner has no additive Codex launch shape");
-    assert.match(codexOnV160.error ?? "", /protocol-v161/);
+    assert.match(codexOnV160.error ?? "", /protocol-v162/);
     const claudeOnV160 = svc.createSession(
       { ...request, role: "orchestrator", config: { permissionMode: "acceptEdits" } },
       undefined, undefined, false, false, false, human,
@@ -17406,7 +17406,7 @@ test("Orchestrator is an additive role independent of the provider permission mo
     assert.equal(claudeOnV160.ok, true, claudeOnV160.error);
     const codexRestartOnV160 = svc.restart(codex.data!.id);
     assert.equal(codexRestartOnV160.status, 409, "restart refuses the same combination with the same guidance");
-    assert.match(codexRestartOnV160.error ?? "", /protocol-v161/);
+    assert.match(codexRestartOnV160.error ?? "", /protocol-v162/);
     const windows = { ...meta, os: "windows" as const };
     db.registerRunner(windows, Date.now(), PROTOCOL_VERSION);
     const startsBeforeWindows = hub.sentOfType("start_session").length;
