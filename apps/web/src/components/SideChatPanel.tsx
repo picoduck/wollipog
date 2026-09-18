@@ -1,13 +1,53 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { isTerminal, type SessionEvent, type SessionView, type SideChatView } from "@wollipog/protocol";
+import { isTerminal, type SessionEvent, type SessionStatus, type SessionView, type SideChatView } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
+import { useHasStore, useStoreActions } from "../store.js";
 import { EventTimeline } from "./EventTimeline.js";
 import { useTimeline } from "./useTimeline.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
 
 const POLL_MS = 1_500;
 const PAGE_SIZE = 200;
+
+/** Prose, so sentence case: these complete the sentence "This side chat's session …". */
+const ENDED_PHRASE: Partial<Record<SessionStatus, string>> = {
+  completed: "has finished",
+  failed: "failed",
+  stopped: "was stopped",
+};
+
+/**
+ * Why the composer is unavailable, or null when it is usable. An ended child and an offline runner
+ * are different problems with different remedies, so they never share one message (#1206).
+ */
+export function sideChatComposerUnavailable(
+  status: SessionStatus,
+  runnerOnline: boolean,
+): string | null {
+  if (isTerminal(status)) {
+    return `This side chat's session ${ENDED_PHRASE[status] ?? "ended"}, so it can no longer receive ` +
+      "messages. Start a new side chat to continue; the ended transcript stays open at the link above.";
+  }
+  if (!runnerOnline) return "The runner is offline, so this side chat cannot send messages until it reconnects.";
+  return null;
+}
+
+/**
+ * Harness pages render `RightPanel` under an `ApiProvider` with no store (see
+ * `src/e2e/request-surfaces-main.tsx`), and `useStoreActions` throws there. Keeping the one
+ * store-backed control in its own component means adding this link cannot make the whole panel
+ * un-renderable on those pages.
+ */
+function OpenSideChatSession({ childSessionId }: { childSessionId: string }) {
+  const { navigate } = useStoreActions();
+  return (
+    <button type="button" className="btn sidechat-open-child"
+      onClick={() => navigate({ name: "session", id: childSessionId })}>
+      Open Side Chat Session
+    </button>
+  );
+}
 
 export function SideChatPanel({
   session,
@@ -20,6 +60,7 @@ export function SideChatPanel({
   onInsertDraft: (text: string) => void;
 }) {
   const api = useApi();
+  const hasStore = useHasStore();
   const [sideChat, setSideChat] = useState<SideChatView | null>();
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [text, setText] = useState("");
@@ -29,6 +70,13 @@ export function SideChatPanel({
   const mountedRef = useRef(true);
   const cursorRef = useRef(0);
   const epochRef = useRef(0);
+  /**
+   * The child the transcript state currently belongs to, tracked synchronously. A poll iteration
+   * for the outgoing child can resolve after the switch but before React commits — and therefore
+   * before the effect cleanup sets its `current` flag — so `current` alone cannot keep it from
+   * writing the retired child's events back over the incoming one's.
+   */
+  const transcriptChildRef = useRef<string | undefined>(undefined);
   const childId = sideChat?.session.id;
 
   useEffect(() => () => { mountedRef.current = false; }, []);
@@ -50,7 +98,24 @@ export function SideChatPanel({
     return () => { current = false; };
   }, [api, session.id]);
 
+  /**
+   * Drop the transcript belonging to whichever child we are leaving. Call this in the SAME commit as
+   * the switch: React batches the two updates, so the incoming child never renders for a frame with
+   * the retired child's events beneath it — which would also, briefly, offer that child's text to
+   * "Insert Latest Response into Primary Draft", the one action that crosses back into the primary
+   * composer.
+   */
+  const resetTranscript = (next: SideChatView | null) => {
+    transcriptChildRef.current = next?.session.id;
+    cursorRef.current = 0;
+    epochRef.current = next?.session.eventEpoch ?? 0;
+    setEvents([]);
+  };
+
+  // Backstop for any path that changes the child without going through `resetTranscript`. It runs
+  // after paint, so it settles state rather than preventing a mismatched frame.
   useEffect(() => {
+    transcriptChildRef.current = childId;
     cursorRef.current = 0;
     epochRef.current = sideChat?.session.eventEpoch ?? 0;
     setEvents([]);
@@ -63,18 +128,31 @@ export function SideChatPanel({
     const poll = async () => {
       if (!current || inFlight) return;
       inFlight = true;
+      let readingEvents = false;
       try {
-        const { session: latest } = await api.session(childId);
-        if (!current) return;
-        setSideChat((prior) => prior?.session.id === childId ? { ...prior, session: latest } : prior);
-        const epoch = latest.eventEpoch ?? 0;
+        // Poll the RELATIONSHIP, not just this child. Any other client can replace an ended side
+        // chat, and a panel that watched only its own child stayed on the retired transcript for
+        // good — its recovery action then failed with "the current side chat is still active"
+        // forever, because it was still arguing about a child the parent had already let go.
+        const { sideChat: latest } = await api.sideChat(session.id);
+        if (!current || transcriptChildRef.current !== childId) return;
+        // A different child means a new generation; this effect re-runs for it rather than merging
+        // the two transcripts here.
+        if (latest?.session.id !== childId) {
+          resetTranscript(latest);
+          setSideChat(latest);
+          return;
+        }
+        setSideChat(latest);
+        const epoch = latest.session.eventEpoch ?? 0;
         if (epochRef.current !== epoch) {
           epochRef.current = epoch;
           cursorRef.current = 0;
           setEvents([]);
         }
+        readingEvents = true;
         const page = await api.getSessionEventPage(childId, cursorRef.current, epoch, PAGE_SIZE);
-        if (!current) return;
+        if (!current || transcriptChildRef.current !== childId) return;
         if (page.events.length) {
           setEvents((prior) => {
             const bySeq = new Map(prior.map((event) => [event.seq, event]));
@@ -85,10 +163,11 @@ export function SideChatPanel({
         cursorRef.current = page.nextAfter ?? page.events.at(-1)?.seq ?? cursorRef.current;
         setError(null);
       } catch (cause) {
-        if (!current) return;
-        if (cause instanceof ApiError && cause.status === 409) {
+        if (!current || transcriptChildRef.current !== childId) return;
+        if (readingEvents && cause instanceof ApiError && cause.status === 409) {
           // The CP replaced this history generation. The next poll reloads the authoritative
-          // session epoch and starts again from zero; never merge across generations.
+          // session epoch and starts again from zero; never merge across generations. A 409 from
+          // the relationship lookup is a different, reportable condition and must not land here.
           cursorRef.current = 0;
           setEvents([]);
         } else {
@@ -104,7 +183,7 @@ export function SideChatPanel({
       current = false;
       window.clearInterval(timer);
     };
-  }, [api, childId]);
+  }, [api, childId, session.id]);
 
   const items = useTimeline(childId ?? "side-chat", events);
   const latestResponse = useMemo(() => {
@@ -115,13 +194,15 @@ export function SideChatPanel({
     return null;
   }, [items]);
 
-  const create = async () => {
+  const create = async (replaceEnded = false) => {
     if (creating) return;
     setCreating(true);
     setError(null);
     try {
-      const created = await api.createSideChat(session.id);
-      if (mountedRef.current) setSideChat(created);
+      const created = await api.createSideChat(session.id, replaceEnded);
+      if (!mountedRef.current) return;
+      if (created.session.id !== childId) resetTranscript(created);
+      setSideChat(created);
     } catch (cause) {
       if (mountedRef.current) setError((cause as Error).message);
     } finally {
@@ -172,12 +253,19 @@ export function SideChatPanel({
     );
   }
 
-  const canSend = runnerOnline && !isTerminal(sideChat.session.status) && Boolean(text.trim()) && !sending;
+  const childEnded = isTerminal(sideChat.session.status);
+  const unavailable = sideChatComposerUnavailable(sideChat.session.status, runnerOnline);
+  // Starting the replacement launches a child on the runner, so it needs the runner even though the
+  // ended child is the reason the composer is closed.
+  const replacementBlocked = childEnded && !runnerOnline
+    ? "The runner must be online to start a new side chat." : null;
+  const canSend = !unavailable && Boolean(text.trim()) && !sending;
   return (
     <div className="sidechat-panel">
       <div className="sidechat-boundary" role="note">
         <strong>Isolated Side Chat</strong>
         <span>{sideChat.session.status} · separate worktree and transcript</span>
+        {hasStore && <OpenSideChatSession childSessionId={sideChat.session.id} />}
       </div>
       <div className="sidechat-timeline" aria-label="Side Chat Transcript">
         {items.length ? (
@@ -196,6 +284,14 @@ export function SideChatPanel({
           Insert Latest Response into Primary Draft
         </button>
       )}
+      {unavailable && <div className="hint warn" role="status">{unavailable}</div>}
+      {replacementBlocked && <div className="hint warn" role="status">{replacementBlocked}</div>}
+      {childEnded && (
+        <button type="button" className="btn primary sidechat-restart"
+          disabled={creating || Boolean(replacementBlocked)} onClick={() => void create(true)}>
+          {creating ? "Starting…" : "Start a New Side Chat"}
+        </button>
+      )}
       {error && <div className="error-box" role="alert">{error}</div>}
       <div className="sidechat-composer">
         <textarea
@@ -205,7 +301,7 @@ export function SideChatPanel({
           placeholder="Ask without sharing the primary transcript…"
           aria-label="Side Chat Message"
           rows={3}
-          disabled={!runnerOnline || isTerminal(sideChat.session.status)}
+          disabled={Boolean(unavailable)}
         />
         <button type="button" className="btn primary" disabled={!canSend} onClick={() => void send()}>
           {sending ? "Sending…" : "Send"}

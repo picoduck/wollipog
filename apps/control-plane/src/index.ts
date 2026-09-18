@@ -58,6 +58,7 @@ import {
   type CreateAutomationRequest,
   type CreateAutomationTriggerRequest,
   type CreateOutboundEventSubscriptionRequest,
+  type CreateSideChatRequest,
   type CreateWorkflowDefinitionRequest,
   type CreateWorkflowDefinitionVersionRequest,
   type CreateWorkflowInstanceRequest,
@@ -3413,9 +3414,13 @@ app.get("/api/sessions/:id/side-chat", async (req, reply) => {
   return { sideChat: result.data ?? null };
 });
 
-app.post("/api/sessions/:id/side-chat", async (req, reply) =>
-  respond(reply, svc.createSideChat((req.params as { id: string }).id)),
-);
+app.post("/api/sessions/:id/side-chat", async (req, reply) => {
+  const body = (req.body ?? {}) as CreateSideChatRequest;
+  if (body.replaceEnded !== undefined && typeof body.replaceEnded !== "boolean") {
+    return reply.code(400).send({ error: "replaceEnded must be a boolean" });
+  }
+  return respond(reply, svc.createSideChat((req.params as { id: string }).id, body.replaceEnded === true));
+});
 
 app.get("/api/sessions/:id/events", async (req, reply) => {
   const id = (req.params as { id: string }).id;

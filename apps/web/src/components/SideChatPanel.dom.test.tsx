@@ -7,7 +7,10 @@ import { Window } from "happy-dom";
 import type { SessionEvent, SessionView, SideChatView } from "@wollipog/protocol";
 import { api } from "../api.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
-import { SideChatPanel } from "./SideChatPanel.js";
+import { StoreProvider } from "../store.js";
+import { UI_SOCKET_OPEN, type UiConnectionRuntime } from "../ui-transport.js";
+import type { View, ViewNavigation } from "../navigation.js";
+import { SideChatPanel, sideChatComposerUnavailable } from "./SideChatPanel.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -44,6 +47,23 @@ const child = {
 } as SessionView;
 
 const relation: SideChatView = { parentSessionId: parent.id, session: child, createdAt: 1 };
+
+const connection: UiConnectionRuntime = {
+  instanceId: "side-chat-test", runtimeKey: "side-chat-test",
+  createSocket: () => ({ readyState: UI_SOCKET_OPEN, onopen: null, onmessage: null,
+    onclose: null, onerror: null, send() {}, close() {} }),
+  close() {},
+};
+
+/** The panel navigates through the store, so every render needs one mounted above it. */
+function mount(node: React.ReactElement, pushed: View[]) {
+  const navigation: ViewNavigation = {
+    current: () => ({ name: "session", id: parent.id }),
+    push: (view) => { pushed.push(view); },
+    listen: () => () => {},
+  };
+  return <StoreProvider connection={connection} navigation={navigation}>{node}</StoreProvider>;
+}
 const responseEvent: SessionEvent = {
   id: 1,
   sessionId: child.id,
@@ -63,8 +83,9 @@ test("side chat starts separately, prompts only the child, and inserts output ex
   const prompted: Array<{ id: string; text: string }> = [];
   const inserted: string[] = [];
   let eventServed = false;
-  api.sideChat = async () => ({ sideChat: null });
-  api.createSideChat = async () => relation;
+  let related: SideChatView | null = null;
+  api.sideChat = async () => ({ sideChat: related });
+  api.createSideChat = async () => { related = relation; return relation; };
   api.session = async () => ({ session: child });
   api.getSessionEventPage = async () => {
     if (eventServed) return { events: [], eventEpoch: 0, nextAfter: 1, cacheComplete: true };
@@ -82,7 +103,8 @@ test("side chat starts separately, prompts only the child, and inserts output ex
   const root = createRoot(container);
   try {
     await act(async () => {
-      root.render(<SideChatPanel session={parent} runnerOnline onInsertDraft={(text) => inserted.push(text)} />);
+      root.render(mount(<SideChatPanel session={parent} runnerOnline
+        onInsertDraft={(text) => inserted.push(text)} />, []));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     assert.match(container.textContent ?? "", /No prompt, transcript, attachments, artifacts, or budget are copied/);
@@ -112,6 +134,251 @@ test("side chat starts separately, prompts only the child, and inserts output ex
     await act(async () => { (insert as HTMLButtonElement).click(); });
     assert.deepEqual(inserted, ["Selected side-chat answer"]);
     assert.deepEqual(prompted, [{ id: child.id, text: "independent question" }], "insertion never auto-submits primary text");
+  } finally {
+    await act(async () => { root.unmount(); });
+    Object.assign(api, originals);
+    container.remove();
+  }
+});
+
+test("the two composer closures never share a message", () => {
+  assert.match(sideChatComposerUnavailable("stopped", true)!, /session was stopped/);
+  assert.match(sideChatComposerUnavailable("failed", true)!, /session failed/);
+  assert.match(sideChatComposerUnavailable("completed", true)!, /session has finished/);
+  assert.match(sideChatComposerUnavailable("idle", false)!, /runner is offline/);
+  assert.doesNotMatch(sideChatComposerUnavailable("idle", false)!, /side chat's session/,
+    "an offline runner is not reported as an ended child");
+  assert.doesNotMatch(sideChatComposerUnavailable("stopped", true)!, /runner/,
+    "an ended child is not reported as an offline runner");
+  assert.equal(sideChatComposerUnavailable("running", true), null);
+});
+
+/**
+ * #1206: a side chat whose child reached a terminal state used to be a dead end — a disabled
+ * composer with no action, because `create` was reachable only when no side chat existed at all.
+ */
+test("a terminal side chat offers a working replacement and a link to the ended child", async () => {
+  const originals = {
+    sideChat: api.sideChat,
+    createSideChat: api.createSideChat,
+    session: api.session,
+    getSessionEventPage: api.getSessionEventPage,
+    prompt: api.prompt,
+  };
+  const ended = { ...child, status: "stopped" } as SessionView;
+  const replacement = { ...child, id: "side-session-2", status: "idle" } as SessionView;
+  const createCalls: Array<{ id: string; replaceEnded: boolean }> = [];
+  const pushed: View[] = [];
+  const sessions = new Map([[ended.id, ended], [replacement.id, replacement]]);
+  let related: SideChatView = { ...relation, session: ended };
+  api.sideChat = async () => ({ sideChat: related });
+  api.createSideChat = async (id: string, replaceEnded = false) => {
+    createCalls.push({ id, replaceEnded });
+    if (replaceEnded) related = { parentSessionId: parent.id, session: replacement, createdAt: 2 };
+    return related;
+  };
+  api.session = async (id: string) => ({ session: sessions.get(id)! });
+  api.getSessionEventPage = async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true });
+  api.prompt = async () => { throw new Error("a terminal side chat must never be prompted"); };
+
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const button = (label: string) => Array.from(container.querySelectorAll("button"))
+    .find((candidate) => candidate.textContent === label) as HTMLButtonElement | undefined;
+  try {
+    await act(async () => {
+      root.render(mount(<SideChatPanel session={parent} runnerOnline onInsertDraft={() => {}} />, pushed));
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    });
+
+    assert.equal((container.querySelector("textarea") as HTMLTextAreaElement).disabled, true);
+    assert.match(container.textContent ?? "", /This side chat's session was stopped/,
+      "the disabled composer explains that the child ended, not that the runner is offline");
+
+    await act(async () => { button("Open Side Chat Session")!.click(); });
+    assert.deepEqual(pushed, [{ name: "session", id: ended.id }],
+      "the ended child's own session view stays reachable");
+
+    const restart = button("Start a New Side Chat")!;
+    assert.equal(restart.disabled, false, "the recovery action is enabled, not merely present");
+    await act(async () => {
+      restart.click();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    });
+
+    assert.deepEqual(createCalls, [{ id: parent.id, replaceEnded: true }]);
+    assert.equal((container.querySelector("textarea") as HTMLTextAreaElement).disabled, false,
+      "the replacement is usable without leaving the parent session");
+    assert.equal(button("Start a New Side Chat"), undefined, "a live child offers no replacement action");
+    assert.doesNotMatch(container.textContent ?? "", /can no longer receive/);
+  } finally {
+    await act(async () => { root.unmount(); });
+    Object.assign(api, originals);
+    container.remove();
+  }
+});
+
+test("a terminal side chat cannot be replaced while the runner is offline", async () => {
+  const originals = { sideChat: api.sideChat, session: api.session, getSessionEventPage: api.getSessionEventPage };
+  const ended = { ...child, status: "failed" } as SessionView;
+  api.sideChat = async () => ({ sideChat: { ...relation, session: ended } });
+  api.session = async () => ({ session: ended });
+  api.getSessionEventPage = async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true });
+
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(mount(<SideChatPanel session={parent} runnerOnline={false} onInsertDraft={() => {}} />, []));
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    });
+    const restart = Array.from(container.querySelectorAll("button"))
+      .find((candidate) => candidate.textContent === "Start a New Side Chat") as HTMLButtonElement;
+    assert.equal(restart.disabled, true);
+    assert.match(container.textContent ?? "", /runner must be online to start a new side chat/);
+    assert.match(container.textContent ?? "", /This side chat's session failed/,
+      "both closures are reported, because they have different remedies");
+  } finally {
+    await act(async () => { root.unmount(); });
+    Object.assign(api, originals);
+    container.remove();
+  }
+});
+
+/**
+ * Cross-model review CR-1.1. Two panels can show the same ended child. When one replaces it, the
+ * other used to keep polling its own retired child forever: its recovery action then failed with
+ * "the current side chat is still active" every time, because the parent had already moved on.
+ * Polling the relationship rather than the child is what lets the second panel catch up.
+ */
+test("a side chat replaced by another client is picked up by the polling panel", async () => {
+  const originals = { sideChat: api.sideChat, session: api.session, getSessionEventPage: api.getSessionEventPage };
+  const ended = { ...child, status: "stopped" } as SessionView;
+  const replacement = { ...child, id: "side-session-elsewhere", status: "idle" } as SessionView;
+  let related: SideChatView = { ...relation, session: ended };
+  api.sideChat = async () => ({ sideChat: related });
+  api.session = async () => ({ session: ended });
+  api.getSessionEventPage = async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true });
+
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(mount(<SideChatPanel session={parent} runnerOnline onInsertDraft={() => {}} />, []));
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    });
+    assert.match(container.textContent ?? "", /can no longer receive messages/);
+
+    // Somebody else replaces it. Only the control plane's answer changes.
+    related = { parentSessionId: parent.id, session: replacement, createdAt: 3 };
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1_800)); });
+
+    assert.equal((container.querySelector("textarea") as HTMLTextAreaElement).disabled, false,
+      "the panel follows the parent's current side chat instead of arguing about a retired one");
+    assert.doesNotMatch(container.textContent ?? "", /can no longer receive messages/);
+  } finally {
+    await act(async () => { root.unmount(); });
+    Object.assign(api, originals);
+    container.remove();
+  }
+});
+
+/**
+ * Cross-model review CR-1.2. `src/e2e/request-surfaces-main.tsx` renders `RightPanel` — and so this
+ * panel — under an `ApiProvider` with no store. An unconditional `useStoreActions()` crashed that
+ * tracked fixture the moment the Side Chat destination was opened.
+ */
+test("the panel still renders where no store is mounted, minus the store-backed link", async () => {
+  const originals = { sideChat: api.sideChat, session: api.session, getSessionEventPage: api.getSessionEventPage };
+  const ended = { ...child, status: "stopped" } as SessionView;
+  api.sideChat = async () => ({ sideChat: { ...relation, session: ended } });
+  api.session = async () => ({ session: ended });
+  api.getSessionEventPage = async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true });
+
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      // Deliberately no StoreProvider.
+      root.render(<SideChatPanel session={parent} runnerOnline onInsertDraft={() => {}} />);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    });
+    assert.match(container.textContent ?? "", /separate worktree and transcript/);
+    assert.equal(Array.from(container.querySelectorAll("button"))
+      .some((button) => button.textContent === "Open Side Chat Session"), false);
+    assert.equal(Array.from(container.querySelectorAll("button"))
+      .some((button) => button.textContent === "Start a New Side Chat"), true,
+      "the recovery action needs no store and stays available");
+  } finally {
+    await act(async () => { root.unmount(); });
+    Object.assign(api, originals);
+    container.remove();
+  }
+});
+
+/**
+ * Cross-model review CR-2.1. Switching children used to commit the new child while `events` still
+ * held the old one's, so for one render the retired transcript sat under the new child's header —
+ * and its "Insert Latest Response into Primary Draft" was live, which is the one action that crosses
+ * back into the primary composer. The fix resets the transcript in the same commit as the switch;
+ * that sub-frame window is not observable from happy-dom (a MutationObserver batches its records and
+ * reports only the settled text), so this test pins the settled outcome and the insert boundary,
+ * and the same-commit guarantee rests on `resetTranscript` being called beside every `setSideChat`
+ * that changes the child.
+ */
+test("a replaced child carries neither the retired transcript nor its insert action", async () => {
+  const originals = {
+    sideChat: api.sideChat, createSideChat: api.createSideChat,
+    session: api.session, getSessionEventPage: api.getSessionEventPage,
+  };
+  const ended = { ...child, status: "stopped" } as SessionView;
+  const replacement = { ...child, id: "side-session-fresh", status: "idle" } as SessionView;
+  const inserted: string[] = [];
+  let related: SideChatView = { ...relation, session: ended };
+  api.sideChat = async () => ({ sideChat: related });
+  api.createSideChat = async (_id: string, replaceEnded = false) => {
+    if (replaceEnded) related = { parentSessionId: parent.id, session: replacement, createdAt: 3 };
+    return related;
+  };
+  api.session = async () => ({ session: related.session });
+  api.getSessionEventPage = async (id: string) => ({
+    events: id === ended.id ? [responseEvent] : [], eventEpoch: 0, nextAfter: 1, cacheComplete: true,
+  });
+
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const button = (label: string) => Array.from(container.querySelectorAll("button"))
+    .find((candidate) => candidate.textContent === label) as HTMLButtonElement | undefined;
+  try {
+    await act(async () => {
+      root.render(mount(<SideChatPanel session={parent} runnerOnline
+        onInsertDraft={(text) => inserted.push(text)} />, []));
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    });
+    assert.match(container.textContent ?? "", /Selected side-chat answer/, "the retired transcript is loaded");
+    assert.ok(button("Insert Latest Response into Primary Draft"));
+
+    await act(async () => {
+      button("Start a New Side Chat")!.click();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    assert.match(container.textContent ?? "", /idle · separate worktree and transcript/);
+    assert.doesNotMatch(container.textContent ?? "", /Selected side-chat answer/,
+      "the fresh child does not inherit the retired child's transcript");
+    assert.equal(button("Insert Latest Response into Primary Draft"), undefined,
+      "nor its route back into the primary composer");
+    assert.deepEqual(inserted, []);
   } finally {
     await act(async () => { root.unmount(); });
     Object.assign(api, originals);

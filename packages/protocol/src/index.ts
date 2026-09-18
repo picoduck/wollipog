@@ -8433,6 +8433,16 @@ export interface SideChatResponse {
   sideChat: SideChatView | null;
 }
 
+/**
+ * Creating a side chat is idempotent by default: an existing relationship is returned rather than
+ * replaced. `replaceEnded` is the recovery path for a child that reached a terminal state — it
+ * unlinks that child (which is retained as an ordinary archived session, transcript and worktree
+ * intact) and starts a fresh one. It is refused while the current child is still alive.
+ */
+export interface CreateSideChatRequest {
+  replaceEnded?: boolean;
+}
+
 export interface RunResponse {
   run: RunView;
   sessions: SessionView[];
