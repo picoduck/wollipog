@@ -78,8 +78,11 @@ export function PendingPromptBubbles({
     const cancelLive = !cancelPending && !prompt.canDismiss && canCancelLive &&
       liveQueueIds.has(prompt.commandId);
     const detailsId = `pending-prompt-details-${prompt.commandId}`;
-    const recoveryBlocksRetry = worktreeRecoveryPending &&
-      prompt.errorCode === "WORKTREE_RECOVERY_REQUIRED";
+    // The service rejects every retry while the session's selected worktree is in recovery,
+    // whatever the retained receipt records. A prompt retained by an earlier authentication
+    // failure is blocked just the same, so enablement follows the live recovery state alone —
+    // keying it off the receipt's code offers an action the server answers with HTTP 409.
+    const recoveryBlocksRetry = worktreeRecoveryPending;
     return (
       <div
         className="tl-row user"
