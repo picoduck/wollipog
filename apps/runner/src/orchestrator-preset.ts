@@ -352,7 +352,13 @@ const ADDITIVE_CODEX_MCP_MARKER = ORCHESTRATOR_ENV_KEY;
 /** Exactly `mcp_servers.wollipog` (the whole entry or one of its fields), never a server whose
  * name merely starts with it, such as `mcp_servers.wollipog-helper`. */
 function namesReservedCodexMcpServer(setting: string): boolean {
-  return setting.startsWith(`${ADDITIVE_CODEX_MCP_KEY}=`) || setting.startsWith(`${ADDITIVE_CODEX_MCP_KEY}.`);
+  const assignment = setting.indexOf("=");
+  if (assignment < 0) return false;
+  // Codex parses the left side as a TOML dotted key: whitespace around the dots and the
+  // assignment is insignificant and each segment may be quoted.
+  const segments = setting.slice(0, assignment).split(".")
+    .map((segment) => segment.trim().replace(/^(["'])(.*)\1$/u, "$2"));
+  return segments[0] === "mcp_servers" && segments[1] === "wollipog";
 }
 
 /** A user-supplied launch argument that configures an MCP server under Wollipog's reserved name.

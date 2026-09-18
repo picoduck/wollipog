@@ -584,6 +584,17 @@ test("a user's own MCP server named wollipog is never deleted by the additive Co
   const similar = ["-c", 'mcp_servers.wollipog-helper={ command = "x", env = { WOLLIPOG_PERMISSION_PRESET = "orchestrator" } }',
     "-c", 'mcp_servers.wollipog2.command="y"'];
   assert.equal(reservedCodexMcpNameCollision(similar), false, "only the exact reserved name collides");
+  for (const spelling of [
+    'mcp_servers.wollipog = { command = "mine" }',
+    'mcp_servers . wollipog.command = "mine"',
+    'mcp_servers."wollipog"={ command = "mine" }',
+    "mcp_servers.'wollipog'.command=\"mine\"",
+  ]) {
+    assert.equal(reservedCodexMcpNameCollision(["-c", spelling]), true, `collision detected for: ${spelling}`);
+    assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(["-c", spelling], "codex", []), ["-c", spelling]);
+  }
+  assert.equal(reservedCodexMcpNameCollision(["-c", 'model="mcp_servers.wollipog=x"']), false,
+    "a value that merely mentions the key is not a collision");
   assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(similar, "codex", []), similar,
     "a similarly named server is never stripped, even if its value mentions the marker");
   assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(injected, "codex-app-server", ["/repo"]), []);
