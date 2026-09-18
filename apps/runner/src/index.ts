@@ -2187,10 +2187,17 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               // launch snapshot: that snapshot predates the awaited worktree proof and the
               // Orchestrator's scratch and credential preparation, and writing a stale inventory
               // would overwrite the live refresh — leaving a worktree created in that window
-              // unprotected for the running provider too.
-              protections: () => sessions.managedWorktreeProtections(
-                store.readMeta(prepared.sessionId) ?? prepared,
-              ),
+              // unprotected for the running provider too. A session deleted inside that same
+              // window is refused HERE, before provisioning writes anything: deletion removes this
+              // session's runner-owned hook files, and recreating them for a launch that is about
+              // to be rejected anyway would leave them behind until the next startup sweep.
+              protections: () => {
+                const current = store.readMeta(prepared.sessionId);
+                if (!current || store.isDeleted(prepared.sessionId)) {
+                  throw new Error("session is being deleted");
+                }
+                return sessions.managedWorktreeProtections(current);
+              },
             },
             log,
             claudeHookHost,

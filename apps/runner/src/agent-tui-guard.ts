@@ -58,6 +58,8 @@ export function provisionAgentTuiManagedWorktreeGuard(
   host: ClaudeHookHost = defaultClaudeHookHost(),
 ): AgentTuiGuardProvisioning {
   const { protections: resolveProtections, ...hookConfig } = config;
+  // Resolved BEFORE anything is written, so a caller that refuses the launch from here (a session
+  // deleted while the TUI was preparing) leaves no runner-owned files behind for it.
   const protections = resolveProtections();
   provisionClaudeHooks(
     spec,

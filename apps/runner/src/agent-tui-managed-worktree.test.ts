@@ -9,7 +9,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -311,6 +311,26 @@ test("the protection list is resolved when provisioning runs, not from the launc
     assert.deepEqual(readManagedWorktreeGuardProtections(claudeHookProtectionsPath(settings)), [
       { worktreePath: WORKTREE, repoPath: REPO },
     ]);
+  } finally {
+    resetClaudeGuardState();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a refusal from the protection source leaves no runner-owned files behind", async () => {
+  // CR-2.1. The production source refuses a session deleted while the TUI was preparing, because
+  // deletion has already removed this session's hook files. That only helps if nothing is written
+  // before the list is resolved.
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-tui-guard-"));
+  resetClaudeGuardState();
+  try {
+    await assert.rejects(
+      prepareAgentTuiLaunch(meta(), dependencies(dir, () => {
+        throw new Error("session is being deleted");
+      })),
+      /session is being deleted/u,
+    );
+    assert.deepEqual(readdirSync(dir), []);
   } finally {
     resetClaudeGuardState();
     rmSync(dir, { recursive: true, force: true });
