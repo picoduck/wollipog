@@ -2318,10 +2318,14 @@ export class ClaudeCodeDriver implements Driver {
                   // The request carries no cwd and the Bash tool keeps its own directory between
                   // calls, so a relative operand cannot be placed from here (#1333). With the guard
                   // active the hook has already judged this command from Claude's real directory;
-                  // the channel then adds only the refusals that hold wherever the shell is. A
-                  // subagent's request, and every request of a mediated launch, keeps the session
-                  // directory: nothing else has judged those.
-                  this.managedWorktreeGuardActive && parentId === null ? PLACELESS_CWD : this.cwd,
+                  // the channel then adds only the refusals that hold wherever the shell is.
+                  // Measured for #1361 on claude 2.1.270 and 2.1.277: the hook runs for a
+                  // SUBAGENT's Bash calls too, and its `cwd` is the directory that subagent's
+                  // command actually runs in — which is the top-level shell's current directory,
+                  // not the session directory. So the session directory is the wrong place for a
+                  // subagent's operand as well, and the guard is the authority for both. Only a
+                  // mediated launch, which has no hook at all, keeps the session directory.
+                  this.managedWorktreeGuardActive ? PLACELESS_CWD : this.cwd,
                   protections,
                 )
               : null);

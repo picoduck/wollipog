@@ -46,7 +46,9 @@ in the mode the user selected whenever that guard is in place.
   judging relative operands from the session directory refused `cd ..` from any subdirectory,
   and inferring the directory from command text does not converge (renaming the shell's own
   directory defeats it). The hook receives the real directory and is the authority for those.
-  Subagent requests and mediated launches keep the session-directory check.
+  Amended again by #1361: the hook was measured to run for a SUBAGENT's Bash calls too, carrying
+  that subagent's real directory, so a subagent's request is judged from the placeless directory as
+  well. Only a mediated launch, which has no hook at all, keeps the session-directory check.
 - `commandTargetsManagedWorktree` itself is unchanged (its false positives are #1301), and the
   `plan` path is untouched.
 
@@ -67,6 +69,27 @@ A `PreToolUse` command hook supplied through `--settings`:
   classifier ran `git status` with no prompt).
 
 Two `--settings` arguments do NOT merge: only the last file's hooks apply.
+
+## Measurements (claude 2.1.270 and 2.1.277, this machine, 2026-09-18)
+
+Do `PreToolUse` hooks cover a SUBAGENT's tool calls (#1361)? Measured by running headless Claude in
+a throwaway project whose `--settings` hook logged every payload, then comparing each payload's
+`cwd` against what that same command's own `pwd` printed. 2.1.270 (the version the measurements
+above were taken on) and 2.1.277 (the version installed on this machine) behaved identically, over
+repeated runs:
+
+- A `"matcher": "Bash"` hook runs for the Bash calls a subagent makes. No subagent call was missed.
+- A subagent's payload adds `agent_id` and `agent_type` to the top-level shape, which is how such a
+  call can be recognised in the hook.
+- The payload's `cwd` is the directory the subagent's command actually runs in — confirmed call by
+  call, with no disagreement.
+- That directory is the TOP-LEVEL shell's current directory, not the session directory: after the
+  top-level shell did `cd sub`, every subagent call ran in `<proj>/sub`.
+- A subagent's Bash shell does not keep its own `cd` between calls; it resets to that inherited
+  directory each time (the top-level shell does keep its own).
+
+Hence the session directory could not place a subagent's relative operand either, and the amendment
+above.
 
 ## Fail closed, and the fail-safe
 
