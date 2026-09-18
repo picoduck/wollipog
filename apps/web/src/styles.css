@@ -3599,7 +3599,7 @@ textarea {
   height: 4px;
   appearance: none;
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   overflow: hidden;
   background: color-mix(in srgb, var(--warning) 20%, var(--border));
   accent-color: var(--warning);
