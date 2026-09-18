@@ -50,7 +50,6 @@ import {
   Smartphone as LucideSmartphone,
   Square as LucideSquare,
   SquareTerminal as LucideSquareTerminal,
-  Terminal as LucideTerminal,
   TriangleAlert as LucideTriangleAlert,
   Upload as LucideUpload,
   UserPlus as LucideUserPlus,
@@ -261,10 +260,6 @@ export function DockBottomIcon(props: IconProps) {
 
 export function PanelRightIcon(props: IconProps) {
   return <LibraryIcon glyph={LucidePanelRight} {...props} />;
-}
-
-export function TerminalIcon(props: IconProps) {
-  return <LibraryIcon glyph={LucideTerminal} {...props} />;
 }
 
 export function CommandLineIcon(props: IconProps) {
