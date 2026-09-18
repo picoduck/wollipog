@@ -778,9 +778,8 @@ function guardStateCandidates(path: string, cwd: string): string[] {
 
 /**
  * How a spelling relates to the guard-state directory. `inside` is the directory itself or anything
- * beneath it. `ancestor` is a strict ancestor, and carries how many path components separate the
- * two: a walk that descends no further than that names the directory at most, and never enumerates
- * what is in it.
+ * beneath it. `ancestor` is a strict ancestor: a directory that contains it, which an inspection may
+ * name but a walk would reach.
  */
 export type GuardStateRelation = { kind: "inside" } | { kind: "ancestor" };
 
@@ -820,15 +819,17 @@ export function pathTargetsGuardState(path: string, cwd: string, directory: stri
  * Refusing every operand that CONTAINS the hook directory also refused `ls /home` and a listing of
  * the home directory in every session whose data directory lives under it (#1334), though neither
  * reads anything the guard owns. The carve-out below is deliberately narrow and fails closed: an
- * operand that is a strict ancestor is allowed only for `ls` without a recursive option, `du`, and
+ * operand that is a strict ancestor is allowed only for `ls` without a recursive option and for
  * `stat`, and only when the WHOLE command is such an inspection and nothing else. A recursive
  * removal or a recursive search rooted at an ancestor is refused as before.
  *
- * `find` is deliberately NOT here, though #1334 lists `find -maxdepth 1` among the commands that
- * should be allowed. Supporting it means arithmetic on how far a walk may descend before it reaches
- * the hook directory, and three of the bypasses found while reviewing this change came out of that
- * arithmetic. The remaining commands need no depth reasoning at all: none of them descends. A
- * depth-bounded `find` is worth its own change, with that arithmetic as the whole subject.
+ * `du` and `find` are deliberately NOT here, though #1334 lists both among the commands that should
+ * be allowed. Each walks the tree it is given and each can be pointed at a file through an option
+ * value, which is not an operand and so is never compared against the guard state: three of the
+ * bypasses found while reviewing this change came out of bounding `find`'s walk, and two more out of
+ * `du`'s file-valued options. `ls` and `stat` do neither — neither descends, and neither takes an
+ * option that names a file to open — so they need no depth reasoning and no option parsing. A
+ * bounded `du` or `find` is worth its own change, with that reasoning as the whole subject.
  *
  * What disqualifies a command, and why each one has to:
  *
@@ -849,19 +850,12 @@ export function pathTargetsGuardState(path: string, cwd: string, directory: stri
  *   `--recursive` long before this classifier would see it.
  * - A `NAME=value` assignment: a `PATH=` prefix decides what the command name resolves to.
  * - A command word that is not a bare name: `./ls` and `/tmp/ls` are whatever was planted there.
- * - An option word carrying a path, in any spelling. `du --exclude-from=<path>`, `-X<path>`, and
- *   `--files0-from=<path>` all OPEN that file, and an option's value is not an operand, so it is
- *   not compared against the guard state. No inspection needs a path inside an option.
  * - A working directory inside the guard state, since a command with no operand acts there.
  *
  * It over-refuses where the safe direction is to do so. A short-option cluster is scanned for `R`
  * without modelling which options take an attached value, so GNU's `ls -IREADME` reads as recursive
  * and is refused; the alternative, a hard-coded list of value-taking options, fails OPEN the day
  * that list is wrong.
- *
- * `du` is the accepted exception among the commands themselves: it walks the whole tree it is
- * given, so it learns the hook directory's shape and the size of what is in it. It reads no file
- * contents, and #1334 lists it among the commands that must be allowed.
  * ------------------------------------------------------------------------------------------ */
 
 /** Operators that end one command and begin another. */
@@ -949,16 +943,11 @@ function inspectsAncestorOnly(words: readonly string[]): boolean {
   if (words.some((word) => /[*?[\]{}]/u.test(word))) return false;
   // An assignment decides what the command name resolves to.
   if (words.some((word) => /^[A-Za-z_][A-Za-z0-9_]*=/u.test(word))) return false;
-  // An option carrying a path reads that file without ever naming it as an operand.
-  if (words.some((word) => word.startsWith("-") && (word.includes("/") || word.includes("\\")))) {
-    return false;
-  }
   const name = words[0];
   if (name === undefined || name === "" || name.includes("/") || name.includes("\\")) return false;
   switch (name) {
     case "ls":
       return !words.some(recursiveListing);
-    case "du":
     case "stat":
       return true;
     default:
