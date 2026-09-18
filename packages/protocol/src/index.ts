@@ -455,6 +455,17 @@
 //      the launch outright, and an even older runner would start an ordinary Codex session with no
 //      orchestration surface while the control plane still granted orchestrator routes and a scoped
 //      credential. The combination is therefore refused with upgrade guidance rather than degraded.
+// 163: the additive Orchestrator role extends to the native Pi harness. A non-strict Pi
+//      Orchestrator launches exactly as an ordinary Pi session — extensions, skills, prompt
+//      templates, context files, and the built-in tool inventory are all retained, and the selected
+//      permission mode keeps enforcing approvals through the verified Agent Control bridge — and
+//      gains only the Wollipog orchestration tools already carried by that bridge plus the
+//      Orchestrator instructions. A v162 runner has no additive Pi shape for the launch policy
+//      block, and an older runner would start an ordinary Pi session with no orchestration surface
+//      while the control plane still granted orchestrator routes and a scoped credential, so the
+//      combination is refused with upgrade guidance rather than degraded. The ACP harness is
+//      deliberately excluded: its provider-mode permission contract is still unaudited, so an ACP
+//      Orchestrator keeps the coupled preset.
 export const PROTOCOL_VERSION = 162;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
@@ -648,6 +659,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   orchestratorIssueScope: 158,
   orchestratorAdditiveRole: 160,
   orchestratorAdditiveCodex: 162,
+  orchestratorAdditivePi: 163,
   worktreeSetup: 141,
   worktreeTeardownPorts: 145,
   worktreeSetupConfig: 146,
@@ -1452,12 +1464,14 @@ export function usesOrchestratorPresetPermissions(
 }
 
 /** Harnesses whose Orchestrator role can be additive, each with the capability gate that carries
- * its launch shape. Claude Code landed in v160; the Codex drivers in v162. Every other driver
- * still requires the coupled preset, so it has no entry here. */
+ * its launch shape. Claude Code landed in v160; the Codex drivers in v162; Pi in v163. Every other
+ * driver still requires the coupled preset, so it has no entry here — notably `acp`, whose
+ * provider-mode permission contract has not been audited. */
 export const ORCHESTRATOR_ADDITIVE_CAPABILITY = {
   "claude-code": "orchestratorAdditiveRole",
   codex: "orchestratorAdditiveCodex",
   "codex-app-server": "orchestratorAdditiveCodex",
+  pi: "orchestratorAdditivePi",
 } as const satisfies Partial<Record<string, keyof typeof RUNNER_CAPABILITY_MIN_PROTOCOL>>;
 
 /** The runner capability a driver needs to launch the Orchestrator role additively, or `undefined`

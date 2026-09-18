@@ -381,11 +381,12 @@ export function additiveCodexMcpServerArg(
 }
 
 /**
- * Independent provider permissions (protocol v160 for Claude Code, v162 for the Codex drivers): the
- * harness launches exactly as an equivalent normal session and only gains Wollipog's orchestration
- * tools, instructions, and — for Claude — project read locations. Nothing here narrows the
- * permission mode, sandbox, approval policy, built-in tool inventory, apps, plugins, hooks,
- * multi-agent or multimodal tools, settings sources, or configured MCP servers.
+ * Independent provider permissions (protocol v160 for Claude Code, v162 for the Codex drivers, v163
+ * for Pi): the harness launches exactly as an equivalent normal session and only gains Wollipog's
+ * orchestration tools, instructions, and — for Claude — project read locations. Nothing here
+ * narrows the permission mode, sandbox, approval policy, built-in tool inventory, apps, plugins,
+ * hooks, extensions, skills, prompt templates, context files, multi-agent or multimodal tools,
+ * settings sources, or configured MCP servers.
  *
  * Claude's Wollipog server arrives through the general Agent Control MCP config that ordinary
  * sessions already receive, so only the pre-authorization, instructions, and Project Locations are
@@ -419,7 +420,20 @@ export function additiveOrchestratorLaunchArgs(
       "-c", `developer_instructions=${toml(instructions)}`,
     ];
   }
-  throw new Error("independent provider permissions are supported only for the native Claude Code and Codex Orchestrators");
+  // Pi's Wollipog tools arrive through the discovery-verified Agent Control extension that every
+  // verified Pi session already loads; the orchestration subset of its catalog is selected by
+  // ORCHESTRATOR_ENV_KEY in the agent environment. Nothing else is needed, so the additive Pi
+  // launch is the ordinary launch plus the instructions alone — no `--no-extensions`,
+  // `--no-skills`, `--no-prompt-templates`, `--no-context-files`, or `--exclude-tools`.
+  //
+  // Measured against the installed pi 0.85.0: `dist/cli/args.js` pushes every
+  // `--append-system-prompt` onto an array and `dist/core/agent-session.js` joins them with a blank
+  // line, so this append never displaces a user's own append and there is no reserved name to
+  // collide with.
+  if (driver === "pi") {
+    return ["--append-system-prompt", instructions];
+  }
+  throw new Error("independent provider permissions are supported only for the native Claude Code, Codex, and Pi Orchestrators");
 }
 
 /** Remove only the arguments `additiveOrchestratorLaunchArgs` injects, leaving every user- or
@@ -438,7 +452,14 @@ export function stripAdditiveOrchestratorLaunchArgs(
     const flag = arg.split("=", 1)[0]!;
     const inline = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : undefined;
     const value = inline ?? args[i + 1];
-    const injected = driver === "claude-code"
+    // Measured against pi 0.85.0 `dist/cli/args.js`: `--append-system-prompt` is matched by exact
+    // string equality and consumes the NEXT argument. `--append-system-prompt=TEXT` is not that
+    // flag at all — it falls through to the unknown-flag branch and is handed to extensions — so
+    // matching the inline form here would delete a user argument that Pi reads as something else.
+    const injected = driver === "pi"
+      ? arg === "--append-system-prompt" && typeof args[i + 1] === "string" &&
+        args[i + 1]!.startsWith(ORCHESTRATOR_INSTRUCTIONS_PREFIX)
+      : driver === "claude-code"
       ? (flag === "--allowedTools" && value === ADDITIVE_CLAUDE_ALLOWED_TOOLS) ||
         (flag === "--append-system-prompt" && typeof value === "string" && value.startsWith(ORCHESTRATOR_INSTRUCTIONS_PREFIX)) ||
         (flag === "--add-dir" && typeof value === "string" && projects.has(value))

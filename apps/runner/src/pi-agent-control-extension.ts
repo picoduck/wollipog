@@ -11,11 +11,20 @@ export const PI_SECURITY_REQUEST_TITLE = "Wollipog Security Approval";
 export const PI_SECURITY_REQUEST_PREFIX = "wollipog-security-v1:";
 export const PI_SECURITY_REQUEST_NONCE_ENV = "WOLLIPOG_PI_SECURITY_REQUEST_NONCE";
 
+/** Set only by the coupled Orchestrator preset, which launches Pi with `--exclude-tools bash,edit,write`
+ * and the discovery flags off, and therefore restores its own read-only inspection surface. The
+ * additive role must NOT set it: that launch keeps whatever tool inventory the user configured, so
+ * force-activating tools here would re-enable ones a `--tools` allowlist or an `--exclude-tools`
+ * denylist deliberately removed. The role itself is signalled by ORCHESTRATOR_ENV_KEY, which is what
+ * selects the orchestration tool catalog in the Agent Control MCP server. */
+export const PI_ORCHESTRATOR_PRESET_TOOLS_ENV = "WOLLIPOG_PI_ORCHESTRATOR_PRESET_TOOLS";
+
 export const PI_AGENT_CONTROL_ENV_KEYS = [
   "WOLLIPOG_PI_AGENT_CONTROL_COMMAND",
   "WOLLIPOG_PI_AGENT_CONTROL_ARGS",
   "WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE",
   PI_SECURITY_REQUEST_NONCE_ENV,
+  PI_ORCHESTRATOR_PRESET_TOOLS_ENV,
 ] as const;
 
 export function piAgentControlProbeSource(nonce: string): string {
@@ -279,7 +288,7 @@ export default function (pi) {
         });
       }
       questionTool(pi);
-      if (process.env.WOLLIPOG_PERMISSION_PRESET === "orchestrator") {
+      if (process.env[${JSON.stringify(PI_ORCHESTRATOR_PRESET_TOOLS_ENV)}] === "1") {
         pi.setActiveTools([...new Set([...pi.getActiveTools(), "read", "grep", "find", "ls"])]);
       }
       ctx.ui.setStatus(STATUS_KEY, nonce);

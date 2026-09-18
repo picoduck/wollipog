@@ -57,6 +57,7 @@ import {
   PI_AGENT_CONTROL_ENV_KEYS,
   PI_AGENT_CONTROL_EXTENSION_SUFFIX,
   PI_AGENT_CONTROL_PROTOCOL,
+  PI_ORCHESTRATOR_PRESET_TOOLS_ENV,
   PI_SECURITY_REQUEST_NONCE_ENV,
   piAgentControlExtensionSource,
 } from "./pi-agent-control-extension.js";
@@ -287,7 +288,7 @@ export function provisionAgentControl(
   const additiveCapability = orchestratorAdditiveCapability(spec.driver);
   if (additiveOrchestrator) {
     if (!additiveCapability || !nativeHostExecution) {
-      throw new Error("independent provider permissions are supported only for the native Claude Code and Codex Orchestrators on the host");
+      throw new Error("independent provider permissions are supported only for the native Claude Code, Codex, and Pi Orchestrators on the host");
     }
     if (!runnerSupportsProtocol(config.controlPlaneProtocolVersion, additiveCapability)) {
       throw new Error(`an Orchestrator with independent provider permissions requires a protocol-v${
@@ -330,11 +331,30 @@ export function provisionAgentControl(
   }
   if (orchestrator && spec.driver === "pi") {
     const agent = config.orchestratorAgent;
-    const baseArgs = stripOrchestratorLaunchArgs(spec.args, spec.driver);
+    // The coupled preset replaces Pi's whole controlled surface, so it compares against the
+    // preset-stripped baseline. The additive launch must not: `stripOrchestratorLaunchArgs` also
+    // removes user flags such as `--no-skills` or `--exclude-tools`, which the additive contract
+    // deliberately preserves, so a catalog agent carrying one would fail this identity check.
+    // Remove only what this runner provably injected: the additive arguments and, since the
+    // bridge is provisioned before every relaunch, our own session-scoped extension path.
+    const piExtension = piAgentControlExtensionPath(host.configDir, spec.sessionId);
+    let baseArgs = additiveOrchestrator
+      ? stripAdditiveOrchestratorLaunchArgs(spec.args, spec.driver, orchestratorProjectPaths)
+      : stripOrchestratorLaunchArgs(spec.args, spec.driver);
+    if (additiveOrchestrator) {
+      baseArgs = [...baseArgs];
+      for (let i = baseArgs.length - 2; i >= 0; i--) {
+        if ((baseArgs[i] === "--extension" || baseArgs[i] === "-e") && baseArgs[i + 1] === piExtension) {
+          baseArgs.splice(i, 2);
+        }
+      }
+    }
     const launchMatches = agent && agent.driver === "pi" && agent.command === spec.command &&
       agent.args.length === baseArgs.length && agent.args.every((arg, index) => arg === baseArgs[index]);
     if (!launchMatches || agent?.piAgentControl?.protocolVersion !== PI_AGENT_CONTROL_PROTOCOL) {
-      throw new Error("the Orchestrator preset requires the exact discovery-verified Pi extension bridge");
+      throw new Error(additiveOrchestrator
+        ? "the Orchestrator role requires the exact discovery-verified Pi extension bridge"
+        : "the Orchestrator preset requires the exact discovery-verified Pi extension bridge");
     }
   }
   if (orchestrator && (spec.driver ?? "acp") === "acp") {
@@ -438,6 +458,9 @@ export function provisionAgentControl(
     WOLLIPOG_CLI_ARGS: JSON.stringify(cli.args),
   };
   delete spec.env[ORCHESTRATOR_ENV_KEY];
+  // Both role markers are re-established below for the shape this launch actually uses, so a value
+  // persisted by an earlier preset launch can never survive into an additive or ordinary one.
+  delete spec.env[PI_ORCHESTRATOR_PRESET_TOOLS_ENV];
   if (piAgentControlVerified) {
     const file = piAgentControlExtensionPath(host.configDir, spec.sessionId);
     const mcp = runnerReentryCommand(host, "--agent-control-mcp");
@@ -499,6 +522,9 @@ export function provisionAgentControl(
       spec.args.push(...orchestratorLaunchArgs(spec.driver, mcp, orchestratorProjectPaths, strictProjectIsolation));
       if (spec.driver === "pi") {
         spec.args.push("--extension", piAgentControlExtensionPath(host.configDir, spec.sessionId));
+        // The preset excludes bash/edit/write and disables discovery, so the extension restores the
+        // read-only inspection tools. The additive role keeps the user's own inventory instead.
+        spec.env[PI_ORCHESTRATOR_PRESET_TOOLS_ENV] = "1";
       }
     }
   }
