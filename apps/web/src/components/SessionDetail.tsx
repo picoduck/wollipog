@@ -130,6 +130,7 @@ import { ComposerQuestionResponse } from "./ComposerQuestionResponse.js";
 import { useGovernanceAudit, useGovernanceTimeline } from "./useGovernanceAudit.js";
 import { SessionHeader } from "./SessionHeader.js";
 import { WorktreeSetupNotice } from "./WorktreeSetupNotice.js";
+import { WorktreeRecoveryCard } from "./WorktreeRecoveryCard.js";
 import { worktreeSetupNoticeSessionIds } from "../worktree-setup-notice.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { useAccessibleMenu, useDismissiblePopover } from "./interactions.js";
@@ -2612,9 +2613,11 @@ function SessionDetailLoaded({
   // A quarantined provider conversation rejects every submission before the model runs, so the
   // composer must not invite retries that cannot succeed.
   const historyQuarantine = session.historyQuarantine;
-  const canPrompt = runnerOnline && !terminal && !policyPaused && !historyQuarantine;
+  const worktreeRecovery = session.worktreeRecovery;
+  const canPrompt = runnerOnline && !terminal && !policyPaused && !historyQuarantine && !worktreeRecovery;
   const composerPlaceholder = terminal ? `Session is ${session.status}.`
     : !runnerOnline ? "Runner is offline."
+    : worktreeRecovery ? "Worktree recovery is required before sending another message."
     : historyQuarantine ? "Conversation quarantined. Recover this session to continue."
     : policyPaused ? "Session is paused by guardrails. Review the pending decision to continue."
     : "Do anything";
@@ -3256,6 +3259,18 @@ function SessionDetailLoaded({
   }, [api, busy, loadSession, restartPending, runnerOnline, session.id, session.status,
     session.stopOperation?.status]);
   const failedSetupWorktree = session.worktrees?.find((worktree) => worktree.setup?.status === "failed");
+  const createRecoveryWorktree = useCallback(async (input: { branch: string; baseRef?: string }) => {
+    const generation = viewGenerationRef.current;
+    setError(null);
+    const result = await api.createSessionWorktree(session.id, input);
+    if (viewGenerationRef.current === generation) loadSession(result.session);
+  }, [api, loadSession, session.id]);
+  const selectRecoveryWorktree = useCallback(async (path: string) => {
+    const generation = viewGenerationRef.current;
+    setError(null);
+    const result = await api.selectSessionWorktree(session.id, path);
+    if (viewGenerationRef.current === generation) loadSession(result.session);
+  }, [api, loadSession, session.id]);
   const retryWorktreeSetup = useCallback(async () => {
     if (!failedSetupWorktree || setupRetryPending || !runnerOnline) return;
     const generation = viewGenerationRef.current;
@@ -4785,6 +4800,7 @@ function SessionDetailLoaded({
                     liveQueueIds={liveQueueIds}
                     canCancelLive={runnerOnline && canCancelQueued}
                     pendingAction={pendingPromptAction}
+                    worktreeRecoveryPending={worktreeRecovery !== undefined}
                     onCancelPending={(commandId) => void resolvePendingPrompt(commandId, "cancel")}
                     onCancelLive={(commandId) => void cancelLivePendingPrompt(commandId)}
                     onDismiss={(commandId) => void resolvePendingPrompt(commandId, "dismiss")}
@@ -4916,6 +4932,14 @@ function SessionDetailLoaded({
                   : ""}
             </span>
             {error && <div className="composer-error" role="alert">{error}</div>}
+            {worktreeRecovery && (
+              <WorktreeRecoveryCard
+                session={session}
+                runnerOnline={runnerOnline}
+                onCreate={createRecoveryWorktree}
+                onSelect={selectRecoveryWorktree}
+              />
+            )}
             {failedSetupWorktree && (
               <div className="quarantine-banner" role="status" aria-label="Worktree Setup Failed">
                 <div className="quarantine-copy">

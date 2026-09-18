@@ -67,6 +67,7 @@ import type {
   SessionStatus,
   SessionTitleSource,
   SessionWorktreeView,
+  WorktreeRecoveryView,
 } from "@wollipog/protocol";
 import type { WorktreeHookSnapshot } from "./worktree-setup.js";
 
@@ -202,6 +203,9 @@ export interface SessionMeta {
   /** Content-free command tombstones for auth recovery the user explicitly dismissed before a
    * restarted runner reclaimed the corresponding durable handles. */
   providerAuthDismissedCommandIds?: string[];
+  /** Durable, content-free pre-launch worktree refusal. Prompt content remains solely in the
+   * control-plane durable outbox and is correlated by its command identity there. */
+  worktreeRecovery?: WorktreeRecoveryView;
   /** Durable quarantine of a provider-owned conversation whose stored history the provider rejects
    * before inference. Authoritative across process restart: while it is set, no prompt, automatic
    * continuation, or compaction may be submitted to this thread, because every submission resends
@@ -2821,6 +2825,7 @@ const NATIVE_SLASH_COMMAND_OVERLAY_PROTOCOL_VERSION = 74;
 const MANAGED_BACKGROUND_JOBS_PROTOCOL_VERSION = RUNNER_CAPABILITY_MIN_PROTOCOL.managedBackgroundDelivery;
 const BACKGROUND_WORK_TRACKING_PROTOCOL_VERSION = RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundWorkTracking;
 const PROVIDER_HISTORY_QUARANTINE_PROTOCOL_VERSION = RUNNER_CAPABILITY_MIN_PROTOCOL.providerHistoryQuarantine;
+const WORKTREE_RECOVERY_PROTOCOL_VERSION = RUNNER_CAPABILITY_MIN_PROTOCOL.worktreeRecovery;
 
 /** Bounded projection of the durable quarantine. Sizes and the offending item's position are
  * structural provider evidence; the retained prompt is reported only as a boolean so its text
@@ -2899,6 +2904,10 @@ export function metaToSnapshot(
     historyQuarantine: controlPlaneProtocolVersion != null &&
       controlPlaneProtocolVersion >= PROVIDER_HISTORY_QUARANTINE_PROTOCOL_VERSION
       ? providerHistoryQuarantineView(m) ?? null
+      : undefined,
+    worktreeRecovery: controlPlaneProtocolVersion != null &&
+      controlPlaneProtocolVersion >= WORKTREE_RECOVERY_PROTOCOL_VERSION
+      ? m.worktreeRecovery ?? null
       : undefined,
     backgroundWorkState: m.backgroundWorkState,
     backgroundWorkTracking: controlPlaneProtocolVersion != null &&

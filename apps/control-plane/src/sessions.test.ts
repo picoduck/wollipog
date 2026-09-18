@@ -7678,6 +7678,43 @@ test("admission-queued prompts persist before success, survive service restart, 
     "stopped sessions never replay retained prompts");
 });
 
+test("idle worktree prompts use durable delivery before a possible provider relaunch", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+    id,
+    status: "idle",
+    worktreePath: "/repos/demo/.agent-worktrees/relaunch",
+  })]);
+  hub.sentToRunner.length = 0;
+
+  const result = svc.promptFromUser(db.localIdentityContext().userId, id, "retain before relaunch");
+
+  assert.ok(result.ok, result.error);
+  assert.equal(hub.sentOfType("prompt_session").length, 0);
+  const delivery = hub.sentOfType("durable_session_command")[0];
+  assert.ok(delivery?.command.type === "prompt_session");
+  assert.equal(delivery.command.text, "retain before relaunch");
+  assert.equal(db.getSessionPromptCommand(delivery.commandId)?.state, "sent");
+});
+
+test("a human prompt during a live worktree turn keeps the existing non-durable delivery path", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+    id,
+    status: "running",
+    worktreePath: "/repos/demo/.agent-worktrees/live",
+  })]);
+  hub.sentToRunner.length = 0;
+
+  const result = svc.promptFromUser(db.localIdentityContext().userId, id, "steer the live turn");
+
+  assert.ok(result.ok, result.error);
+  assert.equal(hub.sentOfType("durable_session_command").length, 0);
+  assert.equal(hub.sentOfType("prompt_session").length, 1);
+});
+
 test("terminal hydration and runtime snapshots fence every durable prompt from replay", () => {
   for (const source of ["hydration", "runtime"] as const) {
     const { db, hub, svc } = makeHarness();
@@ -8022,6 +8059,57 @@ test("authentication prompt retry refuses a stopped session without replacing re
     "a refused retry keeps the original recoverable content intact");
   assert.equal(db.getSessionPromptCommand(sent.commandId)?.dismissedAt, undefined);
   assert.equal(db.getSession(id)?.pendingPrompts?.length, 1);
+});
+
+test("worktree recovery keeps a known-unsent prompt parked until verified recovery", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { prompt: "initial" });
+  hub.sentToRunner.length = 0;
+  assert.equal(svc.prompt(id, "retained worktree prompt").ok, true);
+  const sent = hub.sentOfType("durable_session_command")[0]!;
+  assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+    type: "durable_session_command_update",
+    commandId: sent.commandId,
+    sessionId: id,
+    state: "failed",
+    revision: 2,
+    error: "selected worktree is unavailable; this message was not sent",
+    code: "WORKTREE_RECOVERY_REQUIRED",
+  }), true);
+  db.raw().prepare("UPDATE sessions SET status='input_required',worktree_recovery=? WHERE id=?").run(
+    JSON.stringify({
+      recoveryId: "worktree-recovery:test",
+      detectedAt: Date.now(),
+      selectedPath: "/repos/project/missing",
+      expectedBranch: "fix/missing",
+      detail: "the selected worktree could not be verified",
+    }),
+    id,
+  );
+  assert.equal(db.getSession(id)?.pendingPrompts?.[0]?.canRetry, true);
+  const ordinary = svc.prompt(id, "must not queue behind recovery");
+  assert.equal(ordinary.ok, false);
+  if (!ordinary.ok) assert.match(ordinary.error ?? "", /worktree recovery is required/u);
+  hub.sentToRunner.length = 0;
+  const blocked = svc.retryPendingWork(id, sent.commandId);
+  assert.equal(blocked.ok, false);
+  if (!blocked.ok) assert.match(blocked.error ?? "", /recover.*worktree/u);
+  assert.equal(hub.sentOfType("durable_session_command").length, 0);
+
+  db.raw().prepare("UPDATE session_prompt_commands SET error_code=? WHERE command_id=?")
+    .run("PROVIDER_AUTHENTICATION_REQUIRED", sent.commandId);
+  const mixedRecoveryBlocked = svc.retryPendingWork(id, sent.commandId);
+  assert.equal(mixedRecoveryBlocked.ok, false,
+    "a stale authentication receipt cannot bypass the live worktree recovery gate");
+  if (!mixedRecoveryBlocked.ok) assert.match(mixedRecoveryBlocked.error ?? "", /recover.*worktree/u);
+  assert.equal(hub.sentOfType("durable_session_command").length, 0);
+
+  db.raw().prepare("UPDATE sessions SET status='idle',worktree_recovery=NULL WHERE id=?").run(id);
+  const recovered = svc.retryPendingWork(id, sent.commandId);
+  assert.equal(recovered.ok, true, recovered.error);
+  const retry = hub.sentOfType("durable_session_command")[0]!;
+  assert.equal(retry.commandId, `${sent.commandId}.retry-1`);
+  assert.deepEqual(retry.command, sent.command);
 });
 
 test("durable prompt retry attempt identities stay bounded while recent receipts remain valid", () => {

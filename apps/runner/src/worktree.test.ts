@@ -4867,20 +4867,84 @@ test("a worktree removed between turns fails the resume instead of spawning a pr
     assert.equal(existsSync(worktreePath), false);
 
     const before = launchedCwds.length;
-    manager.prompt(spec.sessionId, "second");
+    const durableFailures: Array<{ error: string; code?: string }> = [];
+    manager.prompt(spec.sessionId, "second", [], undefined, undefined, {
+      commandId: "prompt-missing-worktree",
+      queued() {},
+      started() {},
+      completed() {},
+      failed(error, code) { durableFailures.push({ error, code }); },
+      uncertain() {},
+    }, false, undefined, true);
     await waitForCondition(
-      () => messages.some((message) => message.type === "session_status" && message.status === "failed" &&
-        /could not be verified before provider launch/.test(message.detail ?? "")),
+      () => durableFailures.length === 1,
       "the resume never reported the invalid worktree",
     );
     assert.equal(launchedCwds.length, before, "no provider process was created for the removed worktree");
     assert.deepEqual(prompts, ["first"], "and the resumed turn never reached a provider");
-    assert.equal(messages.some((message) => message.type === "session_status" && message.status === "failed"), true,
-      "the affected session fails with a durable status");
+    assert.equal(messages.some((message) => message.type === "session_status" && message.status === "input_required"), true,
+      "the affected session parks in a durable recovery state");
     const meta = store.readMeta(spec.sessionId);
     assert.equal(meta?.worktreePath, worktreePath,
       "the selection is retained rather than silently falling back to the primary workspace");
     assert.equal(launchedCwds.includes(repo), false, "the primary repository was never used as a substitute cwd");
+    assert.deepEqual(durableFailures, [{
+      error: `${meta?.worktreeRecovery?.detail}; this message was not sent`,
+      code: "WORKTREE_RECOVERY_REQUIRED",
+    }], "an authentication-retained pre-launch command keeps one known-not-delivered receipt");
+
+    const restoredBranch = meta?.worktreeBranch;
+    assert.ok(restoredBranch);
+    execFileSync("git", ["-C", repo, "worktree", "add", worktreePath, restoredBranch]);
+    const internals = manager as unknown as {
+      beginLaunchGeneration(sessionId: string): number;
+      verifySelectedWorktreeBeforeLaunch(
+        meta: NonNullable<ReturnType<SessionStore["readMeta"]>>,
+        worktree: { path: string; branch: string },
+        generation: number,
+      ): Promise<boolean>;
+    };
+    const launchGeneration = internals.beginLaunchGeneration(spec.sessionId);
+    assert.equal(await internals.verifySelectedWorktreeBeforeLaunch(
+      store.readMeta(spec.sessionId)!,
+      { path: worktreePath, branch: restoredBranch },
+      launchGeneration,
+    ), true);
+    assert.equal(store.readMeta(spec.sessionId)?.worktreeRecovery, undefined,
+      "a positive proof retires the matching incident before a restored-path relaunch");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("worktree recovery remains input-required across runner restart", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-worktree-recovery-restart-"));
+  let manager: SessionManager | undefined;
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    const missingPath = join(root, "missing-worktree");
+    store.create({
+      sessionId: "s_recovery_restart", agentId: "codex", workspaceId: "repo", repoPath: join(root, "repo"),
+      worktreePath: missingPath, worktreeBranch: "fix/missing", worktrees: [{
+        id: "missing", path: missingPath, branch: "fix/missing", source: "attached",
+      }],
+      driver: "codex-app-server", command: "codex", args: [], env: {}, context: { kind: "native" },
+      agentSessionId: "thread-1", status: "input_required", title: "recovery", config: {}, tokensIn: 0,
+      tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null, seq: 1, createdAt: 1, updatedAt: 2,
+      indexReset: true,
+      worktreeRecovery: {
+        recoveryId: "worktree-recovery:restart", detectedAt: 2, selectedPath: missingPath,
+        expectedBranch: "fix/missing", detail: "the selected worktree could not be verified",
+      },
+    });
+
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, root);
+
+    const restored = store.readMeta("s_recovery_restart");
+    assert.equal(restored?.status, "input_required");
+    assert.equal(restored?.pendingApproval, null);
+    assert.equal(restored?.worktreeRecovery?.recoveryId, "worktree-recovery:restart");
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
@@ -4928,7 +4992,7 @@ test("queued app-server recovery refuses to relaunch into a removed worktree", {
     await internals.recoverQueuedAppServer("s_recovery_wt");
 
     assert.deepEqual(launchedCwds, [], "recovery never spawned a provider in the removed worktree");
-    assert.equal(messages.some((message) => message.type === "session_status" && message.status === "failed" &&
+    assert.equal(messages.some((message) => message.type === "session_status" && message.status === "input_required" &&
       /could not be verified before provider launch/.test(message.detail ?? "")), true,
       "recovery reported the invalid worktree state through actionable status detail");
     assert.equal(internals.recoveryQueues.get("s_recovery_wt"), queued, "the queued prompts stay held");
@@ -5045,7 +5109,7 @@ test("a non-host execution target verifies its host worktree before the adapter 
     await internals.recoverQueuedAppServer("s_container_wt");
 
     assert.deepEqual(launchedCwds, [], "no driver was constructed for the removed mount source");
-    assert.equal(messages.some((message) => message.type === "session_status" && message.status === "failed" &&
+    assert.equal(messages.some((message) => message.type === "session_status" && message.status === "input_required" &&
       /could not be verified before provider launch/.test(message.detail ?? "")), true,
       "the worktree is proved before any adapter-specific preparation runs");
   } finally {
@@ -5142,7 +5206,7 @@ test("a legacy row without a recorded branch still fails closed when its worktre
     await internals.recoverQueuedAppServer("s_legacy_branch");
 
     assert.deepEqual(launchedCwds, [], "a switched legacy worktree never reaches a provider");
-    assert.equal(messages.some((message) => message.type === "session_status" && message.status === "failed" &&
+    assert.equal(messages.some((message) => message.type === "session_status" && message.status === "input_required" &&
       /instead of agent\/s_legacy_branch/.test(message.detail ?? "")), true,
       "and the status detail names the identity the legacy row implies");
 
@@ -5154,7 +5218,7 @@ test("a legacy row without a recorded branch still fails closed when its worktre
     internals.recoveryQueues.set("s_legacy_branch", [{ id: "q2", text: "held", images: [], queuedAt: 2 }]);
     await internals.recoverQueuedAppServer("s_legacy_branch");
     assert.deepEqual(launchedCwds, [], "the owner-prefixed form is not accepted for a native row");
-    assert.equal(messages.some((message) => message.type === "session_status" && message.status === "failed" &&
+    assert.equal(messages.some((message) => message.type === "session_status" && message.status === "input_required" &&
       message.detail?.includes(`now on branch ${ownerBranch} instead of agent/s_legacy_branch`)), true,
       "and the refusal names the one branch the path's creation mode implies");
   } finally {

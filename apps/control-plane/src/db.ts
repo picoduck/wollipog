@@ -73,6 +73,7 @@ import {
   type BackgroundWorkState,
   type BackgroundWorkTracking,
   type ProviderHistoryQuarantineView,
+  type WorktreeRecoveryView,
   type ChildSessionAttentionOwner,
   type ManagedBackgroundJobSnapshot,
   type ManagedBackgroundJobView,
@@ -508,6 +509,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   background_work_state TEXT,
   background_work_tracking TEXT,
   history_quarantine TEXT,
+  worktree_recovery TEXT,
   capacity_wait TEXT,
   status         TEXT NOT NULL DEFAULT 'queued',
   board_column   TEXT,
@@ -2392,6 +2394,7 @@ interface SessionRow {
   background_work_state: string | null;
   background_work_tracking: string | null;
   history_quarantine: string | null;
+  worktree_recovery: string | null;
   capacity_wait: string | null;
   status: string;
   board_column: string | null;
@@ -4610,6 +4613,8 @@ export class ControlPlaneDb {
       // Protocol v126: bounded, content-free projection of a runner-owned provider-history
       // quarantine. Runner-authoritative, so it is overwritten on every snapshot.
       "history_quarantine TEXT",
+      // Protocol v161: bounded runner-owned pre-launch worktree recovery coordinates.
+      "worktree_recovery TEXT",
       // Secret-free ACP MCP environment references and explicit directory selections.
       "acp_session_context TEXT",
       // Protocol v60 immutable launch placement. NULL identifies legacy sessions.
@@ -11079,6 +11084,10 @@ export class ControlPlaneDb {
         this.stmt("UPDATE sessions SET worktrees=? WHERE id=?")
           .run(JSON.stringify(snap.worktrees), snap.id);
       }
+      if (snap.worktreeRecovery) {
+        this.stmt("UPDATE sessions SET worktree_recovery=? WHERE id=?")
+          .run(JSON.stringify(snap.worktreeRecovery), snap.id);
+      }
       const handoff = validateExecutionHandoffReceipt(snap.executionHandoff, snap.executionTarget);
       if (handoff) {
         this.stmt("UPDATE sessions SET execution_handoff_request=?, execution_handoff=? WHERE id=?")
@@ -11226,7 +11235,7 @@ export class ControlPlaneDb {
         );
       }
       this.stmt(
-        `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), history_quarantine=NULLIF(COALESCE(?, history_quarantine), ''), capacity_wait=?, preview=?, pending_approval=?, worktree_path=?, worktrees=?, workspace_path=?, use_worktree=?,
+        `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), history_quarantine=NULLIF(COALESCE(?, history_quarantine), ''), worktree_recovery=NULLIF(COALESCE(?, worktree_recovery), ''), capacity_wait=?, preview=?, pending_approval=?, worktree_path=?, worktrees=?, workspace_path=?, use_worktree=?,
             model=?, resolved_model=?, effort=?, service_tier=?, permission_mode=?, agent_capabilities=?, input_tokens=?, output_tokens=?, context_tokens_used=?, context_window=?, cost_usd=?, adopted=?,
             acp_session_context=COALESCE(?, acp_session_context),
             updated_at=? WHERE id=?`,
@@ -11243,6 +11252,7 @@ export class ControlPlaneDb {
         // whatever is stored; the empty-string sentinel is a supporting runner saying the
         // conversation is healthy, which NULLIF turns into a real clear.
         historyQuarantineForStorage(snap.historyQuarantine),
+        worktreeRecoveryForStorage(snap.worktreeRecovery),
         capacityWaitForStorage(
           status,
           snap.capacityWait,
@@ -16659,6 +16669,10 @@ export class ControlPlaneDb {
         return historyQuarantine ? { historyQuarantine } : {};
       })(),
       ...(() => {
+        const worktreeRecovery = parseWorktreeRecovery(row.worktree_recovery);
+        return worktreeRecovery ? { worktreeRecovery } : {};
+      })(),
+      ...(() => {
         const backgroundDeliveries = this.listBackgroundDeliveries(row.id, status);
         return backgroundDeliveries.length ? { backgroundDeliveries } : {};
       })(),
@@ -16954,7 +16968,8 @@ export class ControlPlaneDb {
         ...(row.state === "pending" ? { canCancel: true } : {}),
         ...(row.state === "failed" || row.state === "uncertain" ? { canDismiss: true } : {}),
         ...(row.state === "failed" && !isTerminal(sessionStatus) &&
-          row.error_code === "PROVIDER_AUTHENTICATION_REQUIRED" &&
+          (row.error_code === "PROVIDER_AUTHENTICATION_REQUIRED" ||
+            row.error_code === "WORKTREE_RECOVERY_REQUIRED") &&
           row.user_event_seq == null ? { canRetry: true } : {}),
       }];
     });
@@ -22282,6 +22297,38 @@ function parseHistoryQuarantine(raw: string | null): ProviderHistoryQuarantineVi
     ...(recovery === undefined ? {} : { recovery }),
     ...(value.retainedPrompt === true ? { retainedPrompt: true } : {}),
   };
+}
+
+/** `undefined` preserves an older runner's last known value; `null` is an explicit healthy clear. */
+function worktreeRecoveryForStorage(
+  value: WorktreeRecoveryView | null | undefined,
+): string | null {
+  if (value === undefined) return null;
+  return value === null ? "" : JSON.stringify(value);
+}
+
+function parseWorktreeRecovery(raw: string | null): WorktreeRecoveryView | undefined {
+  if (!raw) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object") return undefined;
+  const value = parsed as Partial<WorktreeRecoveryView>;
+  if (typeof value.recoveryId !== "string" || !value.recoveryId || value.recoveryId.length > 128 ||
+      !Number.isSafeInteger(value.detectedAt) || value.detectedAt! < 0 ||
+      typeof value.selectedPath !== "string" || !value.selectedPath || value.selectedPath.length > 4_096 ||
+      typeof value.expectedBranch !== "string" || !value.expectedBranch || value.expectedBranch.length > 255 ||
+      typeof value.detail !== "string" || !value.detail || value.detail.length > 4_096) return undefined;
+  return {
+    recoveryId: value.recoveryId,
+    detectedAt: value.detectedAt,
+    selectedPath: value.selectedPath,
+    expectedBranch: value.expectedBranch,
+    detail: value.detail,
+  } as WorktreeRecoveryView;
 }
 
 function validBackgroundIdentity(value: unknown): value is string {

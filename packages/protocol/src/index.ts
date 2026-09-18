@@ -444,7 +444,10 @@
 //      inventory, hooks, and configured MCP servers, and only gains Wollipog's orchestration tools,
 //      instructions, and scoped credential. Older runners would launch such a session as an
 //      ordinary one, so the control plane refuses the combination instead of degrading silently.
-export const PROTOCOL_VERSION = 160;
+// 161: pre-launch worktree verification publishes a durable, content-free recovery block and a
+//      distinct known-not-delivered prompt receipt. Older peers receive the conservative cancelled
+//      receipt and never see recovery state they cannot act on.
+export const PROTOCOL_VERSION = 161;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -693,6 +696,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v159 reports durable deferred retirement instead of silently treating it as removal. */
   sessionWorktreeRetirement: 159,
   progressAwareSessionWorktrees: 113,
+  /** v161 carries durable worktree-recovery state and its exact not-delivered receipt. */
+  worktreeRecovery: 161,
   /** `GET /api/admin/status` and `pairing.publicOrigin` on device creation (`wollipog admin`). */
   hostAdministration: 114,
   /** `GET /api/admin/doctor`: pass/warn/fail operational checks (`wollipog admin doctor`). */
@@ -834,6 +839,15 @@ export function providerAuthenticationReceiptCode(
     : "COMMAND_CANCELLED";
 }
 
+/** Preserve worktree-recovery truth only for peers that understand its durable recovery surface. */
+export function worktreeRecoveryReceiptCode(
+  protocolVersion: number | null | undefined,
+): "WORKTREE_RECOVERY_REQUIRED" | "COMMAND_CANCELLED" {
+  return runnerSupportsProtocol(protocolVersion, "worktreeRecovery")
+    ? "WORKTREE_RECOVERY_REQUIRED"
+    : "COMMAND_CANCELLED";
+}
+
 /** Additive event kinds that have an explicit older-peer wire policy. Kinds absent from this
  * table are sent unchanged: an unreviewed event must fail closed at an older consumer rather than
  * being silently discarded. */
@@ -923,6 +937,13 @@ export function projectRunnerMessageForProtocol(
     message.code === "PROVIDER_AUTHENTICATION_REQUIRED"
   ) {
     return { ...message, code: providerAuthenticationReceiptCode(protocolVersion) };
+  }
+  if (
+    (message.type === "durable_session_command_result" ||
+      message.type === "durable_session_command_update") &&
+    message.code === "WORKTREE_RECOVERY_REQUIRED"
+  ) {
+    return { ...message, code: worktreeRecoveryReceiptCode(protocolVersion) };
   }
   return message;
 }
@@ -4700,6 +4721,16 @@ export interface ProviderHistoryQuarantineView {
   retainedPrompt?: boolean;
 }
 
+/** Durable, content-free refusal to launch into an unverified selected worktree. The retained
+ * prompt stays in the control-plane outbox; this record carries only recovery coordinates. */
+export interface WorktreeRecoveryView {
+  recoveryId: string;
+  detectedAt: number;
+  selectedPath: string;
+  expectedBranch: string;
+  detail: string;
+}
+
 /** Denormalised session record for the UI (board cards + lists). */
 export interface SessionView {
   id: string;
@@ -4742,6 +4773,8 @@ export interface SessionView {
   /** Set when the provider conversation is quarantined; ordinary prompts and `/compact` cannot
    * reach it and clients must offer recovery instead. Omitted by pre-v128 control planes. */
   historyQuarantine?: ProviderHistoryQuarantineView;
+  /** The provider is parked until this session selects or creates a verified replacement tree. */
+  worktreeRecovery?: WorktreeRecoveryView;
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
   /** Explicit provider capability boundary. Omitted by pre-v83 control planes. */
@@ -4921,6 +4954,8 @@ export interface SessionSnapshot {
    * what the control plane already stored. Explicit `null` is a v126 runner stating there is no
    * quarantine, which is what lets a restart onto a fresh provider conversation clear the guard. */
   historyQuarantine?: ProviderHistoryQuarantineView | null;
+  /** Three-valued like historyQuarantine: undefined is an older peer, null explicitly clears. */
+  worktreeRecovery?: WorktreeRecoveryView | null;
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
   /** Explicit provider capability boundary. Omitted for pre-v83 control planes. */
@@ -6634,6 +6669,7 @@ export type DurableSessionCommandErrorCode =
   | "QUEUE_FULL"
   | "COMMAND_CANCELLED"
   | "PROVIDER_AUTHENTICATION_REQUIRED"
+  | "WORKTREE_RECOVERY_REQUIRED"
   | "RECEIPT_STORE_FULL";
 
 const DURABLE_SESSION_COMMAND_ERROR_CODES = {
@@ -6644,6 +6680,7 @@ const DURABLE_SESSION_COMMAND_ERROR_CODES = {
   QUEUE_FULL: true,
   COMMAND_CANCELLED: true,
   PROVIDER_AUTHENTICATION_REQUIRED: true,
+  WORKTREE_RECOVERY_REQUIRED: true,
   RECEIPT_STORE_FULL: true,
 } as const satisfies Record<DurableSessionCommandErrorCode, true>;
 
