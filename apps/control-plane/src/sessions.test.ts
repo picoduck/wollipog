@@ -17499,13 +17499,33 @@ test("Orchestrator is an additive role independent of the provider permission mo
     const codexRestartOnV160 = svc.restart(codex.data!.id);
     assert.equal(codexRestartOnV160.status, 409, "restart refuses the same combination with the same guidance");
     assert.match(codexRestartOnV160.error ?? "", /protocol-v162/);
+    // #1308: Codex's audited Linux or macOS sandbox is the COUPLED preset's precondition. The
+    // additive launch injects no sandbox, approval, or reviewer setting, so it is admitted wherever
+    // the runner advertises the role, and the session keeps the sandbox its permission mode already
+    // gives a normal Codex session on that platform.
     const windows = { ...meta, os: "windows" as const };
     db.registerRunner(windows, Date.now(), PROTOCOL_VERSION);
+    const codexOnWindows = svc.createSession(
+      { ...request, agentId: CODEX_APP_AGENT_ID, role: "orchestrator", config: { permissionMode: codexMode } },
+      undefined, undefined, false, false, false, human,
+    );
+    assert.equal(codexOnWindows.ok, true, codexOnWindows.error);
+    assert.equal(codexOnWindows.data!.permissionMode, codexMode);
+    codexOrchestrators += 1;
+    const codexPresetOnWindows = svc.createSession(
+      { ...request, agentId: CODEX_APP_AGENT_ID, role: "orchestrator",
+        config: { permissionMode: "orchestrator" },
+        orchestrator: { execution: { strictProjectIsolation: false } } },
+      undefined, undefined, false, false, false, human,
+    );
+    assert.equal(codexPresetOnWindows.status, 409,
+      "the coupled preset still forces the audited sandbox it can only enforce on Linux or macOS");
+    assert.match(codexPresetOnWindows.error ?? "", /Linux or macOS/);
     const startsBeforeWindows = hub.sentOfType("start_session").length;
     const codexRestartOnWindows = svc.restart(codex.data!.id);
-    assert.equal(codexRestartOnWindows.status, 409, "restart re-applies the creation-time Codex platform gate");
-    assert.match(codexRestartOnWindows.error ?? "", /Linux or macOS/);
-    assert.equal(hub.sentOfType("start_session").length, startsBeforeWindows);
+    assert.equal(codexRestartOnWindows.ok, true,
+      `restart mirrors creation on a platform without the audited sandbox: ${codexRestartOnWindows.error}`);
+    assert.equal(hub.sentOfType("start_session").length, startsBeforeWindows + 1);
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     assert.equal(db.listSessions().filter((session) => session.role === "orchestrator").length,
       6 + codexOrchestrators);

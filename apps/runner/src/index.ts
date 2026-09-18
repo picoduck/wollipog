@@ -378,7 +378,6 @@ const metadata: RunnerMetadata = {
   // fill availability and capabilities; supported native agents gain the runner-owned preset.
   agents: withOrchestratorAdditiveRole(
     withOrchestratorPreset(configuredAgentDefinitions, { isolationMode: config.executionIsolation.mode }),
-    { isolationMode: config.executionIsolation.mode },
   ),
   workspaces: config.workspaces.map((w) => ({
     id: w.id,
@@ -1181,7 +1180,6 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
     );
     metadata.agents = withOrchestratorAdditiveRole(
       withOrchestratorPreset(metadata.agents, { isolationMode: config.executionIsolation.mode }),
-      { isolationMode: config.executionIsolation.mode },
     );
     // A definitive native discovery result is newer authoritative evidence than the process-local
     // failure overlay. Drop only its status (preserving ACP capability state) so a terminal login

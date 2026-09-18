@@ -1883,6 +1883,65 @@ test("a non-strict Codex Orchestrator shows the saved harness default rather tha
   } finally { await unmountFixture(outdatedRunner); }
 });
 
+/**
+ * A current Codex installation on a platform without Codex's audited sandbox (#1308). The runner
+ * attests the additive role — the additive launch injects no sandbox, approval, or reviewer setting,
+ * so it needs none — while correctly withholding the coupled preset's permission mode, whose forced
+ * `sandbox_mode="workspace-write"` that sandbox is what enforces.
+ */
+const windowsCodexRunner: RunnerView = {
+  ...runner, os: "windows", protocolVersion: PROTOCOL_VERSION,
+  agents: [{
+    id: "codex", name: "Codex App Server", command: "codex", args: [], env: {},
+    driver: "codex-app-server", available: true, context: { kind: "native" },
+    capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["auto-review", "read-only", "on-request"],
+      orchestratorAdditive: true,
+    },
+  }],
+};
+
+test("an additive Codex Orchestrator is offered where the audited sandbox is unavailable, and Strict Project Isolation is not", async () => {
+  const fixture = await mountFixture({ runners: [windowsCodexRunner], capabilities: {
+    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+  } });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    assert.equal(permissionPresetCard(fixture.container, "Orchestrator")?.getAttribute("aria-disabled"), null,
+      "the role is offered wherever the runner advertises the additive launch");
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    const providerPermissions = fixture.container.querySelector('[role="group"][aria-label="Provider Permissions"]')!;
+    assert.doesNotMatch(providerPermissions.textContent!, /Orchestrator Preset/,
+      "the launch keeps the permission mode a normal Codex session would use here");
+    assert.match(providerPermissions.textContent!, /same permission modes, integrations, and credentials as a normal session/);
+    for (const error of fixture.container.querySelectorAll('.form-error[role="alert"]')) {
+      assert.doesNotMatch(error.textContent ?? "", /Provider-mode orchestration|sandbox/,
+        "no platform reason is stated, because the additive launch has no platform condition");
+    }
+    assert.equal(createButton(fixture.container).disabled, false);
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests.length, 1);
+    assert.equal(fixture.requests[0]?.role, "orchestrator");
+    assert.equal(fixture.requests[0]?.config?.permissionMode, undefined,
+      "the provider mode is resolved by the server exactly as for a normal session");
+  } finally { await unmountFixture(fixture); }
+
+  // The preset's own precondition is untouched: without it there is no Strict Project Isolation
+  // here, and the dialog says which advertisement is missing rather than refusing the whole role.
+  const strict = await mountFixture({ runners: [windowsCodexRunner], capabilities: {
+    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+  } }, undefined, undefined, undefined, undefined, strictOrchestratorDefaults);
+  try {
+    await act(async () => { await selectProject(strict.container, project.id); });
+    await choosePermissionPreset(strict.container, "Orchestrator");
+    const errors = [...strict.container.querySelectorAll('.form-error[role="alert"]')]
+      .map((error) => error.textContent ?? "").join(" ");
+    assert.match(errors, /Strict Project Isolation is delivered by the Orchestrator preset/);
+    assert.equal(createButton(strict.container).disabled, true);
+  } finally { await unmountFixture(strict); }
+});
+
 test("choosing Normal explicitly overrides a saved Orchestrator harness default on a current control plane", async () => {
   const claudeRunner: RunnerView = {
     ...runner, protocolVersion: PROTOCOL_VERSION,

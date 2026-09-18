@@ -3581,9 +3581,15 @@ export class SessionsService {
           ? "Delegate Implementation without Strict Project Isolation requires a supported native Codex or Claude Code harness."
           : "Delegate Implementation without Strict Project Isolation requires a supported native Codex, Claude Code, or Pi harness.", 409);
       }
-      if (!strictProjectIsolation && (launch.driver === "codex" || launch.driver === "codex-app-server") &&
+      // The COUPLED preset's non-strict Codex shape still forces `sandbox_mode="workspace-write"`,
+      // and that sandbox is audited only on Linux and macOS. The ADDITIVE launch injects no sandbox,
+      // approval, or reviewer setting at all (#1308), so this is not its gate: an additive Codex
+      // Orchestrator on another platform runs with exactly the sandbox and approval behavior its
+      // selected permission mode gives a normal Codex session there.
+      if (presetPermissions && !strictProjectIsolation &&
+          (launch.driver === "codex" || launch.driver === "codex-app-server") &&
           !["linux", "macos"].includes(runner.os)) {
-        return fail("Provider-mode Codex Orchestrator requires its audited Linux or macOS sandbox.", 409);
+        return fail("The Orchestrator preset forces Codex's audited sandbox, which requires Linux or macOS; choose independent provider permissions to keep this Codex session's own sandbox.", 409);
       }
       if (presetPermissions && launch.driver === "claude-code" && req.launchSurface !== "native_tui" &&
           (!agentCapabilities?.supportsApprovals ||
@@ -5642,12 +5648,12 @@ export class SessionsService {
           RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation
         } runner; update the runner and retry.`, 409);
       }
-      // Creation admits a non-strict Codex Orchestrator only on platforms with Codex's audited
-      // sandbox; a runner re-registered on another platform must not bypass that on restart.
-      if ((launch.driver === "codex" || launch.driver === "codex-app-server") &&
-          !["linux", "macos"].includes(runner?.os ?? "")) {
-        return fail("Provider-mode Codex Orchestrator requires its audited Linux or macOS sandbox.", 409);
-      }
+      // Codex's audited Linux or macOS sandbox is NOT checked here, and creation no longer checks it
+      // for this shape either (#1308). That platform rule belongs to the coupled preset, whose
+      // launch forces `sandbox_mode="workspace-write"`; the additive launch adds only Wollipog's MCP
+      // entry and the instructions, so a Codex Orchestrator restarted on another platform keeps
+      // exactly the sandbox its permission mode gives a normal Codex session there.
+      //
       // Pi's bridge rule mirrors creation through the advertised-role check above: a rediscovery
       // that loses the verified bridge withdraws `orchestratorAdditive`, which is refused there.
       // `piAgentControl` itself is not persisted, so it cannot be re-read here; the runner makes

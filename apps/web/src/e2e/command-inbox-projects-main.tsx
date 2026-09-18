@@ -1594,6 +1594,9 @@ declare global {
         orchestratorAdditive?: boolean;
         /** Advertise the v160 control-plane capability for an independent Session Role. */
         controlPlaneRole?: boolean;
+        /** Host platform of the fixture runner. Codex's audited sandbox exists on Linux and macOS
+         * only, and that is the coupled preset's precondition rather than the additive role's. */
+        os?: RunnerView["os"];
       }): void;
       pushSnapshot(): void;
       deferNextGit(id: string, action: GitFixtureAction): void;
@@ -1819,6 +1822,7 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
   setOrchestratorAgentFixture(options) {
     const agent = runner.agents[0]!;
     const capabilities = agent.capabilities;
+    runner.os = options.os ?? "linux";
     agent.context = options.context === "wsl"
       ? { kind: "wsl", distro: "Ubuntu-24.04" }
       : { kind: "native" };
