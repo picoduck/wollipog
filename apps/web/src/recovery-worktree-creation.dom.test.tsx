@@ -58,7 +58,7 @@ function recoveredSession(): SessionView {
 }
 
 type PostReply = { operation?: SessionWorktreeCreateOperationView; session?: SessionView } | Error;
-type ReadReply = SessionWorktreeCreateOperationSummary[] | Error;
+type ReadReply = SessionWorktreeCreateOperationSummary[] | Error | Promise<SessionWorktreeCreateOperationSummary[]>;
 
 /** Scripted control plane. Each call consumes the next reply; an exhausted script fails loudly. */
 function fakeApi(script: { posts?: PostReply[]; reads?: ReadReply[]; session?: () => SessionView }) {
@@ -80,7 +80,7 @@ function fakeApi(script: { posts?: PostReply[]; reads?: ReadReply[]; session?: (
         const reply = reads.shift();
         if (!reply) throw new Error("unexpected operations read");
         if (reply instanceof Error) throw reply;
-        return { operations: reply };
+        return { operations: await reply };
       },
       session: async () => {
         calls.sessions += 1;
@@ -104,12 +104,27 @@ function manualClock() {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => { resolve = settle; });
+  return { promise, resolve };
+}
+
+async function flushAct(work: () => void = () => {}) {
+  await act(async () => {
+    work();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
 async function render(api: ReturnType<typeof fakeApi>["api"], sleep: () => Promise<void>) {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
+  let replaceSession!: (session: SessionView) => void;
   function Harness() {
     const [session, setSession] = useState(recoverySession);
+    replaceSession = setSession;
     const { creation, create } = useRecoveryWorktreeCreation({ api: api as never, session, onSession: setSession, sleep });
     return (
       <>
@@ -126,9 +141,10 @@ async function render(api: ReturnType<typeof fakeApi>["api"], sleep: () => Promi
   return {
     container,
     root,
+    replaceSession: (session: SessionView) => flushAct(() => replaceSession(session)),
     progress: () => q('[aria-label="Replacement Worktree Progress"]')?.textContent ?? null,
     createButton: () => [...container.querySelectorAll("button")]
-      .find((button) => /Creat/u.test(button.textContent ?? "")) as HTMLButtonElement,
+      .find((button) => /Creat|Checking/u.test(button.textContent ?? "")) as HTMLButtonElement,
     alert: () => q('[id^="worktree-recovery-create-failed-"]')?.textContent ?? null,
     status: () => q('[data-testid="status"]')?.textContent,
     card: () => q('[aria-label="Worktree Recovery Required"]'),
@@ -326,6 +342,107 @@ test("a create that vanishes while the incident remains is reported, not silentl
     await clock.tick();
     assert.match(view.alert() ?? "", /^Creation Failed: Fetching Remote Replacement worktree creation ended without a result/u);
     assert.match(view.card()?.textContent ?? "", /retained as Not Sent/u);
+  } finally {
+    await act(async () => view.root.unmount());
+  }
+});
+
+test("the card offers no create until it has checked for one already running", async () => {
+  const clock = manualClock();
+  const pending = deferred<SessionWorktreeCreateOperationSummary[]>();
+  const { api, calls } = fakeApi({
+    reads: [
+      pending.promise,
+      [{ id: "op1", status: "in_progress", phase: "running_setup", branch: "fix/edited", baseRef: "origin/release" }],
+    ],
+  });
+  const view = await render(api, clock.sleep);
+  try {
+    assert.equal(view.createButton().textContent, "Checking…");
+    assert.equal(view.createButton().disabled, true,
+      "a reloaded page must not propose default coordinates while an edited create may be running");
+    await flushAct(() => pending.resolve([
+      { id: "op1", status: "in_progress", phase: "materializing", branch: "fix/edited", baseRef: "origin/release" },
+    ]));
+    assert.equal(view.progress(), "Creating WorktreeStep 2 of 4");
+    assert.equal(view.createButton().disabled, true);
+    await clock.tick();
+    assert.equal(view.progress(), "Running SetupStep 3 of 4");
+    assert.equal(calls.posts.length, 0);
+  } finally {
+    await act(async () => view.root.unmount());
+  }
+});
+
+test("a transient check failure is retried before the form is offered", async () => {
+  const clock = manualClock();
+  const { api, calls } = fakeApi({
+    reads: [
+      new Error("network down"),
+      [{ id: "op1", status: "in_progress", phase: "fetching_remote", branch: "fix/edited" }],
+    ],
+  });
+  const view = await render(api, clock.sleep);
+  try {
+    assert.equal(view.createButton().disabled, true, "one failed read does not unlock creation");
+    await clock.tick();
+    assert.equal(view.progress(), "Fetching RemoteStep 1 of 4");
+    assert.equal(calls.posts.length, 0);
+  } finally {
+    await act(async () => view.root.unmount());
+  }
+});
+
+test("a check that keeps failing gives the form back after a bounded retry", async () => {
+  const clock = manualClock();
+  const { api, calls } = fakeApi({ reads: [1, 2, 3, 4].map(() => new Error("network down")) });
+  const view = await render(api, clock.sleep);
+  try {
+    await clock.tick();
+    await clock.tick();
+    assert.equal(view.createButton().disabled, true);
+    await clock.tick();
+    assert.equal(calls.reads, 4);
+    assert.equal(view.createButton().disabled, false);
+    assert.equal(view.createButton().textContent, "Create Replacement");
+  } finally {
+    await act(async () => view.root.unmount());
+  }
+});
+
+test("a create that completed while the page was away settles the session", async () => {
+  const { api, calls } = fakeApi({ reads: [[{ id: "op1", status: "completed", branch: "fix/edited" }]] });
+  const view = await render(api, manualClock().sleep);
+  try {
+    await flushAct();
+    assert.equal(calls.sessions, 1);
+    assert.equal(view.card(), null);
+    assert.equal(calls.posts.length, 0);
+  } finally {
+    await act(async () => view.root.unmount());
+  }
+});
+
+test("a poll answering after a new incident cannot republish the old create's progress", async () => {
+  const clock = manualClock();
+  const late = deferred<SessionWorktreeCreateOperationSummary[]>();
+  const { api } = fakeApi({
+    reads: [[], late.promise, []],
+    posts: [{ operation: { id: "op1", status: "in_progress", phase: "fetching_remote" } }],
+  });
+  const view = await render(api, clock.sleep);
+  try {
+    await view.clickCreate();
+    await clock.tick();
+    const next = recoverySession();
+    next.worktreeRecovery = { ...next.worktreeRecovery!, recoveryId: "worktree-recovery:next" };
+    await view.replaceSession(next);
+    assert.equal(view.createButton().disabled, false, "the new incident found nothing running");
+    await flushAct(() => late.resolve([
+      { id: "op1", status: "in_progress", phase: "running_setup", branch: "fix/missing-recovery" },
+    ]));
+    assert.equal(view.progress(), null);
+    assert.equal(view.createButton().disabled, false, "a stale poll must not lock the new incident's card");
   } finally {
     await act(async () => view.root.unmount());
   }

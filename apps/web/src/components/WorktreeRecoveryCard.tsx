@@ -66,10 +66,12 @@ export function WorktreeRecoveryCard({
 
   if (!recovery) return null;
   const creating = action === "create" || creation?.status === "creating";
+  // While the card checks for a create already running, offering another could start a second one.
+  const checking = !creating && creation?.status === "checking";
   const creationFailure = !creating && action === null && creation?.status === "failed" ? creation : null;
   const phase = creation?.status === "creating" && creation.phase ? worktreeCreationPhase(creation.phase) : null;
   const failedPhase = creationFailure?.phase ? worktreeCreationPhase(creationFailure.phase) : null;
-  const disabled = action !== null || creating || !runnerOnline;
+  const disabled = action !== null || creating || checking || !runnerOnline;
   // Both actions carry the incident detail and the reason ordinary submission is unavailable, so a
   // screen reader announces why the card exists rather than just the action's own name.
   const describedBy = [detailId, retainedId, ...(runnerOnline ? [] : [offlineId]),
@@ -138,7 +140,7 @@ export function WorktreeRecoveryCard({
               ...(baseRef.trim() ? { baseRef: baseRef.trim() } : {}),
             }))}
           >
-            {creating ? "Creating…" : "Create Replacement"}
+            {creating ? "Creating…" : checking ? "Checking…" : "Create Replacement"}
           </button>
         </fieldset>
         <fieldset disabled={disabled || candidates.length === 0}>

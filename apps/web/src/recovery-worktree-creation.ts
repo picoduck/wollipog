@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   SessionView,
+  SessionWorktreeCreateOperationSummary,
   SessionWorktreeCreateOperationView,
   SessionWorktreeProgressPhase,
 } from "@wollipog/protocol";
@@ -27,6 +28,8 @@ export function worktreeCreationPhase(phase: SessionWorktreeProgressPhase): { la
 }
 
 export type RecoveryWorktreeCreation =
+  /** Reading whether a create is already running before offering a new one. */
+  | { status: "checking" }
   | { status: "creating"; phase?: SessionWorktreeProgressPhase }
   | { status: "failed"; error: string; phase?: SessionWorktreeProgressPhase };
 
@@ -38,6 +41,8 @@ type Step =
   | { kind: "failed"; id?: string; error: string; phase?: SessionWorktreeProgressPhase };
 
 const POLL_INTERVAL_MS = 1_000;
+/** Transient-failure budget for the reconciling read: roughly 1 + 2 + 4 seconds, then give up. */
+const RECONCILE_READ_ATTEMPTS = 4;
 const ENDED_WITHOUT_RESULT = "Replacement worktree creation ended without a result. " +
   "Check this session's worktrees before trying again.";
 
@@ -110,6 +115,8 @@ export function useRecoveryWorktreeCreation({
     let observeByRead = true;
     let lastPhase: SessionWorktreeProgressPhase | undefined;
     while (step.kind === "progress") {
+      // Every await below can resolve after this run was abandoned; never publish its progress.
+      if (!live()) return;
       const { operation } = step;
       lastPhase = operation.phase ?? lastPhase;
       setCreation({ status: "creating", ...(lastPhase ? { phase: lastPhase } : {}) });
@@ -181,32 +188,64 @@ export function useRecoveryWorktreeCreation({
   followRef.current = follow;
   const apiRef = useRef(api);
   apiRef.current = api;
+  const onSessionRef = useRef(onSession);
+  onSessionRef.current = onSession;
+  const sleepRef = useRef(sleep);
+  sleepRef.current = sleep;
 
   // A reloaded page, or another device, rejoins a create that is still running and shows an
-  // unconsumed failure. Older control planes have no operations route; the card stays idle.
+  // unconsumed failure. Until that read settles the card offers no create: a page reloaded during
+  // a create with edited coordinates would otherwise propose defaults that start a second one.
   useEffect(() => {
     if (!recoveryId) return;
     const run = ++runRef.current;
-    let cancelled = false;
-    void apiRef.current.sessionWorktreeOperations(sessionId).then(({ operations }) => {
-      if (cancelled || runRef.current !== run) return;
-      const running = operations.find((operation) => operation.status === "in_progress");
-      if (running) {
-        const coordinates = { branch: running.branch, ...(running.baseRef ? { baseRef: running.baseRef } : {}) };
-        void followRef.current(run, coordinates, operationStep(running));
+    const live = () => runRef.current === run;
+    setCreation({ status: "checking" });
+    void (async () => {
+      for (let attempt = 1; ; attempt += 1) {
+        let operations: SessionWorktreeCreateOperationSummary[];
+        try {
+          ({ operations } = await apiRef.current.sessionWorktreeOperations(sessionId));
+        } catch (cause) {
+          if (!live()) return;
+          // An older control plane has no route and nothing to rejoin. A read that keeps failing
+          // must not hold the card hostage either; after a bounded retry it offers the form again.
+          if (missingRoute(cause) || attempt >= RECONCILE_READ_ATTEMPTS) {
+            setCreation(null);
+            return;
+          }
+          await sleepRef.current(POLL_INTERVAL_MS * 2 ** (attempt - 1));
+          if (!live()) return;
+          continue;
+        }
+        if (!live()) return;
+        const running = operations.find((operation) => operation.status === "in_progress");
+        if (running) {
+          const coordinates = { branch: running.branch, ...(running.baseRef ? { baseRef: running.baseRef } : {}) };
+          await followRef.current(run, coordinates, operationStep(running));
+          return;
+        }
+        if (operations.some((operation) => operation.status === "completed")) {
+          // The create finished but this view still shows the incident; the session record decides.
+          try {
+            const { session: current } = await apiRef.current.session(sessionId);
+            if (live()) onSessionRef.current(current);
+          } catch {
+            /* the session stream still delivers the result */
+          }
+          if (live()) setCreation(null);
+          return;
+        }
+        const failed = [...operations].reverse().find((operation) => operation.status === "failed");
+        if (failed?.status === "failed") {
+          shownTerminalRef.current.add(failed.id);
+          setCreation({ status: "failed", error: failed.error, ...(failed.phase ? { phase: failed.phase } : {}) });
+        } else {
+          setCreation(null);
+        }
         return;
       }
-      const failed = [...operations].reverse().find((operation) => operation.status === "failed");
-      if (failed?.status === "failed") {
-        shownTerminalRef.current.add(failed.id);
-        setCreation({ status: "failed", error: failed.error, ...(failed.phase ? { phase: failed.phase } : {}) });
-      }
-    }).catch(() => {
-      /* older control plane or transient read failure: the card keeps its idle form */
-    });
-    return () => {
-      cancelled = true;
-    };
+    })();
     // Only a new session or incident re-reads; callback identity churn must not restart observation.
   }, [recoveryId, sessionId]);
 
