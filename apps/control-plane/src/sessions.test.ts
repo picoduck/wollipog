@@ -17233,6 +17233,18 @@ test("Orchestrator is an additive role independent of the provider permission mo
     assert.notEqual(explicitNormal.data!.permissionMode, "orchestrator");
     db.deleteAgentHarnessDefault(localUser.defaultOwnerUserId, identity);
 
+    const redefined = runnerMeta();
+    const redefinedAgent = redefined.agents.find((item) => item.id === AGENT_ID)!;
+    redefinedAgent.driver = "codex";
+    redefinedAgent.capabilities = { ...agent.capabilities! };
+    db.registerRunner(redefined, Date.now(), PROTOCOL_VERSION);
+    const startsBefore = hub.sentOfType("start_session").length;
+    const redefinedRestart = svc.restart(view.id);
+    assert.equal(redefinedRestart.status, 409, "a redefined agent fails at the control plane rather than at the runner");
+    assert.match(redefinedRestart.error ?? "", /native Claude Code harness/);
+    assert.equal(hub.sentOfType("start_session").length, startsBefore, "no launch is sent for the refused restart");
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+
     db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole - 1);
     const outdated = svc.createSession(
       { ...request, role: "orchestrator", config: { permissionMode: "acceptEdits" } },

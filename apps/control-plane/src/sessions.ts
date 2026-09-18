@@ -5518,9 +5518,20 @@ export class SessionsService {
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
     // A runner that predates the independent role would relaunch this Orchestrator as an ordinary
     // session while the control plane still granted it orchestrator routes; refuse instead.
-    if (sessionRole(session) === "orchestrator" && !usesOrchestratorPresetPermissions(session) &&
-        !runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "orchestratorAdditiveRole")) {
-      return fail("An Orchestrator with independent provider permissions requires a protocol-v159 runner; update the runner and retry.", 409);
+    if (sessionRole(session) === "orchestrator" && !usesOrchestratorPresetPermissions(session)) {
+      const runner = this.db.getRunner(session.runnerId);
+      if (!runnerSupportsProtocol(runner?.protocolVersion, "orchestratorAdditiveRole")) {
+        return fail("An Orchestrator with independent provider permissions requires a protocol-v159 runner; update the runner and retry.", 409);
+      }
+      // Discovery can redefine the agent id between launches. Mirror the creation-time shape
+      // check so a changed definition fails here with guidance instead of at the runner.
+      const restartingAgentId = session.agentId;
+      const advertised = runner?.agents.find((agent) => agent.id === restartingAgentId)?.capabilities;
+      const target = session.executionTarget;
+      if (!advertised?.permissionModes?.includes("orchestrator") || launch.driver !== "claude-code" ||
+          (launch.context?.kind ?? "native") !== "native" || (target && target.adapter !== "host")) {
+        return fail("An Orchestrator with independent provider permissions requires a native Claude Code harness on the host that advertises the Orchestrator role; the agent definition no longer matches. Start a new session or choose the Orchestrator preset permission mode.", 409);
+      }
     }
     const agentId = session.agentId;
     const supportsIssueScope = runnerSupportsProtocol(
