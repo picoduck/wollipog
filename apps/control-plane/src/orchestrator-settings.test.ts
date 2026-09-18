@@ -78,7 +78,7 @@ function defaults(overrides: Partial<OrchestratorDefaults["behavior"]> = {}): Or
         ui_evidence_approval: "orchestrator",
       },
     },
-    execution: { strictProjectIsolation: false },
+    execution: { strictProjectIsolation: false, integrationIsolation: false },
   };
 }
 

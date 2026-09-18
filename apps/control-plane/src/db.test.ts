@@ -22,9 +22,15 @@ import type {
   WorkflowArtifactView,
   type UsageAmount,
 } from "@wollipog/protocol";
-import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL } from "@wollipog/protocol";
+import {
+  DEFAULT_ORCHESTRATOR_DEFAULTS,
+  PROTOCOL_VERSION,
+  RUNNER_CAPABILITY_MIN_PROTOCOL,
+  type OrchestratorCampaignPolicy,
+} from "@wollipog/protocol";
 import { archiveSessionPage } from "./archive-session-page.js";
 import { parseRateTable } from "./usage-pricing.js";
+import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import {
   ControlPlaneDb,
   GOVERNANCE_AUDIT_RETENTION_MS,
@@ -6687,6 +6693,70 @@ test("session role is persisted explicitly and backfilled for existing Orchestra
     assert.equal(upgraded.getSession("plain")?.role, "normal");
     upgraded.close();
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("existing campaigns migrate to the Integration Isolation their current launch already has", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-integration-isolation-migration-"));
+  const path = join(root, "cp.db");
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(path);
+    db.registerRunner(meta(), 500);
+    // A coupled-preset campaign and an additive one, created the way each shape records itself.
+    db.createSession(newSession({ id: "preset", config: { permissionMode: "orchestrator" } }));
+    db.createSession(newSession({ id: "additive", config: { permissionMode: "default" } }));
+    const policy = (strictProjectIsolation: boolean): OrchestratorCampaignPolicy =>
+      resolveOrchestratorCampaignPolicy(
+        { ...structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS),
+          execution: { strictProjectIsolation, integrationIsolation: false } },
+        "user_default",
+      );
+    for (const [id, strict] of [["preset", true], ["additive", false]] as const) {
+      db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?")
+        .run(JSON.stringify(policy(strict)), id);
+    }
+    const userId = db.localIdentityContext().userId;
+    db.setOrchestratorDefaults(userId, {
+      ...structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS),
+      execution: { strictProjectIsolation: false, integrationIsolation: true },
+    }, 900);
+    db.close();
+    db = undefined;
+
+    // Reopen as a pre-v164 database: strip the settings column and the stored policy field.
+    const legacy = new DatabaseSync(path);
+    legacy.exec("ALTER TABLE orchestrator_settings DROP COLUMN integration_isolation");
+    for (const id of ["preset", "additive"]) {
+      const row = legacy.prepare("SELECT orchestrator_policy FROM sessions WHERE id=?")
+        .get(id) as { orchestrator_policy: string };
+      const stored = JSON.parse(row.orchestrator_policy);
+      delete stored.execution.integrationIsolation;
+      delete stored.sources.execution.integrationIsolation;
+      legacy.prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?")
+        .run(JSON.stringify(stored), id);
+    }
+    legacy.close();
+
+    assert.doesNotThrow(() => { db = ControlPlaneDb.open(path); },
+      "a pre-v164 database must still open");
+    // A coupled-preset launch replaces the whole provider surface, so it already runs without
+    // integrations; an additive one keeps them. Both keep the launch they had.
+    const preset = db!.sessionOrchestratorPolicy("preset")!;
+    assert.equal(preset.execution.integrationIsolation, true);
+    assert.equal(preset.sources.execution.integrationIsolation, "legacy_session");
+    assert.equal(preset.execution.strictProjectIsolation, true,
+      "the boundary policy is untouched by the migration");
+    const additive = db!.sessionOrchestratorPolicy("additive")!;
+    assert.equal(additive.execution.integrationIsolation, false);
+    assert.equal(additive.sources.execution.integrationIsolation, "legacy_session");
+    assert.equal(additive.execution.strictProjectIsolation, false);
+    // The user-default column is restored at the conservative system default, not at the value the
+    // pre-migration row happened to hold.
+    assert.equal(db!.getOrchestratorDefaults(userId)?.defaults.execution.integrationIsolation, false);
+  } finally {
+    db?.close();
     rmSync(root, { recursive: true, force: true });
   }
 });

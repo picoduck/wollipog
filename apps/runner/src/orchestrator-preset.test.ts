@@ -755,3 +755,98 @@ test("projectOrchestratorPresetForPeer keeps the additive role advertisement", (
       `the role attestation survives projection for a v${controlPlaneProtocolVersion} peer`);
   }
 });
+
+test("Integration Isolation changes only the integration surface of the additive launch", () => {
+  const projects = ["/repo"];
+  for (const driver of ["claude-code", "codex", "codex-app-server", "pi"] as const) {
+    const plain = additiveOrchestratorLaunchArgs(driver, mcp, projects);
+    const isolated = additiveOrchestratorLaunchArgs(driver, mcp, projects, true);
+    assert.deepEqual(additiveOrchestratorLaunchArgs(driver, mcp, projects, false), plain,
+      `${driver}: a disabled policy is byte-identical to the launch before this policy existed`);
+    // Everything the plain additive launch carries is still there, in the same order.
+    assert.deepEqual(isolated.slice(isolated.length - plain.length), plain,
+      `${driver}: Integration Isolation only prepends; it rewrites nothing the additive launch already sent`);
+    const added = isolated.slice(0, isolated.length - plain.length);
+    // No permission-mode, sandbox, approval, reviewer, tool-inventory, or working-directory change.
+    for (const forbidden of [
+      "--permission-mode", "--tools", "--disallowedTools", "--exclude-tools", "--no-tools",
+      "--no-builtin-tools", "--restricted", "--bare", "--add-dir", "-C", "--cd", "-s", "--sandbox",
+      "-a", "--ask-for-approval", "--strict-config", "--dangerously-skip-permissions",
+    ]) {
+      assert.equal(added.includes(forbidden), false,
+        `${driver}: Integration Isolation must not inject ${forbidden}`);
+    }
+    for (const setting of added) {
+      assert.equal(/^(sandbox_mode|sandbox_workspace_write|approval_policy|approvals_reviewer|model)/u.test(setting), false,
+        `${driver}: Integration Isolation must not inject the setting ${setting}`);
+    }
+    assert.deepEqual(
+      stripAdditiveOrchestratorLaunchArgs(isolated, driver, projects, true), [],
+      `${driver}: the strip removes exactly what the isolated launch injected`);
+    // Repeated provisioning is idempotent: strip then re-add reproduces the same argument vector.
+    assert.deepEqual(
+      [...stripAdditiveOrchestratorLaunchArgs(isolated, driver, projects, true),
+        ...additiveOrchestratorLaunchArgs(driver, mcp, projects, true)],
+      isolated, `${driver}: provisioning an already-provisioned launch is idempotent`);
+  }
+});
+
+test("Integration Isolation uses the measured per-harness integration levers", () => {
+  const claude = additiveOrchestratorLaunchArgs("claude-code", mcp, ["/repo"], true);
+  assert.equal(claude.includes("--strict-mcp-config"), true,
+    "only servers named by --mcp-config apply, which for an Orchestrator is Wollipog's own config");
+  assert.equal(claude[claude.indexOf("--setting-sources") + 1], "",
+    "user, project, and local settings files are the only source of Claude hooks and enabled plugins");
+  assert.equal(claude.includes("--settings"), false,
+    "a second --settings replaces the first (measured on claude 2.1.270), so it would displace Wollipog's own managed policy hooks");
+  assert.equal(claude.join(" ").includes("disableAllHooks"), false,
+    "disableAllHooks also stops the --settings file's hooks, removing Wollipog's governance channel");
+
+  for (const driver of ["codex", "codex-app-server"] as const) {
+    const codex = additiveOrchestratorLaunchArgs(driver, mcp, [], true);
+    for (const feature of ["apps", "plugins", "hooks"]) {
+      assert.equal(codex[codex.indexOf(feature) - 1], "--disable", `${driver} disables ${feature}`);
+    }
+    for (const builtIn of ["multi_agent", "browser_use", "computer_use", "image_generation"]) {
+      assert.equal(codex.includes(builtIn), false,
+        `${driver}: ${builtIn} is Codex's own built-in tool inventory, not a user-configured integration`);
+    }
+  }
+
+  const pi = additiveOrchestratorLaunchArgs("pi", mcp, [], true);
+  assert.deepEqual(pi.slice(0, 4),
+    ["--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files"]);
+  assert.equal(pi.includes("--exclude-tools"), false,
+    "excluding built-in tools is tool inventory, which the coupled preset owns and this policy does not touch");
+});
+
+test("the Integration Isolation strip leaves user arguments alone and is exact about their forms", () => {
+  // A disabled policy never touches these flags at all, whoever supplied them.
+  const userClaude = ["--strict-mcp-config", "--setting-sources", "user", "--mcp-config", "/user.json"];
+  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(userClaude, "claude-code", [], false), userClaude);
+  // With the policy on, only the runner's own EMPTY setting-sources value is ours; a user's own
+  // named sources stay where they are and Claude takes the last occurrence.
+  assert.deepEqual(
+    stripAdditiveOrchestratorLaunchArgs(
+      ["--setting-sources", "user", "--strict-mcp-config", "--setting-sources", ""], "claude-code", [], true),
+    ["--setting-sources", "user"]);
+  assert.deepEqual(
+    stripAdditiveOrchestratorLaunchArgs(["--setting-sources=user", "--setting-sources="], "claude-code", [], true),
+    ["--setting-sources=user"], "the inline --flag=value form is recognised too");
+
+  // Codex: only the three features this policy disables, and only per-server MCP disables.
+  assert.deepEqual(
+    stripAdditiveOrchestratorLaunchArgs(
+      ["--disable", "apps", "--disable", "web_search", "--disable=hooks",
+        "-c", "mcp_servers.other.enabled=false", "-c", "mcp_servers.wollipog.enabled=false",
+        "-c", "model=\"o3\""],
+      "codex", [], true),
+    ["--disable", "web_search", "-c", "mcp_servers.wollipog.enabled=false", "-c", "model=\"o3\""],
+    "an unrelated --disable, the reserved Wollipog entry, and unrelated -c settings survive");
+
+  // Pi: the long and short forms of exactly the four discovery switches, nothing else.
+  assert.deepEqual(
+    stripAdditiveOrchestratorLaunchArgs(
+      ["--no-extensions", "-ns", "--no-builtin-tools", "--extension", "/user.js"], "pi", [], true),
+    ["--no-builtin-tools", "--extension", "/user.js"]);
+});
