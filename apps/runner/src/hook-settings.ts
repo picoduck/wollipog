@@ -587,8 +587,7 @@ export function provisionClaudeHooks(
       "in this turn is protected from the next spawn",
     );
   }
-  const guardProvisionable = !userSettingsWouldBeShadowed;
-  if (guardProvisionable) {
+  if (!userSettingsWouldBeShadowed) {
     if (compromisedGuardSessions.has(spec.sessionId)) {
       // The guard's own state was tampered with or could not be kept in step for this session.
       // Mediation (the pre-#1313 behaviour) is the honest fallback; it needs no trusted state.
@@ -776,8 +775,8 @@ function verifiedGuardLaunch(
 
 /**
  * Drop a guard this launch does not carry (it cannot carry the hook, or it would shadow the
- * agent's own `--settings` while the session owns no worktree). A guard-only settings file goes with it; a file that also
- * carries the manager hooks is left for the manager path to rewrite.
+ * agent's own `--settings` while the session owns no worktree). A guard-only settings file goes
+ * with it; a file that also carries the manager hooks is left for the manager path to rewrite.
  */
 function discardGuardArtifacts(file: string): void {
   // A protections file can also be left behind by a failed launch self-test, which writes it
