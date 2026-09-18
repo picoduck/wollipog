@@ -392,6 +392,76 @@ export function orchestratorLaunchArgs(
 
 const ADDITIVE_CLAUDE_ALLOWED_TOOLS = "mcp__wollipog__*";
 
+/**
+ * Integration Isolation for the ADDITIVE Claude launch (protocol v164).
+ *
+ * `--strict-mcp-config` keeps only the servers named by `--mcp-config`, which for an Orchestrator is
+ * exactly Wollipog's own Agent Control config. `--setting-sources ""` stops Claude reading the user,
+ * project, and local settings files, which is where hooks, enabled plugins, marketplaces, and
+ * status lines are declared.
+ *
+ * Measured against the installed claude 2.1.270 (`claude --settings <file> -p …`, a `SessionStart`
+ * hook that touches a marker):
+ *   - a `--settings` file's hooks run (marker written);
+ *   - `{"disableAllHooks":true}` in that same file stops them (no marker) — so `disableAllHooks`
+ *     would also remove WOLLIPOG's own managed policy hooks, which carry the `hook` elicitation
+ *     transport that the permission mode uses to ask for approval. That is a permission-surface
+ *     change, so it is deliberately NOT used here;
+ *   - under `--setting-sources ""` the `--settings` file's hooks still run while a project settings
+ *     file's hooks do not — so the runner's governance hooks survive and only the user's ambient
+ *     hooks are removed. That is the combination this policy uses;
+ *   - a second `--settings` silently replaces the first, so the runner cannot add a settings
+ *     argument of its own without displacing its own hook file or the user's.
+ *
+ * Known and disclosed residual: permission RULES (`permissions.allow` / `ask` / `deny` and
+ * `defaultMode`) declared in those same settings files are dropped with them, because Claude has no
+ * per-source hook switch. The permission MODE is unaffected — the driver always passes an explicit
+ * `--permission-mode` — but a `deny` rule declared in user settings does not apply to an
+ * integration-isolated Orchestrator. See docs/adr/0011.
+ */
+const ISOLATED_CLAUDE_INTEGRATION_ARGS = ["--strict-mcp-config", "--setting-sources", ""];
+
+/** Integration Isolation for the ADDITIVE Codex launch. `--disable <feature>` is exactly
+ * `-c features.<name>=false` (codex-cli 0.154.0 `--help`), and `apps`, `plugins`, and `hooks` are
+ * the three stable feature flags that carry user-configured integrations.
+ *
+ * `multi_agent`, `browser_use`, `computer_use`, and `image_generation` are deliberately NOT
+ * disabled: they are Codex's own built-in tool inventory, not integrations the user configured, and
+ * the additive contract preserves the tool inventory exactly. The coupled preset disables them
+ * because it replaces the whole tool surface, which this policy must not do.
+ *
+ * `--strict-config` is also not used: it makes Codex reject unrecognised `config.toml` fields, which
+ * is a launch-failure policy rather than an integration boundary, and would make an isolated
+ * Orchestrator fail on configuration an ordinary session accepts. Configured MCP servers are
+ * removed separately, by the same live `codex mcp list --json` probe the preset uses. */
+const ISOLATED_CODEX_FEATURES = ["apps", "plugins", "hooks"] as const;
+const ISOLATED_CODEX_INTEGRATION_ARGS = ISOLATED_CODEX_FEATURES.flatMap((feature) => ["--disable", feature]);
+/** Exactly the shape `isolateCodexMcpServers` emits for a non-Wollipog server. */
+const ISOLATED_CODEX_MCP_DISABLE = /^mcp_servers\.[A-Za-z0-9_-]+\.enabled=false$/u;
+
+/** Integration Isolation for the ADDITIVE Pi launch. Per `pi --help` (0.85.0), `--no-extensions`
+ * "Disable extension discovery (explicit -e paths still work)", so the discovery-verified Wollipog
+ * Agent Control extension — which provisioning appends as `--extension <session file>` — still
+ * loads and the orchestration tools remain available.
+ *
+ * `--exclude-tools` is deliberately absent: it removes built-in tools, which is tool inventory
+ * rather than integrations, and the coupled preset owns that. */
+const ISOLATED_PI_INTEGRATION_ARGS = [
+  "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files",
+];
+const ISOLATED_PI_INTEGRATION_FLAGS = new Set([
+  ...ISOLATED_PI_INTEGRATION_ARGS,
+  // Pi's own short aliases, so a catalog that already carries one is normalised the same way.
+  "-ne", "-ns", "-np", "-nc",
+]);
+
+/** Remove the boolean Integration Isolation flags from a launch argument list, so a comparison
+ * against a discovery-verified catalog definition is made on the same normalised form whether the
+ * flag came from the catalog or from this runner. */
+export function withoutPiIntegrationIsolationArgs(args: readonly string[]): string[] {
+  return args.filter((arg) => !ISOLATED_PI_INTEGRATION_FLAGS.has(arg));
+}
+
 /** Codex merges a dotted `mcp_servers.<name>` override into the user's table (verified against
  * codex-cli 0.154.0), so naming the single Wollipog entry adds it without touching, disabling, or
  * re-declaring any configured server. The coupled preset's whole-table form merges too, which is
@@ -451,15 +521,23 @@ export function additiveCodexMcpServerArg(
  *
  * No sandbox, approval, reviewer, or `--add-dir` override is injected: Project Locations are named
  * in the instructions text, and anything stronger would be the preset's fixed policy again.
+ *
+ * `integrationIsolation` (protocol v164) is the ONE exception, and it is scoped to integrations
+ * alone: it adds the per-harness arguments documented above, which remove user-configured MCP
+ * servers, hooks, plugins, apps, extensions, skills, prompt templates, and ambient context files.
+ * It adds no permission-mode, sandbox, approval, tool-inventory, or working-directory argument, so
+ * with it disabled this function returns exactly what it returned at v163.
  */
 export function additiveOrchestratorLaunchArgs(
   driver: SessionLaunchSpec["driver"],
   mcp: { command: string; args: string[]; env: Record<string, string> },
   projectPaths: readonly string[] = [],
+  integrationIsolation = false,
 ): string[] {
   const instructions = orchestratorInstructions(projectPaths, false);
   if (driver === "claude-code") {
     return [
+      ...(integrationIsolation ? ISOLATED_CLAUDE_INTEGRATION_ARGS : []),
       "--allowedTools", ADDITIVE_CLAUDE_ALLOWED_TOOLS,
       "--append-system-prompt", instructions,
       ...projectPaths.flatMap((path) => ["--add-dir", path]),
@@ -467,6 +545,7 @@ export function additiveOrchestratorLaunchArgs(
   }
   if (driver === "codex" || driver === "codex-app-server") {
     return [
+      ...(integrationIsolation ? ISOLATED_CODEX_INTEGRATION_ARGS : []),
       "-c", additiveCodexMcpServerArg(mcp),
       "-c", `developer_instructions=${toml(instructions)}`,
     ];
@@ -482,9 +561,50 @@ export function additiveOrchestratorLaunchArgs(
   // line, so this append never displaces a user's own append and there is no reserved name to
   // collide with.
   if (driver === "pi") {
-    return ["--append-system-prompt", instructions];
+    return [
+      ...(integrationIsolation ? ISOLATED_PI_INTEGRATION_ARGS : []),
+      "--append-system-prompt", instructions,
+    ];
   }
   throw new Error("independent provider permissions are supported only for the native Claude Code, Codex, and Pi Orchestrators");
+}
+
+/** How many arguments an Integration Isolation injection occupies at this position, or 0 when the
+ * argument is not one. Both the `--flag value` and the inline `--flag=value` forms are recognised,
+ * because a persisted launch may carry either. */
+function isolatedIntegrationArgLength(
+  driver: SessionLaunchSpec["driver"],
+  arg: string,
+  flag: string,
+  inline: string | undefined,
+  next: string | undefined,
+): number {
+  if (driver === "pi") return ISOLATED_PI_INTEGRATION_FLAGS.has(arg) ? 1 : 0;
+  if (driver === "claude-code") {
+    if (arg === "--strict-mcp-config") return 1;
+    if (flag !== "--setting-sources") return 0;
+    // Only the runner's own empty value. A user's `--setting-sources user` stays where it is; the
+    // isolated launch appends its own afterwards and Claude takes the last occurrence (measured
+    // against claude 2.1.270: with `--setting-sources project --setting-sources ""` the project
+    // settings file's hooks do not run).
+    if (inline !== undefined) return inline === "" ? 1 : 0;
+    return next === "" ? 2 : 0;
+  }
+  if (driver !== "codex" && driver !== "codex-app-server") return 0;
+  if (flag === "--disable") {
+    const value = inline ?? next;
+    if (!(ISOLATED_CODEX_FEATURES as readonly string[]).includes(value ?? "")) return 0;
+    return inline === undefined ? 2 : 1;
+  }
+  if (flag !== "-c" && flag !== "--config") return 0;
+  // A per-server `enabled=false` is exactly what `isolateCodexMcpServers` emits from the live probe,
+  // and it must be re-derived on every launch because the user's configured inventory can change.
+  // A user's own identical setting is re-emitted verbatim by that same probe, so removing and
+  // re-adding it cannot change the effective configuration.
+  const value = inline ?? next;
+  if (typeof value !== "string" || !ISOLATED_CODEX_MCP_DISABLE.test(value) ||
+      namesReservedCodexMcpServer(value)) return 0;
+  return inline === undefined ? 2 : 1;
 }
 
 /** Remove only the arguments `additiveOrchestratorLaunchArgs` injects, leaving every user- or
@@ -495,6 +615,7 @@ export function stripAdditiveOrchestratorLaunchArgs(
   args: readonly string[],
   driver: SessionLaunchSpec["driver"],
   projectPaths: readonly string[] = [],
+  integrationIsolation = false,
 ): string[] {
   const projects = new Set(projectPaths);
   const result: string[] = [];
@@ -503,6 +624,19 @@ export function stripAdditiveOrchestratorLaunchArgs(
     const flag = arg.split("=", 1)[0]!;
     const inline = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : undefined;
     const value = inline ?? args[i + 1];
+    // The Integration Isolation arguments are plain switches with no runner-owned value to
+    // recognise, so they are removed only when this launch re-adds them a few lines later in
+    // `additiveOrchestratorLaunchArgs`. That keeps repeated provisioning idempotent — including of
+    // arguments a user or catalog supplied, which are re-added verbatim — while a launch whose
+    // policy is disabled never touches them at all. The policy is fixed at creation, so the two
+    // cases cannot mix within one session.
+    if (integrationIsolation) {
+      const consumed = isolatedIntegrationArgLength(driver, arg, flag, inline, args[i + 1]);
+      if (consumed > 0) {
+        i += consumed - 1;
+        continue;
+      }
+    }
     // Measured against pi 0.85.0 `dist/cli/args.js`: `--append-system-prompt` is matched by exact
     // string equality and consumes the NEXT argument. `--append-system-prompt=TEXT` is not that
     // flag at all — it falls through to the unknown-flag branch and is handed to extensions — so

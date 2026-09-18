@@ -597,7 +597,10 @@ export class CodexAppServerDriver implements Driver {
     return exit;
   }
   private async startAppServer(enableDefaultModeQuestions: boolean): Promise<void> {
-    const isolationArgs = this.config.permissionMode === "orchestrator"
+    // Same rule as the exec driver: the coupled preset always isolates configured MCP servers, and
+    // the additive role does so exactly when Integration Isolation is enabled.
+    const isolationArgs = this.config.permissionMode === "orchestrator" ||
+      this.opts.orchestrator?.integrationIsolation === true
       ? await codexOrchestratorMcpArgs(this.opts, this.cwd) : [];
     if (this.disposed) throw new Error("session disposed before provider launch");
     const child = this.spawn({

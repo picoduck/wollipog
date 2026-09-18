@@ -50,6 +50,7 @@ import {
   orchestratorLaunchArgs,
   stripAdditiveOrchestratorLaunchArgs,
   stripOrchestratorLaunchArgs,
+  withoutPiIntegrationIsolationArgs,
   supportsClaudeAgentAcpOrchestrator,
   supportsNativeOrchestratorBoundary,
 } from "./orchestrator-preset.js";
@@ -289,6 +290,11 @@ export function provisionAgentControl(
   const additiveOrchestrator = orchestrator && !presetPermissions;
   const wslOrchestrator = context.kind === "wsl" && targetIsHost && orchestrator && presetPermissions;
   const strictProjectIsolation = orchestrator && spec.orchestrator?.strictProjectIsolation !== false;
+  // Integration Isolation (protocol v164). It applies only to the ADDITIVE shape: every coupled
+  // preset launch already replaces the whole integration surface, on this runner and on every older
+  // one, so the preset needs nothing from this flag. Metadata written before v164 has no field, and
+  // a session persisted then was launched with its integrations, so absent means disabled.
+  const integrationIsolation = additiveOrchestrator && spec.orchestrator?.integrationIsolation === true;
   const additiveCapability = orchestratorAdditiveCapability(spec.driver);
   if (additiveOrchestrator) {
     if (!additiveCapability || !nativeHostExecution) {
@@ -301,6 +307,16 @@ export function provisionAgentControl(
     if (strictProjectIsolation) {
       throw new Error("Strict Project Isolation requires the Orchestrator preset permission mode");
     }
+  }
+  // Refuse before any credential is minted: an unenforceable Integration Isolation would otherwise
+  // launch a session the control plane has already told the human carries no ambient integration.
+  if (spec.orchestrator?.integrationIsolation === true && !integrationIsolation && !presetPermissions) {
+    throw new Error("Integration Isolation is supported only for the native Claude Code, Codex, and Pi Orchestrator role on the host");
+  }
+  if (integrationIsolation &&
+      !runnerSupportsProtocol(config.controlPlaneProtocolVersion, "orchestratorIntegrationIsolation")) {
+    throw new Error(`Integration Isolation requires a protocol-v${
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation} control plane`);
   }
   const orchestratorProjectPaths = [...new Set([
     ...(config.orchestratorProjectPaths ?? []),
@@ -343,7 +359,7 @@ export function provisionAgentControl(
     // bridge is provisioned before every relaunch, our own session-scoped extension path.
     const piExtension = piAgentControlExtensionPath(host.configDir, spec.sessionId);
     let baseArgs = additiveOrchestrator
-      ? stripAdditiveOrchestratorLaunchArgs(spec.args, spec.driver, orchestratorProjectPaths)
+      ? stripAdditiveOrchestratorLaunchArgs(spec.args, spec.driver, orchestratorProjectPaths, integrationIsolation)
       : stripOrchestratorLaunchArgs(spec.args, spec.driver);
     if (additiveOrchestrator) {
       baseArgs = [...baseArgs];
@@ -353,8 +369,16 @@ export function provisionAgentControl(
         }
       }
     }
-    const launchMatches = agent && agent.driver === "pi" && agent.command === spec.command &&
-      agent.args.length === baseArgs.length && agent.args.every((arg, index) => arg === baseArgs[index]);
+    // Integration Isolation's Pi arguments are plain switches with no runner-owned value, so a
+    // catalog definition that already carries one (`--no-skills`, say) is indistinguishable from
+    // this runner's own injection. Compare both sides with those switches removed: the launch is
+    // then verified against the discovery-verified definition on exactly the argument surface the
+    // policy does not control, and a user flag cannot make the identity check fail.
+    const comparableAgentArgs = integrationIsolation && agent?.args
+      ? withoutPiIntegrationIsolationArgs(agent.args)
+      : agent?.args;
+    const launchMatches = agent && comparableAgentArgs && agent.driver === "pi" && agent.command === spec.command &&
+      comparableAgentArgs.length === baseArgs.length && comparableAgentArgs.every((arg, index) => arg === baseArgs[index]);
     if (!launchMatches || agent?.piAgentControl?.protocolVersion !== PI_AGENT_CONTROL_PROTOCOL) {
       throw new Error(additiveOrchestrator
         ? "the Orchestrator role requires the exact discovery-verified Pi extension bridge"
@@ -486,7 +510,7 @@ export function provisionAgentControl(
   }
   if (additiveOrchestrator) {
     spec.env[ORCHESTRATOR_ENV_KEY] = "orchestrator";
-    spec.args = stripAdditiveOrchestratorLaunchArgs(spec.args, spec.driver, orchestratorProjectPaths);
+    spec.args = stripAdditiveOrchestratorLaunchArgs(spec.args, spec.driver, orchestratorProjectPaths, integrationIsolation);
     if ((spec.driver === "codex" || spec.driver === "codex-app-server") && reservedCodexMcpNameCollision(spec.args)) {
       throw new Error("the agent launch configures an MCP server named \"wollipog\", which is reserved for Wollipog's orchestration tools; rename that server to use the Orchestrator role");
     }
@@ -502,7 +526,7 @@ export function provisionAgentControl(
         WOLLIPOG_SESSION_TOKEN_FILE: tokenFile, WOLLIPOG_SESSION_CREDENTIAL_READY_FILE: readyFile,
         [ORCHESTRATOR_ENV_KEY]: "orchestrator",
       },
-    }, orchestratorProjectPaths));
+    }, orchestratorProjectPaths, integrationIsolation));
   } else if (orchestrator) {
     spec.env[ORCHESTRATOR_ENV_KEY] = "orchestrator";
     const mcp = {
