@@ -85,6 +85,17 @@ export function restorePanelScratch<T extends string>(
   return accept === undefined || accept(stored) ? (stored as T) : fallback;
 }
 
+/**
+ * Forget one value only if it is still the exact one the caller is done with.
+ *
+ * The compare is the point: a body that finishes consuming a draft (a side chat message that was
+ * sent) may already be unmounted, and a blind delete would then discard a replacement the user
+ * typed after remounting.
+ */
+export function clearPanelScratchIf(scope: string, key: string, expected: string): void {
+  if (readPanelScratch(scope, key) === expected) writePanelScratch(scope, key, null);
+}
+
 /** Forget everything. Test-only: module state would otherwise leak between cases. */
 export function clearPanelScratch(): void {
   scratch.clear();
@@ -104,6 +115,8 @@ export function usePanelScratchScope(sessionId: string): string {
 interface ScratchEntry<T extends string> {
   scope: string;
   key: string;
+  /** The default in force when this value was last settled — see the adoption rule below. */
+  fallback: T;
   value: T;
 }
 
@@ -154,18 +167,26 @@ function usePanelScratchValue<T extends string>(
   const [entry, setEntry] = useState<ScratchEntry<T>>(() => ({
     scope,
     key,
+    fallback,
     value: restorePanelScratch(scope, key, fallback, accept),
   }));
   let current = entry;
   if (entry.scope !== scope || entry.key !== key) {
-    current = { scope, key, value: restorePanelScratch(scope, key, fallback, accept) };
+    current = { scope, key, fallback, value: restorePanelScratch(scope, key, fallback, accept) };
+    setEntry(current);
+  } else if (entry.fallback !== fallback) {
+    // The default moved under a mounted body — Review's commit message defaults to the session
+    // title, and the session can be renamed while the panel is open. An untouched value follows it;
+    // one the user has edited is theirs and stays. Without this, the old default is written out as
+    // if it were a draft and pins the previous title for the rest of the tab's life.
+    current = { ...entry, fallback, value: entry.value === entry.fallback ? fallback : entry.value };
     setEntry(current);
   }
 
-  const { scope: liveScope, key: liveKey, value } = current;
+  const { scope: liveScope, key: liveKey, fallback: liveFallback, value } = current;
   useEffect(() => {
-    writePanelScratch(liveScope, liveKey, value === fallback ? null : value);
-  }, [fallback, liveKey, liveScope, value]);
+    writePanelScratch(liveScope, liveKey, value === liveFallback ? null : value);
+  }, [liveFallback, liveKey, liveScope, value]);
 
   const setValue = useCallback((next: T | ((prior: T) => T)) => {
     setEntry((prior) => {

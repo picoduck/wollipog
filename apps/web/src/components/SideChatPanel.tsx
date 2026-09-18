@@ -6,7 +6,7 @@ import { useHasStore, useStoreActions } from "../store.js";
 import { EventTimeline } from "./EventTimeline.js";
 import { useTimeline } from "./useTimeline.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
-import { usePanelScratchScope, usePanelScratchText } from "../right-panel-scratch.js";
+import { clearPanelScratchIf, usePanelScratchScope, usePanelScratchText } from "../right-panel-scratch.js";
 
 const POLL_MS = 1_500;
 const PAGE_SIZE = 200;
@@ -217,10 +217,16 @@ export function SideChatPanel({
   const send = async () => {
     const outgoing = text.trim();
     if (!sideChat || !outgoing || sending || !runnerOnline || isTerminal(sideChat.session.status)) return;
+    const sent = text;
     setSending(true);
     setError(null);
     try {
       const updated = await api.prompt(sideChat.session.id, outgoing);
+      // The send landed, so the draft it consumed must not come back — switching modes mid-flight
+      // unmounts this panel before `setText("")` runs, and a restored copy of an already-sent
+      // message invites sending it twice. Only the exact text that went out is dropped, so a
+      // replacement typed after a remount survives.
+      clearPanelScratchIf(panelScratch, "sidechat.draft", sent);
       if (!mountedRef.current) return;
       setSideChat((prior) => prior ? { ...prior, session: updated } : prior);
       setText("");

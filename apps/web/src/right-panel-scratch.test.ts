@@ -3,6 +3,7 @@ import { beforeEach, test } from "node:test";
 import {
   PANEL_SCRATCH_SESSION_LIMIT,
   clearPanelScratch,
+  clearPanelScratchIf,
   panelScratchScopeCount,
   panelScratchScopeKey,
   readPanelScratch,
@@ -36,6 +37,20 @@ test("a value equal to the body's own default is forgotten rather than pinned", 
   // Forgetting an absent key is not an error: a body mounts holding its default and says so.
   writePanelScratch(scope, "files.directory", null);
   assert.equal(panelScratchScopeCount(), 0);
+});
+
+test("a consumed draft is cleared only while it is still the one that was consumed", () => {
+  const scope = panelScratchScopeKey("session-1");
+  writePanelScratch(scope, "sidechat.draft", "already on its way");
+  // The panel that sent this can be unmounted by the time the send succeeds, so the clear happens
+  // outside it — and must not take a replacement the user typed after coming back with it.
+  clearPanelScratchIf(scope, "sidechat.draft", "something else");
+  assert.equal(readPanelScratch(scope, "sidechat.draft"), "already on its way");
+  clearPanelScratchIf(scope, "sidechat.draft", "already on its way");
+  assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined);
+  // Clearing what was never stored is the ordinary case for a body holding its default.
+  clearPanelScratchIf(scope, "sidechat.draft", "");
+  assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined);
 });
 
 test("restore falls back when the stored value is missing or refused", () => {

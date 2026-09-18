@@ -89,9 +89,11 @@ export function FilesBrowser({
   const reqRef = useRef(0);
   const viewerRef = useRef<HTMLDivElement>(null);
   const pendingDirectoryRef = useRef<string | null>(null);
-  // Consumed by the first listing this mount performs. Later listings — clearing a source location,
-  // arriving from Back/Forward — keep their established meaning of returning to the root.
-  const restoredDirectoryRef = useRef<string | null>(path || null);
+  // The directory this mount resumes into, retired by the first listing that actually resolves —
+  // NOT by the first pass of the effect below, which React runs twice under StrictMode. Once a
+  // listing has happened, later ones — clearing a source location, arriving from Back/Forward —
+  // keep their established meaning of returning to the root.
+  const resumeDirectoryRef = useRef<string | null>(path || null);
   const runner = useStoreSelector((state) => state.runners.get(session.runnerId));
   const isRemote = useStoreSelector((state) => [...state.boxes.values()].some((box) => box.runnerId === session.runnerId));
 
@@ -111,6 +113,7 @@ export function FilesBrowser({
       setError((e as Error).message);
       return "failed";
     } finally {
+      resumeDirectoryRef.current = null;
       if (reqRef.current === reqId) setBusy(false);
     }
   }, [api, session.id, setPath]);
@@ -136,8 +139,7 @@ export function FilesBrowser({
   // The canonical route owns file selection. Back/Forward therefore reloads the exact target,
   // while the plain session route returns to a root listing.
   useEffect(() => {
-    const restoredDirectory = restoredDirectoryRef.current;
-    restoredDirectoryRef.current = null;
+    const resumeDirectory = resumeDirectoryRef.current;
     if (location) {
       if (file?.path === location.path) {
         setRendered(!(location.line !== undefined || location.symbol !== undefined));
@@ -149,9 +151,9 @@ export function FilesBrowser({
     else {
       setFile(null);
       setSymbolDraft("");
-      const nextDirectory = pendingDirectoryRef.current ?? restoredDirectory ?? "";
+      const nextDirectory = pendingDirectoryRef.current ?? resumeDirectory ?? "";
       pendingDirectoryRef.current = null;
-      const resumed = nextDirectory !== "" && nextDirectory === restoredDirectory;
+      const resumed = nextDirectory !== "" && nextDirectory === resumeDirectory;
       void loadDir(nextDirectory).then((outcome) => {
         // A remembered directory can be gone by the time the panel reopens (a branch switch, the
         // agent deleting it). Fall back to the root listing rather than stranding the browser on

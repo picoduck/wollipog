@@ -1,7 +1,7 @@
 import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
-import React, { act, useState } from "react";
+import React, { StrictMode, act, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import {
@@ -59,6 +59,8 @@ beforeEach(() => {
   domWindow.localStorage.clear();
   clearPanelScratch();
   listed.length = 0;
+  heldPrompt = false;
+  releasePrompt = null;
 });
 
 after(() => {
@@ -120,6 +122,10 @@ const tree: Record<string, SessionFileEntry[]> = {
 /** Every directory the panel asked the runner for, in order. */
 const listed: string[] = [];
 
+/** Set by the case that needs a side chat send still in flight while the panel unmounts. */
+let heldPrompt = false;
+let releasePrompt: (() => void) | null = null;
+
 const client = {
   ...api,
   gitDiff: async () => ({ diff: emptyDiff }),
@@ -142,17 +148,23 @@ const client = {
     } satisfies SideChatView,
   }),
   getSessionEventPage: async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true }),
+  prompt: async (id: string) => {
+    if (heldPrompt) await new Promise<void>((resolve) => { releasePrompt = resolve; });
+    return sessionOf(id);
+  },
   childSessions: async () => { throw new Error("this fixture has no durable child-session registry"); },
 } as unknown as ApiClient;
 
-function PanelHarness({ onState, onSwitchSession }: {
+function PanelHarness({ onState, onSwitchSession, onRename }: {
   onState: (state: RightPanelState) => void;
   onSwitchSession?: (switchTo: (id: string) => void) => void;
+  onRename?: (rename: (title: string) => void) => void;
 }) {
   const state = useRightPanelState();
   const [session, setSession] = useState(() => sessionOf("session-1"));
   onState(state);
   onSwitchSession?.((id: string) => setSession(sessionOf(id)));
+  onRename?.((title: string) => setSession((current) => ({ ...current, title })));
   return (
     <ApiProvider client={client}><StoreProvider connection={connection}><RightPanel
       state={state}
@@ -174,24 +186,33 @@ interface Panel {
   state: RightPanelState;
   show: (mode: "review" | "files" | "browser" | "sidechat") => Promise<void>;
   switchSession: (id: string) => Promise<void>;
+  rename: (title: string) => Promise<void>;
   dispose: () => Promise<void>;
 }
 
-async function mountPanel(): Promise<Panel> {
+/** `strict` mounts under StrictMode, whose doubled mount effects are their own regression surface. */
+async function mountPanel(options: { strict?: boolean } = {}): Promise<Panel> {
   const host = domWindow.document.createElement("div");
   domWindow.document.body.append(host);
   const container = host as unknown as HTMLElement;
   const root = createRoot(container as unknown as Element);
   let state!: RightPanelState;
   let switchTo!: (id: string) => void;
-  await act(async () => root.render(
-    <PanelHarness onState={(next) => { state = next; }} onSwitchSession={(next) => { switchTo = next; }} />,
-  ));
+  let renameTo!: (title: string) => void;
+  const harness = (
+    <PanelHarness
+      onState={(next) => { state = next; }}
+      onSwitchSession={(next) => { switchTo = next; }}
+      onRename={(next) => { renameTo = next; }}
+    />
+  );
+  await act(async () => root.render(options.strict ? <StrictMode>{harness}</StrictMode> : harness));
   return {
     container,
     get state() { return state; },
     async show(mode) { await act(async () => state.show(mode)); },
     async switchSession(id) { await act(async () => switchTo(id)); },
+    async rename(title) { await act(async () => renameTo(title)); },
     async dispose() {
       await act(async () => root.unmount());
       container.remove();
@@ -345,6 +366,77 @@ test("the Side Chat draft and the Browser address survive a mode switch", async 
     assert.equal(panel.container.querySelector(".browser-web-frame")?.getAttribute("src"),
       "http://localhost:4174/preview", "the page it had open is still open");
   } finally {
+    await panel.dispose();
+  }
+});
+
+test("StrictMode's doubled mount effect still resumes the remembered directory", async () => {
+  // React invokes a mount effect, its cleanup, and the effect again in development. A resume that
+  // is retired by the first pass rather than by a listing is silently lost in every dev build.
+  const first = await mountPanel();
+  try {
+    await first.show("files");
+    await act(async () => fireDomEvent.click(first.container.querySelector<HTMLButtonElement>(".files-entry")!));
+    assert.equal(crumbs(first), "root/apps");
+  } finally {
+    await first.dispose();
+  }
+
+  const strict = await mountPanel({ strict: true });
+  try {
+    await strict.show("files");
+    assert.equal(crumbs(strict), "root/apps");
+  } finally {
+    await strict.dispose();
+  }
+});
+
+test("an untouched Review default follows a renamed session; an edited one does not", async () => {
+  const panel = await mountPanel();
+  try {
+    await panel.show("review");
+    assert.equal(commitInput(panel).value, "Panel Scratch Fixture", "the commit message defaults to the title");
+
+    await panel.rename("Renamed While Open");
+    await panel.show("files");
+    await panel.show("review");
+    assert.equal(commitInput(panel).value, "Renamed While Open",
+      "a default nobody edited is not a draft, and must not pin the old title");
+    assert.equal(field(panel, "PR Title")!.value, "Renamed While Open");
+
+    await type(commitInput(panel), "fix: something the user wrote");
+    await panel.rename("Renamed Again");
+    await panel.show("files");
+    await panel.show("review");
+    assert.equal(commitInput(panel).value, "fix: something the user wrote",
+      "what the user typed is theirs and survives the rename");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("a Side Chat send that lands after the panel closes does not restore the sent message", async () => {
+  heldPrompt = true;
+  const panel = await mountPanel();
+  try {
+    await panel.show("sidechat");
+    const composer = field(panel, "Side Chat Message") as HTMLTextAreaElement;
+    await type(composer, "already on its way");
+    await act(async () => fireDomEvent.click(
+      [...panel.container.querySelectorAll<HTMLButtonElement>(".sidechat-composer button")]
+        .find((button) => button.textContent === "Send")!,
+    ));
+
+    // The reviewer switches away while the prompt is still in flight, so the panel is unmounted
+    // when the send succeeds and never gets to clear its own composer.
+    await panel.show("files");
+    await act(async () => { releasePrompt?.(); });
+
+    await panel.show("sidechat");
+    assert.equal((field(panel, "Side Chat Message") as HTMLTextAreaElement).value, "",
+      "a message that was already sent must not come back and invite a second send");
+  } finally {
+    releasePrompt?.();
     await panel.dispose();
   }
 });
