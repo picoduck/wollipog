@@ -21,6 +21,7 @@ import {
   provisionClaudeHooks,
   POLICY_HOOK_ENV,
   readHookCircuitState,
+  refreshClaudeGuardProtections,
   removeClaudeHookFiles,
   sweepClaudeHookFiles,
   writeHookCircuitState,
@@ -677,3 +678,207 @@ test("an integration-isolated additive Orchestrator keeps Wollipog's managed pol
     assert.deepEqual(preset.args, [], "the preset keeps no managed settings argument");
   });
 });
+
+/* ---------------------------------------------------------------------------------------------
+ * Issue #1313: the managed-worktree guard shares ONE settings file with the manager policy hooks,
+ * because Claude applies only the LAST `--settings` argument.
+ * ------------------------------------------------------------------------------------------ */
+
+const PROTECTIONS = [{ worktreePath: "/repo-worktrees/s1", repoPath: "/repo" }];
+
+function guardedSpec(overrides: Partial<SessionLaunchSpec> = {}): SessionLaunchSpec {
+  return spec(overrides);
+}
+
+function provisionGuarded(
+  dir: string,
+  overrides: Partial<SessionLaunchSpec> = {},
+  configOverrides: Partial<typeof config> & { managedWorktreeProtections?: typeof PROTECTIONS | [] } = {},
+): SessionLaunchSpec {
+  const launch = guardedSpec(overrides);
+  provisionClaudeHooks(
+    launch,
+    { ...config, managedWorktreeProtections: PROTECTIONS, ...configOverrides },
+    () => {},
+    host(dir),
+  );
+  return launch;
+}
+
+function settingsOf(dir: string, sessionId = "sess_hook_1"): {
+  file: string;
+  live: { env?: Record<string, string>; hooks?: Record<string, Array<{ matcher?: string; hooks: Array<{ command: string; args: string[] }> }>> };
+} {
+  const file = claudeHookSettingsPath(dir, sessionId);
+  return { file, live: JSON.parse(readFileSync(file, "utf8")) };
+}
+
+function guardEntries(live: ReturnType<typeof settingsOf>["live"]): Array<{ matcher?: string; hooks: Array<{ command: string; args: string[] }> }> {
+  return (live.hooks?.PreToolUse ?? []).filter((entry) =>
+    entry.hooks.some((hook) => hook.args.includes("--managed-worktree-guard")));
+}
+
+test("the guard is provisioned when manager hooks are DISABLED", () => temp((dir) => {
+  const launch = provisionGuarded(dir, {}, { enabled: false });
+  const { file, live } = settingsOf(dir);
+  assert.deepEqual(launch.args, ["--settings", file]);
+  const guards = guardEntries(live);
+  assert.equal(guards.length, 1, "exactly one guard entry");
+  assert.equal(guards[0]!.matcher, "Bash");
+  assert.ok(guards[0]!.hooks[0]!.args.includes("--protections"));
+  assert.equal(live.hooks?.PostToolUse, undefined, "no manager hooks came along");
+  assert.equal(live.env?.MANAGER_TOKEN_FILE, undefined, "and no credential reference");
+}));
+
+test("the guard is provisioned when the mode's elicitation is unsupported for manager hooks", () => temp((dir) => {
+  // `auto` advertises stdio-control, so the manager policy transport is not used for it.
+  const launch = provisionGuarded(dir, { config: { permissionMode: "auto" } });
+  const { file, live } = settingsOf(dir);
+  assert.deepEqual(launch.args, ["--settings", file]);
+  assert.equal(guardEntries(live).length, 1);
+  assert.equal(live.hooks?.PreToolUse?.length, 1, "the manager PreToolUse hook is absent");
+}));
+
+test("the guard is provisioned for the Orchestrator preset, which manager hooks skip entirely", () => temp((dir) => {
+  const launch = provisionGuarded(dir, { config: { permissionMode: "orchestrator" } });
+  const { file, live } = settingsOf(dir);
+  assert.deepEqual(launch.args, ["--settings", file]);
+  assert.equal(guardEntries(live).length, 1);
+}));
+
+test("the guard and the manager hooks share one settings file when both are on", () => temp((dir) => {
+  const launch = provisionGuarded(dir);
+  const { file, live } = settingsOf(dir);
+  assert.deepEqual(launch.args, ["--settings", file], "one and only one --settings argument");
+  assert.equal(guardEntries(live).length, 1);
+  assert.equal(live.hooks?.PreToolUse?.length, 2, "guard plus manager PreToolUse");
+  assert.equal(live.hooks!.PreToolUse![0]!.matcher, "Bash", "the guard runs first");
+  assert.ok(live.hooks?.PostToolUse, "the manager hooks keep working exactly as before");
+  assert.ok(live.hooks?.UserPromptSubmit);
+  assert.equal(live.env?.MANAGER_TOKEN_FILE, claudeHookTokenPath(file));
+  // The guard's own state is a path, never a credential.
+  assert.equal(
+    live.env?.WOLLIPOG_MANAGED_WORKTREE_GUARD_FILE,
+    file.replace(/\.settings\.json$/u, ".protections.json"),
+  );
+}));
+
+test("no token material is written into the settings file, only credential-FILE references", () => temp((dir) => {
+  provisionGuarded(dir);
+  const { file } = settingsOf(dir);
+  const token = readFileSync(claudeHookTokenPath(file), "utf8");
+  for (const candidate of [file, claudeHookTemplatePath(file), file.replace(/\.settings\.json$/u, ".guard.json")]) {
+    assert.equal(readFileSync(candidate, "utf8").includes(token), false, `${candidate} carries no secret`);
+  }
+}));
+
+test("the protections file is 0600 and carries exactly the live protection set", () => temp((dir) => {
+  provisionGuarded(dir);
+  const protections = claudeHookSettingsPath(dir, "sess_hook_1").replace(/\.settings\.json$/u, ".protections.json");
+  if (process.platform !== "win32") {
+    assert.equal(statSync(protections).mode & 0o777, 0o600);
+  }
+  assert.deepEqual(JSON.parse(readFileSync(protections, "utf8")), { version: 1, protections: PROTECTIONS });
+}));
+
+test("repeated provisioning is idempotent: one --settings pair, one guard entry", () => temp((dir) => {
+  const launch = provisionGuarded(dir);
+  for (let round = 0; round < 3; round++) {
+    provisionClaudeHooks(launch, { ...config, managedWorktreeProtections: PROTECTIONS }, () => {}, host(dir));
+  }
+  assert.deepEqual(launch.args, ["--settings", claudeHookSettingsPath(dir, "sess_hook_1")]);
+  assert.equal(guardEntries(settingsOf(dir).live).length, 1);
+}));
+
+test("healing a deleted settings file restores the guard too", () => temp((dir) => {
+  const launch = provisionGuarded(dir, {}, { enabled: false });
+  const { file } = settingsOf(dir);
+  rmSync(file, { force: true });
+  const prepared = prepareClaudeHookArgs(launch.args);
+  assert.equal(prepared.healed, true);
+  assert.equal(prepared.guardActive, true);
+  assert.deepEqual(prepared.args, launch.args);
+  assert.equal(guardEntries(settingsOf(dir).live).length, 1);
+}));
+
+test("an open manager circuit keeps the guard and drops only the policy transport", () => temp((dir) => {
+  const launch = provisionGuarded(dir);
+  const file = claudeHookSettingsPath(dir, "sess_hook_1");
+  writeHookCircuitState(claudeHookCircuitPath(file), {
+    consecutiveFailures: 3, open: true, openedAt: Date.now(),
+  });
+  const prepared = prepareClaudeHookArgs(launch.args);
+  assert.equal(prepared.circuitOpen, true);
+  assert.equal(prepared.guardActive, true);
+  assert.deepEqual(prepared.args, launch.args, "the settings argument is retained for the guard");
+  const live = settingsOf(dir).live;
+  assert.equal(guardEntries(live).length, 1);
+  assert.equal(live.hooks?.PostToolUse, undefined, "the manager hooks are out for this spawn");
+  assert.equal(live.env?.MANAGER_TOKEN_FILE, undefined);
+
+  // Re-provisioning while the circuit is open must not resurrect the manager hooks either.
+  provisionClaudeHooks(launch, { ...config, managedWorktreeProtections: PROTECTIONS }, () => {}, host(dir));
+  const reprepared = prepareClaudeHookArgs(launch.args);
+  assert.equal(reprepared.guardActive, true);
+  assert.equal(settingsOf(dir).live.hooks?.PostToolUse, undefined);
+}));
+
+test("a recovered circuit restores the manager hooks into the live file", () => temp((dir) => {
+  const launch = provisionGuarded(dir);
+  const file = claudeHookSettingsPath(dir, "sess_hook_1");
+  writeHookCircuitState(claudeHookCircuitPath(file), {
+    consecutiveFailures: 3, open: true, openedAt: Date.now(),
+  });
+  prepareClaudeHookArgs(launch.args);
+  assert.equal(settingsOf(dir).live.hooks?.PostToolUse, undefined);
+  writeHookCircuitState(claudeHookCircuitPath(file), { consecutiveFailures: 0, open: false });
+  const prepared = prepareClaudeHookArgs(launch.args);
+  assert.equal(prepared.circuitOpen, false);
+  assert.equal(prepared.guardActive, true);
+  assert.ok(settingsOf(dir).live.hooks?.PostToolUse, "the template is the authority once eligible again");
+}));
+
+test("a session with no managed worktree gets no guard, and discarding the last one removes it", () => temp((dir) => {
+  const none = provisionGuarded(dir, { sessionId: "sess_hook_2" }, { enabled: false, managedWorktreeProtections: [] });
+  assert.deepEqual(none.args, [], "no runner-owned settings at all");
+  assert.equal(existsSync(claudeHookSettingsPath(dir, "sess_hook_2")), false);
+
+  const launch = provisionGuarded(dir, {}, { enabled: false });
+  const file = claudeHookSettingsPath(dir, "sess_hook_1");
+  assert.deepEqual(launch.args, ["--settings", file]);
+  // The last managed worktree is discarded; the next launch is provisioned without protections.
+  provisionClaudeHooks(launch, { ...config, enabled: false, managedWorktreeProtections: [] }, () => {}, host(dir));
+  assert.deepEqual(launch.args, [], "the runner-owned settings argument is withdrawn");
+  assert.equal(existsSync(file.replace(/\.settings\.json$/u, ".guard.json")), false);
+  assert.equal(existsSync(file.replace(/\.settings\.json$/u, ".protections.json")), false);
+}));
+
+test("refreshClaudeGuardProtections updates an existing guard and never creates one", () => temp((dir) => {
+  assert.equal(refreshClaudeGuardProtections("sess_hook_1", PROTECTIONS, dir), false,
+    "a session with no provisioned guard is left alone");
+  provisionGuarded(dir, {}, { enabled: false });
+  const protections = claudeHookSettingsPath(dir, "sess_hook_1").replace(/\.settings\.json$/u, ".protections.json");
+  const next = [...PROTECTIONS, { worktreePath: "/repo-worktrees/s2", repoPath: "/repo" }];
+  assert.equal(refreshClaudeGuardProtections("sess_hook_1", next, dir), true);
+  assert.deepEqual(JSON.parse(readFileSync(protections, "utf8")), { version: 1, protections: next });
+  assert.equal(refreshClaudeGuardProtections("../escape", next, dir), false, "an unsafe id is refused");
+}));
+
+test("a non-native context or a non-host target cannot carry the guard", () => temp((dir) => {
+  const wsl = provisionGuarded(dir, { context: { kind: "wsl", distro: "Ubuntu" } });
+  assert.deepEqual(wsl.args, []);
+  const container = provisionGuarded(dir, {
+    sessionId: "sess_hook_3",
+    executionTarget: { adapter: "container", id: "c1" },
+  } as Partial<SessionLaunchSpec>);
+  assert.deepEqual(container.args, []);
+}));
+
+test("session cleanup removes the guard and protections files", () => temp((dir) => {
+  provisionGuarded(dir, {}, { enabled: false });
+  const file = claudeHookSettingsPath(dir, "sess_hook_1");
+  removeClaudeHookFiles("sess_hook_1", dir);
+  for (const suffix of [".settings.json", ".template.json", ".guard.json", ".protections.json"]) {
+    assert.equal(existsSync(file.replace(/\.settings\.json$/u, suffix)), false, `${suffix} is gone`);
+  }
+}));

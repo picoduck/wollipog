@@ -43,6 +43,7 @@ import { ClaudeCodeDriver } from "./drivers/claude-code.js";
 import type { DriverCallbacks, DriverOptions } from "./drivers/driver.js";
 import {
   applyClaudeHookCapability,
+  claudeHookSettingsPath,
   provisionClaudeHooks,
   type ClaudeHookHost,
 } from "./hook-settings.js";
@@ -359,6 +360,9 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
       async (meta) => {
         provisionClaudeHooks(meta, {
           controlPlaneUrl: CONTROL_PLANE_URL, controlPlaneProtocolVersion: PROTOCOL_VERSION, enabled: true,
+          // index.ts passes exactly this: the live runner-owned worktree set, which provisions the
+          // managed-worktree guard hook for the launch.
+          managedWorktreeProtections: manager!.managedWorktreeProtections(meta),
         }, () => {}, hookHost);
         await provisionAgentControl(meta, {
           controlPlaneUrl: CONTROL_PLANE_URL,
@@ -688,12 +692,12 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
       "the role survives the worktree rebind");
     assert.equal(store.readMeta(parent.id)?.config.permissionMode, "auto",
       "the user's permission-mode selection is untouched by the worktree");
-    // A linked runner-owned worktree routes automatic review through Wollipog
-    // (`protectedClaudePermissionMode`, apps/runner/src/drivers/claude-code.ts:294), so the
-    // selected `auto` mediates to the interactive mode for this launch. That is ordinary
-    // managed-worktree behavior, not an Orchestrator rule, and the stdio channel remains.
-    assert.deepEqual(valuesOf(second.argv, "--permission-mode"), []);
+    // A linked runner-owned worktree provisions the managed-worktree guard hook, which enforces
+    // the runner-owned worktree veto for every Bash call in every mode. The launch therefore keeps
+    // the user's selected `auto` instead of being mediated to interactive `default` (issue #1313).
+    assert.deepEqual(valuesOf(second.argv, "--permission-mode"), ["auto"]);
     assert.deepEqual(valuesOf(second.argv, "--permission-prompt-tool"), ["stdio"]);
+    assert.equal(hasFlag(second.argv, "--settings"), true, "the guard rides a runner-owned settings file");
     assert.equal(hasFlag(second.argv, "--strict-mcp-config"), false);
     // Resume idempotence: re-provisioning the same session adds the additive arguments once.
     assert.deepEqual(valuesOf(second.argv, "--allowedTools"), ["mcp__wollipog__*"]);
@@ -702,7 +706,14 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
     // value still appears exactly once.
     assert.deepEqual(valuesOf(second.argv, "--add-dir"), ["/home/user/notes", repo, parentWorktree]);
     assert.deepEqual(valuesOf(second.argv, "--mcp-config"), [USER_MCP_CONFIG, wollipogMcp]);
-    assert.deepEqual(valuesOf(second.argv, "--settings"), [USER_SETTINGS]);
+    // The manager policy hooks are unsupported for `auto` (its elicitation is `stdio-control`), so
+    // the runner-owned settings file carries the managed-worktree guard alone. Claude applies only
+    // the LAST `--settings`, so the user's own file is shadowed for this launch — the same thing
+    // that already happened whenever manager hooks were provisioned (docs/adr/0012).
+    assert.deepEqual(
+      valuesOf(second.argv, "--settings"),
+      [USER_SETTINGS, claudeHookSettingsPath(hookDir, parent.id)],
+    );
 
     // ------------------ 5. the implementation itself behaves exactly as for a normal Session
     second.child.stdout.write(JSON.stringify({

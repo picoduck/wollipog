@@ -182,7 +182,7 @@ export function runManagedWorktreeGuardDecision(
   if (!protectionsFile) {
     return {
       stdout: "",
-      stderr: "managed worktree guard was launched without a protections file\n",
+      stderr: `${MANAGED_WORKTREE_REFUSAL} (managed worktree guard was launched without a protections file)\n`,
       exitCode: 2,
     };
   }

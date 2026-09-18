@@ -4187,13 +4187,25 @@ test("claudePermissionArgs: 'default' uses the stdio prompt tool (interactive, n
   assert.equal(args.includes("--permission-mode"), false);
 });
 
-test("managed worktrees retain restrictive Claude modes and narrow bypass modes to runner review", () => {
+test("a managed worktree WITHOUT the guard still narrows every non-plan mode to runner review", () => {
+  // The fail-safe branch (#1256): when the managed-worktree guard hook cannot be provisioned, the
+  // runner's stdio control channel is the only place the veto can see a command, so every
+  // non-plan mode is mediated to interactive `default`.
   assert.equal(protectedClaudePermissionMode("plan", true), "plan");
   assert.equal(protectedClaudePermissionMode("acceptEdits", true), "default");
   assert.equal(protectedClaudePermissionMode("auto", true), "default");
   assert.equal(protectedClaudePermissionMode("bypassPermissions", true), "default");
   assert.equal(protectedClaudePermissionMode("dontAsk", true), "default");
   assert.equal(protectedClaudePermissionMode("bypassPermissions", false), "bypassPermissions");
+});
+
+test("a managed worktree WITH the guard keeps the selected mode (issue #1313)", () => {
+  // The guard hook enforces the veto for every Bash call in every mode, so there is nothing left
+  // for the mode replacement to protect. See claude-code-managed-worktree.test.ts for the argv.
+  for (const mode of ["plan", "auto", "acceptEdits", "bypassPermissions", "dontAsk", "default"]) {
+    assert.equal(protectedClaudePermissionMode(mode, true, true), mode);
+    assert.equal(protectedClaudePermissionMode(mode, false, false), mode);
+  }
 });
 
 test("claudePermissionArgs: 'auto' is interactive AND passes --permission-mode auto (classifier + UI escalation)", () => {

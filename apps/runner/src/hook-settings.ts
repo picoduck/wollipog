@@ -568,6 +568,7 @@ export function provisionClaudeHooks(
       if (removeManagedSettingsArgs(spec.args, host.configDir) > 0) {
         log(`Claude hooks ${spec.sessionId}: disabled for this launch`);
       }
+      discardGuardArtifacts(file);
     } else {
       try {
         writeClaudeSettingsSet(file, null, guard);
@@ -671,6 +672,22 @@ export function provisionClaudeHooks(
   // and only after both provisioning and the Phase 4 ask protocol fence have succeeded.
   if (protocolVersion >= 66) advertiseHookForLaunchCapability(spec);
   else stripHookFromLaunchCapability(spec);
+}
+
+/**
+ * Drop a guard this session no longer needs (its last managed worktree was discarded, or the
+ * launch cannot carry the hook). A guard-only settings file goes with it; a file that also
+ * carries the manager hooks is left for the manager path to rewrite.
+ */
+function discardGuardArtifacts(file: string): void {
+  const described = describeManagedSettings(file);
+  if (!described?.guard) return;
+  rmSync(claudeHookGuardPath(file), { force: true });
+  rmSync(claudeHookProtectionsPath(file), { force: true });
+  if (!described.manager) {
+    rmSync(file, { force: true });
+    rmSync(claudeHookTemplatePath(file), { force: true });
+  }
 }
 
 /**
