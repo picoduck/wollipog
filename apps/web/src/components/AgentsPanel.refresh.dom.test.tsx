@@ -3,8 +3,8 @@ import { after, before, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { PROTOCOL_VERSION, type ChildSessionRegistryPage, type SessionEventPayload,
-  type SessionView } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, type ChildSessionRegistryEntry, type ChildSessionRegistryPage,
+  type SessionEventPayload, type SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { StoreProvider } from "../store.js";
@@ -63,6 +63,12 @@ const baseSession = {
 const startedTool = (toolCallId: string, id: number): TimelineItem => ({
   kind: "tool_call", id, toolCallId, title: toolCallId, text: "",
   toolKind: "agent", status: "in_progress", startedAt: now - 30_000,
+});
+
+/** The same agent row once its tool call has settled: the roster fingerprint moves, nothing else. */
+const settledTool = (toolCallId: string, id: number): TimelineItem => ({
+  kind: "tool_call", id, toolCallId, title: toolCallId, text: "",
+  toolKind: "agent", status: "completed", startedAt: now - 30_000,
 });
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -261,6 +267,91 @@ test("a folded re-statement refreshes promptly without restoring per-event regis
     assert.equal(calls, 2, "a folded re-statement refreshes the roster on the 1 s tier, not the 15 s one");
     assert.match(container.textContent ?? "", /1 worker has an ambiguous provider identity/,
       "the reclassification the re-statement caused is visible without waiting for the idle cadence");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+/**
+ * #1290: #1207 reduced how often the panel refreshed its registry but not how much each refresh
+ * read — `refreshRegistry` looped `ceil(registry.length / PAGE_SIZE)` pages, so one child's change
+ * against a five-page registry cost five requests. Cursors are the assertion here: a refresh reads
+ * the page holding the child that moved and the tail page a new spawn would land on, and leaves the
+ * pages with no evidence behind them alone.
+ */
+test("a single child's change costs two requests against a five-page registry, not five", async () => {
+  const registrySize = 250;
+  const entry = (index: number): ChildSessionRegistryEntry => ({
+    toolCallId: `child-${index}`, name: `Child ${index}`,
+    status: index === 1 ? "in_progress" : "completed",
+    lifecycle: index === 1 ? "running" : "completed",
+    sourceSeq: index, startedAt: now - 30_000, lastActivityAt: now - 20_000,
+    // The control plane stamps `completedAt` exactly when it judges a child terminal, which is what
+    // lets a refresh skip a page of settled children.
+    ...(index === 1 ? {} : { completedAt: now - 20_000 }),
+    toolCount: 1,
+  });
+  const all = Array.from({ length: registrySize }, (_value, index) => entry(index + 1));
+  const cursors: number[] = [];
+  const childSessions = async (
+    _id: string, _epoch: number, after = 0, limit = 50,
+  ): Promise<ChildSessionRegistryPage> => {
+    cursors.push(after);
+    const eligible = all.filter((child) => child.sourceSeq > after);
+    const children = eligible.slice(0, limit);
+    const truncated = eligible.length > children.length;
+    return { children, attentionOwners: [], unidentifiedChildren: 0, eventEpoch: 0,
+      nextAfter: truncated ? children.at(-1)!.sourceSeq : null, truncated };
+  };
+  const client: ApiClient = { ...api, childSessions };
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const render = (session: SessionView, items: TimelineItem[]) =>
+    root.render(<ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
+      <AgentsPanel session={session} items={items} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
+        requestedId={null} onSelect={() => {}} parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
+    </StoreProvider></FeedbackProvider></ApiProvider>);
+
+  try {
+    // `child-1` is the one child still running, and its row is loaded, so the transcript already
+    // renders its live state and no idle sweep needs its page.
+    const items = [startedTool("child-1", 1)];
+    await act(async () => { render(baseSession, items); });
+    await advance(50);
+
+    // Read the whole registry in, the way a reader does: five pages, four of them behind Load More.
+    for (let page = 1; page < 5; page += 1) {
+      const loadMore = Array.from(container.querySelectorAll("button"))
+        .find((button) => button.textContent === "Load More Recorded Workers")!;
+      await act(async () => { (loadMore as HTMLButtonElement).click(); });
+      await advance(60);
+    }
+    assert.deepEqual(cursors, [0, 50, 100, 150, 200], "the reader loaded all five pages");
+
+    // That child completes. Its evidence is on the first page, so that page and the tail are the
+    // only ones with anything to say; the pre-fix refresh read all five.
+    await act(async () => {
+      render({ ...baseSession, messageCount: 11, lastEventAt: now + 1_000 },
+        [settledTool("child-1", 1)]);
+    });
+    await advance(1_200);
+    assert.deepEqual(cursors.slice(5), [0, 200],
+      "one child's change reads its own page and the tail, never every loaded page");
+
+    // A different child, five pages in, moves the roster. The request follows it rather than
+    // restarting at the front, and the settled pages on either side stay unread.
+    await act(async () => {
+      render({ ...baseSession, messageCount: 12, lastEventAt: now + 2_000 },
+        [settledTool("child-1", 1), startedTool("child-120", 2)]);
+    });
+    await advance(1_200);
+    assert.deepEqual(cursors.slice(7), [100, 200],
+      "the refresh reads the page holding the child that moved, not the pages that did not");
+    assert.ok(cursors.every((cursor) => cursor !== 50 || cursors.indexOf(cursor) < 5),
+      "no page was re-read without evidence behind it");
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

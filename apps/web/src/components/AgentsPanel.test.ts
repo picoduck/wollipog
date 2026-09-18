@@ -3,8 +3,9 @@ import test from "node:test";
 import { deriveSubagentDescriptors, type SubagentDescriptor } from "../subagents.js";
 import { MAX_TRACKED_TOOL_CALL_STATEMENTS, TimelineBuilder } from "../timeline.js";
 import type { ChildSessionRegistryEntry, SessionEventPayload, SessionView } from "@wollipog/protocol";
-import { childRegistryProgressKey, childRegistryRefreshDelay, childRegistryRosterKey,
-  mergeCompactAttentionOwners, mergeDurableAgents, mergeRegistrySnapshotPages,
+import { changedRosterIds, childRegistryAgentFingerprints, childRegistryProgressKey,
+  childRegistryRefreshDelay, childRegistryRosterKey, mergeCompactAttentionOwners, mergeDurableAgents,
+  mergeRefreshedRegistryPages, registryRefreshCursors,
   shouldOpenPrimaryRequestInSession } from "./AgentsPanel.js";
 
 const child = (id: string, lifecycle: SubagentDescriptor["lifecycle"], sourceIndex: number): SubagentDescriptor => ({
@@ -92,15 +93,97 @@ test("an authoritative unresolved compact owner suppresses a misleading loaded d
   ), [{ requestId: "ask", toolCallId: "conflicted-owner", resolved: false }]);
 });
 
-test("a refreshed paged snapshot replaces stale child lifecycle and activity", () => {
+test("a refreshed page replaces stale child lifecycle and activity across the range it covers", () => {
   const entry = (status: string, lastActivityAt: number, completedAt?: number): ChildSessionRegistryEntry => ({
     toolCallId: "off-window-child", name: "Subagent", status, sourceSeq: 80,
     startedAt: 100, lastActivityAt, ...(completedAt === undefined ? {} : { completedAt }), toolCount: 1,
   });
-  const first = mergeRegistrySnapshotPages([[entry("running", 120)], []]);
-  const refreshed = mergeRegistrySnapshotPages([[entry("completed", 200, 200)], []]);
+  const first = mergeRefreshedRegistryPages([],
+    [{ after: 0, children: [entry("running", 120)], truncated: false }]);
+  const refreshed = mergeRefreshedRegistryPages(first,
+    [{ after: 0, children: [entry("completed", 200, 200)], truncated: false }]);
   assert.equal(first[0]?.completedAt, undefined);
   assert.deepEqual(refreshed, [entry("completed", 200, 200)]);
+});
+
+/**
+ * #1289 made a child stop being identified mid-session, and #1290 stops re-reading every page, so
+ * the two meet here: the page that lost the child answers for its own range and drops it, while the
+ * entries beyond that range survive precisely because nobody re-read them.
+ */
+test("a page that no longer returns a child drops it without disturbing the pages it does not cover", () => {
+  const entry = (id: string, sourceSeq: number): ChildSessionRegistryEntry => ({
+    toolCallId: id, name: id, status: "running", sourceSeq,
+    startedAt: 100, lastActivityAt: 100, toolCount: 0,
+  });
+  const held = [entry("alpha", 10), entry("beta", 20), entry("gamma", 30)];
+  const merged = mergeRefreshedRegistryPages(held,
+    [{ after: 0, children: [entry("alpha", 10)], truncated: true }]);
+  assert.deepEqual(merged.map((child) => child.toolCallId), ["alpha", "beta", "gamma"],
+    "a truncated page answers only up to its last entry");
+  const settled = mergeRefreshedRegistryPages(held,
+    [{ after: 0, children: [entry("alpha", 10)], truncated: false }]);
+  assert.deepEqual(settled.map((child) => child.toolCallId), ["alpha"],
+    "an untruncated page answers for everything after its cursor, so a vanished child is dropped");
+});
+
+test("the changed-child set covers arrivals, departures and a folded re-statement", () => {
+  const previous = childRegistryAgentFingerprints([child("alpha", "working", 1), child("beta", "working", 2)]);
+  const restated = childRegistryAgentFingerprints([
+    { ...child("alpha", "working", 1), statementCount: 2 }, child("beta", "working", 2)]);
+  assert.deepEqual([...changedRosterIds(previous, restated)], ["alpha"]);
+  const departed = childRegistryAgentFingerprints([child("alpha", "working", 1)]);
+  assert.deepEqual([...changedRosterIds(previous, departed)], ["beta"]);
+  const arrived = childRegistryAgentFingerprints([
+    child("alpha", "working", 1), child("beta", "working", 2), child("gamma", "working", 3)]);
+  assert.deepEqual([...changedRosterIds(previous, arrived)], ["gamma"]);
+  assert.deepEqual([...changedRosterIds(previous, previous)], []);
+});
+
+/**
+ * #1290: the refresh used to cost one request per loaded page whatever moved. A page earns its
+ * request from its own contents, so a single child's change reaches the page holding it and the
+ * tail page where a new spawn would land — two requests against a ten-page registry, not ten.
+ */
+test("a single child's change re-reads its own page and the tail, not every loaded page", () => {
+  const settled = (index: number): ChildSessionRegistryEntry => ({
+    toolCallId: `child-${index}`, name: `Child ${index}`, status: "completed", lifecycle: "completed",
+    sourceSeq: index, startedAt: 100, lastActivityAt: 200, completedAt: 200, toolCount: 1,
+  });
+  const registry = Array.from({ length: 500 }, (_value, index) => settled(index + 1));
+  const loaded = new Set(registry.map((entry) => entry.toolCallId));
+  const pageCount = Math.ceil(registry.length / 50);
+  assert.equal(pageCount, 10);
+
+  // `child-120` sits on the third page, whose cursor is the last entry of the second.
+  assert.deepEqual(registryRefreshCursors(registry, new Set(["child-120"]), loaded, 50), [100, 450]);
+  assert.deepEqual(registryRefreshCursors(registry, new Set(), loaded, 50), [450],
+    "with nothing to chase, only the page a new spawn would land on is worth a request");
+  assert.deepEqual(registryRefreshCursors(registry, new Set(["child-1"]), loaded, 50), [0, 450],
+    "the first page's cursor is the start of the registry, not a child's sourceSeq");
+  assert.deepEqual(registryRefreshCursors([], new Set(), new Set(), 50), [0],
+    "an empty registry still reads its first page");
+});
+
+/**
+ * The idle cadence exists for a child whose durable state moves with nothing observable in the
+ * loaded transcript (#1207). Only an unsettled child outside that window can do so, so only its
+ * page keeps costing an idle request.
+ */
+test("only an unsettled child outside the loaded transcript keeps its page in the idle sweep", () => {
+  const entry = (index: number, settled: boolean): ChildSessionRegistryEntry => ({
+    toolCallId: `child-${index}`, name: `Child ${index}`, status: settled ? "completed" : "running",
+    ...(settled ? { lifecycle: "completed" as const, completedAt: 200 } : { lifecycle: "running" as const }),
+    sourceSeq: index, startedAt: 100, lastActivityAt: 200, toolCount: 1,
+  });
+  // Three pages: one unsettled child on the first, one on the second, and the rest settled.
+  const registry = Array.from({ length: 150 }, (_value, index) =>
+    entry(index + 1, index !== 0 && index !== 60));
+
+  assert.deepEqual(registryRefreshCursors(registry, new Set(), new Set(), 50), [0, 50, 100],
+    "an unsettled child nobody can see in the transcript still earns its page a request");
+  assert.deepEqual(registryRefreshCursors(registry, new Set(), new Set(["child-1", "child-61"]), 50), [100],
+    "those same children rendered from the loaded transcript need no registry read at all");
 });
 
 test("message progress invalidates the registry even inside one timestamp millisecond", () => {

@@ -67,11 +67,31 @@ export function mergeDurableAgents(
   });
 }
 
-export function mergeRegistrySnapshotPages(
-  pages: readonly (readonly ChildSessionRegistryEntry[])[],
+/** One refreshed page, with the `after` cursor it was requested at. */
+export type RefreshedRegistryPage = {
+  after: number;
+  children: readonly ChildSessionRegistryEntry[];
+  truncated: boolean;
+};
+
+/**
+ * Fold refreshed pages into the registry the panel already holds, leaving the pages this refresh
+ * had no reason to re-read untouched. A page answers for the whole `sourceSeq` range it covers — up
+ * to its last entry when truncated, and to the end of the registry when not — so a child the control
+ * plane has stopped identifying is dropped rather than kept alive by a page nobody re-read (#1289).
+ */
+export function mergeRefreshedRegistryPages(
+  existing: readonly ChildSessionRegistryEntry[],
+  fetched: readonly RefreshedRegistryPage[],
 ): ChildSessionRegistryEntry[] {
-  const byId = new Map<string, ChildSessionRegistryEntry>();
-  for (const page of pages) for (const child of page) byId.set(child.toolCallId, child);
+  const covered = fetched.map((page) => ({
+    from: page.after,
+    to: page.truncated ? page.children.at(-1)?.sourceSeq ?? page.after : Number.POSITIVE_INFINITY,
+  }));
+  const byId = new Map(existing
+    .filter((child) => !covered.some((range) => child.sourceSeq > range.from && child.sourceSeq <= range.to))
+    .map((child) => [child.toolCallId, child]));
+  for (const page of fetched) for (const child of page.children) byId.set(child.toolCallId, child);
   return [...byId.values()].sort((a, b) => a.sourceSeq - b.sourceSeq);
 }
 
@@ -132,6 +152,76 @@ export function childRegistryRosterKey(
   ]);
 }
 
+/**
+ * The same per-child evidence `childRegistryRosterKey` folds into its string, kept addressable so a
+ * refresh can tell *which* child moved rather than only that something did (#1290). The key itself
+ * stays the one value the cadence compares, so its format is unaffected.
+ */
+export function childRegistryAgentFingerprints(
+  agents: readonly Pick<SubagentDescriptor, "id" | "toolStatus" | "lifecycle" | "statementCount">[],
+): Map<string, string> {
+  return new Map(agents.map((agent) =>
+    [agent.id, JSON.stringify([agent.toolStatus, agent.lifecycle, agent.statementCount ?? 1])]));
+}
+
+/** The children whose own evidence moved between two refreshes, arrivals and departures included. */
+export function changedRosterIds(
+  previous: ReadonlyMap<string, string>,
+  next: ReadonlyMap<string, string>,
+): Set<string> {
+  const changed = new Set<string>();
+  for (const [id, fingerprint] of next) if (previous.get(id) !== fingerprint) changed.add(id);
+  for (const id of previous.keys()) if (!next.has(id)) changed.add(id);
+  return changed;
+}
+
+/**
+ * The control plane stamps `completedAt` exactly when it judges a child terminal, so a settled entry
+ * is readable here without a second copy of its status vocabulary. A control plane that omits the
+ * field reads as unsettled, which costs a re-read rather than a stale row.
+ */
+function isSettledRegistryEntry(child: ChildSessionRegistryEntry): boolean {
+  return child.completedAt != null;
+}
+
+/**
+ * The page cursors a refresh actually has to re-read (#1290). Re-reading all `ceil(n / PAGE_SIZE)`
+ * loaded pages for one child's change is the cost this removes: a page is worth a request only on
+ * evidence that its own contents moved.
+ *
+ * - It holds a child whose roster fingerprint changed since the last refresh — the targeted case,
+ *   and the one the 1 s active cadence fires on.
+ * - It holds a child that is neither settled in the registry nor present in the loaded transcript.
+ *   That child is the only one whose durable state can move with nothing observable in `items`,
+ *   which is what the idle cadence exists to catch; a loaded child's live state is already rendered
+ *   from the transcript, and a settled child cannot move again.
+ * - It is the last page, where a newly spawned child lands and where the `nextAfter` cursor behind
+ *   "Load More" is read from.
+ *
+ * Cursors are `after` values taken from the caller's own `sourceSeq` ordering, and responses merge
+ * by id over the ranges they cover, so an entry inserted mid-registry shifts pages without being
+ * lost: it is added where it belongs, and the entry it displaces is already held.
+ */
+export function registryRefreshCursors(
+  registry: readonly ChildSessionRegistryEntry[],
+  changedIds: ReadonlySet<string>,
+  loadedIds: ReadonlySet<string>,
+  pageSize: number = PAGE_SIZE,
+): number[] {
+  if (registry.length === 0) return [0];
+  const cursors: number[] = [];
+  const pageCount = Math.ceil(registry.length / pageSize);
+  for (let page = 0; page < pageCount; page += 1) {
+    const start = page * pageSize;
+    const children = registry.slice(start, start + pageSize);
+    const worthReading = page === pageCount - 1 || children.some((child) =>
+      changedIds.has(child.toolCallId) ||
+      (!isSettledRegistryEntry(child) && !loadedIds.has(child.toolCallId)));
+    if (worthReading) cursors.push(start === 0 ? 0 : registry[start - 1]!.sourceSeq);
+  }
+  return cursors;
+}
+
 /** Milliseconds to wait before the next registry refresh, measured from the last one. */
 export function childRegistryRefreshDelay(rosterChanged: boolean, sinceLastRefresh: number): number {
   const floor = rosterChanged ? REGISTRY_ACTIVE_REFRESH_MS : REGISTRY_IDLE_REFRESH_MS;
@@ -188,7 +278,12 @@ export function AgentsPanel(props: Props) {
   const progressKey = useMemo(() => childRegistryProgressKey(session),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [session.messageCount, session.lastEventAt, session.status, session.pendingApproval]);
+  const agentFingerprints = useMemo(() => childRegistryAgentFingerprints(projection.descriptors),
+    [projection.descriptors]);
+  const loadedAgentIds = useMemo(() => new Set(projection.descriptors.map((agent) => agent.id)),
+    [projection.descriptors]);
   const refreshedRosterKey = useRef(rosterKey);
+  const refreshedFingerprints = useRef(agentFingerprints);
   const [registry, setRegistry] = useState<ChildSessionRegistryEntry[] | null>(null);
   const [attentionOwners, setAttentionOwners] = useState<ChildSessionAttentionOwner[]>([]);
   const [registryAfter, setRegistryAfter] = useState<number | null>(0);
@@ -252,29 +347,30 @@ export function AgentsPanel(props: Props) {
       }
     });
   };
-  const refreshRegistry = (progress: string) => {
+  const refreshRegistry = (progress: string, changedIds: ReadonlySet<string>, loadedIds: ReadonlySet<string>) => {
     const key = `${session.id}:${session.eventEpoch ?? 0}:refresh:${progress}`;
     if (registryRequest.current === key) return;
     registryRequest.current = key;
     lastRegistryRefresh.current = Date.now();
     setRegistryLoading(true);
-    const pageCount = Math.max(1, Math.ceil((registryRef.current?.length ?? 0) / PAGE_SIZE));
+    const held = registryRef.current ?? [];
+    const cursors = registryRefreshCursors(held, changedIds, loadedIds);
     void (async () => {
-      const pages: ChildSessionRegistryEntry[][] = [];
-      let after = 0;
+      const fetched: RefreshedRegistryPage[] = [];
       let latestOwners: ChildSessionAttentionOwner[] = [];
       let latestUnidentified = 0;
-      let nextAfter: number | null = 0;
-      for (let pageIndex = 0; pageIndex < pageCount && nextAfter !== null; pageIndex += 1) {
-        const page = await api.childSessions(session.id, session.eventEpoch ?? 0, after, PAGE_SIZE);
-        pages.push(page.children);
+      // The last cursor is always the tail page, so its `nextAfter` is the cursor "Load More"
+      // continues from — the same value the refresh read when it walked every page in order.
+      let nextAfter: number | null = null;
+      for (const cursor of cursors) {
+        const page = await api.childSessions(session.id, session.eventEpoch ?? 0, cursor, PAGE_SIZE);
+        fetched.push({ after: cursor, children: page.children, truncated: page.truncated });
         latestOwners = page.attentionOwners;
         latestUnidentified = page.unidentifiedChildren;
         nextAfter = page.nextAfter;
-        if (nextAfter !== null) after = nextAfter;
       }
       if (registryRequest.current !== key) return;
-      setRegistry(mergeRegistrySnapshotPages(pages));
+      setRegistry(mergeRefreshedRegistryPages(held, fetched));
       setAttentionOwners(latestOwners);
       setUnidentifiedChildren(latestUnidentified);
       setRegistryAfter(nextAfter);
@@ -303,6 +399,7 @@ export function AgentsPanel(props: Props) {
     setRegistryRetryExhausted(false);
     registryRequest.current = null;
     refreshedRosterKey.current = rosterKey;
+    refreshedFingerprints.current = agentFingerprints;
     loadRegistry(0);
     // Registry generations are scoped by exact session + event epoch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -337,7 +434,9 @@ export function AgentsPanel(props: Props) {
         // request slot away from the page load still in flight.
         if (remaining() > 0) return arm();
         refreshedRosterKey.current = rosterKey;
-        refreshRegistry(progressKey);
+        const changedIds = changedRosterIds(refreshedFingerprints.current, agentFingerprints);
+        refreshedFingerprints.current = agentFingerprints;
+        refreshRegistry(progressKey, changedIds, loadedAgentIds);
       }, remaining());
     };
     arm();
