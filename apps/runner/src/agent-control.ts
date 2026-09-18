@@ -46,6 +46,7 @@ import { installWslBwrapLauncher } from "./wsl-bwrap-launcher.js";
 import {
   ORCHESTRATOR_ENV_KEY,
   additiveOrchestratorLaunchArgs,
+  reservedCodexMcpNameCollision,
   orchestratorLaunchArgs,
   stripAdditiveOrchestratorLaunchArgs,
   stripOrchestratorLaunchArgs,
@@ -453,6 +454,9 @@ export function provisionAgentControl(
   if (additiveOrchestrator) {
     spec.env[ORCHESTRATOR_ENV_KEY] = "orchestrator";
     spec.args = stripAdditiveOrchestratorLaunchArgs(spec.args, spec.driver, orchestratorProjectPaths);
+    if (spec.driver !== "claude-code" && reservedCodexMcpNameCollision(spec.args)) {
+      throw new Error("the agent launch configures an MCP server named \"wollipog\", which is reserved for Wollipog's orchestration tools; rename that server to use the Orchestrator role");
+    }
     // The general MCP config is re-appended below; removing it first keeps resume argv identical.
     const generalMcpConfig = agentControlMcpConfigPath(host.configDir, spec.sessionId);
     for (let i = spec.args.length - 2; i >= 0; i--) {

@@ -17397,6 +17397,13 @@ test("Orchestrator is an additive role independent of the provider permission mo
     const codexRestartOnV160 = svc.restart(codex.data!.id);
     assert.equal(codexRestartOnV160.status, 409, "restart refuses the same combination with the same guidance");
     assert.match(codexRestartOnV160.error ?? "", /protocol-v161/);
+    const windows = { ...meta, os: "windows" as const };
+    db.registerRunner(windows, Date.now(), PROTOCOL_VERSION);
+    const startsBeforeWindows = hub.sentOfType("start_session").length;
+    const codexRestartOnWindows = svc.restart(codex.data!.id);
+    assert.equal(codexRestartOnWindows.status, 409, "restart re-applies the creation-time Codex platform gate");
+    assert.match(codexRestartOnWindows.error ?? "", /Linux or macOS/);
+    assert.equal(hub.sentOfType("start_session").length, startsBeforeWindows);
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     assert.equal(db.listSessions().filter((session) => session.role === "orchestrator").length,
       6 + codexOrchestrators);

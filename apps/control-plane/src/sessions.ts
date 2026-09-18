@@ -5563,6 +5563,12 @@ export class SessionsService {
         return fail(`An Orchestrator with independent provider permissions requires a protocol-v${
           RUNNER_CAPABILITY_MIN_PROTOCOL[additiveCapability]} runner for this harness; update the runner and retry.`, 409);
       }
+      // Creation admits a non-strict Codex Orchestrator only on platforms with Codex's audited
+      // sandbox; a runner re-registered on another platform must not bypass that on restart.
+      if ((launch.driver === "codex" || launch.driver === "codex-app-server") &&
+          !["linux", "macos"].includes(runner?.os ?? "")) {
+        return fail("Provider-mode Codex Orchestrator requires its audited Linux or macOS sandbox.", 409);
+      }
     }
     const agentId = session.agentId;
     const supportsIssueScope = runnerSupportsProtocol(

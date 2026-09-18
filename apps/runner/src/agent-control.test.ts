@@ -663,3 +663,21 @@ test("an Orchestrator with independent provider permissions keeps the ordinary C
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("an additive Codex Orchestrator refuses a launch that already claims the reserved wollipog MCP name", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-additive-codex-collision-"));
+  try {
+    const host: AgentControlHost = { isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root, platform: "linux" };
+    const launch = spec("codex-app-server");
+    launch.sessionId = "s_codex_collision";
+    launch.args = ["-c", 'mcp_servers.wollipog={ command = "my-server", args = [] }'];
+    launch.config = { permissionMode: "on-request" };
+    launch.orchestrator = { strictProjectIsolation: false };
+    assert.throws(() => provisionAgentControl(launch, {
+      controlPlaneUrl: "ws://127.0.0.1:4317/runner", controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      executionIsolationMode: "provider" as const,
+    }, () => {}, host), /reserved for Wollipog/);
+    assert.deepEqual(launch.args, ["-c", 'mcp_servers.wollipog={ command = "my-server", args = [] }'],
+      "the user's server is reported, never silently removed");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

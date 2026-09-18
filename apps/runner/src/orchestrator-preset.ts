@@ -345,6 +345,22 @@ const ADDITIVE_CLAUDE_ALLOWED_TOOLS = "mcp__wollipog__*";
  * codex-cli 0.154.0), so naming the single Wollipog entry adds it without touching, disabling, or
  * re-declaring any configured server. The coupled preset's whole-table form merges too, which is
  * exactly why it also needs `--strict-config` and the explicit isolation probe. */
+const ADDITIVE_CODEX_MCP_KEY = "mcp_servers.wollipog";
+/** The role marker is present in every runner-built Wollipog MCP entry and never in a user's own. */
+const ADDITIVE_CODEX_MCP_MARKER = ORCHESTRATOR_ENV_KEY;
+
+/** A user-supplied launch argument that configures an MCP server under Wollipog's reserved name.
+ * The additive launch names its single entry by that key, so it would silently replace it. */
+export function reservedCodexMcpNameCollision(args: readonly string[]): boolean {
+  return args.some((arg, index) => {
+    const flag = arg.split("=", 1)[0]!;
+    if (flag !== "-c" && flag !== "--config") return false;
+    const value = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : args[index + 1];
+    return typeof value === "string" && value.startsWith(ADDITIVE_CODEX_MCP_KEY) &&
+      !value.includes(ADDITIVE_CODEX_MCP_MARKER);
+  });
+}
+
 export function additiveCodexMcpServerArg(
   mcp: { command: string; args: string[]; env: Record<string, string> },
 ): string {
@@ -413,10 +429,12 @@ export function stripAdditiveOrchestratorLaunchArgs(
       ? (flag === "--allowedTools" && value === ADDITIVE_CLAUDE_ALLOWED_TOOLS) ||
         (flag === "--append-system-prompt" && typeof value === "string" && value.startsWith(ORCHESTRATOR_INSTRUCTIONS_PREFIX)) ||
         (flag === "--add-dir" && typeof value === "string" && projects.has(value))
-      // Only the `wollipog` MCP entry and an instructions value carrying the runner's own prefix
-      // are ours; a user's `-c developer_instructions=...` is left exactly where it was.
+      // Only a `wollipog` MCP entry carrying the runner's own role marker and an
+      // instructions value carrying the runner's own prefix are ours. A user's own
+      // `-c mcp_servers.wollipog=...` or `-c developer_instructions=...` is left where it was;
+      // provisioning refuses the former as a reserved-name collision instead of deleting it.
       : (flag === "-c" || flag === "--config") && typeof value === "string" &&
-        (value.startsWith("mcp_servers.wollipog=") ||
+        ((value.startsWith(ADDITIVE_CODEX_MCP_KEY) && value.includes(ADDITIVE_CODEX_MCP_MARKER)) ||
           (value.startsWith("developer_instructions=") && value.includes(ORCHESTRATOR_INSTRUCTIONS_PREFIX)));
     if (injected) {
       if (inline === undefined) i++;

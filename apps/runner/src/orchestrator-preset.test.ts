@@ -16,6 +16,7 @@ import {
   orchestratorInstructions,
   orchestratorLaunchArgs,
   projectOrchestratorPresetForPeer,
+  reservedCodexMcpNameCollision,
   stripAdditiveOrchestratorLaunchArgs,
   stripOrchestratorLaunchArgs,
   supportsClaudeAgentAcpOrchestrator,
@@ -566,4 +567,19 @@ test("the additive Codex Orchestrator adds only Wollipog's MCP server and instru
     assert.deepEqual(stripAdditiveOrchestratorLaunchArgs([...inline, ...user], driver), user,
       `${driver} strips the inline --config=key=value form too`);
   }
+});
+
+test("a user's own MCP server named wollipog is never deleted by the additive Codex strip", () => {
+  const userServer = ["-c", 'mcp_servers.wollipog={ command = "my-server", args = [] }'];
+  const userInline = ['--config=mcp_servers.wollipog.command="my-server"'];
+  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(userServer, "codex-app-server", []), userServer);
+  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(userInline, "codex", []), userInline);
+  assert.equal(reservedCodexMcpNameCollision(userServer), true);
+  assert.equal(reservedCodexMcpNameCollision(userInline), true);
+  const injected = additiveOrchestratorLaunchArgs("codex-app-server", {
+    command: "/opt/runner", args: ["--agent-control-mcp"],
+    env: { WOLLIPOG_SESSION_TOKEN_FILE: "/run/token", WOLLIPOG_PERMISSION_PRESET: "orchestrator" },
+  }, ["/repo"]);
+  assert.equal(reservedCodexMcpNameCollision(injected), false, "the runner's own entry is not a collision");
+  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(injected, "codex-app-server", ["/repo"]), []);
 });
