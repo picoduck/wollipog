@@ -743,9 +743,6 @@ test("a command cannot launder itself into the ancestor carve-out", (t) => {
     `cd ${project} && ls ${home}`,
     // Deciding a directory is empty means opening it, which at the bound is the hook directory.
     `find ${home} -maxdepth 2 -empty`,
-    // `find` with no path searches the working directory, which no operand mentions, so a command
-    // that names no ancestor of its own is held to the tightest bound in the list.
-    `ls ${home}; find -maxdepth 999`,
     // An option carrying a path OPENS that file without ever naming it as an operand.
     `du --exclude-from=../.wollipog-data/hooks/s1.protections.json ${home}`,
     `du -X../.wollipog-data/hooks/s1.protections.json ${home}`,
@@ -757,6 +754,28 @@ test("a command cannot launder itself into the ancestor carve-out", (t) => {
   ]) {
     assert.equal(commandTargetsGuardState(command, project, directory), GUARD_STATE_REFUSAL, command);
   }
+});
+
+test("a command with no operand is judged against the directory it would run in", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-guard-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const data = join(home, ".wollipog-data");
+  const directory = join(data, "hooks");
+  mkdirSync(directory, { recursive: true });
+  const elsewhere = mkdtempSync(join(tmpdir(), "wollipog-guard-away-"));
+  t.after(() => rmSync(elsewhere, { recursive: true, force: true }));
+  // From the home directory the hook directory is two components down, so a walk that deep or
+  // deeper enumerates it even though the only operand named is the filesystem root.
+  assert.equal(commandTargetsGuardState("ls /; find -maxdepth 3", home, directory), GUARD_STATE_REFUSAL);
+  assert.equal(commandTargetsGuardState("ls /; find -maxdepth 2", data, directory), GUARD_STATE_REFUSAL);
+  // At or above that depth the walk names the hook directory without entering it.
+  assert.equal(commandTargetsGuardState("ls /; find -maxdepth 1", home, directory), null);
+  assert.equal(commandTargetsGuardState("ls /; find -maxdepth 2", home, directory), null);
+  // From a working directory that is not an ancestor at all, the same walk reaches nothing.
+  assert.equal(commandTargetsGuardState(`ls ${home}; find -maxdepth 999`, elsewhere, directory), null);
+  // From INSIDE the guard state there is no bounded form of an operand-less command.
+  assert.equal(commandTargetsGuardState(`ls ${home}; ls`, directory, directory), GUARD_STATE_REFUSAL);
+  assert.equal(commandTargetsGuardState(`ls ${home}; du`, directory, directory), GUARD_STATE_REFUSAL);
 });
 
 test("the reported home-directory listings are allowed while the file tools stay closed", () => {

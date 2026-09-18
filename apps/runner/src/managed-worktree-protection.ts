@@ -855,6 +855,10 @@ export function pathTargetsGuardState(path: string, cwd: string, directory: stri
  *   `--files0-from=<path>` all OPEN that file, and an option's value is not an operand, so it is
  *   not compared against the guard state. No bounded inspection needs a path inside an option.
  *
+ * A command that names no ancestor of its own is judged against the WORKING DIRECTORY, which is
+ * where an operand-less `find` starts. That can sit closer to the guard state than anything the
+ * command list names.
+ *
  * It over-refuses where the safe direction is to do so. A short-option cluster is scanned for `R`
  * without modelling which options take an attached value, so GNU's `ls -IREADME` reads as recursive
  * and is refused; the alternative, a hard-coded list of value-taking options, fails OPEN the day
@@ -1049,13 +1053,22 @@ export function commandTargetsGuardState(
     bounds.push(bound);
   }
   if (tightest === null) return null;
+  // A command that names no ancestor of its own still acts SOMEWHERE: `find` with no path searches
+  // the working directory, which no operand mentions. That directory, not the tightest operand in
+  // the list, is the depth such a command has to respect — it can sit closer to the guard state
+  // than anything named, which is how `ls /; find -maxdepth 3` reached the hook directory. From
+  // inside the guard state there is no bounded form at all.
+  const here = guardStateRelation(cwd, cwd, root);
+  const implicit = here === null
+    ? Number.POSITIVE_INFINITY
+    : here.kind === "inside" ? null : here.separation;
   // Every command in the list has to be an inspection, not only the ones naming an ancestor: an
-  // earlier `hash -p`, `PATH=`, or function definition decides what a later `ls` runs. One that
-  // names no ancestor of its own is held to the tightest bound in the list, because its implicit
-  // target is the working directory, which no operand mentions: `find -maxdepth 999` beside a
-  // listing of an ancestor would otherwise walk the hook directory from an ancestor `cwd`.
-  const inspection = segments.every(({ words }, index) =>
-    words !== null && inspectsAncestorOnly(words, bounds[index] ?? tightest));
+  // earlier `hash -p`, `PATH=`, or function definition decides what a later `ls` runs.
+  const inspection = segments.every(({ words }, index) => {
+    if (words === null) return false;
+    const bound = bounds[index] ?? implicit;
+    return bound !== null && inspectsAncestorOnly(words, bound);
+  });
   return inspection ? null : GUARD_STATE_REFUSAL;
 }
 

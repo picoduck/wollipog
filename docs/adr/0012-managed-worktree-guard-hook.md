@@ -148,8 +148,9 @@ What is done instead:
   planted there, and an option word carrying a path in any spelling, since `du --exclude-from=<path>`
   opens that file while an option's value is never compared as an operand. Long options are matched
   as GNU `getopt_long` accepts them, so `ls --recurs` counts as recursive. A command that names no
-  ancestor of its own is held to the tightest bound in the list, because its implicit target is the
-  working directory, which no operand mentions.
+  ancestor of its own is judged against the WORKING DIRECTORY, which is where an operand-less `find`
+  starts and which can sit closer to the guard state than anything the list names; from inside the
+  guard state there is no bounded form at all.
 
   Where the two directions conflict, it over-refuses. A short-option cluster is scanned for `R`
   without modelling which options take an attached value, so GNU's `ls -IREADME` reads as recursive
