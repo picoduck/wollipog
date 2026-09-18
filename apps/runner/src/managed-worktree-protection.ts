@@ -185,6 +185,18 @@ function physicalResolve(cwd: string, value: string, followFinalSymlink: boolean
   return current;
 }
 
+/**
+ * Whether the shell is inside a managed worktree, by spelling OR physically. The guard hook is
+ * handed Claude's physical directory (`pwd -P`), while a worktree can be registered through a
+ * symlinked prefix: comparing spellings alone made such a shell look like it was somewhere else,
+ * which silently skipped the escape check. Where a `cd` LANDS is decided physically only, because
+ * that is where the shell really ends up.
+ */
+function shellInsideManagedRoot(cwd: string, protections: readonly ManagedWorktreeProtection[]): boolean {
+  return withinProtectedRoot(cwd, protections) ||
+    withinProtectedRoot(physicalCwd(cwd), physicalProtections(protections));
+}
+
 function operandTargetsProtected(
   token: ShellToken | undefined,
   cwd: string,
@@ -506,7 +518,7 @@ function segmentRefusal(
     const nested = words.slice(commandIndex);
     if (segmentRefusal(nested, cwd, new Map(environment), protections, depth + 1)) return true;
     const nestedExecutable = commandWords(nested, cwd, new Map(environment))?.executable ?? "";
-    return withinProtectedRoot(cwd, protections) &&
+    return shellInsideManagedRoot(cwd, protections) &&
       ["rm", "rmdir", "unlink", "trash", "trash-put", "mv", "move"].includes(nestedExecutable);
   }
   if (executable === "git") return gitWorktreeRefusal(words, cwd, environment, protections);
@@ -550,8 +562,12 @@ function segmentRefusal(
           word(token, cwd, environment) === "!"));
       const roots = words.slice(rootStart, expressionStart < 0 ? actionIndex : expressionStart);
       const effectiveRoots = roots.length ? roots : ["."];
+      // `find` defaults to -P: a symlink given as a search root is not followed, so `-delete`
+      // unlinks the alias, not what it points at. -H and -L follow it.
+      const followsRoots = words.slice(0, rootStart).some((token) =>
+        ["-H", "-L"].includes(word(token, cwd, environment) ?? ""));
       const protectedRoot = effectiveRoots.some((token) =>
-        operandTargetsProtected(token, cwd, environment, protections));
+        operandTargetsProtected(token, cwd, environment, protections, followsRoots));
       const action = word(words[actionIndex], cwd, environment);
       if (action === "-delete") return protectedRoot;
       if (depth < 3) {
@@ -602,9 +618,8 @@ function commandTargetsManagedWorktreeUnsafe(
       const target = resolvedOperand(parsed.words[0], currentCwd, localEnvironment);
       // Claude's Bash tool keeps its shell directory between calls. Refuse an escape from every
       // managed root so a later relative removal cannot be resolved against an unobservable cwd.
-      if (target && withinProtectedRoot(currentCwd, protections) &&
-          (!withinProtectedRoot(target, protections) ||
-            !withinProtectedRoot(canonicalPath(target), physicalProtections(protections)))) return true;
+      if (target && shellInsideManagedRoot(currentCwd, protections) &&
+          !withinProtectedRoot(canonicalPath(target), physicalProtections(protections))) return true;
       if (target) currentCwd = target;
       for (const [key, value] of localEnvironment) environment.set(key, value);
       return false;

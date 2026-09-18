@@ -196,6 +196,16 @@ test("a worktree reached through a symlinked prefix is not refused against itsel
   const protections = [{ worktreePath: worktree, repoPath: join(base, "repo") }];
   assert.equal(commandTargetsManagedWorktree("cd ..", join(worktree, "apps"), protections), null);
   assert.equal(commandTargetsManagedWorktree("rm -rf build", join(worktree, "apps"), protections), null);
+  // The guard hook is handed the PHYSICAL directory. The shell is still inside the worktree, so
+  // leaving it is still an escape, and moving around inside it still is not.
+  const physical = join(base, "real", "managed");
+  assert.equal(commandTargetsManagedWorktree("cd ..", physical, protections), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("cd .. && ln -s . jump && rm -rf 'jump/m*'", physical, protections),
+    MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("cd apps && cd ..", physical, protections), null);
+  assert.equal(commandTargetsManagedWorktree("cd ..", join(physical, "apps"), protections), null);
+  assert.equal(commandTargetsManagedWorktree(`cd ${join(worktree, "apps")}`, physical, protections), null,
+    "the aliased spelling of a directory inside the worktree is inside it");
   assert.equal(commandTargetsManagedWorktree("git worktree prune", join(worktree, "apps"), protections),
     MANAGED_WORKTREE_REFUSAL);
   assert.equal(commandTargetsManagedWorktree("rm -rf ../..", join(worktree, "apps"), protections),
@@ -221,6 +231,12 @@ test("removing a symlink that merely points at the worktree is not removing the 
   assert.equal(commandTargetsManagedWorktree("rm -rf alias/", sibling, protections), MANAGED_WORKTREE_REFUSAL);
   assert.equal(commandTargetsManagedWorktree("rm -rf alias/.", sibling, protections), MANAGED_WORKTREE_REFUSAL);
   assert.equal(commandTargetsManagedWorktree("git worktree remove alias", sibling, protections), MANAGED_WORKTREE_REFUSAL);
+  // find defaults to -P and unlinks a symlinked search root itself; -H and -L follow it.
+  assert.equal(commandTargetsManagedWorktree("find alias -delete", sibling, protections), null);
+  assert.equal(commandTargetsManagedWorktree("find -P alias -delete", sibling, protections), null);
+  assert.equal(commandTargetsManagedWorktree("find -L alias -delete", sibling, protections), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("find -H alias -delete", sibling, protections), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("find alias/ -delete", sibling, protections), MANAGED_WORKTREE_REFUSAL);
   // An INTERMEDIATE symlink is always followed: alias/.. is the worktree's parent.
   assert.equal(commandTargetsManagedWorktree("rm -rf alias/../managed", sibling, protections), MANAGED_WORKTREE_REFUSAL);
 });
