@@ -5126,6 +5126,37 @@ test("review findings persist anchors, enforce stale-safe triage, summarize comp
   assert.deepEqual(db.listReviewFindings("sess-1"), []);
 });
 
+test("a finding's anchored line text round-trips, keeping 'not recorded' distinct from a blank line", () => {
+  // The durable half of #1286: without this the client has nothing to compare after a reload.
+  const db = withRunner();
+  db.createSession(newSession());
+  const base = {
+    sessionId: "sess-1",
+    scope: "uncommitted",
+    diffHash: "a".repeat(64),
+    filePath: "src/example.ts",
+    side: "right",
+    body: "Preserve the invariant.",
+    severity: "major",
+    required: true,
+    status: "open",
+    source: "local",
+    author: { kind: "human", id: "device-1" },
+    createdAt: 1_100,
+    updatedAt: 1_100,
+  } as const;
+  const legacy = { ...base, findingId: "rf_legacy123456", line: 12 } satisfies ReviewFinding;
+  const anchored = { ...base, findingId: "rf_anchored1234", line: 13, anchorText: "  const x = 1;" } satisfies ReviewFinding;
+  // A blank line is anchorable content, and `""` must survive as itself: reading it back as absent
+  // would silently downgrade such a finding to the pre-#1286 hash fallback.
+  const blank = { ...base, findingId: "rf_blankline123", line: 14, anchorText: "" } satisfies ReviewFinding;
+  for (const finding of [legacy, anchored, blank]) db.createReviewFinding(finding);
+  // Listed by status group, then creation time, then id — all three are open and share a timestamp.
+  assert.deepEqual(db.listReviewFindings("sess-1"), [anchored, blank, legacy]);
+  const readBack = db.listReviewFindings("sess-1");
+  assert.equal("anchorText" in readBack[2]!, false, "an unrecorded anchor stays absent, not empty");
+});
+
 test("GitHub review reconciliation is idempotent, remote-owned, and dismisses only after a complete sync", () => {
   const db = withRunner();
   db.createSession(newSession());
@@ -5320,7 +5351,13 @@ test("review finding v106 migration preserves legacy GitHub provenance and index
         CHECK (status IN ('open','sent','resolved','dismissed')),
         CHECK (source IN ('local','github'))
       );
-      INSERT INTO review_findings_v105 SELECT * FROM review_findings;
+      INSERT INTO review_findings_v105 SELECT
+        finding_id, session_id, scope, diff_hash, file_path, side, line, body, severity, required,
+        status, source, author_kind, author_id, created_at, updated_at, sent_at, resolved_at,
+        resolved_by_kind, resolved_by_id, remote_provider, remote_repository, remote_pr_number,
+        remote_thread_id, remote_comment_id, remote_url, remote_commit_id, remote_outdated,
+        remote_subject_type, remote_synchronized_at
+      FROM review_findings;
       DROP TABLE review_findings;
       ALTER TABLE review_findings_v105 RENAME TO review_findings;
       CREATE INDEX idx_review_findings_session ON review_findings(session_id, status, created_at, finding_id);
@@ -5339,6 +5376,10 @@ test("review finding v106 migration preserves legacy GitHub provenance and index
     assert.match(tableSql.sql, /'gitlab'/);
     const indexes = verified.prepare("PRAGMA index_list(review_findings)").all() as Array<{ name: string }>;
     assert.equal(indexes.some((index) => index.name === "idx_review_findings_session"), true);
+    // The legacy table above predates the anchored-line column (#1286); the upgrade has to re-add
+    // it, or findings written after the upgrade lose what keeps them anchored across a reload.
+    const columns = verified.prepare("PRAGMA table_info(review_findings)").all() as Array<{ name: string }>;
+    assert.equal(columns.some((column) => column.name === "anchor_text"), true);
     verified.close();
   } finally {
     rmSync(root, { recursive: true, force: true });

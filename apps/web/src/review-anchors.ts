@@ -8,6 +8,10 @@
  * and keying the rendered cards on it throws away collapse state and unsent drafts across an
  * unrelated refresh (#1203). These helpers answer both questions per hunk and per anchor instead.
  *
+ * A finding also carries the text of the line it was written against, so that answer survives a
+ * page reload, a second tab, and a sync to another device — none of which hold this client's
+ * anchor history (#1286).
+ *
  * {@link changeSetSignature} answers the third identity question in the same pane: whether the
  * shared status reader has observed a change set the loaded diff does not describe yet (#1204).
  *
@@ -156,10 +160,24 @@ export interface FindingAnchorState {
 /**
  * Re-anchor `findings` against `diff`, carrying `previous`'s conclusions where the line did not move.
  *
- * A finding is anchored when either it was authored against this exact diff, or it was anchored a
- * moment ago and the text at its anchor is byte-identical in the previous diff and this one. That
- * makes "Stale Diff Anchor" mean what it says — the anchored content actually changed — instead of
- * firing on every unrelated hash change (#1203).
+ * A finding is anchored when any of three things holds:
+ *
+ * 1. it was authored against this exact diff;
+ * 2. it stored the text of the line it was written against, and the diff on screen still has that
+ *    exact text at that file, side and line (#1286);
+ * 3. failing both — it has no stored text — it was anchored a moment ago and the text at its anchor
+ *    is byte-identical in the previous diff and this one (#1203).
+ *
+ * Together those make "Stale Diff Anchor" mean what it says — the anchored content actually changed
+ * — instead of firing on every unrelated hash change.
+ *
+ * Rule 2 is what survives a reload. The carried chain of rule 3 proves the same thing by induction
+ * (each step demands byte-equality with the step before, which began at the authoring text), but it
+ * lives only in this client's memory: a reload, a second tab, or another device starts with no
+ * `previous` at all and used to fall back to hash equality, marking untouched lines stale (#1286).
+ * A finding that stored its text therefore ignores the chain entirely and asks the diff directly,
+ * which also makes the verdict identical with and without client-side history — and lets a line
+ * that was edited and then restored re-anchor, because its content is once again what was reviewed.
  *
  * Idempotent in `previous`: re-running it on its own output returns the same set. That is what lets
  * the caller derive it during render — avoiding an effect that would paint one frame of
@@ -182,10 +200,23 @@ export function reanchorFindings(
       anchored.add(finding.findingId);
       continue;
     }
-    if (!carry?.anchored.has(finding.findingId)) continue;
     const key = diffAnchorKey(finding);
+    const now = index.get(key);
+    // `undefined` is "this anchor is not in the diff on screen" — never a match, and the reason a
+    // stored empty line (a real, anchorable value) must be compared with `!==`, not truthiness.
+    if (now === undefined) continue;
+    if (finding.anchorText !== undefined) {
+      // Scope is tested explicitly here and nowhere else in this loop: the other two rules carry it
+      // implicitly — a matching `diffHash` is one scope's snapshot, and the carry belongs to one
+      // lineage — while stored text is compared against whatever diff is on screen. Without this, a
+      // branch-scoped finding would render inline in the uncommitted pane whenever the two happened
+      // to show the same line.
+      if (finding.scope === diff.scope && finding.anchorText === now) anchored.add(finding.findingId);
+      continue;
+    }
+    if (!carry?.anchored.has(finding.findingId)) continue;
     const before = carry.index.get(key);
-    if (before !== undefined && before === index.get(key)) anchored.add(finding.findingId);
+    if (before !== undefined && before === now) anchored.add(finding.findingId);
   }
   return { lineage, hash: diff.diffHash, index, anchored };
 }

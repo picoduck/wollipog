@@ -1117,6 +1117,10 @@ CREATE TABLE IF NOT EXISTS review_findings (
   remote_outdated INTEGER,
   remote_subject_type TEXT,
   remote_synchronized_at INTEGER,
+  -- The anchored line's own text (#1286). Last in the column order on purpose: the v106 rebuild
+  -- below copies an older table positionally, and appending keeps that copy well-formed.
+  -- NULL means "not recorded" (pre-#1286, or a line past the stored ceiling); '' is a blank line.
+  anchor_text TEXT,
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
   CHECK (scope IN ('uncommitted','all_branch','last_turn')),
   CHECK (side IN ('left','right')),
@@ -2861,6 +2865,7 @@ interface ReviewFindingRow {
   remote_outdated: number | null;
   remote_subject_type: "line" | "file" | "remote" | null;
   remote_synchronized_at: number | null;
+  anchor_text: string | null;
 }
 
 interface RunRow {
@@ -4448,6 +4453,7 @@ export class ControlPlaneDb {
       "remote_outdated INTEGER",
       "remote_subject_type TEXT",
       "remote_synchronized_at INTEGER",
+      "anchor_text TEXT",
     ]) {
       try {
         db.exec(`ALTER TABLE review_findings ADD COLUMN ${column}`);
@@ -17949,6 +17955,7 @@ export class ControlPlaneDb {
       filePath: row.file_path,
       side: row.side,
       line: row.line,
+      ...(row.anchor_text != null ? { anchorText: row.anchor_text } : {}),
       body: row.body,
       severity: row.severity,
       required: row.required === 1,
@@ -17990,8 +17997,8 @@ export class ControlPlaneDb {
           required, status, source, author_kind, author_id, created_at, updated_at, sent_at, resolved_at,
           resolved_by_kind, resolved_by_id, remote_provider, remote_repository, remote_pr_number,
           remote_thread_id, remote_comment_id, remote_url, remote_commit_id, remote_outdated, remote_subject_type,
-          remote_synchronized_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          remote_synchronized_at, anchor_text)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       finding.findingId, finding.sessionId, finding.scope, finding.diffHash, finding.filePath,
       finding.side, finding.line, finding.body, finding.severity, finding.required ? 1 : 0,
@@ -18004,6 +18011,7 @@ export class ControlPlaneDb {
       finding.remote == null ? null : finding.remote.outdated ? 1 : 0,
       finding.remote?.subjectType ?? null,
       finding.remote?.synchronizedAt ?? null,
+      finding.anchorText ?? null,
     );
     return finding;
   }
