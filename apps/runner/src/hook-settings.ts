@@ -284,16 +284,21 @@ function claudeSettingsDocument(
 /**
  * Write the live settings file, its heal template, and (when a guard is present) the guard-only
  * copy the driver falls back to while the manager hook circuit is open.
+ *
+ * `preserveGuardState` leaves an existing guard's protection list and guard-only copy alone when
+ * no guard is written: a provisioning call that does not know the live worktree set must not
+ * retire the guard a running provider is still consulting.
  */
 export function writeClaudeSettingsSet(
   file: string,
   manager: ClaudeManagerHookOptions | null,
   guard: ClaudeGuardHookOptions | null,
+  preserveGuardState = false,
 ): void {
   if (guard) {
     writeManagedWorktreeGuardProtections(guard.protectionsFile, guard.protections);
     protectedWrite(claudeHookGuardPath(file), claudeSettingsDocument(file, null, guard));
-  } else {
+  } else if (!preserveGuardState) {
     rmSync(claudeHookGuardPath(file), { force: true });
     rmSync(claudeHookProtectionsPath(file), { force: true });
   }
@@ -646,8 +651,14 @@ export function provisionClaudeHooks(
       if (removeManagedSettingsArgs(spec.args, host.configDir) > 0) {
         log(`Claude hooks ${spec.sessionId}: disabled for this launch`);
       }
-      discardGuardArtifacts(file);
-      guardStateDigests.delete(spec.sessionId);
+      // A call that does not know the live worktree set (the pre-authorization start_session
+      // provisioning) must not retire a guard a running provider still consults: if that restart
+      // is rejected, the provider would fail closed on every matched tool. The post-authorization
+      // pre-spawn provisioning decides the guard's fate.
+      if (guardRequested) {
+        discardGuardArtifacts(file);
+        guardStateDigests.delete(spec.sessionId);
+      }
     } else {
       try {
         writeClaudeSettingsSet(file, null, guard);
@@ -701,6 +712,7 @@ export function provisionClaudeHooks(
           }
           : null,
         guard,
+        !guardRequested,
       );
     }
     if (!hasCurrentSettings && (managedSettingsExist || guard)) {
@@ -739,7 +751,7 @@ export function provisionClaudeHooks(
     cpHttpUrl: deriveCpHttpUrl(config.controlPlaneUrl, config.allowInsecureTransport),
     tokenFile,
     askCapable: protocolVersion >= 66,
-  }, guard);
+  }, guard, !guardRequested);
   if (!hasCurrentSettings) {
     validateInjectedArg(file);
     spec.args.push("--settings", file);

@@ -29,6 +29,7 @@ import {
   writeHookCircuitState,
   type ClaudeHookHost,
 } from "./hook-settings.js";
+import { runManagedWorktreeGuardDecision } from "./managed-worktree-guard.js";
 
 function temp<T>(fn: (dir: string) => T): T {
   const dir = mkdtempSync(join(tmpdir(), "wollipog-hooks-"));
@@ -887,6 +888,34 @@ test("a provisioning call that supplies no worktree set provisions no guard", ()
   provisionClaudeHooks(launch, { ...config, enabled: false, verifyGuardLaunch: guardVerifies }, () => {}, host(dir));
   assert.deepEqual(launch.args, []);
   assert.equal(existsSync(claudeHookSettingsPath(dir, "sess_hook_1")), false);
+}));
+
+test("a provisioning call that does not know the worktree set leaves a running guard intact", () => temp((dir) => {
+  // start_session runs this BEFORE launch authorization; a restart it precedes may be rejected,
+  // and the provider still running must keep a guard that evaluates rather than fails closed.
+  for (const enabled of [false, true]) {
+    const sessionId = enabled ? "sess_hook_2" : "sess_hook_1";
+    const running = spec({ sessionId });
+    resetClaudeGuardState();
+    provisionClaudeHooks(running, {
+      ...config, enabled, managedWorktreeProtections: PROTECTIONS, verifyGuardLaunch: guardVerifies,
+    }, () => {}, host(dir));
+    const settings = claudeHookSettingsPath(dir, sessionId);
+    const protections = settings.replace(/\.settings\.json$/u, ".protections.json");
+    const restart = spec({ sessionId });
+    provisionClaudeHooks(restart, { ...config, enabled, verifyGuardLaunch: guardVerifies }, () => {}, host(dir));
+    assert.deepEqual(JSON.parse(readFileSync(protections, "utf8")), { version: 1, protections: PROTECTIONS },
+      `manager hooks ${enabled ? "on" : "off"}: the running guard's list is untouched`);
+    assert.deepEqual(
+      runManagedWorktreeGuardDecision(JSON.stringify({
+        hook_event_name: "PreToolUse", tool_name: "Bash", cwd: "/repo", tool_input: { command: "git status" },
+      }), protections),
+      { stdout: "", stderr: "", exitCode: 0 },
+      `manager hooks ${enabled ? "on" : "off"}: ordinary work is still evaluated, not failed closed`,
+    );
+    // And the tripwire baseline survives, so a mid-turn refresh still succeeds.
+    assert.deepEqual(refreshClaudeGuardProtections(sessionId, [], dir), { state: "refreshed" });
+  }
 }));
 
 test("a launch with its own --settings and no worktree is not guarded, so nothing it sets is shadowed", () => temp((dir) => {
