@@ -2,6 +2,7 @@
  * manager session, but never the structured driver's process, stdio, or provider session id. */
 
 import { existsSync } from "node:fs";
+import type { AgentTuiGuardProvisioning } from "./agent-tui-guard.js";
 import type { SessionMeta } from "./session-store.js";
 import type { ShellProcessLaunch } from "./shell-manager.js";
 import { windowsCommandLine } from "./windows-conpty.js";
@@ -22,13 +23,19 @@ export async function prepareAgentTuiLaunch(
   dependencies: {
     controlPlaneProtocolVersion: number | null;
     provision(meta: SessionMeta): Promise<void> | void;
+    /** Runner-owned managed-worktree guard provisioning for this spawn (#1337). */
+    provisionManagedWorktreeGuard(
+      spec: SessionMeta,
+    ): AgentTuiGuardProvisioning | Promise<AgentTuiGuardProvisioning>;
     prepareScratch(meta: SessionMeta): Promise<string>;
     probe?: typeof codexOrchestratorMcpArgs;
     platform?: NodeJS.Platform;
     executionIsolationMode?: OrchestratorIsolationMode;
   },
 ): Promise<ShellProcessLaunch | null> {
-  if (!isOrchestratorLaunch(meta)) return agentTuiLaunch(meta);
+  if (!isOrchestratorLaunch(meta)) {
+    return agentTuiLaunch(await withManagedWorktreeGuard(meta, dependencies));
+  }
   if (!usesOrchestratorPresetPermissions(meta.config)) {
     // No runner control channel exists inside a TUI, so the additive role's routine-operation
     // contract cannot be honoured there; the coupled preset's static rules are the only TUI shape.
@@ -63,8 +70,44 @@ export async function prepareAgentTuiLaunch(
       prepared, cwd,
     ));
   }
-  const launch = agentTuiLaunch(prepared, { platform, comspec: process.env.ComSpec });
+  const launch = agentTuiLaunch(
+    await withManagedWorktreeGuard(prepared, dependencies),
+    { platform, comspec: process.env.ComSpec },
+  );
   return launch ? { ...launch, cwd } : null;
+}
+
+/**
+ * Carry the managed-worktree guard into a TUI launch, or refuse the launch (#1337).
+ *
+ * Before this, a TUI replayed the session's persisted arguments and never re-ran launch
+ * provisioning, so a runner-owned worktree opened in the TUI had neither the control-channel veto
+ * nor the guard hook. The guard is the ONLY interception point a TUI has: the mediation fallback
+ * (`protectedClaudePermissionMode`) is driver-side, and a TUI runs no driver. So a session that
+ * owns a runner-created worktree launches only when the guard really is in the argv this spawn
+ * will use — the refusal the bug report allows, rather than an unprotected launch. A session that
+ * owns none launches as it always did, guarded whenever the guard is provisionable.
+ *
+ * Other providers' worktree protection is likewise driver-side and has no TUI form
+ * (docs/adr/0012), so only a Claude launch is provisioned here; nothing about theirs changes.
+ */
+async function withManagedWorktreeGuard(
+  meta: SessionMeta,
+  dependencies: Pick<
+    Parameters<typeof prepareAgentTuiLaunch>[1], "provisionManagedWorktreeGuard"
+  >,
+): Promise<SessionMeta> {
+  if (meta.driver !== "claude-code" || !meta.command) return meta;
+  // Provisioning rewrites the launch arguments; durable metadata must not move under it.
+  const prepared = { ...meta, args: [...meta.args] };
+  const guard = await dependencies.provisionManagedWorktreeGuard(prepared);
+  if (guard.protections.length > 0 && !guard.guardActive) {
+    throw new Error(
+      "Native TUI is unavailable for this session: its managed worktree guard could not be " +
+      "provisioned, and a TUI carries no other refusal for a runner-owned worktree.",
+    );
+  }
+  return { ...prepared, args: guard.args };
 }
 
 function scrubInheritedEnv(driver: SessionMeta["driver"]): string[] {
@@ -83,10 +126,11 @@ function scrubInheritedEnv(driver: SessionMeta["driver"]): string[] {
 
 /**
  * `claude` refuses to start when `--settings` names a file that does not exist ("Settings file not
- * found"). A TUI launch replays the session's PERSISTED args without re-running launch
- * provisioning, so a runner-owned settings file that the startup sweep removed would break the
- * launch outright. Drop only the pairs whose file is gone: the TUI then behaves exactly as it did
- * before the managed-worktree guard existed.
+ * found"). A TUI launch replays the session's PERSISTED args, so a settings file that the startup
+ * sweep removed would break the launch outright. Since #1337 the runner-owned document is
+ * re-provisioned (and healed) before every Claude TUI launch, so what remains for this to drop is
+ * what provisioning does not write: an agent-supplied `--settings` whose file is gone, and any
+ * launch with no guard to provision.
  */
 function withoutMissingSettingsFiles(args: readonly string[]): string[] {
   const result: string[] = [];

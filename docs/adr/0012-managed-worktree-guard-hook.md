@@ -194,10 +194,41 @@ control-channel veto keeps reading the live inventory.
   exactly as they do without one, apart from the refusal of protected targets.
 - Orchestrator children in Auto no longer relay routine commands to their parent.
 - Native TUI launches were never protected by #1256 (its mediation is driver-side, and a TUI has no
-  runner control channel). They are not made worse: a TUI replays the session's persisted args, so
-  it carries the guard whenever a structured launch persisted the settings argument and the file is
-  still present, and `agentTuiLaunch` now drops a `--settings` pair whose file is gone — `claude`
-  refuses to start with "Settings file not found", and a TUI never re-runs launch provisioning.
+  runner control channel). As first shipped they inherited the guard only by accident — a TUI
+  replays the session's persisted args, so it carried the guard when a structured launch had
+  persisted the settings argument and the file was still present, and `agentTuiLaunch` drops a
+  `--settings` pair whose file is gone because `claude` refuses to start with "Settings file not
+  found". A swept file therefore produced a launch with no guard at all (#1337).
+
+  Amended by #1337: a Claude TUI launch now re-runs launch provisioning, exactly as a
+  runner-driven spawn does. `prepareAgentTuiLaunch` provisions a fresh settings document and a
+  fresh protection list, then runs the driver's own `prepareClaudeHookArgs` over the result, so
+  "guard active" for a TUI is read from the argv it will launch with — the same explicit fact, not
+  an inference from the session owning a worktree. The removal command in #1337's reproduction is
+  refused from the TUI by the same hook that refuses it in a structured session.
+
+  Where the guard cannot be provisioned (WSL/container path translation, a non-host execution
+  target, an unquotable path, a write failure, a failed launch self-test) or is no longer trusted
+  (an invalidated guard, an open circuit with no guard-only copy), a TUI has nowhere left to
+  stand: the mediation fallback below is driver-side and a TUI runs no driver. So a session that
+  owns a runner-created worktree is REFUSED the TUI instead of being opened unprotected, and one
+  that owns none opens exactly as before. The #1303 exception is unchanged: a session with no
+  managed worktree that carries its own `--settings` is not guarded, and is not refused either,
+  because there is nothing to protect.
+
+  A TUI is also the first launch that provisions ALONGSIDE a running provider rather than
+  replacing it, and both read the same per-session documents. So its provisioning is marked
+  `concurrentLaunch`: it may write and refresh the guard, never retire it. Retiring is what the
+  ordinary path does when it knows the live worktree set and can produce no guard — and doing that
+  under a running provider removes the very list its loaded hook reads, which fails every matched
+  tool call of the turn it is in. The protection list it writes is likewise resolved when
+  provisioning runs, not from the launch snapshot, which predates the awaited worktree proof and
+  the Orchestrator's scratch and credential work.
+
+  Non-Claude TUI launches remain unprotected. Codex's worktree protection is carried in the turn
+  parameters its driver sends, so it has no TUI form at all and nothing to provision; only a
+  refusal could cover it, which would withdraw the TUI from every worktree session. That is left
+  open deliberately rather than closed by #1337.
 - One extra short-lived process runs before each Bash, Edit, MultiEdit, Write, NotebookEdit, Read,
   Grep, and Glob call in a guarded session — since #1303, every guardable session.
 - The runner's hook state directory is invisible to the provider: reading it is refused as firmly

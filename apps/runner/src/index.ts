@@ -143,6 +143,7 @@ import {
 } from "./session-files.js";
 import { ShellManager } from "./shell-manager.js";
 import { prepareAgentTuiLaunch } from "./agent-tui.js";
+import { provisionAgentTuiManagedWorktreeGuard } from "./agent-tui-guard.js";
 import { capabilitiesFor } from "./catalog.js";
 import { createPromptImageFetcher } from "./prompt-image-fetch.js";
 import {
@@ -2172,6 +2173,35 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             // Even the no-turn MCP configuration probe may initialize provider HOME.
             sessions.acquireAgentTuiProviderHome(prepared);
           },
+          // The TUI is a spawn like any other: it gets the same fresh settings document and the
+          // same live protection list a runner-driven launch gets (#1337).
+          provisionManagedWorktreeGuard: (prepared) => provisionAgentTuiManagedWorktreeGuard(
+            prepared,
+            {
+              controlPlaneUrl: config.controlPlaneUrl,
+              controlPlaneProtocolVersion,
+              enabled: claudeHookFeatureEnabled,
+              allowInsecureTransport,
+              registerCredential: registerPolicyHookCredential,
+              // Resolved from the CURRENT stored metadata when provisioning runs, never from the
+              // launch snapshot: that snapshot predates the awaited worktree proof and the
+              // Orchestrator's scratch and credential preparation, and writing a stale inventory
+              // would overwrite the live refresh — leaving a worktree created in that window
+              // unprotected for the running provider too. A session deleted inside that same
+              // window is refused HERE, before provisioning writes anything: deletion removes this
+              // session's runner-owned hook files, and recreating them for a launch that is about
+              // to be rejected anyway would leave them behind until the next startup sweep.
+              protections: () => {
+                const current = store.readMeta(prepared.sessionId);
+                if (!current || store.isDeleted(prepared.sessionId)) {
+                  throw new Error("session is being deleted");
+                }
+                return sessions.managedWorktreeProtections(current);
+              },
+            },
+            log,
+            claudeHookHost,
+          ),
         }),
         open: (message, target, launch, cleanupBoundary) => {
           if (launch) sessions.acquireAgentTuiProviderHome({ ...target.meta, env: launch.env ?? {} });
