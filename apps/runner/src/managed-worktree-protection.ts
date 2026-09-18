@@ -4,6 +4,7 @@ import { parse, type ParseEntry } from "shell-quote";
 const MAX_COMMAND_LENGTH = 32_768;
 const MAX_GLOB_METACHARACTERS = 64;
 const MAX_GLOB_BRACE_GROUPS = 8;
+const MAX_ENV_SPLIT_STRING_EXPANSIONS = 8;
 export const MANAGED_WORKTREE_REFUSAL =
   "Wollipog protects this runner-owned worktree. Use discard_worktree so retirement can wait for the provider to exit and then apply the managed safety checks.";
 
@@ -14,6 +15,12 @@ export interface ManagedWorktreeProtection {
 
 interface EnvironmentReference { env: string }
 type ShellToken = ParseEntry | EnvironmentReference;
+
+/**
+ * Raised when provider input exceeds an explicit parsing bound. The exported guard turns it into a
+ * refusal, so a command the classifier declines to keep parsing retains the managed worktree.
+ */
+class UnclassifiableCommandError extends Error {}
 
 function environmentReference(token: ShellToken | undefined): token is EnvironmentReference {
   return token != null && typeof token === "object" && "env" in token && typeof token.env === "string";
@@ -150,6 +157,45 @@ function resolvedOperand(
   return normalize(isAbsolute(value) ? value : resolve(cwd, value));
 }
 
+/**
+ * Match one long-option word against `option`. GNU accepts any unambiguous abbreviation, so a name
+ * of at least `minimumLength` characters that prefixes `option` is that option; its value is either
+ * attached after `=` or, when `attached` is null, the following word.
+ */
+function longOption(
+  value: string,
+  option: string,
+  minimumLength: number,
+): { attached: string | null } | null {
+  if (!value.startsWith("--")) return null;
+  const equals = value.indexOf("=");
+  const name = equals < 0 ? value : value.slice(0, equals);
+  if (name.length < minimumLength || !option.startsWith(name)) return null;
+  return { attached: equals < 0 ? null : value.slice(equals + 1) };
+}
+
+/**
+ * Classify one GNU `mv` option word. The target directory may be named as `-t /dst`, `-t/dst`,
+ * `-ft/dst` in a short-option cluster, or `--target-directory=/dst`, and `--target-directory` is the
+ * only `mv` long option beginning with `t`. All of those spellings make every remaining operand a
+ * source, so they must classify identically; report the option carried and whether its value is
+ * still the following word.
+ */
+function moveOption(value: string): { targetDirectory: boolean; consumesNext: boolean } {
+  if (value.startsWith("--")) {
+    const target = longOption(value, "--target-directory", 3);
+    if (target) return { targetDirectory: true, consumesNext: target.attached == null };
+    const suffix = longOption(value, "--suffix", 4);
+    return { targetDirectory: false, consumesNext: suffix != null && suffix.attached == null };
+  }
+  for (let index = 1; index < value.length; index += 1) {
+    const option = value[index];
+    if (option !== "t" && option !== "S") continue;
+    return { targetDirectory: option === "t", consumesNext: index === value.length - 1 };
+  }
+  return { targetDirectory: false, consumesNext: false };
+}
+
 function executableName(value: string): string {
   return value.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase().replace(/\.exe$/u, "") ?? "";
 }
@@ -160,6 +206,17 @@ function commandWords(
   environment: Map<string, string>,
 ): { words: ShellToken[]; executable: string } | null {
   let index = 0;
+  let splitStringExpansions = 0;
+  // Each `env --split-string` value is re-parsed in place, so a chain of them re-reads its own
+  // payload once per level. The command-length cap alone leaves that quadratic; bound the chain
+  // explicitly and fail closed past it rather than parsing on.
+  const expandSplitString = (script: string): ShellToken[] => {
+    splitStringExpansions += 1;
+    if (splitStringExpansions > MAX_ENV_SPLIT_STRING_EXPANSIONS) {
+      throw new UnclassifiableCommandError("env --split-string nesting exceeded its bound");
+    }
+    return parse<EnvironmentReference>(script, (env) => ({ env }));
+  };
   while (typeof tokens[index] === "string" && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(tokens[index] as string)) {
     const assignment = tokens[index] as string;
     const equals = assignment.indexOf("=");
@@ -201,15 +258,19 @@ function commandWords(
           index += 1;
           continue;
         }
-        if (["-S", "--split-string"].includes(value)) {
+        // `env` takes the split-string value attached (`-Srm -rf x`, `--split-string=rm -rf x`) as
+        // readily as separated, and accepts any unambiguous long-option abbreviation — no other
+        // `env` long option begins with `s`. Every spelling has to expand the same way.
+        const splitString = value.startsWith("-S")
+          ? { attached: value.length > 2 ? value.slice(2) : null }
+          : longOption(value, "--split-string", 3);
+        if (splitString) {
+          if (splitString.attached != null) {
+            tokens.splice(index, 1, ...expandSplitString(splitString.attached));
+            continue;
+          }
           const script = word(tokens[index + 1], cwd, environment);
-          const split = script == null ? [] : parse<EnvironmentReference>(script, (env) => ({ env }));
-          tokens.splice(index, 2, ...split);
-          continue;
-        }
-        if (value.startsWith("--split-string=")) {
-          const split = parse<EnvironmentReference>(value.slice("--split-string=".length), (env) => ({ env }));
-          tokens.splice(index, 1, ...split);
+          tokens.splice(index, 2, ...(script == null ? [] : expandSplitString(script)));
           continue;
         }
         if (["-u", "--unset", "-C", "--chdir"].includes(value)) {
@@ -344,6 +405,9 @@ function segmentRefusal(
     return words.slice(1).some((token) => operandTargetsProtected(token, cwd, environment, protections));
   }
   if (["mv", "move", "rename-item"].includes(executable)) {
+    // PowerShell's Rename-Item names its arguments (-Path, -NewName) instead of clustering GNU
+    // short options, so only the GNU movers have their option words decomposed.
+    const gnuOptions = executable !== "rename-item";
     let targetDirectory = false;
     const operands: ShellToken[] = [];
     for (let index = 0; index < words.length; index += 1) {
@@ -354,16 +418,13 @@ function segmentRefusal(
         operands.push(...words.slice(index + 1));
         break;
       }
-      if (["-t", "--target-directory"].includes(value ?? "")) {
-        targetDirectory = true;
-        index += 1;
+      if (value?.startsWith("-")) {
+        if (!gnuOptions) continue;
+        const option = moveOption(value);
+        if (option.targetDirectory) targetDirectory = true;
+        if (option.consumesNext) index += 1;
         continue;
       }
-      if (["-S", "--suffix"].includes(value ?? "")) {
-        index += 1;
-        continue;
-      }
-      if (value?.startsWith("-")) continue;
       operands.push(token);
     }
     const sources = targetDirectory ? operands : operands.slice(0, -1);
