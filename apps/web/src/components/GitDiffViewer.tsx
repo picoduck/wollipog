@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useRef, useState } from "react";
+import { Fragment, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { normalizeSourcePath, REVIEW_ANCHOR_TEXT_MAX_LENGTH } from "@wollipog/protocol";
 import type {
   CreateReviewFindingRequest,
@@ -90,6 +90,12 @@ export interface DiffDraft {
 /** Frozen: every editor with no stored draft seeds its state from this one object. */
 const EMPTY_DRAFT: DiffDraft = Object.freeze({ body: "", severity: "major", required: true, anchorText: "" });
 
+/** Where the caret sat in a draft's body, as offsets into it. Collapsed when start equals end. */
+interface DraftSelection {
+  start: number;
+  end: number;
+}
+
 /**
  * Unsent inline-finding drafts, owned by the viewer root instead of by the hunk that renders them.
  *
@@ -107,6 +113,14 @@ interface DraftStore {
   keyFor: (anchor: DiffAnchor) => string;
   read: (key: string) => DiffDraft;
   write: (key: string, draft: DiffDraft) => void;
+  /**
+   * Where this draft's caret sat when its editor was last torn down, or null if it never had one.
+   * Restoring the text alone leaves the caret at the end of it, which is not where the reviewer was
+   * writing (#1287), so the caret is carried across a rebuild alongside the text.
+   */
+  readSelection: (key: string) => DraftSelection | null;
+  /** Record the caret of an editor being torn down. Ignored once the draft itself is gone. */
+  rememberSelection: (key: string, selection: DraftSelection) => void;
   /** The + control: open the editor for this anchor, or close it if already open. */
   toggle: (key: string, anchorText: string) => void;
   /** Cancel — closes the editor but keeps the text, so a mis-click cannot destroy it. */
@@ -167,12 +181,23 @@ export function GitDiffViewer({
     return grouped;
   }, [review?.findings, review?.anchoredFindingIds]);
   const draftValues = useRef(new Map<string, DiffDraft>());
+  // Kept beside the draft text rather than inside it: a caret is editor state, not a field of the
+  // finding being written, and holding it apart keeps `write` — which runs on every keystroke from
+  // state that predates the current caret — from stamping a stale offset over a live one.
+  const draftSelections = useRef(new Map<string, DraftSelection>());
   const [openDrafts, setOpenDrafts] = useState<ReadonlySet<string>>(() => new Set<string>());
   const drafts: DraftStore = {
     open: openDrafts,
     keyFor: (anchor) => `${lineage}\u0000${diffAnchorKey(anchor)}`,
     read: (key) => draftValues.current.get(key) ?? EMPTY_DRAFT,
     write: (key, draft) => void draftValues.current.set(key, draft),
+    readSelection: (key) => draftSelections.current.get(key) ?? null,
+    rememberSelection: (key, selection) => {
+      // Only while the draft itself survives. Submitting clears the draft in the same commit that
+      // unmounts its editor, and a caret outliving its draft would land in the next one written
+      // against this anchor.
+      if (draftValues.current.has(key)) draftSelections.current.set(key, selection);
+    },
     toggle: (key, anchorText) => {
       // Seeded on first open only: reopening an anchor the reviewer already typed against must keep
       // both their text and the line it was aimed at, or the changed-anchor notice below resets too.
@@ -191,6 +216,7 @@ export function GitDiffViewer({
     }),
     clear: (key) => {
       draftValues.current.delete(key);
+      draftSelections.current.delete(key);
       setOpenDrafts((prior) => {
         if (!prior.has(key)) return prior;
         const next = new Set(prior);
@@ -402,6 +428,38 @@ function DiffCommentEditor({
   anchor: DiffAnchor;
 }) {
   const [draft, setDraft] = useState<DiffDraft>(() => drafts.read(anchorKey));
+  const bodyRef = useRef<HTMLTextAreaElement | null>(null);
+  /**
+   * The caret's hand-off across a rebuild.
+   *
+   * A refresh that rewrites the drafted hunk rebuilds this editor, and the restored body arrives
+   * with the caret at the end of it — not where the reviewer was writing (#1287). So the outgoing
+   * editor records its caret as it is torn down, which is the one moment the live offset is known
+   * without watching every keystroke, and the incoming one puts it back.
+   *
+   * The offset is read from the store here rather than from the `draft` seeded above: that seed is
+   * computed while rendering, and the outgoing editor's teardown does not run until the commit.
+   */
+  useLayoutEffect(() => {
+    const body = bodyRef.current;
+    if (!body) return;
+    const remembered = drafts.readSelection(anchorKey);
+    if (remembered) {
+      // Clamped to the text that actually came back, so an offset the body no longer reaches lands
+      // at its end instead of throwing.
+      const limit = body.value.length;
+      const end = Math.min(remembered.end, limit);
+      const start = Math.min(remembered.start, end);
+      body.setSelectionRange(start, end);
+    }
+    return () => {
+      const { selectionStart, selectionEnd } = body;
+      if (selectionStart === null || selectionEnd === null) return;
+      drafts.rememberSelection(anchorKey, { start: selectionStart, end: selectionEnd });
+    };
+    // Mount and teardown only: `anchorKey` is this editor's identity, and `drafts` is rebuilt on
+    // every render of the viewer root while reading and writing nothing but refs.
+  }, [anchorKey]);
   // The draft survived a refresh that rewrote the very line it targets. Keeping the text is the
   // point (#1203), but submitting it silently would attach a comment written about content that is
   // no longer on that line, so say so and let the reviewer decide.
@@ -440,6 +498,7 @@ function DiffCommentEditor({
         </div>
       )}
       <textarea
+        ref={bodyRef}
         value={draft.body}
         onChange={(event) => update({ body: event.target.value })}
         rows={3}
