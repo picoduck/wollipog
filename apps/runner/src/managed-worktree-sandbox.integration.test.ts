@@ -135,12 +135,15 @@ test("an unmanaged worktree keeps a fully writable Git link", {
       // read-only rules at all and the sandbox must be byte-for-byte what it is today.
     },
   );
+  assert.equal(isolation?.backend, "bwrap");
   assert.equal(isolation?.backend === "bwrap" ? isolation.readOnlyBinds : "absent", undefined);
   const args = buildBwrapArgs(
     { command: "/bin/sh", args: ["-c", "printf rewritten > .git"], cwd: worktreePath },
     isolation as Extract<typeof isolation, { backend: "bwrap" }>,
   );
-  assert.equal(args.includes("--ro-bind") && args.at(-4) === "--ro-bind", false);
+  // The host root is still read-only bound, so assert on the operand rather than on the flag: no
+  // argument anywhere in the launch may name this worktree's link file.
+  assert.equal(args.includes(join(worktreePath, ".git")), false, args.join(" "));
   const attempt = run(isolation!.command, args, worktreePath);
   assert.equal(attempt.status, 0, `an unmanaged worktree stays writable: ${attempt.output}`);
   assert.equal(readFileSync(join(worktreePath, ".git"), "utf8"), "rewritten");

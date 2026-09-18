@@ -210,6 +210,15 @@ contribute no rule at all: only runner-created identities are managed.
 On a non-enforcing mode the behavior is exactly what it was before this rule existed. Nothing is
 newly permitted anywhere: the rule only ever removes provider write access to one runner-owned path.
 
+**The rule is bound at launch, like every other filesystem boundary here.** A `bwrap` or Seatbelt
+sandbox is constructed when the provider starts, so the read-only entries are the ones that exist
+then. A worktree the provider requests *during* a turn is created inside the session's
+requested-worktree boundary, which is already writable, and a worktree switch schedules a relaunch
+rather than rebinding a live sandbox — so that new worktree's link is writable until the relaunch,
+exactly as the **Attach** notice already reports for the worktree root itself. This is the same
+same-turn window the command-approval boundary has, tracked separately; closing it means retiring
+the provider at creation time, not changing the sandbox rule.
+
 ## Typed Parent Control Decisions
 
 An Orchestrator that cannot continue without a human response must create a structured blocking
