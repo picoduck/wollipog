@@ -32,10 +32,15 @@
  * tab that never saw another's scope drops that scope when it writes. With two tabs open, a reload
  * therefore restores what the tab that wrote last knew about. That is under-delivery, never a
  * regression — none of this survived a reload at all before — and it is deliberately left alone,
- * because the obvious repairs are wrong. Adopting the other tab's scopes on a `storage` event, or
- * merging the stored record in on every write, makes this tab re-persist text the other tab has
- * since sent: the resurrection problem composer-drafts.ts carries a tombstone layer to solve.
- * Reconciling tabs honestly means that layer, and it is a change of its own.
+ * because the cheap repairs are wrong and the sound ones are a redesign. Adopting the other tab's
+ * scopes on a `storage` event, or merging the stored record in on every write, makes this tab
+ * re-persist text the other tab has since sent: the resurrection problem composer-drafts.ts carries
+ * a tombstone layer to solve. Doing it honestly means either that layer, or moving persistence off
+ * the whole-map write entirely — an origin-wide lock (Web Locks) around a read, apply this
+ * mutation's own set or delete, write back — so a later unrelated write observes deletions instead
+ * of undoing them. That second route also means the record stops being this tab's map, which is
+ * what currently makes its bound and its ceiling trivially true. Either way it is a change of its
+ * own, and neither is needed for the per-session reload this module is here to deliver.
  *
  * The scope key is instance-qualified, because a remote control plane can reuse a local session id
  * (see instance-storage.ts) and one session's drafts must never surface under another's. That
@@ -173,6 +178,13 @@ export const PANEL_SCRATCH_PERSIST_CHAR_LIMIT = 256 * 1024;
 const PERSIST_ENVELOPE_CHARS = 25;
 
 /**
+ * The exact record this tab last put in storage — or read out of it at hydration — so a refused
+ * rewrite can tell its own stale record, which it must take back, from one another tab has written
+ * since, which is not this tab's to correct.
+ */
+let lastWritten: string | null = null;
+
+/**
  * Whether the persisted record has been read into the map yet. Read lazily rather than at import,
  * so a module graph that pulls this in outside a browser costs nothing, and so tests can drive a
  * reload by dropping memory alone.
@@ -227,6 +239,9 @@ function hydrate(): void {
     removeBrowserStorageValue(PERSIST_KEY);
     return;
   }
+  // This page is now working from that record, so it is the one a refused rewrite would be leaving
+  // behind, and the one this tab is entitled to take back.
+  lastWritten = raw;
   for (const entry of record.scopes) {
     if (!entry || typeof entry !== "object") continue;
     const { scope, values } = entry as { scope?: unknown; values?: unknown };
@@ -264,19 +279,33 @@ function persist(): void {
     size += entry.length + 1;
   }
   if (stored.length === 0) {
+    // Removing is this tab writing its empty map, which is what any successful mutation does to the
+    // shared record. The refusal path below is the one that must not presume to speak for it.
     removeBrowserStorageValue(PERSIST_KEY);
+    lastWritten = null;
     return;
   }
   // Assembled from the pieces that were measured, so the ceiling holds for the string actually
   // written. Restored in stored order, which is why it goes back least-recently-used first.
   stored.reverse();
-  // A refusal (private mode, a full quota, a restricted webview) is not an error here — but the
-  // record already in storage is now a lie. It describes a map this one has moved past, so a reload
-  // would restore older text, including a draft this very mutation cleared after sending it.
-  // Degrading to no restore is the honest failure; the next mutation that is allowed to write puts
-  // the whole map back, so the exposure is one mutation wide.
-  if (!saveBrowserStorageValue(PERSIST_KEY, `{"version":1,"scopes":[${stored.join(",")}]}`)) {
+  const record = `{"version":1,"scopes":[${stored.join(",")}]}`;
+  if (saveBrowserStorageValue(PERSIST_KEY, record)) {
+    lastWritten = record;
+    return;
+  }
+  // A refusal (private mode, a full quota, a restricted webview) is not an error here — but a record
+  // this tab left behind is now a lie. It describes a map this one has moved past, so a reload would
+  // restore older text, including a draft this very mutation cleared after sending it. Degrading to
+  // no restore is the honest failure; the next mutation that is allowed to write puts the whole map
+  // back, so the exposure is one mutation wide.
+  //
+  // Only this tab's own record, though. Another tab may have written since, and that record is its
+  // latest state rather than this one's stale state — taking it back would cost that tab the reload
+  // this whole module exists for, to correct a lie it never told.
+  const abandoned = loadBrowserStorageValue(PERSIST_KEY);
+  if (abandoned !== null && abandoned === lastWritten) {
     removeBrowserStorageValue(PERSIST_KEY);
+    lastWritten = null;
   }
 }
 
@@ -358,6 +387,7 @@ export function clearPanelScratchIf(
 export function clearPanelScratch(): void {
   scratch.clear();
   hydrated = false;
+  lastWritten = null;
   removeBrowserStorageValue(PERSIST_KEY);
 }
 
@@ -369,6 +399,9 @@ export function clearPanelScratch(): void {
 export function dropPanelScratchMemory(): void {
   scratch.clear();
   hydrated = false;
+  // A reload is a fresh module: it has written nothing yet, and learns what is in storage by
+  // hydrating from it.
+  lastWritten = null;
 }
 
 /** How many sessions currently hold scratch. Test-only. */

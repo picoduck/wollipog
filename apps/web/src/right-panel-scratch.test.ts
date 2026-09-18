@@ -412,6 +412,31 @@ test("a refused write leaves no older record behind to restore instead", () => {
   assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined);
 });
 
+test("a refused write takes back only this tab's own record, never another's", () => {
+  // Taking a record back is a correction of this tab's own stale story. Another tab writing since
+  // makes the record that tab's latest state, and deleting it would cost that tab exactly the
+  // reload this module exists for — to fix a lie it never told.
+  const mine = panelScratchScopeKey("session-mine");
+  writePanelScratch(mine, "review.requestBody", "my draft", "draft");
+  const foreign = JSON.stringify({
+    version: 1,
+    scopes: [{
+      scope: panelScratchScopeKey("session-theirs"),
+      values: { "review.requestBody": { value: "the other tab's unsent draft", retention: "draft" } },
+    }],
+  });
+  backing.set(PERSIST_KEY, foreign);
+
+  denyWrites = true;
+  writePanelScratch(mine, "review.requestBody", "my draft, longer", "draft");
+  assert.equal(backing.get(PERSIST_KEY), foreign, "the record that is not ours is left where it is");
+
+  denyWrites = false;
+  reload();
+  assert.equal(readPanelScratch(panelScratchScopeKey("session-theirs"), "review.requestBody"),
+    "the other tab's unsent draft", "and it is still there to be restored from");
+});
+
 test("the stored record is bounded even where the map deliberately is not", () => {
   // Unsent text is exempt from the scope bound, and a form that keeps its text after submitting
   // holds its scope for as long as it is mounted (#1375). In memory that overshoot ends with the
