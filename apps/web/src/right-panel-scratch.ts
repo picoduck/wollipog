@@ -24,8 +24,28 @@ import { useInstanceScope } from "./instance-scope.js";
  * for as long as the tab lives, so the oldest session's scratch is dropped rather than letting a
  * long navigation session grow the map forever. Well past the handful of sessions anyone switches
  * between while writing one pull request.
+ *
+ * It bounds recreatable scratch only. A scope still holding unsent text the user wrote is exempt,
+ * because evicting it destroys that text with nothing to recover it from (#1283) — so the map's
+ * size is this limit plus however many sessions the user has an unsent draft open in, and it falls
+ * back to the limit as those drafts are sent or emptied. Predictable at the bound is the point: the
+ * only thing that can push a scope out is scratch the app can rebuild by asking the runner again.
  */
 export const PANEL_SCRATCH_SESSION_LIMIT = 8;
+
+/**
+ * What is at stake in one remembered value, and therefore whether the scope holding it may be
+ * evicted to stay under the limit.
+ *
+ * `draft` is text the user typed and has not sent: a pull request description, a side chat message.
+ * Nothing else knows it, so losing it loses it for good. `disposable` is everything the app can
+ * reconstruct — the directory Files was browsing, the diff layout, an address bar's contents — for
+ * which eviction costs a re-listing and a re-choice, not the user's words.
+ *
+ * Recorded at the write, never inferred from the key, for the reason `dirty` is recorded below: the
+ * call site is the only place that knows which of its values the user authored.
+ */
+export type PanelScratchRetention = "draft" | "disposable";
 
 /**
  * One remembered value. The revision is a global monotonic stamp, so a caller that captured it
@@ -35,6 +55,7 @@ export const PANEL_SCRATCH_SESSION_LIMIT = 8;
 interface ScratchValue {
   value: string;
   revision: number;
+  retention: PanelScratchRetention;
 }
 
 /** Scope key → logical key → value. Insertion order is least-recently-used first. */
@@ -50,6 +71,45 @@ export function panelScratchScopeKey(sessionId: string, instanceScope = LOCAL_IN
 function touch(scope: string, values: Map<string, ScratchValue>): void {
   scratch.delete(scope);
   scratch.set(scope, values);
+}
+
+/**
+ * Whether a scope is holding text the user wrote and has not sent.
+ *
+ * Blank is not held text: a composer whose message was sent keeps writing back the empty string it
+ * was reset to, and an emptied field is text the user deleted. Treating either as a draft would pin
+ * a scope forever on nothing, which is how an exemption quietly becomes a leak.
+ */
+function holdsUnsentText(values: Map<string, ScratchValue>): boolean {
+  for (const held of values.values()) {
+    if (held.retention === "draft" && held.value.trim() !== "") return true;
+  }
+  return false;
+}
+
+/**
+ * Bring the map back under the limit by dropping the least recently used scopes that hold nothing
+ * the user wrote, oldest first. Scopes with unsent text are skipped rather than counted out, so a
+ * tour of eight other sessions costs the drafts nothing; when every scope is holding a draft there
+ * is simply nothing to evict and the map stays over the limit until one of them is sent.
+ *
+ * Every mutation runs this, removals included: a draft that is sent releases its scope, and if that
+ * scope is still holding a directory the map would otherwise stay over the limit until the next
+ * unrelated write happened to collect it.
+ *
+ * `keep` is the scope the mutation just touched, and it is spared on removals for the same reason
+ * as on writes: it is by definition the most recently used, which is never what least-recently-used
+ * eviction takes. Collecting it here would mean sending a side chat message also discards that same
+ * session's browsed directory while eight idle sessions keep theirs — a visible loss in the session
+ * someone is looking at, to settle a soft bound one mutation earlier. The next mutation touching
+ * any other scope collects it.
+ */
+function evictDisposableScopes(keep: string): void {
+  for (const [candidate, values] of scratch) {
+    if (scratch.size <= PANEL_SCRATCH_SESSION_LIMIT) return;
+    if (candidate === keep || holdsUnsentText(values)) continue;
+    scratch.delete(candidate);
+  }
 }
 
 /** Read one remembered value, or undefined when the session never stored it. */
@@ -69,23 +129,25 @@ export function panelScratchRevision(scope: string, key: string): number {
  * Remember a value, or forget it when `value` is null. Callers pass null for a body that is holding
  * a value it never took ownership of — see the `dirty` provenance the hook tracks below.
  */
-export function writePanelScratch(scope: string, key: string, value: string | null): void {
+export function writePanelScratch(
+  scope: string,
+  key: string,
+  value: string | null,
+  retention: PanelScratchRetention = "disposable",
+): void {
   const values = scratch.get(scope);
   if (value === null) {
     if (!values) return;
     values.delete(key);
     if (values.size === 0) scratch.delete(scope);
     else touch(scope, values);
+    evictDisposableScopes(scope);
     return;
   }
   const next = values ?? new Map<string, ScratchValue>();
-  next.set(key, { value, revision: nextRevision++ });
+  next.set(key, { value, revision: nextRevision++, retention });
   touch(scope, next);
-  while (scratch.size > PANEL_SCRATCH_SESSION_LIMIT) {
-    const oldest = scratch.keys().next();
-    if (oldest.done || oldest.value === scope) break;
-    scratch.delete(oldest.value);
-  }
+  evictDisposableScopes(scope);
 }
 
 /** Restore a value, falling back whenever the stored one is missing or the caller rejects it. */
@@ -168,9 +230,13 @@ function restored<T extends string>(
 }
 
 /**
- * `useState` for free text — a draft, a path, an address — that must survive the body being
- * unmounted. Prose is restored verbatim; pass `accept` for the rare text the body will go on to
- * parse (a URL it hands to `new URL`), so a value it could not honour degrades to the fallback.
+ * `useState` for free text the app could rebuild — a path, an address, an id — that must survive
+ * the body being unmounted. Text is restored verbatim; pass `accept` for the rare value the body
+ * will go on to parse (a URL it hands to `new URL`), so one it could not honour degrades to the
+ * fallback.
+ *
+ * Use `usePanelScratchDraft` instead for anything the user is composing: this one's value is spent
+ * to keep the scope budget, and a message nobody else has a copy of must not be.
  */
 export function usePanelScratchText(
   scope: string,
@@ -178,7 +244,30 @@ export function usePanelScratchText(
   fallback = "",
   accept?: (raw: string) => boolean,
 ): [string, (next: string | ((prior: string) => string)) => void] {
-  return usePanelScratchValue<string>(scope, key, fallback, accept);
+  return usePanelScratchValue<string>(scope, key, fallback, "disposable", accept);
+}
+
+/**
+ * `useState` for unsent text the user is writing — a pull request description, a commit message, a
+ * side chat message. Identical to `usePanelScratchText` except that the session holding it is
+ * exempt from scope eviction for as long as the text is non-blank, so visiting other sessions
+ * cannot destroy it (#1283).
+ *
+ * No `accept`: prose has no closed set to refuse it against, and a draft degraded to its default
+ * would be the very loss this exemption exists to prevent.
+ *
+ * The exemption follows the text, not the form's fate. A body that consumes its draft says so —
+ * Side Chat clears the message it sent, which releases the scope — while Review leaves the four
+ * fields of a submitted commit or pull request exactly as the user left them, so that session keeps
+ * its scope for as long as the text is still in the box. That is the same bargain as any other
+ * unsent text: the map grows only where someone typed, and only while what they typed is on screen.
+ */
+export function usePanelScratchDraft(
+  scope: string,
+  key: string,
+  fallback = "",
+): [string, (next: string | ((prior: string) => string)) => void] {
+  return usePanelScratchValue<string>(scope, key, fallback, "draft");
 }
 
 /**
@@ -195,7 +284,7 @@ export function usePanelScratchChoice<T extends string>(
   fallback: T,
   accept: (raw: string) => boolean,
 ): [T, (next: T | ((prior: T) => T)) => void] {
-  return usePanelScratchValue<T>(scope, key, fallback, accept);
+  return usePanelScratchValue<T>(scope, key, fallback, "disposable", accept);
 }
 
 /**
@@ -209,6 +298,7 @@ function usePanelScratchValue<T extends string>(
   scope: string,
   key: string,
   fallback: T,
+  retention: PanelScratchRetention,
   accept?: (raw: string) => boolean,
 ): [T, (next: T | ((prior: T) => T)) => void] {
   const [entry, setEntry] = useState<ScratchEntry<T>>(() => restored(scope, key, fallback, accept));
@@ -229,8 +319,8 @@ function usePanelScratchValue<T extends string>(
 
   const { scope: liveScope, key: liveKey, value, dirty } = current;
   useEffect(() => {
-    writePanelScratch(liveScope, liveKey, dirty ? value : null);
-  }, [dirty, liveKey, liveScope, value]);
+    writePanelScratch(liveScope, liveKey, dirty ? value : null, retention);
+  }, [dirty, liveKey, liveScope, retention, value]);
 
   const setValue = useCallback((next: T | ((prior: T) => T)) => {
     setEntry((prior) => {

@@ -95,26 +95,123 @@ test("restore falls back when the stored value is missing or refused", () => {
   assert.equal(restorePanelScratch(scope, "review.requestBody", ""), "  half a sentence");
 });
 
-test("the oldest session's scratch is evicted rather than growing without bound", () => {
+test("the oldest session's recreatable scratch is evicted rather than growing without bound", () => {
   const scopes = Array.from({ length: PANEL_SCRATCH_SESSION_LIMIT + 1 },
     (_unused, index) => panelScratchScopeKey(`session-${index}`));
-  for (const scope of scopes) writePanelScratch(scope, "review.requestBody", scope);
+  for (const scope of scopes) writePanelScratch(scope, "files.directory", scope);
   assert.equal(panelScratchScopeCount(), PANEL_SCRATCH_SESSION_LIMIT);
-  assert.equal(readPanelScratch(scopes[0]!, "review.requestBody"), undefined, "the idle session went first");
-  assert.equal(readPanelScratch(scopes.at(-1)!, "review.requestBody"), scopes.at(-1));
+  assert.equal(readPanelScratch(scopes[0]!, "files.directory"), undefined, "the idle session went first");
+  assert.equal(readPanelScratch(scopes.at(-1)!, "files.directory"), scopes.at(-1));
 });
 
 test("eviction is least-recently-used, so a session being read stays", () => {
   const first = panelScratchScopeKey("session-first");
-  writePanelScratch(first, "review.requestBody", "still writing this");
+  writePanelScratch(first, "files.directory", "apps/web");
   for (let index = 0; index < PANEL_SCRATCH_SESSION_LIMIT - 1; index += 1) {
-    writePanelScratch(panelScratchScopeKey(`session-${index}`), "review.requestBody", "other");
+    writePanelScratch(panelScratchScopeKey(`session-${index}`), "files.directory", "other");
   }
   // Reading is how a mounting body restores, and it is exactly the signal that a session is still
-  // in use — the draft being returned to must outlive the ones merely passed through.
-  assert.equal(readPanelScratch(first, "review.requestBody"), "still writing this");
-  writePanelScratch(panelScratchScopeKey("session-newest"), "review.requestBody", "newest");
+  // in use — the one being returned to must outlive the ones merely passed through.
+  assert.equal(readPanelScratch(first, "files.directory"), "apps/web");
+  writePanelScratch(panelScratchScopeKey("session-newest"), "files.directory", "newest");
   assert.equal(panelScratchScopeCount(), PANEL_SCRATCH_SESSION_LIMIT);
-  assert.equal(readPanelScratch(first, "review.requestBody"), "still writing this");
-  assert.equal(readPanelScratch(panelScratchScopeKey("session-0"), "review.requestBody"), undefined);
+  assert.equal(readPanelScratch(first, "files.directory"), "apps/web");
+  assert.equal(readPanelScratch(panelScratchScopeKey("session-0"), "files.directory"), undefined);
+});
+
+test("unsent text is exempt from eviction; the idle recreatable scope goes instead", () => {
+  // The #1283 walk: a description is left unsent in the oldest scope, then more sessions than the
+  // bound allows are opened. Under a plain least-recently-used bound the description is the first
+  // thing destroyed, because being the oldest is exactly what it is.
+  const writing = panelScratchScopeKey("session-writing");
+  writePanelScratch(writing, "review.requestBody", "half a pull request description", "draft");
+  const visited = Array.from({ length: PANEL_SCRATCH_SESSION_LIMIT },
+    (_unused, index) => panelScratchScopeKey(`session-visited-${index}`));
+  for (const scope of visited) writePanelScratch(scope, "files.directory", "apps/web");
+
+  assert.equal(readPanelScratch(writing, "review.requestBody"), "half a pull request description",
+    "the draft survives the tour that would have evicted it");
+  assert.equal(readPanelScratch(visited[0]!, "files.directory"), undefined,
+    "the oldest scope holding only a directory is what the bound spends instead");
+  assert.equal(panelScratchScopeCount(), PANEL_SCRATCH_SESSION_LIMIT);
+});
+
+test("a draft's own scope keeps its recreatable values too", () => {
+  // Eviction is per scope, so exempting the draft exempts the session holding it: coming back to
+  // an unsent description and finding the diff layout reset would be the same surprise, smaller.
+  const writing = panelScratchScopeKey("session-writing");
+  writePanelScratch(writing, "review.requestBody", "half a description", "draft");
+  writePanelScratch(writing, "review.diffLayout", "split");
+  for (let index = 0; index < PANEL_SCRATCH_SESSION_LIMIT + 4; index += 1) {
+    writePanelScratch(panelScratchScopeKey(`session-${index}`), "files.directory", "apps");
+  }
+  assert.equal(readPanelScratch(writing, "review.diffLayout"), "split");
+});
+
+test("when every scope holds unsent text nothing is discarded, and the bound returns with them", () => {
+  // The bound cannot be honoured without destroying something nobody else has a copy of, so it is
+  // not honoured: the map carries the drafts above the limit rather than silently eating one.
+  const scopes = Array.from({ length: PANEL_SCRATCH_SESSION_LIMIT + 2 },
+    (_unused, index) => panelScratchScopeKey(`session-${index}`));
+  for (const scope of scopes) writePanelScratch(scope, "sidechat.draft", `unsent in ${scope}`, "draft");
+  assert.equal(panelScratchScopeCount(), scopes.length, "every draft is still held");
+  for (const scope of scopes) {
+    assert.equal(readPanelScratch(scope, "sidechat.draft"), `unsent in ${scope}`);
+  }
+
+  // The overshoot lasts exactly as long as the text does. Sending the four oldest messages — one
+  // cleared outright, one left as the empty string its composer was reset to — hands those scopes
+  // back, and the next writes collect them until the map sits on the limit again.
+  for (const scope of scopes.slice(0, 3)) writePanelScratch(scope, "sidechat.draft", null);
+  writePanelScratch(scopes[3]!, "sidechat.draft", "", "draft");
+  for (let index = 0; index < 4; index += 1) {
+    writePanelScratch(panelScratchScopeKey(`session-visited-${index}`), "files.directory", "apps");
+  }
+  assert.equal(panelScratchScopeCount(), PANEL_SCRATCH_SESSION_LIMIT, "the bound reasserts itself");
+  assert.equal(readPanelScratch(scopes[3]!, "sidechat.draft"), undefined,
+    "a composer emptied after sending is not unsent text and pins nothing");
+  for (const scope of scopes.slice(4)) {
+    assert.equal(readPanelScratch(scope, "sidechat.draft"), `unsent in ${scope}`,
+      "the messages still unsent were never candidates");
+  }
+});
+
+test("a sent draft releases its scope to the bound on the spot", () => {
+  // Eviction used to run only on writes, so a scope released by a send that still held a browsed
+  // directory sat above the limit until some unrelated write happened to collect it. Removal is a
+  // mutation like any other and reasserts the bound itself.
+  const scopes = Array.from({ length: PANEL_SCRATCH_SESSION_LIMIT + 1 },
+    (_unused, index) => panelScratchScopeKey(`session-${index}`));
+  for (const scope of scopes) {
+    writePanelScratch(scope, "sidechat.draft", "unsent", "draft");
+    writePanelScratch(scope, "files.directory", "apps/web");
+  }
+  assert.equal(panelScratchScopeCount(), scopes.length, "every scope is holding a message");
+
+  // The scope this send released is now the most recently used one, so it is not what a
+  // least-recently-used bound takes: collecting it would discard the browsed directory of the
+  // session the user is looking at while eight idle ones keep theirs. Every other scope is still
+  // holding text, so this send deliberately leaves the map one over the bound.
+  writePanelScratch(scopes[1]!, "sidechat.draft", null);
+  assert.equal(panelScratchScopeCount(), scopes.length);
+  assert.equal(readPanelScratch(scopes[1]!, "files.directory"), "apps/web",
+    "the session being used keeps its directory");
+
+  writePanelScratch(scopes[0]!, "sidechat.draft", null);
+  assert.equal(panelScratchScopeCount(), PANEL_SCRATCH_SESSION_LIMIT,
+    "the second send collects the scope released by the first, without waiting for a later write");
+  assert.equal(readPanelScratch(scopes[1]!, "files.directory"), undefined,
+    "the least recently used released scope is the one the bound takes");
+  assert.equal(readPanelScratch(scopes[0]!, "files.directory"), "apps/web");
+});
+
+test("blank text is not a draft, so an untouched composer cannot pin a scope", () => {
+  const blank = panelScratchScopeKey("session-blank");
+  writePanelScratch(blank, "review.requestBody", "   \n  ", "draft");
+  for (let index = 0; index < PANEL_SCRATCH_SESSION_LIMIT; index += 1) {
+    writePanelScratch(panelScratchScopeKey(`session-${index}`), "files.directory", "apps");
+  }
+  assert.equal(panelScratchScopeCount(), PANEL_SCRATCH_SESSION_LIMIT);
+  assert.equal(readPanelScratch(blank, "review.requestBody"), undefined,
+    "whitespace is nothing to protect");
 });
