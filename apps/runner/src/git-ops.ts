@@ -103,7 +103,14 @@ export interface GitRunOpts {
   /** Override the default 30s guard. The guard exists for credential prompts/hooks; purely local
    * commands (worktree snapshots on big repos) can legitimately need longer. */
   timeoutMs?: number;
+  /** Override the default 64 MiB stdout ceiling. Lower it for reads whose output a caller cannot
+   * bound in advance, so an unexpectedly huge response is abandoned cheaply instead of buffered to
+   * the shared maximum first. Exceeding it kills git and rejects, exactly as the default does. */
+  maxBuffer?: number;
 }
+
+/** Default stdout ceiling for one git invocation; `GitRunOpts.maxBuffer` narrows it per call. */
+const GIT_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 
 /**
  * All `git` invocations go through this indirection. Production runs the real, time-bounded
@@ -132,6 +139,7 @@ const realGitRunner: GitRunner = (cwd, args, opts) => {
       env: opts?.env,
       stdin: opts?.stdin,
       timeoutMs: opts?.timeoutMs ?? GIT_TIMEOUT_MS,
+      maxBuffer: opts?.maxBuffer ?? GIT_MAX_BUFFER_BYTES,
     }).then((result) => result.stdout);
   }
   return new Promise((resolve, reject) => {
@@ -142,7 +150,7 @@ const realGitRunner: GitRunner = (cwd, args, opts) => {
         cwd,
         timeout: opts?.timeoutMs ?? GIT_TIMEOUT_MS,
         killSignal: "SIGKILL",
-        maxBuffer: 64 * 1024 * 1024,
+        maxBuffer: opts?.maxBuffer ?? GIT_MAX_BUFFER_BYTES,
         env: opts?.env ? { ...process.env, ...opts.env } : undefined,
       },
       (err, stdout, stderr) => (err ? reject(Object.assign(err as Error, { stdout, stderr })) : resolve(stdout)),
@@ -1172,13 +1180,24 @@ interface CollectedGitStatus {
 /**
  * Upper bound on the working-tree line volume whose content the status read will hash.
  *
- * The digest below costs one extra `git diff` per observation and its output grows with the
+ * The digest below costs extra `git diff` reads per observation and their output grows with the
  * change set, so a pathological tree could emit tens of megabytes of patch text on the status
  * cadence. The numstat totals the same read already computed bound that output before it is
  * asked for: above this many added + deleted lines the digest is reported as null and clients
  * fall back to the status entries alone — the pre-v165 behaviour, not a new failure mode.
  */
 export const MAX_STATUS_CONTENT_HASH_LINES = 20_000;
+
+/**
+ * Upper bound on the patch BYTES one status observation will buffer, per read.
+ *
+ * A line count is not a byte count: replacing one 40 MiB minified line is `1\t1` to numstat and
+ * passes the line guard, yet emits both the removed and the added line. Without this, such a tree
+ * would buffer to git's shared 64 MiB ceiling on every observation before failing. This cap is
+ * generous for anything the Review pane can usefully render — 20,000 lines at 400 bytes each —
+ * and abandons the rest cheaply, degrading to the same null the line guard produces.
+ */
+export const MAX_STATUS_CONTENT_HASH_BYTES = 8 * 1024 * 1024;
 
 /**
  * A content identity for the uncommitted tracked diff, or null when it was not computed.
@@ -1189,29 +1208,50 @@ export const MAX_STATUS_CONTENT_HASH_LINES = 20_000;
  * that gap: each file's `index <old>..<new>` header carries git's own object id for the worktree
  * content, and every rewritten line appears as a `-`/`+` pair.
  *
+ * Both halves of the rendered diff's identity are covered, mirroring `uncommittedRaw`'s
+ * `fineHashInput`. `diff HEAD` alone describes only HEAD versus the final worktree, so externally
+ * staging one of several hunks in a file that stays `MM` leaves it — and every status entry and
+ * total — byte-identical while the per-hunk `staged` flags and the staged/unstaged panes move.
+ * Folding the index-versus-HEAD patch in makes that partition part of the identity.
+ *
  * `--unified=0` deliberately. Context lines cannot distinguish two change sets whose changed lines
  * all agree, so they buy nothing here, and dropping them keeps the payload proportional to the
  * change rather than to the number of hunks.
  */
 async function statusContentSignature(
   cwd: string,
-  observed: { changedLines: number; trackedChanges: boolean },
+  observed: { changedLines: number; trackedChanges: boolean; stagedPaths: number },
 ): Promise<string | null> {
   if (observed.changedLines > MAX_STATUS_CONTENT_HASH_LINES) return null;
   // Porcelain is the authority for dirty state throughout this read, and it reports every tracked
   // difference from HEAD — modes and renames included. With no tracked entry at all there is
-  // nothing for `git diff HEAD` to print, so the ordinary clean-worktree observation hashes the
-  // empty diff directly rather than spawning git to be told so.
-  if (!observed.trackedChanges) return computeDiffHash("");
+  // nothing for either diff to print, so the ordinary clean-worktree observation hashes the empty
+  // pair directly rather than spawning git to be told so.
+  if (!observed.trackedChanges) return computeDiffHash(statusContentInput("", ""));
+  const read = (scope: string) => git(
+    cwd,
+    [...DIFF_CFG, "--no-optional-locks", "diff", "--no-ext-diff", "--unified=0", scope, "--"],
+    { maxBuffer: MAX_STATUS_CONTENT_HASH_BYTES },
+  );
   try {
-    return computeDiffHash(
-      await git(cwd, [...DIFF_CFG, "--no-optional-locks", "diff", "--no-ext-diff", "--unified=0", "HEAD", "--"]),
-    );
+    // A zero staged count means the index matches HEAD, so `--cached` is empty by construction and
+    // the second subprocess is skipped — which is every observation of an ordinary agent worktree.
+    const [combined, cached] = await Promise.all([
+      read("HEAD"),
+      observed.stagedPaths > 0 ? read("--cached") : Promise.resolve(""),
+    ]);
+    return computeDiffHash(statusContentInput(combined, cached));
   } catch {
-    // Unborn HEAD, or a transient git failure. Null reports "not observed"; hashing the empty
-    // string instead would assert a clean diff the authoritative porcelain may well contradict.
+    // Unborn HEAD, a patch past the byte budget, or a transient git failure. Null reports "not
+    // observed"; hashing the empty pair instead would assert a clean diff the authoritative
+    // porcelain may well contradict.
     return null;
   }
+}
+
+/** The two patches as one hash input. NUL-delimited so no patch body can forge the boundary. */
+function statusContentInput(combined: string, cached: string): string {
+  return `${combined}\u0000cached\n${cached}`;
 }
 
 /** Collect one coherent local snapshot. Divergence pairs each come from one rev-list invocation,
@@ -1283,10 +1323,14 @@ async function collectGitStatus(
   const contentSignature = hashContent
     ? await statusContentSignature(cwd, {
         changedLines: addedLines + deletedLines,
-        // Untracked entries are deliberately not folded in: the rendered diff carries them
-        // name-only, so their bytes cannot make it stale, and their arrival or departure already
-        // moves the file list.
+        // Untracked entries are deliberately not folded in. The rendered diff carries them
+        // without content, and their arrival or departure already moves the file list. The
+        // residual is narrow and knowingly accepted: the diff read also probes each untracked
+        // file's first bytes for a binary flag, so an untracked file rewritten in place from text
+        // to binary changes its card's note and nothing here sees it. Closing that would mean
+        // re-probing every untracked path on every observation — an unbounded cost for a label.
         trackedChanges: allFiles.some((file) => file.status !== "??"),
+        stagedPaths: categories.stagedCount,
       })
     : null;
   return {

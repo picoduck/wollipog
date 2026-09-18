@@ -7764,10 +7764,11 @@ export interface GitStatusInfo extends GitRepositoryFacts {
   addedLines?: number;
   deletedLines?: number;
   /**
-   * Content identity of the uncommitted tracked diff this status describes (`git diff HEAD`,
-   * staged + unstaged). Every other field here describes the change set's shape, so this is the
-   * only one that moves when an in-place edit rewrites a line without adding, removing, or
-   * staging anything.
+   * Content identity of the uncommitted tracked diff this status describes — HEAD versus the
+   * worktree together with the index-versus-HEAD partition, so it covers both the content the
+   * diff renders and which pane each hunk falls in. Every other field here describes the change
+   * set's shape, so this is the only one that moves when an in-place edit rewrites a line, or an
+   * external `git add` restages one of several hunks, without changing any status entry.
    *
    * A present null means the runner checked and did not compute it — the change set is larger
    * than the status read's hashing budget, or HEAD is unborn. Omitted by pre-v165 runners. Both

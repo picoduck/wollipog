@@ -22,6 +22,7 @@ import {
   loadGitLabReviewThreads,
   markStagedHunks,
   MAX_GIT_STATUS_FILES,
+  MAX_STATUS_CONTENT_HASH_BYTES,
   MAX_STATUS_CONTENT_HASH_LINES,
   mapWithConcurrency,
   openPr,
@@ -417,7 +418,7 @@ test("status bounds the file payload while preserving complete dirty counts", as
  * caller. That is the #1285 reproduction expressed as stdout.
  */
 function stubStatusRead(
-  read: () => { patch: string; numstat: string; porcelain?: string },
+  read: () => { patch: string; numstat: string; porcelain?: string; cached?: string },
 ): string[][] {
   const calls: string[][] = [];
   setGitRunnerForTests(async (_cwd, args) => {
@@ -430,7 +431,9 @@ function stubStatusRead(
       return read().porcelain ?? " M a.ts\n";
     }
     if (command === "--no-optional-locks diff HEAD --numstat") return read().numstat;
-    if (args.includes("--unified=0")) return read().patch;
+    if (args.includes("--unified=0")) {
+      return args.includes("--cached") ? read().cached ?? "" : read().patch;
+    }
     return "";
   });
   return calls;
@@ -484,12 +487,75 @@ test("status declines to hash a change set past its budget rather than reading i
 
 test("a worktree with no tracked change is hashed without spawning a diff to be told so", async (t) => {
   t.after(() => setGitRunnerForTests());
-  // Untracked-only: the rendered diff carries those name-only, so there is no content to hash.
+  // Untracked-only: the rendered diff carries those without content, so there is none to hash.
   const calls = stubStatusRead(() => ({ patch: patchOf("TWO"), numstat: "", porcelain: "?? new.ts\n" }));
 
   const untrackedOnly = await gitStatus("/repo");
   assert.match(untrackedOnly.contentSignature ?? "", /^[0-9a-f]{64}$/);
   assert.equal(calls.some((args) => args.includes("--unified=0")), false);
+});
+
+test("status sees an external restage that leaves the file MM and every total identical", async (t) => {
+  t.after(() => setGitRunnerForTests());
+  // `git diff HEAD` spans the index, so moving a hunk across it does not change one byte of the
+  // combined patch — nor the `MM` porcelain code, the staged count, or the numstat totals. The
+  // rendered diff DOES move: the per-hunk staged flags and the staged/unstaged panes follow the
+  // index. Folding the index-versus-HEAD patch into the identity is what sees it.
+  let cached = patchOf("TWO");
+  const calls = stubStatusRead(() => ({
+    patch: patchOf("TWO"),
+    numstat: SAME_SHAPE_NUMSTAT,
+    porcelain: "MM a.ts\n",
+    cached,
+  }));
+
+  const before = await gitStatus("/repo");
+  assert.equal(before.stagedCount, 1);
+  assert.equal((await gitStatus("/repo")).contentSignature, before.contentSignature);
+
+  cached = patchOf("TWO").replace("@@ -2 +2 @@", "@@ -2,2 +2,2 @@");
+  const after = await gitStatus("/repo");
+  assert.deepEqual(
+    { ...after, contentSignature: null },
+    { ...before, contentSignature: null },
+    "the combined diff and every status fact are unchanged",
+  );
+  assert.notEqual(after.contentSignature, before.contentSignature);
+  assert.ok(calls.some((args) => args.includes("--cached") && args.includes("--unified=0")));
+});
+
+test("status skips the index read when porcelain reports nothing staged", async (t) => {
+  t.after(() => setGitRunnerForTests());
+  // The ordinary agent worktree: everything unstaged. A zero staged count means the index matches
+  // HEAD, so the second subprocess would only ever return an empty patch.
+  const calls = stubStatusRead(() => ({ patch: patchOf("TWO"), numstat: SAME_SHAPE_NUMSTAT }));
+
+  assert.match((await gitStatus("/repo")).contentSignature ?? "", /^[0-9a-f]{64}$/);
+  assert.equal(calls.some((args) => args.includes("--cached")), false);
+});
+
+test("the content read caps its own buffer instead of spending git's shared ceiling", async (t) => {
+  t.after(() => setGitRunnerForTests());
+  // A line count is not a byte count: one replaced 40 MiB minified line is `1\t1` to numstat and
+  // clears the line guard. Without a narrower ceiling every observation would buffer to 64 MiB
+  // before failing.
+  const seen: Array<number | undefined> = [];
+  setGitRunnerForTests(async (_cwd, args, opts) => {
+    const command = args.join(" ");
+    if (command === "--no-optional-locks status --porcelain=v1 --untracked-files=all") return " M a.ts\n";
+    if (command === "--no-optional-locks diff HEAD --numstat") return SAME_SHAPE_NUMSTAT;
+    if (args.includes("--unified=0")) {
+      seen.push(opts?.maxBuffer);
+      throw Object.assign(new Error("stdout maxBuffer length exceeded"), { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" });
+    }
+    return "";
+  });
+
+  const status = await gitStatus("/repo");
+  assert.deepEqual(seen, [MAX_STATUS_CONTENT_HASH_BYTES]);
+  assert.ok(MAX_STATUS_CONTENT_HASH_BYTES < 64 * 1024 * 1024, "narrower than git's shared ceiling");
+  assert.equal(status.contentSignature, null, "and the overrun degrades to shape-only comparison");
+  assert.equal(status.hasChanges, true, "without disturbing the authoritative porcelain facts");
 });
 
 test("legacy ahead and behind retain upstream fallback when default-base facts are unavailable", async (t) => {
