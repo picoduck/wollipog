@@ -6,8 +6,10 @@ import {
   type RunnerView,
   type SessionEvent,
   type SessionView,
+  type SessionWorktreeCreateOperationSummary,
+  type SessionWorktreeProgressPhase,
 } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
@@ -21,7 +23,10 @@ import "../styles.css";
  * `?pagination=1` resolves a bounded opening window and then holds the automatic earlier-page
  * request in flight for inspection. `?pagination=resolve` serves multiple variable-height pages;
  * `?event-heavy=1` makes 200 raw opening events collapse into one partial rendered response, and
- * `?live=1` adds a live tail event during the first prepend. */
+ * `?live=1` adds a live tail event during the first prepend. With `?worktree-recovery=1`,
+ * `?create-progress=complete|fail` answers replacement creation as a progress-aware control plane
+ * whose phases advance every `?phase-ms=<ms>`; the operation lives in sessionStorage so a reload
+ * rejoins it. Without it the fixture answers like an older, synchronous control plane. */
 const params = new URLSearchParams(window.location.search);
 const mode = params.get("mode") === "preview" ? ("preview" as const) : ("expanded" as const);
 const frameHeight = Number(params.get("height") ?? "600");
@@ -34,6 +39,8 @@ const liveDuringPagination = params.get("live") === "1";
 const paginationDelay = Number(params.get("pagination-delay") ?? "80");
 const settled = params.get("settled") === "1";
 const worktreeRecoveryFixture = params.get("worktree-recovery") === "1";
+const createProgress = params.get("create-progress");
+const phaseMs = Number(params.get("phase-ms") ?? "400");
 
 const SESSION_ID = "recovery-e2e-session";
 
@@ -193,10 +200,49 @@ const navigation: ViewNavigation = {
 
 /** The default endpoints never answer, keeping recovery active for geometry tests. Pagination mode
  * resolves only the opening window; its next request stays pending so loading state is observable. */
+const OPERATION_KEY = "recovery-e2e-create-operation";
+const FIXTURE_PHASES: SessionWorktreeProgressPhase[] = ["fetching_remote", "materializing", "running_setup", "activating"];
+
+/** Derives the fixture create's state from elapsed time, so progress is identical across reloads. */
+function fixtureOperation(): SessionWorktreeCreateOperationSummary | null {
+  const raw = sessionStorage.getItem(OPERATION_KEY);
+  if (!raw) return null;
+  const { startedAt, branch, baseRef } = JSON.parse(raw) as { startedAt: number; branch: string; baseRef?: string };
+  const coordinates = { branch, ...(baseRef ? { baseRef } : {}) };
+  const index = Math.floor((Date.now() - startedAt) / phaseMs);
+  const failAt = FIXTURE_PHASES.indexOf("running_setup");
+  if (createProgress === "fail" && index > failAt) {
+    return {
+      id: "fixture-create", status: "failed", phase: "running_setup",
+      error: "Setup step \"pnpm install\" exited with code 1.", ...coordinates,
+    };
+  }
+  if (index >= FIXTURE_PHASES.length) return { id: "fixture-create", status: "completed", ...coordinates };
+  return { id: "fixture-create", status: "in_progress", phase: FIXTURE_PHASES[index]!, ...coordinates };
+}
+
+function recoveredByCreate(input: { branch: string; baseRef?: string }) {
+  return {
+    worktree: {
+      id: "created-replacement",
+      path: `/repos/wollipog/worktrees/${input.branch}`,
+      branch: input.branch,
+      ...(input.baseRef ? { baseRef: input.baseRef } : {}),
+      source: "created" as const,
+    },
+    session: {
+      ...session,
+      status: "idle" as const,
+      column: "review" as const,
+      worktreePath: `/repos/wollipog/worktrees/${input.branch}`,
+      worktreeRecovery: undefined,
+    },
+  };
+}
+
 let tailRequestCount = 0;
 const client = {
   ...api,
-  session: () => new Promise<never>(() => {}),
   getSessionEventPage: () => new Promise<never>(() => {}),
   getSessionEventTailPage: (_id: string, before: number | undefined, eventEpoch: number) => {
     tailRequestCount += 1;
@@ -242,22 +288,35 @@ const client = {
       hasMoreOlder: true, turnAligned: eventHeavyOpening ? false : true, cacheComplete: true,
     });
   },
-  createSessionWorktree: async (_id: string, input: { branch: string; baseRef?: string }) => ({
-    worktree: {
-      id: "created-replacement",
-      path: `/repos/wollipog/worktrees/${input.branch}`,
-      branch: input.branch,
-      ...(input.baseRef ? { baseRef: input.baseRef } : {}),
-      source: "created" as const,
-    },
-    session: {
-      ...session,
-      status: "idle" as const,
-      column: "review" as const,
-      worktreePath: `/repos/wollipog/worktrees/${input.branch}`,
-      worktreeRecovery: undefined,
-    },
-  }),
+  createSessionWorktreeWithProgress: async (_id: string, input: { branch: string; baseRef?: string }) => {
+    if (!createProgress) return recoveredByCreate(input);
+    const existing = fixtureOperation();
+    if (existing?.status === "failed") {
+      sessionStorage.removeItem(OPERATION_KEY);
+      throw new ApiError(existing.error, 409, undefined, { operation: existing });
+    }
+    if (existing?.status === "completed") {
+      sessionStorage.removeItem(OPERATION_KEY);
+      return { operation: { id: existing.id, status: "completed" as const }, ...recoveredByCreate(existing) };
+    }
+    if (!existing) {
+      sessionStorage.setItem(OPERATION_KEY, JSON.stringify({ startedAt: Date.now(), ...input }));
+    }
+    return { operation: { id: "fixture-create", status: "in_progress" as const } };
+  },
+  sessionWorktreeOperations: async () => {
+    if (!createProgress) throw new ApiError("Route GET not found", 404);
+    const operation = fixtureOperation();
+    return { operations: operation ? [operation] : [] };
+  },
+  session: async () => {
+    const operation = fixtureOperation();
+    if (operation?.status === "completed") {
+      sessionStorage.removeItem(OPERATION_KEY);
+      return recoveredByCreate(operation);
+    }
+    return new Promise<never>(() => {});
+  },
   selectSessionWorktree: async (_id: string, path: string) => ({
     worktree: session.worktrees?.find((worktree) => worktree.path === path),
     session: {

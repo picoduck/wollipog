@@ -127,10 +127,12 @@ export function useRecoveryWorktreeCreation({
           // The session record is the only remaining authority on what happened.
           const { session: current } = await api.session(sessionId);
           if (!live()) return;
-          onSession(current);
-          step = current.worktreeRecovery?.recoveryId === recoveryIdRef.current && current.worktreeRecovery
-            ? { kind: "failed", error: ENDED_WITHOUT_RESULT, ...(lastPhase ? { phase: lastPhase } : {}) }
-            : { kind: "completed" };
+          if (current.worktreeRecovery && current.worktreeRecovery.recoveryId === recoveryIdRef.current) {
+            onSession(current);
+            step = { kind: "failed", error: ENDED_WITHOUT_RESULT, ...(lastPhase ? { phase: lastPhase } : {}) };
+          } else {
+            step = { kind: "completed", session: current };
+          }
           break;
         }
         step = operationStep(found);
@@ -168,7 +170,7 @@ export function useRecoveryWorktreeCreation({
     const run = ++runRef.current;
     setCreation({ status: "creating" });
     let step = await post(coordinates);
-    if (step.kind !== "progress" && step.id && shownTerminalRef.current.delete(step.id)) {
+    if (step.kind === "failed" && step.id && shownTerminalRef.current.delete(step.id)) {
       // That answer was the already-shown outcome of an earlier attempt, now consumed. Start anew.
       step = await post(coordinates);
     }

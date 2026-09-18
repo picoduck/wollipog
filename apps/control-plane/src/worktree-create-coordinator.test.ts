@@ -125,3 +125,60 @@ test("base ref is part of the in-flight identity", async () => {
   assert.notEqual(otherBase.id, first.id);
   assert.equal(starts, 2);
 });
+
+test("a failed create keeps the phase it stopped in", async () => {
+  let fail!: (error: Error) => void;
+  const coordinator = new WorktreeCreateCoordinator(60_000, () => "worktree_phase_failed");
+  coordinator.startOrJoin(coordinates, () => new Promise((_resolve, reject) => { fail = reject; }));
+  await flush();
+  coordinator.recordProgress("runner-1", {
+    type: "session_worktree_progress",
+    requestId: "worktree_phase_failed",
+    sessionId: "session-1",
+    phase: "running_setup",
+  });
+  fail(new Error("runner request timed out"));
+  await flush();
+  assert.deepEqual(coordinator.startOrJoin(coordinates, async () => ({ snapshot })), {
+    id: "worktree_phase_failed",
+    status: "failed",
+    error: "runner request timed out",
+    phase: "running_setup",
+  });
+});
+
+test("listing a session's creates is read-only and omits snapshots and superseded results", async () => {
+  let nextId = 0;
+  let starts = 0;
+  let complete!: (value: { snapshot: SessionSnapshot }) => void;
+  const coordinator = new WorktreeCreateCoordinator(60_000, () => `worktree_${++nextId}`);
+  coordinator.startOrJoin(coordinates, () => {
+    starts += 1;
+    return new Promise((resolve) => { complete = resolve; });
+  });
+  coordinator.startOrJoin({ ...coordinates, sessionId: "session-2" }, () => new Promise(() => {}));
+  await flush();
+  coordinator.recordProgress("runner-1", {
+    type: "session_worktree_progress",
+    requestId: "worktree_1",
+    sessionId: "session-1",
+    phase: "fetching_remote",
+  });
+  assert.deepEqual(coordinator.listForSession("session-1"), [{
+    id: "worktree_1", status: "in_progress", phase: "fetching_remote", branch: "fix/one", baseRef: "origin/main",
+  }]);
+
+  complete({ snapshot });
+  await flush();
+  assert.deepEqual(coordinator.listForSession("session-1"), [{
+    id: "worktree_1", status: "completed", branch: "fix/one", baseRef: "origin/main",
+  }], "completion is reported without its snapshot");
+  coordinator.listForSession("session-1");
+  assert.equal(coordinator.startOrJoin(coordinates, async () => ({ snapshot })).status, "completed",
+    "reading never consumes a terminal result");
+  assert.equal(starts, 1);
+
+  coordinator.invalidateSession("session-1");
+  assert.deepEqual(coordinator.listForSession("session-1"), [],
+    "a superseded create is not offered to a rejoining client");
+});

@@ -784,12 +784,6 @@ export function createApiClient(transport: ApiTransport) {
 
   restart: (id: string) => req<SessionView>(`/api/sessions/${id}/restart`, { method: "POST" }),
 
-  createSessionWorktree: (id: string, input: { branch: string; baseRef?: string }) =>
-    req<{ session: SessionView; worktree?: SessionWorktreeView }>(
-      `/api/sessions/${encodeURIComponent(id)}/worktrees`,
-      { method: "POST", body: JSON.stringify(input) },
-    ),
-
   /** Progress-aware create. A current control plane acknowledges with an `in_progress` operation
    * that repeating the exact coordinates joins; an older one ignores `progress` and answers with
    * the complete synchronous result. */

@@ -3583,6 +3583,30 @@ textarea {
 .worktree-recovery-controls .ui-select { width: 100%; min-width: 0; }
 .worktree-recovery-controls .btn { justify-self: start; }
 .worktree-recovery-error { color: var(--danger-text) !important; }
+.worktree-recovery-progress {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 8px;
+  align-items: baseline;
+  margin-top: 6px;
+  font-size: var(--text-xs);
+}
+.worktree-recovery-progress-phase { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.worktree-recovery-progress-step { color: var(--text-dim); white-space: nowrap; }
+.worktree-recovery-progress progress {
+  grid-column: 1 / -1;
+  width: 100%;
+  height: 4px;
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--warning) 20%, var(--border));
+  accent-color: var(--warning);
+}
+.worktree-recovery-progress progress::-webkit-progress-bar { background: transparent; }
+.worktree-recovery-progress progress::-webkit-progress-value { background: var(--warning); }
+.worktree-recovery-progress progress::-moz-progress-bar { background: var(--warning); }
 @media (max-width: 600px) {
   .quarantine-banner {
     align-items: stretch;

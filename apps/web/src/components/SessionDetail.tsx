@@ -133,6 +133,7 @@ import { useGovernanceAudit, useGovernanceTimeline } from "./useGovernanceAudit.
 import { SessionHeader } from "./SessionHeader.js";
 import { WorktreeSetupNotice } from "./WorktreeSetupNotice.js";
 import { WorktreeRecoveryCard } from "./WorktreeRecoveryCard.js";
+import { useRecoveryWorktreeCreation } from "../recovery-worktree-creation.js";
 import { worktreeSetupNoticeSessionIds } from "../worktree-setup-notice.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { useAccessibleMenu, useDismissiblePopover } from "./interactions.js";
@@ -3261,12 +3262,12 @@ function SessionDetailLoaded({
   }, [api, busy, loadSession, restartPending, runnerOnline, session.id, session.status,
     session.stopOperation?.status]);
   const failedSetupWorktree = session.worktrees?.find((worktree) => worktree.setup?.status === "failed");
+  const { creation: recoveryCreation, create: createRecoveryWorktreeWithProgress } =
+    useRecoveryWorktreeCreation({ api, session, onSession: loadSession });
   const createRecoveryWorktree = useCallback(async (input: { branch: string; baseRef?: string }) => {
-    const generation = viewGenerationRef.current;
     setError(null);
-    const result = await api.createSessionWorktree(session.id, input);
-    if (viewGenerationRef.current === generation) loadSession(result.session);
-  }, [api, loadSession, session.id]);
+    await createRecoveryWorktreeWithProgress(input);
+  }, [createRecoveryWorktreeWithProgress]);
   const selectRecoveryWorktree = useCallback(async (path: string) => {
     const generation = viewGenerationRef.current;
     setError(null);
@@ -4938,6 +4939,7 @@ function SessionDetailLoaded({
               <WorktreeRecoveryCard
                 session={session}
                 runnerOnline={runnerOnline}
+                creation={recoveryCreation}
                 onCreate={createRecoveryWorktree}
                 onSelect={selectRecoveryWorktree}
               />
