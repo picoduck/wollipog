@@ -78,7 +78,9 @@ a throwaway project whose `--settings` hook logged every payload, then comparing
 above were taken on) and 2.1.277 (the version installed on this machine) behaved identically, over
 repeated runs:
 
-- A `"matcher": "Bash"` hook runs for the Bash calls a subagent makes. No subagent call was missed.
+- A hook runs for the Bash calls a subagent makes; no subagent call was missed. Measured both with
+  a bare `"matcher": "Bash"` and with the alternation the runner writes
+  (`MANAGED_WORKTREE_GUARD_MATCHER`), which behaved identically.
 - A subagent's payload adds `agent_id` and `agent_type` to the top-level shape, which is how such a
   call can be recognised in the hook.
 - The payload's `cwd` is the directory the subagent's command actually runs in — confirmed call by
@@ -89,7 +91,10 @@ repeated runs:
   directory each time (the top-level shell does keep its own).
 
 Hence the session directory could not place a subagent's relative operand either, and the amendment
-above.
+above. The runs were made in `bypassPermissions`, which never consults the control channel, so they
+establish the hook's coverage of a subagent — not whether Claude emits a `can_use_tool` frame with
+`parent_tool_use_id` in `default`/`auto`. The handler has carried that branch since #1333/#1343
+regardless; #1361 only decides which directory it uses.
 
 ## Fail closed, and the fail-safe
 

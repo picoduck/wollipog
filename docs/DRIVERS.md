@@ -590,8 +590,11 @@ harmless because Claude never reaches the control channel for a command the hook
   in a throwaway project with a `PreToolUse` hook that logged its payload, and comparing that
   payload against what each command's own `pwd` printed. Both versions behaved identically, over
   repeated runs:
-  - A `PreToolUse` hook supplied through `--settings` with `"matcher": "Bash"` DOES run for the
-    Bash calls a subagent makes. Every subagent Bash call was hooked; none was missed.
+  - A `PreToolUse` hook supplied through `--settings` DOES run for the Bash calls a subagent makes.
+    Every subagent Bash call was hooked; none was missed. Measured both with a bare
+    `"matcher": "Bash"` and with the alternation the runner actually writes
+    (`MANAGED_WORKTREE_GUARD_MATCHER`, `Bash|Edit|MultiEdit|Write|Read|NotebookEdit|Grep|Glob`);
+    the two behaved identically, so the recorded result is the production configuration's.
   - The payload has the same shape as a top-level one and adds `agent_id` and `agent_type`
     (`"general-purpose"` here), which is how a subagent's call can be told apart in the hook. The
     full key set observed was `agent_id`, `agent_type`, `cwd`, `effort`, `hook_event_name`,
@@ -612,6 +615,13 @@ harmless because Claude never reaches the control channel for a command the hook
   session-directory check reads it as leaving: the #1333 false refusal, reproduced for subagents.
   The hook has the right directory and has already judged the command, so the channel treats a
   subagent's request exactly like a top-level one.
+
+  What the measurement does NOT establish: it ran in `bypassPermissions`, where the CLI never
+  consults the control channel, so it proves the hook fires for a subagent — not that Claude emits
+  a `can_use_tool` frame carrying `parent_tool_use_id` in `default`/`auto`. That is unchanged by
+  #1361 either way: the handler has had a subagent branch since #1343, and if no such frame is ever
+  emitted the branch simply never runs. What #1361 settles is which directory it must use when it
+  does.
 - **Operands are judged physically as well as by spelling.** The shared matcher resolves each
   external operand one component at a time from the physical form of its directory, compares
   against the physical protections (a worktree reached through a symlinked prefix is not refused
