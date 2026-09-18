@@ -834,7 +834,9 @@ export function pathTargetsGuardState(path: string, cwd: string, directory: stri
  *
  * - Every command in the list has to be an inspection, not merely the one holding the operand. The
  *   shell carries state across `;` and `&&`: `hash -p /bin/rm ls; ls -rf <ancestor>` runs `rm`, and
- *   a bare `PATH=` assignment or a function definition rebinds a later name the same way.
+ *   a bare `PATH=` assignment or a function definition rebinds a later name the same way. Each one
+ *   is judged against the ancestor IT names, so two `find`s at different depths in one list are
+ *   each held to their own bound rather than to the tightest in the list.
  * - Anything that routes one command's output into another, or nests a command inside another:
  *   `|`, `|&`, `( )`, `<( )`, `>( )`, a backtick, or an operator not modelled here. A listing piped
  *   into `xargs rm -rf` is not an inspection, and neither is a removal whose operand is a command
@@ -921,9 +923,11 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
       continue;
     }
     if (!REDIRECTIONS.has(op)) return null;
-    // `2>file`: the IO number is a word of its own here, but it belongs to the redirection.
-    if (words !== null && previousWord !== null && /^\d+$/u.test(previousWord) &&
-        words[words.length - 1] === previousWord) words.pop();
+    // `2>file`: the IO number is a word of its own here, but it belongs to the redirection. Only a
+    // LEADING one is claimed: `shell-quote` drops the adjacency that separates `2>x` from a spaced
+    // numeric argument, and claiming that one ate the value of `-maxdepth`.
+    if (words !== null && words.length === 1 && previousWord !== null &&
+        words[0] === previousWord && /^\d+$/u.test(previousWord)) words.pop();
     redirected = true;
     previousWord = null;
   }
@@ -1020,20 +1024,29 @@ export function commandTargetsGuardState(
     }
     return null;
   }
+  // Relate every operand first. `inside` refuses outright, and each segment keeps the tightest
+  // ancestor IT names, which is the depth its own walk has to respect. Classifying afterwards, once
+  // per segment, keeps a long command list linear rather than quadratic.
+  const bounds: number[] = [];
+  let namesAncestor = false;
   for (const { operands } of segments) {
+    let bound = Number.POSITIVE_INFINITY;
     for (const value of operands) {
       if (value === null) continue;
       const relation = guardStateRelation(value, cwd, root);
       if (relation === null) continue;
       if (relation.kind === "inside") return GUARD_STATE_REFUSAL;
-      // Every command in the list has to be an inspection, not just the one holding this operand:
-      // an earlier `hash -p`, `PATH=`, or function definition decides what a later `ls` runs.
-      const bounded = segments.every(({ words }) =>
-        words !== null && inspectsAncestorOnly(words, relation.separation));
-      if (!bounded) return GUARD_STATE_REFUSAL;
+      namesAncestor = true;
+      bound = Math.min(bound, relation.separation);
     }
+    bounds.push(bound);
   }
-  return null;
+  if (!namesAncestor) return null;
+  // Every command in the list has to be an inspection, not only the ones naming an ancestor: an
+  // earlier `hash -p`, `PATH=`, or function definition decides what a later `ls` runs.
+  const inspection = segments.every(({ words }, index) =>
+    words !== null && inspectsAncestorOnly(words, bounds[index] ?? 0));
+  return inspection ? null : GUARD_STATE_REFUSAL;
 }
 
 /**

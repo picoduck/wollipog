@@ -641,10 +641,14 @@ test("a directory that merely contains the guard state can be inspected without 
     `ls ${home}; stat ${data}`,
     `ls ${home};`,
     // A redirection belongs to the command it follows; its target is judged as a location only,
-    // and an IO number belongs to the redirection rather than to the command.
+    // and a LEADING IO number belongs to the redirection rather than to the command.
     `ls ${home} > ${join(project, "listing.txt")}`,
     `ls ${home} 2>/dev/null`,
     `2>/dev/null ls ${home}`,
+    // A spaced numeric argument is not an IO number: this one is the depth bound.
+    `find ${home} -maxdepth 2 > ${join(project, "listing.txt")}`,
+    // Each command is held to the ancestor IT names, not to the tightest one in the list.
+    `find ${home} -maxdepth 2; find ${data} -maxdepth 1`,
   ]) {
     assert.equal(commandTargetsGuardState(command, project, directory), null, command);
   }
@@ -781,6 +785,23 @@ test("the guard hook allows an ancestor listing and still refuses an ancestor sw
     const outcome = runManagedWorktreeGuardDecision(hookInput({ tool_input: { command } }), f.protectionsFile);
     assert.ok(outcome.stdout.includes(GUARD_STATE_REFUSAL), `refused: ${command}`);
   }
+});
+
+test("a long list of inspections is classified in linear time", () => {
+  // The first cut of the all-segments rule re-scanned every segment for every ancestor operand,
+  // which made a command list quadratic: 30,000 characters of `ls /;` took over three seconds
+  // inside a hook that runs synchronously before every Bash call.
+  const measure = (repetitions: number): number => {
+    const command = "ls /;".repeat(repetitions);
+    const started = performance.now();
+    assert.equal(commandTargetsGuardState(command, WORKTREE, "/a/b"), null);
+    return performance.now() - started;
+  };
+  measure(500); // Warm the module and the JIT before either measurement counts.
+  const small = Math.max(measure(500), 1);
+  const large = measure(6_000);
+  // Twelve times the input. Linear work lands near 12x; the quadratic form measured about 69x.
+  assert.ok(large / small < 25, `12x the input took ${(large / small).toFixed(1)}x the time`);
 });
 
 test("every ancestor is separated by its own depth, and every descendant is inside", () => {
