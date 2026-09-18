@@ -46,6 +46,7 @@ test("raw Git and filesystem retirement forms are refused with managed-discard g
     "timeout 30 rm -rf .",
     "eval 'rm -rf .'",
     "sudo -u root rm -rf .",
+    "env -u PATH rm -rf .",
     "find -L . -delete",
     "find . -exec rm -rf {} +",
     `find ${protectedPath} -execdir rm -rf {} +`,
@@ -68,6 +69,8 @@ test("normal work inside a managed worktree and unmanaged retirement remain avai
     "git -C /projects/repo worktree remove /user/worktrees/unmanaged",
     "rm -rf /user/worktrees/unmanaged",
     "mv src/old.ts src/new.ts",
+    "mv -t . ../scratch.ts",
+    "find . -type f -exec grep -l TODO {} +",
   ]) assert.equal(commandTargetsManagedWorktree(command, protectedPath, protection), null, command);
   assert.equal(commandTargetsManagedWorktree("cd apps/web", "/projects/repo", protection), null,
     "a provider still outside its newly selected worktree may navigate in the original repository");

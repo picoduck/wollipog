@@ -201,6 +201,10 @@ function commandWords(
           index += 1;
           continue;
         }
+        if (["-u", "--unset", "-C", "--chdir", "-S", "--split-string"].includes(value)) {
+          index += 2;
+          continue;
+        }
         if (value.startsWith("-")) { index += 1; continue; }
         break;
       }
@@ -329,10 +333,22 @@ function segmentRefusal(
     return words.slice(1).some((token) => operandTargetsProtected(token, cwd, environment, protections));
   }
   if (["mv", "move", "rename-item"].includes(executable)) {
-    const source = words.find((token) => {
+    let source: ShellToken | undefined;
+    for (let index = 0; index < words.length; index += 1) {
+      const token = words[index];
       const value = word(token, cwd, environment);
-      return value !== "--" && !value?.startsWith("-");
-    });
+      if (value === "--") {
+        source = words[index + 1];
+        break;
+      }
+      if (["-t", "--target-directory", "-S", "--suffix"].includes(value ?? "")) {
+        index += 1;
+        continue;
+      }
+      if (value?.startsWith("-")) continue;
+      source = token;
+      break;
+    }
     return operandTargetsProtected(source, cwd, environment, protections);
   }
   if (executable === "find") {
@@ -347,13 +363,19 @@ function segmentRefusal(
           word(token, cwd, environment) === "!"));
       const roots = words.slice(rootStart, expressionStart < 0 ? actionIndex : expressionStart);
       const effectiveRoots = roots.length ? roots : ["."];
-      if (effectiveRoots.some((token) => operandTargetsProtected(token, cwd, environment, protections))) return true;
+      const protectedRoot = effectiveRoots.some((token) =>
+        operandTargetsProtected(token, cwd, environment, protections));
       const action = word(words[actionIndex], cwd, environment);
-      if (action !== "-delete" && depth < 3) {
+      if (action === "-delete") return protectedRoot;
+      if (depth < 3) {
         const end = words.findIndex((token, index) => index > actionIndex &&
           [";", "+"].includes(word(token, cwd, environment) ?? ""));
         const nested = words.slice(actionIndex + 1, end < 0 ? undefined : end);
         if (segmentRefusal(nested, cwd, new Map(environment), protections, depth + 1)) return true;
+        const nestedExecutable = commandWords(nested, cwd, new Map(environment))?.executable ?? "";
+        if (protectedRoot && ["rm", "rmdir", "unlink", "trash", "trash-put", "mv", "move"].includes(nestedExecutable)) {
+          return true;
+        }
       }
     }
   }
