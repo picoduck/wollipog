@@ -200,6 +200,53 @@ test("ACP driver keeps orchestrator out of provider modes and refuses provider c
   assert.deepEqual(applied, { model: "model-b" });
 });
 
+test("ACP exact-adapter identity assertion follows the Orchestrator role, not the preset mode", async () => {
+  // The mock agent identifies as `mock-acp-agent`, so the pinned-release assertion must reject
+  // every launch that holds the Orchestrator role, and only those. An additive shape carries an
+  // ordinary provider permission mode, so keying the assertion on the preset literal would have
+  // let it through unchecked (#1306).
+  const cwd = await mkdtemp(join(tmpdir(), "wollipog-acp-identity-"));
+  const launch = (options: Partial<DriverOptions>): AcpDriver => new AcpDriver(
+    {
+      command: process.execPath,
+      args: [fileURLToPath(new URL("../../mock-agent/index.mjs", import.meta.url))],
+      cwd,
+      env: {},
+      context: { kind: "native" },
+      config: {},
+      ...options,
+    },
+    { onEvent: () => undefined, onStderr: () => undefined, onExit: () => undefined },
+  );
+  const refusal = /Orchestrator ACP launch refused/;
+  const drivers: AcpDriver[] = [];
+  try {
+    // Additive shape: the role arrives as runner-owned metadata while the permission mode stays an
+    // ordinary provider mode. This is the case the preset literal could not see.
+    const additive = launch({
+      config: { permissionMode: "default" },
+      orchestrator: { strictProjectIsolation: false },
+    });
+    drivers.push(additive);
+    await assert.rejects(() => additive.initialize(), refusal);
+
+    // Coupled preset with no role metadata: legacy sessions predate the field, so the preset
+    // literal must keep arming the assertion on its own.
+    const preset = launch({ config: { permissionMode: "orchestrator" } });
+    drivers.push(preset);
+    await assert.rejects(() => preset.initialize(), refusal);
+
+    // An ordinary session holds no Orchestrator authority and is unaffected by the pin.
+    const ordinary = launch({ config: { permissionMode: "default" } });
+    drivers.push(ordinary);
+    await assert.doesNotReject(() => ordinary.initialize());
+  } finally {
+    for (const driver of drivers) driver.dispose();
+    await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    await rm(cwd, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
 test("real Gemini CLI 0.50.0 initialize fixture degrades omitted stable capabilities", async () => {
   const frame = await fixture("gemini-cli-0.50.0.initialize.json");
   const got = negotiateAcpInitialize(frame.result);
