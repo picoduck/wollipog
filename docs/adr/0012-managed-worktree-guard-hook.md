@@ -124,8 +124,15 @@ What is done instead:
   prefix) are matched on their resolved path and are part of the hook matcher. Reads are refused
   too: the provider has no need of them. "Resolved" means `~`, `~name`, `~+`, and `$HOME` are expanded and the
   nearest existing ancestor is passed through `realpath`, so a home-relative spelling or a symlink
-  planted in the workspace is judged by where it lands. Third-party MCP filesystem tools are not
-  classifiable by name and remain outside the veto, like any other indirection.
+  planted in the workspace is judged by where it lands. A Bash operand that merely CONTAINS the
+  directory is the one carve-out (#1334): `ls`, `du`, `stat`, and a `find` whose `-maxdepth` stops
+  at or above it may inspect an ancestor, because they name the hook directory at most and never
+  enumerate it. Everything else on an ancestor stays refused — `rm -rf ~`, `grep -r`, `ls -R`, an
+  unbounded `find`, a wrapper such as `sudo`, and any segment carrying an unexpanded variable — as
+  do the file tools, which have no bounded form. `du` is the accepted exception within the
+  carve-out: it walks the tree it is given, so it learns the hook directory's shape and size, but
+  it reads no file contents. Third-party MCP filesystem tools are not classifiable by name and
+  remain outside the veto, like any other indirection.
 - **No free advertising.** The protections path is not exported in the settings `env` block (which
   reaches every tool process); it travels only in the hook command inside the 0600 settings file,
   and the guard accepts it only from there — never from the environment.

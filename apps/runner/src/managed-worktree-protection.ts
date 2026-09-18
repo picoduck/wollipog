@@ -687,7 +687,8 @@ export const PLACELESS_CWD = `${sep}.wollipog-placeless${`${sep}x`.repeat(64)}`;
  * runs as the same OS user, so a permitted command could rewrite that file and disarm the veto.
  * Real integrity against a same-user process needs an OS boundary (#1302); what IS achievable is
  * to refuse every tool call that references the runner's own hook state directory at all — reads
- * included, since the provider never needs them — and to make tampering evident.
+ * included, since the provider never needs them — and to make tampering evident. A command that
+ * merely inspects a DIRECTORY CONTAINING it, without enumerating it, is the one carve-out (#1334).
  *
  * The match is deliberately conservative and of the same strength class as
  * `commandTargetsManagedWorktree`: it inspects command text and resolved tool paths, so both are
@@ -775,24 +776,145 @@ function guardStateCandidates(path: string, cwd: string): string[] {
   return home === literal ? [literal] : [literal, home];
 }
 
-/** A path is out of bounds when it is inside the guard-state directory, or contains it. */
-export function pathTargetsGuardState(path: string, cwd: string, directory: string): boolean {
-  if (!directory || !path || path.includes("\0")) return false;
+/**
+ * How a spelling relates to the guard-state directory. `inside` is the directory itself or anything
+ * beneath it. `ancestor` is a strict ancestor, and carries how many path components separate the
+ * two: a walk that descends no further than that names the directory at most, and never enumerates
+ * what is in it.
+ */
+export type GuardStateRelation = { kind: "inside" } | { kind: "ancestor"; separation: number };
+
+function pathComponents(path: string): number {
+  return normalize(path).split(sep).filter((part) => part && part !== ".").length;
+}
+
+/**
+ * Where a spelling sits relative to the guard-state directory, or `null` when the two are
+ * unrelated. Every candidate is judged twice — by its spelling and by its physical path, since a
+ * symlink anywhere along either one lands elsewhere — and the most restrictive answer wins.
+ */
+export function guardStateRelation(
+  path: string,
+  cwd: string,
+  directory: string,
+): GuardStateRelation | null {
+  if (!directory || !path || path.includes("\0")) return null;
   const root = resolve(directory);
   let realRoot: string | null = null;
+  const separations: number[] = [];
   for (const resolved of guardStateCandidates(path, cwd)) {
-    if (pathContains(root, resolved) || pathContains(resolved, root)) return true;
-    // The lexical spelling is only half of it: a symlink anywhere along either path lands elsewhere.
+    if (pathContains(root, resolved)) return { kind: "inside" };
+    if (pathContains(resolved, root)) separations.push(pathComponents(root) - pathComponents(resolved));
     realRoot ??= canonicalPath(root);
     const realResolved = canonicalPath(resolved);
-    if (pathContains(realRoot, realResolved) || pathContains(realResolved, realRoot)) return true;
+    if (pathContains(realRoot, realResolved)) return { kind: "inside" };
+    if (pathContains(realResolved, realRoot)) {
+      separations.push(pathComponents(realRoot) - pathComponents(realResolved));
+    }
   }
-  return false;
+  return separations.length === 0 ? null : { kind: "ancestor", separation: Math.min(...separations) };
+}
+
+/** A path is out of bounds when it is inside the guard-state directory, or contains it. */
+export function pathTargetsGuardState(path: string, cwd: string, directory: string): boolean {
+  return guardStateRelation(path, cwd, directory) !== null;
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Bounded inspection of an ancestor.
+ *
+ * Refusing every operand that CONTAINS the hook directory also refused `ls /home` and `ls ~` in
+ * every session whose data directory lives under the home directory (#1334), though neither reads
+ * anything the guard owns. The carve-out below is deliberately narrow and fails closed: an operand
+ * that is a strict ancestor is allowed only for a short list of commands whose walk is bounded, and
+ * only in a segment whose every word is known text. An unexpanded variable, a wrapper such as
+ * `sudo`, a recursive flag, or a `find` without a usable depth bound all keep the refusal, as does
+ * every other command — `rm -rf ~` and `grep -r . ~` are refused exactly as before.
+ *
+ * `du` is the accepted exception: it walks the whole tree it is given, so it learns the hook
+ * directory's shape and the size of what is in it. It reads no file contents, and #1334 lists it
+ * among the commands that must be allowed.
+ * ------------------------------------------------------------------------------------------ */
+
+/** `find` options and actions that walk, or act on what they find, without regard to `-maxdepth`. */
+const FIND_UNBOUNDED_WORDS = new Set(["-L", "-follow", "-delete", "-exec", "-execdir", "-ok", "-okdir"]);
+
+function tokenText(token: ShellToken): string | null {
+  if (typeof token === "string") return token;
+  return token != null && typeof token === "object" && "op" in token && token.op === "glob" &&
+      "pattern" in token && typeof token.pattern === "string"
+    ? token.pattern
+    : null;
+}
+
+/** Split a parsed command at every shell operator, so each run of words is classified on its own. */
+function commandSegments(tokens: readonly ShellToken[]): ShellToken[][] {
+  const segments: ShellToken[][] = [];
+  let current: ShellToken[] = [];
+  for (const token of tokens) {
+    if (operator(token) === null) {
+      current.push(token);
+      continue;
+    }
+    segments.push(current);
+    current = [];
+  }
+  segments.push(current);
+  return segments;
+}
+
+/** The program a segment runs, ignoring the leading `NAME=value` assignments a shell strips first. */
+function segmentCommand(words: readonly string[]): string | null {
+  for (const word of words) {
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(word)) continue;
+    return basename(word);
+  }
+  return null;
+}
+
+/** `-R` (bundled or long) turns a listing into a walk. */
+function recursiveListing(word: string): boolean {
+  return word === "--recursive" || (/^-[^-]/u.test(word) && word.includes("R"));
+}
+
+/** The deepest level `find` visits, or `null` when the walk is unbounded or acts on what it finds. */
+function findWalkBound(words: readonly string[]): number | null {
+  let bound: number | null = null;
+  for (const [index, word] of words.entries()) {
+    if (FIND_UNBOUNDED_WORDS.has(word)) return null;
+    if (word !== "-maxdepth") continue;
+    const value = words[index + 1];
+    if (value === undefined || !/^\d+$/u.test(value)) return null;
+    bound = Math.max(bound ?? 0, Number(value));
+  }
+  return bound;
+}
+
+/**
+ * Whether this segment merely inspects an operand sitting `separation` components above the guard
+ * state: it may name the hook directory, but must not enumerate what is inside it.
+ */
+function inspectsAncestorOnly(words: readonly string[], separation: number): boolean {
+  switch (segmentCommand(words)) {
+    case "ls":
+      return !words.some(recursiveListing);
+    case "du":
+    case "stat":
+      return true;
+    case "find": {
+      const bound = findWalkBound(words);
+      return bound !== null && bound <= separation;
+    }
+    default:
+      return false;
+  }
 }
 
 /**
  * Refuse a shell command that references the guard-state directory in any form. Unparsable input
- * is refused rather than allowed: this is the state the veto itself depends on.
+ * is refused rather than allowed: this is the state the veto itself depends on. An operand that is
+ * a strict ancestor of the directory is refused too, unless its command segment is bounded
+ * inspection — see "Bounded inspection of an ancestor" above.
  */
 export function commandTargetsGuardState(
   command: string,
@@ -816,15 +938,18 @@ export function commandTargetsGuardState(
   } catch {
     return GUARD_STATE_REFUSAL;
   }
-  for (const token of tokens) {
-    const value = typeof token === "string"
-      ? token
-      : token != null && typeof token === "object" && "op" in token && token.op === "glob" &&
-          "pattern" in token && typeof token.pattern === "string"
-        ? token.pattern
-        : null;
-    if (value === null) continue;
-    if (pathTargetsGuardState(value, cwd, root)) return GUARD_STATE_REFUSAL;
+  for (const segment of commandSegments(tokens)) {
+    const words = segment.map(tokenText);
+    // A single opaque word (an unexpanded variable) could be a recursion flag or another operand,
+    // so a segment carrying one never qualifies as bounded inspection.
+    const known = words.includes(null) ? null : words as string[];
+    for (const value of words) {
+      if (value === null) continue;
+      const relation = guardStateRelation(value, cwd, root);
+      if (relation === null) continue;
+      if (relation.kind === "inside" || known === null) return GUARD_STATE_REFUSAL;
+      if (!inspectsAncestorOnly(known, relation.separation)) return GUARD_STATE_REFUSAL;
+    }
   }
   return null;
 }
