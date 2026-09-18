@@ -4538,7 +4538,11 @@ export class SessionManager {
         } catch (error) {
           managedPiCleanupError = `managed Pi transcript cleanup failed while changing drivers: ${errText(error)}`;
           meta.status = "stopped";
-          this.store.patchMeta(spec.sessionId, { status: "stopped" });
+          meta.worktreePending = false;
+          this.store.patchMeta(spec.sessionId, {
+            status: "stopped",
+            worktreePending: false,
+          });
           this.refreshCapacityInventorySession(spec.sessionId);
           return;
         }
@@ -8415,6 +8419,13 @@ export class SessionManager {
     }
     if (this.closing.has(sessionId)) {
       durable?.failed("the previous provider process could not be confirmed stopped", "COMMAND_CANCELLED");
+      return;
+    }
+    if (meta.adoptedProviderState?.cleanupContext) {
+      const message = "managed Pi transcript cleanup is pending; Restart this session to retry cleanup before prompting";
+      this.emitEvent(sessionId, { kind: "error", message });
+      this.emitStatus(sessionId, "stopped", message);
+      durable?.failed(message, "INVALID_COMMAND");
       return;
     }
     if (syntheticRecovery && (meta.status === "stopped" || !automaticClaudeRecoveryAllowed(meta))) {

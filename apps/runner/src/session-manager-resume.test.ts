@@ -5800,16 +5800,27 @@ test("failed managed Pi cleanup retains its original context for retry", async (
       agentId: "codex-native",
       driver: "codex",
       command: "codex",
+      useWorktree: true,
     }), false);
     const persisted = h.store.readMeta("resume-session")!;
     assert.equal(persisted.driver, "codex");
     assert.equal(persisted.status, "stopped");
+    assert.equal(persisted.worktreePending, false);
     assert.deepEqual(persisted.adoptedProviderState?.cleanupContext, originalContext);
     const error = h.sent.find(
       (message) => message.type === "session_event" && message.payload.kind === "error" &&
         /managed Pi transcript cleanup failed/u.test(message.payload.message),
     );
     assert.ok(error);
+    h.manager.prompt("resume-session", "must not bypass pending cleanup");
+    await shortDelay();
+    await tick();
+    assert.equal(h.launches.length, 0);
+    const promptError = h.sent.findLast(
+      (message) => message.type === "session_event" && message.payload.kind === "error",
+    );
+    assert.ok(promptError && promptError.type === "session_event" && promptError.payload.kind === "error");
+    assert.match(promptError.payload.message, /Restart this session to retry cleanup/u);
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
