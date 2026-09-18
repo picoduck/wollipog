@@ -17,6 +17,13 @@ const POLL_MS = 1_500;
 const SIDE_CHAT_DRAFT_KEY = "sidechat.draft";
 const PAGE_SIZE = 200;
 
+/**
+ * Sends still awaiting the control plane, by panel scratch scope. A send outlives the panel that
+ * started it — switching right panel mode unmounts it — and a panel mounted meanwhile restores the
+ * very text on its way out; without this it would offer to send it again (#1284).
+ */
+const sendsInFlight = new Map<string, Promise<unknown>>();
+
 /** Prose, so sentence case: these complete the sentence "This side chat's session …". */
 const ENDED_PHRASE: Partial<Record<SessionStatus, string>> = {
   completed: "has finished",
@@ -91,6 +98,17 @@ export function SideChatPanel({
   const childId = sideChat?.session.id;
 
   useEffect(() => () => { mountedRef.current = false; }, []);
+
+  // Inherit a send an earlier mount started, so its text is not offered for sending twice while it
+  // is still in flight. The draft itself is cleared from under this composer when the send lands.
+  useEffect(() => {
+    const pending = sendsInFlight.get(panelScratch);
+    if (!pending) return;
+    let current = true;
+    setSending(true);
+    void pending.finally(() => { if (current) setSending(false); });
+    return () => { current = false; };
+  }, [panelScratch]);
 
   useEffect(() => {
     let current = true;
@@ -228,8 +246,14 @@ export function SideChatPanel({
     const sentRevision = panelScratchRevision(panelScratch, SIDE_CHAT_DRAFT_KEY);
     setSending(true);
     setError(null);
+    const prompted = api.prompt(sideChat.session.id, outgoing);
+    const settled = prompted.catch(() => undefined);
+    sendsInFlight.set(panelScratch, settled);
+    void settled.then(() => {
+      if (sendsInFlight.get(panelScratch) === settled) sendsInFlight.delete(panelScratch);
+    });
     try {
-      const updated = await api.prompt(sideChat.session.id, outgoing);
+      const updated = await prompted;
       // The send landed, so the draft it consumed must not come back — switching modes mid-flight
       // unmounts this panel before `setText("")` runs, and a restored copy of an already-sent
       // message invites sending it twice. Guarded on the revision as well as the text: a draft that

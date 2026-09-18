@@ -393,7 +393,52 @@ export function clearPanelScratchIf(
   revision: number,
 ): void {
   if (panelScratchRevision(scope, key) !== revision) return;
-  if (readPanelScratch(scope, key) === expected) writePanelScratch(scope, key, null);
+  if (readPanelScratch(scope, key) !== expected) return;
+  writePanelScratch(scope, key, null);
+  // A body mounted since the draft was consumed restored it into its own state, and would show it
+  // — and write it straight back — until told (#1284). Removing the stored copy is only half of
+  // consuming it.
+  for (const listener of [...(consumedListeners.get(consumedListenerKey(scope, key)) ?? [])]) {
+    listener(expected);
+  }
+}
+
+/** Bodies currently showing one scope's value, told when that value is consumed out from under them. */
+const consumedListeners = new Map<string, Set<(consumed: string) => void>>();
+
+function consumedListenerKey(scope: string, key: string): string {
+  return JSON.stringify([scope, key]);
+}
+
+function onPanelScratchConsumed(scope: string, key: string, listener: (consumed: string) => void): () => void {
+  const id = consumedListenerKey(scope, key);
+  const listeners = consumedListeners.get(id) ?? new Set();
+  listeners.add(listener);
+  consumedListeners.set(id, listeners);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0 && consumedListeners.get(id) === listeners) consumedListeners.delete(id);
+  };
+}
+
+/**
+ * Write a mounted body's value unless it is exactly what is already held.
+ *
+ * A body mounting reports the value it just restored, and treating that as a new write would
+ * re-stamp the revision — so a draft sent from the previous mount, with its send still in flight,
+ * would look replaced and `clearPanelScratchIf` would leave the sent text behind (#1284). Anything
+ * the user actually types moves the value, so a retyped draft still earns a fresh revision.
+ */
+function syncPanelScratch(
+  scope: string,
+  key: string,
+  value: string | null,
+  retention: PanelScratchRetention,
+): void {
+  hydrate();
+  const held = scratch.get(scope)?.get(key);
+  if (value !== null && held?.value === value && held.retention === retention) return;
+  writePanelScratch(scope, key, value, retention);
 }
 
 /** Forget everything, persisted included. Test-only: state would otherwise leak between cases. */
@@ -555,8 +600,17 @@ function usePanelScratchValue<T extends string>(
 
   const { scope: liveScope, key: liveKey, value, dirty } = current;
   useEffect(() => {
-    writePanelScratch(liveScope, liveKey, dirty ? value : null, retention);
+    syncPanelScratch(liveScope, liveKey, dirty ? value : null, retention);
   }, [dirty, liveKey, liveScope, retention, value]);
+
+  // A value consumed elsewhere — a send that landed after this body remounted — must leave the box
+  // as well as the store. Only while the box still holds exactly what was consumed: anything the
+  // user has typed since is theirs.
+  useEffect(() => onPanelScratchConsumed(liveScope, liveKey, (consumed) => {
+    setEntry((prior) => prior.scope === liveScope && prior.key === liveKey && prior.value === consumed
+      ? { ...prior, value: prior.fallback, dirty: false }
+      : prior);
+  }), [liveKey, liveScope]);
 
   const setValue = useCallback((next: T | ((prior: T) => T)) => {
     setEntry((prior) => {
