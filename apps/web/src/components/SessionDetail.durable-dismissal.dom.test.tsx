@@ -472,7 +472,25 @@ test("a terminal receipt listed beside a held live queue stays dismissible and i
     const receiptBadge = receiptRow.querySelector<HTMLElement>(".queued-badge");
     assert.equal(receiptBadge?.textContent, "Delivery Failed");
     assert.equal(receiptBadge?.classList.contains("held"), false, "a settled receipt is not paused by the held FIFO");
-    assert.notEqual(receiptBadge?.getAttribute("title"), HELD_TITLE);
+    // Session-wide gates run before per-row state, so every surface that explains the row — badge,
+    // Steer, its info popover, and Edit — must carry the receipt's own reason, never a wait.
+    const RECEIPT_REASON = "Delivery attempts for this message have ended, so it cannot be steered or edited.";
+    const receiptExplanations = {
+      badge: receiptBadge?.getAttribute("title"),
+      steer: receiptRow.querySelector('button[aria-label="Steer Queued Message"]')?.getAttribute("title"),
+      steerInfo: receiptRow.querySelector('.queued-steer-info [role="status"]')?.textContent,
+      edit: receiptRow.querySelector('button[aria-label="Edit Queued Message"]')?.getAttribute("title"),
+    };
+    assert.deepEqual(receiptExplanations, {
+      badge: RECEIPT_REASON,
+      steer: RECEIPT_REASON,
+      steerInfo: RECEIPT_REASON,
+      edit: RECEIPT_REASON,
+    });
+    for (const [surface, text] of Object.entries(receiptExplanations)) {
+      assert.doesNotMatch(text ?? "", /active turn|settle|admission|wait/i,
+        `the receipt's ${surface} explanation must not present it as waiting on the queue`);
+    }
     const dismiss = receiptRow.querySelector<HTMLButtonElement>('button[aria-label="Dismiss Failed Message"]');
     assert.ok(dismiss);
     assert.equal(dismiss.disabled, false);
@@ -484,6 +502,11 @@ test("a terminal receipt listed beside a held live queue stays dismissible and i
     assert.equal(liveBadge?.textContent, "Held", "the live entry keeps its held presentation");
     assert.equal(liveBadge?.classList.contains("held"), true);
     assert.equal(liveBadge?.getAttribute("title"), HELD_TITLE);
+    assert.notEqual(
+      liveRow.querySelector('button[aria-label="Steer Queued Message"]')?.getAttribute("title"),
+      RECEIPT_REASON,
+      "live entries keep the session-wide steering explanation",
+    );
     const cancel = liveRow.querySelector<HTMLButtonElement>('button[aria-label="Cancel Queued Message"]');
     assert.ok(cancel, "the live entry keeps its cancellation control");
     assert.equal(cancel.disabled, false);

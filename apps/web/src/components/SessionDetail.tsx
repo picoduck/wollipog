@@ -232,6 +232,9 @@ import { materializePromptImages } from "../prompt-image-materialization.js";
 
 const NO_IMAGE_MIME_TYPES: readonly string[] = [];
 const STOP_TURN_RETRY_MS = 8_000;
+/** Why a `failed` or `uncertain` durable receipt offers only Dismiss. Worded for both states:
+ * uncertain delivery may have landed, but either way no further attempt will be made. */
+const TERMINAL_RECEIPT_REASON = "Delivery attempts for this message have ended, so it cannot be steered or edited.";
 /** WebKit may synthesize a touch click in a later task. Keep the pointer transfer alive long
  * enough for that click; if no click arrives, finish the collapse instead of leaving a blurred
  * composer expanded. Pointer cancellation (the usual scroll path) finishes immediately. */
@@ -5090,14 +5093,6 @@ function SessionDetailLoaded({
                     : q.steeringState === "uncertain"
                       ? "Delivery Uncertain"
                       : session.queueHeld ? "Held" : "Queued";
-                  const queueTitle = locallyPromoting
-                    ? "Steering is being submitted for this queued message."
-                    : !availability.available
-                      ? availability.reason
-                      : composerRequestBusy
-                        ? "Wait for the current message request to finish."
-                      : "Promote this queued message into the active turn.";
-                  const canCancelThis = canCancelQueued && !durable && !reserved && !locallyPromoting;
                   // A terminal durable receipt records delivery that has already stopped, so it can
                   // never be cancelled. It carries dismissal instead, and the two are mutually
                   // exclusive: cancellation removes work that may still run, dismissal only hides
@@ -5106,11 +5101,22 @@ function SessionDetailLoaded({
                   // as `userEventSeq` lands, so this row is the only place the action can live.
                   const terminalDurable = q.durableDeliveryState === "failed" ||
                     q.durableDeliveryState === "uncertain";
+                  // Session-wide gates (a held queue, a busy turn) are checked before per-row state,
+                  // so they would otherwise explain a receipt as waiting on the live FIFO. A settled
+                  // receipt is waiting on nothing: it explains itself, and borrows no held styling.
+                  const queueTitle = terminalDurable
+                    ? TERMINAL_RECEIPT_REASON
+                    : locallyPromoting
+                      ? "Steering is being submitted for this queued message."
+                      : !availability.available
+                        ? availability.reason
+                        : composerRequestBusy
+                          ? "Wait for the current message request to finish."
+                        : "Promote this queued message into the active turn.";
+                  const heldBadge = session.queueHeld === true && !terminalDurable;
+                  const canCancelThis = canCancelQueued && !durable && !reserved && !locallyPromoting;
                   const dismissBusy = pendingPromptAction?.commandId === q.id &&
                     pendingPromptAction.action === "dismiss";
-                  // A held queue pauses the live FIFO. A settled receipt listed beside it is waiting
-                  // on nothing, so it must not borrow the held styling or explanation.
-                  const heldBadge = session.queueHeld === true && !terminalDurable;
                   return (
                     <div
                       className={`queued-item${queuedEdit?.promptId === q.id ? " is-editing" : ""}`}
@@ -5154,11 +5160,13 @@ function SessionDetailLoaded({
                           type="button"
                           className="btn ghost sm queued-edit"
                           disabled={!editAvailability.available || queuedEdit !== null}
-                          title={queuedEdit?.promptId === q.id
-                            ? "This queued message is already being edited."
-                            : editAvailability.available
-                              ? "Edit this queued message."
-                              : editAvailability.reason}
+                          title={terminalDurable
+                            ? TERMINAL_RECEIPT_REASON
+                            : queuedEdit?.promptId === q.id
+                              ? "This queued message is already being edited."
+                              : editAvailability.available
+                                ? "Edit this queued message."
+                                : editAvailability.reason}
                           aria-label="Edit Queued Message"
                           onClick={() => void beginQueuedPromptEdit(q)}
                         >
