@@ -15,7 +15,9 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import {
+  RUNNER_CAPABILITY_MIN_PROTOCOL,
   isOrchestratorLaunch,
+  orchestratorAdditiveCapability,
   runnerSupportsProtocol,
   usesOrchestratorPresetPermissions,
   type AcpMcpStdioServer,
@@ -281,15 +283,17 @@ export function provisionAgentControl(
   const additiveOrchestrator = orchestrator && !presetPermissions;
   const wslOrchestrator = context.kind === "wsl" && targetIsHost && orchestrator && presetPermissions;
   const strictProjectIsolation = orchestrator && spec.orchestrator?.strictProjectIsolation !== false;
+  const additiveCapability = orchestratorAdditiveCapability(spec.driver);
   if (additiveOrchestrator) {
-    if (!runnerSupportsProtocol(config.controlPlaneProtocolVersion, "orchestratorAdditiveRole")) {
-      throw new Error("an Orchestrator with independent provider permissions requires a protocol-v160 control plane");
+    if (!additiveCapability || !nativeHostExecution) {
+      throw new Error("independent provider permissions are supported only for the native Claude Code and Codex Orchestrators on the host");
+    }
+    if (!runnerSupportsProtocol(config.controlPlaneProtocolVersion, additiveCapability)) {
+      throw new Error(`an Orchestrator with independent provider permissions requires a protocol-v${
+        RUNNER_CAPABILITY_MIN_PROTOCOL[additiveCapability]} control plane for this harness`);
     }
     if (strictProjectIsolation) {
       throw new Error("Strict Project Isolation requires the Orchestrator preset permission mode");
-    }
-    if (!nativeHostExecution || spec.driver !== "claude-code") {
-      throw new Error("independent provider permissions are supported only for the native Claude Code Orchestrator on the host");
     }
   }
   const orchestratorProjectPaths = [...new Set([
@@ -448,13 +452,20 @@ export function provisionAgentControl(
   }
   if (additiveOrchestrator) {
     spec.env[ORCHESTRATOR_ENV_KEY] = "orchestrator";
-    spec.args = stripAdditiveOrchestratorLaunchArgs(spec.args, orchestratorProjectPaths);
+    spec.args = stripAdditiveOrchestratorLaunchArgs(spec.args, spec.driver, orchestratorProjectPaths);
     // The general MCP config is re-appended below; removing it first keeps resume argv identical.
     const generalMcpConfig = agentControlMcpConfigPath(host.configDir, spec.sessionId);
     for (let i = spec.args.length - 2; i >= 0; i--) {
       if (spec.args[i] === "--mcp-config" && spec.args[i + 1] === generalMcpConfig) spec.args.splice(i, 2);
     }
-    spec.args.push(...additiveOrchestratorLaunchArgs(spec.driver, orchestratorProjectPaths));
+    spec.args.push(...additiveOrchestratorLaunchArgs(spec.driver, {
+      ...runnerReentryCommand(host, "--agent-control-mcp"),
+      env: {
+        WOLLIPOG_CONTROL_PLANE_URL: cpUrl, WOLLIPOG_SESSION_ID: spec.sessionId,
+        WOLLIPOG_SESSION_TOKEN_FILE: tokenFile, WOLLIPOG_SESSION_CREDENTIAL_READY_FILE: readyFile,
+        [ORCHESTRATOR_ENV_KEY]: "orchestrator",
+      },
+    }, orchestratorProjectPaths));
   } else if (orchestrator) {
     spec.env[ORCHESTRATOR_ENV_KEY] = "orchestrator";
     const mcp = {

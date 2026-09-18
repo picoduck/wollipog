@@ -1,5 +1,6 @@
 import {
   installationSupportsDefault,
+  orchestratorAdditiveCapability,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type AgentDefinition,
@@ -76,10 +77,10 @@ export function orchestratorUnavailableReason(input: {
  * Why an Orchestrator must launch with the harness-owned Orchestrator preset instead of the same
  * provider permission mode a normal session would use, or `undefined` when the role is additive.
  *
- * Only a non-strict native Claude Code Orchestrator on a v160 runner and control plane keeps its
- * ordinary permission mode, tool inventory, hooks, and configured MCP servers. Every other
- * combination still uses the coupled preset, and the sentence names which condition selects it so
- * the user can change the one they control.
+ * Only a non-strict native Claude Code (v160) or Codex (v161) Orchestrator on a supporting runner
+ * and control plane keeps its ordinary permission mode, tool inventory, apps, plugins, hooks, and
+ * configured MCP servers. Every other combination still uses the coupled preset, and the sentence
+ * names which condition selects it so the user can change the one they control.
  */
 export function orchestratorPresetPermissionsReason(input: {
   controlPlaneSupportsRole: boolean;
@@ -94,11 +95,12 @@ export function orchestratorPresetPermissionsReason(input: {
   if (input.strictProjectIsolation) {
     return "Strict Project Isolation is enforced through the harness-owned Orchestrator preset.";
   }
-  if (input.driver !== "claude-code") {
-    return "This harness still uses the harness-owned Orchestrator preset; independent provider permissions are available for native Claude Code.";
+  const additiveCapability = orchestratorAdditiveCapability(input.driver);
+  if (!additiveCapability) {
+    return "This harness still uses the harness-owned Orchestrator preset; independent provider permissions are available for native Claude Code and Codex.";
   }
   if (input.contextKind !== "native" || !input.hostExecutionTarget) {
-    return "Independent provider permissions are available only for a native Claude Code harness on the host execution target.";
+    return "Independent provider permissions are available only for a native Claude Code or Codex harness on the host execution target.";
   }
   if (input.nativeTui) {
     return "Native TUI Orchestrators use the harness-owned Orchestrator preset.";
@@ -109,10 +111,10 @@ export function orchestratorPresetPermissionsReason(input: {
   if (!input.controlPlaneSupportsRole) {
     return "Update the control plane to give an Orchestrator ordinary provider permissions.";
   }
-  if (!runnerSupportsProtocol(input.runnerProtocolVersion, "orchestratorAdditiveRole")) {
+  if (!runnerSupportsProtocol(input.runnerProtocolVersion, additiveCapability)) {
     return runnerCapabilityRequirement(
       input.runnerProtocolVersion,
-      "orchestratorAdditiveRole",
+      additiveCapability,
       "Independent Orchestrator provider permissions",
     );
   }

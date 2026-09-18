@@ -341,31 +341,67 @@ export function orchestratorLaunchArgs(
 
 const ADDITIVE_CLAUDE_ALLOWED_TOOLS = "mcp__wollipog__*";
 
+/** Codex merges a dotted `mcp_servers.<name>` override into the user's table (verified against
+ * codex-cli 0.154.0), so naming the single Wollipog entry adds it without touching, disabling, or
+ * re-declaring any configured server. The coupled preset's whole-table form merges too, which is
+ * exactly why it also needs `--strict-config` and the explicit isolation probe. */
+export function additiveCodexMcpServerArg(
+  mcp: { command: string; args: string[]; env: Record<string, string> },
+): string {
+  return `mcp_servers.wollipog=${toml({ ...mcp, enabled: true, default_tools_approval_mode: "approve" })}`;
+}
+
 /**
- * Independent provider permissions (protocol v160): the harness launches exactly as an equivalent
- * normal session and only gains Wollipog's orchestration tools, instructions, and project
- * read locations. Nothing here narrows the permission mode, built-in tool inventory, hooks,
- * settings sources, or configured MCP servers; the general Agent Control MCP config already
- * carries the Wollipog server for ordinary Claude sessions.
+ * Independent provider permissions (protocol v160 for Claude Code, v161 for the Codex drivers): the
+ * harness launches exactly as an equivalent normal session and only gains Wollipog's orchestration
+ * tools, instructions, and — for Claude — project read locations. Nothing here narrows the
+ * permission mode, sandbox, approval policy, built-in tool inventory, apps, plugins, hooks,
+ * multi-agent or multimodal tools, settings sources, or configured MCP servers.
+ *
+ * Claude's Wollipog server arrives through the general Agent Control MCP config that ordinary
+ * sessions already receive, so only the pre-authorization, instructions, and Project Locations are
+ * added here. Codex has no such per-session config file, so the server is named inline instead.
+ *
+ * Codex has no append form for instructions: `developer_instructions` is a plain string, the last
+ * `-c` wins, and `additional_developer_instructions` is managed-configuration-only and ignored from
+ * the CLI. Setting it therefore replaces a user's own top-level `developer_instructions` for the
+ * duration of an Orchestrator session — the same thing today's coupled preset does, so it is not a
+ * regression, but it is the one part of the Codex launch that is not purely additive.
+ *
+ * No sandbox, approval, reviewer, or `--add-dir` override is injected: Project Locations are named
+ * in the instructions text, and anything stronger would be the preset's fixed policy again.
  */
 export function additiveOrchestratorLaunchArgs(
   driver: SessionLaunchSpec["driver"],
+  mcp: { command: string; args: string[]; env: Record<string, string> },
   projectPaths: readonly string[] = [],
 ): string[] {
-  if (driver !== "claude-code") {
-    throw new Error("independent provider permissions are supported only for the native Claude Code Orchestrator");
+  const instructions = orchestratorInstructions(projectPaths, false);
+  if (driver === "claude-code") {
+    return [
+      "--allowedTools", ADDITIVE_CLAUDE_ALLOWED_TOOLS,
+      "--append-system-prompt", instructions,
+      ...projectPaths.flatMap((path) => ["--add-dir", path]),
+    ];
   }
-  return [
-    "--allowedTools", ADDITIVE_CLAUDE_ALLOWED_TOOLS,
-    "--append-system-prompt", orchestratorInstructions(projectPaths, false),
-    ...projectPaths.flatMap((path) => ["--add-dir", path]),
-  ];
+  if (driver === "codex" || driver === "codex-app-server") {
+    return [
+      "-c", additiveCodexMcpServerArg(mcp),
+      "-c", `developer_instructions=${toml(instructions)}`,
+    ];
+  }
+  throw new Error("independent provider permissions are supported only for the native Claude Code and Codex Orchestrators");
 }
 
 /** Remove only the arguments `additiveOrchestratorLaunchArgs` injects, leaving every user- or
  * catalog-supplied flag (including the user's own `--add-dir`, `--allowedTools`, `--settings`,
- * and `--mcp-config` values) untouched. Idempotent on every resume. */
-export function stripAdditiveOrchestratorLaunchArgs(args: readonly string[], projectPaths: readonly string[] = []): string[] {
+ * `--mcp-config`, `--disable`, sandbox/approval overrides, and unrelated `-c` settings) untouched.
+ * Idempotent on every resume, in both the `--flag value` and inline `--flag=value` forms. */
+export function stripAdditiveOrchestratorLaunchArgs(
+  args: readonly string[],
+  driver: SessionLaunchSpec["driver"],
+  projectPaths: readonly string[] = [],
+): string[] {
   const projects = new Set(projectPaths);
   const result: string[] = [];
   for (let i = 0; i < args.length; i++) {
@@ -373,10 +409,15 @@ export function stripAdditiveOrchestratorLaunchArgs(args: readonly string[], pro
     const flag = arg.split("=", 1)[0]!;
     const inline = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : undefined;
     const value = inline ?? args[i + 1];
-    const injected =
-      (flag === "--allowedTools" && value === ADDITIVE_CLAUDE_ALLOWED_TOOLS) ||
-      (flag === "--append-system-prompt" && typeof value === "string" && value.startsWith(ORCHESTRATOR_INSTRUCTIONS_PREFIX)) ||
-      (flag === "--add-dir" && typeof value === "string" && projects.has(value));
+    const injected = driver === "claude-code"
+      ? (flag === "--allowedTools" && value === ADDITIVE_CLAUDE_ALLOWED_TOOLS) ||
+        (flag === "--append-system-prompt" && typeof value === "string" && value.startsWith(ORCHESTRATOR_INSTRUCTIONS_PREFIX)) ||
+        (flag === "--add-dir" && typeof value === "string" && projects.has(value))
+      // Only the `wollipog` MCP entry and an instructions value carrying the runner's own prefix
+      // are ours; a user's `-c developer_instructions=...` is left exactly where it was.
+      : (flag === "-c" || flag === "--config") && typeof value === "string" &&
+        (value.startsWith("mcp_servers.wollipog=") ||
+          (value.startsWith("developer_instructions=") && value.includes(ORCHESTRATOR_INSTRUCTIONS_PREFIX)));
     if (injected) {
       if (inline === undefined) i++;
       continue;
