@@ -228,7 +228,7 @@ test("a relative removal is judged from where the shell actually is", () => {
   assert.equal(commandTargetsManagedWorktree("rm -rf ../..", `${protectedPath}/apps/runner`, protection), MANAGED_WORKTREE_REFUSAL);
 });
 
-test("the tracked directory is logical and operands are judged from its physical form", (t) => {
+test("the tracked directory is the physical end of a logical walk, as Claude's pwd -P records it", (t) => {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-cwd-")));
   t.after(() => rmSync(base, { recursive: true, force: true }));
   const worktree = join(base, "managed");
@@ -238,22 +238,47 @@ test("the tracked directory is logical and operands are judged from its physical
   symlinkSync(base, join(worktree, "link"));
   symlinkSync(join("deep", "target"), join(worktree, "inner"));
   const protections = [{ worktreePath: worktree, repoPath: join(base, "repo") }];
-  // The shell prints the logical directory, and that is what gets tracked.
-  assert.equal(shellCwdAfterCommand("cd link/escape", worktree), join(worktree, "link", "escape"));
+  // Within one command the walk is logical; the recorded end is physical.
+  assert.equal(shellCwdAfterCommand("cd inner", worktree), join(worktree, "deep", "target"));
   assert.equal(shellCwdAfterCommand("cd inner && cd ..", worktree), worktree, "a logical chain ends at the root");
-  // An external operand from a symlinked logical directory resolves through the kernel.
+  assert.equal(shellCwdAfterCommand("cd link/escape", worktree), join(base, "escape"));
+  assert.equal(shellCwdAfterCommand("cd apps", worktree), join(worktree, "apps"));
+  assert.equal(shellCwdAfterCommand("ls", join(worktree, "inner")), join(worktree, "inner"), "no cd, no change");
+  // An external operand from a symlinked directory resolves through the kernel.
   assert.equal(commandTargetsManagedWorktree("rm -rf ../managed", join(worktree, "link", "escape"), protections),
     MANAGED_WORKTREE_REFUSAL, "physically ../managed IS the worktree");
   assert.equal(commandTargetsManagedWorktree("rm -rf managed", join(worktree, "link"), protections),
     MANAGED_WORKTREE_REFUSAL);
   assert.equal(commandTargetsManagedWorktree("cd inner && cd .. && rm -rf .", worktree, protections),
     MANAGED_WORKTREE_REFUSAL, "the logical chain reaches the root");
-  assert.equal(commandTargetsManagedWorktree("rm -rf ..", join(worktree, "inner"), protections),
-    MANAGED_WORKTREE_REFUSAL, "physically .. is deep/, lexically it is the root: either refuses");
   assert.equal(commandTargetsManagedWorktree("cd link/escape", worktree, protections),
     MANAGED_WORKTREE_REFUSAL, "a cd whose physical target leaves the worktree is an escape");
   assert.equal(commandTargetsManagedWorktree("rm -rf build", join(worktree, "apps"), protections), null);
   assert.equal(commandTargetsManagedWorktree("rm -rf target", join(worktree, "inner"), protections), null);
+});
+
+test("a symlink retargeted after the shell entered it does not move the tracked directory", (t) => {
+  // /base/wt/a/b/link -> /base/wt/x. The shell enters it; the link is then re-pointed. The shell is
+  // still physically in x, which is what was recorded when the command finished.
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-cwd-")));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const wt = join(base, "wt");
+  mkdirSync(join(wt, "a", "b"), { recursive: true });
+  mkdirSync(join(wt, "x"));
+  mkdirSync(join(wt, "deep", "y"), { recursive: true });
+  symlinkSync(join(wt, "x"), join(wt, "a", "b", "link"));
+  const protections = [{ worktreePath: wt, repoPath: join(base, "repo") }];
+  const tracked = shellCwdAfterCommand("cd a/b/link", wt);
+  assert.equal(tracked, join(wt, "x"));
+  rmSync(join(wt, "a", "b", "link"));
+  symlinkSync(join(wt, "deep", "y"), join(wt, "a", "b", "link"));
+  assert.equal(commandTargetsManagedWorktree("rm -rf ../../wt", tracked!, protections), MANAGED_WORKTREE_REFUSAL);
+  // git -C is resolved from the same physical directory: ../.. from wt/x is /base.
+  assert.equal(
+    commandTargetsManagedWorktree(`git --git-dir=${join(base, "repo", ".git")} -C ../.. worktree remove --force wt`, tracked!, protections),
+    MANAGED_WORKTREE_REFUSAL,
+  );
+  assert.equal(commandTargetsManagedWorktree("rm -rf scratch", tracked!, protections), null);
 });
 
 test("a worktree reached through a symlinked prefix is not refused against itself", (t) => {

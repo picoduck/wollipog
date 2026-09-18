@@ -581,10 +581,12 @@ harmless because Claude never reaches the control channel for a command the hook
   beside `;` or `||` (`cd x; ls` exits 0 with the `cd` failed), `cd $DIR`, `cd -`, the directory stack, `eval`/`builtin`/`source`, a
   pipeline member, a subshell, a compound command, a launcher prefix (`nice cd x` runs an
   external `cd`), or a multi-line command that mentions any of these makes the directory unknown,
-  and a failed command leaves it in place. The recorded directory is the shell's LOGICAL one; the
-  matcher resolves every external operand from its physical form as well, because the kernel
-  resolves `..` from where a symlink points while the shell's own `cd ..` does not. Unknown falls
-  back to the session directory — the pre-#1333 behavior, never less strict,
+  and a failed command leaves it in place. The walk inside one command is logical, as the shell's
+  own `cd ..` is, and the end position is resolved to its physical directory once, when the
+  command's result arrives — exactly what Claude records with `pwd -P` and starts the next shell
+  in, so a symlink retargeted later does not move it. The shared matcher additionally judges every
+  external operand from the physical form of its directory. Unknown falls back to the session
+  directory — the pre-#1333 behavior, never less strict,
   and never deeper than the truth — until an absolute `cd` re-establishes it. Every spawn starts at
   the session directory again, and subagents are not tracked (#1333).
 

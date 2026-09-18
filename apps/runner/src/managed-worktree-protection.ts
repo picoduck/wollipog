@@ -616,7 +616,9 @@ export function commandTargetsManagedWorktree(
  * succeeded. A `;` or `||` breaks that proof (`cd x; ls` exits 0 with the `cd` failed), so a
  * directory change anywhere in such a command is unknown; the same goes for anything else that
  * can move it invisibly (a pipeline member, a subshell, the directory stack, `eval`/`builtin`/
- * `source`, `cd -`, an operand the text does not spell out). Unknown never reads as deeper than the truth: the caller falls back to the
+ * `source`, `cd -`, an operand the text does not spell out). The result is PHYSICAL, resolved
+ * once at the end, exactly as Claude's own `pwd -P` records it. Unknown never reads as deeper
+ * than the truth: the caller falls back to the
  * session directory, and an unknown directory stays unknown until an absolute `cd` re-establishes
  * it. A `cwd` of null means the directory is already unknown.
  */
@@ -690,8 +692,8 @@ export function shellCwdAfterCommand(command: string, cwd: string | null): strin
     // Only a plain literal path is followed: no previous-directory, tilde, brace, glob, or escape
     // forms, each of which the shell expands to something the text does not spell out.
     if (operand === "-" || /^~|[{}*?[\]\\$`]/u.test(operand)) return false;
-    // Record the LOGICAL directory, as the shell keeps it: a later `cd ..` in the same shell is
-    // logical too. External operands are resolved from its physical form by the matcher itself.
+    // Walk LOGICALLY, as the shell does within one command: a later `cd ..` in the same chain is
+    // logical too. The final position is made physical once, below.
     if (isAbsolute(operand)) {
       current = normalize(operand);
       return true;
@@ -713,7 +715,13 @@ export function shellCwdAfterCommand(command: string, cwd: string | null): strin
     segment = [];
     piped = op === "|";
   }
-  return evaluate() ? current : null;
+  if (!evaluate()) return null;
+  // Claude ends every successful command with `pwd -P` and starts the next shell there, so at the
+  // start of each command the logical and physical directories are the same one. Mirror that:
+  // resolve the final logical position NOW, while the filesystem is as the command left it. A
+  // symlink retargeted later does not move a shell that is already inside the old target, and a
+  // physical directory makes a later `git -C ../..` or `rm ../x` resolve the way the kernel does.
+  return current === null || current === cwd ? current : canonicalPath(current);
 }
 
 /* ---------------------------------------------------------------------------------------------
