@@ -4,7 +4,7 @@ import { PROTOCOL_VERSION, type HostAction, type RunnerView, type SessionView, t
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { EditorSelect } from "../components/EditorSelect.js";
-import { PanelRightIcon, PinnedPanelIcon, TerminalIcon } from "../components/Icons.js";
+import { DockBottomIcon, PanelRightIcon, PinnedPanelIcon } from "../components/Icons.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
@@ -132,7 +132,7 @@ function SessionActions() {
     <>
       <EditorSelect sessionId={session.id} />
       <button type="button" className="icon-btn" aria-label="Toggle Pinned Summary"><PinnedPanelIcon /></button>
-      <button type="button" className="icon-btn" aria-label="Show Terminal"><TerminalIcon /></button>
+      <button type="button" className="icon-btn" aria-label="Show Terminal"><DockBottomIcon /></button>
       <button type="button" className="icon-btn" aria-label="Show Side Panel"><PanelRightIcon /></button>
     </>
   );

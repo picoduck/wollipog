@@ -55,7 +55,6 @@ exports.
 | `PinnedPanelIcon` | Lucide | `List` | Pinned summary list. |
 | `DockBottomIcon` | Lucide | `PanelBottom` | Bottom dock placement. |
 | `PanelRightIcon` | Lucide | `PanelRight` | Right panel placement. |
-| `TerminalIcon` | Lucide | `Terminal` | Terminal destination. |
 | `CommandLineIcon` | Lucide | `SquareTerminal` | Command-line destination. |
 | `GlobeIcon` | Lucide | `Globe` | Remote host. |
 | `FolderIcon` | Lucide | `Folder` | Generic directory. |
@@ -116,5 +115,8 @@ The manifest declares `lucide-react` and `pnpm-lock.yaml` pins the resolved rele
 The pre-migration production entry bundle was 1,736,906 bytes (482,380 bytes gzip); after the full
 migration it is 1,739,444 bytes (484,263 bytes gzip), a 2,538-byte raw and 1,883-byte gzip increase.
 The dedicated icon bundle contract provides the durable regression guard: it bundles every stable
-icon export (20,235 bytes at migration), rejects evidence of the full Lucide catalog, and enforces
-an icon-specific size budget independent of unrelated application growth.
+icon export, rejects evidence of the full Lucide catalog, and enforces an icon-specific size budget
+independent of unrelated application growth. That budget is a 125,000-byte ceiling; the contract
+currently reports 27,937 bytes across 70 exports, up from 20,235 bytes at migration. Read the
+current figure from the contract itself rather than this paragraph: running
+`node apps/web/scripts/verify-icon-bundle.mjs` prints the export count and byte total it measured.
