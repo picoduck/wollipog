@@ -527,7 +527,13 @@ export function provisionClaudeHooks(
     enabled: boolean;
     allowInsecureTransport?: boolean;
     registerCredential?: (sessionId: string, tokenHash: string) => void;
-    /** Live runner-owned worktrees for this session; the guard is provisioned even when empty. */
+    /**
+     * Live runner-owned worktrees for this session. Supplying it — even empty — is what provisions
+     * the guard; omitting it provisions none. Only the pre-spawn provisioning (after launch
+     * authorization) knows the live set: the `start_session` handlers run BEFORE authorization,
+     * which compares the argv against the runner-local catalog exactly, so a guard appended there
+     * would reject every ordinary launch as a command mismatch.
+     */
     managedWorktreeProtections?: readonly ManagedWorktreeProtection[];
     /** Seam for tests: prove the guard sidecar actually refuses before relying on it. */
     verifyGuardLaunch?: typeof verifyManagedWorktreeGuardLaunch;
@@ -554,6 +560,7 @@ export function provisionClaudeHooks(
   const targetIsHost = !spec.executionTarget || spec.executionTarget.adapter === "host";
   const native = (spec.context?.kind ?? "native") === "native";
   const file = persistedFile ?? expectedFile;
+  const guardRequested = config.managedWorktreeProtections !== undefined;
   const protections = config.managedWorktreeProtections ?? [];
 
   // "Guard active" is established here, at provisioning time, and is observable in the argv the
@@ -580,7 +587,8 @@ export function provisionClaudeHooks(
     config.controlPlaneProtocolVersion == null ||
     config.controlPlaneProtocolVersion < CLAUDE_HOOK_PROTOCOL_VERSION ||
     !native || !targetIsHost || !hookTransportSupported(spec);
-  const userSettingsWouldBeShadowed = protections.length === 0 && hasUserSettingsArg(spec.args, file);
+  const userSettingsWouldBeShadowed = guardRequested && protections.length === 0 &&
+    hasUserSettingsArg(spec.args, file);
   if (userSettingsWouldBeShadowed) {
     log(
       `Claude managed worktree guard ${spec.sessionId}: not provisioned while the session owns no ` +
@@ -588,7 +596,7 @@ export function provisionClaudeHooks(
       "in this turn is protected from the next spawn",
     );
   }
-  if (!userSettingsWouldBeShadowed) {
+  if (guardRequested && !userSettingsWouldBeShadowed) {
     if (compromisedGuardSessions.has(spec.sessionId)) {
       // The guard's own state was tampered with or could not be kept in step for this session.
       // Mediation (the pre-#1313 behaviour) is the honest fallback; it needs no trusted state.

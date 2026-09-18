@@ -879,6 +879,16 @@ test("a session with no managed worktree is guarded from spawn with an empty lis
   assert.equal(prepareClaudeHookArgs(launch.args).guardActive, true);
 }));
 
+test("a provisioning call that supplies no worktree set provisions no guard", () => temp((dir) => {
+  // The start_session handlers run before launch authorization, which rejects any argv that
+  // differs from the runner-local catalog; only the pre-spawn call knows the live worktree set.
+  const launch = spec({ args: [] });
+  resetClaudeGuardState();
+  provisionClaudeHooks(launch, { ...config, enabled: false, verifyGuardLaunch: guardVerifies }, () => {}, host(dir));
+  assert.deepEqual(launch.args, []);
+  assert.equal(existsSync(claudeHookSettingsPath(dir, "sess_hook_1")), false);
+}));
+
 test("a launch with its own --settings and no worktree is not guarded, so nothing it sets is shadowed", () => temp((dir) => {
   const logs: string[] = [];
   const launch = spec({ args: ["--settings", "/home/user/claude-settings.json"] });
