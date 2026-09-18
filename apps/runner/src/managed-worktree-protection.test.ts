@@ -64,6 +64,9 @@ test("raw Git and filesystem retirement forms are refused with managed-discard g
     "env --split-str='rm -rf .'",
     "env --uns PATH rm -rf .",
     "env --chd /tmp rm -rf .",
+    // GNU env -S separates arguments on \_, which shell-quote reads as quoting and joins instead.
+    String.raw`env -S'rm\_-rf\_.'`,
+    String.raw`env --split-string='rm\_-rf\_.'`,
     "printf '.\\0' | xargs -0 rm -rf",
     "printf '.\\0' | xargs -0 sudo -u root rm -rf",
     "rm -rf /runner/worktrees/session/requested/{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{managed,other}",

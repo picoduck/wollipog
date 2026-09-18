@@ -242,6 +242,13 @@ function commandWords(
     if (splitStringExpansions > MAX_ENV_SPLIT_STRING_EXPANSIONS) {
       throw new UnclassifiableCommandError("env --split-string nesting exceeded its bound");
     }
+    // `env -S` has an escape grammar of its own, in which `\_` separates arguments, while
+    // shell-quote reads a backslash as POSIX shell quoting and joins those words into one. The two
+    // tokenizations disagree wherever a backslash survives into the payload, so the wrapped command
+    // cannot be classified and the worktree is retained instead of being parsed on a guess.
+    if (script.includes("\\")) {
+      throw new UnclassifiableCommandError("env --split-string payload escapes are not shell quoting");
+    }
     return parse<EnvironmentReference>(script, (env) => ({ env }));
   };
   while (typeof tokens[index] === "string" && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(tokens[index] as string)) {
