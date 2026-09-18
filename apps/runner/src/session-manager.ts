@@ -2342,6 +2342,27 @@ export class SessionManager {
         sameWorktreePath(rebinding.entry.context, rebinding.entry.worktree.path, path));
   }
 
+  /** The durable signal that this session's selected worktree is the one a launch is bringing up.
+   * An explicit discard answers `provider_launching` for exactly this state. */
+  private launchingSelection(meta: SessionMeta, path: string): boolean {
+    return !!meta.worktreePath && sameWorktreePath(meta.context, meta.worktreePath, path) &&
+      (meta.status === "starting" || meta.status === "queued" || meta.worktreePending === true);
+  }
+
+  /** The same boundary as seen by automatic replay, which is strictly wider on purpose.
+   *
+   * A launch generation owns its selected worktree long before it publishes a provider entry or
+   * takes the worktree lease: `active`, `closing`, and the rebind map are all empty while
+   * preparation runs, and the row is patched to `starting` only afterwards, so nothing else can see
+   * that window. A caller-initiated discard is a single deliberate act and reports the durable
+   * state; replay repeats on a timer and must never race an unpublished launch into retiring the
+   * exact path it is preparing. */
+  private launchingSelectionUsesPath(sessionId: string, meta: SessionMeta, path: string): boolean {
+    if (this.launchingSelection(meta, path)) return true;
+    return this.launchGenerations.has(sessionId) && !!meta.worktreePath &&
+      sameWorktreePath(meta.context, meta.worktreePath, path);
+  }
+
   private providerTurnUsesPath(sessionId: string, context: AgentContext, path: string): boolean {
     const active = this.active.get(sessionId);
     if (!active || !sameWorktreePath(context, active.cwd, path)) return false;
@@ -2913,9 +2934,7 @@ export class SessionManager {
     if (worktree.source === "attached") {
       return { removed: false, reason: "attached operator-owned worktrees must be removed by their owner" };
     }
-    const initiallySelectedIsLaunching = !!meta.worktreePath &&
-      sameWorktreePath(meta.context, meta.worktreePath, worktree.path) &&
-      (meta.status === "starting" || meta.status === "queued" || meta.worktreePending === true);
+    const initiallySelectedIsLaunching = this.launchingSelection(meta, worktree.path);
     if (initiallySelectedIsLaunching) {
       return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard");
     }
@@ -2971,9 +2990,7 @@ export class SessionManager {
     if (worktree.source === "attached") {
       return { removed: false, reason: "attached operator-owned worktrees must be removed by their owner" };
     }
-    const selectedIsLaunching = !!meta.worktreePath &&
-      sameWorktreePath(meta.context, meta.worktreePath, worktree.path) &&
-      (meta.status === "starting" || meta.status === "queued" || meta.worktreePending === true);
+    const selectedIsLaunching = this.launchingSelection(meta, worktree.path);
     if (selectedIsLaunching) {
       return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard");
     }
@@ -11123,17 +11140,20 @@ export class SessionManager {
       this.resumePromptsQueuedDuringParking(sessionId, retirement);
       this.reportCapacity();
     }
-    // A discard requested while this provider was already closing is refused its immediate reap by
-    // the closing fence itself, and the ActiveSession was deleted before that fence was installed.
-    // Retirement completion is the exact moment the fence lifts, so it owns the missed replay.
-    if (!this.shuttingDown) this.scheduleDeferredSafeWorktreeReaps(sessionId, "provider retirement completed");
-    if (!this.shuttingDown && this.pendingDeletions.delete(sessionId)) {
+    if (this.shuttingDown) return;
+    if (this.pendingDeletions.delete(sessionId)) {
+      // Deletion reaps every journal record this session owns, so it supersedes the replay below.
       setImmediate(() => {
         void this.delete(sessionId).catch((error) => {
           this.log(`deferred deletion retry failed for ${sessionId}: ${errText(error)}`);
         });
       });
+      return;
     }
+    // A discard requested while this provider was already closing is refused its immediate reap by
+    // the closing fence itself, and the ActiveSession was deleted before that fence was installed.
+    // Retirement completion is the exact moment the fence lifts, so it owns the missed replay.
+    this.scheduleDeferredSafeWorktreeReaps(sessionId, "provider retirement completed");
   }
 
   private resumePromptsQueuedDuringParking(sessionId: string, retirement: ProviderRetirement): void {
@@ -11610,13 +11630,25 @@ export class SessionManager {
         }
         return;
       }
-      if (this.liveWorktreeUsesPath(record.sessionId, record.worktreePath) ||
-          this.providerTurnUsesPath(record.sessionId, meta.context, record.worktreePath) ||
-          this.transitioningProviderUsesPath(record.sessionId, meta.context, record.worktreePath)) {
-        this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} deferred while a provider turn uses the worktree`);
-        return;
+      // Launch preparation runs outside this lane and publishes neither a provider entry nor the
+      // worktree lease until it is nearly done, so this boundary is re-proved before anything
+      // destructive begins rather than only once at entry.
+      const worktreeFenced = (): boolean => {
+        const latest = this.store.readMeta(record.sessionId);
+        return !latest ||
+          this.liveWorktreeUsesPath(record.sessionId, record.worktreePath) ||
+          this.providerTurnUsesPath(record.sessionId, latest.context, record.worktreePath) ||
+          this.transitioningProviderUsesPath(record.sessionId, latest.context, record.worktreePath) ||
+          this.launchingSelectionUsesPath(record.sessionId, latest, record.worktreePath);
+      };
+      const logFenced = () => {
+        this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} deferred while a provider turn or launch uses the worktree`);
+      };
+      if (worktreeFenced()) return logFenced();
+      if (!record.worktreeRemovedAt) {
+        await this.refreshDeferredMergedHead(record);
+        if (worktreeFenced()) return logFenced();
       }
-      if (!record.worktreeRemovedAt) await this.refreshDeferredMergedHead(record);
 
       const cleanupLeaseOwner = `${this.lockOwner}:cleanup-replay:${randomUUID()}`;
       let transferredFrom: string | null = null;
@@ -11632,7 +11664,10 @@ export class SessionManager {
       }
       try {
         if (!record.worktreeRemovedAt) {
-          const removal = await this.removeRecordedWorktree(record, meta);
+          const removal = await this.removeRecordedWorktree(
+            record,
+            this.store.readMeta(record.sessionId) ?? meta,
+          );
           if (!removal.removed) {
             this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after safe worktree removal`);
             return;

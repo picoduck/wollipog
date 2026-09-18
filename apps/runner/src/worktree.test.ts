@@ -3074,6 +3074,67 @@ test("replay refreshes a merged-head proof the launching deferral was journaled 
   }
 });
 
+test("replay never retires the worktree a launch generation is preparing to use", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-replay-launch-fence-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_replay_launch_fence", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "cleanup",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    (manager as unknown as { discoverMergedWorktreePullRequest: () => Promise<null> })
+      .discoverMergedWorktreePullRequest = async () => null;
+    const selected = await manager.requestWorktree("s_replay_launch_fence", {
+      baseRef: "HEAD", branch: "fix/replay-launch-fence",
+    });
+    execFileSync("git", ["-C", selected.worktree.path, "push", "-u", "origin", selected.worktree.branch]);
+    const internals = manager as unknown as {
+      launchGenerations: Map<string, number>;
+      finishLaunchGeneration: (sessionId: string, generation: number) => void;
+    };
+    internals.launchGenerations.set("s_replay_launch_fence", 11);
+    store.patchMeta("s_replay_launch_fence", {
+      status: "starting",
+      worktreePath: selected.worktree.path,
+      worktreeBranch: selected.worktree.branch,
+      worktreePending: true,
+    });
+    assert.deepEqual(
+      (await manager.discardWorktree("s_replay_launch_fence", selected.worktree.path)).retirement,
+      { status: "deferred", reason: "provider_launching" },
+    );
+
+    // The durable row still says the selected worktree is launching: no replay may touch it.
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(existsSync(selected.worktree.path), true,
+      "replay must not retire the selected worktree while the row says a provider is starting");
+
+    // Launch preparation reaches the window before it publishes a provider entry or takes the
+    // worktree lease: the row no longer reads as starting, but the generation still owns the path.
+    store.patchMeta("s_replay_launch_fence", { status: "idle", worktreePending: false });
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(existsSync(selected.worktree.path), true,
+      "replay must not retire the path an unpublished launch generation still owns");
+    assert.equal(new WorktreeCleanupJournal(dataDir).list().length, 1,
+      "the durable retirement is retained, not discarded, while the launch owns the worktree");
+
+    // The launch finishes without publishing a provider; only now may the journal converge.
+    internals.finishLaunchGeneration("s_replay_launch_fence", 11);
+    await waitForCondition(() => !existsSync(selected.worktree.path),
+      "launch finalization did not release the deferred retirement");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a deferred retirement survives a runner restart and converges on the periodic sweep", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-deferred-restart-"));
   const dataDir = join(root, "data");
