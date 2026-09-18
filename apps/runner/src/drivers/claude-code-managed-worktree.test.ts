@@ -168,7 +168,10 @@ test("with the guard active, every selected mode launches exactly as it would wi
   for (const mode of MODES) {
     const guarded = provision(dir, `s-${mode}`, mode, { protections: PROTECTIONS });
     const plain = provision(dir, `p-${mode}`, mode, { protections: [] });
-    assert.deepEqual(plain, [], "a session without a managed worktree gets no runner-owned settings");
+    // #1303: a session that owns no worktree yet carries the guard too, over an empty list, so a
+    // worktree it creates part-way through a turn is protected from the guard's next invocation.
+    assert.deepEqual(plain, ["--settings", claudeHookSettingsPath(dir, `p-${mode}`)],
+      `${mode}: a session without a managed worktree carries the empty-list guard`);
     assert.deepEqual(guarded, ["--settings", claudeHookSettingsPath(dir, `s-${mode}`)],
       `${mode} carries the guard settings file and nothing else`);
 
@@ -180,18 +183,13 @@ test("with the guard active, every selected mode launches exactly as it would wi
       `${mode}: the managed worktree changes nothing about the permission transport`,
     );
     assert.deepEqual(withWorktree.stderr, [], `${mode}: no mediation notice is emitted`);
-    // The ONLY argv difference is the runner-owned settings file that carries the guard. (The
+    // The ONLY argv difference is which session's runner-owned settings file is named. (The
     // provider session id is a fresh UUID per driver, so it is normalized away first.)
-    const normalize = (run: Launch) => {
-      const argv = [...run.argv];
-      const index = argv.indexOf("--session-id");
-      if (index >= 0) argv[index + 1] = "<session-id>";
-      return argv;
-    };
-    const plainArgv = normalize(withoutWorktree);
-    const difference = normalize(withWorktree).filter((arg) => !plainArgv.includes(arg));
-    assert.deepEqual(difference, ["--settings", claudeHookSettingsPath(dir, `s-${mode}`)],
-      `${mode}: the guard settings file is the only difference`);
+    const normalize = (run: Launch, sessionId: string) => run.argv.map((arg, index, argv) =>
+      argv[index - 1] === "--session-id" ? "<session-id>"
+        : arg === claudeHookSettingsPath(dir, sessionId) ? "<settings>" : arg);
+    assert.deepEqual(normalize(withWorktree, `s-${mode}`), normalize(withoutWorktree, `p-${mode}`),
+      `${mode}: the launches are otherwise identical`);
     withWorktree.driver.dispose();
     withoutWorktree.driver.dispose();
   }

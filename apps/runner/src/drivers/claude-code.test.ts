@@ -3624,6 +3624,9 @@ test("managed bypass mode keeps ordinary Claude tools autonomous while retaining
   });
   const writes: string[] = [];
   (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
+  // What a mediated spawn binds (#1303): the running child emulates the mode it was launched for,
+  // whatever the inventory later does. The veto below still reads the LIVE inventory.
+  (h.driver as any).launchedManagedEmulationMode = "bypassPermissions";
 
   protections = [{ worktreePath, repoPath: "/projects/repo" }];
   h.feed({

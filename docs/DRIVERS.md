@@ -580,15 +580,26 @@ harmless because Claude never reaches the control channel for a command the hook
   the driver's own one-shot, resume, and persistent respawns, which re-check trust in
   `prepareClaudeHookArgs` and drop the runner-owned settings document when it fails — and emits a
   visible notice; if the list cannot even be removed, the provider is stopped through the ordinary
-  stop path. The runner never writes an empty protection list, and the guard fails closed if it
-  reads one: when the last managed worktree goes away the guard state is retired instead.
+  stop path. Invalidation is signalled by REMOVING the list; an empty list is a valid, runner-written
+  state (below), and the tamper tripwire covers it like any other document.
 - **State.** `<dataDir>/hooks/<runnerHash>/<sessionId>.protections.json` (mode `0600`) holds the
   live protected worktree set. It is written at every Claude spawn, and refreshed synchronously
   whenever the session's attributed worktree inventory changes (creation, activation, attach,
   discard), so a worktree created mid-turn is protected from the guard's very next invocation.
-  A session that owns NO worktree at spawn time has no guard in its running process; if it gains
-  its first worktree mid-session the process keeps the mediated behaviour below until its next
-  spawn.
+- **Guarded from spawn (#1303).** Every guardable launch carries the guard, even while the session
+  owns no worktree — over an empty list the guard holds no opinion beyond its own state. A running
+  process cannot gain a hook, and outside `default`/`auto` the CLI never consults the control
+  channel, so this is the only way a worktree the session creates part-way through a noninteractive
+  turn is protected for the rest of that turn. Discarding the last worktree writes an empty list
+  rather than retiring the guard. The one exception: a launch that owns no worktree, carries a
+  user-supplied `--settings`, and would otherwise get no runner-owned settings (manager hooks off)
+  is NOT guarded, because provisioning would shadow the user's own settings — possibly dropping
+  their deny rules. That launch keeps the pre-#1303 window until its next spawn. Unguardable
+  launches (below) keep it too.
+- **Mediation is bound at spawn.** Whether the running child is mediated, and which fixed-rule mode
+  the driver emulates for it, is recorded when it is spawned — like the routine-operation
+  supplement — because the worktree inventory and configuration can change while it runs. The
+  driver's own control-channel veto still reads the live inventory.
 - **Fail closed.** Malformed hook input, a missing/unreadable/malformed protections file, a Bash
   call with no command text or working directory, or any exception blocks the tool call (exit 2
   with the refusal on stderr). The guard performs no network, control-plane, or credential work.
@@ -596,11 +607,14 @@ harmless because Claude never reaches the control channel for a command the hook
   (exit 1) would silently wave every command through. Hook processes inherit CLAUDE's working
   directory, so `runnerReentryCommand` makes bare loader specifiers such as `--import tsx`
   absolute (`cwdIndependentExecArgv`), and provisioning runs the real sidecar once per distinct
-  launch command and demands the real refusal document before the guard counts as active.
+  launch command — against a probe-owned protections file, so a session with no worktree can be
+  proven too — and demands the real refusal document before the guard counts as active. A failed
+  probe is retried only after a five-minute cooldown, so a broken sidecar does not put a failing
+  process start in front of every spawn.
 - **One settings file.** Claude applies only the LAST `--settings` argument — a later one replaces
   an earlier one rather than merging — so the guard and the §2.3.1 manager policy hooks are written
   into a single per-session settings document, with the guard first in `PreToolUse`. The guard is
-  present whenever protections exist and it is provisionable, including when manager hooks are
+  present whenever it is provisionable (see the exception above), including when manager hooks are
   disabled, unsupported for the mode, skipped for the Orchestrator preset, or their circuit is
   open. While the circuit is open the live settings file is swapped for a guard-only copy
   (`<sessionId>.guard.json`) and the `--settings` argument is KEPT; the heal template restores the
