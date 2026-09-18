@@ -919,12 +919,14 @@ test("worktree tools use the canonical routes and default to the calling session
     body: {
       worktree: { id: "wt_1", path: "/repo/wt", branch: "fix/one", baseRef: "origin/main", source: "created" },
       session: { id: SELF_ID, status: "running", runnerId: "r1" },
+      retirement: { status: "deferred", reason: "provider_active" },
     },
   }));
+  deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
   await callTool(deps, "create_worktree", { branch: "fix/one", baseRef: "origin/main" });
   await callTool(deps, "attach_worktree", { sessionId: "s_child", path: "/repo/attached" });
   await callTool(deps, "select_worktree", { sessionId: "s_child", path: "/repo/wt" });
-  await callTool(deps, "discard_worktree", { sessionId: "s_child", path: "/repo/old" });
+  const discarded = await callTool(deps, "discard_worktree", { sessionId: "s_child", path: "/repo/old" });
   assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/${SELF_ID}/worktrees`);
   assert.deepEqual(calls[0]!.body, { branch: "fix/one", baseRef: "origin/main", progress: true });
   assert.equal(calls[1]!.url, `${CP_URL}/api/sessions/s_child/worktrees/attach`);
@@ -932,6 +934,16 @@ test("worktree tools use the canonical routes and default to the calling session
   assert.equal(calls[2]!.url, `${CP_URL}/api/sessions/s_child/worktrees/select`);
   assert.equal(calls[3]!.url, `${CP_URL}/api/sessions/s_child/worktrees/discard`);
   assert.deepEqual(calls[3]!.body, { path: "/repo/old" });
+  assert.deepEqual(resultJson(discarded).retirement, { status: "deferred", reason: "provider_active" });
+});
+
+test("discard_worktree refuses peers that cannot report deferred retirement", async () => {
+  const { deps, calls } = makeDeps();
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRetirement - 1;
+  const result = await callTool(deps, "discard_worktree", { path: "/repo/old" });
+  assert.equal(result.isError, true);
+  assert.match(resultText(result), /requires control plane protocol v159/);
+  assert.equal(calls.length, 0);
 });
 
 test("create_worktree can finish after the ordinary control-plane request deadline", async () => {

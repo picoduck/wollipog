@@ -103,11 +103,11 @@ MCP tool). Never run `git worktree remove` against a session-linked path, and ne
 cleanup command in a report: raw Git deletes the directory without telling the control plane, so the
 session keeps selecting a path that no longer exists and its next launch refuses to start there.
 
-Discard is deliberately conservative. It retains the worktree and explains why whenever the tree is
-still in use — including the one this session is running in, which stays until the session's own
-provider exits. That is a deferral, not a failure: report the retained path and its reason in the
-cleanup summary and leave it alone. Runner reconciliation removes a clean, fully pushed worktree
-whose pull request reached a terminal state once nothing is using it.
+Discard is deliberately conservative. When the tree is still in use — including the one this
+session is running in — it records a durable deferred retirement and reports what provider boundary
+it is waiting for. That is not a failure: report the deferred path and reason in the cleanup summary
+and leave it alone. The runner resumes retirement after provider exit and removes the worktree only
+when its ownership, cleanliness, publication, and pull-request safety checks pass.
 
 If `wollipog` is not on `PATH`, invoke the runner-provided location with its mode:
 

@@ -47,6 +47,7 @@ import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
 import { stagePromptImages, type StagedPromptImages } from "./prompt-images.js";
 import { codexOrchestratorMcpArgs } from "../orchestrator-preset.js";
 import { readCodexRolloutCompletedCommand } from "./codex-rollout-proof.js";
+import { commandTargetsManagedWorktree } from "../managed-worktree-protection.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any;
@@ -196,6 +197,12 @@ export function approvalResponse(method: string, params: Json, choice: string | 
   return { decision };
 }
 
+function approvalCommand(value: Json): string | null {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value) || value.some((part) => typeof part !== "string")) return null;
+  return value.map((part) => `'${part.replaceAll("'", `'\\''`)}'`).join(" ");
+}
+
 /**
  * Build the turn/start params for a permission mode. Exported for tests.
  * - default / "auto-review": on-request + approvalsReviewer=auto_review (Guardian model review).
@@ -214,8 +221,15 @@ export function buildCodexTurnParams(
   cwd: string,
   input: Json[],
   capabilities?: AgentCapabilities,
+  protectManagedWorktrees = false,
 ): Json {
-  const mode = cfg.permissionMode || AUTO_REVIEW_MODE;
+  const configuredMode = cfg.permissionMode || AUTO_REVIEW_MODE;
+  // Full access would let the provider unlink the worktree root or its shared Git registration
+  // without crossing an approval boundary. Preserve every restricted mode, but narrow this one
+  // while a runner-owned worktree is live so the local target veto remains enforceable.
+  const mode = protectManagedWorktrees && configuredMode === "danger-full-access"
+    ? "on-request"
+    : configuredMode;
   if (mode === "orchestrator") {
     return { threadId, input, approvalPolicy: { granular: {
       mcp_elicitations: true,
@@ -245,7 +259,10 @@ export function buildCodexTurnParams(
     sandboxPolicy: { type: sandboxType },
     cwd,
   };
-  if (autoReview) params.approvalsReviewer = "auto_review";
+  // Guardian owns ordinary automatic review, but it cannot know which host paths belong to the
+  // runner lifecycle. Route boundary-crossing asks through this driver while a managed worktree
+  // exists so the local target veto runs before any grant is returned.
+  if (autoReview) params.approvalsReviewer = protectManagedWorktrees ? "user" : "auto_review";
   if (cfg.model && cfg.model !== "default") params.model = cfg.model;
   if (cfg.effort) params.effort = cfg.effort;
   Object.assign(params, configuredServiceTier(cfg, capabilities));
@@ -808,7 +825,14 @@ export class CodexAppServerDriver implements Driver {
       const base = slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text;
       const input: Json[] = base || !staged.inputs.length ? [{ type: "text", text: base }] : [];
       input.push(...staged.inputs);
-      const params = buildCodexTurnParams(this.config, this.threadId, this.cwd, input, this.opts.capabilities);
+      const params = buildCodexTurnParams(
+        this.config,
+        this.threadId,
+        this.cwd,
+        input,
+        this.opts.capabilities,
+        (this.opts.managedWorktreeProtections?.().length ?? 0) > 0,
+      );
 
       this.peer!.request("turn/start", params).then((response: Json) => {
         // Notifications may precede the response, including completion or a later turn.
@@ -1194,6 +1218,20 @@ export class CodexAppServerDriver implements Driver {
       new Promise<Json>((resolve) => {
         if (this.disposed || this.cancelled) {
           return resolve(approvalResponse(method, params, null));
+        }
+        const command = method === "item/commandExecution/requestApproval"
+          ? approvalCommand(params?.command)
+          : null;
+        const refusal = command
+          ? commandTargetsManagedWorktree(
+              command,
+              typeof params?.cwd === "string" ? params.cwd : this.cwd,
+              this.opts.managedWorktreeProtections?.() ?? [],
+            )
+          : null;
+        if (refusal) {
+          this.cb.onStderr(refusal);
+          return resolve(approvalResponse(method, params, "decline"));
         }
         const id = String(rpcRequestId ?? params?.approvalId ?? params?.itemId ?? `${params?.turnId}:${++this.approvalSeq}`);
         const ownership = this.prepareAttention(params, id);

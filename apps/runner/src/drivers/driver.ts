@@ -15,6 +15,7 @@ import type {
   AcpSessionContextConfig,
 } from "@wollipog/protocol";
 import type { SpawnIsolation } from "../spawn.js";
+import type { ManagedWorktreeProtection } from "../managed-worktree-protection.js";
 import type { PoisonedProviderHistory } from "./poisoned-provider-history.js";
 import type { ProviderRejectionShape } from "./provider-rejection-shape.js";
 
@@ -191,6 +192,8 @@ export interface DriverOptions {
   isolation?: SpawnIsolation;
   /** Runner-private durable descendant marker for one managed worktree. */
   descendantMarker?: string;
+  /** Live runner-owned roots whose retirement must stay behind the managed discard lifecycle. */
+  managedWorktreeProtections?: () => ManagedWorktreeProtection[];
 }
 
 export interface Driver {

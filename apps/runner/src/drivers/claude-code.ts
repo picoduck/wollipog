@@ -24,6 +24,7 @@ import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import { inspectClaudeBackgroundWork, inspectClaudeBackgroundWorkInContext, type ClaudeBackgroundWorkInspection } from "../claude-background-work.js";
 import { effectiveClaudePermissionMode } from "../claude-permission.js";
 import { prepareClaudeHookArgs } from "../hook-settings.js";
+import { commandTargetsManagedWorktree, type ManagedWorktreeProtection } from "../managed-worktree-protection.js";
 import { classifyRoutineClaudeOrchestratorPermission } from "../orchestrator-provider-permissions.js";
 import { killTree, spawnAgent, terminateDescendantBoundaries, trackPendingKill, type AgentProcess, type SpawnAgentOptions } from "../spawn.js";
 import type {
@@ -287,6 +288,13 @@ export function claudeStructuredOrchestratorArgs(args: readonly string[], strict
   return result;
 }
 
+/** Claude's classifier cannot know which paths are runner-owned. Keep automatic review for
+ * ordinary sessions, but route every boundary-crossing tool decision through Wollipog while a
+ * managed worktree is present so the local target veto cannot be auto-overridden. */
+export function protectedClaudePermissionMode(mode: string, protectManagedWorktrees: boolean): string {
+  return protectManagedWorktrees && mode !== "plan" ? "default" : mode;
+}
+
 /**
  * Build a stream-json user message carrying text plus base64 image blocks (the
  * Anthropic Messages API content shape, which `claude -p` accepts). Exported for tests.
@@ -515,6 +523,7 @@ export class ClaudeCodeDriver implements Driver {
   private streamedAgentResponse = false;
   private hookCircuitReported = false;
   private hookCircuitOpenedAt: number | null = null;
+  private managedPermissionMediationReported = false;
   /** A fresh UUID is only a proposed coordinate until Claude confirms it in system/init. */
   private sessionEstablished: boolean;
 
@@ -575,6 +584,22 @@ export class ClaudeCodeDriver implements Driver {
 
   setConfig(config: SessionConfig): void {
     this.config = config;
+  }
+
+  private managedProtections(): ManagedWorktreeProtection[] {
+    return this.opts.managedWorktreeProtections?.() ?? [];
+  }
+
+  private effectivePermissionMode(): string {
+    return effectiveClaudePermissionMode(this.config, this.opts.orchestrator?.strictProjectIsolation !== false);
+  }
+
+  private reportManagedPermissionMediation(mode: string): void {
+    if (this.managedPermissionMediationReported || mode !== "auto") return;
+    this.managedPermissionMediationReported = true;
+    this.cb.onStderr(
+      "Claude automatic permission review is routed through Wollipog while runner-owned worktrees are linked so destructive retirement can be refused; use discard_worktree for cleanup.",
+    );
   }
 
   async initialize(): Promise<void> {
@@ -895,8 +920,11 @@ export class ClaudeCodeDriver implements Driver {
       // control protocol (which the runner already owns, so it works through the WSL bridge
       // — no MCP, no side channel). Non-interactive modes pass --permission-mode and pipe
       // the plain-text prompt over stdin so Windows cmd.exe never has to parse user content.
+      const configuredPermissionMode = this.effectivePermissionMode();
+      const managedProtections = this.managedProtections();
+      this.reportManagedPermissionMediation(configuredPermissionMode);
       const perm = claudePermissionArgs(
-        effectiveClaudePermissionMode(cfg, this.opts.orchestrator?.strictProjectIsolation !== false),
+        protectedClaudePermissionMode(configuredPermissionMode, managedProtections.length > 0),
         imgs.length > 0,
       );
       this.interactive = perm.interactive;
@@ -1126,8 +1154,15 @@ export class ClaudeCodeDriver implements Driver {
       return;
     }
     const cfg = this.config;
+    const configuredPermissionMode = this.effectivePermissionMode();
+    const managedProtections = this.managedProtections();
+    this.reportManagedPermissionMediation(configuredPermissionMode);
+    const permissionMode = protectedClaudePermissionMode(
+      configuredPermissionMode,
+      managedProtections.length > 0,
+    );
     const perm = claudePermissionArgs(
-      effectiveClaudePermissionMode(cfg, this.opts.orchestrator?.strictProjectIsolation !== false),
+      permissionMode,
       true,
     );
     const preparedArgs = this.preparedBaseArgs();
@@ -1136,10 +1171,7 @@ export class ClaudeCodeDriver implements Driver {
       cwd: this.cwd,
       model: cfg.model ?? null,
       effort: cfg.effort ?? null,
-      permissionMode: effectiveClaudePermissionMode(
-        cfg,
-        this.opts.orchestrator?.strictProjectIsolation !== false,
-      ),
+      permissionMode,
       args: preparedArgs,
     });
 
@@ -2142,13 +2174,60 @@ export class ClaudeCodeDriver implements Driver {
         if (!this.child) return null;
         const req = msg.request;
         if (req?.subtype === "can_use_tool" && typeof msg.request_id === "string") {
+          const protections = this.managedProtections();
+          const managedRefusal = req.tool_name === "Bash" && typeof req.input?.command === "string"
+            ? commandTargetsManagedWorktree(
+                req.input.command,
+                this.cwd,
+                protections,
+              )
+            : null;
+          if (managedRefusal) {
+            try {
+              this.child.stdin.write(JSON.stringify({
+                type: "control_response",
+                response: {
+                  subtype: "success",
+                  request_id: msg.request_id,
+                  response: { behavior: "deny", message: managedRefusal },
+                },
+              }) + "\n");
+            } catch { /* the provider process ended before the refusal could be written */ }
+            return null;
+          }
+          if (protections.length > 0) {
+            const configuredMode = this.effectivePermissionMode();
+            const editTool = ["Edit", "MultiEdit", "NotebookEdit", "Write"].includes(req.tool_name ?? "");
+            const behavior = configuredMode === "bypassPermissions" ||
+                (configuredMode === "acceptEdits" && editTool)
+              ? "allow"
+              : configuredMode === "dontAsk" ? "deny" : null;
+            if (behavior) {
+              try {
+                this.child.stdin.write(JSON.stringify({
+                  type: "control_response",
+                  response: {
+                    subtype: "success",
+                    request_id: msg.request_id,
+                    response: behavior === "allow"
+                      ? { behavior, updatedInput: req.input }
+                      : { behavior, message: "Claude permission mode dontAsk does not authorize this tool." },
+                  },
+                }) + "\n");
+                return null;
+              } catch {
+                // Fall through to the visible approval path if a bounded response cannot be sent.
+              }
+            }
+          }
           const orchestratorDisposition = this.opts.config.permissionMode === "orchestrator" && this.opts.orchestrator
             ? classifyRoutineClaudeOrchestratorPermission(
-            req.tool_name,
-            req.input,
-            this.opts.orchestrator.issueNumbers ?? [],
-            this.opts.cwd,
-          ) : "interactive";
+                req.tool_name,
+                req.input,
+                this.opts.orchestrator.issueNumbers ?? [],
+                this.opts.cwd,
+              )
+            : "interactive";
           if (orchestratorDisposition === "allow") {
             try {
               this.child.stdin.write(JSON.stringify({

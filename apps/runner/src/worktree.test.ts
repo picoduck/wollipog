@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedWorktreePullRequestForBranch, parseWorktreePullRequestState, readRepositoryDefaultBranch, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
+import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedWorktreePullRequestForBranch, parseWorktreePullRequestState, readRepositoryDefaultBranch, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type WorktreeCleanupRecord } from "./worktree.js";
 import { createHash, randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
@@ -1887,25 +1887,22 @@ test("PR reconciliation defers cleanup until the provider turn leaves the worktr
     await manager.reconcileWorktreePullRequests();
     assert.equal(existsSync(merged.worktree.path), true, "automatic cleanup does not interrupt an in-flight turn");
     assert.equal(activeEntries.has("s_pr_turn_cleanup"), true, "the provider remains alive to finish its reply");
-    assert.equal(new WorktreeCleanupJournal(dataDir).list().length, 0, "deferral creates no destructive intent");
+    assert.equal(new WorktreeCleanupJournal(dataDir).list().length, 1,
+      "deferral persists one managed retirement intent");
 
     active.running = false;
-    const internals = manager as unknown as { discardSessionWorktreeIfSafe: typeof discardWorktreeIfSafe };
-    const originalDiscard = internals.discardSessionWorktreeIfSafe;
-    internals.discardSessionWorktreeIfSafe = async (...args) => {
-      active.running = true;
-      return originalDiscard(...args);
-    };
     await manager.reconcileWorktreePullRequests();
     assert.equal(existsSync(merged.worktree.path), true,
-      "a turn that starts during Git safety proof is fenced before provider retirement");
+      "an idle resident provider still owns its worktree boundary");
     assert.equal(activeEntries.has("s_pr_turn_cleanup"), true);
-    assert.equal(new WorktreeCleanupJournal(dataDir).list().length, 0,
-      "the final turn fence removes an unstarted cleanup intent");
+    assert.equal(new WorktreeCleanupJournal(dataDir).list().length, 1,
+      "reconciliation preserves the same durable cleanup intent");
 
-    internals.discardSessionWorktreeIfSafe = originalDiscard;
-    activeEntries.delete("s_pr_turn_cleanup");
-    await manager.reconcileWorktreePullRequests();
+    assert.equal((manager as unknown as {
+      deleteActiveSession: (sessionId: string, expected: unknown) => boolean;
+    }).deleteActiveSession("s_pr_turn_cleanup", active), true);
+    await waitForCondition(() => !existsSync(merged.worktree.path),
+      "deferred reconciliation did not resume after provider exit");
     assert.equal(existsSync(merged.worktree.path), false, "the same terminal worktree is removed after the turn settles");
   } finally {
     manager?.shutdownAll();
@@ -2086,10 +2083,11 @@ test("merged PR worktrees remain discardable after their remote branches are del
       cwd: discoveredExplicit.worktree.path,
       worktree: { path: discoveredExplicit.worktree.path, branch: discoveredExplicit.worktree.branch },
     });
-    await assert.rejects(
-      manager.discardWorktree("s_merged_no_upstream", discoveredExplicit.worktree.path),
-      /branch has no upstream/,
+    const activeRetirement = await manager.discardWorktree(
+      "s_merged_no_upstream",
+      discoveredExplicit.worktree.path,
     );
+    assert.deepEqual(activeRetirement.retirement, { status: "deferred", reason: "provider_active" });
     assert.equal(discoveryCalls.get(discoveredExplicit.worktree.path) ?? 0, discoveryCallsBeforeActiveDiscard + 1,
       "safe-discard eligibility is checked before an active provider is retired");
     activeEntries.delete("s_merged_no_upstream");
@@ -2099,10 +2097,11 @@ test("merged PR worktrees remain discardable after their remote branches are del
       worktreeBranch: discoveredExplicit.worktree.branch,
       worktreePending: true,
     });
-    await assert.rejects(
-      manager.discardWorktree("s_merged_no_upstream", discoveredExplicit.worktree.path),
-      /still being launched by a provider process/,
+    const launchingRetirement = await manager.discardWorktree(
+      "s_merged_no_upstream",
+      discoveredExplicit.worktree.path,
     );
+    assert.deepEqual(launchingRetirement.retirement, { status: "deferred", reason: "cleanup_pending" });
     assert.equal(discoveryCalls.get(discoveredExplicit.worktree.path) ?? 0, discoveryCallsBeforeActiveDiscard + 1,
       "explicit discard rejects a launching worktree before another forge discovery");
     store.patchMeta("s_merged_no_upstream", {
@@ -2391,7 +2390,7 @@ test("legacy merged-worktree discard refreshes launch state and reports vanished
       worktreePending: true,
     });
     launchingResolution.release();
-    await assert.rejects(launchingDiscard, /still being launched by a provider process/);
+    assert.deepEqual((await launchingDiscard).retirement, { status: "deferred", reason: "provider_launching" });
     assert.equal(existsSync(launching.worktree.path), true,
       "a launch recorded during forge verification keeps the merged worktree intact");
     assert.equal(store.readMeta("s_legacy_discard_refresh")?.worktrees
@@ -2812,8 +2811,10 @@ test("launch finalization cannot overwrite a worktree selected while launch is p
       baseRef: "HEAD",
       branch: "fix/launch-race-selection",
     });
-    await assert.rejects(manager.discardWorktree(spec.sessionId, selected.worktree.path),
-      /still being launched by a provider process/);
+    assert.deepEqual(
+      (await manager.discardWorktree(spec.sessionId, selected.worktree.path)).retirement,
+      { status: "deferred", reason: "provider_launching" },
+    );
     releaseFinalization();
     assert.equal(await launch, true);
     assert.equal(store.readMeta(spec.sessionId)?.worktreePath, selected.worktree.path);
@@ -2821,6 +2822,68 @@ test("launch finalization cannot overwrite a worktree selected while launch is p
       "provider construction uses the mutation lane's winning selection");
   } finally {
     releaseFinalization();
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a launching retirement journaled after failed-launch finalization still reaps", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-launch-retirement-race-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  let releaseSnapshot = () => {};
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_launch_retirement_race", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "cleanup",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const selected = await manager.requestWorktree("s_launch_retirement_race", {
+      baseRef: "HEAD", branch: "fix/launch-retirement-race",
+    });
+    store.patchMeta("s_launch_retirement_race", {
+      status: "starting",
+      worktreePending: true,
+    });
+
+    const internals = manager as unknown as {
+      launchGenerations: Map<string, number>;
+      ensureDurableWorktreeHookSnapshot: (...args: unknown[]) => Promise<void>;
+      finishLaunchGeneration: (sessionId: string, generation: number) => void;
+      reapWorktree: (record: WorktreeCleanupRecord) => Promise<void>;
+    };
+    internals.launchGenerations.set("s_launch_retirement_race", 42);
+    const originalEnsureSnapshot = internals.ensureDurableWorktreeHookSnapshot.bind(manager);
+    let signalSnapshotReady!: () => void;
+    const snapshotReady = new Promise<void>((resolve) => { signalSnapshotReady = resolve; });
+    const snapshotGate = new Promise<void>((resolve) => { releaseSnapshot = resolve; });
+    internals.ensureDurableWorktreeHookSnapshot = async (...args) => {
+      await originalEnsureSnapshot(...args);
+      signalSnapshotReady();
+      await snapshotGate;
+    };
+    let signalReaped!: (record: WorktreeCleanupRecord) => void;
+    const reaped = new Promise<WorktreeCleanupRecord>((resolve) => { signalReaped = resolve; });
+    internals.reapWorktree = async (record) => { signalReaped(record); };
+
+    const discard = manager.discardWorktree("s_launch_retirement_race", selected.worktree.path);
+    await snapshotReady;
+    internals.finishLaunchGeneration("s_launch_retirement_race", 42);
+    releaseSnapshot();
+    assert.deepEqual((await discard).retirement, { status: "deferred", reason: "provider_launching" });
+    assert.equal((await reaped).worktreePath, selected.worktree.path,
+      "journal creation schedules the replay missed by failed-launch finalization");
+  } finally {
+    releaseSnapshot();
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
@@ -3895,9 +3958,11 @@ test("a selection made during replacement launch is fenced and receives a follow
     const latest = await manager.requestWorktree(spec.sessionId, {
       baseRef: "HEAD", branch: "fix/overlap-latest",
     });
-    await assert.rejects(manager.discardWorktree(spec.sessionId, launching.worktree.path),
-      /still active in a provider process/,
-      "cleanup must fence the target already captured by an in-flight launch");
+    assert.deepEqual(
+      (await manager.discardWorktree(spec.sessionId, launching.worktree.path)).retirement,
+      { status: "deferred", reason: "provider_active" },
+      "cleanup must durably fence the target already captured by an in-flight launch",
+    );
     const internals = manager as unknown as {
       active: Map<string, {
         governanceTripped?: "cost_budget" | "max_tool_calls";
@@ -3916,9 +3981,11 @@ test("a selection made during replacement launch is fenced and receives a follow
     store.patchMeta(spec.sessionId, { status: "idle", worktreePending: false });
     assert.equal(internals.liveWorktreeUsesPath(spec.sessionId, latest.worktree.path), true,
       "the pending target itself must remain fenced after launch status settles");
-    await assert.rejects(manager.discardWorktree(spec.sessionId, latest.worktree.path),
-      /still active in a provider process/,
-      "cleanup must fence the newest target while its follow-up rebind is deferred");
+    assert.deepEqual(
+      (await manager.discardWorktree(spec.sessionId, latest.worktree.path)).retirement,
+      { status: "deferred", reason: "provider_active" },
+      "cleanup must durably fence the newest target while its follow-up rebind is deferred",
+    );
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
     assert.deepEqual(launchedCwds, [repo, launching.worktree.path],
       "the governance boundary must defer the follow-up handoff");
@@ -4630,11 +4697,20 @@ test("a running session discards its own finished worktrees despite the per-sess
       queue: [],
       client: { dispose: () => {} },
     });
-    await manager.discardWorktree("s_own_lease", current.worktree.path);
-    assert.equal(existsSync(current.worktree.path), false,
-      "cleanup retires the provider before removing its selected worktree");
+    const deferredCurrent = await manager.discardWorktree("s_own_lease", current.worktree.path);
+    assert.deepEqual(deferredCurrent.retirement, { status: "deferred", reason: "provider_active" });
+    assert.equal(existsSync(current.worktree.path), true, "active provider keeps its selected path");
+    const currentEntry = activeEntries.get("s_own_lease");
+    assert.equal((manager as unknown as {
+      deleteActiveSession: (sessionId: string, expected: unknown) => boolean;
+    }).deleteActiveSession("s_own_lease", currentEntry), true);
+    await waitForCondition(() => !existsSync(current.worktree.path) &&
+      store.readWorktreeLease("s_own_lease") === null,
+      "deferred cleanup did not complete after provider exit");
     assert.equal(activeEntries.has("s_own_lease"), false);
     assert.equal(store.readWorktreeLease("s_own_lease"), null);
+    assert.equal(store.readMeta("s_own_lease")?.worktreePath, fifth.worktree.path,
+      "retiring a provider's older cwd does not clear the newer selected worktree");
 
     // A launch that holds the lease but has not published its active entry yet still blocks.
     store.releaseWorktreeLease("s_own_lease", providerOwner);
@@ -4653,7 +4729,7 @@ test("a running session discards its own finished worktrees despite the per-sess
   }
 });
 
-test("post-merge cleanup retires the provider before removing its selected worktree", { skip: !haveGit() }, async () => {
+test("post-merge cleanup durably defers selected-worktree retirement until provider exit", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-selected-cleanup-"));
   const dataDir = join(root, "data");
   let manager: SessionManager | undefined;
@@ -4686,12 +4762,63 @@ test("post-merge cleanup retires the provider before removing its selected workt
       client: { dispose: () => {} },
     });
 
-    await manager.discardWorktree("s_selected_cleanup", merged.worktree.path);
-    assert.equal(existsSync(merged.worktree.path), false);
-    assert.equal(activeEntries.has("s_selected_cleanup"), false, "the selected provider is retired first");
+    const originalPatchMeta = store.patchMeta.bind(store);
+    let failFinalMetadataCommit = true;
+    store.patchMeta = (sessionId, patch) => {
+      if (failFinalMetadataCommit && sessionId === "s_selected_cleanup" && Array.isArray(patch.worktrees) &&
+          !patch.worktrees.some((item) => item.id === merged.worktree.id)) {
+        failFinalMetadataCommit = false;
+        return undefined;
+      }
+      return originalPatchMeta(sessionId, patch);
+    };
+    const retirementInternals = manager as unknown as {
+      ensureDurableWorktreeHookSnapshot: (...args: unknown[]) => Promise<void>;
+      deleteActiveSession: (sessionId: string, expected: unknown) => boolean;
+    };
+    const originalEnsureSnapshot = retirementInternals.ensureDurableWorktreeHookSnapshot.bind(manager);
+    let signalSnapshotReady!: () => void;
+    let releaseSnapshot!: () => void;
+    const snapshotReady = new Promise<void>((resolve) => { signalSnapshotReady = resolve; });
+    const snapshotGate = new Promise<void>((resolve) => { releaseSnapshot = resolve; });
+    retirementInternals.ensureDurableWorktreeHookSnapshot = async (...args) => {
+      await originalEnsureSnapshot(...args);
+      signalSnapshotReady();
+      await snapshotGate;
+    };
+    const discard = manager.discardWorktree("s_selected_cleanup", merged.worktree.path);
+    await snapshotReady;
+    const selectedEntry = activeEntries.get("s_selected_cleanup");
+    assert.equal(retirementInternals.deleteActiveSession("s_selected_cleanup", selectedEntry), true,
+      "provider exit can race the journal write");
+    releaseSnapshot();
+    const deferred = await discard;
+    retirementInternals.ensureDurableWorktreeHookSnapshot = originalEnsureSnapshot;
+    assert.deepEqual(deferred.retirement, { status: "deferred", reason: "provider_active" });
+    assert.equal(JSON.parse(readFileSync(join(dataDir, "worktree-cleanup.json"), "utf8")).length, 1,
+      "the deferred retirement is durable before returning");
+    await waitForCondition(() => !existsSync(merged.worktree.path) &&
+      store.readWorktreeLease("s_selected_cleanup") === null,
+      "a retirement journaled just after provider exit still completes automatically");
     assert.equal(store.readWorktreeLease("s_selected_cleanup"), null);
+    assert.equal(store.readMeta("s_selected_cleanup")?.worktreePath, merged.worktree.path,
+      "a failed metadata commit clears neither selection nor inventory");
+    assert.equal(store.readMeta("s_selected_cleanup")?.worktrees?.some((item) => item.id === merged.worktree.id), true);
+    const pending = new WorktreeCleanupJournal(dataDir).list().find((item) => item.worktreeId === merged.worktree.id);
+    assert.ok(pending, "the cleanup journal remains retryable after a metadata commit failure");
+    store.patchMeta = originalPatchMeta;
+    originalPatchMeta("s_selected_cleanup", {
+      worktrees: store.readMeta("s_selected_cleanup")?.worktrees?.filter((item) => item.id !== merged.worktree.id),
+    });
+    assert.equal(store.readMeta("s_selected_cleanup")?.worktreePath, merged.worktree.path,
+      "a crash-shaped partial commit can leave a stale selection after inventory is gone");
+    await (manager as unknown as {
+      reapLiveSafeWorktree: (record: NonNullable<typeof pending>) => Promise<void>;
+    }).reapLiveSafeWorktree(pending);
     assert.equal(store.readMeta("s_selected_cleanup")?.worktreePath, null,
       "the managed path clears the selection with the directory, leaving no dangling reference");
+    assert.equal(store.readMeta("s_selected_cleanup")?.worktrees?.some((item) => item.id === merged.worktree.id), false,
+      "idempotent cleanup preserves the already-cleared inventory while repairing selection");
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });

@@ -4008,6 +4008,7 @@ async function runSessionWorktreeRequest(
     // A pre-v133 runner omits it, and the field stays absent rather than being guessed here.
     return { worktree: res.worktree, session: db.getSession(sessionId),
       ...(res.isolation ? { isolation: res.isolation } : {}),
+      ...(res.retirement ? { retirement: res.retirement } : {}),
       ...(res.generatedSetup ? { generatedSetup: res.generatedSetup } : {}) };
   } catch (error) {
     return reply.code(502).send({ error: (error as Error).message });

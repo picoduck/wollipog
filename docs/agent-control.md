@@ -60,8 +60,10 @@ Paired-device callers may supply `--session`. A create without `--base` fetches 
 resolves the remote default branch. Create, attach, and select return the selected absolute path;
 the already-running provider process keeps its original operating-system cwd, so it must use the
 returned path explicitly during that turn. A later resume or restart launches in the selection.
-Discard is intentionally fail-closed: it removes only an inactive runner-owned tree with a clean
-status and no commits ahead of its configured upstream. If a merged pull or merge request's remote
+Discard is intentionally fail-closed: it removes only a runner-owned tree with a clean status and
+no commits ahead of its configured upstream. If a provider still owns the path, the result reports
+a durable deferred retirement; the runner resumes it automatically after provider exit. If a
+merged pull or merge request's remote
 branch has already been deleted, its forge-verified head OID can replace the missing upstream proof
 only when it exactly matches the local branch head. Attached, active, dirty, other upstream-less,
 unpushed, branch-drifted, and Git-unavailable worktrees are retained. The runner applies the same
@@ -70,9 +72,10 @@ merged or closed; an unavailable forge keeps the durable open linkage unchanged.
 
 Discard is the only supported way to retire a runner-owned worktree. `git worktree remove` bypasses
 every check above and leaves the session selecting a path that no longer exists, so agent cleanup
-workflows must not use it for a session-linked path. A retained worktree is reported with the reason
-it was kept, including the tree the requesting session is itself running in; that is a deferral to
-reconciliation, not a failed cleanup.
+workflows must not use it for a session-linked path. Provider approval also refuses raw Git and
+filesystem retirement aimed at runner-owned paths while ordinary work beneath those roots remains
+available. A deferred worktree is reported with the provider boundary it is waiting for; that is a
+durable retirement request, not a failed cleanup or an invitation to force-remove the path.
 
 Because a worktree can still disappear outside Wollipog, every launch that carries a persisted
 worktree re-proves it immediately before the provider process is created — start, resume, worktree
