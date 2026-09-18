@@ -207,8 +207,9 @@ adapter implements all of it:
 - **Observed.** `createSession` returns `{ sessionId, modes, configOptions }`, `modes` being
   `{ currentModeId, availableModes }` from `SessionModeManager.initialize` (6214). That is the
   `session/new` response, and `getOrCreateSession` (5708) returns it for `session/load` and
-  `session/resume` too. `AcpClient` *already* reads it, via `acceptSessionState`, from the responses to
-  `newSession`, `resumeSession`, and `loadSession`.
+  `session/resume` too. `AcpClient` *already* reads it, via `acceptSessionState`, from the responses
+  to `newSession` and `resumeSession` — the latter covering both its `session/resume` and its
+  `session/load` branch.
 - **Constrained.** `session/set_mode` is wired to `setSessionMode` (8202), which calls
   `query.setPermissionMode()` and throws on refusal (`session-mode.js:98-129`). `AcpClient` already
   drives it — `AcpClient.setMode`, reached from `setConfig` and `restoreInitialConfig`.
