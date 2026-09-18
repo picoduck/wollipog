@@ -345,6 +345,23 @@ test("a cursor that fails to advance ends a targeted read instead of looping on 
 });
 
 /**
+ * Every skip rule rests on a predicate about the control plane. The backstop does not: once it is
+ * due, a refresh reads every loaded page whatever the evidence says, so a predicate that is ever
+ * wrong costs bounded staleness rather than a permanently stale row.
+ */
+test("a due backstop sweeps every loaded page even when the evidence points at one", () => {
+  const settled = (index: number): ChildSessionRegistryEntry => ({
+    toolCallId: `child-${index}`, name: `Child ${index}`, status: "completed", lifecycle: "completed",
+    sourceSeq: index, startedAt: 100, lastActivityAt: 200, completedAt: 200, toolCount: 1,
+  });
+  const registry = Array.from({ length: 150 }, (_value, index) => settled(index + 1));
+  const loaded = new Set(registry.map((entry) => entry.toolCallId));
+  assert.deepEqual(registryRefreshPlan(registry, new Set(), loaded, 50, false),
+    { kind: "targeted", pages: [{ after: 100, through: 150 }] });
+  assert.deepEqual(registryRefreshPlan(registry, new Set(), loaded, 50, true), { kind: "sweep", pageCount: 3 });
+});
+
+/**
  * The idle cadence exists for a child whose durable state moves with nothing observable in the
  * loaded transcript (#1207). Only an unsettled child outside that window can do so, so only its
  * page keeps costing an idle request.

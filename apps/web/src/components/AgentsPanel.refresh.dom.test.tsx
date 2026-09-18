@@ -12,7 +12,7 @@ import { FeedbackProvider } from "./FeedbackProvider.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime } from "../ui-transport.js";
 import { TimelineBuilder, type TimelineItem } from "../timeline.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
-import { AgentsPanel } from "./AgentsPanel.js";
+import { AgentsPanel, REGISTRY_SWEEP_BACKSTOP_MS } from "./AgentsPanel.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 const globals: Record<string, unknown> = {
@@ -428,6 +428,92 @@ test("a rejected refresh leaves its evidence unspent, so the next one still read
     assert.deepEqual(cursors.slice(4), [0, 100],
       "the unspent first-page evidence is retried alongside the tail page the new change points at");
   } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+/**
+ * The skip rules trust that a settled child stays settled. If the control plane ever reports one
+ * as running again while its transcript row is not loaded, no rule selects its page — so a bounded
+ * periodic full sweep backs them up. Targeted refreshes stay targeted until the backstop falls due;
+ * the first refresh after that reads every loaded page, chained from the control plane's own
+ * cursors, and the one after it is targeted again.
+ */
+test("a periodic full sweep backs up the skip rules without replacing them", async () => {
+  const entry = (index: number): ChildSessionRegistryEntry => ({
+    toolCallId: `child-${index}`, name: `Child ${index}`,
+    status: index === 1 ? "in_progress" : "completed",
+    lifecycle: index === 1 ? "running" : "completed",
+    sourceSeq: index, startedAt: now - 30_000, lastActivityAt: now - 20_000,
+    ...(index === 1 ? {} : { completedAt: now - 20_000 }),
+    toolCount: 1,
+  });
+  const all = Array.from({ length: 250 }, (_value, index) => entry(index + 1));
+  const cursors: number[] = [];
+  const childSessions = async (
+    _id: string, _epoch: number, after = 0, limit = 50,
+  ): Promise<ChildSessionRegistryPage> => {
+    cursors.push(after);
+    const eligible = all.filter((child) => child.sourceSeq > after);
+    const children = eligible.slice(0, limit);
+    const truncated = eligible.length > children.length;
+    return { children, attentionOwners: [], unidentifiedChildren: 0, eventEpoch: 0,
+      nextAfter: truncated ? children.at(-1)!.sourceSeq : null, truncated };
+  };
+  const client: ApiClient = { ...api, childSessions };
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const render = (session: SessionView, items: TimelineItem[]) =>
+    root.render(<ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
+      <AgentsPanel session={session} items={items} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
+        requestedId={null} onSelect={() => {}} parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
+    </StoreProvider></FeedbackProvider></ApiProvider>);
+  // Only the wall clock the panel reads is skewed; timers keep running in real time.
+  const realNow = Date.now;
+  let skew = 0;
+  Date.now = () => realNow() + skew;
+
+  try {
+    await act(async () => { render(baseSession, [startedTool("child-1", 1)]); });
+    await advance(50);
+    for (let page = 1; page < 5; page += 1) {
+      const loadMore = Array.from(container.querySelectorAll("button"))
+        .find((button) => button.textContent === "Load More Recorded Workers")!;
+      await act(async () => { (loadMore as HTMLButtonElement).click(); });
+      await advance(60);
+    }
+    assert.deepEqual(cursors, [0, 50, 100, 150, 200]);
+
+    await act(async () => {
+      render({ ...baseSession, messageCount: 11, lastEventAt: now + 1_000 }, [settledTool("child-1", 1)]);
+    });
+    await advance(1_200);
+    assert.deepEqual(cursors.slice(5), [0, 200], "before the backstop falls due, the refresh is targeted");
+
+    // A settled child off the loaded transcript reopens. Nothing the skip rules watch has moved.
+    all[99] = { ...all[99]!, status: "in_progress", lifecycle: "running" };
+    delete all[99]!.completedAt;
+    skew = REGISTRY_SWEEP_BACKSTOP_MS;
+    await act(async () => {
+      render({ ...baseSession, messageCount: 12, lastEventAt: now + 2_000 },
+        [settledTool("child-1", 1), startedTool("child-240", 2)]);
+    });
+    await advance(1_200);
+    assert.deepEqual(cursors.slice(7), [0, 50, 100, 150, 200],
+      "once the backstop is due, the refresh sweeps every loaded page from the control plane's cursors");
+
+    await act(async () => {
+      render({ ...baseSession, messageCount: 13, lastEventAt: now + 3_000 },
+        [settledTool("child-1", 1), settledTool("child-240", 2)]);
+    });
+    await advance(1_200);
+    assert.deepEqual(cursors.slice(12), [50, 200],
+      "the sweep resets the backstop, so the next refresh is targeted — and the reopened child it found now keeps its own page");
+  } finally {
+    Date.now = realNow;
     await act(async () => { root.unmount(); });
     container.remove();
   }
