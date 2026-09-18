@@ -531,3 +531,105 @@ test("Pi RPC reports process loss after a possibly accepted prompt", async (t) =
   assert.ok(exits >= 1);
   assert.equal(driver.agentTurnId(), null);
 });
+
+test("an additive Pi Orchestrator keeps the ordinary approval path and never auto-confirms", async () => {
+  // The Orchestrator ROLE is carried by SessionLaunchSpec.orchestrator and the agent-environment
+  // marker; the literal permissionMode "orchestrator" is the coupled PRESET. Every permission
+  // branch in this driver keys on the preset literal, so an additive Orchestrator — which carries
+  // an ordinary mode — must be indistinguishable here from a normal session of that mode.
+  //
+  // This matters: the preset's blanket auto-confirm is safe only because the preset also excludes
+  // bash/edit/write. The additive launch keeps those tools, so carrying the auto-confirm across
+  // would be a real privilege escalation.
+  for (const permissionMode of ["default", "acceptEdits", "on-request"] as const) {
+    const events: SessionEventPayload[] = [];
+    const sent: Record<string, unknown>[] = [];
+    const nonce = `additive-nonce-${permissionMode}`;
+    const driverOptions = options();
+    driverOptions.env[PI_SECURITY_REQUEST_NONCE_ENV] = nonce;
+    driverOptions.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE = `additive-ready-${permissionMode}`;
+    // The agent environment marks the role; it must not change any approval decision.
+    driverOptions.env.WOLLIPOG_PERMISSION_PRESET = "orchestrator";
+    driverOptions.config = { permissionMode };
+    const driver = new PiRpcDriver(driverOptions, callbacks(events));
+    (driver as any).peer = {
+      send: (message: Record<string, unknown>) => { sent.push(message); return true; },
+      dispose: () => {},
+    };
+    (driver as any).onRpcEvent(securityRequest(nonce, `write-${permissionMode}`, {
+      kind: "tool_call", toolCallId: "provider-write", toolName: "write",
+      input: JSON.stringify({ path: "/repo/src/index.ts" }),
+    }));
+    // Never silently confirmed: either a human approval is raised, or the mode blocks it.
+    assert.equal(
+      sent.some((message) => message.confirmed === true), false,
+      `an additive Pi Orchestrator in ${permissionMode} must not auto-confirm an implementation tool`,
+    );
+    if (permissionMode === "default") {
+      const request = events.find((event): event is Extract<SessionEventPayload, { kind: "permission_request" }> =>
+        event.kind === "permission_request")!;
+      assert.equal(request.title, "write requires approval.");
+      assert.equal(driver.resolvePermission(`write-${permissionMode}`, "deny"), true);
+      assert.deepEqual(sent.pop(), {
+        type: "extension_ui_response", id: `write-${permissionMode}`, confirmed: false,
+      });
+    } else {
+      // Unsupported-for-Pi modes fail closed rather than falling back to the preset's confirm.
+      assert.deepEqual(sent.pop(), {
+        type: "extension_ui_response", id: `write-${permissionMode}`, confirmed: false,
+      });
+    }
+    driver.dispose();
+  }
+
+  // The coupled preset does auto-confirm — and is safe only because it also excludes those tools.
+  const presetSent: Record<string, unknown>[] = [];
+  const presetNonce = "preset-nonce";
+  const presetOptions = options("orchestrator-launch");
+  presetOptions.env[PI_SECURITY_REQUEST_NONCE_ENV] = presetNonce;
+  presetOptions.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE = "preset-ready";
+  presetOptions.config = { permissionMode: "orchestrator" };
+  const presetDriver = new PiRpcDriver(presetOptions, callbacks([]));
+  (presetDriver as any).peer = {
+    send: (message: Record<string, unknown>) => { presetSent.push(message); return true; },
+    dispose: () => {},
+  };
+  (presetDriver as any).onRpcEvent(securityRequest(presetNonce, "preset-write", {
+    kind: "tool_call", toolCallId: "provider-write", toolName: "write", input: "{}",
+  }));
+  assert.deepEqual(presetSent.pop(), { type: "extension_ui_response", id: "preset-write", confirmed: true });
+  presetDriver.dispose();
+});
+
+test("an additive Pi Orchestrator waits for project trust and is not launched with --no-approve", async (t) => {
+  // The preset always passes --no-approve and skips the project-trust wait, because it must never
+  // load repository-controlled Pi code. The additive launch keeps the user's extensions, skills,
+  // and context files, so it must take the ordinary path: wait for trust, and receive --no-approve
+  // only when a normal session of the same mode would.
+  const spawned: string[][] = [];
+  const additive = options("startup-trust");
+  additive.env[PI_SECURITY_REQUEST_NONCE_ENV] = "additive-trust-security";
+  additive.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE = "additive-trust-ready";
+  additive.env.WOLLIPOG_PERMISSION_PRESET = "orchestrator";
+  additive.config = { permissionMode: "default" };
+  const events: SessionEventPayload[] = [];
+  const driver = new PiRpcDriver(additive, callbacks(events));
+  t.after(() => driver.dispose());
+  const realSpawn = (driver as any).spawn.bind(driver);
+  (driver as any).spawn = (opts: { args: string[] }) => { spawned.push([...opts.args]); return realSpawn(opts); };
+  const started = driver.initialize();
+  // The startup-trust scenario blocks until project trust is resolved, proving the wait happened.
+  const trust = await new Promise<Extract<SessionEventPayload, { kind: "permission_request" }>>((resolve) => {
+    const poll = setInterval(() => {
+      const found = events.find((event): event is Extract<SessionEventPayload, { kind: "permission_request" }> =>
+        event.kind === "permission_request" && event.context?.toolName === "pi.project_trust");
+      if (found) { clearInterval(poll); resolve(found); }
+    }, 5);
+    poll.unref?.();
+  });
+  assert.equal(spawned.length, 1);
+  assert.equal(spawned[0]!.includes("--no-approve"), false,
+    "an additive Pi Orchestrator with a verified bridge takes the ordinary project-trust path");
+  driver.resolvePermission(trust.requestId, "trust");
+  await started;
+});

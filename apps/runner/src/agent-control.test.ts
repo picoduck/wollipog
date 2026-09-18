@@ -30,7 +30,7 @@ import {
   type AgentControlHost,
 } from "./agent-control.js";
 import { CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION } from "./orchestrator-preset.js";
-import { PI_SECURITY_REQUEST_NONCE_ENV } from "./pi-agent-control-extension.js";
+import { PI_ORCHESTRATOR_PRESET_TOOLS_ENV, PI_SECURITY_REQUEST_NONCE_ENV } from "./pi-agent-control-extension.js";
 
 function spec(driver: SessionLaunchSpec["driver"] = "codex"): SessionLaunchSpec {
   return {
@@ -220,6 +220,149 @@ test("discovery-verified Pi receives a private Agent Control extension and stric
       orchestratorAgent: { ...piAgent, piAgentControl: undefined },
     }, () => {}, host), /discovery-verified Pi extension bridge/);
     assert.equal(existsSync(agentControlTokenPath(root, unverified.sessionId)), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a non-strict Pi Orchestrator launches as a normal session plus only the Orchestrator instructions", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-pi-additive-"));
+  try {
+    const host: AgentControlHost = {
+      isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root, platform: "linux",
+    };
+    const control = {
+      controlPlaneUrl: "ws://127.0.0.1:4317/runner",
+      controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      executionIsolationMode: "bwrap" as const,
+    };
+    // Deliberately narrowing user flags: the additive contract must preserve every one of them.
+    const userArgs = ["--no-skills", "--exclude-tools", "write", "--append-system-prompt", "Be terse."];
+    const piAgent: AgentDefinition = {
+      id: "pi", name: "Pi", command: "pi", args: [...userArgs], env: {}, driver: "pi",
+      context: { kind: "native" }, piAgentControl: { protocolVersion: 1 },
+    };
+    const build = (sessionId: string, extra: Partial<SessionLaunchSpec>): SessionLaunchSpec => {
+      const s = spec("pi");
+      s.sessionId = sessionId;
+      s.agentId = "pi";
+      s.command = "pi";
+      s.args = [...userArgs];
+      return Object.assign(s, extra);
+    };
+    const normalized = (s: SessionLaunchSpec) => s.args.map((arg) =>
+      arg === piAgentControlExtensionPath(root, s.sessionId) ? "<extension>" : arg);
+
+    const ordinary = build("s_pi_normal", { config: { permissionMode: "default" } });
+    provisionAgentControl(ordinary, { ...control, orchestratorAgent: piAgent }, () => {}, host);
+
+    const additive = build("s_pi_additive", {
+      config: { permissionMode: "default" },
+      orchestrator: { strictProjectIsolation: false },
+    });
+    provisionAgentControl(additive, { ...control, orchestratorAgent: piAgent }, () => {}, host);
+
+    // The two launches differ by exactly the Orchestrator instructions.
+    assert.deepEqual(normalized(additive).slice(0, normalized(ordinary).length), normalized(ordinary),
+      "the additive Pi launch extends the ordinary one without rewriting it");
+    const extra = normalized(additive).slice(normalized(ordinary).length);
+    assert.equal(extra.length, 2);
+    assert.equal(extra[0], "--append-system-prompt");
+    assert.match(extra[1]!, /^You are running with the Wollipog Orchestrator role/);
+    assert.match(extra[1]!, /Strict Project Isolation is disabled/);
+
+    // Every user flag survives, and none of the coupled preset's restrictions appear.
+    assert.equal(additive.args[additive.args.indexOf("--exclude-tools") + 1], "write",
+      "the user's own tool denylist is untouched");
+    assert.ok(additive.args.includes("--no-skills"));
+    for (const forbidden of ["--no-extensions", "--no-prompt-templates", "--no-context-files", "--tools"]) {
+      assert.equal(additive.args.includes(forbidden), false, `${forbidden} would narrow the ordinary launch`);
+    }
+    assert.equal(additive.args.filter((arg) => arg === "--append-system-prompt").length, 2,
+      "Pi accumulates appends, so the user's own is kept alongside the runner's");
+
+    // The orchestration tool catalog is selected by the role marker; the preset's tool
+    // re-activation marker must NOT be set, or it would re-enable tools the user excluded.
+    assert.equal(additive.env.WOLLIPOG_PERMISSION_PRESET, "orchestrator");
+    assert.equal(additive.env[PI_ORCHESTRATOR_PRESET_TOOLS_ENV], undefined,
+      "the additive role never force-activates tools the user's launch removed");
+    assert.equal(ordinary.env.WOLLIPOG_PERMISSION_PRESET, undefined);
+    assert.equal(additive.args[additive.args.indexOf("--extension") + 1],
+      piAgentControlExtensionPath(root, additive.sessionId), "the Wollipog tool bridge is still loaded");
+
+    // The coupled preset still restricts the launch and sets the tool re-activation marker. It
+    // replaces Pi's whole controlled surface, so its identity check compares against the
+    // preset-stripped baseline and a catalog carrying those flags cannot use it at all.
+    const plainAgent: AgentDefinition = { ...piAgent, args: [] };
+    const preset = build("s_pi_preset", {
+      args: [],
+      config: { permissionMode: "orchestrator" },
+      orchestrator: { strictProjectIsolation: true },
+    });
+    provisionAgentControl(preset, { ...control, orchestratorAgent: plainAgent }, () => {}, host);
+    assert.equal(preset.env[PI_ORCHESTRATOR_PRESET_TOOLS_ENV], "1");
+    assert.ok(preset.args.includes("--no-extensions"));
+    assert.equal(preset.args[preset.args.indexOf("--exclude-tools") + 1], "bash,edit,write");
+
+    // Re-provisioning is idempotent: resume must not stack the instructions.
+    const before = [...additive.args];
+    provisionAgentControl(additive, { ...control, orchestratorAgent: piAgent }, () => {}, host);
+    assert.deepEqual(additive.args, before, "Pi resume replaces rather than stacks the additive flags");
+
+    // A stale preset marker left in the launch environment never survives into an additive or
+    // ordinary launch: provisioning clears it before re-establishing the markers this shape needs.
+    const stale = build("s_pi_stale_marker", {
+      config: { permissionMode: "default" },
+      orchestrator: { strictProjectIsolation: false },
+    });
+    stale.env[PI_ORCHESTRATOR_PRESET_TOOLS_ENV] = "1";
+    provisionAgentControl(stale, { ...control, orchestratorAgent: piAgent }, () => {}, host);
+    assert.equal(stale.env[PI_ORCHESTRATOR_PRESET_TOOLS_ENV], undefined);
+    const staleOrdinary = build("s_pi_stale_ordinary", { config: { permissionMode: "default" } });
+    staleOrdinary.env[PI_ORCHESTRATOR_PRESET_TOOLS_ENV] = "1";
+    provisionAgentControl(staleOrdinary, { ...control, orchestratorAgent: piAgent }, () => {}, host);
+    assert.equal(staleOrdinary.env[PI_ORCHESTRATOR_PRESET_TOOLS_ENV], undefined);
+
+    // Strict Project Isolation still requires the coupled preset.
+    assert.throws(() => provisionAgentControl(build("s_pi_strict", {
+      config: { permissionMode: "default" }, orchestrator: { strictProjectIsolation: true },
+    }), { ...control, orchestratorAgent: piAgent }, () => {}, host),
+      /Strict Project Isolation requires the Orchestrator preset/);
+
+    // An older control plane cannot request the additive Pi shape.
+    assert.throws(() => provisionAgentControl(build("s_pi_old", {
+      config: { permissionMode: "default" }, orchestrator: { strictProjectIsolation: false },
+    }), {
+      ...control,
+      controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi - 1,
+      orchestratorAgent: piAgent,
+    }, () => {}, host), /protocol-v162 control plane/);
+
+    // The verified bridge is still required for the additive shape.
+    assert.throws(() => provisionAgentControl(build("s_pi_nobridge", {
+      config: { permissionMode: "default" }, orchestrator: { strictProjectIsolation: false },
+    }), { ...control, orchestratorAgent: { ...piAgent, piAgentControl: undefined } }, () => {}, host),
+      /discovery-verified Pi extension bridge/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("an additive ACP Orchestrator is refused rather than launched with unaudited provider permissions", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-acp-additive-"));
+  try {
+    const host: AgentControlHost = {
+      isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root, platform: "linux",
+    };
+    const acp = spec("acp");
+    acp.sessionId = "s_acp_additive";
+    acp.command = "npx";
+    acp.args = [`@agentclientprotocol/claude-agent-acp@${CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION}`];
+    acp.config = { permissionMode: "default" };
+    acp.orchestrator = { strictProjectIsolation: false };
+    // ACP has no entry in ORCHESTRATOR_ADDITIVE_CAPABILITY, so the additive branch refuses first.
+    assert.throws(() => provisionAgentControl(acp, {
+      controlPlaneUrl: "ws://127.0.0.1:4317/runner",
+      controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      executionIsolationMode: "bwrap",
+    }, () => {}, host), /native Claude Code, Codex, and Pi Orchestrators/);
+    assert.equal(existsSync(agentControlTokenPath(root, acp.sessionId)), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -639,11 +782,21 @@ test("an Orchestrator with independent provider permissions keeps the ordinary C
     strict.orchestrator = { strictProjectIsolation: true };
     assert.throws(() => provisionAgentControl(strict, control, () => {}, host),
       /Strict Project Isolation requires the Orchestrator preset/);
+    // Pi gained the additive shape in v162 (#1294), so it is no longer refused for its harness —
+    // but it still requires the discovery-verified bridge that enforces its permission mode.
     const pi = spec("pi");
     pi.sessionId = "s_pi_independent";
     pi.config = { permissionMode: "on-request" };
     pi.orchestrator = { strictProjectIsolation: false };
-    assert.throws(() => provisionAgentControl(pi, control, () => {}, host), /native Claude Code and Codex/);
+    assert.throws(() => provisionAgentControl(pi, control, () => {}, host),
+      /discovery-verified Pi extension bridge/);
+    // ACP has no additive shape at all: its provider permission contract is unaudited.
+    const acp = spec("acp");
+    acp.sessionId = "s_acp_independent";
+    acp.config = { permissionMode: "default" };
+    acp.orchestrator = { strictProjectIsolation: false };
+    assert.throws(() => provisionAgentControl(acp, control, () => {}, host),
+      /native Claude Code, Codex, and Pi Orchestrators/);
     const outdated = spec("claude-code");
     outdated.sessionId = "s_outdated_control_plane";
     outdated.config = { permissionMode: "acceptEdits" };
@@ -657,8 +810,13 @@ test("an Orchestrator with independent provider permissions keeps the ordinary C
     outdatedCodex.orchestrator = { strictProjectIsolation: false };
     assert.throws(() => provisionAgentControl(outdatedCodex, {
       ...control, controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex - 1,
+<<<<<<< HEAD
     }, () => {}, host), /protocol-v162/);
     for (const refused of [strict, pi, outdated, outdatedCodex]) {
+=======
+    }, () => {}, host), /protocol-v161/);
+    for (const refused of [strict, pi, acp, outdated, outdatedCodex]) {
+>>>>>>> 6ab9c3ff (Prove the additive Pi launch shape and its ordinary approval path)
       assert.equal(existsSync(agentControlTokenPath(root, refused.sessionId)), false, "refusal precedes credential minting");
     }
   } finally { rmSync(root, { recursive: true, force: true }); }

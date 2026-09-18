@@ -105,7 +105,9 @@ export function orchestratorPresetPermissionsReason(input: {
   }
   const additiveCapability = orchestratorAdditiveCapability(input.driver);
   if (!additiveCapability) {
-    return "This harness still uses the harness-owned Orchestrator preset; independent provider permissions are available for native Claude Code, Codex, and Pi.";
+    return input.driver === "acp"
+      ? "The Claude ACP adapter's provider permission contract is unaudited, so an ACP Orchestrator uses the harness-owned Orchestrator preset."
+      : "This harness still uses the harness-owned Orchestrator preset; independent provider permissions are available for native Claude Code, Codex, and Pi.";
   }
   if (input.contextKind !== "native" || !input.hostExecutionTarget) {
     return "Independent provider permissions are available only for a native Claude Code, Codex, or Pi harness on the host execution target.";

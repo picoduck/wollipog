@@ -522,8 +522,54 @@ test("additive Orchestrator launch arguments are injected and removed without to
     `--append-system-prompt=${orchestratorInstructions(["/repo"], false)}`,
   ];
   assert.deepEqual(stripAdditiveOrchestratorLaunchArgs([...inline, ...user], "claude-code", ["/repo"]), user);
-  assert.throws(() => additiveOrchestratorLaunchArgs("pi", mcp, []), /native Claude Code and Codex/);
-  assert.throws(() => additiveOrchestratorLaunchArgs("acp", mcp, []), /native Claude Code and Codex/);
+  assert.throws(() => additiveOrchestratorLaunchArgs("acp", mcp, []),
+    /native Claude Code, Codex, and Pi/);
+});
+
+test("the additive Pi Orchestrator is the ordinary launch plus only the instructions", () => {
+  const added = additiveOrchestratorLaunchArgs("pi", mcp, ["/repo"]);
+  // Pi's Wollipog tools arrive through the Agent Control extension every verified Pi session
+  // already loads, selected by WOLLIPOG_PERMISSION_PRESET in the agent env. Nothing else is needed.
+  assert.equal(added.length, 2, "exactly one flag pair reaches Pi");
+  assert.equal(added[0], "--append-system-prompt");
+  assert.match(added[1]!, /^You are running with the Wollipog Orchestrator role/);
+  assert.match(added[1]!, /Strict Project Isolation is disabled/);
+  // Every coupled-preset restriction must be absent: the selected mode owns approvals, and the
+  // user's own extensions, skills, prompt templates, context files, and tools all survive.
+  for (const forbidden of ["--no-extensions", "--no-skills", "--no-prompt-templates",
+    "--no-context-files", "--exclude-tools", "--tools", "--no-tools", "--no-builtin-tools",
+    "--no-approve", "--extension"]) {
+    assert.equal(added.includes(forbidden), false, `the additive Pi launch never injects ${forbidden}`);
+  }
+  // A non-strict Pi Orchestrator differs from the ordinary launch by exactly these two arguments,
+  // including when the user's own configuration narrows the launch.
+  const ordinary = ["--provider", "anthropic", "--no-skills", "--exclude-tools", "write"];
+  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs([...ordinary, ...added], "pi", ["/repo"]), ordinary,
+    "resume removes exactly what it injected, keeping the user's own narrowing flags");
+  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(ordinary, "pi", ["/repo"]), ordinary,
+    "a user's own --no-skills/--exclude-tools is never mistaken for an injected flag");
+  // Idempotent across repeated provisioning.
+  assert.deepEqual(
+    stripAdditiveOrchestratorLaunchArgs(
+      stripAdditiveOrchestratorLaunchArgs([...ordinary, ...added], "pi", ["/repo"]), "pi", ["/repo"]),
+    ordinary);
+  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs([...ordinary, ...added, ...added], "pi", ["/repo"]), ordinary);
+});
+
+test("the additive Pi strip leaves a user's own --append-system-prompt alone", () => {
+  const added = additiveOrchestratorLaunchArgs("pi", mcp, []);
+  const user = ["--append-system-prompt", "Be terse."];
+  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs([...user, ...added], "pi", []), user);
+  // Measured against pi 0.85.0: `dist/cli/args.js` pushes each `--append-system-prompt` value onto
+  // an array and `dist/core/agent-session.js` joins them with a blank line, so the runner's append
+  // never displaces the user's — both reach the system prompt, and there is no reserved name.
+  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs([...added, ...user], "pi", []), user);
+  // Also measured there: the flag is matched by exact string equality and consumes the NEXT
+  // argument. `--append-system-prompt=TEXT` is a different thing entirely — it falls through to the
+  // unknown-flag branch and is handed to extensions — so the strip must not touch the inline form.
+  const inline = [`--append-system-prompt=${orchestratorInstructions([], false)}`];
+  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(inline, "pi", []), inline,
+    "Pi does not parse the inline form as an append, so removing it would delete a user argument");
 });
 
 test("the additive Codex Orchestrator adds only Wollipog's MCP server and instructions", () => {

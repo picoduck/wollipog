@@ -3523,7 +3523,9 @@ export class SessionsService {
 >>>>>>> 1f0a3f45 (WIP: gate additive Pi through the control plane and web dialog)
         const additiveCapability = orchestratorAdditiveCapability(launch.driver);
         if (!additiveCapability || contextKind !== "native" || executionTarget.adapter !== "host") {
-          return fail("Independent provider permissions for an Orchestrator are supported only by a native Claude Code, Codex, or Pi harness on the host; other harnesses still use the Orchestrator preset permission mode.", 409);
+          return fail(launch.driver === "acp"
+            ? "The Claude ACP Orchestrator's provider permission contract is unaudited, so it still uses the Orchestrator preset permission mode with Strict Project Isolation."
+            : "Independent provider permissions for an Orchestrator are supported only by a native Claude Code, Codex, or Pi harness on the host; other harnesses still use the Orchestrator preset permission mode.", 409);
         }
         // Mirrors the ordinary-session rule above: every Pi permission mode that enforces approvals
         // does so through the verified Agent Control bridge, and the additive launch keeps that

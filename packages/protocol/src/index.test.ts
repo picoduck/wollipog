@@ -181,10 +181,17 @@ test("PROTOCOL_VERSION is 162", () => {
   assert.equal(runnerSupportsProtocol(158, "orchestratorIssueScope"), true);
   assert.equal(runnerSupportsProtocol(159, "orchestratorAdditiveRole"), false);
   assert.equal(runnerSupportsProtocol(160, "orchestratorAdditiveRole"), true);
+<<<<<<< HEAD
   assert.equal(runnerSupportsProtocol(160, "worktreeRecovery"), false);
   assert.equal(runnerSupportsProtocol(161, "worktreeRecovery"), true);
   assert.equal(runnerSupportsProtocol(161, "orchestratorAdditiveCodex"), false);
   assert.equal(runnerSupportsProtocol(162, "orchestratorAdditiveCodex"), true);
+=======
+  assert.equal(runnerSupportsProtocol(160, "orchestratorAdditiveCodex"), false);
+  assert.equal(runnerSupportsProtocol(161, "orchestratorAdditiveCodex"), true);
+  assert.equal(runnerSupportsProtocol(161, "orchestratorAdditivePi"), false);
+  assert.equal(runnerSupportsProtocol(162, "orchestratorAdditivePi"), true);
+>>>>>>> 6ab9c3ff (Prove the additive Pi launch shape and its ordinary approval path)
   assert.equal(runnerSupportsProtocol(145, "worktreeSetupConfig"), false);
   assert.equal(runnerSupportsProtocol(146, "worktreeSetupConfig"), true);
   assert.equal(runnerSupportsProtocol(134, "runnerCapacityDimensions"), false);
@@ -1313,8 +1320,11 @@ test("the Orchestrator role is independent of the provider permission mode", asy
   assert.equal(orchestratorAdditiveCapability("claude-code"), "orchestratorAdditiveRole");
   assert.equal(orchestratorAdditiveCapability("codex"), "orchestratorAdditiveCodex");
   assert.equal(orchestratorAdditiveCapability("codex-app-server"), "orchestratorAdditiveCodex");
-  for (const coupled of ["acp", "pi", undefined, null]) {
+  assert.equal(orchestratorAdditiveCapability("pi"), "orchestratorAdditivePi");
+  for (const coupled of ["acp", undefined, null]) {
     assert.equal(orchestratorAdditiveCapability(coupled), undefined,
       "every other harness still requires the coupled preset");
   }
+  assert.equal(orchestratorAdditiveCapability("acp"), undefined,
+    "the ACP provider-mode permission contract is unaudited, so ACP keeps the coupled preset");
 });
