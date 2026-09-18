@@ -45,8 +45,26 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     await expect(handoff).toBeVisible();
     const handoffDescriptionId = await handoff.getAttribute("aria-describedby");
     expect(handoffDescriptionId).toBeTruthy();
-    await expect(page.locator(`[id="${handoffDescriptionId}"]`))
-      .toContainText("Fresh provider conversation");
+    const description = page.locator(`[id="${handoffDescriptionId}"]`);
+    await expect(description).toContainText("Fresh provider conversation");
+    const descriptionLayout = await description.evaluate((element) => {
+      const descriptionRect = element.getBoundingClientRect();
+      const eventRect = element.parentElement!.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return {
+        textAlign: style.textAlign,
+        maxWidth: style.maxWidth,
+        leftInset: descriptionRect.left - eventRect.left,
+        rightInset: eventRect.right - descriptionRect.right,
+        scrollWidth: element.scrollWidth,
+        clientWidth: element.clientWidth,
+      };
+    });
+    expect(descriptionLayout.textAlign).toBe("start");
+    expect(descriptionLayout.maxWidth).not.toBe("none");
+    expect(Math.abs(descriptionLayout.leftInset - descriptionLayout.rightInset)).toBeLessThanOrEqual(1);
+    expect(descriptionLayout.leftInset).toBeGreaterThanOrEqual(width === 1280 ? 100 : 23);
+    expect(descriptionLayout.scrollWidth).toBeLessThanOrEqual(descriptionLayout.clientWidth);
     expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests())).toEqual([]);
     // The chosen tier is what actually crossed the boundary.
     const handoffs = await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.handoffRequests());

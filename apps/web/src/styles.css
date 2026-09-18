@@ -11828,11 +11828,14 @@ body.shell-dock-dragging * {
   margin: 0;
 }
 .checkpoint-description {
-  margin: 4px 24px 0;
+  width: calc(100% - var(--space-6) - var(--space-6));
+  max-width: 60ch;
+  margin: var(--space-1) auto 0;
   color: var(--text-dim);
   font-size: var(--text-xs);
   line-height: 1.4;
-  text-align: center;
+  overflow-wrap: anywhere;
+  text-align: start;
 }
 
 /* --------- Cmd+K search palette ---------- */
