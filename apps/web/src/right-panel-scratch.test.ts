@@ -4,6 +4,7 @@ import {
   PANEL_SCRATCH_SESSION_LIMIT,
   clearPanelScratch,
   clearPanelScratchIf,
+  panelScratchRevision,
   panelScratchScopeCount,
   panelScratchScopeKey,
   readPanelScratch,
@@ -28,7 +29,17 @@ test("scratch is keyed per session and per control-plane instance", () => {
   assert.equal(readPanelScratch(remote, "review.requestBody"), undefined);
 });
 
-test("a value equal to the body's own default is forgotten rather than pinned", () => {
+test("a rewritten value gets a new revision even when the bytes are unchanged", () => {
+  const scope = panelScratchScopeKey("session-1");
+  writePanelScratch(scope, "review.requestBody", "same");
+  const first = panelScratchRevision(scope, "review.requestBody");
+  writePanelScratch(scope, "review.requestBody", "same");
+  assert.ok(panelScratchRevision(scope, "review.requestBody") > first, "revisions are monotonic");
+  writePanelScratch(scope, "review.requestBody", null);
+  assert.equal(panelScratchRevision(scope, "review.requestBody"), 0, "nothing held has no revision");
+});
+
+test("a value the body never took ownership of is forgotten rather than pinned", () => {
   const scope = panelScratchScopeKey("session-1");
   writePanelScratch(scope, "review.commitMessage", "edited");
   writePanelScratch(scope, "review.commitMessage", null);
@@ -42,14 +53,27 @@ test("a value equal to the body's own default is forgotten rather than pinned", 
 test("a consumed draft is cleared only while it is still the one that was consumed", () => {
   const scope = panelScratchScopeKey("session-1");
   writePanelScratch(scope, "sidechat.draft", "already on its way");
+  const sent = panelScratchRevision(scope, "sidechat.draft");
+
   // The panel that sent this can be unmounted by the time the send succeeds, so the clear happens
-  // outside it — and must not take a replacement the user typed after coming back with it.
-  clearPanelScratchIf(scope, "sidechat.draft", "something else");
+  // outside it — and must not take a replacement the user typed after coming back.
+  clearPanelScratchIf(scope, "sidechat.draft", "something else", sent);
   assert.equal(readPanelScratch(scope, "sidechat.draft"), "already on its way");
-  clearPanelScratchIf(scope, "sidechat.draft", "already on its way");
+
+  // Retyping the same message after a remount reads identically, which is exactly why the value
+  // compare alone is not the guard: the revision says a different draft is in the box now.
+  writePanelScratch(scope, "sidechat.draft", "already on its way");
+  assert.notEqual(panelScratchRevision(scope, "sidechat.draft"), sent);
+  clearPanelScratchIf(scope, "sidechat.draft", "already on its way", sent);
+  assert.equal(readPanelScratch(scope, "sidechat.draft"), "already on its way",
+    "a retyped replacement is not the draft that was sent");
+
+  clearPanelScratchIf(scope, "sidechat.draft", "already on its way",
+    panelScratchRevision(scope, "sidechat.draft"));
   assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined);
+
   // Clearing what was never stored is the ordinary case for a body holding its default.
-  clearPanelScratchIf(scope, "sidechat.draft", "");
+  clearPanelScratchIf(scope, "sidechat.draft", "", panelScratchRevision(scope, "sidechat.draft"));
   assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined);
 });
 

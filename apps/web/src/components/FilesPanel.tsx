@@ -113,8 +113,12 @@ export function FilesBrowser({
       setError((e as Error).message);
       return "failed";
     } finally {
-      resumeDirectoryRef.current = null;
-      if (reqRef.current === reqId) setBusy(false);
+      // Only the listing that is still current retires the resume. One superseded by an opened file
+      // or a newer listing did not land, so the directory it was resuming into is still owed.
+      if (reqRef.current === reqId) {
+        resumeDirectoryRef.current = null;
+        setBusy(false);
+      }
     }
   }, [api, session.id, setPath]);
 

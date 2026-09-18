@@ -27,8 +27,19 @@ import { useInstanceScope } from "./instance-scope.js";
  */
 export const PANEL_SCRATCH_SESSION_LIMIT = 8;
 
+/**
+ * One remembered value. The revision is a global monotonic stamp, so a caller that captured it
+ * before an await can tell "nobody has touched this draft since" from "it was changed and then
+ * changed back to the same bytes" — which a value compare alone cannot.
+ */
+interface ScratchValue {
+  value: string;
+  revision: number;
+}
+
 /** Scope key → logical key → value. Insertion order is least-recently-used first. */
-const scratch = new Map<string, Map<string, string>>();
+const scratch = new Map<string, Map<string, ScratchValue>>();
+let nextRevision = 1;
 
 /** The collision-proof identity of one session's scratch within one control-plane instance. */
 export function panelScratchScopeKey(sessionId: string, instanceScope = LOCAL_INSTANCE_SCOPE): string {
@@ -36,7 +47,7 @@ export function panelScratchScopeKey(sessionId: string, instanceScope = LOCAL_IN
 }
 
 /** Move a scope to the most-recently-used end so eviction takes the genuinely idle one. */
-function touch(scope: string, values: Map<string, string>): void {
+function touch(scope: string, values: Map<string, ScratchValue>): void {
   scratch.delete(scope);
   scratch.set(scope, values);
 }
@@ -46,13 +57,17 @@ export function readPanelScratch(scope: string, key: string): string | undefined
   const values = scratch.get(scope);
   if (!values) return undefined;
   touch(scope, values);
-  return values.get(key);
+  return values.get(key)?.value;
+}
+
+/** The stamp of the value currently held, or 0 when nothing is. */
+export function panelScratchRevision(scope: string, key: string): number {
+  return scratch.get(scope)?.get(key)?.revision ?? 0;
 }
 
 /**
- * Remember a value, or forget it when `value` is null. Callers pass null for a body holding its
- * own default: there is nothing to restore, and not storing it keeps a default that is derived
- * from the session (the commit message, say) free to follow the session when it changes.
+ * Remember a value, or forget it when `value` is null. Callers pass null for a body that is holding
+ * a value it never took ownership of — see the `dirty` provenance the hook tracks below.
  */
 export function writePanelScratch(scope: string, key: string, value: string | null): void {
   const values = scratch.get(scope);
@@ -63,8 +78,8 @@ export function writePanelScratch(scope: string, key: string, value: string | nu
     else touch(scope, values);
     return;
   }
-  const next = values ?? new Map<string, string>();
-  next.set(key, value);
+  const next = values ?? new Map<string, ScratchValue>();
+  next.set(key, { value, revision: nextRevision++ });
   touch(scope, next);
   while (scratch.size > PANEL_SCRATCH_SESSION_LIMIT) {
     const oldest = scratch.keys().next();
@@ -86,13 +101,21 @@ export function restorePanelScratch<T extends string>(
 }
 
 /**
- * Forget one value only if it is still the exact one the caller is done with.
+ * Forget one value only if it is still untouched since `revision` and still reads as `expected`.
  *
- * The compare is the point: a body that finishes consuming a draft (a side chat message that was
- * sent) may already be unmounted, and a blind delete would then discard a replacement the user
- * typed after remounting.
+ * A body that finishes consuming a draft — a side chat message that was sent — may already be
+ * unmounted by the time it can say so, and a blind delete would discard whatever replaced it. The
+ * value compare alone is not enough: a user who retypes the same message after coming back would
+ * have it deleted under them, and the mounted body would not even learn its scratch was gone. The
+ * revision is what distinguishes an untouched draft from one that came back to the same bytes.
  */
-export function clearPanelScratchIf(scope: string, key: string, expected: string): void {
+export function clearPanelScratchIf(
+  scope: string,
+  key: string,
+  expected: string,
+  revision: number,
+): void {
+  if (panelScratchRevision(scope, key) !== revision) return;
   if (readPanelScratch(scope, key) === expected) writePanelScratch(scope, key, null);
 }
 
@@ -115,9 +138,33 @@ export function usePanelScratchScope(sessionId: string): string {
 interface ScratchEntry<T extends string> {
   scope: string;
   key: string;
-  /** The default in force when this value was last settled — see the adoption rule below. */
+  /** The default in force for this entry; a moved default is adopted only while `dirty` is false. */
   fallback: T;
   value: T;
+  /**
+   * Whether the body has taken ownership of this value — the user typed, chose, or navigated.
+   *
+   * Recorded, never inferred from `value !== fallback`. Equality cannot tell an untouched default
+   * from text the user wrote that happens to read the same, so inferring it lets a rename to that
+   * same text mark the value untouched and a later rename silently overwrite what was typed.
+   */
+  dirty: boolean;
+}
+
+/**
+ * A freshly restored entry. A value the scratch still holds was put there by a body that owned it,
+ * so restoring it restores that ownership too — but a refused value is not restored at all, and the
+ * body is left holding its default with no claim on it.
+ */
+function restored<T extends string>(
+  scope: string,
+  key: string,
+  fallback: T,
+  accept?: (raw: string) => boolean,
+): ScratchEntry<T> {
+  const stored = readPanelScratch(scope, key);
+  const usable = stored !== undefined && (accept === undefined || accept(stored));
+  return { scope, key, fallback, value: usable ? (stored as T) : fallback, dirty: usable };
 }
 
 /**
@@ -164,34 +211,32 @@ function usePanelScratchValue<T extends string>(
   fallback: T,
   accept?: (raw: string) => boolean,
 ): [T, (next: T | ((prior: T) => T)) => void] {
-  const [entry, setEntry] = useState<ScratchEntry<T>>(() => ({
-    scope,
-    key,
-    fallback,
-    value: restorePanelScratch(scope, key, fallback, accept),
-  }));
+  const [entry, setEntry] = useState<ScratchEntry<T>>(() => restored(scope, key, fallback, accept));
   let current = entry;
   if (entry.scope !== scope || entry.key !== key) {
-    current = { scope, key, fallback, value: restorePanelScratch(scope, key, fallback, accept) };
+    current = restored(scope, key, fallback, accept);
+    setEntry(current);
+  } else if (entry.fallback !== fallback && !entry.dirty) {
+    // The default moved under a mounted body — Review's commit message defaults to the session
+    // title, and the session can be renamed while the panel is open. A value nobody has taken
+    // ownership of follows it; anything the user made theirs stays exactly as they left it.
+    current = { ...entry, fallback, value: fallback };
     setEntry(current);
   } else if (entry.fallback !== fallback) {
-    // The default moved under a mounted body — Review's commit message defaults to the session
-    // title, and the session can be renamed while the panel is open. An untouched value follows it;
-    // one the user has edited is theirs and stays. Without this, the old default is written out as
-    // if it were a draft and pins the previous title for the rest of the tab's life.
-    current = { ...entry, fallback, value: entry.value === entry.fallback ? fallback : entry.value };
+    current = { ...entry, fallback };
     setEntry(current);
   }
 
-  const { scope: liveScope, key: liveKey, fallback: liveFallback, value } = current;
+  const { scope: liveScope, key: liveKey, value, dirty } = current;
   useEffect(() => {
-    writePanelScratch(liveScope, liveKey, value === liveFallback ? null : value);
-  }, [liveFallback, liveKey, liveScope, value]);
+    writePanelScratch(liveScope, liveKey, dirty ? value : null);
+  }, [dirty, liveKey, liveScope, value]);
 
   const setValue = useCallback((next: T | ((prior: T) => T)) => {
     setEntry((prior) => {
       const resolved = typeof next === "function" ? next(prior.value) : next;
-      return resolved === prior.value ? prior : { ...prior, value: resolved };
+      if (resolved === prior.value) return prior.dirty ? prior : { ...prior, dirty: true };
+      return { ...prior, value: resolved, dirty: true };
     });
   }, []);
 

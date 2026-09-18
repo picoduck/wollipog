@@ -10,6 +10,7 @@ import {
   type SessionFileEntry,
   type SessionView,
   type SideChatView,
+  type SourceLocation,
 } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -61,6 +62,8 @@ beforeEach(() => {
   listed.length = 0;
   heldPrompt = false;
   releasePrompt = null;
+  heldListing = false;
+  releaseListing = null;
 });
 
 after(() => {
@@ -125,6 +128,9 @@ const listed: string[] = [];
 /** Set by the case that needs a side chat send still in flight while the panel unmounts. */
 let heldPrompt = false;
 let releasePrompt: (() => void) | null = null;
+/** Set by the case that needs a directory listing still in flight when a source location arrives. */
+let heldListing = false;
+let releaseListing: (() => void) | null = null;
 
 const client = {
   ...api,
@@ -135,10 +141,12 @@ const client = {
   }),
   listSessionFiles: async (_id: string, dir: string) => {
     listed.push(dir);
+    if (heldListing) await new Promise<void>((resolve) => { releaseListing = resolve; });
     const entries = tree[dir];
     if (!entries) throw new Error(`no such directory: ${dir}`);
     return { path: dir, entries };
   },
+  readSessionFile: async (_id: string, path: string) => ({ path, content: "fixture\n", size: 8 }),
   sessionWorkflowArtifacts: async () => ({ artifacts: [] }),
   sideChat: async (parentSessionId: string) => ({
     sideChat: {
@@ -155,16 +163,19 @@ const client = {
   childSessions: async () => { throw new Error("this fixture has no durable child-session registry"); },
 } as unknown as ApiClient;
 
-function PanelHarness({ onState, onSwitchSession, onRename }: {
+function PanelHarness({ onState, onSwitchSession, onRename, onLocate }: {
   onState: (state: RightPanelState) => void;
   onSwitchSession?: (switchTo: (id: string) => void) => void;
   onRename?: (rename: (title: string) => void) => void;
+  onLocate?: (locate: (location: SourceLocation | undefined) => void) => void;
 }) {
   const state = useRightPanelState();
   const [session, setSession] = useState(() => sessionOf("session-1"));
+  const [location, setLocation] = useState<SourceLocation | undefined>(undefined);
   onState(state);
   onSwitchSession?.((id: string) => setSession(sessionOf(id)));
   onRename?.((title: string) => setSession((current) => ({ ...current, title })));
+  onLocate?.(setLocation);
   return (
     <ApiProvider client={client}><StoreProvider connection={connection}><RightPanel
       state={state}
@@ -173,8 +184,9 @@ function PanelHarness({ onState, onSwitchSession, onRename }: {
       runnerProtocolVersion={PROTOCOL_VERSION}
       git={git}
       items={[]}
-      onOpenSourceLocation={() => {}}
-      onClearSourceLocation={() => {}}
+      sourceLocation={location}
+      onOpenSourceLocation={setLocation}
+      onClearSourceLocation={() => setLocation(undefined)}
       onOpenTerminal={() => {}}
       onInsertSideChatDraft={() => {}}
     /></StoreProvider></ApiProvider>
@@ -187,6 +199,7 @@ interface Panel {
   show: (mode: "review" | "files" | "browser" | "sidechat") => Promise<void>;
   switchSession: (id: string) => Promise<void>;
   rename: (title: string) => Promise<void>;
+  locate: (location: SourceLocation | undefined) => Promise<void>;
   dispose: () => Promise<void>;
 }
 
@@ -199,11 +212,13 @@ async function mountPanel(options: { strict?: boolean } = {}): Promise<Panel> {
   let state!: RightPanelState;
   let switchTo!: (id: string) => void;
   let renameTo!: (title: string) => void;
+  let locateAt!: (location: SourceLocation | undefined) => void;
   const harness = (
     <PanelHarness
       onState={(next) => { state = next; }}
       onSwitchSession={(next) => { switchTo = next; }}
       onRename={(next) => { renameTo = next; }}
+      onLocate={(next) => { locateAt = next; }}
     />
   );
   await act(async () => root.render(options.strict ? <StrictMode>{harness}</StrictMode> : harness));
@@ -213,6 +228,7 @@ async function mountPanel(options: { strict?: boolean } = {}): Promise<Panel> {
     async show(mode) { await act(async () => state.show(mode)); },
     async switchSession(id) { await act(async () => switchTo(id)); },
     async rename(title) { await act(async () => renameTo(title)); },
+    async locate(location) { await act(async () => locateAt(location)); },
     async dispose() {
       await act(async () => root.unmount());
       container.remove();
@@ -437,6 +453,86 @@ test("a Side Chat send that lands after the panel closes does not restore the se
       "a message that was already sent must not come back and invite a second send");
   } finally {
     releasePrompt?.();
+    await panel.dispose();
+  }
+});
+
+test("a draft that happens to read like a later title is not swallowed by the next rename", async () => {
+  // Ownership is recorded, not inferred from `value !== fallback`. Inferred, a rename onto the
+  // user's own text would mark it untouched and the rename after that would overwrite it.
+  const panel = await mountPanel();
+  try {
+    await panel.show("review");
+    await type(commitInput(panel), "Renamed Later");
+    await panel.rename("Renamed Later");
+    await panel.show("files");
+    await panel.show("review");
+    assert.equal(commitInput(panel).value, "Renamed Later");
+
+    await panel.rename("Renamed Again");
+    await panel.show("files");
+    await panel.show("review");
+    assert.equal(commitInput(panel).value, "Renamed Later",
+      "the title caught up with what the user wrote; that does not make it the app's to replace");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("a send that resolves behind a live composer leaves the draft in it alone", async () => {
+  heldPrompt = true;
+  const panel = await mountPanel();
+  try {
+    await panel.show("sidechat");
+    await type(field(panel, "Side Chat Message") as HTMLTextAreaElement, "same message");
+    await act(async () => fireDomEvent.click(
+      [...panel.container.querySelectorAll<HTMLButtonElement>(".sidechat-composer button")]
+        .find((button) => button.textContent === "Send")!,
+    ));
+
+    // Back before the send resolves, and the reviewer types the same bytes again. Reading alike is
+    // not being the same draft: deleting this one would empty a composer nobody was watching.
+    await panel.show("files");
+    await panel.show("sidechat");
+    await type(field(panel, "Side Chat Message") as HTMLTextAreaElement, "different");
+    await type(field(panel, "Side Chat Message") as HTMLTextAreaElement, "same message");
+    await act(async () => { releasePrompt?.(); });
+
+    await panel.show("files");
+    await panel.show("sidechat");
+    assert.equal((field(panel, "Side Chat Message") as HTMLTextAreaElement).value, "same message",
+      "the retyped draft belongs to the reviewer, not to the send that went before it");
+  } finally {
+    releasePrompt?.();
+    await panel.dispose();
+  }
+});
+
+test("a resumed listing superseded by an opened file is still owed its directory", async () => {
+  const panel = await mountPanel();
+  try {
+    await panel.show("files");
+    await act(async () => fireDomEvent.click(panel.container.querySelector<HTMLButtonElement>(".files-entry")!));
+    assert.equal(crumbs(panel), "root/apps");
+
+    await panel.show("review");
+    heldListing = true;
+    await panel.show("files");            // launches the resume listing for "apps", held open
+    await panel.locate({ path: "README.md" });  // supersedes it before it can land
+    await act(async () => { releaseListing?.(); });
+    assert.match(panel.container.textContent ?? "", /README\.md/, "the file the route asked for is open");
+
+    heldListing = false;
+    listed.length = 0;
+    await panel.locate(undefined);
+    // Clearing the target drops the open file, which re-runs the effect — so the count is not the
+    // assertion; the directory every one of those listings asked for is.
+    assert.deepEqual([...new Set(listed)], ["apps"],
+      "a listing that never landed did not spend the resume, so clearing the target returns to it");
+    assert.equal(crumbs(panel), "root/apps");
+  } finally {
+    heldListing = false;
+    releaseListing?.();
     await panel.dispose();
   }
 });
