@@ -98,8 +98,9 @@ A user-supplied `--settings` in the agent catalog is therefore shadowed for guar
 is not new — it already happened for every launch that provisioned manager hooks — but it now
 applies to more launches. Restoring user settings under a runner-owned settings file is out of
 scope here and needs its own decision. Until then, #1303 does NOT widen the shadowing: a launch that
-owns no worktree, carries its own `--settings`, and would get no manager hooks stays unguarded
-(see "Live protections").
+owns no worktree and carries its own `--settings` stays unguarded (see "Live protections"). That
+includes launches with manager hooks, whose open circuit would otherwise leave a guard-only
+document shadowing settings that previously applied.
 
 ## The guard's own state
 
@@ -172,9 +173,9 @@ tool call of the running turn fail closed). The cost is one short-lived process 
 call in every guardable session.
 
 The remaining windows, each until the next spawn: an unguardable launch (below), and a launch that
-owns no worktree, carries a user-supplied `--settings`, and gets no manager hooks — guarding that
-one would shadow the user's settings, possibly dropping their deny rules, which is a change this ADR
-leaves to its own decision. The sandbox read-only derivation (#1302) is likewise computed at spawn.
+owns no worktree and carries a user-supplied `--settings` — guarding that one would shadow the
+user's settings, possibly dropping their deny rules, which is a change this ADR leaves to its own
+decision. The sandbox read-only derivation (#1302) is likewise computed at spawn.
 
 Because the inventory now changes under a running child by design, the driver binds its mediation
 decision and emulated mode at spawn, as it already does for the routine-operation supplement; the

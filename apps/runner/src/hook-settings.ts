@@ -568,18 +568,19 @@ export function provisionClaudeHooks(
   // beyond the guard's own state; the live refresh makes a new worktree protected from the
   // guard's very next invocation.
   //
-  // The one exception: a launch that owns no worktree yet, carries a user-supplied `--settings`,
-  // and would otherwise get no runner-owned settings at all. Claude applies only the LAST
-  // `--settings`, so provisioning there would silently drop the user's own deny rules and hooks —
-  // newly allowing what their configuration blocks. That launch keeps the pre-#1303 behaviour (no
-  // guard until its next spawn) until user settings can be merged under the runner-owned file.
+  // The one exception: a launch that owns no worktree yet and carries a user-supplied
+  // `--settings`. Claude applies only the LAST `--settings`, so a guard there would shadow the
+  // user's own deny rules and hooks — newly allowing what their configuration blocks — whenever
+  // the guard is the only runner-owned document in play: with manager hooks off, and also while
+  // their circuit is open, when a spawn drops to the guard-only copy. That launch keeps the
+  // pre-#1303 behaviour (no guard until its next spawn) until user settings can be merged under
+  // the runner-owned file.
   const managerHooksBlocked = spec.config?.permissionMode === "orchestrator" ||
     !config.enabled ||
     config.controlPlaneProtocolVersion == null ||
     config.controlPlaneProtocolVersion < CLAUDE_HOOK_PROTOCOL_VERSION ||
     !native || !targetIsHost || !hookTransportSupported(spec);
-  const userSettingsWouldBeShadowed = protections.length === 0 && managerHooksBlocked &&
-    hasUserSettingsArg(spec.args, file);
+  const userSettingsWouldBeShadowed = protections.length === 0 && hasUserSettingsArg(spec.args, file);
   if (userSettingsWouldBeShadowed) {
     log(
       `Claude managed worktree guard ${spec.sessionId}: not provisioned while the session owns no ` +

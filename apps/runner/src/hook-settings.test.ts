@@ -902,14 +902,32 @@ test("a launch with its own --settings and no worktree is not guarded, so nothin
   assert.deepEqual(launch.args.slice(-2), ["--settings", claudeHookSettingsPath(dir, "sess_hook_1")]);
 }));
 
-test("a launch whose manager hooks already shadow its own --settings still gets the empty-list guard", () => temp((dir) => {
+test("an open manager circuit never lets the empty-list guard shadow the agent's own --settings", () => temp((dir) => {
+  // With manager hooks enabled their document already shadows a user --settings while the circuit
+  // is closed; that is not new. But while it is OPEN, a spawn of a guard-less session drops the
+  // runner-owned document and the user's settings apply — a guard-only copy would take that away.
   const launch = spec({ args: ["--settings", "/home/user/claude-settings.json"] });
   resetClaudeGuardState();
   provisionClaudeHooks(launch, {
     ...config, managedWorktreeProtections: [], verifyGuardLaunch: guardVerifies,
   }, () => {}, host(dir));
-  assert.deepEqual(launch.args.slice(-2), ["--settings", claudeHookSettingsPath(dir, "sess_hook_1")]);
-  assert.equal(guardEntries(settingsOf(dir).live).length, 1, "nothing new is shadowed, so the guard rides along");
+  const file = claudeHookSettingsPath(dir, "sess_hook_1");
+  assert.deepEqual(launch.args.slice(-2), ["--settings", file], "the manager hooks are provisioned as before");
+  assert.equal(guardEntries(settingsOf(dir).live).length, 0, "but no guard rides along");
+  writeHookCircuitState(claudeHookCircuitPath(file), { consecutiveFailures: 3, open: true, openedAt: Date.now() });
+  const prepared = prepareClaudeHookArgs(launch.args);
+  assert.equal(prepared.guardActive, false);
+  assert.deepEqual(prepared.args, ["--settings", "/home/user/claude-settings.json"],
+    "the open circuit leaves the user's settings in effect, exactly as before #1303");
+  // A first launch that finds the circuit already open does not append a guard-only file either.
+  const second = spec({ sessionId: "sess_hook_2", args: ["--settings", "/home/user/claude-settings.json"] });
+  writeHookCircuitState(claudeHookCircuitPath(claudeHookSettingsPath(dir, "sess_hook_2")), {
+    consecutiveFailures: 3, open: true, openedAt: Date.now(),
+  });
+  provisionClaudeHooks(second, {
+    ...config, managedWorktreeProtections: [], verifyGuardLaunch: guardVerifies,
+  }, () => {}, host(dir));
+  assert.deepEqual(second.args, ["--settings", "/home/user/claude-settings.json"]);
 }));
 
 test("an unguardable launch with no worktree keeps no runner-owned settings", () => temp((dir) => {

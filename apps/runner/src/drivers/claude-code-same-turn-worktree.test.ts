@@ -14,7 +14,6 @@
  */
 
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,6 +22,7 @@ import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { SessionLaunchSpec } from "@wollipog/protocol";
+import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import {
   claudeHookSettingsPath,
   provisionClaudeHooks,

@@ -591,11 +591,11 @@ harmless because Claude never reaches the control channel for a command the hook
   process cannot gain a hook, and outside `default`/`auto` the CLI never consults the control
   channel, so this is the only way a worktree the session creates part-way through a noninteractive
   turn is protected for the rest of that turn. Discarding the last worktree writes an empty list
-  rather than retiring the guard. The one exception: a launch that owns no worktree, carries a
-  user-supplied `--settings`, and would otherwise get no runner-owned settings (manager hooks off)
-  is NOT guarded, because provisioning would shadow the user's own settings — possibly dropping
-  their deny rules. That launch keeps the pre-#1303 window until its next spawn. Unguardable
-  launches (below) keep it too.
+  rather than retiring the guard. The one exception: a launch that owns no worktree and carries a
+  user-supplied `--settings` is NOT guarded, because the guard would shadow the user's own
+  settings — possibly dropping their deny rules — whenever it is the only runner-owned document
+  in play (manager hooks off, or their circuit open). That launch keeps the pre-#1303 window
+  until its next spawn. Unguardable launches (below) keep it too.
 - **Mediation is bound at spawn.** Whether the running child is mediated, and which fixed-rule mode
   the driver emulates for it, is recorded when it is spawned — like the routine-operation
   supplement — because the worktree inventory and configuration can change while it runs. The
