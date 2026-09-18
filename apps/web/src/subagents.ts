@@ -30,6 +30,13 @@ export interface SubagentDescriptor {
   toolCount?: number;
   /** Most recently observed direct child tool; never inferred from prose output. */
   latestTool?: { title: string; active: boolean };
+  /**
+   * Saturating count of the provider's `tool_call` statements of this id, carried through from the
+   * folded transcript row. Absent means exactly one. A re-statement the timeline folds is invisible
+   * in every other field, so this is what makes the control plane's re-classification of the id
+   * observable to the roster fingerprint (#1289).
+   */
+  statementCount?: number;
 }
 
 export interface SubagentProjectionContext {
@@ -344,6 +351,7 @@ function deriveIndexedSubagentDescriptors(
       ...(node.tool.subagentRollup == null ? {} : { directUsage: node.tool.subagentRollup }),
       ...(inclusiveUsageById.get(id) == null ? {} : { inclusiveUsage: inclusiveUsageById.get(id) }),
       ...(directTools == null ? {} : { toolCount: directTools.count }),
+      ...(node.tool.statementCount == null ? {} : { statementCount: node.tool.statementCount }),
       ...(latestTool == null ? {} : { latestTool: {
         title: latestTool.title,
         active: !["completed", "success", "succeeded", "failed", "error", "rejected", "cancelled", "canceled"]

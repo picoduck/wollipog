@@ -137,6 +137,15 @@ export type TimelineItem =
       subagentLifecycle?: AuthoritativeSubagentLifecycle;
       /** Subagent items nested under this Task call — populated only by nestSubagents(). */
       children?: TimelineItem[];
+      /**
+       * How many distinct `tool_call` statements of this id have folded into this row, capped at
+       * `MAX_TRACKED_TOOL_CALL_STATEMENTS`. Absent means exactly one, the ordinary case. Folding an
+       * identical re-statement leaves every other field equal, so this is the only trace left of an
+       * observation the control plane counts when deciding whether the id still identifies exactly
+       * one child (#1289). Never derived from `tool_call_update`, which a streaming turn emits
+       * freely and which cannot change that classification.
+       */
+      statementCount?: number;
       /** Event timestamps keep duration available even when the provider has no explicit metric. */
       startedAt?: number;
       /** Most recent runner-recorded event for this call. */
@@ -235,6 +244,14 @@ export interface SubagentRollup {
  * boundaries. Real providers keep this set small; the cap prevents malformed/unclosed streams
  * from turning stable message identities into transcript-lifetime state. */
 export const MAX_OPEN_PROVIDER_TEXT_ITEMS = 128;
+
+/**
+ * The control plane stops accumulating spawn observations for one tool-call id at three, and a third
+ * observation is permanently ambiguous, so a count saturating at three carries every classification
+ * the registry can still reach. Saturation is what keeps the signal bounded: over a whole session an
+ * id can move this number at most twice, never once per streamed event.
+ */
+export const MAX_TRACKED_TOOL_CALL_STATEMENTS = 3;
 
 const GOVERNANCE_ACTOR_LABELS: Record<GovernanceActor["kind"], string> = {
   human: "You",
@@ -506,6 +523,9 @@ export function deriveSidePaneContent(items: TimelineItem[]): SidePaneContent {
 export class TimelineBuilder {
   private items: TimelineItem[] = [];
   private readonly toolIndex = new Map<string, number>();
+  /** Statements per tool-call id, saturating at `MAX_TRACKED_TOOL_CALL_STATEMENTS`: one small
+   * integer per id `toolIndex` already tracks. A `tool_call_update` never contributes. */
+  private readonly toolStatements = new Map<string, number>();
   // fileIndex + planIndex are keyed by PARENT CONTEXT (parentToolUseId ?? "") so a subagent's
   // edit/plan never coalesces into — or overwrites — the top-level agent's (or another
   // subagent's). tool ids are globally unique, so toolIndex needs no such scoping.
@@ -801,6 +821,13 @@ export class TimelineBuilder {
         break;
       case "tool_call": {
         this.breakText();
+        // Count the statement itself, not the row it lands on: an update-created row has never been
+        // stated, so the first real statement must read as one rather than as a re-statement.
+        const statementCount = Math.min(
+          (this.toolStatements.get(p.toolCallId) ?? 0) + 1,
+          MAX_TRACKED_TOOL_CALL_STATEMENTS,
+        );
+        this.toolStatements.set(p.toolCallId, statementCount);
         const existing = this.toolIndex.get(p.toolCallId);
         if (existing != null) {
           const item = this.items[existing] as ToolItem;
@@ -821,6 +848,7 @@ export class TimelineBuilder {
               ? { subagentLifecycle: p.subagentLifecycle ?? item.subagentLifecycle }
               : {}),
             ...(activityAt != null ? { lastActivityAt: activityAt } : {}),
+            ...(statementCount > 1 ? { statementCount } : {}),
           };
           if (isTerminalToolStatus(p.status) && activityAt != null) updated.completedAt = activityAt;
           else delete updated.completedAt;
@@ -840,6 +868,7 @@ export class TimelineBuilder {
             ...(p.textRefs?.length ? { referencedText: [{ preview: p.text ?? "", refs: p.textRefs }] } : {}),
             parentToolUseId: p.parentToolUseId,
             ...(p.subagentLifecycle ? { subagentLifecycle: p.subagentLifecycle } : {}),
+            ...(statementCount > 1 ? { statementCount } : {}),
             ...(Number.isFinite(ev.ts) ? { startedAt: ev.ts, lastActivityAt: ev.ts } : {}),
             ...(isTerminalToolStatus(p.status) && Number.isFinite(ev.ts) ? { completedAt: ev.ts } : {}),
             subagentRollup: this.pendingSubagentRollups.get(p.toolCallId),

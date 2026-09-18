@@ -3,13 +3,14 @@ import { after, before, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { PROTOCOL_VERSION, type ChildSessionRegistryPage, type SessionView } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, type ChildSessionRegistryPage, type SessionEventPayload,
+  type SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { StoreProvider } from "../store.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime } from "../ui-transport.js";
-import type { TimelineItem } from "../timeline.js";
+import { TimelineBuilder, type TimelineItem } from "../timeline.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { AgentsPanel } from "./AgentsPanel.js";
 
@@ -173,6 +174,93 @@ test("a page load started under an armed timer moves the deadline instead of los
     assert.deepEqual(calls, [{ after: 0, kind: "refresh" }, { after: 1, kind: "load" }],
       "the armed timer re-armed rather than firing at its original deadline and stealing the request slot");
     assert.match(container.textContent ?? "", /Recorded Second/, "the page the reader asked for was applied");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+/**
+ * #1289: when a provider re-emits an identical full tool-call observation, `TimelineBuilder` folds
+ * that statement into the row it already holds, so the status, lifecycle, title and parent the
+ * roster fingerprint reads all stay equal — while the control plane, now holding a third
+ * observation, stops identifying the child at all. The warning used to wait for the 15 s idle
+ * cadence.
+ *
+ * Both acceptance criteria are asserted here in one run, because they constrain each other: the
+ * obvious signal for the first (the agent row's `lastActivityAt`) moves on every child event, so
+ * satisfying it that way would have made the burst below cost one request per second — the exact
+ * traffic #1207 removed. `calls` is therefore the assertion on both sides of the re-statement.
+ */
+test("a folded re-statement refreshes promptly without restoring per-event registry traffic", async () => {
+  let ambiguous = false;
+  let calls = 0;
+  const childSessions = async (): Promise<ChildSessionRegistryPage> => {
+    calls += 1;
+    return {
+      children: ambiguous ? [] : [{ toolCallId: "child-a", name: "Child A", status: "running",
+        lifecycle: "running", sourceSeq: 1, startedAt: now - 30_000, lastActivityAt: now, toolCount: 2 }],
+      attentionOwners: [], unidentifiedChildren: ambiguous ? 1 : 0, eventEpoch: 0,
+      nextAfter: null, truncated: false,
+    };
+  };
+  const client: ApiClient = { ...api, childSessions };
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const render = (session: SessionView, items: TimelineItem[]) =>
+    root.render(<ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
+      <AgentsPanel session={session} items={items} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
+        requestedId={null} onSelect={() => {}} parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
+    </StoreProvider></FeedbackProvider></ApiProvider>);
+
+  // Real events through the real fold: hand-authored items could not show that a re-statement
+  // leaves the row otherwise identical, which is the whole defect.
+  const builder = new TimelineBuilder();
+  let seq = 0;
+  const push = (payload: SessionEventPayload) => {
+    seq += 1;
+    builder.push({ id: seq, sessionId: baseSession.id, seq, ts: now + seq * 10, payload });
+  };
+  const spawn = { kind: "tool_call", toolCallId: "child-a", title: "child-a",
+    toolKind: "agent", status: "in_progress" } as const;
+
+  try {
+    // Claude's partial stream and its full assistant record: two compatible observations of one
+    // spawn, which the control plane still collapses into a single identity.
+    push({ ...spawn, status: "pending" });
+    push(spawn);
+    await act(async () => { render(baseSession, builder.snapshot()); });
+    await advance(50);
+    assert.equal(calls, 1, "the panel loads the registry once when it opens");
+
+    // A streaming turn under that child: text chunks, its own tool rows, and rollups. Each one
+    // bumps the agent row's activity and tool count, and none of it moves the roster.
+    for (let tick = 1; tick <= 12; tick += 1) {
+      push({ kind: "agent_message", text: `chunk ${tick}`, parentToolUseId: "child-a" });
+      push({ kind: "tool_call", toolCallId: `read-${tick}`, title: "Read", toolKind: "read",
+        status: "completed", parentToolUseId: "child-a" });
+      push({ kind: "token_usage", parentToolUseId: "child-a", inputTokens: tick, outputTokens: tick });
+      await act(async () => {
+        render({ ...baseSession, messageCount: 10 + tick, lastEventAt: now + tick * 100 }, builder.snapshot());
+      });
+      await advance(100);
+    }
+    assert.equal(calls, 1, "a streaming turn that leaves the roster alone still costs no refresh");
+
+    // The provider re-states the identical full observation. The fold leaves the row's status,
+    // lifecycle, title and parent exactly as they were; the control plane now holds a third
+    // observation and can no longer identify the child.
+    ambiguous = true;
+    push(spawn);
+    await act(async () => {
+      render({ ...baseSession, messageCount: 23, lastEventAt: now + 1_300 }, builder.snapshot());
+    });
+    await advance(150);
+    assert.equal(calls, 2, "a folded re-statement refreshes the roster on the 1 s tier, not the 15 s one");
+    assert.match(container.textContent ?? "", /1 worker has an ambiguous provider identity/,
+      "the reclassification the re-statement caused is visible without waiting for the idle cadence");
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
