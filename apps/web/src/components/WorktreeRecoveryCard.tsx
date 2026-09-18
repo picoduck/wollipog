@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import type { SessionView } from "@wollipog/protocol";
 import { Select } from "./ui/ChoiceControls.js";
 
@@ -36,6 +36,12 @@ export function WorktreeRecoveryCard({
   const [selectedPath, setSelectedPath] = useState(() => candidates[0]?.path ?? "");
   const [action, setAction] = useState<"create" | "select" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Colons are legal in an id but hostile to CSS selectors, and these ids are looked up by tests
+  // and by assistive technology alike.
+  const uid = useId().replace(/:/gu, "");
+  const detailId = `worktree-recovery-detail-${uid}`;
+  const retainedId = `worktree-recovery-retained-${uid}`;
+  const offlineId = `worktree-recovery-offline-${uid}`;
 
   useEffect(() => {
     if (!recovery) return;
@@ -50,6 +56,9 @@ export function WorktreeRecoveryCard({
 
   if (!recovery) return null;
   const disabled = action !== null || !runnerOnline;
+  // Both actions carry the incident detail and the reason ordinary submission is unavailable, so a
+  // screen reader announces why the card exists rather than just the action's own name.
+  const describedBy = [detailId, retainedId, ...(runnerOnline ? [] : [offlineId])].join(" ");
   const run = async (next: "create" | "select", operation: () => Promise<void>) => {
     if (disabled) return;
     setAction(next);
@@ -66,12 +75,12 @@ export function WorktreeRecoveryCard({
     <section className="quarantine-banner worktree-recovery" aria-label="Worktree Recovery Required">
       <div className="quarantine-copy">
         <span className="quarantine-title">Worktree Recovery Required</span>
-        <p>{recovery.detail}</p>
-        <p>
+        <p id={detailId}>{recovery.detail}</p>
+        <p id={retainedId}>
           The provider was not launched. Your submitted message is retained as <strong>Not Sent</strong>
           {" "}and can be retried after this session has a verified worktree.
         </p>
-        {!runnerOnline && <p className="worktree-recovery-error">The runner is offline.</p>}
+        {!runnerOnline && <p id={offlineId} className="worktree-recovery-error">The runner is offline.</p>}
         {error && <p className="worktree-recovery-error" role="alert">{error}</p>}
       </div>
       <div className="worktree-recovery-controls">
@@ -92,6 +101,7 @@ export function WorktreeRecoveryCard({
           <button
             type="button"
             className="btn primary sm"
+            aria-describedby={describedBy}
             disabled={disabled || !branch.trim()}
             onClick={() => void run("create", () => onCreate({
               branch: branch.trim(),
@@ -122,6 +132,7 @@ export function WorktreeRecoveryCard({
           <button
             type="button"
             className="btn ghost sm"
+            aria-describedby={describedBy}
             disabled={disabled || !selectedPath}
             onClick={() => void run("select", () => onSelect(selectedPath))}
           >

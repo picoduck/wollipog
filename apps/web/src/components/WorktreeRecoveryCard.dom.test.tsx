@@ -160,3 +160,43 @@ test("worktree recovery actions remain visible but disabled while the runner is 
     container.remove();
   }
 });
+
+function describedText(container: HTMLElement, control: Element): string[] {
+  const ids = control.getAttribute("aria-describedby")?.split(/\s+/u).filter(Boolean) ?? [];
+  return ids.map((id) => {
+    const target = container.ownerDocument.getElementById(id);
+    assert.ok(target && container.contains(target), `aria-describedby target ${id} is rendered in the card`);
+    return target.textContent?.replace(/\s+/gu, " ").trim() ?? "";
+  });
+}
+
+test("recovery actions are described by the incident and the disabled-submission reason", async () => {
+  const online = await renderCard();
+  try {
+    for (const label of ["Create Replacement", "Select Worktree"]) {
+      const button = [...online.container.querySelectorAll("button")].find((item) => item.textContent === label)!;
+      assert.ok(button, `${label} is rendered`);
+      assert.equal(button.getAttribute("aria-label"), null,
+        "the accessible name stays the visible Title Case label");
+      assert.deepEqual(describedText(online.container, button), [
+        "The selected worktree is no longer registered.",
+        "The provider was not launched. Your submitted message is retained as Not Sent and can be retried after this session has a verified worktree.",
+      ]);
+    }
+  } finally {
+    await act(async () => online.root.unmount());
+    online.container.remove();
+  }
+
+  const offline = await renderCard({ runnerOnline: false });
+  try {
+    for (const label of ["Create Replacement", "Select Worktree"]) {
+      const button = [...offline.container.querySelectorAll("button")].find((item) => item.textContent === label)!;
+      assert.equal(describedText(offline.container, button).at(-1), "The runner is offline.",
+        "an offline runner is announced as the reason the action is unavailable");
+    }
+  } finally {
+    await act(async () => offline.root.unmount());
+    offline.container.remove();
+  }
+});

@@ -338,3 +338,56 @@ test("started prompts retire from partial transcripts using durable user-event e
     container.remove();
   }
 });
+
+test("retained-prompt Retry and Dismiss are described by the message and the recovery reason", async () => {
+  const container = domWindow.document.createElement("div");
+  domWindow.document.body.append(container);
+  const root = createRoot(container as unknown as HTMLDivElement);
+  const noOp = () => {};
+  const render = async (worktreeRecoveryPending: boolean) => {
+    await act(async () => root.render(<PendingPromptBubbles
+      prompts={[pending({
+        commandId: "retained", state: "failed", errorCode: "WORKTREE_RECOVERY_REQUIRED",
+        error: "The selected worktree could not be verified; this message was not sent.",
+        canDismiss: true, canRetry: true,
+      })]}
+      deliveredCommandIds={new Set()}
+      liveQueueIds={new Set()}
+      canCancelLive={false}
+      worktreeRecoveryPending={worktreeRecoveryPending}
+      onCancelPending={noOp}
+      onCancelLive={noOp}
+      onDismiss={noOp}
+      onRetry={noOp}
+    />));
+  };
+  const button = (label: string) =>
+    [...container.querySelectorAll("button")].find((candidate) => candidate.textContent === label)!;
+  const described = (control: { getAttribute(name: string): string | null }) =>
+    (control.getAttribute("aria-describedby") ?? "").split(/\s+/u).filter(Boolean).map((id) => {
+      const target = domWindow.document.getElementById(id);
+      assert.ok(target && container.contains(target as never), `aria-describedby target ${id} is rendered`);
+      return target.textContent ?? "";
+    });
+  try {
+    await render(true);
+    assert.equal(button("Retry").getAttribute("aria-label"), "Retry Message");
+    assert.equal(button("Dismiss").getAttribute("aria-label"), "Dismiss Pending Message");
+    assert.deepEqual(described(button("Retry")), [
+      "Durable messageThe selected worktree could not be verified; this message was not sent.",
+      "Recover the selected worktree before retrying this message.",
+    ], "a disabled Retry announces why it is unavailable, not only a tooltip");
+    assert.deepEqual(described(button("Dismiss")), [
+      "Durable messageThe selected worktree could not be verified; this message was not sent.",
+    ], "Dismiss stays available, so it carries only the retained message");
+
+    await render(false);
+    assert.deepEqual(described(button("Retry")), [
+      "Durable messageThe selected worktree could not be verified; this message was not sent.",
+    ], "the recovery reason is withdrawn once the worktree is recovered");
+    assert.equal(container.querySelector("#pending-prompt-recovery-retained"), null);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

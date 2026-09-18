@@ -1,6 +1,12 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import type { ControlPlaneToUi, RunnerView, SessionEvent, SessionView } from "@wollipog/protocol";
+import {
+  RUNNER_CAPABILITY_MIN_PROTOCOL,
+  type ControlPlaneToUi,
+  type RunnerView,
+  type SessionEvent,
+  type SessionView,
+} from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
@@ -49,7 +55,9 @@ const runner = {
   workspaces: [],
   connectedAt: 1,
   lastSeen: 1,
-  protocolVersion: worktreeRecoveryFixture ? 159 : 67,
+  // The recovery branch advertises the version that actually carries worktree recovery state, so
+  // the fixture stays a real peer; the geometry branch keeps its original legacy version.
+  protocolVersion: worktreeRecoveryFixture ? RUNNER_CAPABILITY_MIN_PROTOCOL.worktreeRecovery : 67,
 } as RunnerView;
 
 const session: SessionView = {

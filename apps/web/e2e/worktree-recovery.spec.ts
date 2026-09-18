@@ -29,6 +29,9 @@ test("desktop recovery selects a verified session-linked worktree before Retry i
   const retry = page.getByRole("button", { name: "Retry Message" });
   await expect(card).toContainText("The provider was not launched");
   await expect(retry).toBeDisabled();
+  await expect(retry).toHaveAccessibleDescription(/Recover the selected worktree before retrying this message\./u);
+  await expect(card.getByRole("button", { name: "Create Replacement" }))
+    .toHaveAccessibleDescription(/no longer registered.*retained as Not Sent/u);
   await expect(page.locator(".composer-input")).toBeDisabled();
   await saveEvidence(page, testInfo, "desktop-recovery-required");
 
