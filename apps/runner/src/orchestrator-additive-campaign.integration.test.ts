@@ -459,13 +459,13 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
     const startMessage = hub.sentOfType("start_session").find((msg) => msg.spec.sessionId === parent.id);
     assert.ok(startMessage, "the control plane sent a launch spec");
     assert.equal(startMessage.spec.config?.permissionMode, "auto", "the launch carries the selected permission mode");
-    assert.deepEqual(startMessage.spec.orchestrator, { strictProjectIsolation: false },
+    assert.deepEqual(startMessage.spec.orchestrator, { strictProjectIsolation: false, integrationIsolation: false },
       "the launch policy carries the role to the runner");
     assert.ok(startMessage.spec.args.includes(USER_MCP_CONFIG), "the launch carries the user's configured MCP servers");
 
     // ------------------------------------------- 2. the runner launch, through the real pipeline
     const first = await deliver(parent.id, "plan the campaign");
-    assert.deepEqual(first.opts.orchestrator, { strictProjectIsolation: false },
+    assert.deepEqual(first.opts.orchestrator, { strictProjectIsolation: false, integrationIsolation: false },
       "SessionManager hands the driver the launch policy that carries the role");
     assert.equal(first.opts.config.permissionMode, "auto",
       "the driver runs under the selected provider permission mode");
@@ -682,7 +682,7 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
     await new Promise<void>((resolve) => setImmediate(resolve));
 
     assert.equal(second.cwd, parentWorktree, "the parent's next launch uses its dedicated worktree as cwd");
-    assert.deepEqual(second.opts.orchestrator, { strictProjectIsolation: false },
+    assert.deepEqual(second.opts.orchestrator, { strictProjectIsolation: false, integrationIsolation: false },
       "the role survives the worktree rebind");
     assert.equal(store.readMeta(parent.id)?.config.permissionMode, "auto",
       "the user's permission-mode selection is untouched by the worktree");

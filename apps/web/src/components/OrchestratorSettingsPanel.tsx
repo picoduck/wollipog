@@ -10,6 +10,13 @@ import {
 import { agentHarnessOptionLabel } from "../agent-presentation.js";
 import { useApi } from "../api-context.js";
 import { effortLabel } from "../format.js";
+import {
+  ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE,
+  INTEGRATION_ISOLATION_BY_HARNESS,
+  INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED,
+  INTEGRATION_ISOLATION_PRESERVED,
+  controlPlaneSupportsIntegrationIsolation,
+} from "../session-preset-defaults.js";
 import { SettingsGroup } from "./SettingsView.js";
 import { SegmentedRow, SelectRow, StaticRow } from "./ui/SettingsRows.js";
 
@@ -90,14 +97,24 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
       },
     } : current);
   };
-  const updateExecution = (strictProjectIsolation: boolean) => {
+  const updateExecution = <Key extends keyof OrchestratorDefaults["execution"]>(
+    key: Key,
+    value: OrchestratorDefaults["execution"][Key],
+  ) => {
     draftDirty.current = true;
     setDraft((current) => current ? {
       ...current,
-      execution: { strictProjectIsolation },
+      execution: { ...current.execution, [key]: value },
     } : current);
   };
 
+  // Strict Project Isolation's harness shapes carry no user integration at all, so the settings
+  // panel shows the value those launches actually have rather than the one stored underneath it.
+  const integrationIsolationImplied = draft?.execution.strictProjectIsolation === true;
+  // An older control plane's update parser rejects a defaults payload carrying this key, so the
+  // control is disabled there. The draft is a plain spread of the served payload, so a save from
+  // this panel round-trips WITHOUT the field and every unrelated default stays saveable.
+  const integrationIsolationSupported = controlPlaneSupportsIntegrationIsolation(view?.defaults);
   const harnessPolicySupported = view?.capabilities.harnesses !== undefined;
   const harnesses = view?.capabilities.harnesses ?? [];
   const selectedHarness = draft?.behavior.childHarness ?? null;
@@ -355,13 +372,50 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
           },
         ]}
         value={draft.execution.strictProjectIsolation ? "enabled" : "disabled"}
-        onChange={(value) => updateExecution(value === "enabled")}
+        onChange={(value) => updateExecution("strictProjectIsolation", value === "enabled")}
       />
       <StaticRow
         title="Effective Boundary"
         description={draft.execution.strictProjectIsolation
           ? "Project writes are blocked by operating-system or audited provider sandbox enforcement. Unsupported harness and isolation combinations are refused."
           : "Provider approval controls and repository governance still apply. Orchestrator mode does not claim operating-system read-only enforcement."}
+      />
+      <SegmentedRow
+        title="Integration Isolation"
+        options={[
+          {
+            value: "disabled",
+            label: "Disabled",
+            description: "Load the same integrations as a normal session with the selected harness.",
+          },
+          {
+            value: "enabled",
+            label: "Enabled",
+            // Account defaults have no selected harness, so the pill states the shared promise and
+            // the row below it carries the per-harness differences.
+            description: "Launch with Wollipog's management tools as the only integration.",
+          },
+        ]}
+        // Strict Project Isolation already launches without any provider integration, so the value
+        // it implies is shown here rather than the stored one, and the control cannot contradict it.
+        value={integrationIsolationImplied || draft.execution.integrationIsolation ? "enabled" : "disabled"}
+        disabled={integrationIsolationImplied || !integrationIsolationSupported}
+        disabledReason={integrationIsolationImplied
+          ? "Strict Project Isolation already launches without provider integrations."
+          : !integrationIsolationSupported
+            ? INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED
+            : undefined}
+        onChange={(value) => updateExecution("integrationIsolation", value === "enabled")}
+      />
+      <StaticRow
+        title="Effective Integrations"
+        description={!integrationIsolationSupported
+          ? INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED
+          : integrationIsolationImplied
+          ? `Strict Project Isolation already launches without provider integrations, so Integration Isolation is implied and cannot be disabled. ${ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE}`
+          : draft.execution.integrationIsolation
+            ? `${INTEGRATION_ISOLATION_BY_HARNESS} ${INTEGRATION_ISOLATION_PRESERVED}`
+            : "Hooks, plugins, extensions, skills, and configured MCP servers load exactly as they would for a normal session."}
       />
     </SettingsGroup>
 

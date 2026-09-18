@@ -3494,6 +3494,31 @@ export class SessionsService {
           !runnerSupportsProtocol(runner.protocolVersion, "orchestratorExecutionPolicy")) {
         return fail("Delegate Implementation without Strict Project Isolation requires a protocol-v144 runner; update the runner or enable Strict Project Isolation.", 409);
       }
+      // Every coupled-preset launch — Native TUI, ACP, legacy, and the Claude/Codex non-strict
+      // preset shapes — replaces the provider surface with the runner-owned planning surface and so
+      // carries no user integration. Record `true` rather than storing a value the launch would
+      // contradict, and refuse an explicit override that asked for the opposite, because the
+      // interface must never offer a shape the launch will not honour.
+      if (presetPermissions && !orchestratorPolicy.execution.integrationIsolation) {
+        if (orchestratorPolicy.sources.execution.integrationIsolation === "session_override") {
+          return fail("The Orchestrator preset permission mode always launches without provider integrations; disable Integration Isolation only with independent provider permissions.", 409);
+        }
+        orchestratorPolicy.execution.integrationIsolation = true;
+        orchestratorPolicy.sources.execution.integrationIsolation =
+          orchestratorPolicy.sources.execution.strictProjectIsolation;
+      }
+      // An older runner accepts the launch policy block but has no field for this policy, so it
+      // would launch WITH every ambient integration the human asked to remove. Unlike Parent
+      // Control — where a saved account default is downgraded to `compatibility_fallback` because
+      // dropping delegation can only NARROW what the session may do — silently dropping this one
+      // BROADENS the launch's reach into the user's credentials and tools. It therefore fails
+      // closed for a saved user default exactly as it does for an explicit per-session override.
+      if (!presetPermissions && orchestratorPolicy.execution.integrationIsolation &&
+          !runnerSupportsProtocol(runner.protocolVersion, "orchestratorIntegrationIsolation")) {
+        return fail(`Integration Isolation requires a protocol-v${
+          RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation
+        } runner; update the runner or disable Integration Isolation.`, 409);
+      }
       requestedConfig.maxChildSessions = orchestratorPolicy.behavior.maximumConcurrentChildren;
       parentControl = orchestratorPolicy.delegation.parentControl;
       parentControlPolicy = Object.values(orchestratorPolicy.delegation.decisions).includes("orchestrator")
@@ -5589,6 +5614,15 @@ export class SessionsService {
       if (!runnerSupportsProtocol(runner?.protocolVersion, additiveCapability)) {
         return fail(`An Orchestrator with independent provider permissions requires a protocol-v${
           RUNNER_CAPABILITY_MIN_PROTOCOL[additiveCapability]} runner for this harness; update the runner and retry.`, 409);
+      }
+      // Mirror creation exactly. The stored policy is fixed, so a runner that was downgraded or
+      // re-registered without this capability would relaunch the campaign WITH the integrations the
+      // human removed, while the session still advertises them as absent.
+      if (session.orchestratorPolicy?.execution.integrationIsolation &&
+          !runnerSupportsProtocol(runner?.protocolVersion, "orchestratorIntegrationIsolation")) {
+        return fail(`Integration Isolation requires a protocol-v${
+          RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation
+        } runner; update the runner and retry.`, 409);
       }
       // Creation admits a non-strict Codex Orchestrator only on platforms with Codex's audited
       // sandbox; a runner re-registered on another platform must not bypass that on restart.

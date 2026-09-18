@@ -32,6 +32,7 @@ import {
   MAX_UI_SESSION_SUBSCRIPTIONS,
   POLICY_HOOK_ABANDONMENT_MS,
   PROTOCOL_VERSION,
+  DEFAULT_ORCHESTRATOR_DEFAULTS,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   SESSION_NAMING_RUNNER_BUDGET_MS,
   SESSION_NAMING_SUPERVISION_MARGIN_MS,
@@ -820,7 +821,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
             ui_evidence_approval: "human",
           },
         },
-        execution: { strictProjectIsolation: false },
+        execution: { strictProjectIsolation: false, integrationIsolation: false },
       },
       capabilities: {
         models: [{ id: "text-model", efforts: ["high"] }],
@@ -17237,7 +17238,7 @@ test("Orchestrator is an additive role independent of the provider permission mo
     assert.equal(view.orchestratorPolicy?.execution.strictProjectIsolation, false);
     assert.equal(view.parentControl, "questions_and_approvals", "delegation follows the role, not the preset");
     const spec = hub.sentOfType("start_session").find((message) => message.spec.sessionId === view.id)?.spec;
-    assert.deepEqual(spec?.orchestrator, { strictProjectIsolation: false }, "the launch policy carries the role to the runner");
+    assert.deepEqual(spec?.orchestrator, { strictProjectIsolation: false, integrationIsolation: false }, "the launch policy carries the role to the runner");
     assert.equal(spec?.config?.permissionMode, "acceptEdits");
     assert.ok(svc.setConfig(view.id, { permissionMode: "default" }).ok, "ordinary modes keep their normal live semantics");
     assert.equal(svc.setConfig(view.id, { permissionMode: "orchestrator" }).status, 409, "the preset cannot be entered later");
@@ -17310,7 +17311,7 @@ test("Orchestrator is an additive role independent of the provider permission mo
     assert.equal(codex.data!.permissionMode, codexMode,
       "a non-strict Codex Orchestrator keeps the permission mode a normal session would use");
     const codexSpec = hub.sentOfType("start_session").find((message) => message.spec.sessionId === codex.data!.id)?.spec;
-    assert.deepEqual(codexSpec?.orchestrator, { strictProjectIsolation: false });
+    assert.deepEqual(codexSpec?.orchestrator, { strictProjectIsolation: false, integrationIsolation: false });
     assert.equal(codexSpec?.config?.permissionMode, codexMode);
     // Every mode the installation advertises for a normal session is accepted for the role too.
     let codexOrchestrators = 1;
@@ -17466,7 +17467,7 @@ test("a non-strict Pi Orchestrator keeps its provider permission mode and is gat
     const additiveSpec = hub.sentOfType("start_session").find((m) => m.spec.sessionId === additive.data!.id)?.spec;
     assert.equal(additiveSpec?.config?.permissionMode, normalSpec?.config?.permissionMode,
       "the additive Orchestrator launches with the same provider mode as an equivalent normal session");
-    assert.deepEqual(additiveSpec?.orchestrator, { strictProjectIsolation: false },
+    assert.deepEqual(additiveSpec?.orchestrator, { strictProjectIsolation: false, integrationIsolation: false },
       "only the launch policy distinguishes it");
 
     // Strict Project Isolation still requires the coupled preset for Pi.
@@ -17572,4 +17573,118 @@ test("an ACP Orchestrator still requires the coupled preset and Strict Project I
     assert.match(additive.error ?? "", /unaudited/,
       "the refusal names the actual reason rather than a generic harness list");
   } finally { db.close?.(); }
+});
+
+test("Integration Isolation is its own policy, gated separately and fixed at creation", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    const agent = meta.agents.find((item) => item.id === AGENT_ID)!;
+    agent.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "acceptEdits", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+    const human = { defaultOwnerUserId: "human" };
+    const specFor = (id: string) =>
+      hub.sentOfType("start_session").find((message) => message.spec.sessionId === id)?.spec;
+
+    // Ordinary project permissions with no ambient integrations: exactly the combination #1295 adds.
+    const isolated = svc.createSession({
+      ...request, role: "orchestrator", config: { permissionMode: "acceptEdits" },
+      orchestrator: { execution: { strictProjectIsolation: false, integrationIsolation: true } },
+    }, undefined, undefined, false, false, false, human);
+    assert.ok(isolated.ok, isolated.error);
+    const policy = isolated.data!.orchestratorPolicy!;
+    assert.equal(policy.execution.integrationIsolation, true);
+    assert.equal(policy.sources.execution.integrationIsolation, "session_override");
+    assert.equal(policy.execution.strictProjectIsolation, false,
+      "the integration policy does not drag the project boundary with it");
+    assert.equal(isolated.data!.permissionMode, "acceptEdits",
+      "and it does not consume the provider permission mode either");
+    const isolatedSpec = specFor(isolated.data!.id);
+    assert.deepEqual(isolatedSpec?.orchestrator,
+      { strictProjectIsolation: false, integrationIsolation: true });
+
+    // The same session without the policy: the boundary and the mode are identical, and the launch
+    // policy block differs in exactly one field.
+    const plain = svc.createSession({
+      ...request, role: "orchestrator", config: { permissionMode: "acceptEdits" },
+    }, undefined, undefined, false, false, false, human);
+    assert.ok(plain.ok, plain.error);
+    assert.equal(plain.data!.orchestratorPolicy?.execution.integrationIsolation, false);
+    assert.deepEqual(specFor(plain.data!.id)?.config, isolatedSpec?.config,
+      "the policy changes nothing about the provider configuration sent to the runner");
+    assert.deepEqual(specFor(plain.data!.id)?.orchestrator,
+      { strictProjectIsolation: false, integrationIsolation: false });
+
+    // The coupled preset already launches without integrations, so it records `true` and names the
+    // boundary that implied it rather than a default nobody chose.
+    const preset = svc.createSession({
+      ...request, role: "orchestrator", config: { permissionMode: "orchestrator" },
+    }, undefined, undefined, false, false, false, human);
+    assert.ok(preset.ok, preset.error);
+    assert.equal(preset.data!.orchestratorPolicy?.execution.strictProjectIsolation, false,
+      "even a non-strict preset launch replaces the whole provider surface");
+    assert.equal(preset.data!.orchestratorPolicy?.execution.integrationIsolation, true);
+    assert.equal(preset.data!.orchestratorPolicy?.sources.execution.integrationIsolation, "system_default",
+      "the implied value carries the provenance of the policy that implied it");
+    // Never offer a shape the launch will not honour.
+    const contradiction = svc.createSession({
+      ...request, role: "orchestrator", config: { permissionMode: "orchestrator" },
+      orchestrator: { execution: { strictProjectIsolation: false, integrationIsolation: false } },
+    }, undefined, undefined, false, false, false, human);
+    assert.equal(contradiction.status, 409);
+    assert.match(contradiction.error ?? "", /always launches without provider integrations/);
+
+    // An older runner has no field for the policy and would launch WITH the integrations the human
+    // removed. Refuse with upgrade guidance, for an explicit override...
+    db.registerRunner(meta, Date.now(),
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation - 1);
+    const outdated = svc.createSession({
+      ...request, role: "orchestrator", config: { permissionMode: "acceptEdits" },
+      orchestrator: { execution: { strictProjectIsolation: false, integrationIsolation: true } },
+    }, undefined, undefined, false, false, false, human);
+    assert.equal(outdated.status, 409);
+    assert.match(outdated.error ?? "", /Integration Isolation requires a protocol-v164 runner/);
+    // ...and equally for a saved account default. Unlike Parent Control, whose portable default
+    // downgrades because dropping delegation only narrows what a session may do, silently dropping
+    // this one would BROADEN the launch's reach into the user's credentials and tools.
+    const savedDefault = {
+      source: "user_default" as const,
+      defaults: {
+        ...structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS),
+        execution: { strictProjectIsolation: false, integrationIsolation: true },
+      },
+      capabilities: { models: [], effortLevels: [], installations: 1, compatibleInstallations: 1, status: "available" as const },
+    };
+    const outdatedDefault = svc.createSession({
+      ...request, role: "orchestrator", config: { permissionMode: "acceptEdits" },
+    }, undefined, undefined, false, false, false, {
+      defaultOwnerUserId: "human", orchestratorDefaults: savedDefault, validateOrchestratorDefaults: () => null,
+    });
+    assert.equal(outdatedDefault.status, 409,
+      "a security-relevant default fails closed for an older peer instead of downgrading");
+    assert.match(outdatedDefault.error ?? "", /Integration Isolation requires a protocol-v164 runner/);
+    // The preset needs nothing new from the runner: it isolates on every runner ever shipped.
+    const outdatedPreset = svc.createSession({
+      ...request, role: "orchestrator", config: { permissionMode: "orchestrator" },
+    }, undefined, undefined, false, false, false, human);
+    assert.equal(outdatedPreset.ok, true, outdatedPreset.error);
+    assert.equal(outdatedPreset.data!.orchestratorPolicy?.execution.integrationIsolation, true);
+
+    // Restart mirrors creation exactly: a runner that lost the capability cannot relaunch a
+    // campaign whose stored policy says its integrations are gone.
+    const restart = svc.restart(isolated.data!.id);
+    assert.equal(restart.status, 409);
+    assert.match(restart.error ?? "", /Integration Isolation requires a protocol-v164 runner/);
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    assert.equal(svc.restart(isolated.data!.id).ok, true);
+    assert.deepEqual(specFor(isolated.data!.id)?.orchestrator,
+      { strictProjectIsolation: false, integrationIsolation: true },
+      "the fixed policy is replayed verbatim on restart");
+  } finally {
+    db.close();
+  }
 });

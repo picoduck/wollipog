@@ -466,7 +466,17 @@
 //      combination is refused with upgrade guidance rather than degraded. The ACP harness is
 //      deliberately excluded: its provider-mode permission contract is still unaudited, so an ACP
 //      Orchestrator keeps the coupled preset.
-export const PROTOCOL_VERSION = 163;
+// 164: Integration Isolation is an Orchestrator execution policy of its own, independent of Strict
+//      Project Isolation and of the role. When it is enabled an additive Orchestrator launches with
+//      only Wollipog's management tools as integrations — no user-configured MCP servers, hooks,
+//      plugins, apps, extensions, skills, prompt templates, or ambient context files — while the
+//      provider permission mode, built-in tool inventory, sandbox and approval behaviour, and the
+//      project boundary stay exactly those of the ordinary additive launch. An older runner
+//      recognises the launch policy block but ignores the new field and would launch WITH every
+//      ambient integration the human asked to remove, so the control plane refuses the combination
+//      with upgrade guidance rather than silently broadening the launch. When the policy is
+//      disabled nothing new is required of the runner and the launch is byte-identical to v163's.
+export const PROTOCOL_VERSION = 164;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -660,6 +670,11 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   orchestratorAdditiveRole: 160,
   orchestratorAdditiveCodex: 162,
   orchestratorAdditivePi: 163,
+  /** Runner removes every ambient provider integration from an ADDITIVE Orchestrator launch while
+   * leaving its permission mode, tool inventory, sandbox/approval behaviour, and project boundary
+   * untouched. The coupled preset already launches without integrations on every runner, so this
+   * gate gates only the additive shape. */
+  orchestratorIntegrationIsolation: 164,
   worktreeSetup: 141,
   worktreeTeardownPorts: 145,
   worktreeSetupConfig: 146,
@@ -1580,6 +1595,16 @@ export interface OrchestratorDelegationDefaults {
 export interface OrchestratorExecutionDefaults {
   /** Enforce the legacy scratch-only project boundary with an attested OS/provider sandbox. */
   strictProjectIsolation: boolean;
+  /**
+   * Launch with only Wollipog's management tools as integrations: no user-configured MCP servers,
+   * hooks, plugins, apps, extensions, skills, prompt templates, or ambient context files.
+   *
+   * Deliberately independent of both the role and the project boundary. The provider permission
+   * mode, built-in tool inventory, sandbox/approval behaviour, and working directory are exactly
+   * those of the equivalent additive launch. Strict Project Isolation and every coupled-preset
+   * launch already remove integrations, so their effective value is always `true`.
+   */
+  integrationIsolation: boolean;
 }
 
 /** Runner launch policy for one Orchestrator session. Issue numbers are admitted only from the
@@ -1608,7 +1633,7 @@ export const DEFAULT_ORCHESTRATOR_DEFAULTS: OrchestratorDefaults = {
     parentControl: "questions_and_approvals",
     decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY },
   },
-  execution: { strictProjectIsolation: false },
+  execution: { strictProjectIsolation: false, integrationIsolation: false },
 };
 
 export type OrchestratorPolicySource =

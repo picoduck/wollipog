@@ -37,6 +37,7 @@ import {
   type SessionReminderView,
   sessionRole,
   type SessionView,
+  usesOrchestratorPresetPermissions,
   type SourceLocation,
   type WorkspaceReference,
   type WorkspaceReferenceCandidate,
@@ -47,6 +48,7 @@ import { isPartialHistory, isRebuiltEventsArray, useStoreActions, useStoreSelect
 import { relativeTime, shortenPath, titleCaseLabel } from "../format.js";
 import { agentHarnessIdentityLabel } from "../agent-presentation.js";
 import { runnerDisplay } from "../runners.js";
+import { integrationIsolationDisclosure, ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE } from "../session-preset-defaults.js";
 import { DirectoryPicker } from "./DirectoryPicker.js";
 import { type TimelineItem } from "../timeline.js";
 import { useTimeline } from "./useTimeline.js";
@@ -6586,6 +6588,34 @@ export function ComposerPlusMenu({
                       <div><dt>Maximum Concurrent Children</dt><dd>{session.orchestratorPolicy.behavior.maximumConcurrentChildren}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.maximumConcurrentChildren.replaceAll("_", " "))}</small></dd></div>
                       <div><dt>Follow-Ups</dt><dd>{titleCaseLabel(session.orchestratorPolicy.behavior.followUps.replaceAll("_", " "))}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.followUps.replaceAll("_", " "))}</small></dd></div>
                       <div><dt>Completion</dt><dd>{titleCaseLabel(session.orchestratorPolicy.behavior.completion.replaceAll("_", " "))}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.completion.replaceAll("_", " "))}</small></dd></div>
+                      {/* An older control plane publishes no execution block at all, and one between
+                          v144 and v164 publishes it without this field. Read both defensively and
+                          fall back the same way the stored policy's own migration does: a strict
+                          policy is only ever delivered by a preset launch, which carries no user
+                          integration. */}
+                      {(() => {
+                        // A pre-v164 payload has no field. Derive it in the same order the
+                        // control-plane migration does, and for the same reason: EVERY coupled
+                        // preset launch replaces the provider surface and so carries no user
+                        // integration, including the non-strict Claude and Codex preset shapes,
+                        // where `strictProjectIsolation` is false. Reading strictness first would
+                        // report those as Disabled even though they removed the integrations.
+                        const enabled = session.orchestratorPolicy!.execution?.integrationIsolation ??
+                          (usesOrchestratorPresetPermissions(session) ||
+                            (session.orchestratorPolicy!.execution?.strictProjectIsolation ?? true));
+                        // A preset launch is not the additive launch minus integrations, so it
+                        // gets its own sentence instead of the per-harness "kept" list.
+                        const copy = integrationIsolationDisclosure(session.driver);
+                        const disclosure = usesOrchestratorPresetPermissions(session)
+                          ? ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE
+                          : `${copy.removed} ${copy.kept}`;
+                        return <div title={enabled ? disclosure : undefined}>
+                          <dt>Integration Isolation</dt>
+                          <dd>{enabled ? "Enabled" : "Disabled"}<small>{titleCaseLabel(
+                            (session.orchestratorPolicy!.sources.execution?.integrationIsolation ?? "legacy_session")
+                              .replaceAll("_", " "))}</small></dd>
+                        </div>;
+                      })()}
                       {session.orchestratorCampaign && <>
                         <div><dt>Children</dt><dd>{session.orchestratorCampaign.children.total}<small>{session.orchestratorCampaign.children.verified} Verified · {session.orchestratorCampaign.children.active} Active · {session.orchestratorCampaign.children.waitingHuman} Waiting for Human · {session.orchestratorCampaign.children.blocked} Blocked</small></dd></div>
                         <div><dt>Follow-Up Recommendations</dt><dd>{session.orchestratorCampaign.followUps.unique}<small>{session.orchestratorCampaign.followUps.duplicates} Duplicates Skipped</small></dd></div>

@@ -12,6 +12,7 @@ import {
   CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION,
   codexOrchestratorMcpArgs,
   codexOrchestratorMcpProbe,
+  declaredCodexMcpServerNames,
   isolateCodexMcpServers,
   orchestratorAcpSessionMeta,
   orchestratorInstructions,
@@ -754,4 +755,161 @@ test("projectOrchestratorPresetForPeer keeps the additive role advertisement", (
     assert.equal(projected!.capabilities?.orchestratorAdditive, true,
       `the role attestation survives projection for a v${controlPlaneProtocolVersion} peer`);
   }
+});
+
+test("Integration Isolation changes only the integration surface of the additive launch", () => {
+  const projects = ["/repo"];
+  for (const driver of ["claude-code", "codex", "codex-app-server", "pi"] as const) {
+    const plain = additiveOrchestratorLaunchArgs(driver, mcp, projects);
+    const isolated = additiveOrchestratorLaunchArgs(driver, mcp, projects, true);
+    assert.deepEqual(additiveOrchestratorLaunchArgs(driver, mcp, projects, false), plain,
+      `${driver}: a disabled policy is byte-identical to the launch before this policy existed`);
+    // Everything the plain additive launch carries is still there, in the same order.
+    assert.deepEqual(isolated.slice(isolated.length - plain.length), plain,
+      `${driver}: Integration Isolation only prepends; it rewrites nothing the additive launch already sent`);
+    const added = isolated.slice(0, isolated.length - plain.length);
+    // No permission-mode, sandbox, approval, reviewer, tool-inventory, or working-directory change.
+    for (const forbidden of [
+      "--permission-mode", "--tools", "--disallowedTools", "--exclude-tools", "--no-tools",
+      "--no-builtin-tools", "--restricted", "--bare", "--add-dir", "-C", "--cd", "-s", "--sandbox",
+      "-a", "--ask-for-approval", "--strict-config", "--dangerously-skip-permissions",
+    ]) {
+      assert.equal(added.includes(forbidden), false,
+        `${driver}: Integration Isolation must not inject ${forbidden}`);
+    }
+    for (const setting of added) {
+      assert.equal(/^(sandbox_mode|sandbox_workspace_write|approval_policy|approvals_reviewer|model)/u.test(setting), false,
+        `${driver}: Integration Isolation must not inject the setting ${setting}`);
+    }
+    assert.deepEqual(
+      stripAdditiveOrchestratorLaunchArgs(isolated, driver, projects, true), [],
+      `${driver}: the strip removes exactly what the isolated launch injected`);
+    // Repeated provisioning is idempotent: strip then re-add reproduces the same argument vector.
+    assert.deepEqual(
+      [...stripAdditiveOrchestratorLaunchArgs(isolated, driver, projects, true),
+        ...additiveOrchestratorLaunchArgs(driver, mcp, projects, true)],
+      isolated, `${driver}: provisioning an already-provisioned launch is idempotent`);
+  }
+});
+
+test("Integration Isolation uses the measured per-harness integration levers", () => {
+  const plainClaude = additiveOrchestratorLaunchArgs("claude-code", mcp, ["/repo"]);
+  const claude = additiveOrchestratorLaunchArgs("claude-code", mcp, ["/repo"], true);
+  // Claude isolates MCP servers and NOTHING else. Measured against claude 2.1.270 with a stub stdio
+  // server that writes a marker on start: a user-scope `~/.claude.json` server and a project
+  // `.mcp.json` server both start normally, and under `--strict-mcp-config` neither does while the
+  // `--mcp-config` server still does.
+  assert.deepEqual(claude, ["--strict-mcp-config", ...plainClaude],
+    "the isolated Claude launch differs from the additive one by exactly --strict-mcp-config");
+  // Claude cannot drop the user's hooks without also dropping either their permission rules or
+  // Wollipog's own governance hooks, so it under-delivers rather than over-reaching. None of these
+  // may appear: each would change something other than the integration surface.
+  for (const forbidden of [
+    "--setting-sources", "--settings", "--tools", "--permission-mode", "--disallowedTools",
+    "--disable-slash-commands", "--restricted", "--bare", "--allow-dangerously-skip-permissions",
+  ]) {
+    assert.equal(claude.includes(forbidden), false,
+      `Integration Isolation must not inject ${forbidden} for Claude Code`);
+  }
+  assert.equal(claude.join(" ").includes("disableAllHooks"), false,
+    "disableAllHooks also stops the --settings file's own hooks, removing Wollipog's governance channel");
+
+  for (const driver of ["codex", "codex-app-server"] as const) {
+    const codex = additiveOrchestratorLaunchArgs(driver, mcp, [], true);
+    for (const feature of ["apps", "plugins", "hooks"]) {
+      assert.equal(codex[codex.indexOf(feature) - 1], "--disable", `${driver} disables ${feature}`);
+    }
+    for (const builtIn of ["multi_agent", "browser_use", "computer_use", "image_generation"]) {
+      assert.equal(codex.includes(builtIn), false,
+        `${driver}: ${builtIn} is Codex's own built-in tool inventory, not a user-configured integration`);
+    }
+  }
+
+  const pi = additiveOrchestratorLaunchArgs("pi", mcp, [], true);
+  assert.deepEqual(pi.slice(0, 4),
+    ["--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files"]);
+  assert.equal(pi.includes("--exclude-tools"), false,
+    "excluding built-in tools is tool inventory, which the coupled preset owns and this policy does not touch");
+});
+
+test("the Integration Isolation strip leaves user arguments alone and is exact about their forms", () => {
+  // A disabled policy never touches these flags at all, whoever supplied them.
+  const userClaude = ["--strict-mcp-config", "--setting-sources", "user", "--mcp-config", "/user.json"];
+  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(userClaude, "claude-code", [], false), userClaude);
+  // With the policy on, only `--strict-mcp-config` is ours. Settings sources are never touched: the
+  // isolated Claude launch does not inject one, so removing one would delete a user argument — and
+  // dropping the settings files would drop the user's permission rules with them.
+  assert.deepEqual(
+    stripAdditiveOrchestratorLaunchArgs(
+      ["--setting-sources", "user", "--strict-mcp-config", "--mcp-config", "/user.json"], "claude-code", [], true),
+    ["--setting-sources", "user", "--mcp-config", "/user.json"]);
+  assert.deepEqual(
+    stripAdditiveOrchestratorLaunchArgs(["--setting-sources=user", "--settings", "/user.json"], "claude-code", [], true),
+    ["--setting-sources=user", "--settings", "/user.json"],
+    "neither form of a settings argument is ever removed by this policy");
+
+  // Codex: only the three features this policy disables, and only per-server MCP disables.
+  assert.deepEqual(
+    stripAdditiveOrchestratorLaunchArgs(
+      ["--disable", "apps", "--disable", "web_search", "--disable=hooks",
+        "-c", "mcp_servers.other.enabled=false", "-c", "mcp_servers.wollipog.enabled=false",
+        "-c", "model=\"o3\""],
+      "codex", [], true),
+    ["--disable", "web_search", "-c", "mcp_servers.wollipog.enabled=false", "-c", "model=\"o3\""],
+    "an unrelated --disable, the reserved Wollipog entry, and unrelated -c settings survive");
+
+  // Pi: the long and short forms of exactly the four discovery switches, nothing else.
+  assert.deepEqual(
+    stripAdditiveOrchestratorLaunchArgs(
+      ["--no-extensions", "-ns", "--no-builtin-tools", "--extension", "/user.js"], "pi", [], true),
+    ["--no-builtin-tools", "--extension", "/user.js"]);
+});
+
+test("Integration Isolation keeps Codex MCP servers the agent definition declares, and the preset keeps none", () => {
+  const inventory = JSON.stringify([
+    { name: "wollipog", enabled: true },
+    { name: "declared", enabled: true },
+    { name: "ambient", enabled: true },
+  ]);
+  // The coupled preset's audited boundary is unchanged: everything but Wollipog's entry is disabled,
+  // whether or not the launch declared it.
+  assert.deepEqual(isolateCodexMcpServers(inventory), [
+    "-c", "mcp_servers.declared.enabled=false",
+    "-c", "mcp_servers.ambient.enabled=false",
+  ]);
+  // The additive isolated shape removes only the ambient one. A server the operator named in the
+  // agent definition is part of the harness installation (ADR 0011), and disabling it would
+  // override the very launch argument that declared it.
+  assert.deepEqual(
+    isolateCodexMcpServers(inventory, declaredCodexMcpServerNames([
+      "-c", "mcp_servers.declared.command=\"/usr/bin/declared\"",
+    ])),
+    ["-c", "mcp_servers.ambient.enabled=false"]);
+});
+
+test("declared Codex MCP names are parsed exactly as codex-cli 0.154.0 parses -c keys", () => {
+  // All three argument forms, and a dotted sub-key, declare the server.
+  assert.deepEqual([...declaredCodexMcpServerNames(["-c", "mcp_servers.a=\"x\""])], ["a"]);
+  assert.deepEqual([...declaredCodexMcpServerNames(["--config", "mcp_servers.b.command=\"x\""])], ["b"]);
+  assert.deepEqual([...declaredCodexMcpServerNames(["--config=mcp_servers.c.env.TOKEN=\"x\""])], ["c"]);
+  // Measured grammar: the key is trimmed as a WHOLE and split on dots, with no per-segment trimming
+  // or unquoting. Each of these therefore names a different server than the bare spelling would.
+  assert.deepEqual([...declaredCodexMcpServerNames(["-c", "  mcp_servers.d=\"x\""])], ["d"],
+    "leading whitespace on the whole key is trimmed");
+  assert.deepEqual([...declaredCodexMcpServerNames(["-c", "mcp_servers.\"e\"=\"x\""])], ["\"e\""],
+    "a quoted segment is the literal name including its quotes");
+  assert.deepEqual([...declaredCodexMcpServerNames(["-c", "mcp_servers . f=\"x\""])], [],
+    "a spaced segment does not parse as the mcp_servers table at all");
+  assert.deepEqual([...declaredCodexMcpServerNames(["-c", "mcp_servers.g .command=\"x\""])], ["g "],
+    "an inner segment keeps its trailing space");
+  // Non-MCP settings, valueless keys, and Wollipog's own reserved entry are never declarations.
+  assert.deepEqual([...declaredCodexMcpServerNames([
+    "-c", "model=\"o3\"", "-c", "mcp_servers", "-c", "mcp_servers.wollipog.enabled=true",
+    "--model", "mcp_servers.h=\"x\"",
+  ])], [], "only -c/--config settings under mcp_servers, and never the reserved Wollipog name");
+  // The exemption cannot resurrect Wollipog's reserved name, which isolation always keeps anyway.
+  assert.deepEqual(
+    isolateCodexMcpServers(JSON.stringify([{ name: "wollipog", enabled: true }, { name: "z", enabled: true }]),
+      declaredCodexMcpServerNames(["-c", "mcp_servers.wollipog=\"x\""])),
+    ["-c", "mcp_servers.z.enabled=false"]);
 });

@@ -1980,3 +1980,143 @@ test("an agent offering neither Orchestrator advertisement still says the agent 
     assert.match(fixture.container.textContent!, /does not offer the Orchestrator role/);
   } finally { await unmountFixture(fixture); }
 });
+
+test("Integration Isolation is an independent control that discloses what it removes", async () => {
+  const fixture = await mountFixture({ runners: [piAdditiveRunner], capabilities: {
+    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+  } });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    // Off by default, and the dialog says integrations load as they would for a normal session.
+    assert.match(fixture.container.textContent!,
+      /Hooks, plugins, extensions, skills, and configured MCP servers load exactly as they would/);
+    await chooseSelectOption(fixture.container, "Integration Isolation", "Enabled");
+    // The copy follows the SELECTED agent's harness, because the policy genuinely differs by
+    // harness. This fixture is Pi.
+    assert.match(fixture.container.textContent!,
+      /Removes discovered extensions, skills, prompt templates, and ambient context files/);
+    assert.doesNotMatch(fixture.container.textContent!, /cannot drop hooks/,
+      "the Claude-specific caveat must not be shown for a Pi launch");
+    assert.match(fixture.container.textContent!,
+      /provider permission mode, built-in tool inventory, sandbox and approval behavior, and the project boundary are unchanged/);
+    assert.equal(createButton(fixture.container).disabled, false);
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests[0]?.orchestrator?.execution?.integrationIsolation, true);
+    assert.equal(fixture.requests[0]?.orchestrator?.execution?.strictProjectIsolation, undefined,
+      "an untouched project boundary keeps the provenance of the default it came from");
+    assert.equal(fixture.requests[0]?.config?.permissionMode, undefined,
+      "and without consuming the provider permission mode");
+  } finally { await unmountFixture(fixture); }
+});
+
+test("an older runner blocks Integration Isolation rather than letting it be submitted", async () => {
+  const oldPi: RunnerView = {
+    ...piAdditiveRunner,
+    protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation - 1,
+  };
+  const fixture = await mountFixture({ runners: [oldPi], capabilities: {
+    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+  } });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    await chooseSelectOption(fixture.container, "Integration Isolation", "Enabled");
+    assert.match(fixture.container.textContent!, /Integration Isolation/);
+    assert.equal(createButton(fixture.container).disabled, true,
+      "the dialog never advertises a shape the control plane refuses");
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests.length, 0);
+  } finally { await unmountFixture(fixture); }
+});
+
+test("Strict Project Isolation shows Integration Isolation as implied and not separately selectable", async () => {
+  const fixture = await mountFixture({ runners: [piAdditiveRunner], capabilities: {
+    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+  } }, undefined, undefined, undefined, undefined, strictOrchestratorDefaults);
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    const trigger = fixture.container.querySelector<HTMLButtonElement>('[aria-label^="Integration Isolation:"]');
+    assert.ok(trigger, "the control is still shown, so the effective value is visible");
+    assert.equal(trigger.getAttribute("aria-disabled"), "true",
+      "it is implied rather than independently selectable");
+    assert.match(trigger.getAttribute("aria-label")!, /Enabled/);
+    assert.match(fixture.container.textContent!,
+      /already launches without provider integrations, so this policy is implied and cannot be disabled/);
+    // A strict launch is a coupled preset, which fixes the tool inventory and approval behavior,
+    // so the additive launch's "everything else is unchanged" promise must not appear here.
+    assert.match(fixture.container.textContent!, /harness-owned Orchestrator preset replaces the provider surface/);
+    assert.doesNotMatch(fixture.container.textContent!, /sandbox and approval behavior, and the project boundary are unchanged/);
+  } finally { await unmountFixture(fixture); }
+});
+
+test("the Claude Integration Isolation copy says MCP servers go and hooks, plugins, and permission rules stay", async () => {
+  const claudeAdditive: RunnerView = {
+    ...runner, protocolVersion: PROTOCOL_VERSION,
+    agents: [{
+      id: "claude", name: "Claude Code", command: "claude", args: [], env: {},
+      driver: "claude-code", available: true, context: { kind: "native" },
+      capabilities: {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+        permissionModes: ["default", "acceptEdits"],
+        orchestratorAdditive: true,
+      },
+    }],
+  };
+  const fixture = await mountFixture({ runners: [claudeAdditive], capabilities: {
+    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+  } });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    await chooseSelectOption(fixture.container, "Integration Isolation", "Enabled");
+    // Claude Code isolates MCP servers ONLY. The copy must under-promise exactly, and say why.
+    assert.match(fixture.container.textContent!,
+      /Removes configured MCP servers, so Wollipog's management tools are the only MCP integration/);
+    assert.match(fixture.container.textContent!,
+      /Hooks, plugins enabled in settings, skills, and your permission rules are all kept/);
+    assert.match(fixture.container.textContent!,
+      /cannot drop hooks without also dropping either your permission rules or Wollipog's own governance hooks/);
+    assert.doesNotMatch(fixture.container.textContent!, /Removes .*apps, plugins, and hooks/,
+      "the Codex wording must not leak into a Claude launch");
+  } finally { await unmountFixture(fixture); }
+});
+
+/** An Orchestrator settings payload from a control plane that predates the policy: its own default
+ * shape has no `execution.integrationIsolation`, and its override parser rejects the key. */
+async function preIntegrationIsolationDefaults(): Promise<OrchestratorSettingsView> {
+  const defaults = structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
+  delete (defaults.execution as Partial<typeof defaults.execution>).integrationIsolation;
+  return {
+    defaults,
+    source: "system_default",
+    capabilities: {
+      models: [{ id: "test-model", efforts: ["high"] }], effortLevels: ["high"],
+      installations: 1, compatibleInstallations: 1, status: "available",
+    },
+  };
+}
+
+test("an older control plane blocks Integration Isolation even when the runner supports it", async () => {
+  // The peers upgrade independently: this runner is current, the control plane is not.
+  const fixture = await mountFixture({ runners: [piAdditiveRunner], capabilities: {
+    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+  } }, undefined, undefined, undefined, undefined, preIntegrationIsolationDefaults);
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    const trigger = fixture.container.querySelector<HTMLButtonElement>('[aria-label^="Integration Isolation:"]');
+    assert.ok(trigger, "the setting is still shown rather than hidden");
+    assert.equal(trigger.getAttribute("aria-disabled"), "true");
+    assert.match(fixture.container.textContent!, /Update the control plane to configure Integration Isolation/);
+    // An unrelated Orchestrator session must still be creatable, and the request must not carry a
+    // key this control plane would reject as an unknown override.
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests.length, 1);
+    assert.equal(fixture.requests[0]?.role, "orchestrator");
+    assert.equal(
+      Object.hasOwn(fixture.requests[0]?.orchestrator?.execution ?? {}, "integrationIsolation"), false,
+      "the field is never sent to a control plane that does not know it");
+  } finally { await unmountFixture(fixture); }
+});

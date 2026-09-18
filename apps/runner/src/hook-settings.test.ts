@@ -643,3 +643,37 @@ test("an Orchestrator with independent provider permissions keeps ordinary hook 
     assert.ok(launch.args.includes("--settings"));
   });
 });
+
+test("an integration-isolated additive Orchestrator keeps Wollipog's managed policy hooks", () => {
+  temp((dir) => {
+    // The additive role with Integration Isolation: an ordinary provider permission mode whose
+    // approvals travel over the `hook` elicitation transport, plus the isolation launch argument.
+    const isolated = spec({
+      sessionId: "sess_hook_isolated",
+      args: ["--strict-mcp-config"],
+      config: { permissionMode: "acceptEdits" },
+      orchestrator: { strictProjectIsolation: false, integrationIsolation: true },
+    });
+    provisionClaudeHooks(isolated, config, () => {}, host(dir));
+    const file = claudeHookSettingsPath(dir, isolated.sessionId);
+    assert.deepEqual(isolated.args, ["--strict-mcp-config", "--settings", file],
+      "the managed settings argument is injected alongside the isolation flag, not instead of it");
+    const settings = JSON.parse(readFileSync(file, "utf8"));
+    for (const event of ["PreToolUse", "PostToolUse", "UserPromptSubmit"]) {
+      assert.ok(settings.hooks?.[event]?.[0]?.hooks?.[0]?.command,
+        `the ${event} manager policy hook is still provisioned`);
+    }
+    assert.equal(settings.disableAllHooks, undefined,
+      "nothing in the managed settings switches hooks off");
+    assert.deepEqual(isolated.capabilities!.elicitation!.acceptEdits, ["hook"],
+      "the approval elicitation transport survives Integration Isolation");
+    assert.equal(isolated.args.includes("--setting-sources"), false,
+      "the user's own settings sources, and so their permission rules and hooks, are left alone");
+
+    // The coupled preset is unchanged: it still removes the manager hooks, because it replaces the
+    // whole provider policy with the runner-owned planning surface.
+    const preset = spec({ sessionId: "sess_hook_preset", config: { permissionMode: "orchestrator" } });
+    provisionClaudeHooks(preset, config, () => {}, host(dir));
+    assert.deepEqual(preset.args, [], "the preset keeps no managed settings argument");
+  });
+});

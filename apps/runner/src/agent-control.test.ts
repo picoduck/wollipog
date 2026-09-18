@@ -849,3 +849,132 @@ test("an additive Codex Orchestrator refuses a launch that already claims the re
       "the user's server is reported, never silently removed");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("Integration Isolation removes only integrations from an additive launch, and refuses what it cannot enforce", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-integration-isolation-"));
+  try {
+    const host: AgentControlHost = {
+      isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root, platform: "linux",
+    };
+    const control = {
+      controlPlaneUrl: "ws://127.0.0.1:4317/runner",
+      controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      executionIsolationMode: "bwrap" as const,
+    };
+    const build = (
+      sessionId: string, driver: SessionLaunchSpec["driver"], args: string[],
+      orchestrator?: SessionLaunchSpec["orchestrator"],
+    ): SessionLaunchSpec => Object.assign(spec(driver), {
+      sessionId, agentId: driver, command: driver, args: [...args],
+      config: { permissionMode: "default" },
+      ...(orchestrator ? { orchestrator } : {}),
+    });
+    const anonymize = (s: SessionLaunchSpec) => s.args.map((arg) =>
+      arg === piAgentControlExtensionPath(root, s.sessionId) ? "<extension>"
+        : arg === agentControlMcpConfigPath(root, s.sessionId) ? "<mcp-config>"
+        : arg.includes(s.sessionId) ? "<session-scoped>" : arg);
+
+    for (const [driver, userArgs, agent] of [
+      ["claude-code", ["--permission-mode", "acceptEdits", "--mcp-config", "/user.json",
+        "--setting-sources", "user", "--settings", "/user-settings.json"], undefined],
+      ["pi", ["--no-skills", "--exclude-tools", "write"], {
+        id: "pi", name: "Pi", command: "pi", args: ["--no-skills", "--exclude-tools", "write"],
+        env: {}, driver: "pi" as const, context: { kind: "native" as const },
+        piAgentControl: { protocolVersion: 1 },
+      } as AgentDefinition],
+    ] as const) {
+      const plain = build(`s_${driver}_plain`, driver, [...userArgs], { strictProjectIsolation: false });
+      provisionAgentControl(plain, { ...control, orchestratorAgent: agent }, () => {}, host);
+      const isolated = build(`s_${driver}_isolated`, driver, [...userArgs],
+        { strictProjectIsolation: false, integrationIsolation: true });
+      provisionAgentControl(isolated, { ...control, orchestratorAgent: agent }, () => {}, host);
+
+      // Nothing about the permission mode, sandbox, tool inventory, or working directory changes.
+      assert.deepEqual(isolated.config, plain.config, `${driver}: the provider configuration is identical`);
+      // Session-scoped paths and freshly minted per-launch nonces differ by construction; every
+      // other environment entry must be identical.
+      const scrub = (s: SessionLaunchSpec) => Object.fromEntries(Object.entries(s.env).map(
+        ([key, value]) => [key,
+          /NONCE$/u.test(key) ? "<nonce>" : value.includes(s.sessionId) ? "<session-scoped>" : value]));
+      assert.deepEqual(scrub(isolated), scrub(plain),
+        `${driver}: the launch environment is identical apart from session-scoped paths`);
+      const added = anonymize(isolated).filter((arg, index) =>
+        anonymize(plain)[index] !== arg || anonymize(plain).length <= index);
+      assert.ok(added.length > 0, `${driver}: Integration Isolation must actually change the launch`);
+      for (const forbidden of ["--permission-mode", "--tools", "--exclude-tools", "--add-dir", "--restricted"]) {
+        const plainCount = anonymize(plain).filter((arg) => arg === forbidden).length;
+        assert.equal(anonymize(isolated).filter((arg) => arg === forbidden).length, plainCount,
+          `${driver}: Integration Isolation must not add or remove ${forbidden}`);
+      }
+      // The user's own narrowing flags are preserved either way.
+      for (const userArg of userArgs) {
+        assert.ok(isolated.args.includes(userArg), `${driver}: the user argument ${userArg} survives`);
+      }
+      // Repeated provisioning (every resume re-provisions) is idempotent.
+      const before = [...isolated.args];
+      provisionAgentControl(isolated, { ...control, orchestratorAgent: agent }, () => {}, host);
+      assert.deepEqual(isolated.args, before, `${driver}: resume replaces rather than stacks the isolation flags`);
+    }
+
+    // Claude's one lever, and the many it deliberately does not use. Claude cannot drop the user's
+    // hooks without also dropping either their permission rules or Wollipog's governance hooks, so
+    // it isolates MCP servers only and every disclosure surface says so.
+    const claudePlain = build("s_claude_plain_levers", "claude-code", [], { strictProjectIsolation: false });
+    provisionAgentControl(claudePlain, control, () => {}, host);
+    const claude = build("s_claude_levers", "claude-code", [],
+      { strictProjectIsolation: false, integrationIsolation: true });
+    provisionAgentControl(claude, control, () => {}, host);
+    const claudeAnon = (s: SessionLaunchSpec) => s.args.map((arg) =>
+      arg === agentControlMcpConfigPath(root, s.sessionId) ? "<mcp-config>" : arg);
+    assert.deepEqual(claudeAnon(claude), ["--strict-mcp-config", ...claudeAnon(claudePlain)],
+      "the isolated Claude launch differs from the additive one by exactly --strict-mcp-config");
+    for (const forbidden of [
+      "--setting-sources", "--tools", "--permission-mode", "--disallowedTools",
+      "--disable-slash-commands", "--restricted", "--bare",
+    ]) {
+      assert.equal(claude.args.includes(forbidden), false,
+        `Integration Isolation must not inject ${forbidden} for Claude Code`);
+    }
+    assert.equal(claude.args.join(" ").includes("disableAllHooks"), false,
+      "Wollipog's own managed policy hooks carry the approval elicitation transport and must survive");
+
+    // Pi keeps the discovery-verified Wollipog extension: `--no-extensions` disables DISCOVERY, and
+    // explicit `--extension` paths still load (pi 0.85.0 --help).
+    const piAgent: AgentDefinition = {
+      id: "pi", name: "Pi", command: "pi", args: [], env: {}, driver: "pi",
+      context: { kind: "native" }, piAgentControl: { protocolVersion: 1 },
+    };
+    const pi = build("s_pi_levers", "pi", [], { strictProjectIsolation: false, integrationIsolation: true });
+    provisionAgentControl(pi, { ...control, orchestratorAgent: piAgent }, () => {}, host);
+    assert.ok(pi.args.includes("--no-extensions"));
+    assert.equal(pi.args[pi.args.indexOf("--extension") + 1],
+      piAgentControlExtensionPath(root, pi.sessionId), "the Wollipog tool bridge is still loaded");
+    assert.equal(pi.env[PI_ORCHESTRATOR_PRESET_TOOLS_ENV], undefined,
+      "the preset's tool re-activation marker stays out of the additive launch");
+
+    // A catalog that already carries one of the isolation switches still matches the identity check.
+    const carryingAgent: AgentDefinition = { ...piAgent, args: ["--no-skills"] };
+    const carrying = build("s_pi_carrying", "pi", ["--no-skills"],
+      { strictProjectIsolation: false, integrationIsolation: true });
+    assert.doesNotThrow(() => provisionAgentControl(
+      carrying, { ...control, orchestratorAgent: carryingAgent }, () => {}, host));
+    assert.equal(carrying.args.filter((arg) => arg === "--no-skills").length, 1,
+      "the switch is not duplicated when the catalog already supplied it");
+
+    // An older control plane cannot request this policy, and no credential is minted for a refused
+    // launch.
+    const outdated = build("s_outdated", "claude-code", [],
+      { strictProjectIsolation: false, integrationIsolation: true });
+    assert.throws(() => provisionAgentControl(outdated, {
+      ...control,
+      controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation - 1,
+    }, () => {}, host), /Integration Isolation requires a protocol-v164 control plane/);
+    assert.equal(existsSync(agentControlTokenPath(root, outdated.sessionId)), false);
+
+    // A harness with no additive shape cannot enforce it either, and says so before minting.
+    const acp = build("s_acp", "acp", [], { strictProjectIsolation: false, integrationIsolation: true });
+    assert.throws(() => provisionAgentControl(acp, control, () => {}, host),
+      /Integration Isolation|independent provider permissions/);
+    assert.equal(existsSync(agentControlTokenPath(root, acp.sessionId)), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

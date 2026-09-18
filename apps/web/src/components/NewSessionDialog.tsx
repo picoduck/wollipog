@@ -46,6 +46,11 @@ import {
 import { machineOptionLabels, runnerDisplay } from "../runners.js";
 import { shortenPath, permissionModeLabel, titleCaseLabel } from "../format.js";
 import {
+  INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED,
+  INTEGRATION_ISOLATION_PRESERVED,
+  ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE,
+  controlPlaneSupportsIntegrationIsolation,
+  integrationIsolationDisclosure,
   orchestratorPresetPermissionsReason,
   orchestratorUnavailableReason,
   savedSessionPermissionMode,
@@ -406,8 +411,18 @@ export function NewSessionDialog({
     setOrchestratorOverrides((current) => new Set(current).add(`delegation.decisions.${category}`));
   };
   const setStrictProjectIsolation = (strictProjectIsolation: boolean) => {
-    setOrchestratorDraft((current) => ({ ...current, execution: { strictProjectIsolation } }));
+    setOrchestratorDraft((current) => ({
+      ...current,
+      execution: { ...current.execution, strictProjectIsolation },
+    }));
     setOrchestratorOverrides((current) => new Set(current).add("execution.strictProjectIsolation"));
+  };
+  const setIntegrationIsolation = (integrationIsolation: boolean) => {
+    setOrchestratorDraft((current) => ({
+      ...current,
+      execution: { ...current.execution, integrationIsolation },
+    }));
+    setOrchestratorOverrides((current) => new Set(current).add("execution.integrationIsolation"));
   };
   const effectiveParentControl = !parentControlSupported &&
       !orchestratorOverrides.has("delegation.parentControl")
@@ -418,6 +433,9 @@ export function NewSessionDialog({
     ? "human" as const
     : orchestratorDraft.delegation.decisions[category];
   const orchestratorSource = (path: string) => {
+    if (path === "execution.integrationIsolation" && integrationIsolationImplied) {
+      return orchestratorSource("execution.strictProjectIsolation");
+    }
     if (orchestratorOverrides.has(path)) return "Session Override";
     if (path === "delegation.parentControl" && !parentControlSupported &&
         orchestratorDraft.delegation.parentControl !== "off") return "Compatibility Fallback";
@@ -578,9 +596,54 @@ export function NewSessionDialog({
     (agent?.driver !== "claude-code" ||
       (agent.capabilities?.supportsApprovals === true &&
         agent.capabilities.permissionModes?.includes("default") === true));
-  const orchestratorExecutionValid = orchestratorDraft.execution.strictProjectIsolation
+  // The sentence that explains why the preset still applies is also what decides that it applies.
+  const orchestratorPresetReason = orchestrator
+    ? orchestratorPresetPermissionsReason({
+      controlPlaneSupportsRole: orchestratorRoleSupported,
+      runnerProtocolVersion: runner?.protocolVersion,
+      driver: agent?.driver ?? "acp",
+      contextKind: orchestratorContext,
+      hostExecutionTarget,
+      nativeTui: launchSurface === "native_tui",
+      strictProjectIsolation: orchestratorDraft.execution.strictProjectIsolation,
+      savedOrchestratorDefault,
+    })
+    : undefined;
+  const providerPermissionsPreset = orchestrator && orchestratorPresetReason !== undefined;
+  // Strict Project Isolation, and every coupled-preset launch, already launches without provider
+  // integrations. The control is then implied rather than independent, and the server stores the
+  // same `true`, so showing anything else would advertise a shape the control plane refuses.
+  const integrationIsolationImplied = orchestratorDraft.execution.strictProjectIsolation ||
+    providerPermissionsPreset;
+  const effectiveIntegrationIsolation = integrationIsolationImplied ||
+    orchestratorDraft.execution.integrationIsolation;
+  // BOTH peers have to know the policy, and they upgrade independently: a v164 runner can sit behind
+  // a v163 control plane, whose override parser rejects `execution.integrationIsolation` outright.
+  // The runner's protocol version cannot answer that, so the control plane's own settings payload
+  // does — it echoes the field only if it knows it.
+  const integrationIsolationControlPlane = controlPlaneSupportsIntegrationIsolation(
+    orchestratorSettings?.view?.defaults,
+  );
+  // Only the additive shape needs anything new from the runner; the preset isolates on every
+  // runner. The additive gate itself already requires a native Claude Code, Codex, or Pi harness on
+  // the host, which is exactly the set that can enforce this policy, so no separate harness rule is
+  // needed here — only the protocol gate the control plane will apply.
+  const integrationIsolationSupported = integrationIsolationImplied ||
+    (integrationIsolationControlPlane &&
+      runnerSupportsProtocol(runner?.protocolVersion, "orchestratorIntegrationIsolation"));
+  // The policy differs by harness, so the copy follows the agent this session will actually launch.
+  const integrationIsolationCopy = integrationIsolationDisclosure(agent?.driver);
+  const integrationIsolationUnavailable = !integrationIsolationControlPlane
+    ? INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED
+    : runnerCapabilityRequirement(
+      runner?.protocolVersion,
+      "orchestratorIntegrationIsolation",
+      "Integration Isolation",
+    );
+  const orchestratorExecutionValid = (orchestratorDraft.execution.strictProjectIsolation
     ? strictProjectBoundaryAvailable
-    : providerExecutionAvailable;
+    : providerExecutionAvailable) &&
+    (!effectiveIntegrationIsolation || integrationIsolationSupported);
   const orchestratorExecutionUnavailable = orchestratorDraft.execution.strictProjectIsolation
     ? (agentOffersOrchestratorPreset
       ? "Strict Project Isolation needs an audited Codex sandbox, Direct WSL bubblewrap, or runner bubblewrap/Seatbelt isolation with the required Claude mode."
@@ -852,20 +915,6 @@ export function NewSessionDialog({
       : !!selectedProject && projectLocationLaunchable;
   // Independent provider permissions (#1281, #1293): a non-strict native Claude Code or Codex
   // Orchestrator keeps the same permission mode, tools, hooks, and MCP servers as a normal session.
-  // The sentence that explains why the preset still applies is also what decides that it applies.
-  const orchestratorPresetReason = orchestrator
-    ? orchestratorPresetPermissionsReason({
-      controlPlaneSupportsRole: orchestratorRoleSupported,
-      runnerProtocolVersion: runner?.protocolVersion,
-      driver: agent?.driver ?? "acp",
-      contextKind: orchestratorContext,
-      hostExecutionTarget,
-      nativeTui: launchSurface === "native_tui",
-      strictProjectIsolation: orchestratorDraft.execution.strictProjectIsolation,
-      savedOrchestratorDefault,
-    })
-    : undefined;
-  const providerPermissionsPreset = orchestrator && orchestratorPresetReason !== undefined;
   const savedPermissionTitle = !defaultsReady ? "Default (Not Loaded)"
     : savedPiModeUnavailableForTarget ? "Target Default — Full Access"
     : savedPermissionMode ? `Saved Default — ${titleCaseLabel(permissionModeLabel(savedPermissionMode, agent?.driver))}`
@@ -1032,7 +1081,8 @@ export function NewSessionDialog({
           ? [[category, orchestratorDraft.delegation.decisions[category]]]
           : [],
       ));
-      const executionOverridden = orchestratorOverrides.has("execution.strictProjectIsolation");
+      const executionOverridden = orchestratorOverrides.has("execution.strictProjectIsolation") ||
+        orchestratorOverrides.has("execution.integrationIsolation");
       const orchestratorRequest = orchestrator ? {
         behavior: {
           ...(orchestratorOverrides.has("behavior.childHarness") ? { childHarness: orchestratorDraft.behavior.childHarness } : {}),
@@ -1046,8 +1096,20 @@ export function NewSessionDialog({
           ...(orchestratorOverrides.has("delegation.parentControl") ? { parentControl: orchestratorDraft.delegation.parentControl } : {}),
           ...(Object.keys(decisionOverrides).length ? { decisions: decisionOverrides } : {}),
         },
+        // Each execution policy is sent only when this session actually overrode it, so an
+        // untouched one keeps the provenance of the default it came from. Integration Isolation is
+        // withheld while it is implied: the preset and Strict Project Isolation both launch without
+        // integrations, the server derives `true` and attributes it to the policy that implied it,
+        // and an explicit `false` in that state is a shape the control plane refuses.
         ...(executionOverridden ? { execution: {
-          strictProjectIsolation: orchestratorDraft.execution.strictProjectIsolation,
+          ...(orchestratorOverrides.has("execution.strictProjectIsolation")
+            ? { strictProjectIsolation: orchestratorDraft.execution.strictProjectIsolation }
+            : {}),
+          // An older control plane rejects this key outright, so it is never sent there.
+          ...(orchestratorOverrides.has("execution.integrationIsolation") &&
+            !integrationIsolationImplied && integrationIsolationControlPlane
+            ? { integrationIsolation: orchestratorDraft.execution.integrationIsolation }
+            : {}),
         } } : {}),
       } : undefined;
       const session = await api.createSession({
@@ -1450,7 +1512,9 @@ export function NewSessionDialog({
                   : savedPiModeUnavailableForTarget
                     ? "This target cannot host Pi's approval bridge, so commands run without interactive approvals."
                     : orchestrator
-                      ? "The same permission modes, integrations, and credentials as a normal session apply, and the Orchestrator role only adds Wollipog's orchestration tools. Typed workflow decisions do not govern integrations they cannot intercept. Change the mode in the composer after creation."
+                      ? effectiveIntegrationIsolation
+                        ? `The same permission modes and credentials as a normal session apply, and the Orchestrator role only adds Wollipog's orchestration tools. Integration Isolation is enabled: ${integrationIsolationCopy.removed.charAt(0).toLowerCase()}${integrationIsolationCopy.removed.slice(1)} ${integrationIsolationCopy.kept} Change the mode in the composer after creation.`
+                        : "The same permission modes, integrations, and credentials as a normal session apply, and the Orchestrator role only adds Wollipog's orchestration tools. Typed workflow decisions do not govern integrations they cannot intercept. Change the mode in the composer after creation."
                       : "Use the approval behavior saved for this agent harness. Change it in the composer after creation."}
               </span>
             </div>
@@ -1619,7 +1683,41 @@ export function NewSessionDialog({
                     ? "Operating-system or audited provider sandbox enforcement blocks Project writes."
                     : "Provider approval controls and governance still apply; no read-only operating-system boundary is claimed."}
                 </p>
-                {!orchestratorExecutionValid && <p className="form-error" role="alert">{orchestratorExecutionUnavailable}</p>}
+                <div className="orchestrator-policy-control">
+                  <span>Integration Isolation <small aria-hidden="true">{orchestratorSource("execution.integrationIsolation")}</small></span>
+                  <Select<"disabled" | "enabled">
+                    label="Integration Isolation"
+                    value={effectiveIntegrationIsolation ? "enabled" : "disabled"}
+                    disabled={integrationIsolationImplied || !integrationIsolationControlPlane}
+                    options={[
+                      {
+                        value: "disabled",
+                        label: "Disabled",
+                        description: "Load the same integrations as a normal session with this harness.",
+                      },
+                      {
+                        value: "enabled",
+                        label: "Enabled",
+                        description: integrationIsolationCopy.removed,
+                      },
+                    ]}
+                    onChange={(value) => setIntegrationIsolation(value === "enabled")}
+                  />
+                </div>
+                <p className="muted">
+                  {integrationIsolationImplied
+                    ? `${orchestratorDraft.execution.strictProjectIsolation ? "Strict Project Isolation" : "The Orchestrator preset"} already launches without provider integrations, so this policy is implied and cannot be disabled. ${ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE}`
+                    : !integrationIsolationControlPlane
+                      ? INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED
+                      : effectiveIntegrationIsolation
+                      ? `${integrationIsolationCopy.removed} ${integrationIsolationCopy.kept} ${INTEGRATION_ISOLATION_PRESERVED}`
+                      : "Hooks, plugins, extensions, skills, and configured MCP servers load exactly as they would for a normal session with this harness."}
+                </p>
+                {!orchestratorExecutionValid && <p className="form-error" role="alert">
+                  {effectiveIntegrationIsolation && !integrationIsolationSupported
+                    ? integrationIsolationUnavailable
+                    : orchestratorExecutionUnavailable}
+                </p>}
               </fieldset>
               <fieldset className="orchestrator-policy-area">
                 <legend>Decision Delegation</legend>

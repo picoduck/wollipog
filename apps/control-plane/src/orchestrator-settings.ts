@@ -7,6 +7,7 @@ import {
   type OrchestratorCampaignOverrides,
   type OrchestratorCampaignPolicy,
   type OrchestratorDefaults,
+  type OrchestratorExecutionDefaults,
   type OrchestratorPolicySource,
   type OrchestratorSettingsCapabilities,
   type OrchestratorHarnessCapability,
@@ -24,6 +25,10 @@ function identifier(value: unknown, maximum = 256): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= maximum &&
     value === value.trim() && !/[\0-\x1f\x7f]/u.test(value);
 }
+
+/** Every execution policy field, in one place, so the parser, the override allowlist, and the
+ * provenance map cannot drift apart when another policy is added. */
+const EXECUTION_KEYS = ["strictProjectIsolation", "integrationIsolation"] as const;
 
 export function parseOrchestratorDefaults(value: unknown): OrchestratorDefaults | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -52,8 +57,9 @@ export function parseOrchestratorDefaults(value: unknown): OrchestratorDefaults 
       (behavior.completion !== "retain" && behavior.completion !== "stop_and_archive") ||
       (delegation.parentControl !== "off" && delegation.parentControl !== "questions" &&
         delegation.parentControl !== "questions_and_approvals") ||
-      Object.keys(execution).length !== 1 ||
-      typeof execution.strictProjectIsolation !== "boolean") return null;
+      Object.keys(execution).length !== EXECUTION_KEYS.length ||
+      typeof execution.strictProjectIsolation !== "boolean" ||
+      typeof execution.integrationIsolation !== "boolean") return null;
   const decisions = delegation.decisions as Record<string, unknown> | undefined;
   if (!decisions || Array.isArray(decisions) || Object.keys(decisions).length !== WORKFLOW_DECISION_CATEGORIES.length ||
       !WORKFLOW_DECISION_CATEGORIES.every((category) =>
@@ -71,7 +77,10 @@ export function parseOrchestratorDefaults(value: unknown): OrchestratorDefaults 
       parentControl: delegation.parentControl,
       decisions: decisions as OrchestratorDefaults["delegation"]["decisions"],
     },
-    execution: { strictProjectIsolation: execution.strictProjectIsolation },
+    execution: {
+      strictProjectIsolation: execution.strictProjectIsolation,
+      integrationIsolation: execution.integrationIsolation,
+    },
   };
 }
 
@@ -108,7 +117,8 @@ export function parseOrchestratorOverrides(value: unknown): OrchestratorCampaign
   if (input.delegation && Object.keys(input.delegation).some((key) => !["parentControl", "decisions"].includes(key))) return null;
   if (input.delegation?.decisions && Object.keys(input.delegation.decisions).some((key) =>
     !WORKFLOW_DECISION_CATEGORIES.includes(key as (typeof WORKFLOW_DECISION_CATEGORIES)[number]))) return null;
-  if (input.execution && Object.keys(input.execution).some((key) => key !== "strictProjectIsolation")) return null;
+  if (input.execution && Object.keys(input.execution).some((key) =>
+    !(EXECUTION_KEYS as readonly string[]).includes(key))) return null;
   return {
     ...(input.behavior ? {
       behavior: {
@@ -221,6 +231,16 @@ export function resolveOrchestratorCampaignPolicy(
       Object.hasOwn(overrides.behavior ?? {}, key) ? "session_override" : baseSource,
     ]),
   ) as OrchestratorCampaignPolicy["sources"]["behavior"];
+  const executionSources = Object.fromEntries(EXECUTION_KEYS.map((key) => [
+    key,
+    Object.hasOwn(overrides.execution ?? {}, key) ? "session_override" : baseSource,
+  ])) as OrchestratorCampaignPolicy["sources"]["execution"];
+  // Strict Project Isolation removes every integration by construction, so the stored policy names
+  // `true` and attributes it to the boundary that implied it rather than to a default nobody chose.
+  if (impliesIntegrationIsolation(execution) && !execution.integrationIsolation) {
+    execution.integrationIsolation = true;
+    executionSources.integrationIsolation = executionSources.strictProjectIsolation;
+  }
   return {
     version: 1,
     behavior,
@@ -240,13 +260,21 @@ export function resolveOrchestratorCampaignPolicy(
           Object.hasOwn(overrides.delegation?.decisions ?? {}, category) ? "session_override" : baseSource,
         ])) as OrchestratorCampaignPolicy["sources"]["delegation"]["decisions"],
       },
-      execution: {
-        strictProjectIsolation: Object.hasOwn(overrides.execution ?? {}, "strictProjectIsolation")
-          ? "session_override"
-          : baseSource,
-      },
+      execution: executionSources,
     },
   };
+}
+
+/**
+ * Strict Project Isolation already launches without any user integration: its harness shapes
+ * replace the whole provider surface. Record that truthfully rather than storing a `false` the
+ * launch would contradict — the effective value is `true`, and its provenance is the provenance of
+ * the boundary that implied it, so the interface can name where it came from.
+ */
+export function impliesIntegrationIsolation(
+  execution: Pick<OrchestratorExecutionDefaults, "strictProjectIsolation">,
+): boolean {
+  return execution.strictProjectIsolation;
 }
 
 export class OrchestratorSettings {

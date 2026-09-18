@@ -392,6 +392,82 @@ export function orchestratorLaunchArgs(
 
 const ADDITIVE_CLAUDE_ALLOWED_TOOLS = "mcp__wollipog__*";
 
+/**
+ * Integration Isolation for the ADDITIVE Claude launch (protocol v164): `--strict-mcp-config`, and
+ * nothing else.
+ *
+ * Claude's settings files declare hooks, enabled plugins, and marketplaces — AND the user's
+ * permission rules. There is no per-source hook switch, so every way of removing the user's hooks
+ * also removes something that is not an integration:
+ *
+ *   - `--setting-sources ""` drops user, project, and local settings wholesale, taking
+ *     `permissions.allow` / `ask` / `deny` and `defaultMode` with them. A dropped `deny` rule
+ *     BROADENS what the session may touch, which is the opposite of what enabling an isolation
+ *     policy means, and it changes the permission surface this policy promises not to touch.
+ *   - `{"disableAllHooks":true}` stops hooks in the very `--settings` file that sets it (measured
+ *     below), so it would also remove Wollipog's own managed policy hooks, which carry the `hook`
+ *     elicitation transport the permission mode uses to ask a human for approval.
+ *
+ * Claude user hooks are frequently guardrails themselves — PreToolUse blockers, secret scanners — so
+ * removing them is not unambiguously the safer direction either. A policy that cannot be delivered
+ * exactly under-delivers and says so; it never over-reaches. Claude therefore isolates MCP servers
+ * only, and every disclosure surface states that hooks, settings-enabled plugins, and permission
+ * rules are kept.
+ *
+ * Measured against the installed claude 2.1.270, with `-p x --model <invalid>` so the run ends
+ * before any model call and a stub stdio server that writes a marker file the instant it starts:
+ *   - a user-scope `~/.claude.json` server and a project `.mcp.json` server both start normally;
+ *   - under `--strict-mcp-config` neither starts, while the `--mcp-config` server still does;
+ *   - a plugin-contributed server could NOT be measured cleanly, so no surface claims those are
+ *     removed. See docs/adr/0011.
+ *
+ * Hook-source measurements from the same harness, retained because they are why `disableAllHooks`
+ * is rejected: a `--settings` file's hooks run; `{"disableAllHooks":true}` in that same file stops
+ * them; and a second `--settings` silently replaces the first rather than merging.
+ */
+const ISOLATED_CLAUDE_INTEGRATION_ARGS = ["--strict-mcp-config"];
+
+/** Integration Isolation for the ADDITIVE Codex launch. `--disable <feature>` is exactly
+ * `-c features.<name>=false` (codex-cli 0.154.0 `--help`), and `apps`, `plugins`, and `hooks` are
+ * the three stable feature flags that carry user-configured integrations.
+ *
+ * `multi_agent`, `browser_use`, `computer_use`, and `image_generation` are deliberately NOT
+ * disabled: they are Codex's own built-in tool inventory, not integrations the user configured, and
+ * the additive contract preserves the tool inventory exactly. The coupled preset disables them
+ * because it replaces the whole tool surface, which this policy must not do.
+ *
+ * `--strict-config` is also not used: it makes Codex reject unrecognised `config.toml` fields, which
+ * is a launch-failure policy rather than an integration boundary, and would make an isolated
+ * Orchestrator fail on configuration an ordinary session accepts. Configured MCP servers are
+ * removed separately, by the same live `codex mcp list --json` probe the preset uses. */
+const ISOLATED_CODEX_FEATURES = ["apps", "plugins", "hooks"] as const;
+const ISOLATED_CODEX_INTEGRATION_ARGS = ISOLATED_CODEX_FEATURES.flatMap((feature) => ["--disable", feature]);
+/** Exactly the shape `isolateCodexMcpServers` emits for a non-Wollipog server. */
+const ISOLATED_CODEX_MCP_DISABLE = /^mcp_servers\.[A-Za-z0-9_-]+\.enabled=false$/u;
+
+/** Integration Isolation for the ADDITIVE Pi launch. Per `pi --help` (0.85.0), `--no-extensions`
+ * "Disable extension discovery (explicit -e paths still work)", so the discovery-verified Wollipog
+ * Agent Control extension — which provisioning appends as `--extension <session file>` — still
+ * loads and the orchestration tools remain available.
+ *
+ * `--exclude-tools` is deliberately absent: it removes built-in tools, which is tool inventory
+ * rather than integrations, and the coupled preset owns that. */
+const ISOLATED_PI_INTEGRATION_ARGS = [
+  "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files",
+];
+const ISOLATED_PI_INTEGRATION_FLAGS = new Set([
+  ...ISOLATED_PI_INTEGRATION_ARGS,
+  // Pi's own short aliases, so a catalog that already carries one is normalised the same way.
+  "-ne", "-ns", "-np", "-nc",
+]);
+
+/** Remove the boolean Integration Isolation flags from a launch argument list, so a comparison
+ * against a discovery-verified catalog definition is made on the same normalised form whether the
+ * flag came from the catalog or from this runner. */
+export function withoutPiIntegrationIsolationArgs(args: readonly string[]): string[] {
+  return args.filter((arg) => !ISOLATED_PI_INTEGRATION_FLAGS.has(arg));
+}
+
 /** Codex merges a dotted `mcp_servers.<name>` override into the user's table (verified against
  * codex-cli 0.154.0), so naming the single Wollipog entry adds it without touching, disabling, or
  * re-declaring any configured server. The coupled preset's whole-table form merges too, which is
@@ -400,29 +476,73 @@ const ADDITIVE_CODEX_MCP_KEY = "mcp_servers.wollipog";
 /** The role marker is present in every runner-built Wollipog MCP entry and never in a user's own. */
 const ADDITIVE_CODEX_MCP_MARKER = ORCHESTRATOR_ENV_KEY;
 
+/**
+ * The MCP server a `-c`/`--config` SETTING names, or `null` when it names something else.
+ *
+ * Measured against codex-cli 0.154.0: the key is trimmed as a whole and then split on dots, but
+ * segments are neither trimmed nor unquoted. `mcp_servers.wollipog = {...}` therefore configures the
+ * server named `wollipog`, while `mcp_servers."wollipog"` names a server literally called
+ * `"wollipog"` (quotes included), and `mcp_servers . wollipog` and `mcp_servers.wollipog .command`
+ * each name something else again. A dotted sub-key such as `mcp_servers.foo.command=...` still
+ * declares `foo`.
+ *
+ * This is the single parser for that grammar; every caller reads server names through it so a second
+ * spelling of the rule cannot drift from the measured one.
+ */
+export function codexMcpServerNameFromSetting(setting: string): string | null {
+  const assignment = setting.indexOf("=");
+  if (assignment < 0) return null;
+  const segments = setting.slice(0, assignment).trim().split(".");
+  if (segments[0] !== "mcp_servers" || segments.length < 2) return null;
+  return segments[1]!;
+}
+
 /** Exactly `mcp_servers.wollipog` (the whole entry or one of its fields), never a server whose
  * name merely starts with it, such as `mcp_servers.wollipog-helper`. */
 function namesReservedCodexMcpServer(setting: string): boolean {
-  const assignment = setting.indexOf("=");
-  if (assignment < 0) return false;
-  // Measured against codex-cli 0.154.0: the key is trimmed as a whole and then split on dots, but
-  // segments are neither trimmed nor unquoted. `mcp_servers.wollipog = {...}` therefore configures
-  // the server named `wollipog`, while `mcp_servers."wollipog"`, `mcp_servers . wollipog`, and
-  // `mcp_servers.wollipog .command` each name a different server and are not collisions.
-  const segments = setting.slice(0, assignment).trim().split(".");
-  return segments[0] === "mcp_servers" && segments[1] === "wollipog";
+  return codexMcpServerNameFromSetting(setting) === "wollipog";
+}
+
+/** Walk the `-c key=value` / `--config key=value` / `--config=key=value` forms in a launch argument
+ * list, yielding each setting value exactly once. */
+function* codexConfigSettings(args: readonly string[]): Generator<string> {
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    const flag = arg.split("=", 1)[0]!;
+    if (flag !== "-c" && flag !== "--config") continue;
+    const value = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : args[index + 1];
+    if (typeof value === "string") yield value;
+  }
+}
+
+/**
+ * MCP server names the agent definition's own launch arguments declare.
+ *
+ * Integration Isolation removes integrations the environment supplies implicitly; an integration
+ * named explicitly in the launch arguments is part of the harness installation an operator
+ * configured, and ADR 0011 keeps it. The isolation probe enumerates the EFFECTIVE inventory, which
+ * includes these, so without this exemption the probe's `enabled=false` would override the very
+ * catalog argument that declared the server.
+ *
+ * Wollipog's own reserved entry is never returned: it is the one server isolation always keeps, and
+ * `reservedCodexMcpNameCollision` already refuses a launch that tries to claim that name.
+ */
+export function declaredCodexMcpServerNames(args: readonly string[]): Set<string> {
+  const names = new Set<string>();
+  for (const setting of codexConfigSettings(args)) {
+    const name = codexMcpServerNameFromSetting(setting);
+    if (name !== null && name !== "wollipog") names.add(name);
+  }
+  return names;
 }
 
 /** A user-supplied launch argument that configures an MCP server under Wollipog's reserved name.
  * The additive launch names its single entry by that key, so it would silently replace it. */
 export function reservedCodexMcpNameCollision(args: readonly string[]): boolean {
-  return args.some((arg, index) => {
-    const flag = arg.split("=", 1)[0]!;
-    if (flag !== "-c" && flag !== "--config") return false;
-    const value = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : args[index + 1];
-    return typeof value === "string" && namesReservedCodexMcpServer(value) &&
-      !value.includes(ADDITIVE_CODEX_MCP_MARKER);
-  });
+  for (const setting of codexConfigSettings(args)) {
+    if (namesReservedCodexMcpServer(setting) && !setting.includes(ADDITIVE_CODEX_MCP_MARKER)) return true;
+  }
+  return false;
 }
 
 export function additiveCodexMcpServerArg(
@@ -451,15 +571,23 @@ export function additiveCodexMcpServerArg(
  *
  * No sandbox, approval, reviewer, or `--add-dir` override is injected: Project Locations are named
  * in the instructions text, and anything stronger would be the preset's fixed policy again.
+ *
+ * `integrationIsolation` (protocol v164) is the ONE exception, and it is scoped to integrations
+ * alone: it adds the per-harness arguments documented above, which remove user-configured MCP
+ * servers, hooks, plugins, apps, extensions, skills, prompt templates, and ambient context files.
+ * It adds no permission-mode, sandbox, approval, tool-inventory, or working-directory argument, so
+ * with it disabled this function returns exactly what it returned at v163.
  */
 export function additiveOrchestratorLaunchArgs(
   driver: SessionLaunchSpec["driver"],
   mcp: { command: string; args: string[]; env: Record<string, string> },
   projectPaths: readonly string[] = [],
+  integrationIsolation = false,
 ): string[] {
   const instructions = orchestratorInstructions(projectPaths, false);
   if (driver === "claude-code") {
     return [
+      ...(integrationIsolation ? ISOLATED_CLAUDE_INTEGRATION_ARGS : []),
       "--allowedTools", ADDITIVE_CLAUDE_ALLOWED_TOOLS,
       "--append-system-prompt", instructions,
       ...projectPaths.flatMap((path) => ["--add-dir", path]),
@@ -467,6 +595,7 @@ export function additiveOrchestratorLaunchArgs(
   }
   if (driver === "codex" || driver === "codex-app-server") {
     return [
+      ...(integrationIsolation ? ISOLATED_CODEX_INTEGRATION_ARGS : []),
       "-c", additiveCodexMcpServerArg(mcp),
       "-c", `developer_instructions=${toml(instructions)}`,
     ];
@@ -482,9 +611,46 @@ export function additiveOrchestratorLaunchArgs(
   // line, so this append never displaces a user's own append and there is no reserved name to
   // collide with.
   if (driver === "pi") {
-    return ["--append-system-prompt", instructions];
+    return [
+      ...(integrationIsolation ? ISOLATED_PI_INTEGRATION_ARGS : []),
+      "--append-system-prompt", instructions,
+    ];
   }
   throw new Error("independent provider permissions are supported only for the native Claude Code, Codex, and Pi Orchestrators");
+}
+
+/** How many arguments an Integration Isolation injection occupies at this position, or 0 when the
+ * argument is not one. Both the `--flag value` and the inline `--flag=value` forms are recognised,
+ * because a persisted launch may carry either. */
+function isolatedIntegrationArgLength(
+  driver: SessionLaunchSpec["driver"],
+  arg: string,
+  flag: string,
+  inline: string | undefined,
+  next: string | undefined,
+): number {
+  if (driver === "pi") return ISOLATED_PI_INTEGRATION_FLAGS.has(arg) ? 1 : 0;
+  // `--strict-mcp-config` is the whole Claude policy. It is a plain switch, so it is removed only
+  // when this launch re-adds it: a user's own identical flag is then re-emitted verbatim, and a
+  // launch whose policy is disabled never touches it. `--setting-sources` is deliberately NOT
+  // matched here — the isolated Claude launch never injects one, so removing one would be deleting
+  // a user argument.
+  if (driver === "claude-code") return arg === "--strict-mcp-config" ? 1 : 0;
+  if (driver !== "codex" && driver !== "codex-app-server") return 0;
+  if (flag === "--disable") {
+    const value = inline ?? next;
+    if (!(ISOLATED_CODEX_FEATURES as readonly string[]).includes(value ?? "")) return 0;
+    return inline === undefined ? 2 : 1;
+  }
+  if (flag !== "-c" && flag !== "--config") return 0;
+  // A per-server `enabled=false` is exactly what `isolateCodexMcpServers` emits from the live probe,
+  // and it must be re-derived on every launch because the user's configured inventory can change.
+  // A user's own identical setting is re-emitted verbatim by that same probe, so removing and
+  // re-adding it cannot change the effective configuration.
+  const value = inline ?? next;
+  if (typeof value !== "string" || !ISOLATED_CODEX_MCP_DISABLE.test(value) ||
+      namesReservedCodexMcpServer(value)) return 0;
+  return inline === undefined ? 2 : 1;
 }
 
 /** Remove only the arguments `additiveOrchestratorLaunchArgs` injects, leaving every user- or
@@ -495,6 +661,7 @@ export function stripAdditiveOrchestratorLaunchArgs(
   args: readonly string[],
   driver: SessionLaunchSpec["driver"],
   projectPaths: readonly string[] = [],
+  integrationIsolation = false,
 ): string[] {
   const projects = new Set(projectPaths);
   const result: string[] = [];
@@ -503,6 +670,19 @@ export function stripAdditiveOrchestratorLaunchArgs(
     const flag = arg.split("=", 1)[0]!;
     const inline = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : undefined;
     const value = inline ?? args[i + 1];
+    // The Integration Isolation arguments are plain switches with no runner-owned value to
+    // recognise, so they are removed only when this launch re-adds them a few lines later in
+    // `additiveOrchestratorLaunchArgs`. That keeps repeated provisioning idempotent — including of
+    // arguments a user or catalog supplied, which are re-added verbatim — while a launch whose
+    // policy is disabled never touches them at all. The policy is fixed at creation, so the two
+    // cases cannot mix within one session.
+    if (integrationIsolation) {
+      const consumed = isolatedIntegrationArgLength(driver, arg, flag, inline, args[i + 1]);
+      if (consumed > 0) {
+        i += consumed - 1;
+        continue;
+      }
+    }
     // Measured against pi 0.85.0 `dist/cli/args.js`: `--append-system-prompt` is matched by exact
     // string equality and consumes the NEXT argument. `--append-system-prompt=TEXT` is not that
     // flag at all — it falls through to the unknown-flag branch and is handed to extensions — so
@@ -579,10 +759,16 @@ export function stripOrchestratorLaunchArgs(args: string[], driver: SessionLaunc
   return result;
 }
 
-/** Codex merges MCP tables, even when the CLI supplies an empty table. Enumerate the
- * effective configuration at the actual launch cwd and explicitly disable every other
- * server. Never include probe output (which may contain credentials) in errors/logs. */
-export function isolateCodexMcpServers(output: string): string[] {
+/**
+ * Codex merges MCP tables, even when the CLI supplies an empty table. Enumerate the effective
+ * configuration at the actual launch cwd and explicitly disable every other server. Never include
+ * probe output (which may contain credentials) in errors/logs.
+ *
+ * `exempt` is the ADDITIVE Integration Isolation shape's list of servers the agent definition itself
+ * declares, which ADR 0011 keeps. It is ALWAYS empty for the coupled preset: that shape's audited
+ * behaviour is to disable everything but Wollipog's entry, and this issue must not change it.
+ */
+export function isolateCodexMcpServers(output: string, exempt: ReadonlySet<string> = new Set()): string[] {
   let servers: unknown;
   try { servers = JSON.parse(output); } catch { throw new Error("cannot verify orchestrator MCP isolation"); }
   if (!Array.isArray(servers) || !servers.some((server) => server?.name === "wollipog" && server?.enabled === true)) {
@@ -592,7 +778,9 @@ export function isolateCodexMcpServers(output: string): string[] {
     if (!server || typeof server.name !== "string" || !/^[A-Za-z0-9_-]+$/.test(server.name)) {
       throw new Error("cannot verify orchestrator MCP isolation");
     }
-    return server.name === "wollipog" ? [] : ["-c", `mcp_servers.${server.name}.enabled=false`];
+    return server.name === "wollipog" || exempt.has(server.name)
+      ? []
+      : ["-c", `mcp_servers.${server.name}.enabled=false`];
   });
 }
 
@@ -682,17 +870,25 @@ async function runIsolatedCodexMcpProbe(
   });
 }
 
+/**
+ * @param exemptDeclaredServers Additive Integration Isolation only. The coupled preset must never
+ * set it: exempting a declared server there would weaken the audited planning boundary.
+ */
 export async function codexOrchestratorMcpArgs(
   opts: CodexOrchestratorProbeOptions,
   cwd: string,
   dependencies: CodexOrchestratorProbeDependencies = {},
+  exemptDeclaredServers = false,
 ): Promise<string[]> {
+  // Derived here from the launch arguments rather than accepted as a caller-supplied list, so a
+  // caller cannot exempt a name the agent definition never declared.
+  const exempt = exemptDeclaredServers ? declaredCodexMcpServerNames(opts.args) : new Set<string>();
   try {
     if (opts.isolation?.backend === "wsl-bwrap") {
       if (opts.context?.kind !== "wsl") throw new Error("target-local WSL isolation context mismatch");
       const probeArgs = [...opts.args.filter((arg) => arg !== "--strict-config"), "mcp", "list", "--json"];
       const stdout = await (dependencies.runIsolated ?? runIsolatedCodexMcpProbe)(opts, cwd, probeArgs);
-      return isolateCodexMcpServers(stdout);
+      return isolateCodexMcpServers(stdout, exempt);
     }
     const { probe, env, nativeCwd } = codexOrchestratorMcpProbe(opts, cwd);
     const { stdout } = await execFileAsync(probe.file, probe.args, {
@@ -700,7 +896,7 @@ export async function codexOrchestratorMcpArgs(
       windowsHide: true,
       ...(probe.windowsVerbatimArguments ? { windowsVerbatimArguments: true, argv0: probe.argv0 } : {}),
     });
-    return isolateCodexMcpServers(stdout);
+    return isolateCodexMcpServers(stdout, exempt);
   } catch {
     throw new Error("Orchestrator launch refused: unable to isolate Codex MCP servers.");
   }

@@ -154,8 +154,18 @@ export class CodexDriver implements Driver {
     // the probe still wins at the post-await check and must not launch a process.
     this.cancelled = false;
     let isolationArgs: string[] = [];
-    if (this.config.permissionMode === "orchestrator") {
-      try { isolationArgs = await this.deps.orchestratorMcpArgs(this.opts, this.cwd); }
+    // The coupled preset always isolates MCP servers; the additive role does so only when the human
+    // asked for Integration Isolation. Codex merges MCP tables even when the CLI supplies one, so
+    // both shapes need the same live probe to enumerate and disable everything but Wollipog's.
+    //
+    // The shapes differ in ONE way. The additive shape exempts servers the agent definition's own
+    // launch arguments declare: Integration Isolation removes ambient, discovered integrations, and
+    // disabling a server the catalog explicitly configured would override that very argument
+    // (ADR 0011). The coupled preset never exempts anything — its audited boundary is that nothing
+    // but Wollipog's entry survives.
+    const preset = this.config.permissionMode === "orchestrator";
+    if (preset || this.opts.orchestrator?.integrationIsolation === true) {
+      try { isolationArgs = await this.deps.orchestratorMcpArgs(this.opts, this.cwd, {}, !preset); }
       catch (err) {
         this.cb.onEvent({ kind: "error", message: (err as Error).message });
         return "refusal";

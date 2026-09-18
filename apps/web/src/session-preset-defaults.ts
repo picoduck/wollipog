@@ -6,6 +6,7 @@ import {
   type AgentDefinition,
   type AgentDriverKind,
   type AgentHarnessDefaultsView,
+  type OrchestratorDefaults,
 } from "@wollipog/protocol";
 
 /** Match the server's exact harness identity and whole-preference capability check. */
@@ -87,6 +88,76 @@ export function orchestratorUnavailableReason(input: {
  * uses the coupled preset — notably ACP, whose provider-mode permission contract is unaudited — and
  * the sentence names which condition selects it so the user can change the one they control.
  */
+/**
+ * What Integration Isolation removes and keeps, per harness.
+ *
+ * The policy genuinely differs by harness, because each provider offers different levers, so a
+ * single sentence would be wrong for at least one of them. Claude Code in particular isolates MCP
+ * servers ONLY: it cannot drop hooks without also dropping either the user's permission rules or
+ * Wollipog's own governance hooks, so it under-delivers and says so rather than over-reaching.
+ */
+export function integrationIsolationDisclosure(driver: AgentDriverKind | undefined): {
+  removed: string;
+  kept: string;
+} {
+  if (driver === "codex" || driver === "codex-app-server") {
+    return {
+      removed: "Removes configured MCP servers, apps, plugins, and hooks, leaving Wollipog's management tools as the only integration.",
+      kept: "Built-in tools, including the multi-agent and multimodal tools, are kept, and so is anything named in the agent definition's own launch arguments.",
+    };
+  }
+  if (driver === "pi") {
+    return {
+      removed: "Removes discovered extensions, skills, prompt templates, and ambient context files, leaving Wollipog's management extension as the only integration.",
+      kept: "Built-in tools are kept, and so is anything named in the agent definition's own launch arguments.",
+    };
+  }
+  return {
+    removed: "Removes configured MCP servers, so Wollipog's management tools are the only MCP integration.",
+    kept: "Hooks, plugins enabled in settings, skills, and your permission rules are all kept, because Claude Code cannot drop hooks without also dropping either your permission rules or Wollipog's own governance hooks.",
+  };
+}
+
+/** What a coupled Orchestrator preset launch carries. The preset replaces the provider surface
+ * rather than trimming it, so the additive per-harness disclosure above would overstate what is
+ * kept: the preset also fixes the tool inventory and disables every MCP server but Wollipog's,
+ * including ones the agent definition declares. */
+export const ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE =
+  "The harness-owned Orchestrator preset replaces the provider surface: Wollipog's management tools are the only integration, and the preset also fixes the tool inventory and approval behavior.";
+
+/**
+ * Whether the CONTROL PLANE understands the Integration Isolation policy at all.
+ *
+ * A v164 runner can sit behind a v163 control plane. That control plane's override parser rejects
+ * `execution.integrationIsolation` as an unknown key and its settings update parser rejects a
+ * defaults payload carrying it, so the runner's protocol version says nothing about whether the
+ * field may be sent. The Orchestrator settings view is served by the control plane and echoes its
+ * own default shape, so the presence of the field there is the capability: it can only be present
+ * if the control plane knows the field.
+ */
+export function controlPlaneSupportsIntegrationIsolation(
+  defaults: OrchestratorDefaults | undefined,
+): boolean {
+  return defaults !== undefined && defaults.execution !== undefined &&
+    Object.hasOwn(defaults.execution, "integrationIsolation");
+}
+
+export const INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED =
+  "Update the control plane to configure Integration Isolation.";
+
+/** The account-level settings panel has no selected harness, so it states the differences compactly
+ * rather than picking one harness's wording and being wrong about the other two. */
+export const INTEGRATION_ISOLATION_BY_HARNESS =
+  "What is removed depends on the harness: Claude Code removes configured MCP servers only, because " +
+  "it cannot drop hooks without also dropping your permission rules or Wollipog's own governance " +
+  "hooks; Codex also removes apps, plugins, and hooks; Pi removes discovered extensions, skills, " +
+  "prompt templates, and ambient context files.";
+
+/** Companion sentence: what this policy deliberately does not touch, on every harness. */
+export const INTEGRATION_ISOLATION_PRESERVED =
+  "The provider permission mode, built-in tool inventory, sandbox and approval behavior, and the " +
+  "project boundary are unchanged.";
+
 export function orchestratorPresetPermissionsReason(input: {
   controlPlaneSupportsRole: boolean;
   runnerProtocolVersion: number | null | undefined;

@@ -300,7 +300,7 @@ if (composerFixture) {
         parentControl: "questions_and_approvals",
         decisions: { ...session.parentControlPolicy.decisions },
       },
-      execution: { strictProjectIsolation: false },
+      execution: { strictProjectIsolation: false, integrationIsolation: false },
       sources: {
         behavior: {
           childHarness: "user_default",
@@ -320,7 +320,7 @@ if (composerFixture) {
             ui_evidence_approval: "user_default",
           },
         },
-        execution: { strictProjectIsolation: "user_default" },
+        execution: { strictProjectIsolation: "user_default", integrationIsolation: "user_default" },
       },
     };
     if (params.get("campaign-state") !== "off") {

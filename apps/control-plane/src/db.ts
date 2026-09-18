@@ -2167,6 +2167,7 @@ CREATE TABLE IF NOT EXISTS orchestrator_settings (
   follow_ups                  TEXT NOT NULL CHECK (follow_ups IN ('recommend_only','execute_approved')),
   completion                  TEXT NOT NULL CHECK (completion IN ('retain','stop_and_archive')),
   strict_project_isolation    INTEGER NOT NULL DEFAULT 0 CHECK (strict_project_isolation IN (0, 1)),
+  integration_isolation       INTEGER NOT NULL DEFAULT 0 CHECK (integration_isolation IN (0, 1)),
   parent_control              TEXT NOT NULL CHECK (parent_control IN ('off','questions','questions_and_approvals')),
   decision_policy             TEXT NOT NULL,
   updated_at                  INTEGER NOT NULL,
@@ -4652,6 +4653,11 @@ export class ControlPlaneDb {
     } catch {
       /* column already present */
     }
+    try {
+      db.exec("ALTER TABLE orchestrator_settings ADD COLUMN integration_isolation INTEGER NOT NULL DEFAULT 0 CHECK (integration_isolation IN (0, 1))");
+    } catch {
+      /* column already present */
+    }
     if (needsCreationActorBackfill) {
       // Parent attribution is durable CP-owned proof of agent creation. Existing top-level
       // Orchestrators qualify only when their already-persisted campaign snapshot establishes a
@@ -4723,7 +4729,7 @@ export class ControlPlaneDb {
             ...HUMAN_ONLY_PARENT_CONTROL_POLICY,
           },
         },
-        execution: { strictProjectIsolation: true },
+        execution: { strictProjectIsolation: true, integrationIsolation: true },
         sources: {
           behavior: {
             childHarness: source,
@@ -4739,10 +4745,44 @@ export class ControlPlaneDb {
               WORKFLOW_DECISION_CATEGORIES.map((category) => [category, source]),
             ) as Record<(typeof WORKFLOW_DECISION_CATEGORIES)[number], typeof source>,
           },
-          execution: { strictProjectIsolation: source },
+          execution: { strictProjectIsolation: source, integrationIsolation: source },
         },
       };
       saveLegacyOrchestrator.run(JSON.stringify(policy), row.id);
+    }
+    // Integration Isolation becomes an explicit policy. Existing campaigns get the value that
+    // matches the launch they already have, so nothing about their behaviour changes: a
+    // coupled-preset session (`permission_mode='orchestrator'`) launches through the runner-owned
+    // planning surface, which carries no user MCP server, hook, plugin, extension, or skill, while
+    // an additive session created since v160 keeps all of them. `permission_mode` is the only
+    // durable record of which shape a session was created with, so the backfill reads it here
+    // rather than inferring from the boundary.
+    const policiesWithoutIntegrationIsolation = db.prepare(
+      `SELECT id, permission_mode, orchestrator_policy FROM sessions
+       WHERE orchestrator_policy IS NOT NULL`,
+    ).all() as unknown as Array<{
+      id: string;
+      permission_mode: string | null;
+      orchestrator_policy: string;
+    }>;
+    const saveIntegrationIsolation = db.prepare(
+      "UPDATE sessions SET orchestrator_policy=? WHERE id=?",
+    );
+    for (const row of policiesWithoutIntegrationIsolation) {
+      let policy: {
+        execution?: Record<string, unknown>;
+        sources?: { execution?: Record<string, unknown> };
+      };
+      try { policy = JSON.parse(row.orchestrator_policy); } catch { continue; }
+      if (!policy || typeof policy !== "object") continue;
+      const execution = policy.execution;
+      const sources = policy.sources?.execution;
+      if (!execution || typeof execution !== "object" || !sources || typeof sources !== "object") continue;
+      if (execution.integrationIsolation !== undefined && sources.integrationIsolation !== undefined) continue;
+      execution.integrationIsolation = row.permission_mode === "orchestrator" ||
+        execution.strictProjectIsolation === true;
+      sources.integrationIsolation = "legacy_session";
+      saveIntegrationIsolation.run(JSON.stringify(policy), row.id);
     }
     // The role becomes an explicit column. Existing Orchestrators keep the coupled preset in
     // permission_mode, so their provider policy, isolation, and delegation are unchanged; only the
@@ -7863,7 +7903,7 @@ export class ControlPlaneDb {
   getOrchestratorDefaults(userId: string): OrchestratorDefaultsRecord | null {
     const row = this.stmt(
       `SELECT child_harness, child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
-              strict_project_isolation, parent_control, decision_policy, updated_at
+              strict_project_isolation, integration_isolation, parent_control, decision_policy, updated_at
        FROM orchestrator_settings WHERE user_id=?`,
     ).get(userId) as {
       child_harness: string | null;
@@ -7873,6 +7913,7 @@ export class ControlPlaneDb {
       follow_ups: OrchestratorDefaults["behavior"]["followUps"];
       completion: OrchestratorDefaults["behavior"]["completion"];
       strict_project_isolation: number;
+      integration_isolation: number;
       parent_control: ParentControlMode;
       decision_policy: string;
       updated_at: number;
@@ -7891,7 +7932,10 @@ export class ControlPlaneDb {
           completion: row.completion,
         },
         delegation: { parentControl: row.parent_control, decisions },
-        execution: { strictProjectIsolation: row.strict_project_isolation === 1 },
+        execution: {
+          strictProjectIsolation: row.strict_project_isolation === 1,
+          integrationIsolation: row.integration_isolation === 1,
+        },
       },
       updatedAt: row.updated_at,
     };
@@ -7901,13 +7945,14 @@ export class ControlPlaneDb {
     this.stmt(
       `INSERT INTO orchestrator_settings
          (user_id, child_harness, child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
-          strict_project_isolation, parent_control, decision_policy, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          strict_project_isolation, integration_isolation, parent_control, decision_policy, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id) DO UPDATE SET
          child_harness=excluded.child_harness, child_model=excluded.child_model, child_effort=excluded.child_effort,
          maximum_concurrent_children=excluded.maximum_concurrent_children,
          follow_ups=excluded.follow_ups, completion=excluded.completion,
          strict_project_isolation=excluded.strict_project_isolation,
+         integration_isolation=excluded.integration_isolation,
          parent_control=excluded.parent_control, decision_policy=excluded.decision_policy,
          updated_at=excluded.updated_at`,
     ).run(
@@ -7919,6 +7964,7 @@ export class ControlPlaneDb {
       defaults.behavior.followUps,
       defaults.behavior.completion,
       defaults.execution.strictProjectIsolation ? 1 : 0,
+      defaults.execution.integrationIsolation ? 1 : 0,
       defaults.delegation.parentControl,
       JSON.stringify(defaults.delegation.decisions),
       now,
@@ -22120,8 +22166,20 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
   // Policies written before protocol v144 had only one possible execution posture: the enforced
   // scratch-only boundary. Normalize them in memory without broadening the stored session.
   if (!value.execution && !value.sources.execution) {
-    value.execution = { strictProjectIsolation: true };
-    value.sources.execution = { strictProjectIsolation: "legacy_session" };
+    value.execution = { strictProjectIsolation: true, integrationIsolation: true };
+    value.sources.execution = { strictProjectIsolation: "legacy_session", integrationIsolation: "legacy_session" };
+  }
+  // Policies written before protocol v164 had no separate integration policy. Derive the value that
+  // matches the launch they already have, without broadening the stored session: a strict policy is
+  // only ever delivered by a coupled-preset launch, which removes every integration, while a
+  // non-strict policy is an additive launch that keeps them. The session backfill migration writes
+  // the same value from `permission_mode`, which is the authoritative signal; this read-time
+  // derivation only has to cover rows an older control plane writes after that migration ran.
+  if (value.execution && value.execution.integrationIsolation === undefined) {
+    value.execution.integrationIsolation = value.execution.strictProjectIsolation === true;
+  }
+  if (value.sources.execution && value.sources.execution.integrationIsolation === undefined) {
+    value.sources.execution.integrationIsolation = "legacy_session";
   }
   const behavior = value.behavior;
   const childHarness = behavior.childHarness === null ? null : normalizeAgentHarnessIdentity(behavior.childHarness);
@@ -22137,6 +22195,7 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
       (behavior.completion !== "retain" && behavior.completion !== "stop_and_archive") ||
       !["off", "questions", "questions_and_approvals"].includes(value.delegation.parentControl) ||
       typeof value.execution?.strictProjectIsolation !== "boolean" ||
+      typeof value.execution?.integrationIsolation !== "boolean" ||
       !parentControlDecisionPolicyFromJson(JSON.stringify(value.delegation.decisions))) return null;
   behavior.childHarness = childHarness;
   if (value.issueNumbers) value.issueNumbers = [...new Set(value.issueNumbers)];
@@ -22153,6 +22212,7 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
       Object.keys(value.sources.delegation.decisions).length !== WORKFLOW_DECISION_CATEGORIES.length ||
       !validSources.has(value.sources.delegation.parentControl) ||
       !validSources.has(value.sources.execution.strictProjectIsolation) ||
+      !validSources.has(value.sources.execution.integrationIsolation) ||
       !WORKFLOW_DECISION_CATEGORIES.every((category) =>
         validSources.has(value.sources.delegation.decisions[category]))) return null;
   return value;

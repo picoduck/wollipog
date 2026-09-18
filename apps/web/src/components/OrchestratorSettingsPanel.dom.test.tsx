@@ -64,7 +64,7 @@ function settings(drifted = false): OrchestratorSettingsView {
           ui_evidence_approval: "human",
         },
       },
-      execution: { strictProjectIsolation: false },
+      execution: { strictProjectIsolation: false, integrationIsolation: false },
     },
     capabilities: {
       harnesses: [
@@ -287,6 +287,123 @@ test("runner discovery refreshes capabilities without discarding unsaved default
     </ApiProvider>));
     await settle();
     assert.equal(container.querySelector<HTMLInputElement>("#orchestrator-max-children")?.value, "8");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("Integration Isolation is a separate saved default, implied by Strict Project Isolation", async () => {
+  let current = settings();
+  const writes: Array<{ defaults: OrchestratorSettingsView["defaults"] }> = [];
+  const transport: ApiTransport = {
+    instanceId: "test", publicOrigin: "http://localhost", close() {},
+    async request(_path, init) {
+      if (init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as { defaults: OrchestratorSettingsView["defaults"] };
+        writes.push(body);
+        current = { ...current, defaults: body.defaults };
+      }
+      return new Response(JSON.stringify(current), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const pill = (group: string, label: string) => {
+    const row = [...container.querySelectorAll('[role="radiogroup"]')]
+      .find((node) => node.getAttribute("aria-label") === group);
+    assert.ok(row, `${group} is rendered as its own control`);
+    return [...row.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+      .find((button) => button.textContent?.trim() === label);
+  };
+  try {
+    await act(async () => root.render(<ApiProvider client={createApiClient(transport)}><OrchestratorSettingsPanel /></ApiProvider>));
+    await settle();
+    assert.match(container.textContent ?? "",
+      /Hooks, plugins, extensions, skills, and configured MCP servers load exactly as they would/);
+    const enable = pill("Integration Isolation", "Enabled")!;
+    assert.equal(enable.getAttribute("aria-disabled"), null,
+      "the policy is independently configurable while the project boundary is off");
+    await act(async () => enable.click());
+    // An account default has no selected harness, so the panel states the per-harness differences
+    // compactly rather than picking one harness's wording and being wrong about the other two.
+    assert.match(container.textContent ?? "",
+      /Claude Code removes configured MCP servers only, because it cannot drop hooks without also dropping your permission rules/);
+    assert.match(container.textContent ?? "", /Codex also removes apps, plugins, and hooks/);
+    assert.match(container.textContent ?? "",
+      /Pi removes discovered extensions, skills, prompt templates, and ambient context files/);
+    const save = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Save Defaults")!;
+    await act(async () => save.click());
+    await settle();
+    assert.equal(writes[0]?.defaults.execution.integrationIsolation, true);
+    assert.equal(writes[0]?.defaults.execution.strictProjectIsolation, false,
+      "the two execution policies are saved independently");
+
+    // Turning the project boundary on makes the integration policy implied, not merely selected.
+    await act(async () => { pill("Strict Project Isolation", "Enabled")!.click(); });
+    assert.equal(pill("Integration Isolation", "Disabled")!.getAttribute("aria-disabled"), "true");
+    assert.match(container.textContent ?? "",
+      /Strict Project Isolation already launches without provider integrations/);
+    assert.match(container.textContent ?? "", /harness-owned Orchestrator preset replaces the provider surface/);
+    assert.doesNotMatch(container.textContent ?? "", /sandbox and approval behavior, and the project boundary are unchanged/);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("an older control plane blocks Integration Isolation and still round-trips a save without it", async () => {
+  // This control plane predates the policy: its own default shape has no
+  // `execution.integrationIsolation`, and its update parser rejects a payload carrying it.
+  let current = settings();
+  delete (current.defaults.execution as Partial<typeof current.defaults.execution>).integrationIsolation;
+  const writes: Array<{ defaults: OrchestratorSettingsView["defaults"] }> = [];
+  const transport: ApiTransport = {
+    instanceId: "test", publicOrigin: "http://localhost", close() {},
+    async request(_path, init) {
+      if (init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as { defaults: OrchestratorSettingsView["defaults"] };
+        // Model the older parser exactly: an unknown execution key is a hard rejection.
+        if (Object.hasOwn(body.defaults.execution, "integrationIsolation")) {
+          return new Response(JSON.stringify({ error: "a complete valid Orchestrator default is required" }),
+            { status: 400, headers: { "content-type": "application/json" } });
+        }
+        writes.push(body);
+        current = { ...current, defaults: body.defaults };
+      }
+      return new Response(JSON.stringify(current), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<ApiProvider client={createApiClient(transport)}><OrchestratorSettingsPanel /></ApiProvider>));
+    await settle();
+    const row = [...container.querySelectorAll('[role="radiogroup"]')]
+      .find((node) => node.getAttribute("aria-label") === "Integration Isolation");
+    assert.ok(row, "the setting is shown rather than hidden, so it can explain itself");
+    for (const pill of row.querySelectorAll<HTMLButtonElement>('[role="radio"]')) {
+      assert.equal(pill.getAttribute("aria-disabled"), "true");
+    }
+    assert.match(container.textContent ?? "", /Update the control plane to configure Integration Isolation/);
+
+    // Changing an UNRELATED default must still save; otherwise this feature would break every
+    // Orchestrator settings save against an older control plane.
+    const limit = container.querySelector<HTMLInputElement>("#orchestrator-max-children")!;
+    await act(async () => { fireDomEvent.change(limit, { target: { value: "9" } }); });
+    const save = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Save Defaults")!;
+    await act(async () => save.click());
+    await settle();
+    assert.equal(writes.length, 1, "the save succeeded against the older parser");
+    assert.equal(writes[0]?.defaults.behavior.maximumConcurrentChildren, 9);
+    assert.equal(Object.hasOwn(writes[0]!.defaults.execution, "integrationIsolation"), false,
+      "the payload round-trips without gaining a field this control plane rejects");
+    assert.equal(writes[0]?.defaults.execution.strictProjectIsolation, false,
+      "and the execution policy it does know is preserved");
   } finally {
     await act(async () => root.unmount());
     container.remove();
