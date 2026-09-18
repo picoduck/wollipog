@@ -201,7 +201,18 @@ function commandWords(
           index += 1;
           continue;
         }
-        if (["-u", "--unset", "-C", "--chdir", "-S", "--split-string"].includes(value)) {
+        if (["-S", "--split-string"].includes(value)) {
+          const script = word(tokens[index + 1], cwd, environment);
+          const split = script == null ? [] : parse<EnvironmentReference>(script, (env) => ({ env }));
+          tokens.splice(index, 2, ...split);
+          continue;
+        }
+        if (value.startsWith("--split-string=")) {
+          const split = parse<EnvironmentReference>(value.slice("--split-string=".length), (env) => ({ env }));
+          tokens.splice(index, 1, ...split);
+          continue;
+        }
+        if (["-u", "--unset", "-C", "--chdir"].includes(value)) {
           index += 2;
           continue;
         }
@@ -333,23 +344,30 @@ function segmentRefusal(
     return words.slice(1).some((token) => operandTargetsProtected(token, cwd, environment, protections));
   }
   if (["mv", "move", "rename-item"].includes(executable)) {
-    let source: ShellToken | undefined;
+    let targetDirectory = false;
+    const operands: ShellToken[] = [];
     for (let index = 0; index < words.length; index += 1) {
       const token = words[index];
+      if (token == null) continue;
       const value = word(token, cwd, environment);
       if (value === "--") {
-        source = words[index + 1];
+        operands.push(...words.slice(index + 1));
         break;
       }
-      if (["-t", "--target-directory", "-S", "--suffix"].includes(value ?? "")) {
+      if (["-t", "--target-directory"].includes(value ?? "")) {
+        targetDirectory = true;
+        index += 1;
+        continue;
+      }
+      if (["-S", "--suffix"].includes(value ?? "")) {
         index += 1;
         continue;
       }
       if (value?.startsWith("-")) continue;
-      source = token;
-      break;
+      operands.push(token);
     }
-    return operandTargetsProtected(source, cwd, environment, protections);
+    const sources = targetDirectory ? operands : operands.slice(0, -1);
+    return sources.some((source) => operandTargetsProtected(source, cwd, environment, protections));
   }
   if (executable === "find") {
     const actionIndex = words.findIndex((token) =>
