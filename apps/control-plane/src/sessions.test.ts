@@ -17251,10 +17251,10 @@ test("Orchestrator is an additive role independent of the provider permission mo
       undefined, undefined, false, false, false, human,
     );
     assert.equal(outdated.status, 409, "an older runner would launch this as an ordinary session");
-    assert.match(outdated.error ?? "", /protocol-v159/);
+    assert.match(outdated.error ?? "", /protocol-v160/);
     const outdatedRestart = svc.restart(view.id);
     assert.equal(outdatedRestart.status, 409, "restart after a runner downgrade fails the same way");
-    assert.match(outdatedRestart.error ?? "", /protocol-v159/);
+    assert.match(outdatedRestart.error ?? "", /protocol-v160/);
     const legacyOnOlderRunner = svc.createSession(
       { ...request, role: "orchestrator", config: { permissionMode: "orchestrator" } },
       undefined, undefined, false, false, false, human,

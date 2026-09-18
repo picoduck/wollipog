@@ -342,7 +342,7 @@ export function orchestratorLaunchArgs(
 const ADDITIVE_CLAUDE_ALLOWED_TOOLS = "mcp__wollipog__*";
 
 /**
- * Independent provider permissions (protocol v159): the harness launches exactly as an equivalent
+ * Independent provider permissions (protocol v160): the harness launches exactly as an equivalent
  * normal session and only gains Wollipog's orchestration tools, instructions, and project
  * read locations. Nothing here narrows the permission mode, built-in tool inventory, hooks,
  * settings sources, or configured MCP servers; the general Agent Control MCP config already

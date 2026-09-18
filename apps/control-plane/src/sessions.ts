@@ -3402,7 +3402,7 @@ export class SessionsService {
     else delete requestedConfig.serviceTier;
     const validationConfig = claudeModelConfigForValidation(requestedConfig, agentCapabilities, launch.driver);
     // The role is independent of the provider permission mode. Older clients encode it only as the
-    // coupled preset value; a v159 client may pair the role with an ordinary provider mode.
+    // coupled preset value; a v160 client may pair the role with an ordinary provider mode.
     const role: SessionRole = req.role ?? sessionRole({ permissionMode: requestedConfig.permissionMode });
     const orchestrator = role === "orchestrator";
     const presetPermissions = usesOrchestratorPresetPermissions(requestedConfig);
@@ -3513,7 +3513,7 @@ export class SessionsService {
         // session and gains only Wollipog's orchestration tools, instructions, and credential. An
         // older runner would launch this as an ordinary session, so refuse rather than degrade.
         if (!runnerSupportsProtocol(runner.protocolVersion, "orchestratorAdditiveRole")) {
-          return fail("An Orchestrator with independent provider permissions requires a protocol-v159 runner; update the runner or choose the Orchestrator preset permission mode.", 409);
+          return fail("An Orchestrator with independent provider permissions requires a protocol-v160 runner; update the runner or choose the Orchestrator preset permission mode.", 409);
         }
         if (!agentCapabilities?.permissionModes?.includes("orchestrator")) {
           return fail("the Orchestrator role requires explicit support from this agent installation", 409);
@@ -5521,7 +5521,7 @@ export class SessionsService {
     if (sessionRole(session) === "orchestrator" && !usesOrchestratorPresetPermissions(session)) {
       const runner = this.db.getRunner(session.runnerId);
       if (!runnerSupportsProtocol(runner?.protocolVersion, "orchestratorAdditiveRole")) {
-        return fail("An Orchestrator with independent provider permissions requires a protocol-v159 runner; update the runner and retry.", 409);
+        return fail("An Orchestrator with independent provider permissions requires a protocol-v160 runner; update the runner and retry.", 409);
       }
       // Discovery can redefine the agent id between launches. Mirror the creation-time shape
       // check so a changed definition fails here with guidance instead of at the runner.

@@ -1590,7 +1590,7 @@ declare global {
         requirement?: string;
         /** Present the fixture agent as this harness; Codex app-server when omitted. */
         driver?: "claude-code" | "codex-app-server";
-        /** Advertise the v159 control-plane capability for an independent Session Role. */
+        /** Advertise the v160 control-plane capability for an independent Session Role. */
         controlPlaneRole?: boolean;
       }): void;
       pushSnapshot(): void;

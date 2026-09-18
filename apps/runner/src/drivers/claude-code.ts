@@ -2221,7 +2221,7 @@ export class ClaudeCodeDriver implements Driver {
             }
           }
           // The launch policy is the role signal: it is present for every Orchestrator a v144+
-          // control plane launches, whether the provider mode is the coupled preset or (v159) an
+          // control plane launches, whether the provider mode is the coupled preset or (v160) an
           // ordinary mode the user selected. Strict isolation only ever arrives with the preset.
           const orchestratorDisposition = this.opts.orchestrator
             ? classifyRoutineClaudeOrchestratorPermission(

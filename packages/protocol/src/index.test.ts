@@ -1276,7 +1276,7 @@ test("the Orchestrator role is independent of the provider permission mode", asy
   assert.equal(sessionRole({ role: "normal", permissionMode: "orchestrator" }), "normal",
     "an explicit role wins over the legacy preset literal");
   assert.equal(sessionRole({ permissionMode: "orchestrator" }), "orchestrator",
-    "pre-v159 peers encode the role only as the coupled preset");
+    "pre-v160 peers encode the role only as the coupled preset");
   assert.equal(sessionRole({ permissionMode: "default" }), "normal");
   assert.equal(sessionRole({ role: null, permissionMode: null }), "normal");
   assert.equal(isOrchestratorLaunch({ config: { permissionMode: "acceptEdits" }, orchestrator: { strictProjectIsolation: false } }), true,

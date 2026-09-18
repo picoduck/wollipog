@@ -275,7 +275,7 @@ export function provisionAgentControl(
   const nativeHostExecution = context.kind === "native" && targetIsHost;
   const orchestrator = isOrchestratorLaunch(spec);
   // The coupled preset replaces the provider policy with the runner-owned planning surface. An
-  // Orchestrator with an ordinary provider mode (protocol v159) keeps its normal launch and only
+  // Orchestrator with an ordinary provider mode (protocol v160) keeps its normal launch and only
   // gains the additive orchestration arguments below.
   const presetPermissions = usesOrchestratorPresetPermissions(spec.config);
   const additiveOrchestrator = orchestrator && !presetPermissions;
@@ -283,7 +283,7 @@ export function provisionAgentControl(
   const strictProjectIsolation = orchestrator && spec.orchestrator?.strictProjectIsolation !== false;
   if (additiveOrchestrator) {
     if (!runnerSupportsProtocol(config.controlPlaneProtocolVersion, "orchestratorAdditiveRole")) {
-      throw new Error("an Orchestrator with independent provider permissions requires a protocol-v159 control plane");
+      throw new Error("an Orchestrator with independent provider permissions requires a protocol-v160 control plane");
     }
     if (strictProjectIsolation) {
       throw new Error("Strict Project Isolation requires the Orchestrator preset permission mode");

@@ -1393,11 +1393,11 @@ export type SessionRole = "normal" | "orchestrator";
 
 /** The legacy coupled provider policy: `permissionMode` carries this literal when the harness
  * launches with the runner-owned Orchestrator preset (strict isolation, Codex, Pi, ACP, Native
- * TUI, and sessions created before the role became independent). A v159 native Claude Code
+ * TUI, and sessions created before the role became independent). A v160 native Claude Code
  * Orchestrator keeps an ordinary permission mode instead. */
 export const ORCHESTRATOR_PRESET_PERMISSION_MODE = "orchestrator";
 
-/** Effective role of a persisted session. Control planes predating v159 omit `role`, where the
+/** Effective role of a persisted session. Control planes predating v160 omit `role`, where the
  * coupled preset value in `permissionMode` was the only representation of the role. */
 export function sessionRole(
   session: { role?: SessionRole | null; permissionMode?: string | null },
@@ -4712,7 +4712,7 @@ export interface SessionView {
   parentControl?: ParentControlMode;
   /** Independent typed workflow assignments. Legacy modes never imply these grants. */
   parentControlPolicy?: ParentControlPolicy;
-  /** Fixed session role. Omitted by control planes predating v159; use `sessionRole()` to read
+  /** Fixed session role. Omitted by control planes predating v160; use `sessionRole()` to read
    * it so the legacy coupled preset in `permissionMode` still resolves to the Orchestrator role. */
   role?: SessionRole;
   /** Resolved campaign behavior and authority snapshot. Present only for Orchestrator sessions
@@ -8174,7 +8174,7 @@ export interface CreateSessionRequest {
   executionHandoff?: { sourceSessionId?: string; artifactIds?: string[] };
   config?: SessionConfig;
   /** Session role, independent of `config.permissionMode`. Omitted by older clients, which encode
-   * an Orchestrator only as the coupled preset value in `config.permissionMode`. A v159 control
+   * an Orchestrator only as the coupled preset value in `config.permissionMode`. A v160 control
    * plane launches a non-strict native Claude Code Orchestrator with the ordinary permission mode
    * (the saved harness default when omitted) and refuses combinations older runners cannot enforce. */
   role?: SessionRole;

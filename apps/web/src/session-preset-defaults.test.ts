@@ -149,6 +149,6 @@ test("the Orchestrator preset applies only where independent provider permission
   assert.match(orchestratorPresetPermissionsReason({ ...additive, controlPlaneSupportsRole: false }) ?? "", /Update the control plane/);
   assert.match(
     orchestratorPresetPermissionsReason({ ...additive, runnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole - 1 }) ?? "",
-    /protocol v159/,
+    /protocol v160/,
   );
 });

@@ -3731,7 +3731,7 @@ test("strictly isolated Claude Orchestrators auto-deny commands outside the rout
 });
 
 test("an Orchestrator with independent provider permissions keeps the routine-operation contract", () => {
-  // The launch policy is the role signal (protocol v159): a non-strict Claude Orchestrator that
+  // The launch policy is the role signal (protocol v160): a non-strict Claude Orchestrator that
   // kept its ordinary permission mode still auto-authorizes routine coordination and still
   // returns everything else to the ordinary provider approval path.
   const h = makeHarness({

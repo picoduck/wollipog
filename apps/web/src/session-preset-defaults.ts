@@ -76,7 +76,7 @@ export function orchestratorUnavailableReason(input: {
  * Why an Orchestrator must launch with the harness-owned Orchestrator preset instead of the same
  * provider permission mode a normal session would use, or `undefined` when the role is additive.
  *
- * Only a non-strict native Claude Code Orchestrator on a v159 runner and control plane keeps its
+ * Only a non-strict native Claude Code Orchestrator on a v160 runner and control plane keeps its
  * ordinary permission mode, tool inventory, hooks, and configured MCP servers. Every other
  * combination still uses the coupled preset, and the sentence names which condition selects it so
  * the user can change the one they control.

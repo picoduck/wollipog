@@ -18,7 +18,7 @@ hooks, and configured MCP servers as an equivalent normal session (#1281).
 
 Represent the role independently of the provider permission mode.
 
-- Protocol v159 adds `SessionRole = "normal" | "orchestrator"` on `CreateSessionRequest` and
+- Protocol v160 adds `SessionRole = "normal" | "orchestrator"` on `CreateSessionRequest` and
   `SessionView`, and the control plane persists it in a dedicated `session_role` column. The
   runner treats the launch policy block (`SessionLaunchSpec.orchestrator`, present for every
   Orchestrator since v144) as the role signal; `permissionMode === "orchestrator"` remains the
@@ -35,7 +35,7 @@ Represent the role independently of the provider permission mode.
   injected; manager hooks provision as for any Claude session. The routine-operation classifier of
   ADR 0007 keeps applying on the runner control channel, supplementing rather than replacing the
   selected policy.
-- The control plane refuses the independent combination when the runner predates v159 (an older
+- The control plane refuses the independent combination when the runner predates v160 (an older
   runner would launch the session as an ordinary one), when the harness is not native Claude Code on
   the host, when Strict Project Isolation is enabled, or for a Native TUI launch, each with guidance
   naming the preset as the alternative. Parent Control, typed workflow decisions, campaign
@@ -43,7 +43,7 @@ Represent the role independently of the provider permission mode.
 - The New Session dialog exposes **Session Role** (Normal or Orchestrator) and a separate
   **Provider Permissions** summary. The summary shows the saved harness default whenever the role is
   additive and states which policy selects the preset otherwise. A saved Orchestrator harness
-  default still selects the role; choosing Normal explicitly overrides it on a v159 control plane.
+  default still selects the role; choosing Normal explicitly overrides it on a v160 control plane.
 
 ## Consequences
 
