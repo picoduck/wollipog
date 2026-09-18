@@ -31,6 +31,10 @@ test("Orchestrator instructions separate delegation from explicit parent impleme
   assert.match(provider, /overlapping ownership/);
   assert.match(provider, /dedicated Wollipog worktree/);
   assert.match(provider, /testing, cross-model review, UI evidence, merge, and cleanup/);
+  assert.match(provider, /Do not ask the human to approve routine coordination shell commands/);
+  assert.match(provider, /Read, Grep, or Glob for local files and review ledgers/);
+  assert.match(provider, /use @me plus --body/);
+  assert.match(provider, /retry it canonically/);
   assert.doesNotMatch(provider, /Project locations are read-only/);
 
   const strict = orchestratorInstructions(["/repo"], true);

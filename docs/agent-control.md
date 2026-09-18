@@ -169,7 +169,11 @@ interfaces distinguish provider permission controls from OS-enforced read-only f
 isolation. Provider-mode native Claude Code requires interactive Default approval support. Strict
 structured Claude also uses that runner control channel inside `bwrap` on Linux or Seatbelt on
 macOS: routine coordination is auto-authorized by the shared semantic contract, and everything else
-is denied. Native TUI and ACP launches without the channel retain `dontAsk`. Provider permission
+is denied. In provider mode, a routine-looking command that is not in canonical safe form is denied
+back to the agent with retry guidance instead of producing a human approval card; genuine mutations
+and unknown operations retain the normal provider approval path. Existing human-created root
+campaigns recover missing issue scope from their immutable initial request on restart. Native TUI
+and ACP launches without the channel retain `dontAsk`. Provider permission
 checks, Parent Control, typed workflow decisions, authentication exclusions, child admission,
 resource limits, and audit provenance are unchanged. The full operation and campaign issue-scope
 contract is recorded in [ADR 0007](adr/0007-separate-orchestrator-role-from-project-isolation.md).

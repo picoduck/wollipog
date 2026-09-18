@@ -3525,13 +3525,14 @@ test("provider-mode Claude Orchestrator auto-allows the observed issue-claiming 
   assert.equal(JSON.parse(writes[0]!).response.response.behavior, "allow");
 });
 
-test("provider-mode Claude Orchestrator keeps shell-special loop variables interactive", () => {
+test("provider-mode Claude Orchestrator returns non-canonical routine attempts to Claude", () => {
   const h = makeHarness({
     config: { permissionMode: "orchestrator" },
     orchestrator: { strictProjectIsolation: false },
   });
+  const writes: string[] = [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (h.driver as any).child = { stdin: { write: () => {} } };
+  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
 
   h.feed({
     type: "control_request",
@@ -3543,8 +3544,47 @@ test("provider-mode Claude Orchestrator keeps shell-special loop variables inter
     },
   });
 
-  assert.equal(h.events.length, 1);
-  assert.equal(h.events[0]?.kind, "permission_request");
+  assert.deepEqual(h.events, [], "a routine retry never becomes a human approval card");
+  const response = JSON.parse(writes[0]!).response.response;
+  assert.equal(response.behavior, "deny");
+  assert.match(response.message, /Retry with separate semantic Git\/GitHub commands/);
+});
+
+test("provider-mode Claude Orchestrator auto-allows bounded inspection pipelines", () => {
+  const h = makeHarness({
+    config: { permissionMode: "orchestrator" },
+    orchestrator: { strictProjectIsolation: false },
+  });
+  const writes: string[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
+  const command = "git fetch origin main --quiet; gh pr view 1255 --json state; git ls-remote --heads origin fix/issue-1206 | wc -l";
+  h.feed({
+    type: "control_request",
+    request_id: "inspection-pipeline",
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: { command } },
+  });
+  assert.deepEqual(h.events, []);
+  assert.equal(JSON.parse(writes[0]!).response.response.behavior, "allow");
+});
+
+test("provider-mode Claude Orchestrator rejects broad ledger searches without involving the human", () => {
+  const h = makeHarness({
+    config: { permissionMode: "orchestrator" },
+    orchestrator: { strictProjectIsolation: false },
+  });
+  const writes: string[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
+  h.feed({
+    type: "control_request",
+    request_id: "ledger-search",
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: {
+      command: "find / -xdev -name ledger.md -mmin -300 2>/dev/null | head",
+    } },
+  });
+  assert.deepEqual(h.events, []);
+  assert.equal(JSON.parse(writes[0]!).response.response.behavior, "deny");
 });
 
 test("strictly isolated Claude Orchestrators share the routine-operation auto-authorization contract", () => {

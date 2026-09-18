@@ -8,7 +8,17 @@ test("explicit initial campaign requests produce a finite issue scope", () => {
     [1209, 1210, 1211],
   );
   assert.deepEqual(orchestratorIssueNumbersFromInitialPrompt("Please coordinate GitHub issues #4 and #9"), [4, 9]);
-  assert.deepEqual(orchestratorIssueNumbersFromInitialPrompt("Manage issue 42 and issue 43"), [42]);
+  assert.deepEqual(orchestratorIssueNumbersFromInitialPrompt("Manage issue 42 and issue 43"), [42, 43]);
+  assert.deepEqual(
+    orchestratorIssueNumbersFromInitialPrompt("Claim and delegate issue 1201 through 1207."),
+    [1201, 1202, 1203, 1204, 1205, 1206, 1207],
+  );
+  assert.deepEqual(
+    orchestratorIssueNumbersFromInitialPrompt(
+      "Claim and orchestrate issues 1209, 1210, and 1211.\nDelegate each to a child session.",
+    ),
+    [1209, 1210, 1211],
+  );
 });
 
 test("mentions and ambiguous or negated prose do not grant issue-write scope", () => {
@@ -19,5 +29,10 @@ test("mentions and ambiguous or negated prose do not grant issue-write scope", (
     "The campaign concerns issue 1209.",
     "Claim issue 0.",
     "Claim issue 9999999999999999.",
+    "Delegate issues 1207 through 1201.",
+    "Delegate issues 1 through 101.",
+    "Delegate issues 1201 through 1207 and inspect issue 1300.",
+    "Claim issue 1209. Do not claim it after all.",
+    "Claim issue 1209. Inspect issue 1300 before starting.",
   ]) assert.deepEqual(orchestratorIssueNumbersFromInitialPrompt(prompt), [], prompt);
 });
