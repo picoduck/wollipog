@@ -17,10 +17,17 @@ export class AcpDriver implements Driver {
   private readonly resumeId: string | undefined;
   private readonly initialConfig: SessionConfig;
   private readonly orchestrator: boolean;
+  private readonly orchestratorRole: boolean;
   private readonly preparedCommands = new WeakSet<object>();
 
   constructor(opts: DriverOptions, cb: DriverCallbacks) {
     this.orchestrator = opts.config.permissionMode === "orchestrator";
+    // The coupled preset above is only one way to hold the Orchestrator role; runner-owned role
+    // metadata is another, and it survives a session that does not carry the preset literal. The
+    // exact-adapter identity assertion must key on the role, so that moving ACP off the preset can
+    // never silently drop it. Either signal alone arms the assertion, so this is never weaker than
+    // the preset check it replaces — including for legacy sessions that predate `orchestrator`.
+    this.orchestratorRole = this.orchestrator || opts.orchestrator != null;
     this.client = new AcpClient(
       {
         command: opts.command,
@@ -34,6 +41,7 @@ export class AcpDriver implements Driver {
         containerAgentLaunch: true,
         cloudAgentLaunch: true,
         orchestrator: this.orchestrator,
+        orchestratorRole: this.orchestratorRole,
         descendantMarker: opts.descendantMarker,
       },
       cb,

@@ -138,6 +138,12 @@ export class AcpClient {
       containerAgentLaunch?: boolean;
       cloudAgentLaunch?: boolean;
       orchestrator?: boolean;
+      /** The Orchestrator ROLE, however it is expressed. The exact-adapter identity assertion keys
+       * on this rather than on `orchestrator` (the coupled preset), so a session that carries the
+       * role without the preset permission-mode literal cannot silently drop the assertion. It is
+       * OR-ed with `orchestrator`, so omitting it — or passing `false` — is never weaker than the
+       * preset alone. */
+      orchestratorRole?: boolean;
       descendantMarker?: string;
       /** Discovery probes negotiate only the ACP initialize response and must not expose client
        * filesystem, terminal, permission, or session-update services to the launched adapter. */
@@ -147,6 +153,9 @@ export class AcpClient {
     deps: Partial<AcpClientDeps> = {},
   ) {
     this.orchestrator = opts.orchestrator === true;
+    // `||`, not `??`: the role can only ever widen the assertion. An explicit `false` alongside the
+    // coupled preset must not be able to switch the pinned-identity check off.
+    this.orchestratorRole = opts.orchestratorRole === true || this.orchestrator;
     this.commands = this.orchestrator ? [] : normalizeAcpCommands(opts.initialCommands);
     this.sessionContext = opts.sessionContext;
     this.mcpEnvironment = { ...process.env, ...opts.env };
@@ -193,6 +202,7 @@ export class AcpClient {
   private readonly sessionContext: AcpSessionContextConfig | undefined;
   private readonly mcpEnvironment: NodeJS.ProcessEnv;
   private readonly orchestrator: boolean;
+  private readonly orchestratorRole: boolean;
 
   get pid(): number | undefined {
     return this.child.pid;
@@ -233,7 +243,9 @@ export class AcpClient {
   async initialize(): Promise<void> {
     const res = await this.peer.request("initialize", acpInitializeRequest());
     this.negotiation = negotiateAcpInitialize(res);
-    if (this.orchestrator) assertClaudeAgentAcpOrchestratorIdentity(this.negotiation.agentInfo);
+    // Keyed on the role, not the preset: only the exact audited adapter release may ever carry
+    // Orchestrator authority, whichever launch shape asked for it.
+    if (this.orchestratorRole) assertClaudeAgentAcpOrchestratorIdentity(this.negotiation.agentInfo);
     this.supportsImages = this.negotiation.stable.promptImage;
     this.ev.onAcpCapabilities?.(runtimeCapabilities(this.negotiation));
   }

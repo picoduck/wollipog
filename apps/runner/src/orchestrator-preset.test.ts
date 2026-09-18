@@ -316,7 +316,25 @@ test("Claude ACP orchestrator metadata grants planning tools while preserving th
     tool.startsWith("Bash(gh issue comment")), false, "unscoped issue writes are never statically authorized");
   assert.equal(allowed.includes("Bash(git branch:*)"), false, "branch inspection does not permit mutation flags");
   assert.equal(allowed.some((tool) => tool.includes("git push") || tool.includes("gh pr create")), false);
-  assert.equal(meta.claudeCode.options.permissionMode, "dontAsk");
+  // `dontAsk` is carried, but it is NOT what makes the preset fail-closed, and must never be read
+  // as though it were. Against the pinned adapter 0.75.1 it is inert twice over: `createSession`
+  // assigns `permissionMode` *after* spreading `_meta.claudeCode.options` into the SDK options, so
+  // this field is overwritten by the settings-derived mode; and `dontAsk` is not one of the session
+  // modes the adapter makes available at all (`buildAvailableModes` offers default, acceptEdits,
+  // plan, auto, and bypassPermissions only), so it would be clamped to "default" even if it did
+  // arrive. It is retained only as a forward-compatible hint to an adapter that honors it.
+  //
+  // Two other mechanisms close the preset, and they are the ones to protect:
+  //   1. the static tool boundary asserted above and below — `tools`/`allowedTools` grant no
+  //      implementation tool, and `disallowedTools` denies edits and child spawning outright;
+  //   2. AcpClient cancelling every `session/request_permission` for a preset session, which is
+  //      asserted directly in acp-conformance.test.ts.
+  // See ADR 0010's audit section (#1306).
+  assert.equal(meta.claudeCode.options.permissionMode, "dontAsk",
+    "retained as an inert forward-compatible hint; the assertions below are what enforce the preset");
+  assert.deepEqual(meta.claudeCode.options.disallowedTools,
+    ["Write", "Edit", "MultiEdit", "NotebookEdit", "Agent", "Task"],
+    "the tool boundary denies implementation and child-spawning tools regardless of permission mode");
   assert.match(JSON.stringify(meta.claudeCode.options.systemPrompt), /Project locations are read-only.*\/repo/s);
   assert.deepEqual(meta.claudeCode.options.settingSources, []);
   assert.deepEqual(meta.claudeCode.options.settings, { disableAllHooks: true });
@@ -726,7 +744,7 @@ test("the additive Orchestrator role is advertised independently of the coupled 
     env: {}, driver: "acp", context: { kind: "native" }, capabilities: caps(["default"]),
   };
   assert.equal(advertise([acp], "bwrap")[0]!.capabilities?.orchestratorAdditive, undefined,
-    "the ACP provider permission contract is unaudited, so it has no additive role");
+    "the ACP provider permission contract was audited and found not sound, so it has no additive role");
 
   // The shared control-plane/web predicate reads the same advertisement.
   assert.equal(advertisesOrchestratorAdditiveRole("pi", providerPi!.capabilities), true);

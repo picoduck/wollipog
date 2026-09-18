@@ -464,8 +464,8 @@
 //      block, and an older runner would start an ordinary Pi session with no orchestration surface
 //      while the control plane still granted orchestrator routes and a scoped credential, so the
 //      combination is refused with upgrade guidance rather than degraded. The ACP harness is
-//      deliberately excluded: its provider-mode permission contract is still unaudited, so an ACP
-//      Orchestrator keeps the coupled preset.
+//      deliberately excluded: #1306 audited its provider-mode permission contract and found it not
+//      sound (ADR 0010), so an ACP Orchestrator keeps the coupled preset.
 // 164: Integration Isolation is an Orchestrator execution policy of its own, independent of Strict
 //      Project Isolation and of the role. When it is enabled an additive Orchestrator launches with
 //      only Wollipog's management tools as integrations — no user-configured MCP servers, hooks,
@@ -1505,7 +1505,7 @@ export function usesOrchestratorPresetPermissions(
 /** Harnesses whose Orchestrator role can be additive, each with the capability gate that carries
  * its launch shape. Claude Code landed in v160; the Codex drivers in v162; Pi in v163. Every other
  * driver still requires the coupled preset, so it has no entry here — notably `acp`, whose
- * provider-mode permission contract has not been audited. */
+ * provider-mode permission contract was audited and found not sound (ADR 0010). */
 export const ORCHESTRATOR_ADDITIVE_CAPABILITY = {
   "claude-code": "orchestratorAdditiveRole",
   codex: "orchestratorAdditiveCodex",
