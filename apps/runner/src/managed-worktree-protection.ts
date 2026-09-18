@@ -554,9 +554,18 @@ function segmentRefusal(
     const actionIndex = words.findIndex((token) =>
       ["-delete", "-exec", "-execdir", "-ok", "-okdir"].includes(word(token, cwd, environment) ?? ""));
     if (actionIndex >= 0) {
+      // Pre-root options: -H/-L/-P, -O<level> (attached), -D <opts> (a separate word), and `--`
+      // ending the options. Every one of them has to be stepped over, or the real roots and a
+      // later -L land beyond rootStart and are never examined.
       let rootStart = 0;
-      while (["-H", "-L", "-P"].includes(word(words[rootStart], cwd, environment) ?? "") ||
-          /^-(?:O|D)/u.test(word(words[rootStart], cwd, environment) ?? "")) rootStart += 1;
+      for (;;) {
+        const option = word(words[rootStart], cwd, environment) ?? "";
+        if (option === "--") { rootStart += 1; break; }
+        if (["-H", "-L", "-P"].includes(option) || /^-O/u.test(option)) { rootStart += 1; continue; }
+        if (option === "-D") { rootStart += 2; continue; }
+        if (/^-D./u.test(option)) { rootStart += 1; continue; }
+        break;
+      }
       const expressionStart = words.findIndex((token, index) => index >= rootStart &&
         (word(token, cwd, environment)?.startsWith("-") === true || operator(token) === "(" ||
           word(token, cwd, environment) === "!"));

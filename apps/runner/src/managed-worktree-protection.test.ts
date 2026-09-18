@@ -238,6 +238,14 @@ test("removing a symlink that merely points at the worktree is not removing the 
   assert.equal(commandTargetsManagedWorktree("find -H alias -delete", sibling, protections), MANAGED_WORKTREE_REFUSAL);
   assert.equal(commandTargetsManagedWorktree("find alias/ -delete", sibling, protections), MANAGED_WORKTREE_REFUSAL);
   assert.equal(commandTargetsManagedWorktree("find alias -follow -delete", sibling, protections), MANAGED_WORKTREE_REFUSAL);
+  // Every pre-root option is stepped over, so the real roots and a later -L are examined.
+  assert.equal(commandTargetsManagedWorktree("find -P -D search -L alias -delete", sibling, protections), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("find -L -- alias -delete", sibling, protections), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("find -O2 -L alias -delete", sibling, protections), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("find -D search alias -delete", sibling, protections), null);
+  assert.equal(commandTargetsManagedWorktree("find -- alias -delete", sibling, protections), null);
+  assert.equal(commandTargetsManagedWorktree(`find -D search -L ${sibling} -delete`, sibling, protections), null,
+    "a followed root that is not the worktree");
   assert.equal(commandTargetsManagedWorktree("find alias -name x -follow -exec rm -rf {} +", sibling, protections),
     MANAGED_WORKTREE_REFUSAL);
   // An INTERMEDIATE symlink is always followed: alias/.. is the worktree's parent.
