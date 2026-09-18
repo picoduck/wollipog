@@ -284,16 +284,22 @@ function claudeSettingsDocument(
 /**
  * Write the live settings file, its heal template, and (when a guard is present) the guard-only
  * copy the driver falls back to while the manager hook circuit is open.
+ *
+ * `preserveGuardState` never touches the guard's protection list: a provisioning call that does
+ * not know the live worktree set must neither retire the guard a running provider still consults
+ * nor rewrite (and so launder) the list the tamper tripwire compares. With no guard given, the
+ * guard-only copy is left alone too.
  */
 export function writeClaudeSettingsSet(
   file: string,
   manager: ClaudeManagerHookOptions | null,
   guard: ClaudeGuardHookOptions | null,
+  preserveGuardState = false,
 ): void {
   if (guard) {
-    writeManagedWorktreeGuardProtections(guard.protectionsFile, guard.protections);
+    if (!preserveGuardState) writeManagedWorktreeGuardProtections(guard.protectionsFile, guard.protections);
     protectedWrite(claudeHookGuardPath(file), claudeSettingsDocument(file, null, guard));
-  } else {
+  } else if (!preserveGuardState) {
     rmSync(claudeHookGuardPath(file), { force: true });
     rmSync(claudeHookProtectionsPath(file), { force: true });
   }
@@ -495,16 +501,26 @@ export function applyClaudeHookCapability(
 }
 
 /**
+ * Whether a `--settings` other than the runner-owned `file` survives in the launch argv. Stale
+ * runner-owned copies have already been removed, so anything left is the user's own.
+ */
+function hasUserSettingsArg(args: readonly string[], file: string): boolean {
+  return args.some((arg, index) =>
+    (arg === "--settings" && index + 1 < args.length && !sameGuardPath(args[index + 1]!, file)) ||
+    (arg.startsWith("--settings=") && !sameGuardPath(arg.slice("--settings=".length), file)));
+}
+
+/**
  * Inject (or heal) the managed settings argument.
  *
  * ONE file carries every runner-owned hook for the spawn, because Claude applies only the LAST
  * `--settings` argument (a later one replaces an earlier one; they do not merge):
  *  - the manager policy hooks, when the feature is enabled and supported for this launch, and
- *  - the managed-worktree guard, whenever the session owns a runner-created worktree and the
- *    guard can be provisioned — INCLUDING when the manager hooks are disabled, unsupported for
- *    the mode, the Orchestrator preset, or their circuit is open.
+ *  - the managed-worktree guard, whenever it can be provisioned — even while the session owns
+ *    no runner-created worktree yet (#1303), and INCLUDING when the manager hooks are disabled,
+ *    unsupported for the mode, the Orchestrator preset, or their circuit is open.
  *
- * Disabled, unsupported, WSL, and guardless sessions remove only this runner-owned `--settings`
+ * Disabled, unsupported, WSL, and unguardable sessions remove only this runner-owned `--settings`
  * pair; any user-supplied settings remain. (A user `--settings` that survives is still shadowed
  * by the runner-owned one, exactly as it already was whenever manager hooks were provisioned —
  * see docs/adr/0012.)
@@ -517,7 +533,13 @@ export function provisionClaudeHooks(
     enabled: boolean;
     allowInsecureTransport?: boolean;
     registerCredential?: (sessionId: string, tokenHash: string) => void;
-    /** Live runner-owned worktrees for this session; a non-empty set provisions the guard. */
+    /**
+     * Live runner-owned worktrees for this session. Supplying it — even empty — is what provisions
+     * the guard; omitting it provisions none. Only the pre-spawn provisioning (after launch
+     * authorization) knows the live set: the `start_session` handlers run BEFORE authorization,
+     * which compares the argv against the runner-local catalog exactly, so a guard appended there
+     * would reject every ordinary launch as a command mismatch.
+     */
     managedWorktreeProtections?: readonly ManagedWorktreeProtection[];
     /** Seam for tests: prove the guard sidecar actually refuses before relying on it. */
     verifyGuardLaunch?: typeof verifyManagedWorktreeGuardLaunch;
@@ -544,6 +566,7 @@ export function provisionClaudeHooks(
   const targetIsHost = !spec.executionTarget || spec.executionTarget.adapter === "host";
   const native = (spec.context?.kind ?? "native") === "native";
   const file = persistedFile ?? expectedFile;
+  const guardRequested = config.managedWorktreeProtections !== undefined;
   const protections = config.managedWorktreeProtections ?? [];
 
   // "Guard active" is established here, at provisioning time, and is observable in the argv the
@@ -551,7 +574,35 @@ export function provisionClaudeHooks(
   // that (non-native context, container/cloud target, an unquotable path) leaves the guard off,
   // and the driver keeps mediating the permission mode instead.
   let guard: ClaudeGuardHookOptions | null = null;
-  if (protections.length > 0) {
+  // Provisioned whether or not the session owns a worktree yet (#1303): a session can create its
+  // first one part-way through a turn, and outside `default`/`auto` the running CLI offers no
+  // other interception point — a guard absent from the process cannot be added until its next
+  // spawn. An empty list costs one short-lived process per matched tool call and holds no opinion
+  // beyond the guard's own state; the live refresh makes a new worktree protected from the
+  // guard's very next invocation.
+  //
+  // The one exception: a launch that owns no worktree yet and carries a user-supplied
+  // `--settings`. Claude applies only the LAST `--settings`, so a guard there would shadow the
+  // user's own deny rules and hooks — newly allowing what their configuration blocks — whenever
+  // the guard is the only runner-owned document in play: with manager hooks off, and also while
+  // their circuit is open, when a spawn drops to the guard-only copy. That launch keeps the
+  // pre-#1303 behaviour (no guard until its next spawn) until user settings can be merged under
+  // the runner-owned file.
+  const managerHooksBlocked = spec.config?.permissionMode === "orchestrator" ||
+    !config.enabled ||
+    config.controlPlaneProtocolVersion == null ||
+    config.controlPlaneProtocolVersion < CLAUDE_HOOK_PROTOCOL_VERSION ||
+    !native || !targetIsHost || !hookTransportSupported(spec);
+  const userSettingsWouldBeShadowed = guardRequested && protections.length === 0 &&
+    hasUserSettingsArg(spec.args, file);
+  if (userSettingsWouldBeShadowed) {
+    log(
+      `Claude managed worktree guard ${spec.sessionId}: not provisioned while the session owns no ` +
+      "managed worktree, because it would shadow the agent's own --settings; a worktree created " +
+      "in this turn is protected from the next spawn",
+    );
+  }
+  if (guardRequested && !userSettingsWouldBeShadowed) {
     if (compromisedGuardSessions.has(spec.sessionId)) {
       // The guard's own state was tampered with or could not be kept in step for this session.
       // Mediation (the pre-#1313 behaviour) is the honest fallback; it needs no trusted state.
@@ -595,19 +646,20 @@ export function provisionClaudeHooks(
     }
   }
 
-  const managerHooksBlocked = spec.config?.permissionMode === "orchestrator" ||
-    !config.enabled ||
-    config.controlPlaneProtocolVersion == null ||
-    config.controlPlaneProtocolVersion < CLAUDE_HOOK_PROTOCOL_VERSION ||
-    !native || !targetIsHost || !hookTransportSupported(spec);
   if (managerHooksBlocked) {
     stripHookFromLaunchCapability(spec);
     if (!guard) {
       if (removeManagedSettingsArgs(spec.args, host.configDir) > 0) {
         log(`Claude hooks ${spec.sessionId}: disabled for this launch`);
       }
-      discardGuardArtifacts(file);
-      guardStateDigests.delete(spec.sessionId);
+      // A call that does not know the live worktree set (the pre-authorization start_session
+      // provisioning) must not retire a guard a running provider still consults: if that restart
+      // is rejected, the provider would fail closed on every matched tool. The post-authorization
+      // pre-spawn provisioning decides the guard's fate.
+      if (guardRequested) {
+        discardGuardArtifacts(file);
+        guardStateDigests.delete(spec.sessionId);
+      }
     } else {
       try {
         writeClaudeSettingsSet(file, null, guard);
@@ -639,6 +691,21 @@ export function provisionClaudeHooks(
   }
 
   validateInjectedArg(file);
+  // A call that does not know the live worktree set rewrites the manager documents below; it must
+  // carry an already-declared, still-trusted guard into them (CR-4.1). Otherwise a restart that
+  // authorization then rejects leaves the RUNNING driver's next spawn reading a guard-less
+  // template, and a worktree created in that turn would go unprotected. Its list is not rewritten.
+  const carriedGuard: ClaudeGuardHookOptions | null = !guardRequested &&
+      !compromisedGuardSessions.has(spec.sessionId) &&
+      describeManagedSettings(file)?.guard === true &&
+      guardStatePresent(claudeHookProtectionsPath(file))
+    ? {
+      launch: runnerReentryCommand(host, MANAGED_WORKTREE_GUARD_MODE),
+      protectionsFile: claudeHookProtectionsPath(file),
+      // Never written: `preserveGuardState` leaves the live list exactly as the runner last wrote it.
+      protections: [],
+    }
+    : null;
   // `managerHooksBlocked` already rejected a null/too-old control plane.
   const protocolVersion = config.controlPlaneProtocolVersion ?? 0;
   const circuit = readHookCircuitState(claudeHookCircuitPath(file));
@@ -660,7 +727,8 @@ export function provisionClaudeHooks(
             askCapable: protocolVersion >= 66,
           }
           : null,
-        guard,
+        guard ?? carriedGuard,
+        !guardRequested,
       );
     }
     if (!hasCurrentSettings && (managedSettingsExist || guard)) {
@@ -699,7 +767,7 @@ export function provisionClaudeHooks(
     cpHttpUrl: deriveCpHttpUrl(config.controlPlaneUrl, config.allowInsecureTransport),
     tokenFile,
     askCapable: protocolVersion >= 66,
-  }, guard);
+  }, guard ?? carriedGuard, !guardRequested);
   if (!hasCurrentSettings) {
     validateInjectedArg(file);
     spec.args.push("--settings", file);
@@ -716,25 +784,36 @@ export function provisionClaudeHooks(
 /**
  * One self-test per distinct sidecar launch per runner process. The command is identical for every
  * session, and the probe costs a process start.
+ *
+ * A success is final. A failure can be transient, so it is retried — but only after a cooldown:
+ * since #1303 every guardable launch probes, and a sidecar that reliably cannot start would
+ * otherwise put a failing process start (up to its whole timeout) in front of every Claude spawn.
  */
-const verifiedGuardLaunches = new Map<string, { ok: true } | { ok: false; reason: string }>();
+export const CLAUDE_GUARD_LAUNCH_RETRY_COOLDOWN_MS = 5 * 60_000;
+const verifiedGuardLaunches = new Map<string, {
+  verdict: { ok: true } | { ok: false; reason: string };
+  at: number;
+}>();
 
 function verifiedGuardLaunch(
   guard: ClaudeGuardHookOptions,
   verify: typeof verifyManagedWorktreeGuardLaunch = verifyManagedWorktreeGuardLaunch,
+  now: number = Date.now(),
 ): { ok: true } | { ok: false; reason: string } {
   const key = [guard.launch.command, ...guard.launch.args].join("\u0000");
   const cached = verifiedGuardLaunches.get(key);
-  if (cached?.ok) return cached;
-  const verdict = verify(guard.launch, guard.protectionsFile, guard.protections);
-  verifiedGuardLaunches.set(key, verdict);
+  if (cached && (cached.verdict.ok || now - cached.at < CLAUDE_GUARD_LAUNCH_RETRY_COOLDOWN_MS)) {
+    return cached.verdict;
+  }
+  const verdict = verify(guard.launch);
+  verifiedGuardLaunches.set(key, { verdict, at: now });
   return verdict;
 }
 
 /**
- * Drop a guard this session no longer needs (its last managed worktree was discarded, or the
- * launch cannot carry the hook). A guard-only settings file goes with it; a file that also
- * carries the manager hooks is left for the manager path to rewrite.
+ * Drop a guard this launch does not carry (it cannot carry the hook, or it would shadow the
+ * agent's own `--settings` while the session owns no worktree). A guard-only settings file goes
+ * with it; a file that also carries the manager hooks is left for the manager path to rewrite.
  */
 function discardGuardArtifacts(file: string): void {
   // A protections file can also be left behind by a failed launch self-test, which writes it
@@ -810,9 +889,11 @@ function poisonClaudeGuardState(sessionId: string, file: string): boolean {
  * Refresh the live protection set for an ALREADY provisioned guard.
  *
  * The file exists only while a spawn was provisioned with the guard, so this never creates one:
- * a session that gains its first managed worktree mid-session has no guard in its running
- * process and keeps the driver's mediated behavior until its next spawn. Returns whether the
- * live protection set was rewritten.
+ * a running process that carries no guard cannot be given one, and a file it does not read would
+ * only claim a protection nobody enforces. Every guardable launch is provisioned with the guard
+ * even while the session owns no worktree (#1303), so a worktree created part-way through a turn
+ * is protected from the guard's next invocation. An unguardable launch keeps whatever the driver
+ * bound at spawn until its next spawn.
  */
 export function refreshClaudeGuardProtections(
   sessionId: string,
@@ -834,13 +915,9 @@ export function refreshClaudeGuardProtections(
   if (baseline && !managedWorktreeGuardStateMatches(file, baseline)) {
     return reasonFor("the protected worktree list was modified outside the runner");
   }
-  if (protections.length === 0) {
-    // The last managed worktree is gone. Retire the guard rather than write "nothing is
-    // protected"; the next spawn runs exactly like a session that never had a worktree.
-    return poisonClaudeGuardState(sessionId, file)
-      ? { state: "invalidated", reason: "this session no longer has a runner-owned worktree" }
-      : { state: "unprotected", reason: "this session no longer has a runner-owned worktree" };
-  }
+  // An empty set (the last managed worktree is gone) is written like any other: the running
+  // process keeps its guard, which keeps vetoing its own state and protects the next worktree
+  // this session creates in the same turn. Retiring it here would fail every later tool call.
   try {
     guardStateDigests.set(sessionId, writeManagedWorktreeGuardProtections(file, protections));
     return { state: "refreshed" };
@@ -969,9 +1046,11 @@ function claudeGuardStateTrusted(settingsFile: string): boolean {
       poisonClaudeGuardState(sessionId, protectionsFile);
       return false;
     }
-    // Without a baseline (nothing provisioned in this process) the list still has to be a valid,
-    // non-empty document: that is exactly what the hook itself demands before it allows anything.
-    return readManagedWorktreeGuardProtections(protectionsFile).length > 0;
+    // Without a baseline (nothing provisioned in this process) the list still has to be a valid
+    // document: that is exactly what the hook itself demands before it allows anything. An empty
+    // one is valid — the session simply owns no managed worktree yet (#1303).
+    readManagedWorktreeGuardProtections(protectionsFile);
+    return true;
   } catch {
     return false;
   }

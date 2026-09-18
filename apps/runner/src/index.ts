@@ -613,8 +613,9 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
         enabled: claudeHookFeatureEnabled,
         allowInsecureTransport,
         registerCredential: registerPolicyHookCredential,
-        // The live runner-owned worktree set for this session: a non-empty set provisions the
-        // managed-worktree guard hook, which is what lets the launch keep the user's mode.
+        // The live runner-owned worktree set for this session, written into the managed-worktree
+        // guard's list. The guard is provisioned even while it is empty (#1303), which is what
+        // protects a worktree created later in the same turn and lets the launch keep the user's mode.
         managedWorktreeProtections: sessions.managedWorktreeProtections(meta),
       },
       log,

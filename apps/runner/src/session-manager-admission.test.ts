@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RunnerToControlPlane, SessionLaunchSpec } from "@wollipog/protocol";
 import { SessionManager } from "./session-manager.js";
+import { provisionClaudeHooks, resetClaudeGuardState } from "./hook-settings.js";
 import { BoxAdmission } from "./box-admission.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { WorktreeCleanupJournal, type WorktreeCleanupRecord } from "./worktree.js";
@@ -65,6 +66,48 @@ test("native launches reject control-plane argv that differs from the exact runn
       message.type === "session_status" && message.sessionId === "mismatch" && message.status === "failed");
     assert.ok(status?.type === "session_status");
     assert.match(status.detail ?? "", /does not match runner-local configuration/);
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a start_session provisioned as index.ts does still matches the runner-local argv (#1303 review)", async () => {
+  // The start_session handlers provision Claude hooks BEFORE launch authorization, which compares
+  // the argv with the runner-local catalog exactly. They pass no worktree set, so they must not
+  // append the managed-worktree guard: the pre-spawn provisioning, after authorization, does that.
+  const root = mkdtempSync(join(tmpdir(), "wollipog-native-launch-guard-"));
+  try {
+    const sent: RunnerToControlPlane[] = [];
+    const store = new SessionStore(join(root, "sessions"));
+    let constructed = false;
+    const manager = new SessionManager(
+      (message) => sent.push(message),
+      () => {},
+      store,
+      "runner",
+      () => ({ command: "claude", args: [], env: {} }),
+      () => {
+        constructed = true;
+        throw new Error("driver construction reached: authorization passed");
+      },
+    );
+    const spec = { ...launchSpec(root, "guarded-start"), args: [], context: { kind: "native" as const } };
+    resetClaudeGuardState();
+    provisionClaudeHooks(spec, {
+      controlPlaneUrl: "ws://127.0.0.1:4317/runner",
+      controlPlaneProtocolVersion: 66,
+      enabled: false,
+      verifyGuardLaunch: () => ({ ok: true }),
+    }, () => {}, {
+      isSea: false, execPath: process.execPath, execArgv: [], scriptPath: "/runner/src/index.ts",
+      configDir: join(root, "hooks"),
+    });
+    assert.deepEqual(spec.args, [], "no runner-owned settings before authorization");
+    await manager.start(spec);
+    assert.equal(constructed, true, "the launch was authorized");
+    assert.equal(sent.some((message) => message.type === "session_status" &&
+      /does not match runner-local configuration/u.test(message.detail ?? "")), false);
     manager.shutdownAll();
   } finally {
     rmSync(root, { recursive: true, force: true });

@@ -120,15 +120,42 @@ test("a Bash call made by a subagent is evaluated exactly like any other Bash ca
   assert.match(outcome.stdout, /"permissionDecision":"deny"/u);
 });
 
-test("an empty protection list fails closed, and the runner refuses to write one", (t) => {
+test("an empty protection list is a session with no worktree yet: no opinion, but its own state stays vetoed", (t) => {
+  // Issue #1303: the guard is installed from spawn so a worktree created later in the same turn is
+  // protected from the next invocation. Until then it holds no worktree opinion at all.
   const f = fixture();
   t.after(f.cleanup);
-  assert.throws(() => writeManagedWorktreeGuardProtections(f.protectionsFile, []), /empty/u);
-  // Only tampering or a half-finished retirement can produce one, and neither may be trusted.
-  writeFileSync(f.protectionsFile, JSON.stringify({ version: 1, protections: [] }), "utf8");
-  blocks(
-    runManagedWorktreeGuardDecision(hookInput({ tool_input: { command: "ls" } }), f.protectionsFile),
-    "an empty protection list",
+  writeManagedWorktreeGuardProtections(f.protectionsFile, []);
+  assert.deepEqual(readManagedWorktreeGuardProtections(f.protectionsFile), []);
+  for (const command of ["ls", `git worktree remove ${WORKTREE}`, `rm -rf ${WORKTREE}`]) {
+    assert.deepEqual(
+      runManagedWorktreeGuardDecision(hookInput({ tool_input: { command } }), f.protectionsFile),
+      { stdout: "", stderr: "", exitCode: 0 },
+      `${command} is left to the selected mode while nothing is protected`,
+    );
+  }
+  const stateWrite = runManagedWorktreeGuardDecision(
+    hookInput({ tool_input: { command: `echo '{}' > ${f.protectionsFile}` } }),
+    f.protectionsFile,
+  );
+  assert.match(stateWrite.stdout, /"permissionDecision":"deny"/u, "the empty list itself is still off limits");
+  // The runner signals an invalidated guard by REMOVING the list, never by emptying it.
+  rmSync(f.protectionsFile);
+  blocks(runManagedWorktreeGuardDecision(hookInput(), f.protectionsFile), "a missing protection list");
+});
+
+test("a worktree added to an empty list is protected from the very next invocation", (t) => {
+  const f = fixture();
+  t.after(f.cleanup);
+  writeManagedWorktreeGuardProtections(f.protectionsFile, []);
+  const destroy = hookInput({ tool_input: { command: `git worktree remove --force ${WORKTREE}` } });
+  assert.equal(runManagedWorktreeGuardDecision(destroy, f.protectionsFile).stdout, "");
+  writeManagedWorktreeGuardProtections(f.protectionsFile, [{ worktreePath: WORKTREE, repoPath: REPO }]);
+  assert.match(runManagedWorktreeGuardDecision(destroy, f.protectionsFile).stdout, /"permissionDecision":"deny"/u);
+  // Ordinary work inside the new worktree is untouched.
+  assert.deepEqual(
+    runManagedWorktreeGuardDecision(hookInput({ tool_input: { command: "git status && pnpm test" } }), f.protectionsFile),
+    { stdout: "", stderr: "", exitCode: 0 },
   );
 });
 
@@ -295,8 +322,6 @@ test("the REAL sidecar launch refuses from a foreign working directory", (t) => 
   // launched with a BARE loader specifier (`--import tsx`) resolves it from CLAUDE's cwd, not the
   // runner's, fails with ERR_MODULE_NOT_FOUND, and exits 1 — and Claude blocks only on exit 2, so
   // every command would have been waved through while the driver stopped mediating.
-  const f = fixture();
-  t.after(f.cleanup);
   const launch = runnerReentryCommand(
     {
       isSea: false,
@@ -306,39 +331,41 @@ test("the REAL sidecar launch refuses from a foreign working directory", (t) => 
     },
     "--managed-worktree-guard",
   );
-  assert.deepEqual(
-    verifyManagedWorktreeGuardLaunch(launch, f.protectionsFile, [{ worktreePath: WORKTREE, repoPath: REPO }]),
-    { ok: true },
-  );
+  assert.deepEqual(verifyManagedWorktreeGuardLaunch(launch), { ok: true });
 });
 
-test("a sidecar that cannot start is reported as unverified, never as a working guard", (t) => {
-  const f = fixture();
-  t.after(f.cleanup);
+test("a sidecar that cannot start is reported as unverified, never as a working guard", () => {
   const launch = { command: process.execPath, args: ["--import", "definitely-not-installed-xyz", "/nope.ts"] };
-  const verdict = verifyManagedWorktreeGuardLaunch(launch, f.protectionsFile, [
-    { worktreePath: WORKTREE, repoPath: REPO },
-  ]);
+  const verdict = verifyManagedWorktreeGuardLaunch(launch);
   assert.equal(verdict.ok, false);
 });
 
-test("a sidecar that exits 0 without refusing is rejected by the self-test", (t) => {
-  const f = fixture();
-  t.after(f.cleanup);
+test("a sidecar that exits 0 without refusing is rejected by the self-test", () => {
   const verdict = verifyManagedWorktreeGuardLaunch(
     { command: process.execPath, args: ["-e", "process.stdin.resume()"] },
-    f.protectionsFile,
-    [{ worktreePath: WORKTREE, repoPath: REPO }],
     (() => ({ status: 0, stdout: "", stderr: "", error: undefined })) as never,
   );
   assert.deepEqual(verdict, { ok: false, reason: "probe did not produce the managed worktree refusal" });
 });
 
-test("the self-test needs a protected worktree to probe with", () => {
-  assert.deepEqual(
-    verifyManagedWorktreeGuardLaunch({ command: "node", args: [] }, "/nowhere.json", []),
-    { ok: false, reason: "no protected worktree to probe with" },
+test("the self-test owns its protections, needs none from the session, and leaves nothing behind", () => {
+  // Issue #1303: a session with no worktree yet still needs a PROVEN guard. The probe publishes a
+  // protection only in its own private file — never in a session's live list.
+  const seen: Array<{ args: string[]; cwd: string; input: string }> = [];
+  const verdict = verifyManagedWorktreeGuardLaunch(
+    { command: "node", args: ["guard.js"] },
+    ((command: string, args: string[], options: { cwd: string; input: string }) => {
+      seen.push({ args, cwd: options.cwd, input: options.input });
+      return { status: 0, stdout: `{"permissionDecision":"deny","reason":"${MANAGED_WORKTREE_REFUSAL}"}`, stderr: "" };
+    }) as never,
   );
+  assert.deepEqual(verdict, { ok: true });
+  assert.equal(seen.length, 1);
+  const protectionsFile = seen[0]!.args[seen[0]!.args.indexOf("--protections") + 1]!;
+  assert.ok(protectionsFile.startsWith(seen[0]!.cwd), "the probe's list lives in the probe's own directory");
+  const payload = JSON.parse(seen[0]!.input) as { tool_input: { command: string } };
+  assert.match(payload.tool_input.command, /^git worktree remove ["']/u, "the probe path is shell-quoted");
+  assert.throws(() => readManagedWorktreeGuardProtections(protectionsFile), /ENOENT/u, "the probe cleans up");
 });
 
 /* ---------------------------------------------------------------------------------------------
@@ -445,7 +472,7 @@ test("the tamper tripwire notices any edit to the document the runner wrote", (t
     "a removed file is a mismatch, never a pass");
 });
 
-test("the launch self-test quotes a protected path containing spaces and a quote", (t) => {
+test("the REAL sidecar refuses a protected path containing spaces and a quote", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "wollipog-guard-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   // The worktree must live OUTSIDE the guard's own state directory, as it always does in reality:
@@ -453,20 +480,11 @@ test("the launch self-test quotes a protected path containing spaces and a quote
   const awkward = join(dir, "trees", "my work's trees", "issue 42");
   const protectionsFile = join(dir, "state", "s1.protections.json");
   writeManagedWorktreeGuardProtections(protectionsFile, [{ worktreePath: awkward, repoPath: REPO }]);
-  const launch = runnerReentryCommand(
-    {
-      isSea: false,
-      execPath: process.execPath,
-      execArgv: process.execArgv,
-      scriptPath: fileURLToPath(new URL("./index.ts", import.meta.url)),
-    },
-    "--managed-worktree-guard",
+  const outcome = runManagedWorktreeGuardDecision(
+    hookInput({ cwd: dir, tool_input: { command: `git worktree remove '${awkward.replaceAll("'", "'\\''")}'` } }),
+    protectionsFile,
   );
-  assert.deepEqual(
-    verifyManagedWorktreeGuardLaunch(launch, protectionsFile, [{ worktreePath: awkward, repoPath: REPO }]),
-    { ok: true },
-    "an unquoted path would split into several operands and the probe would see no refusal",
-  );
+  assert.match(outcome.stdout, /"permissionDecision":"deny"/u, "a quoted awkward path is still recognised");
 });
 
 test("the search tools respect the guard-state boundary: path, default cwd, and glob prefix", (t) => {

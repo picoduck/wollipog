@@ -24,8 +24,9 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import {
   GUARD_STATE_FILE_TOOLS,
   MANAGED_WORKTREE_REFUSAL,
@@ -71,15 +72,17 @@ export function managedWorktreeGuardDigest(document: string): string {
   return createHash("sha256").update(document).digest("hex");
 }
 
-/** Returns the digest of what was written, so the caller can remember its own baseline. */
+/**
+ * Returns the digest of what was written, so the caller can remember its own baseline.
+ *
+ * An empty list is a legitimate state (issue #1303): the guard is installed from spawn so that a
+ * worktree the session creates part-way through a turn is protected from the guard's next
+ * invocation, and until then it has no worktree to protect. It still vetoes its own state.
+ */
 export function writeManagedWorktreeGuardProtections(
   file: string,
   protections: readonly ManagedWorktreeProtection[],
 ): string {
-  if (protections.length === 0) {
-    // An empty list would read as "nothing is protected". The runner removes the guard instead.
-    throw new Error("refusing to write an empty managed worktree protection list");
-  }
   const document = managedWorktreeGuardProtectionsDocument(protections);
   protectedWrite(file, document, "managed worktree guard file");
   return managedWorktreeGuardDigest(document);
@@ -161,11 +164,8 @@ export function managedWorktreeGuardDecision(
   if (typeof toolName !== "string" || !toolName) {
     return { kind: "block", reason: "managed worktree guard received a tool call with no tool name" };
   }
-  // An empty list can only mean the runner meant to retire this guard and something went wrong:
-  // the runner never writes one. Trusting it would be trusting a disarmed veto.
-  if (protections.length === 0) {
-    return { kind: "block", reason: "this session's protected worktree list is empty; the guard has been invalidated" };
-  }
+  // An empty list is the runner's own statement that this session owns no managed worktree yet;
+  // an invalidated guard has NO list, which `loadProtections` has already turned into a block.
   const isBash = toolName === "Bash";
   const isFileTool = Object.hasOwn(GUARD_STATE_FILE_TOOLS, toolName);
   // Every other tool is outside the veto's vocabulary, so the guard holds no opinion.
@@ -302,54 +302,75 @@ export async function runManagedWorktreeGuardCli(
 
 /**
  * Prove, before the launch commits to it, that this exact hook command actually refuses a
- * destructive command against this session's own protected worktree.
+ * destructive command against a protected worktree.
  *
  * Claude only treats exit code 2 as blocking: a hook that fails to START (a bad interpreter, an
  * unresolvable loader, a missing script) exits 1 and the tool call proceeds. A guard that cannot
  * be proven to run is therefore worse than no guard, because the driver would stop mediating on
- * the strength of it. The probe runs the real sidecar with the real protections file, from a
- * directory that is NOT the runner's own, and demands the real refusal document.
+ * the strength of it. The probe runs the real sidecar from a directory that is NOT the runner's
+ * own and demands the real refusal document.
+ *
+ * The probe owns its protections file and the worktree named in it. What is proven is a property
+ * of the launch command, not of the session — and a session that owns no worktree yet still needs
+ * a proven guard, because it may create its first one later in the very turn about to start
+ * (issue #1303). Probing through the session's live file would mean publishing a fake protection
+ * there, where a concurrent guard invocation could read it.
  */
 export function verifyManagedWorktreeGuardLaunch(
   launch: { command: string; args: string[] },
-  protectionsFile: string,
-  protections: readonly ManagedWorktreeProtection[],
   spawn: typeof spawnSync = spawnSync,
 ): { ok: true } | { ok: false; reason: string } {
-  const target = protections[0];
-  if (!target) return { ok: false, reason: "no protected worktree to probe with" };
-  const payload = JSON.stringify({
-    hook_event_name: "PreToolUse",
-    tool_name: "Bash",
-    cwd: target.worktreePath,
-    // Shell-quote the path: a protected worktree containing whitespace or a quote would otherwise
-    // split into several operands, the matcher would inspect the wrong one, the probe would see no
-    // refusal, and every such session would silently fall back to mediation.
-    tool_input: { command: quote(["git", "worktree", "remove", target.worktreePath]) },
-  });
-  let result: ReturnType<typeof spawnSync>;
+  let probeDir: string;
   try {
-    result = spawn(launch.command, [...launch.args, "--protections", protectionsFile], {
-      input: payload,
-      encoding: "utf8",
-      // The sidecar's cwd is CLAUDE's, never the runner's; probe the same way.
-      cwd: dirname(protectionsFile),
-      timeout: 20_000,
-      maxBuffer: 256 * 1024,
-      windowsHide: true,
-    });
+    probeDir = mkdtempSync(join(tmpdir(), "wollipog-guard-probe-"));
   } catch (error) {
-    return { ok: false, reason: `probe could not be started: ${(error as Error).message}` };
+    return { ok: false, reason: `probe directory could not be created: ${(error as Error).message}` };
   }
-  if (result.error) return { ok: false, reason: `probe failed: ${result.error.message}` };
-  if (result.status !== 0) {
-    return { ok: false, reason: `probe exited ${String(result.status)}: ${String(result.stderr ?? "").trim().slice(0, 200)}` };
+  try {
+    // The worktree lives OUTSIDE the state directory, as a real one always does: a path inside it
+    // would be refused by the guard-state veto instead, which proves nothing about the worktree
+    // veto. Its name carries a space and a quote so the probe always exercises the quoting below.
+    const stateDir = join(probeDir, "state");
+    const protectionsFile = join(stateDir, "probe.protections.json");
+    const worktreePath = join(probeDir, "trees", "probe's worktree");
+    writeManagedWorktreeGuardProtections(protectionsFile, [{ worktreePath, repoPath: join(probeDir, "repo") }]);
+    const payload = JSON.stringify({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      cwd: probeDir,
+      // Shell-quote the path: whitespace or a quote would otherwise split it into several operands,
+      // the matcher would inspect the wrong one, the probe would see no refusal, and every launch
+      // would silently fall back to mediation.
+      tool_input: { command: quote(["git", "worktree", "remove", worktreePath]) },
+    });
+    let result: ReturnType<typeof spawnSync>;
+    try {
+      result = spawn(launch.command, [...launch.args, "--protections", protectionsFile], {
+        input: payload,
+        encoding: "utf8",
+        // The sidecar's cwd is CLAUDE's, never the runner's; probe the same way.
+        cwd: probeDir,
+        timeout: 20_000,
+        maxBuffer: 256 * 1024,
+        windowsHide: true,
+      });
+    } catch (error) {
+      return { ok: false, reason: `probe could not be started: ${(error as Error).message}` };
+    }
+    if (result.error) return { ok: false, reason: `probe failed: ${result.error.message}` };
+    if (result.status !== 0) {
+      return { ok: false, reason: `probe exited ${String(result.status)}: ${String(result.stderr ?? "").trim().slice(0, 200)}` };
+    }
+    const stdout = String(result.stdout ?? "");
+    if (!stdout.includes('"permissionDecision":"deny"') || !stdout.includes(MANAGED_WORKTREE_REFUSAL)) {
+      return { ok: false, reason: "probe did not produce the managed worktree refusal" };
+    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, reason: `probe could not be prepared: ${(error as Error).message}` };
+  } finally {
+    rmSync(probeDir, { recursive: true, force: true });
   }
-  const stdout = String(result.stdout ?? "");
-  if (!stdout.includes('"permissionDecision":"deny"') || !stdout.includes(MANAGED_WORKTREE_REFUSAL)) {
-    return { ok: false, reason: "probe did not produce the managed worktree refusal" };
-  }
-  return { ok: true };
 }
 
 /** Resolve-normalized comparison used by the settings self-description check. */

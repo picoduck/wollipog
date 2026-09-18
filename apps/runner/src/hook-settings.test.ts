@@ -14,6 +14,7 @@ import {
   claudeHookTemplatePath,
   claudeHookTokenPath,
   claudeHooksEnabled,
+  CLAUDE_GUARD_LAUNCH_RETRY_COOLDOWN_MS,
   LEGACY_POLICY_HOOK_ENV,
   markClaudeHookCredentialRejected,
   markClaudeHookCredentialReady,
@@ -28,6 +29,7 @@ import {
   writeHookCircuitState,
   type ClaudeHookHost,
 } from "./hook-settings.js";
+import { runManagedWorktreeGuardDecision } from "./managed-worktree-guard.js";
 
 function temp<T>(fn: (dir: string) => T): T {
   const dir = mkdtempSync(join(tmpdir(), "wollipog-hooks-"));
@@ -862,21 +864,137 @@ test("a recovered circuit restores the manager hooks into the live file", () => 
   assert.ok(settingsOf(dir).live.hooks?.PostToolUse, "the template is the authority once eligible again");
 }));
 
-test("a session with no managed worktree gets no guard, and discarding the last one removes it", () => temp((dir) => {
-  const none = provisionGuarded(dir, { sessionId: "sess_hook_2" }, { enabled: false, managedWorktreeProtections: [] });
-  assert.deepEqual(none.args, [], "no runner-owned settings at all");
-  assert.equal(existsSync(claudeHookSettingsPath(dir, "sess_hook_2")), false);
-
-  const launch = provisionGuarded(dir, {}, { enabled: false });
+test("a session with no managed worktree is guarded from spawn with an empty list (#1303)", () => temp((dir) => {
+  const launch = provisionGuarded(dir, {}, { enabled: false, managedWorktreeProtections: [] });
   const file = claudeHookSettingsPath(dir, "sess_hook_1");
-  assert.deepEqual(launch.args, ["--settings", file]);
-  // The last managed worktree is discarded; the next launch is provisioned without protections.
+  assert.deepEqual(launch.args, ["--settings", file], "the guard rides in the runner-owned settings");
+  assert.equal(guardEntries(settingsOf(dir).live).length, 1);
+  const protections = file.replace(/\.settings\.json$/u, ".protections.json");
+  assert.deepEqual(JSON.parse(readFileSync(protections, "utf8")), { version: 1, protections: [] });
+  const prepared = prepareClaudeHookArgs(launch.args);
+  assert.equal(prepared.guardActive, true, "an empty list is a trusted, active guard");
+  assert.deepEqual(prepared.args, launch.args);
+  // A worktree created mid-turn lands in the live list the running guard reads next.
+  assert.deepEqual(refreshClaudeGuardProtections("sess_hook_1", PROTECTIONS, dir), { state: "refreshed" });
+  assert.deepEqual(JSON.parse(readFileSync(protections, "utf8")), { version: 1, protections: PROTECTIONS });
+  assert.equal(prepareClaudeHookArgs(launch.args).guardActive, true);
+}));
+
+test("a provisioning call that supplies no worktree set provisions no guard", () => temp((dir) => {
+  // The start_session handlers run before launch authorization, which rejects any argv that
+  // differs from the runner-local catalog; only the pre-spawn call knows the live worktree set.
+  const launch = spec({ args: [] });
+  resetClaudeGuardState();
+  provisionClaudeHooks(launch, { ...config, enabled: false, verifyGuardLaunch: guardVerifies }, () => {}, host(dir));
+  assert.deepEqual(launch.args, []);
+  assert.equal(existsSync(claudeHookSettingsPath(dir, "sess_hook_1")), false);
+}));
+
+test("a provisioning call that does not know the worktree set leaves a running guard intact", () => temp((dir) => {
+  // start_session runs this BEFORE launch authorization; a restart it precedes may be rejected,
+  // and the provider still running must keep a guard that evaluates rather than fails closed.
+  for (const enabled of [false, true]) {
+    const sessionId = enabled ? "sess_hook_2" : "sess_hook_1";
+    const running = spec({ sessionId });
+    resetClaudeGuardState();
+    provisionClaudeHooks(running, {
+      ...config, enabled, managedWorktreeProtections: PROTECTIONS, verifyGuardLaunch: guardVerifies,
+    }, () => {}, host(dir));
+    const settings = claudeHookSettingsPath(dir, sessionId);
+    const protections = settings.replace(/\.settings\.json$/u, ".protections.json");
+    const restart = spec({ sessionId });
+    provisionClaudeHooks(restart, { ...config, enabled, verifyGuardLaunch: guardVerifies }, () => {}, host(dir));
+    assert.deepEqual(JSON.parse(readFileSync(protections, "utf8")), { version: 1, protections: PROTECTIONS },
+      `manager hooks ${enabled ? "on" : "off"}: the running guard's list is untouched`);
+    assert.deepEqual(
+      runManagedWorktreeGuardDecision(JSON.stringify({
+        hook_event_name: "PreToolUse", tool_name: "Bash", cwd: "/repo", tool_input: { command: "git status" },
+      }), protections),
+      { stdout: "", stderr: "", exitCode: 0 },
+      `manager hooks ${enabled ? "on" : "off"}: ordinary work is still evaluated, not failed closed`,
+    );
+    // The RUNNING launch's next driver-internal spawn is still guarded (CR-4.1): the rewritten
+    // settings and template carry the guard declaration forward.
+    assert.equal(prepareClaudeHookArgs(running.args).guardActive, true,
+      `manager hooks ${enabled ? "on" : "off"}: the next spawn keeps the guard`);
+    // And the tripwire baseline survives, so mid-turn refreshes still succeed — from empty to a
+    // newly created worktree included — and the spawn after that is still guarded.
+    assert.deepEqual(refreshClaudeGuardProtections(sessionId, [], dir), { state: "refreshed" });
+    assert.deepEqual(refreshClaudeGuardProtections(sessionId, PROTECTIONS, dir), { state: "refreshed" });
+    assert.equal(prepareClaudeHookArgs(running.args).guardActive, true);
+  }
+}));
+
+test("carrying a guard forward never launders a tampered protection list", () => temp((dir) => {
+  const running = spec();
+  resetClaudeGuardState();
+  provisionClaudeHooks(running, {
+    ...config, managedWorktreeProtections: [], verifyGuardLaunch: guardVerifies,
+  }, () => {}, host(dir));
+  const protections = claudeHookSettingsPath(dir, "sess_hook_1").replace(/\.settings\.json$/u, ".protections.json");
+  writeFileSync(protections, JSON.stringify({ version: 1, protections: [{ worktreePath: "/x", repoPath: "/repo" }] }), "utf8");
+  provisionClaudeHooks(spec(), { ...config, verifyGuardLaunch: guardVerifies }, () => {}, host(dir));
+  assert.deepEqual(JSON.parse(readFileSync(protections, "utf8")).protections, [{ worktreePath: "/x", repoPath: "/repo" }],
+    "the foreign list is left as evidence, not rewritten");
+  assert.equal(prepareClaudeHookArgs(running.args).guardActive, false, "and the tripwire still rejects it");
+}));
+
+test("a launch with its own --settings and no worktree is not guarded, so nothing it sets is shadowed", () => temp((dir) => {
+  const logs: string[] = [];
+  const launch = spec({ args: ["--settings", "/home/user/claude-settings.json"] });
+  resetClaudeGuardState();
   provisionClaudeHooks(launch, {
     ...config, enabled: false, managedWorktreeProtections: [], verifyGuardLaunch: guardVerifies,
+  }, (message) => logs.push(message), host(dir));
+  assert.deepEqual(launch.args, ["--settings", "/home/user/claude-settings.json"], "the user's settings stay last");
+  assert.equal(existsSync(claudeHookSettingsPath(dir, "sess_hook_1")), false);
+  assert.ok(logs.some((line) => /would shadow the agent's own --settings/u.test(line)));
+  // The same holds for the `--settings=` spelling.
+  const inline = spec({ sessionId: "sess_hook_2", args: ["--settings=/home/user/claude-settings.json"] });
+  provisionClaudeHooks(inline, {
+    ...config, enabled: false, managedWorktreeProtections: [], verifyGuardLaunch: guardVerifies,
   }, () => {}, host(dir));
-  assert.deepEqual(launch.args, [], "the runner-owned settings argument is withdrawn");
-  assert.equal(existsSync(file.replace(/\.settings\.json$/u, ".guard.json")), false);
-  assert.equal(existsSync(file.replace(/\.settings\.json$/u, ".protections.json")), false);
+  assert.deepEqual(inline.args, ["--settings=/home/user/claude-settings.json"]);
+  // Once the session owns a worktree the guard wins, exactly as before #1303.
+  provisionClaudeHooks(launch, {
+    ...config, enabled: false, managedWorktreeProtections: PROTECTIONS, verifyGuardLaunch: guardVerifies,
+  }, () => {}, host(dir));
+  assert.deepEqual(launch.args.slice(-2), ["--settings", claudeHookSettingsPath(dir, "sess_hook_1")]);
+}));
+
+test("an open manager circuit never lets the empty-list guard shadow the agent's own --settings", () => temp((dir) => {
+  // With manager hooks enabled their document already shadows a user --settings while the circuit
+  // is closed; that is not new. But while it is OPEN, a spawn of a guard-less session drops the
+  // runner-owned document and the user's settings apply — a guard-only copy would take that away.
+  const launch = spec({ args: ["--settings", "/home/user/claude-settings.json"] });
+  resetClaudeGuardState();
+  provisionClaudeHooks(launch, {
+    ...config, managedWorktreeProtections: [], verifyGuardLaunch: guardVerifies,
+  }, () => {}, host(dir));
+  const file = claudeHookSettingsPath(dir, "sess_hook_1");
+  assert.deepEqual(launch.args.slice(-2), ["--settings", file], "the manager hooks are provisioned as before");
+  assert.equal(guardEntries(settingsOf(dir).live).length, 0, "but no guard rides along");
+  writeHookCircuitState(claudeHookCircuitPath(file), { consecutiveFailures: 3, open: true, openedAt: Date.now() });
+  const prepared = prepareClaudeHookArgs(launch.args);
+  assert.equal(prepared.guardActive, false);
+  assert.deepEqual(prepared.args, ["--settings", "/home/user/claude-settings.json"],
+    "the open circuit leaves the user's settings in effect, exactly as before #1303");
+  // A first launch that finds the circuit already open does not append a guard-only file either.
+  const second = spec({ sessionId: "sess_hook_2", args: ["--settings", "/home/user/claude-settings.json"] });
+  writeHookCircuitState(claudeHookCircuitPath(claudeHookSettingsPath(dir, "sess_hook_2")), {
+    consecutiveFailures: 3, open: true, openedAt: Date.now(),
+  });
+  provisionClaudeHooks(second, {
+    ...config, managedWorktreeProtections: [], verifyGuardLaunch: guardVerifies,
+  }, () => {}, host(dir));
+  assert.deepEqual(second.args, ["--settings", "/home/user/claude-settings.json"]);
+}));
+
+test("an unguardable launch with no worktree keeps no runner-owned settings", () => temp((dir) => {
+  const wsl = provisionGuarded(dir, { context: { kind: "wsl", distro: "Ubuntu" } }, {
+    enabled: false, managedWorktreeProtections: [],
+  });
+  assert.deepEqual(wsl.args, []);
 }));
 
 test("refreshClaudeGuardProtections updates an existing guard and never creates one", () => temp((dir) => {
@@ -928,12 +1046,16 @@ test("a refresh that cannot even retire the stale list reports the guard as unpr
   }
 }));
 
-test("the last managed worktree going away retires the guard rather than writing an empty list", () => temp((dir) => {
-  provisionGuarded(dir, {}, { enabled: false });
+test("the last managed worktree going away keeps the running guard with an empty list", () => temp((dir) => {
+  // Retiring the list would make the running process block every matched tool for the rest of the
+  // turn, and a worktree created next in that turn would find no guard to protect it (#1303).
+  const launch = provisionGuarded(dir, {}, { enabled: false });
   const protections = claudeHookSettingsPath(dir, "sess_hook_1").replace(/\.settings\.json$/u, ".protections.json");
-  const outcome = refreshClaudeGuardProtections("sess_hook_1", [], dir);
-  assert.equal(outcome.state, "invalidated");
-  assert.equal(existsSync(protections), false, "no empty list is ever written");
+  assert.deepEqual(refreshClaudeGuardProtections("sess_hook_1", [], dir), { state: "refreshed" });
+  assert.deepEqual(JSON.parse(readFileSync(protections, "utf8")), { version: 1, protections: [] });
+  assert.equal(prepareClaudeHookArgs(launch.args).guardActive, true);
+  assert.deepEqual(refreshClaudeGuardProtections("sess_hook_1", PROTECTIONS, dir), { state: "refreshed" });
+  assert.deepEqual(JSON.parse(readFileSync(protections, "utf8")), { version: 1, protections: PROTECTIONS });
 }));
 
 test("a tampered protections file invalidates the guard and mediates the next launch", () => temp((dir) => {
@@ -987,7 +1109,9 @@ test("a driver-internal spawn after an invalidation drops the guard settings and
   // re-provisioning, so the invalidation has to be honored where the argv is prepared.
   const launch = provisionGuarded(dir, {}, { enabled: false });
   assert.equal(prepareClaudeHookArgs(launch.args).guardActive, true);
-  const outcome = refreshClaudeGuardProtections("sess_hook_1", [], dir);
+  const protections = claudeHookSettingsPath(dir, "sess_hook_1").replace(/\.settings\.json$/u, ".protections.json");
+  writeFileSync(protections, JSON.stringify({ version: 1, protections: [] }), "utf8");
+  const outcome = refreshClaudeGuardProtections("sess_hook_1", PROTECTIONS, dir);
   assert.equal(outcome.state, "invalidated");
   const prepared = prepareClaudeHookArgs(launch.args);
   assert.equal(prepared.guardActive, false);
@@ -1024,10 +1148,26 @@ test("an invalidated guard does not make an open manager-hook circuit look recov
   const { file } = settingsOf(dir);
   writeHookCircuitState(claudeHookCircuitPath(file), { consecutiveFailures: 3, open: true, openedAt: 100 });
   assert.equal(prepareClaudeHookArgs(launch.args, 101).circuitOpen, true);
-  assert.equal(refreshClaudeGuardProtections("sess_hook_1", [], dir).state, "invalidated");
+  writeFileSync(file.replace(/\.settings\.json$/u, ".protections.json"), "{}", "utf8");
+  assert.equal(refreshClaudeGuardProtections("sess_hook_1", PROTECTIONS, dir).state, "invalidated");
   const prepared = prepareClaudeHookArgs(launch.args, 102);
   assert.equal(prepared.guardActive, false);
   assert.deepEqual(prepared.args, []);
   assert.equal(prepared.circuitOpen, true, "the persisted circuit is still open");
   assert.equal(prepared.circuitOpenedAt, 100);
+}));
+
+test("a failed launch self-test is retried only after a cooldown, a success never", () => temp((dir) => {
+  resetClaudeGuardState();
+  let probes = 0;
+  const failing = () => { probes += 1; return { ok: false as const, reason: "cannot start" }; };
+  for (const sessionId of ["sess_hook_1", "sess_hook_2", "sess_hook_3"]) {
+    const launch = spec({ sessionId });
+    provisionClaudeHooks(launch, {
+      ...config, enabled: false, managedWorktreeProtections: [], verifyGuardLaunch: failing,
+    }, () => {}, host(dir));
+    assert.deepEqual(launch.args, [], "an unproven guard is never relied on");
+  }
+  assert.equal(probes, 1, "every guardable launch would otherwise pay for a failing process start");
+  assert.ok(CLAUDE_GUARD_LAUNCH_RETRY_COOLDOWN_MS > 0);
 }));

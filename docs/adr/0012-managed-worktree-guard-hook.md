@@ -37,7 +37,8 @@ in the mode the user selected whenever that guard is in place.
   message the control channel uses. It does no network, control-plane, or credential work.
 - `protectedClaudePermissionMode(mode, protectionsPresent, guardActive)` mediates only when
   protections exist AND the guard is not active. With the guard active there is no mode
-  replacement, no emulation in the `control_request` handler, and no mediation notice.
+  replacement, no emulation in the `control_request` handler, and no mediation notice. Whether a
+  running child is mediated, and which mode is emulated for it, is bound when it is spawned (#1303).
 - The control-channel refusal stays in the handler as defense in depth for `default`/`auto`.
 - `commandTargetsManagedWorktree` itself is unchanged (its false positives are #1301), and the
   `plan` path is untouched.
@@ -73,9 +74,9 @@ Two different failure domains, two different answers:
    bare specifier failed to resolve with `ERR_MODULE_NOT_FOUND` and every command was waved
    through. Two answers: `cwdIndependentExecArgv` makes bare loader specifiers absolute in the
    runner's own module graph, and `verifyManagedWorktreeGuardLaunch` runs the real sidecar once per
-   distinct launch command (from a foreign cwd, with the real protections file, demanding the real
-   refusal document) before anything relies on it. A failed self-test means no guard, hence
-   mediation.
+   distinct launch command (from a foreign cwd, with a probe-owned protections file, demanding the
+   real refusal document) before anything relies on it. A failed self-test means no guard, hence
+   mediation; it is retried after a cooldown rather than on every launch.
 3. **The guard cannot be provisioned at all.** Non-native (WSL/container) context, a non-host
    execution target, an unquotable path, or a write failure: the driver falls back to EXACTLY the
    #1256 mediation. There is never an unprotected native launch. "Guard active" is established at
@@ -86,7 +87,8 @@ Two different failure domains, two different answers:
 
 Because only the last `--settings` applies, the guard and the manager policy hooks (DRIVERS.md
 §2.3.1) share ONE per-session settings document, guard first in `PreToolUse`. The guard is present
-whenever protections exist and it is provisionable — including when manager hooks are disabled,
+whenever it is provisionable — since #1303 even while the session owns no worktree — including
+when manager hooks are disabled,
 unsupported for the mode, skipped for the Orchestrator preset, or their circuit is open. While the
 circuit is open the live file is swapped for a guard-only copy and the `--settings` argument is
 kept; the heal template restores the combined document when the transport is eligible again.
@@ -95,7 +97,10 @@ Nothing secret is written into the guard-only document.
 A user-supplied `--settings` in the agent catalog is therefore shadowed for guarded launches. That
 is not new — it already happened for every launch that provisioned manager hooks — but it now
 applies to more launches. Restoring user settings under a runner-owned settings file is out of
-scope here and needs its own decision.
+scope here and needs its own decision. Until then, #1303 does NOT widen the shadowing: a launch that
+owns no worktree and carries its own `--settings` stays unguarded (see "Live protections"). That
+includes launches with manager hooks, whose open circuit would otherwise leave a guard-only
+document shadowing settings that previously applied.
 
 ## The guard's own state
 
@@ -120,8 +125,9 @@ What is done instead:
 - **Tripwire.** The runner remembers the SHA-256 of the exact protections document it last wrote
   and compares the file before every rewrite, at spawn and at refresh. A mismatch invalidates the
   guard for that session (mediation from then on) and emits a visible notice.
-- **No empty list.** The runner never writes one, and the guard fails closed if it ever reads one.
-  When the last managed worktree goes away the guard state is retired instead.
+- **Removal, not emptiness, means invalidated.** An empty list is a valid runner-written state
+  (#1303) and is covered by the tripwire like any other document. A guard the runner no longer
+  trusts has its list removed, and a missing list fails closed.
 
 This is tamper-EVIDENT best effort of exactly the same strength class as #1256's command-text
 matcher: both are defeated by indirection (a script file, an interpreter, an unexpanded variable).
@@ -147,7 +153,7 @@ restart forgets it, and the next spawn re-provisions and re-proves the guard fro
 "Next spawn" includes the spawns the driver makes on its own. One-shot turns, resumes, and
 persistent-transport restarts reuse the provisioned argv without re-provisioning, so
 `prepareClaudeHookArgs` re-checks trust every time: the compromise marker, the tripwire digest, and
-a valid non-empty list. When any of them fails, the runner-owned settings document is dropped for
+a valid list. When any of them fails, the runner-owned settings document is dropped for
 that spawn (a guard hook without a list would block every matched tool) and the driver mediates.
 The manager policy hooks in the same document are dropped with it, as they are when the hook
 circuit is open.
@@ -156,10 +162,24 @@ circuit is open.
 
 The protections file is written at every Claude spawn and refreshed synchronously from the session
 store's `worktrees` patch observer, so creation, activation, attach, and discard are all reflected
-immediately — a worktree created mid-turn is protected from the guard's next invocation (#1303).
-A session that owns no worktree at spawn time has no guard in its running process and keeps the
-mediated behaviour until its next spawn; that window is deliberate and fail-safe, because mediation
-is the stricter of the two.
+immediately — a worktree created mid-turn is protected from the guard's next invocation.
+
+As first shipped, a session that owned no worktree at spawn had no guard in its running process,
+and in a noninteractive mode nothing else is consulted, so a worktree it created mid-turn was
+unprotected until the next spawn (#1303). Every guardable launch is therefore now provisioned with
+the guard over an EMPTY list, over which it holds no opinion beyond its own state, and discarding
+the last worktree writes an empty list instead of retiring the guard (retiring it made every later
+tool call of the running turn fail closed). The cost is one short-lived process per matched tool
+call in every guardable session.
+
+The remaining windows, each until the next spawn: an unguardable launch (below), and a launch that
+owns no worktree and carries a user-supplied `--settings` — guarding that one would shadow the
+user's settings, possibly dropping their deny rules, which is a change this ADR leaves to its own
+decision. The sandbox read-only derivation (#1302) is likewise computed at spawn.
+
+Because the inventory now changes under a running child by design, the driver binds its mediation
+decision and emulated mode at spawn, as it already does for the routine-operation supplement; the
+control-channel veto keeps reading the live inventory.
 
 ## Consequences
 
@@ -172,7 +192,7 @@ is the stricter of the two.
   still present, and `agentTuiLaunch` now drops a `--settings` pair whose file is gone — `claude`
   refuses to start with "Settings file not found", and a TUI never re-runs launch provisioning.
 - One extra short-lived process runs before each Bash, Edit, MultiEdit, Write, NotebookEdit, Read,
-  Grep, and Glob call in a guarded session.
+  Grep, and Glob call in a guarded session — since #1303, every guardable session.
 - The runner's hook state directory is invisible to the provider: reading it is refused as firmly
   as writing it.
 - Native hooks remain a cooperative same-user governance mechanism, not an OS isolation boundary,

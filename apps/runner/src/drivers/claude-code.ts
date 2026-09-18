@@ -582,6 +582,14 @@ export class ClaudeCodeDriver implements Driver {
   private managedWorktreeGuardActive = false;
   /** Runner-owned hook state directory for this spawn; the provider must not touch it. */
   private managedWorktreeGuardStateDirectory = "";
+  /** The permission mode the RUNNING child emulates on the worktree veto's behalf, or null when it
+   * was launched unmediated. Bound at spawn for the same reason as
+   * `launchedRoutineControlChannelMode`: the worktree inventory now changes mid-turn by design
+   * (#1303) and the configuration can change behind a deferred child, while the child keeps the
+   * argv — and the permission semantics — it was launched with. Recomputing it live would stop
+   * emulating a fixed-rule mode the moment a mediated child's last worktree went away, or start
+   * emulating one for a child that was launched in that mode natively. */
+  private launchedManagedEmulationMode: string | null = null;
   /** A fresh UUID is only a proposed coordinate until Claude confirms it in system/init. */
   private sessionEstablished: boolean;
 
@@ -1033,10 +1041,8 @@ export class ClaudeCodeDriver implements Driver {
       // — no MCP, no side channel). Non-interactive modes pass --permission-mode and pipe
       // the plain-text prompt over stdin so Windows cmd.exe never has to parse user content.
       const configuredPermissionMode = this.effectivePermissionMode();
-      this.reportManagedPermissionMediation(
-        configuredPermissionMode,
-        this.mediatesManagedPermissions(this.managedProtections()),
-      );
+      const mediatesManagedPermissions = this.mediatesManagedPermissions(this.managedProtections());
+      this.reportManagedPermissionMediation(configuredPermissionMode, mediatesManagedPermissions);
       const routineChannelMode = this.routineControlChannelMode();
       const perm = claudePermissionArgs(
         this.launchedPermissionMode(),
@@ -1044,7 +1050,9 @@ export class ClaudeCodeDriver implements Driver {
         routineChannelMode !== null,
       );
       this.interactive = perm.interactive;
+      // A one-shot turn always spawns, so these bindings are always the running child's own.
       this.launchedRoutineControlChannelMode = routineChannelMode;
+      this.launchedManagedEmulationMode = mediatesManagedPermissions ? configuredPermissionMode : null;
       args.push(...perm.args);
 
       // Auth precedence (DRIVERS.md §2.1 + README): an EXPLICITLY-configured ANTHROPIC_API_KEY
@@ -1275,10 +1283,8 @@ export class ClaudeCodeDriver implements Driver {
     // so it must be resolved BEFORE the permission mode that depends on it.
     const preparedArgs = this.preparedBaseArgs();
     const configuredPermissionMode = this.effectivePermissionMode();
-    this.reportManagedPermissionMediation(
-      configuredPermissionMode,
-      this.mediatesManagedPermissions(this.managedProtections()),
-    );
+    const mediatesManagedPermissions = this.mediatesManagedPermissions(this.managedProtections());
+    this.reportManagedPermissionMediation(configuredPermissionMode, mediatesManagedPermissions);
     const permissionMode = this.launchedPermissionMode();
     const routineChannelMode = this.routineControlChannelMode();
     const perm = claudePermissionArgs(
@@ -1312,6 +1318,7 @@ export class ClaudeCodeDriver implements Driver {
       // Only a spawn rebinds the permission semantics: the deferred branch above deliberately keeps
       // the running child's argv, so its supplement (or absence of one) must survive this turn.
       this.launchedRoutineControlChannelMode = routineChannelMode;
+      this.launchedManagedEmulationMode = mediatesManagedPermissions ? configuredPermissionMode : null;
       const args = [
         ...preparedArgs,
         "-p",
@@ -2324,15 +2331,16 @@ export class ClaudeCodeDriver implements Driver {
             } catch { /* the provider process ended before the refusal could be written */ }
             return null;
           }
-          // Emulation exists only for the mediated launch. With the guard active the process was
-          // launched in the user's own mode, so Claude's own rules already decide this request.
-          if (this.mediatesManagedPermissions(protections)) {
-            const configuredMode = this.effectivePermissionMode();
+          // Emulation exists only for the mediated launch, and the RUNNING child's launch decides
+          // that — not the worktree inventory or configuration as they stand now. With the guard
+          // active the process was launched in the user's own mode, so Claude's own rules decide.
+          const emulatedMode = this.launchedManagedEmulationMode;
+          if (emulatedMode !== null) {
             const editTool = ["Edit", "MultiEdit", "NotebookEdit", "Write"].includes(req.tool_name ?? "");
-            const behavior = configuredMode === "bypassPermissions" ||
-                (configuredMode === "acceptEdits" && editTool)
+            const behavior = emulatedMode === "bypassPermissions" ||
+                (emulatedMode === "acceptEdits" && editTool)
               ? "allow"
-              : configuredMode === "dontAsk" ? "deny" : null;
+              : emulatedMode === "dontAsk" ? "deny" : null;
             if (behavior) {
               try {
                 this.child.stdin.write(JSON.stringify({
