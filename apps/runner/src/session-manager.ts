@@ -1002,6 +1002,12 @@ export class SessionManager {
     resolves: Array<(result: { accepted: boolean; auditId: string; eventSeq?: number; error?: string }) => void>;
     timer: ReturnType<typeof setTimeout>;
   }>();
+  /** Runner-local mirror of the live protection set consulted by the Claude guard hook. */
+  private refreshManagedWorktreeGuard?: (
+    meta: SessionMeta,
+    protections: ManagedWorktreeProtection[],
+  ) => void;
+
   /** Exact duplicate create requests join one operation, including after a control-plane retry. */
   private readonly worktreeCreates = new Map<string, {
     promise: Promise<{ worktree: SessionWorktreeView; snapshot: SessionSnapshot }>;
@@ -1055,6 +1061,18 @@ export class SessionManager {
     private readonly worktreePorts: RunnerWorktreePorts = DEFAULT_WORKTREE_PORTS,
   ) {
     this.lockOwner = `${runnerId}#${randomUUID()}`;
+    // Every worktree creation, activation, attach, and discard lands as a `worktrees` patch. The
+    // managed-worktree guard reads its protections from a file, so refresh it here — synchronously
+    // with the persisted change, which is what lets a worktree created mid-turn be protected from
+    // the guard's very next invocation rather than only from the next spawn.
+    store.observeMetaPatch((meta, patch) => {
+      if (!("worktrees" in patch) || !this.refreshManagedWorktreeGuard) return;
+      try {
+        this.refreshManagedWorktreeGuard(meta, this.managedWorktreeProtections(meta));
+      } catch (error) {
+        this.log(`managed worktree guard refresh ${meta.sessionId}: ${(error as Error).message}`);
+      }
+    });
     this.providerHomeLeases = runnerOwnerHash ? new ProviderHomeLeaseRegistry(runnerOwnerHash) : undefined;
     this.stateDir = dataDir ?? join(store.rootPath(), ".runner-data");
     this.cleanupJournal = new WorktreeCleanupJournal(this.stateDir);
@@ -1389,9 +1407,18 @@ export class SessionManager {
       .find((worktree) => sameWorktreePath(meta.context, worktree.path, path));
   }
 
+  /** Install the runner-local writer that mirrors the live protection set for the Claude
+   * managed-worktree guard hook (the runner owns the hook config dir, not SessionManager). */
+  setManagedWorktreeGuardRefresh(
+    refresh: (meta: SessionMeta, protections: ManagedWorktreeProtection[]) => void,
+  ): void {
+    this.refreshManagedWorktreeGuard = refresh;
+  }
+
   /** Every runner-created identity remains protected even while a sibling is selected or its
-   * cleanup is pending. Attached operator worktrees deliberately stay outside this boundary. */
-  private managedWorktreeProtections(meta: SessionMeta): ManagedWorktreeProtection[] {
+   * cleanup is pending. Attached operator worktrees deliberately stay outside this boundary.
+   * Public because launch provisioning needs the same set the driver's veto uses. */
+  managedWorktreeProtections(meta: SessionMeta): ManagedWorktreeProtection[] {
     return this.attributedWorktrees(meta)
       .filter((worktree) => worktree.source !== "attached")
       .map((worktree) => ({ worktreePath: worktree.path, repoPath: meta.repoPath }));

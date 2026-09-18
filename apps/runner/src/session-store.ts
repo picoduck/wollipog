@@ -1631,7 +1631,25 @@ export class SessionStore {
     } else {
       this.writeMeta(next); // folds the pending deltas readMeta overlaid into `cur`
     }
+    if (this.metaPatchObserver) {
+      try {
+        this.metaPatchObserver(next, patch);
+      } catch {
+        /* A post-patch side effect must never fail the persisted state change. */
+      }
+    }
     return next;
+  }
+
+  private metaPatchObserver?: (meta: SessionMeta, patch: Partial<SessionMeta>) => void;
+
+  /**
+   * One runner-owned post-patch observer. SessionManager uses it to keep launch-local material
+   * that mirrors meta (the managed-worktree guard's protections file) in step with every change,
+   * including ones made deep inside a worktree operation.
+   */
+  observeMetaPatch(observer: (meta: SessionMeta, patch: Partial<SessionMeta>) => void): void {
+    this.metaPatchObserver = observer;
   }
 
   /** Append an event (assigning the next seq) and bump meta's seq/updatedAt. Returns the stored

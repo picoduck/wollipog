@@ -3,6 +3,7 @@ export type RunnerEntryMode =
   | "--policy-hook"
   | "--agent-control-mcp"
   | "--wollipog-cli"
+  | "--managed-worktree-guard"
   | "daemon";
 
 const INTERNAL_MODES = new Set<RunnerEntryMode>([
@@ -10,6 +11,7 @@ const INTERNAL_MODES = new Set<RunnerEntryMode>([
   "--policy-hook",
   "--agent-control-mcp",
   "--wollipog-cli",
+  "--managed-worktree-guard",
 ]);
 
 /** Resolve only the first application argument. Provider/user data later in argv must never

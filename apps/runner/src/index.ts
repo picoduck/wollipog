@@ -68,6 +68,7 @@ import {
   markClaudeHookCredentialReady,
   markClaudeHookCredentialRejected,
   provisionClaudeHooks,
+  refreshClaudeGuardProtections,
   removeClaudeHookFiles,
   sweepClaudeHookFiles,
 } from "./hook-settings.js";
@@ -613,6 +614,9 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
         enabled: claudeHookFeatureEnabled,
         allowInsecureTransport,
         registerCredential: registerPolicyHookCredential,
+        // The live runner-owned worktree set for this session: a non-empty set provisions the
+        // managed-worktree guard hook, which is what lets the launch keep the user's mode.
+        managedWorktreeProtections: sessions.managedWorktreeProtections(meta),
       },
       log,
       claudeHookHost,
@@ -693,6 +697,16 @@ const shells = new ShellManager({
 });
 sessions.setWorktreeShellRetirement((sessionId, context, path) =>
   shells.closeForWorktree(sessionId, context, path));
+// Keep the Claude managed-worktree guard's protection set live: a worktree created, activated,
+// attached, or discarded mid-session is reflected in the guard's next invocation, without waiting
+// for the next provider spawn.
+sessions.setManagedWorktreeGuardRefresh((meta, protections) => {
+  try {
+    refreshClaudeGuardProtections(meta.sessionId, protections, claudeHookHost.configDir);
+  } catch (error) {
+    log(`managed worktree guard ${meta.sessionId}: protection refresh failed (${errText(error)})`);
+  }
+});
 sessions.reconcileStore(); // demote stale sessions and replay cleanup only after shell retirement is wired
 
 // Buffer outbound events while the control-plane socket is down or mid-reconnect so a terminal

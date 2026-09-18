@@ -2,7 +2,7 @@
  * Runner entry dispatcher. ONE executable, several modes — the box deployment is a single
  * Node-SEA binary, so its sidecars must live inside it, not beside it:
  *  - internal modes (`--state-doctor`, `--policy-hook`, `--agent-control-mcp`,
- *    `--wollipog-cli`; see runner-entry.ts) skip the daemon entirely.
+ *    `--wollipog-cli`, `--managed-worktree-guard`; see runner-entry.ts) skip the daemon entirely.
  *  - default: the runner daemon (index.ts, unchanged as a module).
  * Dynamic imports, NOT top-level await: build-binary.mjs bundles this entry to CJS,
  * where TLA is a build error.
@@ -22,6 +22,16 @@ if (entry.mode === "--state-doctor") {
   void import("./policy-hook.js").then((m) => m.runPolicyHookCli(process.argv, process.env));
 } else if (entry.mode === "--agent-control-mcp") {
   void import("./wollipog-cli.js").then((m) => m.runAgentControlMcp(process.env));
+} else if (entry.mode === "--managed-worktree-guard") {
+  // Runs before every Claude Bash call; it must never start the daemon or write anything to
+  // stdout except its own PreToolUse decision.
+  void import("./managed-worktree-guard.js")
+    .then((m) => m.runManagedWorktreeGuardCli(process.argv, process.env))
+    .catch((error) => {
+      // Fail closed: a guard that cannot start must block the tool call, never wave it through.
+      console.error(`[managed-worktree-guard] ${error instanceof Error ? error.message : String(error)}`);
+      process.exitCode = 2;
+    });
 } else if (entry.mode === "--wollipog-cli") {
   void import("./wollipog-cli.js").then(async (m) => {
     process.exitCode = await m.runWollipogCli(process.argv, process.env);
