@@ -49,28 +49,35 @@ have the runner control channel.
 
 The classifier automatically authorizes:
 
-- read-only Git state, history, diff, reference, worktree-list, and search operations after rejecting
-  output-file, external-diff, text-conversion, pager-launch, branch mutation, and tag mutation flags;
+- read-only Git state, history, diff, reference, worktree-list, and search operations, bounded
+  `fetch origin main`, repository-local `git -C`, and `ls-remote origin` after rejecting output-file,
+  external-diff, text-conversion, pager-launch, branch mutation, and tag mutation flags;
 - read-only GitHub issue, pull-request, check, run, repository, and search inspection, excluding web
   launches and cross-repository overrides;
 - self-assignment/unassignment, label additions/removals, and `--body` plan or status comments only
   for issue numbers in the immutable campaign issue scope; and
-- bounded numeric loops, `;`, `&&`, `||`, harmless `echo`, and stdout redirection to `/dev/null` only
-  when every leaf independently satisfies the contract.
+- bounded numeric loops, `;`, `&&`, `||`, harmless `echo`, output discard to `/dev/null`, and
+  pipelines whose later stages are stdin-only presentation filters, only when every source leaf
+  independently satisfies the contract.
 
 The campaign issue scope is extracted only from an authenticated human's explicit initial request of
-the form “claim/orchestrate/coordinate/manage issue(s) …”, is capped at 100 unique positive safe
+the form “claim/delegate/orchestrate/coordinate/manage issue(s) …”. Explicit lists and bounded
+ascending “through” or “to” ranges are supported. The scope is capped at 100 unique positive safe
 integers, persists in the campaign policy and runner launch metadata, and is inherited without
-broadening by nested Orchestrators. Ambiguous prose and agent-authored prompts produce no scope.
+broadening by nested Orchestrators. On restart, human-created root campaigns that predate scope
+persistence recover it once from the immutable initial user message. Ambiguous prose and
+agent-authored prompts produce no scope.
 Protocol peers older than v158 cannot enforce this field, so scoped issue coordination fails at
 admission with an upgrade requirement instead of silently degrading to approval cards or denial.
 
-Provider-mode operations outside the contract use the ordinary visible approval path. Strictly
-isolated sessions deny them without creating a futile human approval because the filesystem boundary
-cannot be overridden. `AskUserQuestion` remains visible, and Wollipog management tools retain their
-explicit allowlist plus server-side typed gates. Authentication, secrets, persistent grants,
-governance, budgets, implementation writes, pull-request merge, merged-branch deletion, follow-up
-issue publication, UI evidence, and unknown operations are never admitted by this classifier.
+Routine coordination attempts that cannot be proven safe in their submitted shell form are denied
+back to the agent with canonical retry guidance and never create a human approval card. Genuine
+mutations and unknown provider-mode operations retain the ordinary visible approval path. Strictly
+isolated sessions deny them because the filesystem boundary cannot be overridden. `AskUserQuestion`
+remains visible, and Wollipog management tools retain their explicit allowlist plus server-side typed
+gates. Authentication, secrets, persistent grants, governance, budgets, implementation writes,
+pull-request merge, merged-branch deletion, follow-up issue publication, UI evidence, and unknown
+operations are never automatically admitted by this classifier.
 
 ## Consequences
 

@@ -24,7 +24,7 @@ import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import { inspectClaudeBackgroundWork, inspectClaudeBackgroundWorkInContext, type ClaudeBackgroundWorkInspection } from "../claude-background-work.js";
 import { effectiveClaudePermissionMode } from "../claude-permission.js";
 import { prepareClaudeHookArgs } from "../hook-settings.js";
-import { isRoutineClaudeOrchestratorPermission } from "../orchestrator-provider-permissions.js";
+import { classifyRoutineClaudeOrchestratorPermission } from "../orchestrator-provider-permissions.js";
 import { killTree, spawnAgent, terminateDescendantBoundaries, trackPendingKill, type AgentProcess, type SpawnAgentOptions } from "../spawn.js";
 import type {
   Driver,
@@ -2142,12 +2142,14 @@ export class ClaudeCodeDriver implements Driver {
         if (!this.child) return null;
         const req = msg.request;
         if (req?.subtype === "can_use_tool" && typeof msg.request_id === "string") {
-          if (this.opts.config.permissionMode === "orchestrator" && this.opts.orchestrator &&
-              isRoutineClaudeOrchestratorPermission(
+          const orchestratorDisposition = this.opts.config.permissionMode === "orchestrator" && this.opts.orchestrator
+            ? classifyRoutineClaudeOrchestratorPermission(
             req.tool_name,
             req.input,
             this.opts.orchestrator.issueNumbers ?? [],
-          )) {
+            this.opts.cwd,
+          ) : "interactive";
+          if (orchestratorDisposition === "allow") {
             try {
               this.child.stdin.write(JSON.stringify({
                 type: "control_response",
@@ -2162,6 +2164,22 @@ export class ClaudeCodeDriver implements Driver {
               // Provider mode retains the request on the visible approval path. Strict mode falls
               // through to its fail-closed denial path; neither silently parks the provider.
             }
+          }
+          if (orchestratorDisposition === "reformulate") {
+            try {
+              this.child.stdin.write(JSON.stringify({
+                type: "control_response",
+                response: {
+                  subtype: "success",
+                  request_id: msg.request_id,
+                  response: {
+                    behavior: "deny",
+                    message: "Routine coordination must not require human approval. Retry with separate semantic Git/GitHub commands, use Read/Grep/Glob for local files, use @me and --body for campaign-scoped issue writes, and keep presentation-only filters on stdin.",
+                  },
+                },
+              }) + "\n");
+            } catch { /* the provider process ended before the reformulation response was written */ }
+            return null;
           }
           if (this.opts.config.permissionMode === "orchestrator" &&
               this.opts.orchestrator?.strictProjectIsolation && req.tool_name !== "AskUserQuestion") {

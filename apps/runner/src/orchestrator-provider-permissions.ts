@@ -8,10 +8,13 @@ const LOOP_IDENTIFIERS = new Set(["n", "i", "id", "num", "issue", "pr"]);
 const ISSUE_OR_PR_NUMBER = /^[1-9][0-9]{0,15}$/u;
 const INPUT_KEYS = new Set(["command", "description", "timeout"]);
 const COMPOSITION_OPERATORS = new Set([";", "&&", "||"]);
+const PIPE_OPERATOR = "|";
 const READ_ONLY_GH_OPERATIONS = new Set([
   "issue:list", "issue:view", "issue:status",
+  "label:list",
   "pr:list", "pr:view", "pr:checks", "pr:diff", "pr:status",
   "run:list", "run:view", "run:watch", "repo:view",
+  "search:issues", "search:prs", "search:repos",
 ]);
 const READ_ONLY_GIT_COMMANDS = new Set([
   "status", "log", "show", "diff", "blame", "rev-parse", "merge-base", "range-diff",
@@ -58,6 +61,7 @@ interface RoutineContext {
   allowedIssueNumbers: ReadonlySet<string>;
   loopVariable: string | null;
   loopIssueNumbers: readonly string[];
+  workspacePath?: string;
 }
 
 function isLoopReference(token: ShellToken | undefined, context: RoutineContext): boolean {
@@ -76,13 +80,30 @@ function containsShortOption(argument: string, options: ReadonlySet<string>): bo
     [...argument.slice(1)].some((character) => options.has(`-${character}`));
 }
 
-function isReadOnlyGit(tokens: ShellToken[]): boolean {
-  if (tokens.length < 2 || tokens[0] !== "git" || !tokens.every(isPlainArgument)) return false;
-  const command = tokens[1] as string;
-  const args = tokens.slice(2) as string[];
+function isReadOnlyGit(tokens: ShellToken[], context: RoutineContext): boolean {
+  if (tokens.length < 2 || tokens[0] !== "git") return false;
+  let commandIndex = 1;
+  if (tokens[1] === "-C") {
+    if (!context.workspacePath || tokens[2] !== context.workspacePath) return false;
+    commandIndex = 3;
+  }
+  if (!tokens.slice(commandIndex).every(isPlainArgument)) return false;
+  const command = tokens[commandIndex] as string;
+  const args = tokens.slice(commandIndex + 1) as string[];
   if (args.some((arg) => deniedArgument(arg, GIT_ARGUMENT_DENYLIST) ||
       containsShortOption(arg, GIT_CLUSTERED_SHORT_DENYLIST))) return false;
   if (READ_ONLY_GIT_COMMANDS.has(command)) return true;
+  if (command === "fetch") {
+    return args.filter((arg) => arg !== "--quiet" && arg !== "-q").every((arg, index) =>
+      index === 0 ? arg === "origin" : arg === "main" || arg === "refs/heads/main",
+    ) && args.some((arg) => arg === "origin") && args.some((arg) => arg === "main" || arg === "refs/heads/main");
+  }
+  if (command === "ls-remote") {
+    const positional = args.filter((arg) => !arg.startsWith("-"));
+    return args.every((arg) => !arg.startsWith("-") || ["--heads", "--refs", "--quiet", "-q"].includes(arg)) &&
+      positional.length >= 1 && positional[0] === "origin" &&
+      positional.slice(1).every((arg) => /^[A-Za-z0-9_./*-]+$/u.test(arg));
+  }
   if (command === "worktree") {
     return args[0] === "list" && args.slice(1).every((arg) => arg.startsWith("-"));
   }
@@ -186,12 +207,29 @@ function hasCrossRepositoryGhSearch(tokens: ShellToken[]): boolean {
   return false;
 }
 
+function isReadOnlyGhApiUser(tokens: ShellToken[]): boolean {
+  if (tokens[0] !== "gh" || tokens[1] !== "api" || tokens[2] !== "user") return false;
+  let consumesValue = false;
+  for (const token of tokens.slice(3)) {
+    if (!isPlainArgument(token)) return false;
+    if (consumesValue) {
+      consumesValue = false;
+      continue;
+    }
+    const { flag, inlineValue } = splitFlag(token);
+    if (!["--jq", "-q", "--template", "-t"].includes(flag)) return false;
+    consumesValue = inlineValue === null;
+  }
+  return !consumesValue;
+}
+
 function isRoutineGh(tokens: ShellToken[], context: RoutineContext): boolean {
   if (tokens.length < 3 || tokens[0] !== "gh" || !isPlainArgument(tokens[1]) ||
       !isPlainArgument(tokens[2])) return false;
   const operation = `${tokens[1]}:${tokens[2]}`;
   if (operation === "issue:edit") return isRoutineIssueEdit(tokens, context);
   if (operation === "issue:comment") return isRoutineIssueComment(tokens, context);
+  if (operation === "api:user") return isReadOnlyGhApiUser(tokens);
   if (!READ_ONLY_GH_OPERATIONS.has(operation)) return false;
   if (hasCrossRepositoryGhTarget(operation, tokens) || hasCrossRepositoryGhSearch(tokens)) return false;
   return tokens.slice(3).every((token) => isPlainArgument(token) || isLoopReference(token, context)) &&
@@ -201,33 +239,91 @@ function isRoutineGh(tokens: ShellToken[], context: RoutineContext): boolean {
 }
 
 function isRoutineLeaf(tokens: ShellToken[], context: RoutineContext): boolean {
-  if (isReadOnlyGit(tokens) || isRoutineGh(tokens, context)) return true;
+  if (isReadOnlyGit(tokens, context) || isRoutineGh(tokens, context)) return true;
   return tokens.length > 0 && tokens[0] === "echo" &&
     tokens.slice(1).every((token) => isPlainArgument(token) || isLoopReference(token, context));
 }
 
+/** Pipeline filters consume only stdin. They cannot name files, execute subprocesses, follow a
+ * stream indefinitely, or write output, so adding them does not change the source operation's
+ * authorization category. */
+function isReadOnlyPipelineFilter(tokens: ShellToken[]): boolean {
+  if (!tokens.every(isPlainArgument) || tokens.length === 0) return false;
+  const args = tokens.slice(1) as string[];
+  if (tokens[0] === "head" || tokens[0] === "tail") {
+    return args.every((arg) => /^-(?:[0-9]+|n)$/u.test(arg) || /^[0-9]+$/u.test(arg)) &&
+      !args.some((arg) => arg === "-f");
+  }
+  if (tokens[0] === "wc") return args.every((arg) => /^-[lwcm]+$/u.test(arg));
+  if (tokens[0] === "tr") return args.length === 2;
+  if (tokens[0] === "awk") return args.length === 1 && /^\{\s*print\s+\$[1-9][0-9]*\s*\}$/u.test(args[0]!);
+  if (tokens[0] !== "grep") return false;
+  let patterns = 0;
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    if (arg === "-e" || arg === "--regexp") {
+      if (!args[++index] || args[index]!.startsWith("-")) return false;
+      patterns += 1;
+      continue;
+    }
+    if (arg.startsWith("--regexp=")) {
+      patterns += 1;
+      continue;
+    }
+    if (/^-[EFGinvxclLoqsh]+$/u.test(arg) || ["--extended-regexp", "--fixed-strings", "--basic-regexp",
+      "--ignore-case", "--invert-match", "--line-number", "--with-filename", "--no-filename",
+      "--count", "--files-with-matches", "--files-without-match", "--only-matching", "--quiet",
+      "--no-messages"].includes(arg)) continue;
+    if (arg.startsWith("-")) return false;
+    patterns += 1;
+  }
+  return patterns === 1;
+}
+
+function isRoutinePipeline(tokens: ShellToken[], context: RoutineContext): boolean {
+  const stages: ShellToken[][] = [[]];
+  for (const token of tokens) {
+    if (isOperator(token, PIPE_OPERATOR)) {
+      if (stages.at(-1)!.length === 0) return false;
+      stages.push([]);
+    } else {
+      stages.at(-1)!.push(token);
+    }
+  }
+  return stages[0]!.length > 0 && isRoutineLeaf(stages[0]!, context) &&
+    stages.slice(1).every((stage) => isReadOnlyPipelineFilter(stage));
+}
+
 /** Every shell leaf must independently satisfy the routine-operation contract. The only permitted
- * redirection discards stdout; file writes, pipes, substitutions, backgrounding, and grouping fail
- * closed before any leaf is considered. */
+ * redirections discard output and pipelines contain stdin-only presentation filters; file writes,
+ * substitutions, backgrounding, and grouping fail closed before any leaf is considered. */
 function isRoutineSequence(tokens: ShellToken[], context: RoutineContext): boolean {
   let command: ShellToken[] = [];
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index];
+    if (token === "2" && isOperator(tokens[index + 1], ">") && tokens[index + 2] === "/dev/null") {
+      index += 2;
+      continue;
+    }
     if (isOperator(token, ">")) {
       if (command.length === 0 || tokens[index + 1] !== "/dev/null") return false;
       index += 1;
       continue;
     }
     if (isOperator(token) && COMPOSITION_OPERATORS.has(token.op)) {
-      if (command.length === 0 || !isRoutineLeaf(command, context)) return false;
+      if (command.length === 0 || !isRoutinePipeline(command, context)) return false;
       command = [];
       if (index === tokens.length - 1) return token.op === ";";
+      continue;
+    }
+    if (isOperator(token, PIPE_OPERATOR)) {
+      command.push(token);
       continue;
     }
     if (token == null || (typeof token === "object" && !isEnvironmentReference(token))) return false;
     command.push(token);
   }
-  return command.length > 0 && isRoutineLeaf(command, context);
+  return command.length > 0 && isRoutinePipeline(command, context);
 }
 
 /** Classify a Bash request by operation rather than a finite set of command strings. Issue writes
@@ -235,9 +331,9 @@ function isRoutineSequence(tokens: ShellToken[], context: RoutineContext): boole
 export function isRoutineClaudeOrchestratorBash(
   command: string,
   allowedIssueNumbers: readonly number[] = [],
+  workspacePath?: string,
 ): boolean {
-  if (command.length === 0 || command.length > MAX_COMMAND_LENGTH || /[\r\n]/u.test(command) ||
-      /(?:^|[\s;&|])[0-9]+(?:>|>>|>&)/u.test(command)) return false;
+  if (command.length === 0 || command.length > MAX_COMMAND_LENGTH || /[\r\n]/u.test(command)) return false;
   let tokens: ShellToken[];
   try {
     tokens = parse<EnvironmentReference>(command, (env) => ({ env }));
@@ -246,7 +342,9 @@ export function isRoutineClaudeOrchestratorBash(
   }
 
   const allowed = new Set(allowedIssueNumbers.filter((number) => Number.isSafeInteger(number) && number > 0).map(String));
-  const directContext: RoutineContext = { allowedIssueNumbers: allowed, loopVariable: null, loopIssueNumbers: [] };
+  const directContext: RoutineContext = {
+    allowedIssueNumbers: allowed, loopVariable: null, loopIssueNumbers: [], workspacePath,
+  };
   if (tokens[0] !== "for") return isRoutineSequence(tokens, directContext);
   if (!isPlainArgument(tokens[1]) || !LOOP_IDENTIFIERS.has(tokens[1]) || tokens[2] !== "in") return false;
   const loopVariable = tokens[1];
@@ -260,7 +358,45 @@ export function isRoutineClaudeOrchestratorBash(
     allowedIssueNumbers: allowed,
     loopVariable,
     loopIssueNumbers: loopIssueNumbers as string[],
+    workspacePath,
   });
+}
+
+export type RoutineClaudeOrchestratorPermissionDisposition = "allow" | "reformulate" | "interactive";
+
+/** Read-only coordination attempts that cannot be proven safe are returned to Claude for a
+ * canonical retry instead of becoming repetitive human approval cards. Mutations and unknown
+ * tools retain the ordinary interactive path. */
+function isRoutineCoordinationAttempt(command: string): boolean {
+  if (command.length === 0 || command.length > MAX_COMMAND_LENGTH) return false;
+  if (/\b(?:rm|mv|cp|touch|chmod|chown|kill|pkill|sudo)\b/u.test(command) ||
+      /\bgit\s+(?:push|commit|reset|clean|checkout|switch|merge|rebase|cherry-pick)\b/u.test(command) ||
+      /\bgh\s+pr\s+(?:merge|close|reopen|create|edit)\b/u.test(command) ||
+      /\bgh\s+issue\s+(?:close|reopen|create|delete)\b/u.test(command)) return false;
+  if (/\bgh\s+issue\s+edit\b/u.test(command) &&
+      !/--(?:add|remove)-(?:assignee|label)(?:=|\s)/u.test(command)) return false;
+  if (/\bgh\s+issue\s+comment\b/u.test(command) &&
+      !/(?:--body|-b)(?:=|\s)/u.test(command)) return false;
+  return /(?:^|[;&|()\s])(?:git|gh\s+(?:issue|pr|run|repo|api)|find|grep|sed|ls|head|tail|wc|awk)(?:\s|$)/u
+    .test(command);
+}
+
+export function classifyRoutineClaudeOrchestratorPermission(
+  toolName: unknown,
+  input: unknown,
+  allowedIssueNumbers: readonly number[] = [],
+  workspacePath?: string,
+): RoutineClaudeOrchestratorPermissionDisposition {
+  if (toolName !== "Bash" || input == null || typeof input !== "object" || Array.isArray(input)) return "interactive";
+  const record = input as Record<string, unknown>;
+  if (!Object.keys(record).every((key) => INPUT_KEYS.has(key)) || typeof record.command !== "string") return "interactive";
+  if (record.description !== undefined && typeof record.description !== "string") return "interactive";
+  if (record.timeout !== undefined &&
+      (!Number.isSafeInteger(record.timeout) || (record.timeout as number) < 0 || (record.timeout as number) > 120_000)) {
+    return "interactive";
+  }
+  if (isRoutineClaudeOrchestratorBash(record.command, allowedIssueNumbers, workspacePath)) return "allow";
+  return isRoutineCoordinationAttempt(record.command) ? "reformulate" : "interactive";
 }
 
 /** Auto-approval is confined to Orchestrator Bash asks with a bounded input and issue scope. */
@@ -268,14 +404,9 @@ export function isRoutineClaudeOrchestratorPermission(
   toolName: unknown,
   input: unknown,
   allowedIssueNumbers: readonly number[] = [],
+  workspacePath?: string,
 ): boolean {
-  if (toolName !== "Bash" || input == null || typeof input !== "object" || Array.isArray(input)) return false;
-  const record = input as Record<string, unknown>;
-  if (!Object.keys(record).every((key) => INPUT_KEYS.has(key)) || typeof record.command !== "string") return false;
-  if (record.description !== undefined && typeof record.description !== "string") return false;
-  if (record.timeout !== undefined &&
-      (!Number.isSafeInteger(record.timeout) || (record.timeout as number) < 0 || (record.timeout as number) > 120_000)) {
-    return false;
-  }
-  return isRoutineClaudeOrchestratorBash(record.command, allowedIssueNumbers);
+  return classifyRoutineClaudeOrchestratorPermission(
+    toolName, input, allowedIssueNumbers, workspacePath,
+  ) === "allow";
 }

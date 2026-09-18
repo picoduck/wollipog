@@ -10768,14 +10768,43 @@ export class ControlPlaneDb {
 
   sessionWasHumanCreatedOrchestrator(sessionId: string): boolean {
     const row = this.stmt(
-      "SELECT creation_actor, permission_mode, orchestrator_policy FROM sessions WHERE id=?",
+      "SELECT creation_actor, permission_mode, orchestrator_policy, parent_session_id FROM sessions WHERE id=?",
     ).get(sessionId) as unknown as {
       creation_actor: string | null;
       permission_mode: string | null;
       orchestrator_policy: string | null;
+      parent_session_id: string | null;
     } | undefined;
-    return row?.creation_actor === "human" && row.permission_mode === "orchestrator" &&
+    return row?.creation_actor === "human" && row.parent_session_id === null &&
+      row.permission_mode === "orchestrator" &&
       orchestratorCampaignPolicyFromJson(row.orchestrator_policy) !== null;
+  }
+
+  /** Recover the authenticated root request without loading an unbounded transcript. The first
+   * user message is immutable launch evidence; later prompts can never broaden campaign scope. */
+  initialUserMessageText(sessionId: string): string | null {
+    const row = this.stmt(
+      `SELECT substr(json_extract(payload, '$.text'), 1, 65537) AS text
+       FROM session_events WHERE session_id=? AND kind='user_message' ORDER BY seq LIMIT 1`,
+    ).get(sessionId) as { text: string | null } | undefined;
+    return typeof row?.text === "string" && row.text.length <= 65_536 ? row.text : null;
+  }
+
+  /** One-time upgrade path for human-created root campaigns that predate protocol v158. A stored
+   * non-empty scope is immutable, and ambiguous provenance or prompts remain unscoped. */
+  backfillSessionOrchestratorIssueNumbers(id: string, issueNumbers: readonly number[], now: number): number[] | null {
+    const unique = [...new Set(issueNumbers)].filter((number) => Number.isSafeInteger(number) && number > 0);
+    if (unique.length === 0 || unique.length > 100 || !this.sessionWasHumanCreatedOrchestrator(id)) return null;
+    const policy = this.sessionOrchestratorPolicy(id);
+    if (!policy) return null;
+    if (policy.issueNumbers?.length) return [...policy.issueNumbers];
+    const previous = JSON.stringify(policy);
+    policy.issueNumbers = unique;
+    const result = this.stmt(
+      "UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=? AND orchestrator_policy=?",
+    ).run(JSON.stringify(policy), now, id, previous);
+    if (Number(result.changes) === 1) return unique;
+    return this.sessionOrchestratorPolicy(id)?.issueNumbers ?? null;
   }
 
   createSession(input: NewSessionInput): SessionView {

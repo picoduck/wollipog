@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import fc from "fast-check";
 import {
+  classifyRoutineClaudeOrchestratorPermission,
   isRoutineClaudeOrchestratorBash,
   isRoutineClaudeOrchestratorPermission,
 } from "./orchestrator-provider-permissions.js";
@@ -68,6 +69,10 @@ test("routine inspection accepts semantic Git and GitHub operations across safe 
     "git merge-base origin/main HEAD",
     "gh issue list --state open --json number,title",
     "gh issue list --search 'is:open bug' --json number,title",
+    "gh search issues orchestrator --state open --json number,title",
+    "gh label list --limit 40 --json name --jq '.[].name' | tr '\\n' ' '",
+    "gh api user --jq .login",
+    "gh api user --jq .login && gh issue view 1216 --json assignees,labels",
     "gh issue view --json number,title 1209",
     "gh pr checks --watch 1234",
     "gh pr diff --name-only 1234",
@@ -76,7 +81,24 @@ test("routine inspection accepts semantic Git and GitHub operations across safe 
     "gh run view --log-failed 123456",
     "gh repo view --json nameWithOwner",
     "gh repo view --branch feature/topic --json nameWithOwner",
+    "gh issue view 1201 --json body --jq .body | head -60",
+    "git fetch origin main --quiet; gh issue view 1209 --json state; git ls-remote --heads origin fix/issue-1209 | wc -l",
+    "gh pr view 1255 --json state,mergedAt | grep -E state | head -5",
   ]) assert.equal(isRoutineClaudeOrchestratorBash(command), true, command);
+  assert.equal(isRoutineClaudeOrchestratorBash(
+    "git -C /workspace diff --stat origin/main...HEAD", [], "/workspace",
+  ), true);
+});
+
+test("stdin-only presentation filters preserve routine authorization across generated compositions", () => {
+  const filters = fc.array(fc.constantFrom("head -20", "tail -5", "wc -l", "grep -E state", "awk '{print $2}'"), {
+    minLength: 1,
+    maxLength: 5,
+  });
+  fc.assert(fc.property(issueIds, filters, (ids, generatedFilters) => {
+    const command = [`gh issue view ${ids[0]} --json number,state`, ...generatedFilters].join(" | ");
+    assert.equal(isRoutineClaudeOrchestratorBash(command), true, command);
+  }));
 });
 
 test("routine leaves compose through separators, conjunctions, loops, and stdout suppression", () => {
@@ -84,6 +106,7 @@ test("routine leaves compose through separators, conjunctions, loops, and stdout
     "gh issue edit 1209 --add-assignee @me >/dev/null && echo claimed 1209",
     "git status --short; gh issue view 1209 --json number,title",
     "gh issue view 1209 || gh issue view 1210",
+    "gh issue view 1209 2>/dev/null",
     "for n in 1209 1210 1211; do gh issue edit $n --add-assignee @me >/dev/null && echo \"claimed $n\"; done",
   ]) assert.equal(isRoutineClaudeOrchestratorBash(command, [1209, 1210, 1211]), true, command);
 });
@@ -122,7 +145,6 @@ test("the loop parser fails closed on shell expansion, redirection, and control-
     "for path in 1; do gh issue view $path; done",
     "for n in one; do gh issue view $n; done",
     "for n in 1\n2; do gh issue view $n; done",
-    "gh issue view 1 2>/dev/null",
     "gh issue view 1 >/tmp/issue.json",
     "git diff --output=diff.txt HEAD~1",
     "git diff --textc HEAD~1",
@@ -138,14 +160,41 @@ test("the loop parser fails closed on shell expansion, redirection, and control-
     "gh repo view other/private-repo",
     "gh issue view https://github.com/other/private/issues/3",
     "gh pr view other/private-repo#3",
-    "gh search issues --state open orchestrator",
     "gh issue list --search 'repo:other/private is:open'",
     "gh pr list --search='org:other is:open'",
     "gh issue list -S 'user:other is:open'",
     "gh issue edit 1 --add-assignee someone-else",
     "gh issue edit 1 --title replacement",
     "gh issue comment 1 --body-file /tmp/comment.md",
+    "git fetch origin feature/untrusted",
+    "git -C /other/repository status --short",
+    "gh issue view 1 | tee issue.json",
+    "gh api user --method DELETE",
+    "gh api user -f name=attacker",
+    "gh label create unsafe",
+    "gh issue view 1 | awk '{system(\"touch changed.txt\")}'",
   ]) assert.equal(isRoutineClaudeOrchestratorBash(command), false, command);
+});
+
+test("observed routine inspection attempts are reformulated instead of becoming human approval cards", () => {
+  const observed = [
+    "for n in 1201 1202; do gh issue edit $n --add-assignee Misko19 >/dev/null && echo assigned; done",
+    "gh issue comment 1201 -b 'Claimed and delegated.' >/dev/null",
+    "n=$(gh pr list --state open --json number --jq '.[0].number'); gh pr checks $n --required",
+    "grep -rl --include=ledger.md '#1256' /workspace/.git /tmp 2>/dev/null | head",
+    "find / -xdev -name ledger.md -mmin -300 2>/dev/null | head",
+    "d=/tmp/cross-model-review; ls $d; sed -n '1,20p' $d/ledger.md",
+  ];
+  for (const command of observed) {
+    assert.equal(
+      classifyRoutineClaudeOrchestratorPermission("Bash", { command }, [1201, 1202], "/workspace"),
+      "reformulate",
+      command,
+    );
+  }
+  for (const command of ["git push origin main", "gh pr merge 1255 --squash", "rm -rf build"]) {
+    assert.equal(classifyRoutineClaudeOrchestratorPermission("Bash", { command }), "interactive", command);
+  }
 });
 
 test("permission classification rejects non-Bash and expanded Bash input shapes", () => {
