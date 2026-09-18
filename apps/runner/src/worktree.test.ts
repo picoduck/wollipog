@@ -2889,6 +2889,250 @@ test("a launching retirement journaled after failed-launch finalization still re
   }
 });
 
+test("a retirement deferred by a closing provider replays when that retirement completes", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-closing-retirement-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  let releaseClose = () => {};
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_closing_retirement", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "cleanup",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    let closeStartedResolve!: () => void;
+    const closeStarted = new Promise<void>((resolve) => { closeStartedResolve = resolve; });
+    const closeGate = new Promise<void>((resolve) => { releaseClose = resolve; });
+    const factory = () => ({
+      pid: 1,
+      initialize: async () => {},
+      newSession: async () => {},
+      close: async () => { closeStartedResolve(); await closeGate; },
+      prompt: async () => "end_turn" as const,
+      cancel: () => {}, dispose: () => {}, setConfig: () => {},
+      resolvePermission: () => false, agentSessionId: () => "provider-session-id",
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    // No forge linkage exists for this branch; keep discovery deterministic and offline.
+    (manager as unknown as { discoverMergedWorktreePullRequest: () => Promise<null> })
+      .discoverMergedWorktreePullRequest = async () => null;
+    const selected = await manager.requestWorktree("s_closing_retirement", {
+      baseRef: "HEAD", branch: "fix/closing-retirement",
+    });
+    execFileSync("git", ["-C", selected.worktree.path, "push", "-u", "origin", selected.worktree.branch]);
+    await manager.start({
+      sessionId: "s_closing_retirement", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: true, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    });
+
+    manager.stop("s_closing_retirement");
+    await closeStarted;
+    const internals = manager as unknown as {
+      active: Map<string, unknown>;
+      closing: Map<string, unknown>;
+    };
+    assert.equal(internals.active.has("s_closing_retirement"), false,
+      "stop deletes the active entry before installing the closing fence");
+    assert.equal(internals.closing.has("s_closing_retirement"), true);
+
+    const retirement = await manager.discardWorktree("s_closing_retirement", selected.worktree.path);
+    assert.deepEqual(retirement.retirement, { status: "deferred", reason: "provider_active" },
+      "a discard requested during provider retirement is durably deferred, never silently removed");
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    assert.equal(existsSync(selected.worktree.path), true,
+      "the closing fence still protects the worktree while the provider is being disposed");
+    assert.equal(new WorktreeCleanupJournal(dataDir).list().length, 1,
+      "the deferral persists exactly one durable retirement intent");
+
+    releaseClose();
+    await waitForCondition(() => !existsSync(selected.worktree.path),
+      "retirement completion did not replay the journaled deferral");
+    await waitForCondition(() => new WorktreeCleanupJournal(dataDir).list().length === 0,
+      "the completed retirement did not clear its journal record");
+    assert.equal(store.readMeta("s_closing_retirement")?.worktrees?.length ?? 0, 0,
+      "replay clears the inventory row together with the worktree");
+  } finally {
+    releaseClose();
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("replay refreshes a merged-head proof the launching deferral was journaled without", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-deferred-merged-head-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_deferred_merged_head", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "cleanup",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const merged = await manager.requestWorktree("s_deferred_merged_head", {
+      baseRef: "HEAD", branch: "fix/deferred-merged",
+    });
+    const unmerged = await manager.requestWorktree("s_deferred_merged_head", {
+      baseRef: "HEAD", branch: "fix/deferred-unmerged",
+    });
+    const diverged = await manager.requestWorktree("s_deferred_merged_head", {
+      baseRef: "HEAD", branch: "fix/deferred-diverged",
+    });
+    for (const worktree of [merged.worktree, unmerged.worktree, diverged.worktree]) {
+      execFileSync("git", ["-C", worktree.path, "push", "-u", "origin", worktree.branch]);
+      execFileSync("git", ["-C", worktree.path, "push", "origin", "--delete", worktree.branch]);
+    }
+    let discoveryEnabled = false;
+    const discoveryCalls = new Map<string, number>();
+    (manager as unknown as {
+      discoverMergedWorktreePullRequest: (path: string) => Promise<{
+        url: string; state: "merged"; headOid: string; provider: "github"; kind: "pull_request";
+      } | null>;
+    }).discoverMergedWorktreePullRequest = async (path) => {
+      discoveryCalls.set(path, (discoveryCalls.get(path) ?? 0) + 1);
+      if (!discoveryEnabled || path === unmerged.worktree.path) return null;
+      return {
+        url: `https://github.com/picoduck/wollipog/pull/${path === merged.worktree.path ? "810" : "811"}`,
+        state: "merged",
+        // The diverged worktree's forge head names a commit this branch never reached.
+        headOid: path === merged.worktree.path
+          ? execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()
+          : "b".repeat(40),
+        provider: "github",
+        kind: "pull_request",
+      };
+    };
+
+    const internals = manager as unknown as {
+      launchGenerations: Map<string, number>;
+      finishLaunchGeneration: (sessionId: string, generation: number) => void;
+    };
+    for (const worktree of [merged.worktree, unmerged.worktree, diverged.worktree]) {
+      internals.launchGenerations.set("s_deferred_merged_head", 7);
+      store.patchMeta("s_deferred_merged_head", {
+        status: "starting",
+        worktreePath: worktree.path,
+        worktreeBranch: worktree.branch,
+        worktreePending: true,
+      });
+      assert.deepEqual(
+        (await manager.discardWorktree("s_deferred_merged_head", worktree.path)).retirement,
+        { status: "deferred", reason: "provider_launching" },
+        "a launching selection is journaled before any forge refresh can supply merged-head proof",
+      );
+    }
+    const journaled = new WorktreeCleanupJournal(dataDir).list();
+    assert.equal(journaled.length, 3);
+    assert.equal(journaled.every((record) => record.verifiedMergedHead === undefined), true,
+      "the launching deferral is journaled without merged-head proof");
+    assert.equal([...discoveryCalls.values()].reduce((total, count) => total + count, 0), 0,
+      "the launching deferral short-circuits before the forge is consulted");
+
+    discoveryEnabled = true;
+    store.patchMeta("s_deferred_merged_head", {
+      status: "idle", worktreePath: null, worktreeBranch: undefined, worktreePending: false,
+    });
+    internals.finishLaunchGeneration("s_deferred_merged_head", 7);
+
+    await waitForCondition(() => !existsSync(merged.worktree.path),
+      "replay did not refresh the missing merged-head proof for a deleted remote branch");
+    assert.equal(existsSync(unmerged.worktree.path), true,
+      "a branch the forge cannot prove merged stays retained across replay");
+    assert.equal(existsSync(diverged.worktree.path), true,
+      "merged-head proof for a different commit cannot retire unpushed work");
+    await waitForCondition(() => new WorktreeCleanupJournal(dataDir).list().length === 2,
+      "only the proven retirement should complete");
+    assert.equal(store.readMeta("s_deferred_merged_head")?.worktrees
+      ?.find((item) => item.path === merged.worktree.path)?.pullRequest?.headOid,
+      undefined,
+      "the removed worktree leaves no inventory row behind");
+    await waitForCondition(() => discoveryCalls.size === 3,
+      "replay did not consult the forge for the proof each deferral lacks");
+
+    const replay = manager as unknown as {
+      cleanupJournal: { list: () => WorktreeCleanupRecord[] };
+      reapWorktree: (record: WorktreeCleanupRecord) => Promise<void>;
+    };
+    const callsBeforeSecondReplay = new Map(discoveryCalls);
+    for (const record of replay.cleanupJournal.list()) await replay.reapWorktree(record);
+    assert.deepEqual(discoveryCalls, callsBeforeSecondReplay,
+      "a negative refresh backs off instead of asking the forge again on every replay");
+    assert.equal(existsSync(unmerged.worktree.path), true,
+      "backing off the forge never relaxes the retention the missing proof requires");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a deferred retirement survives a runner restart and converges on the periodic sweep", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-deferred-restart-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  let restarted: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_deferred_restart", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "cleanup",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const selected = await manager.requestWorktree("s_deferred_restart", {
+      baseRef: "HEAD", branch: "fix/deferred-restart",
+    });
+    execFileSync("git", ["-C", selected.worktree.path, "push", "-u", "origin", selected.worktree.branch]);
+    (manager as unknown as { launchGenerations: Map<string, number> })
+      .launchGenerations.set("s_deferred_restart", 3);
+    store.patchMeta("s_deferred_restart", {
+      status: "starting",
+      worktreePath: selected.worktree.path,
+      worktreeBranch: selected.worktree.branch,
+      worktreePending: true,
+    });
+    assert.deepEqual(
+      (await manager.discardWorktree("s_deferred_restart", selected.worktree.path)).retirement,
+      { status: "deferred", reason: "provider_launching" },
+    );
+    assert.equal(existsSync(selected.worktree.path), true);
+    // The process ends without ever finishing that launch generation: nothing in this instance
+    // will replay the journal again.
+    manager.shutdownAll();
+    manager = undefined;
+
+    const restartedStore = new SessionStore(join(dataDir, "sessions"));
+    restartedStore.patchMeta("s_deferred_restart", {
+      status: "idle", worktreePath: null, worktreeBranch: undefined, worktreePending: false,
+    });
+    restarted = new SessionManager(() => {}, () => {}, restartedStore, "runner", undefined, undefined, dataDir);
+    (restarted as unknown as { discoverMergedWorktreePullRequest: () => Promise<null> })
+      .discoverMergedWorktreePullRequest = async () => null;
+    assert.equal(new WorktreeCleanupJournal(dataDir).list().length, 1,
+      "the durable retirement survives the restart");
+    await restarted.reconcileWorktreePullRequests();
+    await waitForCondition(() => !existsSync(selected.worktree.path),
+      "the periodic sweep did not replay the surviving deferral");
+    await waitForCondition(() => new WorktreeCleanupJournal(dataDir).list().length === 0,
+      "the replayed retirement did not clear its journal record");
+  } finally {
+    manager?.shutdownAll();
+    restarted?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a requested worktree safely rebinds the provider before its next queued turn", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-requested-cwd-"));
   const repo = join(root, "repo");

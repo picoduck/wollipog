@@ -88,7 +88,7 @@ export function worktreeHelp(): string {
     "  worktree select [--session <session-id>] --path <absolute-path> [--json]",
     "  worktree discard [--session <session-id>] --path <absolute-path> [--json]",
     "Options: --url <control-plane-origin>, --token-file <credential-file>.",
-    "An injected agent session defaults --session to itself. Use discard, not raw Git removal, for runner-owned worktrees; active retirement is durably deferred until provider exit.",
+    "An injected agent session defaults --session to itself. Use discard, not raw Git removal, for runner-owned worktrees; active retirement is durably deferred until provider exit and then replays on its own.",
   ].join("\n");
 }
 
