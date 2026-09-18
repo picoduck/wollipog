@@ -100,6 +100,63 @@ test("worktree-blocked Retry remains visible but waits for confirmed recovery", 
   }
 });
 
+test("a stale authentication receipt cannot re-enable Retry during worktree recovery", async () => {
+  const container = domWindow.document.createElement("div");
+  domWindow.document.body.append(container);
+  const root = createRoot(container as unknown as HTMLDivElement);
+  const actions: string[] = [];
+  const noOp = () => {};
+  // The receipt still records the earlier authentication failure because it was retained before
+  // the selected worktree failed pre-launch verification. The server rejects the retry with
+  // HTTP 409 on the live recovery state alone, so the receipt's code must not re-enable it.
+  const staleAuthReceipt = pending({
+    commandId: "stale-auth-retry",
+    state: "failed",
+    errorCode: "PROVIDER_AUTHENTICATION_REQUIRED",
+    error: "authentication recovery was dismissed; this message was not sent",
+    canDismiss: true,
+    canRetry: true,
+  });
+  const render = async (worktreeRecoveryPending: boolean) => {
+    await act(async () => root.render(<PendingPromptBubbles
+      prompts={[staleAuthReceipt]}
+      deliveredCommandIds={new Set()}
+      liveQueueIds={new Set()}
+      canCancelLive={false}
+      worktreeRecoveryPending={worktreeRecoveryPending}
+      onCancelPending={noOp}
+      onCancelLive={noOp}
+      onDismiss={() => actions.push("dismiss")}
+      onRetry={() => actions.push("retry")}
+    />));
+  };
+  const button = (label: string) =>
+    [...container.querySelectorAll("button")].find((candidate) => candidate.textContent === label)!;
+  try {
+    await render(true);
+    const retry = button("Retry");
+    assert.equal(retry.disabled, true,
+      "a retry the server answers with HTTP 409 must not be offered as an available action");
+    assert.match(retry.title, /Recover the selected worktree/u);
+    await act(async () => retry.click());
+    assert.deepEqual(actions, []);
+    assert.equal(button("Dismiss").disabled, false,
+      "the stale receipt can still be cleared while the worktree is unrecovered");
+
+    // Authentication-only recovery keeps its existing behavior: the same receipt retries freely
+    // once no worktree recovery is live.
+    await render(false);
+    const enabled = button("Retry");
+    assert.equal(enabled.disabled, false);
+    assert.equal(enabled.title, "");
+    await act(async () => enabled.click());
+    assert.deepEqual(actions, ["retry"]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("one pending action disables every prompt action", async () => {
   const container = domWindow.document.createElement("div");
   domWindow.document.body.append(container);
