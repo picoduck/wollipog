@@ -5314,6 +5314,11 @@ export class SessionManager {
     void this.abortWorktreeSetup(sessionId);
     this.cancelWorktreePreparationWait(sessionId);
     this.worktreeVerificationRefusals.delete(sessionId);
+    // The superseded generation's claim dies with it. Dropping it here rather than in its own
+    // finish is what keeps the map to at most one live entry per session: a generation that is
+    // replaced before it finishes would otherwise leave an entry its successor refuses to touch,
+    // and a deletion marker generation never records a path of its own to overwrite it.
+    this.launchingWorktreePaths.delete(sessionId);
     const generation = ++this.nextLaunchGeneration;
     this.launchGenerations.set(sessionId, generation);
     this.latestLaunchGenerations.set(sessionId, generation);
@@ -6185,6 +6190,12 @@ export class SessionManager {
     const worktree: WorktreeHandle | null = meta.worktreePath
       ? { path: meta.worktreePath, branch: meta.worktreeBranch ?? `agent/${sessionId}` }
       : null;
+    // The single capture boundary every launch path crosses — start, resume, queued app-server
+    // recovery, and worktree rebind all arrive here. This generation owns exactly this path from
+    // now until it finishes, whatever the selection does next; a launch with no worktree drops any
+    // claim its own preparation made.
+    if (worktree) this.recordLaunchingWorktreePath(sessionId, launchGeneration, worktree.path);
+    else this.forgetLaunchingWorktreePath(sessionId, launchGeneration);
 
     let isolation: SpawnIsolation | undefined;
     let launchPreparation: void | SessionLaunchPreparation;

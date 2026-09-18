@@ -3219,6 +3219,79 @@ test("replay never retires a launch's captured worktree after the selection move
     manager.stop("s_captured_path");
     await waitForCondition(() => !existsSync(captured.worktree.path),
       "the captured path was never released once its provider retired");
+    assert.equal(
+      (manager as unknown as { launchingWorktreePaths: Map<string, unknown> }).launchingWorktreePaths.size,
+      0,
+      "a finished launch generation leaves no captured-path claim behind");
+  } finally {
+    releaseIsolation();
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a resuming launch claims its captured worktree just as a fresh start does", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-resume-captured-path-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  let releaseIsolation = () => {};
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const factory = () => ({
+      pid: 1, initialize: async () => {}, newSession: async () => {}, loadSession: async () => {},
+      prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {}, setConfig: () => {},
+      resolvePermission: () => false, agentSessionId: () => "provider-session-id",
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    (manager as unknown as { discoverMergedWorktreePullRequest: () => Promise<null> })
+      .discoverMergedWorktreePullRequest = async () => null;
+    store.create({
+      sessionId: "s_resume_captured", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: "provider-session-id", status: "idle",
+      title: "cleanup", config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null,
+      pendingApproval: null, seq: 1, createdAt: 1, updatedAt: 1,
+    });
+    const captured = await manager.requestWorktree("s_resume_captured", {
+      baseRef: "HEAD", branch: "fix/resume-captured-target",
+    });
+    execFileSync("git", ["-C", captured.worktree.path, "push", "-u", "origin", captured.worktree.branch]);
+    store.patchMeta("s_resume_captured", { status: "idle", worktreePending: false });
+
+    const internals = manager as unknown as {
+      resolveLaunchIsolation: (...args: unknown[]) => Promise<unknown>;
+    };
+    const originalResolveIsolation = internals.resolveLaunchIsolation.bind(manager);
+    let isolationReachedResolve!: () => void;
+    const isolationReached = new Promise<void>((resolve) => { isolationReachedResolve = resolve; });
+    const isolationGate = new Promise<void>((resolve) => { releaseIsolation = resolve; });
+    internals.resolveLaunchIsolation = async (...args) => {
+      isolationReachedResolve();
+      await isolationGate;
+      return originalResolveIsolation(...args);
+    };
+
+    // Resume, not a fresh start: this reaches launch() directly, never through startGeneration.
+    manager.prompt("s_resume_captured", "continue");
+    await isolationReached;
+
+    const advanced = await manager.requestWorktree("s_resume_captured", {
+      baseRef: "HEAD", branch: "fix/resume-selection-advanced",
+    });
+    assert.equal(store.readMeta("s_resume_captured")?.worktreePath, advanced.worktree.path);
+    assert.deepEqual(
+      (await manager.discardWorktree("s_resume_captured", captured.worktree.path)).retirement,
+      { status: "deferred", reason: "provider_launching" },
+      "a resuming launch must fence its captured path exactly as a fresh start does");
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(existsSync(captured.worktree.path), true,
+      "replay must not retire the path a resuming launch captured");
+
+    releaseIsolation();
+    await waitForCondition(
+      () => (manager as unknown as { active: Map<string, unknown> }).active.has("s_resume_captured"),
+      "the resumed provider never started");
   } finally {
     releaseIsolation();
     manager?.shutdownAll();
