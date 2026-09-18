@@ -141,8 +141,22 @@ test("the Orchestrator preset applies only where independent provider permission
   };
   assert.equal(orchestratorPresetPermissionsReason(additive), undefined);
   assert.match(orchestratorPresetPermissionsReason({ ...additive, strictProjectIsolation: true }) ?? "", /Strict Project Isolation/);
-  assert.match(orchestratorPresetPermissionsReason({ ...additive, driver: "codex-app-server" }) ?? "", /native Claude Code/);
-  assert.match(orchestratorPresetPermissionsReason({ ...additive, contextKind: "wsl" }) ?? "", /native Claude Code harness on the host/);
+  for (const driver of ["codex", "codex-app-server"] as const) {
+    assert.equal(orchestratorPresetPermissionsReason({ ...additive, driver }), undefined,
+      "a non-strict Codex Orchestrator keeps ordinary provider permissions");
+    assert.match(
+      orchestratorPresetPermissionsReason({
+        ...additive, driver, runnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex - 1,
+      }) ?? "",
+      /protocol v161/,
+      "each harness names its own runner requirement",
+    );
+    assert.match(orchestratorPresetPermissionsReason({ ...additive, driver, contextKind: "wsl" }) ?? "",
+      /native Claude Code or Codex harness on the host/);
+  }
+  assert.match(orchestratorPresetPermissionsReason({ ...additive, driver: "acp" }) ?? "", /native Claude Code and Codex/);
+  assert.match(orchestratorPresetPermissionsReason({ ...additive, driver: "pi" }) ?? "", /native Claude Code and Codex/);
+  assert.match(orchestratorPresetPermissionsReason({ ...additive, contextKind: "wsl" }) ?? "", /native Claude Code or Codex harness on the host/);
   assert.match(orchestratorPresetPermissionsReason({ ...additive, hostExecutionTarget: false }) ?? "", /host execution target/);
   assert.match(orchestratorPresetPermissionsReason({ ...additive, nativeTui: true }) ?? "", /Native TUI/);
   assert.match(orchestratorPresetPermissionsReason({ ...additive, savedOrchestratorDefault: true }) ?? "", /saved Agent Harness default/);

@@ -17305,8 +17305,30 @@ test("Orchestrator is an additive role independent of the provider permission mo
       { ...request, agentId: CODEX_APP_AGENT_ID, role: "orchestrator", config: { permissionMode: codexMode } },
       undefined, undefined, false, false, false, human,
     );
-    assert.equal(codex.status, 409, "other harnesses still require the coupled preset");
-    assert.match(codex.error ?? "", /Orchestrator preset permission mode/);
+    assert.equal(codex.ok, true, codex.error);
+    assert.equal(codex.data!.role, "orchestrator");
+    assert.equal(codex.data!.permissionMode, codexMode,
+      "a non-strict Codex Orchestrator keeps the permission mode a normal session would use");
+    const codexSpec = hub.sentOfType("start_session").find((message) => message.spec.sessionId === codex.data!.id)?.spec;
+    assert.deepEqual(codexSpec?.orchestrator, { strictProjectIsolation: false });
+    assert.equal(codexSpec?.config?.permissionMode, codexMode);
+    const codexStrict = svc.createSession(
+      { ...request, agentId: CODEX_APP_AGENT_ID, role: "orchestrator", config: { permissionMode: codexMode },
+        orchestrator: { execution: { strictProjectIsolation: true } } },
+      undefined, undefined, false, false, false, human,
+    );
+    assert.equal(codexStrict.status, 409, "Strict Project Isolation keeps the coupled Codex preset");
+    assert.match(codexStrict.error ?? "", /Strict Project Isolation/);
+    const acpAgent = meta.agents.find((item) => item.driver === "acp")!;
+    acpAgent.capabilities = { models: [], effortLevels: [], slashCommands: [], supportsImages: false,
+      supportsApprovals: true, permissionModes: ["default", "orchestrator"] };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const acp = svc.createSession(
+      { ...request, agentId: acpAgent.id, role: "orchestrator", config: { permissionMode: "default" } },
+      undefined, undefined, false, false, false, human,
+    );
+    assert.equal(acp.status, 409, "every other harness still requires the coupled preset");
+    assert.match(acp.error ?? "", /Orchestrator preset permission mode/);
 
     const localUser = { defaultOwnerUserId: db.localIdentityContext().userId };
     const identity = { agentId: AGENT_ID, driver: "claude-code" as const, context: { kind: "native" as const } };
@@ -17323,13 +17345,13 @@ test("Orchestrator is an additive role independent of the provider permission mo
 
     const redefined = runnerMeta();
     const redefinedAgent = redefined.agents.find((item) => item.id === AGENT_ID)!;
-    redefinedAgent.driver = "codex";
+    redefinedAgent.driver = "acp";
     redefinedAgent.capabilities = { ...agent.capabilities! };
     db.registerRunner(redefined, Date.now(), PROTOCOL_VERSION);
     const startsBefore = hub.sentOfType("start_session").length;
     const redefinedRestart = svc.restart(view.id);
     assert.equal(redefinedRestart.status, 409, "a redefined agent fails at the control plane rather than at the runner");
-    assert.match(redefinedRestart.error ?? "", /native Claude Code harness/);
+    assert.match(redefinedRestart.error ?? "", /native Claude Code or Codex harness/);
     assert.equal(hub.sentOfType("start_session").length, startsBefore, "no launch is sent for the refused restart");
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
 
@@ -17348,7 +17370,24 @@ test("Orchestrator is an additive role independent of the provider permission mo
       undefined, undefined, false, false, false, human,
     );
     assert.equal(legacyOnOlderRunner.ok, true, legacyOnOlderRunner.error);
-    assert.equal(db.listSessions().filter((session) => session.role === "orchestrator").length, 5);
+    // A v160 runner carries the Claude shape but not the Codex one; each harness names its own gate.
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex - 1);
+    const codexOnV160 = svc.createSession(
+      { ...request, agentId: CODEX_APP_AGENT_ID, role: "orchestrator", config: { permissionMode: codexMode } },
+      undefined, undefined, false, false, false, human,
+    );
+    assert.equal(codexOnV160.status, 409, "a v160 runner has no additive Codex launch shape");
+    assert.match(codexOnV160.error ?? "", /protocol-v161/);
+    const claudeOnV160 = svc.createSession(
+      { ...request, role: "orchestrator", config: { permissionMode: "acceptEdits" } },
+      undefined, undefined, false, false, false, human,
+    );
+    assert.equal(claudeOnV160.ok, true, claudeOnV160.error);
+    const codexRestartOnV160 = svc.restart(codex.data!.id);
+    assert.equal(codexRestartOnV160.status, 409, "restart refuses the same combination with the same guidance");
+    assert.match(codexRestartOnV160.error ?? "", /protocol-v161/);
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    assert.equal(db.listSessions().filter((session) => session.role === "orchestrator").length, 7);
   } finally {
     db.close();
   }

@@ -1420,7 +1420,7 @@ export function NewSessionDialog({
                   : savedPiModeUnavailableForTarget
                     ? "This target cannot host Pi's approval bridge, so commands run without interactive approvals."
                     : orchestrator
-                      ? "The same permission modes as a normal session apply, and the Orchestrator role only adds Wollipog's orchestration tools. Change the mode in the composer after creation."
+                      ? "The same permission modes, integrations, and credentials as a normal session apply, and the Orchestrator role only adds Wollipog's orchestration tools. Typed workflow decisions do not govern integrations they cannot intercept. Change the mode in the composer after creation."
                       : "Use the approval behavior saved for this agent harness. Change it in the composer after creation."}
               </span>
             </div>
