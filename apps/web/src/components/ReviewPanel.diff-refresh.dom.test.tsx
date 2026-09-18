@@ -468,6 +468,14 @@ function field<T extends HTMLElement>(scope: HTMLElement, selector: string): T {
   return found;
 }
 
+/** A control inside an open draft editor, matched on its label rather than its class list. */
+function editorButton(container: HTMLElement, path: string, label: string): HTMLElement {
+  const found = [...requiredEditor(container, path).querySelectorAll<HTMLElement>("button")]
+    .find((button) => (button.textContent ?? "").trim() === label);
+  if (!found) throw new Error(`no ${label} control in the ${path} draft editor`);
+  return found;
+}
+
 function inlineFindingBodies(container: HTMLElement): string[] {
   return [...container.querySelectorAll(".diff-inline-finding-body")].map((node) => node.textContent ?? "");
 }
@@ -682,6 +690,130 @@ test("a draft that outlived the line it targets says so instead of submitting si
       "the typed text still survives, as the criterion requires");
     assert.ok(editor.textContent?.includes("This line changed after you started writing"),
       "and the editor admits the anchor moved");
+  } finally {
+    await harness.unmount();
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/* #1287 — the caret survives a rebuild the same way the text does             */
+/* -------------------------------------------------------------------------- */
+
+test("a rebuilt draft editor puts the caret back where the reviewer left it", async () => {
+  // The drafted hunk changing is the one refresh that still rebuilds this editor after #1203/#1204,
+  // and a rebuild restores the body by assigning it — which parks the caret at the end of the text.
+  // Mid-sentence is exactly where a half-written finding is being typed, so the offset has to be
+  // carried across the rebuild too, not just the characters.
+  const harness = await mountPanel();
+  try {
+    await act(async () => {
+      fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
+    });
+    const before = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
+    await act(async () => {
+      before.value = "leaks the handle\nsecond thought";
+      fireDomEvent.change(before);
+    });
+    // The reviewer goes back to fix a word in the first line.
+    before.setSelectionRange(6, 6);
+    assert.equal(before.selectionStart, 6, "the caret really is mid-text before the refresh");
+
+    // The agent rewrites the very line the draft is aimed at, which rebuilds the hunk holding it.
+    harness.serveDiff(diffOf("2", [fileA(), fileB({ context: "keep-rewritten" })]));
+    await harness.render({ status: statusOf({ addedLines: 8 }) });
+
+    const after = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
+    assert.notEqual(after, before, "a different textarea node, so the editor was genuinely rebuilt");
+    assert.equal(after.value, "leaks the handle\nsecond thought", "the text still survives (#1203)");
+    assert.deepEqual(
+      [after.selectionStart, after.selectionEnd],
+      [6, 6],
+      "and the caret returns to the offset it was left at, rather than the end of the text",
+    );
+  } finally {
+    await harness.unmount();
+  }
+});
+
+test("a rebuilt draft editor restores a whole selection, not just a collapsed caret", async () => {
+  const harness = await mountPanel();
+  try {
+    await act(async () => {
+      fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
+    });
+    const before = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
+    await act(async () => {
+      before.value = "replace this phrase";
+      fireDomEvent.change(before);
+    });
+    // A word selected for replacement is as much "where the reviewer is" as a bare caret.
+    before.setSelectionRange(8, 12);
+
+    harness.serveDiff(diffOf("2", [fileA(), fileB({ context: "keep-rewritten" })]));
+    await harness.render({ status: statusOf({ addedLines: 8 }) });
+
+    const after = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
+    assert.deepEqual([after.selectionStart, after.selectionEnd], [8, 12]);
+  } finally {
+    await harness.unmount();
+  }
+});
+
+test("a submitted draft leaves no caret behind for the next finding written on its line", async () => {
+  // Submitting drops the draft, so the offset it was holding must go with it — otherwise the next
+  // finding written against this anchor opens with its caret aimed at text that is no longer there.
+  const harness = await mountPanel();
+  try {
+    await act(async () => {
+      fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
+    });
+    const first = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
+    await act(async () => {
+      first.value = "a finished finding";
+      fireDomEvent.change(first);
+    });
+    first.setSelectionRange(4, 9);
+    await act(async () => {
+      fireDomEvent.click(editorButton(harness.container, "src/b.ts", "Add Finding"));
+    });
+    assert.equal(editorIn(harness.container, "src/b.ts"), null, "submitting closed the editor");
+
+    await act(async () => {
+      fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
+    });
+    const reopened = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
+    assert.equal(reopened.value, "", "the new draft starts empty");
+    assert.deepEqual([reopened.selectionStart, reopened.selectionEnd], [0, 0],
+      "and with no caret carried over from the finding that was sent");
+  } finally {
+    await harness.unmount();
+  }
+});
+
+test("a draft that was cancelled reopens with its caret intact", async () => {
+  // Cancel keeps the text on purpose (#1203), so it must keep the place in it too.
+  const harness = await mountPanel();
+  try {
+    await act(async () => {
+      fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
+    });
+    const before = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
+    await act(async () => {
+      before.value = "paused mid-thought";
+      fireDomEvent.change(before);
+    });
+    before.setSelectionRange(7, 7);
+    await act(async () => {
+      fireDomEvent.click(editorButton(harness.container, "src/b.ts", "Cancel"));
+    });
+    assert.equal(editorIn(harness.container, "src/b.ts"), null, "cancel closed the editor");
+
+    await act(async () => {
+      fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
+    });
+    const reopened = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
+    assert.equal(reopened.value, "paused mid-thought");
+    assert.deepEqual([reopened.selectionStart, reopened.selectionEnd], [7, 7]);
   } finally {
     await harness.unmount();
   }
