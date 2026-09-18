@@ -152,11 +152,23 @@ test("the Orchestrator preset applies only where independent provider permission
       "each harness names its own runner requirement",
     );
     assert.match(orchestratorPresetPermissionsReason({ ...additive, driver, contextKind: "wsl" }) ?? "",
-      /native Claude Code or Codex harness on the host/);
+      /native Claude Code, Codex, or Pi harness on the host/);
   }
-  assert.match(orchestratorPresetPermissionsReason({ ...additive, driver: "acp" }) ?? "", /native Claude Code and Codex/);
-  assert.match(orchestratorPresetPermissionsReason({ ...additive, driver: "pi" }) ?? "", /native Claude Code and Codex/);
-  assert.match(orchestratorPresetPermissionsReason({ ...additive, contextKind: "wsl" }) ?? "", /native Claude Code or Codex harness on the host/);
+  // Pi gained the additive shape in v163 (#1294); ACP still has no audited provider-mode contract.
+  assert.equal(orchestratorPresetPermissionsReason({ ...additive, driver: "pi" }), undefined,
+    "a non-strict Pi Orchestrator keeps ordinary provider permissions");
+  assert.match(
+    orchestratorPresetPermissionsReason({
+      ...additive, driver: "pi", runnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi - 1,
+    }) ?? "",
+    /protocol v163/,
+    "Pi names its own runner requirement",
+  );
+  assert.match(orchestratorPresetPermissionsReason({ ...additive, driver: "pi", contextKind: "wsl" }) ?? "",
+    /native Claude Code, Codex, or Pi harness on the host/);
+  assert.match(orchestratorPresetPermissionsReason({ ...additive, driver: "acp" }) ?? "",
+    /ACP adapter's provider permission contract is unaudited/);
+  assert.match(orchestratorPresetPermissionsReason({ ...additive, contextKind: "wsl" }) ?? "", /native Claude Code, Codex, or Pi harness on the host/);
   assert.match(orchestratorPresetPermissionsReason({ ...additive, hostExecutionTarget: false }) ?? "", /host execution target/);
   assert.match(orchestratorPresetPermissionsReason({ ...additive, nativeTui: true }) ?? "", /Native TUI/);
   assert.match(orchestratorPresetPermissionsReason({ ...additive, savedOrchestratorDefault: true }) ?? "", /saved Agent Harness default/);

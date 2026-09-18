@@ -146,6 +146,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   SESSION_NAMING_RUNNER_BUDGET_MS,
   SESSION_NAMING_SUPERVISION_MARGIN_MS,
   sessionRole,
+  advertisesOrchestratorAdditiveRole,
   orchestratorAdditiveCapability,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   usesOrchestratorPresetPermissions,
@@ -3514,16 +3515,26 @@ export class SessionsService {
         // Independent provider permissions: the harness launches exactly as an equivalent normal
         // session and gains only Wollipog's orchestration tools, instructions, and credential. An
         // older runner would launch this as an ordinary session, so refuse rather than degrade.
-        // Each harness carries its own gate: Claude Code since v160, the Codex drivers since v162.
+        // Each harness carries its own gate: Claude Code since v160, the Codex drivers since v162,
+        // Pi since v163. ACP is absent from the map: its provider-mode permission contract has not
+        // been audited, so an ACP Orchestrator still uses the coupled preset.
         const additiveCapability = orchestratorAdditiveCapability(launch.driver);
         if (!additiveCapability || contextKind !== "native" || executionTarget.adapter !== "host") {
-          return fail("Independent provider permissions for an Orchestrator are supported only by a native Claude Code or Codex harness on the host; other harnesses still use the Orchestrator preset permission mode.", 409);
+          return fail(launch.driver === "acp"
+            ? "The Claude ACP Orchestrator's provider permission contract is unaudited, so it still uses the Orchestrator preset permission mode with Strict Project Isolation."
+            : "Independent provider permissions for an Orchestrator are supported only by a native Claude Code, Codex, or Pi harness on the host; other harnesses still use the Orchestrator preset permission mode.", 409);
         }
         if (!runnerSupportsProtocol(runner.protocolVersion, additiveCapability)) {
           return fail(`An Orchestrator with independent provider permissions requires a protocol-v${
             RUNNER_CAPABILITY_MIN_PROTOCOL[additiveCapability]} runner for this harness; update the runner or choose the Orchestrator preset permission mode.`, 409);
         }
-        if (!agentCapabilities?.permissionModes?.includes("orchestrator")) {
+        // The runner attests the additive role separately from the coupled preset, because the
+        // preset advertisement also encodes the strict filesystem boundary that the additive role
+        // does not need. For Pi that attestation is also how the verified Agent Control bridge
+        // reaches this process: `piAgentControl` is runner-side discovery state with no column in
+        // this database, so it cannot be re-read here. `provisionAgentControl` re-checks the exact
+        // bridge against the live agent definition before launch.
+        if (!advertisesOrchestratorAdditiveRole(launch.driver, agentCapabilities)) {
           return fail("the Orchestrator role requires explicit support from this agent installation", 409);
         }
         if (strictProjectIsolation) {
@@ -3533,9 +3544,17 @@ export class SessionsService {
           return fail("Orchestrator Native TUI requires the Orchestrator preset permission mode.", 409);
         }
       }
+      // Pi has no non-strict coupled-preset launch shape: its preset arguments are the same
+      // restricted launch either way, so a non-strict Pi Orchestrator is supported only through the
+      // additive role. Claude Code and Codex have an audited non-strict preset shape as well.
+      const nonStrictHarnesses = presetPermissions
+        ? ["codex", "codex-app-server", "claude-code"]
+        : ["codex", "codex-app-server", "claude-code", "pi"];
       if (!strictProjectIsolation && (contextKind !== "native" ||
-          !["codex", "codex-app-server", "claude-code"].includes(launch.driver))) {
-        return fail("Delegate Implementation without Strict Project Isolation requires a supported native Codex or Claude Code harness.", 409);
+          !nonStrictHarnesses.includes(launch.driver))) {
+        return fail(presetPermissions
+          ? "Delegate Implementation without Strict Project Isolation requires a supported native Codex or Claude Code harness."
+          : "Delegate Implementation without Strict Project Isolation requires a supported native Codex, Claude Code, or Pi harness.", 409);
       }
       if (!strictProjectIsolation && (launch.driver === "codex" || launch.driver === "codex-app-server") &&
           !["linux", "macos"].includes(runner.os)) {
@@ -3569,9 +3588,13 @@ export class SessionsService {
         launch.wslAgentControl.bwrapRuntime === "/usr/bin/bwrap" &&
         this.db.getRunner(req.runnerId)?.runtime?.executionIsolation?.mode === "bwrap";
       if (!(["codex", "codex-app-server", "claude-code"].includes(launch.driver) ||
-          (launch.driver === "acp" && req.launchSurface !== "native_tui")) ||
+          (launch.driver === "acp" && req.launchSurface !== "native_tui") ||
+          // Pi reaches the Orchestrator role only through the additive shape (#1294). The coupled
+          // preset has never been admitted here for Pi, and this issue does not add it: enabling an
+          // unaudited strict Pi preset is a separate change from decoupling the role.
+          (launch.driver === "pi" && !presetPermissions && req.launchSurface !== "native_tui")) ||
           (contextKind !== "native" && !wslDirect) || executionTarget.adapter !== "host") {
-        return fail("the orchestrator preset requires a supported native host harness or verified Direct WSL bridge", 409);
+        return fail("the orchestrator role requires a supported native host harness or verified Direct WSL bridge", 409);
       }
     }
     if (parentControl !== "off" && !orchestrator) {
@@ -5559,9 +5582,9 @@ export class SessionsService {
       // provider permission mode belongs to the harness the session was created with, so a driver
       // change is refused rather than reinterpreted under the new harness's mode vocabulary.
       if (!additiveCapability || launch.driver !== session.driver ||
-          !advertised?.permissionModes?.includes("orchestrator") ||
+          !advertisesOrchestratorAdditiveRole(launch.driver, advertised) ||
           (launch.context?.kind ?? "native") !== "native" || (target && target.adapter !== "host")) {
-        return fail("An Orchestrator with independent provider permissions requires a native Claude Code or Codex harness on the host that advertises the Orchestrator role; the agent definition no longer matches. Start a new session or choose the Orchestrator preset permission mode.", 409);
+        return fail("An Orchestrator with independent provider permissions requires a native Claude Code, Codex, or Pi harness on the host that advertises the Orchestrator role; the agent definition no longer matches. Start a new session or choose the Orchestrator preset permission mode.", 409);
       }
       if (!runnerSupportsProtocol(runner?.protocolVersion, additiveCapability)) {
         return fail(`An Orchestrator with independent provider permissions requires a protocol-v${
@@ -5573,6 +5596,10 @@ export class SessionsService {
           !["linux", "macos"].includes(runner?.os ?? "")) {
         return fail("Provider-mode Codex Orchestrator requires its audited Linux or macOS sandbox.", 409);
       }
+      // Pi's bridge rule mirrors creation through the advertised-role check above: a rediscovery
+      // that loses the verified bridge withdraws `orchestratorAdditive`, which is refused there.
+      // `piAgentControl` itself is not persisted, so it cannot be re-read here; the runner makes
+      // the final exact-bridge check before launch.
     }
     const agentId = session.agentId;
     const supportsIssueScope = runnerSupportsProtocol(

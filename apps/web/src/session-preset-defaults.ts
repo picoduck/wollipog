@@ -45,6 +45,7 @@ export function savedSessionPermissionMode(
  */
 export function orchestratorUnavailableReason(input: {
   runnerSupportsOrchestration: boolean;
+  /** Either advertisement: the coupled preset's permission mode, or the additive role (#1294). */
   agentOffersOrchestrator: boolean;
   agentOrchestratorRequirement?: string;
   /** The agent's execution context. `"wsl"` needs the verified safe launcher; `"native"` does not. */
@@ -56,9 +57,12 @@ export function orchestratorUnavailableReason(input: {
   if (!input.runnerSupportsOrchestration) reasons.push("This runner is too old to orchestrate child sessions.");
   // A pre-orchestration runner may omit the mode simply because its binary never advertised it.
   // A discovery-specific requirement remains trustworthy; the generic absence does not.
+  // "Offers" means either advertisement: the coupled preset's permission mode, or the runner's
+  // separate attestation of the additive role (#1294). This sentence appears only when neither is
+  // offered, so an installation that can run the role additively is never described as lacking it.
   if (!input.agentOffersOrchestrator &&
       (input.runnerSupportsOrchestration || input.agentOrchestratorRequirement)) {
-    reasons.push(input.agentOrchestratorRequirement ?? "This agent does not offer the Orchestrator permission mode.");
+    reasons.push(input.agentOrchestratorRequirement ?? "This agent does not offer the Orchestrator role.");
   }
   if (input.contextKind === "wsl" && !input.directWslVerified) {
     reasons.push("WSL agents need the verified Direct WSL bridge and a bubblewrap-isolated runner.");
@@ -77,10 +81,11 @@ export function orchestratorUnavailableReason(input: {
  * Why an Orchestrator must launch with the harness-owned Orchestrator preset instead of the same
  * provider permission mode a normal session would use, or `undefined` when the role is additive.
  *
- * Only a non-strict native Claude Code (v160) or Codex (v162) Orchestrator on a supporting runner
- * and control plane keeps its ordinary permission mode, tool inventory, apps, plugins, hooks, and
- * configured MCP servers. Every other combination still uses the coupled preset, and the sentence
- * names which condition selects it so the user can change the one they control.
+ * Only a non-strict native Claude Code (v160), Codex (v162), or Pi (v163) Orchestrator on a
+ * supporting runner and control plane keeps its ordinary permission mode, tool inventory, apps,
+ * plugins, hooks, extensions, skills, and configured MCP servers. Every other combination still
+ * uses the coupled preset — notably ACP, whose provider-mode permission contract is unaudited — and
+ * the sentence names which condition selects it so the user can change the one they control.
  */
 export function orchestratorPresetPermissionsReason(input: {
   controlPlaneSupportsRole: boolean;
@@ -97,10 +102,12 @@ export function orchestratorPresetPermissionsReason(input: {
   }
   const additiveCapability = orchestratorAdditiveCapability(input.driver);
   if (!additiveCapability) {
-    return "This harness still uses the harness-owned Orchestrator preset; independent provider permissions are available for native Claude Code and Codex.";
+    return input.driver === "acp"
+      ? "The Claude ACP adapter's provider permission contract is unaudited, so an ACP Orchestrator uses the harness-owned Orchestrator preset."
+      : "This harness still uses the harness-owned Orchestrator preset; independent provider permissions are available for native Claude Code, Codex, and Pi.";
   }
   if (input.contextKind !== "native" || !input.hostExecutionTarget) {
-    return "Independent provider permissions are available only for a native Claude Code or Codex harness on the host execution target.";
+    return "Independent provider permissions are available only for a native Claude Code, Codex, or Pi harness on the host execution target.";
   }
   if (input.nativeTui) {
     return "Native TUI Orchestrators use the harness-owned Orchestrator preset.";

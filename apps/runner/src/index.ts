@@ -82,6 +82,7 @@ import {
 import {
   projectOrchestratorPresetForPeer,
   stripOrchestratorLaunchArgs,
+  withOrchestratorAdditiveRole,
   withOrchestratorPreset,
 } from "./orchestrator-preset.js";
 import {
@@ -375,7 +376,10 @@ const metadata: RunnerMetadata = {
   version: VERSION,
   // Pre-discovery config rows go out verbatim so live discovery can still authoritatively
   // fill availability and capabilities; supported native agents gain the runner-owned preset.
-  agents: withOrchestratorPreset(configuredAgentDefinitions, { isolationMode: config.executionIsolation.mode }),
+  agents: withOrchestratorAdditiveRole(
+    withOrchestratorPreset(configuredAgentDefinitions, { isolationMode: config.executionIsolation.mode }),
+    { isolationMode: config.executionIsolation.mode },
+  ),
   workspaces: config.workspaces.map((w) => ({
     id: w.id,
     name: w.name,
@@ -423,9 +427,11 @@ function agentsForControlPlane() {
       // publish it only through the principal-scoped subscription-usage snapshot.
       return {
         ...agent,
-        // Pi bridge attestation authorizes runner-local launch construction. The projected
-        // Orchestrator permission mode is sufficient for the control plane; do not persist the
-        // local implementation marker as if a future runner could inherit it.
+        // Pi bridge attestation authorizes runner-local launch construction; do not persist the
+        // local implementation marker as if a future runner could inherit it. What the control
+        // plane needs from it travels instead as `capabilities.orchestratorAdditive`, which the
+        // spreads below must preserve — clearing this field while the consumer still read it is
+        // what made the additive Pi Orchestrator unreachable from the dialog (#1294).
         piAgentControl: undefined,
         env: {},
         ...(agent.claudeCode
@@ -436,6 +442,8 @@ function agentsForControlPlane() {
             (!runnerSupportsProtocol(controlPlaneProtocolVersion, "wslSafeLauncher") ||
               agent.wslAgentControl?.safeLauncherProtocolVersion !== 1 ||
               config.executionIsolation.mode !== "bwrap"))) && agent.capabilities
+          // Narrows only the coupled-preset advertisement. `orchestratorAdditive` rides the spread
+          // untouched: it is a separate attestation, and this branch is about the preset alone.
           ? { capabilities: { ...agent.capabilities, permissionModes: agent.capabilities.permissionModes?.filter((mode) => mode !== "orchestrator") } }
           : {}),
       };
@@ -1171,7 +1179,10 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
       claudeHookFeatureEnabled,
       log,
     );
-    metadata.agents = withOrchestratorPreset(metadata.agents, { isolationMode: config.executionIsolation.mode });
+    metadata.agents = withOrchestratorAdditiveRole(
+      withOrchestratorPreset(metadata.agents, { isolationMode: config.executionIsolation.mode }),
+      { isolationMode: config.executionIsolation.mode },
+    );
     // A definitive native discovery result is newer authoritative evidence than the process-local
     // failure overlay. Drop only its status (preserving ACP capability state) so a terminal login
     // followed by rediscovery cannot be overwritten by stale "unauthenticated" state.

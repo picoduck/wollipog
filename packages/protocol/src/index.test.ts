@@ -9,6 +9,7 @@ import {
   LEGACY_CONTROL_PLANE_SERVICE,
   LEGACY_POLICY_HOOK_POLL_CAPABILITY_HEADER,
   POLICY_HOOK_POLL_CAPABILITY_HEADER,
+  advertisesOrchestratorAdditiveRole,
   PROTOCOL_VERSION,
   SESSION_NAMING_CLEANUP_BUDGET_MS,
   SESSION_NAMING_GENERATION_BUDGET_MS,
@@ -155,8 +156,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 162", () => {
-  assert.equal(PROTOCOL_VERSION, 162);
+test("PROTOCOL_VERSION is 163", () => {
+  assert.equal(PROTOCOL_VERSION, 163);
   assert.equal(runnerSupportsProtocol(136, "capacityLockDiagnostics"), false);
   assert.equal(runnerSupportsProtocol(137, "capacityLockDiagnostics"), true);
   assert.equal(runnerSupportsProtocol(137, "sessionAgentControlReasoningEffort"), false);
@@ -185,6 +186,8 @@ test("PROTOCOL_VERSION is 162", () => {
   assert.equal(runnerSupportsProtocol(161, "worktreeRecovery"), true);
   assert.equal(runnerSupportsProtocol(161, "orchestratorAdditiveCodex"), false);
   assert.equal(runnerSupportsProtocol(162, "orchestratorAdditiveCodex"), true);
+  assert.equal(runnerSupportsProtocol(162, "orchestratorAdditivePi"), false);
+  assert.equal(runnerSupportsProtocol(163, "orchestratorAdditivePi"), true);
   assert.equal(runnerSupportsProtocol(145, "worktreeSetupConfig"), false);
   assert.equal(runnerSupportsProtocol(146, "worktreeSetupConfig"), true);
   assert.equal(runnerSupportsProtocol(134, "runnerCapacityDimensions"), false);
@@ -1313,8 +1316,49 @@ test("the Orchestrator role is independent of the provider permission mode", asy
   assert.equal(orchestratorAdditiveCapability("claude-code"), "orchestratorAdditiveRole");
   assert.equal(orchestratorAdditiveCapability("codex"), "orchestratorAdditiveCodex");
   assert.equal(orchestratorAdditiveCapability("codex-app-server"), "orchestratorAdditiveCodex");
-  for (const coupled of ["acp", "pi", undefined, null]) {
+  assert.equal(orchestratorAdditiveCapability("pi"), "orchestratorAdditivePi");
+  for (const coupled of ["acp", undefined, null]) {
     assert.equal(orchestratorAdditiveCapability(coupled), undefined,
       "every other harness still requires the coupled preset");
   }
+  assert.equal(orchestratorAdditiveCapability("acp"), undefined,
+    "the ACP provider-mode permission contract is unaudited, so ACP keeps the coupled preset");
+});
+
+test("the additive Orchestrator role is advertised separately from the coupled preset", () => {
+  const caps = (extra: Partial<AgentCapabilities> = {}): AgentCapabilities => ({
+    models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+    ...extra,
+  });
+  // A v163+ runner attests the role directly. This is the only accepted signal for Pi, whose
+  // preset advertisement additionally encodes the strict boundary the additive role never needs.
+  assert.equal(advertisesOrchestratorAdditiveRole("pi", caps({ orchestratorAdditive: true })), true);
+  assert.equal(advertisesOrchestratorAdditiveRole("pi", caps({ permissionModes: ["orchestrator"] })), false,
+    "the coupled preset advertisement is never a substitute for Pi's additive attestation");
+  assert.equal(advertisesOrchestratorAdditiveRole("pi", caps()), false);
+
+  // Claude and the Codex drivers keep working from a pre-v163 advertisement, because their preset
+  // preconditions are a superset of their additive ones, so the stand-in is only conservative.
+  for (const driver of ["claude-code", "codex", "codex-app-server"] as const) {
+    assert.equal(advertisesOrchestratorAdditiveRole(driver, caps({ permissionModes: ["orchestrator"] })), true);
+    assert.equal(advertisesOrchestratorAdditiveRole(driver, caps({ orchestratorAdditive: true })), true);
+    assert.equal(advertisesOrchestratorAdditiveRole(driver, caps({ permissionModes: ["default"] })), false);
+  }
+
+  // Harnesses with no additive shape never advertise one, however they are described.
+  for (const driver of ["acp", "unknown", undefined, null]) {
+    assert.equal(advertisesOrchestratorAdditiveRole(driver, caps({ orchestratorAdditive: true })), false);
+    assert.equal(advertisesOrchestratorAdditiveRole(driver, caps({ permissionModes: ["orchestrator"] })), false);
+  }
+  assert.equal(advertisesOrchestratorAdditiveRole("pi", undefined), false);
+
+  // Catalog truth, not session truth: a session snapshot never narrows the attestation.
+  const catalog = caps({ permissionModes: ["default"], orchestratorAdditive: true });
+  assert.equal(mergeSessionCapabilities(catalog, { supportsSteering: false })?.orchestratorAdditive, true,
+    "an overlay leaves the runner's attestation intact");
+  assert.equal(mergeSessionCapabilities(catalog, caps({ permissionModes: ["default"] }))?.orchestratorAdditive, true,
+    "even a full provider-native snapshot does not drop it");
+  assert.equal(
+    mergeSessionCapabilities(catalog, caps({ orchestratorAdditive: false }))?.orchestratorAdditive, false,
+    "a snapshot that states it explicitly still wins");
 });

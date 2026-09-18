@@ -17362,7 +17362,7 @@ test("Orchestrator is an additive role independent of the provider permission mo
     const startsBefore = hub.sentOfType("start_session").length;
     const redefinedRestart = svc.restart(view.id);
     assert.equal(redefinedRestart.status, 409, "a redefined agent fails at the control plane rather than at the runner");
-    assert.match(redefinedRestart.error ?? "", /native Claude Code or Codex harness/);
+    assert.match(redefinedRestart.error ?? "", /native Claude Code, Codex, or Pi harness/);
     assert.equal(hub.sentOfType("start_session").length, startsBefore, "no launch is sent for the refused restart");
     const crossHarness = runnerMeta();
     const crossHarnessAgent = crossHarness.agents.find((item) => item.id === AGENT_ID)!;
@@ -17420,4 +17420,156 @@ test("Orchestrator is an additive role independent of the provider permission mo
   } finally {
     db.close();
   }
+});
+
+test("a non-strict Pi Orchestrator keeps its provider permission mode and is gated per harness", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const PI_AGENT = "pi-orchestrator";
+    const meta = runnerMeta();
+    // A pre-v163 Claude advertisement: the coupled preset mode and no `orchestratorAdditive`.
+    meta.agents.find((item) => item.id === AGENT_ID)!.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "acceptEdits", "orchestrator"],
+    };
+    const piAgent = {
+      id: PI_AGENT, name: "Pi", command: "pi", args: [] as string[], env: {}, driver: "pi" as const,
+      available: true, context: { kind: "native" as const },
+      piAgentControl: { protocolVersion: 1 },
+      // The realistic default-runner shape (#1294 finding 1): a bridge-verified Pi installation on
+      // a runner using the default `provider` execution isolation attests the additive ROLE but
+      // cannot offer the coupled PRESET, whose strict filesystem boundary it lacks. Reading the
+      // preset advertisement as the role advertisement made this combination unreachable.
+      capabilities: {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+        permissionModes: ["default", "dontAsk", "bypassPermissions"],
+        orchestratorAdditive: true,
+      },
+    };
+    db.registerRunner({ ...meta, agents: [...meta.agents, piAgent] }, Date.now(), PROTOCOL_VERSION);
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: PI_AGENT };
+    const human = { defaultOwnerUserId: "human" };
+
+    // A normal Pi session and a non-strict Pi Orchestrator resolve the same provider mode.
+    const normal = svc.createSession({ ...request, role: "normal", config: { permissionMode: "default" } },
+      undefined, undefined, false, false, false, human);
+    assert.ok(normal.ok, normal.error);
+    const normalSpec = hub.sentOfType("start_session").find((m) => m.spec.sessionId === normal.data!.id)?.spec;
+
+    const additive = svc.createSession({ ...request, role: "orchestrator", config: { permissionMode: "default" } },
+      undefined, undefined, false, false, false, human);
+    assert.ok(additive.ok, additive.error);
+    assert.equal(additive.data!.role, "orchestrator");
+    assert.equal(additive.data!.permissionMode, "default",
+      "the role never consumes the Pi permission-mode selection");
+    assert.equal(additive.data!.orchestratorPolicy?.execution.strictProjectIsolation, false);
+    const additiveSpec = hub.sentOfType("start_session").find((m) => m.spec.sessionId === additive.data!.id)?.spec;
+    assert.equal(additiveSpec?.config?.permissionMode, normalSpec?.config?.permissionMode,
+      "the additive Orchestrator launches with the same provider mode as an equivalent normal session");
+    assert.deepEqual(additiveSpec?.orchestrator, { strictProjectIsolation: false },
+      "only the launch policy distinguishes it");
+
+    // Strict Project Isolation still requires the coupled preset for Pi.
+    const strict = svc.createSession({
+      ...request, role: "orchestrator", config: { permissionMode: "default" },
+      orchestrator: { execution: { strictProjectIsolation: true } },
+    }, undefined, undefined, false, false, false, human);
+    assert.equal(strict.status, 409);
+    assert.match(strict.error ?? "", /Strict Project Isolation/);
+
+    // An older runner has no additive Pi shape: refuse with upgrade guidance rather than degrade.
+    db.registerRunner({ ...meta, agents: [...meta.agents, piAgent] }, Date.now(),
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi - 1);
+    const outdated = svc.createSession({ ...request, role: "orchestrator", config: { permissionMode: "default" } },
+      undefined, undefined, false, false, false, human);
+    assert.equal(outdated.status, 409);
+    assert.match(outdated.error ?? "", /protocol-v163 runner/);
+    // Pre-existing limitation, unchanged by #1294: the control plane has never admitted a coupled
+    // Orchestrator preset for Pi, so the additive shape is the only Pi Orchestrator there is.
+    const preset = svc.createSession({ ...request, role: "orchestrator", config: { permissionMode: "orchestrator" } },
+      undefined, undefined, false, false, false, human);
+    assert.equal(preset.ok, false);
+
+    // A Pi installation advertising only the coupled preset mode — never produced by a current
+    // runner — must NOT be read as offering the additive role: that substitution is exactly the
+    // false negative's mirror image, and it would admit a launch with no verified bridge.
+    db.registerRunner({
+      ...meta,
+      agents: [...meta.agents, {
+        ...piAgent, piAgentControl: undefined,
+        capabilities: {
+          ...piAgent.capabilities, orchestratorAdditive: undefined,
+          permissionModes: ["default", "dontAsk", "bypassPermissions", "orchestrator"],
+        },
+      }],
+    }, Date.now(), PROTOCOL_VERSION);
+    const presetOnly = svc.createSession({ ...request, role: "orchestrator", config: { permissionMode: "default" } },
+      undefined, undefined, false, false, false, human);
+    assert.equal(presetOnly.status, 409);
+    assert.match(presetOnly.error ?? "", /requires explicit support from this agent installation/);
+
+    // The Pi bridge rule reaches the control plane as `orchestratorAdditive`: the runner attests it
+    // only once discovery has verified the Agent Control bridge. Losing the bridge withdraws the
+    // attestation, and the additive shape is refused. The preset advertisement is NOT accepted as a
+    // substitute for Pi, because it also encodes the strict boundary the additive role never needs.
+    const unverified = {
+      ...piAgent, piAgentControl: undefined,
+      capabilities: { ...piAgent.capabilities, orchestratorAdditive: undefined },
+    };
+    db.registerRunner({ ...meta, agents: [...meta.agents, unverified] }, Date.now(), PROTOCOL_VERSION);
+    const noBridge = svc.createSession({ ...request, role: "orchestrator", config: { permissionMode: "default" } },
+      undefined, undefined, false, false, false, human);
+    assert.equal(noBridge.status, 409);
+    assert.match(noBridge.error ?? "", /requires explicit support from this agent installation/);
+
+    // Claude and Codex keep working from a pre-v163 advertisement that predates the flag: for them
+    // the preset advertisement is a conservative stand-in, because their preset preconditions are a
+    // superset of their additive ones.
+    const preFlagClaude = svc.createSession(
+      { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID,
+        role: "orchestrator", config: { permissionMode: "acceptEdits" } },
+      undefined, undefined, false, false, false, human,
+    );
+    assert.equal(preFlagClaude.ok, true, preFlagClaude.error);
+
+    // ...and on restart, so a rediscovery that drops the bridge cannot slip through.
+    db.updateSessionStatus(additive.data!.id, "stopped", Date.now());
+    const restartNoBridge = svc.restart(additive.data!.id);
+    assert.equal(restartNoBridge.status, 409);
+    assert.match(restartNoBridge.error ?? "", /advertises the Orchestrator role/);
+
+    // Restoring the bridge lets the same session restart with its permission mode intact.
+    db.registerRunner({ ...meta, agents: [...meta.agents, piAgent] }, Date.now(), PROTOCOL_VERSION);
+    const restarted = svc.restart(additive.data!.id);
+    assert.equal(restarted.ok, true, restarted.error);
+    assert.equal(db.getSession(additive.data!.id)?.permissionMode, "default",
+      "an existing Session keeps its permission mode across restart");
+  } finally { hub.close?.(); db.close?.(); }
+});
+
+test("an ACP Orchestrator still requires the coupled preset and Strict Project Isolation", () => {
+  const { db, svc } = makeHarness();
+  try {
+    const ACP_AGENT = "acp-orchestrator";
+    const meta = runnerMeta();
+    const acpAgent = {
+      id: ACP_AGENT, name: "Claude Agent ACP", command: "npx",
+      args: ["@agentclientprotocol/claude-agent-acp@0.75.1"], env: {}, driver: "acp" as const,
+      available: true, context: { kind: "native" as const },
+      capabilities: {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+        permissionModes: ["default", "orchestrator"],
+      },
+    };
+    db.registerRunner({ ...meta, agents: [...meta.agents, acpAgent] }, Date.now(), PROTOCOL_VERSION);
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: ACP_AGENT };
+    const human = { defaultOwnerUserId: "human" };
+
+    // The ACP provider-mode permission contract is unaudited (#1294): no additive shape exists.
+    const additive = svc.createSession({ ...request, role: "orchestrator", config: { permissionMode: "default" } },
+      undefined, undefined, false, false, false, human);
+    assert.equal(additive.status, 409);
+    assert.match(additive.error ?? "", /unaudited/,
+      "the refusal names the actual reason rather than a generic harness list");
+  } finally { db.close?.(); }
 });

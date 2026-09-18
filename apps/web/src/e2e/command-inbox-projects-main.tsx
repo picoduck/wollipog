@@ -1589,7 +1589,9 @@ declare global {
         permissionModes: string[];
         requirement?: string;
         /** Present the fixture agent as this harness; Codex app-server when omitted. */
-        driver?: "claude-code" | "codex-app-server";
+        driver?: "claude-code" | "codex-app-server" | "pi";
+        /** Publish the runner-attested additive role flag (`capabilities.orchestratorAdditive`). */
+        orchestratorAdditive?: boolean;
         /** Advertise the v160 control-plane capability for an independent Session Role. */
         controlPlaneRole?: boolean;
       }): void;
@@ -1828,8 +1830,13 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
       supportsImages: capabilities?.supportsImages ?? false,
       supportsApprovals: capabilities?.supportsApprovals ?? true,
       permissionModes: [...options.permissionModes],
+      ...(options.orchestratorAdditive ? { orchestratorAdditive: true } : {}),
     };
-    if (options.driver === "claude-code") {
+    if (options.driver === "pi") {
+      agent.driver = "pi";
+      agent.name = "Pi";
+      agent.codexAppServer = undefined;
+    } else if (options.driver === "claude-code") {
       agent.driver = "claude-code";
       agent.name = "Claude Code";
       agent.codexAppServer = undefined;
