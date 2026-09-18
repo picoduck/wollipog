@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import fc from "fast-check";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   commandTargetsManagedWorktree,
   MANAGED_WORKTREE_REFUSAL,
@@ -183,6 +186,18 @@ test("shellCwdAfterCommand follows literal directory changes and gives up on inv
     ["timeout 5 cd apps", root, null],
     ["FOO=1 cd apps", root, null],
     ["cd apps && nice cd ..", root, null],
+    // Newlines are whitespace to the tokenizer: a multi-line command that could move the shell
+    // is unknown; one that cannot has not moved it.
+    ["cd apps\ncd ..", root, null],
+    ["cd apps\n", root, null],
+    ["ls\npwd", root, root],
+    ["python3 - <<'EOF'\nprint(1)\nEOF", root, root],
+    ["cat <<'EOF'\ncd ..\nEOF", root, null],
+    // Compound commands run their body in the current shell.
+    ["if true; then cd ..; fi", `${root}/apps`, null],
+    ["{ cd ..; }", `${root}/apps`, null],
+    ["while true; do cd ..; break; done", `${root}/apps`, null],
+    ["time cd apps", root, null],
     ["(cd apps && ls)", root, null],
     ["cd apps | cat", root, null],
     ["ls && cd apps | cat", root, null],
@@ -202,4 +217,23 @@ test("a relative removal is judged from where the shell actually is", () => {
   assert.equal(commandTargetsManagedWorktree("cd ..", `${protectedPath}/apps/runner`, protection), null);
   assert.equal(commandTargetsManagedWorktree("cd ..", protectedPath, protection), MANAGED_WORKTREE_REFUSAL);
   assert.equal(commandTargetsManagedWorktree("rm -rf ../..", `${protectedPath}/apps/runner`, protection), MANAGED_WORKTREE_REFUSAL);
+});
+
+test("the tracked directory is physical, so a symlink cannot leave it lexically inside the worktree", (t) => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-cwd-")));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const worktree = join(base, "managed");
+  mkdirSync(join(worktree, "apps"), { recursive: true });
+  mkdirSync(join(base, "escape"));
+  symlinkSync(base, join(worktree, "link"));
+  assert.equal(shellCwdAfterCommand("cd link/escape", worktree), join(base, "escape"));
+  assert.equal(shellCwdAfterCommand("cd -P link/escape", worktree), join(base, "escape"));
+  assert.equal(shellCwdAfterCommand(`cd ${join(worktree, "link", "escape")}`, null), join(base, "escape"));
+  assert.equal(shellCwdAfterCommand("cd apps", worktree), join(worktree, "apps"));
+  // A relative removal from there is judged physically: `../managed` is the worktree root.
+  const protections = [{ worktreePath: worktree, repoPath: join(base, "repo") }];
+  assert.equal(
+    commandTargetsManagedWorktree("rm -rf ../managed", shellCwdAfterCommand("cd link/escape", worktree)!, protections),
+    MANAGED_WORKTREE_REFUSAL,
+  );
 });

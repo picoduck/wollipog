@@ -592,6 +592,12 @@ export function commandTargetsManagedWorktree(
  */
 export function shellCwdAfterCommand(command: string, cwd: string | null): string | null {
   if (!command || command.length > MAX_COMMAND_LENGTH || command.includes("\0")) return cwd;
+  // The tokenizer reads a newline as whitespace, so `cd apps\ncd ..` would collapse into one
+  // segment. A multi-line command that mentions anything able to move the shell is unknown; one
+  // that does not cannot have moved it.
+  if (/[\r\n]/u.test(command)) {
+    return /(^|[^\w-])(cd|pushd|popd|dirs|eval|builtin|command|exec|source|\.)(?![\w-])/u.test(command) ? null : cwd;
+  }
   let tokens: ShellToken[];
   try {
     tokens = parse<EnvironmentReference>(command, (env) => ({ env }));
@@ -614,9 +620,11 @@ export function shellCwdAfterCommand(command: string, cwd: string | null): strin
     }
     if (parsed?.executable !== "cd") {
       // Anything that can move the shell without spelling `cd` at the top level: the directory
-      // stack (`pushd -n` moves the stack, not the shell), indirect evaluation, sourced files.
-      return !["pushd", "popd", "dirs", "eval", "builtin", "command", "exec", "source", "."]
-        .includes(parsed?.executable ?? "");
+      // stack (`pushd -n` moves the stack, not the shell), indirect evaluation, sourced files,
+      // and compound commands whose body runs in the current shell.
+      return !["pushd", "popd", "dirs", "eval", "builtin", "command", "exec", "source", ".",
+        "if", "then", "else", "elif", "fi", "while", "until", "do", "done", "for", "select", "case",
+        "esac", "function", "time", "{", "}", "!"].includes(parsed?.executable ?? "");
     }
     // A directory change inside a pipeline runs in a subshell in some shells and not others.
     if (piped || conditional) return false;
@@ -625,8 +633,9 @@ export function shellCwdAfterCommand(command: string, cwd: string | null): strin
     // is installed. Only a segment that literally starts with the builtin is followed.
     const first = segment.find((token) => typeof token === "string");
     if (first !== "cd" && first !== "command") return false;
-    // Only `cd`'s own resolution options are understood (`cd -P dir`, `cd -- dir`); any other
-    // option, and a lone `-` (the previous directory), is unknown.
+    // Only `cd`'s own resolution options are understood (`cd -P dir`, `cd -- dir`) — both end at
+    // the same physical directory, which is what gets recorded; any other option, and a lone `-`
+    // (the previous directory), is unknown.
     let index = 0;
     while (typeof parsed.words[index] === "string" && (parsed.words[index] as string).startsWith("-") &&
         parsed.words[index] !== "-") {
@@ -643,12 +652,15 @@ export function shellCwdAfterCommand(command: string, cwd: string | null): strin
     }
     if (typeof operand !== "string") return false;
     if (operand === "-" || operand.startsWith("~")) return false;
+    // Record the PHYSICAL directory. The shell's own `cd` is logical, but every external command
+    // the veto judges resolves `..` through the kernel, so a symlink beneath the worktree must not
+    // leave the tracked directory lexically inside it while the shell is physically elsewhere.
     if (isAbsolute(operand)) {
-      current = normalize(operand);
+      current = canonicalPath(normalize(operand));
       return true;
     }
     if (current === null) return false;
-    current = normalize(resolve(current, operand));
+    current = canonicalPath(normalize(resolve(current, operand)));
     return true;
   };
   for (const token of tokens) {
