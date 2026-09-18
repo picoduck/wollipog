@@ -216,6 +216,11 @@ test("observed routine inspection attempts are reformulated instead of becoming 
     "pnpm test 2>&1 | tail -40",
     "gh release create v1 -n x; ls",
     "gh workflow run ci.yml && gh run list | head -5",
+    "sed -i 's/old/new/' apps/web/src/App.tsx",
+    "find /workspace -name '*.snap' -delete",
+    "find . -name '*.ts' -exec ./tool.sh {} +",
+    "echo 'oauth_token: secret' > ~/.config/gh/hosts.yml",
+    "gh issue edit 1201 1300 --add-label triage",
   ]) {
     assert.equal(
       classifyRoutineClaudeOrchestratorPermission("Bash", { command }, [1201, 1202]),

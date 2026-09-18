@@ -369,21 +369,36 @@ export type RoutineClaudeOrchestratorPermissionDisposition = "allow" | "reformul
  * tools retain the ordinary interactive path. */
 function hasOnlyScopedIssueWriteTargets(command: string, allowedIssueNumbers: readonly number[]): boolean {
   const allowed = new Set(allowedIssueNumbers.map(String));
+  let tokens: ShellToken[];
+  try {
+    tokens = parse<EnvironmentReference>(command, (env) => ({ env }));
+  } catch {
+    return false;
+  }
   let writes = 0;
-  for (const match of command.matchAll(/\bgh\s+issue\s+(?:edit|comment)\s+(?:['"])?([1-9][0-9]{0,15}|\$[A-Za-z_][A-Za-z0-9_]*)(?:['"])?/gu)) {
+  for (let index = 0; index < tokens.length - 2; index++) {
+    if (tokens[index] !== "gh" || tokens[index + 1] !== "issue" ||
+        (tokens[index + 2] !== "edit" && tokens[index + 2] !== "comment")) continue;
     writes += 1;
-    const target = match[1]!;
-    if (!target.startsWith("$")) {
-      if (!allowed.has(target)) return false;
-      continue;
+    let targetCount = 0;
+    for (let argumentIndex = index + 3; argumentIndex < tokens.length; argumentIndex++) {
+      const token = tokens[argumentIndex];
+      if (isOperator(token) && COMPOSITION_OPERATORS.has(token.op)) break;
+      if (isPlainArgument(token) && ISSUE_OR_PR_NUMBER.test(token)) {
+        if (!allowed.has(token)) return false;
+        targetCount += 1;
+      } else if (isEnvironmentReference(token)) {
+        const variable = token.env;
+        const loop = new RegExp(
+          `\\bfor\\s+${variable}\\s+in\\s+([1-9][0-9]{0,15}(?:\\s+[1-9][0-9]{0,15})*)\\s*;`,
+          "u",
+        ).exec(command);
+        const numbers = loop?.[1]?.trim().split(/\s+/u) ?? [];
+        if (numbers.length === 0 || numbers.some((number) => !allowed.has(number))) return false;
+        targetCount += 1;
+      }
     }
-    const variable = target.slice(1);
-    const loop = new RegExp(
-      `\\bfor\\s+${variable}\\s+in\\s+([1-9][0-9]{0,15}(?:\\s+[1-9][0-9]{0,15})*)\\s*;`,
-      "u",
-    ).exec(command);
-    const numbers = loop?.[1]?.trim().split(/\s+/u) ?? [];
-    if (numbers.length === 0 || numbers.some((number) => !allowed.has(number))) return false;
+    if (targetCount === 0) return false;
   }
   return writes > 0;
 }
@@ -417,6 +432,24 @@ const REFORMULATABLE_LOCAL_COMMANDS = new Set([
   "find", "grep", "sed", "ls", "head", "tail", "wc", "awk", "echo", "[",
 ]);
 
+function isKnownLocalCoordinationAttempt(tokens: ShellToken[], index: number, command: string): boolean {
+  const name = tokens[index];
+  if (!isPlainArgument(name) || !REFORMULATABLE_LOCAL_COMMANDS.has(name)) return false;
+  const args: string[] = [];
+  for (let argumentIndex = index + 1; argumentIndex < tokens.length; argumentIndex++) {
+    const token = tokens[argumentIndex];
+    if (isOperator(token) && [";", "&&", "||", "|", "("].includes(token.op)) break;
+    if (isPlainArgument(token)) args.push(token);
+  }
+  if (name === "sed" && args.some((arg) => arg === "-i" || arg.startsWith("-i") ||
+      arg === "--in-place" || arg.startsWith("--in-place="))) return false;
+  if (name === "find" && args.some((arg) => arg === "-delete" || arg === "-exec" ||
+      arg === "-execdir" || arg === "-ok" || arg === "-okdir" ||
+      arg === "-fls" || arg === "-fprint" || arg === "-fprint0" || arg === "-fprintf")) return false;
+  if (name === "awk" && /\b(?:system\s*\(|getline\b)/u.test(command)) return false;
+  return true;
+}
+
 function isKnownGitCoordinationAttempt(tokens: ShellToken[], index: number): boolean {
   let commandIndex = index + 1;
   if (tokens[commandIndex] === "-C") commandIndex += 2;
@@ -444,6 +477,13 @@ function hasOnlyKnownCoordinationCommands(command: string): boolean {
   } catch {
     return false;
   }
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (!isOperator(token)) continue;
+    if (token.op === ">" && tokens[index + 1] === "/dev/null") continue;
+    if (token.op === ">&" && tokens[index + 1] === "1" && tokens[index - 1] === "2") continue;
+    if ([">", ">>", ">&", "&>"].includes(token.op)) return false;
+  }
   let expectsCommand = true;
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index];
@@ -470,7 +510,7 @@ function hasOnlyKnownCoordinationCommands(command: string): boolean {
       if (!isKnownGhCoordinationAttempt(tokens, index)) return false;
     } else if (token === "node") {
       if (!/\bnode\s+-p\s+["']require\(["']\.\/package\.json["']\)\.version["']/u.test(command)) return false;
-    } else if (!REFORMULATABLE_LOCAL_COMMANDS.has(token)) {
+    } else if (!isKnownLocalCoordinationAttempt(tokens, index, command)) {
       return false;
     }
     expectsCommand = false;
