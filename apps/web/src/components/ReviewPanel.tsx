@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   isTerminal,
   normalizeSourcePath,
@@ -11,6 +11,7 @@ import {
   type GitDiffScope,
   type GitForgeInfo,
   type GitPrInfo,
+  type GitStatusInfo,
   type ReviewFinding,
   type ReviewFindingSummary,
   type SessionView,
@@ -26,11 +27,28 @@ import {
   type StagingControls,
 } from "./GitDiffViewer.js";
 import type { GitStatus } from "./useGitStatus.js";
+import {
+  changeSetSignature,
+  reanchorFindingStore,
+  EMPTY_FINDING_ANCHOR_STORE,
+  type FindingAnchorStore,
+} from "../review-anchors.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { safeExternalHref } from "../external-href.js";
 import { sourceKind } from "../pinned-summary.js";
+
+/** No diff on screen means nothing is anchored; one shared empty set keeps that allocation-free. */
+const NO_ANCHORED_FINDINGS: ReadonlySet<string> = new Set<string>();
+
+/**
+ * How often the diff re-reads itself while a turn is running. The status reader deliberately stops
+ * polling during a turn, so its observation cannot drive the refresh; this bounded cadence is what
+ * keeps the pane showing the agent's edits as they land instead of freezing until the turn settles
+ * (#1204). Staging controls are withheld during a turn, so nothing here can race a stage reply.
+ */
+const ACTIVE_TURN_DIFF_RELOAD_MS = 10_000;
 
 /**
  * Git / PR workflow for a worktree session: review the worktree status, commit the
@@ -78,6 +96,13 @@ export function ReviewPanel({
   // non-fatal notice shown when a stage raced the worktree/index (GIT_STALE / GIT_APPLY_FAILED).
   const [hunkBusy, setHunkBusy] = useState<string | null>(null);
   const [stageNotice, setStageNotice] = useState<string | null>(null);
+  // An automatic reload (#1204) never hijacks the error surface — but it must not fail silently
+  // either, or the diff below would keep contradicting the header with nothing to say why. This
+  // drives the manual refresh affordance instead.
+  const [autoReloadFailed, setAutoReloadFailed] = useState(false);
+  // Which findings are still attached to the line they were written against, per lineage (#1203).
+  // One slot per scope+pane, so leaving a lineage and coming back does not lose what it carried.
+  const [anchors, setAnchors] = useState<FindingAnchorStore>(EMPTY_FINDING_ANCHOR_STORE);
   const [findings, setFindings] = useState<ReviewFinding[]>([]);
   const [findingSummary, setFindingSummary] = useState<ReviewFindingSummary | null>(null);
   const [selectedFindings, setSelectedFindings] = useState<Set<string>>(new Set());
@@ -98,6 +123,22 @@ export function ReviewPanel({
   // then be gated out of display below, leaving a silently blank pane.
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
+  // Which change set the loaded diff describes, as the status reader saw it (#1204). Set from the
+  // signature captured when the read was *launched*, so a write that landed mid-read still counts
+  // as unobserved and schedules another pass.
+  const diffSignatureRef = useRef<string | null>(null);
+  const statusSignatureRef = useRef<string | null>(null);
+  // The busy flag belongs to the newest FOREGROUND read. Any newer request takes ownership away,
+  // and whoever takes it must clear the flag: a background reload that superseded a pending
+  // foreground one would otherwise leave Refresh stuck on "Loading…" forever, because the
+  // superseded request is barred from clearing it and the background winner never sets it.
+  const busyOwnerRef = useRef<number | null>(null);
+  // How many diff reads are in flight. The active-turn cadence skips a tick while one is pending,
+  // so a read slower than the interval cannot have every response superseded by the next request
+  // (the pane would never update) or pile up unbounded for the length of the turn.
+  const pendingDiffReadsRef = useRef(0);
+  const statusSignature = useMemo(() => changeSetSignature(status), [status]);
+  statusSignatureRef.current = statusSignature;
   const uid = useId();
   const commitId = `${uid}-commit`;
 
@@ -121,23 +162,84 @@ export function ReviewPanel({
   const fineDiffHint = runnerCapabilityRequirement(runnerProtocolVersion, "fineGrainedDiff", "Staged panes, line staging, and discard");
   const diffEnabled = runnerOnline && !!session.worktreePath && diffSupported;
 
-  const loadDiff = async () => {
+  /**
+   * Read the diff for the scope selected *right now* (see `scopeRef`).
+   *
+   * `background` marks a reload nobody asked for — a status observation moved the change set, or
+   * the active-turn cadence came round. Those skip the busy flag, so the Refresh control and the
+   * disabled-while-loading surface don't flicker under the reader, and they leave the current diff
+   * on screen when the read fails: a transient error must not blank the pane and take the unsent
+   * drafts and anchored findings attached to it with it (#1203). A user-driven read keeps the old
+   * behaviour of surfacing the failure.
+   */
+  const loadDiff = async (options?: { background?: boolean }) => {
     if (!diffEnabled) return;
+    const background = options?.background === true;
+    const observed = statusSignatureRef.current;
     const reqId = ++diffReqRef.current;
-    setDiffBusy(true);
-    setDiffError(null);
+    if (background) {
+      // This request just superseded whatever the foreground read was going to render, so the
+      // foreground read's busy flag has no owner left to clear it.
+      if (busyOwnerRef.current !== null) {
+        busyOwnerRef.current = null;
+        setDiffBusy(false);
+      }
+    } else {
+      busyOwnerRef.current = reqId;
+      setDiffBusy(true);
+      setDiffError(null);
+    }
+    pendingDiffReadsRef.current += 1;
     try {
       const { diff: d } = await api.gitDiff(session.id, scopeRef.current);
       if (diffReqRef.current !== reqId) return; // superseded by a newer scope/refresh
+      diffSignatureRef.current = observed;
       setDiff(d);
+      setDiffError(null);
+      setAutoReloadFailed(false);
     } catch (e) {
       if (diffReqRef.current !== reqId) return;
+      if (background) {
+        setAutoReloadFailed(true);
+        return;
+      }
+      setAutoReloadFailed(false);
       setDiff(null);
       setDiffError((e as Error).message);
     } finally {
-      // Only the latest request owns the busy flag; a superseded one must not clear it.
-      if (diffReqRef.current === reqId) setDiffBusy(false);
+      pendingDiffReadsRef.current -= 1;
+      // Only the request that set the flag clears it, so a superseded foreground read cannot report
+      // "done" while a newer foreground read is still loading.
+      if (busyOwnerRef.current === reqId) {
+        busyOwnerRef.current = null;
+        setDiffBusy(false);
+      }
     }
+  };
+
+  /**
+   * Install the fresh read a stage / line-stage / discard reply carried.
+   *
+   * Shared by all three so they agree on what a reply means: the status and the diff in it come
+   * from one runner read, so recording that change set keeps the observation watcher below from
+   * immediately re-reading a diff that is already current.
+   */
+  const installMutationRead = (payload: { status?: GitStatusInfo | null; diff?: GitDiffInfo | null }) => {
+    if (payload.status) git.install(payload.status);
+    if (!payload.diff || scopeRef.current !== "uncommitted") return;
+    // The reply IS a fresh read — supersede any in-flight loadDiff so a slower response
+    // can't clobber it. Only when installing: if the user switched scope mid-stage, that
+    // scope's own loadDiff must stay in charge (bumping here would orphan it and wedge the
+    // pane on "Loading diff…").
+    diffReqRef.current += 1;
+    if (payload.status) diffSignatureRef.current = changeSetSignature(payload.status);
+    busyOwnerRef.current = null;
+    setDiffBusy(false);
+    setDiff(payload.diff);
+    setDiffError(null);
+    // This reply IS a successful paired read of both halves, so any earlier warning that the diff
+    // had fallen behind the file list is now answered.
+    setAutoReloadFailed(false);
   };
 
   const installFindings = (next: { findings: ReviewFinding[]; summary: ReviewFindingSummary }) => {
@@ -284,6 +386,52 @@ export function ReviewPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, turnActive]);
 
+  // A stage / line-stage / discard reply is itself a fresh read, and a Commit or PR run reloads on
+  // completion — so a reload launched underneath one would either be superseded by it or supersede
+  // it. Defer instead: every deferring condition is a dependency of the watcher below, which runs
+  // again the moment the mutation settles (#1204).
+  const reloadDeferred = hunkBusy !== null || busy !== null;
+  // A diff read that finished before the status reader had reported anything is recorded against a
+  // null observation, and stays unread until a real one confirms it. Adopting that first observation
+  // instead would be unverified: the status read completes AFTER the diff read, so it can legitimately
+  // describe a change set the diff does not have, and the header would sit ahead of the diff in
+  // silence. One extra read on panel open is the cheaper mistake.
+  const observationUnread = statusSignature !== null && statusSignature !== diffSignatureRef.current;
+
+  // #1204: the branch line, changed-file count, and file list come from the shared status reader;
+  // the diff came from its own mount-and-turn-boundary schedule, so an edit from an editor, the
+  // terminal dock, or the agent moved one and not the other and the panel contradicted itself.
+  // Follow the same observation: when the status reader reports a change set this diff does not
+  // describe, re-read it in the background.
+  useEffect(() => {
+    if (!diffEnabled || !diff) return;
+    if (!observationUnread || reloadDeferred) return;
+    void loadDiff({ background: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, diffEnabled, diff, observationUnread, reloadDeferred, statusSignature]);
+
+  // During an active turn the status reader stops polling, so the watcher above has nothing to
+  // observe — the diff would sit frozen while the agent rewrites the worktree. Re-read it on a
+  // bounded cadence instead, and only while the tab is visible so a backgrounded panel is free.
+  const reloadDeferredRef = useRef(reloadDeferred);
+  reloadDeferredRef.current = reloadDeferred;
+  useEffect(() => {
+    if (!diffEnabled || !turnActive) return;
+    const reload = () => {
+      if (reloadDeferredRef.current || pendingDiffReadsRef.current > 0) return;
+      if (document.visibilityState !== "visible") return;
+      void loadDiff({ background: true });
+    };
+    const timer = setInterval(reload, ACTIVE_TURN_DIFF_RELOAD_MS);
+    // Foregrounding catches up at once rather than waiting out a tick the hidden tab skipped.
+    document.addEventListener("visibilitychange", reload);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", reload);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, diffEnabled, turnActive]);
+
   /** `all` forces commit-everything even with staged hunks — the escape hatch out of a partial stage. */
   const doCommit = async (all = false) => {
     setBusy("commit");
@@ -324,17 +472,7 @@ export function ReviewPanel({
     setStageNotice(null);
     try {
       const d = await api.gitStageHunk(session.id, { direction, filePath, hunkIndex, diffHash: diff.diffHash });
-      if (d.status) git.install(d.status);
-      if (d.diff && scopeRef.current === "uncommitted") {
-        // The reply IS a fresh read — supersede any in-flight loadDiff so a slower response
-        // can't clobber it. Only when installing: if the user switched scope mid-stage, that
-        // scope's own loadDiff must stay in charge (bumping here would orphan it and wedge the
-        // pane on "Loading diff…").
-        diffReqRef.current += 1;
-        setDiffBusy(false);
-        setDiff(d.diff);
-        setDiffError(null);
-      }
+      installMutationRead(d);
     } catch (e) {
       if (e instanceof ApiError && (e.code === "GIT_STALE" || e.code === "GIT_APPLY_FAILED")) {
         // A race, not a failure: the worktree or index moved. Tell the user and refetch.
@@ -367,13 +505,7 @@ export function ReviewPanel({
       const d = await api.gitStageLines(session.id, {
         direction, filePath, hunkIndex, lineIndices, diffHash: diff.fineDiffHash,
       });
-      if (d.status) git.install(d.status);
-      if (d.diff && scopeRef.current === "uncommitted") {
-        diffReqRef.current += 1;
-        setDiffBusy(false);
-        setDiff(d.diff);
-        setDiffError(null);
-      }
+      installMutationRead(d);
     } catch (e) {
       if (e instanceof ApiError && (e.code === "GIT_STALE" || e.code === "GIT_APPLY_FAILED")) {
         setStageNotice(`${e.message} — the canonical panes were refreshed; check the selected lines and try again.`);
@@ -398,13 +530,7 @@ export function ReviewPanel({
     setStageNotice(null);
     try {
       const d = await api.gitDiscardFile(session.id, { filePath, diffHash: diff.fineDiffHash });
-      if (d.status) git.install(d.status);
-      if (d.diff && scopeRef.current === "uncommitted") {
-        diffReqRef.current += 1;
-        setDiffBusy(false);
-        setDiff(d.diff);
-        setDiffError(null);
-      }
+      installMutationRead(d);
     } catch (e) {
       if (e instanceof ApiError && (e.code === "GIT_STALE" || e.code === "GIT_APPLY_FAILED")) {
         setStageNotice(`${e.message} — the diff was refreshed; review the file before retrying.`);
@@ -445,17 +571,47 @@ export function ReviewPanel({
   // until the new one lands, so gate the viewer on the response's own scope. A same-scope refresh
   // still shows the current diff while reloading (stale-while-revalidate).
   const scopedDiff = diff && diff.scope === scope ? diff : null;
-  const shownDiff = scopedDiff && scope === "uncommitted" && fineDiffSupported && pane !== "combined"
-    ? {
-        ...scopedDiff,
-        diffHash: pane === "staged"
-          ? scopedDiff.stagedDiffHash ?? scopedDiff.diffHash
-          : scopedDiff.unstagedDiffHash ?? scopedDiff.diffHash,
-        files: pane === "staged" ? scopedDiff.stagedFiles ?? [] : scopedDiff.unstagedFiles ?? [],
-        stats: pane === "staged" ? scopedDiff.stagedStats ?? { filesChanged: 0, insertions: 0, deletions: 0 }
-          : scopedDiff.unstagedStats ?? { filesChanged: 0, insertions: 0, deletions: 0 },
-      }
-    : scopedDiff;
+  // Memoized on the response plus the pane that projects it: the viewer keys its file cards and its
+  // anchor bookkeeping off this object's identity, so re-minting it for unrelated panel state (a
+  // keystroke in the commit message) would throw that work away every render.
+  const shownDiff = useMemo(
+    () => scopedDiff && scope === "uncommitted" && fineDiffSupported && pane !== "combined"
+      ? {
+          ...scopedDiff,
+          diffHash: pane === "staged"
+            ? scopedDiff.stagedDiffHash ?? scopedDiff.diffHash
+            : scopedDiff.unstagedDiffHash ?? scopedDiff.diffHash,
+          files: pane === "staged" ? scopedDiff.stagedFiles ?? [] : scopedDiff.unstagedFiles ?? [],
+          stats: pane === "staged" ? scopedDiff.stagedStats ?? { filesChanged: 0, insertions: 0, deletions: 0 }
+            : scopedDiff.unstagedStats ?? { filesChanged: 0, insertions: 0, deletions: 0 },
+        }
+      : scopedDiff,
+    [fineDiffSupported, pane, scope, scopedDiff],
+  );
+
+  // Which change set the findings and the unsent drafts belong to. A pane switch is a different
+  // lineage even at the same line number: pane-local anchor identities exist so a finding authored
+  // against the staged pane is never re-attached to the unstaged one.
+  const diffLineage = `${scope}:${scope === "uncommitted" && fineDiffSupported ? pane : "combined"}`;
+  // Derived during render and committed with `setState`, the sanctioned way to adjust state when
+  // the inputs change: React discards this render and re-runs it immediately, so no frame of
+  // wrongly-stale findings is ever painted — and because it is state rather than a ref, an
+  // interrupted render's conclusions are abandoned with it instead of becoming the starting point
+  // for a render of a diff that was never replaced. `reanchorFindingStore` returns the same store
+  // when nothing observable moved, which is what terminates this.
+  const nextAnchors = shownDiff
+    ? reanchorFindingStore(anchors, shownDiff, diffLineage, findings)
+    : anchors;
+  if (nextAnchors !== anchors) setAnchors(nextAnchors);
+  const anchoredFindingIds = shownDiff
+    ? nextAnchors.get(diffLineage)?.anchored ?? NO_ANCHORED_FINDINGS
+    : NO_ANCHORED_FINDINGS;
+
+  // Automatic reloads cover the ordinary cases; this is the escape hatch for the two they cannot.
+  // Either a reload is deferred behind a mutation reply that owns the pane, or the last automatic
+  // one failed — both leave the diff behind a header that already moved, which #1204 requires the
+  // panel to admit rather than show silently.
+  const diffLagsStatus = !!shownDiff && (autoReloadFailed || (observationUnread && reloadDeferred));
 
   // Stage buttons exist only where the identity is defined (the uncommitted diff), the runner can
   // act, and no turn is running (an agent writing mid-stage would race the index). When undefined
@@ -562,7 +718,7 @@ export function ReviewPanel({
               </button>
             )}
           </div>
-          <button className="btn ghost sm" onClick={loadDiff} disabled={diffBusy || !runnerOnline || !diffSupported}>
+          <button className="btn ghost sm" onClick={() => void loadDiff()} disabled={diffBusy || !runnerOnline || !diffSupported}>
             {diffBusy ? "Loading…" : "↻ Refresh"}
           </button>
         </div>
@@ -600,6 +756,18 @@ export function ReviewPanel({
         </div>
         {diffError && <div className="composer-error">{diffError}</div>}
         {stageNotice && <div className="hint warn">{stageNotice}</div>}
+        {diffLagsStatus && (
+          // Amber only for the failure: it persists until the user acts, while a deferred reload
+          // heals itself the moment the mutation settles and must not flash a warning to say so.
+          <div className={autoReloadFailed ? "hint warn" : "hint"} role="status">
+            {autoReloadFailed
+              ? "The last automatic refresh of this diff did not land, so it may be older than the file list above."
+              : "The changes on disk moved since this diff was read — it reloads once the action in progress finishes."}{" "}
+            <button className="btn ghost sm" onClick={() => void loadDiff()} disabled={diffBusy || !runnerOnline || !diffSupported}>
+              ↻ Refresh Diff
+            </button>
+          </div>
+        )}
         {/* Keyed off !shownDiff (not diffBusy): after a tab click there is one paint before
             the load effect sets busy, and the pane must not flash blank in between. Gated on
             diffEnabled — with loading intentionally disabled (runner offline), an indefinite
@@ -617,6 +785,8 @@ export function ReviewPanel({
             onAttachWorkspaceReference={onAttachWorkspaceReference}
             review={{
               findings,
+              anchoredFindingIds,
+              lineage: diffLineage,
               creating: creatingFinding,
               busyFindingId: findingBusyId,
               onCreate: createFinding,
@@ -668,7 +838,9 @@ export function ReviewPanel({
         ) : (
           <div className="review-findings-list">
             {findings.filter((finding) => finding.status === "open" || finding.status === "sent").map((finding) => {
-              const stale = shownDiff?.diffHash !== finding.diffHash;
+              // Stale means the anchored content actually moved — not merely that the change-set
+              // hash advanced, which every unrelated stage and agent edit does (#1203).
+              const stale = !anchoredFindingIds.has(finding.findingId);
               const remoteOnly = finding.remote?.subjectType === "remote";
               const sourcePath = remoteOnly ? null : normalizeSourcePath(finding.filePath);
               const sourceLocation = sourcePath ? {

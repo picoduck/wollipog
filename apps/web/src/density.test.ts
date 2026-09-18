@@ -85,9 +85,25 @@ test("every class the harness renders is a class the app renders", () => {
   // diff-gutter-new")` and `rowClass("ui-row-nav", disabled)` are both production markup, and an
   // attribute-only scan called them invented. Whole tokens still, so `board-col` cannot pass on the
   // strength of `dataKind="board-column"` the way it did before.
+  //
+  // Two corrections to how the literals are cut, because the original scan only passed by luck.
+  //
+  // Comments go first: an apostrophe in prose ("the file's hunks") is otherwise read as an opening
+  // quote, and the scan then swallows every `className="…"` after it until the next apostrophe —
+  // which is why this directory's real classes could read as invented. Stripping is also stricter,
+  // since a class named only in a comment stops counting as rendered.
+  //
+  // Then each delimiter closes with ITSELF, so an apostrophe inside a double-quoted string cannot
+  // desynchronize the rest of the file. This very directory ships one: `"renamed — stage/unstage
+  // isn't available for renames yet"`.
+  const withoutComments = (source: string) => source
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+  const LITERAL = /"((?:[^"\\\n]|\\.)*)"|'((?:[^'\\\n]|\\.)*)'|`((?:[^`\\]|\\.)*)`/g;
   const rendered = new Set(
-    sources.flatMap((source) => [...source.matchAll(/["'`]([^"'`]*)["'`]/g)]
-      .flatMap((match) => match[1]!.replace(/\$\{[^}]*\}/g, " ").split(/\s+/)))
+    sources.flatMap((source) => [...withoutComments(source).matchAll(LITERAL)]
+      .flatMap((match) => (match[1] ?? match[2] ?? match[3] ?? "")
+        .replace(/\$\{[^}]*\}/g, " ").split(/\s+/)))
       .filter((token) => /^[a-z][a-z0-9-]*$/.test(token)),
   );
 
