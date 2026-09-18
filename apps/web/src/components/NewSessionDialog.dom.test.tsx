@@ -1998,8 +1998,8 @@ test("Integration Isolation is an independent control that discloses what it rem
     assert.equal(createButton(fixture.container).disabled, false);
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests[0]?.orchestrator?.execution?.integrationIsolation, true);
-    assert.equal(fixture.requests[0]?.orchestrator?.execution?.strictProjectIsolation, false,
-      "the integration policy is sent without dragging the project boundary with it");
+    assert.equal(fixture.requests[0]?.orchestrator?.execution?.strictProjectIsolation, undefined,
+      "an untouched project boundary keeps the provenance of the default it came from");
     assert.equal(fixture.requests[0]?.config?.permissionMode, undefined,
       "and without consuming the provider permission mode");
   } finally { await unmountFixture(fixture); }

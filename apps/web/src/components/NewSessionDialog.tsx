@@ -1081,12 +1081,18 @@ export function NewSessionDialog({
           ...(orchestratorOverrides.has("delegation.parentControl") ? { parentControl: orchestratorDraft.delegation.parentControl } : {}),
           ...(Object.keys(decisionOverrides).length ? { decisions: decisionOverrides } : {}),
         },
+        // Each execution policy is sent only when this session actually overrode it, so an
+        // untouched one keeps the provenance of the default it came from. Integration Isolation is
+        // withheld while it is implied: the preset and Strict Project Isolation both launch without
+        // integrations, the server derives `true` and attributes it to the policy that implied it,
+        // and an explicit `false` in that state is a shape the control plane refuses.
         ...(executionOverridden ? { execution: {
-          strictProjectIsolation: orchestratorDraft.execution.strictProjectIsolation,
-          // Never send a `false` the server would refuse: the preset and Strict Project Isolation
-          // both launch without integrations, and the control plane rejects an explicit override
-          // that contradicts them.
-          integrationIsolation: effectiveIntegrationIsolation,
+          ...(orchestratorOverrides.has("execution.strictProjectIsolation")
+            ? { strictProjectIsolation: orchestratorDraft.execution.strictProjectIsolation }
+            : {}),
+          ...(orchestratorOverrides.has("execution.integrationIsolation") && !integrationIsolationImplied
+            ? { integrationIsolation: orchestratorDraft.execution.integrationIsolation }
+            : {}),
         } } : {}),
       } : undefined;
       const session = await api.createSession({

@@ -6586,7 +6586,14 @@ export function ComposerPlusMenu({
                       <div><dt>Maximum Concurrent Children</dt><dd>{session.orchestratorPolicy.behavior.maximumConcurrentChildren}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.maximumConcurrentChildren.replaceAll("_", " "))}</small></dd></div>
                       <div><dt>Follow-Ups</dt><dd>{titleCaseLabel(session.orchestratorPolicy.behavior.followUps.replaceAll("_", " "))}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.followUps.replaceAll("_", " "))}</small></dd></div>
                       <div><dt>Completion</dt><dd>{titleCaseLabel(session.orchestratorPolicy.behavior.completion.replaceAll("_", " "))}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.completion.replaceAll("_", " "))}</small></dd></div>
-                      <div><dt>Integration Isolation</dt><dd>{session.orchestratorPolicy.execution.integrationIsolation ? "Enabled" : "Disabled"}<small>{titleCaseLabel(session.orchestratorPolicy.sources.execution.integrationIsolation.replaceAll("_", " "))}</small></dd></div>
+                      {/* An older control plane publishes no execution block at all, and one between
+                          v144 and v164 publishes it without this field. Read both defensively and
+                          fall back the same way the stored policy's own migration does: a strict
+                          policy is only ever delivered by a preset launch, which carries no user
+                          integration. */}
+                      <div><dt>Integration Isolation</dt><dd>{(session.orchestratorPolicy.execution?.integrationIsolation ??
+                        session.orchestratorPolicy.execution?.strictProjectIsolation ?? true) ? "Enabled" : "Disabled"}<small>{titleCaseLabel(
+                        (session.orchestratorPolicy.sources.execution?.integrationIsolation ?? "legacy_session").replaceAll("_", " "))}</small></dd></div>
                       {session.orchestratorCampaign && <>
                         <div><dt>Children</dt><dd>{session.orchestratorCampaign.children.total}<small>{session.orchestratorCampaign.children.verified} Verified · {session.orchestratorCampaign.children.active} Active · {session.orchestratorCampaign.children.waitingHuman} Waiting for Human · {session.orchestratorCampaign.children.blocked} Blocked</small></dd></div>
                         <div><dt>Follow-Up Recommendations</dt><dd>{session.orchestratorCampaign.followUps.unique}<small>{session.orchestratorCampaign.followUps.duplicates} Duplicates Skipped</small></dd></div>
