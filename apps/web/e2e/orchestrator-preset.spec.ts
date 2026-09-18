@@ -197,3 +197,56 @@ for (const scenario of [
   });
   }
 }
+
+for (const scenario of [
+  { name: "desktop light", viewport: { width: 1280, height: 1000 }, theme: "light" },
+  { name: "mobile dark", viewport: { width: 390, height: 844 }, theme: "dark" },
+] as const) {
+  test(`bridge-verified Pi offers only the additive Orchestrator role ${scenario.name}`, async ({ page }, testInfo) => {
+    await page.setViewportSize(scenario.viewport);
+    await page.evaluate(({ theme, protocolVersion }) => {
+      document.documentElement.dataset.theme = theme;
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(protocolVersion);
+      // The default runner isolation cannot launch Pi's coupled preset, so the installation
+      // advertises the additive role without the "orchestrator" permission mode (#1294).
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.setOrchestratorAgentFixture({
+        context: "native",
+        permissionModes: ["default", "bypassPermissions"],
+        driver: "pi",
+        orchestratorAdditive: true,
+        controlPlaneRole: true,
+      });
+    }, { theme: scenario.theme, protocolVersion: PROTOCOL_VERSION });
+    await page.getByRole("tab", { name: /Alpha/ }).click();
+    await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+    await page.getByRole("menuitem", { name: "New Session Here" }).click();
+    const dialog = page.getByRole("dialog", { name: "New Session" });
+    const providerPermissions = dialog.getByRole("group", { name: "Provider Permissions" });
+    const orchestratorCard = presetCard(dialog, /^Orchestrator/);
+    await expect(orchestratorCard).not.toHaveAttribute("aria-disabled", "true");
+    await orchestratorCard.click();
+    await expect(orchestratorCard).toHaveAttribute("aria-checked", "true");
+    await expect(providerPermissions).toContainText("Harness Default");
+    await expect(providerPermissions).not.toContainText("Orchestrator Preset");
+    await providerPermissions.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath("pi-orchestrator-independent.png"), fullPage: true });
+
+    // Strict isolation is delivered by the preset this installation cannot launch: it must block
+    // with a reason rather than let the user submit a shape the control plane refuses.
+    await dialog.getByRole("button", { name: /Strict Project Isolation: Disabled/ }).click();
+    await dialog.getByRole("option", { name: /^Enabled/ }).click();
+    const blocked = dialog.getByText(/Strict Project Isolation is delivered by the Orchestrator preset, which this agent installation cannot launch here/);
+    await expect(blocked).toBeVisible();
+    await blocked.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath("pi-strict-blocked.png"), fullPage: true });
+    await expect(dialog.getByRole("button", { name: "Create Session" })).toBeDisabled();
+
+    await dialog.getByRole("button", { name: /Strict Project Isolation: Enabled/ }).click();
+    await dialog.getByRole("option", { name: /^Disabled/ }).click();
+    await dialog.getByRole("button", { name: "Create Session" }).click();
+    await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
+      .toMatchObject({ role: "orchestrator" });
+    expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()?.config?.permissionMode))
+      .toBeUndefined();
+  });
+}
