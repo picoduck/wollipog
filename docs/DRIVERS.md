@@ -143,8 +143,21 @@ session and only gains the campaign tools on the general Agent Control MCP serve
 `mcp__wollipog__*` pre-authorization, the Orchestrator instructions, and Project Location read
 access; hooks, settings sources, the built-in tool inventory, and configured MCP servers are left
 untouched. `permissionMode: "orchestrator"` now names the coupled Orchestrator preset, which remains
-the only shape for Strict Project Isolation, Native TUI, Codex, Pi, ACP, and pre-v160 peers. The
+the only shape for Strict Project Isolation, Native TUI, Pi, ACP, and pre-v160 peers. The
 control plane refuses the independent combination on older runners instead of degrading silently.
+
+Protocol v161 extends the additive role to native Codex and Codex App Server (ADR 0009). A
+non-strict Codex Orchestrator keeps the selected mode's sandbox and approval semantics, its apps,
+plugins, hooks, multi-agent and multimodal tools, and every configured MCP server; the launch adds
+only `-c mcp_servers.wollipog=<table>` (a dotted override that merges into the user's table, so no
+`--strict-config`, no `--disable`, and no MCP isolation probe) and `-c developer_instructions=<the
+Orchestrator instructions>`. Codex has no append form for instructions — the value is a plain
+string, the last `-c` wins, and `additional_developer_instructions` is managed-configuration-only —
+so a user's own top-level `developer_instructions` is replaced for the duration of an Orchestrator
+session, exactly as today's coupled preset already does. Strict Project Isolation keeps the
+restricted Codex preset and its MCP isolation probe. Each harness carries its own capability gate:
+`orchestratorAdditiveRole` (v160) for Claude Code, `orchestratorAdditiveCodex` (v161) for the Codex
+drivers; creation and restart refuse a combination the runner cannot enforce, naming the version.
 
 Strict Project Isolation preserves the scratch-only boundary. Claude Bash-prefix rules alone are
 insufficient because an otherwise read-only command can redirect output into a Project Location, so

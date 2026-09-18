@@ -820,9 +820,9 @@ export function NewSessionDialog({
     : projectSelection === NO_PROJECT_SELECTION
       ? !!runnerId && (!!workspaceId || !!browsedPath)
       : !!selectedProject && projectLocationLaunchable;
-  // Independent provider permissions (#1281): a non-strict native Claude Code Orchestrator keeps
-  // the same permission mode, tools, hooks, and MCP servers as a normal session. The sentence
-  // that explains why the preset still applies is also what decides that it applies.
+  // Independent provider permissions (#1281, #1293): a non-strict native Claude Code or Codex
+  // Orchestrator keeps the same permission mode, tools, hooks, and MCP servers as a normal session.
+  // The sentence that explains why the preset still applies is also what decides that it applies.
   const orchestratorPresetReason = orchestrator
     ? orchestratorPresetPermissionsReason({
       controlPlaneSupportsRole: orchestratorRoleSupported,

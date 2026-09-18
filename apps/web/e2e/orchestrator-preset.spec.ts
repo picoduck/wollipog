@@ -168,7 +168,7 @@ for (const scenario of [
     // #1281: the role is additive. The provider permission summary is unchanged by the role and
     // the harness keeps its ordinary modes, so no preset is announced.
     await expect(providerPermissions).toContainText("Harness Default");
-    await expect(providerPermissions).toContainText(/same permission modes as a normal session/);
+    await expect(providerPermissions).toContainText(/same permission modes, integrations, and credentials as a normal session/);
     await expect(providerPermissions).not.toContainText("Orchestrator Preset");
     await providerPermissions.scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath("role-orchestrator-independent.png"), fullPage: true });
