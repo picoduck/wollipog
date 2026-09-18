@@ -1234,6 +1234,24 @@ export interface AgentCapabilities {
   permissionModes?: string[];
   /** How approvals reach the UI per permission mode. Absent = not probed (unknown, not false). */
   elicitation?: Partial<Record<string, ElicitationTransport[]>>;
+  /**
+   * Runner-attested: this installation can launch the Orchestrator ROLE additively, with the
+   * ordinary provider permissions a normal session would use.
+   *
+   * Deliberately independent of the `"orchestrator"` entry in `permissionModes`, which advertises
+   * something else — that the COUPLED PRESET is launchable here, including its Strict Project
+   * Isolation filesystem-boundary requirements. The two genuinely diverge: a Pi installation with
+   * the verified Agent Control bridge on a runner using the default `provider` execution isolation
+   * can launch the additive role but not the preset, so reading the preset advertisement as the
+   * role advertisement is a false negative (#1294).
+   *
+   * Additive field: older peers ignore it, and no new protocol version is needed beyond v163,
+   * because only a v163+ runner publishes it and the per-harness gates in
+   * `ORCHESTRATOR_ADDITIVE_CAPABILITY` already tell the control plane which runner protocol each
+   * harness's additive shape requires. Catalog truth, not session truth: a session capability
+   * snapshot never narrows it.
+   */
+  orchestratorAdditive?: boolean;
 }
 
 /** Native drivers publish only session-scoped truth. Their catalog capabilities remain live runner
@@ -1269,7 +1287,13 @@ export function mergeSessionCapabilities(
   session: SessionCapabilities | undefined,
 ): AgentCapabilities | undefined {
   if (!session) return isOrchestratorOnlyCapabilities(catalog) ? undefined : catalog;
-  if ("models" in session) return session;
+  // `orchestratorAdditive` is runner-attested catalog truth about the installation, not something a
+  // session snapshot observes, so even a full provider-native snapshot must not drop it.
+  if ("models" in session) {
+    return catalog?.orchestratorAdditive !== undefined && session.orchestratorAdditive === undefined
+      ? { ...session, orchestratorAdditive: catalog.orchestratorAdditive }
+      : session;
+  }
   if (!catalog) return undefined;
   return {
     ...catalog,
@@ -1480,6 +1504,30 @@ export function orchestratorAdditiveCapability(
   driver: string | null | undefined,
 ): keyof typeof RUNNER_CAPABILITY_MIN_PROTOCOL | undefined {
   return (ORCHESTRATOR_ADDITIVE_CAPABILITY as Record<string, keyof typeof RUNNER_CAPABILITY_MIN_PROTOCOL>)[driver ?? ""];
+}
+
+/**
+ * Whether an agent installation advertises that it can launch the Orchestrator role ADDITIVELY.
+ * The single rule read by session creation, session restart, and the New Session dialog, so none of
+ * them can drift from the others.
+ *
+ * A v163+ runner attests this directly with `orchestratorAdditive`. Older runners predate that flag,
+ * so for Claude Code and the Codex drivers the coupled-preset advertisement stands in for it: those
+ * harnesses' preset preconditions are a superset of their additive ones, so the substitution can
+ * only be conservative.
+ *
+ * Pi is deliberately excluded from that fallback. Its preset advertisement additionally requires the
+ * Strict Project Isolation filesystem boundary, which the additive role does not need — reading one
+ * as the other is exactly the false negative #1294 fixes — and no pre-v163 runner has an additive Pi
+ * launch shape at all, so there is nothing to be compatible with.
+ */
+export function advertisesOrchestratorAdditiveRole(
+  driver: string | null | undefined,
+  capabilities: Pick<AgentCapabilities, "permissionModes" | "orchestratorAdditive"> | undefined,
+): boolean {
+  if (!orchestratorAdditiveCapability(driver)) return false;
+  if (capabilities?.orchestratorAdditive === true) return true;
+  return driver !== "pi" && capabilities?.permissionModes?.includes(ORCHESTRATOR_PRESET_PERMISSION_MODE) === true;
 }
 
 /** Human-owned delegation level for an eligible supervising session. */

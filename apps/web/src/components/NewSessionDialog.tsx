@@ -12,6 +12,7 @@ import {
   DEFAULT_LIVE_CHILD_LIMIT,
   MAX_LIVE_CHILD_LIMIT,
   WORKFLOW_DECISION_CATEGORIES,
+  advertisesOrchestratorAdditiveRole,
   agentHarnessIdentityKey,
   type ProjectLocationView,
   type ProjectView,
@@ -437,9 +438,16 @@ export function NewSessionDialog({
   // Availability is DERIVED from the sentence that explains it, so the two cannot disagree. The
   // preset card is rendered either way now — §11.3 — and a disabled card whose reason contradicted
   // why it was disabled would be worse than the omission it replaced.
+  // Two independent advertisements (#1294): the "orchestrator" permission mode says the COUPLED
+  // PRESET is launchable here (including its strict filesystem boundary), while
+  // `orchestratorAdditive` says the ROLE is launchable with ordinary provider permissions. A
+  // bridge-verified Pi installation on a runner using the default `provider` isolation offers the
+  // second and not the first, so reading only the mode hid the role entirely.
+  const agentOffersOrchestratorPreset = agent?.capabilities?.permissionModes?.includes("orchestrator") === true;
+  const agentOffersAdditiveRole = advertisesOrchestratorAdditiveRole(agent?.driver ?? "acp", agent?.capabilities);
   const orchestratorUnavailable = orchestratorUnavailableReason({
     runnerSupportsOrchestration: runnerSupportsProtocol(runner?.protocolVersion, "sessionOrchestration"),
-    agentOffersOrchestrator: agent?.capabilities?.permissionModes?.includes("orchestrator") ?? false,
+    agentOffersOrchestrator: agentOffersOrchestratorPreset || agentOffersAdditiveRole,
     agentOrchestratorRequirement: agent?.codexAppServer?.orchestratorApproval?.failure,
     contextKind: orchestratorContext,
     directWslVerified: directWslOrchestrator,
@@ -532,7 +540,10 @@ export function NewSessionDialog({
     (!WORKFLOW_DECISION_CATEGORIES.some((category) => effectiveDecision(category) === "orchestrator") ||
       typedDelegationSupported);
   const executionPolicySupported = runnerSupportsProtocol(runner?.protocolVersion, "orchestratorExecutionPolicy");
-  const strictProjectBoundaryAvailable = directWslOrchestrator || (orchestratorContext === "native" && (
+  // Strict Project Isolation is delivered only by the coupled preset, so an installation that
+  // offers just the additive role cannot provide it however good its filesystem boundary is.
+  const strictProjectBoundaryAvailable = agentOffersOrchestratorPreset &&
+    (directWslOrchestrator || (orchestratorContext === "native" && (
     agent?.driver === "codex" || agent?.driver === "codex-app-server"
       ? runner?.os === "linux" || runner?.os === "macos"
       : agent?.driver === "claude-code"
@@ -543,14 +554,12 @@ export function NewSessionDialog({
           ? (runner?.os === "linux" && runner?.runtime?.executionIsolation?.mode === "bwrap") ||
             (runner?.os === "macos" && runner?.runtime?.executionIsolation?.mode === "seatbelt")
           : false
-  ));
+  )));
   // Pi (#1294) has no non-strict coupled-preset shape, so the server admits a non-strict Pi
-  // Orchestrator only through the additive role. Ask the shared helper whether that role is
-  // actually available here instead of restating its conditions: offering the choice when it is
-  // not would submit a preset non-strict Pi launch, which the control plane refuses.
-  const piAdditiveExecutionAvailable = agent?.driver === "pi" &&
-    Boolean(agent.piAgentControl?.protocolVersion) &&
-    agent.capabilities?.permissionModes?.includes("orchestrator") === true &&
+  // Orchestrator only through the additive role. Read the runner's own attestation of that role
+  // rather than `agent.piAgentControl`, which `agentsForControlPlane` deliberately clears before
+  // publishing and the control-plane database never persists — so it is always absent here.
+  const piAdditiveExecutionAvailable = agent?.driver === "pi" && agentOffersAdditiveRole &&
     orchestratorPresetPermissionsReason({
       controlPlaneSupportsRole: orchestratorRoleSupported,
       runnerProtocolVersion: runner?.protocolVersion,
@@ -573,7 +582,9 @@ export function NewSessionDialog({
     ? strictProjectBoundaryAvailable
     : providerExecutionAvailable;
   const orchestratorExecutionUnavailable = orchestratorDraft.execution.strictProjectIsolation
-    ? "Strict Project Isolation needs an audited Codex sandbox, Direct WSL bubblewrap, or runner bubblewrap/Seatbelt isolation with the required Claude mode."
+    ? (agentOffersOrchestratorPreset
+      ? "Strict Project Isolation needs an audited Codex sandbox, Direct WSL bubblewrap, or runner bubblewrap/Seatbelt isolation with the required Claude mode."
+      : "Strict Project Isolation is delivered by the Orchestrator preset, which this agent installation cannot launch here. Disable it to run this Orchestrator with ordinary provider permissions.")
     : !executionPolicySupported
       ? "Delegate Implementation without Strict Project Isolation requires a protocol-v144 runner. Update the runner or enable Strict Project Isolation."
       : "Provider-mode orchestration requires a native Codex, approval-capable Claude Code, or bridge-verified Pi harness.";
@@ -645,6 +656,7 @@ export function NewSessionDialog({
     agentReady: !selectedAgentOption?.disabled,
     orchestrator,
     orchestratorTuiSupported,
+    orchestratorPresetAvailable: agentOffersOrchestratorPreset,
     orchestratorTuiHostContext,
     runnerSupported: nativeTuiRunnerSupported,
     startFenceSupported: nativeTuiStartFenceSupported,

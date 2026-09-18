@@ -23,6 +23,13 @@ export function nativeTuiUnavailableReason(input: {
   /** Whether the session will run under the Orchestrator permission preset. */
   orchestrator: boolean;
   orchestratorTuiSupported: boolean;
+  /**
+   * The coupled Orchestrator preset is launchable on this installation. Orchestrator Native TUI
+   * always uses the preset, so an agent that offers only the additive role (#1294) cannot launch
+   * one, and must say so rather than let the user submit a shape the control plane refuses.
+   * Absent is treated as available, so callers that predate the additive role are unaffected.
+   */
+  orchestratorPresetAvailable?: boolean;
   /** Orchestrator Native TUI requires a native host context, not WSL. */
   orchestratorTuiHostContext: boolean;
   /** The runner advertises a Claude Code or Codex agent on a supported OS. */
@@ -38,6 +45,9 @@ export function nativeTuiUnavailableReason(input: {
   // problem, and it is the condition that previously disabled the option with no sentence.
   if (!input.agentReady) return "This agent needs setup before it can launch a Native TUI session.";
   if (input.orchestrator && !input.orchestratorTuiSupported) return input.orchestratorTuiRequirement;
+  if (input.orchestrator && input.orchestratorPresetAvailable === false) {
+    return "Orchestrator Native TUI uses the Orchestrator preset, which this agent installation cannot launch here.";
+  }
   if (input.orchestrator && !input.orchestratorTuiHostContext) {
     return "Orchestrator Native TUI is unavailable for WSL agents. Use a native host.";
   }

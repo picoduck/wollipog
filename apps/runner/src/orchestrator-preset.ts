@@ -1,5 +1,6 @@
 import type { AcpImplementationDiagnostics } from "./acp-contract.js";
 import {
+  orchestratorAdditiveCapability,
   runnerSupportsProtocol,
   type AgentDefinition,
   type AgentCapabilities,
@@ -231,6 +232,51 @@ export function withOrchestratorPreset(
       ...agent.capabilities,
       permissionModes: [...new Set([...(agent.capabilities.permissionModes ?? []), ORCHESTRATOR_PRESET])],
     } };
+  });
+}
+
+/**
+ * Advertise the additive Orchestrator ROLE, separately from the coupled preset.
+ *
+ * `withOrchestratorPreset` above answers "is the coupled preset launchable here", which includes
+ * the Strict Project Isolation filesystem boundary. The additive role is explicitly non-strict and
+ * needs no such boundary, so the two answers genuinely differ: a bridge-verified Pi installation on
+ * a runner using the default `provider` execution isolation can launch the role but not the preset.
+ * Reading the preset advertisement as the role advertisement made additive Pi unreachable (#1294).
+ *
+ * This sets `orchestratorAdditive` exactly when `provisionAgentControl` would accept the additive
+ * launch: an additive-capable driver, a native context, and the per-harness precondition.
+ */
+export function withOrchestratorAdditiveRole(
+  agents: AgentDefinition[],
+  host: { platform?: NodeJS.Platform; isolationMode?: OrchestratorIsolationMode } = {},
+): AgentDefinition[] {
+  return agents.map((agent) => {
+    const driver = agent.driver ?? "acp";
+    // WSL and every other non-native context is excluded: the additive launch requires host
+    // execution. ACP has no additive shape at all — its provider permission contract is unaudited —
+    // so it has no entry in ORCHESTRATOR_ADDITIVE_CAPABILITY and never reaches this advertisement.
+    if (!agent.capabilities || (agent.context?.kind ?? "native") !== "native" ||
+        !orchestratorAdditiveCapability(driver)) return agent;
+    let supported: boolean;
+    if (driver === "pi") {
+      // The verified Agent Control bridge, and only that: the additive Pi launch keeps the ordinary
+      // permission mode, whose approvals that bridge enforces. It needs no filesystem boundary.
+      supported = agent.piAgentControl?.protocolVersion === 1;
+    } else if (driver === "claude-code") {
+      // Exactly the precondition Claude already uses to advertise the role for provider mode, so
+      // Claude's behaviour is unchanged by this function.
+      supported = agent.capabilities.supportsApprovals === true &&
+        agent.capabilities.permissionModes?.includes("default") === true;
+    } else {
+      // Codex keeps today's effective requirement — the preset advertisement conditions, which
+      // include the granular-approval capability and the audited sandbox. Codex's additive role
+      // does not strictly need either; widening it is deliberately out of scope for #1294.
+      supported = agent.codexAppServer?.orchestratorApproval?.status === "supported" &&
+        supportsNativeOrchestratorBoundary(driver, host.platform ?? process.platform, host.isolationMode);
+    }
+    if (!supported) return agent;
+    return { ...agent, capabilities: { ...agent.capabilities, orchestratorAdditive: true } };
   });
 }
 

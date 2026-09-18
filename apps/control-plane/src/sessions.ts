@@ -146,6 +146,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   SESSION_NAMING_RUNNER_BUDGET_MS,
   SESSION_NAMING_SUPERVISION_MARGIN_MS,
   sessionRole,
+  advertisesOrchestratorAdditiveRole,
   orchestratorAdditiveCapability,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   usesOrchestratorPresetPermissions,
@@ -3523,17 +3524,17 @@ export class SessionsService {
             ? "The Claude ACP Orchestrator's provider permission contract is unaudited, so it still uses the Orchestrator preset permission mode with Strict Project Isolation."
             : "Independent provider permissions for an Orchestrator are supported only by a native Claude Code, Codex, or Pi harness on the host; other harnesses still use the Orchestrator preset permission mode.", 409);
         }
-        // The Pi bridge rule is carried by the capability check below, not by a separate test here:
-        // `piAgentControl` is runner-side discovery state that this database does not persist (only
-        // `codexAppServer` and `wslAgentControl` have columns), so reading it here would refuse
-        // every Pi Orchestrator. The runner's `withOrchestratorPreset` advertises "orchestrator"
-        // for Pi only once discovery has verified the bridge, and `provisionAgentControl` re-checks
-        // the exact bridge against the live agent definition before launch.
         if (!runnerSupportsProtocol(runner.protocolVersion, additiveCapability)) {
           return fail(`An Orchestrator with independent provider permissions requires a protocol-v${
             RUNNER_CAPABILITY_MIN_PROTOCOL[additiveCapability]} runner for this harness; update the runner or choose the Orchestrator preset permission mode.`, 409);
         }
-        if (!agentCapabilities?.permissionModes?.includes("orchestrator")) {
+        // The runner attests the additive role separately from the coupled preset, because the
+        // preset advertisement also encodes the strict filesystem boundary that the additive role
+        // does not need. For Pi that attestation is also how the verified Agent Control bridge
+        // reaches this process: `piAgentControl` is runner-side discovery state with no column in
+        // this database, so it cannot be re-read here. `provisionAgentControl` re-checks the exact
+        // bridge against the live agent definition before launch.
+        if (!advertisesOrchestratorAdditiveRole(launch.driver, agentCapabilities)) {
           return fail("the Orchestrator role requires explicit support from this agent installation", 409);
         }
         if (strictProjectIsolation) {
@@ -5581,7 +5582,7 @@ export class SessionsService {
       // provider permission mode belongs to the harness the session was created with, so a driver
       // change is refused rather than reinterpreted under the new harness's mode vocabulary.
       if (!additiveCapability || launch.driver !== session.driver ||
-          !advertised?.permissionModes?.includes("orchestrator") ||
+          !advertisesOrchestratorAdditiveRole(launch.driver, advertised) ||
           (launch.context?.kind ?? "native") !== "native" || (target && target.adapter !== "host")) {
         return fail("An Orchestrator with independent provider permissions requires a native Claude Code, Codex, or Pi harness on the host that advertises the Orchestrator role; the agent definition no longer matches. Start a new session or choose the Orchestrator preset permission mode.", 409);
       }
@@ -5595,10 +5596,10 @@ export class SessionsService {
           !["linux", "macos"].includes(runner?.os ?? "")) {
         return fail("Provider-mode Codex Orchestrator requires its audited Linux or macOS sandbox.", 409);
       }
-      // Pi's bridge rule mirrors creation through the advertised-capability check above: a
-      // rediscovery that loses the verified bridge drops "orchestrator" from the agent's permission
-      // modes, which is refused there. `piAgentControl` itself is not persisted, so it cannot be
-      // re-read here; the runner makes the final exact-bridge check before launch.
+      // Pi's bridge rule mirrors creation through the advertised-role check above: a rediscovery
+      // that loses the verified bridge withdraws `orchestratorAdditive`, which is refused there.
+      // `piAgentControl` itself is not persisted, so it cannot be re-read here; the runner makes
+      // the final exact-bridge check before launch.
     }
     const agentId = session.agentId;
     const supportsIssueScope = runnerSupportsProtocol(
