@@ -17657,11 +17657,12 @@ test("an ACP Orchestrator still requires the coupled preset and Strict Project I
     const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: ACP_AGENT };
     const human = { defaultOwnerUserId: "human" };
 
-    // The ACP provider-mode permission contract is unaudited (#1294): no additive shape exists.
+    // The ACP provider-mode permission contract was audited and found not sound (#1306): no
+    // additive shape exists.
     const additive = svc.createSession({ ...request, role: "orchestrator", config: { permissionMode: "default" } },
       undefined, undefined, false, false, false, human);
     assert.equal(additive.status, 409);
-    assert.match(additive.error ?? "", /unaudited/,
+    assert.match(additive.error ?? "", /audited and does not meet the bar for an additive launch/,
       "the refusal names the actual reason rather than a generic harness list");
   } finally { db.close?.(); }
 });

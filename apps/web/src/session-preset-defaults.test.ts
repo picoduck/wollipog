@@ -167,7 +167,7 @@ test("the Orchestrator preset applies only where independent provider permission
   assert.match(orchestratorPresetPermissionsReason({ ...additive, driver: "pi", contextKind: "wsl" }) ?? "",
     /native Claude Code, Codex, or Pi harness on the host/);
   assert.match(orchestratorPresetPermissionsReason({ ...additive, driver: "acp" }) ?? "",
-    /ACP adapter's provider permission contract is unaudited/);
+    /ACP adapter's provider permission contract was audited and does not meet the bar/);
   assert.match(orchestratorPresetPermissionsReason({ ...additive, contextKind: "wsl" }) ?? "", /native Claude Code, Codex, or Pi harness on the host/);
   assert.match(orchestratorPresetPermissionsReason({ ...additive, hostExecutionTarget: false }) ?? "", /host execution target/);
   assert.match(orchestratorPresetPermissionsReason({ ...additive, nativeTui: true }) ?? "", /Native TUI/);

@@ -359,7 +359,7 @@ test("a non-strict Pi Orchestrator launches as a normal session plus only the Or
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("an additive ACP Orchestrator is refused rather than launched with unaudited provider permissions", () => {
+test("an additive ACP Orchestrator is refused rather than launched under an ungoverned permission mode", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-acp-additive-"));
   try {
     const host: AgentControlHost = {
@@ -805,7 +805,8 @@ test("an Orchestrator with independent provider permissions keeps the ordinary C
     pi.orchestrator = { strictProjectIsolation: false };
     assert.throws(() => provisionAgentControl(pi, control, () => {}, host),
       /discovery-verified Pi extension bridge/);
-    // ACP has no additive shape at all: its provider permission contract is unaudited.
+    // ACP has no additive shape at all: #1306 audited its provider permission contract and
+    // found it not sound (ADR 0010).
     const acp = spec("acp");
     acp.sessionId = "s_acp_independent";
     acp.config = { permissionMode: "default" };

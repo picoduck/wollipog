@@ -85,8 +85,9 @@ export function orchestratorUnavailableReason(input: {
  * Only a non-strict native Claude Code (v160), Codex (v162), or Pi (v163) Orchestrator on a
  * supporting runner and control plane keeps its ordinary permission mode, tool inventory, apps,
  * plugins, hooks, extensions, skills, and configured MCP servers. Every other combination still
- * uses the coupled preset — notably ACP, whose provider-mode permission contract is unaudited — and
- * the sentence names which condition selects it so the user can change the one they control.
+ * uses the coupled preset — notably ACP, whose provider-mode permission contract was audited and
+ * found not sound (ADR 0010) — and the sentence names which condition selects it so the user can
+ * change the one they control.
  */
 /**
  * What Integration Isolation removes and keeps, per harness.
@@ -174,7 +175,7 @@ export function orchestratorPresetPermissionsReason(input: {
   const additiveCapability = orchestratorAdditiveCapability(input.driver);
   if (!additiveCapability) {
     return input.driver === "acp"
-      ? "The Claude ACP adapter's provider permission contract is unaudited, so an ACP Orchestrator uses the harness-owned Orchestrator preset."
+      ? "The Claude ACP adapter's provider permission contract was audited and does not meet the bar for an additive launch, so an ACP Orchestrator uses the harness-owned Orchestrator preset."
       : "This harness still uses the harness-owned Orchestrator preset; independent provider permissions are available for native Claude Code, Codex, and Pi.";
   }
   if (input.contextKind !== "native" || !input.hostExecutionTarget) {

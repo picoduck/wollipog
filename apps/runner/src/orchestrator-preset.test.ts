@@ -745,7 +745,7 @@ test("the additive Orchestrator role is advertised independently of the coupled 
     env: {}, driver: "acp", context: { kind: "native" }, capabilities: caps(["default"]),
   };
   assert.equal(advertise([acp], "bwrap")[0]!.capabilities?.orchestratorAdditive, undefined,
-    "the ACP provider permission contract is unaudited, so it has no additive role");
+    "the ACP provider permission contract was audited and found not sound, so it has no additive role");
 
   // The shared control-plane/web predicate reads the same advertisement.
   assert.equal(advertisesOrchestratorAdditiveRole("pi", providerPi!.capabilities), true);

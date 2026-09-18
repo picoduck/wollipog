@@ -3541,12 +3541,12 @@ export class SessionsService {
         // session and gains only Wollipog's orchestration tools, instructions, and credential. An
         // older runner would launch this as an ordinary session, so refuse rather than degrade.
         // Each harness carries its own gate: Claude Code since v160, the Codex drivers since v162,
-        // Pi since v163. ACP is absent from the map: its provider-mode permission contract has not
-        // been audited, so an ACP Orchestrator still uses the coupled preset.
+        // Pi since v163. ACP is absent from the map: #1306 audited its provider-mode permission
+        // contract and found it not sound (ADR 0010), so an ACP Orchestrator keeps the coupled preset.
         const additiveCapability = orchestratorAdditiveCapability(launch.driver);
         if (!additiveCapability || contextKind !== "native" || executionTarget.adapter !== "host") {
           return fail(launch.driver === "acp"
-            ? "The Claude ACP Orchestrator's provider permission contract is unaudited, so it still uses the Orchestrator preset permission mode with Strict Project Isolation."
+            ? "The Claude ACP Orchestrator's provider permission contract was audited and does not meet the bar for an additive launch, so it still uses the Orchestrator preset permission mode with Strict Project Isolation."
             : "Independent provider permissions for an Orchestrator are supported only by a native Claude Code, Codex, or Pi harness on the host; other harnesses still use the Orchestrator preset permission mode.", 409);
         }
         if (!runnerSupportsProtocol(runner.protocolVersion, additiveCapability)) {

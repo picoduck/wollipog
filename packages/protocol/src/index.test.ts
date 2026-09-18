@@ -1324,7 +1324,7 @@ test("the Orchestrator role is independent of the provider permission mode", asy
       "every other harness still requires the coupled preset");
   }
   assert.equal(orchestratorAdditiveCapability("acp"), undefined,
-    "the ACP provider-mode permission contract is unaudited, so ACP keeps the coupled preset");
+    "the ACP provider-mode permission contract was audited and found not sound, so ACP keeps the coupled preset");
 });
 
 test("the additive Orchestrator role is advertised separately from the coupled preset", () => {

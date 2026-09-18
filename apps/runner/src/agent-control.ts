@@ -387,13 +387,15 @@ export function provisionAgentControl(
   }
   if (orchestrator && (spec.driver ?? "acp") === "acp") {
     if (!strictProjectIsolation) {
-      // The ACP Orchestrator has no non-strict shape, coupled or additive. `AcpClient`'s single
-      // `orchestrator` flag couples three separate things: the exact-adapter identity assertion,
-      // the runner-owned `_meta` session options, and the refusal of client fs/terminal services
-      // plus `session/request_permission`. An additive ACP session would clear that flag and so
-      // would silently drop the identity assertion as well, and the adapter's own handling of the
-      // omitted `_meta` options is not established for the audited release. See docs/adr/0010.
-      throw new Error("provider-mode Orchestrator execution is not supported by the Claude ACP adapter; its provider permission contract is unaudited, so an ACP Orchestrator requires Strict Project Isolation and the Orchestrator preset permission mode");
+      // The ACP Orchestrator has no non-strict shape, coupled or additive. #1306 audited the
+      // provider-mode permission contract against the pinned adapter release and found it not
+      // sound: the client can observe and set the session mode, but has no way to read it back,
+      // and the adapter's internal query-recreation paths re-derive it from user settings without
+      // notifying anyone. Who answers a bypass-immune permission request for an autonomous
+      // Orchestrator, and which client fs/terminal services it should expose, are both still
+      // undecided. See docs/adr/0010. (The identity assertion itself is no longer at risk: it now
+      // keys on the Orchestrator role rather than the preset permission-mode literal.)
+      throw new Error("provider-mode Orchestrator execution is not supported by the Claude ACP adapter; its provider permission contract was audited and does not meet the bar for an additive launch, so an ACP Orchestrator requires Strict Project Isolation and the Orchestrator preset permission mode");
     }
     const agent = config.orchestratorAgent;
     const launchMatches = agent && agent.command === spec.command && agent.args.length === spec.args.length &&
