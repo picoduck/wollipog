@@ -529,6 +529,74 @@ test("startup sweep removes final and interrupted staging files while retaining 
   }
 });
 
+test("a non-strict Codex Orchestrator launches as a normal session plus Wollipog's server and instructions", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-additive-codex-orchestrator-"));
+  try {
+    const host: AgentControlHost = {
+      isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root, platform: "linux",
+    };
+    const control = { controlPlaneUrl: "ws://127.0.0.1:4317/runner", controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      executionIsolationMode: "provider" as const, orchestratorProjectPaths: ["/other-project"] };
+    // Everything a user may have configured for an ordinary Codex session, including their own
+    // MCP server, their own developer instructions, and an explicitly enabled feature.
+    const userArgs = [
+      "-c", "model_reasoning_effort=high", "--enable", "apps",
+      "-c", 'mcp_servers.mine={ "command" = "/mine" }',
+      "-c", 'developer_instructions="my own instructions"',
+    ];
+    for (const driver of ["codex", "codex-app-server"] as const) {
+      for (const permissionMode of ["read-only", "on-request", "danger-full-access", "auto-review"]) {
+        const normal = spec(driver);
+        normal.sessionId = `s_normal_${driver.replace(/-/gu, "_")}`;
+        normal.args = [...userArgs];
+        normal.config = { permissionMode };
+        provisionAgentControl(normal, control, () => {}, host);
+        assert.deepEqual(normal.args, userArgs, "a normal Codex session receives no launch arguments");
+        assert.equal(normal.env.WOLLIPOG_PERMISSION_PRESET, undefined);
+
+        const orchestrator = spec(driver);
+        orchestrator.sessionId = `s_orch_${driver.replace(/-/gu, "_")}`;
+        orchestrator.args = [...userArgs];
+        // Every mode the installation advertises for a normal session is accepted unchanged.
+        orchestrator.config = { permissionMode };
+        orchestrator.orchestrator = { strictProjectIsolation: false };
+        provisionAgentControl(orchestrator, control, () => {}, host);
+        const args = [...orchestrator.args];
+        assert.deepEqual(args.slice(0, userArgs.length), userArgs,
+          "apps, plugins, hooks, and configured MCP servers survive untouched");
+        const added = args.slice(userArgs.length);
+        assert.equal(added.length, 4, `${driver}/${permissionMode} adds only two settings`);
+        assert.match(added[1]!, /^mcp_servers\.wollipog=/);
+        assert.match(added[3]!, /^developer_instructions="You are running with the Wollipog Orchestrator role/);
+        assert.equal(orchestrator.env.WOLLIPOG_PERMISSION_PRESET, "orchestrator",
+          "the campaign tools are exposed on Wollipog's own server");
+        assert.equal(existsSync(agentControlMcpConfigPath(root, orchestrator.sessionId)), false,
+          "Codex needs no runner-written MCP config file beside the user's own");
+        provisionAgentControl(orchestrator, control, () => {}, host);
+        assert.deepEqual(orchestrator.args, args, "resume is idempotent");
+      }
+    }
+
+    // Strict Project Isolation and a pre-existing preset session both keep the coupled launch.
+    const strict = spec("codex");
+    strict.sessionId = "s_codex_strict_independent";
+    strict.config = { permissionMode: "on-request" };
+    strict.orchestrator = { strictProjectIsolation: true };
+    assert.throws(() => provisionAgentControl(strict, control, () => {}, host),
+      /Strict Project Isolation requires the Orchestrator preset/);
+    const legacy = spec("codex");
+    legacy.sessionId = "s_codex_legacy_preset";
+    legacy.args = [...userArgs];
+    legacy.config = { permissionMode: "orchestrator" };
+    legacy.orchestrator = { strictProjectIsolation: false };
+    provisionAgentControl(legacy, control, () => {}, host);
+    assert.ok(legacy.args.includes("--strict-config"), "an existing Codex Orchestrator keeps the preset");
+    assert.ok(legacy.args.includes("--disable"));
+    assert.ok(legacy.args.some((arg) => arg.startsWith("sandbox_mode=")));
+    assert.ok(legacy.args.some((arg) => arg.startsWith("approval_policy=")));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("an Orchestrator with independent provider permissions keeps the ordinary Claude launch and gains only additive tools", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-additive-orchestrator-control-"));
   try {
@@ -571,11 +639,11 @@ test("an Orchestrator with independent provider permissions keeps the ordinary C
     strict.orchestrator = { strictProjectIsolation: true };
     assert.throws(() => provisionAgentControl(strict, control, () => {}, host),
       /Strict Project Isolation requires the Orchestrator preset/);
-    const codex = spec("codex");
-    codex.sessionId = "s_codex_independent";
-    codex.config = { permissionMode: "on-request" };
-    codex.orchestrator = { strictProjectIsolation: false };
-    assert.throws(() => provisionAgentControl(codex, control, () => {}, host), /native Claude Code/);
+    const pi = spec("pi");
+    pi.sessionId = "s_pi_independent";
+    pi.config = { permissionMode: "on-request" };
+    pi.orchestrator = { strictProjectIsolation: false };
+    assert.throws(() => provisionAgentControl(pi, control, () => {}, host), /native Claude Code and Codex/);
     const outdated = spec("claude-code");
     outdated.sessionId = "s_outdated_control_plane";
     outdated.config = { permissionMode: "acceptEdits" };
@@ -583,7 +651,14 @@ test("an Orchestrator with independent provider permissions keeps the ordinary C
     assert.throws(() => provisionAgentControl(outdated, {
       ...control, controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole - 1,
     }, () => {}, host), /protocol-v160/);
-    for (const refused of [strict, codex, outdated]) {
+    const outdatedCodex = spec("codex");
+    outdatedCodex.sessionId = "s_codex_outdated_control_plane";
+    outdatedCodex.config = { permissionMode: "on-request" };
+    outdatedCodex.orchestrator = { strictProjectIsolation: false };
+    assert.throws(() => provisionAgentControl(outdatedCodex, {
+      ...control, controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex - 1,
+    }, () => {}, host), /protocol-v161/);
+    for (const refused of [strict, pi, outdated, outdatedCodex]) {
       assert.equal(existsSync(agentControlTokenPath(root, refused.sessionId)), false, "refusal precedes credential minting");
     }
   } finally { rmSync(root, { recursive: true, force: true }); }

@@ -2245,6 +2245,44 @@ test("buildCodexTurnParams: orchestrator uses constrained Guardian review withou
   });
 });
 
+test("an additive Codex Orchestrator turn follows the selected mode and skips the isolation probe", async () => {
+  // The additive shape is an ordinary permission mode plus runner-injected launch arguments. The
+  // driver has no other signal, so both the turn parameters and the app-server launch must be
+  // indistinguishable from a normal session's: the preset's fixed policy and MCP isolation probe
+  // stay bound to the `orchestrator` permission mode alone.
+  const preset = buildCodexTurnParams(cfg("orchestrator"), "t1", "/w", []);
+  for (const mode of ["auto-review", "on-request", "read-only", "danger-full-access", "workspace-write"]) {
+    const params = buildCodexTurnParams(cfg(mode, { model: "gpt-5.6", effort: "high" }), "t1", "/w", []) as
+      Record<string, unknown>;
+    assert.notDeepEqual(params.approvalPolicy, preset.approvalPolicy,
+      `${mode}: per-turn approval follows the mode, not the preset's granular policy`);
+    assert.equal(params.approvalsReviewer, mode === "auto-review" ? "auto_review" : undefined,
+      `${mode}: the reviewer is whatever the selected mode already implies`);
+    assert.notDeepEqual(params.sandboxPolicy, preset.sandboxPolicy,
+      `${mode}: the sandbox follows the mode, not the preset's pinned writable roots`);
+
+    const launched: string[][] = [];
+    const h = makeHarness({ config: cfg(mode), args: ["-c", 'mcp_servers.wollipog={ "command" = "/runner" }'] });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (h.driver as any).spawn = (options: { args: string[] }) => {
+      launched.push(options.args);
+      throw new Error("spawn-reached");
+    };
+    await assert.rejects(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      () => (h.driver as any).startAppServer(false),
+      /spawn-reached/u,
+      `${mode}: the launch reaches spawn without an Orchestrator MCP isolation probe`,
+    );
+    assert.deepEqual(launched.length, 1);
+    assert.ok(launched[0]!.includes('mcp_servers.wollipog={ "command" = "/runner" }'),
+      `${mode}: Wollipog's own server is the only added configuration`);
+    assert.equal(launched[0]!.some((arg) => arg.startsWith("mcp_servers.") && arg.endsWith(".enabled=false")), false,
+      `${mode}: no other MCP server is disabled`);
+    assert.equal(launched[0]!.includes("--strict-config"), false, `${mode}: --strict-config is never added`);
+  }
+});
+
 test("orchestrator surfaces Guardian escalations instead of declining them at the driver boundary", async () => {
   const h = makeHarness({ config: cfg("orchestrator") });
   const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
