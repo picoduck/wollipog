@@ -80,20 +80,25 @@ export type RefreshedRegistryPage = {
  * had no reason to re-read untouched. A page answers for the whole `sourceSeq` range it covers — up
  * to its last entry when truncated, and to the end of the registry when not — so a child the control
  * plane has stopped identifying is dropped rather than kept alive by a page nobody re-read (#1289).
+ *
+ * Pages apply in the order they were read, each replacing its own range, so where two responses
+ * overlap the later one wins: a child the control plane dropped between the two requests is not
+ * revived by the earlier response that still listed it.
  */
 export function mergeRefreshedRegistryPages(
   existing: readonly ChildSessionRegistryEntry[],
   fetched: readonly RefreshedRegistryPage[],
 ): ChildSessionRegistryEntry[] {
-  const covered = fetched.map((page) => ({
-    from: page.after,
-    to: page.truncated ? page.children.at(-1)?.sourceSeq ?? page.after : Number.POSITIVE_INFINITY,
-  }));
-  const byId = new Map(existing
-    .filter((child) => !covered.some((range) => child.sourceSeq > range.from && child.sourceSeq <= range.to))
-    .map((child) => [child.toolCallId, child]));
-  for (const page of fetched) for (const child of page.children) byId.set(child.toolCallId, child);
-  return [...byId.values()].sort((a, b) => a.sourceSeq - b.sourceSeq);
+  let merged: readonly ChildSessionRegistryEntry[] = existing;
+  for (const page of fetched) {
+    const through = page.truncated ? page.children.at(-1)?.sourceSeq ?? page.after : Number.POSITIVE_INFINITY;
+    const byId = new Map(merged
+      .filter((child) => child.sourceSeq <= page.after || child.sourceSeq > through)
+      .map((child) => [child.toolCallId, child]));
+    for (const child of page.children) byId.set(child.toolCallId, child);
+    merged = [...byId.values()];
+  }
+  return [...merged].sort((a, b) => a.sourceSeq - b.sourceSeq);
 }
 
 export function mergeCompactAttentionOwners(
@@ -247,7 +252,10 @@ export function registryRefreshPlan(
  * request. A sweep follows each response's own `nextAfter`, leaving no gap between pages for an
  * entry the control plane dropped to survive in. A targeted page keeps reading until it has covered
  * the held range it was chosen for: an entry sorted in ahead of it pushes the page's own last entry
- * onto the next one, and that entry may be the very child the refresh was sent for.
+ * onto the next one, and that entry may be the very child the refresh was sent for. A page that
+ * earlier reads already reached is resumed where they stopped, or skipped once they cover it, so no
+ * range is read twice in one refresh. A cursor that fails to advance ends the read rather than
+ * looping on it.
  */
 export async function readRegistryRefresh(
   plan: RegistryRefreshPlan,
@@ -262,10 +270,17 @@ export async function readRegistryRefresh(
   if (plan.kind === "targeted") {
     let last: ChildSessionRegistryPage | undefined;
     for (const target of plan.pages) {
-      last = await read(target.after);
-      while (last.nextAfter !== null && last.nextAfter < target.through) last = await read(last.nextAfter);
+      // Earlier reads answer through their own `nextAfter`, or to the end when it is null.
+      const reached = last?.nextAfter;
+      if (reached === null || (reached !== undefined && reached >= target.through)) continue;
+      let cursor = reached !== undefined && reached > target.after ? reached : target.after;
+      last = await read(cursor);
+      while (last.nextAfter !== null && last.nextAfter > cursor && last.nextAfter < target.through) {
+        cursor = last.nextAfter;
+        last = await read(cursor);
+      }
     }
-    // The plan always names the tail page, so at least one page was read.
+    // The first target is always read, so `last` is set.
     return { pages, last: last! };
   }
   let last = await read(0);

@@ -275,6 +275,76 @@ test("a targeted page keeps reading until it covers the held range it was chosen
 });
 
 /**
+ * Responses are not an atomic snapshot: the control plane is live between two requests of one
+ * refresh. Where two responses overlap, the later one is the fresher account of that range, so a
+ * child it omits is gone even though the earlier response still listed it.
+ */
+test("where two responses overlap, the later one's omission wins over the earlier one's listing", () => {
+  const entry = (id: string, sourceSeq: number): ChildSessionRegistryEntry => ({
+    toolCallId: id, name: id, status: "completed", sourceSeq, startedAt: 100, lastActivityAt: 200, toolCount: 1,
+  });
+  const held = [entry("alpha", 10), entry("beta", 20), entry("gamma", 30)];
+  const merged = mergeRefreshedRegistryPages(held, [
+    { after: 0, children: [entry("alpha", 10), entry("beta", 20), entry("gamma", 30)], truncated: true },
+    // `beta` was dropped between the two requests.
+    { after: 15, children: [entry("gamma", 30)], truncated: false },
+  ]);
+  assert.deepEqual(merged.map((child) => child.toolCallId), ["alpha", "gamma"]);
+});
+
+/**
+ * Adjacent targets after an insertion: the first page's continuation runs past the second page's
+ * held start. Restarting the second page at that stale start would read the overlap twice — and,
+ * across many adjacent pages, cost nearly double a sweep — so each target resumes where the reads
+ * before it stopped, and a target they already cover costs nothing.
+ */
+test("a target resumes where earlier reads stopped rather than re-reading the overlap", async () => {
+  const entry = (id: string, sourceSeq: number): ChildSessionRegistryEntry => ({
+    toolCallId: id, name: id, status: "completed", lifecycle: "completed",
+    sourceSeq, startedAt: 100, lastActivityAt: 200, completedAt: 200, toolCount: 1,
+  });
+  const held = Array.from({ length: 150 }, (_value, index) => entry(`child-${index + 1}`, (index + 1) * 10));
+  const served = [...held, entry("recovered", 245)].sort((a, b) => a.sourceSeq - b.sourceSeq);
+  const requested: number[] = [];
+  const fetchPage = async (after: number): Promise<ChildSessionRegistryPage> => {
+    requested.push(after);
+    const eligible = served.filter((child) => child.sourceSeq > after);
+    const children = eligible.slice(0, 50);
+    const truncated = eligible.length > children.length;
+    return { children, attentionOwners: [], unidentifiedChildren: 0, eventEpoch: 0,
+      nextAfter: truncated ? children.at(-1)!.sourceSeq : null, truncated };
+  };
+
+  const loaded = new Set(held.map((child) => child.toolCallId));
+  const plan = registryRefreshPlan(held, new Set(["child-10", "child-60"]), loaded, 50);
+  assert.deepEqual(plan, { kind: "targeted", pages: [
+    { after: 0, through: 500 }, { after: 500, through: 1000 }, { after: 1000, through: 1500 }] });
+  const { pages, last } = await readRegistryRefresh(plan, fetchPage);
+  assert.deepEqual(requested, [0, 490, 990, 1490],
+    "every read starts where the one before it ended; none restarts at a held boundary already passed");
+  assert.equal(new Set(requested).size, requested.length, "no cursor is read twice");
+  assert.equal(mergeRefreshedRegistryPages(held, pages).length, 151);
+  assert.equal(last.nextAfter, null);
+});
+
+/**
+ * The control plane's `nextAfter` is always past the cursor it answered, but the loop that follows
+ * it must not depend on that for termination: a cursor that fails to advance ends the read.
+ */
+test("a cursor that fails to advance ends a targeted read instead of looping on it", async () => {
+  const requested: number[] = [];
+  const fetchPage = async (after: number): Promise<ChildSessionRegistryPage> => {
+    requested.push(after);
+    if (requested.length > 5) throw new Error("the read did not stop");
+    return { children: [{ toolCallId: "stuck", name: "stuck", status: "running", sourceSeq: 5,
+      startedAt: 100, lastActivityAt: 200, toolCount: 0 }],
+    attentionOwners: [], unidentifiedChildren: 0, eventEpoch: 0, nextAfter: 5, truncated: true };
+  };
+  await readRegistryRefresh({ kind: "targeted", pages: [{ after: 5, through: 500 }] }, fetchPage);
+  assert.deepEqual(requested, [5]);
+});
+
+/**
  * The idle cadence exists for a child whose durable state moves with nothing observable in the
  * loaded transcript (#1207). Only an unsettled child outside that window can do so, so only its
  * page keeps costing an idle request.
