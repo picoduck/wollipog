@@ -17312,6 +17312,17 @@ test("Orchestrator is an additive role independent of the provider permission mo
     const codexSpec = hub.sentOfType("start_session").find((message) => message.spec.sessionId === codex.data!.id)?.spec;
     assert.deepEqual(codexSpec?.orchestrator, { strictProjectIsolation: false });
     assert.equal(codexSpec?.config?.permissionMode, codexMode);
+    // Every mode the installation advertises for a normal session is accepted for the role too.
+    let codexOrchestrators = 1;
+    for (const mode of codexAgent.capabilities!.permissionModes!.filter((item) => item !== "orchestrator")) {
+      const perMode = svc.createSession(
+        { ...request, agentId: CODEX_APP_AGENT_ID, role: "orchestrator", config: { permissionMode: mode } },
+        undefined, undefined, false, false, false, human,
+      );
+      assert.equal(perMode.ok, true, `${mode}: ${perMode.error}`);
+      assert.equal(perMode.data!.permissionMode, mode);
+      codexOrchestrators += 1;
+    }
     const codexStrict = svc.createSession(
       { ...request, agentId: CODEX_APP_AGENT_ID, role: "orchestrator", config: { permissionMode: codexMode },
         orchestrator: { execution: { strictProjectIsolation: true } } },
@@ -17387,7 +17398,8 @@ test("Orchestrator is an additive role independent of the provider permission mo
     assert.equal(codexRestartOnV160.status, 409, "restart refuses the same combination with the same guidance");
     assert.match(codexRestartOnV160.error ?? "", /protocol-v161/);
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
-    assert.equal(db.listSessions().filter((session) => session.role === "orchestrator").length, 7);
+    assert.equal(db.listSessions().filter((session) => session.role === "orchestrator").length,
+      6 + codexOrchestrators);
   } finally {
     db.close();
   }
