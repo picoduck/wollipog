@@ -242,13 +242,20 @@ function commandWords(
     if (splitStringExpansions > MAX_ENV_SPLIT_STRING_EXPANSIONS) {
       throw new UnclassifiableCommandError("env --split-string nesting exceeded its bound");
     }
-    // `env -S` has a word grammar of its own that shell-quote cannot model, and both divergences
-    // hide the real command rather than revealing it. `\_` separates arguments, where shell-quote
-    // reads the backslash as POSIX quoting and joins those words into one; `${VAR}` is expanded and
-    // concatenated with its neighbours, where shell-quote emits the literal and the reference as
-    // separate tokens, so `r${X}` reaches the classifier as `r` rather than as `rm`. A payload
-    // carrying either is unclassifiable, and the worktree is retained instead of parsed on a guess.
-    if (/[\\$]/u.test(script)) {
+    // `env -S` has a word grammar of its own, and shell-quote models only part of it. Its complete
+    // set of metacharacters is whitespace, `"`, `'`, `\`, `$` and `#`; the first three agree with
+    // shell-quote, and the last three each diverge in a direction that hides the real command:
+    //   `\`  — `\_` separates arguments, where shell-quote reads the backslash as POSIX quoting and
+    //          joins those words into one.
+    //   `$`  — `${VAR}` is expanded and concatenated with its neighbours, where shell-quote emits the
+    //          literal and the reference separately, so `r${X}` arrives as `r` rather than as `rm`.
+    //   `#`  — a comment starts only at a word start, where shell-quote also starts one mid-word and
+    //          so drops every later argument, including a protected path behind an earlier `x#foo`.
+    // Enumerating the grammar rather than blacklisting the divergence found most recently is what
+    // makes this list closed. A payload carrying any of them is unclassifiable, and the worktree is
+    // retained instead of parsed on a guess. Backticks are rejected alongside them because
+    // shell-quote reads command substitution that `env` would pass through literally.
+    if (/[\\$#`]/u.test(script)) {
       throw new UnclassifiableCommandError("env --split-string payload uses env's own word grammar");
     }
     return parse<EnvironmentReference>(script, (env) => ({ env }));

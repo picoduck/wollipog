@@ -70,6 +70,7 @@ test("raw Git and filesystem retirement forms are refused with managed-discard g
     String.raw`env --split-string='rm\_-rf\_.'`,
     "X=m env -S'r${X} -rf .'",
     "env -S'${REMOVER} -rf .'",
+    `env -S'rm -rf scratch x#foo ${protectedPath}'`,
     "printf '.\\0' | xargs -0 rm -rf",
     "printf '.\\0' | xargs -0 sudo -u root rm -rf",
     "rm -rf /runner/worktrees/session/requested/{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{managed,other}",
