@@ -22,6 +22,7 @@ import {
   POLICY_HOOK_ENV,
   readHookCircuitState,
   refreshClaudeGuardProtections,
+  resetManagedWorktreeGuardVerification,
   removeClaudeHookFiles,
   sweepClaudeHookFiles,
   writeHookCircuitState,
@@ -200,7 +201,11 @@ test("provisioning writes protected composable settings and reuses generic runne
     for (const event of ["PreToolUse", "PostToolUse", "UserPromptSubmit"]) {
       const handler = settings.hooks[event][0].hooks[0];
       assert.equal(handler.command, "/usr/bin/node");
-      assert.deepEqual(handler.args.slice(0, 4), ["--import", "tsx", "/repo/apps/runner/src/cli.ts", "--policy-hook"]);
+      // A sidecar launched as a Claude hook inherits CLAUDE's cwd, so a bare loader specifier is
+      // made absolute in the runner's own module graph (see cwdIndependentExecArgv).
+      assert.equal(handler.args[0], "--import");
+      assert.match(handler.args[1], /[\\/]tsx[\\/].*loader\.mjs$|^tsx$/u);
+      assert.deepEqual(handler.args.slice(2, 4), ["/repo/apps/runner/src/cli.ts", "--policy-hook"]);
       assert.deepEqual(handler.args.slice(-2), ["--hook-event", event]);
       assert.equal(handler.timeout, event === "PreToolUse" ? 2_000_000 : 3);
     }
@@ -690,15 +695,27 @@ function guardedSpec(overrides: Partial<SessionLaunchSpec> = {}): SessionLaunchS
   return spec(overrides);
 }
 
+/** The real sidecar self-test spawns a process; these tests supply its verdict directly. */
+const guardVerifies = () => ({ ok: true }) as { ok: true };
+
 function provisionGuarded(
   dir: string,
   overrides: Partial<SessionLaunchSpec> = {},
-  configOverrides: Partial<typeof config> & { managedWorktreeProtections?: typeof PROTECTIONS | [] } = {},
+  configOverrides: Partial<typeof config> & {
+    managedWorktreeProtections?: typeof PROTECTIONS | [];
+    verifyGuardLaunch?: () => { ok: true } | { ok: false; reason: string };
+  } = {},
 ): SessionLaunchSpec {
   const launch = guardedSpec(overrides);
+  resetManagedWorktreeGuardVerification();
   provisionClaudeHooks(
     launch,
-    { ...config, managedWorktreeProtections: PROTECTIONS, ...configOverrides },
+    {
+      ...config,
+      managedWorktreeProtections: PROTECTIONS,
+      verifyGuardLaunch: guardVerifies,
+      ...configOverrides,
+    },
     () => {},
     host(dir),
   );
@@ -784,7 +801,9 @@ test("the protections file is 0600 and carries exactly the live protection set",
 test("repeated provisioning is idempotent: one --settings pair, one guard entry", () => temp((dir) => {
   const launch = provisionGuarded(dir);
   for (let round = 0; round < 3; round++) {
-    provisionClaudeHooks(launch, { ...config, managedWorktreeProtections: PROTECTIONS }, () => {}, host(dir));
+    provisionClaudeHooks(launch, {
+      ...config, managedWorktreeProtections: PROTECTIONS, verifyGuardLaunch: guardVerifies,
+    }, () => {}, host(dir));
   }
   assert.deepEqual(launch.args, ["--settings", claudeHookSettingsPath(dir, "sess_hook_1")]);
   assert.equal(guardEntries(settingsOf(dir).live).length, 1);
@@ -817,7 +836,9 @@ test("an open manager circuit keeps the guard and drops only the policy transpor
   assert.equal(live.env?.MANAGER_TOKEN_FILE, undefined);
 
   // Re-provisioning while the circuit is open must not resurrect the manager hooks either.
-  provisionClaudeHooks(launch, { ...config, managedWorktreeProtections: PROTECTIONS }, () => {}, host(dir));
+  provisionClaudeHooks(launch, {
+    ...config, managedWorktreeProtections: PROTECTIONS, verifyGuardLaunch: guardVerifies,
+  }, () => {}, host(dir));
   const reprepared = prepareClaudeHookArgs(launch.args);
   assert.equal(reprepared.guardActive, true);
   assert.equal(settingsOf(dir).live.hooks?.PostToolUse, undefined);
@@ -847,7 +868,9 @@ test("a session with no managed worktree gets no guard, and discarding the last 
   const file = claudeHookSettingsPath(dir, "sess_hook_1");
   assert.deepEqual(launch.args, ["--settings", file]);
   // The last managed worktree is discarded; the next launch is provisioned without protections.
-  provisionClaudeHooks(launch, { ...config, enabled: false, managedWorktreeProtections: [] }, () => {}, host(dir));
+  provisionClaudeHooks(launch, {
+    ...config, enabled: false, managedWorktreeProtections: [], verifyGuardLaunch: guardVerifies,
+  }, () => {}, host(dir));
   assert.deepEqual(launch.args, [], "the runner-owned settings argument is withdrawn");
   assert.equal(existsSync(file.replace(/\.settings\.json$/u, ".guard.json")), false);
   assert.equal(existsSync(file.replace(/\.settings\.json$/u, ".protections.json")), false);

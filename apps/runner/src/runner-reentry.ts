@@ -7,6 +7,7 @@
  */
 
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 
 export interface RunnerReentryHost {
   isSea: boolean;
@@ -41,6 +42,61 @@ function rewriteToCliEntry(scriptPath: string): string {
   return rewritten;
 }
 
+/** Node flags whose value is a module specifier the CHILD resolves from ITS OWN cwd. */
+const MODULE_SPECIFIER_FLAGS = new Set(["--import", "--require", "-r", "--loader", "--experimental-loader"]);
+
+function resolveModuleSpecifier(specifier: string): string | null {
+  if (specifier.startsWith(".") || specifier.startsWith("/") || specifier.includes("://") ||
+      /^[A-Za-z]:[\\/]/u.test(specifier)) {
+    return null; // already a path or URL: the child resolves it identically
+  }
+  try {
+    const resolver = (import.meta as unknown as { resolve?: (value: string) => string }).resolve;
+    if (typeof resolver === "function") return fileURLToPath(resolver(specifier));
+  } catch { /* fall through to the CJS resolver */ }
+  try {
+    const req = typeof require === "function" ? require : createRequire(import.meta.url);
+    return req.resolve(specifier);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Make bare module specifiers in the runner's own exec argv absolute.
+ *
+ * A sidecar launched as a Claude hook inherits CLAUDE's working directory, not the runner's, so a
+ * development runner started with `--import tsx` would fail with ERR_MODULE_NOT_FOUND and exit 1 —
+ * and a hook that exits with anything other than 2 does NOT block the tool call. For a guard whose
+ * whole purpose is to block, that is a fail-open hole. Resolving here, in the runner's own module
+ * graph, makes the sidecar launchable from any directory.
+ */
+export function cwdIndependentExecArgv(execArgv: readonly string[]): string[] {
+  const result: string[] = [];
+  for (let index = 0; index < execArgv.length; index++) {
+    const argument = execArgv[index]!;
+    const equals = argument.indexOf("=");
+    const flag = equals >= 0 ? argument.slice(0, equals) : argument;
+    if (!MODULE_SPECIFIER_FLAGS.has(flag)) {
+      result.push(argument);
+      continue;
+    }
+    const inline = equals >= 0;
+    const value = inline ? argument.slice(equals + 1) : execArgv[index + 1];
+    if (value === undefined) {
+      result.push(argument);
+      continue;
+    }
+    const resolved = resolveModuleSpecifier(value) ?? value;
+    if (inline) result.push(`${flag}=${resolved}`);
+    else {
+      result.push(flag, resolved);
+      index += 1;
+    }
+  }
+  return result;
+}
+
 export function runnerReentryCommand(
   host: RunnerReentryHost,
   mode: "--policy-hook" | "--agent-control-mcp" | "--wollipog-cli" | "--managed-worktree-guard",
@@ -48,6 +104,6 @@ export function runnerReentryCommand(
   if (host.isSea) return { command: host.execPath, args: [mode] };
   return {
     command: host.execPath,
-    args: [...host.execArgv, rewriteToCliEntry(host.scriptPath ?? ""), mode],
+    args: [...cwdIndependentExecArgv(host.execArgv), rewriteToCliEntry(host.scriptPath ?? ""), mode],
   };
 }

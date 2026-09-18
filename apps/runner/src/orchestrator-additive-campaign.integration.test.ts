@@ -363,6 +363,9 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
           // index.ts passes exactly this: the live runner-owned worktree set, which provisions the
           // managed-worktree guard hook for the launch.
           managedWorktreeProtections: manager!.managedWorktreeProtections(meta),
+          // The sidecar self-test spawns a real process; its own coverage lives in
+          // apps/runner/src/managed-worktree-guard.test.ts.
+          verifyGuardLaunch: () => ({ ok: true }),
         }, () => {}, hookHost);
         await provisionAgentControl(meta, {
           controlPlaneUrl: CONTROL_PLANE_URL,

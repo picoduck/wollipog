@@ -560,6 +560,11 @@ harmless because Claude never reaches the control channel for a command the hook
 - **Fail closed.** Malformed hook input, a missing/unreadable/malformed protections file, a Bash
   call with no command text or working directory, or any exception blocks the tool call (exit 2
   with the refusal on stderr). The guard performs no network, control-plane, or credential work.
+- **Proven, not assumed.** Claude blocks only on exit code 2, so a sidecar that fails to *start*
+  (exit 1) would silently wave every command through. Hook processes inherit CLAUDE's working
+  directory, so `runnerReentryCommand` makes bare loader specifiers such as `--import tsx`
+  absolute (`cwdIndependentExecArgv`), and provisioning runs the real sidecar once per distinct
+  launch command and demands the real refusal document before the guard counts as active.
 - **One settings file.** Claude applies only the LAST `--settings` argument — a later one replaces
   an earlier one rather than merging — so the guard and the §2.3.1 manager policy hooks are written
   into a single per-session settings document, with the guard first in `PreToolUse`. The guard is

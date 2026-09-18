@@ -3,8 +3,10 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { MANAGED_WORKTREE_REFUSAL } from "./managed-worktree-protection.js";
+import { runnerReentryCommand } from "./runner-reentry.js";
 import {
   MANAGED_WORKTREE_GUARD_ENV,
   managedWorktreeGuardProtectionsArgument,
@@ -12,6 +14,7 @@ import {
   readManagedWorktreeGuardProtections,
   runManagedWorktreeGuardCli,
   runManagedWorktreeGuardDecision,
+  verifyManagedWorktreeGuardLaunch,
   writeManagedWorktreeGuardProtections,
 } from "./managed-worktree-guard.js";
 
@@ -261,4 +264,55 @@ test("a written protections file round-trips exactly the runner-owned worktrees"
     { worktreePath: WORKTREE, repoPath: REPO },
     { worktreePath: "/repo-worktrees/b", repoPath: REPO },
   ]);
+});
+
+test("the REAL sidecar launch refuses from a foreign working directory", (t) => {
+  // Regression for the fail-open hole found while validating #1313 against claude 2.1.270: a hook
+  // launched with a BARE loader specifier (`--import tsx`) resolves it from CLAUDE's cwd, not the
+  // runner's, fails with ERR_MODULE_NOT_FOUND, and exits 1 — and Claude blocks only on exit 2, so
+  // every command would have been waved through while the driver stopped mediating.
+  const f = fixture();
+  t.after(f.cleanup);
+  const launch = runnerReentryCommand(
+    {
+      isSea: false,
+      execPath: process.execPath,
+      execArgv: process.execArgv,
+      scriptPath: fileURLToPath(new URL("./index.ts", import.meta.url)),
+    },
+    "--managed-worktree-guard",
+  );
+  assert.deepEqual(
+    verifyManagedWorktreeGuardLaunch(launch, f.protectionsFile, [{ worktreePath: WORKTREE, repoPath: REPO }]),
+    { ok: true },
+  );
+});
+
+test("a sidecar that cannot start is reported as unverified, never as a working guard", (t) => {
+  const f = fixture();
+  t.after(f.cleanup);
+  const launch = { command: process.execPath, args: ["--import", "definitely-not-installed-xyz", "/nope.ts"] };
+  const verdict = verifyManagedWorktreeGuardLaunch(launch, f.protectionsFile, [
+    { worktreePath: WORKTREE, repoPath: REPO },
+  ]);
+  assert.equal(verdict.ok, false);
+});
+
+test("a sidecar that exits 0 without refusing is rejected by the self-test", (t) => {
+  const f = fixture();
+  t.after(f.cleanup);
+  const verdict = verifyManagedWorktreeGuardLaunch(
+    { command: process.execPath, args: ["-e", "process.stdin.resume()"] },
+    f.protectionsFile,
+    [{ worktreePath: WORKTREE, repoPath: REPO }],
+    (() => ({ status: 0, stdout: "", stderr: "", error: undefined })) as never,
+  );
+  assert.deepEqual(verdict, { ok: false, reason: "probe did not produce the managed worktree refusal" });
+});
+
+test("the self-test needs a protected worktree to probe with", () => {
+  assert.deepEqual(
+    verifyManagedWorktreeGuardLaunch({ command: "node", args: [] }, "/nowhere.json", []),
+    { ok: false, reason: "no protected worktree to probe with" },
+  );
 });

@@ -28,6 +28,7 @@ import {
   MANAGED_WORKTREE_GUARD_PROTECTIONS_SUFFIX,
   managedWorktreeGuardProtectionsPath,
   sameGuardPath,
+  verifyManagedWorktreeGuardLaunch,
   writeManagedWorktreeGuardProtections,
 } from "./managed-worktree-guard.js";
 import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
@@ -505,6 +506,8 @@ export function provisionClaudeHooks(
     registerCredential?: (sessionId: string, tokenHash: string) => void;
     /** Live runner-owned worktrees for this session; a non-empty set provisions the guard. */
     managedWorktreeProtections?: readonly ManagedWorktreeProtection[];
+    /** Seam for tests: prove the guard sidecar actually refuses before relying on it. */
+    verifyGuardLaunch?: typeof verifyManagedWorktreeGuardLaunch;
   },
   log: (message: string) => void,
   host: ClaudeHookHost = defaultClaudeHookHost(),
@@ -545,11 +548,18 @@ export function provisionClaudeHooks(
       try {
         validateInjectedArg(file);
         validateInjectedArg(protectionsFile);
-        guard = {
+        const candidate: ClaudeGuardHookOptions = {
           launch: runnerReentryCommand(host, MANAGED_WORKTREE_GUARD_MODE),
           protectionsFile,
           protections,
         };
+        // The launch has to be PROVEN, not assumed: Claude blocks only on exit code 2, so a
+        // sidecar that cannot start would silently wave every command through while the driver
+        // stopped mediating on the strength of it.
+        writeManagedWorktreeGuardProtections(protectionsFile, protections);
+        const verdict = verifiedGuardLaunch(candidate, config.verifyGuardLaunch);
+        if (verdict.ok) guard = candidate;
+        else log(`Claude managed worktree guard ${spec.sessionId}: launch self-test failed (${verdict.reason})`);
       } catch (error) {
         guard = null;
         log(`Claude managed worktree guard ${spec.sessionId}: not injectable (${(error as Error).message})`);
@@ -672,6 +682,29 @@ export function provisionClaudeHooks(
   // and only after both provisioning and the Phase 4 ask protocol fence have succeeded.
   if (protocolVersion >= 66) advertiseHookForLaunchCapability(spec);
   else stripHookFromLaunchCapability(spec);
+}
+
+/**
+ * One self-test per distinct sidecar launch per runner process. The command is identical for every
+ * session, and the probe costs a process start.
+ */
+const verifiedGuardLaunches = new Map<string, { ok: true } | { ok: false; reason: string }>();
+
+function verifiedGuardLaunch(
+  guard: ClaudeGuardHookOptions,
+  verify: typeof verifyManagedWorktreeGuardLaunch = verifyManagedWorktreeGuardLaunch,
+): { ok: true } | { ok: false; reason: string } {
+  const key = [guard.launch.command, ...guard.launch.args].join("\u0000");
+  const cached = verifiedGuardLaunches.get(key);
+  if (cached?.ok) return cached;
+  const verdict = verify(guard.launch, guard.protectionsFile, guard.protections);
+  verifiedGuardLaunches.set(key, verdict);
+  return verdict;
+}
+
+/** Testing seam: forget the cached sidecar self-tests. */
+export function resetManagedWorktreeGuardVerification(): void {
+  verifiedGuardLaunches.clear();
 }
 
 /**

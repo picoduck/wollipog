@@ -89,6 +89,9 @@ function provision(
     controlPlaneProtocolVersion: 66,
     enabled: options.managerHooks ?? false,
     managedWorktreeProtections: options.protections,
+    // The real sidecar self-test spawns a process; claude-code-managed-worktree covers the driver
+    // contract, and managed-worktree-guard.test.ts runs the real launch probe.
+    verifyGuardLaunch: () => ({ ok: true }),
   }, () => {}, hookHost(configDir));
   return spec.args;
 }
@@ -255,6 +258,7 @@ test("without a provisionable guard the launch falls back to EXACTLY today's med
     controlPlaneProtocolVersion: 66,
     enabled: true,
     managedWorktreeProtections: PROTECTIONS,
+    verifyGuardLaunch: () => ({ ok: true }),
   }, () => {}, hookHost(dir));
   assert.deepEqual(spec.args, [], "no guard settings file is injected for a non-native context");
 

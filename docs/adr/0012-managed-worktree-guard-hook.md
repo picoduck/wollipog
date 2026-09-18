@@ -67,10 +67,20 @@ Two different failure domains, two different answers:
 1. **The guard runs but cannot decide.** Malformed stdin, a missing/unreadable/malformed
    protections file, a Bash call with no command text or cwd, no protections argument at all, or any
    exception: exit 2 with the refusal on stderr, which blocks the tool call.
-2. **The guard cannot be provisioned at all.** Non-native (WSL/container) context, a non-host
+2. **The guard cannot be proven to start.** Claude blocks only on exit code 2; a sidecar that
+   fails to START exits 1 and the tool call proceeds. That was a real hole: the development runner
+   re-enters itself with `--import tsx`, and a hook inherits CLAUDE's working directory, so the
+   bare specifier failed to resolve with `ERR_MODULE_NOT_FOUND` and every command was waved
+   through. Two answers: `cwdIndependentExecArgv` makes bare loader specifiers absolute in the
+   runner's own module graph, and `verifyManagedWorktreeGuardLaunch` runs the real sidecar once per
+   distinct launch command (from a foreign cwd, with the real protections file, demanding the real
+   refusal document) before anything relies on it. A failed self-test means no guard, hence
+   mediation.
+3. **The guard cannot be provisioned at all.** Non-native (WSL/container) context, a non-host
    execution target, an unquotable path, or a write failure: the driver falls back to EXACTLY the
    #1256 mediation. There is never an unprotected native launch. "Guard active" is established at
-   provisioning time and is observable in the launch argv, never inferred.
+   provisioning time — argument quoting, the settings write, AND the launch self-test all have to
+   succeed — and is observable in the launch argv, never inferred.
 
 ## Settings merge
 

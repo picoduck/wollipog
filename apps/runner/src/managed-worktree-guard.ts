@@ -22,8 +22,9 @@
  * control-plane round trip, no credentials. Anything it cannot evaluate confidently BLOCKS.
  */
 
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import {
   MANAGED_WORKTREE_REFUSAL,
   commandTargetsManagedWorktree,
@@ -247,6 +248,55 @@ export async function runManagedWorktreeGuardCli(
   if (outcome.stdout) write(outcome.stdout);
   if (outcome.stderr) warn(outcome.stderr);
   exit(outcome.exitCode);
+}
+
+/**
+ * Prove, before the launch commits to it, that this exact hook command actually refuses a
+ * destructive command against this session's own protected worktree.
+ *
+ * Claude only treats exit code 2 as blocking: a hook that fails to START (a bad interpreter, an
+ * unresolvable loader, a missing script) exits 1 and the tool call proceeds. A guard that cannot
+ * be proven to run is therefore worse than no guard, because the driver would stop mediating on
+ * the strength of it. The probe runs the real sidecar with the real protections file, from a
+ * directory that is NOT the runner's own, and demands the real refusal document.
+ */
+export function verifyManagedWorktreeGuardLaunch(
+  launch: { command: string; args: string[] },
+  protectionsFile: string,
+  protections: readonly ManagedWorktreeProtection[],
+  spawn: typeof spawnSync = spawnSync,
+): { ok: true } | { ok: false; reason: string } {
+  const target = protections[0];
+  if (!target) return { ok: false, reason: "no protected worktree to probe with" };
+  const payload = JSON.stringify({
+    hook_event_name: "PreToolUse",
+    tool_name: "Bash",
+    cwd: target.worktreePath,
+    tool_input: { command: `git worktree remove ${target.worktreePath}` },
+  });
+  let result: ReturnType<typeof spawnSync>;
+  try {
+    result = spawn(launch.command, [...launch.args, "--protections", protectionsFile], {
+      input: payload,
+      encoding: "utf8",
+      // The sidecar's cwd is CLAUDE's, never the runner's; probe the same way.
+      cwd: dirname(protectionsFile),
+      timeout: 20_000,
+      maxBuffer: 256 * 1024,
+      windowsHide: true,
+    });
+  } catch (error) {
+    return { ok: false, reason: `probe could not be started: ${(error as Error).message}` };
+  }
+  if (result.error) return { ok: false, reason: `probe failed: ${result.error.message}` };
+  if (result.status !== 0) {
+    return { ok: false, reason: `probe exited ${String(result.status)}: ${String(result.stderr ?? "").trim().slice(0, 200)}` };
+  }
+  const stdout = String(result.stdout ?? "");
+  if (!stdout.includes('"permissionDecision":"deny"') || !stdout.includes(MANAGED_WORKTREE_REFUSAL)) {
+    return { ok: false, reason: "probe did not produce the managed worktree refusal" };
+  }
+  return { ok: true };
 }
 
 /** Resolve-normalized comparison used by the settings self-description check. */
