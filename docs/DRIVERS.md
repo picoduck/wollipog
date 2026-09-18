@@ -172,9 +172,20 @@ mode would, and is **never** blanket auto-confirmed — the preset's auto-confir
 the preset also excludes `bash`, `edit`, and `write`. Measured against pi 0.85.0, repeated
 `--append-system-prompt` values accumulate rather than displace one another, and the flag is matched
 by exact equality (so `--append-system-prompt=TEXT` is an extension flag, not an append, and the
-resume strip leaves it alone). The Pi bridge requirement reaches the control plane as the advertised
-`orchestrator` permission mode, which the runner publishes only for a discovery-verified bridge;
-`piAgentControl` itself is not persisted. The control plane has never admitted a coupled-preset Pi
+resume strip leaves it alone). The Pi bridge requirement reaches the control plane as `capabilities.orchestratorAdditive`, a
+runner attestation published only for a discovery-verified bridge; `piAgentControl` itself is
+cleared before publication and never persisted.
+
+That flag is deliberately separate from the `"orchestrator"` entry in `permissionModes`. The latter
+says the COUPLED PRESET is launchable, boundary requirements included; the former says the ROLE is
+launchable with ordinary provider permissions. They diverge whenever a harness can do the second but
+not the first — a bridge-verified Pi installation on the default `provider` execution isolation is
+exactly that case, and conflating the two made additive Pi unreachable. `withOrchestratorAdditiveRole`
+publishes the flag, and `advertisesOrchestratorAdditiveRole()` is the single rule that session
+creation, session restart, and the New Session dialog all read; for Claude Code and Codex it falls
+back to the preset advertisement so v160–v162 runners keep working, while Pi requires the explicit
+flag. An installation offering only the additive role cannot provide Strict Project Isolation or
+Orchestrator Native TUI, which still require the preset, and the dialog blocks both with a reason. The control plane has never admitted a coupled-preset Pi
 Orchestrator, so the additive shape is the only Pi Orchestrator there is.
 
 ACP deliberately has no additive shape. The audited `claude-agent-acp` 0.75.1 resolves its

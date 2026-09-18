@@ -103,3 +103,19 @@ test("availability is exactly the absence of a reason", () => {
       `disagreed for ${JSON.stringify(typed, flags as unknown as string[])}`);
   }
 });
+
+test("an Orchestrator installation without the coupled preset cannot launch a Native TUI", () => {
+  // Orchestrator Native TUI always uses the preset, so an installation offering only the additive
+  // role (#1294) must say so rather than let the user submit a shape the control plane refuses.
+  assert.match(reason({ orchestrator: true, orchestratorPresetAvailable: false }) ?? "",
+    /uses the Orchestrator preset, which this agent installation cannot launch here/);
+  assert.equal(reason({ orchestrator: true, orchestratorPresetAvailable: true }), undefined);
+  assert.equal(reason({ orchestrator: false, orchestratorPresetAvailable: false }), undefined,
+    "the preset is irrelevant to an ordinary Native TUI session");
+  assert.equal(reason({ orchestrator: true }), undefined,
+    "an absent flag is treated as available, so callers predating the additive role are unaffected");
+  // Ordered after the capability sentence, which is the more actionable of the two.
+  assert.match(reason({
+    orchestrator: true, orchestratorTuiSupported: false, orchestratorPresetAvailable: false,
+  }) ?? "", /requires v112/);
+});

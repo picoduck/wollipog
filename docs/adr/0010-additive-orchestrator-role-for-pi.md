@@ -67,6 +67,41 @@ is not that flag at all (it falls through to the unknown-flag branch and is hand
 The resume strip therefore matches only the space-separated form carrying the runner's own
 instructions prefix, so it can never delete a user argument Pi reads as something else.
 
+### The role is advertised separately from the preset
+
+Review round 1 found additive Pi unreachable under the default runner configuration, from a single
+root cause: the literal `"orchestrator"` in `capabilities.permissionModes` was doing double duty for
+two different claims — "the coupled preset is launchable here" and "the Orchestrator role is
+launchable here". Those genuinely differ. The preset advertisement also encodes the Strict Project
+Isolation filesystem boundary, so a bridge-verified Pi installation on a runner using the default
+`provider` execution isolation (or on Windows) offered neither, and the control plane refused the
+additive launch at its advertised-mode check.
+
+The preset advertisement is unchanged — it correctly describes the preset, boundary requirements
+included. A second, independent one is added beside it:
+
+- `AgentCapabilities.orchestratorAdditive` (additive field; no protocol bump beyond v163 is needed,
+  because only a v163+ runner publishes it and the per-harness gates already exist).
+- `withOrchestratorAdditiveRole` sets it exactly when `provisionAgentControl` would accept the
+  additive launch: an additive-capable driver, a native context, and the per-harness precondition —
+  for Pi the verified Agent Control bridge and **not** the filesystem boundary. Never for WSL or
+  ACP. Claude keeps the precondition it already used, so its behaviour is unchanged. Codex keeps
+  today's effective requirement; its additive role does not strictly need the granular-approval
+  capability or the audited sandbox, but widening it is deliberately out of scope here.
+- `advertisesOrchestratorAdditiveRole(driver, capabilities)` is the single rule read by session
+  creation, session restart, and the New Session dialog, so they cannot drift. For Claude and Codex
+  it falls back to the preset advertisement, keeping v160–v162 runners working; **Pi is excluded
+  from that fallback**, because its preset advertisement requires the strict boundary — reading one
+  as the other is exactly the false negative — and no pre-v163 runner has an additive Pi shape.
+- For Pi this attestation is also how the verified bridge reaches the control plane at all:
+  `agentsForControlPlane` deliberately clears `piAgentControl` before publishing, and the
+  control-plane database never persists it, so neither the server nor the dialog can read it.
+
+Because an installation can now offer the role without the preset, the dialog must refuse the two
+shapes that still require the preset: Strict Project Isolation and Native TUI both surface a
+blocking sentence naming the preset as the missing piece, rather than letting the user submit a
+launch the control plane would reject.
+
 ### Pre-existing limitation, deliberately not changed
 
 The control plane has never admitted a *coupled-preset* Pi Orchestrator: its general Orchestrator
@@ -136,7 +171,7 @@ files, and tool inventory of a normal Pi session, and its approvals behave ident
 Project Isolation, Native TUI, ACP, and every pre-existing `permission_mode='orchestrator'` session
 keep the coupled preset. No database migration is needed. Creation and restart refuse an additive Pi
 launch when the runner predates v163, when the agent no longer advertises the Orchestrator role
-(which is how the loss of the verified bridge reaches the control plane, since `piAgentControl` is
-not persisted), when the context is not native on the host, when Strict Project Isolation is
-enabled, or for a Native TUI launch. An explicit integration-isolation policy (#1295) and the ACP
+(`orchestratorAdditive`, which is how the loss of the verified bridge reaches the control plane,
+since `piAgentControl` is not persisted), when the context is not native on the host, when Strict
+Project Isolation is enabled, or for a Native TUI launch. An explicit integration-isolation policy (#1295) and the ACP
 audit above remain follow-ups.

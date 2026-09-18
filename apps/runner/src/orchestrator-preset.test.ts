@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
+  advertisesOrchestratorAdditiveRole,
   type AgentDefinition,
 } from "@wollipog/protocol";
 import {
@@ -20,7 +21,9 @@ import {
   stripAdditiveOrchestratorLaunchArgs,
   stripOrchestratorLaunchArgs,
   supportsClaudeAgentAcpOrchestrator,
+  withOrchestratorAdditiveRole,
   withOrchestratorPreset,
+  type OrchestratorIsolationMode,
 } from "./orchestrator-preset.js";
 
 const mcp = { command: "/runner", args: ["agent", "mcp"], env: { WOLLIPOG_PERMISSION_PRESET: "orchestrator" } };
@@ -653,4 +656,102 @@ test("a user's own MCP server named wollipog is never deleted by the additive Co
   assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(similar, "codex", []), similar,
     "a similarly named server is never stripped, even if its value mentions the marker");
   assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(injected, "codex-app-server", ["/repo"]), []);
+});
+
+test("the additive Orchestrator role is advertised independently of the coupled preset", () => {
+  const caps = (permissionModes: string[]) => ({
+    models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+    permissionModes,
+  });
+  const pi = (piAgentControl?: { protocolVersion: 1 }): AgentDefinition => ({
+    id: "pi", name: "Pi", command: "pi", args: [], env: {}, driver: "pi",
+    context: { kind: "native" }, capabilities: caps(["default", "dontAsk", "bypassPermissions"]),
+    ...(piAgentControl ? { piAgentControl } : {}),
+  });
+  const advertise = (agents: AgentDefinition[], isolationMode: OrchestratorIsolationMode) =>
+    withOrchestratorAdditiveRole(
+      withOrchestratorPreset(agents, { platform: "linux", isolationMode }),
+      { platform: "linux", isolationMode },
+    );
+
+  // The case #1294 fixes: the default runner isolation cannot host the preset's filesystem
+  // boundary, but the additive role never needed one. The role is advertised; the preset is not.
+  const [providerPi] = advertise([pi({ protocolVersion: 1 })], "provider");
+  assert.equal(providerPi!.capabilities?.orchestratorAdditive, true,
+    "a bridge-verified Pi can launch the additive role under the default provider isolation");
+  assert.equal(providerPi!.capabilities?.permissionModes?.includes("orchestrator"), false,
+    "...while the coupled preset stays correctly unavailable");
+
+  // With the strict boundary, both advertisements appear.
+  const [bwrapPi] = advertise([pi({ protocolVersion: 1 })], "bwrap");
+  assert.equal(bwrapPi!.capabilities?.orchestratorAdditive, true);
+  assert.equal(bwrapPi!.capabilities?.permissionModes?.includes("orchestrator"), true);
+
+  // Without the verified bridge, neither: the additive Pi launch enforces its approvals through it.
+  for (const isolationMode of ["provider", "bwrap"] as const) {
+    const [unverified] = advertise([pi()], isolationMode);
+    assert.equal(unverified!.capabilities?.orchestratorAdditive, undefined,
+      `an unverified Pi bridge never attests the additive role (${isolationMode})`);
+    assert.equal(unverified!.capabilities?.permissionModes?.includes("orchestrator"), false);
+  }
+
+  // Claude is unchanged by this function: its additive precondition is the one it already used.
+  const claude = (permissionModes: string[], supportsApprovals = true): AgentDefinition => ({
+    id: "claude", name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code",
+    context: { kind: "native" }, capabilities: { ...caps(permissionModes), supportsApprovals },
+  });
+  assert.equal(advertise([claude(["default"])], "bwrap")[0]!.capabilities?.orchestratorAdditive, true);
+  assert.equal(advertise([claude(["default"])], "provider")[0]!.capabilities?.orchestratorAdditive, true,
+    "Claude's additive role does not require the strict filesystem boundary either");
+  assert.equal(advertise([claude(["acceptEdits"])], "bwrap")[0]!.capabilities?.orchestratorAdditive, undefined,
+    "Claude still needs its Default mode and approval channel");
+  assert.equal(advertise([claude(["default"], false)], "bwrap")[0]!.capabilities?.orchestratorAdditive, undefined);
+
+  // Codex deliberately keeps today's effective requirement; this PR does not widen it.
+  const codex = (approval?: "supported"): AgentDefinition => ({
+    id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex",
+    context: { kind: "native" }, capabilities: caps(["on-request"]),
+    ...(approval ? { codexAppServer: { orchestratorApproval: { status: approval } } } : {}),
+  });
+  assert.equal(advertise([codex("supported")], "bwrap")[0]!.capabilities?.orchestratorAdditive, true);
+  assert.equal(advertise([codex()], "bwrap")[0]!.capabilities?.orchestratorAdditive, undefined);
+
+  // Never for a non-native context, and never for ACP, which has no additive shape at all.
+  const wslPi: AgentDefinition = { ...pi({ protocolVersion: 1 }), context: { kind: "wsl", distro: "Ubuntu" } };
+  assert.equal(advertise([wslPi], "bwrap")[0]!.capabilities?.orchestratorAdditive, undefined,
+    "the additive launch requires host execution");
+  const acp: AgentDefinition = {
+    id: "acp", name: "Claude Agent", command: "npx",
+    args: [`@agentclientprotocol/claude-agent-acp@${CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION}`],
+    env: {}, driver: "acp", context: { kind: "native" }, capabilities: caps(["default"]),
+  };
+  assert.equal(advertise([acp], "bwrap")[0]!.capabilities?.orchestratorAdditive, undefined,
+    "the ACP provider permission contract is unaudited, so it has no additive role");
+
+  // The shared control-plane/web predicate reads the same advertisement.
+  assert.equal(advertisesOrchestratorAdditiveRole("pi", providerPi!.capabilities), true);
+  assert.equal(advertisesOrchestratorAdditiveRole("pi", caps(["orchestrator"])), false,
+    "a preset advertisement is never a substitute for Pi's additive attestation");
+  assert.equal(advertisesOrchestratorAdditiveRole("claude-code", caps(["orchestrator"])), true,
+    "pre-v163 Claude and Codex runners keep working from the preset advertisement");
+  assert.equal(advertisesOrchestratorAdditiveRole("codex", caps(["orchestrator"])), true);
+  assert.equal(advertisesOrchestratorAdditiveRole("acp", caps(["orchestrator"])), false);
+});
+
+test("projectOrchestratorPresetForPeer keeps the additive role advertisement", () => {
+  const agent: AgentDefinition = {
+    id: "pi", name: "Pi", command: "pi", args: [], env: {}, driver: "pi",
+    context: { kind: "native" }, piAgentControl: { protocolVersion: 1 },
+    capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+      permissionModes: ["default"], orchestratorAdditive: true,
+    },
+  };
+  for (const controlPlaneProtocolVersion of [null, 143, PROTOCOL_VERSION]) {
+    const [projected] = projectOrchestratorPresetForPeer([agent], {
+      controlPlaneProtocolVersion, platform: "linux", isolationMode: "provider",
+    });
+    assert.equal(projected!.capabilities?.orchestratorAdditive, true,
+      `the role attestation survives projection for a v${controlPlaneProtocolVersion} peer`);
+  }
 });

@@ -17427,13 +17427,23 @@ test("a non-strict Pi Orchestrator keeps its provider permission mode and is gat
   try {
     const PI_AGENT = "pi-orchestrator";
     const meta = runnerMeta();
+    // A pre-v163 Claude advertisement: the coupled preset mode and no `orchestratorAdditive`.
+    meta.agents.find((item) => item.id === AGENT_ID)!.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "acceptEdits", "orchestrator"],
+    };
     const piAgent = {
       id: PI_AGENT, name: "Pi", command: "pi", args: [] as string[], env: {}, driver: "pi" as const,
       available: true, context: { kind: "native" as const },
       piAgentControl: { protocolVersion: 1 },
+      // The realistic default-runner shape (#1294 finding 1): a bridge-verified Pi installation on
+      // a runner using the default `provider` execution isolation attests the additive ROLE but
+      // cannot offer the coupled PRESET, whose strict filesystem boundary it lacks. Reading the
+      // preset advertisement as the role advertisement made this combination unreachable.
       capabilities: {
         models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
-        permissionModes: ["default", "dontAsk", "bypassPermissions", "orchestrator"],
+        permissionModes: ["default", "dontAsk", "bypassPermissions"],
+        orchestratorAdditive: true,
       },
     };
     db.registerRunner({ ...meta, agents: [...meta.agents, piAgent] }, Date.now(), PROTOCOL_VERSION);
@@ -17478,21 +17488,49 @@ test("a non-strict Pi Orchestrator keeps its provider permission mode and is gat
     // Orchestrator preset for Pi, so the additive shape is the only Pi Orchestrator there is.
     const preset = svc.createSession({ ...request, role: "orchestrator", config: { permissionMode: "orchestrator" } },
       undefined, undefined, false, false, false, human);
-    assert.equal(preset.status, 409);
-    assert.match(preset.error ?? "", /requires a supported native/);
+    assert.equal(preset.ok, false);
 
-    // The Pi bridge rule reaches the control plane as the advertised "orchestrator" permission
-    // mode: the runner only advertises it once discovery has verified the Agent Control bridge.
-    // Losing the bridge therefore withdraws the mode, and the additive shape is refused.
+    // A Pi installation advertising only the coupled preset mode — never produced by a current
+    // runner — must NOT be read as offering the additive role: that substitution is exactly the
+    // false negative's mirror image, and it would admit a launch with no verified bridge.
+    db.registerRunner({
+      ...meta,
+      agents: [...meta.agents, {
+        ...piAgent, piAgentControl: undefined,
+        capabilities: {
+          ...piAgent.capabilities, orchestratorAdditive: undefined,
+          permissionModes: ["default", "dontAsk", "bypassPermissions", "orchestrator"],
+        },
+      }],
+    }, Date.now(), PROTOCOL_VERSION);
+    const presetOnly = svc.createSession({ ...request, role: "orchestrator", config: { permissionMode: "default" } },
+      undefined, undefined, false, false, false, human);
+    assert.equal(presetOnly.status, 409);
+    assert.match(presetOnly.error ?? "", /requires explicit support from this agent installation/);
+
+    // The Pi bridge rule reaches the control plane as `orchestratorAdditive`: the runner attests it
+    // only once discovery has verified the Agent Control bridge. Losing the bridge withdraws the
+    // attestation, and the additive shape is refused. The preset advertisement is NOT accepted as a
+    // substitute for Pi, because it also encodes the strict boundary the additive role never needs.
     const unverified = {
       ...piAgent, piAgentControl: undefined,
-      capabilities: { ...piAgent.capabilities, permissionModes: ["default", "dontAsk", "bypassPermissions"] },
+      capabilities: { ...piAgent.capabilities, orchestratorAdditive: undefined },
     };
     db.registerRunner({ ...meta, agents: [...meta.agents, unverified] }, Date.now(), PROTOCOL_VERSION);
     const noBridge = svc.createSession({ ...request, role: "orchestrator", config: { permissionMode: "default" } },
       undefined, undefined, false, false, false, human);
     assert.equal(noBridge.status, 409);
     assert.match(noBridge.error ?? "", /requires explicit support from this agent installation/);
+
+    // Claude and Codex keep working from a pre-v163 advertisement that predates the flag: for them
+    // the preset advertisement is a conservative stand-in, because their preset preconditions are a
+    // superset of their additive ones.
+    const preFlagClaude = svc.createSession(
+      { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID,
+        role: "orchestrator", config: { permissionMode: "acceptEdits" } },
+      undefined, undefined, false, false, false, human,
+    );
+    assert.equal(preFlagClaude.ok, true, preFlagClaude.error);
 
     // ...and on restart, so a rediscovery that drops the bridge cannot slip through.
     db.updateSessionStatus(additive.data!.id, "stopped", Date.now());

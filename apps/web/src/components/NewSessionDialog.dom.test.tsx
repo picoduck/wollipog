@@ -1909,3 +1909,74 @@ test("choosing Normal explicitly overrides a saved Orchestrator harness default 
     assert.equal(fixture.requests[0]?.orchestrator, undefined);
   } finally { await unmountFixture(fixture); }
 });
+
+/**
+ * A Pi installation that offers ONLY the additive role: the runner attested `orchestratorAdditive`
+ * from the verified Agent Control bridge, but cannot offer the coupled preset because it runs the
+ * default `provider` execution isolation. This is the default configuration (#1294 finding 2), and
+ * `piAgentControl` is deliberately absent because `agentsForControlPlane` clears it before
+ * publishing and the control-plane database never persists it.
+ */
+const piAdditiveRunner: RunnerView = {
+  ...runner, protocolVersion: PROTOCOL_VERSION,
+  agents: [{
+    id: "pi", name: "Pi", command: "pi", args: [], env: {},
+    driver: "pi", available: true, context: { kind: "native" },
+    capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+      permissionModes: ["default", "dontAsk", "bypassPermissions"],
+      orchestratorAdditive: true,
+    },
+  }],
+};
+
+test("a Pi agent offering only the additive role can launch an Orchestrator", async () => {
+  const fixture = await mountFixture({ runners: [piAdditiveRunner], capabilities: {
+    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+  } });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    assert.equal(cardRefused(permissionPresetCard(fixture.container, "Orchestrator")), false,
+      "the Orchestrator card is offered even though this installation has no coupled preset");
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests.length, 1);
+    assert.equal(fixture.requests[0]?.role, "orchestrator");
+    assert.equal(fixture.requests[0]?.config?.permissionMode, undefined,
+      "the additive role never consumes the provider permission-mode selection");
+  } finally { await unmountFixture(fixture); }
+});
+
+test("an additive-only Pi Orchestrator refuses Strict Project Isolation with a reason", async () => {
+  const strict = await mountFixture({ runners: [piAdditiveRunner], capabilities: {
+    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+  } }, undefined, undefined, undefined, undefined, strictOrchestratorDefaults);
+  try {
+    await act(async () => { await selectProject(strict.container, project.id); });
+    await choosePermissionPreset(strict.container, "Orchestrator");
+    // Strict Project Isolation is delivered only by the coupled preset, which this installation
+    // cannot launch. The dialog must say so and refuse, not submit a shape the server rejects.
+    assert.match(strict.container.textContent!, /Strict Project Isolation is delivered by the Orchestrator preset/);
+    assert.equal(createButton(strict.container).disabled, true,
+      "a shape the control plane would refuse is never submittable");
+    await act(async () => { createButton(strict.container).click(); });
+    assert.equal(strict.requests.length, 0);
+  } finally { await unmountFixture(strict); }
+});
+
+test("an agent offering neither Orchestrator advertisement still says the agent lacks the role", async () => {
+  const plain: RunnerView = {
+    ...piAdditiveRunner,
+    agents: piAdditiveRunner.agents.map((agent) => ({
+      ...agent, capabilities: { ...agent.capabilities!, orchestratorAdditive: undefined },
+    })),
+  };
+  const fixture = await mountFixture({ runners: [plain], capabilities: {
+    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+  } });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    assert.equal(cardRefused(permissionPresetCard(fixture.container, "Orchestrator")), true);
+    assert.match(fixture.container.textContent!, /does not offer the Orchestrator role/);
+  } finally { await unmountFixture(fixture); }
+});

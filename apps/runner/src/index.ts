@@ -427,9 +427,11 @@ function agentsForControlPlane() {
       // publish it only through the principal-scoped subscription-usage snapshot.
       return {
         ...agent,
-        // Pi bridge attestation authorizes runner-local launch construction. The projected
-        // Orchestrator permission mode is sufficient for the control plane; do not persist the
-        // local implementation marker as if a future runner could inherit it.
+        // Pi bridge attestation authorizes runner-local launch construction; do not persist the
+        // local implementation marker as if a future runner could inherit it. What the control
+        // plane needs from it travels instead as `capabilities.orchestratorAdditive`, which the
+        // spreads below must preserve — clearing this field while the consumer still read it is
+        // what made the additive Pi Orchestrator unreachable from the dialog (#1294).
         piAgentControl: undefined,
         env: {},
         ...(agent.claudeCode
@@ -440,6 +442,8 @@ function agentsForControlPlane() {
             (!runnerSupportsProtocol(controlPlaneProtocolVersion, "wslSafeLauncher") ||
               agent.wslAgentControl?.safeLauncherProtocolVersion !== 1 ||
               config.executionIsolation.mode !== "bwrap"))) && agent.capabilities
+          // Narrows only the coupled-preset advertisement. `orchestratorAdditive` rides the spread
+          // untouched: it is a separate attestation, and this branch is about the preset alone.
           ? { capabilities: { ...agent.capabilities, permissionModes: agent.capabilities.permissionModes?.filter((mode) => mode !== "orchestrator") } }
           : {}),
       };
