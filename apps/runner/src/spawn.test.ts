@@ -447,6 +447,24 @@ test("buildBwrapArgs makes the host read-only, worktree/tmp writable, and networ
   assert.deepEqual(state.slice(stateIndex - 1, stateIndex + 2), ["--bind", "/state/codex", "/home/me/.codex/sessions"]);
 });
 
+test("buildBwrapArgs mounts runner-owned entries read-only after every writable bind", () => {
+  const args = buildBwrapArgs({ command: "/usr/bin/agent", args: [], cwd: "/work/tree" }, {
+    backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "inherit",
+    writableBinds: [{ source: "/state/codex", target: "/home/me/.codex/sessions" }],
+    readOnlyBinds: ["/work/tree/.git", "/work/sibling/.git"],
+  });
+  // bwrap applies mounts in argv order, so the narrow read-only entry has to be rendered after the
+  // writable cwd that contains it. Rendered first, the cwd bind would simply cover it again.
+  const cwdBind = args.indexOf("--bind", args.indexOf("--tmpfs"));
+  const linkBind = args.indexOf("/work/tree/.git");
+  assert.ok(cwdBind > 0 && linkBind > cwdBind, `read-only entry must follow the cwd bind: ${args.join(" ")}`);
+  assert.deepEqual(args.slice(linkBind - 1, linkBind + 5), [
+    "--ro-bind", "/work/tree/.git", "/work/tree/.git",
+    "--ro-bind", "/work/sibling/.git", "/work/sibling/.git",
+  ]);
+  assert.deepEqual(args.slice(args.indexOf("--chdir")), ["--chdir", "/work/tree", "--", "/usr/bin/agent"]);
+});
+
 test("spawnAgent scrubs inherited env keys but explicit env still wins", async () => {
   process.env.WOLLIPOG_TEST_SCRUB_A = "leaked-from-daemon";
   process.env.WOLLIPOG_TEST_SCRUB_B = "leaked-from-daemon";

@@ -145,6 +145,9 @@ export interface BwrapSpawnIsolation {
   network: "inherit" | "deny";
   /** Narrow durable state exceptions; source lives under runner data, target is the CLI's home path. */
   writableBinds?: Array<{ source: string; target: string }>;
+  /** Runner-owned administrative entries bound read-only over themselves. Rendered after every
+   * writable bind, including the cwd, so the narrower rule is the one that lands. */
+  readOnlyBinds?: string[];
   /** Ephemeral authenticated bridge state; never persisted or advertised. WSL only. */
   wslAgentControl?: WslAgentControlLaunch;
 }
@@ -170,6 +173,8 @@ export interface SeatbeltSpawnIsolation {
   profile: string;
   /** Canonical roots rendered into profile, retained so live-process notices report that exact boundary. */
   writableRoots: string[];
+  /** Runner-owned entries the profile denies writes to even though a writable root contains them. */
+  readOnlyPaths?: string[];
 }
 
 export interface WindowsJobSpawnIsolation {
@@ -312,6 +317,7 @@ export function buildBwrapArgs(opts: Pick<SpawnAgentOptions, "command" | "args" 
       "--ro-bind", socketDir, WSL_AGENT_CONTROL_PRIVATE_DIR] : []),
     ...(isolation.writableBinds ?? []).flatMap((bind) => ["--bind", bind.source, bind.target]),
     "--bind", opts.cwd, opts.cwd,
+    ...(isolation.readOnlyBinds ?? []).flatMap((path) => ["--ro-bind", path, path]),
     "--chdir", opts.cwd,
     "--",
     opts.command,

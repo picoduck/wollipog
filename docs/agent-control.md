@@ -181,6 +181,44 @@ checks, Parent Control, typed workflow decisions, authentication exclusions, chi
 resource limits, and audit provenance are unchanged. The full operation and campaign issue-scope
 contract is recorded in [ADR 0007](adr/0007-separate-orchestrator-role-from-project-isolation.md).
 
+## Managed Worktree Administrative Paths
+
+A runner-owned session worktree is protected against provider commands that remove or unregister it,
+but that protection lives at the command-approval boundary and cannot see a write a script or tool
+performs at runtime. The worktree's `.git` link file is the one path inside an otherwise writable
+worktree where a single stray write is unrecoverable: Git reads it to locate the real administrative
+directory, so a damaged link breaks every later Git operation and the session's pre-launch
+verification while the worktree root and its repository registration both survive.
+
+Sandbox modes that can express a per-path rule therefore present that link read-only to the provider
+and leave the rest of the worktree writable. Git never rewrites the link, so ordinary edits, staging,
+commits, branch switches, and test runs are unaffected. The repository's own `.git` directory is
+deliberately **not** covered — every worktree's real administrative directory lives inside it, and
+freezing it would break the commits this rule exists to keep working. Attached operator worktrees
+contribute no rule at all: only runner-created identities are managed.
+
+| Isolation mode | Enforces the read-only rule | Why |
+| --- | --- | --- |
+| `bwrap` (native Linux) | Yes | The link is bind-mounted read-only over itself after every writable bind, so writes fail with `EROFS` and delete or rename with `EBUSY`. |
+| `seatbelt` (native macOS) | Yes | The profile denies `file-write*` on the link after the `allow` that grants the containing worktree; Seatbelt takes the last matching rule. |
+| `bwrap` in Direct WSL | No | The target-local launcher attests only directories as bind sources, so a link **file** cannot be bound. Raising that needs a new attested launcher protocol version. |
+| `windows-job` | No | Job Objects manage a process tree. They do not restrict filesystem access at all. |
+| `container` execution targets | No | The workspace is one read-write bind into the image; the rule is not expressed per path today. |
+| `cloud` execution targets | No | The filesystem boundary belongs to the remote adapter, not to this runner. |
+| `provider` | No | There is no runner-owned boundary; the provider's own sandbox decides, and none of the supported providers expose a per-path exclusion inside a writable root. |
+
+On a non-enforcing mode the behavior is exactly what it was before this rule existed. Nothing is
+newly permitted anywhere: the rule only ever removes provider write access to one runner-owned path.
+
+**The rule is bound at launch, like every other filesystem boundary here.** A `bwrap` or Seatbelt
+sandbox is constructed when the provider starts, so the read-only entries are the ones that exist
+then. A worktree the provider requests *during* a turn is created inside the session's
+requested-worktree boundary, which is already writable, and a worktree switch schedules a relaunch
+rather than rebinding a live sandbox — so that new worktree's link is writable until the relaunch,
+exactly as the **Attach** notice already reports for the worktree root itself. This is the same
+same-turn window the command-approval boundary has, tracked separately; closing it means retiring
+the provider at creation time, not changing the sandbox rule.
+
 ## Typed Parent Control Decisions
 
 An Orchestrator that cannot continue without a human response must create a structured blocking

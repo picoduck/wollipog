@@ -84,6 +84,7 @@ import { isDeepStrictEqual } from "node:util";
 import { makeDriver, type Driver } from "./drivers/factory.js";
 import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
 import type { ClaudeGuardRefreshOutcome as ManagedWorktreeGuardRefreshOutcome } from "./hook-settings.js";
+import { managedWorktreeReadOnlyPaths } from "./managed-worktree-sandbox.js";
 import type {
   CompletedCommandReconciliationProof,
   DriverBackgroundWorkUpdate,
@@ -6756,12 +6757,21 @@ export class SessionManager {
       return this.prepareCloudIsolation(meta, cwd, launchGeneration);
     }
     this.assertHostIsolationContextSupported(meta);
+    // The provider may write anywhere in its managed worktree except the entries the runner owns.
+    // Ordinary command approval cannot see a write a script performs at runtime, so the same set of
+    // runner-owned paths is handed to the filesystem boundary as well. Native only: a Direct WSL
+    // worktree is a POSIX pathname that a Windows host would join with the wrong separator, and no
+    // WSL mode can express the rule anyway — deriving it there would produce a path nobody uses.
+    const readOnlyPaths = meta.context.kind === "native"
+      ? managedWorktreeReadOnlyPaths(this.managedWorktreeProtections(meta))
+      : [];
     return this.requestedWorktreeIsolation(meta).then((additionalWritableRoots) => this.resolveIsolation(this.executionIsolation, meta.context, {}, {
       driver: meta.driver,
       dataDir: this.stateDir,
       env: meta.env,
       sessionId: meta.sessionId,
       cwd,
+      ...(readOnlyPaths.length ? { readOnlyPaths } : {}),
       ...(this.strictProjectIsolation(meta) ? { orchestratorScratchOnly: true } : {}),
       ...((additionalWritableRoots.length || meta.adoptedProviderState)
         ? { additionalWritableRoots: [
