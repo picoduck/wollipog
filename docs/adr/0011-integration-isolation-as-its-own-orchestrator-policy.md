@@ -43,41 +43,60 @@ them would also mean deleting user-supplied launch arguments, which every strip 
 codebase is forbidden to do. The rule is uniform across all three harnesses so the disclosure can be
 one sentence.
 
-### Claude Code
+### Claude Code: `--strict-mcp-config`, and nothing else
 
-`--strict-mcp-config` plus `--setting-sources ""`. Wollipog's own managed policy-hook `--settings`
-file is **kept**.
+Claude Code isolates **configured MCP servers only**. Hooks (the user's and Wollipog's managed
+policy hooks), plugins enabled in settings, skills, and the user's permission rules are all kept.
 
-Measured against the installed claude 2.1.270, with a `SessionStart` hook that touches a marker file
-and `claude … -p x --model <invalid>` so the run ends before a model call:
+This deliberately under-delivers against the issue's headline ("no hooks, plugins, extensions, or
+skills"), because Claude Code offers no lever that removes user hooks without also removing
+something that is not an integration:
 
-| probe | result |
-| --- | --- |
-| `--settings hooks.json` | marker written — a `--settings` file's hooks run |
-| `--settings both.json` (hooks **and** `"disableAllHooks":true`) | no marker — `disableAllHooks` stops hooks in the very same file |
-| `CLAUDE_CONFIG_DIR=… --settings hooks.json` | both the user-settings marker and the `--settings` marker |
-| `CLAUDE_CONFIG_DIR=… --setting-sources "" --settings hooks.json` | only the `--settings` marker — user settings are ignored, ours still runs |
-| `--settings a.json --settings b.json` | only `b.json`'s marker — a second `--settings` replaces the first |
-| `--setting-sources project --setting-sources ""` | no project marker — the last occurrence wins |
+- `--setting-sources ""` drops user, project, and local settings wholesale, taking
+  `permissions.allow` / `ask` / `deny` and `defaultMode` with them. A dropped `deny` rule
+  **broadens** what the session may touch — the opposite of what a user enabling an isolation policy
+  expects — and it changes the permission surface this policy promises not to touch.
+- `{"disableAllHooks":true}` stops hooks in the very `--settings` file that sets it, so it would
+  also remove Wollipog's own managed policy hooks. Those are governance, not a user integration, and
+  they carry the `hook` elicitation transport the permission mode uses to ask a human for approval.
+- Claude user hooks are frequently guardrails themselves (PreToolUse blockers, secret scanners), so
+  removing them is not unambiguously the safer direction either.
+- `--restricted` removes built-in tools and confines the file tools; `--bare` changes
+  authentication, attribution, and CLAUDE.md discovery. Both are far more than the integration
+  surface.
 
-`disableAllHooks` is therefore rejected: it would also disable Wollipog's manager policy hooks, which
-are governance, not a user integration, and which carry the `hook` elicitation transport the
-permission mode uses to ask a human for approval. Removing them would change the permission surface,
-which this policy must not do. `--setting-sources ""` is the only lever Claude offers that separates
-the two hook sources, and the measurement above shows it does exactly that.
+The rule for this series is that nothing may silently broaden. A policy that cannot be delivered
+exactly under-delivers and says so; it never over-reaches. Every disclosure surface therefore states,
+for Claude specifically, that configured MCP servers are removed while hooks, settings-enabled
+plugins, and permission rules are kept, and why.
 
-`--restricted` and `--bare` were also rejected: `--restricted` removes built-in tools and confines
-the file tools, and `--bare` changes authentication, attribution, and CLAUDE.md discovery. Both are
-far more than the integration surface.
+#### Measurements
 
-**Known residual, disclosed rather than hidden.** Permission *rules* (`permissions.allow` / `ask` /
-`deny` and `defaultMode`) declared in user, project, or local settings files are dropped together
-with those files, because Claude has no per-source hook switch. The permission *mode* is unaffected —
-the Claude driver always passes an explicit `--permission-mode` — but a `deny` rule declared in user
-settings does not apply to an integration-isolated Orchestrator. There is no way to re-declare those
-rules: the measurement above shows a second `--settings` replaces the first, so re-emitting them
-would displace either the runner's own governance hook settings or the user's. This is the one place
-where the policy reaches beyond integrations, and it is stated in the UI, here, and in DRIVERS.md.
+All against the installed claude 2.1.270, with `-p x --model nonexistent-model-probe` so the run
+ends before any model call. MCP probes use a stub stdio server that writes a marker file the instant
+it starts; hook probes use a `SessionStart` hook that touches a marker.
+
+| # | command | result |
+| --- | --- | --- |
+| 1 | `claude --mcp-config wollipog.mcp.json -p x --model <invalid>` (cwd has `.mcp.json` + `.claude/settings.local.json` `enabledMcpjsonServers`) | project `.mcp.json` marker **and** `--mcp-config` marker |
+| 2 | same **+ `--strict-mcp-config`** | only the `--mcp-config` marker — the project server did not start |
+| 3 | `CLAUDE_CONFIG_DIR=<tmp with .claude.json mcpServers> claude --mcp-config wollipog.mcp.json -p x --model <invalid>` | user-scope marker **and** `--mcp-config` marker |
+| 4 | same **+ `--strict-mcp-config`** | only the `--mcp-config` marker — the user-scope server did not start |
+| 5 | `claude --settings hooks.json -p x --model <invalid>` | marker written — a `--settings` file's hooks run |
+| 6 | `claude --settings both.json …` (hooks **and** `"disableAllHooks":true`) | no marker — `disableAllHooks` stops hooks in the same file |
+| 7 | `claude --settings a.json --settings b.json …` | only `b.json`'s marker — a second `--settings` replaces the first |
+| 8 | `CLAUDE_CONFIG_DIR=… --setting-sources "" --settings hooks.json` | only the `--settings` marker — settings sources are dropped wholesale, permission rules included |
+
+So `--strict-mcp-config` excludes both user-scope and project-file MCP servers while keeping the
+`--mcp-config` ones: exactly the isolation this policy needs, with no other effect.
+
+**Not measured: plugin-contributed MCP servers.** `claude mcp list` ignores `--mcp-config` and
+`--strict-mcp-config` entirely, so it is not a valid instrument. A purpose-built `--plugin-dir`
+plugin declaring an MCP server (both via `.mcp.json` and via the manifest's `mcpServers`) never
+started its server even without `--strict-mcp-config`, so there was no baseline to compare against.
+Observing a real enabled plugin's server by process detection was confounded: the measuring agent's
+own Claude Code session runs the same plugin servers. The copy is therefore worded conservatively —
+"configured MCP servers" — and **no surface claims plugin-contributed servers are removed**.
 
 ### Codex and Codex App Server
 
@@ -137,10 +156,11 @@ shipped. Its effective and stored value is `true`, attributed to the provenance 
 implied it, and an explicit override asking for `false` under the preset is refused rather than
 stored as a value the launch would contradict.
 
-The one residual in that claim: the non-strict Claude *preset* shape does not pass
-`--setting-sources ""`, so user settings hooks are still evaluated for it. They cannot introduce
-integration tools, because that shape's `--allowedTools`/`--disallowedTools` allowlist is closed. It
-is recorded here rather than fixed, because this issue must not change any preset launch.
+The one residual in that claim: the STRICT Claude preset passes `--setting-sources ""`, but the
+non-strict Claude preset shape does not, so user settings hooks are still evaluated for it. They
+cannot introduce integration tools, because that shape's `--allowedTools`/`--disallowedTools`
+allowlist is closed. It is recorded here rather than fixed, because this issue must not change any
+preset launch.
 
 ## Migration
 
@@ -160,5 +180,11 @@ policy is only ever delivered by a preset launch.
   required and Strict Project Isolation could not express.
 - Two independent execution policies mean two provenance entries and two capability stories; both
   are resolved in `resolveOrchestratorCampaignPolicy` so no caller re-derives either.
-- The Claude permission-rule residual is real and is disclosed. If Claude ever gains a per-source
-  hook switch, or a way to merge a second `--settings` file, this ADR should be revisited.
+- Claude Code under-delivers against the issue's headline, deliberately and visibly: it removes
+  configured MCP servers and nothing else. If Claude ever gains a per-source hook switch, or a way
+  to merge a second `--settings` file so permission rules could be preserved independently, this
+  decision should be revisited.
+- Because the policy now genuinely differs by harness, the disclosure is per-harness:
+  `integrationIsolationDisclosure(driver)` drives the dialog control, the Provider Permissions
+  summary, and the session detail row, and `INTEGRATION_ISOLATION_BY_HARNESS` states the differences
+  compactly in the account-level settings panel, which has no selected harness.

@@ -47,6 +47,7 @@ import { isPartialHistory, isRebuiltEventsArray, useStoreActions, useStoreSelect
 import { relativeTime, shortenPath, titleCaseLabel } from "../format.js";
 import { agentHarnessIdentityLabel } from "../agent-presentation.js";
 import { runnerDisplay } from "../runners.js";
+import { integrationIsolationDisclosure } from "../session-preset-defaults.js";
 import { DirectoryPicker } from "./DirectoryPicker.js";
 import { type TimelineItem } from "../timeline.js";
 import { useTimeline } from "./useTimeline.js";
@@ -6591,9 +6592,17 @@ export function ComposerPlusMenu({
                           fall back the same way the stored policy's own migration does: a strict
                           policy is only ever delivered by a preset launch, which carries no user
                           integration. */}
-                      <div><dt>Integration Isolation</dt><dd>{(session.orchestratorPolicy.execution?.integrationIsolation ??
-                        session.orchestratorPolicy.execution?.strictProjectIsolation ?? true) ? "Enabled" : "Disabled"}<small>{titleCaseLabel(
-                        (session.orchestratorPolicy.sources.execution?.integrationIsolation ?? "legacy_session").replaceAll("_", " "))}</small></dd></div>
+                      {(() => {
+                        const enabled = session.orchestratorPolicy!.execution?.integrationIsolation ??
+                          session.orchestratorPolicy!.execution?.strictProjectIsolation ?? true;
+                        const copy = integrationIsolationDisclosure(session.driver);
+                        return <div title={enabled ? `${copy.removed} ${copy.kept}` : undefined}>
+                          <dt>Integration Isolation</dt>
+                          <dd>{enabled ? "Enabled" : "Disabled"}<small>{titleCaseLabel(
+                            (session.orchestratorPolicy!.sources.execution?.integrationIsolation ?? "legacy_session")
+                              .replaceAll("_", " "))}</small></dd>
+                        </div>;
+                      })()}
                       {session.orchestratorCampaign && <>
                         <div><dt>Children</dt><dd>{session.orchestratorCampaign.children.total}<small>{session.orchestratorCampaign.children.verified} Verified · {session.orchestratorCampaign.children.active} Active · {session.orchestratorCampaign.children.waitingHuman} Waiting for Human · {session.orchestratorCampaign.children.blocked} Blocked</small></dd></div>
                         <div><dt>Follow-Up Recommendations</dt><dd>{session.orchestratorCampaign.followUps.unique}<small>{session.orchestratorCampaign.followUps.duplicates} Duplicates Skipped</small></dd></div>

@@ -87,14 +87,45 @@ export function orchestratorUnavailableReason(input: {
  * uses the coupled preset — notably ACP, whose provider-mode permission contract is unaudited — and
  * the sentence names which condition selects it so the user can change the one they control.
  */
-/** The exact list of what Integration Isolation removes, used by every surface that discloses it so
- * the dialog, the settings panel, and the session detail cannot describe the policy differently. */
-export const INTEGRATION_ISOLATION_REMOVED =
-  "Removes user-configured MCP servers, hooks, plugins, apps, extensions, skills, prompt templates, " +
-  "and ambient context files, leaving only Wollipog's management tools. Integrations named explicitly " +
-  "in the agent definition's launch arguments are part of the harness installation and remain.";
+/**
+ * What Integration Isolation removes and keeps, per harness.
+ *
+ * The policy genuinely differs by harness, because each provider offers different levers, so a
+ * single sentence would be wrong for at least one of them. Claude Code in particular isolates MCP
+ * servers ONLY: it cannot drop hooks without also dropping either the user's permission rules or
+ * Wollipog's own governance hooks, so it under-delivers and says so rather than over-reaching.
+ */
+export function integrationIsolationDisclosure(driver: AgentDriverKind | undefined): {
+  removed: string;
+  kept: string;
+} {
+  if (driver === "codex" || driver === "codex-app-server") {
+    return {
+      removed: "Removes configured MCP servers, apps, plugins, and hooks, leaving Wollipog's management tools as the only integration.",
+      kept: "Built-in tools, including the multi-agent and multimodal tools, are kept, and so is anything named in the agent definition's own launch arguments.",
+    };
+  }
+  if (driver === "pi") {
+    return {
+      removed: "Removes discovered extensions, skills, prompt templates, and ambient context files, leaving Wollipog's management extension as the only integration.",
+      kept: "Built-in tools are kept, and so is anything named in the agent definition's own launch arguments.",
+    };
+  }
+  return {
+    removed: "Removes configured MCP servers, so Wollipog's management tools are the only MCP integration.",
+    kept: "Hooks, plugins enabled in settings, skills, and your permission rules are all kept, because Claude Code cannot drop hooks without also dropping either your permission rules or Wollipog's own governance hooks.",
+  };
+}
 
-/** Companion sentence: the two things this policy deliberately does not touch. */
+/** The account-level settings panel has no selected harness, so it states the differences compactly
+ * rather than picking one harness's wording and being wrong about the other two. */
+export const INTEGRATION_ISOLATION_BY_HARNESS =
+  "What is removed depends on the harness: Claude Code removes configured MCP servers only, because " +
+  "it cannot drop hooks without also dropping your permission rules or Wollipog's own governance " +
+  "hooks; Codex also removes apps, plugins, and hooks; Pi removes discovered extensions, skills, " +
+  "prompt templates, and ambient context files.";
+
+/** Companion sentence: what this policy deliberately does not touch, on every harness. */
 export const INTEGRATION_ISOLATION_PRESERVED =
   "The provider permission mode, built-in tool inventory, sandbox and approval behavior, and the " +
   "project boundary are unchanged.";

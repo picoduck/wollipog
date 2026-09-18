@@ -792,15 +792,26 @@ test("Integration Isolation changes only the integration surface of the additive
 });
 
 test("Integration Isolation uses the measured per-harness integration levers", () => {
+  const plainClaude = additiveOrchestratorLaunchArgs("claude-code", mcp, ["/repo"]);
   const claude = additiveOrchestratorLaunchArgs("claude-code", mcp, ["/repo"], true);
-  assert.equal(claude.includes("--strict-mcp-config"), true,
-    "only servers named by --mcp-config apply, which for an Orchestrator is Wollipog's own config");
-  assert.equal(claude[claude.indexOf("--setting-sources") + 1], "",
-    "user, project, and local settings files are the only source of Claude hooks and enabled plugins");
-  assert.equal(claude.includes("--settings"), false,
-    "a second --settings replaces the first (measured on claude 2.1.270), so it would displace Wollipog's own managed policy hooks");
+  // Claude isolates MCP servers and NOTHING else. Measured against claude 2.1.270 with a stub stdio
+  // server that writes a marker on start: a user-scope `~/.claude.json` server and a project
+  // `.mcp.json` server both start normally, and under `--strict-mcp-config` neither does while the
+  // `--mcp-config` server still does.
+  assert.deepEqual(claude, ["--strict-mcp-config", ...plainClaude],
+    "the isolated Claude launch differs from the additive one by exactly --strict-mcp-config");
+  // Claude cannot drop the user's hooks without also dropping either their permission rules or
+  // Wollipog's own governance hooks, so it under-delivers rather than over-reaching. None of these
+  // may appear: each would change something other than the integration surface.
+  for (const forbidden of [
+    "--setting-sources", "--settings", "--tools", "--permission-mode", "--disallowedTools",
+    "--disable-slash-commands", "--restricted", "--bare", "--allow-dangerously-skip-permissions",
+  ]) {
+    assert.equal(claude.includes(forbidden), false,
+      `Integration Isolation must not inject ${forbidden} for Claude Code`);
+  }
   assert.equal(claude.join(" ").includes("disableAllHooks"), false,
-    "disableAllHooks also stops the --settings file's hooks, removing Wollipog's governance channel");
+    "disableAllHooks also stops the --settings file's own hooks, removing Wollipog's governance channel");
 
   for (const driver of ["codex", "codex-app-server"] as const) {
     const codex = additiveOrchestratorLaunchArgs(driver, mcp, [], true);
@@ -824,15 +835,17 @@ test("the Integration Isolation strip leaves user arguments alone and is exact a
   // A disabled policy never touches these flags at all, whoever supplied them.
   const userClaude = ["--strict-mcp-config", "--setting-sources", "user", "--mcp-config", "/user.json"];
   assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(userClaude, "claude-code", [], false), userClaude);
-  // With the policy on, only the runner's own EMPTY setting-sources value is ours; a user's own
-  // named sources stay where they are and Claude takes the last occurrence.
+  // With the policy on, only `--strict-mcp-config` is ours. Settings sources are never touched: the
+  // isolated Claude launch does not inject one, so removing one would delete a user argument — and
+  // dropping the settings files would drop the user's permission rules with them.
   assert.deepEqual(
     stripAdditiveOrchestratorLaunchArgs(
-      ["--setting-sources", "user", "--strict-mcp-config", "--setting-sources", ""], "claude-code", [], true),
-    ["--setting-sources", "user"]);
+      ["--setting-sources", "user", "--strict-mcp-config", "--mcp-config", "/user.json"], "claude-code", [], true),
+    ["--setting-sources", "user", "--mcp-config", "/user.json"]);
   assert.deepEqual(
-    stripAdditiveOrchestratorLaunchArgs(["--setting-sources=user", "--setting-sources="], "claude-code", [], true),
-    ["--setting-sources=user"], "the inline --flag=value form is recognised too");
+    stripAdditiveOrchestratorLaunchArgs(["--setting-sources=user", "--settings", "/user.json"], "claude-code", [], true),
+    ["--setting-sources=user", "--settings", "/user.json"],
+    "neither form of a settings argument is ever removed by this policy");
 
   // Codex: only the three features this policy disables, and only per-server MCP disables.
   assert.deepEqual(

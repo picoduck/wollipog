@@ -326,7 +326,13 @@ test("Integration Isolation is a separate saved default, implied by Strict Proje
     assert.equal(enable.getAttribute("aria-disabled"), null,
       "the policy is independently configurable while the project boundary is off");
     await act(async () => enable.click());
-    assert.match(container.textContent ?? "", /Removes user-configured MCP servers, hooks, plugins/);
+    // An account default has no selected harness, so the panel states the per-harness differences
+    // compactly rather than picking one harness's wording and being wrong about the other two.
+    assert.match(container.textContent ?? "",
+      /Claude Code removes configured MCP servers only, because it cannot drop hooks without also dropping your permission rules/);
+    assert.match(container.textContent ?? "", /Codex also removes apps, plugins, and hooks/);
+    assert.match(container.textContent ?? "",
+      /Pi removes discovered extensions, skills, prompt templates, and ambient context files/);
     const save = [...container.querySelectorAll<HTMLButtonElement>("button")]
       .find((button) => button.textContent === "Save Defaults")!;
     await act(async () => save.click());

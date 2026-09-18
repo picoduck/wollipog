@@ -875,7 +875,8 @@ test("Integration Isolation removes only integrations from an additive launch, a
         : arg.includes(s.sessionId) ? "<session-scoped>" : arg);
 
     for (const [driver, userArgs, agent] of [
-      ["claude-code", ["--permission-mode", "acceptEdits", "--mcp-config", "/user.json"], undefined],
+      ["claude-code", ["--permission-mode", "acceptEdits", "--mcp-config", "/user.json",
+        "--setting-sources", "user", "--settings", "/user-settings.json"], undefined],
       ["pi", ["--no-skills", "--exclude-tools", "write"], {
         id: "pi", name: "Pi", command: "pi", args: ["--no-skills", "--exclude-tools", "write"],
         env: {}, driver: "pi" as const, context: { kind: "native" as const },
@@ -915,12 +916,25 @@ test("Integration Isolation removes only integrations from an additive launch, a
       assert.deepEqual(isolated.args, before, `${driver}: resume replaces rather than stacks the isolation flags`);
     }
 
-    // Claude's levers, and the ones it deliberately does not use.
+    // Claude's one lever, and the many it deliberately does not use. Claude cannot drop the user's
+    // hooks without also dropping either their permission rules or Wollipog's governance hooks, so
+    // it isolates MCP servers only and every disclosure surface says so.
+    const claudePlain = build("s_claude_plain_levers", "claude-code", [], { strictProjectIsolation: false });
+    provisionAgentControl(claudePlain, control, () => {}, host);
     const claude = build("s_claude_levers", "claude-code", [],
       { strictProjectIsolation: false, integrationIsolation: true });
     provisionAgentControl(claude, control, () => {}, host);
-    assert.ok(claude.args.includes("--strict-mcp-config"));
-    assert.equal(claude.args[claude.args.indexOf("--setting-sources") + 1], "");
+    const claudeAnon = (s: SessionLaunchSpec) => s.args.map((arg) =>
+      arg === agentControlMcpConfigPath(root, s.sessionId) ? "<mcp-config>" : arg);
+    assert.deepEqual(claudeAnon(claude), ["--strict-mcp-config", ...claudeAnon(claudePlain)],
+      "the isolated Claude launch differs from the additive one by exactly --strict-mcp-config");
+    for (const forbidden of [
+      "--setting-sources", "--tools", "--permission-mode", "--disallowedTools",
+      "--disable-slash-commands", "--restricted", "--bare",
+    ]) {
+      assert.equal(claude.args.includes(forbidden), false,
+        `Integration Isolation must not inject ${forbidden} for Claude Code`);
+    }
     assert.equal(claude.args.join(" ").includes("disableAllHooks"), false,
       "Wollipog's own managed policy hooks carry the approval elicitation transport and must survive");
 

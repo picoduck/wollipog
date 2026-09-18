@@ -47,7 +47,7 @@ import { machineOptionLabels, runnerDisplay } from "../runners.js";
 import { shortenPath, permissionModeLabel, titleCaseLabel } from "../format.js";
 import {
   INTEGRATION_ISOLATION_PRESERVED,
-  INTEGRATION_ISOLATION_REMOVED,
+  integrationIsolationDisclosure,
   orchestratorPresetPermissionsReason,
   orchestratorUnavailableReason,
   savedSessionPermissionMode,
@@ -620,6 +620,8 @@ export function NewSessionDialog({
   // needed here — only the protocol gate the control plane will apply.
   const integrationIsolationSupported = integrationIsolationImplied ||
     runnerSupportsProtocol(runner?.protocolVersion, "orchestratorIntegrationIsolation");
+  // The policy differs by harness, so the copy follows the agent this session will actually launch.
+  const integrationIsolationCopy = integrationIsolationDisclosure(agent?.driver);
   const integrationIsolationUnavailable = runnerCapabilityRequirement(
     runner?.protocolVersion,
     "orchestratorIntegrationIsolation",
@@ -1496,7 +1498,7 @@ export function NewSessionDialog({
                     ? "This target cannot host Pi's approval bridge, so commands run without interactive approvals."
                     : orchestrator
                       ? effectiveIntegrationIsolation
-                        ? `The same permission modes and credentials as a normal session apply, and the Orchestrator role only adds Wollipog's orchestration tools. Integration Isolation is enabled: ${INTEGRATION_ISOLATION_REMOVED.charAt(0).toLowerCase()}${INTEGRATION_ISOLATION_REMOVED.slice(1)} Change the mode in the composer after creation.`
+                        ? `The same permission modes and credentials as a normal session apply, and the Orchestrator role only adds Wollipog's orchestration tools. Integration Isolation is enabled: ${integrationIsolationCopy.removed.charAt(0).toLowerCase()}${integrationIsolationCopy.removed.slice(1)} ${integrationIsolationCopy.kept} Change the mode in the composer after creation.`
                         : "The same permission modes, integrations, and credentials as a normal session apply, and the Orchestrator role only adds Wollipog's orchestration tools. Typed workflow decisions do not govern integrations they cannot intercept. Change the mode in the composer after creation."
                       : "Use the approval behavior saved for this agent harness. Change it in the composer after creation."}
               </span>
@@ -1681,7 +1683,7 @@ export function NewSessionDialog({
                       {
                         value: "enabled",
                         label: "Enabled",
-                        description: INTEGRATION_ISOLATION_REMOVED,
+                        description: integrationIsolationCopy.removed,
                       },
                     ]}
                     onChange={(value) => setIntegrationIsolation(value === "enabled")}
@@ -1691,7 +1693,7 @@ export function NewSessionDialog({
                   {integrationIsolationImplied
                     ? `${orchestratorDraft.execution.strictProjectIsolation ? "Strict Project Isolation" : "The Orchestrator preset"} already launches without provider integrations, so this policy is implied and cannot be disabled. ${INTEGRATION_ISOLATION_PRESERVED}`
                     : effectiveIntegrationIsolation
-                      ? `${INTEGRATION_ISOLATION_REMOVED} ${INTEGRATION_ISOLATION_PRESERVED}`
+                      ? `${integrationIsolationCopy.removed} ${integrationIsolationCopy.kept} ${INTEGRATION_ISOLATION_PRESERVED}`
                       : "Hooks, plugins, extensions, skills, and configured MCP servers load exactly as they would for a normal session with this harness."}
                 </p>
                 {!orchestratorExecutionValid && <p className="form-error" role="alert">

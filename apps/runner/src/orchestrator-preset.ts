@@ -393,33 +393,39 @@ export function orchestratorLaunchArgs(
 const ADDITIVE_CLAUDE_ALLOWED_TOOLS = "mcp__wollipog__*";
 
 /**
- * Integration Isolation for the ADDITIVE Claude launch (protocol v164).
+ * Integration Isolation for the ADDITIVE Claude launch (protocol v164): `--strict-mcp-config`, and
+ * nothing else.
  *
- * `--strict-mcp-config` keeps only the servers named by `--mcp-config`, which for an Orchestrator is
- * exactly Wollipog's own Agent Control config. `--setting-sources ""` stops Claude reading the user,
- * project, and local settings files, which is where hooks, enabled plugins, marketplaces, and
- * status lines are declared.
+ * Claude's settings files declare hooks, enabled plugins, and marketplaces — AND the user's
+ * permission rules. There is no per-source hook switch, so every way of removing the user's hooks
+ * also removes something that is not an integration:
  *
- * Measured against the installed claude 2.1.270 (`claude --settings <file> -p …`, a `SessionStart`
- * hook that touches a marker):
- *   - a `--settings` file's hooks run (marker written);
- *   - `{"disableAllHooks":true}` in that same file stops them (no marker) — so `disableAllHooks`
- *     would also remove WOLLIPOG's own managed policy hooks, which carry the `hook` elicitation
- *     transport that the permission mode uses to ask for approval. That is a permission-surface
- *     change, so it is deliberately NOT used here;
- *   - under `--setting-sources ""` the `--settings` file's hooks still run while a project settings
- *     file's hooks do not — so the runner's governance hooks survive and only the user's ambient
- *     hooks are removed. That is the combination this policy uses;
- *   - a second `--settings` silently replaces the first, so the runner cannot add a settings
- *     argument of its own without displacing its own hook file or the user's.
+ *   - `--setting-sources ""` drops user, project, and local settings wholesale, taking
+ *     `permissions.allow` / `ask` / `deny` and `defaultMode` with them. A dropped `deny` rule
+ *     BROADENS what the session may touch, which is the opposite of what enabling an isolation
+ *     policy means, and it changes the permission surface this policy promises not to touch.
+ *   - `{"disableAllHooks":true}` stops hooks in the very `--settings` file that sets it (measured
+ *     below), so it would also remove Wollipog's own managed policy hooks, which carry the `hook`
+ *     elicitation transport the permission mode uses to ask a human for approval.
  *
- * Known and disclosed residual: permission RULES (`permissions.allow` / `ask` / `deny` and
- * `defaultMode`) declared in those same settings files are dropped with them, because Claude has no
- * per-source hook switch. The permission MODE is unaffected — the driver always passes an explicit
- * `--permission-mode` — but a `deny` rule declared in user settings does not apply to an
- * integration-isolated Orchestrator. See docs/adr/0011.
+ * Claude user hooks are frequently guardrails themselves — PreToolUse blockers, secret scanners — so
+ * removing them is not unambiguously the safer direction either. A policy that cannot be delivered
+ * exactly under-delivers and says so; it never over-reaches. Claude therefore isolates MCP servers
+ * only, and every disclosure surface states that hooks, settings-enabled plugins, and permission
+ * rules are kept.
+ *
+ * Measured against the installed claude 2.1.270, with `-p x --model <invalid>` so the run ends
+ * before any model call and a stub stdio server that writes a marker file the instant it starts:
+ *   - a user-scope `~/.claude.json` server and a project `.mcp.json` server both start normally;
+ *   - under `--strict-mcp-config` neither starts, while the `--mcp-config` server still does;
+ *   - a plugin-contributed server could NOT be measured cleanly, so no surface claims those are
+ *     removed. See docs/adr/0011.
+ *
+ * Hook-source measurements from the same harness, retained because they are why `disableAllHooks`
+ * is rejected: a `--settings` file's hooks run; `{"disableAllHooks":true}` in that same file stops
+ * them; and a second `--settings` silently replaces the first rather than merging.
  */
-const ISOLATED_CLAUDE_INTEGRATION_ARGS = ["--strict-mcp-config", "--setting-sources", ""];
+const ISOLATED_CLAUDE_INTEGRATION_ARGS = ["--strict-mcp-config"];
 
 /** Integration Isolation for the ADDITIVE Codex launch. `--disable <feature>` is exactly
  * `-c features.<name>=false` (codex-cli 0.154.0 `--help`), and `apps`, `plugins`, and `hooks` are
@@ -580,16 +586,12 @@ function isolatedIntegrationArgLength(
   next: string | undefined,
 ): number {
   if (driver === "pi") return ISOLATED_PI_INTEGRATION_FLAGS.has(arg) ? 1 : 0;
-  if (driver === "claude-code") {
-    if (arg === "--strict-mcp-config") return 1;
-    if (flag !== "--setting-sources") return 0;
-    // Only the runner's own empty value. A user's `--setting-sources user` stays where it is; the
-    // isolated launch appends its own afterwards and Claude takes the last occurrence (measured
-    // against claude 2.1.270: with `--setting-sources project --setting-sources ""` the project
-    // settings file's hooks do not run).
-    if (inline !== undefined) return inline === "" ? 1 : 0;
-    return next === "" ? 2 : 0;
-  }
+  // `--strict-mcp-config` is the whole Claude policy. It is a plain switch, so it is removed only
+  // when this launch re-adds it: a user's own identical flag is then re-emitted verbatim, and a
+  // launch whose policy is disabled never touches it. `--setting-sources` is deliberately NOT
+  // matched here — the isolated Claude launch never injects one, so removing one would be deleting
+  // a user argument.
+  if (driver === "claude-code") return arg === "--strict-mcp-config" ? 1 : 0;
   if (driver !== "codex" && driver !== "codex-app-server") return 0;
   if (flag === "--disable") {
     const value = inline ?? next;

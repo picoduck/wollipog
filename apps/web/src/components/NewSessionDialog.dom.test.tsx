@@ -1992,7 +1992,12 @@ test("Integration Isolation is an independent control that discloses what it rem
     assert.match(fixture.container.textContent!,
       /Hooks, plugins, extensions, skills, and configured MCP servers load exactly as they would/);
     await chooseSelectOption(fixture.container, "Integration Isolation", "Enabled");
-    assert.match(fixture.container.textContent!, /Removes user-configured MCP servers, hooks, plugins/);
+    // The copy follows the SELECTED agent's harness, because the policy genuinely differs by
+    // harness. This fixture is Pi.
+    assert.match(fixture.container.textContent!,
+      /Removes discovered extensions, skills, prompt templates, and ambient context files/);
+    assert.doesNotMatch(fixture.container.textContent!, /cannot drop hooks/,
+      "the Claude-specific caveat must not be shown for a Pi launch");
     assert.match(fixture.container.textContent!,
       /provider permission mode, built-in tool inventory, sandbox and approval behavior, and the project boundary are unchanged/);
     assert.equal(createButton(fixture.container).disabled, false);
@@ -2039,5 +2044,37 @@ test("Strict Project Isolation shows Integration Isolation as implied and not se
     assert.match(trigger.getAttribute("aria-label")!, /Enabled/);
     assert.match(fixture.container.textContent!,
       /already launches without provider integrations, so this policy is implied and cannot be disabled/);
+  } finally { await unmountFixture(fixture); }
+});
+
+test("the Claude Integration Isolation copy says MCP servers go and hooks, plugins, and permission rules stay", async () => {
+  const claudeAdditive: RunnerView = {
+    ...runner, protocolVersion: PROTOCOL_VERSION,
+    agents: [{
+      id: "claude", name: "Claude Code", command: "claude", args: [], env: {},
+      driver: "claude-code", available: true, context: { kind: "native" },
+      capabilities: {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+        permissionModes: ["default", "acceptEdits"],
+        orchestratorAdditive: true,
+      },
+    }],
+  };
+  const fixture = await mountFixture({ runners: [claudeAdditive], capabilities: {
+    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+  } });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    await chooseSelectOption(fixture.container, "Integration Isolation", "Enabled");
+    // Claude Code isolates MCP servers ONLY. The copy must under-promise exactly, and say why.
+    assert.match(fixture.container.textContent!,
+      /Removes configured MCP servers, so Wollipog's management tools are the only MCP integration/);
+    assert.match(fixture.container.textContent!,
+      /Hooks, plugins enabled in settings, skills, and your permission rules are all kept/);
+    assert.match(fixture.container.textContent!,
+      /cannot drop hooks without also dropping either your permission rules or Wollipog's own governance hooks/);
+    assert.doesNotMatch(fixture.container.textContent!, /Removes .*apps, plugins, and hooks/,
+      "the Codex wording must not leak into a Claude launch");
   } finally { await unmountFixture(fixture); }
 });

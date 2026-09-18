@@ -11,8 +11,8 @@ import { agentHarnessOptionLabel } from "../agent-presentation.js";
 import { useApi } from "../api-context.js";
 import { effortLabel } from "../format.js";
 import {
+  INTEGRATION_ISOLATION_BY_HARNESS,
   INTEGRATION_ISOLATION_PRESERVED,
-  INTEGRATION_ISOLATION_REMOVED,
 } from "../session-preset-defaults.js";
 import { SettingsGroup } from "./SettingsView.js";
 import { SegmentedRow, SelectRow, StaticRow } from "./ui/SettingsRows.js";
@@ -384,7 +384,9 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
           {
             value: "enabled",
             label: "Enabled",
-            description: INTEGRATION_ISOLATION_REMOVED,
+            // Account defaults have no selected harness, so the pill states the shared promise and
+            // the row below it carries the per-harness differences.
+            description: "Launch with Wollipog's management tools as the only integration.",
           },
         ]}
         // Strict Project Isolation already launches without any provider integration, so the value
@@ -401,7 +403,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         description={integrationIsolationImplied
           ? `Strict Project Isolation already launches without provider integrations, so Integration Isolation is implied and cannot be disabled. ${INTEGRATION_ISOLATION_PRESERVED}`
           : draft.execution.integrationIsolation
-            ? INTEGRATION_ISOLATION_PRESERVED
+            ? `${INTEGRATION_ISOLATION_BY_HARNESS} ${INTEGRATION_ISOLATION_PRESERVED}`
             : "Hooks, plugins, extensions, skills, and configured MCP servers load exactly as they would for a normal session."}
       />
     </SettingsGroup>
