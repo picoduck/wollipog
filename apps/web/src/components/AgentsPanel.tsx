@@ -33,9 +33,11 @@ const REGISTRY_ACTIVE_REFRESH_MS = 1_000;
 /**
  * The page-selection rules decide what a refresh may skip, and each rests on a predicate about the
  * control plane — that a settled child stays settled, that a loaded transcript row is current. A
- * refresh at least this long after the last full read sweeps every loaded page regardless, so a
- * predicate that is ever wrong costs at most this much staleness, never a permanently stale row,
- * and full reads happen at most once per interval instead of on every refresh (#1290).
+ * refresh at least this long after the last full read sweeps every loaded page regardless, and a
+ * targeted refresh leaves a full read owed that is paid at this deadline even if the session goes
+ * quiet. A predicate that is ever wrong therefore costs at most this much staleness, never a
+ * permanently stale row, and full reads happen at most once per interval instead of on every
+ * refresh (#1290). A panel with nothing owed still costs no requests at all.
  */
 export const REGISTRY_SWEEP_BACKSTOP_MS = 60_000;
 type RegistryRetry = { generation: string; after: number; attempt: number };
@@ -375,6 +377,11 @@ export function AgentsPanel(props: Props) {
   const registryRef = useRef<ChildSessionRegistryEntry[] | null>(null);
   const lastRegistryRefresh = useRef(0);
   const lastRegistrySweep = useRef(0);
+  const sweepTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // The owed sweep fires after the render that armed it, so it reads the evidence current then.
+  const latestRefreshInputs = useRef({ rosterKey, progressKey, agentFingerprints, loadedAgentIds });
+  useEffect(() => { latestRefreshInputs.current = { rosterKey, progressKey, agentFingerprints, loadedAgentIds }; });
+  useEffect(() => () => clearTimeout(sweepTimer.current), []);
   const registryGeneration = `${session.id}:${session.eventEpoch ?? 0}`;
   useEffect(() => { registryRef.current = registry; }, [registry]);
   const loadRegistry = (after: number, attempt = 0) => {
@@ -426,6 +433,27 @@ export function AgentsPanel(props: Props) {
       }
     });
   };
+  // A targeted refresh leaves a full read owed. Nothing else schedules a refresh once the session
+  // goes quiet, so the debt is paid on its own timer at the backstop deadline.
+  const oweSweep = () => {
+    if (sweepTimer.current !== undefined) return;
+    const fire = () => {
+      const remaining = lastRegistrySweep.current + REGISTRY_SWEEP_BACKSTOP_MS - Date.now();
+      // Never take the request slot from a page load or retry in flight; come back shortly.
+      if (remaining > 0 || registryRequest.current !== null) {
+        sweepTimer.current = setTimeout(fire, Math.max(remaining, REGISTRY_ACTIVE_REFRESH_MS));
+        return;
+      }
+      sweepTimer.current = undefined;
+      const latest = latestRefreshInputs.current;
+      refreshedRosterKey.current = latest.rosterKey;
+      refreshRegistry(`${latest.progressKey}:backstop`,
+        changedRosterIds(refreshedFingerprints.current, latest.agentFingerprints), latest.loadedAgentIds,
+        latest.agentFingerprints);
+    };
+    sweepTimer.current = setTimeout(fire,
+      Math.max(0, lastRegistrySweep.current + REGISTRY_SWEEP_BACKSTOP_MS - Date.now()));
+  };
   const refreshRegistry = (
     progress: string, changedIds: ReadonlySet<string>, loadedIds: ReadonlySet<string>,
     // Banked only once the pages are merged: a refresh that fails or is abandoned must leave the
@@ -447,7 +475,13 @@ export function AgentsPanel(props: Props) {
         (after) => api.childSessions(session.id, session.eventEpoch ?? 0, after, PAGE_SIZE));
       if (registryRequest.current !== key) return;
       refreshedFingerprints.current = refreshedTo;
-      if (plan.kind === "sweep") lastRegistrySweep.current = startedAt;
+      if (plan.kind === "sweep") {
+        lastRegistrySweep.current = startedAt;
+        clearTimeout(sweepTimer.current);
+        sweepTimer.current = undefined;
+      } else {
+        oweSweep();
+      }
       setRegistry(mergeRefreshedRegistryPages(held, pages));
       setAttentionOwners(last.attentionOwners);
       setUnidentifiedChildren(last.unidentifiedChildren);
@@ -480,6 +514,8 @@ export function AgentsPanel(props: Props) {
     refreshedFingerprints.current = agentFingerprints;
     // The opening load reads the only page the panel holds, which is a full read.
     lastRegistrySweep.current = Date.now();
+    clearTimeout(sweepTimer.current);
+    sweepTimer.current = undefined;
     loadRegistry(0);
     // Registry generations are scoped by exact session + event epoch.
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -518,3 +518,77 @@ test("a periodic full sweep backs up the skip rules without replacing them", asy
     container.remove();
   }
 });
+
+/**
+ * Refreshes are scheduled by transcript evidence, so a session that goes quiet schedules none. A
+ * backstop that only rode on the next refresh would never run there — exactly when a skipped page
+ * is most likely to stay stale. A targeted refresh therefore leaves a full read owed, paid on its
+ * own timer at the deadline with no further render; once paid, a quiet panel costs nothing more.
+ *
+ * The control plane moves the panel's clock past the deadline while the targeted refresh is in
+ * flight, so the owed sweep falls due the moment that refresh lands, without waiting a real minute.
+ */
+test("a quiet session still gets the owed full sweep, and then nothing more", async () => {
+  const entry = (index: number): ChildSessionRegistryEntry => ({
+    toolCallId: `child-${index}`, name: `Child ${index}`,
+    status: index === 1 ? "in_progress" : "completed",
+    lifecycle: index === 1 ? "running" : "completed",
+    sourceSeq: index, startedAt: now - 30_000, lastActivityAt: now - 20_000,
+    ...(index === 1 ? {} : { completedAt: now - 20_000 }),
+    toolCount: 1,
+  });
+  const all = Array.from({ length: 150 }, (_value, index) => entry(index + 1));
+  const realNow = Date.now;
+  let skew = 0;
+  const cursors: number[] = [];
+  const childSessions = async (
+    _id: string, _epoch: number, after = 0, limit = 50,
+  ): Promise<ChildSessionRegistryPage> => {
+    cursors.push(after);
+    // The fourth request is the targeted refresh; the deadline passes while it is in flight.
+    if (cursors.length === 4) skew = REGISTRY_SWEEP_BACKSTOP_MS;
+    const eligible = all.filter((child) => child.sourceSeq > after);
+    const children = eligible.slice(0, limit);
+    const truncated = eligible.length > children.length;
+    return { children, attentionOwners: [], unidentifiedChildren: 0, eventEpoch: 0,
+      nextAfter: truncated ? children.at(-1)!.sourceSeq : null, truncated };
+  };
+  const client: ApiClient = { ...api, childSessions };
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const render = (session: SessionView, items: TimelineItem[]) =>
+    root.render(<ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
+      <AgentsPanel session={session} items={items} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
+        requestedId={null} onSelect={() => {}} parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
+    </StoreProvider></FeedbackProvider></ApiProvider>);
+  Date.now = () => realNow() + skew;
+
+  try {
+    await act(async () => { render(baseSession, [startedTool("child-1", 1)]); });
+    await advance(50);
+    for (let page = 1; page < 3; page += 1) {
+      const loadMore = Array.from(container.querySelectorAll("button"))
+        .find((button) => button.textContent === "Load More Recorded Workers")!;
+      await act(async () => { (loadMore as HTMLButtonElement).click(); });
+      await advance(60);
+    }
+    assert.deepEqual(cursors, [0, 50, 100]);
+
+    // One last change, then silence: no further render happens in this test.
+    await act(async () => {
+      render({ ...baseSession, messageCount: 11, lastEventAt: now + 1_000 }, [settledTool("child-1", 1)]);
+    });
+    await advance(1_500);
+    assert.deepEqual(cursors.slice(3), [0, 100, 0, 50, 100],
+      "the targeted refresh reads its page and the tail, then the owed sweep reads every page unprompted");
+
+    await advance(1_500);
+    assert.equal(cursors.length, 8, "with the debt paid, a quiet panel makes no further requests");
+  } finally {
+    Date.now = realNow;
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
