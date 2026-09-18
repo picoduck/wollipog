@@ -5,10 +5,12 @@ import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import fc from "fast-check";
 import {
   GUARD_STATE_REFUSAL,
   MANAGED_WORKTREE_REFUSAL,
   commandTargetsGuardState,
+  guardStateRelation,
   pathTargetsGuardState,
 } from "./managed-worktree-protection.js";
 import { runnerReentryCommand } from "./runner-reentry.js";
@@ -611,4 +613,274 @@ test("a Glob base of ~+ is resolved against the event's working directory, not t
     protectionsFile,
   );
   assert.deepEqual(allowed, { stdout: "", stderr: "", exitCode: 0 });
+});
+
+test("a directory that merely contains the guard state can be inspected without recursion", (t) => {
+  // The layout the bug was reported against: the hook directory sits under a data directory, which
+  // sits under a home directory. Listing either of those reads nothing the guard owns (#1334).
+  const home = mkdtempSync(join(tmpdir(), "wollipog-guard-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const project = join(home, "project");
+  const data = join(home, ".wollipog-data");
+  const directory = join(data, "hooks");
+  mkdirSync(project);
+  mkdirSync(directory, { recursive: true });
+  for (const command of [
+    `ls ${home}`,
+    `ls -la ${home}`,
+    `ls -- ${home}`,
+    `ls --color=auto ${data}`,
+    `ls /`,
+    `stat ${data}`,
+    // A list of inspections is still an inspection; a stray separator commands nothing.
+    `ls ${home} && stat ${home}`,
+    `ls ${home}; stat ${data}`,
+    `ls ${home};`,
+    // A redirection belongs to the command it follows; its target is judged as a location only,
+    // and a LEADING IO number belongs to the redirection rather than to the command.
+    `ls ${home} > ${join(project, "listing.txt")}`,
+    `ls ${home} 2>/dev/null`,
+    `2>/dev/null ls ${home}`,
+  ]) {
+    assert.equal(commandTargetsGuardState(command, project, directory), null, command);
+  }
+});
+
+test("recursive or unclassifiable work on an ancestor of the guard state stays refused", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-guard-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const project = join(home, "project");
+  const data = join(home, ".wollipog-data");
+  const directory = join(data, "hooks");
+  mkdirSync(project);
+  mkdirSync(directory, { recursive: true });
+  for (const command of [
+    // Removal and recursive search sweep the hook directory up with everything else.
+    `rm -rf ${home}`,
+    `rm -r -- ${data}`,
+    `grep -r token ${home}`,
+    `tar -czf /tmp/all.tgz ${home}`,
+    `chmod -R 000 ${home}`,
+    // A recursive listing is a walk, however it is spelled.
+    `ls -R ${home}`,
+    `ls -laR ${home}`,
+    `ls --recursive ${home}`,
+    // `find` is outside the carve-out altogether: bounding its walk needs depth arithmetic, which
+    // this change deliberately does not take on. Every form of it on an ancestor is refused.
+    `find ${home} -maxdepth 1`,
+    `find ${data} -maxdepth 1`,
+    `find ${home} -name '*.json'`,
+    `find ${home} -maxdepth 1 -delete`,
+    `find -L ${home} -maxdepth 1`,
+    // `du` is outside it too: it walks the tree it is given, and its file-valued options open a
+    // file that is never compared as an operand. Every form of it on an ancestor is refused.
+    `du -sh ${home}`,
+    `du ${data}`,
+    `ls ${home} && du -sh ${home}`,
+    // An unexpanded variable could be a recursion flag or another operand.
+    `ls $FLAGS ${home}`,
+    // A wrapper is not the command it wraps, and is not classifiable here.
+    `sudo ls ${home}`,
+    `xargs ls ${home}`,
+    // A destructive segment is refused even when a harmless one precedes it.
+    `ls ${home} && rm -rf ${home}`,
+    `ls ${home} | xargs rm -rf ${data}`,
+  ]) {
+    assert.equal(commandTargetsGuardState(command, project, directory), GUARD_STATE_REFUSAL, command);
+  }
+  // The directory itself and everything in it stay refused for every command, inspection included.
+  for (const command of [`ls ${directory}`, `du -sh ${directory}`, `stat ${directory}`,
+    `cat ${join(directory, "s1.protections.json")}`]) {
+    assert.equal(commandTargetsGuardState(command, project, directory), GUARD_STATE_REFUSAL, command);
+  }
+});
+
+test("a command cannot launder itself into the ancestor carve-out", (t) => {
+  // Every form here reaches the hook directory while containing something that looks like a
+  // bounded inspection. Each was allowed by the first cut of the #1334 carve-out.
+  const home = mkdtempSync(join(tmpdir(), "wollipog-guard-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const project = join(home, "project");
+  const data = join(home, ".wollipog-data");
+  const directory = join(data, "hooks");
+  mkdirSync(project);
+  mkdirSync(directory, { recursive: true });
+  for (const command of [
+    // A leading redirection does not start a new command: the shell runs `rm`, not `ls`.
+    `>ls rm -rf ${home}`,
+    // GNU getopt_long takes any unambiguous abbreviation, so these all recurse.
+    `ls --recurs ${home}`,
+    `ls --recursi ${home}`,
+    `ls --r ${home}`,
+    // Brace expansion produces `--recursive` before the command ever runs.
+    `ls --recurs{ive,} ${home}`,
+    // An assignment prefix decides what the name resolves to.
+    `PATH=${project} ls ${home}`,
+    `LC_ALL=C ls ${home}`,
+    // Only a bare name is the program it looks like.
+    `${join(project, "ls")} ${home}`,
+    `./ls ${home}`,
+    // A pipe hands the listing to a command the classifier never vouched for.
+    `ls ${home} | xargs rm -rf`,
+    `find ${home} -maxdepth 1 | xargs rm -rf`,
+    `du -sh ${home} | sh`,
+    // A command substitution nests the inspection inside a removal.
+    `rm -rf $(ls ${home})`,
+    // A subshell and a process substitution are not modelled, so nothing in them is inspectable.
+    `(rm -rf ${home})`,
+    `cat <(rm -rf ${home})`,
+    // An unescaped newline is whitespace to the tokenizer, so the second command would otherwise
+    // join the first one's words; a backslash-newline would split `-R` into `-` and `R`.
+    `ls ${home}\nrm -rf ${home}`,
+    `ls -\\\nR ${home}`,
+    // The shell carries state across a list: an earlier command decides what a later name runs.
+    `hash -p /bin/rm ls; ls -rf ${home}`,
+    `PATH=${project}; ls ${home}`,
+    `ls ${home} && echo done`,
+    `cd ${project} && ls ${home}`,
+    // A file-valued option OPENS that file without ever naming it as an operand.
+    `du --exclude-from=../.wollipog-data/hooks/s1.protections.json ${home}`,
+    `du -X../.wollipog-data/hooks/s1.protections.json ${home}`,
+    `ls ${home}; du --files0-from=../.wollipog-data/hooks/s1.protections.json`,
+    // Accepted over-refusal: an option word carrying a path separator disqualifies the command,
+    // although neither `ls` nor `stat` has an option that opens a file.
+    `ls -l --time-style=+%Y/%m/%d ${home}`,
+    `stat --format=%n/%s ${home}`,
+    // Accepted over-refusal: a short-option cluster is scanned for `R` without modelling which
+    // options take an attached value, so GNU's `ls -IREADME` reads as recursive. The alternative,
+    // a hard-coded list of value-taking options, fails OPEN the day that list is wrong.
+    `ls -IREADME ${home}`,
+  ]) {
+    assert.equal(commandTargetsGuardState(command, project, directory), GUARD_STATE_REFUSAL, command);
+  }
+});
+
+test("a file-valued option cannot reach the guard state through a symlink it names", (t) => {
+  // Review round 6: a separator-free option value is a bare name, so no path check on the option's
+  // spelling can see that it is a symlink to the protections file. `du` opens it, and echoes its
+  // contents back in an error. The fix is not a better spelling check: `du` is out of the carve-out.
+  const home = mkdtempSync(join(tmpdir(), "wollipog-guard-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const directory = join(home, ".wollipog-data", "hooks");
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, "s1.protections.json"), "{}", "utf8");
+  symlinkSync(join(directory, "s1.protections.json"), join(home, "state-link"));
+  for (const command of [
+    `ls ${home}; du --files0-from=state-link`,
+    `du --exclude-from=state-link ${home}`,
+    `du -Xstate-link ${home}`,
+  ]) {
+    assert.equal(commandTargetsGuardState(command, home, directory), GUARD_STATE_REFUSAL, command);
+  }
+  // `ls` and `stat` of the same ancestor from the same place remain allowed.
+  assert.equal(commandTargetsGuardState(`ls ${home}; stat ${home}`, home, directory), null);
+});
+
+test("a command with no operand is judged against the directory it would run in", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-guard-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const directory = join(home, ".wollipog-data", "hooks");
+  mkdirSync(directory, { recursive: true });
+  const elsewhere = mkdtempSync(join(tmpdir(), "wollipog-guard-away-"));
+  t.after(() => rmSync(elsewhere, { recursive: true, force: true }));
+  // From INSIDE the guard state there is no inspection-only form of an operand-less command: the
+  // bare `ls` lists the hook directory, and the bare `stat` reads its metadata.
+  assert.equal(commandTargetsGuardState(`ls ${home}; ls`, directory, directory), GUARD_STATE_REFUSAL);
+  assert.equal(commandTargetsGuardState(`ls ${home}; stat .`, directory, directory), GUARD_STATE_REFUSAL);
+  // From anywhere else the same list is an inspection of an ancestor and nothing more.
+  assert.equal(commandTargetsGuardState(`ls ${home}; ls`, elsewhere, directory), null);
+  assert.equal(commandTargetsGuardState(`ls ${home}; ls`, home, directory), null);
+});
+
+test("the reported home-directory listings are allowed while the file tools stay closed", () => {
+  const directory = join(homedir(), ".wollipog-test-data", "hooks");
+  for (const command of ["ls ~", "ls -la ~/", "ls /", "stat ~"]) {
+    assert.equal(commandTargetsGuardState(command, WORKTREE, directory), null, command);
+  }
+  for (const command of ["rm -rf ~", "grep -r secret ~", "find ~ -maxdepth 1", "du -sh ~", "ls -R ~"]) {
+    assert.equal(commandTargetsGuardState(command, WORKTREE, directory), GUARD_STATE_REFUSAL, command);
+  }
+  // The path-level predicate is unchanged: an ancestor is still "related", and the file tools,
+  // which have no notion of a bounded walk, keep failing closed on it.
+  assert.equal(pathTargetsGuardState("~", WORKTREE, directory), true);
+  assert.deepEqual(guardStateRelation("~", WORKTREE, directory), { kind: "ancestor" });
+  assert.deepEqual(guardStateRelation(join(directory, "s1.protections.json"), WORKTREE, directory),
+    { kind: "inside" });
+  assert.equal(guardStateRelation("~/projects/readme.md", WORKTREE, directory), null);
+});
+
+test("the guard hook allows an ancestor listing and still refuses an ancestor sweep", (t) => {
+  const f = fixture();
+  t.after(f.cleanup);
+  const above = dirname(f.dir);
+  for (const command of [`ls ${above}`, `stat ${above}`]) {
+    assert.deepEqual(
+      runManagedWorktreeGuardDecision(hookInput({ tool_input: { command } }), f.protectionsFile),
+      { stdout: "", stderr: "", exitCode: 0 },
+      command,
+    );
+  }
+  for (const command of [`rm -rf ${above}`, `ls -R ${above}`, `grep -r x ${above}`,
+    `find ${above} -maxdepth 1`, `du -sh ${above}`]) {
+    const outcome = runManagedWorktreeGuardDecision(hookInput({ tool_input: { command } }), f.protectionsFile);
+    assert.ok(outcome.stdout.includes(GUARD_STATE_REFUSAL), `refused: ${command}`);
+  }
+});
+
+test("a long list of inspections is classified in linear time", () => {
+  // The first cut of the all-segments rule re-scanned every segment for every ancestor operand,
+  // which made a command list quadratic: 30,000 characters of `ls /;` took over three seconds
+  // inside a hook that runs synchronously before every Bash call.
+  const measure = (repetitions: number): number => {
+    const command = "ls /;".repeat(repetitions);
+    const started = performance.now();
+    assert.equal(commandTargetsGuardState(command, WORKTREE, "/a/b"), null);
+    return performance.now() - started;
+  };
+  measure(500); // Warm the module and the JIT before either measurement counts.
+  const small = Math.max(measure(500), 1);
+  const large = measure(6_000);
+  // Twelve times the input. Linear work lands near 12x; the quadratic form measured about 69x.
+  assert.ok(large / small < 25, `12x the input took ${(large / small).toFixed(1)}x the time`);
+});
+
+test("every strict ancestor is an ancestor, and every descendant is inside", () => {
+  const segment = fc.constantFrom("a", "b", "state", "data", "hooks");
+  const trunk = fc.array(segment, { minLength: 1, maxLength: 5 });
+  const cwd = "/wollipog-fc-cwd";
+  fc.assert(fc.property(trunk, fc.nat({ max: 5 }), fc.nat({ max: 5 }), (tail, cut, extra) => {
+    const root = ["/wollipog-fc-root", ...tail].join("/");
+    const depth = 1 + (cut % tail.length);
+    const ancestor = ["/wollipog-fc-root", ...tail.slice(0, tail.length - depth)].join("/") || "/";
+    assert.deepEqual(guardStateRelation(ancestor, cwd, root), { kind: "ancestor" },
+      `${ancestor} contains ${root}`);
+    assert.deepEqual(guardStateRelation(root, cwd, root), { kind: "inside" });
+    const descendant = [root, ...Array.from({ length: extra }, (_, index) => `deep${index}`)].join("/");
+    assert.deepEqual(guardStateRelation(descendant, cwd, root), { kind: "inside" }, descendant);
+    // An unrelated sibling of the ancestor is neither.
+    assert.equal(guardStateRelation(`${ancestor === "/" ? "" : ancestor}/unrelated-sibling`, cwd, root),
+      null);
+  }));
+});
+
+test("an inspection never reaches into the guard state, whatever the command", () => {
+  const root = "/wollipog-fc-root/data/hooks";
+  const cwd = "/wollipog-fc-cwd";
+  const ancestors = fc.constantFrom("/wollipog-fc-root", "/wollipog-fc-root/data", "/");
+  const inspection = fc.constantFrom("ls", "ls -la", "stat");
+  const reaching = fc.constantFrom("rm -rf", "rm -r", "grep -r pattern", "ls -R", "cp -r", "mv",
+    "find", "find -maxdepth 1", "du", "du -sh");
+  fc.assert(fc.property(inspection, ancestors, (prefix, target) => {
+    assert.equal(commandTargetsGuardState(`${prefix} ${target}`, cwd, root), null);
+  }));
+  fc.assert(fc.property(reaching, ancestors, (prefix, target) => {
+    assert.equal(commandTargetsGuardState(`${prefix} ${target}`, cwd, root), GUARD_STATE_REFUSAL);
+  }));
+  // A second command in the list is held to the same standard as the first, whichever order.
+  fc.assert(fc.property(inspection, reaching, ancestors, (good, bad, target) => {
+    assert.equal(commandTargetsGuardState(`${good} ${target}; ${bad} ${target}`, cwd, root),
+      GUARD_STATE_REFUSAL);
+    assert.equal(commandTargetsGuardState(`${bad} ${target}; ${good} ${target}`, cwd, root),
+      GUARD_STATE_REFUSAL);
+  }));
 });

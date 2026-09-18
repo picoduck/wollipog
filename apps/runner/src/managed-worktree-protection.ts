@@ -687,7 +687,8 @@ export const PLACELESS_CWD = `${sep}.wollipog-placeless${`${sep}x`.repeat(64)}`;
  * runs as the same OS user, so a permitted command could rewrite that file and disarm the veto.
  * Real integrity against a same-user process needs an OS boundary (#1302); what IS achievable is
  * to refuse every tool call that references the runner's own hook state directory at all — reads
- * included, since the provider never needs them — and to make tampering evident.
+ * included, since the provider never needs them — and to make tampering evident. A command that
+ * merely inspects a DIRECTORY CONTAINING it, without enumerating it, is the one carve-out (#1334).
  *
  * The match is deliberately conservative and of the same strength class as
  * `commandTargetsManagedWorktree`: it inspects command text and resolved tool paths, so both are
@@ -775,24 +776,197 @@ function guardStateCandidates(path: string, cwd: string): string[] {
   return home === literal ? [literal] : [literal, home];
 }
 
-/** A path is out of bounds when it is inside the guard-state directory, or contains it. */
-export function pathTargetsGuardState(path: string, cwd: string, directory: string): boolean {
-  if (!directory || !path || path.includes("\0")) return false;
+/**
+ * How a spelling relates to the guard-state directory. `inside` is the directory itself or anything
+ * beneath it. `ancestor` is a strict ancestor: a directory that contains it, which an inspection may
+ * name but a walk would reach.
+ */
+export type GuardStateRelation = { kind: "inside" } | { kind: "ancestor" };
+
+/**
+ * Where a spelling sits relative to the guard-state directory, or `null` when the two are
+ * unrelated. Every candidate is judged twice — by its spelling and by its physical path, since a
+ * symlink anywhere along either one lands elsewhere — and the most restrictive answer wins.
+ */
+export function guardStateRelation(
+  path: string,
+  cwd: string,
+  directory: string,
+): GuardStateRelation | null {
+  if (!directory || !path || path.includes("\0")) return null;
   const root = resolve(directory);
   let realRoot: string | null = null;
+  let ancestor = false;
   for (const resolved of guardStateCandidates(path, cwd)) {
-    if (pathContains(root, resolved) || pathContains(resolved, root)) return true;
-    // The lexical spelling is only half of it: a symlink anywhere along either path lands elsewhere.
+    if (pathContains(root, resolved)) return { kind: "inside" };
+    if (pathContains(resolved, root)) ancestor = true;
     realRoot ??= canonicalPath(root);
     const realResolved = canonicalPath(resolved);
-    if (pathContains(realRoot, realResolved) || pathContains(realResolved, realRoot)) return true;
+    if (pathContains(realRoot, realResolved)) return { kind: "inside" };
+    if (pathContains(realResolved, realRoot)) ancestor = true;
   }
-  return false;
+  return ancestor ? { kind: "ancestor" } : null;
+}
+
+/** A path is out of bounds when it is inside the guard-state directory, or contains it. */
+export function pathTargetsGuardState(path: string, cwd: string, directory: string): boolean {
+  return guardStateRelation(path, cwd, directory) !== null;
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Bounded inspection of an ancestor.
+ *
+ * Refusing every operand that CONTAINS the hook directory also refused `ls /home` and a listing of
+ * the home directory in every session whose data directory lives under it (#1334), though neither
+ * reads anything the guard owns. The carve-out below is deliberately narrow and fails closed: an
+ * operand that is a strict ancestor is allowed only for `ls` without a recursive option and for
+ * `stat`, and only when the WHOLE command is such an inspection and nothing else. A recursive
+ * removal or a recursive search rooted at an ancestor is refused as before.
+ *
+ * `du` and `find` are deliberately NOT here, though #1334 lists both among the commands that should
+ * be allowed. Each walks the tree it is given and each can be pointed at a file through an option
+ * value, which is not an operand and so is never compared against the guard state: three of the
+ * bypasses found while reviewing this change came out of bounding `find`'s walk, and two more out of
+ * `du`'s file-valued options. `ls` and `stat` do neither — neither descends, and neither takes an
+ * option that names a file to open — so they need no depth reasoning and no option parsing. A
+ * bounded `du` or `find` is worth its own change, with that reasoning as the whole subject.
+ *
+ * What disqualifies a command, and why each one has to:
+ *
+ * - Every command in the list has to be an inspection, not merely the one holding the operand. The
+ *   shell carries state across `;` and `&&`: `hash -p /bin/rm ls; ls -rf <ancestor>` runs `rm`, and
+ *   a bare `PATH=` assignment or a function definition rebinds a later name the same way.
+ * - Anything that routes one command's output into another, or nests a command inside another:
+ *   `|`, `|&`, `( )`, `<( )`, `>( )`, a backtick, or an operator not modelled here. A listing piped
+ *   into `xargs rm -rf` is not an inspection, and neither is a removal whose operand is a command
+ *   substitution, though each contains one.
+ * - A newline or carriage return anywhere in the command. `shell-quote` treats an unescaped newline
+ *   as whitespace, so a second line would join the first command's words rather than starting a
+ *   command of its own, and a backslash-newline would split `-R` into `-` and `R`.
+ * - A redirection does NOT start a new command, so its target is kept out of the classification and
+ *   is judged as a location only. Treating it as a command word let a leading `>ls` pass a removal
+ *   off as an `ls`. A LEADING IO number belongs to the redirection that follows it.
+ * - A glob or brace metacharacter anywhere in the command: the shell expands `--recurs{ive,}` into
+ *   `--recursive` long before this classifier would see it.
+ * - A `NAME=value` assignment: a `PATH=` prefix decides what the command name resolves to.
+ * - A command word that is not a bare name: `./ls` and `/tmp/ls` are whatever was planted there.
+ * - An option word carrying a path separator. Neither `ls` nor `stat` has an option that opens a
+ *   file, so this refuses nothing either needs to read; it is kept so that a path inside an option
+ *   is never the one thing the classifier waves through, whatever the option turns out to mean.
+ * - A working directory inside the guard state, since a command with no operand acts there.
+ *
+ * It over-refuses where the safe direction is to do so. A short-option cluster is scanned for `R`
+ * without modelling which options take an attached value, so GNU's `ls -IREADME` reads as recursive
+ * and is refused; the alternative, a hard-coded list of value-taking options, fails OPEN the day
+ * that list is wrong.
+ * ------------------------------------------------------------------------------------------ */
+
+/** Operators that end one command and begin another. */
+const SEGMENT_SEPARATORS = new Set([";", ";;", "&&", "||", "&"]);
+/** Operators that attach a target to the CURRENT command rather than starting a new one. */
+const REDIRECTIONS = new Set([">", ">>", "<", ">&"]);
+
+function tokenText(token: ShellToken): string | null {
+  if (typeof token === "string") return token;
+  return token != null && typeof token === "object" && "op" in token && token.op === "glob" &&
+      "pattern" in token && typeof token.pattern === "string"
+    ? token.pattern
+    : null;
+}
+
+/**
+ * One command out of a list: every word that names a location, and separately the words that decide
+ * what the command DOES. `words` is null when the segment carries an unexpanded variable, since one
+ * opaque word could be a recursion flag or another operand.
+ */
+interface CommandSegment { operands: Array<string | null>; words: string[] | null }
+
+/**
+ * Split a parsed command into segments, or `null` when it contains a construct this classifier does
+ * not model — in which case nothing in it is an inspection and the caller refuses every related
+ * operand, exactly as it did before #1334.
+ */
+function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null {
+  const segments: CommandSegment[] = [];
+  let operands: Array<string | null> = [];
+  let words: string[] | null = [];
+  let redirected = false;
+  let previousWord: string | null = null;
+  for (const token of tokens) {
+    const op = operator(token);
+    if (op === null) {
+      const text = tokenText(token);
+      operands.push(text);
+      if (redirected) redirected = false;
+      else if (words !== null) {
+        if (text === null) words = null;
+        else words.push(text);
+      }
+      previousWord = text;
+      continue;
+    }
+    if (SEGMENT_SEPARATORS.has(op)) {
+      segments.push({ operands, words });
+      operands = [];
+      words = [];
+      redirected = false;
+      previousWord = null;
+      continue;
+    }
+    if (!REDIRECTIONS.has(op)) return null;
+    // `2>file`: the IO number is a word of its own here, but it belongs to the redirection. Only a
+    // LEADING one is claimed, because `shell-quote` drops the adjacency that separates `2>x` from
+    // an ordinary numeric argument.
+    if (words !== null && words.length === 1 && previousWord !== null &&
+        words[0] === previousWord && /^\d+$/u.test(previousWord)) words.pop();
+    redirected = true;
+    previousWord = null;
+  }
+  segments.push({ operands, words });
+  return segments;
+}
+
+/** `-R`, or any abbreviation of `--recursive` that GNU `getopt_long` accepts. */
+function recursiveListing(word: string): boolean {
+  if (word.startsWith("--")) {
+    const name = word.slice(2).split("=")[0] ?? "";
+    return name.length > 0 && "recursive".startsWith(name);
+  }
+  return /^-[^-]/u.test(word) && word.includes("R");
+}
+
+/**
+ * Whether this segment only inspects the directories it names, without enumerating what is inside
+ * them. An empty segment — a stray separator, or a bare redirection — commands nothing and can
+ * rebind nothing, so it qualifies vacuously.
+ */
+function inspectsAncestorOnly(words: readonly string[]): boolean {
+  if (words.length === 0) return true;
+  // The shell expands these into words this classifier never sees.
+  if (words.some((word) => /[*?[\]{}]/u.test(word))) return false;
+  // An assignment decides what the command name resolves to.
+  if (words.some((word) => /^[A-Za-z_][A-Za-z0-9_]*=/u.test(word))) return false;
+  // A path inside an option is never waved through, whatever the option turns out to mean.
+  if (words.some((word) => word.startsWith("-") && (word.includes("/") || word.includes("\\")))) {
+    return false;
+  }
+  const name = words[0];
+  if (name === undefined || name === "" || name.includes("/") || name.includes("\\")) return false;
+  switch (name) {
+    case "ls":
+      return !words.some(recursiveListing);
+    case "stat":
+      return true;
+    default:
+      return false;
+  }
 }
 
 /**
  * Refuse a shell command that references the guard-state directory in any form. Unparsable input
- * is refused rather than allowed: this is the state the veto itself depends on.
+ * is refused rather than allowed: this is the state the veto itself depends on. An operand that is
+ * a strict ancestor of the directory is refused too, unless the whole command is inspection — see
+ * "Bounded inspection of an ancestor" above.
  */
 export function commandTargetsGuardState(
   command: string,
@@ -816,17 +990,34 @@ export function commandTargetsGuardState(
   } catch {
     return GUARD_STATE_REFUSAL;
   }
-  for (const token of tokens) {
-    const value = typeof token === "string"
-      ? token
-      : token != null && typeof token === "object" && "op" in token && token.op === "glob" &&
-          "pattern" in token && typeof token.pattern === "string"
-        ? token.pattern
-        : null;
-    if (value === null) continue;
-    if (pathTargetsGuardState(value, cwd, root)) return GUARD_STATE_REFUSAL;
+  // A backtick nests a command the tokenizer does not separate, and a newline would silently join
+  // two commands into one; nothing in either is inspectable.
+  const segments = /[`\n\r]/u.test(command) ? null : commandSegments(tokens);
+  if (segments === null) {
+    for (const token of tokens) {
+      const value = tokenText(token);
+      if (value !== null && pathTargetsGuardState(value, cwd, root)) return GUARD_STATE_REFUSAL;
+    }
+    return null;
   }
-  return null;
+  let namesAncestor = false;
+  for (const { operands } of segments) {
+    for (const value of operands) {
+      if (value === null) continue;
+      const relation = guardStateRelation(value, cwd, root);
+      if (relation === null) continue;
+      if (relation.kind === "inside") return GUARD_STATE_REFUSAL;
+      namesAncestor = true;
+    }
+  }
+  if (!namesAncestor) return null;
+  // A command with no operand acts on the working directory, so from inside the guard state there
+  // is no inspection-only form of one.
+  if (guardStateRelation(cwd, cwd, root)?.kind === "inside") return GUARD_STATE_REFUSAL;
+  // Every command in the list has to be an inspection, not only the ones naming an ancestor: an
+  // earlier `hash -p`, `PATH=`, or function definition decides what a later `ls` runs.
+  const inspection = segments.every(({ words }) => words !== null && inspectsAncestorOnly(words));
+  return inspection ? null : GUARD_STATE_REFUSAL;
 }
 
 /**

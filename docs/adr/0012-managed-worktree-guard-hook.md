@@ -154,6 +154,43 @@ What is done instead:
   nearest existing ancestor is passed through `realpath`, so a home-relative spelling or a symlink
   planted in the workspace is judged by where it lands. Third-party MCP filesystem tools are not
   classifiable by name and remain outside the veto, like any other indirection.
+- **One carve-out: inspecting an ancestor.** A Bash operand that merely CONTAINS the directory is
+  allowed when the whole command is `ls` without a recursive option or `stat`, and nothing else
+  (#1334). Such a command may NAME the hook directory; it never enumerates what is in it. The
+  file tools stay refused on an ancestor, so the path-level predicate keeps its old meaning.
+
+  `du` and `find` are deliberately outside the carve-out, though #1334 lists both among the
+  commands that should be allowed. Each walks the tree it is given, and each can be pointed at a
+  file through an option value, which is not an operand and so is never compared against the guard
+  state. Three of the bypasses found while reviewing #1334 came out of bounding `find`'s walk, and
+  two more out of `du`'s file-valued options — the last of them a bare option value naming a symlink
+  to the protections file, which no check on the option's spelling can see. `ls` and `stat` neither
+  descend nor take an option that names a file to open, so they need no depth reasoning and no
+  option parsing. A bounded `du` or `find` belongs in its own change, with that reasoning as the
+  subject.
+
+  The carve-out fails closed, because a command-text classifier is easy to talk past. EVERY command
+  in the list has to be an inspection, not merely the one holding the ancestor operand: the shell
+  carries state across `;` and `&&`, so `hash -p /bin/rm ls; ls -rf <ancestor>` runs `rm`, and a
+  bare `PATH=` assignment rebinds a later name the same way. Beyond that, a command is disqualified
+  wholesale when it routes or nests commands — a pipe, a command substitution, a subshell, a process
+  substitution, a backtick, or an operator the classifier does not model — so a listing piped into
+  `xargs rm -rf` is not an inspection. A newline disqualifies it, because the tokenizer treats one
+  as whitespace and would join two commands into one. A redirection does not start a new command, so
+  its target is judged as a location and never mistaken for the command word, and a leading IO
+  number belongs to the redirection rather than to the command. A glob or brace metacharacter
+  disqualifies the command, because the shell expands `--recurs{ive,}` into `--recursive` first. So
+  does a `NAME=value` assignment, a command word that is not a bare name, since `./ls` is whatever
+  was planted there, and an option word carrying a path separator: neither `ls` nor `stat` has an
+  option that opens a file, so that refuses nothing either needs, and a path inside an option is
+  never waved through. Long options are matched as GNU `getopt_long` accepts them, so `ls --recurs` counts as
+  recursive. A working directory inside the guard state disqualifies the command too, since one
+  with no operand acts there.
+
+  Where the two directions conflict, it over-refuses. A short-option cluster is scanned for `R`
+  without modelling which options take an attached value, so GNU's `ls -IREADME` reads as recursive
+  and is refused; a hard-coded list of value-taking options would fail OPEN the day it is wrong.
+
 - **No free advertising.** The protections path is not exported in the settings `env` block (which
   reaches every tool process); it travels only in the hook command inside the 0600 settings file,
   and the guard accepts it only from there — never from the environment.
