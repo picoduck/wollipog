@@ -582,10 +582,13 @@ export function commandTargetsManagedWorktree(
  * Claude Code runs each Bash call in a shell started in the directory the previous successful call
  * ended in, and records that directory only when the whole command exits 0 — so a caller must feed
  * this only successful commands. The walk is deliberately literal: `cd`/`pushd` at the top level of
- * an `&&`, `;`, or `||` chain moves the directory; anything else that can move it invisibly (a
- * pipeline, a subshell, `popd`, `cd -`, an operand the text does not spell out) makes the answer
- * unknown, and an unknown directory stays unknown until an absolute `cd` re-establishes it. A `cwd`
- * of null means the directory is already unknown.
+ * an `&&` chain moves the directory, because exit 0 of such a chain proves every member ran and
+ * succeeded. A `;` or `||` breaks that proof (`cd x; ls` exits 0 with the `cd` failed), so a
+ * directory change anywhere in such a command is unknown; the same goes for anything else that
+ * can move it invisibly (a pipeline member, a subshell, `popd`, `cd -`, an operand the text does
+ * not spell out). Unknown never reads as deeper than the truth: the caller falls back to the
+ * session directory, and an unknown directory stays unknown until an absolute `cd` re-establishes
+ * it. A `cwd` of null means the directory is already unknown.
  */
 export function shellCwdAfterCommand(command: string, cwd: string | null): string | null {
   if (!command || command.length > MAX_COMMAND_LENGTH || command.includes("\0")) return cwd;
@@ -599,6 +602,8 @@ export function shellCwdAfterCommand(command: string, cwd: string | null): strin
   let segment: ShellToken[] = [];
   let piped = false;
   const environment = new Map<string, string>();
+  // Exit 0 proves nothing about a `cd` that sits beside `;` or `||`; only an all-`&&` chain does.
+  const conditional = tokens.some((token) => operator(token) === ";" || operator(token) === "||");
   const evaluate = (): boolean => {
     if (!segment.length) return true;
     let parsed: ReturnType<typeof commandWords>;
@@ -612,7 +617,7 @@ export function shellCwdAfterCommand(command: string, cwd: string | null): strin
       return true;
     }
     // A directory change inside a pipeline runs in a subshell in some shells and not others.
-    if (piped) return false;
+    if (piped || conditional) return false;
     // Skip the builtin's own options (`cd -P dir`, `cd -- dir`); a lone `-` is the previous directory.
     let index = 0;
     while (typeof parsed.words[index] === "string" && (parsed.words[index] as string).startsWith("-") &&

@@ -146,7 +146,9 @@ test("shellCwdAfterCommand follows literal directory changes and gives up on inv
     ["ls", root, root],
     ["cd apps/runner", root, `${root}/apps/runner`],
     ["cd apps/runner && pnpm typecheck", root, `${root}/apps/runner`],
-    ["cd apps && cd runner; ls", root, `${root}/apps/runner`],
+    ["cd apps && cd runner && ls", root, `${root}/apps/runner`],
+    ["ls; pwd", root, root],
+    ["ls || true", root, root],
     ["cd ..", `${root}/apps/runner`, `${root}/apps`],
     ["cd .. && cd ..", `${root}/apps/runner`, root],
     ["cd -P apps && ls", root, `${root}/apps`],
@@ -155,6 +157,12 @@ test("shellCwdAfterCommand follows literal directory changes and gives up on inv
     ["pushd apps", root, `${root}/apps`],
     // Unknown after these: the text does not say where the shell ends up.
     ["cd $DIR", root, null],
+    // Exit 0 does not prove a `cd` beside `;` or `||` ran or succeeded; unknown, never deeper.
+    ["cd apps; ls", root, null],
+    ["cd apps && cd runner; ls", root, null],
+    ["cd apps || true", root, null],
+    ["true || cd apps", root, null],
+    ["ls; cd apps", root, null],
     ["cd -", root, null],
     ["cd ~", root, null],
     ["popd", root, null],
