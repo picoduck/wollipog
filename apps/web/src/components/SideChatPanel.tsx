@@ -9,8 +9,8 @@ import { isTimelineSessionActive } from "../timeline-clock.js";
 import {
   clearPanelScratchIf,
   panelScratchRevision,
+  usePanelScratchDraft,
   usePanelScratchScope,
-  usePanelScratchText,
 } from "../right-panel-scratch.js";
 
 const POLL_MS = 1_500;
@@ -71,9 +71,10 @@ export function SideChatPanel({
   const [sideChat, setSideChat] = useState<SideChatView | null>();
   const [events, setEvents] = useState<SessionEvent[]>([]);
   // The unsent message belongs to the person typing it, not to the child: it survives the panel
-  // being switched away and closed (#1202), and the transcript resets around it.
+  // being switched away and closed (#1202), the transcript resets around it, and no tour of other
+  // sessions can evict the scope while it still holds one (#1283).
   const panelScratch = usePanelScratchScope(session.id);
-  const [text, setText] = usePanelScratchText(panelScratch, SIDE_CHAT_DRAFT_KEY);
+  const [text, setText] = usePanelScratchDraft(panelScratch, SIDE_CHAT_DRAFT_KEY);
   const [creating, setCreating] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);

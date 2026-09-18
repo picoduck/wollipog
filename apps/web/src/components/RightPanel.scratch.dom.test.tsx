@@ -559,3 +559,55 @@ test("merely opening Files in other sessions cannot evict a draft", async () => 
     await panel.dispose();
   }
 });
+
+test("a tour of sessions that each leave scratch behind still cannot evict a draft", async () => {
+  // #1283: the scope bound used to spend the least recently used scope, and the session holding an
+  // unsent description is exactly the one that has been idle longest. Every session on this tour
+  // stores something real — a browsed directory — so the bound is genuinely reached, and the only
+  // scope it must refuse to take is the one holding text nobody else has a copy of.
+  const panel = await mountPanel();
+  try {
+    await panel.show("review");
+    await type(field(panel, "PR Description")!, "the description that outlives the bound");
+    await type(field(panel, "Branch Name")!, "fix/issue-1283");
+
+    for (let visit = 0; visit <= PANEL_SCRATCH_SESSION_LIMIT; visit += 1) {
+      await panel.switchSession(`tour-session-${visit}`);
+      await panel.show("files");
+      await act(async () => fireDomEvent.click(panel.container.querySelector<HTMLButtonElement>(".files-entry")!));
+      assert.equal(crumbs(panel), "root/apps", "each visited session leaves a directory behind");
+      await panel.show("review");
+    }
+
+    await panel.switchSession("session-1");
+    await panel.show("review");
+    assert.equal(field(panel, "PR Description")!.value, "the description that outlives the bound");
+    assert.equal(field(panel, "Branch Name")!.value, "fix/issue-1283");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("a session whose draft was left blank is evicted like any other", async () => {
+  // The exemption is for text that exists. A description opened and then emptied is not a draft,
+  // so it cannot pin a scope for the rest of the tab's life.
+  const panel = await mountPanel();
+  try {
+    await panel.show("review");
+    await type(field(panel, "PR Description")!, "typed, then thought better of");
+    await type(field(panel, "PR Description")!, "");
+
+    for (let visit = 0; visit <= PANEL_SCRATCH_SESSION_LIMIT; visit += 1) {
+      await panel.switchSession(`tour-session-${visit}`);
+      await panel.show("files");
+      await act(async () => fireDomEvent.click(panel.container.querySelector<HTMLButtonElement>(".files-entry")!));
+      await panel.show("review");
+    }
+
+    await panel.switchSession("session-1");
+    await panel.show("review");
+    assert.equal(field(panel, "PR Description")!.value, "", "an emptied field has nothing to lose");
+  } finally {
+    await panel.dispose();
+  }
+});

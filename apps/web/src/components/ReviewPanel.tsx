@@ -38,7 +38,7 @@ import { useFeedback } from "./FeedbackProvider.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { safeExternalHref } from "../external-href.js";
 import { sourceKind } from "../pinned-summary.js";
-import { usePanelScratchChoice, usePanelScratchScope, usePanelScratchText } from "../right-panel-scratch.js";
+import { usePanelScratchChoice, usePanelScratchDraft, usePanelScratchScope } from "../right-panel-scratch.js";
 
 /** No diff on screen means nothing is anchored; one shared empty set keeps that allocation-free. */
 const NO_ANCHORED_FINDINGS: ReadonlySet<string> = new Set<string>();
@@ -81,13 +81,15 @@ export function ReviewPanel({
   const status = git.status;
   // Everything the reviewer typed or chose outlives this mount: the panel is unmounted by any
   // mode switch and by closing the panel, and losing a pull request description to a glance at
-  // Files is exactly the defect in #1202.
+  // Files is exactly the defect in #1202. The four fields of the unsubmitted commit and pull
+  // request forms are drafts rather than plain scratch, so visiting other sessions cannot evict
+  // this one out from under half a written description either (#1283).
   const panelScratch = usePanelScratchScope(session.id);
   const defaultMessage = session.title || "Agent changes";
-  const [commitMsg, setCommitMsg] = usePanelScratchText(panelScratch, "review.commitMessage", defaultMessage);
-  const [prTitle, setPrTitle] = usePanelScratchText(panelScratch, "review.requestTitle", defaultMessage);
-  const [prBody, setPrBody] = usePanelScratchText(panelScratch, "review.requestBody");
-  const [branch, setBranch] = usePanelScratchText(panelScratch, "review.branch");
+  const [commitMsg, setCommitMsg] = usePanelScratchDraft(panelScratch, "review.commitMessage", defaultMessage);
+  const [prTitle, setPrTitle] = usePanelScratchDraft(panelScratch, "review.requestTitle", defaultMessage);
+  const [prBody, setPrBody] = usePanelScratchDraft(panelScratch, "review.requestBody");
+  const [branch, setBranch] = usePanelScratchDraft(panelScratch, "review.branch");
   const [commit, setCommit] = useState<GitCommitInfo | null>(null);
   const [pr, setPr] = useState<GitPrInfo | null>(null);
   // Rich-diff pane (Phase 2, PR-A). Branch-relative scopes only make sense for worktree sessions;
