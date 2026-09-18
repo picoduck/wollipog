@@ -3671,6 +3671,48 @@ test("strictly isolated Claude Orchestrators share the routine-operation auto-au
   assert.equal(JSON.parse(writes[0]!).response.response.behavior, "allow");
 });
 
+test("managed-worktree protection preserves scoped Claude Orchestrator authorization and veto precedence", () => {
+  const worktreePath = "/runner/worktrees/session/managed";
+  const h = makeHarness({
+    cwd: worktreePath,
+    config: { permissionMode: "orchestrator" },
+    orchestrator: { strictProjectIsolation: true, issueNumbers: [1209] },
+    managedWorktreeProtections: () => [{ worktreePath, repoPath: "/projects/repo" }],
+  });
+  const writes: string[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
+
+  h.feed({
+    type: "control_request",
+    request_id: "protected-scoped-routine",
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: {
+      command: "gh issue edit 1209 --add-assignee @me",
+    } },
+  });
+  h.feed({
+    type: "control_request",
+    request_id: "protected-managed-remove",
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: {
+      command: `git worktree remove ${worktreePath}`,
+    } },
+  });
+  h.feed({
+    type: "control_request",
+    request_id: "protected-out-of-scope",
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: {
+      command: "gh issue edit 1210 --add-assignee @me",
+    } },
+  });
+
+  assert.deepEqual(h.events, []);
+  assert.deepEqual(writes.map((value) => JSON.parse(value).response.response), [
+    { behavior: "allow", updatedInput: { command: "gh issue edit 1209 --add-assignee @me" } },
+    { behavior: "deny", message: "Wollipog protects this runner-owned worktree. Use discard_worktree so retirement can wait for the provider to exit and then apply the managed safety checks." },
+    { behavior: "deny", message: "Strict Project Isolation denied an operation outside the Orchestrator routine-operation contract." },
+  ]);
+});
+
 test("strictly isolated Claude Orchestrators auto-deny commands outside the routine contract", () => {
   const h = makeHarness({
     config: { permissionMode: "orchestrator" },
