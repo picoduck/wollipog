@@ -292,6 +292,13 @@ export function withOrchestratorAdditiveRole(agents: AgentDefinition[]): AgentDe
       //
       // `withOrchestratorPreset` above is untouched and still withdraws the coupled preset's
       // permission mode in both of those cases.
+      //
+      // One launch-argument-level refusal is deliberately NOT mirrored here: a definition whose own
+      // arguments already claim the reserved `mcp_servers.wollipog` name is refused by
+      // `provisionAgentControl` with an exact rename instruction. Withdrawing the advertisement
+      // would replace that actionable message with a generic "this installation does not offer the
+      // role", and the same asymmetry already exists for Pi, whose exact-argument identity check is
+      // likewise not re-derived from the catalog definition.
       supported = true;
     }
     if (!supported) return agent;
