@@ -17,6 +17,15 @@ Existing clients remain compatible through `runnerId` and `useWorktree`. New cli
 advertised target id as well, and the control plane plus runner both reject identity, mode, or policy
 drift before launch.
 
+A session's workspace strategy is not frozen at creation: an in-place session can later select a
+runner-owned session worktree. The runner derives the placement it expects from the launch's own
+`useWorktree` and refuses a launch whose target disagrees, so the control plane reconciles the two
+before every relaunch. A session with a worktree selected relaunches as a worktree session on the
+matching host placement. Where no advertised placement can express the session's current strategy —
+a container or cloud session that reports no workspace, for instance, since those targets have no
+in-place form — the control plane refuses with guidance rather than sending a launch the runner
+would reject.
+
 Protocol v61 adds opt-in runner-owned container targets. Each target binds a digest-pinned image,
 template revision, deterministic setup-check digest, and exact compatible agent ids into the durable
 session reference. The runner checks the native Docker or Podman runtime, reconciles its own orphaned

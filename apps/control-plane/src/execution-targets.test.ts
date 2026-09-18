@@ -4,6 +4,7 @@ import type { RunnerView } from "@wollipog/protocol";
 import {
   executionTargetRef,
   executionTargetsForRunner,
+  relaunchExecutionTarget,
   resolveExecutionTarget,
   validateExecutionHandoffReceipt,
   validateRunnerCloudTargets,
@@ -133,4 +134,67 @@ test("validates metered cloud targets, snapshot selection, policy refs, and hand
   assert.throws(() => validateRunnerCloudTargets("dev box/1", [{
     ...target, policy: { ...target.policy!, cost: { ...target.policy!.cost, currency: "EUR" as never } },
   }]), /cost or admission/);
+});
+
+test("a relaunch follows the session's current workspace strategy across host placements", () => {
+  const r = runner();
+  const [inPlace, worktree] = executionTargetsForRunner(r, false).map(executionTargetRef) as [
+    ReturnType<typeof executionTargetRef>, ReturnType<typeof executionTargetRef>,
+  ];
+
+  // The bug this covers: an in-place session that later gains a runner-owned session worktree keeps
+  // its creation-time placement, and the pair is exactly what the runner refuses.
+  assert.deepEqual(relaunchExecutionTarget(r, false, inPlace, true), { target: worktree },
+    "gaining a worktree moves the relaunch onto the isolated-worktree placement");
+  assert.deepEqual(relaunchExecutionTarget(r, false, worktree, false), { target: inPlace },
+    "losing the worktree moves it back in place");
+  assert.deepEqual(relaunchExecutionTarget(r, false, worktree, true), { target: worktree },
+    "a session created with Worktree mode on keeps the exact placement it was created with");
+  assert.deepEqual(relaunchExecutionTarget(r, false, inPlace, false), { target: inPlace });
+  assert.deepEqual(relaunchExecutionTarget(r, false, undefined, true), { target: undefined },
+    "a session launched before execution targets existed still carries none");
+
+  // Reconciliation keeps the placement family the session was created with.
+  const sshWorktree = executionTargetRef(executionTargetsForRunner(r, true)[1]!);
+  assert.deepEqual(relaunchExecutionTarget(r, true, executionTargetRef(executionTargetsForRunner(r, true)[0]!), true),
+    { target: sshWorktree }, "an SSH box reconciles within its own SSH placements");
+});
+
+test("a relaunch refuses rather than launching a placement that cannot express the strategy", () => {
+  const container = validateRunnerContainerTargets("dev box/1", [{
+    id: "runner:dev%20box%2F1:container:offline-tools",
+    runnerId: "dev box/1",
+    name: "builder · Offline tools",
+    kind: "container",
+    workspaceStrategy: "worktree",
+    adapter: "container",
+    boundaries: { filesystem: "container", network: "deny", secrets: "none", billing: "none" },
+    environment: {
+      id: "offline-tools", revision: 1, image: `example/agent@sha256:${"e".repeat(64)}`,
+      setupCheckDigest: "f".repeat(64),
+    },
+    compatibleAgentIds: ["codex"],
+    available: true,
+  }])[0]!;
+  const withContainer = runner({ executionTargets: [...executionTargetsForRunner(runner(), false), container] });
+  const containerRef = executionTargetRef(container);
+  assert.deepEqual(relaunchExecutionTarget(withContainer, false, containerRef, true), { target: containerRef },
+    "an isolated-by-construction target is untouched while the session still has its workspace");
+  const lostWorkspace = relaunchExecutionTarget(withContainer, false, containerRef, false);
+  assert.match("error" in lostWorkspace ? lostWorkspace.error : "",
+    /container execution target always runs in an isolated workspace/,
+    "a container session that lost its workspace is refused with guidance instead of a doomed launch");
+
+  // A container target also advertises the `worktree` strategy, so reconciliation must not drift a
+  // host session onto it.
+  assert.deepEqual(relaunchExecutionTarget(withContainer, false, executionTargetRef(
+    executionTargetsForRunner(runner(), false)[0]!), true),
+  { target: executionTargetRef(executionTargetsForRunner(runner(), false)[1]!) },
+  "a host session reconciles onto the host worktree placement, never a container one");
+
+  const offline = runner({ status: "offline" });
+  const stale = relaunchExecutionTarget(offline, false, executionTargetRef(
+    executionTargetsForRunner(offline, false)[0]!), true);
+  assert.match("error" in stale ? stale.error : "", /offline/,
+    "an unavailable placement is reported rather than sent");
 });

@@ -6209,6 +6209,97 @@ test("createSession selects and persists an exact compatible container environme
   assert.match(hostContext.error ?? "", /do not permit ACP/);
 });
 
+const hostTargetId = (strategy: "in_place" | "worktree"): string =>
+  `runner:${encodeURIComponent(RUNNER_ID)}:host:${strategy}`;
+
+test("restart carries the session's current workspace strategy, not its creation-time placement", () => {
+  const { db, hub, svc } = makeHarness();
+
+  // An ordinary in-place session that later gains a runner-owned session worktree. The snapshot
+  // reports `useWorktree` from the selected worktree while the stored target still names the
+  // in-place placement, which is the pair the runner refuses.
+  const adopted = seedSession(svc, hub, { useWorktree: false });
+  assert.equal(db.getSession(adopted)?.executionTarget?.id, hostTargetId("in_place"));
+  svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({
+    id: adopted, useWorktree: true, worktreePath: "/data/worktrees/adopted",
+  }));
+  assert.equal(db.getSession(adopted)?.executionTarget?.id, hostTargetId("in_place"),
+    "the runner echoes the launch-time target, so the stored placement never moves on its own");
+  hub.sentToRunner.length = 0;
+  assert.ok(svc.restart(adopted).ok);
+  const adoptedSpec = hub.sentOfType("start_session").at(-1)!.spec;
+  assert.equal(adoptedSpec.useWorktree, true);
+  assert.equal(adoptedSpec.executionTarget?.id, hostTargetId("worktree"));
+  assert.equal(adoptedSpec.executionTarget?.boundaries.filesystem, "worktree",
+    "the boundary the runner checks matches the launch as well as the identity");
+  assert.equal(db.getSession(adopted)?.executionTarget?.id, hostTargetId("worktree"),
+    "the session view stops advertising the placement this launch replaced");
+
+  // A worktree session whose most recent snapshot was taken while its worktree was still
+  // materializing: the flag reads false, but a selected worktree is what the relaunch lands in.
+  const isolated = seedSession(svc, hub, { useWorktree: true });
+  svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({
+    id: isolated, useWorktree: false, worktreePath: "/data/worktrees/isolated",
+  }));
+  assert.equal(db.getSession(isolated)?.useWorktree, false);
+  hub.sentToRunner.length = 0;
+  assert.ok(svc.restart(isolated).ok);
+  const isolatedSpec = hub.sentOfType("start_session").at(-1)!.spec;
+  assert.equal(isolatedSpec.useWorktree, true);
+  assert.equal(isolatedSpec.executionTarget?.id, hostTargetId("worktree"),
+    "a session created with Worktree mode on restarts on the placement it was created with");
+
+  // A session with no worktree at all still restarts in place.
+  const inPlace = seedSession(svc, hub, { useWorktree: false });
+  svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({ id: inPlace, useWorktree: false, worktreePath: null }));
+  hub.sentToRunner.length = 0;
+  assert.ok(svc.restart(inPlace).ok);
+  const inPlaceSpec = hub.sentOfType("start_session").at(-1)!.spec;
+  assert.equal(inPlaceSpec.useWorktree, false);
+  assert.equal(inPlaceSpec.executionTarget?.id, hostTargetId("in_place"));
+});
+
+test("restart refuses a placement that cannot express the session's workspace strategy", () => {
+  const { db, hub, svc } = makeHarness();
+  const container = {
+    id: `runner:${RUNNER_ID}:container:offline-tools`, runnerId: RUNNER_ID, name: "host · Offline tools",
+    kind: "container" as const, workspaceStrategy: "worktree" as const, adapter: "container" as const,
+    boundaries: { filesystem: "container" as const, network: "deny" as const, secrets: "none" as const, billing: "none" as const },
+    environment: {
+      id: "offline-tools", revision: 1, image: `example/agent@sha256:${"3".repeat(64)}`,
+      setupCheckDigest: "4".repeat(64),
+    },
+    compatibleAgentIds: [AGENT_ID], available: true,
+  };
+  db.registerRunner({ ...runnerMeta(), executionTargets: [container] }, Date.now(), PROTOCOL_VERSION);
+  const created = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID,
+    executionTargetId: container.id, useWorktree: true,
+  });
+  assert.ok(created.ok && created.data, created.error);
+  const id = created.data!.id;
+
+  // A container target is isolated by construction and has no in-place form, so a session of one
+  // that reports no workspace has nowhere to relaunch. Refuse with guidance rather than sending a
+  // launch the runner will reject.
+  svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({ id, useWorktree: false, worktreePath: null }));
+  hub.sentToRunner.length = 0;
+  const refused = svc.restart(id);
+  assert.equal(refused.ok, false);
+  assert.equal(refused.status, 409);
+  assert.match(refused.error ?? "", /container execution target always runs in an isolated workspace/);
+  assert.equal(hub.sentOfType("start_session").length, 0, "no launch is sent when restart refuses");
+  assert.deepEqual(db.getSession(id)?.executionTarget?.id, container.id,
+    "a refused restart leaves the stored placement exactly as it was");
+
+  // With its workspace intact the same session restarts on its own target, untouched.
+  svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({
+    id, useWorktree: true, worktreePath: "/containers/offline-tools/work",
+  }));
+  assert.ok(svc.restart(id).ok);
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.executionTarget?.id, container.id);
+});
+
 test("container Pi sessions do not claim host-only approval enforcement", () => {
   const { db, hub, svc } = makeHarness();
   const piAgentId = "pi-container";
