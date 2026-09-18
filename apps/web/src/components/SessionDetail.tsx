@@ -5092,6 +5092,15 @@ function SessionDetailLoaded({
                         ? "Wait for the current message request to finish."
                       : "Promote this queued message into the active turn.";
                   const canCancelThis = canCancelQueued && !durable && !reserved && !locallyPromoting;
+                  // A terminal durable receipt records delivery that has already stopped, so it can
+                  // never be cancelled. It carries dismissal instead, and the two are mutually
+                  // exclusive: cancellation removes work that may still run, dismissal only hides
+                  // settled evidence. The row's removal affordance must not be a disabled control —
+                  // the transcript recovery card that used to carry Dismiss is suppressed as soon
+                  // as `userEventSeq` lands, so this row is the only place the action can live.
+                  const terminalDurable = q.durableDeliveryState === "failed" ||
+                    q.durableDeliveryState === "uncertain";
+                  const dismissBusy = pendingPromptAction === q.id;
                   return (
                     <div
                       className={`queued-item${queuedEdit?.promptId === q.id ? " is-editing" : ""}`}
@@ -5145,28 +5154,44 @@ function SessionDetailLoaded({
                         >
                           <EditIcon size={14} />
                         </button>
-                        <button
-                          type="button"
-                          className="queued-cancel"
-                          disabled={!canCancelThis}
-                          title={
-                            !canCancelQueued
-                              ? runnerCapabilityRequirement(
-                                  runner?.protocolVersion,
-                                  "queuedPromptCancellation",
-                                  "Queued prompt cancellation",
-                                )
-                              : reserved || locallyPromoting
-                                ? "Resolve steering before cancelling this queued message."
-                                : durable
-                                  ? "Durable delivery entries cannot be cancelled before runner admission."
-                                : "Cancel this queued message."
-                          }
-                          aria-label={canCancelThis ? "Cancel Queued Message" : "Queued Message Cancellation Unavailable"}
-                          onClick={() => void api.cancelQueuedPrompt(session.id, q.id)}
-                        >
-                          ✕
-                        </button>
+                        {terminalDurable ? (
+                          <button
+                            type="button"
+                            className="btn ghost sm queued-dismiss"
+                            disabled={pendingPromptAction !== undefined}
+                            aria-busy={dismissBusy || undefined}
+                            title="Remove this delivery receipt. The message already recorded in the transcript is kept, and no provider work is cancelled, resent, or restarted."
+                            aria-label={q.durableDeliveryState === "failed"
+                              ? "Dismiss Failed Message"
+                              : "Dismiss Uncertain Message"}
+                            onClick={() => void resolvePendingPrompt(q.id, "dismiss")}
+                          >
+                            {dismissBusy ? "Dismissing…" : "Dismiss"}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="queued-cancel"
+                            disabled={!canCancelThis}
+                            title={
+                              !canCancelQueued
+                                ? runnerCapabilityRequirement(
+                                    runner?.protocolVersion,
+                                    "queuedPromptCancellation",
+                                    "Queued prompt cancellation",
+                                  )
+                                : reserved || locallyPromoting
+                                  ? "Resolve steering before cancelling this queued message."
+                                  : durable
+                                    ? "Durable delivery entries cannot be cancelled before runner admission."
+                                  : "Cancel this queued message."
+                            }
+                            aria-label={canCancelThis ? "Cancel Queued Message" : "Queued Message Cancellation Unavailable"}
+                            onClick={() => void api.cancelQueuedPrompt(session.id, q.id)}
+                          >
+                            ✕
+                          </button>
+                        )}
                       </div>
                     </div>
                   );

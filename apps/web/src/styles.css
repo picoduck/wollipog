@@ -3437,6 +3437,7 @@ textarea {
   flex: none;
 }
 .queued-steer,
+.queued-dismiss,
 .queued-edit { flex: none; }
 .queued-steer-info { position: relative; }
 .queued-steer-info summary {

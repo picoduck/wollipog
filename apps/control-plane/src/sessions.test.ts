@@ -7913,6 +7913,72 @@ test("pending prompt cancellation is definite before send and wins late admissio
     "dismissal scrubs retained prompt content without deleting the outcome tombstone");
 });
 
+for (const terminal of ["failed", "uncertain"] as const) {
+  test(`a durable prompt that ends ${terminal} with a transcript event stays dismissible from both projections`, () => {
+    const { db, hub, svc } = makeHarness();
+    const id = seedSession(svc, hub, { prompt: "initial" });
+    hub.sentToRunner.length = 0;
+    const text = "message the composer would otherwise keep forever";
+    const command: DurableSessionCommand = { type: "prompt_session", sessionId: id, text };
+    const commandId = `prompt-${terminal}-with-transcript-event`;
+    const now = Date.now();
+    db.stageSessionPromptCommand({
+      commandId,
+      sessionId: id,
+      runnerId: RUNNER_ID,
+      payloadJson: canonicalAutomationCommandJson(command),
+      payloadSha256: automationCommandDigest(command),
+      expiresAt: now + 30 * 24 * 60 * 60_000,
+      now,
+    });
+    // The runner flushed the command-tagged user event before durable delivery settled. That
+    // populated user_event_seq is what suppresses the transcript recovery card carrying Dismiss,
+    // so the receipt must stay dismissible through the surfaces that remain visible.
+    const transcript = db.appendEvent(id, { kind: "user_message", text, images: [] }, now);
+    assert.ok(db.recordSessionPromptCommandReceipt({
+      commandId,
+      runnerId: RUNNER_ID,
+      sessionId: id,
+      state: terminal,
+      revision: 4,
+      error: "provider cancelled",
+      code: "COMMAND_CANCELLED",
+      userEventSeq: transcript.seq,
+      now,
+    })?.advanced);
+
+    const settled = db.getSession(id)!;
+    const receipt = settled.pendingPrompts?.find((prompt) => prompt.commandId === commandId);
+    assert.equal(receipt?.state, terminal);
+    assert.equal(receipt?.userEventSeq, transcript.seq);
+    assert.equal(receipt?.canDismiss, true,
+      "a terminal receipt stays dismissible whatever the transcript already records");
+    assert.equal(receipt?.canCancel, undefined, "terminal delivery is past the cancellation boundary");
+    const queueEntry = settled.queued?.find((entry) => entry.id === commandId);
+    assert.equal(queueEntry?.durableDeliveryState, terminal,
+      "the composer keeps rendering the terminal entry, so that row needs its own removal action");
+
+    assert.equal(svc.dismissPendingPrompt(id, commandId).ok, true);
+
+    // Dismissal is durable and clears every surface the entry was visible on, so a reload or
+    // reconnect cannot bring the unremovable row back.
+    const reloaded = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+    void reloaded;
+    const after = db.getSession(id)!;
+    assert.equal(after.pendingPrompts?.some((prompt) => prompt.commandId === commandId) ?? false, false);
+    assert.equal(after.queued?.some((entry) => entry.id === commandId) ?? false, false);
+
+    // Only the delivery receipt goes: the canonical transcript message it was tagged with stays,
+    // and no cancel/prompt traffic is sent to the runner on the way out.
+    const events = db.listEvents(id);
+    assert.equal(events.some((event) => event.seq === transcript.seq &&
+      event.payload.kind === "user_message" && event.payload.text === text), true,
+      "dismissal must not remove the canonical transcript message");
+    assert.deepEqual(hub.sentToRunner, [],
+      "dismissal never cancels, resends, reorders, or restarts provider work");
+  });
+}
+
 test("pending prompt cancel loses safely once the send boundary is crossed", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { prompt: "initial" });
