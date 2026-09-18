@@ -620,6 +620,11 @@ export function shellCwdAfterCommand(command: string, cwd: string | null): strin
     }
     // A directory change inside a pipeline runs in a subshell in some shells and not others.
     if (piped || conditional) return false;
+    // The tokenizer unwraps launcher prefixes (`nice cd x`, `env cd x`, `sudo cd x`) to their
+    // executable, but those run an EXTERNAL cd that never moves the shell — and exits 0 where one
+    // is installed. Only a segment that literally starts with the builtin is followed.
+    const first = segment.find((token) => typeof token === "string");
+    if (first !== "cd" && first !== "command") return false;
     // Only `cd`'s own resolution options are understood (`cd -P dir`, `cd -- dir`); any other
     // option, and a lone `-` (the previous directory), is unknown.
     let index = 0;

@@ -176,6 +176,13 @@ test("shellCwdAfterCommand follows literal directory changes and gives up on inv
     ["cd apps && . ./env.sh", root, null],
     ["cd apps && exec sh", root, null],
     ["cd -q apps", root, null],
+    // A launcher prefix runs an external cd that never moves the shell (and exits 0 on macOS).
+    ["nice cd apps", root, null],
+    ["env cd apps", root, null],
+    ["sudo cd apps", root, null],
+    ["timeout 5 cd apps", root, null],
+    ["FOO=1 cd apps", root, null],
+    ["cd apps && nice cd ..", root, null],
     ["(cd apps && ls)", root, null],
     ["cd apps | cat", root, null],
     ["ls && cd apps | cat", root, null],
