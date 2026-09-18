@@ -968,7 +968,13 @@ function SessionDetailLoaded({
     composer: ReturnType<typeof captureComposerFocus>;
   } | null>(null);
   const retitleRetryPointerActivationRef = useRef(false);
-  const [pendingPromptAction, setPendingPromptAction] = useState<string>();
+  // The command alone cannot say which control is busy: one commandId can own several resolution
+  // controls at once (the recovery card's Retry and Dismiss, plus the composer row's Dismiss), so
+  // the action travels with it and each control reports progress only for its own request.
+  const [pendingPromptAction, setPendingPromptAction] = useState<{
+    commandId: string;
+    action: "cancel" | "dismiss" | "retry";
+  }>();
   const sendRequestBusy = busy || activeComposerMutation?.kind === "send";
   const steeringRequestBusy = steeringBusy || activeComposerMutation?.kind === "steer" ||
     activeComposerMutation?.kind === "promote";
@@ -2587,7 +2593,7 @@ function SessionDetailLoaded({
     action: "cancel" | "dismiss" | "retry",
   ) => {
     if (pendingPromptAction) return;
-    setPendingPromptAction(commandId);
+    setPendingPromptAction({ commandId, action });
     setError(null);
     try {
       await api.resolvePendingPrompt(session.id, commandId, action);
@@ -2599,7 +2605,7 @@ function SessionDetailLoaded({
   }, [api, pendingPromptAction, session.id]);
   const cancelLivePendingPrompt = useCallback(async (commandId: string) => {
     if (pendingPromptAction) return;
-    setPendingPromptAction(commandId);
+    setPendingPromptAction({ commandId, action: "cancel" });
     setError(null);
     try {
       await api.cancelQueuedPrompt(session.id, commandId);
@@ -4550,7 +4556,7 @@ function SessionDetailLoaded({
         {session.orchestratorCampaign?.continuation && (
           <CampaignContinuationNotice
             continuation={session.orchestratorCampaign.continuation}
-            acknowledgementPending={pendingPromptAction === session.orchestratorCampaign.continuation.commandId}
+            acknowledgementPending={pendingPromptAction?.commandId === session.orchestratorCampaign.continuation.commandId}
             onAcknowledge={(commandId) => void resolvePendingPrompt(commandId, "dismiss")}
             onRetry={(commandId) => void resolvePendingPrompt(commandId, "retry")}
           />
@@ -4802,7 +4808,7 @@ function SessionDetailLoaded({
                     deliveredCommandIds={deliveredPromptCommandIds}
                     liveQueueIds={liveQueueIds}
                     canCancelLive={runnerOnline && canCancelQueued}
-                    pendingAction={pendingPromptAction}
+                    pendingAction={pendingPromptAction?.commandId}
                     worktreeRecoveryPending={worktreeRecovery !== undefined}
                     onCancelPending={(commandId) => void resolvePendingPrompt(commandId, "cancel")}
                     onCancelLive={(commandId) => void cancelLivePendingPrompt(commandId)}
@@ -5100,7 +5106,8 @@ function SessionDetailLoaded({
                   // as `userEventSeq` lands, so this row is the only place the action can live.
                   const terminalDurable = q.durableDeliveryState === "failed" ||
                     q.durableDeliveryState === "uncertain";
-                  const dismissBusy = pendingPromptAction === q.id;
+                  const dismissBusy = pendingPromptAction?.commandId === q.id &&
+                    pendingPromptAction.action === "dismiss";
                   return (
                     <div
                       className={`queued-item${queuedEdit?.promptId === q.id ? " is-editing" : ""}`}

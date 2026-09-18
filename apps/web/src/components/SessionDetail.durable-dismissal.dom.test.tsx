@@ -160,6 +160,8 @@ let fixtureSequence = 0;
 async function mountFixture(options: {
   sessionPatch?: Partial<SessionView>;
   eventPayloads?: SessionEvent["payload"][];
+  /** Leaves every prompt resolution in flight, so busy state stays observable. */
+  holdResolutions?: boolean;
 } = {}): Promise<Fixture> {
   fixtureSequence += 1;
   const currentSession = session(`durable-dismissal-${fixtureSequence}`);
@@ -182,6 +184,7 @@ async function mountFixture(options: {
     session: () => new Promise<never>(() => {}),
     resolvePendingPrompt: async (sessionId: string, commandId: string, action: string) => {
       calls.resolvePendingPrompt.push({ sessionId, commandId, action });
+      if (options.holdResolutions) await new Promise(() => {});
       return {};
     },
     cancelQueuedPrompt: async (sessionId: string, promptId: string) => {
@@ -298,7 +301,7 @@ for (const { state, label } of [
   { state: "failed" as const, label: "Dismiss Failed Message" },
   { state: "uncertain" as const, label: "Dismiss Uncertain Message" },
 ]) {
-  test(`a ${state} durable entry whose recovery card is suppressed still offers an enabled Dismiss`, async () => {
+  test(`a durable entry that ended ${state} with its recovery card suppressed still offers an enabled Dismiss`, async () => {
     const fixture = await mountFixture({
       sessionPatch: {
         queued: terminalQueueEntry(state),
@@ -338,7 +341,7 @@ for (const { state, label } of [
     }
   });
 
-  test(`a ${state} durable entry that kept its recovery card also offers Dismiss on the composer row`, async () => {
+  test(`a durable entry that ended ${state} and kept its recovery card also offers Dismiss on the composer row`, async () => {
     const fixture = await mountFixture({
       sessionPatch: {
         queued: terminalQueueEntry(state),
@@ -399,6 +402,42 @@ test("dismissing a terminal delivery entry removes only the receipt and survives
     await fixture.pushSession({ status: "running" });
     assert.equal(fixture.container.querySelector(`[data-testid="queued-prompt-${COMMAND_ID}"]`), null);
     assert.deepEqual(fixture.calls.cancelQueuedPrompt, []);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an in-flight Retry does not make the composer row's Dismiss claim to be dismissing", async () => {
+  const fixture = await mountFixture({
+    sessionPatch: {
+      queued: terminalQueueEntry("failed"),
+      // Retryable non-delivery: the recovery card keeps both Retry and Dismiss, and the composer
+      // row carries its own Dismiss for the same commandId. They share `pendingPromptAction`.
+      pendingPrompts: [{
+        ...terminalPendingPrompt("failed", undefined)![0]!,
+        errorCode: "PROVIDER_AUTHENTICATION_REQUIRED",
+        error: "Provider authentication is required; this message was not sent.",
+        canRetry: true,
+      }],
+    },
+    eventPayloads: [{ kind: "user_message", text: "an earlier message", images: [] }],
+    holdResolutions: true,
+  });
+  try {
+    const retry = button(fixture, "Retry Message");
+    assert.ok(retry, "the recovery card offers Retry for a known-undelivered failure");
+    await act(async () => fireDomEvent.click(retry));
+    assert.deepEqual(fixture.calls.resolvePendingPrompt, [
+      { sessionId: fixture.sessionId, commandId: COMMAND_ID, action: "retry" },
+    ]);
+
+    const dismiss = fixture.container.querySelector<HTMLButtonElement>(".queued-dismiss");
+    assert.ok(dismiss, "the composer row's Dismiss is still rendered while the retry is in flight");
+    assert.equal(dismiss.textContent, "Dismiss",
+      "a retry must not label an unrelated dismissal control as dismissing");
+    assert.equal(dismiss.hasAttribute("aria-busy"), false,
+      "busy state belongs to the control whose action is actually running");
+    assert.equal(dismiss.disabled, true, "but it stays disabled while another action is in flight");
   } finally {
     await unmountFixture(fixture);
   }
