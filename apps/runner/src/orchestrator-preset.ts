@@ -259,8 +259,9 @@ export function withOrchestratorAdditiveRole(
   return agents.map((agent) => {
     const driver = agent.driver ?? "acp";
     // WSL and every other non-native context is excluded: the additive launch requires host
-    // execution. ACP has no additive shape at all — its provider permission contract is unaudited —
-    // so it has no entry in ORCHESTRATOR_ADDITIVE_CAPABILITY and never reaches this advertisement.
+    // execution. ACP has no additive shape at all: #1306 audited its provider-mode permission
+    // contract against the pinned adapter and found it not sound (ADR 0010), so it has no entry in
+    // ORCHESTRATOR_ADDITIVE_CAPABILITY and never reaches this advertisement.
     if (!agent.capabilities || (agent.context?.kind ?? "native") !== "native" ||
         !orchestratorAdditiveCapability(driver)) return agent;
     let supported: boolean;
