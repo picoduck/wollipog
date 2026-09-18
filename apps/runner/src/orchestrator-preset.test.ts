@@ -584,13 +584,22 @@ test("a user's own MCP server named wollipog is never deleted by the additive Co
   const similar = ["-c", 'mcp_servers.wollipog-helper={ command = "x", env = { WOLLIPOG_PERMISSION_PRESET = "orchestrator" } }',
     "-c", 'mcp_servers.wollipog2.command="y"'];
   assert.equal(reservedCodexMcpNameCollision(similar), false, "only the exact reserved name collides");
+  // Spellings measured against codex-cli 0.154.0 (`codex -c <setting> mcp list`).
   for (const spelling of [
     'mcp_servers.wollipog = { command = "mine" }',
-    'mcp_servers . wollipog.command = "mine"',
-    'mcp_servers."wollipog"={ command = "mine" }',
-    "mcp_servers.'wollipog'.command=\"mine\"",
+    ' mcp_servers.wollipog={ command = "mine" }',
+    'mcp_servers.wollipog.command = "mine"',
   ]) {
-    assert.equal(reservedCodexMcpNameCollision(["-c", spelling]), true, `collision detected for: ${spelling}`);
+    assert.equal(reservedCodexMcpNameCollision(["-c", spelling]), true, `codex names this server wollipog: ${spelling}`);
+    assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(["-c", spelling], "codex", []), ["-c", spelling]);
+  }
+  for (const spelling of [
+    'mcp_servers."wollipog"={ command = "mine" }',
+    "mcp_servers.'wollipog'={ command = \"mine\" }",
+    'mcp_servers . wollipog = { command = "mine" }',
+    'mcp_servers.wollipog .command = "mine"',
+  ]) {
+    assert.equal(reservedCodexMcpNameCollision(["-c", spelling]), false, `codex names a different server: ${spelling}`);
     assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(["-c", spelling], "codex", []), ["-c", spelling]);
   }
   assert.equal(reservedCodexMcpNameCollision(["-c", 'model="mcp_servers.wollipog=x"']), false,

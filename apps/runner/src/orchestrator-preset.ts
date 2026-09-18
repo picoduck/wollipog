@@ -354,10 +354,11 @@ const ADDITIVE_CODEX_MCP_MARKER = ORCHESTRATOR_ENV_KEY;
 function namesReservedCodexMcpServer(setting: string): boolean {
   const assignment = setting.indexOf("=");
   if (assignment < 0) return false;
-  // Codex parses the left side as a TOML dotted key: whitespace around the dots and the
-  // assignment is insignificant and each segment may be quoted.
-  const segments = setting.slice(0, assignment).split(".")
-    .map((segment) => segment.trim().replace(/^(["'])(.*)\1$/u, "$2"));
+  // Measured against codex-cli 0.154.0: the key is trimmed as a whole and then split on dots, but
+  // segments are neither trimmed nor unquoted. `mcp_servers.wollipog = {...}` therefore configures
+  // the server named `wollipog`, while `mcp_servers."wollipog"`, `mcp_servers . wollipog`, and
+  // `mcp_servers.wollipog .command` each name a different server and are not collisions.
+  const segments = setting.slice(0, assignment).trim().split(".");
   return segments[0] === "mcp_servers" && segments[1] === "wollipog";
 }
 
