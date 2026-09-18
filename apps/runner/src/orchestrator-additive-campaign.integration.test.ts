@@ -502,13 +502,14 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
     assert.deepEqual(valuesOf(first.argv, "--permission-prompt-tool"), ["stdio"]);
 
     // --------------------------------- 2b. the scoped Agent Control credential, round-tripped
+    assert.deepEqual(credentialAcks.filter((ack) => ack.sessionId === parent.id).map((ack) => ack.accepted),
+      [true], "the runner registered the minted credential and the control plane accepted the binding");
     const parentToken = scopedToken(parent.id);
     const parentHash = hashToken(parentToken);
+    assert.equal(credentialAcks.find((ack) => ack.sessionId === parent.id)?.tokenHash, parentHash,
+      "the registered hash is the hash of this session's minted token");
     assert.equal(first.env.WOLLIPOG_SESSION_TOKEN_FILE, agentControlTokenPath(configDir, parent.id),
       "the provider is pointed at this session's own credential file");
-    assert.deepEqual(credentialAcks.filter((ack) => ack.sessionId === parent.id),
-      [{ sessionId: parent.id, tokenHash: parentHash, accepted: true }],
-      "the runner registered the minted credential and the control plane accepted the binding");
     assert.equal(readFileSync(agentControlReadyPath(configDir, parent.id), "utf8"), parentHash,
       "the acknowledgement published the matching ready-file hash");
     assert.equal(db.agentControlCredentialValid(parent.id, RUNNER_ID, parentHash), true,
