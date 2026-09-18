@@ -450,20 +450,31 @@ test("with the guard active the channel refuses only what holds wherever the she
   assert.deepEqual(await deniedRequests(run), ["absolute-rm", "absolute-cd-then-relative"]);
 });
 
-test("a subagent's request keeps the session-directory check even with the guard active", async (t) => {
+test("a subagent's request is judged from the placeless directory too (#1361)", async (t) => {
+  // Measured on claude 2.1.270 and 2.1.277 (docs/DRIVERS.md §2.3.2): the guard hook runs for a
+  // subagent's Bash calls, and the `cwd` it is handed is the directory that subagent's command
+  // really runs in — the top-level shell's current directory, NOT the session directory. So the
+  // hook is the authority for a subagent's relative operands exactly as it is for a top-level
+  // one, and judging them from the session directory only reproduced the #1333 false refusal.
   const dir = tempDir(t);
   const run = launch(provision(dir, "cwd-2", "auto", { protections: PROTECTIONS }), "auto", PROTECTIONS);
   t.after(() => run.driver.dispose());
-  requestBash(run, "sub", "rm -rf .", true);
-  requestBash(run, "top", "rm -rf .");
-  assert.deepEqual(await deniedRequests(run), ["sub"]);
+  requestBash(run, "sub-relative-cd", "cd .. && pnpm typecheck", true);
+  requestBash(run, "sub-relative-rm", "rm -rf build", true);
+  requestBash(run, "sub-absolute-rm", `rm -rf ${WORKTREE}`, true);
+  requestBash(run, "sub-absolute-cd-then-relative", `cd ${WORKTREE}/apps && rm -rf ..`, true);
+  assert.deepEqual(await deniedRequests(run), ["sub-absolute-rm", "sub-absolute-cd-then-relative"]);
 });
 
 test("a mediated launch has no hook, so it keeps the session-directory check entirely", async (t) => {
-  // Known limit: here `cd ..` from a subdirectory is still refused, as before #1333.
+  // Known limit: here `cd ..` from a subdirectory is still refused, as before #1333 — for a
+  // subagent's request as much as for a top-level one, because nothing else has judged either.
   const run = launch([], "default", PROTECTIONS);
   t.after(() => run.driver.dispose());
   requestBash(run, "relative-cd", "cd ..");
   requestBash(run, "relative-rm", "rm -rf .");
-  assert.deepEqual(await deniedRequests(run), ["relative-cd", "relative-rm"]);
+  requestBash(run, "sub-relative-cd", "cd ..", true);
+  requestBash(run, "sub-relative-rm", "rm -rf .", true);
+  assert.deepEqual(await deniedRequests(run),
+    ["relative-cd", "relative-rm", "sub-relative-cd", "sub-relative-rm"]);
 });

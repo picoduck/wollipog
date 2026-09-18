@@ -582,8 +582,46 @@ harmless because Claude never reaches the control channel for a command the hook
   `PLACELESS_CWD`, a directory that is nowhere: refusals that do not depend on the shell's
   position survive (an absolute path to the worktree, an absolute `cd` followed by a relative
   removal), and the rest is left to the hook, which has already judged the command from the real
-  directory. A subagent's request, and every request of a mediated launch, keeps the session
-  directory, so the false `cd ..` refusal remains only in that fallback.
+  directory. Since #1361 a subagent's request is judged from `PLACELESS_CWD` on the same evidence
+  (next bullet). Only a mediated launch, which has no hook at all, keeps the session directory, so
+  the false `cd ..` refusal remains only in that fallback.
+- **Hooks cover a subagent's Bash calls, with the subagent's real directory (#1361).** Measured on
+  claude 2.1.270 and on 2.1.277 (the version installed on this machine), by running headless Claude
+  in a throwaway project with a `PreToolUse` hook that logged its payload, and comparing that
+  payload against what each command's own `pwd` printed. Both versions behaved identically, over
+  repeated runs:
+  - A `PreToolUse` hook supplied through `--settings` DOES run for the Bash calls a subagent makes.
+    Every subagent Bash call was hooked; none was missed. Measured both with a bare
+    `"matcher": "Bash"` and with the alternation the runner actually writes
+    (`MANAGED_WORKTREE_GUARD_MATCHER`, `Bash|Edit|MultiEdit|Write|Read|NotebookEdit|Grep|Glob`);
+    the two behaved identically, so the recorded result is the production configuration's.
+  - The payload has the same shape as a top-level one and adds `agent_id` and `agent_type`
+    (`"general-purpose"` here), which is how a subagent's call can be told apart in the hook. The
+    full key set observed was `agent_id`, `agent_type`, `cwd`, `effort`, `hook_event_name`,
+    `permission_mode`, `prompt_id`, `session_id`, `tool_input`, `tool_name`, `tool_use_id`,
+    `transcript_path`.
+  - The payload's `cwd` is the directory the subagent's command actually runs in — verified call by
+    call against the command's own `pwd` output, with no disagreement.
+  - That directory is **not** the session directory. A subagent's Bash shell starts in the
+    TOP-LEVEL shell's current directory: after the top-level shell had done `cd sub`, every
+    subagent call ran in `<proj>/sub`.
+  - Unlike the top-level shell, a subagent's Bash shell does NOT keep its own `cd` between calls —
+    it resets to that inherited directory each time. After the subagent ran `cd sub && pwd`
+    (printing `<proj>/sub/sub`), its next call ran in `<proj>/sub` again, and a following `cd ..`
+    landed in `<proj>`.
+
+  So the session directory is the wrong place to resolve a subagent's relative operand — with the
+  top-level shell one level down, a subagent's `cd ..` stays inside the worktree while the
+  session-directory check reads it as leaving: the #1333 false refusal, reproduced for subagents.
+  The hook has the right directory and has already judged the command, so the channel treats a
+  subagent's request exactly like a top-level one.
+
+  What the measurement does NOT establish: it ran in `bypassPermissions`, where the CLI never
+  consults the control channel, so it proves the hook fires for a subagent — not that Claude emits
+  a `can_use_tool` frame carrying `parent_tool_use_id` in `default`/`auto`. That is unchanged by
+  #1361 either way: the handler has had a subagent branch since #1343, and if no such frame is ever
+  emitted the branch simply never runs. What #1361 settles is which directory it must use when it
+  does.
 - **Operands are judged physically as well as by spelling.** The shared matcher resolves each
   external operand one component at a time from the physical form of its directory, compares
   against the physical protections (a worktree reached through a symlinked prefix is not refused
