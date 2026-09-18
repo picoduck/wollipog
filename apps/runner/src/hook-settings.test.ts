@@ -742,7 +742,7 @@ test("the guard is provisioned when manager hooks are DISABLED", () => temp((dir
   const guards = guardEntries(live);
   assert.equal(guards.length, 1, "exactly one guard entry");
   assert.deepEqual(guards[0]!.matcher!.split("|").sort(),
-    ["Bash", "Edit", "MultiEdit", "NotebookEdit", "Read", "Write"]);
+    ["Bash", "Edit", "Glob", "Grep", "MultiEdit", "NotebookEdit", "Read", "Write"]);
   assert.ok(guards[0]!.hooks[0]!.args.includes("--protections"));
   assert.equal(live.hooks?.PostToolUse, undefined, "no manager hooks came along");
   assert.equal(live.env?.MANAGER_TOKEN_FILE, undefined, "and no credential reference");
@@ -980,4 +980,41 @@ test("session cleanup removes the guard and protections files", () => temp((dir)
   for (const suffix of [".settings.json", ".template.json", ".guard.json", ".protections.json"]) {
     assert.equal(existsSync(file.replace(/\.settings\.json$/u, suffix)), false, `${suffix} is gone`);
   }
+}));
+
+test("a driver-internal spawn after an invalidation drops the guard settings and mediates", () => temp((dir) => {
+  // The driver spawns again on its own (one-shot turns, resume, persistent restarts) without
+  // re-provisioning, so the invalidation has to be honored where the argv is prepared.
+  const launch = provisionGuarded(dir, {}, { enabled: false });
+  assert.equal(prepareClaudeHookArgs(launch.args).guardActive, true);
+  const outcome = refreshClaudeGuardProtections("sess_hook_1", [], dir);
+  assert.equal(outcome.state, "invalidated");
+  const prepared = prepareClaudeHookArgs(launch.args);
+  assert.equal(prepared.guardActive, false);
+  assert.deepEqual(prepared.args, [], "a guard hook with no list would block every matched tool");
+}));
+
+test("a driver-internal spawn re-runs the tripwire: a foreign but VALID list is not trusted", () => temp((dir) => {
+  const launch = provisionGuarded(dir, {}, { enabled: false });
+  const protections = claudeHookSettingsPath(dir, "sess_hook_1").replace(/\.settings\.json$/u, ".protections.json");
+  writeFileSync(protections, JSON.stringify({
+    version: 1, protections: [{ worktreePath: "/somewhere/else", repoPath: "/repo" }],
+  }), "utf8");
+  const prepared = prepareClaudeHookArgs(launch.args);
+  assert.equal(prepared.guardActive, false);
+  assert.deepEqual(prepared.args, []);
+  // The session is now compromised: restoring the file does not restore trust in this process.
+  assert.equal(prepareClaudeHookArgs(launch.args).guardActive, false);
+  const relaunch = spec();
+  provisionClaudeHooks(relaunch, {
+    ...config, enabled: false, managedWorktreeProtections: PROTECTIONS, verifyGuardLaunch: guardVerifies,
+  }, () => {}, host(dir));
+  assert.deepEqual(relaunch.args, [], "and the next provisioned launch is mediated");
+}));
+
+test("a driver-internal spawn whose protection list has vanished is mediated", () => temp((dir) => {
+  const launch = provisionGuarded(dir, {}, { enabled: false });
+  const protections = claudeHookSettingsPath(dir, "sess_hook_1").replace(/\.settings\.json$/u, ".protections.json");
+  rmSync(protections, { force: true });
+  assert.equal(prepareClaudeHookArgs(launch.args).guardActive, false);
 }));

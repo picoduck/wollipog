@@ -28,6 +28,7 @@ import {
   MANAGED_WORKTREE_GUARD_PROTECTIONS_SUFFIX,
   managedWorktreeGuardProtectionsPath,
   managedWorktreeGuardStateMatches,
+  readManagedWorktreeGuardProtections,
   sameGuardPath,
   verifyManagedWorktreeGuardLaunch,
   writeManagedWorktreeGuardProtections,
@@ -949,6 +950,33 @@ export interface PreparedClaudeHookArgs {
   guardStateDirectory?: string;
 }
 
+/**
+ * Whether the guard behind this settings file may still be relied on for the spawn being prepared.
+ *
+ * Provisioning proves the guard once per launch spec, but the driver spawns again on its own
+ * (every one-shot turn, resume, and persistent-transport restart) without re-provisioning. Each of
+ * those spawns has to honor an invalidation that happened in between, and re-run the tripwire:
+ * a list that is gone would make the hook block every matched tool, and a list someone else
+ * rewrote must not be trusted.
+ */
+function claudeGuardStateTrusted(settingsFile: string): boolean {
+  const sessionId = basename(settingsFile).slice(0, -SETTINGS_SUFFIX.length);
+  if (compromisedGuardSessions.has(sessionId)) return false;
+  const protectionsFile = claudeHookProtectionsPath(settingsFile);
+  const baseline = guardStateDigests.get(sessionId);
+  try {
+    if (baseline && !managedWorktreeGuardStateMatches(protectionsFile, baseline)) {
+      poisonClaudeGuardState(sessionId, protectionsFile);
+      return false;
+    }
+    // Without a baseline (nothing provisioned in this process) the list still has to be a valid,
+    // non-empty document: that is exactly what the hook itself demands before it allows anything.
+    return readManagedWorktreeGuardProtections(protectionsFile).length > 0;
+  } catch {
+    return false;
+  }
+}
+
 /** Driver-side exact-path heal and recoverable circuit check before every Claude process spawn. */
 export function prepareClaudeHookArgs(args: string[], now = Date.now()): PreparedClaudeHookArgs {
   let index = -1;
@@ -972,6 +1000,20 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
   const described = describeManagedSettings(file);
   const hasGuard = described?.guard === true;
   const hookAskCapable = managedSettingsAskCapable(file);
+  if (hasGuard && !claudeGuardStateTrusted(file)) {
+    // The settings document carries a guard hook that can no longer be relied on. Launching with
+    // it would either block every matched tool or trust a foreign list, so the whole document is
+    // dropped for this spawn and the driver mediates, exactly as when no guard was provisionable.
+    return {
+      args: [...args.slice(0, index), ...args.slice(index + 2)],
+      circuitOpen: false,
+      circuitReprobePending: false,
+      hookAskCapable: false,
+      healed: false,
+      guardActive: false,
+      guardStateDirectory: dirname(resolve(file)),
+    };
+  }
   const circuit = readHookCircuitState(claudeHookCircuitPath(file));
   const reprobePending = circuit.open && circuit.openedAt != null &&
     now - circuit.openedAt >= CLAUDE_HOOK_CIRCUIT_COOLDOWN_MS;

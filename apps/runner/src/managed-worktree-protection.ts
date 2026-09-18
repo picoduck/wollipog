@@ -1,4 +1,6 @@
-import { dirname, isAbsolute, matchesGlob, normalize, resolve, sep } from "node:path";
+import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, matchesGlob, normalize, resolve, sep } from "node:path";
 import { parse, type ParseEntry } from "shell-quote";
 
 const MAX_COMMAND_LENGTH = 32_768;
@@ -590,21 +592,60 @@ export function commandTargetsManagedWorktree(
 export const GUARD_STATE_REFUSAL =
   "Wollipog protects its own managed-worktree guard state. That runner-owned directory is not part of this session's workspace and must not be read or modified.";
 
-/** Tools whose input names a file path and therefore has to respect the guard-state boundary. */
-export const GUARD_STATE_FILE_TOOLS: Readonly<Record<string, "file_path" | "notebook_path">> = {
-  Edit: "file_path",
-  MultiEdit: "file_path",
-  Write: "file_path",
-  Read: "file_path",
-  NotebookEdit: "notebook_path",
+/**
+ * Tools whose input names a filesystem location and therefore has to respect the guard-state
+ * boundary. `optional` tools search the working directory when the key is absent; `pattern` names
+ * a glob input whose static prefix is a location of its own.
+ */
+export interface GuardStateToolPath { key: string; optional?: true; pattern?: string }
+export const GUARD_STATE_FILE_TOOLS: Readonly<Record<string, GuardStateToolPath>> = {
+  Edit: { key: "file_path" },
+  MultiEdit: { key: "file_path" },
+  Write: { key: "file_path" },
+  Read: { key: "file_path" },
+  NotebookEdit: { key: "notebook_path" },
+  Grep: { key: "path", optional: true },
+  Glob: { key: "path", optional: true, pattern: "pattern" },
 };
+
+/** `~` and `~/...` as the shell (and Claude's file tools) spell the home directory. */
+function expandHome(path: string): string {
+  if (path === "~") return homedir();
+  return path.startsWith("~/") || path.startsWith(`~${sep}`) ? resolve(homedir(), path.slice(2)) : path;
+}
+
+/**
+ * Follow symlinks as far as the filesystem allows: the nearest existing ancestor is resolved and
+ * the not-yet-existing remainder is appended, so a link into the guard state is seen for what it
+ * is even when the final component does not exist yet.
+ */
+function canonicalPath(path: string): string {
+  const missing: string[] = [];
+  let current = path;
+  for (let depth = 0; depth < 256; depth++) {
+    try {
+      return resolve(realpathSync(current), ...missing);
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) break;
+      missing.unshift(basename(current));
+      current = parent;
+    }
+  }
+  return path;
+}
 
 /** A path is out of bounds when it is inside the guard-state directory, or contains it. */
 export function pathTargetsGuardState(path: string, cwd: string, directory: string): boolean {
   if (!directory || !path || path.includes("\0")) return false;
-  const resolved = isAbsolute(path) ? resolve(path) : resolve(cwd || ".", path);
+  const expanded = expandHome(path);
+  const resolved = isAbsolute(expanded) ? resolve(expanded) : resolve(cwd || ".", expanded);
   const root = resolve(directory);
-  return pathContains(root, resolved) || pathContains(resolved, root);
+  if (pathContains(root, resolved) || pathContains(resolved, root)) return true;
+  // The lexical spelling is only half of it: a symlink anywhere along either path lands elsewhere.
+  const realResolved = canonicalPath(resolved);
+  const realRoot = canonicalPath(root);
+  return pathContains(realRoot, realResolved) || pathContains(realResolved, realRoot);
 }
 
 /**
@@ -627,7 +668,9 @@ export function commandTargetsGuardState(
   }
   let tokens: ShellToken[];
   try {
-    tokens = parse(command, (name) => ({ env: name })) as ShellToken[];
+    // `$HOME` is as direct a spelling of the data directory's parent as `~`; every other variable
+    // stays opaque, which is the documented limit of a command-text matcher.
+    tokens = parse(command, (name) => name === "HOME" ? homedir() : { env: name }) as ShellToken[];
   } catch {
     return GUARD_STATE_REFUSAL;
   }
@@ -655,11 +698,24 @@ export function toolTargetsGuardState(
   directory: string,
 ): string | "malformed" | null {
   if (!directory) return null;
-  const key = GUARD_STATE_FILE_TOOLS[toolName];
-  if (!key) return null;
-  const value = input && typeof input === "object"
-    ? (input as Record<string, unknown>)[key]
-    : undefined;
-  if (typeof value !== "string" || !value) return "malformed";
-  return pathTargetsGuardState(value, cwd, directory) ? GUARD_STATE_REFUSAL : null;
+  const spec = Object.hasOwn(GUARD_STATE_FILE_TOOLS, toolName) ? GUARD_STATE_FILE_TOOLS[toolName] : undefined;
+  if (!spec) return null;
+  const fields = input && typeof input === "object" ? input as Record<string, unknown> : {};
+  const value = fields[spec.key];
+  const absent = value === undefined || value === null || value === "";
+  if (absent ? !spec.optional : typeof value !== "string") return "malformed";
+  // A search tool without a path searches the working directory.
+  if (pathTargetsGuardState(absent ? cwd : value as string, cwd, directory)) return GUARD_STATE_REFUSAL;
+  if (spec.pattern) {
+    const pattern = fields[spec.pattern];
+    if (typeof pattern === "string" && pattern) {
+      // Only the static prefix of a glob is a location; the rest is matched beneath it.
+      const wildcard = pattern.search(/[*?[{]/u);
+      const prefix = wildcard < 0 ? pattern : pattern.slice(0, pattern.lastIndexOf("/", wildcard) + 1);
+      const base = absent ? cwd : value as string;
+      const anchored = isAbsolute(expandHome(prefix)) ? prefix : resolve(expandHome(base), prefix || ".");
+      if (pathTargetsGuardState(anchored, cwd, directory)) return GUARD_STATE_REFUSAL;
+    }
+  }
+  return null;
 }

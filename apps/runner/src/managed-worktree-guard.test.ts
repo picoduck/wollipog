@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { GUARD_STATE_REFUSAL, MANAGED_WORKTREE_REFUSAL } from "./managed-worktree-protection.js";
+import {
+  GUARD_STATE_REFUSAL,
+  MANAGED_WORKTREE_REFUSAL,
+  commandTargetsGuardState,
+  pathTargetsGuardState,
+} from "./managed-worktree-protection.js";
 import { runnerReentryCommand } from "./runner-reentry.js";
 import {
   MANAGED_WORKTREE_GUARD_MATCHER,
@@ -80,7 +85,7 @@ test("a harmless command produces no decision at all, so the selected mode decid
 test("a tool outside the veto's vocabulary produces no decision", (t) => {
   const f = fixture();
   t.after(f.cleanup);
-  for (const toolName of ["Task", "WebFetch", "Glob", "Grep", "TodoWrite"]) {
+  for (const toolName of ["Task", "WebFetch", "TodoWrite"]) {
     const outcome = runManagedWorktreeGuardDecision(
       hookInput({ tool_name: toolName, tool_input: { file_path: WORKTREE } }),
       f.protectionsFile,
@@ -262,7 +267,7 @@ test("the protections path comes only from the hook command, never from the envi
 
 test("the hook matcher covers Bash and every path-bearing file tool", () => {
   assert.deepEqual(MANAGED_WORKTREE_GUARD_MATCHER.split("|").sort(),
-    ["Bash", "Edit", "MultiEdit", "NotebookEdit", "Read", "Write"]);
+    ["Bash", "Edit", "Glob", "Grep", "MultiEdit", "NotebookEdit", "Read", "Write"]);
 });
 
 test("the protections path is derived from the settings file it belongs to", () => {
@@ -462,4 +467,76 @@ test("the launch self-test quotes a protected path containing spaces and a quote
     { ok: true },
     "an unquoted path would split into several operands and the probe would see no refusal",
   );
+});
+
+test("the search tools respect the guard-state boundary: path, default cwd, and glob prefix", (t) => {
+  const f = fixture();
+  t.after(f.cleanup);
+  const refused: Array<[string, Record<string, unknown>, string?]> = [
+    ["Grep", { pattern: "token", path: f.dir }],
+    ["Grep", { pattern: "token", path: dirname(f.dir) }],
+    ["Grep", { pattern: "token" }, f.dir],
+    ["Glob", { pattern: "*.json", path: f.dir }],
+    ["Glob", { pattern: `${f.dir}/*.json` }],
+    ["Glob", { pattern: "*" }, f.dir],
+  ];
+  for (const [toolName, toolInput, cwd] of refused) {
+    const outcome = runManagedWorktreeGuardDecision(
+      hookInput({ tool_name: toolName, tool_input: toolInput, ...(cwd ? { cwd } : {}) }),
+      f.protectionsFile,
+    );
+    assert.ok(outcome.stdout.includes(GUARD_STATE_REFUSAL), `${toolName} ${JSON.stringify(toolInput)} is refused`);
+  }
+  for (const [toolName, toolInput] of [
+    ["Grep", { pattern: "token" }],
+    ["Grep", { pattern: "token", path: "src" }],
+    ["Glob", { pattern: "**/*.ts" }],
+  ] as Array<[string, Record<string, unknown>]>) {
+    const outcome = runManagedWorktreeGuardDecision(
+      hookInput({ tool_name: toolName, tool_input: toolInput }), f.protectionsFile,
+    );
+    assert.deepEqual(outcome, { stdout: "", stderr: "", exitCode: 0 }, `${toolName} in the workspace is untouched`);
+  }
+  const malformed = runManagedWorktreeGuardDecision(
+    hookInput({ tool_name: "Grep", tool_input: { pattern: "x", path: 7 } }), f.protectionsFile,
+  );
+  assert.equal(malformed.exitCode, 2, "a path that is not a string fails closed");
+});
+
+test("home-directory spellings of the guard state are refused", () => {
+  const directory = join(homedir(), ".wollipog-test-data", "hooks");
+  assert.equal(pathTargetsGuardState("~/.wollipog-test-data/hooks/s1.protections.json", WORKTREE, directory), true);
+  assert.equal(pathTargetsGuardState("~", WORKTREE, directory), true, "an ancestor is refused as before");
+  assert.equal(pathTargetsGuardState("~/projects/readme.md", WORKTREE, directory), false);
+  for (const command of [
+    "ls ~/.wollipog-test-data/hooks",
+    "cat $HOME/.wollipog-test-data/hooks/s1.protections.json",
+    'cat "${HOME}/.wollipog-test-data/hooks/s1.settings.json"',
+  ]) {
+    assert.equal(commandTargetsGuardState(command, WORKTREE, directory), GUARD_STATE_REFUSAL, command);
+  }
+  assert.equal(commandTargetsGuardState("ls ~/projects", WORKTREE, directory), null);
+});
+
+test("a symlink into the guard state is refused for what it points at", (t) => {
+  const f = fixture();
+  t.after(f.cleanup);
+  const workspace = mkdtempSync(join(tmpdir(), "wollipog-guard-ws-"));
+  t.after(() => rmSync(workspace, { recursive: true, force: true }));
+  mkdirSync(join(workspace, "src"));
+  symlinkSync(f.dir, join(workspace, "innocent"));
+  assert.equal(pathTargetsGuardState("innocent/s1.protections.json", workspace, f.dir), true);
+  assert.equal(pathTargetsGuardState("innocent/not-yet-created.json", workspace, f.dir), true,
+    "the nearest existing ancestor is what gets resolved");
+  assert.equal(pathTargetsGuardState("src/index.ts", workspace, f.dir), false);
+  const outcome = runManagedWorktreeGuardDecision(
+    hookInput({ cwd: workspace, tool_name: "Read", tool_input: { file_path: join(workspace, "innocent", "s1.protections.json") } }),
+    f.protectionsFile,
+  );
+  assert.ok(outcome.stdout.includes(GUARD_STATE_REFUSAL));
+  const viaShell = runManagedWorktreeGuardDecision(
+    hookInput({ cwd: workspace, tool_input: { command: "cat innocent/s1.protections.json" } }),
+    f.protectionsFile,
+  );
+  assert.ok(viaShell.stdout.includes(GUARD_STATE_REFUSAL));
 });

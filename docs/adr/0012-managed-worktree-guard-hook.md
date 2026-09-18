@@ -107,8 +107,13 @@ What is done instead:
 - **Veto.** Every tool call that references the runner's hook state directory is refused — by the
   guard hook and, for `default`/`auto`, by the control-channel handler, through one shared
   function. Bash commands are matched on raw text and on every `cwd`-resolved operand; the file
-  tools (`Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Read`) are matched on their resolved path
-  and are now part of the hook matcher. Reads are refused too: the provider has no need of them.
+  tools (`Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Read`) and the search tools (`Grep`, `Glob`,
+  whose absent `path` means the working directory, and whose glob pattern contributes its static
+  prefix) are matched on their resolved path and are part of the hook matcher. Reads are refused
+  too: the provider has no need of them. "Resolved" means `~` and `$HOME` are expanded and the
+  nearest existing ancestor is passed through `realpath`, so a home-relative spelling or a symlink
+  planted in the workspace is judged by where it lands. Third-party MCP filesystem tools are not
+  classifiable by name and remain outside the veto, like any other indirection.
 - **No free advertising.** The protections path is not exported in the settings `env` block (which
   reaches every tool process); it travels only in the hook command inside the 0600 settings file,
   and the guard accepts it only from there — never from the environment.
@@ -139,6 +144,14 @@ a running provider would keep trusting stale state, so it is stopped through the
 path and the next prompt relaunches it. The compromise marker lives in runner memory: a runner
 restart forgets it, and the next spawn re-provisions and re-proves the guard from scratch.
 
+"Next spawn" includes the spawns the driver makes on its own. One-shot turns, resumes, and
+persistent-transport restarts reuse the provisioned argv without re-provisioning, so
+`prepareClaudeHookArgs` re-checks trust every time: the compromise marker, the tripwire digest, and
+a valid non-empty list. When any of them fails, the runner-owned settings document is dropped for
+that spawn (a guard hook without a list would block every matched tool) and the driver mediates.
+The manager policy hooks in the same document are dropped with it, as they are when the hook
+circuit is open.
+
 ## Live protections
 
 The protections file is written at every Claude spawn and refreshed synchronously from the session
@@ -158,8 +171,8 @@ is the stricter of the two.
   it carries the guard whenever a structured launch persisted the settings argument and the file is
   still present, and `agentTuiLaunch` now drops a `--settings` pair whose file is gone — `claude`
   refuses to start with "Settings file not found", and a TUI never re-runs launch provisioning.
-- One extra short-lived process runs before each Bash, Edit, MultiEdit, Write, NotebookEdit, and
-  Read call in a guarded session.
+- One extra short-lived process runs before each Bash, Edit, MultiEdit, Write, NotebookEdit, Read,
+  Grep, and Glob call in a guarded session.
 - The runner's hook state directory is invisible to the provider: reading it is refused as firmly
   as writing it.
 - Native hooks remain a cooperative same-user governance mechanism, not an OS isolation boundary,

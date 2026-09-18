@@ -553,14 +553,18 @@ harmless because Claude never reaches the control channel for a command the hook
 - **The guard's own state is vetoed.** The provider runs as the runner's OS user, so it could
   rewrite the protection list. Every tool call that references the runner hook state directory is
   refused — Bash by raw text and by every `cwd`-resolved operand, and `Edit`/`MultiEdit`/`Write`/
-  `NotebookEdit`/`Read` by their resolved path (all are in the hook matcher) — including reads.
+  `NotebookEdit`/`Read`/`Grep`/`Glob` by their resolved path (all are in the hook matcher) —
+  including reads. Resolution expands `~` and `$HOME` and follows symlinks through the nearest
+  existing ancestor; MCP filesystem tools are not classifiable and stay outside the veto.
   The control-channel handler mirrors the same check for `default`/`auto`. The protections path is
   never exported through the settings `env` block; it travels only in the hook command. The runner
   also keeps a SHA-256 of the document it last wrote and compares before every rewrite. This is
   tamper-EVIDENT best effort of the same strength class as the command-text worktree matcher — both
   are defeated by indirection — not an isolation boundary; that is #1302.
 - **Invalidation.** A refresh that cannot be completed removes the protection list (so every later
-  guard invocation fails closed), marks the session for mediation on its next spawn, and emits a
+  guard invocation fails closed), marks the session for mediation on its next spawn — including
+  the driver's own one-shot, resume, and persistent respawns, which re-check trust in
+  `prepareClaudeHookArgs` and drop the runner-owned settings document when it fails — and emits a
   visible notice; if the list cannot even be removed, the provider is stopped through the ordinary
   stop path. The runner never writes an empty protection list, and the guard fails closed if it
   reads one: when the last managed worktree goes away the guard state is retired instead.
