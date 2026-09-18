@@ -419,160 +419,51 @@ test("an ordinary edit outside the guard's state still reaches the normal approv
   assert.deepEqual(responses, [], "the runner holds no opinion; it becomes an ordinary approval");
 });
 
-/** Feed one completed Bash tool call through the stream, the way Claude reports it. */
-function completeBash(run: Launch, id: string, command: string, ok = true): void {
-  run.child.stdout.write(JSON.stringify({
-    type: "assistant", message: { content: [{ type: "tool_use", id, name: "Bash", input: { command } }] },
-  }) + "\n");
-  run.child.stdout.write(JSON.stringify({
-    type: "user",
-    message: { content: [{ type: "tool_result", tool_use_id: id, is_error: !ok, content: ok ? "" : "Exit code 1" }] },
-  }) + "\n");
-}
-
-function requestBash(run: Launch, requestId: string, command: string): void {
+function requestBash(run: Launch, requestId: string, command: string, subagent = false): void {
   run.child.stdout.write(JSON.stringify({
     type: "control_request",
     request_id: requestId,
+    ...(subagent ? { parent_tool_use_id: "task-1" } : {}),
     request: { subtype: "can_use_tool", tool_name: "Bash", input: { command }, tool_use_id: `use-${requestId}` },
   }) + "\n");
 }
 
-async function controlResponses(run: Launch): Promise<Array<{ id: string; behavior?: string }>> {
+async function deniedRequests(run: Launch): Promise<string[]> {
   await new Promise<void>((resolve) => setImmediate(resolve));
   return run.writes.join("").split("\n").filter(Boolean)
     .map((line) => JSON.parse(line) as { type?: string; response?: { request_id?: string; response?: { behavior?: string } } })
-    .filter((frame) => frame.type === "control_response")
-    .map((frame) => ({ id: frame.response?.request_id ?? "", behavior: frame.response?.response?.behavior }));
+    .filter((frame) => frame.type === "control_response" && frame.response?.response?.behavior === "deny")
+    .map((frame) => frame.response?.request_id ?? "");
 }
 
-test("a relative Bash request is resolved where the tool's shell is, not at the session directory (#1333)", async (t) => {
+test("with the guard active the channel refuses only what holds wherever the shell is (#1333)", async (t) => {
+  // The request carries no cwd and the Bash tool keeps its own directory, so `cd ..` from a
+  // subdirectory used to be refused as leaving the worktree. The hook has the real directory and
+  // has already judged these commands; the channel must not second-guess it with a wrong one.
   const dir = tempDir(t);
   const run = launch(provision(dir, "cwd-1", "auto", { protections: PROTECTIONS }), "auto", PROTECTIONS);
   t.after(() => run.driver.dispose());
-  // Before any directory change, leaving the worktree root is refused.
-  requestBash(run, "root", "cd ..");
-  // The shell moves into a subdirectory and the command succeeds: Claude commits that directory.
-  completeBash(run, "t1", "cd apps/runner");
-  requestBash(run, "sub", "cd .. && pnpm typecheck");
-  // A change that FAILED leaves the shell where it was: still two levels down, so `cd ..` is fine.
-  completeBash(run, "t2", "cd ../.. && false", false);
-  requestBash(run, "still-sub", "cd ..");
-  // Back at the root through a successful change, leaving is refused again.
-  completeBash(run, "t3", "cd ../..");
-  requestBash(run, "root-again", "cd ..");
-  // A change the text cannot follow makes the directory unknown, and the session directory is
-  // the fallback — exactly the pre-#1333 behavior, never less strict.
-  completeBash(run, "t4", "cd $SOMEWHERE");
-  requestBash(run, "unknown", "cd ..");
-  const responses = await controlResponses(run);
-  assert.deepEqual(responses, [
-    { id: "root", behavior: "deny" },
-    { id: "root-again", behavior: "deny" },
-    { id: "unknown", behavior: "deny" },
-  ], "only the requests issued at the worktree root (or from an unknown directory) are refused");
+  requestBash(run, "relative-cd", "cd .. && pnpm typecheck");
+  requestBash(run, "relative-rm", "rm -rf build");
+  requestBash(run, "absolute-rm", `rm -rf ${WORKTREE}`);
+  requestBash(run, "absolute-cd-then-relative", `cd ${WORKTREE}/apps && rm -rf ..`);
+  assert.deepEqual(await deniedRequests(run), ["absolute-rm", "absolute-cd-then-relative"]);
 });
 
-function subagentBash(run: Launch, id: string, command: string): void {
-  run.child.stdout.write(JSON.stringify({
-    type: "assistant", parent_tool_use_id: "task-1",
-    message: { content: [{ type: "tool_use", id, name: "Bash", input: { command } }] },
-  }) + "\n");
-  run.child.stdout.write(JSON.stringify({
-    type: "user", parent_tool_use_id: "task-1",
-    message: { content: [{ type: "tool_result", tool_use_id: id, is_error: false, content: "" }] },
-  }) + "\n");
-}
-
-test("a subagent's directory change makes the top-level directory unknown, never deeper", async (t) => {
-  // Whether a subagent shares the top-level shell's directory is not something the stream says.
+test("a subagent's request keeps the session-directory check even with the guard active", async (t) => {
   const dir = tempDir(t);
   const run = launch(provision(dir, "cwd-2", "auto", { protections: PROTECTIONS }), "auto", PROTECTIONS);
   t.after(() => run.driver.dispose());
-  completeBash(run, "t1", "cd apps/runner");
-  subagentBash(run, "s1", "ls");
-  requestBash(run, "still-tracked", "cd ..");
-  subagentBash(run, "s2", "cd ..");
-  requestBash(run, "unknown-now", "cd ..");
-  assert.deepEqual(await controlResponses(run), [{ id: "unknown-now", behavior: "deny" }],
-    "a harmless subagent command keeps the tracking; one that may move a shell falls back to the session directory");
-});
-
-test("a subagent's own request is resolved at the session directory", async (t) => {
-  const dir = tempDir(t);
-  const run = launch(provision(dir, "cwd-4", "auto", { protections: PROTECTIONS }), "auto", PROTECTIONS);
-  t.after(() => run.driver.dispose());
-  completeBash(run, "t1", "cd apps");
-  // From the top-level shell in apps/, `rm -rf .` is a descendant; from a subagent at the session
-  // root it is the worktree itself.
-  run.child.stdout.write(JSON.stringify({
-    type: "control_request", request_id: "sub", parent_tool_use_id: "task-1",
-    request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "rm -rf ." }, tool_use_id: "use-sub" },
-  }) + "\n");
+  requestBash(run, "sub", "rm -rf .", true);
   requestBash(run, "top", "rm -rf .");
-  assert.deepEqual(await controlResponses(run), [{ id: "sub", behavior: "deny" }]);
+  assert.deepEqual(await deniedRequests(run), ["sub"]);
 });
 
-test("a new spawn starts the tracked shell directory at the session directory again", async (t) => {
-  const dir = tempDir(t);
-  const run = launch(provision(dir, "cwd-3", "auto", { protections: PROTECTIONS }), "auto", PROTECTIONS);
+test("a mediated launch has no hook, so it keeps the session-directory check entirely", async (t) => {
+  // Known limit: here `cd ..` from a subdirectory is still refused, as before #1333.
+  const run = launch([], "default", PROTECTIONS);
   t.after(() => run.driver.dispose());
-  completeBash(run, "t1", "cd apps/runner");
-  requestBash(run, "sub", "cd ..");
-  assert.deepEqual(await controlResponses(run), []);
-  // End the turn and start another: the driver spawns a fresh process.
-  run.child.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "" }) + "\n");
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  run.child.emit("close", 0);
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  const spawns = run.argv.length;
-  void run.driver.prompt("again");
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.ok(run.argv.length > spawns, "a second process was spawned");
-  requestBash(run, "root", "cd ..");
-  assert.deepEqual((await controlResponses(run)).map((r) => r.id), ["root"]);
-});
-
-test("a command that may move a shell hides the tracked directory from every other request while it runs", async (t) => {
-  const dir = tempDir(t);
-  const run = launch(provision(dir, "cwd-5", "auto", { protections: PROTECTIONS }), "auto", PROTECTIONS);
-  t.after(() => run.driver.dispose());
-  completeBash(run, "t1", "cd apps/runner");
-  // A background subagent starts a command that may move a (possibly shared) shell. No result yet.
-  run.child.stdout.write(JSON.stringify({
-    type: "assistant", parent_tool_use_id: "task-1",
-    message: { content: [{ type: "tool_use", id: "s1", name: "Bash", input: { command: "cd ../.. && sleep 30" } }] },
-  }) + "\n");
-  // An approval is not re-judged later, so the stale deeper directory must not be used meanwhile.
-  requestBash(run, "during", "rm -rf .");
-  assert.deepEqual(await controlResponses(run), [{ id: "during", behavior: "deny" }]);
-});
-
-test("a moving command's own request is still judged from the directory it starts in", async (t) => {
-  const dir = tempDir(t);
-  const run = launch(provision(dir, "cwd-6", "auto", { protections: PROTECTIONS }), "auto", PROTECTIONS);
-  t.after(() => run.driver.dispose());
-  completeBash(run, "t1", "cd apps/runner");
-  run.child.stdout.write(JSON.stringify({
-    type: "assistant", message: { content: [{ type: "tool_use", id: "t2", name: "Bash", input: { command: "cd .. && pnpm typecheck" } }] },
-  }) + "\n");
-  run.child.stdout.write(JSON.stringify({
-    type: "control_request", request_id: "own",
-    request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "cd .. && pnpm typecheck" }, tool_use_id: "t2" },
-  }) + "\n");
-  assert.deepEqual(await controlResponses(run), [], "the #1333 case itself is still allowed");
-});
-
-test("a cd that textually lands where the shell already is still hides the directory while it runs", async (t) => {
-  // `cd ../runner` from apps/runner predicts the same directory, but a command can retarget a
-  // symlink before it walks through it, so the prediction is not evidence.
-  const dir = tempDir(t);
-  const run = launch(provision(dir, "cwd-7", "auto", { protections: PROTECTIONS }), "auto", PROTECTIONS);
-  t.after(() => run.driver.dispose());
-  completeBash(run, "t1", "cd apps/runner");
-  run.child.stdout.write(JSON.stringify({
-    type: "assistant", message: { content: [{ type: "tool_use", id: "t2", name: "Bash", input: { command: "rm back && ln -s ../.. back && cd ../runner" } }] },
-  }) + "\n");
-  requestBash(run, "during", "rm -rf .");
-  assert.deepEqual(await controlResponses(run), [{ id: "during", behavior: "deny" }]);
+  requestBash(run, "relative-cd", "cd ..");
+  requestBash(run, "relative-rm", "rm -rf .");
+  assert.deepEqual(await deniedRequests(run), ["relative-cd", "relative-rm"]);
 });

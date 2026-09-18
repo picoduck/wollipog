@@ -5,10 +5,9 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  commandMayMoveShell,
   commandTargetsManagedWorktree,
   MANAGED_WORKTREE_REFUSAL,
-  shellCwdAfterCommand,
+  PLACELESS_CWD,
   type ManagedWorktreeProtection,
 } from "./managed-worktree-protection.js";
 
@@ -144,88 +143,6 @@ test("all literal spellings of the protected root stay refused while descendants
   }));
 });
 
-test("shellCwdAfterCommand follows literal directory changes and gives up on invisible ones", () => {
-  const root = protectedPath;
-  const cases: Array<[string, string | null, string | null]> = [
-    ["ls", root, root],
-    ["cd apps/runner", root, `${root}/apps/runner`],
-    ["cd apps/runner && pnpm typecheck", root, `${root}/apps/runner`],
-    ["cd apps && cd runner && ls", root, `${root}/apps/runner`],
-    ["ls; pwd", root, root],
-    ["ls || true", root, root],
-    ["cd ..", `${root}/apps/runner`, `${root}/apps`],
-    ["cd .. && cd ..", `${root}/apps/runner`, root],
-    ["cd -P apps && ls", root, null],
-    ["cd -- apps", root, `${root}/apps`],
-    ["cd /tmp/elsewhere", root, "/tmp/elsewhere"],
-    ["cd -L apps", root, `${root}/apps`],
-    // Unknown after these: the text does not say where the shell ends up.
-    ["cd $DIR", root, null],
-    // Exit 0 does not prove a `cd` beside `;` or `||` ran or succeeded; unknown, never deeper.
-    ["cd apps; ls", root, null],
-    ["cd apps && cd runner; ls", root, null],
-    ["cd apps || true", root, null],
-    ["true || cd apps", root, null],
-    ["ls; cd apps", root, null],
-    ["cd -", root, null],
-    ["cd ~", root, null],
-    ["popd", root, null],
-    // The directory stack and indirect evaluation move the shell without a top-level `cd`.
-    ["pushd apps", root, null],
-    ["pushd -n apps", root, null],
-    ["cd apps && eval 'cd ..'", root, null],
-    ["cd apps && builtin cd ..", root, null],
-    ["cd apps && command cd ..", root, root],
-    ["cd apps && source ./env.sh", root, null],
-    ["cd apps && . ./env.sh", root, null],
-    ["cd apps && exec sh", root, null],
-    ["cd -q apps", root, null],
-    // A launcher prefix runs an external cd that never moves the shell (and exits 0 on macOS).
-    ["nice cd apps", root, null],
-    ["env cd apps", root, null],
-    ["sudo cd apps", root, null],
-    ["timeout 5 cd apps", root, null],
-    ["FOO=1 cd apps", root, null],
-    ["cd apps && nice cd ..", root, null],
-    // Newlines are whitespace to the tokenizer: a multi-line command that could move the shell
-    // is unknown; one that cannot has not moved it.
-    ["cd apps\ncd ..", root, null],
-    ["cd apps\n", root, null],
-    ["ls\npwd", root, root],
-    ["python3 - <<'EOF'\nprint(1)\nEOF", root, root],
-    ["cat <<'EOF'\ncd ..\nEOF", root, null],
-    // Compound commands run their body in the current shell.
-    ["if true; then cd ..; fi", `${root}/apps`, null],
-    ["{ cd ..; }", `${root}/apps`, null],
-    ["while true; do cd ..; break; done", `${root}/apps`, null],
-    ["time cd apps", root, null],
-    // A DEBUG/EXIT trap body runs before Claude's appended `pwd -P`.
-    ["trap 'cd /elsewhere' DEBUG", `${root}/apps`, null],
-    ["cd apps && trap 'cd ..' EXIT", root, null],
-    ["trap 'cd ..' DEBUG\nls", `${root}/apps`, null],
-    // Forms the shell expands or joins into something the text does not spell out.
-    ["cd link{1..1}", root, null],
-    ["cd ap\\ps", root, `${root}/apps`],
-    ["c\\\nd apps", root, null],
-    ["cd apps && ls \\\n  -la", root, null],
-    ["ls \\\n  -la", root, root],
-    ["command -v cd", root, null],
-    ["command -pv cd", root, null],
-    ["command -p cd apps", root, `${root}/apps`],
-    ["(cd apps && ls)", root, null],
-    ["cd apps | cat", root, null],
-    ["ls && cd apps | cat", root, null],
-    // An unknown directory stays unknown until an absolute change re-establishes it.
-    ["ls", null, null],
-    ["cd apps", null, null],
-    ["cd /tmp/known", null, "/tmp/known"],
-    ["cd /tmp/known && cd sub", null, "/tmp/known/sub"],
-  ];
-  for (const [command, cwd, expected] of cases) {
-    assert.equal(shellCwdAfterCommand(command, cwd), expected, `${cwd} + \`${command}\``);
-  }
-});
-
 test("a relative removal is judged from where the shell actually is", () => {
   // From a subdirectory, `cd ..` stays inside the worktree; from the root it leaves it.
   assert.equal(commandTargetsManagedWorktree("cd ..", `${protectedPath}/apps/runner`, protection), null);
@@ -233,57 +150,41 @@ test("a relative removal is judged from where the shell actually is", () => {
   assert.equal(commandTargetsManagedWorktree("rm -rf ../..", `${protectedPath}/apps/runner`, protection), MANAGED_WORKTREE_REFUSAL);
 });
 
-test("the tracked directory is the physical end of a logical walk, as Claude's pwd -P records it", (t) => {
+test("operands are judged from the physical form of the directory as well as its spelling", (t) => {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-cwd-")));
   t.after(() => rmSync(base, { recursive: true, force: true }));
   const worktree = join(base, "managed");
   mkdirSync(join(worktree, "apps"), { recursive: true });
   mkdirSync(join(worktree, "deep", "target"), { recursive: true });
+  mkdirSync(join(worktree, "x"));
   mkdirSync(join(base, "escape"));
   symlinkSync(base, join(worktree, "link"));
   symlinkSync(join("deep", "target"), join(worktree, "inner"));
   const protections = [{ worktreePath: worktree, repoPath: join(base, "repo") }];
-  // Within one command the walk is logical; the recorded end is physical.
-  assert.equal(shellCwdAfterCommand("cd inner", worktree), join(worktree, "deep", "target"));
-  assert.equal(shellCwdAfterCommand("cd inner && cd ..", worktree), worktree, "a logical chain ends at the root");
-  assert.equal(shellCwdAfterCommand("cd link/escape", worktree), join(base, "escape"));
-  assert.equal(shellCwdAfterCommand("cd apps", worktree), join(worktree, "apps"));
-  assert.equal(shellCwdAfterCommand("ls", join(worktree, "inner")), join(worktree, "inner"), "no cd, no change");
   // An external operand from a symlinked directory resolves through the kernel.
   assert.equal(commandTargetsManagedWorktree("rm -rf ../managed", join(worktree, "link", "escape"), protections),
     MANAGED_WORKTREE_REFUSAL, "physically ../managed IS the worktree");
   assert.equal(commandTargetsManagedWorktree("rm -rf managed", join(worktree, "link"), protections),
     MANAGED_WORKTREE_REFUSAL);
   assert.equal(commandTargetsManagedWorktree("cd inner && cd .. && rm -rf .", worktree, protections),
-    MANAGED_WORKTREE_REFUSAL, "the logical chain reaches the root");
+    MANAGED_WORKTREE_REFUSAL, "the shell's own cd chain is logical and reaches the root");
   assert.equal(commandTargetsManagedWorktree("cd link/escape", worktree, protections),
     MANAGED_WORKTREE_REFUSAL, "a cd whose physical target leaves the worktree is an escape");
-  assert.equal(commandTargetsManagedWorktree("rm -rf build", join(worktree, "apps"), protections), null);
-  assert.equal(commandTargetsManagedWorktree("rm -rf target", join(worktree, "inner"), protections), null);
-});
-
-test("a symlink retargeted after the shell entered it does not move the tracked directory", (t) => {
-  // /base/wt/a/b/link -> /base/wt/x. The shell enters it; the link is then re-pointed. The shell is
-  // still physically in x, which is what was recorded when the command finished.
-  const base = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-cwd-")));
-  t.after(() => rmSync(base, { recursive: true, force: true }));
-  const wt = join(base, "wt");
-  mkdirSync(join(wt, "a", "b"), { recursive: true });
-  mkdirSync(join(wt, "x"));
-  mkdirSync(join(wt, "deep", "y"), { recursive: true });
-  symlinkSync(join(wt, "x"), join(wt, "a", "b", "link"));
-  const protections = [{ worktreePath: wt, repoPath: join(base, "repo") }];
-  const tracked = shellCwdAfterCommand("cd a/b/link", wt);
-  assert.equal(tracked, join(wt, "x"));
-  rmSync(join(wt, "a", "b", "link"));
-  symlinkSync(join(wt, "deep", "y"), join(wt, "a", "b", "link"));
-  assert.equal(commandTargetsManagedWorktree("rm -rf ../../wt", tracked!, protections), MANAGED_WORKTREE_REFUSAL);
-  // git -C is resolved from the same physical directory: ../.. from wt/x is /base.
+  // From a physical directory two levels down, both spellings of the way back up are judged.
+  assert.equal(commandTargetsManagedWorktree("rm -rf ../../managed", join(worktree, "x"), protections),
+    MANAGED_WORKTREE_REFUSAL, "../../managed from managed/x is the worktree itself");
+  assert.equal(commandTargetsManagedWorktree("rm -rf ../../managed", join(worktree, "deep", "target"), protections), null,
+    "from managed/deep/target it is managed/managed, an ordinary descendant");
   assert.equal(
-    commandTargetsManagedWorktree(`git --git-dir=${join(base, "repo", ".git")} -C ../.. worktree remove --force wt`, tracked!, protections),
+    commandTargetsManagedWorktree(`git --git-dir=${join(base, "repo", ".git")} -C ../.. worktree remove --force managed`,
+      join(worktree, "x"), protections),
     MANAGED_WORKTREE_REFUSAL,
   );
-  assert.equal(commandTargetsManagedWorktree("rm -rf scratch", tracked!, protections), null);
+  // Through the symlink `inner` the shell is physically in deep/target, whatever it prints.
+  assert.equal(commandTargetsManagedWorktree("rm -rf ../../../managed", join(worktree, "inner"), protections),
+    MANAGED_WORKTREE_REFUSAL, "physically three levels up from deep/target is the worktree's parent");
+  assert.equal(commandTargetsManagedWorktree("rm -rf build", join(worktree, "apps"), protections), null);
+  assert.equal(commandTargetsManagedWorktree("rm -rf target", join(worktree, "inner"), protections), null);
 });
 
 test("a worktree reached through a symlinked prefix is not refused against itself", (t) => {
@@ -355,21 +256,22 @@ test("on POSIX a backslash is a filename character, not a separator", { skip: pr
   assert.equal(commandTargetsManagedWorktree("rm -rf '\\alias/../scratch'", join(base, "sibling"), protections), null);
 });
 
-test("a command may move the shell whenever it mentions a mover, whatever the predicted landing", (t) => {
-  for (const command of ["cd .", "cd ../runner", "rm back && ln -s ../.. back && cd back", "cd $X", "pushd x",
-    "eval 'cd ..'", "trap 'cd ..' EXIT", "ls\ncd ..", "(cd ..)", "cd x | cat"]) {
-    assert.equal(commandMayMoveShell(command), true, command);
+
+test("from the placeless directory only refusals that hold wherever the shell is survive", () => {
+  // Relative operands and relative directory changes cannot be placed, so they are not refused...
+  for (const command of ["cd ..", "cd .. && pnpm typecheck", "rm -rf .", "rm -rf ../..", "rm -rf build",
+    "git worktree prune", `cd ${"../".repeat(40)}`]) {
+    assert.equal(commandTargetsManagedWorktree(command, PLACELESS_CWD, protection), null, command);
   }
-  for (const command of ["ls", "pnpm typecheck && git status", "rm -rf build; ls", "cat <<'EOF'\nhello\nEOF", "echo cdrom"]) {
-    assert.equal(commandMayMoveShell(command), false, command);
+  // ...while anything that names the worktree, or moves into it before acting, still is.
+  for (const command of [`rm -rf ${protectedPath}`, `git worktree remove ${protectedPath}`,
+    `cd ${protectedPath} && rm -rf .`, `cd ${protectedPath}/apps && rm -rf ..`, `cd ${protectedPath} && cd ..`,
+    `git -C ${protectedPath} worktree prune`, `rm -rf ${"../".repeat(80)}`]) {
+    assert.equal(commandTargetsManagedWorktree(command, PLACELESS_CWD, protection), MANAGED_WORKTREE_REFUSAL, command);
   }
-  // The landing is resolved when the result arrives, after the command retargeted the link.
-  const base = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-cwd-")));
-  t.after(() => rmSync(base, { recursive: true, force: true }));
-  const runner = join(base, "wt", "apps", "runner");
-  mkdirSync(runner, { recursive: true });
-  symlinkSync(join("..", ".."), join(runner, "back"));
-  assert.equal(shellCwdAfterCommand("rm back && ln -s ../.. back && cd back", runner), join(base, "wt"));
-  const protections = [{ worktreePath: join(base, "wt"), repoPath: join(base, "repo") }];
-  assert.equal(commandTargetsManagedWorktree("rm -rf .", join(base, "wt"), protections), MANAGED_WORKTREE_REFUSAL);
+});
+
+test("the filesystem root is an ancestor of the worktree like any other", () => {
+  assert.equal(commandTargetsManagedWorktree("rm -rf /", protectedPath, protection), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree(`rm -rf ${"../".repeat(40)}`, protectedPath, protection), MANAGED_WORKTREE_REFUSAL);
 });

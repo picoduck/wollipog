@@ -39,7 +39,10 @@ function pathContains(parent: string, child: string): boolean {
   const foldCase = process.platform === "win32" || process.platform === "darwin";
   const normalizedParent = foldCase ? normalize(parent).toLowerCase() : normalize(parent);
   const normalizedChild = foldCase ? normalize(child).toLowerCase() : normalize(child);
-  return normalizedChild === normalizedParent || normalizedChild.startsWith(`${normalizedParent}${sep}`);
+  // A filesystem root already ends with the separator; appending another made `/` the ancestor
+  // of nothing, so `rm -rf /` and any `..` chain that climbed to the root were never refused.
+  const prefix = normalizedParent.endsWith(sep) ? normalizedParent : `${normalizedParent}${sep}`;
+  return normalizedChild === normalizedParent || normalizedChild.startsWith(prefix);
 }
 
 function withinProtectedRoot(path: string, protections: readonly ManagedWorktreeProtection[]): boolean {
@@ -638,146 +641,18 @@ export function commandTargetsManagedWorktree(
 }
 
 /**
- * The shell directory Claude's Bash tool will keep after `command` succeeds, or null when it cannot
- * be known from the text alone.
+ * A working directory that is nowhere: deep enough that no realistic `..` chain climbs out of it,
+ * and beneath nothing that is protected. Judging a command from here keeps exactly the refusals
+ * that do not depend on where the shell is (an absolute path to the worktree, an absolute `cd`
+ * followed by a relative removal) and drops the ones that do.
  *
- * Claude Code runs each Bash call in a shell started in the directory the previous successful call
- * ended in, and records that directory only when the whole command exits 0 — so a caller must feed
- * this only successful commands. The walk is deliberately literal: `cd` at the top level of
- * an `&&` chain moves the directory, because exit 0 of such a chain proves every member ran and
- * succeeded. A `;` or `||` breaks that proof (`cd x; ls` exits 0 with the `cd` failed), so a
- * directory change anywhere in such a command is unknown; the same goes for anything else that
- * can move it invisibly (a pipeline member, a subshell, the directory stack, `eval`/`builtin`/
- * `source`, `cd -`, an operand the text does not spell out). The result is PHYSICAL, resolved
- * once at the end, exactly as Claude's own `pwd -P` records it. Unknown never reads as deeper
- * than the truth: the caller falls back to the
- * session directory, and an unknown directory stays unknown until an absolute `cd` re-establishes
- * it. A `cwd` of null means the directory is already unknown.
+ * It exists for one caller. Claude's `can_use_tool` request carries no cwd, and its Bash tool keeps
+ * a directory of its own between calls, so the control channel cannot know where a relative
+ * operand lands (#1333). Inferring it from command text does not converge: renaming the shell's
+ * own directory defeats every such inference. The guard hook DOES receive the real directory and
+ * has already judged the command, so the control channel only adds what it can know.
  */
-function walkShellCwd(command: string, cwd: string | null): { cwd: string | null; mayMove: boolean } {
-  if (!command) return { cwd, mayMove: false };
-  if (command.length > MAX_COMMAND_LENGTH || command.includes("\0")) return { cwd: null, mayMove: true };
-  // The tokenizer reads a newline as whitespace, so `cd apps\ncd ..` would collapse into one
-  // segment. A multi-line command that mentions anything able to move the shell is unknown; one
-  // that does not cannot have moved it. A line continuation is joined first: `c\<newline>d` is `cd`.
-  if (/[\r\n]/u.test(command)) {
-    const joined = command.replace(/\\\r?\n/gu, "");
-    return /(^|[^\w-])(cd|pushd|popd|dirs|eval|builtin|command|exec|source|trap|\.)(?![\w-])/u.test(joined)
-      ? { cwd: null, mayMove: true }
-      : { cwd, mayMove: false };
-  }
-  let tokens: ShellToken[];
-  try {
-    tokens = parse<EnvironmentReference>(command, (env) => ({ env }));
-  } catch {
-    return { cwd: null, mayMove: true };
-  }
-  let current = cwd;
-  let sawCd = false;
-  let segment: ShellToken[] = [];
-  let piped = false;
-  const environment = new Map<string, string>();
-  // Exit 0 proves nothing about a `cd` that sits beside `;` or `||`; only an all-`&&` chain does.
-  const conditional = tokens.some((token) => operator(token) === ";" || operator(token) === "||");
-  const evaluate = (): boolean => {
-    if (!segment.length) return true;
-    let parsed: ReturnType<typeof commandWords>;
-    try {
-      parsed = commandWords(segment, current ?? ".", environment);
-    } catch {
-      return false;
-    }
-    if (parsed?.executable === "cd") sawCd = true;
-    if (parsed?.executable !== "cd") {
-      // Anything that can move the shell without spelling `cd` at the top level: the directory
-      // stack (`pushd -n` moves the stack, not the shell), indirect evaluation, sourced files,
-      // and compound commands whose body runs in the current shell.
-      // `trap '...' DEBUG` (or EXIT/RETURN) runs its body before Claude's appended `pwd -P`.
-      return !["pushd", "popd", "dirs", "eval", "builtin", "command", "exec", "source", ".", "trap",
-        "if", "then", "else", "elif", "fi", "while", "until", "do", "done", "for", "select", "case",
-        "esac", "function", "time", "{", "}", "!"].includes(parsed?.executable ?? "");
-    }
-    // A directory change inside a pipeline runs in a subshell in some shells and not others.
-    if (piped || conditional) return false;
-    // The tokenizer unwraps launcher prefixes (`nice cd x`, `env cd x`, `sudo cd x`) to their
-    // executable, but those run an EXTERNAL cd that never moves the shell — and exits 0 where one
-    // is installed. Only a segment that literally starts with the builtin is followed.
-    const literal = segment.filter((token): token is string => typeof token === "string");
-    const first = literal[0];
-    // `command cd x` and `command -p cd x` execute the builtin; any other `command` form is a
-    // lookup (`command -v cd`) that moves nothing, or something this walk does not model.
-    if (first === "command") {
-      const runsBuiltin = literal[1] === "cd" || (literal[1] === "-p" && literal[2] === "cd");
-      if (!runsBuiltin) return false;
-    } else if (first !== "cd") return false;
-    // Only `cd -L` and `--` are understood; `-P` changes what the shell records for later `..`
-    // steps, so it and every other option, and a lone `-` (the previous directory), are unknown.
-    let index = 0;
-    while (typeof parsed.words[index] === "string" && (parsed.words[index] as string).startsWith("-") &&
-        parsed.words[index] !== "-") {
-      if (parsed.words[index] === "--") { index += 1; break; }
-      if (parsed.words[index] !== "-L") return false;
-      index += 1;
-    }
-    const operand = parsed.words[index];
-    if (operand === undefined) {
-      const home = environment.get("HOME") ?? process.env.HOME;
-      if (!home) return false;
-      current = normalize(home);
-      return true;
-    }
-    if (typeof operand !== "string") return false;
-    // Only a plain literal path is followed: no previous-directory, tilde, brace, glob, or escape
-    // forms, each of which the shell expands to something the text does not spell out.
-    if (operand === "-" || /^~|[{}*?[\]\\$`]/u.test(operand)) return false;
-    // Walk LOGICALLY, as the shell does within one command: a later `cd ..` in the same chain is
-    // logical too. The final position is made physical once, below.
-    if (isAbsolute(operand)) {
-      current = normalize(operand);
-      return true;
-    }
-    if (current === null) return false;
-    current = normalize(resolve(current, operand));
-    return true;
-  };
-  for (const token of tokens) {
-    const op = operator(token);
-    if (op === null) {
-      segment.push(token);
-      continue;
-    }
-    if (op !== "&&" && op !== ";" && op !== "||" && op !== "|") return { cwd: null, mayMove: true };
-    // Both sides of a `|` are pipeline members.
-    if (op === "|") piped = true;
-    if (!evaluate()) return { cwd: null, mayMove: true };
-    segment = [];
-    piped = op === "|";
-  }
-  if (!evaluate()) return { cwd: null, mayMove: true };
-  // A command with no directory change at all cannot have moved the shell.
-  if (!sawCd) return { cwd, mayMove: false };
-  // Claude ends every successful command with `pwd -P` and starts the next shell there, so at the
-  // start of each command the logical and physical directories are the same one. Mirror that:
-  // resolve the final logical position NOW, while the filesystem is as the command left it. A
-  // symlink retargeted later does not move a shell that is already inside the old target, and a
-  // physical directory makes a later `git -C ../..` or `rm ../x` resolve the way the kernel does.
-  // Always re-resolve after a `cd`, even one that lands on the same spelling: an earlier segment
-  // of the same command may have retargeted a symlink the `cd` then walked through.
-  return { cwd: current === null ? null : canonicalPath(current), mayMove: true };
-}
-
-export function shellCwdAfterCommand(command: string, cwd: string | null): string | null {
-  return walkShellCwd(command, cwd).cwd;
-}
-
-/**
- * Whether `command` contains anything that can move the shell. Decided from the text alone and
- * BEFORE it runs: comparing a predicted directory with the current one proves nothing, because
- * the command can retarget a symlink first and `cd` through it afterwards.
- */
-export function commandMayMoveShell(command: string): boolean {
-  return walkShellCwd(command, null).mayMove;
-}
+export const PLACELESS_CWD = `${sep}.wollipog-placeless${`${sep}x`.repeat(64)}`;
 
 /* ---------------------------------------------------------------------------------------------
  * Guard-state boundary.

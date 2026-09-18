@@ -571,26 +571,25 @@ no mode emulation and emits no mediation notice. The control-channel refusal in 
 `control_request` handler is retained as defense in depth for `default`/`auto`; a double refusal is
 harmless because Claude never reaches the control channel for a command the hook already denied.
 
-- **Relative operands are resolved where the Bash tool's shell is.** Claude's Bash tool keeps its
-  own directory between calls and the `can_use_tool` request carries no cwd (measured on 2.1.270:
-  the request has `tool_use_id`, `input`, and permission metadata only, while the hook payload's
-  `cwd` follows the tool). The driver therefore follows the directory itself: each top-level Bash
-  `tool_use` records its command, and its successful `tool_result` — the moment Claude commits the
-  directory — advances the tracked directory through `shellCwdAfterCommand`. Only a `cd` in an
-  all-`&&` chain counts, because exit 0 of such a chain proves the `cd` ran and succeeded; a `cd`
-  beside `;` or `||` (`cd x; ls` exits 0 with the `cd` failed), `cd $DIR`, `cd -`, the directory stack, `eval`/`builtin`/`source`, a
-  pipeline member, a subshell, a compound command, a launcher prefix (`nice cd x` runs an
-  external `cd`), or a multi-line command that mentions any of these makes the directory unknown,
-  and a failed command leaves it in place. The walk inside one command is logical, as the shell's
-  own `cd ..` is, and the end position is resolved to its physical directory once, when the
-  command's result arrives — exactly what Claude records with `pwd -P` and starts the next shell
-  in, so a symlink retargeted later does not move it. The shared matcher additionally judges every
-  external operand from the physical form of its directory. Unknown falls back to the session
-  directory — the pre-#1333 behavior, never less strict,
-  and never deeper than the truth — until an absolute `cd` re-establishes it. Every spawn starts at
-  the session directory again. A subagent's request is always resolved at the session directory,
-  and a subagent command that may have moved a shell makes the top-level directory unknown
-  (#1333).
+- **The channel refuses only what holds wherever the shell is.** Claude's Bash tool keeps its own
+  directory between calls and the `can_use_tool` request carries no cwd (measured on 2.1.270: the
+  request has `tool_use_id`, `input`, and permission metadata only; the hook payload's `cwd` DOES
+  follow the tool; Claude records `pwd -P` after each successful command and starts the next shell
+  there; and it does not confine `cd` to the session directory). Judging a relative operand from
+  the session directory refused `cd ..` from any subdirectory (#1333), and inferring the
+  directory from command text does not converge — renaming the shell's own directory defeats it
+  with no `cd` at all. So with the guard active, a top-level Bash request is judged from
+  `PLACELESS_CWD`, a directory that is nowhere: refusals that do not depend on the shell's
+  position survive (an absolute path to the worktree, an absolute `cd` followed by a relative
+  removal), and the rest is left to the hook, which has already judged the command from the real
+  directory. A subagent's request, and every request of a mediated launch, keeps the session
+  directory, so the false `cd ..` refusal remains only in that fallback.
+- **Operands are judged physically as well as by spelling.** The shared matcher resolves each
+  external operand one component at a time from the physical form of its directory, compares
+  against the physical protections (a worktree reached through a symlinked prefix is not refused
+  against itself), does not follow a final symlink for `rm`/`unlink`/`trash`/an `mv` source
+  unless a trailing slash makes the kernel follow it, refuses an operand too deep to walk, and
+  treats a `cd` whose physical target leaves the worktree as an escape.
 
 - **The guard's own state is vetoed.** The provider runs as the runner's OS user, so it could
   rewrite the protection list. Every tool call that references the runner hook state directory is

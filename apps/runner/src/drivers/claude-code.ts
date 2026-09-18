@@ -27,10 +27,9 @@ import { inspectClaudeBackgroundWork, inspectClaudeBackgroundWorkInContext, type
 import { effectiveClaudePermissionMode } from "../claude-permission.js";
 import { prepareClaudeHookArgs } from "../hook-settings.js";
 import {
+  PLACELESS_CWD,
   commandTargetsGuardState,
-  commandMayMoveShell,
   commandTargetsManagedWorktree,
-  shellCwdAfterCommand,
   toolTargetsGuardState,
   type ManagedWorktreeProtection,
 } from "../managed-worktree-protection.js";
@@ -579,19 +578,6 @@ export class ClaudeCodeDriver implements Driver {
   private hookCircuitReported = false;
   private hookCircuitOpenedAt: number | null = null;
   private managedPermissionMediationReported = false;
-  /**
-   * The directory Claude's Bash tool is in right now, or null when a command moved it somewhere
-   * the text did not spell out. Relative operands in a Bash permission request are resolved here,
-   * not at the session directory: the control request carries no cwd, and the tool keeps its own
-   * directory between calls (#1333). Reset to the session directory at every spawn.
-   */
-  private toolShellCwd: string | null = null;
-  /**
-   * Bash commands that have STARTED and may move a shell, by tool_use id. While one is running the
-   * directory is unknown to every OTHER request: an approval is not re-judged when the command
-   * that was running commits its directory, so the stale value must never be used meanwhile.
-   */
-  private readonly inflightShellMovers = new Map<string, { command: string; subagent: boolean; overlapped: boolean }>();
   /** Established by the last `preparedBaseArgs()`: the managed-worktree guard hook is in the
    * settings file this spawn launches with, so the runner does NOT have to mediate the mode. */
   private managedWorktreeGuardActive = false;
@@ -703,70 +689,12 @@ export class ClaudeCodeDriver implements Driver {
   }
 
   /**
-   * Where a Bash command from the provider will run; the session directory when unknown. Only the
-   * top-level shell is tracked, so a subagent's request is always resolved at the session
-   * directory, as it was before #1333. A command that may move a shell and is still running makes
-   * the directory unknown to every request except its own.
-   */
-  private bashToolCwd(subagent: boolean, requestToolUseId?: string): string {
-    if (subagent || this.toolShellCwd === null) return this.cwd;
-    for (const id of this.inflightShellMovers.keys()) {
-      if (id !== requestToolUseId) return this.cwd;
-    }
-    return this.toolShellCwd;
-  }
-
-  /**
-   * Follow the Bash tool's directory through the stream. A `tool_use` whose command may move a
-   * shell is registered the moment it STARTS; its successful `tool_result` is when Claude commits
-   * the directory the command ended in, and a failed one leaves the directory where it was. A
-   * subagent's own directory is not tracked, and whether it shares the top-level shell's directory
-   * is not something the stream says — so a subagent mover ends with the directory unknown, as
-   * does any mover that overlapped another, which is safe under either answer.
-   */
-  private observeToolShellCwd(msg: Json): void {
-    const subagent = typeof msg?.parent_tool_use_id === "string" && msg.parent_tool_use_id !== "";
-    const blocks: Json[] = Array.isArray(msg?.message?.content) ? msg.message.content : [];
-    if (msg?.type === "assistant") {
-      for (const block of blocks) {
-        if (block?.type !== "tool_use" || block.name !== "Bash" || typeof block.id !== "string") continue;
-        const command = (block.input as { command?: unknown } | undefined)?.command;
-        if (typeof command !== "string") continue;
-        // Only a command with no directory-changing word at all is left untracked. Predicting
-        // where a `cd` lands proves nothing before it runs: the command can retarget a symlink
-        // first and walk through it afterwards.
-        if (!commandMayMoveShell(command)) continue;
-        const overlapped = this.inflightShellMovers.size > 0;
-        if (overlapped) for (const mover of this.inflightShellMovers.values()) mover.overlapped = true;
-        this.inflightShellMovers.set(block.id, { command, subagent, overlapped });
-      }
-      return;
-    }
-    if (msg?.type !== "user") return;
-    for (const block of blocks) {
-      if (block?.type !== "tool_result" || typeof block.tool_use_id !== "string") continue;
-      const mover = this.inflightShellMovers.get(block.tool_use_id);
-      if (!mover) continue;
-      this.inflightShellMovers.delete(block.tool_use_id);
-      if (block.is_error === true) continue;
-      this.toolShellCwd = mover.subagent || mover.overlapped
-        ? null
-        : shellCwdAfterCommand(mover.command, this.toolShellCwd);
-    }
-  }
-
-  /**
    * The guard keeps its protection list in a runner-owned file, and the provider runs as the same
    * OS user, so any tool call that names that directory — read or write — is refused. This is
    * tamper-EVIDENT best effort of the same strength class as the command-text worktree matcher,
    * not an isolation boundary; that belongs at the sandbox (#1302).
    */
-  private managedWorktreeGuardStateVeto(
-    toolName: unknown,
-    input: unknown,
-    subagent: boolean,
-    requestToolUseId?: string,
-  ): string | null {
+  private managedWorktreeGuardStateVeto(toolName: unknown, input: unknown): string | null {
     const directory = this.managedWorktreeGuardStateDirectory;
     if (!directory || typeof toolName !== "string") return null;
     const fileVerdict = toolTargetsGuardState(toolName, input, this.cwd, directory);
@@ -778,7 +706,7 @@ export class ClaudeCodeDriver implements Driver {
       ? (input as { command?: unknown }).command
       : undefined;
     return toolName === "Bash" && typeof command === "string"
-      ? commandTargetsGuardState(command, this.bashToolCwd(subagent, requestToolUseId), directory)
+      ? commandTargetsGuardState(command, this.cwd, directory)
       : null;
   }
 
@@ -1164,8 +1092,6 @@ export class ClaudeCodeDriver implements Driver {
         return resolve("refusal");
       }
       this.child = child;
-      this.toolShellCwd = this.cwd;
-      this.inflightShellMovers.clear();
       const turnId = ++this.providerTurnSeq;
       this.activeOneShotTurnId = turnId;
 
@@ -1438,8 +1364,6 @@ export class ClaudeCodeDriver implements Driver {
         return;
       }
       this.child = child;
-      this.toolShellCwd = this.cwd;
-      this.inflightShellMovers.clear();
       this.persistentTransport = true;
       this.persistentFingerprint = fingerprint;
       this.persistentBuffer = new BoundedNdjsonBuffer(
@@ -1559,7 +1483,6 @@ export class ClaudeCodeDriver implements Driver {
     }
     if (!turn) {
       this.observeBackgroundLifecycle(msg);
-      this.observeToolShellCwd(msg);
       if (msg.type === "rate_limit_event") {
         this.cb.onSubscriptionUsage?.({ provider: "claude", kind: "sparse", payload: msg });
       } else if (msg.type !== "system") {
@@ -2346,7 +2269,6 @@ export class ClaudeCodeDriver implements Driver {
   private handleEvent(msg: Json): StopReason | null {
     if (this.disposed) return null;
     this.observeBackgroundLifecycle(msg);
-    this.observeToolShellCwd(msg);
     // Claude tags every assistant/user/stream_event message that originated inside a subagent
     // with `parent_tool_use_id` = the id of the spawning Task tool call (top-level ⇒ null). We
     // carry it onto the emitted events so the UI can nest a subagent's work under its Task block.
@@ -2388,15 +2310,18 @@ export class ClaudeCodeDriver implements Driver {
           const protections = this.managedProtections();
           // Defense in depth for `default`/`auto`, mirroring the guard hook exactly: the runner's
           // own hook state is off limits to every tool, and only then does the worktree veto run.
-          const requestToolUseId = typeof req.tool_use_id === "string" ? req.tool_use_id : undefined;
-          const guardStateRefusal = this.managedWorktreeGuardStateVeto(
-            req.tool_name, req.input, parentId !== null, requestToolUseId,
-          );
+          const guardStateRefusal = this.managedWorktreeGuardStateVeto(req.tool_name, req.input);
           const managedRefusal = guardStateRefusal ??
             (req.tool_name === "Bash" && typeof req.input?.command === "string"
               ? commandTargetsManagedWorktree(
                   req.input.command,
-                  this.bashToolCwd(parentId !== null, requestToolUseId),
+                  // The request carries no cwd and the Bash tool keeps its own directory between
+                  // calls, so a relative operand cannot be placed from here (#1333). With the guard
+                  // active the hook has already judged this command from Claude's real directory;
+                  // the channel then adds only the refusals that hold wherever the shell is. A
+                  // subagent's request, and every request of a mediated launch, keeps the session
+                  // directory: nothing else has judged those.
+                  this.managedWorktreeGuardActive && parentId === null ? PLACELESS_CWD : this.cwd,
                   protections,
                 )
               : null);
