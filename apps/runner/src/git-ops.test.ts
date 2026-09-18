@@ -22,6 +22,7 @@ import {
   loadGitLabReviewThreads,
   markStagedHunks,
   MAX_GIT_STATUS_FILES,
+  MAX_STATUS_CONTENT_HASH_LINES,
   mapWithConcurrency,
   openPr,
   parseDiff,
@@ -408,6 +409,87 @@ test("status bounds the file payload while preserving complete dirty counts", as
   assert.equal(status.filesTruncated, true);
   assert.equal(status.untrackedCount, MAX_GIT_STATUS_FILES + 7);
   assert.equal(status.hasChanges, true);
+});
+
+/**
+ * Serve one status read whose SHAPE never varies — the porcelain entry, the numstat row, and so
+ * every count and line total derived from them — while `patch` and `numstat` are chosen by the
+ * caller. That is the #1285 reproduction expressed as stdout.
+ */
+function stubStatusRead(
+  read: () => { patch: string; numstat: string; porcelain?: string },
+): string[][] {
+  const calls: string[][] = [];
+  setGitRunnerForTests(async (_cwd, args) => {
+    calls.push(args);
+    const command = args.join(" ");
+    if (command === "rev-parse --abbrev-ref HEAD") return "feature\n";
+    if (command === "symbolic-ref --quiet --short HEAD") return "feature\n";
+    if (command === "rev-parse --short=12 HEAD") return "abcdef123456\n";
+    if (command === "--no-optional-locks status --porcelain=v1 --untracked-files=all") {
+      return read().porcelain ?? " M a.ts\n";
+    }
+    if (command === "--no-optional-locks diff HEAD --numstat") return read().numstat;
+    if (args.includes("--unified=0")) return read().patch;
+    return "";
+  });
+  return calls;
+}
+
+const SAME_SHAPE_NUMSTAT = "1\t1\ta.ts\n";
+const patchOf = (added: string) =>
+  `diff --git a/a.ts b/a.ts\nindex 1111111..2222222 100644\n--- a/a.ts\n+++ b/a.ts\n@@ -2 +2 @@\n-two\n+${added}\n`;
+
+test("status reports a content identity that moves for an in-place edit no status entry shows", async (t) => {
+  t.after(() => setGitRunnerForTests());
+  // #1285: one line is REPLACED, so the porcelain entry, the staged count, and both numstat
+  // totals are byte-identical before and after. Only the content moved.
+  let patch = patchOf("TWO");
+  stubStatusRead(() => ({ patch, numstat: SAME_SHAPE_NUMSTAT }));
+
+  const before = await gitStatus("/repo");
+  assert.match(before.contentSignature ?? "", /^[0-9a-f]{64}$/);
+  // A second observation of the same tree must not look like movement — that would re-read the
+  // diff on every poll for nothing.
+  assert.equal((await gitStatus("/repo")).contentSignature, before.contentSignature);
+
+  patch = patchOf("XYZ");
+  const after = await gitStatus("/repo");
+  assert.deepEqual(
+    { ...after, contentSignature: null },
+    { ...before, contentSignature: null },
+    "every shape fact is unchanged, exactly as the report describes",
+  );
+  assert.notEqual(after.contentSignature, before.contentSignature);
+});
+
+test("status declines to hash a change set past its budget rather than reading it unbounded", async (t) => {
+  t.after(() => setGitRunnerForTests());
+  // One line over: the guard compares added + deleted against the budget.
+  let numstat = `${MAX_STATUS_CONTENT_HASH_LINES}\t1\thuge.ts\n`;
+  const calls = stubStatusRead(() => ({ patch: patchOf("TWO"), numstat }));
+
+  const huge = await gitStatus("/repo");
+  assert.equal(huge.contentSignature, null, "a present null says the runner checked and declined");
+  assert.equal(
+    calls.some((args) => args.includes("--unified=0")),
+    false,
+    "and the patch it would have hashed is never even requested",
+  );
+
+  // Exactly at the budget is inside it, so the ordinary case keeps its content identity.
+  numstat = `${MAX_STATUS_CONTENT_HASH_LINES - 1}\t1\thuge.ts\n`;
+  assert.match((await gitStatus("/repo")).contentSignature ?? "", /^[0-9a-f]{64}$/);
+});
+
+test("a worktree with no tracked change is hashed without spawning a diff to be told so", async (t) => {
+  t.after(() => setGitRunnerForTests());
+  // Untracked-only: the rendered diff carries those name-only, so there is no content to hash.
+  const calls = stubStatusRead(() => ({ patch: patchOf("TWO"), numstat: "", porcelain: "?? new.ts\n" }));
+
+  const untrackedOnly = await gitStatus("/repo");
+  assert.match(untrackedOnly.contentSignature ?? "", /^[0-9a-f]{64}$/);
+  assert.equal(calls.some((args) => args.includes("--unified=0")), false);
 });
 
 test("legacy ahead and behind retain upstream fallback when default-base facts are unavailable", async (t) => {

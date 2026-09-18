@@ -149,6 +149,49 @@ test("gitStatus (real git): numstat line totals cover staged + unstaged; clean t
   }
 });
 
+test("gitStatus (real git): an in-place edit no status entry can show still moves the content identity", { skip: !GIT }, async () => {
+  // #1285, reproduced against real git: edit a tracked file again without adding, removing, or
+  // staging anything. The porcelain entry, every count, and both line totals stay byte-identical,
+  // so the content identity is the only thing that can tell an observer the diff moved.
+  const repo = mkdtempSync(join(tmpdir(), "wollipog-gitstatus-content-"));
+  try {
+    initRepo(repo);
+    writeFileSync(join(repo, "a.txt"), "line1\nline2\nline3\n");
+    git(repo, ["add", "-A"]);
+    git(repo, ["commit", "-q", "-m", "baseline"]);
+
+    writeFileSync(join(repo, "a.txt"), "line1\nCHANGED\nline3\n");
+    const before = await gitStatus(repo);
+    assert.match(before.contentSignature ?? "", /^[0-9a-f]{64}$/);
+    assert.equal((await gitStatus(repo)).contentSignature, before.contentSignature, "re-reading the same tree is not movement");
+
+    // The edit: one line replaced by another of the same length. Nothing about the SHAPE moves.
+    writeFileSync(join(repo, "a.txt"), "line1\nREPLACED\nline3\n");
+    const after = await gitStatus(repo);
+    assert.deepEqual(
+      { ...after, contentSignature: null },
+      { ...before, contentSignature: null },
+      "no status entry, count, or line total can see this edit",
+    );
+    assert.notEqual(after.contentSignature, before.contentSignature, "but the content identity does");
+
+    // Restoring the exact prior content restores the exact prior identity: the digest is content,
+    // not a counter, so an undo cannot leave the panel re-reading forever.
+    writeFileSync(join(repo, "a.txt"), "line1\nCHANGED\nline3\n");
+    assert.equal((await gitStatus(repo)).contentSignature, before.contentSignature);
+
+    // Staged content counts too — `git diff HEAD` spans the index, so a staged edit is visible
+    // even where the porcelain code and the totals would repeat.
+    git(repo, ["add", "a.txt"]);
+    writeFileSync(join(repo, "a.txt"), "line1\nSTAGED-THEN-EDITED\nline3\n");
+    git(repo, ["add", "a.txt"]);
+    const staged = await gitStatus(repo);
+    assert.notEqual(staged.contentSignature, before.contentSignature);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test("gitSummary (real git): status bits flow through; no GitHub remote → pr/checks null, never a throw", { skip: !GIT }, async () => {
   const repo = mkdtempSync(join(tmpdir(), "wollipog-gitsummary-"));
   try {

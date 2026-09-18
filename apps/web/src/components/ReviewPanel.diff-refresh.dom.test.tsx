@@ -807,6 +807,42 @@ test("a status observation that changes the change set reloads the diff, with st
   }
 });
 
+test("an in-place edit no status entry can show still reloads the diff", async () => {
+  // #1285: the reported gap. The reader observes the same two modified files, the same staged
+  // count, and the same line totals — the edit replaced a line rather than adding or removing
+  // one — so before the runner published a content identity nothing here moved and the rendered
+  // diff sat behind the working tree until the next manual refresh.
+  const harness = await mountPanel({ status: statusOf({ contentSignature: hash("a") }) });
+  try {
+    assert.deepEqual(harness.diffCalls, ["uncommitted"], "one read on mount");
+
+    // Same content, observed again: still no request.
+    await harness.render({ status: statusOf({ contentSignature: hash("a") }) });
+    assert.deepEqual(harness.diffCalls, ["uncommitted"], "an unchanged observation costs nothing");
+
+    harness.serveDiff(diffOf("2", [fileA({ text: "edited-in-place" }), fileB()]));
+    await harness.render({ status: statusOf({ contentSignature: hash("b") }) });
+
+    assert.deepEqual(harness.diffCalls, ["uncommitted", "uncommitted"], "the diff followed the edit");
+    assert.ok(harness.container.textContent?.includes("edited-in-place"), "and the new content is rendered");
+  } finally {
+    await harness.unmount();
+  }
+});
+
+test("a runner that publishes no content identity keeps the observation watcher quiet", async () => {
+  // A pre-v165 runner omits the field entirely. That must read as "unknown", never as movement:
+  // a signature that changed on every poll would re-read the diff once a minute forever.
+  const harness = await mountPanel({ status: statusOf() });
+  try {
+    await harness.render({ status: statusOf() });
+    await harness.render({ status: statusOf() });
+    assert.deepEqual(harness.diffCalls, ["uncommitted"], "shape-only comparison, exactly as before");
+  } finally {
+    await harness.unmount();
+  }
+});
+
 test("a diff read against no observation is verified by the first real one, not assumed current", async () => {
   // The status read completes AFTER this diff read, so it can legitimately describe a change set the
   // diff does not have. Adopting it unverified would leave the header ahead of the diff in silence;

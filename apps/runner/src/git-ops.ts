@@ -1169,9 +1169,57 @@ interface CollectedGitStatus {
   behindBase: number;
 }
 
+/**
+ * Upper bound on the working-tree line volume whose content the status read will hash.
+ *
+ * The digest below costs one extra `git diff` per observation and its output grows with the
+ * change set, so a pathological tree could emit tens of megabytes of patch text on the status
+ * cadence. The numstat totals the same read already computed bound that output before it is
+ * asked for: above this many added + deleted lines the digest is reported as null and clients
+ * fall back to the status entries alone — the pre-v165 behaviour, not a new failure mode.
+ */
+export const MAX_STATUS_CONTENT_HASH_LINES = 20_000;
+
+/**
+ * A content identity for the uncommitted tracked diff, or null when it was not computed.
+ *
+ * Status entries, their counts, and the numstat totals all describe the SHAPE of the change set,
+ * so an in-place edit that rewrites a line without adding, removing, or staging anything leaves
+ * every one of them identical and no observer can tell the diff moved (#1285). This digest closes
+ * that gap: each file's `index <old>..<new>` header carries git's own object id for the worktree
+ * content, and every rewritten line appears as a `-`/`+` pair.
+ *
+ * `--unified=0` deliberately. Context lines cannot distinguish two change sets whose changed lines
+ * all agree, so they buy nothing here, and dropping them keeps the payload proportional to the
+ * change rather than to the number of hunks.
+ */
+async function statusContentSignature(
+  cwd: string,
+  observed: { changedLines: number; trackedChanges: boolean },
+): Promise<string | null> {
+  if (observed.changedLines > MAX_STATUS_CONTENT_HASH_LINES) return null;
+  // Porcelain is the authority for dirty state throughout this read, and it reports every tracked
+  // difference from HEAD — modes and renames included. With no tracked entry at all there is
+  // nothing for `git diff HEAD` to print, so the ordinary clean-worktree observation hashes the
+  // empty diff directly rather than spawning git to be told so.
+  if (!observed.trackedChanges) return computeDiffHash("");
+  try {
+    return computeDiffHash(
+      await git(cwd, [...DIFF_CFG, "--no-optional-locks", "diff", "--no-ext-diff", "--unified=0", "HEAD", "--"]),
+    );
+  } catch {
+    // Unborn HEAD, or a transient git failure. Null reports "not observed"; hashing the empty
+    // string instead would assert a clean diff the authoritative porcelain may well contradict.
+    return null;
+  }
+}
+
 /** Collect one coherent local snapshot. Divergence pairs each come from one rev-list invocation,
  * so HEAD cannot move between separate ahead and behind reads and produce an impossible pair. */
-async function collectGitStatus(cwd: string): Promise<CollectedGitStatus> {
+async function collectGitStatus(
+  cwd: string,
+  options: { hashContent?: boolean } = {},
+): Promise<CollectedGitStatus> {
   // Porcelain is the authority for dirty state. Unlike optional enrichment reads, it must fail
   // closed: a timeout, max-buffer failure, or Git error must never be projected as a clean tree.
   // A bare repository has no worktree by definition, so Git legitimately rejects status there.
@@ -1229,6 +1277,18 @@ async function collectGitStatus(cwd: string): Promise<CollectedGitStatus> {
   }
   const allFiles = parsePorcelain(porcelain);
   const files = allFiles.slice(0, MAX_GIT_STATUS_FILES);
+  // A bare repository has no worktree to diff, and the pinned summary projects the header facts
+  // only — neither needs (nor should pay for) the content digest.
+  const hashContent = options.hashContent !== false && !bare;
+  const contentSignature = hashContent
+    ? await statusContentSignature(cwd, {
+        changedLines: addedLines + deletedLines,
+        // Untracked entries are deliberately not folded in: the rendered diff carries them
+        // name-only, so their bytes cannot make it stale, and their arrival or departure already
+        // moves the file list.
+        trackedChanges: allFiles.some((file) => file.status !== "??"),
+      })
+    : null;
   return {
     status: {
       branch,
@@ -1250,6 +1310,7 @@ async function collectGitStatus(cwd: string): Promise<CollectedGitStatus> {
       remoteRefsAt,
       addedLines,
       deletedLines,
+      ...(hashContent ? { contentSignature } : {}),
     },
     behindBase: baseCounts?.left ?? upstreamCounts?.left ?? 0,
   };
@@ -1990,7 +2051,7 @@ export function safeHttpUrl(value: unknown): string | null {
 
 /** One read powering the pinned summary card: status bits plus provider-neutral forge metadata. */
 export async function gitSummary(cwd: string): Promise<GitSummaryInfo> {
-  const { status, behindBase } = await collectGitStatus(cwd);
+  const { status, behindBase } = await collectGitStatus(cwd, { hashContent: false });
   // Commits the base has that this branch lacks (0 if unknown) — same resolved base as the
   // ahead count in gitStatus, so the two can never disagree about what "the base" is.
   const { files: _files, ...facts } = status;
