@@ -13,9 +13,10 @@ import type { Hub } from "./hub.js";
 
 type Receipt = DurableSessionCommandResultMessage | DurableSessionCommandUpdateMessage;
 type Logger = { warn: (message: string) => void };
-export type RetryableAuthenticationPrompt = {
+export type RetryablePendingPrompt = {
   command: Extract<DurableSessionCommand, { type: "prompt_session" }>;
   runnerId: string;
+  errorCode: "PROVIDER_AUTHENTICATION_REQUIRED" | "WORKTREE_RECOVERY_REQUIRED";
 };
 
 const RECEIPT_HORIZON_MS = 30 * 24 * 60 * 60_000;
@@ -237,13 +238,13 @@ export class SessionPromptOutbox {
     return result;
   }
 
-  retryAuthenticationFailure(
+  retryKnownUndeliveredFailure(
     sessionId: string,
     commandId: string,
     now = Date.now(),
     flush = true,
   ): "retried" | "not_found" | "not_retryable" {
-    const candidate = this.retryableAuthenticationPrompt(sessionId, commandId);
+    const candidate = this.retryableKnownUndeliveredPrompt(sessionId, commandId);
     if (typeof candidate === "string") return candidate;
     const prior = this.db.getSessionPromptCommand(commandId);
     if (!prior) return "not_found";
@@ -274,14 +275,16 @@ export class SessionPromptOutbox {
   }
 
   /** Read-only validation used by the service admission gate before it mutates either prompt
-   * identity. retryAuthenticationFailure repeats this check at its synchronous commit boundary. */
-  retryableAuthenticationPrompt(
+   * identity. retryKnownUndeliveredFailure repeats this check at its synchronous commit boundary. */
+  retryableKnownUndeliveredPrompt(
     sessionId: string,
     commandId: string,
-  ): RetryableAuthenticationPrompt | "not_found" | "not_retryable" {
+  ): RetryablePendingPrompt | "not_found" | "not_retryable" {
     const prior = this.db.getSessionPromptCommand(commandId);
     if (!prior || prior.sessionId !== sessionId || prior.dismissedAt !== undefined) return "not_found";
-    if (prior.state !== "failed" || prior.errorCode !== "PROVIDER_AUTHENTICATION_REQUIRED" ||
+    if (prior.state !== "failed" ||
+        (prior.errorCode !== "PROVIDER_AUTHENTICATION_REQUIRED" &&
+          prior.errorCode !== "WORKTREE_RECOVERY_REQUIRED") ||
         prior.userEventSeq !== undefined || prior.payloadJson === "null") return "not_retryable";
     let command: DurableSessionCommand;
     try {
@@ -291,7 +294,7 @@ export class SessionPromptOutbox {
     }
     if (command.type !== "prompt_session" || command.sessionId !== sessionId || command.campaignContinuation ||
         automationCommandDigest(command) !== prior.payloadSha256) return "not_retryable";
-    return { command, runnerId: prior.runnerId };
+    return { command, runnerId: prior.runnerId, errorCode: prior.errorCode };
   }
 
   private failMalformed(row: SessionPromptCommandRecord, error: string, now: number): void {

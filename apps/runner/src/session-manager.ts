@@ -1918,12 +1918,16 @@ export class SessionManager {
     const worktrees = this.attributedWorktrees(latest)
       .filter((item) => !sameWorktreePath(latest.context, item.path, worktree.path));
     worktrees.push(worktree);
+    const recoveringWorktree = latest.worktreeRecovery !== undefined;
+    const resumeAfterRecovery = recoveringWorktree && latest.status === "input_required" && !latest.pendingApproval;
     const updated = this.store.patchMeta(meta.sessionId, {
       worktreePath: worktree.path,
       worktreeBranch: worktree.branch,
       worktrees,
       checkpointWorktreeIds,
       lastTurnBaseTree: baseTree,
+      ...(recoveringWorktree ? { worktreeRecovery: undefined } : {}),
+      ...(resumeAfterRecovery ? { status: "idle" as const } : {}),
     });
     if (!updated) throw new Error("session disappeared while its requested worktree was activating");
     const active = this.active.get(meta.sessionId);
@@ -1938,6 +1942,7 @@ export class SessionManager {
     }
     const snapshot = this.snapshot(updated);
     this.send({ type: "session_runtime_updated", snapshot });
+    if (resumeAfterRecovery) this.emitStatus(meta.sessionId, "idle", undefined, worktree.path);
     return snapshot;
   }
 
@@ -3713,7 +3718,7 @@ export class SessionManager {
       reconciled = this.reconcileDeliveredBackgroundContinuations(reconciled);
       reconciled = this.reconcileMissingBackgroundContinuations(reconciled);
       const automatic = !reconciled.providerAuthBlock && !reconciled.providerHistoryBlock &&
-        automaticClaudeRecoveryAllowed(reconciled);
+        !reconciled.worktreeRecovery && automaticClaudeRecoveryAllowed(reconciled);
       if (reconciled.status !== "stopped" && automatic && reconciled.orphanedWork) {
         this.scheduleOrphanRecovery(m.sessionId);
       } else if (reconciled.status !== "stopped") {
@@ -3726,14 +3731,15 @@ export class SessionManager {
         reconciled.status === "stopped";
       let historicalQuestion: SessionMeta["pendingApproval"] = null;
       let pendingQuestionResolved = false;
-      if (!terminal && !reconciled.providerAuthBlock && !reconciled.pendingApproval &&
+      if (!terminal && !reconciled.providerAuthBlock && !reconciled.worktreeRecovery &&
+          !reconciled.pendingApproval &&
           reconciled.questionRecoveryReconciled !== true) {
         const recovery = this.unresolvedQuestionFromHistory(m.sessionId);
         historicalQuestion = recovery.question;
         if (recovery.scanned) {
           reconciled = this.store.patchMeta(m.sessionId, { questionRecoveryReconciled: true }) ?? reconciled;
         }
-      } else if (!terminal && !reconciled.providerAuthBlock &&
+      } else if (!terminal && !reconciled.providerAuthBlock && !reconciled.worktreeRecovery &&
           reconciled.pendingApproval?.kind === "question") {
         // A crash can land after the resolution event is durable but before its metadata clear.
         // Prefer that exact durable resolution over the stale pending-card projection.
@@ -3796,6 +3802,11 @@ export class SessionManager {
             pendingApproval: projection,
           });
         }
+      } else if (reconciled.worktreeRecovery && !terminal) {
+        // No provider owns an approval while launch is blocked on a missing or mismatched tree.
+        // Preserve the first-class recovery state across runner restart without emitting another
+        // transcript event; browser and control-plane hydration read the same durable coordinates.
+        this.store.patchMeta(m.sessionId, { status: "input_required", pendingApproval: null });
       } else if (terminal) {
         if (reconciled.pendingApproval) this.store.patchMeta(m.sessionId, { pendingApproval: null });
       } else if (pendingRequests(reconciled.pendingApproval).some((request) => request.ownerToolUseId)) {
@@ -5126,9 +5137,18 @@ export class SessionManager {
         this.store.patchMeta(spec.sessionId, { worktreePath: null });
         await this.reapWorktree(cleanup, true);
       }
+      const worktreeRecovery = unverified ? this.store.readMeta(spec.sessionId)?.worktreeRecovery : undefined;
       durable?.failed(
-        cancelled ? "session launch was cancelled before provider startup" : "agent session could not be launched",
-        cancelled ? "COMMAND_CANCELLED" : "INVALID_COMMAND",
+        cancelled
+          ? "session launch was cancelled before provider startup"
+          : worktreeRecovery
+            ? `${worktreeRecovery.detail}; this message was not sent`
+            : "agent session could not be launched",
+        cancelled
+          ? "COMMAND_CANCELLED"
+          : worktreeRecovery
+            ? "WORKTREE_RECOVERY_REQUIRED"
+            : "INVALID_COMMAND",
       );
       return false;
     }
@@ -6027,10 +6047,27 @@ export class SessionManager {
         this.store.readMeta(meta.sessionId)?.status === "stopped") return false;
     const message = `the selected worktree could not be verified before provider launch: ${detail}` +
       ` — restore ${worktree.path} or select another worktree for this session`;
-    // Failed-status detail is the canonical transport for this refusal. The control plane turns
-    // that detail into the single transcript error while retaining it for summaries and
-    // notifications; emitting an error here as well would create a duplicate card and alert.
-    this.emitStatus(meta.sessionId, "failed", message);
+    const latest = this.store.readMeta(meta.sessionId);
+    if (!latest || latest.status === "stopped") return false;
+    const existingRecovery = latest.worktreeRecovery;
+    const sameIncident = existingRecovery !== undefined &&
+      sameWorktreePath(latest.context, existingRecovery.selectedPath, worktree.path) &&
+      existingRecovery.expectedBranch === worktree.branch;
+    const recovery = sameIncident
+      ? { ...existingRecovery, detail: message }
+      : {
+          recoveryId: `worktree-recovery:${randomUUID()}`,
+          detectedAt: Date.now(),
+          selectedPath: worktree.path,
+          expectedBranch: worktree.branch,
+          detail: message,
+        };
+    const updated = this.store.patchMeta(meta.sessionId, { worktreeRecovery: recovery });
+    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    // One durable runner event owns the transcript card. Reconnects and duplicate launch attempts
+    // reuse the same incident without appending another event, while the status remains actionable.
+    if (!sameIncident) this.emitEvent(meta.sessionId, { kind: "error", message });
+    this.emitStatus(meta.sessionId, "input_required", message);
     return false;
   }
 
@@ -8803,6 +8840,14 @@ export class SessionManager {
         if (!retainedDurable) {
           durable?.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
         }
+      } else if (blocked?.worktreeRecovery) {
+        // Verification runs before provider construction, so delivery is definitively absent.
+        // The control-plane outbox remains the payload owner; this terminal receipt keeps the
+        // exact submission available as an explicit, idempotent retry after tree recovery.
+        durable?.failed(
+          `${blocked.worktreeRecovery.detail}; this message was not sent`,
+          "WORKTREE_RECOVERY_REQUIRED",
+        );
       } else {
         durable?.failed("provider session could not be resumed", "INVALID_COMMAND");
       }

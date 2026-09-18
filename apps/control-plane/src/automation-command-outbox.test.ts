@@ -14,6 +14,7 @@ const DURABLE_RECEIPT_CODES = [
   "QUEUE_FULL",
   "COMMAND_CANCELLED",
   "PROVIDER_AUTHENTICATION_REQUIRED",
+  "WORKTREE_RECOVERY_REQUIRED",
   "RECEIPT_STORE_FULL",
 ] as const satisfies readonly DurableSessionCommandErrorCode[];
 

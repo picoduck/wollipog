@@ -21,6 +21,7 @@ const DURABLE_RECEIPT_CODES = [
   "QUEUE_FULL",
   "COMMAND_CANCELLED",
   "PROVIDER_AUTHENTICATION_REQUIRED",
+  "WORKTREE_RECOVERY_REQUIRED",
   "RECEIPT_STORE_FULL",
 ] as const satisfies readonly DurableSessionCommandErrorCode[];
 
@@ -56,7 +57,7 @@ function fixture(protocolVersion = 107) {
     sessionChangedById: (sessionId: string) => { changed.push(sessionId); },
   } as unknown as Hub;
   const outbox = new SessionPromptOutbox(db, hub, { warn: (message) => { warnings.push(message); } });
-  return { db, outbox, sent, changed, warnings };
+  return { db, hub, outbox, sent, changed, warnings };
 }
 
 function prompt(text = "deliver this prompt"): DurableSessionCommand {
@@ -339,13 +340,13 @@ test("a dismissed known-undelivered authentication prompt retries under a fresh 
     }, NOW + 2), true);
 
     sent.length = 0;
-    assert.equal(outbox.retryAuthenticationFailure(SESSION_ID, staged.commandId, NOW + 3), "retried");
+    assert.equal(outbox.retryKnownUndeliveredFailure(SESSION_ID, staged.commandId, NOW + 3), "retried");
     const retried = sent[0] as { commandId: string; command: DurableSessionCommand };
     assert.equal(retried.commandId, `${staged.commandId}.retry-1`);
     assert.deepEqual(retried.command, command);
     assert.equal(db.getSessionPromptCommand(staged.commandId)?.payloadJson, "null");
     assert.equal(db.getSessionPromptCommand(retried.commandId)?.state, "sent");
-    assert.equal(outbox.retryAuthenticationFailure(SESSION_ID, staged.commandId, NOW + 4), "not_found");
+    assert.equal(outbox.retryKnownUndeliveredFailure(SESSION_ID, staged.commandId, NOW + 4), "not_found");
 
     assert.equal(outbox.receipt(RUNNER_ID, {
       type: "durable_session_command_update",
@@ -357,8 +358,70 @@ test("a dismissed known-undelivered authentication prompt retries under a fresh 
       code: "PROVIDER_AUTHENTICATION_REQUIRED",
     }, NOW + 5), true);
     sent.length = 0;
-    assert.equal(outbox.retryAuthenticationFailure(SESSION_ID, retried.commandId, NOW + 6), "retried");
+    assert.equal(outbox.retryKnownUndeliveredFailure(SESSION_ID, retried.commandId, NOW + 6), "retried");
     assert.equal((sent[0] as { commandId: string }).commandId, `${staged.commandId}.retry-2`);
+  } finally {
+    db.close();
+  }
+});
+
+test("known-undelivered worktree recovery survives service restart and retries the complete prompt exactly once", () => {
+  const { db, hub, outbox, sent } = fixture();
+  try {
+    const command = {
+      type: "prompt_session" as const,
+      sessionId: SESSION_ID,
+      text: "continue after replacing the worktree",
+      images: [{
+        artifactId: "artifact-worktree-image",
+        mimeType: "image/png",
+        sizeBytes: 3,
+        sha256: "a".repeat(64),
+      }, {
+        artifactId: "workspace:source-lines" as const,
+        mimeType: "application/vnd.wollipog.workspace-reference+json" as const,
+        sizeBytes: 0,
+        sha256: "b".repeat(64),
+        referenceVersion: 1 as const,
+        kind: "lines" as const,
+        path: "src/session.ts",
+        rootFingerprint: "c".repeat(64),
+        targetFingerprint: "b".repeat(64),
+        startLine: 4,
+        endLine: 12,
+      }],
+      slashCommand: "review",
+      config: { model: "model-a", effort: "high" },
+    };
+    const staged = outbox.stage(SESSION_ID, RUNNER_ID, command, NOW);
+    assert.equal(outbox.flush(NOW + 1), 1);
+    assert.equal(outbox.receipt(RUNNER_ID, {
+      type: "durable_session_command_update",
+      commandId: staged.commandId,
+      sessionId: SESSION_ID,
+      state: "failed",
+      revision: 2,
+      error: "selected worktree is unavailable; this message was not sent",
+      code: "WORKTREE_RECOVERY_REQUIRED",
+    }, NOW + 2), true);
+
+    const retained = db.getSessionPromptCommand(staged.commandId)!;
+    assert.deepEqual(JSON.parse(retained.payloadJson), command);
+    assert.equal(retained.errorCode, "WORKTREE_RECOVERY_REQUIRED");
+    const restarted = new SessionPromptOutbox(db, hub, { warn() {} });
+    assert.deepEqual(restarted.retryableKnownUndeliveredPrompt(SESSION_ID, staged.commandId), {
+      command,
+      runnerId: RUNNER_ID,
+      errorCode: "WORKTREE_RECOVERY_REQUIRED",
+    });
+    sent.length = 0;
+    assert.equal(restarted.retryKnownUndeliveredFailure(SESSION_ID, staged.commandId, NOW + 3), "retried");
+    assert.equal(sent.length, 1);
+    const retry = sent[0] as { commandId: string; command: DurableSessionCommand };
+    assert.equal(retry.commandId, `${staged.commandId}.retry-1`);
+    assert.deepEqual(retry.command, command);
+    assert.equal(db.getSessionPromptCommand(staged.commandId)?.payloadJson, "null");
+    assert.equal(restarted.retryKnownUndeliveredFailure(SESSION_ID, staged.commandId, NOW + 4), "not_found");
   } finally {
     db.close();
   }
@@ -384,7 +447,7 @@ test("authentication retry identity replacement rolls back atomically when dismi
       BEGIN SELECT RAISE(ABORT, 'simulated dismissal failure'); END`);
 
     assert.throws(
-      () => outbox.retryAuthenticationFailure(SESSION_ID, staged.commandId, NOW + 2),
+      () => outbox.retryKnownUndeliveredFailure(SESSION_ID, staged.commandId, NOW + 2),
       /simulated dismissal failure/u,
     );
     assert.equal(db.getSessionPromptCommand(`${staged.commandId}.retry-1`), null,

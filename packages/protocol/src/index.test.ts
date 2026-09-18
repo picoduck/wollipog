@@ -101,6 +101,7 @@ const DURABLE_SESSION_COMMAND_ERROR_CODES = [
   "QUEUE_FULL",
   "COMMAND_CANCELLED",
   "PROVIDER_AUTHENTICATION_REQUIRED",
+  "WORKTREE_RECOVERY_REQUIRED",
   "RECEIPT_STORE_FULL",
 ] as const satisfies readonly DurableSessionCommandErrorCode[];
 
@@ -154,8 +155,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 160", () => {
-  assert.equal(PROTOCOL_VERSION, 160);
+test("PROTOCOL_VERSION is 161", () => {
+  assert.equal(PROTOCOL_VERSION, 161);
   assert.equal(runnerSupportsProtocol(136, "capacityLockDiagnostics"), false);
   assert.equal(runnerSupportsProtocol(137, "capacityLockDiagnostics"), true);
   assert.equal(runnerSupportsProtocol(137, "sessionAgentControlReasoningEffort"), false);
@@ -180,6 +181,8 @@ test("PROTOCOL_VERSION is 160", () => {
   assert.equal(runnerSupportsProtocol(158, "orchestratorIssueScope"), true);
   assert.equal(runnerSupportsProtocol(159, "orchestratorAdditiveRole"), false);
   assert.equal(runnerSupportsProtocol(160, "orchestratorAdditiveRole"), true);
+  assert.equal(runnerSupportsProtocol(160, "worktreeRecovery"), false);
+  assert.equal(runnerSupportsProtocol(161, "worktreeRecovery"), true);
   assert.equal(runnerSupportsProtocol(145, "worktreeSetupConfig"), false);
   assert.equal(runnerSupportsProtocol(146, "worktreeSetupConfig"), true);
   assert.equal(runnerSupportsProtocol(134, "runnerCapacityDimensions"), false);
@@ -916,6 +919,24 @@ test("provider-authentication receipts are projected for the peer only at send t
   );
   assert.equal(exact.type === "durable_session_command_update" ? exact.code : undefined,
     "PROVIDER_AUTHENTICATION_REQUIRED", "the buffered runner message retains exact local truth");
+});
+
+test("worktree-recovery receipts fail closed for peers before v161", () => {
+  const exact: RunnerToControlPlane = {
+    type: "durable_session_command_update",
+    commandId: "command-worktree",
+    sessionId: "session-1",
+    state: "failed",
+    revision: 2,
+    code: "WORKTREE_RECOVERY_REQUIRED",
+  };
+  const oldPeer = projectRunnerMessageForProtocol(exact, 160);
+  const currentPeer = projectRunnerMessageForProtocol(exact, 161);
+  assert.equal(oldPeer.type === "durable_session_command_update" ? oldPeer.code : undefined, "COMMAND_CANCELLED");
+  assert.equal(currentPeer.type === "durable_session_command_update" ? currentPeer.code : undefined,
+    "WORKTREE_RECOVERY_REQUIRED");
+  assert.equal(exact.type === "durable_session_command_update" ? exact.code : undefined,
+    "WORKTREE_RECOVERY_REQUIRED");
 });
 
 test("additive session-event kinds use explicit older-peer policies without mutating local truth", () => {

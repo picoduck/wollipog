@@ -92,6 +92,7 @@ import type {
   SessionEventsResponse,
   SessionFileEntry,
   SessionView,
+  SessionWorktreeView,
   SessionReminderReadResponse,
   SessionReminderView,
   SessionCommandInvocationView,
@@ -780,6 +781,18 @@ export function createApiClient(transport: ApiTransport) {
     ),
 
   restart: (id: string) => req<SessionView>(`/api/sessions/${id}/restart`, { method: "POST" }),
+
+  createSessionWorktree: (id: string, input: { branch: string; baseRef?: string }) =>
+    req<{ session: SessionView; worktree?: SessionWorktreeView }>(
+      `/api/sessions/${encodeURIComponent(id)}/worktrees`,
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+
+  selectSessionWorktree: (id: string, path: string) =>
+    req<{ session: SessionView; worktree?: SessionWorktreeView }>(
+      `/api/sessions/${encodeURIComponent(id)}/worktrees/select`,
+      { method: "POST", body: JSON.stringify({ path }) },
+    ),
 
   retryWorktreeSetup: (id: string, path: string) =>
     req<{ session: SessionView }>(`/api/sessions/${encodeURIComponent(id)}/worktrees/retry-setup`, {

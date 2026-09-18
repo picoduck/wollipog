@@ -6,6 +6,7 @@ import { Window } from "happy-dom";
 import type { PendingPromptView } from "@wollipog/protocol";
 import {
   hasNewPendingPrompt,
+  pendingPromptLabel,
   PendingPromptBubbles,
   queuedPromptsWithControls,
   shouldShowOptimisticPrompt,
@@ -55,6 +56,48 @@ test("durable transcript projection retains the live queue's steering controls",
   const queue = [{ id: "new-prompt", text: "Steer me", hasImages: false, steerable: true }];
   assert.equal(queuedPromptsWithControls(queue), queue);
   assert.deepEqual(queuedPromptsWithControls(undefined), []);
+});
+
+test("worktree-blocked durable prompts are clearly labelled Not Sent", () => {
+  assert.equal(pendingPromptLabel(pending({
+    state: "failed",
+    errorCode: "WORKTREE_RECOVERY_REQUIRED",
+    canRetry: true,
+  })), "Not Sent");
+});
+
+test("worktree-blocked Retry remains visible but waits for confirmed recovery", async () => {
+  const container = domWindow.document.createElement("div");
+  domWindow.document.body.append(container);
+  const root = createRoot(container as unknown as HTMLDivElement);
+  const actions: string[] = [];
+  try {
+    await act(async () => root.render(<PendingPromptBubbles
+      prompts={[pending({
+        state: "failed", errorCode: "WORKTREE_RECOVERY_REQUIRED", canDismiss: true, canRetry: true,
+      })]}
+      deliveredCommandIds={new Set()}
+      liveQueueIds={new Set()}
+      canCancelLive={false}
+      worktreeRecoveryPending
+      onCancelPending={() => {}}
+      onCancelLive={() => {}}
+      onDismiss={() => actions.push("dismiss")}
+      onRetry={() => actions.push("retry")}
+    />));
+    const retry = [...container.querySelectorAll("button")].find((button) => button.textContent === "Retry")!;
+    assert.equal(retry.disabled, true);
+    assert.match(retry.title, /Recover the selected worktree/u);
+    await act(async () => retry.click());
+    assert.deepEqual(actions, []);
+    const dismiss = [...container.querySelectorAll("button")].find((button) => button.textContent === "Dismiss")!;
+    assert.equal(dismiss.disabled, false, "the retained unsent prompt can be abandoned explicitly");
+    await act(async () => dismiss.click());
+    assert.deepEqual(actions, ["dismiss"]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
 });
 
 test("one pending action disables every prompt action", async () => {

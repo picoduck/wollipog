@@ -3858,7 +3858,16 @@ export class SessionsService {
     // prompt is being delivered, its revision or identity changes and the acknowledgment cannot
     // remove that newer intent.
     const observedReminder = this.db.getSessionReminder(sessionId, userId);
-    const result = this.prompt(sessionId, text, images, slashCommand, config);
+    const result = this.prompt(
+      sessionId,
+      text,
+      images,
+      slashCommand,
+      config,
+      undefined,
+      "session",
+      true,
+    );
     if (!result.ok || observedReminder?.state !== "fired") return result;
     const removed = this.db.removeSessionReminder(
       sessionId,
@@ -3878,6 +3887,7 @@ export class SessionsService {
     config?: SessionConfig,
     delivery?: PreStagedDeliveryOptions,
     imageScope: "session" | "run" = "session",
+    retainAcrossWorktreeRecovery = false,
   ): ServiceResult<SessionView> {
     const snapshotCommand = delivery?.commandSnapshots?.[0];
     if (delivery?.commandSnapshots &&
@@ -3905,6 +3915,9 @@ export class SessionsService {
     if (reconciliationBlock) return fail(reconciliationBlock, 409);
     if (isTerminal(session.status)) return fail(`session is ${session.status}`, 409);
     if (session.historyQuarantine) return fail(QUARANTINED_CONVERSATION_ERROR, 409);
+    if (session.worktreeRecovery) {
+      return fail("worktree recovery is required before sending another prompt", 409);
+    }
     // A guardrail pause must be resolved (Continue / Stop) via approve(), not bypassed by sending a
     // new prompt — otherwise the next turn runs without the user acknowledging the breach.
     if (session.pendingApproval?.kind === "cost_budget") {
@@ -4102,10 +4115,17 @@ export class SessionsService {
     if (effectiveConfig?.costCheckpointsUsd !== undefined) {
       this.db.updateSessionCostCheckpoints(sessionId, normalizeCostCheckpoints(effectiveConfig.costCheckpointsUsd), now);
     }
-    // Current runners accept ordinary user prompts through the same durable, idempotent receipt
-    // lane used by scheduler commands. Persistence happens before success is returned; retries
-    // carry the stable command identity and the runner journals acceptance before queueing it.
-    const durablePrompt = admissionQueuedPrompt;
+    // Admission-queued prompts always need a durable FIFO identity. Protocol-v161 runners also
+    // route human-submitted prompts for a worktree-backed session through this lane: an idle
+    // provider may need to relaunch, and verification can then prove that the prompt was not sent.
+    // Persisting before that attempt retains attachments/workspace references and gives recovery
+    // a stable idempotency identity instead of relying on a browser-local draft.
+    const durablePrompt = admissionQueuedPrompt || (retainAcrossWorktreeRecovery && !delivery &&
+      session.worktreePath != null &&
+      runnerSupportsProtocol(
+        this.db.getRunner(session.runnerId)?.protocolVersion,
+        "worktreeRecovery",
+      ));
     if (durablePrompt) {
       try {
         this.promptOutbox.stage(sessionId, session.runnerId, command, now);
@@ -4320,10 +4340,13 @@ export class SessionsService {
   ): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
-    const candidate = this.promptOutbox.retryableAuthenticationPrompt(sessionId, commandId);
+    const candidate = this.promptOutbox.retryableKnownUndeliveredPrompt(sessionId, commandId);
     if (candidate === "not_found") return fail("pending prompt not found", 404);
     if (candidate === "not_retryable") {
-      return fail("only authentication-blocked messages with known non-delivery can be retried", 409);
+      return fail("only recovery-blocked messages with known non-delivery can be retried", 409);
+    }
+    if (candidate.errorCode === "WORKTREE_RECOVERY_REQUIRED" && session.worktreeRecovery) {
+      return fail("recover this session's selected worktree before retrying the message", 409);
     }
 
     // A Retry is a fresh turn admission with an old, exact payload. Reapply every mutable
@@ -4385,10 +4408,10 @@ export class SessionsService {
     }
 
     const pendingInputBarrier = session.status === "input_required" || session.pendingApproval != null;
-    const result = this.promptOutbox.retryAuthenticationFailure(sessionId, commandId, now, false);
+    const result = this.promptOutbox.retryKnownUndeliveredFailure(sessionId, commandId, now, false);
     if (result === "not_found") return fail("pending prompt not found", 404);
     if (result === "not_retryable") {
-      return fail("only authentication-blocked messages with known non-delivery can be retried", 409);
+      return fail("only recovery-blocked messages with known non-delivery can be retried", 409);
     }
     if (!pendingInputBarrier && session.status !== "queued" && session.status !== "starting") {
       this.db.updateSessionStatus(sessionId, "running", now, false, false);

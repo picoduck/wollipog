@@ -27,6 +27,7 @@ const eventHeavyOpening = params.get("event-heavy") === "1";
 const liveDuringPagination = params.get("live") === "1";
 const paginationDelay = Number(params.get("pagination-delay") ?? "80");
 const settled = params.get("settled") === "1";
+const worktreeRecoveryFixture = params.get("worktree-recovery") === "1";
 
 const SESSION_ID = "recovery-e2e-session";
 
@@ -48,7 +49,7 @@ const runner = {
   workspaces: [],
   connectedAt: 1,
   lastSeen: 1,
-  protocolVersion: 67,
+  protocolVersion: worktreeRecoveryFixture ? 158 : 67,
 } as RunnerView;
 
 const session: SessionView = {
@@ -59,9 +60,9 @@ const session: SessionView = {
   projectId: null,
   agentId: "codex",
   agentName: "Codex",
-  title: "Recovery Notice Geometry Fixture",
-  status: "idle",
-  column: "review",
+  title: worktreeRecoveryFixture ? "Recover Missing Worktree" : "Recovery Notice Geometry Fixture",
+  status: worktreeRecoveryFixture ? "input_required" : "idle",
+  column: worktreeRecoveryFixture ? "input_required" : "review",
   runId: null,
   useWorktree: true,
   worktreePath: "/tmp/recovery-e2e-worktree",
@@ -81,6 +82,42 @@ const session: SessionView = {
   tokensOut: 1337,
   costUsd: 0.42,
   adopted: false,
+  ...(worktreeRecoveryFixture ? {
+    worktreeRecovery: {
+      recoveryId: "worktree-recovery:e2e",
+      detectedAt: 2,
+      selectedPath: "/repos/wollipog/worktrees/missing",
+      expectedBranch: "fix/missing-worktree",
+      detail: "The selected worktree is no longer registered. Restore it or select another worktree for this session.",
+    },
+    worktrees: [{
+      id: "missing",
+      path: "/repos/wollipog/worktrees/missing",
+      branch: "fix/missing-worktree",
+      baseRef: "origin/main",
+      source: "created" as const,
+    }, {
+      id: "replacement",
+      path: "/repos/wollipog/worktrees/replacement",
+      branch: "fix/recovered-worktree",
+      baseRef: "origin/main",
+      source: "created" as const,
+    }],
+    pendingPrompts: [{
+      commandId: "prompt-worktree-recovery",
+      text: "Please continue with the queued refactor and use the attached design reference.",
+      hasImages: true,
+      state: "failed" as const,
+      revision: 2,
+      attemptCount: 1,
+      error: "The selected worktree could not be verified; this message was not sent.",
+      errorCode: "WORKTREE_RECOVERY_REQUIRED" as const,
+      createdAt: 2,
+      updatedAt: 2,
+      canDismiss: true,
+      canRetry: true,
+    }],
+  } : {}),
   // A known context window makes the ContextWindowMeter render in the strip's leading cell,
   // so the specs can prove the active recovery echo wins that cell in compact mode.
   contextWindow: 200_000,
@@ -184,6 +221,32 @@ const client = {
       hasMoreOlder: true, turnAligned: eventHeavyOpening ? false : true, cacheComplete: true,
     });
   },
+  createSessionWorktree: async (_id: string, input: { branch: string; baseRef?: string }) => ({
+    worktree: {
+      id: "created-replacement",
+      path: `/repos/wollipog/worktrees/${input.branch}`,
+      branch: input.branch,
+      ...(input.baseRef ? { baseRef: input.baseRef } : {}),
+      source: "created" as const,
+    },
+    session: {
+      ...session,
+      status: "idle" as const,
+      column: "review" as const,
+      worktreePath: `/repos/wollipog/worktrees/${input.branch}`,
+      worktreeRecovery: undefined,
+    },
+  }),
+  selectSessionWorktree: async (_id: string, path: string) => ({
+    worktree: session.worktrees?.find((worktree) => worktree.path === path),
+    session: {
+      ...session,
+      status: "idle" as const,
+      column: "review" as const,
+      worktreePath: path,
+      worktreeRecovery: undefined,
+    },
+  }),
 } as unknown as ApiClient;
 
 const payloads: SessionEvent["payload"][] = [];
@@ -245,7 +308,22 @@ const eventHeavyFixtureEvents: SessionEvent[] = eventHeavyPayloads.map((payload,
   ts: index + 1,
   payload,
 }));
-const activeFixtureEvents = eventHeavyOpening ? eventHeavyFixtureEvents : fixtureEvents;
+const worktreeRecoveryEvents: SessionEvent[] = [{
+  id: 1,
+  sessionId: SESSION_ID,
+  seq: 1,
+  ts: 1,
+  payload: { kind: "user_message", text: "Finish the recovery-safe worktree flow.", images: [] },
+}, {
+  id: 2,
+  sessionId: SESSION_ID,
+  seq: 2,
+  ts: 2,
+  payload: { kind: "agent_message", text: "The earlier turn completed before the worktree disappeared.", final: true },
+}];
+const activeFixtureEvents = worktreeRecoveryFixture
+  ? worktreeRecoveryEvents
+  : eventHeavyOpening ? eventHeavyFixtureEvents : fixtureEvents;
 
 function EventSeeder() {
   const ready = useStoreSelector((state) => state.sessions.has(SESSION_ID));

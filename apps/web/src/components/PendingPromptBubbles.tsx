@@ -16,6 +16,7 @@ const LABELS: Record<PendingPromptState, string> = {
 };
 
 export function pendingPromptLabel(prompt: PendingPromptView): string {
+  if (prompt.state === "failed" && prompt.errorCode === "WORKTREE_RECOVERY_REQUIRED") return "Not Sent";
   return prompt.state === "failed" && prompt.errorCode === "COMMAND_CANCELLED"
     ? "Cancelled"
     : LABELS[prompt.state];
@@ -49,6 +50,7 @@ export function PendingPromptBubbles({
   liveQueueIds,
   canCancelLive,
   pendingAction,
+  worktreeRecoveryPending = false,
   onCancelPending,
   onCancelLive,
   onDismiss,
@@ -59,6 +61,7 @@ export function PendingPromptBubbles({
   liveQueueIds: ReadonlySet<string>;
   canCancelLive: boolean;
   pendingAction?: string;
+  worktreeRecoveryPending?: boolean;
   onCancelPending: (commandId: string) => void;
   onCancelLive: (commandId: string) => void;
   onDismiss: (commandId: string) => void;
@@ -75,6 +78,8 @@ export function PendingPromptBubbles({
     const cancelLive = !cancelPending && !prompt.canDismiss && canCancelLive &&
       liveQueueIds.has(prompt.commandId);
     const detailsId = `pending-prompt-details-${prompt.commandId}`;
+    const recoveryBlocksRetry = worktreeRecoveryPending &&
+      prompt.errorCode === "WORKTREE_RECOVERY_REQUIRED";
     return (
       <div
         className="tl-row user"
@@ -127,7 +132,8 @@ export function PendingPromptBubbles({
                 <button
                   type="button"
                   className="btn ghost sm"
-                  disabled={actionPending}
+                  disabled={actionPending || recoveryBlocksRetry}
+                  title={recoveryBlocksRetry ? "Recover the selected worktree before retrying this message." : undefined}
                   aria-label={busy && !prompt.canDismiss ? "Retrying Message" : "Retry Message"}
                   aria-describedby={detailsId}
                   onClick={() => onRetry(prompt.commandId)}

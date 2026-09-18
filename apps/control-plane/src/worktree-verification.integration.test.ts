@@ -136,17 +136,18 @@ test("pre-launch worktree verification produces one control-plane transcript err
           message.controlPlaneLaunchId,
           message.capacityWait,
         );
+      } else if (message.type === "session_runtime_updated") {
+        sessions.applySessionRuntimeUpdate(RUNNER_ID, message.snapshot);
       }
     };
     manager = new SessionManager(deliver, () => {}, runnerStore, RUNNER_ID, undefined, undefined, join(root, "data"));
 
-    sessions.onSessionEvent(
+    const earlier = runnerStore.appendEvent(
       sessionId,
       { kind: "error", message: "the earlier deferred worktree rebind failed" },
       1,
-      1,
-      RUNNER_ID,
-    );
+    )!;
+    sessions.onSessionEvent(sessionId, earlier.payload, earlier.seq, earlier.ts, RUNNER_ID);
     const internals = manager as unknown as {
       launchGenerations: Map<string, number>;
       verifySelectedWorktreeBeforeLaunch(
@@ -162,13 +163,14 @@ test("pre-launch worktree verification produces one control-plane transcript err
       1,
     ), false);
 
-    const failure = sent.find((message) => message.type === "session_status" && message.status === "failed");
+    const failure = sent.find((message) => message.type === "session_status" && message.status === "input_required");
     assert.ok(failure?.type === "session_status");
     assert.match(failure.detail ?? "", /restore .*missing-worktree or select another worktree/);
-    assert.equal(sent.some((message) => message.type === "session_event" && message.payload.kind === "error"), false,
-      "the runner does not duplicate the control-plane-owned transcript event");
-    assert.equal(runnerStore.readMeta(sessionId)?.status, "failed");
-    assert.equal(db.getSession(sessionId)?.status, "failed");
+    assert.equal(sent.filter((message) => message.type === "session_event" &&
+      message.payload.kind === "error").length, 1, "the runner owns one durable transcript event");
+    assert.equal(runnerStore.readMeta(sessionId)?.status, "input_required");
+    assert.equal(db.getSession(sessionId)?.status, "input_required");
+    assert.equal(db.getSession(sessionId)?.worktreeRecovery?.selectedPath, worktreePath);
 
     const verificationErrors = () => db.listEvents(sessionId).filter((event) =>
       event.payload.kind === "error" && /could not be verified before provider launch/.test(event.payload.message));
@@ -180,12 +182,35 @@ test("pre-launch worktree verification produces one control-plane transcript err
     ], "a distinct earlier lifecycle failure remains visible");
 
     deliver(failure);
-    sessions.hydrateRunnerSessions(
-      RUNNER_ID,
-      [snapshot(sessionId, repoPath, worktreePath, "failed")],
-    );
+    internals.launchGenerations.set(sessionId, 2);
+    assert.equal(await internals.verifySelectedWorktreeBeforeLaunch(
+      runnerStore.readMeta(sessionId)!,
+      { path: worktreePath, branch: meta.worktreeBranch! },
+      2,
+    ), false);
+    const hydrated = snapshot(sessionId, repoPath, worktreePath, "input_required");
+    hydrated.worktreeRecovery = runnerStore.readMeta(sessionId)!.worktreeRecovery;
+    sessions.hydrateRunnerSessions(RUNNER_ID, [hydrated]);
     assert.equal(verificationErrors().length, 1,
-      "duplicate status delivery and reconnect hydration do not append another card");
+      "duplicate status delivery, repeated verification, and reconnect hydration do not append another card");
+
+    const recoveredPath = join(root, "recovered-worktree");
+    execFileSync("git", ["-C", repoPath, "worktree", "add", "-b", "fix/recovered", recoveredPath]);
+    runnerStore.patchMeta(sessionId, {
+      worktrees: [{ id: "recovered", path: recoveredPath, branch: "fix/recovered", source: "attached" }],
+    });
+    const [recovered, concurrentRecovery] = await Promise.all([
+      manager.selectWorktree(sessionId, recoveredPath),
+      manager.selectWorktree(sessionId, recoveredPath),
+    ]);
+    assert.equal(recovered.status, "idle");
+    assert.equal(recovered.worktreeRecovery, null);
+    assert.equal(concurrentRecovery.worktreeRecovery, null,
+      "concurrent idempotent recovery attempts converge on the same verified selection");
+    assert.equal(runnerStore.readMeta(sessionId)?.worktreeRecovery, undefined);
+    assert.equal(db.getSession(sessionId)?.worktreeRecovery, undefined);
+    assert.equal(db.getSession(sessionId)?.status, "idle");
+    assert.equal(verificationErrors().length, 1, "confirmed recovery does not create another transcript error");
   } finally {
     manager?.shutdownAll();
     db.close();
