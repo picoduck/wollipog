@@ -696,19 +696,25 @@ export class ClaudeCodeDriver implements Driver {
     return claudeRoutineControlChannelMode(this.launchedPermissionMode(), this.opts.orchestrator != null);
   }
 
-  /** Where a Bash command from the provider will run; the session directory when unknown. */
-  private bashToolCwd(): string {
-    return this.toolShellCwd ?? this.cwd;
+  /**
+   * Where a Bash command from the provider will run; the session directory when unknown. Only the
+   * top-level shell is tracked, so a subagent's request is always resolved at the session
+   * directory, as it was before #1333.
+   */
+  private bashToolCwd(subagent: boolean): string {
+    return subagent ? this.cwd : this.toolShellCwd ?? this.cwd;
   }
 
   /**
    * Follow the Bash tool's directory through the stream: a `tool_use` records the command, and its
    * successful `tool_result` is when Claude commits the directory the command ended in. A failed
-   * command leaves the directory where it was. Subagents have directories of their own and are
-   * not tracked; their permission requests are resolved at the session directory as before.
+   * command leaves the directory where it was. A subagent's own directory is not tracked, and
+   * whether it shares the top-level shell's directory is not something the stream says — so a
+   * subagent command that may have moved a shell makes the top-level directory unknown, which is
+   * safe under either answer.
    */
   private observeToolShellCwd(msg: Json): void {
-    if (typeof msg?.parent_tool_use_id === "string" && msg.parent_tool_use_id) return;
+    const subagent = typeof msg?.parent_tool_use_id === "string" && msg.parent_tool_use_id !== "";
     const blocks: Json[] = Array.isArray(msg?.message?.content) ? msg.message.content : [];
     if (msg?.type === "assistant") {
       for (const block of blocks) {
@@ -725,7 +731,8 @@ export class ClaudeCodeDriver implements Driver {
       if (command === undefined) continue;
       this.pendingBashCommands.delete(block.tool_use_id);
       if (block.is_error === true) continue;
-      this.toolShellCwd = shellCwdAfterCommand(command, this.toolShellCwd);
+      const next = shellCwdAfterCommand(command, this.toolShellCwd);
+      this.toolShellCwd = subagent ? (next === this.toolShellCwd ? next : null) : next;
     }
   }
 
@@ -735,7 +742,7 @@ export class ClaudeCodeDriver implements Driver {
    * tamper-EVIDENT best effort of the same strength class as the command-text worktree matcher,
    * not an isolation boundary; that belongs at the sandbox (#1302).
    */
-  private managedWorktreeGuardStateVeto(toolName: unknown, input: unknown): string | null {
+  private managedWorktreeGuardStateVeto(toolName: unknown, input: unknown, subagent: boolean): string | null {
     const directory = this.managedWorktreeGuardStateDirectory;
     if (!directory || typeof toolName !== "string") return null;
     const fileVerdict = toolTargetsGuardState(toolName, input, this.cwd, directory);
@@ -747,7 +754,7 @@ export class ClaudeCodeDriver implements Driver {
       ? (input as { command?: unknown }).command
       : undefined;
     return toolName === "Bash" && typeof command === "string"
-      ? commandTargetsGuardState(command, this.bashToolCwd(), directory)
+      ? commandTargetsGuardState(command, this.bashToolCwd(subagent), directory)
       : null;
   }
 
@@ -2357,12 +2364,12 @@ export class ClaudeCodeDriver implements Driver {
           const protections = this.managedProtections();
           // Defense in depth for `default`/`auto`, mirroring the guard hook exactly: the runner's
           // own hook state is off limits to every tool, and only then does the worktree veto run.
-          const guardStateRefusal = this.managedWorktreeGuardStateVeto(req.tool_name, req.input);
+          const guardStateRefusal = this.managedWorktreeGuardStateVeto(req.tool_name, req.input, parentId !== null);
           const managedRefusal = guardStateRefusal ??
             (req.tool_name === "Bash" && typeof req.input?.command === "string"
               ? commandTargetsManagedWorktree(
                   req.input.command,
-                  this.bashToolCwd(),
+                  this.bashToolCwd(parentId !== null),
                   protections,
                 )
               : null);

@@ -588,7 +588,9 @@ harmless because Claude never reaches the control channel for a command the hook
   external operand from the physical form of its directory. Unknown falls back to the session
   directory — the pre-#1333 behavior, never less strict,
   and never deeper than the truth — until an absolute `cd` re-establishes it. Every spawn starts at
-  the session directory again, and subagents are not tracked (#1333).
+  the session directory again. A subagent's request is always resolved at the session directory,
+  and a subagent command that may have moved a shell makes the top-level directory unknown
+  (#1333).
 
 - **The guard's own state is vetoed.** The provider runs as the runner's OS user, so it could
   rewrite the protection list. Every tool call that references the runner hook state directory is

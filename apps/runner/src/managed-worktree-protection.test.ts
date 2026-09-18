@@ -198,6 +198,10 @@ test("shellCwdAfterCommand follows literal directory changes and gives up on inv
     ["{ cd ..; }", `${root}/apps`, null],
     ["while true; do cd ..; break; done", `${root}/apps`, null],
     ["time cd apps", root, null],
+    // A DEBUG/EXIT trap body runs before Claude's appended `pwd -P`.
+    ["trap 'cd /elsewhere' DEBUG", `${root}/apps`, null],
+    ["cd apps && trap 'cd ..' EXIT", root, null],
+    ["trap 'cd ..' DEBUG\nls", `${root}/apps`, null],
     // Forms the shell expands or joins into something the text does not spell out.
     ["cd link{1..1}", root, null],
     ["cd ap\\ps", root, `${root}/apps`],
@@ -296,4 +300,25 @@ test("a worktree reached through a symlinked prefix is not refused against itsel
     MANAGED_WORKTREE_REFUSAL);
   assert.equal(commandTargetsManagedWorktree(`rm -rf ${join(base, "real", "managed")}`, join(worktree, "apps"), protections),
     MANAGED_WORKTREE_REFUSAL, "the physical spelling of the worktree is the worktree");
+});
+
+test("removing a symlink that merely points at the worktree is not removing the worktree", (t) => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-cwd-")));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const worktree = join(base, "managed");
+  mkdirSync(worktree);
+  mkdirSync(join(base, "sibling"));
+  symlinkSync(worktree, join(base, "sibling", "alias"));
+  const protections = [{ worktreePath: worktree, repoPath: join(base, "repo") }];
+  const sibling = join(base, "sibling");
+  // rm, unlink, and an mv source act on the link itself.
+  assert.equal(commandTargetsManagedWorktree("rm alias", sibling, protections), null);
+  assert.equal(commandTargetsManagedWorktree("unlink alias", sibling, protections), null);
+  assert.equal(commandTargetsManagedWorktree("mv alias renamed", sibling, protections), null);
+  // A trailing slash makes the kernel follow it, and git resolves the path it is given.
+  assert.equal(commandTargetsManagedWorktree("rm -rf alias/", sibling, protections), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("rm -rf alias/.", sibling, protections), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("git worktree remove alias", sibling, protections), MANAGED_WORKTREE_REFUSAL);
+  // An INTERMEDIATE symlink is always followed: alias/.. is the worktree's parent.
+  assert.equal(commandTargetsManagedWorktree("rm -rf alias/../managed", sibling, protections), MANAGED_WORKTREE_REFUSAL);
 });

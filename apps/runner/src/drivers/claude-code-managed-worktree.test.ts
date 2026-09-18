@@ -473,20 +473,44 @@ test("a relative Bash request is resolved where the tool's shell is, not at the 
   ], "only the requests issued at the worktree root (or from an unknown directory) are refused");
 });
 
-test("a subagent's directory changes do not move the top-level shell", async (t) => {
-  const dir = tempDir(t);
-  const run = launch(provision(dir, "cwd-2", "auto", { protections: PROTECTIONS }), "auto", PROTECTIONS);
-  t.after(() => run.driver.dispose());
+function subagentBash(run: Launch, id: string, command: string): void {
   run.child.stdout.write(JSON.stringify({
     type: "assistant", parent_tool_use_id: "task-1",
-    message: { content: [{ type: "tool_use", id: "s1", name: "Bash", input: { command: "cd apps" } }] },
+    message: { content: [{ type: "tool_use", id, name: "Bash", input: { command } }] },
   }) + "\n");
   run.child.stdout.write(JSON.stringify({
     type: "user", parent_tool_use_id: "task-1",
-    message: { content: [{ type: "tool_result", tool_use_id: "s1", is_error: false, content: "" }] },
+    message: { content: [{ type: "tool_result", tool_use_id: id, is_error: false, content: "" }] },
   }) + "\n");
-  requestBash(run, "root", "cd ..");
-  assert.deepEqual(await controlResponses(run), [{ id: "root", behavior: "deny" }]);
+}
+
+test("a subagent's directory change makes the top-level directory unknown, never deeper", async (t) => {
+  // Whether a subagent shares the top-level shell's directory is not something the stream says.
+  const dir = tempDir(t);
+  const run = launch(provision(dir, "cwd-2", "auto", { protections: PROTECTIONS }), "auto", PROTECTIONS);
+  t.after(() => run.driver.dispose());
+  completeBash(run, "t1", "cd apps/runner");
+  subagentBash(run, "s1", "ls");
+  requestBash(run, "still-tracked", "cd ..");
+  subagentBash(run, "s2", "cd ..");
+  requestBash(run, "unknown-now", "cd ..");
+  assert.deepEqual(await controlResponses(run), [{ id: "unknown-now", behavior: "deny" }],
+    "a harmless subagent command keeps the tracking; one that may move a shell falls back to the session directory");
+});
+
+test("a subagent's own request is resolved at the session directory", async (t) => {
+  const dir = tempDir(t);
+  const run = launch(provision(dir, "cwd-4", "auto", { protections: PROTECTIONS }), "auto", PROTECTIONS);
+  t.after(() => run.driver.dispose());
+  completeBash(run, "t1", "cd apps");
+  // From the top-level shell in apps/, `rm -rf .` is a descendant; from a subagent at the session
+  // root it is the worktree itself.
+  run.child.stdout.write(JSON.stringify({
+    type: "control_request", request_id: "sub", parent_tool_use_id: "task-1",
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "rm -rf ." }, tool_use_id: "use-sub" },
+  }) + "\n");
+  requestBash(run, "top", "rm -rf .");
+  assert.deepEqual(await controlResponses(run), [{ id: "sub", behavior: "deny" }]);
 });
 
 test("a new spawn starts the tracked shell directory at the session directory again", async (t) => {

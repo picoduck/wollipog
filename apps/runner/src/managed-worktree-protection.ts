@@ -156,11 +156,37 @@ function physicalCwd(cwd: string): string {
   return canonicalPath(normalize(cwd));
 }
 
+/**
+ * Resolve an operand the way the kernel does: one component at a time from the physical
+ * directory, following each intermediate symlink BEFORE the next `..` is applied. A textual
+ * `resolve()` collapses `alias/..` to nothing, which is exactly the step a symlink changes.
+ */
+function physicalResolve(cwd: string, value: string, followFinalSymlink: boolean): string {
+  const rooted = /^(?:[a-zA-Z]:)?[\\/]+/u.exec(value);
+  let current = rooted ? canonicalPath(resolve(rooted[0])) : physicalCwd(cwd);
+  const parts = value.slice(rooted?.[0].length ?? 0).split(/[\\/]+/u).filter((part) => part && part !== ".");
+  // Provider-controlled depth: past a generous bound, fall back to the collapsed form.
+  if (parts.length > 256) return canonicalPath(normalize(isAbsolute(value) ? value : resolve(physicalCwd(cwd), value)));
+  parts.forEach((part, index) => {
+    if (part === "..") {
+      current = dirname(current);
+      return;
+    }
+    const next = resolve(current, part);
+    current = index === parts.length - 1 && !followFinalSymlink ? next : canonicalPath(next);
+  });
+  return current;
+}
+
 function operandTargetsProtected(
   token: ShellToken | undefined,
   cwd: string,
   environment: ReadonlyMap<string, string>,
   protections: readonly ManagedWorktreeProtection[],
+  // `rm`, `unlink`, `trash`, and an `mv` source act on a final symlink ITSELF, so removing a
+  // harmless alias that points at the worktree is not a removal of the worktree. A trailing slash
+  // (or `/.`) makes the kernel follow it after all.
+  followFinalSymlink = true,
 ): boolean {
   const target = resolvedOperand(token, cwd, environment);
   if (target == null) {
@@ -171,8 +197,9 @@ function operandTargetsProtected(
   // The shell's `cd` is logical, but the command this operand belongs to is external and the
   // kernel resolves it from the PHYSICAL directory: `..` beneath a symlink lands where the link
   // points, not where the shell prints. Judge that reading too, against the physical protections.
-  const physical = resolvedOperand(token, physicalCwd(cwd), environment);
-  return physical != null && protectedTarget(canonicalPath(physical), physicalProtections(protections));
+  const value = word(token, cwd, environment) ?? "";
+  const follows = followFinalSymlink || /[\\/]\.?$/u.test(value);
+  return protectedTarget(physicalResolve(cwd, value, follows), physicalProtections(protections));
 }
 
 function resolvedOperand(
@@ -476,10 +503,10 @@ function segmentRefusal(
   }
   if (executable === "git") return gitWorktreeRefusal(words, cwd, environment, protections);
   if (["rm", "rmdir", "unlink", "trash", "trash-put", "remove-item", "del", "rd"].includes(executable)) {
-    return words.some((token) => operandTargetsProtected(token, cwd, environment, protections));
+    return words.some((token) => operandTargetsProtected(token, cwd, environment, protections, false));
   }
   if (executable === "gio" && word(words[0], cwd, environment) === "trash") {
-    return words.slice(1).some((token) => operandTargetsProtected(token, cwd, environment, protections));
+    return words.slice(1).some((token) => operandTargetsProtected(token, cwd, environment, protections, false));
   }
   if (["mv", "move", "rename-item"].includes(executable)) {
     let targetDirectory = false;
@@ -501,7 +528,7 @@ function segmentRefusal(
       operands.push(token);
     }
     const sources = targetDirectory ? operands : operands.slice(0, -1);
-    return sources.some((source) => operandTargetsProtected(source, cwd, environment, protections));
+    return sources.some((source) => operandTargetsProtected(source, cwd, environment, protections, false));
   }
   if (executable === "find") {
     const actionIndex = words.findIndex((token) =>
@@ -629,7 +656,7 @@ export function shellCwdAfterCommand(command: string, cwd: string | null): strin
   // that does not cannot have moved it. A line continuation is joined first: `c\<newline>d` is `cd`.
   if (/[\r\n]/u.test(command)) {
     const joined = command.replace(/\\\r?\n/gu, "");
-    return /(^|[^\w-])(cd|pushd|popd|dirs|eval|builtin|command|exec|source|\.)(?![\w-])/u.test(joined) ? null : cwd;
+    return /(^|[^\w-])(cd|pushd|popd|dirs|eval|builtin|command|exec|source|trap|\.)(?![\w-])/u.test(joined) ? null : cwd;
   }
   let tokens: ShellToken[];
   try {
@@ -655,7 +682,8 @@ export function shellCwdAfterCommand(command: string, cwd: string | null): strin
       // Anything that can move the shell without spelling `cd` at the top level: the directory
       // stack (`pushd -n` moves the stack, not the shell), indirect evaluation, sourced files,
       // and compound commands whose body runs in the current shell.
-      return !["pushd", "popd", "dirs", "eval", "builtin", "command", "exec", "source", ".",
+      // `trap '...' DEBUG` (or EXIT/RETURN) runs its body before Claude's appended `pwd -P`.
+      return !["pushd", "popd", "dirs", "eval", "builtin", "command", "exec", "source", ".", "trap",
         "if", "then", "else", "elif", "fi", "while", "until", "do", "done", "for", "select", "case",
         "esac", "function", "time", "{", "}", "!"].includes(parsed?.executable ?? "");
     }
