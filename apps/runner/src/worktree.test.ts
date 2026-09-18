@@ -3135,6 +3135,97 @@ test("replay never retires the worktree a launch generation is preparing to use"
   }
 });
 
+test("replay never retires a launch's captured worktree after the selection moves on", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-replay-captured-path-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  let releaseIsolation = () => {};
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const factory = () => ({
+      pid: 1, initialize: async () => {}, newSession: async () => {},
+      prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {}, setConfig: () => {},
+      resolvePermission: () => false, agentSessionId: () => "provider-session-id",
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    (manager as unknown as { discoverMergedWorktreePullRequest: () => Promise<null> })
+      .discoverMergedWorktreePullRequest = async () => null;
+    store.create({
+      sessionId: "s_captured_path", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "cleanup",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    // A is the path the launch will capture; it is clean, pushed, and therefore safely reapable.
+    const captured = await manager.requestWorktree("s_captured_path", {
+      baseRef: "HEAD", branch: "fix/captured-launch-target",
+    });
+    execFileSync("git", ["-C", captured.worktree.path, "push", "-u", "origin", captured.worktree.branch]);
+
+    // Hold the launch after worktree finalization has released the session lane and before it
+    // acquires the worktree lease — the exact window in which nothing else marks A as owned.
+    const internals = manager as unknown as {
+      resolveLaunchIsolation: (...args: unknown[]) => Promise<unknown>;
+      launchGenerations: Map<string, number>;
+    };
+    const originalResolveIsolation = internals.resolveLaunchIsolation.bind(manager);
+    let isolationReachedResolve!: () => void;
+    const isolationReached = new Promise<void>((resolve) => { isolationReachedResolve = resolve; });
+    const isolationGate = new Promise<void>((resolve) => { releaseIsolation = resolve; });
+    internals.resolveLaunchIsolation = async (...args) => {
+      isolationReachedResolve();
+      await isolationGate;
+      return originalResolveIsolation(...args);
+    };
+    const launch = manager.start({
+      sessionId: "s_captured_path", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: true, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    });
+    await isolationReached;
+
+    // The selection advances to B while the launch is still preparing A, so the durable row no
+    // longer names A at all.
+    const advanced = await manager.requestWorktree("s_captured_path", {
+      baseRef: "HEAD", branch: "fix/selection-advanced",
+    });
+    assert.equal(store.readMeta("s_captured_path")?.worktreePath, advanced.worktree.path,
+      "the durable selection must have moved off the launch's captured path");
+    assert.deepEqual(
+      (await manager.discardWorktree("s_captured_path", captured.worktree.path)).retirement,
+      { status: "deferred", reason: "provider_launching" },
+      "an explicit discard of the captured path must defer too, never remove it under the launch");
+
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(existsSync(captured.worktree.path), true,
+      "replay must not retire the path the in-flight launch captured before the selection moved");
+    assert.equal(new WorktreeCleanupJournal(dataDir).list().length, 1,
+      "the durable retirement is retained while the launch still owns its captured path");
+
+    releaseIsolation();
+    assert.equal(await launch, true);
+    // The launch started in the path it captured, so ownership passes straight from the launch
+    // generation to the live provider and the retirement stays deferred rather than converging.
+    assert.equal(
+      (manager as unknown as { active: Map<string, { cwd: string }> }).active.get("s_captured_path")?.cwd,
+      captured.worktree.path);
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(existsSync(captured.worktree.path), true,
+      "a live provider resident in the captured path keeps the retirement deferred");
+
+    // Only once that provider retires does the journal converge — with no second discard.
+    manager.stop("s_captured_path");
+    await waitForCondition(() => !existsSync(captured.worktree.path),
+      "the captured path was never released once its provider retired");
+  } finally {
+    releaseIsolation();
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a deferred retirement survives a runner restart and converges on the periodic sweep", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-deferred-restart-"));
   const dataDir = join(root, "data");

@@ -874,6 +874,12 @@ export class SessionManager {
   private readonly deletedExpiry = new Map<string, ReturnType<typeof setTimeout>>();
   /** Every start captures one generation; delete/restart invalidates all older async continuations. */
   private readonly launchGenerations = new Map<string, number>();
+  /** The exact worktree path each live launch generation captured, which is NOT the same thing as
+   * the session's selected path: a selection made while a launch is preparing changes the row but
+   * not the path that launch will start in. Ownership must be read from here, never inferred from
+   * mutable metadata. Stale entries are inert — every read is validated against the session's
+   * current generation — and are dropped when that generation finishes or is invalidated. */
+  private readonly launchingWorktreePaths = new Map<string, { generation: number; path: string }>();
   /** Only start() generations own the admission queue. Resume/recovery generations use their
    * existing dedicated queues and must never strand a prompt in preLaunchQueues. */
   private readonly preLaunchAdmissionGenerations = new Map<string, number>();
@@ -2349,18 +2355,39 @@ export class SessionManager {
       (meta.status === "starting" || meta.status === "queued" || meta.worktreePending === true);
   }
 
+  /** Record the exact path a launch generation will start in, so ownership of it never has to be
+   * inferred from the session's mutable selection. Only the current generation may claim it. */
+  private recordLaunchingWorktreePath(sessionId: string, generation: number, path: string): void {
+    if (this.launchGenerations.get(sessionId) !== generation) return;
+    this.launchingWorktreePaths.set(sessionId, { generation, path });
+  }
+
+  private forgetLaunchingWorktreePath(sessionId: string, generation?: number): void {
+    const captured = this.launchingWorktreePaths.get(sessionId);
+    if (!captured || (generation !== undefined && captured.generation !== generation)) return;
+    this.launchingWorktreePaths.delete(sessionId);
+  }
+
   /** The same boundary as seen by automatic replay, which is strictly wider on purpose.
    *
-   * A launch generation owns its selected worktree long before it publishes a provider entry or
+   * A launch generation owns the worktree it captured long before it publishes a provider entry or
    * takes the worktree lease: `active`, `closing`, and the rebind map are all empty while
-   * preparation runs, and the row is patched to `starting` only afterwards, so nothing else can see
-   * that window. A caller-initiated discard is a single deliberate act and reports the durable
-   * state; replay repeats on a timer and must never race an unpublished launch into retiring the
-   * exact path it is preparing. */
+   * preparation runs, and the row reads `starting` only afterwards, so nothing else can see that
+   * window. The captured path is authoritative because the selection is mutable — `select_worktree`
+   * or `create_worktree` can move the row to another path while a launch is still preparing the one
+   * it will actually start in, and reading the row would then leave that path unfenced.
+   *
+   * A caller-initiated discard is a single deliberate act and reports the durable state; replay
+   * repeats on a timer and must never race an unpublished launch into retiring its path. */
   private launchingSelectionUsesPath(sessionId: string, meta: SessionMeta, path: string): boolean {
     if (this.launchingSelection(meta, path)) return true;
-    return this.launchGenerations.has(sessionId) && !!meta.worktreePath &&
-      sameWorktreePath(meta.context, meta.worktreePath, path);
+    const generation = this.launchGenerations.get(sessionId);
+    if (generation === undefined) return false;
+    const captured = this.launchingWorktreePaths.get(sessionId);
+    if (captured?.generation === generation && sameWorktreePath(meta.context, captured.path, path)) {
+      return true;
+    }
+    return !!meta.worktreePath && sameWorktreePath(meta.context, meta.worktreePath, path);
   }
 
   private providerTurnUsesPath(sessionId: string, context: AgentContext, path: string): boolean {
@@ -2998,6 +3025,13 @@ export class SessionManager {
         this.transitioningProviderUsesPath(sessionId, meta.context, worktree.path) ||
         this.providerTurnUsesPath(sessionId, meta.context, worktree.path)) {
       return this.deferWorktreeRetirement(meta, worktree, "provider_active", options.trigger ?? "explicit_discard");
+    }
+    // Last: the path an in-flight launch captured before the selection moved on. The row above no
+    // longer names it and no provider entry, rebinding, or lease exists yet, so this is the only
+    // remaining proof that a launch still owns it. Checking it after the fences above keeps every
+    // reason those fences already report unchanged.
+    if (this.launchingSelectionUsesPath(sessionId, meta, worktree.path)) {
+      return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard");
     }
     let teardownIdentityError: string | undefined;
     try {
@@ -4848,6 +4882,10 @@ export class SessionManager {
               id: "legacy", path: worktree.path, branch: worktree.branch, source: "legacy",
             };
           }
+          // Claim the exact path this generation will start in before any further await. A
+          // selection made from here on moves the row but not this launch's target, so deferred
+          // retirement replay must fence on this claim rather than on the row.
+          this.recordLaunchingWorktreePath(spec.sessionId, launchGeneration, worktree.path);
           // createWorktree deliberately returns an already-registered healthy session worktree.
           // Preserve that durable root and its uncommitted diffs if this launch later loses.
           // Legacy/test materializers omit the marker and historically represented a newly
@@ -5027,6 +5065,9 @@ export class SessionManager {
           created: false,
         };
         worktreeIdentity = latestSelection;
+        // Finalization adopted the newer selection, so this generation's captured path moves with
+        // it. The path it abandons is no longer launch-owned and becomes reapable again.
+        this.recordLaunchingWorktreePath(spec.sessionId, launchGeneration, worktree.path);
       }
 
       let worktrees = [...(latest.worktrees ?? [])];
@@ -5282,6 +5323,7 @@ export class SessionManager {
   private finishLaunchGeneration(sessionId: string, generation: number): void {
     if (this.launchGenerations.get(sessionId) !== generation) return;
     this.launchGenerations.delete(sessionId);
+    this.forgetLaunchingWorktreePath(sessionId, generation);
     // A deferred retirement recorded before provider admission has no ActiveSession exit to drive
     // replay when launch fails. Once the generation is finished, it is safe to resume the journal.
     if (this.active.has(sessionId) || this.worktreeRebindings.has(sessionId)) return;
@@ -5296,6 +5338,7 @@ export class SessionManager {
       this.worktreePreparations.has(generation);
     const queuedPreparation = this.cancelWorktreePreparationWait(sessionId);
     this.launchGenerations.delete(sessionId);
+    this.forgetLaunchingWorktreePath(sessionId, generation);
     return activePreparation || queuedPreparation || setupActive;
   }
 
@@ -12309,6 +12352,7 @@ export class SessionManager {
     }
     this.sessionCommandAuthority.clearAll();
     this.launchGenerations.clear();
+    this.launchingWorktreePaths.clear();
     this.preLaunchAdmissionGenerations.clear();
     clearInterval(this.providerStateReconcileTimer);
     clearInterval(this.historyMaintenanceTimer);
