@@ -73,7 +73,14 @@ export class WorktreeCreateCoordinator {
       coordinates.branch,
     ]);
     const existing = this.entriesByKey.get(key);
-    if (existing) return existing.operation;
+    // A running create is always joined, whatever incident started it: a second would duplicate it.
+    // A retained result is replaced only for a request made under a different recovery incident.
+    // A request under no incident still joins: a successful create clears the incident, so that is
+    // exactly how its own poller arrives to collect the result, and restarting would duplicate it.
+    const staleForIncident = existing !== undefined && existing.operation.status !== "in_progress" &&
+      coordinates.recoveryId !== undefined && existing.recoveryId !== coordinates.recoveryId;
+    if (existing && !staleForIncident) return existing.operation;
+    if (existing) this.deleteEntry(existing);
 
     const id = this.createId();
     const entry: Entry = {

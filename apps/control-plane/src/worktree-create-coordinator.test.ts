@@ -193,3 +193,42 @@ test("a listed create carries the recovery incident it started under", async () 
   assert.equal(coordinator.startOrJoin(coordinates, async () => ({ snapshot })).id, "worktree_incident",
     "the incident is metadata, not part of the join identity");
 });
+
+test("another incident's retained result never answers a new incident's create", async () => {
+  let nextId = 0;
+  let starts = 0;
+  let finish!: () => void;
+  const coordinator = new WorktreeCreateCoordinator(60_000, () => `worktree_${++nextId}`);
+  const incidentA = { ...coordinates, recoveryId: "worktree-recovery:a" };
+  const incidentB = { ...coordinates, recoveryId: "worktree-recovery:b" };
+  coordinator.startOrJoin(incidentA, async () => { starts += 1; throw new Error("incident A failed"); });
+  await flush();
+  const running = coordinator.startOrJoin(incidentB, () => {
+    starts += 1;
+    return new Promise((resolve) => { finish = () => resolve({ snapshot }); });
+  });
+  await flush();
+  assert.equal(running.status, "in_progress", "incident B starts its own create");
+  assert.equal(starts, 2);
+  assert.equal(coordinator.startOrJoin(incidentA, async () => ({ snapshot })).id, running.id,
+    "a running create is joined across incidents rather than duplicated");
+  finish();
+  await flush();
+  assert.equal(starts, 2);
+});
+
+test("a poller collecting a create that cleared its incident joins instead of restarting", async () => {
+  let starts = 0;
+  const coordinator = new WorktreeCreateCoordinator(60_000, () => "worktree_cleared");
+  coordinator.startOrJoin({ ...coordinates, recoveryId: "worktree-recovery:a" }, async () => {
+    starts += 1;
+    return { snapshot };
+  });
+  await flush();
+  // The completed create resolved the incident, so the control plane stamps no incident on the poll.
+  const collected = coordinator.startOrJoin(coordinates, async () => { starts += 1; return { snapshot }; });
+  await flush();
+  assert.equal(collected.status, "completed");
+  assert.equal(collected.id, "worktree_cleared");
+  assert.equal(starts, 1);
+});

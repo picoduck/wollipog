@@ -90,7 +90,11 @@ export function useRecoveryWorktreeCreation({
   onSession: (session: SessionView) => void;
   sleep?: (ms: number) => Promise<void>;
 }) {
-  const [creation, setCreation] = useState<RecoveryWorktreeCreation | null>(null);
+  // Creation state belongs to the incident it was produced under. Another incident's state reads as
+  // unset, so a direct switch between incidents is `checking` from its first render.
+  const [owned, setOwned] = useState<{ key: string | null; creation: RecoveryWorktreeCreation | null }>(
+    { key: null, creation: null },
+  );
   // The incident whose running or failed create has been looked up. Until it matches the current
   // one the card reports `checking` from the very first render, not from a later passive effect.
   const [reconciledKey, setReconciledKey] = useState<string | null>(null);
@@ -101,6 +105,12 @@ export function useRecoveryWorktreeCreation({
   const sessionId = session.id;
   const recoveryId = session.worktreeRecovery?.recoveryId;
   const incidentKey = recoveryId ? JSON.stringify([session.id, recoveryId]) : null;
+  const incidentKeyRef = useRef(incidentKey);
+  incidentKeyRef.current = incidentKey;
+  const setCreation = useCallback((creation: RecoveryWorktreeCreation | null) => {
+    setOwned({ key: incidentKeyRef.current, creation });
+  }, []);
+  const creation = owned.key === incidentKey ? owned.creation : null;
   const recoveryIdRef = useRef(recoveryId);
   recoveryIdRef.current = recoveryId;
 
@@ -175,7 +185,7 @@ export function useRecoveryWorktreeCreation({
         ...(step.phase ?? lastPhase ? { phase: step.phase ?? lastPhase } : {}),
       });
     }
-  }, [api, onSession, post, sessionId, sleep]);
+  }, [api, onSession, post, sessionId, setCreation, sleep]);
 
   const create = useCallback(async (coordinates: Coordinates) => {
     const run = ++runRef.current;
@@ -187,7 +197,7 @@ export function useRecoveryWorktreeCreation({
     }
     if (runRef.current !== run) return;
     await follow(run, coordinates, step);
-  }, [follow, post]);
+  }, [follow, post, setCreation]);
   const followRef = useRef(follow);
   followRef.current = follow;
   const apiRef = useRef(api);

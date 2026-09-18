@@ -118,7 +118,13 @@ async function flushAct(work: () => void = () => {}) {
   });
 }
 
-async function render(api: ReturnType<typeof fakeApi>["api"], sleep: () => Promise<void>) {
+type RenderRecord = { recoveryId?: string; creation: string };
+
+async function render(
+  api: ReturnType<typeof fakeApi>["api"],
+  sleep: () => Promise<void>,
+  renders: RenderRecord[] = [],
+) {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -127,6 +133,7 @@ async function render(api: ReturnType<typeof fakeApi>["api"], sleep: () => Promi
     const [session, setSession] = useState(recoverySession);
     replaceSession = setSession;
     const { creation, create } = useRecoveryWorktreeCreation({ api: api as never, session, onSession: setSession, sleep });
+    renders.push({ recoveryId: session.worktreeRecovery?.recoveryId, creation: creation?.status ?? "none" });
     return (
       <>
         <span data-testid="status">{session.status}</span>
@@ -495,6 +502,31 @@ test("only an earlier incident's failure leaves this incident's form clean", asy
   try {
     assert.equal(view.alert(), null);
     assert.equal(view.createButton().disabled, false);
+  } finally {
+    await act(async () => view.root.unmount());
+  }
+});
+
+test("a direct switch from a failed incident renders the new one as checking before any effect", async () => {
+  const renders: RenderRecord[] = [];
+  const next = "worktree-recovery:next";
+  const { api } = fakeApi({
+    reads: [
+      [{ id: "op1", status: "failed", error: "setup exited 1", branch: "fix/missing-recovery", recoveryId: RECOVERY_ID }],
+      [],
+    ],
+  });
+  const view = await render(api, manualClock().sleep, renders);
+  try {
+    assert.match(view.alert() ?? "", /setup exited 1/u);
+    const nextSession = recoverySession();
+    nextSession.worktreeRecovery = { ...nextSession.worktreeRecovery!, recoveryId: next };
+    await view.replaceSession(nextSession);
+    const firstForNext = renders.find((record) => record.recoveryId === next);
+    assert.equal(firstForNext?.creation, "checking",
+      "the prior incident's failure must not re-enable actions before the new incident is read");
+    assert.equal(view.alert(), null);
+    assert.equal(view.createButton().disabled, false, "once read, the new incident offers the form");
   } finally {
     await act(async () => view.root.unmount());
   }
