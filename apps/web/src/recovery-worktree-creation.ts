@@ -192,7 +192,9 @@ export function useRecoveryWorktreeCreation({
     setCreation({ status: "creating" });
     let step = await post(coordinates);
     if (step.kind === "failed" && step.id && shownTerminalRef.current.delete(step.id)) {
-      // That answer was the already-shown outcome of an earlier attempt, now consumed. Start anew.
+      // That answer was the already-shown outcome of an earlier attempt, now consumed. Start anew,
+      // unless the incident resolved meanwhile: a fresh create would override that newer outcome.
+      if (runRef.current !== run) return;
       step = await post(coordinates);
     }
     if (runRef.current !== run) return;

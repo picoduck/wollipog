@@ -58,7 +58,8 @@ function recoveredSession(): SessionView {
   return { ...rest, status: "idle", worktreePath: "/repo/fix/missing-recovery" };
 }
 
-type PostReply = { operation?: SessionWorktreeCreateOperationView; session?: SessionView } | Error;
+type PostReply = { operation?: SessionWorktreeCreateOperationView; session?: SessionView } | Error
+  | Promise<{ operation?: SessionWorktreeCreateOperationView; session?: SessionView }>;
 type ReadReply = SessionWorktreeCreateOperationSummary[] | Error | Promise<SessionWorktreeCreateOperationSummary[]>;
 
 /** Scripted control plane. Each call consumes the next reply; an exhausted script fails loudly. */
@@ -74,7 +75,7 @@ function fakeApi(script: { posts?: PostReply[]; reads?: ReadReply[]; session?: (
         const reply = posts.shift();
         if (!reply) throw new Error("unexpected create request");
         if (reply instanceof Error) throw reply;
-        return reply;
+        return await reply;
       },
       sessionWorktreeOperations: async () => {
         calls.reads += 1;
@@ -527,6 +528,34 @@ test("a direct switch from a failed incident renders the new one as checking bef
       "the prior incident's failure must not re-enable actions before the new incident is read");
     assert.equal(view.alert(), null);
     assert.equal(view.createButton().disabled, false, "once read, the new incident offers the form");
+  } finally {
+    await act(async () => view.root.unmount());
+  }
+});
+
+test("a retry never starts a fresh create once the incident resolved during its first request", async () => {
+  const stale = deferred<{ operation?: SessionWorktreeCreateOperationView }>();
+  const { api, calls } = fakeApi({
+    reads: [[{
+      id: "op1", status: "failed", phase: "running_setup", error: "setup exited 1",
+      branch: "fix/missing-recovery", baseRef: "origin/main", recoveryId: RECOVERY_ID,
+    }]],
+    posts: [
+      stale.promise.then(() => {
+        throw new ApiError("setup exited 1", 409, undefined, {
+          operation: { id: "op1", status: "failed", phase: "running_setup", error: "setup exited 1" },
+        });
+      }),
+    ],
+  });
+  const view = await render(api, manualClock().sleep);
+  try {
+    assert.match(view.alert() ?? "", /setup exited 1/u);
+    await view.clickCreate();
+    // Another tab selects a worktree; the incident resolves before the stale failure is answered.
+    await view.replaceSession(recoveredSession());
+    await flushAct(() => stale.resolve({}));
+    assert.equal(calls.posts.length, 1, "no second create after the incident resolved");
   } finally {
     await act(async () => view.root.unmount());
   }
