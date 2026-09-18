@@ -27,6 +27,7 @@ import {
 } from "./runner-channel.js";
 import { installStartupReadinessGate } from "./startup-readiness.js";
 import { WorktreeCreateCoordinator } from "./worktree-create-coordinator.js";
+import { legacyPeerWorktreeRetirement } from "./worktree-retirement.js";
 import { KeyedSerialTaskQueue } from "./keyed-serial-task-queue.js";
 import {
   AUTOMATION_TRIGGER_MAX_BODY_BYTES,
@@ -4001,7 +4002,16 @@ async function runSessionWorktreeRequest(
         : request.operation === "retry_setup" ? 65 * 60_000 : 150_000,
     );
     if (res.type !== "session_worktree_result") return reply.code(502).send({ error: "unexpected runner reply" });
-    if (!res.ok || !res.snapshot) return reply.code(409).send({ error: res.error ?? "worktree operation failed" });
+    if (!res.ok || !res.snapshot) {
+      const error = res.error ?? "worktree operation failed";
+      // A pre-v159 runner cannot answer a discard with a durable receipt, so its retention refusal
+      // is terminal rather than pending. Say so explicitly instead of letting the caller wait for a
+      // replay that was never journaled.
+      const legacy = request.operation === "discard"
+        ? legacyPeerWorktreeRetirement(db.getRunner(session.runnerId)?.protocolVersion, error)
+        : null;
+      return reply.code(409).send(legacy ?? { error });
+    }
     db.updateSessionFromSnapshot(sessionId, res.snapshot, Date.now());
     if (request.operation !== "create") worktreeCreates.invalidateSession(sessionId);
     // v133+ runners say whether a live platform sandbox can already write to an attached path.

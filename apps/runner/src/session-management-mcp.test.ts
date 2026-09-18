@@ -946,6 +946,25 @@ test("discard_worktree refuses peers that cannot report deferred retirement", as
   assert.equal(calls.length, 0);
 });
 
+test("discard_worktree relays a legacy runner's explicit non-replaying refusal to the agent", async () => {
+  const { deps } = makeDeps(() => ({
+    status: 409,
+    body: {
+      error: "worktree retained: the worktree is still handling a provider turn or queued input — " +
+        "this runner reports protocol v158, and durable deferred worktree retirement requires v159. " +
+        "No retirement was recorded, so this refusal will not replay on its own: retry the discard " +
+        "once the session's provider has exited, or update and restart the runner to receive a " +
+        "durable receipt instead.",
+      retirement: { status: "unsupported", reason: "legacy_runner" },
+    },
+  }));
+  deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  const result = await callTool(deps, "discard_worktree", { sessionId: "s_child", path: "/repo/old" });
+  assert.equal(result.isError, true);
+  assert.match(resultText(result), /will not replay on its own/);
+  assert.match(resultText(result), /retry the discard once the session's provider has exited/);
+});
+
 test("create_worktree can finish after the ordinary control-plane request deadline", async () => {
   const { deps } = makeDeps();
   deps.requestTimeoutMs = 1;

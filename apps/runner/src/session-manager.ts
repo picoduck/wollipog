@@ -667,6 +667,16 @@ const WORKTREE_PR_RECONCILIATION_MS = 5 * 60 * 1_000;
 const WORKTREE_PR_DISCOVERY_CANDIDATES_PER_RECONCILIATION = 8;
 const WORKTREE_PR_DISCOVERY_CONCURRENCY = 4;
 const WORKTREE_PR_DISCOVERY_NEGATIVE_RETRY_MS = 30 * 60 * 1_000;
+
+/** The only linkage shape that may stand in for a vanished upstream during safe cleanup: a
+ * terminal merged state carrying a forge-verified head OID. Anything else — an open or closed
+ * pull request, or a merged record whose head was never verified — is not delivery proof. */
+function verifiedMergedHeadOid(pullRequest: SessionWorktreeView["pullRequest"]): string | undefined {
+  return pullRequest?.state === "merged" && typeof pullRequest.headOid === "string" &&
+    /^[a-f0-9]{40,64}$/u.test(pullRequest.headOid)
+    ? pullRequest.headOid
+    : undefined;
+}
 /** How long one proof of a session's interactive worktree root stands. Short enough that a change
  * made outside Wollipog surfaces while the user is still looking at what caused it, long enough to
  * collapse a burst of overlapping Files and reference-search requests into a single check. */
@@ -865,6 +875,12 @@ export class SessionManager {
   private readonly deletedExpiry = new Map<string, ReturnType<typeof setTimeout>>();
   /** Every start captures one generation; delete/restart invalidates all older async continuations. */
   private readonly launchGenerations = new Map<string, number>();
+  /** The exact worktree path each live launch generation captured, which is NOT the same thing as
+   * the session's selected path: a selection made while a launch is preparing changes the row but
+   * not the path that launch will start in. Ownership must be read from here, never inferred from
+   * mutable metadata. Stale entries are inert — every read is validated against the session's
+   * current generation — and are dropped when that generation finishes or is invalidated. */
+  private readonly launchingWorktreePaths = new Map<string, { generation: number; path: string }>();
   /** Only start() generations own the admission queue. Resume/recovery generations use their
    * existing dedicated queues and must never strand a prompt in preLaunchQueues. */
   private readonly preLaunchAdmissionGenerations = new Map<string, number>();
@@ -948,6 +964,11 @@ export class SessionManager {
     identity: string;
     retryAt: number;
   }>();
+  /** A deferred retirement that still lacks merged-head proof re-consults the forge on replay, and
+   * replay repeats on the reconciliation cadence. Back a negative answer off exactly like periodic
+   * discovery so an unmergeable branch is not asked about every pass. Entries are dropped when the
+   * proof arrives and when the record leaves the journal, so the map tracks pending records only. */
+  private readonly deferredMergedHeadRetryAt = new Map<string, number>();
   /** Test seam for deterministic expiry without changing production time. */
   private worktreePullRequestDiscoveryNow: () => number = Date.now;
   private admissionRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2387,6 +2408,48 @@ export class SessionManager {
         sameWorktreePath(rebinding.entry.context, rebinding.entry.worktree.path, path));
   }
 
+  /** The durable signal that this session's selected worktree is the one a launch is bringing up.
+   * An explicit discard answers `provider_launching` for exactly this state. */
+  private launchingSelection(meta: SessionMeta, path: string): boolean {
+    return !!meta.worktreePath && sameWorktreePath(meta.context, meta.worktreePath, path) &&
+      (meta.status === "starting" || meta.status === "queued" || meta.worktreePending === true);
+  }
+
+  /** Record the exact path a launch generation will start in, so ownership of it never has to be
+   * inferred from the session's mutable selection. Only the current generation may claim it. */
+  private recordLaunchingWorktreePath(sessionId: string, generation: number, path: string): void {
+    if (this.launchGenerations.get(sessionId) !== generation) return;
+    this.launchingWorktreePaths.set(sessionId, { generation, path });
+  }
+
+  private forgetLaunchingWorktreePath(sessionId: string, generation?: number): void {
+    const captured = this.launchingWorktreePaths.get(sessionId);
+    if (!captured || (generation !== undefined && captured.generation !== generation)) return;
+    this.launchingWorktreePaths.delete(sessionId);
+  }
+
+  /** The same boundary as seen by automatic replay, which is strictly wider on purpose.
+   *
+   * A launch generation owns the worktree it captured long before it publishes a provider entry or
+   * takes the worktree lease: `active`, `closing`, and the rebind map are all empty while
+   * preparation runs, and the row reads `starting` only afterwards, so nothing else can see that
+   * window. The captured path is authoritative because the selection is mutable — `select_worktree`
+   * or `create_worktree` can move the row to another path while a launch is still preparing the one
+   * it will actually start in, and reading the row would then leave that path unfenced.
+   *
+   * A caller-initiated discard is a single deliberate act and reports the durable state; replay
+   * repeats on a timer and must never race an unpublished launch into retiring its path. */
+  private launchingSelectionUsesPath(sessionId: string, meta: SessionMeta, path: string): boolean {
+    if (this.launchingSelection(meta, path)) return true;
+    const generation = this.launchGenerations.get(sessionId);
+    if (generation === undefined) return false;
+    const captured = this.launchingWorktreePaths.get(sessionId);
+    if (captured?.generation === generation && sameWorktreePath(meta.context, captured.path, path)) {
+      return true;
+    }
+    return !!meta.worktreePath && sameWorktreePath(meta.context, meta.worktreePath, path);
+  }
+
   private providerTurnUsesPath(sessionId: string, context: AgentContext, path: string): boolean {
     const active = this.active.get(sessionId);
     if (!active || !sameWorktreePath(context, active.cwd, path)) return false;
@@ -2414,19 +2477,27 @@ export class SessionManager {
       this.cancelActiveTurnWait(sessionId);
       this.releaseActiveTurn(sessionId);
       if (refreshCapacityInventory) this.refreshCapacityInventorySession(sessionId);
-      const deferred = this.cleanupJournal.list().filter((record) =>
-        record.sessionId === sessionId && record.removalMode === "safe");
-      if (deferred.length) {
-        setImmediate(() => {
-          for (const record of deferred) {
-            void this.reapWorktree(record).catch((error) => {
-              this.log(`worktree cleanup for ${boundedSessionIdForLog(sessionId)} needs retry after provider exit: ${errText(error)}`);
-            });
-          }
-        });
-      }
+      this.scheduleDeferredSafeWorktreeReaps(sessionId, "provider exit");
     }
     return deleted;
+  }
+
+  /** Replay this session's durable safe-cleanup records once a boundary that forced their deferral
+   * is released. Provider exit, launch finalization, and provider-retirement completion each
+   * release one, so a retirement journaled during any of those transitions gains a guaranteed
+   * trigger instead of waiting for a second discard or a runner restart. Each replay re-proves
+   * every safety check inside the session's worktree lane, so a still-fenced record simply logs. */
+  private scheduleDeferredSafeWorktreeReaps(sessionId: string, boundary: string): void {
+    const deferred = this.cleanupJournal.list().filter((record) =>
+      record.sessionId === sessionId && record.removalMode === "safe");
+    if (!deferred.length) return;
+    setImmediate(() => {
+      for (const record of deferred) {
+        void this.reapWorktree(record).catch((error) => {
+          this.log(`worktree cleanup for ${boundedSessionIdForLog(sessionId)} needs retry after ${boundary}: ${errText(error)}`);
+        });
+      }
+    });
   }
 
   /** Recover linkage for worktrees whose PR was opened outside Wollipog. The forge helper accepts
@@ -2565,10 +2636,7 @@ export class SessionManager {
     removalMode: NonNullable<WorktreeCleanupRecord["removalMode"]>,
   ): WorktreeCleanupRecord {
     const checkpointOwnerHash = this.checkpointOwnerHash(meta);
-    const verifiedMergedHead = worktree.pullRequest?.state === "merged" &&
-      /^[a-f0-9]{40,64}$/u.test(worktree.pullRequest.headOid ?? "")
-      ? worktree.pullRequest.headOid
-      : undefined;
+    const verifiedMergedHead = verifiedMergedHeadOid(worktree.pullRequest);
     return {
       sessionId: meta.sessionId,
       worktreeId: worktree.id,
@@ -2867,6 +2935,7 @@ export class SessionManager {
       }
       record.completedAt = Date.now();
       this.cleanupJournal.complete(record);
+      this.deferredMergedHeadRetryAt.delete(this.deferredMergedHeadKey(record));
       return true;
     } catch (error) {
       this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after cleanup journal update or port release: ${errText(error)}`);
@@ -2906,10 +2975,7 @@ export class SessionManager {
       deferredRecord = this.cleanupRecordForWorktree(latest, current, trigger, "safe");
       this.cleanupJournal.add(deferredRecord);
     } else {
-      const verifiedMergedHead = worktree.pullRequest?.state === "merged" &&
-        /^[a-f0-9]{40,64}$/u.test(worktree.pullRequest.headOid ?? "")
-        ? worktree.pullRequest.headOid
-        : undefined;
+      const verifiedMergedHead = verifiedMergedHeadOid(worktree.pullRequest);
       if (verifiedMergedHead && existing.verifiedMergedHead !== verifiedMergedHead) {
         existing.verifiedMergedHead = verifiedMergedHead;
         this.cleanupJournal.add(existing);
@@ -2955,9 +3021,7 @@ export class SessionManager {
     if (worktree.source === "attached") {
       return { removed: false, reason: "attached operator-owned worktrees must be removed by their owner" };
     }
-    const initiallySelectedIsLaunching = !!meta.worktreePath &&
-      sameWorktreePath(meta.context, meta.worktreePath, worktree.path) &&
-      (meta.status === "starting" || meta.status === "queued" || meta.worktreePending === true);
+    const initiallySelectedIsLaunching = this.launchingSelection(meta, worktree.path);
     if (initiallySelectedIsLaunching) {
       return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard");
     }
@@ -2973,11 +3037,7 @@ export class SessionManager {
       meta = latest;
       worktree = current;
     }
-    const recordedMergedHead = worktree.pullRequest?.state === "merged" &&
-      typeof worktree.pullRequest.headOid === "string" &&
-      /^[a-f0-9]{40,64}$/u.test(worktree.pullRequest.headOid)
-      ? worktree.pullRequest.headOid
-      : undefined;
+    const recordedMergedHead = verifiedMergedHeadOid(worktree.pullRequest);
     if (options.refreshMergedHead !== false && worktree.pullRequest?.state === "merged" && !recordedMergedHead) {
       const legacyPullRequest = worktree.pullRequest;
       const verified = await this.resolveWorktreePullRequestState(
@@ -3017,9 +3077,7 @@ export class SessionManager {
     if (worktree.source === "attached") {
       return { removed: false, reason: "attached operator-owned worktrees must be removed by their owner" };
     }
-    const selectedIsLaunching = !!meta.worktreePath &&
-      sameWorktreePath(meta.context, meta.worktreePath, worktree.path) &&
-      (meta.status === "starting" || meta.status === "queued" || meta.worktreePending === true);
+    const selectedIsLaunching = this.launchingSelection(meta, worktree.path);
     if (selectedIsLaunching) {
       return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard");
     }
@@ -3027,6 +3085,13 @@ export class SessionManager {
         this.transitioningProviderUsesPath(sessionId, meta.context, worktree.path) ||
         this.providerTurnUsesPath(sessionId, meta.context, worktree.path)) {
       return this.deferWorktreeRetirement(meta, worktree, "provider_active", options.trigger ?? "explicit_discard");
+    }
+    // Last: the path an in-flight launch captured before the selection moved on. The row above no
+    // longer names it and no provider entry, rebinding, or lease exists yet, so this is the only
+    // remaining proof that a launch still owns it. Checking it after the fences above keeps every
+    // reason those fences already report unchanged.
+    if (this.launchingSelectionUsesPath(sessionId, meta, worktree.path)) {
+      return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard");
     }
     let teardownIdentityError: string | undefined;
     try {
@@ -3349,10 +3414,30 @@ export class SessionManager {
           this.log(`pull request worktree reconciliation failed for ${boundedSessionIdForLog(candidate.sessionId)}: ${errText(error)}`);
         }
       }
+      await this.replayDeferredWorktreeRetirements();
     } catch (error) {
       this.log(`pull request worktree reconciliation could not enumerate sessions: ${errText(error)}`);
     } finally {
       this.worktreePullRequestReconciling = false;
+    }
+  }
+
+  /** The guaranteed later trigger for every durable deferred retirement. The lifecycle triggers
+   * above are prompt but each depends on this process observing the exact boundary that released
+   * the worktree; a peer running another build, an unconfirmed provider retirement, or a transient
+   * Git or forge failure can still leave a record with nothing left to wake it. This bounded sweep
+   * rides the existing reconciliation cadence so no journal entry waits for a second discard or a
+   * runner restart. Replay re-proves every cleanliness, publication, ownership, and pull-request
+   * check inside the session's worktree lane, so a record that is still unsafe simply stays. */
+  private async replayDeferredWorktreeRetirements(): Promise<void> {
+    for (const record of this.cleanupJournal.list()) {
+      if (this.shuttingDown) return;
+      if (record.removalMode !== "safe") continue;
+      try {
+        await this.reapWorktree(record);
+      } catch (error) {
+        this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after periodic retirement replay: ${errText(error)}`);
+      }
     }
   }
 
@@ -4857,6 +4942,10 @@ export class SessionManager {
               id: "legacy", path: worktree.path, branch: worktree.branch, source: "legacy",
             };
           }
+          // Claim the exact path this generation will start in before any further await. A
+          // selection made from here on moves the row but not this launch's target, so deferred
+          // retirement replay must fence on this claim rather than on the row.
+          this.recordLaunchingWorktreePath(spec.sessionId, launchGeneration, worktree.path);
           // createWorktree deliberately returns an already-registered healthy session worktree.
           // Preserve that durable root and its uncommitted diffs if this launch later loses.
           // Legacy/test materializers omit the marker and historically represented a newly
@@ -5036,6 +5125,9 @@ export class SessionManager {
           created: false,
         };
         worktreeIdentity = latestSelection;
+        // Finalization adopted the newer selection, so this generation's captured path moves with
+        // it. The path it abandons is no longer launch-owned and becomes reapable again.
+        this.recordLaunchingWorktreePath(spec.sessionId, launchGeneration, worktree.path);
       }
 
       let worktrees = [...(latest.worktrees ?? [])];
@@ -5282,6 +5374,11 @@ export class SessionManager {
     void this.abortWorktreeSetup(sessionId);
     this.cancelWorktreePreparationWait(sessionId);
     this.worktreeVerificationRefusals.delete(sessionId);
+    // The superseded generation's claim dies with it. Dropping it here rather than in its own
+    // finish is what keeps the map to at most one live entry per session: a generation that is
+    // replaced before it finishes would otherwise leave an entry its successor refuses to touch,
+    // and a deletion marker generation never records a path of its own to overwrite it.
+    this.launchingWorktreePaths.delete(sessionId);
     const generation = ++this.nextLaunchGeneration;
     this.launchGenerations.set(sessionId, generation);
     this.latestLaunchGenerations.set(sessionId, generation);
@@ -5291,19 +5388,11 @@ export class SessionManager {
   private finishLaunchGeneration(sessionId: string, generation: number): void {
     if (this.launchGenerations.get(sessionId) !== generation) return;
     this.launchGenerations.delete(sessionId);
+    this.forgetLaunchingWorktreePath(sessionId, generation);
     // A deferred retirement recorded before provider admission has no ActiveSession exit to drive
     // replay when launch fails. Once the generation is finished, it is safe to resume the journal.
     if (this.active.has(sessionId) || this.worktreeRebindings.has(sessionId)) return;
-    const deferred = this.cleanupJournal.list().filter((record) =>
-      record.sessionId === sessionId && record.removalMode === "safe");
-    if (!deferred.length) return;
-    setImmediate(() => {
-      for (const record of deferred) {
-        void this.reapWorktree(record).catch((error) => {
-          this.log(`worktree cleanup for ${boundedSessionIdForLog(sessionId)} needs retry after provider launch finished: ${errText(error)}`);
-        });
-      }
-    });
+    this.scheduleDeferredSafeWorktreeReaps(sessionId, "provider launch finished");
   }
 
   private invalidateLaunchGeneration(sessionId: string): boolean {
@@ -5314,6 +5403,7 @@ export class SessionManager {
       this.worktreePreparations.has(generation);
     const queuedPreparation = this.cancelWorktreePreparationWait(sessionId);
     this.launchGenerations.delete(sessionId);
+    this.forgetLaunchingWorktreePath(sessionId, generation);
     return activePreparation || queuedPreparation || setupActive;
   }
 
@@ -6160,6 +6250,12 @@ export class SessionManager {
     const worktree: WorktreeHandle | null = meta.worktreePath
       ? { path: meta.worktreePath, branch: meta.worktreeBranch ?? `agent/${sessionId}` }
       : null;
+    // The single capture boundary every launch path crosses — start, resume, queued app-server
+    // recovery, and worktree rebind all arrive here. This generation owns exactly this path from
+    // now until it finishes, whatever the selection does next; a launch with no worktree drops any
+    // claim its own preparation made.
+    if (worktree) this.recordLaunchingWorktreePath(sessionId, launchGeneration, worktree.path);
+    else this.forgetLaunchingWorktreePath(sessionId, launchGeneration);
 
     let isolation: SpawnIsolation | undefined;
     let launchPreparation: void | SessionLaunchPreparation;
@@ -11158,13 +11254,20 @@ export class SessionManager {
       this.resumePromptsQueuedDuringParking(sessionId, retirement);
       this.reportCapacity();
     }
-    if (!this.shuttingDown && this.pendingDeletions.delete(sessionId)) {
+    if (this.shuttingDown) return;
+    if (this.pendingDeletions.delete(sessionId)) {
+      // Deletion reaps every journal record this session owns, so it supersedes the replay below.
       setImmediate(() => {
         void this.delete(sessionId).catch((error) => {
           this.log(`deferred deletion retry failed for ${sessionId}: ${errText(error)}`);
         });
       });
+      return;
     }
+    // A discard requested while this provider was already closing is refused its immediate reap by
+    // the closing fence itself, and the ActiveSession was deleted before that fence was installed.
+    // Retirement completion is the exact moment the fence lifts, so it owns the missed replay.
+    this.scheduleDeferredSafeWorktreeReaps(sessionId, "provider retirement completed");
   }
 
   private resumePromptsQueuedDuringParking(sessionId: string, retirement: ProviderRetirement): void {
@@ -11547,6 +11650,77 @@ export class SessionManager {
     this.finishWorktreeCleanup(record);
   }
 
+  /** A retirement journaled while its session was launching or closing is recorded before the
+   * forge refresh an explicit discard performs first, so a worktree whose merged branch already
+   * lost its remote can be journaled without the merged-head proof. Safe removal then has neither
+   * an upstream to compare against nor delivery proof to stand in for it and refuses every replay
+   * with `no_upstream`. Re-derive the proof here, through the same forge helpers the initiating
+   * request would have used, so replay converges instead of waiting for a second discard.
+   *
+   * Nothing is relaxed: only a terminal merged linkage carrying a forge-verified head is accepted,
+   * the linkage is re-read after every await so a replaced pull request cannot be blessed, and a
+   * forge that cannot answer simply leaves the record as it was. Callers hold the session's
+   * worktree lane; the helpers below stay inside it. */
+  private async refreshDeferredMergedHead(record: WorktreeCleanupRecord): Promise<void> {
+    if (record.verifiedMergedHead) return;
+    const backoffKey = this.deferredMergedHeadKey(record);
+    const retryAt = this.deferredMergedHeadRetryAt.get(backoffKey);
+    if (retryAt !== undefined && retryAt > this.worktreePullRequestDiscoveryNow()) return;
+    const locate = (meta: SessionMeta | null | undefined) => meta
+      ? this.attributedWorktrees(meta).find((item) =>
+        item.id === record.worktreeId && sameWorktreePath(meta.context, item.path, record.worktreePath) &&
+        (!record.branch || item.branch === record.branch))
+      : undefined;
+    const backOff = () => {
+      this.deferredMergedHeadRetryAt.set(
+        backoffKey,
+        this.worktreePullRequestDiscoveryNow() + WORKTREE_PR_DISCOVERY_NEGATIVE_RETRY_MS,
+      );
+    };
+    let meta = this.store.readMeta(record.sessionId);
+    let worktree = locate(meta);
+    if (!meta || !worktree || worktree.source === "attached") return;
+    if (!worktree.pullRequest) {
+      await this.discoverUnlinkedMergedWorktree(record.sessionId, record.worktreePath);
+      meta = this.store.readMeta(record.sessionId);
+      worktree = locate(meta);
+      if (!meta || !worktree || worktree.source === "attached") return;
+    }
+    const linked = worktree.pullRequest;
+    if (linked?.state !== "merged") return backOff();
+    if (!verifiedMergedHeadOid(linked)) {
+      const verified = await this.resolveWorktreePullRequestState(
+        worktree.path,
+        linked.url,
+        { context: meta.context, provider: linked.provider },
+      );
+      if (verified?.state !== "merged" || !verified.headOid) return backOff();
+      const latest = this.store.readMeta(record.sessionId);
+      const current = locate(latest);
+      if (!latest || !current || current.source === "attached" ||
+          current.pullRequest?.state !== "merged" || current.pullRequest.url !== linked.url) return;
+      const worktrees = this.attributedWorktrees(latest).map((item) =>
+        sameWorktreePath(latest.context, item.path, record.worktreePath)
+          ? { ...item, pullRequest: { ...current.pullRequest!, state: "merged" as const, headOid: verified.headOid } }
+          : item);
+      const updated = this.store.patchMeta(record.sessionId, { worktrees });
+      if (!updated) return;
+      this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+      worktree = locate(updated);
+    }
+    const head = verifiedMergedHeadOid(worktree?.pullRequest);
+    if (!head) return backOff();
+    this.deferredMergedHeadRetryAt.delete(backoffKey);
+    record.verifiedMergedHead = head;
+    this.cleanupJournal.add(record);
+  }
+
+  /** Exactly the cleanup journal's own record identity, so the backoff entry is dropped by the
+   * same calls that retire the record it belongs to. */
+  private deferredMergedHeadKey(record: Pick<WorktreeCleanupRecord, "sessionId" | "worktreeId">): string {
+    return JSON.stringify([record.sessionId, record.worktreeId ?? "legacy"]);
+  }
+
   /** Resume an interrupted explicit or post-merge cleanup without treating its still-live session
    * as a replacement generation. The safe lane never reclaims checkpoint refs: those belong to
    * the live conversation, even when its selected worktree is being retired. */
@@ -11570,11 +11744,24 @@ export class SessionManager {
         }
         return;
       }
-      if (this.liveWorktreeUsesPath(record.sessionId, record.worktreePath) ||
-          this.providerTurnUsesPath(record.sessionId, meta.context, record.worktreePath) ||
-          this.transitioningProviderUsesPath(record.sessionId, meta.context, record.worktreePath)) {
-        this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} deferred while a provider turn uses the worktree`);
-        return;
+      // Launch preparation runs outside this lane and publishes neither a provider entry nor the
+      // worktree lease until it is nearly done, so this boundary is re-proved before anything
+      // destructive begins rather than only once at entry.
+      const worktreeFenced = (): boolean => {
+        const latest = this.store.readMeta(record.sessionId);
+        return !latest ||
+          this.liveWorktreeUsesPath(record.sessionId, record.worktreePath) ||
+          this.providerTurnUsesPath(record.sessionId, latest.context, record.worktreePath) ||
+          this.transitioningProviderUsesPath(record.sessionId, latest.context, record.worktreePath) ||
+          this.launchingSelectionUsesPath(record.sessionId, latest, record.worktreePath);
+      };
+      const logFenced = () => {
+        this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} deferred while a provider turn or launch uses the worktree`);
+      };
+      if (worktreeFenced()) return logFenced();
+      if (!record.worktreeRemovedAt) {
+        await this.refreshDeferredMergedHead(record);
+        if (worktreeFenced()) return logFenced();
       }
 
       const cleanupLeaseOwner = `${this.lockOwner}:cleanup-replay:${randomUUID()}`;
@@ -11591,7 +11778,10 @@ export class SessionManager {
       }
       try {
         if (!record.worktreeRemovedAt) {
-          const removal = await this.removeRecordedWorktree(record, meta);
+          const removal = await this.removeRecordedWorktree(
+            record,
+            this.store.readMeta(record.sessionId) ?? meta,
+          );
           if (!removal.removed) {
             this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after safe worktree removal`);
             return;
@@ -11621,6 +11811,7 @@ export class SessionManager {
   private removeWorktreeCleanupRecord(record: Pick<WorktreeCleanupRecord, "sessionId" | "worktreeId">): boolean {
     try {
       this.cleanupJournal.remove(record.sessionId, record.worktreeId ?? "legacy");
+      this.deferredMergedHeadRetryAt.delete(this.deferredMergedHeadKey(record));
       return true;
     } catch {
       // Journal persistence can fail after the external resources were successfully reclaimed.
@@ -12232,6 +12423,7 @@ export class SessionManager {
     }
     this.sessionCommandAuthority.clearAll();
     this.launchGenerations.clear();
+    this.launchingWorktreePaths.clear();
     this.preLaunchAdmissionGenerations.clear();
     clearInterval(this.providerStateReconcileTimer);
     clearInterval(this.historyMaintenanceTimer);

@@ -1640,7 +1640,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "discard_worktree",
-    description: "Permanently retire a runner-owned worktree and branch only when they are clean and fully pushed. Always use this instead of `git worktree remove` for a session-linked path: when a provider still owns the path, it durably defers retirement until provider exit, then applies the managed safety checks and clears the selection and inventory together. Subject to session permissions and governance policies.",
+    description: "Permanently retire a runner-owned worktree and branch only when they are clean and fully pushed. Always use this instead of `git worktree remove` for a session-linked path: when a provider still owns the path, it durably defers retirement until provider exit, then applies the managed safety checks and clears the selection and inventory together. A `deferred` retirement needs no follow-up — it replays on its own; a runner too old to record one answers with an explicit refusal that names the recovery step instead. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
