@@ -89,7 +89,7 @@ async function selectCommonProjectWithoutPointer(page: Page, touch = false) {
 }
 
 const permissionPresets = (page: Page) =>
-  page.getByRole("radiogroup", { name: "Permission Preset" });
+  page.getByRole("radiogroup", { name: "Session Role" });
 
 /**
  * Whether an element's own content overflows the box it is drawn in.

@@ -212,6 +212,8 @@ import {
   type WorkflowInstanceView,
   type WorkflowNodeState,
   type WorkflowNodeOutcome,
+  sessionRole,
+  type SessionRole,
 } from "@wollipog/protocol";
 
 const OUTBOUND_EVENT_PENDING_LIMIT = 100;
@@ -524,6 +526,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   parent_control_policy TEXT,
   parent_control_policy_revision INTEGER NOT NULL DEFAULT 0,
   orchestrator_policy TEXT,
+  session_role TEXT CHECK (session_role IS NULL OR session_role IN ('normal','orchestrator')),
   policy_resume_status TEXT,
   driver         TEXT NOT NULL DEFAULT 'acp',
   model          TEXT,
@@ -2407,6 +2410,7 @@ interface SessionRow {
   parent_control_policy: string | null;
   parent_control_policy_revision: number;
   orchestrator_policy: string | null;
+  session_role: string | null;
   driver: string;
   model: string | null;
   resolved_model: string | null;
@@ -3351,6 +3355,8 @@ export interface NewSessionInput {
   parentControl?: ParentControlMode;
   parentControlPolicy?: { decisions: ParentControlDecisionPolicy };
   orchestratorPolicy?: OrchestratorCampaignPolicy;
+  /** Fixed session role. Omitted callers derive it from the coupled preset or campaign policy. */
+  role?: SessionRole;
   /** Ad-hoc browsed directory (when workspaceId is null); lets restart re-launch from it. */
   workspacePath?: string | null;
   acpSessionContext?: AcpSessionContextConfig;
@@ -4623,6 +4629,7 @@ export class ControlPlaneDb {
       "parent_control_policy TEXT",
       "parent_control_policy_revision INTEGER NOT NULL DEFAULT 0",
       "orchestrator_policy TEXT",
+      "session_role TEXT CHECK (session_role IS NULL OR session_role IN ('normal','orchestrator'))",
     ]) {
       try {
         db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`);
@@ -4732,6 +4739,14 @@ export class ControlPlaneDb {
       };
       saveLegacyOrchestrator.run(JSON.stringify(policy), row.id);
     }
+    // The role becomes an explicit column. Existing Orchestrators keep the coupled preset in
+    // permission_mode, so their provider policy, isolation, and delegation are unchanged; only the
+    // representation of the role moves. Rows an older control plane writes later stay NULL and
+    // resolve through the legacy preset value on read.
+    db.exec(
+      `UPDATE sessions SET session_role='orchestrator'
+       WHERE session_role IS NULL AND (permission_mode='orchestrator' OR orchestrator_policy IS NOT NULL)`,
+    );
     db.exec(
       "CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id, archived, updated_at DESC, id)",
     );
@@ -10768,15 +10783,16 @@ export class ControlPlaneDb {
 
   sessionWasHumanCreatedOrchestrator(sessionId: string): boolean {
     const row = this.stmt(
-      "SELECT creation_actor, permission_mode, orchestrator_policy, parent_session_id FROM sessions WHERE id=?",
+      "SELECT creation_actor, permission_mode, session_role, orchestrator_policy, parent_session_id FROM sessions WHERE id=?",
     ).get(sessionId) as unknown as {
       creation_actor: string | null;
       permission_mode: string | null;
+      session_role: string | null;
       orchestrator_policy: string | null;
       parent_session_id: string | null;
     } | undefined;
     return row?.creation_actor === "human" && row.parent_session_id === null &&
-      row.permission_mode === "orchestrator" &&
+      sessionRole({ role: row.session_role as SessionRole | null, permissionMode: row.permission_mode }) === "orchestrator" &&
       orchestratorCampaignPolicyFromJson(row.orchestrator_policy) !== null;
   }
 
@@ -10844,8 +10860,8 @@ export class ControlPlaneDb {
          `INSERT INTO sessions
            (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, status, run_id, use_worktree, archived, creation_actor,
              driver, model, effort, service_tier, permission_mode, parent_control, parent_control_policy,
-             parent_control_policy_revision, orchestrator_policy, workspace_path, acp_session_context, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             parent_control_policy_revision, orchestrator_policy, session_role, workspace_path, acp_session_context, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.id,
@@ -10869,6 +10885,9 @@ export class ControlPlaneDb {
         input.parentControlPolicy ? JSON.stringify(input.parentControlPolicy.decisions) : null,
         input.parentControlPolicy ? 1 : 0,
         input.orchestratorPolicy ? JSON.stringify(input.orchestratorPolicy) : null,
+        input.role ?? (input.orchestratorPolicy
+          ? "orchestrator"
+          : sessionRole({ permissionMode: input.config.permissionMode ?? null })),
         input.workspacePath ?? null,
         input.acpSessionContext ? JSON.stringify(input.acpSessionContext) : null,
         input.now,
@@ -12668,7 +12687,7 @@ export class ControlPlaneDb {
   listOrchestratorCampaignSessionIds(runnerId?: string): string[] {
     const rows = this.stmt(
       `SELECT id FROM sessions
-       WHERE permission_mode='orchestrator' AND orchestrator_policy IS NOT NULL
+       WHERE (session_role='orchestrator' OR permission_mode='orchestrator') AND orchestrator_policy IS NOT NULL
          AND parent_session_id IS NULL AND archived=0
          AND status NOT IN ('completed','failed','stopped') ${runnerId ? "AND runner_id=?" : ""}
        ORDER BY created_at,id`,
@@ -12684,7 +12703,7 @@ export class ControlPlaneDb {
   } | null {
     const row = this.stmt(
       `SELECT runner_id,status,archived,pending_approval FROM sessions
-       WHERE id=? AND permission_mode='orchestrator' AND orchestrator_policy IS NOT NULL`,
+       WHERE id=? AND (session_role='orchestrator' OR permission_mode='orchestrator') AND orchestrator_policy IS NOT NULL`,
     ).get(campaignSessionId) as {
       runner_id: string; status: SessionStatus; archived: number; pending_approval: string | null;
     } | undefined;
@@ -16676,6 +16695,7 @@ export class ControlPlaneDb {
           decisions: decisions ?? { ...HUMAN_ONLY_PARENT_CONTROL_POLICY },
         };
       })(),
+      role: sessionRole({ role: row.session_role as SessionRole | null, permissionMode: row.permission_mode }),
       ...(() => {
         const policy = orchestratorCampaignPolicyFromJson(row.orchestrator_policy);
         return policy ? { orchestratorPolicy: policy } : {};

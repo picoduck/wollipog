@@ -528,3 +528,63 @@ test("startup sweep removes final and interrupted staging files while retaining 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("an Orchestrator with independent provider permissions keeps the ordinary Claude launch and gains only additive tools", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-additive-orchestrator-control-"));
+  try {
+    const host: AgentControlHost = {
+      isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root, platform: "linux",
+    };
+    const control = { controlPlaneUrl: "ws://127.0.0.1:4317/runner", controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      executionIsolationMode: "provider" as const, orchestratorProjectPaths: ["/other-project"] };
+    const launch = spec("claude-code");
+    launch.args = ["--mcp-config", "/home/user/mcp.json", "--add-dir", "/home/user/notes", "--allowedTools", "Bash(npm test:*)"];
+    launch.config = { permissionMode: "acceptEdits" };
+    launch.orchestrator = { strictProjectIsolation: false };
+    provisionAgentControl(launch, control, () => {}, host);
+    const args = [...launch.args];
+    assert.equal(launch.env.WOLLIPOG_PERMISSION_PRESET, "orchestrator", "the MCP surface still exposes campaign tools");
+    for (const flag of ["--strict-mcp-config", "--tools", "--permission-mode", "--disallowedTools",
+      "--setting-sources", "--settings", "--disable-slash-commands"]) {
+      assert.equal(args.some((arg) => arg === flag || arg.startsWith(`${flag}=`)), false, `${flag} is never injected`);
+    }
+    for (const kept of ["/home/user/mcp.json", "/home/user/notes", "Bash(npm test:*)"]) {
+      assert.ok(args.includes(kept), `user configuration ${kept} survives`);
+    }
+    const mcpConfig = agentControlMcpConfigPath(root, launch.sessionId);
+    assert.ok(args.includes(mcpConfig), "the general Wollipog MCP config sits beside the user's servers");
+    const config = JSON.parse(readFileSync(mcpConfig, "utf8"));
+    assert.equal(config.mcpServers.wollipog.env.WOLLIPOG_PERMISSION_PRESET, "orchestrator");
+    assert.deepEqual(args.flatMap((arg, index) => arg === "--allowedTools" ? [args[index + 1]] : []),
+      ["Bash(npm test:*)", "mcp__wollipog__*"], "only Wollipog's own tools are pre-authorized");
+    assert.deepEqual(args.flatMap((arg, index) => arg === "--add-dir" ? [args[index + 1]] : []),
+      ["/home/user/notes", "/other-project", "/repo"]);
+    const prompt = args[args.indexOf("--append-system-prompt") + 1]!;
+    assert.match(prompt, /^You are running with the Wollipog Orchestrator role/);
+    assert.match(prompt, /Strict Project Isolation is disabled/);
+    provisionAgentControl(launch, control, () => {}, host);
+    assert.deepEqual(launch.args, args, "resume is idempotent");
+
+    const strict = spec("claude-code");
+    strict.sessionId = "s_strict_independent";
+    strict.config = { permissionMode: "acceptEdits" };
+    strict.orchestrator = { strictProjectIsolation: true };
+    assert.throws(() => provisionAgentControl(strict, control, () => {}, host),
+      /Strict Project Isolation requires the Orchestrator preset/);
+    const codex = spec("codex");
+    codex.sessionId = "s_codex_independent";
+    codex.config = { permissionMode: "on-request" };
+    codex.orchestrator = { strictProjectIsolation: false };
+    assert.throws(() => provisionAgentControl(codex, control, () => {}, host), /native Claude Code/);
+    const outdated = spec("claude-code");
+    outdated.sessionId = "s_outdated_control_plane";
+    outdated.config = { permissionMode: "acceptEdits" };
+    outdated.orchestrator = { strictProjectIsolation: false };
+    assert.throws(() => provisionAgentControl(outdated, {
+      ...control, controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole - 1,
+    }, () => {}, host), /protocol-v159/);
+    for (const refused of [strict, codex, outdated]) {
+      assert.equal(existsSync(agentControlTokenPath(root, refused.sessionId)), false, "refusal precedes credential minting");
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

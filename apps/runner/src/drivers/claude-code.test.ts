@@ -3730,23 +3730,35 @@ test("strictly isolated Claude Orchestrators auto-deny commands outside the rout
   assert.match(JSON.parse(writes[0]!).response.response.message, /Strict Project Isolation/);
 });
 
-test("stale Orchestrator metadata is inert outside Orchestrator permission mode", () => {
+test("an Orchestrator with independent provider permissions keeps the routine-operation contract", () => {
+  // The launch policy is the role signal (protocol v159): a non-strict Claude Orchestrator that
+  // kept its ordinary permission mode still auto-authorizes routine coordination and still
+  // returns everything else to the ordinary provider approval path.
   const h = makeHarness({
-    config: { permissionMode: "default" },
-    orchestrator: { strictProjectIsolation: true, issueNumbers: [1209] },
+    config: { permissionMode: "acceptEdits" },
+    orchestrator: { strictProjectIsolation: false, issueNumbers: [1209] },
   });
   const writes: string[] = [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
   h.feed({
     type: "control_request",
-    request_id: "stale-policy",
+    request_id: "routine-claim",
     request: { subtype: "can_use_tool", tool_name: "Bash", input: {
       command: "gh issue edit 1209 --add-assignee @me",
     } },
   });
-  assert.equal(writes.length, 0);
-  assert.equal(h.events[0]?.kind, "permission_request");
+  assert.equal(writes.length, 1);
+  assert.equal(JSON.parse(writes[0]!).response.response.behavior, "allow");
+  assert.equal(h.events.length, 0, "a routine coordination command never becomes an approval card");
+  h.feed({
+    type: "control_request",
+    request_id: "ordinary-edit",
+    request: { subtype: "can_use_tool", tool_name: "Write", input: { file_path: "/tmp/work/notes.md", content: "plan" } },
+  });
+  assert.equal(writes.length, 1, "non-routine work is neither auto-allowed nor auto-denied");
+  assert.equal(h.events[0]?.kind, "permission_request",
+    "the selected provider permission mode keeps its normal approval semantics");
 });
 
 test("strictly isolated Claude Orchestrators still surface typed human questions", () => {

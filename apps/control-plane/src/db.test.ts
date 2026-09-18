@@ -6655,3 +6655,38 @@ test("a budgeted session whose usage cannot be priced reads as unpriced until a 
   db.acknowledgeSessionCostUnpriced("sess-1", 3_600_700);
   assert.equal(db.getSession("sess-1")!.costUnpricedAcknowledged, true);
 });
+
+test("session role is persisted explicitly and backfilled for existing Orchestrators without broadening them", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-role-migration-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    initial.registerRunner(meta(), 500);
+    initial.createSession({ ...newSession(), id: "legacy", config: { permissionMode: "orchestrator" } });
+    initial.createSession({ ...newSession(), id: "plain", config: { permissionMode: "acceptEdits" } });
+    initial.close();
+
+    const legacy = new DatabaseSync(path);
+    legacy.exec("ALTER TABLE sessions DROP COLUMN session_role");
+    legacy.close();
+
+    const upgraded = ControlPlaneDb.open(path);
+    assert.equal(upgraded.getSession("legacy")?.role, "orchestrator");
+    assert.equal(upgraded.getSession("legacy")?.permissionMode, "orchestrator",
+      "migration keeps the coupled preset, so provider policy and isolation are unchanged");
+    assert.equal(upgraded.getSession("plain")?.role, "normal");
+    assert.deepEqual(
+      upgraded.raw().prepare("SELECT id, session_role FROM sessions ORDER BY id").all().map((row) => ({ ...row })),
+      [{ id: "legacy", session_role: "orchestrator" }, { id: "plain", session_role: null }],
+      "only Orchestrators are backfilled; other rows resolve through the legacy value on read",
+    );
+    upgraded.createSession({ ...newSession(), id: "independent", role: "orchestrator", config: { permissionMode: "acceptEdits" } });
+    const independent = upgraded.getSession("independent");
+    assert.equal(independent?.role, "orchestrator");
+    assert.equal(independent?.permissionMode, "acceptEdits", "the role does not overwrite the provider permission mode");
+    assert.equal(upgraded.getSession("plain")?.role, "normal");
+    upgraded.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

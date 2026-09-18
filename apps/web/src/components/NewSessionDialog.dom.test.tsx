@@ -269,7 +269,7 @@ function labelledNumberInput(container: HTMLDivElement, label: string): HTMLInpu
  */
 async function choosePermissionPreset(container: HTMLDivElement, label: string) {
   const option = permissionPresetCard(container, label);
-  assert.ok(option, `Permission Preset offers ${label}`);
+  assert.ok(option, `Session Role offers ${label}`);
   await act(async () => { option.click(); });
 }
 
@@ -284,8 +284,8 @@ async function chooseSelectOption(container: HTMLDivElement, label: string, opti
 }
 
 function permissionPresetGroup(container: HTMLDivElement): Element {
-  const group = container.querySelector('[role="radiogroup"][aria-label="Permission Preset"]');
-  assert.ok(group, "Permission Preset renders an always-visible choice group");
+  const group = container.querySelector('[role="radiogroup"][aria-label="Session Role"]');
+  assert.ok(group, "Session Role renders an always-visible choice group");
   return group;
 }
 
@@ -1136,8 +1136,10 @@ test("saved Orchestrator default is visible and gates Native TUI without requiri
     }] }), undefined, strictOrchestratorDefaults);
     try {
       await act(async () => { await selectProject(fixture.container, project.id); });
-      assert.ok(permissionPresetCard(fixture.container, "Saved Default — Orchestrator"),
-        "the saved default names itself on an always-visible card rather than inside a closed menu");
+      assert.equal(permissionPresetCard(fixture.container, "Orchestrator")?.getAttribute("aria-checked"), "true",
+        "a saved Orchestrator default selects the role without an explicit override");
+      assert.match(fixture.container.textContent!, /Saved Default — Orchestrator/,
+        "the saved default names itself in the always-visible Provider Permissions summary");
       const tui = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
         .find((button) => button.textContent?.includes("Native TUI"))!;
       assert.equal(cardRefused(tui), protocolVersion < 112);
@@ -1629,7 +1631,7 @@ test("both permission presets are on screen without opening anything", async () 
     // No trigger, so nothing can be behind one. This is the assertion that would have failed
     // before the migration, when the group was a closed listbox with a single visible button.
     assert.equal(
-      fixture.container.querySelector('button[aria-label^="Permission Preset:"]'), null,
+      fixture.container.querySelector('button[aria-label^="Session Role:"]'), null,
       "the preset no longer hides behind a popover trigger",
     );
     assert.equal(fixture.container.querySelector(".ui-select-list"), null, "and opens no list");
@@ -1750,7 +1752,7 @@ test("the Location groups and Harness share one control family", async () => {
   const fixture = await mountFixture();
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    for (const label of ["Project Location", "Permission Preset", "Harness"]) {
+    for (const label of ["Project Location", "Session Role", "Harness"]) {
       const group = fixture.container.querySelector(`[role="radiogroup"][aria-label="${label}"]`);
       assert.ok(group, `${label} is a labelled radiogroup`);
       assert.ok(group.querySelector(".ui-choice-card"), `${label} uses the shared Choice Card`);
@@ -1761,4 +1763,88 @@ test("the Location groups and Harness share one control family", async () => {
   } finally {
     await unmountFixture(fixture);
   }
+});
+
+test("Orchestrator is an additive role that keeps the harness's ordinary provider permissions", async () => {
+  const claudeRunner: RunnerView = {
+    ...runner, protocolVersion: PROTOCOL_VERSION,
+    agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "acceptEdits", "orchestrator"],
+    } })),
+  };
+  const savedAcceptEdits = async (): Promise<AgentHarnessDefaultsView> => ({ defaults: [{
+    agentId: "claude", driver: "claude-code", context: { kind: "native" }, name: "Claude",
+    installations: [], compatibleInstallations: 1, preference: { permissionMode: "acceptEdits" },
+  }] });
+  const fixture = await mountFixture({ runners: [claudeRunner], capabilities: {
+    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+  } }, undefined, undefined, savedAcceptEdits);
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    const providerPermissions = fixture.container.querySelector('[role="group"][aria-label="Provider Permissions"]');
+    assert.ok(providerPermissions, "Provider Permissions is an independent, always-visible control");
+    assert.match(providerPermissions.textContent!, /Saved Default — Auto-?Accept Edits/i);
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    assert.match(providerPermissions.textContent!, /Saved Default — Auto-?Accept Edits/i,
+      "selecting Orchestrator does not consume the provider permission-mode selection");
+    assert.match(providerPermissions.textContent!, /same permission modes as a normal session/);
+    assert.doesNotMatch(providerPermissions.textContent!, /Orchestrator Preset/);
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests.length, 1);
+    assert.equal(fixture.requests[0]?.role, "orchestrator");
+    assert.equal(fixture.requests[0]?.config?.permissionMode, undefined,
+      "the provider mode is resolved by the server exactly as for a normal session");
+  } finally { await unmountFixture(fixture); }
+
+  const strict = await mountFixture({ runners: [claudeRunner], capabilities: {
+    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+  } }, undefined, undefined, savedAcceptEdits, undefined, strictOrchestratorDefaults);
+  try {
+    await act(async () => { await selectProject(strict.container, project.id); });
+    await choosePermissionPreset(strict.container, "Orchestrator");
+    const providerPermissions = strict.container.querySelector('[role="group"][aria-label="Provider Permissions"]')!;
+    assert.match(providerPermissions.textContent!, /Orchestrator Preset — Harness-Enforced/);
+    assert.match(providerPermissions.textContent!, /Strict Project Isolation is enforced/,
+      "the preset is disclosed with the policy that selects it rather than inferred from the role");
+  } finally { await unmountFixture(strict); }
+
+  const legacyControlPlane = await mountFixture({ runners: [claudeRunner] }, undefined, undefined, savedAcceptEdits);
+  try {
+    await act(async () => { await selectProject(legacyControlPlane.container, project.id); });
+    await choosePermissionPreset(legacyControlPlane.container, "Orchestrator");
+    const providerPermissions = legacyControlPlane.container.querySelector('[role="group"][aria-label="Provider Permissions"]')!;
+    assert.match(providerPermissions.textContent!, /Update the control plane/);
+    await act(async () => { createButton(legacyControlPlane.container).click(); });
+    assert.equal(legacyControlPlane.requests[0]?.role, undefined, "older control planes never receive the field");
+    assert.equal(legacyControlPlane.requests[0]?.config?.permissionMode, "orchestrator",
+      "the coupled preset remains the only encoding an older control plane understands");
+  } finally { await unmountFixture(legacyControlPlane); }
+});
+
+test("choosing Normal explicitly overrides a saved Orchestrator harness default on a current control plane", async () => {
+  const claudeRunner: RunnerView = {
+    ...runner, protocolVersion: PROTOCOL_VERSION,
+    agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "acceptEdits", "orchestrator"],
+    } })),
+  };
+  const fixture = await mountFixture({ runners: [claudeRunner], capabilities: {
+    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+  } }, undefined, undefined, async () => ({ defaults: [{
+    agentId: "claude", driver: "claude-code", context: { kind: "native" }, name: "Claude",
+    installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
+  }] }));
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    assert.equal(permissionPresetCard(fixture.container, "Orchestrator")?.getAttribute("aria-checked"), "true");
+    assert.match(fixture.container.textContent!, /Choose Normal to ignore it for this session/);
+    await choosePermissionPreset(fixture.container, "Normal");
+    assert.equal(permissionPresetCard(fixture.container, "Normal")?.getAttribute("aria-checked"), "true");
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests[0]?.role, "normal");
+    assert.equal(fixture.requests[0]?.config?.permissionMode, undefined);
+    assert.equal(fixture.requests[0]?.orchestrator, undefined);
+  } finally { await unmountFixture(fixture); }
 });

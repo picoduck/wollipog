@@ -539,6 +539,7 @@ export class Hub {
         stopFailureRecovery: true,
         sessionReminders: true,
         worktreeSetupConfig: true,
+        orchestratorRole: true,
       },
       runners,
       boxes: globalAdmin ? this.db.listBoxes() : [],

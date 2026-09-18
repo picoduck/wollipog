@@ -154,8 +154,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 159", () => {
-  assert.equal(PROTOCOL_VERSION, 159);
+test("PROTOCOL_VERSION is 160", () => {
+  assert.equal(PROTOCOL_VERSION, 160);
   assert.equal(runnerSupportsProtocol(136, "capacityLockDiagnostics"), false);
   assert.equal(runnerSupportsProtocol(137, "capacityLockDiagnostics"), true);
   assert.equal(runnerSupportsProtocol(137, "sessionAgentControlReasoningEffort"), false);
@@ -178,6 +178,8 @@ test("PROTOCOL_VERSION is 159", () => {
   assert.equal(runnerSupportsProtocol(157, "orchestratorChildHarnessPolicy"), true);
   assert.equal(runnerSupportsProtocol(157, "orchestratorIssueScope"), false);
   assert.equal(runnerSupportsProtocol(158, "orchestratorIssueScope"), true);
+  assert.equal(runnerSupportsProtocol(159, "orchestratorAdditiveRole"), false);
+  assert.equal(runnerSupportsProtocol(160, "orchestratorAdditiveRole"), true);
   assert.equal(runnerSupportsProtocol(145, "worktreeSetupConfig"), false);
   assert.equal(runnerSupportsProtocol(146, "worktreeSetupConfig"), true);
   assert.equal(runnerSupportsProtocol(134, "runnerCapacityDimensions"), false);
@@ -1266,4 +1268,22 @@ test("scope audience containment is conservative and organization-bounded", () =
   for (const [name, narrower, wider, expected] of cases) {
     assert.equal(scopeAudienceContained(narrower, wider), expected, name);
   }
+});
+
+test("the Orchestrator role is independent of the provider permission mode", async () => {
+  const { isOrchestratorLaunch, sessionRole, usesOrchestratorPresetPermissions } = await import("./index.js");
+  assert.equal(sessionRole({ role: "orchestrator", permissionMode: "acceptEdits" }), "orchestrator");
+  assert.equal(sessionRole({ role: "normal", permissionMode: "orchestrator" }), "normal",
+    "an explicit role wins over the legacy preset literal");
+  assert.equal(sessionRole({ permissionMode: "orchestrator" }), "orchestrator",
+    "pre-v159 peers encode the role only as the coupled preset");
+  assert.equal(sessionRole({ permissionMode: "default" }), "normal");
+  assert.equal(sessionRole({ role: null, permissionMode: null }), "normal");
+  assert.equal(isOrchestratorLaunch({ config: { permissionMode: "acceptEdits" }, orchestrator: { strictProjectIsolation: false } }), true,
+    "a v144+ launch policy is the role signal for every provider permission mode");
+  assert.equal(isOrchestratorLaunch({ config: { permissionMode: "orchestrator" } }), true);
+  assert.equal(isOrchestratorLaunch({ config: { permissionMode: "acceptEdits" } }), false);
+  assert.equal(usesOrchestratorPresetPermissions({ permissionMode: "orchestrator" }), true);
+  assert.equal(usesOrchestratorPresetPermissions({ permissionMode: "acceptEdits" }), false);
+  assert.equal(usesOrchestratorPresetPermissions(undefined), false);
 });

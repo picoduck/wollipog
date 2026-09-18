@@ -4,7 +4,7 @@
  */
 
 import os from "node:os";
-import { handoffDestinationError, type SessionConfig } from "@wollipog/protocol";
+import { handoffDestinationError, sessionRole, type SessionConfig } from "@wollipog/protocol";
 import { writeSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -472,7 +472,7 @@ function authedAgentControl(req: { headers: { authorization?: string; [key: stri
       db.agentControlCredentialValid(session.id, session.runnerId, hashToken(bearer))),
     claimedSessionId: claimed,
     session,
-    hasLiveOrchestratorTui: Boolean(session?.permissionMode === "orchestrator" &&
+    hasLiveOrchestratorTui: Boolean(session && sessionRole(session) === "orchestrator" &&
       runnerSupportsProtocol(db.getRunner(session.runnerId)?.protocolVersion, "orchestratorNativeTui") &&
       hub.isRunnerOnline(session.runnerId) &&
       shellRegistry.list(session.id).some((shell) => shell.kind === "agent_tui" && shell.status === "running")),
@@ -512,7 +512,7 @@ function authedApiPrincipal(
   if (local) return local;
   const routePath = req.routeOptions?.url ?? req.url.split("?")[0] ?? "";
   const agentControl = authedAgentControl(req);
-  if (agentControl && isAgentControlApiRouteAllowed(req.method, routePath, agentControl.permissionMode)) {
+  if (agentControl && isAgentControlApiRouteAllowed(req.method, routePath, sessionRole(agentControl))) {
     const delegatedScope = db.sessionScope(agentControl.id);
     if (!delegatedScope) return null;
     return {
@@ -522,7 +522,7 @@ function authedApiPrincipal(
         kind: "agent",
         actorId: agentControl.id,
         credentialSessionId: agentControl.id,
-        ...(agentControl.permissionMode === "orchestrator" ? { orchestrator: true } : {}),
+        ...(sessionRole(agentControl) === "orchestrator" ? { orchestrator: true } : {}),
         organizationId: delegatedScope.organizationId,
         delegatedScope,
       },

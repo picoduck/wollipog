@@ -4,15 +4,15 @@ import { PROTOCOL_VERSION } from "@wollipog/protocol";
 test.use({ video: "on" });
 
 /**
- * A Permission Preset card, scoped to its own radiogroup.
+ * A Session Role card, scoped to its own radiogroup.
  *
- * Scoped because the dialog has three radiogroups — Permission Preset, Harness and Mode — and a
- * bare `getByRole("radio")` matches across all of them. The name is anchored at the start because a
- * ChoiceCard's accessible name is its title followed by its description, and both preset cards
- * mention "Orchestrator": the saved-default card's name begins "Saved Default — ".
+ * Scoped because the dialog has three radiogroups — Session Role, Harness and Mode — and a bare
+ * `getByRole("radio")` matches across all of them. The name is anchored at the start because a
+ * ChoiceCard's accessible name is its title followed by its description, and the Normal card's
+ * description also mentions the harness.
  */
 function presetCard(dialog: Locator, name: RegExp): Locator {
-  return dialog.getByRole("radiogroup", { name: "Permission Preset" }).getByRole("radio", { name });
+  return dialog.getByRole("radiogroup", { name: "Session Role" }).getByRole("radio", { name });
 }
 
 
@@ -65,9 +65,10 @@ for (const theme of ["light", "dark"] as const) {
       await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
       await page.getByRole("menuitem", { name: "New Session Here" }).click();
       const dialog = page.getByRole("dialog", { name: "New Session" });
-      // #832 moved Permission Preset from a popover Select to always-visible ChoiceCards, so the
-      // saved default now STATES itself on a card instead of inside a closed trigger's name.
-      await expect(presetCard(dialog, /^Saved Default — Orchestrator/)).toBeVisible();
+      // A saved Orchestrator harness default selects the role on the user's behalf and names
+      // itself in the always-visible Provider Permissions summary (#1281 separated the two).
+      await expect(presetCard(dialog, /^Orchestrator/)).toHaveAttribute("aria-checked", "true");
+      await expect(dialog.getByText(/Saved Default — Orchestrator/)).toBeVisible();
       await dialog.getByRole("radio", { name: /^Native TUI/ }).click();
       await expect(dialog.getByText(/Usage Accounting: Unavailable/)).toBeVisible();
       await expect(dialog.getByText(/Native TUI spending and tool calls are not included/)).toBeVisible();
@@ -133,4 +134,59 @@ for (const theme of ["light", "dark"] as const) {
     });
     }
   }
+}
+
+for (const scenario of [
+  { name: "desktop light", viewport: { width: 1280, height: 1000 }, theme: "light" },
+  { name: "mobile dark", viewport: { width: 390, height: 844 }, theme: "dark" },
+] as const) {
+  test(`native Claude Orchestrator keeps ordinary provider permissions ${scenario.name}`, async ({ page }, testInfo) => {
+    await page.setViewportSize(scenario.viewport);
+    await page.evaluate(({ theme, protocolVersion }) => {
+      document.documentElement.dataset.theme = theme;
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(protocolVersion);
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.setOrchestratorAgentFixture({
+        context: "native",
+        permissionModes: ["default", "acceptEdits", "orchestrator"],
+        driver: "claude-code",
+        controlPlaneRole: true,
+      });
+    }, { theme: scenario.theme, protocolVersion: PROTOCOL_VERSION });
+    await page.getByRole("tab", { name: /Alpha/ }).click();
+    await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+    await page.getByRole("menuitem", { name: "New Session Here" }).click();
+    const dialog = page.getByRole("dialog", { name: "New Session" });
+    const providerPermissions = dialog.getByRole("group", { name: "Provider Permissions" });
+    await expect(presetCard(dialog, /^Normal/)).toHaveAttribute("aria-checked", "true");
+    await expect(providerPermissions).toContainText("Harness Default");
+    await providerPermissions.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath("role-normal.png"), fullPage: true });
+
+    const orchestratorCard = presetCard(dialog, /^Orchestrator/);
+    await orchestratorCard.click();
+    await expect(orchestratorCard).toHaveAttribute("aria-checked", "true");
+    // #1281: the role is additive. The provider permission summary is unchanged by the role and
+    // the harness keeps its ordinary modes, so no preset is announced.
+    await expect(providerPermissions).toContainText("Harness Default");
+    await expect(providerPermissions).toContainText(/same permission modes as a normal session/);
+    await expect(providerPermissions).not.toContainText("Orchestrator Preset");
+    await providerPermissions.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath("role-orchestrator-independent.png"), fullPage: true });
+
+    await dialog.getByRole("button", { name: /Strict Project Isolation: Disabled/ }).click();
+    await dialog.getByRole("option", { name: /^Enabled/ }).click();
+    await expect(providerPermissions).toContainText("Orchestrator Preset — Harness-Enforced");
+    await expect(providerPermissions).toContainText("Strict Project Isolation is enforced through the harness-owned Orchestrator preset.");
+    await providerPermissions.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath("role-orchestrator-strict-preset.png"), fullPage: true });
+
+    await dialog.getByRole("button", { name: /Strict Project Isolation: Enabled/ }).click();
+    await dialog.getByRole("option", { name: /^Disabled/ }).click();
+    await expect(providerPermissions).not.toContainText("Orchestrator Preset");
+    await dialog.getByRole("button", { name: "Create Session" }).click();
+    await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
+      .toMatchObject({ role: "orchestrator" });
+    expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()?.config?.permissionMode))
+      .toBeUndefined();
+  });
 }

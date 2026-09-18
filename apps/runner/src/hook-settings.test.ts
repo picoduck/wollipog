@@ -629,3 +629,17 @@ test("runner-scoped hook directories prevent one runner startup from sweeping an
     assert.equal(existsSync(claudeHookReadyPath(secondSettings)), true);
   });
 });
+
+test("an Orchestrator with independent provider permissions keeps ordinary hook provisioning", () => {
+  temp((dir) => {
+    const launch = spec({ config: { permissionMode: "acceptEdits" }, orchestrator: { strictProjectIsolation: false } });
+    const registrations: string[] = [];
+    provisionClaudeHooks(launch, {
+      ...config,
+      registerCredential: (_sessionId, tokenHash) => registrations.push(tokenHash),
+    }, () => {}, host(dir));
+    assert.equal(registrations.length, 1, "hooks are not removed merely because the session is an Orchestrator");
+    assert.ok(existsSync(claudeHookSettingsPath(dir, launch.sessionId)));
+    assert.ok(launch.args.includes("--settings"));
+  });
+});

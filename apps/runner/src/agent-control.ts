@@ -15,7 +15,9 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import {
+  isOrchestratorLaunch,
   runnerSupportsProtocol,
+  usesOrchestratorPresetPermissions,
   type AcpMcpStdioServer,
   type AgentContext,
   type AgentDefinition,
@@ -41,7 +43,9 @@ import {
 import { installWslBwrapLauncher } from "./wsl-bwrap-launcher.js";
 import {
   ORCHESTRATOR_ENV_KEY,
+  additiveOrchestratorLaunchArgs,
   orchestratorLaunchArgs,
+  stripAdditiveOrchestratorLaunchArgs,
   stripOrchestratorLaunchArgs,
   supportsClaudeAgentAcpOrchestrator,
   supportsNativeOrchestratorBoundary,
@@ -269,9 +273,25 @@ export function provisionAgentControl(
   const context = spec.context ?? { kind: "native" as const };
   const targetIsHost = !spec.executionTarget || spec.executionTarget.adapter === "host";
   const nativeHostExecution = context.kind === "native" && targetIsHost;
-  const wslOrchestrator = context.kind === "wsl" && targetIsHost && spec.config?.permissionMode === "orchestrator";
-  const orchestrator = spec.config?.permissionMode === "orchestrator";
+  const orchestrator = isOrchestratorLaunch(spec);
+  // The coupled preset replaces the provider policy with the runner-owned planning surface. An
+  // Orchestrator with an ordinary provider mode (protocol v159) keeps its normal launch and only
+  // gains the additive orchestration arguments below.
+  const presetPermissions = usesOrchestratorPresetPermissions(spec.config);
+  const additiveOrchestrator = orchestrator && !presetPermissions;
+  const wslOrchestrator = context.kind === "wsl" && targetIsHost && orchestrator && presetPermissions;
   const strictProjectIsolation = orchestrator && spec.orchestrator?.strictProjectIsolation !== false;
+  if (additiveOrchestrator) {
+    if (!runnerSupportsProtocol(config.controlPlaneProtocolVersion, "orchestratorAdditiveRole")) {
+      throw new Error("an Orchestrator with independent provider permissions requires a protocol-v159 control plane");
+    }
+    if (strictProjectIsolation) {
+      throw new Error("Strict Project Isolation requires the Orchestrator preset permission mode");
+    }
+    if (!nativeHostExecution || spec.driver !== "claude-code") {
+      throw new Error("independent provider permissions are supported only for the native Claude Code Orchestrator on the host");
+    }
+  }
   const orchestratorProjectPaths = [...new Set([
     ...(config.orchestratorProjectPaths ?? []),
     spec.workspacePath,
@@ -426,7 +446,16 @@ export function provisionAgentControl(
     }
     spec.args.push("--extension", file);
   }
-  if (orchestrator) {
+  if (additiveOrchestrator) {
+    spec.env[ORCHESTRATOR_ENV_KEY] = "orchestrator";
+    spec.args = stripAdditiveOrchestratorLaunchArgs(spec.args, orchestratorProjectPaths);
+    // The general MCP config is re-appended below; removing it first keeps resume argv identical.
+    const generalMcpConfig = agentControlMcpConfigPath(host.configDir, spec.sessionId);
+    for (let i = spec.args.length - 2; i >= 0; i--) {
+      if (spec.args[i] === "--mcp-config" && spec.args[i + 1] === generalMcpConfig) spec.args.splice(i, 2);
+    }
+    spec.args.push(...additiveOrchestratorLaunchArgs(spec.driver, orchestratorProjectPaths));
+  } else if (orchestrator) {
     spec.env[ORCHESTRATOR_ENV_KEY] = "orchestrator";
     const mcp = {
       ...runnerReentryCommand(host, "--agent-control-mcp"),

@@ -439,7 +439,12 @@
 //      requirement instead of silently reverting to approval cards or strict-mode denial.
 // 159: discard_worktree reports whether runner-owned retirement completed immediately or was
 //      durably deferred until the provider releases the managed worktree.
-export const PROTOCOL_VERSION = 159;
+// 160: Orchestrator is an additive session role independent of the provider permission mode. A
+//      non-strict native Claude Code Orchestrator keeps the ordinary permission mode, built-in tool
+//      inventory, hooks, and configured MCP servers, and only gains Wollipog's orchestration tools,
+//      instructions, and scoped credential. Older runners would launch such a session as an
+//      ordinary one, so the control plane refuses the combination instead of degrading silently.
+export const PROTOCOL_VERSION = 160;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -630,6 +635,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   orchestratorExecutionPolicy: 144,
   orchestratorChildHarnessPolicy: 157,
   orchestratorIssueScope: 158,
+  orchestratorAdditiveRole: 160,
   worktreeSetup: 141,
   worktreeTeardownPorts: 145,
   worktreeSetupConfig: 146,
@@ -1378,6 +1384,41 @@ export interface SessionConfig {
    * turn without recording it, so the next turn over the same amount asks again. Empty ⇒ none.
    * Control-plane owned; runners ignore it (v105+). */
   costCheckpointsUsd?: number[];
+}
+
+/** Whether a session coordinates child sessions. Fixed at creation and independent of the
+ * provider permission mode: an Orchestrator adds Wollipog's campaign tools, instructions, and
+ * scoped credential on top of whatever the harness would otherwise receive. */
+export type SessionRole = "normal" | "orchestrator";
+
+/** The legacy coupled provider policy: `permissionMode` carries this literal when the harness
+ * launches with the runner-owned Orchestrator preset (strict isolation, Codex, Pi, ACP, Native
+ * TUI, and sessions created before the role became independent). A v159 native Claude Code
+ * Orchestrator keeps an ordinary permission mode instead. */
+export const ORCHESTRATOR_PRESET_PERMISSION_MODE = "orchestrator";
+
+/** Effective role of a persisted session. Control planes predating v159 omit `role`, where the
+ * coupled preset value in `permissionMode` was the only representation of the role. */
+export function sessionRole(
+  session: { role?: SessionRole | null; permissionMode?: string | null },
+): SessionRole {
+  if (session.role === "orchestrator" || session.role === "normal") return session.role;
+  return session.permissionMode === ORCHESTRATOR_PRESET_PERMISSION_MODE ? "orchestrator" : "normal";
+}
+
+/** Whether a launch carries the Orchestrator role. A v144+ control plane always sends the launch
+ * policy for an Orchestrator; older peers encoded the role only as the coupled preset. */
+export function isOrchestratorLaunch(
+  spec: { config?: { permissionMode?: string } | null; orchestrator?: unknown },
+): boolean {
+  return spec.orchestrator != null || spec.config?.permissionMode === ORCHESTRATOR_PRESET_PERMISSION_MODE;
+}
+
+/** Whether a launch uses the coupled Orchestrator preset rather than an ordinary provider mode. */
+export function usesOrchestratorPresetPermissions(
+  config: { permissionMode?: string | null } | null | undefined,
+): boolean {
+  return config?.permissionMode === ORCHESTRATOR_PRESET_PERMISSION_MODE;
 }
 
 /** Human-owned delegation level for an eligible supervising session. */
@@ -4671,6 +4712,9 @@ export interface SessionView {
   parentControl?: ParentControlMode;
   /** Independent typed workflow assignments. Legacy modes never imply these grants. */
   parentControlPolicy?: ParentControlPolicy;
+  /** Fixed session role. Omitted by control planes predating v159; use `sessionRole()` to read
+   * it so the legacy coupled preset in `permissionMode` still resolves to the Orchestrator role. */
+  role?: SessionRole;
   /** Resolved campaign behavior and authority snapshot. Present only for Orchestrator sessions
    * created or migrated by a supporting control plane. */
   orchestratorPolicy?: OrchestratorCampaignPolicy;
@@ -7900,6 +7944,8 @@ export interface UiSnapshotMessage {
     sessionReminders?: boolean;
     /** Per-user worktree setup notices and runner-owned generation are available. */
     worktreeSetupConfig?: boolean;
+    /** Session creation accepts `role` independently of the provider permission mode. */
+    orchestratorRole?: boolean;
   };
   runners: RunnerView[];
   boxes: BoxView[];
@@ -8127,6 +8173,11 @@ export interface CreateSessionRequest {
   /** Cloud-only source session and existing workflow artifacts to transfer/prove. */
   executionHandoff?: { sourceSessionId?: string; artifactIds?: string[] };
   config?: SessionConfig;
+  /** Session role, independent of `config.permissionMode`. Omitted by older clients, which encode
+   * an Orchestrator only as the coupled preset value in `config.permissionMode`. A v159 control
+   * plane launches a non-strict native Claude Code Orchestrator with the ordinary permission mode
+   * (the saved harness default when omitted) and refuses combinations older runners cannot enforce. */
+  role?: SessionRole;
   /** Human-owned opt-in. Agent-created children may not set or broaden it. */
   parentControl?: ParentControlMode;
   /** Optional initial typed policy. Only authenticated human creation may provide it. */

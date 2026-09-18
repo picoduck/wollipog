@@ -35,6 +35,7 @@ import {
   type WorkflowDecisionAuthority,
   type WorkflowDecisionCategory,
   type SessionReminderView,
+  sessionRole,
   type SessionView,
   type SourceLocation,
   type WorkspaceReference,
@@ -6544,7 +6545,7 @@ export function ComposerPlusMenu({
                 : "A session can run four live children by default. Set 0 to pause new child admission. Terminal and archived children release their slots."}
               onCommit={(v) => onApply({ maxChildSessions: v })}
             />
-            {session.permissionMode === "orchestrator" && (
+            {sessionRole(session) === "orchestrator" && (
               <div className="plus-budget">
                 <span className="plus-budget-prefix" aria-hidden="true">↯</span>
                 <div className="parent-control-settings">

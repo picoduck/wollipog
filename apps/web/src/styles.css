@@ -13248,6 +13248,8 @@ body.shell-dock-dragging * {
 .orchestrator-settings-actions { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 
 .new-session-orchestrator-policy { display: grid; gap: var(--space-3); margin-top: var(--space-2); }
+.new-session-provider-permissions { display: grid; gap: var(--space-1); margin-top: var(--space-2); }
+.new-session-provider-permissions-value { font-weight: 600; }
 .orchestrator-policy-area {
   display: grid;
   gap: var(--space-3);

@@ -618,6 +618,7 @@ if (SCENARIO === "preview-follow" || SCENARIO === "scroll-restore" ||
   }
 }
 let fixtureProviderCommandAttachmentPolicy: ProviderComposerCommand["attachmentPolicy"] = "send";
+let orchestratorRoleSupported = false;
 let updateFixtureProviderCommandAttachmentPolicy:
   ((policy: ProviderComposerCommand["attachmentPolicy"]) => void) | null = null;
 
@@ -700,6 +701,7 @@ function snapshot(): UiSnapshotMessage {
       createProjectLocations: !LEGACY_WORKSPACES,
       nativeTuiLaunch: true,
       stopBeforeArchive: true,
+      ...(orchestratorRoleSupported ? { orchestratorRole: true } : {}),
     },
     runners: [runner],
     boxes: [],
@@ -1586,6 +1588,10 @@ declare global {
         context: "native" | "wsl";
         permissionModes: string[];
         requirement?: string;
+        /** Present the fixture agent as this harness; Codex app-server when omitted. */
+        driver?: "claude-code" | "codex-app-server";
+        /** Advertise the v159 control-plane capability for an independent Session Role. */
+        controlPlaneRole?: boolean;
       }): void;
       pushSnapshot(): void;
       deferNextGit(id: string, action: GitFixtureAction): void;
@@ -1823,13 +1829,20 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
       supportsApprovals: capabilities?.supportsApprovals ?? true,
       permissionModes: [...options.permissionModes],
     };
-    agent.codexAppServer = {
-      status: "supported",
-      appServerAvailable: true,
-      orchestratorApproval: options.requirement
-        ? { status: "unsupported", failure: options.requirement }
-        : { status: "supported" },
-    };
+    if (options.driver === "claude-code") {
+      agent.driver = "claude-code";
+      agent.name = "Claude Code";
+      agent.codexAppServer = undefined;
+    } else {
+      agent.codexAppServer = {
+        status: "supported",
+        appServerAvailable: true,
+        orchestratorApproval: options.requirement
+          ? { status: "unsupported", failure: options.requirement }
+          : { status: "supported" },
+      };
+    }
+    orchestratorRoleSupported = options.controlPlaneRole === true;
     socket?.push(snapshot());
   },
   pushSnapshot() {
