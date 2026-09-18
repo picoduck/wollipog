@@ -255,3 +255,16 @@ test("orchestrator TUI preparation fails closed for old peers, unsupported targe
     prepareScratch: async () => assert.fail("ordinary TUI must not prepare scratch"),
   }), agentTuiLaunch(meta()));
 });
+
+test("an Orchestrator with independent provider permissions has no Native TUI form", async () => {
+  await assert.rejects(
+    prepareAgentTuiLaunch(meta({ config: { permissionMode: "acceptEdits" }, orchestrator: { strictProjectIsolation: false } }), {
+      controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      executionIsolationMode: "provider",
+      platform: "linux",
+      prepareScratch: async () => "/scratch",
+      provision: () => {},
+    }),
+    /independent provider permissions/,
+  );
+});

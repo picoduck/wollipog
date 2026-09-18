@@ -898,6 +898,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     stopBeforeArchive: true,
     sessionReminders: true,
     worktreeSetupConfig: true,
+    orchestratorRole: true,
   });
   const initialProjects = snapshot.projects as Array<{
     id: string;

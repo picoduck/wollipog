@@ -187,3 +187,12 @@ test("ordered live chunks append without sorting and retain bounded chars/chunks
     Array.prototype.sort = originalSort;
   }
 });
+
+test("an Orchestrator with independent provider permissions has no Agent TUI affordance", () => {
+  assert.equal(supportsSessionAgentTui("claude-code", 200, "linux", "acceptEdits", "native", "orchestrator"), false);
+  assert.equal(supportsSessionAgentTui("claude-code", 200, "linux", "orchestrator", "native", "orchestrator"), true,
+    "the coupled preset keeps its native TUI");
+  assert.equal(supportsSessionAgentTui("claude-code", 200, "linux", "acceptEdits", "native", "normal"), true);
+  assert.equal(supportsSessionAgentTui("claude-code", 200, "linux", "acceptEdits", "native"), true,
+    "older control planes omit the role and keep the legacy rule");
+});

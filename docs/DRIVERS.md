@@ -136,6 +136,16 @@ approval support and the session-scoped management tools are available. It keeps
 edit and shell permissions, approval routing, and governance; this does not claim an OS read-only
 filesystem boundary. Native Codex remains limited to platforms with its audited provider sandbox.
 
+Since protocol v160 the role is also independent of the provider permission mode
+(`CreateSessionRequest.role`, ADR 0008). A non-strict native Claude Code Orchestrator with an
+ordinary mode such as Default, Auto, or Accept Edits launches exactly like an equivalent normal
+session and only gains the campaign tools on the general Agent Control MCP server, a
+`mcp__wollipog__*` pre-authorization, the Orchestrator instructions, and Project Location read
+access; hooks, settings sources, the built-in tool inventory, and configured MCP servers are left
+untouched. `permissionMode: "orchestrator"` now names the coupled Orchestrator preset, which remains
+the only shape for Strict Project Isolation, Native TUI, Codex, Pi, ACP, and pre-v160 peers. The
+control plane refuses the independent combination on older runners instead of degrading silently.
+
 Strict Project Isolation preserves the scratch-only boundary. Claude Bash-prefix rules alone are
 insufficient because an otherwise read-only command can redirect output into a Project Location, so
 strict native Claude Code and Claude Agent ACP require runner isolation mode `bwrap` on Linux or

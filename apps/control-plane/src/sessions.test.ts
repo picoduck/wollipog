@@ -17126,3 +17126,142 @@ test("direct and pre-staged workflow members persist and enforce the run's check
     db.close();
   }
 });
+
+test("Orchestrator is an additive role independent of the provider permission mode", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    const agent = meta.agents.find((item) => item.id === AGENT_ID)!;
+    agent.capabilities = { models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "acceptEdits", "orchestrator"] };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+    const human = { defaultOwnerUserId: "human" };
+
+    const independent = svc.createSession(
+      { ...request, role: "orchestrator", config: { permissionMode: "acceptEdits" } },
+      undefined, undefined, false, false, false, human,
+    );
+    assert.equal(independent.ok, true, independent.error);
+    const view = independent.data!;
+    assert.equal(view.role, "orchestrator");
+    assert.equal(view.permissionMode, "acceptEdits", "the role never consumes the provider permission-mode selection");
+    assert.equal(view.orchestratorPolicy?.execution.strictProjectIsolation, false);
+    assert.equal(view.parentControl, "questions_and_approvals", "delegation follows the role, not the preset");
+    const spec = hub.sentOfType("start_session").find((message) => message.spec.sessionId === view.id)?.spec;
+    assert.deepEqual(spec?.orchestrator, { strictProjectIsolation: false }, "the launch policy carries the role to the runner");
+    assert.equal(spec?.config?.permissionMode, "acceptEdits");
+    assert.ok(svc.setConfig(view.id, { permissionMode: "default" }).ok, "ordinary modes keep their normal live semantics");
+    assert.equal(svc.setConfig(view.id, { permissionMode: "orchestrator" }).status, 409, "the preset cannot be entered later");
+    assert.ok(svc.setParentControl(view.id, "questions_and_approvals").ok, "Parent Control is governed by the role");
+    assert.ok(svc.campaignProjection(view.id).ok, "campaign state is available to the additive role");
+    db.updateSessionStatus(view.id, "running", Date.now());
+    const childRequest = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, title: "Child" };
+    let child = svc.createSession(childRequest, undefined, undefined, false, false, false, { parentSessionId: view.id });
+    if (child.status === 428) {
+      const spawnApproval = db.getSession(view.id)!.pendingApproval!;
+      assert.ok(svc.approve(view.id, spawnApproval.requestId, "allow").ok);
+      child = svc.createSession(childRequest, undefined, undefined, false, false, false, { parentSessionId: view.id });
+    }
+    assert.ok(child.ok && child.data, child.error);
+    db.updateSessionStatus(child.data.id, "running", Date.now());
+    svc.onSessionEvent(child.data.id, {
+      kind: "permission_request", requestId: "permission", occurrenceId: "request_additive_owner",
+      title: "Run Command", context: { toolName: "Bash" }, options: [
+        { optionId: "once", name: "Allow Once", kind: "allow_once" },
+        { optionId: "deny", name: "Deny", kind: "reject_once" },
+      ],
+    });
+    assert.deepEqual(db.getSession(child.data.id)?.pendingRequestOwners, {
+      human: 0,
+      orchestrator: 1,
+      requests: [{ requestId: "permission", occurrenceId: "request_additive_owner", owner: "orchestrator" }],
+    }, "descendant request ownership resolves through the persisted role, not the preset literal");
+
+    const defaulted = svc.createSession({ ...request, role: "orchestrator" }, undefined, undefined, false, false, false, human);
+    const normal = svc.createSession({ ...request, role: "normal" }, undefined, undefined, false, false, false, human);
+    assert.equal(defaulted.ok, true, defaulted.error);
+    assert.equal(normal.ok, true, normal.error);
+    assert.equal(normal.data!.role, "normal");
+    assert.equal(normal.data!.orchestratorPolicy, undefined);
+    assert.equal(defaulted.data!.permissionMode, normal.data!.permissionMode,
+      "an omitted mode resolves exactly as for an equivalent normal session");
+    assert.notEqual(defaulted.data!.permissionMode, "orchestrator");
+
+    const legacy = svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }, undefined, undefined, false, false, false, human);
+    assert.equal(legacy.ok, true, legacy.error);
+    assert.equal(legacy.data!.role, "orchestrator", "older clients still encode the role as the coupled preset");
+    assert.equal(legacy.data!.permissionMode, "orchestrator");
+
+    const contradiction = svc.createSession({ ...request, role: "normal", config: { permissionMode: "orchestrator" } });
+    assert.equal(contradiction.status, 400);
+    const strict = svc.createSession(
+      { ...request, role: "orchestrator", config: { permissionMode: "acceptEdits" },
+        orchestrator: { execution: { strictProjectIsolation: true } } },
+      undefined, undefined, false, false, false, human,
+    );
+    assert.equal(strict.status, 409);
+    assert.match(strict.error ?? "", /Strict Project Isolation/, "strict isolation stays on the enforced preset");
+    const tui = svc.createSession(
+      { ...request, role: "orchestrator", launchSurface: "native_tui", config: { permissionMode: "acceptEdits" } },
+      undefined, undefined, false, false, false, human,
+    );
+    assert.equal(tui.status, 409);
+    assert.match(tui.error ?? "", /Native TUI/);
+    const codexAgent = meta.agents.find((item) => item.id === CODEX_APP_AGENT_ID)!;
+    const codexMode = codexAgent.capabilities?.permissionModes?.[0] ?? "on-request";
+    codexAgent.capabilities = { ...codexAgent.capabilities!,
+      permissionModes: [...new Set([...(codexAgent.capabilities?.permissionModes ?? []), codexMode, "orchestrator"])] };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const codex = svc.createSession(
+      { ...request, agentId: CODEX_APP_AGENT_ID, role: "orchestrator", config: { permissionMode: codexMode } },
+      undefined, undefined, false, false, false, human,
+    );
+    assert.equal(codex.status, 409, "other harnesses still require the coupled preset");
+    assert.match(codex.error ?? "", /Orchestrator preset permission mode/);
+
+    const localUser = { defaultOwnerUserId: db.localIdentityContext().userId };
+    const identity = { agentId: AGENT_ID, driver: "claude-code" as const, context: { kind: "native" as const } };
+    db.setAgentHarnessDefault(localUser.defaultOwnerUserId, identity, { permissionMode: "orchestrator" });
+    const savedDefault = svc.createSession(request, undefined, undefined, false, false, false, localUser);
+    assert.equal(savedDefault.ok, true, savedDefault.error);
+    assert.equal(savedDefault.data!.role, "orchestrator", "a saved Orchestrator harness default still selects the role");
+    assert.equal(savedDefault.data!.permissionMode, "orchestrator");
+    const explicitNormal = svc.createSession({ ...request, role: "normal" }, undefined, undefined, false, false, false, localUser);
+    assert.equal(explicitNormal.ok, true, explicitNormal.error);
+    assert.equal(explicitNormal.data!.role, "normal", "an explicit Normal role ignores the saved preset");
+    assert.notEqual(explicitNormal.data!.permissionMode, "orchestrator");
+    db.deleteAgentHarnessDefault(localUser.defaultOwnerUserId, identity);
+
+    const redefined = runnerMeta();
+    const redefinedAgent = redefined.agents.find((item) => item.id === AGENT_ID)!;
+    redefinedAgent.driver = "codex";
+    redefinedAgent.capabilities = { ...agent.capabilities! };
+    db.registerRunner(redefined, Date.now(), PROTOCOL_VERSION);
+    const startsBefore = hub.sentOfType("start_session").length;
+    const redefinedRestart = svc.restart(view.id);
+    assert.equal(redefinedRestart.status, 409, "a redefined agent fails at the control plane rather than at the runner");
+    assert.match(redefinedRestart.error ?? "", /native Claude Code harness/);
+    assert.equal(hub.sentOfType("start_session").length, startsBefore, "no launch is sent for the refused restart");
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole - 1);
+    const outdated = svc.createSession(
+      { ...request, role: "orchestrator", config: { permissionMode: "acceptEdits" } },
+      undefined, undefined, false, false, false, human,
+    );
+    assert.equal(outdated.status, 409, "an older runner would launch this as an ordinary session");
+    assert.match(outdated.error ?? "", /protocol-v160/);
+    const outdatedRestart = svc.restart(view.id);
+    assert.equal(outdatedRestart.status, 409, "restart after a runner downgrade fails the same way");
+    assert.match(outdatedRestart.error ?? "", /protocol-v160/);
+    const legacyOnOlderRunner = svc.createSession(
+      { ...request, role: "orchestrator", config: { permissionMode: "orchestrator" } },
+      undefined, undefined, false, false, false, human,
+    );
+    assert.equal(legacyOnOlderRunner.ok, true, legacyOnOlderRunner.error);
+    assert.equal(db.listSessions().filter((session) => session.role === "orchestrator").length, 5);
+  } finally {
+    db.close();
+  }
+});

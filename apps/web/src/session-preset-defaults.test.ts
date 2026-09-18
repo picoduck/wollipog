@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentDefinition, AgentHarnessDefaultsView } from "@wollipog/protocol";
-import { orchestratorUnavailableReason, savedSessionPermissionMode } from "./session-preset-defaults.js";
+import {
+  orchestratorPresetPermissionsReason,
+  orchestratorUnavailableReason,
+  savedSessionPermissionMode,
+} from "./session-preset-defaults.js";
+import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL } from "@wollipog/protocol";
 
 const agent: AgentDefinition = {
   id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server",
@@ -126,4 +131,24 @@ test("an old runner suppresses only an unverified generic agent claim", () => {
     agentOffersOrchestrator: false,
     agentOrchestratorRequirement: "Upgrade Codex to 0.154.0 or newer.",
   }), "This runner is too old to orchestrate child sessions. Upgrade Codex to 0.154.0 or newer.");
+});
+
+test("the Orchestrator preset applies only where independent provider permissions are unsupported", () => {
+  const additive = {
+    controlPlaneSupportsRole: true, runnerProtocolVersion: PROTOCOL_VERSION, driver: "claude-code" as const,
+    contextKind: "native", hostExecutionTarget: true, nativeTui: false, strictProjectIsolation: false,
+    savedOrchestratorDefault: false,
+  };
+  assert.equal(orchestratorPresetPermissionsReason(additive), undefined);
+  assert.match(orchestratorPresetPermissionsReason({ ...additive, strictProjectIsolation: true }) ?? "", /Strict Project Isolation/);
+  assert.match(orchestratorPresetPermissionsReason({ ...additive, driver: "codex-app-server" }) ?? "", /native Claude Code/);
+  assert.match(orchestratorPresetPermissionsReason({ ...additive, contextKind: "wsl" }) ?? "", /native Claude Code harness on the host/);
+  assert.match(orchestratorPresetPermissionsReason({ ...additive, hostExecutionTarget: false }) ?? "", /host execution target/);
+  assert.match(orchestratorPresetPermissionsReason({ ...additive, nativeTui: true }) ?? "", /Native TUI/);
+  assert.match(orchestratorPresetPermissionsReason({ ...additive, savedOrchestratorDefault: true }) ?? "", /saved Agent Harness default/);
+  assert.match(orchestratorPresetPermissionsReason({ ...additive, controlPlaneSupportsRole: false }) ?? "", /Update the control plane/);
+  assert.match(
+    orchestratorPresetPermissionsReason({ ...additive, runnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole - 1 }) ?? "",
+    /protocol v160/,
+  );
 });

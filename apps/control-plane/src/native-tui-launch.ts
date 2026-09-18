@@ -2,6 +2,8 @@ import {
   nativeTuiHasTrackedGuardrails,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
+  sessionRole,
+  usesOrchestratorPresetPermissions,
   type CreateSessionRequest,
   type SessionView,
 } from "@wollipog/protocol";
@@ -160,7 +162,10 @@ export function nativeTuiSessionError(
   if (scope?.owner.kind === "user" && db.getUsageDailyBudget(scope.organizationId).perUserUsd !== null) {
     return { status: 409, error: NATIVE_TUI_DAILY_BUDGET_ERROR };
   }
-  if (session.permissionMode === "orchestrator") {
+  if (sessionRole(session) === "orchestrator") {
+    if (!usesOrchestratorPresetPermissions(session)) {
+      return { status: 409, error: "Native TUI is unavailable for an Orchestrator with independent provider permissions; it requires the Orchestrator preset permission mode." };
+    }
     const protocolVersion = db.getRunner(session.runnerId)?.protocolVersion;
     if (!runnerSupportsProtocol(protocolVersion, "orchestratorNativeTui")) {
       return { status: 409, error: runnerCapabilityRequirement(

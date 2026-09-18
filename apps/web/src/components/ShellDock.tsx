@@ -73,6 +73,7 @@ export function ShellDock({
     runner?.os,
     session?.permissionMode,
     sessionAgentContextKind,
+    session?.role,
   );
   const tuiGuardrailBlocked = nativeTuiHasTrackedGuardrails(session ?? {});
 

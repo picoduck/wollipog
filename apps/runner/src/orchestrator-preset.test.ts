@@ -6,6 +6,7 @@ import {
   type AgentDefinition,
 } from "@wollipog/protocol";
 import {
+  additiveOrchestratorLaunchArgs,
   assertClaudeAgentAcpOrchestratorIdentity,
   CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION,
   codexOrchestratorMcpArgs,
@@ -15,6 +16,7 @@ import {
   orchestratorInstructions,
   orchestratorLaunchArgs,
   projectOrchestratorPresetForPeer,
+  stripAdditiveOrchestratorLaunchArgs,
   stripOrchestratorLaunchArgs,
   supportsClaudeAgentAcpOrchestrator,
   withOrchestratorPreset,
@@ -496,4 +498,28 @@ test("Claude resume removes both current and historical setting-source overrides
       assert.equal(reprovisioned.some((arg) => arg.startsWith("--settings-sources")), false);
     }
   }
+});
+
+test("additive Orchestrator launch arguments are injected and removed without touching user flags", () => {
+  const user = [
+    "--add-dir", "/home/user/notes", "--allowedTools", "Bash(npm test:*)",
+    "--append-system-prompt", "Be terse.", "--mcp-config", "/home/user/mcp.json", "--settings", "/home/user/settings.json",
+  ];
+  const added = additiveOrchestratorLaunchArgs("claude-code", ["/repo"]);
+  assert.deepEqual(added.slice(0, 2), ["--allowedTools", "mcp__wollipog__*"]);
+  assert.equal(added[2], "--append-system-prompt");
+  assert.match(added[3]!, /^You are running with the Wollipog Orchestrator role/);
+  assert.match(added[3]!, /Strict Project Isolation is disabled/);
+  assert.deepEqual(added.slice(4), ["--add-dir", "/repo"]);
+  for (const flag of ["--tools", "--strict-mcp-config", "--permission-mode", "--disallowedTools", "--setting-sources", "--settings"]) {
+    assert.equal(added.includes(flag), false, `${flag} would narrow the ordinary launch`);
+  }
+  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs([...user, ...added], ["/repo"]), user);
+  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(user, ["/repo"]), user, "user flags are never mistaken for injected ones");
+  const inline = [
+    "--allowedTools=mcp__wollipog__*", "--add-dir=/repo",
+    `--append-system-prompt=${orchestratorInstructions(["/repo"], false)}`,
+  ];
+  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs([...inline, ...user], ["/repo"]), user);
+  assert.throws(() => additiveOrchestratorLaunchArgs("codex", []), /native Claude Code/);
 });

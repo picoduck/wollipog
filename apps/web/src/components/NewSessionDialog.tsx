@@ -44,7 +44,11 @@ import {
 } from "../project-session-selection.js";
 import { machineOptionLabels, runnerDisplay } from "../runners.js";
 import { shortenPath, permissionModeLabel, titleCaseLabel } from "../format.js";
-import { orchestratorUnavailableReason, savedSessionPermissionMode } from "../session-preset-defaults.js";
+import {
+  orchestratorPresetPermissionsReason,
+  orchestratorUnavailableReason,
+  savedSessionPermissionMode,
+} from "../session-preset-defaults.js";
 import { loadAgentDefaults, saveAgentDefault } from "../agent-defaults.js";
 import {
   agentMeta,
@@ -125,6 +129,7 @@ export function NewSessionDialog({
     projectLocationCreationSupported,
     accessScopeManagementSupported,
     nativeTuiLaunchSupported,
+    orchestratorRoleSupported,
     navigate,
   } = useStore();
   const [projectOverrides, setProjectOverrides] = useState(() => new Map<string, ProjectView>());
@@ -217,7 +222,9 @@ export function NewSessionDialog({
   const initialAgentOptions = agentOptions(runner?.agents ?? []);
   const initialAgentSelection = savedAgentSelection(initialAgentOptions, agentDefaults[runnerId]);
   const [agentId, setAgentId] = useState(initialAgentSelection.agentId);
-  const [presetOverride, setPresetOverride] = useState<"default" | "orchestrator">("default");
+  // `undefined` until the user chooses: a saved Orchestrator harness default then selects the role
+  // on the user's behalf, exactly as the saved preset did before the role became independent.
+  const [roleOverride, setRoleOverride] = useState<"normal" | "orchestrator" | undefined>(undefined);
   const [orchestratorDraft, setOrchestratorDraft] = useState<OrchestratorDefaults>(
     () => cloneOrchestratorDefaults(DEFAULT_ORCHESTRATOR_DEFAULTS),
   );
@@ -325,7 +332,7 @@ export function NewSessionDialog({
     replacement?.focus();
   }, [responsiveChoiceFocusBeforeRender, touchChoicePicker]);
   const projectLocationOptionsId = `${generatedFormId}-project-locations`;
-  const permissionOptionsId = `${generatedFormId}-permission-presets`;
+  const permissionOptionsId = `${generatedFormId}-session-role`;
   const liveChildLimitInputId = `${generatedFormId}-live-child-limit`;
   const liveChildLimitHelpId = `${generatedFormId}-live-child-limit-help`;
   const harnessOptionsId = `${generatedFormId}-harnesses`;
@@ -366,7 +373,8 @@ export function NewSessionDialog({
   const savedPiModeUnavailableForTarget = agent?.driver === "pi" && executionTarget !== undefined &&
     executionTarget.adapter !== "host" && savedPermissionMode !== undefined &&
     savedPermissionMode !== "bypassPermissions" && savedPermissionMode !== "orchestrator";
-  const orchestrator = presetOverride === "orchestrator" || savedPermissionMode === "orchestrator";
+  const savedOrchestratorDefault = savedPermissionMode === "orchestrator";
+  const orchestrator = roleOverride === "orchestrator" || (roleOverride === undefined && savedOrchestratorDefault);
   const parentControlSupported = runnerSupportsProtocol(runner?.protocolVersion, "delegatedParentControl");
   const parentControlUnavailable = runnerCapabilityRequirement(
     runner?.protocolVersion,
@@ -782,7 +790,7 @@ export function NewSessionDialog({
   }, [projectLocationId, projectsSupported, selectedProject, runnerId, workspaceId]);
 
   useEffect(() => {
-    if (!orchestratorSupported) setPresetOverride("default");
+    if (!orchestratorSupported) setRoleOverride(undefined);
   }, [orchestratorSupported]);
 
   useEffect(() => {
@@ -812,10 +820,30 @@ export function NewSessionDialog({
     : projectSelection === NO_PROJECT_SELECTION
       ? !!runnerId && (!!workspaceId || !!browsedPath)
       : !!selectedProject && projectLocationLaunchable;
+  // Independent provider permissions (#1281): a non-strict native Claude Code Orchestrator keeps
+  // the same permission mode, tools, hooks, and MCP servers as a normal session. The sentence
+  // that explains why the preset still applies is also what decides that it applies.
+  const orchestratorPresetReason = orchestrator
+    ? orchestratorPresetPermissionsReason({
+      controlPlaneSupportsRole: orchestratorRoleSupported,
+      runnerProtocolVersion: runner?.protocolVersion,
+      driver: agent?.driver ?? "acp",
+      contextKind: orchestratorContext,
+      hostExecutionTarget,
+      nativeTui: launchSurface === "native_tui",
+      strictProjectIsolation: orchestratorDraft.execution.strictProjectIsolation,
+      savedOrchestratorDefault,
+    })
+    : undefined;
+  const providerPermissionsPreset = orchestrator && orchestratorPresetReason !== undefined;
+  const savedPermissionTitle = !defaultsReady ? "Default (Not Loaded)"
+    : savedPiModeUnavailableForTarget ? "Target Default — Full Access"
+    : savedPermissionMode ? `Saved Default — ${titleCaseLabel(permissionModeLabel(savedPermissionMode, agent?.driver))}`
+    : "Harness Default";
   const valid = projectPlacementValid && !!agentId && !!selectedAgentOption && !selectedAgentOption.disabled &&
     (!executionTarget || executionTarget.available) && cloudBudgetValid &&
     (launchSurface !== "native_tui" || nativeTuiSupported) &&
-    (defaultsReady || presetOverride === "orchestrator") &&
+    (defaultsReady || orchestrator) &&
     (!orchestrator || (orchestratorSupported && orchestratorSettingsReady &&
       orchestratorCapabilitiesValid && orchestratorDelegationValid && orchestratorExecutionValid)) &&
     liveChildLimitValid &&
@@ -828,7 +856,7 @@ export function NewSessionDialog({
   }, [
     projectSelection, selectedProject?.id, projectLocationId, projectLocationLaunchable,
     runnerId, workspaceId, browsedPath, agentId, selectedAgentOption?.disabled,
-    defaultsReady, harnessDefaults?.error, presetOverride, orchestrator, orchestratorSupported,
+    defaultsReady, harnessDefaults?.error, roleOverride, orchestrator, orchestratorSupported,
     directWslRequiresSafeOrchestrator, launchSurface, nativeTuiSupported,
     executionTargetId, executionTarget?.id, executionTarget?.available,
     cloudBudgetUsd, cloudBudgetValid, retainedSessionId,
@@ -908,13 +936,13 @@ export function NewSessionDialog({
       } else if (!agentId || !selectedAgentOption || selectedAgentOption.disabled) {
         setValidationError("Pick a runner, workspace, and agent.");
         focusValidationProblem('.agent-select [aria-haspopup="listbox"]');
-      } else if (!defaultsReady && presetOverride !== "orchestrator") {
+      } else if (!defaultsReady && !orchestrator) {
         setValidationError(harnessDefaults?.error
           ? "Retry loading saved permission defaults before creating a session."
           : "Wait for saved permission defaults to finish loading.");
         focusValidationProblem('[data-validation-target="defaults"]');
       } else if (orchestrator && !orchestratorSupported) {
-        setValidationError("Choose an available Permission Preset.");
+        setValidationError("Choose an available Session Role.");
         focusValidationProblem(`[id="${permissionOptionsId}"] .ui-choice-card:not([aria-disabled="true"])`);
       } else if (orchestrator && !orchestratorSettingsReady) {
         setValidationError(orchestratorSettings?.error ?? "Wait for Orchestrator defaults to finish loading.");
@@ -960,8 +988,13 @@ export function NewSessionDialog({
         projectSelection === NO_PROJECT_SELECTION ? null : selectedProjectLocation,
         { runnerId, workspaceId },
       );
+      // An explicitly chosen Orchestrator sends the coupled preset only where it still applies;
+      // otherwise the ordinary provider mode is resolved by the server exactly as for a normal
+      // session. A saved Orchestrator default keeps delegating both role and mode to the server.
       const config: SessionConfig = {
-        ...(presetOverride === "orchestrator" ? { permissionMode: "orchestrator" } : {}),
+        ...(roleOverride === "orchestrator" && (providerPermissionsPreset || !orchestratorRoleSupported)
+          ? { permissionMode: "orchestrator" }
+          : {}),
         ...(executionTarget?.adapter === "cloud" ? { costBudgetUsd: cloudBudget } : {}),
       };
       const decisionOverrides = Object.fromEntries(WORKFLOW_DECISION_CATEGORIES.flatMap((category) =>
@@ -990,6 +1023,7 @@ export function NewSessionDialog({
       const session = await api.createSession({
         ...placement,
         agentId,
+        ...(orchestratorRoleSupported && roleOverride !== undefined ? { role: roleOverride } : {}),
         useWorktree,
         executionTargetId: executionTarget?.id,
         config: Object.keys(config).length ? config : undefined,
@@ -1341,31 +1375,32 @@ export function NewSessionDialog({
           </div>
 
           <div className="field">
-            <span>Permission Preset</span>
+            <span>Session Role</span>
             {/* Cards rather than the shared Select: two options that each need a sentence is the
                 shape ChoiceCard exists for, and hiding them behind a trigger is what produced
                 #832's clipping — a 76px menu over 98px of touch targets, with half of one of only
                 two choices below the fold. Always visible, there is no menu to mis-measure. */}
-            <ChoiceCards<"default" | "orchestrator">
+            <ChoiceCards<"normal" | "orchestrator">
               id={permissionOptionsId}
-              label="Permission Preset"
-              value={presetOverride}
-              onChange={setPresetOverride}
+              label="Session Role"
+              value={orchestrator ? "orchestrator" : "normal"}
+              onChange={setRoleOverride}
               options={[
                 {
-                  value: "default",
-                  title: !defaultsReady ? "Default (Not Loaded)"
-                    : savedPiModeUnavailableForTarget ? "Target Default — Full Access"
-                    : savedPermissionMode ? `Saved Default — ${titleCaseLabel(permissionModeLabel(savedPermissionMode, agent?.driver))}`
-                    : "Harness Default",
-                  description: savedPiModeUnavailableForTarget
-                    ? "This target cannot host Pi's approval bridge, so commands run without interactive approvals."
-                    : "Use the approval behavior saved for this agent harness.",
+                  value: "normal",
+                  title: "Normal",
+                  description: "Work directly in this session with the harness's ordinary tools and permissions.",
+                  // An older control plane resolves a saved Orchestrator default itself and cannot
+                  // be told otherwise, so Normal is unavailable rather than silently ignored.
+                  disabled: !orchestratorRoleSupported && savedOrchestratorDefault,
+                  disabledReason: !orchestratorRoleSupported && savedOrchestratorDefault
+                    ? "Orchestrator is your saved Agent Harness default. Change it in Settings to use another default."
+                    : undefined,
                 },
                 {
                   value: "orchestrator",
                   title: "Orchestrator",
-                  description: "Delegate implementation by default. Provider permissions and optional Strict Project Isolation are configured separately below and cannot change after creation.",
+                  description: "Delegate implementation by default. Provider permissions, optional Strict Project Isolation, and decision delegation are configured separately below and cannot change after creation.",
                   // Rendered disabled rather than omitted. The list used to drop this option
                   // entirely when unsupported, leaving a one-option control that could not say
                   // whether the runner, the agent, the context or the target was the reason.
@@ -1374,6 +1409,21 @@ export function NewSessionDialog({
                 },
               ]}
             />
+            <div className="new-session-provider-permissions" role="group" aria-label="Provider Permissions">
+              <span>Provider Permissions</span>
+              <span className="new-session-provider-permissions-value">
+                {providerPermissionsPreset && !savedOrchestratorDefault ? "Orchestrator Preset — Harness-Enforced" : savedPermissionTitle}
+              </span>
+              <span className="muted">
+                {providerPermissionsPreset
+                  ? orchestratorPresetReason
+                  : savedPiModeUnavailableForTarget
+                    ? "This target cannot host Pi's approval bridge, so commands run without interactive approvals."
+                    : orchestrator
+                      ? "The same permission modes as a normal session apply, and the Orchestrator role only adds Wollipog's orchestration tools. Change the mode in the composer after creation."
+                      : "Use the approval behavior saved for this agent harness. Change it in the composer after creation."}
+              </span>
+            </div>
             {!defaultsReady && (harnessDefaults?.error ? <>
               <span className="form-error">Could not load saved permission defaults. Retry before using Default.</span>
               <button
@@ -1386,7 +1436,7 @@ export function NewSessionDialog({
               </button>
             </> : <span className="muted">Loading saved permission defaults…</span>)}
             {orchestrator && <>
-              {presetOverride === "default" && <span className="muted">Orchestrator is your saved Agent Harness default. Change it in Settings to use another default.</span>}
+              {roleOverride === undefined && savedOrchestratorDefault && orchestratorRoleSupported && <span className="muted">Orchestrator is your saved Agent Harness default. Choose Normal to ignore it for this session, or change it in Settings.</span>}
               {!orchestratorSupported && <span className="form-error">The saved Orchestrator preset is unavailable here. {orchestratorUnavailable} Choose a compatible target or change the saved default in Settings.</span>}
             </>}
             {orchestrator && !orchestratorSettingsReady && <div className="orchestrator-policy-unavailable" role="status">

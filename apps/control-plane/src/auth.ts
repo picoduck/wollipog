@@ -12,6 +12,7 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { sessionRole, type SessionRole } from "@wollipog/protocol";
 
 /** 256-bit URL-safe token; rides in an Authorization header or a WS `?token=` param. */
 export function newDeviceToken(): string {
@@ -58,7 +59,7 @@ export function extractBearer(header: string | undefined | null): string | null 
 export function isAuthenticatedAgentControlClaim(input: {
   credentialValid: boolean;
   claimedSessionId: unknown;
-  session: { id: string; status: string; permissionMode?: string | null } | null | undefined;
+  session: { id: string; status: string; permissionMode?: string | null; role?: SessionRole } | null | undefined;
   /** Computed from the online owning runner and its live Agent TUI registry, never request input. */
   hasLiveOrchestratorTui?: boolean;
 }): boolean {
@@ -68,7 +69,7 @@ export function isAuthenticatedAgentControlClaim(input: {
     input.claimedSessionId.length <= 256 &&
     input.session?.id === input.claimedSessionId &&
     (["starting", "running", "input_required"].includes(input.session.status) ||
-      (input.session.status === "idle" && input.session.permissionMode === "orchestrator" &&
+      (input.session.status === "idle" && sessionRole(input.session) === "orchestrator" &&
         input.hasLiveOrchestratorTui === true));
 }
 
@@ -151,8 +152,9 @@ const ORCHESTRATOR_API_ROUTES = new Set([
   "POST /api/sessions/:id/worktrees/select", "POST /api/sessions/:id/worktrees/discard",
 ]);
 
-export function isAgentControlApiRouteAllowed(method: string, routePath: string, permissionMode?: string | null): boolean {
-  if (permissionMode === "orchestrator") return ORCHESTRATOR_API_ROUTES.has(`${method.toUpperCase()} ${routePath}`);
+/** `role` is the credential session's fixed role; the legacy preset literal is accepted for it. */
+export function isAgentControlApiRouteAllowed(method: string, routePath: string, role?: SessionRole | string | null): boolean {
+  if (role === "orchestrator") return ORCHESTRATOR_API_ROUTES.has(`${method.toUpperCase()} ${routePath}`);
   return AGENT_CONTROL_API_ROUTES.has(`${method.toUpperCase()} ${routePath}`);
 }
 

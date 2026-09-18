@@ -2220,7 +2220,10 @@ export class ClaudeCodeDriver implements Driver {
               }
             }
           }
-          const orchestratorDisposition = this.opts.config.permissionMode === "orchestrator" && this.opts.orchestrator
+          // The launch policy is the role signal: it is present for every Orchestrator a v144+
+          // control plane launches, whether the provider mode is the coupled preset or (v160) an
+          // ordinary mode the user selected. Strict isolation only ever arrives with the preset.
+          const orchestratorDisposition = this.opts.orchestrator
             ? classifyRoutineClaudeOrchestratorPermission(
                 req.tool_name,
                 req.input,
@@ -2260,8 +2263,7 @@ export class ClaudeCodeDriver implements Driver {
             } catch { /* the provider process ended before the reformulation response was written */ }
             return null;
           }
-          if (this.opts.config.permissionMode === "orchestrator" &&
-              this.opts.orchestrator?.strictProjectIsolation && req.tool_name !== "AskUserQuestion") {
+          if (this.opts.orchestrator?.strictProjectIsolation && req.tool_name !== "AskUserQuestion") {
             try {
               this.child.stdin.write(JSON.stringify({
                 type: "control_response",

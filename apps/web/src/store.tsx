@@ -289,6 +289,8 @@ export interface State {
   /** True when the control plane provides durable, user-scoped reminder snapshots and deltas. */
   sessionRemindersSupported: boolean;
   worktreeSetupConfigSupported: boolean;
+  /** True when session creation accepts a Session Role independent of the provider permission mode. */
+  orchestratorRoleSupported: boolean;
   runners: Map<string, RunnerView>;
   boxes: Map<string, BoxView>;
   /** Authoritative when the snapshot advertises Project support; empty against legacy control
@@ -1084,6 +1086,7 @@ function reducer(state: State, action: Action): State {
             stopFailureRecoverySupported: msg.capabilities?.stopFailureRecovery === true,
             sessionRemindersSupported: msg.capabilities?.sessionReminders === true,
             worktreeSetupConfigSupported: msg.capabilities?.worktreeSetupConfig === true,
+            orchestratorRoleSupported: msg.capabilities?.orchestratorRole === true,
             runners: new Map(msg.runners.map((r) => [r.runnerId, r])),
             // `boxes` may be absent from an older control plane's snapshot — tolerate it.
             boxes: new Map((msg.boxes ?? []).map((b) => [b.boxId, b])),
@@ -1463,6 +1466,7 @@ function initialState(
     stopFailureRecoverySupported: false,
     sessionRemindersSupported: false,
     worktreeSetupConfigSupported: false,
+    orchestratorRoleSupported: false,
     runners: new Map(),
     boxes: new Map(),
     projects: new Map(),

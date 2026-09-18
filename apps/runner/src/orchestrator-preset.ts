@@ -58,13 +58,17 @@ export function supportsNativeOrchestratorBoundary(
     (platform === "darwin" && isolationMode === "seatbelt");
 }
 
+/** Every Orchestrator system-prompt append starts with this sentence, so runner-injected
+ * instructions can be recognised and replaced on resume without touching user-supplied text. */
+export const ORCHESTRATOR_INSTRUCTIONS_PREFIX = "You are running with the Wollipog Orchestrator role.";
+
 export function orchestratorInstructions(
   projectPaths: readonly string[],
   strictProjectIsolation = true,
 ): string {
   const locations = [...new Set(projectPaths.filter(Boolean))];
   return [
-    "You are running with the Wollipog Orchestrator role. Delegate Implementation is the default: plan, assign work to child sessions, monitor them, and verify their results.",
+    `${ORCHESTRATOR_INSTRUCTIONS_PREFIX} Delegate Implementation is the default: plan, assign work to child sessions, monitor them, and verify their results.`,
     "An ordinary multi-issue implementation request does not by itself authorize an orchestration campaign or child creation. Create children only when the human explicitly requests orchestration or delegation.",
     "When this Orchestrator was created directly by an authenticated human, that creation authorizes routine child creation within its existing audience, workspace access, and configured limits. Explicit governance ask or deny policies remain authoritative; agent-created descendants and ambiguous legacy sessions do not inherit this authorization.",
     strictProjectIsolation
@@ -333,6 +337,53 @@ export function orchestratorLaunchArgs(
       default_tools_approval_mode: "approve",
     } })}`,
   ];
+}
+
+const ADDITIVE_CLAUDE_ALLOWED_TOOLS = "mcp__wollipog__*";
+
+/**
+ * Independent provider permissions (protocol v160): the harness launches exactly as an equivalent
+ * normal session and only gains Wollipog's orchestration tools, instructions, and project
+ * read locations. Nothing here narrows the permission mode, built-in tool inventory, hooks,
+ * settings sources, or configured MCP servers; the general Agent Control MCP config already
+ * carries the Wollipog server for ordinary Claude sessions.
+ */
+export function additiveOrchestratorLaunchArgs(
+  driver: SessionLaunchSpec["driver"],
+  projectPaths: readonly string[] = [],
+): string[] {
+  if (driver !== "claude-code") {
+    throw new Error("independent provider permissions are supported only for the native Claude Code Orchestrator");
+  }
+  return [
+    "--allowedTools", ADDITIVE_CLAUDE_ALLOWED_TOOLS,
+    "--append-system-prompt", orchestratorInstructions(projectPaths, false),
+    ...projectPaths.flatMap((path) => ["--add-dir", path]),
+  ];
+}
+
+/** Remove only the arguments `additiveOrchestratorLaunchArgs` injects, leaving every user- or
+ * catalog-supplied flag (including the user's own `--add-dir`, `--allowedTools`, `--settings`,
+ * and `--mcp-config` values) untouched. Idempotent on every resume. */
+export function stripAdditiveOrchestratorLaunchArgs(args: readonly string[], projectPaths: readonly string[] = []): string[] {
+  const projects = new Set(projectPaths);
+  const result: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    const flag = arg.split("=", 1)[0]!;
+    const inline = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : undefined;
+    const value = inline ?? args[i + 1];
+    const injected =
+      (flag === "--allowedTools" && value === ADDITIVE_CLAUDE_ALLOWED_TOOLS) ||
+      (flag === "--append-system-prompt" && typeof value === "string" && value.startsWith(ORCHESTRATOR_INSTRUCTIONS_PREFIX)) ||
+      (flag === "--add-dir" && typeof value === "string" && projects.has(value));
+    if (injected) {
+      if (inline === undefined) i++;
+      continue;
+    }
+    result.push(arg);
+  }
+  return result;
 }
 
 /** Replace controlled launch flags on every resume, including stale persisted provisioning. */

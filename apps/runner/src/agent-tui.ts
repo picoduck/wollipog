@@ -4,7 +4,7 @@
 import type { SessionMeta } from "./session-store.js";
 import type { ShellProcessLaunch } from "./shell-manager.js";
 import { windowsCommandLine } from "./windows-conpty.js";
-import { runnerSupportsProtocol } from "@wollipog/protocol";
+import { isOrchestratorLaunch, runnerSupportsProtocol, usesOrchestratorPresetPermissions } from "@wollipog/protocol";
 import {
   codexOrchestratorMcpArgs,
   supportsNativeOrchestratorBoundary,
@@ -27,7 +27,12 @@ export async function prepareAgentTuiLaunch(
     executionIsolationMode?: OrchestratorIsolationMode;
   },
 ): Promise<ShellProcessLaunch | null> {
-  if (meta.config?.permissionMode !== "orchestrator") return agentTuiLaunch(meta);
+  if (!isOrchestratorLaunch(meta)) return agentTuiLaunch(meta);
+  if (!usesOrchestratorPresetPermissions(meta.config)) {
+    // No runner control channel exists inside a TUI, so the additive role's routine-operation
+    // contract cannot be honoured there; the coupled preset's static rules are the only TUI shape.
+    throw new Error("Native TUI is unavailable for an Orchestrator with independent provider permissions.");
+  }
   const platform = dependencies.platform ?? process.platform;
   if (!runnerSupportsProtocol(dependencies.controlPlaneProtocolVersion, "orchestratorNativeTui") ||
       meta.context.kind !== "native" || (meta.executionTarget && meta.executionTarget.adapter !== "host") ||

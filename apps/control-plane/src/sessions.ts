@@ -145,6 +145,9 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type ResolveWorkflowDecisionRequest,
   SESSION_NAMING_RUNNER_BUDGET_MS,
   SESSION_NAMING_SUPERVISION_MARGIN_MS,
+  sessionRole,
+  usesOrchestratorPresetPermissions,
+  type SessionRole,
 } from "@wollipog/protocol";
 import {
   MAX_PENDING_STEERING_RESOLUTION_REPLAYS,
@@ -3109,6 +3112,12 @@ export class SessionsService {
     if (req.orchestrator !== undefined && (req.parentControl !== undefined || req.parentControlPolicy !== undefined)) {
       return fail("orchestrator overrides cannot be combined with legacy Parent Control fields", 400);
     }
+    if (req.role !== undefined && req.role !== "normal" && req.role !== "orchestrator") {
+      return fail("role must be normal or orchestrator", 400);
+    }
+    if (req.role === "normal" && usesOrchestratorPresetPermissions(req.config)) {
+      return fail("the Orchestrator preset permission mode requires the Orchestrator role", 400);
+    }
     let parentControl = req.parentControl ?? "off";
     let parentControlPolicy = req.parentControlPolicy;
     if (parentControl !== "off" && parentControl !== "questions" && parentControl !== "questions_and_approvals") {
@@ -3345,9 +3354,10 @@ export class SessionsService {
           if (preference.model !== undefined) requestedConfig.model = preference.model;
           if (preference.effort !== undefined) requestedConfig.effort = preference.effort;
         }
-        const savedPermissionMode = launch.driver === "pi" && executionTarget.adapter !== "host" &&
+        const savedPermissionMode = (launch.driver === "pi" && executionTarget.adapter !== "host" &&
             preference.permissionMode !== undefined && preference.permissionMode !== "bypassPermissions" &&
-            preference.permissionMode !== "orchestrator"
+            preference.permissionMode !== "orchestrator") ||
+            (req.role === "normal" && preference.permissionMode === "orchestrator")
           ? undefined
           : preference.permissionMode;
         if (requestedConfig.permissionMode === undefined && savedPermissionMode !== undefined) {
@@ -3391,8 +3401,13 @@ export class SessionsService {
     if (serviceTier) requestedConfig.serviceTier = serviceTier;
     else delete requestedConfig.serviceTier;
     const validationConfig = claudeModelConfigForValidation(requestedConfig, agentCapabilities, launch.driver);
+    // The role is independent of the provider permission mode. Older clients encode it only as the
+    // coupled preset value; a v160 client may pair the role with an ordinary provider mode.
+    const role: SessionRole = req.role ?? sessionRole({ permissionMode: requestedConfig.permissionMode });
+    const orchestrator = role === "orchestrator";
+    const presetPermissions = usesOrchestratorPresetPermissions(requestedConfig);
     let orchestratorPolicy: OrchestratorCampaignPolicy | undefined;
-    if (requestedConfig.permissionMode === "orchestrator") {
+    if (orchestrator) {
       const configured = creationContext?.orchestratorDefaults;
       const baseDefaults = configured?.defaults ?? structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
       const overrides: OrchestratorCampaignOverrides = {
@@ -3482,17 +3497,37 @@ export class SessionsService {
         ? { decisions: orchestratorPolicy.delegation.decisions }
         : undefined;
     } else if (req.orchestrator !== undefined) {
-      return fail("Orchestrator campaign overrides require the Orchestrator preset", 409);
+      return fail("Orchestrator campaign overrides require the Orchestrator role", 409);
     }
-    if (requestedConfig.permissionMode === "orchestrator") {
+    if (orchestrator) {
       if (req.launchSurface === "native_tui") {
         const tuiUnsupported = this.capabilityFailure(req.runnerId, "orchestratorNativeTui", "Orchestrator Native TUI");
         if (tuiUnsupported) return tuiUnsupported;
       }
-      const unsupported = this.capabilityFailure(req.runnerId, "sessionOrchestration", "Orchestrator preset");
+      const unsupported = this.capabilityFailure(req.runnerId, "sessionOrchestration", "Orchestrator role");
       if (unsupported) return unsupported;
       const contextKind = launch.context?.kind ?? "native";
       const strictProjectIsolation = orchestratorPolicy?.execution.strictProjectIsolation ?? true;
+      if (!presetPermissions) {
+        // Independent provider permissions: the harness launches exactly as an equivalent normal
+        // session and gains only Wollipog's orchestration tools, instructions, and credential. An
+        // older runner would launch this as an ordinary session, so refuse rather than degrade.
+        if (!runnerSupportsProtocol(runner.protocolVersion, "orchestratorAdditiveRole")) {
+          return fail("An Orchestrator with independent provider permissions requires a protocol-v160 runner; update the runner or choose the Orchestrator preset permission mode.", 409);
+        }
+        if (!agentCapabilities?.permissionModes?.includes("orchestrator")) {
+          return fail("the Orchestrator role requires explicit support from this agent installation", 409);
+        }
+        if (contextKind !== "native" || launch.driver !== "claude-code" || executionTarget.adapter !== "host") {
+          return fail("Independent provider permissions for an Orchestrator are supported only by a native Claude Code harness on the host; other harnesses still use the Orchestrator preset permission mode.", 409);
+        }
+        if (strictProjectIsolation) {
+          return fail("Strict Project Isolation is enforced through the Orchestrator preset permission mode; choose it or disable Strict Project Isolation.", 409);
+        }
+        if (req.launchSurface === "native_tui") {
+          return fail("Orchestrator Native TUI requires the Orchestrator preset permission mode.", 409);
+        }
+      }
       if (!strictProjectIsolation && (contextKind !== "native" ||
           !["codex", "codex-app-server", "claude-code"].includes(launch.driver))) {
         return fail("Delegate Implementation without Strict Project Isolation requires a supported native Codex or Claude Code harness.", 409);
@@ -3501,7 +3536,7 @@ export class SessionsService {
           !["linux", "macos"].includes(runner.os)) {
         return fail("Provider-mode Codex Orchestrator requires its audited Linux or macOS sandbox.", 409);
       }
-      if (launch.driver === "claude-code" && req.launchSurface !== "native_tui" &&
+      if (presetPermissions && launch.driver === "claude-code" && req.launchSurface !== "native_tui" &&
           (!agentCapabilities?.supportsApprovals ||
             !agentCapabilities.permissionModes?.includes("default"))) {
         return fail("Structured Claude Orchestrator requires the verified interactive approval channel and Default permission mode.", 409);
@@ -3534,8 +3569,8 @@ export class SessionsService {
         return fail("the orchestrator preset requires a supported native host harness or verified Direct WSL bridge", 409);
       }
     }
-    if (parentControl !== "off" && requestedConfig.permissionMode !== "orchestrator") {
-      return fail("Parent Control is available only for the Orchestrator preset", 409);
+    if (parentControl !== "off" && !orchestrator) {
+      return fail("Parent Control is available only for the Orchestrator role", 409);
     }
     if (parentControl !== "off") {
       const unsupported = this.capabilityFailure(
@@ -3545,8 +3580,8 @@ export class SessionsService {
       );
       if (unsupported) return unsupported;
     }
-    if (parentControlPolicy && requestedConfig.permissionMode !== "orchestrator") {
-      return fail("Parent Control policy is available only for the Orchestrator preset", 409);
+    if (parentControlPolicy && !orchestrator) {
+      return fail("Parent Control policy is available only for the Orchestrator role", 409);
     }
     if (parentControlPolicy && Object.values(parentControlPolicy.decisions).includes("orchestrator")) {
       const unsupported = this.capabilityFailure(
@@ -3728,6 +3763,7 @@ export class SessionsService {
       parentControl,
       parentControlPolicy,
       orchestratorPolicy,
+      role,
       // Remember the ad-hoc browsed directory so restart re-launches from it (workspaceId is null).
       workspacePath: adHoc || null,
       acpSessionContext,
@@ -3863,7 +3899,7 @@ export class SessionsService {
     const pendingInputBarrier = session.status === "input_required" || session.pendingApproval != null;
     const incomingMode = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config?.permissionMode : config?.permissionMode;
     if (incomingMode !== undefined && (incomingMode === "orchestrator") !== (session.permissionMode === "orchestrator")) {
-      return fail("the orchestrator preset is fixed at session creation; start a new session to change it", 409);
+      return fail("the Orchestrator preset permission mode is fixed at session creation; start a new session to change it", 409);
     }
     const reconciliationBlock = this.podReconciliationMutationError(sessionId);
     if (reconciliationBlock) return fail(reconciliationBlock, 409);
@@ -4303,7 +4339,7 @@ export class SessionsService {
     const incomingMode = candidate.command.config?.permissionMode;
     if (incomingMode !== undefined &&
         (incomingMode === "orchestrator") !== (session.permissionMode === "orchestrator")) {
-      return fail("the orchestrator preset is fixed at session creation; start a new session to change it", 409);
+      return fail("the Orchestrator preset permission mode is fixed at session creation; start a new session to change it", 409);
     }
     const reconciliationBlock = this.podReconciliationMutationError(sessionId);
     if (reconciliationBlock) return fail(reconciliationBlock, 409);
@@ -4437,7 +4473,7 @@ export class SessionsService {
     const tuiGuardrailError = this.activeAgentTuiGuardrailError(session, config);
     if (tuiGuardrailError) return fail(tuiGuardrailError, 409);
     if (config.permissionMode !== undefined && (config.permissionMode === "orchestrator") !== (session.permissionMode === "orchestrator")) {
-      return fail("the orchestrator preset is fixed at session creation; start a new session to change it", 409);
+      return fail("the Orchestrator preset permission mode is fixed at session creation; start a new session to change it", 409);
     }
     const agentCapabilities = mergeSessionCapabilities(
       this.db.getRunner(session.runnerId)?.agents.find((agent) => agent.id === session.agentId)?.capabilities,
@@ -5480,6 +5516,23 @@ export class SessionsService {
       (session.workspaceId ? this.db.getWorkspacePath(session.runnerId, session.workspaceId) : null);
     if (!workspacePath) return fail("session has no resolvable workspace directory to restart from", 400);
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
+    // A runner that predates the independent role would relaunch this Orchestrator as an ordinary
+    // session while the control plane still granted it orchestrator routes; refuse instead.
+    if (sessionRole(session) === "orchestrator" && !usesOrchestratorPresetPermissions(session)) {
+      const runner = this.db.getRunner(session.runnerId);
+      if (!runnerSupportsProtocol(runner?.protocolVersion, "orchestratorAdditiveRole")) {
+        return fail("An Orchestrator with independent provider permissions requires a protocol-v160 runner; update the runner and retry.", 409);
+      }
+      // Discovery can redefine the agent id between launches. Mirror the creation-time shape
+      // check so a changed definition fails here with guidance instead of at the runner.
+      const restartingAgentId = session.agentId;
+      const advertised = runner?.agents.find((agent) => agent.id === restartingAgentId)?.capabilities;
+      const target = session.executionTarget;
+      if (!advertised?.permissionModes?.includes("orchestrator") || launch.driver !== "claude-code" ||
+          (launch.context?.kind ?? "native") !== "native" || (target && target.adapter !== "host")) {
+        return fail("An Orchestrator with independent provider permissions requires a native Claude Code harness on the host that advertises the Orchestrator role; the agent definition no longer matches. Start a new session or choose the Orchestrator preset permission mode.", 409);
+      }
+    }
     const agentId = session.agentId;
     const supportsIssueScope = runnerSupportsProtocol(
       this.db.getRunner(session.runnerId)?.protocolVersion,
@@ -5594,8 +5647,8 @@ export class SessionsService {
     }
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
-    if (mode !== "off" && session.permissionMode !== "orchestrator") {
-      return fail("Parent Control is available only for the Orchestrator preset", 409);
+    if (mode !== "off" && sessionRole(session) !== "orchestrator") {
+      return fail("Parent Control is available only for the Orchestrator role", 409);
     }
     if (mode !== "off") {
       const unsupported = this.capabilityFailure(
@@ -5626,8 +5679,8 @@ export class SessionsService {
     }
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
-    if (session.permissionMode !== "orchestrator") {
-      return fail("Parent Control policy is available only for the Orchestrator preset", 409);
+    if (sessionRole(session) !== "orchestrator") {
+      return fail("Parent Control policy is available only for the Orchestrator role", 409);
     }
     if (Object.values(decisions).includes("orchestrator")) {
       const unsupported = this.capabilityFailure(
@@ -5660,8 +5713,8 @@ export class SessionsService {
   campaignProjection(sessionId: string): ServiceResult<OrchestratorCampaignProjection> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
-    if (session.permissionMode !== "orchestrator" || !session.orchestratorPolicy) {
-      return fail("campaign state is available only for the Orchestrator preset", 409);
+    if (sessionRole(session) !== "orchestrator" || !session.orchestratorPolicy) {
+      return fail("campaign state is available only for the Orchestrator role", 409);
     }
     const projection = this.db.campaignProjection(sessionId);
     return projection ? ok(projection) : fail("campaign state is unavailable", 409);
@@ -5775,7 +5828,7 @@ export class SessionsService {
     let controller: SessionView | null = null;
     for (let depth = 0; current && depth < 64 && !seen.has(current.id); depth += 1) {
       seen.add(current.id);
-      if (current.permissionMode === "orchestrator" && current.orchestratorPolicy) controller = current;
+      if (sessionRole(current) === "orchestrator" && current.orchestratorPolicy) controller = current;
       current = current.parentSessionId ? this.db.getSession(current.parentSessionId) : null;
     }
     return controller;
@@ -6473,7 +6526,7 @@ export class SessionsService {
       seen.add(parentId);
       const parent = this.db.getSession(parentId);
       if (!parent) return null;
-      if (parent.permissionMode === "orchestrator") {
+      if (sessionRole(parent) === "orchestrator") {
         controller = {
           session: parent,
           policy: parent.parentControlPolicy ?? {

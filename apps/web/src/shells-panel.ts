@@ -9,9 +9,11 @@
 /** Per-shell scrollback cap — plenty for a console; keeps reducer churn bounded. */
 import {
   runnerSupportsProtocol,
+  sessionRole,
   type AgentDriverKind,
   type OS,
   type SessionCapabilities,
+  type SessionRole,
   type ShellOutputChunk,
 } from "@wollipog/protocol";
 
@@ -54,9 +56,13 @@ export function supportsSessionAgentTui(
   os: OS | undefined,
   permissionMode: string | null | undefined,
   agentContextKind: "native" | "wsl" | undefined,
+  role?: SessionRole,
 ): boolean {
-  return supportsAgentTui(driver, protocolVersion, os) &&
-    (permissionMode !== "orchestrator" || agentContextKind === "native");
+  if (!supportsAgentTui(driver, protocolVersion, os)) return false;
+  if (sessionRole({ role, permissionMode }) !== "orchestrator") return true;
+  // A TUI has no runner control channel, so only the coupled preset's static rules can shape it;
+  // an Orchestrator with independent provider permissions has no TUI form.
+  return permissionMode === "orchestrator" && agentContextKind === "native";
 }
 
 /** Session-scoped post-create truth; never infer policy interception from the catalog agent. */
