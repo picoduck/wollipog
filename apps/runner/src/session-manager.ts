@@ -83,6 +83,7 @@ import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { makeDriver, type Driver } from "./drivers/factory.js";
 import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
+import type { ClaudeGuardRefreshOutcome as ManagedWorktreeGuardRefreshOutcome } from "./hook-settings.js";
 import type {
   CompletedCommandReconciliationProof,
   DriverBackgroundWorkUpdate,
@@ -1002,6 +1003,12 @@ export class SessionManager {
     resolves: Array<(result: { accepted: boolean; auditId: string; eventSeq?: number; error?: string }) => void>;
     timer: ReturnType<typeof setTimeout>;
   }>();
+  /** Runner-local mirror of the live protection set consulted by the Claude guard hook. */
+  private refreshManagedWorktreeGuard?: (
+    meta: SessionMeta,
+    protections: ManagedWorktreeProtection[],
+  ) => ManagedWorktreeGuardRefreshOutcome;
+
   /** Exact duplicate create requests join one operation, including after a control-plane retry. */
   private readonly worktreeCreates = new Map<string, {
     promise: Promise<{ worktree: SessionWorktreeView; snapshot: SessionSnapshot }>;
@@ -1055,6 +1062,22 @@ export class SessionManager {
     private readonly worktreePorts: RunnerWorktreePorts = DEFAULT_WORKTREE_PORTS,
   ) {
     this.lockOwner = `${runnerId}#${randomUUID()}`;
+    // Every worktree creation, activation, attach, and discard lands as a `worktrees` patch. The
+    // managed-worktree guard reads its protections from a file, so refresh it here — synchronously
+    // with the persisted change, which is what lets a worktree created mid-turn be protected from
+    // the guard's very next invocation rather than only from the next spawn.
+    store.observeMetaPatch((meta, patch) => {
+      if (!("worktrees" in patch) || !this.refreshManagedWorktreeGuard) return;
+      let outcome: ManagedWorktreeGuardRefreshOutcome;
+      try {
+        outcome = this.refreshManagedWorktreeGuard(meta, this.managedWorktreeProtections(meta));
+      } catch (error) {
+        // An exception here is itself a refresh failure, and a failed refresh must never leave a
+        // stale protection list trusted by a running provider.
+        outcome = { state: "unprotected", reason: (error as Error).message };
+      }
+      this.applyManagedWorktreeGuardOutcome(meta.sessionId, outcome);
+    });
     this.providerHomeLeases = runnerOwnerHash ? new ProviderHomeLeaseRegistry(runnerOwnerHash) : undefined;
     this.stateDir = dataDir ?? join(store.rootPath(), ".runner-data");
     this.cleanupJournal = new WorktreeCleanupJournal(this.stateDir);
@@ -1389,9 +1412,46 @@ export class SessionManager {
       .find((worktree) => sameWorktreePath(meta.context, worktree.path, path));
   }
 
+  /** Install the runner-local writer that mirrors the live protection set for the Claude
+   * managed-worktree guard hook (the runner owns the hook config dir, not SessionManager). */
+  setManagedWorktreeGuardRefresh(
+    refresh: (
+      meta: SessionMeta,
+      protections: ManagedWorktreeProtection[],
+    ) => ManagedWorktreeGuardRefreshOutcome,
+  ): void {
+    this.refreshManagedWorktreeGuard = refresh;
+  }
+
+  /**
+   * A guard that can no longer be kept in step is not a guard. Its state is removed so every later
+   * invocation fails closed, and the next spawn re-provisions and re-proves it (or falls back to
+   * the mediated permission mode). When the state could NOT be removed, a live provider would keep
+   * running in the mode it was launched with while trusting a stale protection list, so it is
+   * stopped through the ordinary stop path and the next prompt relaunches it cleanly.
+   */
+  private applyManagedWorktreeGuardOutcome(
+    sessionId: string,
+    outcome: ManagedWorktreeGuardRefreshOutcome,
+  ): void {
+    if (outcome.state === "absent" || outcome.state === "refreshed") return;
+    const notice = `Wollipog managed worktree protection was invalidated for this session: ${outcome.reason}.`;
+    this.log(`managed worktree guard ${boundedSessionIdForLog(sessionId)}: ${outcome.reason}`);
+    if (outcome.state === "invalidated") {
+      this.onDriverStderr(sessionId, `${notice} Tool calls are refused until the session relaunches.`);
+      return;
+    }
+    this.onDriverStderr(
+      sessionId,
+      `${notice} The provider is being stopped because its protection state could not be retired.`,
+    );
+    if (this.active.has(sessionId)) this.stop(sessionId);
+  }
+
   /** Every runner-created identity remains protected even while a sibling is selected or its
-   * cleanup is pending. Attached operator worktrees deliberately stay outside this boundary. */
-  private managedWorktreeProtections(meta: SessionMeta): ManagedWorktreeProtection[] {
+   * cleanup is pending. Attached operator worktrees deliberately stay outside this boundary.
+   * Public because launch provisioning needs the same set the driver's veto uses. */
+  managedWorktreeProtections(meta: SessionMeta): ManagedWorktreeProtection[] {
     return this.attributedWorktrees(meta)
       .filter((worktree) => worktree.source !== "attached")
       .map((worktree) => ({ worktreePath: worktree.path, repoPath: meta.repoPath }));

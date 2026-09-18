@@ -528,6 +528,83 @@ This rollout follows Anthropic's documented Agent SDK streaming-input contract w
 CLI transport and subscription authentication unchanged. It does not migrate to the TypeScript SDK;
 that decision remains Phase 2.5.
 
+### 2.3.2 Managed worktree guard and permission-mode preservation
+
+A session that owns a runner-created worktree must never let the provider remove, retire, or
+corrupt it (`commandTargetsManagedWorktree`, apps/runner/src/managed-worktree-protection.ts). That
+veto is a security property: it applies in every permission mode, including Full Access, and
+Claude's automatic classifier must not be able to override it.
+
+The veto is enforced by a runner-owned `PreToolUse` command hook — the **managed worktree guard**
+(apps/runner/src/managed-worktree-guard.ts) — which re-enters the runner executable as
+`--managed-worktree-guard`. Measured against claude 2.1.270: a `PreToolUse` hook supplied through
+`--settings` runs before EVERY Bash call in `auto`, `acceptEdits`, and `bypassPermissions`; a
+`{"hookSpecificOutput":{…,"permissionDecision":"deny","permissionDecisionReason":"…"}}` stdout
+document blocks the call with the reason shown to the model; exit code 2 with stderr also blocks
+it; and a `matcher` of `"Bash"` scopes it without losing a call. The guard therefore sees every
+command the classifier would otherwise decide alone.
+
+Because of that, the launch uses the permission mode the user actually selected
+(`protectedClaudePermissionMode(mode, protectionsPresent, guardActive)`), and the driver performs
+no mode emulation and emits no mediation notice. The control-channel refusal in the
+`control_request` handler is retained as defense in depth for `default`/`auto`; a double refusal is
+harmless because Claude never reaches the control channel for a command the hook already denied.
+
+- **The guard's own state is vetoed.** The provider runs as the runner's OS user, so it could
+  rewrite the protection list. Every tool call that references the runner hook state directory is
+  refused — Bash by raw text and by every `cwd`-resolved operand, and `Edit`/`MultiEdit`/`Write`/
+  `NotebookEdit`/`Read`/`Grep`/`Glob` by their resolved path (all are in the hook matcher) —
+  including reads. Resolution expands `~` and `$HOME` and follows symlinks through the nearest
+  existing ancestor; MCP filesystem tools are not classifiable and stay outside the veto.
+  The control-channel handler mirrors the same check for `default`/`auto`. The protections path is
+  never exported through the settings `env` block; it travels only in the hook command. The runner
+  also keeps a SHA-256 of the document it last wrote and compares before every rewrite. This is
+  tamper-EVIDENT best effort of the same strength class as the command-text worktree matcher — both
+  are defeated by indirection — not an isolation boundary; that is #1302.
+- **Invalidation.** A refresh that cannot be completed removes the protection list (so every later
+  guard invocation fails closed), marks the session for mediation on its next spawn — including
+  the driver's own one-shot, resume, and persistent respawns, which re-check trust in
+  `prepareClaudeHookArgs` and drop the runner-owned settings document when it fails — and emits a
+  visible notice; if the list cannot even be removed, the provider is stopped through the ordinary
+  stop path. The runner never writes an empty protection list, and the guard fails closed if it
+  reads one: when the last managed worktree goes away the guard state is retired instead.
+- **State.** `<dataDir>/hooks/<runnerHash>/<sessionId>.protections.json` (mode `0600`) holds the
+  live protected worktree set. It is written at every Claude spawn, and refreshed synchronously
+  whenever the session's attributed worktree inventory changes (creation, activation, attach,
+  discard), so a worktree created mid-turn is protected from the guard's very next invocation.
+  A session that owns NO worktree at spawn time has no guard in its running process; if it gains
+  its first worktree mid-session the process keeps the mediated behaviour below until its next
+  spawn.
+- **Fail closed.** Malformed hook input, a missing/unreadable/malformed protections file, a Bash
+  call with no command text or working directory, or any exception blocks the tool call (exit 2
+  with the refusal on stderr). The guard performs no network, control-plane, or credential work.
+- **Proven, not assumed.** Claude blocks only on exit code 2, so a sidecar that fails to *start*
+  (exit 1) would silently wave every command through. Hook processes inherit CLAUDE's working
+  directory, so `runnerReentryCommand` makes bare loader specifiers such as `--import tsx`
+  absolute (`cwdIndependentExecArgv`), and provisioning runs the real sidecar once per distinct
+  launch command and demands the real refusal document before the guard counts as active.
+- **One settings file.** Claude applies only the LAST `--settings` argument — a later one replaces
+  an earlier one rather than merging — so the guard and the §2.3.1 manager policy hooks are written
+  into a single per-session settings document, with the guard first in `PreToolUse`. The guard is
+  present whenever protections exist and it is provisionable, including when manager hooks are
+  disabled, unsupported for the mode, skipped for the Orchestrator preset, or their circuit is
+  open. While the circuit is open the live settings file is swapped for a guard-only copy
+  (`<sessionId>.guard.json`) and the `--settings` argument is KEPT; the heal template restores the
+  combined document once the transport is eligible again. Consequently a user-supplied `--settings`
+  in the agent catalog is shadowed for guarded launches, exactly as it already was whenever manager
+  hooks were provisioned.
+- **Fail-safe.** When the guard cannot be provisioned — a non-native (WSL/container) context, a
+  non-host execution target, an unquotable path, or a write failure — the driver falls back to
+  EXACTLY the pre-#1313 behaviour: every non-`plan` mode is mediated to interactive `default` and
+  the runner answers `bypassPermissions` (allow), `acceptEdits` (allow the four edit tools), and
+  `dontAsk` (deny) itself. There is never an unprotected native launch. "Guard active" is
+  established at provisioning time and observable in the launch argv
+  (`prepareClaudeHookArgs(...).guardActive`), never assumed from the presence of protections.
+- **TUI.** A native TUI launch replays the session's persisted args and never re-runs launch
+  provisioning, so it carries the guard only when a structured launch persisted the `--settings`
+  argument and the file still exists. `claude` refuses to start when `--settings` names a missing
+  file, so `agentTuiLaunch` drops such pairs.
+
 ### 2.4 Turn I/O (stdin/stdout JSONL)
 
 - In default mode, one process runs per turn (`--session-id` on turn 1, `--resume` after). In

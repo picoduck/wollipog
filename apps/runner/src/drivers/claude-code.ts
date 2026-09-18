@@ -26,7 +26,12 @@ import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import { inspectClaudeBackgroundWork, inspectClaudeBackgroundWorkInContext, type ClaudeBackgroundWorkInspection } from "../claude-background-work.js";
 import { effectiveClaudePermissionMode } from "../claude-permission.js";
 import { prepareClaudeHookArgs } from "../hook-settings.js";
-import { commandTargetsManagedWorktree, type ManagedWorktreeProtection } from "../managed-worktree-protection.js";
+import {
+  commandTargetsGuardState,
+  commandTargetsManagedWorktree,
+  toolTargetsGuardState,
+  type ManagedWorktreeProtection,
+} from "../managed-worktree-protection.js";
 import { classifyRoutineClaudeOrchestratorPermission } from "../orchestrator-provider-permissions.js";
 import { killTree, spawnAgent, terminateDescendantBoundaries, trackPendingKill, type AgentProcess, type SpawnAgentOptions } from "../spawn.js";
 import type {
@@ -305,11 +310,24 @@ export function claudeStructuredOrchestratorArgs(args: readonly string[], strict
   return result;
 }
 
-/** Claude's classifier cannot know which paths are runner-owned. Keep automatic review for
- * ordinary sessions, but route every boundary-crossing tool decision through Wollipog while a
- * managed worktree is present so the local target veto cannot be auto-overridden. */
-export function protectedClaudePermissionMode(mode: string, protectManagedWorktrees: boolean): string {
-  return protectManagedWorktrees && mode !== "plan" ? "default" : mode;
+/**
+ * Two branches, and the guard decides which one applies (issue #1313).
+ *
+ * With the managed-worktree guard in this spawn's settings, Claude's own `PreToolUse` hook
+ * enforces the runner-owned worktree veto for every Bash call in every mode — the classifier
+ * cannot override a hook `deny` — so the user's selected mode is launched unchanged.
+ *
+ * Without it (non-native context, container/cloud target, unwritable settings) the veto can only
+ * be seen where Claude consults the runner's stdio control channel, so every non-`plan` mode is
+ * still mediated to interactive `default` and the fixed-rule modes are emulated in the driver.
+ * That is the fail-safe: never an unprotected native launch.
+ */
+export function protectedClaudePermissionMode(
+  mode: string,
+  protectManagedWorktrees: boolean,
+  managedWorktreeGuardActive = false,
+): string {
+  return protectManagedWorktrees && !managedWorktreeGuardActive && mode !== "plan" ? "default" : mode;
 }
 
 /**
@@ -559,6 +577,11 @@ export class ClaudeCodeDriver implements Driver {
   private hookCircuitReported = false;
   private hookCircuitOpenedAt: number | null = null;
   private managedPermissionMediationReported = false;
+  /** Established by the last `preparedBaseArgs()`: the managed-worktree guard hook is in the
+   * settings file this spawn launches with, so the runner does NOT have to mediate the mode. */
+  private managedWorktreeGuardActive = false;
+  /** Runner-owned hook state directory for this spawn; the provider must not touch it. */
+  private managedWorktreeGuardStateDirectory = "";
   /** A fresh UUID is only a proposed coordinate until Claude confirms it in system/init. */
   private sessionEstablished: boolean;
 
@@ -629,9 +652,15 @@ export class ClaudeCodeDriver implements Driver {
     return effectiveClaudePermissionMode(this.config, this.opts.orchestrator?.strictProjectIsolation !== false);
   }
 
-  /** The mode actually passed to the CLI: managed-worktree protection can replace it. */
+  /** The mode actually passed to the CLI: managed-worktree protection can replace it, unless the
+   * guard hook verified for this spawn already refuses retirement in the selected mode. Read it only
+   * after `preparedBaseArgs()`, which is what establishes `managedWorktreeGuardActive`. */
   private launchedPermissionMode(): string {
-    return protectedClaudePermissionMode(this.effectivePermissionMode(), this.managedProtections().length > 0);
+    return protectedClaudePermissionMode(
+      this.effectivePermissionMode(),
+      this.managedProtections().length > 0,
+      this.managedWorktreeGuardActive,
+    );
   }
 
   /** The supplement the CURRENT configuration would launch with — see
@@ -650,8 +679,35 @@ export class ClaudeCodeDriver implements Driver {
     return claudeRoutineControlChannelMode(this.launchedPermissionMode(), this.opts.orchestrator != null);
   }
 
-  private reportManagedPermissionMediation(mode: string): void {
-    if (this.managedPermissionMediationReported || mode !== "auto") return;
+  /**
+   * The guard keeps its protection list in a runner-owned file, and the provider runs as the same
+   * OS user, so any tool call that names that directory — read or write — is refused. This is
+   * tamper-EVIDENT best effort of the same strength class as the command-text worktree matcher,
+   * not an isolation boundary; that belongs at the sandbox (#1302).
+   */
+  private managedWorktreeGuardStateVeto(toolName: unknown, input: unknown): string | null {
+    const directory = this.managedWorktreeGuardStateDirectory;
+    if (!directory || typeof toolName !== "string") return null;
+    const fileVerdict = toolTargetsGuardState(toolName, input, this.cwd, directory);
+    if (fileVerdict === "malformed") {
+      return "Wollipog could not read the target path of this tool call, so it was refused.";
+    }
+    if (fileVerdict) return fileVerdict;
+    const command = input && typeof input === "object"
+      ? (input as { command?: unknown }).command
+      : undefined;
+    return toolName === "Bash" && typeof command === "string"
+      ? commandTargetsGuardState(command, this.cwd, directory)
+      : null;
+  }
+
+  /** Whether this spawn still has to route permission decisions through the runner. */
+  private mediatesManagedPermissions(protections: readonly ManagedWorktreeProtection[]): boolean {
+    return protections.length > 0 && !this.managedWorktreeGuardActive;
+  }
+
+  private reportManagedPermissionMediation(mode: string, mediating: boolean): void {
+    if (!mediating || this.managedPermissionMediationReported || mode !== "auto") return;
     this.managedPermissionMediationReported = true;
     this.cb.onStderr(
       "Claude automatic permission review is routed through Wollipog while runner-owned worktrees are linked so destructive retirement can be refused; use discard_worktree for cleanup.",
@@ -977,7 +1033,10 @@ export class ClaudeCodeDriver implements Driver {
       // — no MCP, no side channel). Non-interactive modes pass --permission-mode and pipe
       // the plain-text prompt over stdin so Windows cmd.exe never has to parse user content.
       const configuredPermissionMode = this.effectivePermissionMode();
-      this.reportManagedPermissionMediation(configuredPermissionMode);
+      this.reportManagedPermissionMediation(
+        configuredPermissionMode,
+        this.mediatesManagedPermissions(this.managedProtections()),
+      );
       const routineChannelMode = this.routineControlChannelMode();
       const perm = claudePermissionArgs(
         this.launchedPermissionMode(),
@@ -1212,8 +1271,14 @@ export class ClaudeCodeDriver implements Driver {
       return;
     }
     const cfg = this.config;
+    // The prepared argv establishes whether the managed-worktree guard is active for this spawn,
+    // so it must be resolved BEFORE the permission mode that depends on it.
+    const preparedArgs = this.preparedBaseArgs();
     const configuredPermissionMode = this.effectivePermissionMode();
-    this.reportManagedPermissionMediation(configuredPermissionMode);
+    this.reportManagedPermissionMediation(
+      configuredPermissionMode,
+      this.mediatesManagedPermissions(this.managedProtections()),
+    );
     const permissionMode = this.launchedPermissionMode();
     const routineChannelMode = this.routineControlChannelMode();
     const perm = claudePermissionArgs(
@@ -1221,7 +1286,6 @@ export class ClaudeCodeDriver implements Driver {
       true,
       routineChannelMode !== null,
     );
-    const preparedArgs = this.preparedBaseArgs();
     this.interactive = perm.interactive;
     const fingerprint = JSON.stringify({
       cwd: this.cwd,
@@ -2032,6 +2096,8 @@ export class ClaudeCodeDriver implements Driver {
    * transport circuit opens. The persisted base args remain intact for restart diagnostics. */
   private preparedBaseArgs(): string[] {
     const prepared = prepareClaudeHookArgs(this.opts.args);
+    this.managedWorktreeGuardActive = prepared.guardActive;
+    this.managedWorktreeGuardStateDirectory = prepared.guardStateDirectory ?? "";
     if (prepared.circuitOpen && !this.hookCircuitReported) {
       this.hookCircuitReported = true;
       this.hookCircuitOpenedAt = prepared.circuitOpenedAt ?? null;
@@ -2234,13 +2300,17 @@ export class ClaudeCodeDriver implements Driver {
         const req = msg.request;
         if (req?.subtype === "can_use_tool" && typeof msg.request_id === "string") {
           const protections = this.managedProtections();
-          const managedRefusal = req.tool_name === "Bash" && typeof req.input?.command === "string"
-            ? commandTargetsManagedWorktree(
-                req.input.command,
-                this.cwd,
-                protections,
-              )
-            : null;
+          // Defense in depth for `default`/`auto`, mirroring the guard hook exactly: the runner's
+          // own hook state is off limits to every tool, and only then does the worktree veto run.
+          const guardStateRefusal = this.managedWorktreeGuardStateVeto(req.tool_name, req.input);
+          const managedRefusal = guardStateRefusal ??
+            (req.tool_name === "Bash" && typeof req.input?.command === "string"
+              ? commandTargetsManagedWorktree(
+                  req.input.command,
+                  this.cwd,
+                  protections,
+                )
+              : null);
           if (managedRefusal) {
             try {
               this.child.stdin.write(JSON.stringify({
@@ -2254,7 +2324,9 @@ export class ClaudeCodeDriver implements Driver {
             } catch { /* the provider process ended before the refusal could be written */ }
             return null;
           }
-          if (protections.length > 0) {
+          // Emulation exists only for the mediated launch. With the guard active the process was
+          // launched in the user's own mode, so Claude's own rules already decide this request.
+          if (this.mediatesManagedPermissions(protections)) {
             const configuredMode = this.effectivePermissionMode();
             const editTool = ["Edit", "MultiEdit", "NotebookEdit", "Write"].includes(req.tool_name ?? "");
             const behavior = configuredMode === "bypassPermissions" ||

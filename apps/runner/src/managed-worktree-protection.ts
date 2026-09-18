@@ -1,4 +1,6 @@
-import { dirname, isAbsolute, matchesGlob, normalize, resolve, sep } from "node:path";
+import { realpathSync } from "node:fs";
+import { homedir, userInfo } from "node:os";
+import { basename, dirname, isAbsolute, matchesGlob, normalize, resolve, sep } from "node:path";
 import { parse, type ParseEntry } from "shell-quote";
 
 const MAX_COMMAND_LENGTH = 32_768;
@@ -571,4 +573,190 @@ export function commandTargetsManagedWorktree(
     // destructive target cannot be classified safely, retain the managed worktree.
     return MANAGED_WORKTREE_REFUSAL;
   }
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Guard-state boundary.
+ *
+ * The managed-worktree guard keeps its protection list in a runner-owned file, and the provider
+ * runs as the same OS user, so a permitted command could rewrite that file and disarm the veto.
+ * Real integrity against a same-user process needs an OS boundary (#1302); what IS achievable is
+ * to refuse every tool call that references the runner's own hook state directory at all — reads
+ * included, since the provider never needs them — and to make tampering evident.
+ *
+ * The match is deliberately conservative and of the same strength class as
+ * `commandTargetsManagedWorktree`: it inspects command text and resolved tool paths, so both are
+ * defeated by indirection (a script file, an interpreter, an unexpanded variable).
+ * ------------------------------------------------------------------------------------------ */
+
+export const GUARD_STATE_REFUSAL =
+  "Wollipog protects its own managed-worktree guard state. That runner-owned directory is not part of this session's workspace and must not be read or modified.";
+
+/**
+ * Tools whose input names a filesystem location and therefore has to respect the guard-state
+ * boundary. `optional` tools search the working directory when the key is absent; `pattern` names
+ * a glob input whose static prefix is a location of its own.
+ */
+export interface GuardStateToolPath { key: string; optional?: true; pattern?: string }
+export const GUARD_STATE_FILE_TOOLS: Readonly<Record<string, GuardStateToolPath>> = {
+  Edit: { key: "file_path" },
+  MultiEdit: { key: "file_path" },
+  Write: { key: "file_path" },
+  Read: { key: "file_path" },
+  NotebookEdit: { key: "notebook_path" },
+  Grep: { key: "path", optional: true },
+  Glob: { key: "path", optional: true, pattern: "pattern" },
+};
+
+/**
+ * Tilde forms as the shell (and Claude's file tools) spell a home directory: `~`, `~/x`, the
+ * named-user `~name/x`, and `~+` for the working directory. There is no passwd lookup here, so a
+ * named user resolves to the current home when it is the current user and to a sibling of it
+ * otherwise, which is where every conventional layout puts it. `~-` (OLDPWD) is unknowable.
+ */
+function expandHome(path: string, cwd = ""): string {
+  if (!path.startsWith("~")) return path;
+  const end = path.search(/[\\/]/u);
+  const head = end < 0 ? path : path.slice(0, end);
+  const rest = end < 0 ? "" : path.slice(end + 1);
+  let base: string;
+  if (head === "~") base = homedir();
+  else if (head === "~+") base = cwd || ".";
+  else if (head === "~-") return path;
+  else {
+    const name = head.slice(1);
+    let current = "";
+    try {
+      current = userInfo().username;
+    } catch {
+      /* no passwd entry for this uid: fall through to the sibling layout */
+    }
+    base = name === current ? homedir() : resolve(dirname(homedir()), name);
+  }
+  return resolve(base, rest);
+}
+
+/**
+ * Follow symlinks as far as the filesystem allows: the nearest existing ancestor is resolved and
+ * the not-yet-existing remainder is appended, so a link into the guard state is seen for what it
+ * is even when the final component does not exist yet.
+ */
+function canonicalPath(path: string): string {
+  const missing: string[] = [];
+  let current = path;
+  for (let depth = 0; depth < 256; depth++) {
+    try {
+      return resolve(realpathSync(current), ...missing);
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) break;
+      missing.unshift(basename(current));
+      current = parent;
+    }
+  }
+  return path;
+}
+
+/**
+ * Every location a spelling can name. A tilde form is ambiguous without a passwd lookup: the shell
+ * expands `~name` only when that user exists and otherwise leaves a literal path component, so
+ * both readings are candidates and either one landing in the guard state refuses the call.
+ */
+function guardStateCandidates(path: string, cwd: string): string[] {
+  const literal = isAbsolute(path) ? resolve(path) : resolve(cwd || ".", path);
+  const expanded = expandHome(path, cwd);
+  if (expanded === path) return [literal];
+  const home = isAbsolute(expanded) ? resolve(expanded) : resolve(cwd || ".", expanded);
+  return home === literal ? [literal] : [literal, home];
+}
+
+/** A path is out of bounds when it is inside the guard-state directory, or contains it. */
+export function pathTargetsGuardState(path: string, cwd: string, directory: string): boolean {
+  if (!directory || !path || path.includes("\0")) return false;
+  const root = resolve(directory);
+  let realRoot: string | null = null;
+  for (const resolved of guardStateCandidates(path, cwd)) {
+    if (pathContains(root, resolved) || pathContains(resolved, root)) return true;
+    // The lexical spelling is only half of it: a symlink anywhere along either path lands elsewhere.
+    realRoot ??= canonicalPath(root);
+    const realResolved = canonicalPath(resolved);
+    if (pathContains(realRoot, realResolved) || pathContains(realResolved, realRoot)) return true;
+  }
+  return false;
+}
+
+/**
+ * Refuse a shell command that references the guard-state directory in any form. Unparsable input
+ * is refused rather than allowed: this is the state the veto itself depends on.
+ */
+export function commandTargetsGuardState(
+  command: string,
+  cwd: string,
+  directory: string,
+): string | null {
+  if (!directory || !command || command.length > MAX_COMMAND_LENGTH || command.includes("\0")) return null;
+  const root = resolve(directory);
+  const foldCase = process.platform === "win32" || process.platform === "darwin";
+  const haystack = foldCase ? command.toLowerCase() : command;
+  // Raw text first: concatenations, inline `--settings=<path>`, and quoting styles that tokenize
+  // in ways a path comparison would miss still name the directory verbatim.
+  for (const candidate of [root, root.split(sep).join("/")]) {
+    if (haystack.includes(foldCase ? candidate.toLowerCase() : candidate)) return GUARD_STATE_REFUSAL;
+  }
+  let tokens: ShellToken[];
+  try {
+    // `$HOME` is as direct a spelling of the data directory's parent as `~`; every other variable
+    // stays opaque, which is the documented limit of a command-text matcher.
+    tokens = parse(command, (name) => name === "HOME" ? homedir() : { env: name }) as ShellToken[];
+  } catch {
+    return GUARD_STATE_REFUSAL;
+  }
+  for (const token of tokens) {
+    const value = typeof token === "string"
+      ? token
+      : token != null && typeof token === "object" && "op" in token && token.op === "glob" &&
+          "pattern" in token && typeof token.pattern === "string"
+        ? token.pattern
+        : null;
+    if (value === null) continue;
+    if (pathTargetsGuardState(value, cwd, root)) return GUARD_STATE_REFUSAL;
+  }
+  return null;
+}
+
+/**
+ * Refuse a file tool whose target resolves inside the guard-state directory. Returns `"malformed"`
+ * when a matched file tool carries no usable path: the caller must fail closed rather than guess.
+ */
+export function toolTargetsGuardState(
+  toolName: string,
+  input: unknown,
+  cwd: string,
+  directory: string,
+): string | "malformed" | null {
+  if (!directory) return null;
+  const spec = Object.hasOwn(GUARD_STATE_FILE_TOOLS, toolName) ? GUARD_STATE_FILE_TOOLS[toolName] : undefined;
+  if (!spec) return null;
+  const fields = input && typeof input === "object" ? input as Record<string, unknown> : {};
+  const value = fields[spec.key];
+  const absent = value === undefined || value === null || value === "";
+  if (absent ? !spec.optional : typeof value !== "string") return "malformed";
+  // A search tool without a path searches the working directory.
+  if (pathTargetsGuardState(absent ? cwd : value as string, cwd, directory)) return GUARD_STATE_REFUSAL;
+  if (spec.pattern) {
+    const pattern = fields[spec.pattern];
+    if (typeof pattern === "string" && pattern) {
+      // Only the static prefix of a glob is a location; the rest is matched beneath it.
+      const wildcard = pattern.search(/[*?[{]/u);
+      const prefix = wildcard < 0 ? pattern : pattern.slice(0, pattern.lastIndexOf("/", wildcard) + 1);
+      // The prefix is a location of its own when it is absolute or a tilde form; otherwise it
+      // hangs beneath every reading of the search base, resolved against the EVENT's cwd.
+      const bases = absent ? [resolve(cwd || ".")] : guardStateCandidates(value as string, cwd);
+      const anchors = isAbsolute(prefix) || prefix.startsWith("~")
+        ? [prefix, ...bases.map((base) => resolve(base, prefix))]
+        : bases.map((base) => resolve(base, prefix || "."));
+      if (anchors.some((anchor) => pathTargetsGuardState(anchor, cwd, directory))) return GUARD_STATE_REFUSAL;
+    }
+  }
+  return null;
 }

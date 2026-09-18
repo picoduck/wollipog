@@ -1,0 +1,358 @@
+/**
+ * Managed-worktree guard: the Claude `PreToolUse` sidecar that enforces the runner-owned worktree
+ * veto without taking the session's permission mode away from the user.
+ *
+ * Claude only consults the runner's stdio control channel in `default` (and, for what its own
+ * classifier cannot decide, in `auto`). Before this guard existed the only way to guarantee the
+ * veto saw every command was to force every non-`plan` mode to interactive `default` and emulate
+ * the fixed-rule modes in the runner, which turned `auto` into "ask about everything" for any
+ * session with a managed worktree (issue #1313).
+ *
+ * A `PreToolUse` command hook supplied through `--settings` is consulted for EVERY Bash call in
+ * every mode, including `auto`, `acceptEdits`, and `bypassPermissions`, and its `deny` decision
+ * cannot be overridden by Claude's classifier. Measured against claude 2.1.270:
+ *   - `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny",
+ *      "permissionDecisionReason":"…"}}` on stdout blocks the call in `auto`, `acceptEdits`, and
+ *     `bypassPermissions`, and the reason reaches the model.
+ *   - exit code 2 with a message on stderr also blocks the call (measured in `auto` and
+ *     `acceptEdits`), which is what makes fail-closed possible.
+ *   - a `matcher` of `"Bash"` scopes the hook without losing any Bash call.
+ *
+ * This process runs before every Bash tool call, so it stays dependency-light: no network, no
+ * control-plane round trip, no credentials. Anything it cannot evaluate confidently BLOCKS.
+ */
+
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import {
+  GUARD_STATE_FILE_TOOLS,
+  MANAGED_WORKTREE_REFUSAL,
+  commandTargetsGuardState,
+  commandTargetsManagedWorktree,
+  toolTargetsGuardState,
+  type ManagedWorktreeProtection,
+} from "./managed-worktree-protection.js";
+import { quote } from "shell-quote";
+import { protectedWrite } from "./protected-file.js";
+
+/** Runner re-entry mode that runs this guard. */
+export const MANAGED_WORKTREE_GUARD_MODE = "--managed-worktree-guard";
+/** Tools the guard hook must be invoked for: Bash plus every tool that names a file path. */
+export const MANAGED_WORKTREE_GUARD_MATCHER =
+  ["Bash", ...Object.keys(GUARD_STATE_FILE_TOOLS)].join("|");
+export const MANAGED_WORKTREE_GUARD_PROTECTIONS_SUFFIX = ".protections.json";
+const PROTECTIONS_VERSION = 1;
+const MAX_HOOK_INPUT_BYTES = 1_000_000;
+
+export function managedWorktreeGuardProtectionsPath(settingsFile: string, suffix: string): string {
+  return settingsFile.endsWith(suffix)
+    ? `${settingsFile.slice(0, -suffix.length)}${MANAGED_WORKTREE_GUARD_PROTECTIONS_SUFFIX}`
+    : `${settingsFile}${MANAGED_WORKTREE_GUARD_PROTECTIONS_SUFFIX}`;
+}
+
+/**
+ * Persist the LIVE protection set for a session. Written at every Claude spawn and again whenever
+ * the session's attributed worktree inventory changes, so a worktree created mid-turn is covered
+ * from the guard's next invocation.
+ */
+export function managedWorktreeGuardProtectionsDocument(
+  protections: readonly ManagedWorktreeProtection[],
+): string {
+  return JSON.stringify({
+    version: PROTECTIONS_VERSION,
+    protections: protections.map(({ worktreePath, repoPath }) => ({ worktreePath, repoPath })),
+  });
+}
+
+/** Digest of the exact document the runner wrote, used as the tamper tripwire's baseline. */
+export function managedWorktreeGuardDigest(document: string): string {
+  return createHash("sha256").update(document).digest("hex");
+}
+
+/** Returns the digest of what was written, so the caller can remember its own baseline. */
+export function writeManagedWorktreeGuardProtections(
+  file: string,
+  protections: readonly ManagedWorktreeProtection[],
+): string {
+  if (protections.length === 0) {
+    // An empty list would read as "nothing is protected". The runner removes the guard instead.
+    throw new Error("refusing to write an empty managed worktree protection list");
+  }
+  const document = managedWorktreeGuardProtectionsDocument(protections);
+  protectedWrite(file, document, "managed worktree guard file");
+  return managedWorktreeGuardDigest(document);
+}
+
+/**
+ * Tamper tripwire. The provider runs as the same OS user and can rewrite this file, so the runner
+ * compares what is on disk against the digest of what it last wrote. A mismatch (or an unreadable
+ * file where one is expected) means the guard's state is no longer the runner's.
+ */
+export function managedWorktreeGuardStateMatches(file: string, expectedDigest: string): boolean {
+  try {
+    return managedWorktreeGuardDigest(readFileSync(file, "utf8")) === expectedDigest;
+  } catch {
+    return false;
+  }
+}
+
+/** Parse a protections document. Anything unexpected throws, which the guard turns into a block. */
+export function parseManagedWorktreeGuardProtections(contents: string): ManagedWorktreeProtection[] {
+  const parsed = JSON.parse(contents) as unknown;
+  if (!parsed || typeof parsed !== "object") throw new Error("protections document is not an object");
+  const document = parsed as { version?: unknown; protections?: unknown };
+  if (document.version !== PROTECTIONS_VERSION) throw new Error("unsupported protections document version");
+  if (!Array.isArray(document.protections)) throw new Error("protections document has no protection list");
+  return document.protections.map((entry) => {
+    if (!entry || typeof entry !== "object") throw new Error("protection entry is not an object");
+    const { worktreePath, repoPath } = entry as { worktreePath?: unknown; repoPath?: unknown };
+    if (typeof worktreePath !== "string" || !worktreePath ||
+        typeof repoPath !== "string" || !repoPath) {
+      throw new Error("protection entry is missing a path");
+    }
+    return { worktreePath, repoPath };
+  });
+}
+
+export function readManagedWorktreeGuardProtections(file: string): ManagedWorktreeProtection[] {
+  return parseManagedWorktreeGuardProtections(readFileSync(file, "utf8"));
+}
+
+export type ManagedWorktreeGuardDecision =
+  /** Deny the tool call with a reason the model reads. */
+  | { kind: "deny"; reason: string }
+  /** No opinion: the session's own permission mode decides. */
+  | { kind: "allow" }
+  /** Fail closed: the tool call is blocked because the guard could not evaluate it. */
+  | { kind: "block"; reason: string };
+
+/**
+ * Decide a single `PreToolUse` payload. Every unreadable, malformed, or unexpected input blocks:
+ * a guard that cannot evaluate a command must not let it through.
+ */
+export function managedWorktreeGuardDecision(
+  hookInput: string,
+  loadProtections: () => ManagedWorktreeProtection[],
+  guardStateDirectory: string,
+): ManagedWorktreeGuardDecision {
+  let payload: { tool_name?: unknown; tool_input?: unknown; cwd?: unknown };
+  try {
+    if (hookInput.length > MAX_HOOK_INPUT_BYTES) throw new Error("hook payload is too large");
+    const parsed = JSON.parse(hookInput) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("hook payload is not an object");
+    }
+    payload = parsed as typeof payload;
+  } catch (error) {
+    return { kind: "block", reason: `managed worktree guard could not read its input: ${(error as Error).message}` };
+  }
+  let protections: ManagedWorktreeProtection[];
+  try {
+    protections = loadProtections();
+  } catch (error) {
+    return {
+      kind: "block",
+      reason: `managed worktree guard could not load this session's protected worktrees: ${(error as Error).message}`,
+    };
+  }
+  const toolName = payload.tool_name;
+  if (typeof toolName !== "string" || !toolName) {
+    return { kind: "block", reason: "managed worktree guard received a tool call with no tool name" };
+  }
+  // An empty list can only mean the runner meant to retire this guard and something went wrong:
+  // the runner never writes one. Trusting it would be trusting a disarmed veto.
+  if (protections.length === 0) {
+    return { kind: "block", reason: "this session's protected worktree list is empty; the guard has been invalidated" };
+  }
+  const isBash = toolName === "Bash";
+  const isFileTool = Object.hasOwn(GUARD_STATE_FILE_TOOLS, toolName);
+  // Every other tool is outside the veto's vocabulary, so the guard holds no opinion.
+  if (!isBash && !isFileTool) return { kind: "allow" };
+  const cwd = payload.cwd;
+  if (typeof cwd !== "string" || !cwd) {
+    return { kind: "block", reason: "managed worktree guard received a tool call with no working directory" };
+  }
+  try {
+    if (isFileTool) {
+      const verdict = toolTargetsGuardState(toolName, payload.tool_input, cwd, guardStateDirectory);
+      if (verdict === "malformed") {
+        return { kind: "block", reason: `managed worktree guard received a ${toolName} call with no usable path` };
+      }
+      return verdict ? { kind: "deny", reason: verdict } : { kind: "allow" };
+    }
+    const toolInput = payload.tool_input;
+    const command = toolInput && typeof toolInput === "object"
+      ? (toolInput as { command?: unknown }).command
+      : undefined;
+    if (typeof command !== "string") {
+      return { kind: "block", reason: "managed worktree guard received a Bash call with no command text" };
+    }
+    // The guard's own state comes first: a command that can rewrite the protection list would
+    // otherwise disarm every later check.
+    const stateRefusal = commandTargetsGuardState(command, cwd, guardStateDirectory);
+    if (stateRefusal) return { kind: "deny", reason: stateRefusal };
+    const refusal = commandTargetsManagedWorktree(command, cwd, protections);
+    return refusal ? { kind: "deny", reason: refusal } : { kind: "allow" };
+  } catch (error) {
+    return { kind: "block", reason: `managed worktree guard failed to classify the call: ${(error as Error).message}` };
+  }
+}
+
+export function managedWorktreeGuardDenyPayload(reason: string): string {
+  return JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: reason,
+    },
+  });
+}
+
+/**
+ * The protections path comes ONLY from the hook command inside the 0600 settings file. It is
+ * deliberately not published in the settings `env` block: that block is exported into every tool
+ * process, which would hand the provider the exact path to the guard's own state.
+ */
+export function managedWorktreeGuardProtectionsArgument(argv: readonly string[]): string | null {
+  const index = argv.indexOf("--protections");
+  return (index >= 0 ? argv[index + 1] : undefined) ?? null;
+}
+
+export interface ManagedWorktreeGuardOutcome {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
+
+export function runManagedWorktreeGuardDecision(
+  hookInput: string,
+  protectionsFile: string | null,
+): ManagedWorktreeGuardOutcome {
+  if (!protectionsFile) {
+    return {
+      stdout: "",
+      stderr: `${MANAGED_WORKTREE_REFUSAL} (managed worktree guard was launched without a protections file)\n`,
+      exitCode: 2,
+    };
+  }
+  const decision = managedWorktreeGuardDecision(
+    hookInput,
+    () => readManagedWorktreeGuardProtections(protectionsFile),
+    dirname(resolve(protectionsFile)),
+  );
+  if (decision.kind === "deny") {
+    return { stdout: `${managedWorktreeGuardDenyPayload(decision.reason)}\n`, stderr: "", exitCode: 0 };
+  }
+  if (decision.kind === "block") {
+    return {
+      stdout: "",
+      // Claude blocks the tool call on exit code 2 and shows stderr to the model.
+      stderr: `${MANAGED_WORKTREE_REFUSAL} (${decision.reason})\n`,
+      exitCode: 2,
+    };
+  }
+  return { stdout: "", stderr: "", exitCode: 0 };
+}
+
+async function readAllStdin(stream: NodeJS.ReadableStream): Promise<string> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of stream) {
+    const buffer = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+    total += buffer.length;
+    if (total > MAX_HOOK_INPUT_BYTES) throw new Error("hook payload is too large");
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+/** Runner re-entry entry point (`--managed-worktree-guard`). */
+export async function runManagedWorktreeGuardCli(
+  argv: readonly string[] = process.argv,
+  io: {
+    stdin?: NodeJS.ReadableStream;
+    stdout?: (text: string) => void;
+    stderr?: (text: string) => void;
+    exit?: (code: number) => void;
+  } = {},
+): Promise<void> {
+  const write = io.stdout ?? ((text: string) => process.stdout.write(text));
+  const warn = io.stderr ?? ((text: string) => process.stderr.write(text));
+  const exit = io.exit ?? ((code: number) => { process.exitCode = code; });
+  let outcome: ManagedWorktreeGuardOutcome;
+  try {
+    const hookInput = await readAllStdin(io.stdin ?? process.stdin);
+    outcome = runManagedWorktreeGuardDecision(
+      hookInput,
+      managedWorktreeGuardProtectionsArgument(argv),
+    );
+  } catch (error) {
+    outcome = {
+      stdout: "",
+      stderr: `${MANAGED_WORKTREE_REFUSAL} (managed worktree guard failed: ${(error as Error).message})\n`,
+      exitCode: 2,
+    };
+  }
+  if (outcome.stdout) write(outcome.stdout);
+  if (outcome.stderr) warn(outcome.stderr);
+  exit(outcome.exitCode);
+}
+
+/**
+ * Prove, before the launch commits to it, that this exact hook command actually refuses a
+ * destructive command against this session's own protected worktree.
+ *
+ * Claude only treats exit code 2 as blocking: a hook that fails to START (a bad interpreter, an
+ * unresolvable loader, a missing script) exits 1 and the tool call proceeds. A guard that cannot
+ * be proven to run is therefore worse than no guard, because the driver would stop mediating on
+ * the strength of it. The probe runs the real sidecar with the real protections file, from a
+ * directory that is NOT the runner's own, and demands the real refusal document.
+ */
+export function verifyManagedWorktreeGuardLaunch(
+  launch: { command: string; args: string[] },
+  protectionsFile: string,
+  protections: readonly ManagedWorktreeProtection[],
+  spawn: typeof spawnSync = spawnSync,
+): { ok: true } | { ok: false; reason: string } {
+  const target = protections[0];
+  if (!target) return { ok: false, reason: "no protected worktree to probe with" };
+  const payload = JSON.stringify({
+    hook_event_name: "PreToolUse",
+    tool_name: "Bash",
+    cwd: target.worktreePath,
+    // Shell-quote the path: a protected worktree containing whitespace or a quote would otherwise
+    // split into several operands, the matcher would inspect the wrong one, the probe would see no
+    // refusal, and every such session would silently fall back to mediation.
+    tool_input: { command: quote(["git", "worktree", "remove", target.worktreePath]) },
+  });
+  let result: ReturnType<typeof spawnSync>;
+  try {
+    result = spawn(launch.command, [...launch.args, "--protections", protectionsFile], {
+      input: payload,
+      encoding: "utf8",
+      // The sidecar's cwd is CLAUDE's, never the runner's; probe the same way.
+      cwd: dirname(protectionsFile),
+      timeout: 20_000,
+      maxBuffer: 256 * 1024,
+      windowsHide: true,
+    });
+  } catch (error) {
+    return { ok: false, reason: `probe could not be started: ${(error as Error).message}` };
+  }
+  if (result.error) return { ok: false, reason: `probe failed: ${result.error.message}` };
+  if (result.status !== 0) {
+    return { ok: false, reason: `probe exited ${String(result.status)}: ${String(result.stderr ?? "").trim().slice(0, 200)}` };
+  }
+  const stdout = String(result.stdout ?? "");
+  if (!stdout.includes('"permissionDecision":"deny"') || !stdout.includes(MANAGED_WORKTREE_REFUSAL)) {
+    return { ok: false, reason: "probe did not produce the managed worktree refusal" };
+  }
+  return { ok: true };
+}
+
+/** Resolve-normalized comparison used by the settings self-description check. */
+export function sameGuardPath(left: string, right: string): boolean {
+  return resolve(left).toLowerCase() === resolve(right).toLowerCase();
+}
