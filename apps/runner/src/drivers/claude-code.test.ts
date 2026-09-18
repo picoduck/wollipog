@@ -29,6 +29,7 @@ import {
   claudePermissionArgs,
   claudePersistentSettings,
   claudePersistentSettingsForAgent,
+  claudeRoutineControlChannelMode,
   createPersistentSettingWarningEmitter,
   LEGACY_CLAUDE_PENDING_MAX_MS,
   LEGACY_CLAUDE_PERSISTENT_FLAG,
@@ -2723,6 +2724,62 @@ test("strict Claude Orchestrator structured launches replace static dontAsk with
   assert.equal(await turn, "end_turn");
 });
 
+test("only a structured Orchestrator's fixed-rule launch carries the runner control channel", async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const launchArgs = async (overrides: Partial<DriverOptions>): Promise<string[]> => {
+    const child = fakeProcess();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const launches: any[] = [];
+    const driver = new ClaudeCodeDriver({ ...baseOpts, ...overrides }, noopCb, {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      spawn: (opts: any) => { launches.push(opts); return child; },
+      kill: () => {},
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    const turn = driver.prompt("inspect the campaign issues");
+    await nextTask();
+    child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+    assert.equal(await turn, "end_turn");
+    driver.dispose();
+    return launches[0].args as string[];
+  };
+  const tail = (args: string[]) => args.slice(args.indexOf("--permission-mode") - 4);
+
+  const orchestrator = await launchArgs({
+    config: { permissionMode: "acceptEdits" },
+    orchestrator: { strictProjectIsolation: false },
+  });
+  assert.deepEqual(tail(orchestrator),
+    ["--input-format", "stream-json", "--permission-prompt-tool", "stdio", "--permission-mode", "acceptEdits"],
+    "the selected fixed rule is kept and supplemented, never replaced");
+
+  const ordinary = await launchArgs({ config: { permissionMode: "acceptEdits" } });
+  assert.equal(ordinary.includes("--permission-prompt-tool"), false,
+    "an ordinary session keeps exactly the mode the user chose");
+  assert.deepEqual(ordinary.slice(-2), ["--permission-mode", "acceptEdits"]);
+
+  const unverified = await launchArgs({
+    config: { permissionMode: "acceptEdits" },
+    orchestrator: { strictProjectIsolation: false },
+    capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false,
+      supportsApprovals: false, permissionModes: ["acceptEdits"],
+    },
+  });
+  assert.equal(unverified.includes("--permission-prompt-tool"), false,
+    "an installation whose approval channel was never verified keeps its plain fixed-rule launch");
+  assert.deepEqual(unverified.slice(-2), ["--permission-mode", "acceptEdits"]);
+
+  // Strict Project Isolation always arrives with the coupled preset, which resolves to the
+  // interactive Default channel — unchanged by this feature.
+  const strict = await launchArgs({
+    config: { permissionMode: "orchestrator" },
+    orchestrator: { strictProjectIsolation: true },
+  });
+  assert.equal(strict.includes("--permission-mode"), false);
+  assert.deepEqual(strict.slice(-4), ["--input-format", "stream-json", "--permission-prompt-tool", "stdio"]);
+});
+
 test("agent session id is exposed only after Claude establishes a fresh conversation", () => {
   const resumed = new ClaudeCodeDriver({ ...baseOpts, resumeId: "11111111-2222-3333-4444-555555555555" }, noopCb);
   assert.equal(resumed.agentSessionId(), "11111111-2222-3333-4444-555555555555");
@@ -3732,8 +3789,10 @@ test("strictly isolated Claude Orchestrators auto-deny commands outside the rout
 
 test("an Orchestrator with independent provider permissions keeps the routine-operation contract", () => {
   // The launch policy is the role signal (protocol v160): a non-strict Claude Orchestrator that
-  // kept its ordinary permission mode still auto-authorizes routine coordination and still
-  // returns everything else to the ordinary provider approval path.
+  // kept its ordinary permission mode still auto-authorizes routine coordination. Everything else
+  // keeps the selected mode's own behavior — and Accept Edits blocks what it does not allow
+  // instead of escalating it, so the supplemented channel must not mint a card the mode would
+  // never have produced (#1305).
   const h = makeHarness({
     config: { permissionMode: "acceptEdits" },
     orchestrator: { strictProjectIsolation: false, issueNumbers: [1209] },
@@ -3756,9 +3815,126 @@ test("an Orchestrator with independent provider permissions keeps the routine-op
     request_id: "ordinary-edit",
     request: { subtype: "can_use_tool", tool_name: "Write", input: { file_path: "/tmp/work/notes.md", content: "plan" } },
   });
-  assert.equal(writes.length, 1, "non-routine work is neither auto-allowed nor auto-denied");
-  assert.equal(h.events[0]?.kind, "permission_request",
-    "the selected provider permission mode keeps its normal approval semantics");
+  assert.equal(writes.length, 2, "non-routine work is answered, never parked");
+  assert.equal(JSON.parse(writes[1]!).response.response.behavior, "deny");
+  assert.equal(h.events.length, 0,
+    "the fixed rule blocks what it does not allow rather than escalating it to a human");
+});
+
+/** One routine claim, fed to an Orchestrator in whichever permission mode the case names. */
+function feedOrchestratorRoutineCommand(permissionMode: string): { writes: string[]; events: unknown[] } {
+  const h = makeHarness({
+    config: { permissionMode },
+    orchestrator: { strictProjectIsolation: false, issueNumbers: [1305] },
+  });
+  const writes: string[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
+  h.feed({
+    type: "control_request",
+    request_id: `routine-${permissionMode}`,
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: {
+      command: "gh issue view 1305 --json number,title,state",
+    } },
+  });
+  return { writes, events: h.events };
+}
+
+test("the routine-operation contract authorizes the same command in a fixed-rule and a channel mode", () => {
+  // The bug in #1305: only `default`/`auto` carried the runner's control channel, so the semantic
+  // classifier could not run under a fixed rule and the same routine inspection was refused there
+  // with "This command requires approval". Both launches now reach the same verdict.
+  for (const mode of ["acceptEdits", "auto"]) {
+    const { writes, events } = feedOrchestratorRoutineCommand(mode);
+    assert.equal(writes.length, 1, `${mode}: the request is answered by the runner`);
+    assert.deepEqual(JSON.parse(writes[0]!).response.response, {
+      behavior: "allow",
+      updatedInput: { command: "gh issue view 1305 --json number,title,state" },
+    }, `${mode}: routine coordination is authorized`);
+    assert.deepEqual(events, [], `${mode}: routine coordination never becomes an approval card`);
+  }
+});
+
+test("a supplemented fixed rule adds nothing beyond the routine-operation contract", () => {
+  const h = makeHarness({
+    config: { permissionMode: "acceptEdits" },
+    orchestrator: { strictProjectIsolation: false, issueNumbers: [1305] },
+  });
+  const writes: string[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
+  // A build is ordinary project work, not campaign coordination: Accept Edits refuses it headlessly
+  // today, and the supplemented channel returns that same refusal instead of an approval card.
+  h.feed({
+    type: "control_request",
+    request_id: "beyond-contract",
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "pnpm build" } },
+  });
+  const response = JSON.parse(writes[0]!).response.response;
+  assert.equal(response.behavior, "deny");
+  assert.match(response.message, /acceptEdits/);
+  assert.match(response.message, /human decision/);
+  assert.deepEqual(h.events, [], "the mode's block is not escalated into a new approval path");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  assert.equal((h.driver as any).pendingApprovals.size, 0, "nothing is parked waiting for a human");
+});
+
+test("a supplemented fixed rule still surfaces the Orchestrator's typed human question", () => {
+  const h = makeHarness({
+    config: { permissionMode: "acceptEdits" },
+    orchestrator: { strictProjectIsolation: false, issueNumbers: [1305] },
+  });
+  const writes: string[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
+  h.feed({
+    type: "control_request",
+    request_id: "campaign-question",
+    request: { subtype: "can_use_tool", tool_name: "AskUserQuestion", input: { questions: [{
+      question: "Merge the pull request?",
+      header: "Merge",
+      options: [{ label: "Merge" }, { label: "Not yet" }],
+    }] } },
+  });
+  assert.deepEqual(writes, [], "a question waits for its answer instead of being refused");
+  assert.equal(h.events[0]?.kind, "question_request");
+});
+
+test("an unverified approval channel withholds the fixed-rule supplement", () => {
+  const h = makeHarness({
+    config: { permissionMode: "acceptEdits" },
+    orchestrator: { strictProjectIsolation: false, issueNumbers: [1305] },
+    capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false,
+      supportsApprovals: false, permissionModes: ["acceptEdits"],
+    },
+  });
+  const writes: string[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
+  h.feed({
+    type: "control_request",
+    request_id: "unverified-channel",
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "pnpm build" } },
+  });
+  assert.deepEqual(writes, [], "no supplement means no runner-owned refusal");
+  assert.equal(h.events[0]?.kind, "permission_request");
+});
+
+test("an ordinary Claude session's fixed rule is never supplemented", () => {
+  const h = makeHarness({ config: { permissionMode: "acceptEdits" } });
+  const writes: string[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
+  // Without the role there is no control channel to answer on, so a request that arrives anyway
+  // (a channel mode, or a managed-worktree mediation) keeps the ordinary approval path.
+  h.feed({
+    type: "control_request",
+    request_id: "ordinary-session",
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "gh issue view 1305" } },
+  });
+  assert.deepEqual(writes, []);
+  assert.equal(h.events[0]?.kind, "permission_request");
 });
 
 test("strictly isolated Claude Orchestrators still surface typed human questions", () => {
@@ -3994,6 +4170,38 @@ test("claudePermissionArgs: a fixed-rule mode WITH images switches to stream-jso
 test("claudePermissionArgs: interactive modes always stream input", () => {
   assert.equal(claudePermissionArgs("default").streamInput, true);
   assert.equal(claudePermissionArgs("auto", true).streamInput, true);
+});
+
+test("claudePermissionArgs: a supplemented fixed rule keeps its mode AND gains the stdio channel", () => {
+  for (const mode of ["acceptEdits", "plan", "bypassPermissions", "dontAsk"]) {
+    const { interactive, streamInput, args } = claudePermissionArgs(mode, false, true);
+    assert.equal(interactive, true, `${mode} answers control requests`);
+    assert.equal(streamInput, true, `${mode} delivers the prompt as a stream-json message`);
+    assert.deepEqual(args,
+      ["--input-format", "stream-json", "--permission-prompt-tool", "stdio", "--permission-mode", mode],
+      "the selected fixed rule still decides everything it can decide itself");
+  }
+  // Images change nothing: the supplemented launch already streams its input.
+  assert.deepEqual(claudePermissionArgs("acceptEdits", true, true).args,
+    claudePermissionArgs("acceptEdits", false, true).args);
+});
+
+test("claudePermissionArgs: the channel-mode launches are unchanged by the supplement flag", () => {
+  for (const mode of ["default", "auto"]) {
+    assert.deepEqual(claudePermissionArgs(mode, false, true), claudePermissionArgs(mode));
+  }
+});
+
+test("claudeRoutineControlChannelMode: only a structured Orchestrator's fixed rule is supplemented", () => {
+  for (const mode of ["acceptEdits", "plan", "bypassPermissions", "dontAsk"]) {
+    assert.equal(claudeRoutineControlChannelMode(mode, true), mode);
+    assert.equal(claudeRoutineControlChannelMode(mode, false), null,
+      "an ordinary session is governed by the mode the user chose, and nothing else");
+  }
+  for (const mode of ["default", "auto"]) {
+    assert.equal(claudeRoutineControlChannelMode(mode, true), null,
+      "a channel mode already reaches the routine-operation contract");
+  }
 });
 
 test("buildClaudeUserMessage: text + base64 image content blocks (Messages API shape)", () => {

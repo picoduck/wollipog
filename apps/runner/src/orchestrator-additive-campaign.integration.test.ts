@@ -63,10 +63,12 @@ import { pathWithin, sameWorktreePath } from "./worktree.js";
  *
  * No provider process, credentials, or network are involved. The only external tool is `git`.
  *
- * Permission mode: the scenario selects `auto`, a normal (non-preset) mode. It has to be an
- * interactive one — `claudePermissionArgs` gives only `default`/`auto` the
- * `--permission-prompt-tool stdio` channel, so a `can_use_tool` control request is unreachable for
- * a fixed-rule mode such as `acceptEdits`, and an approval card could not arise there at all.
+ * Permission mode: the scenario selects `auto`, a normal (non-preset) mode whose approval cards are
+ * the CLI's own escalations. Since #1305 a structured Orchestrator also carries the
+ * `--permission-prompt-tool stdio` channel under a fixed rule, but there the runner answers every
+ * request itself (routine coordination allowed, everything else refused as the mode would), so no
+ * approval card — the thing this scenario threads end to end — would arise. The per-mode parity of
+ * the routine contract is covered directly in `drivers/claude-code.test.ts`.
  */
 
 const RUNNER_ID = "runner-additive";

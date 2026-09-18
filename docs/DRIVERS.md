@@ -142,7 +142,9 @@ ordinary mode such as Default, Auto, or Accept Edits launches exactly like an eq
 session and only gains the campaign tools on the general Agent Control MCP server, a
 `mcp__wollipog__*` pre-authorization, the Orchestrator instructions, and Project Location read
 access; hooks, settings sources, the built-in tool inventory, and configured MCP servers are left
-untouched. `permissionMode: "orchestrator"` now names the coupled Orchestrator preset, which remains
+untouched. Its launch does add the runner's stdio control channel on top of a fixed rule, because
+that channel is the only place the routine-operation contract can run (see §2's per-mode table).
+`permissionMode: "orchestrator"` now names the coupled Orchestrator preset, which remains
 the only shape for Strict Project Isolation, Native TUI, ACP, and pre-v160 peers. The
 control plane refuses the independent combination on older runners instead of degrading silently.
 
@@ -322,6 +324,15 @@ are not migrated automatically:
 | `default` (ask everything) | `--input-format stream-json --permission-prompt-tool stdio` (**no** `--permission-mode`) | stream-json user message on stdin; stdin stays open for approvals |
 | `auto` | `--input-format stream-json --permission-prompt-tool stdio --permission-mode auto` | same — mode rules classify first; the stdio channel catches escalations so a blocked headless turn settles gracefully |
 | `acceptEdits` / `plan` / `bypassPermissions` | `--permission-mode <mode>` | plain-text stdin; with images: + `--input-format stream-json` (prompt as a stream-json message, stdin closed immediately — no approvals) |
+| the same fixed rules, **structured Orchestrator** | `--input-format stream-json --permission-prompt-tool stdio --permission-mode <mode>` | same as the channel modes — the fixed rule still decides everything it can decide itself, and the channel catches only what a headless fixed-rule turn would otherwise refuse ("This command requires approval") |
+
+The Orchestrator supplement (`claudeRoutineControlChannelMode`) exists because the routine-operation
+contract is a runner-side classifier reached only over that channel: without it, `gh issue view` in
+Accept Edits is refused for want of a human, which is what the role exists to avoid. It grants
+nothing by itself — the CLI never consults the channel for a decision its own rule makes (an Accept
+Edits file edit, a common file command, anything `bypassPermissions` allows), and a request the
+contract does not authorize is answered with the refusal the mode would have produced, never with a
+new approval card. `AskUserQuestion` is not a tool authorization and still reaches the human.
 
 All argv tokens are quote-safe simple strings (no user prompt or JSON on argv). This keeps multiline
 text and `cmd.exe` metacharacters out of the Windows command line.
