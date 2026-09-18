@@ -288,3 +288,45 @@ export function resolveExecutionTarget(
   }
   return { target, useWorktree };
 }
+
+/**
+ * Choose the execution target a relaunch must carry. A session's workspace strategy is not fixed at
+ * creation: an in-place session that later gains a runner-owned session worktree reports
+ * `useWorktree` true while its stored target still names the creation-time in-place placement. The
+ * runner derives the expected placement from `useWorktree` and refuses that pair, so reconcile the
+ * placement to the session's current strategy here — or report why no placement can express it,
+ * before any launch is sent.
+ */
+export function relaunchExecutionTarget(
+  runner: RunnerView,
+  sshBox: boolean,
+  current: ExecutionTargetRef | undefined,
+  useWorktree: boolean,
+): { target: ExecutionTargetRef | undefined } | { error: string } {
+  // Rolling compatibility with sessions launched before targets existed: they carry none, and the
+  // runner accepts that absence rather than deriving an expectation from it.
+  if (!current) return { target: undefined };
+  // Only host placements have both an in-place and a worktree form. Container and cloud targets are
+  // isolated by construction, so a session of theirs that lost its worktree has nowhere to relaunch.
+  if (current.adapter !== "host") {
+    if (useWorktree) return { target: current };
+    return {
+      error: `this session's ${current.adapter} execution target always runs in an isolated workspace, but the session no longer has one; create a new session on that target instead of restarting this one`,
+    };
+  }
+  const strategy = useWorktree ? "worktree" : "in_place";
+  if (current.workspaceStrategy === strategy) return { target: current };
+  const targets = runner.executionTargets ?? executionTargetsForRunner(runner, sshBox);
+  // Match the adapter too: container targets also advertise the `worktree` strategy, and this
+  // session stays on the host placement family it was created with.
+  const match = targets.find((candidate) =>
+    candidate.adapter === "host" && candidate.workspaceStrategy === strategy);
+  if (!match) {
+    return {
+      error: `runner '${runner.runnerId}' no longer offers a host ${
+        useWorktree ? "isolated worktree" : "in place"} execution target for this session`,
+    };
+  }
+  if (!match.available) return { error: match.unavailableReason ?? "execution target is unavailable" };
+  return { target: executionTargetRef(match) };
+}

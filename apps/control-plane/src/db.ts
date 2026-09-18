@@ -10689,6 +10689,13 @@ export class ControlPlaneDb {
     return validateExecutionHandoffRequest(parsed);
   }
 
+  /** Record the placement a relaunch reconciled. Snapshots rewrite this column from whatever the
+   * runner echoes, which is the launch's own target, so this only closes the window before the
+   * first echo — during which the session view would still advertise the replaced strategy. */
+  setSessionExecutionTarget(id: string, target: ExecutionTargetRef): void {
+    this.stmt("UPDATE sessions SET execution_target=? WHERE id=?").run(JSON.stringify(target), id);
+  }
+
   /* ----------------------------- Sessions -------------------------------- */
 
   /** The scope a new session will carry: the explicit one, else what the workspace or runner

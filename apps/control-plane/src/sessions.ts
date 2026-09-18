@@ -178,7 +178,7 @@ import { type GuardrailFields, normalizeCostCheckpoints,
   rulesFromSession,
   validateGovernancePolicy,
 } from "./policy-engine.js";
-import { executionTargetRef, resolveExecutionTarget } from "./execution-targets.js";
+import { executionTargetRef, relaunchExecutionTarget, resolveExecutionTarget } from "./execution-targets.js";
 import {
   agentHarnessIdentityFor,
   agentHarnessIdentityKey,
@@ -5593,6 +5593,24 @@ export class SessionsService {
       (session.workspaceId ? this.db.getWorkspacePath(session.runnerId, session.workspaceId) : null);
     if (!workspacePath) return fail("session has no resolvable workspace directory to restart from", 400);
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
+    // The workspace strategy is not frozen at creation, and the runner derives the placement it
+    // expects from the launch's own `useWorktree`. A selected session worktree is what decides
+    // where this relaunch lands — the runner reattaches one whether or not the flag asks it to — so
+    // a session that has one restarts as a worktree session even while a snapshot taken mid-
+    // materialization still reports the flag false.
+    const relaunchUseWorktree = session.useWorktree || session.worktreePath != null;
+    // An in-place session that later selected a worktree still carries its creation-time in-place
+    // target, and the runner refuses that pair outright. Reconcile the placement to the strategy
+    // above — or refuse here, with guidance and no launch sent.
+    const targetRunner = this.db.getRunner(session.runnerId);
+    if (!targetRunner) return fail(`runner '${session.runnerId}' not found`, 404);
+    const relaunchTarget = relaunchExecutionTarget(
+      targetRunner,
+      this.db.boxIdForRunner(session.runnerId) !== null,
+      session.executionTarget,
+      relaunchUseWorktree,
+    );
+    if ("error" in relaunchTarget) return fail(relaunchTarget.error, 409);
     // A runner that predates the independent role would relaunch this Orchestrator as an ordinary
     // session while the control plane still granted it orchestrator routes; refuse instead.
     if (sessionRole(session) === "orchestrator" && !usesOrchestratorPresetPermissions(session)) {
@@ -5697,8 +5715,8 @@ export class SessionsService {
       command: launch.command,
       args: launch.args,
       env: launch.env,
-      useWorktree: session.useWorktree,
-      executionTarget: session.executionTarget,
+      useWorktree: relaunchUseWorktree,
+      executionTarget: relaunchTarget.target,
       executionHandoff: this.db.getExecutionHandoffRequest(sessionId) ?? (session.executionHandoff ? {
         ...(session.executionHandoff.sourceSessionId ? { sourceSessionId: session.executionHandoff.sourceSessionId } : {}),
         artifacts: session.executionHandoff.artifacts,
@@ -5734,6 +5752,11 @@ export class SessionsService {
     this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "session-restarted");
     this.abortPolicyHookApprovals(session, now, "session-restarted");
     this.db.setPendingApproval(sessionId, null);
+    // Record a reconciled placement now rather than waiting for the runner's first snapshot to echo
+    // it back: until then the session view would keep advertising the strategy this launch replaced.
+    if (relaunchTarget.target && relaunchTarget.target !== session.executionTarget) {
+      this.db.setSessionExecutionTarget(sessionId, relaunchTarget.target);
+    }
     this.db.updateSessionStatus(sessionId, "starting", now);
     // The runner replaces any existing process for this sessionId (no separate
     // stop_session, which would emit a terminal 'stopped' that blocks the restart).
