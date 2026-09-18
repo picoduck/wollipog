@@ -145,14 +145,19 @@ function TwoSelectHarness() {
 }
 
 /**
- * Drive the deferred trigger-focus restore by hand.
+ * Run `body` with zero-delay timers captured instead of scheduled, and hand back a function that
+ * fires what it caught.
  *
- * The restore runs on a zero-delay timer, so whether it lands before or after the next interaction
- * is a race that a test can only lose intermittently — which is exactly the flake #1307 reported.
- * Capturing the callback instead of scheduling it makes the interleaving the assertion rather than
- * the weather.
+ * The trigger-focus restore runs on a zero-delay timer, so whether it lands before or after the
+ * next interaction is a race a test can only lose intermittently — which is the flake #1307
+ * reported. Capturing the callback makes the interleaving the assertion rather than the weather.
+ *
+ * The override is installed for the duration of `body` and removed in a `finally`, never left for a
+ * later caller to unwind. `tick()` above is itself a zero-delay timer, so an override that outlived
+ * a thrown assertion would leave every subsequent test in this shared process awaiting a promise
+ * that can no longer settle: one failure became a hung file, cancelled at the test timeout.
  */
-function captureDeferredFocusRestore(): { run: () => void } {
+async function withCapturedZeroDelayTimers(body: () => Promise<void>): Promise<() => void> {
   const timers = domWindow as unknown as {
     setTimeout: (handler: () => void, delay?: number) => unknown;
   };
@@ -163,24 +168,25 @@ function captureDeferredFocusRestore(): { run: () => void } {
     scheduled.push(handler);
     return 0;
   };
-  return {
-    run: () => {
-      timers.setTimeout = original;
-      for (const handler of scheduled.splice(0)) handler();
-    },
-  };
+  try {
+    await body();
+  } finally {
+    timers.setTimeout = original;
+  }
+  return () => { for (const handler of scheduled.splice(0)) handler(); };
 }
 
 async function openFirstAndCommit(container: HTMLDivElement) {
   const first = container.querySelector<HTMLButtonElement>('[aria-label="First: Alpha"]')!;
   await act(async () => { first.click(); });
-  const deferred = captureDeferredFocusRestore();
   const beta = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
     .find((option) => option.textContent === "Beta")!;
-  await act(async () => { beta.click(); });
+  const restore = await withCapturedZeroDelayTimers(async () => {
+    await act(async () => { beta.click(); });
+  });
   assert.equal(container.querySelector('[role="listbox"][aria-label="First"]'), null,
     "committing an option closes the list it was chosen from");
-  return { first, deferred };
+  return { first, restore };
 }
 
 test("a deferred trigger restore yields to a control that took focus while the panel closed", async () => {
@@ -189,7 +195,7 @@ test("a deferred trigger restore yields to a control that took focus while the p
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
   await act(async () => { root.render(<TwoSelectHarness />); });
-  const { deferred } = await openFirstAndCommit(container);
+  const { restore } = await openFirstAndCommit(container);
 
   const second = container.querySelector<HTMLButtonElement>('[aria-label="Second: Alpha"]')!;
   await act(async () => {
@@ -202,7 +208,7 @@ test("a deferred trigger restore yields to a control that took focus while the p
   // The first Select's restore now fires with the second list already open. Pulling focus back to
   // the first trigger would read to the second Select's outside-focus dismisser as a click-away,
   // closing a list the user had just opened — issue #1307's intermittent failure.
-  await act(async () => { deferred.run(); });
+  await act(async () => { restore(); });
   assert.ok(container.querySelector('[role="listbox"][aria-label="Second"]'),
     "the late restore does not dismiss the list that took focus after it was scheduled");
   assert.equal(second.getAttribute("aria-expanded"), "true");
@@ -217,9 +223,9 @@ test("a deferred trigger restore still returns focus when nothing else claimed i
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
   await act(async () => { root.render(<TwoSelectHarness />); });
-  const { first, deferred } = await openFirstAndCommit(container);
+  const { first, restore } = await openFirstAndCommit(container);
 
-  await act(async () => { deferred.run(); });
+  await act(async () => { restore(); });
   assert.equal(domWindow.document.activeElement, first,
     "closing a list with nowhere else for focus to go puts it back on the trigger");
 
