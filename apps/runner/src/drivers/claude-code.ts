@@ -27,6 +27,7 @@ import { inspectClaudeBackgroundWork, inspectClaudeBackgroundWorkInContext, type
 import { effectiveClaudePermissionMode } from "../claude-permission.js";
 import { prepareClaudeHookArgs } from "../hook-settings.js";
 import {
+  PLACELESS_CWD,
   commandTargetsGuardState,
   commandTargetsManagedWorktree,
   toolTargetsGuardState,
@@ -2314,7 +2315,13 @@ export class ClaudeCodeDriver implements Driver {
             (req.tool_name === "Bash" && typeof req.input?.command === "string"
               ? commandTargetsManagedWorktree(
                   req.input.command,
-                  this.cwd,
+                  // The request carries no cwd and the Bash tool keeps its own directory between
+                  // calls, so a relative operand cannot be placed from here (#1333). With the guard
+                  // active the hook has already judged this command from Claude's real directory;
+                  // the channel then adds only the refusals that hold wherever the shell is. A
+                  // subagent's request, and every request of a mediated launch, keeps the session
+                  // directory: nothing else has judged those.
+                  this.managedWorktreeGuardActive && parentId === null ? PLACELESS_CWD : this.cwd,
                   protections,
                 )
               : null);

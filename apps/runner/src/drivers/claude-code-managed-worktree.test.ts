@@ -418,3 +418,52 @@ test("an ordinary edit outside the guard's state still reaches the normal approv
     .filter((frame) => frame.type === "control_response");
   assert.deepEqual(responses, [], "the runner holds no opinion; it becomes an ordinary approval");
 });
+
+function requestBash(run: Launch, requestId: string, command: string, subagent = false): void {
+  run.child.stdout.write(JSON.stringify({
+    type: "control_request",
+    request_id: requestId,
+    ...(subagent ? { parent_tool_use_id: "task-1" } : {}),
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: { command }, tool_use_id: `use-${requestId}` },
+  }) + "\n");
+}
+
+async function deniedRequests(run: Launch): Promise<string[]> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  return run.writes.join("").split("\n").filter(Boolean)
+    .map((line) => JSON.parse(line) as { type?: string; response?: { request_id?: string; response?: { behavior?: string } } })
+    .filter((frame) => frame.type === "control_response" && frame.response?.response?.behavior === "deny")
+    .map((frame) => frame.response?.request_id ?? "");
+}
+
+test("with the guard active the channel refuses only what holds wherever the shell is (#1333)", async (t) => {
+  // The request carries no cwd and the Bash tool keeps its own directory, so `cd ..` from a
+  // subdirectory used to be refused as leaving the worktree. The hook has the real directory and
+  // has already judged these commands; the channel must not second-guess it with a wrong one.
+  const dir = tempDir(t);
+  const run = launch(provision(dir, "cwd-1", "auto", { protections: PROTECTIONS }), "auto", PROTECTIONS);
+  t.after(() => run.driver.dispose());
+  requestBash(run, "relative-cd", "cd .. && pnpm typecheck");
+  requestBash(run, "relative-rm", "rm -rf build");
+  requestBash(run, "absolute-rm", `rm -rf ${WORKTREE}`);
+  requestBash(run, "absolute-cd-then-relative", `cd ${WORKTREE}/apps && rm -rf ..`);
+  assert.deepEqual(await deniedRequests(run), ["absolute-rm", "absolute-cd-then-relative"]);
+});
+
+test("a subagent's request keeps the session-directory check even with the guard active", async (t) => {
+  const dir = tempDir(t);
+  const run = launch(provision(dir, "cwd-2", "auto", { protections: PROTECTIONS }), "auto", PROTECTIONS);
+  t.after(() => run.driver.dispose());
+  requestBash(run, "sub", "rm -rf .", true);
+  requestBash(run, "top", "rm -rf .");
+  assert.deepEqual(await deniedRequests(run), ["sub"]);
+});
+
+test("a mediated launch has no hook, so it keeps the session-directory check entirely", async (t) => {
+  // Known limit: here `cd ..` from a subdirectory is still refused, as before #1333.
+  const run = launch([], "default", PROTECTIONS);
+  t.after(() => run.driver.dispose());
+  requestBash(run, "relative-cd", "cd ..");
+  requestBash(run, "relative-rm", "rm -rf .");
+  assert.deepEqual(await deniedRequests(run), ["relative-cd", "relative-rm"]);
+});

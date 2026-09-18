@@ -571,6 +571,26 @@ no mode emulation and emits no mediation notice. The control-channel refusal in 
 `control_request` handler is retained as defense in depth for `default`/`auto`; a double refusal is
 harmless because Claude never reaches the control channel for a command the hook already denied.
 
+- **The channel refuses only what holds wherever the shell is.** Claude's Bash tool keeps its own
+  directory between calls and the `can_use_tool` request carries no cwd (measured on 2.1.270: the
+  request has `tool_use_id`, `input`, and permission metadata only; the hook payload's `cwd` DOES
+  follow the tool; Claude records `pwd -P` after each successful command and starts the next shell
+  there; and it does not confine `cd` to the session directory). Judging a relative operand from
+  the session directory refused `cd ..` from any subdirectory (#1333), and inferring the
+  directory from command text does not converge — renaming the shell's own directory defeats it
+  with no `cd` at all. So with the guard active, a top-level Bash request is judged from
+  `PLACELESS_CWD`, a directory that is nowhere: refusals that do not depend on the shell's
+  position survive (an absolute path to the worktree, an absolute `cd` followed by a relative
+  removal), and the rest is left to the hook, which has already judged the command from the real
+  directory. A subagent's request, and every request of a mediated launch, keeps the session
+  directory, so the false `cd ..` refusal remains only in that fallback.
+- **Operands are judged physically as well as by spelling.** The shared matcher resolves each
+  external operand one component at a time from the physical form of its directory, compares
+  against the physical protections (a worktree reached through a symlinked prefix is not refused
+  against itself), does not follow a final symlink for `rm`/`unlink`/`trash`/an `mv` source
+  unless a trailing slash makes the kernel follow it, refuses an operand too deep to walk, and
+  treats a `cd` whose physical target leaves the worktree as an escape.
+
 - **The guard's own state is vetoed.** The provider runs as the runner's OS user, so it could
   rewrite the protection list. Every tool call that references the runner hook state directory is
   refused — Bash by raw text and by every `cwd`-resolved operand, and `Edit`/`MultiEdit`/`Write`/

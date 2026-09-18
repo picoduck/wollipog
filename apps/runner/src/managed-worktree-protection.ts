@@ -1,6 +1,6 @@
 import { realpathSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
-import { basename, dirname, isAbsolute, matchesGlob, normalize, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, matchesGlob, normalize, parse as parsePath, resolve, sep } from "node:path";
 import { parse, type ParseEntry } from "shell-quote";
 
 const MAX_COMMAND_LENGTH = 32_768;
@@ -39,7 +39,10 @@ function pathContains(parent: string, child: string): boolean {
   const foldCase = process.platform === "win32" || process.platform === "darwin";
   const normalizedParent = foldCase ? normalize(parent).toLowerCase() : normalize(parent);
   const normalizedChild = foldCase ? normalize(child).toLowerCase() : normalize(child);
-  return normalizedChild === normalizedParent || normalizedChild.startsWith(`${normalizedParent}${sep}`);
+  // A filesystem root already ends with the separator; appending another made `/` the ancestor
+  // of nothing, so `rm -rf /` and any `..` chain that climbed to the root were never refused.
+  const prefix = normalizedParent.endsWith(sep) ? normalizedParent : `${normalizedParent}${sep}`;
+  return normalizedChild === normalizedParent || normalizedChild.startsWith(prefix);
 }
 
 function withinProtectedRoot(path: string, protections: readonly ManagedWorktreeProtection[]): boolean {
@@ -139,14 +142,84 @@ function globTargetsProtected(
   });
 }
 
+/**
+ * The protections as the kernel sees them: a worktree registered through a symlinked prefix is
+ * the same directory as its physical path, and the physical reading below must compare like with
+ * like or every relative operand beneath such a worktree would read as an escape.
+ */
+function physicalProtections(protections: readonly ManagedWorktreeProtection[]): ManagedWorktreeProtection[] {
+  return protections.map((protection) => ({
+    worktreePath: canonicalPath(normalize(protection.worktreePath)),
+    repoPath: canonicalPath(normalize(protection.repoPath)),
+  }));
+}
+
+/** Where an external command finds `cwd`: symlinks resolved, as the kernel resolves `..` from it. */
+function physicalCwd(cwd: string): string {
+  return canonicalPath(normalize(cwd));
+}
+
+/**
+ * Resolve an operand the way the kernel does: one component at a time from the physical
+ * directory, following each intermediate symlink BEFORE the next `..` is applied. A textual
+ * `resolve()` collapses `alias/..` to nothing, which is exactly the step a symlink changes.
+ */
+function physicalResolve(cwd: string, value: string, followFinalSymlink: boolean): string {
+  // Platform path semantics, not a guess: on POSIX a backslash is an ordinary filename character.
+  const windows = process.platform === "win32";
+  const root = windows ? parsePath(value).root : value.startsWith("/") ? "/" : "";
+  let current = root ? canonicalPath(resolve(root)) : physicalCwd(cwd);
+  const parts = value.slice(root.length).split(windows ? /[\\/]+/u : /\/+/u)
+    .filter((part) => part && part !== ".");
+  // Provider-controlled depth. Past a generous bound the operand is refused outright: falling
+  // back to a textual collapse would restore exactly the blindness this walk exists to remove.
+  if (parts.length > 256) throw new UnclassifiableCommandError("operand path is too deep to resolve");
+  parts.forEach((part, index) => {
+    if (part === "..") {
+      current = dirname(current);
+      return;
+    }
+    const next = resolve(current, part);
+    current = index === parts.length - 1 && !followFinalSymlink ? next : canonicalPath(next);
+  });
+  return current;
+}
+
+/**
+ * Whether the shell is inside a managed worktree, by spelling OR physically. The guard hook is
+ * handed Claude's physical directory (`pwd -P`), while a worktree can be registered through a
+ * symlinked prefix: comparing spellings alone made such a shell look like it was somewhere else,
+ * which silently skipped the escape check. Where a `cd` LANDS is decided physically only, because
+ * that is where the shell really ends up.
+ */
+function shellInsideManagedRoot(cwd: string, protections: readonly ManagedWorktreeProtection[]): boolean {
+  return withinProtectedRoot(cwd, protections) ||
+    withinProtectedRoot(physicalCwd(cwd), physicalProtections(protections));
+}
+
 function operandTargetsProtected(
   token: ShellToken | undefined,
   cwd: string,
   environment: ReadonlyMap<string, string>,
   protections: readonly ManagedWorktreeProtection[],
+  // `rm`, `unlink`, `trash`, and an `mv` source act on a final symlink ITSELF, so removing a
+  // harmless alias that points at the worktree is not a removal of the worktree. A trailing slash
+  // (or `/.`) makes the kernel follow it after all.
+  followFinalSymlink = true,
 ): boolean {
   const target = resolvedOperand(token, cwd, environment);
-  return target != null ? protectedTarget(target, protections) : globTargetsProtected(token, cwd, protections);
+  if (target == null) {
+    return globTargetsProtected(token, cwd, protections) ||
+      globTargetsProtected(token, physicalCwd(cwd), physicalProtections(protections));
+  }
+  if (protectedTarget(target, protections)) return true;
+  // The shell's `cd` is logical, but the command this operand belongs to is external and the
+  // kernel resolves it from the PHYSICAL directory: `..` beneath a symlink lands where the link
+  // points, not where the shell prints. Judge that reading too, against the physical protections.
+  const value = word(token, cwd, environment) ?? "";
+  const follows = followFinalSymlink ||
+    (process.platform === "win32" ? /[\\/]\.?$/u : /\/\.?$/u).test(value);
+  return protectedTarget(physicalResolve(cwd, value, follows), physicalProtections(protections));
 }
 
 function resolvedOperand(
@@ -399,7 +472,10 @@ function gitWorktreeRefusal(
     const value = word(token, cwd, environment);
     return value !== "--" && !value?.startsWith("-");
   });
-  if (action === "prune") return protectionRepository(cwd, protections);
+  if (action === "prune") {
+    return protectionRepository(cwd, protections) ||
+      protectionRepository(physicalCwd(cwd), physicalProtections(protections));
+  }
   if (action !== "remove" && action !== "move") return false;
   return operandTargetsProtected(operands[0], cwd, environment, protections);
 }
@@ -442,15 +518,15 @@ function segmentRefusal(
     const nested = words.slice(commandIndex);
     if (segmentRefusal(nested, cwd, new Map(environment), protections, depth + 1)) return true;
     const nestedExecutable = commandWords(nested, cwd, new Map(environment))?.executable ?? "";
-    return withinProtectedRoot(cwd, protections) &&
+    return shellInsideManagedRoot(cwd, protections) &&
       ["rm", "rmdir", "unlink", "trash", "trash-put", "mv", "move"].includes(nestedExecutable);
   }
   if (executable === "git") return gitWorktreeRefusal(words, cwd, environment, protections);
   if (["rm", "rmdir", "unlink", "trash", "trash-put", "remove-item", "del", "rd"].includes(executable)) {
-    return words.some((token) => operandTargetsProtected(token, cwd, environment, protections));
+    return words.some((token) => operandTargetsProtected(token, cwd, environment, protections, false));
   }
   if (executable === "gio" && word(words[0], cwd, environment) === "trash") {
-    return words.slice(1).some((token) => operandTargetsProtected(token, cwd, environment, protections));
+    return words.slice(1).some((token) => operandTargetsProtected(token, cwd, environment, protections, false));
   }
   if (["mv", "move", "rename-item"].includes(executable)) {
     let targetDirectory = false;
@@ -472,22 +548,37 @@ function segmentRefusal(
       operands.push(token);
     }
     const sources = targetDirectory ? operands : operands.slice(0, -1);
-    return sources.some((source) => operandTargetsProtected(source, cwd, environment, protections));
+    return sources.some((source) => operandTargetsProtected(source, cwd, environment, protections, false));
   }
   if (executable === "find") {
     const actionIndex = words.findIndex((token) =>
       ["-delete", "-exec", "-execdir", "-ok", "-okdir"].includes(word(token, cwd, environment) ?? ""));
     if (actionIndex >= 0) {
+      // Pre-root options: -H/-L/-P, -O<level> (attached), -D <opts> (a separate word), and `--`
+      // ending the options. Every one of them has to be stepped over, or the real roots and a
+      // later -L land beyond rootStart and are never examined.
       let rootStart = 0;
-      while (["-H", "-L", "-P"].includes(word(words[rootStart], cwd, environment) ?? "") ||
-          /^-(?:O|D)/u.test(word(words[rootStart], cwd, environment) ?? "")) rootStart += 1;
+      for (;;) {
+        const option = word(words[rootStart], cwd, environment) ?? "";
+        if (option === "--") { rootStart += 1; break; }
+        if (["-H", "-L", "-P"].includes(option) || /^-O/u.test(option)) { rootStart += 1; continue; }
+        if (option === "-D") { rootStart += 2; continue; }
+        if (/^-D./u.test(option)) { rootStart += 1; continue; }
+        break;
+      }
       const expressionStart = words.findIndex((token, index) => index >= rootStart &&
         (word(token, cwd, environment)?.startsWith("-") === true || operator(token) === "(" ||
           word(token, cwd, environment) === "!"));
       const roots = words.slice(rootStart, expressionStart < 0 ? actionIndex : expressionStart);
       const effectiveRoots = roots.length ? roots : ["."];
+      // `find` defaults to -P: a symlink given as a search root is not followed, so `-delete`
+      // unlinks the alias, not what it points at. -H and -L before the roots follow it, and so
+      // does the `-follow` expression anywhere after them.
+      const followsRoots = words.slice(0, rootStart).some((token) =>
+        ["-H", "-L"].includes(word(token, cwd, environment) ?? "")) ||
+        words.some((token) => word(token, cwd, environment) === "-follow");
       const protectedRoot = effectiveRoots.some((token) =>
-        operandTargetsProtected(token, cwd, environment, protections));
+        operandTargetsProtected(token, cwd, environment, protections, followsRoots));
       const action = word(words[actionIndex], cwd, environment);
       if (action === "-delete") return protectedRoot;
       if (depth < 3) {
@@ -538,8 +629,8 @@ function commandTargetsManagedWorktreeUnsafe(
       const target = resolvedOperand(parsed.words[0], currentCwd, localEnvironment);
       // Claude's Bash tool keeps its shell directory between calls. Refuse an escape from every
       // managed root so a later relative removal cannot be resolved against an unobservable cwd.
-      if (target && withinProtectedRoot(currentCwd, protections) &&
-          !withinProtectedRoot(target, protections)) return true;
+      if (target && shellInsideManagedRoot(currentCwd, protections) &&
+          !withinProtectedRoot(canonicalPath(target), physicalProtections(protections))) return true;
       if (target) currentCwd = target;
       for (const [key, value] of localEnvironment) environment.set(key, value);
       return false;
@@ -574,6 +665,20 @@ export function commandTargetsManagedWorktree(
     return MANAGED_WORKTREE_REFUSAL;
   }
 }
+
+/**
+ * A working directory that is nowhere: deep enough that no realistic `..` chain climbs out of it,
+ * and beneath nothing that is protected. Judging a command from here keeps exactly the refusals
+ * that do not depend on where the shell is (an absolute path to the worktree, an absolute `cd`
+ * followed by a relative removal) and drops the ones that do.
+ *
+ * It exists for one caller. Claude's `can_use_tool` request carries no cwd, and its Bash tool keeps
+ * a directory of its own between calls, so the control channel cannot know where a relative
+ * operand lands (#1333). Inferring it from command text does not converge: renaming the shell's
+ * own directory defeats every such inference. The guard hook DOES receive the real directory and
+ * has already judged the command, so the control channel only adds what it can know.
+ */
+export const PLACELESS_CWD = `${sep}.wollipog-placeless${`${sep}x`.repeat(64)}`;
 
 /* ---------------------------------------------------------------------------------------------
  * Guard-state boundary.

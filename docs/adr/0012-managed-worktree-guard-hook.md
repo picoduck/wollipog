@@ -40,6 +40,13 @@ in the mode the user selected whenever that guard is in place.
   replacement, no emulation in the `control_request` handler, and no mediation notice. Whether a
   running child is mediated, and which mode is emulated for it, is bound when it is spawned (#1303).
 - The control-channel refusal stays in the handler as defense in depth for `default`/`auto`.
+  Amended by #1333: with the guard active, a top-level Bash request is judged there from a
+  placeless directory, so the channel adds only the refusals that hold wherever the shell is.
+  The `can_use_tool` request carries no cwd and Claude's Bash tool keeps its own directory, so
+  judging relative operands from the session directory refused `cd ..` from any subdirectory,
+  and inferring the directory from command text does not converge (renaming the shell's own
+  directory defeats it). The hook receives the real directory and is the authority for those.
+  Subagent requests and mediated launches keep the session-directory check.
 - `commandTargetsManagedWorktree` itself is unchanged (its false positives are #1301), and the
   `plan` path is untouched.
 
