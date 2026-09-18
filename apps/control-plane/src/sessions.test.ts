@@ -8096,6 +8096,14 @@ test("worktree recovery keeps a known-unsent prompt parked until verified recove
   if (!blocked.ok) assert.match(blocked.error ?? "", /recover.*worktree/u);
   assert.equal(hub.sentOfType("durable_session_command").length, 0);
 
+  db.raw().prepare("UPDATE session_prompt_commands SET error_code=? WHERE command_id=?")
+    .run("PROVIDER_AUTHENTICATION_REQUIRED", sent.commandId);
+  const mixedRecoveryBlocked = svc.retryPendingWork(id, sent.commandId);
+  assert.equal(mixedRecoveryBlocked.ok, false,
+    "a stale authentication receipt cannot bypass the live worktree recovery gate");
+  if (!mixedRecoveryBlocked.ok) assert.match(mixedRecoveryBlocked.error ?? "", /recover.*worktree/u);
+  assert.equal(hub.sentOfType("durable_session_command").length, 0);
+
   db.raw().prepare("UPDATE sessions SET status='idle',worktree_recovery=NULL WHERE id=?").run(id);
   const recovered = svc.retryPendingWork(id, sent.commandId);
   assert.equal(recovered.ok, true, recovered.error);

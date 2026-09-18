@@ -8831,11 +8831,6 @@ export class SessionManager {
           reservedOrdinal,
           recoveredQuestion,
         );
-        if (retainedDurable && queueBeforeLaunch) {
-          // Persistence transfers ownership first; cleanup can then reject only work that auth
-          // recovery did not take. No await separates the two sides of this handoff.
-          this.transferPreLaunchPromptOwnership(sessionId, durable.commandId);
-        }
       } else if (blocked?.providerAuthBlock?.delivery === "not_delivered" &&
           blocked.providerAuthRetryAttemptedRecoveryId !== blocked.providerAuthBlock.recoveryId &&
           !blocked.providerAuthBlock.retry && !syntheticRecovery && !durable && images.length === 0) {
@@ -8866,14 +8861,14 @@ export class SessionManager {
           `${blocked.worktreeRecovery.detail}; this message was not sent`,
           "WORKTREE_RECOVERY_REQUIRED",
         );
-        if (durable && queueBeforeLaunch) {
-          // Authentication recovery can own this same pre-launch prompt before worktree
-          // verification discovers a newer refusal. Preserve the more specific durable receipt;
-          // generic launch cleanup must reject only the remaining FIFO entries.
-          this.transferPreLaunchPromptOwnership(sessionId, durable.commandId);
-        }
       } else {
         durable?.failed("provider session could not be resumed", "INVALID_COMMAND");
+      }
+      if (durable && queueBeforeLaunch) {
+        // The branch above either retained or terminalized this exact durable command. Transfer
+        // ownership before generic launch cleanup so it rejects only other FIFO entries and never
+        // replaces a specific receipt with COMMAND_CANCELLED. No await separates the handoff.
+        this.transferPreLaunchPromptOwnership(sessionId, durable.commandId);
       }
       finishPreLaunch(false);
       return;

@@ -4346,7 +4346,7 @@ export class SessionsService {
     if (candidate === "not_retryable") {
       return fail("only recovery-blocked messages with known non-delivery can be retried", 409);
     }
-    if (candidate.errorCode === "WORKTREE_RECOVERY_REQUIRED" && session.worktreeRecovery) {
+    if (session.worktreeRecovery) {
       return fail("recover this session's selected worktree before retrying the message", 409);
     }
 
