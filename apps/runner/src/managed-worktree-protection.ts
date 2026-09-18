@@ -242,12 +242,14 @@ function commandWords(
     if (splitStringExpansions > MAX_ENV_SPLIT_STRING_EXPANSIONS) {
       throw new UnclassifiableCommandError("env --split-string nesting exceeded its bound");
     }
-    // `env -S` has an escape grammar of its own, in which `\_` separates arguments, while
-    // shell-quote reads a backslash as POSIX shell quoting and joins those words into one. The two
-    // tokenizations disagree wherever a backslash survives into the payload, so the wrapped command
-    // cannot be classified and the worktree is retained instead of being parsed on a guess.
-    if (script.includes("\\")) {
-      throw new UnclassifiableCommandError("env --split-string payload escapes are not shell quoting");
+    // `env -S` has a word grammar of its own that shell-quote cannot model, and both divergences
+    // hide the real command rather than revealing it. `\_` separates arguments, where shell-quote
+    // reads the backslash as POSIX quoting and joins those words into one; `${VAR}` is expanded and
+    // concatenated with its neighbours, where shell-quote emits the literal and the reference as
+    // separate tokens, so `r${X}` reaches the classifier as `r` rather than as `rm`. A payload
+    // carrying either is unclassifiable, and the worktree is retained instead of parsed on a guess.
+    if (/[\\$]/u.test(script)) {
+      throw new UnclassifiableCommandError("env --split-string payload uses env's own word grammar");
     }
     return parse<EnvironmentReference>(script, (env) => ({ env }));
   };
