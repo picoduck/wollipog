@@ -250,3 +250,48 @@ for (const scenario of [
       .toBeUndefined();
   });
 }
+
+for (const scenario of [
+  { name: "desktop light", viewport: { width: 1280, height: 1000 }, theme: "light" },
+  { name: "mobile dark", viewport: { width: 390, height: 844 }, theme: "dark" },
+] as const) {
+  test(`Integration Isolation is its own disclosed control ${scenario.name}`, async ({ page }, testInfo) => {
+    await page.setViewportSize(scenario.viewport);
+    await page.evaluate(({ theme, protocolVersion }) => {
+      document.documentElement.dataset.theme = theme;
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(protocolVersion);
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.setOrchestratorAgentFixture({
+        context: "native",
+        permissionModes: ["default", "acceptEdits", "orchestrator"],
+        driver: "claude-code",
+        controlPlaneRole: true,
+      });
+    }, { theme: scenario.theme, protocolVersion: PROTOCOL_VERSION });
+    await page.getByRole("tab", { name: /Alpha/ }).click();
+    await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+    await page.getByRole("menuitem", { name: "New Session Here" }).click();
+    const dialog = page.getByRole("dialog", { name: "New Session" });
+    await presetCard(dialog, /^Orchestrator/).click();
+    const control = dialog.getByRole("button", { name: /Integration Isolation: Disabled/ });
+    await expect(control).toBeVisible();
+    await control.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath("integration-isolation-disabled.png"), fullPage: true });
+    await control.click();
+    await dialog.getByRole("option", { name: /^Enabled/ }).click();
+    // #1295: the disclosure is per harness. For Claude Code only configured MCP servers go;
+    // hooks and permission rules stay, and the dialog says why.
+    await expect(dialog.getByText(/configured MCP servers/).first()).toBeVisible();
+    await expect(dialog.getByText(/permission rules/).first()).toBeVisible();
+    const enabled = dialog.getByRole("button", { name: /Integration Isolation: Enabled/ });
+    await enabled.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath("integration-isolation-enabled.png"), fullPage: true });
+    // Independent of the project boundary and of the provider permission mode.
+    await expect(dialog.getByRole("button", { name: /Strict Project Isolation: Disabled/ })).toBeVisible();
+    await expect(dialog.getByRole("group", { name: "Provider Permissions" })).not.toContainText("Orchestrator Preset");
+    await dialog.getByRole("button", { name: "Create Session" }).click();
+    await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
+      .toMatchObject({ role: "orchestrator", orchestrator: { execution: { integrationIsolation: true } } });
+    expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()?.config?.permissionMode))
+      .toBeUndefined();
+  });
+}
