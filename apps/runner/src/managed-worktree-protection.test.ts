@@ -237,6 +237,9 @@ test("removing a symlink that merely points at the worktree is not removing the 
   assert.equal(commandTargetsManagedWorktree("find -L alias -delete", sibling, protections), MANAGED_WORKTREE_REFUSAL);
   assert.equal(commandTargetsManagedWorktree("find -H alias -delete", sibling, protections), MANAGED_WORKTREE_REFUSAL);
   assert.equal(commandTargetsManagedWorktree("find alias/ -delete", sibling, protections), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("find alias -follow -delete", sibling, protections), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("find alias -name x -follow -exec rm -rf {} +", sibling, protections),
+    MANAGED_WORKTREE_REFUSAL);
   // An INTERMEDIATE symlink is always followed: alias/.. is the worktree's parent.
   assert.equal(commandTargetsManagedWorktree("rm -rf alias/../managed", sibling, protections), MANAGED_WORKTREE_REFUSAL);
 });

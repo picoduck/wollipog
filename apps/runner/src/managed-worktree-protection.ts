@@ -563,9 +563,11 @@ function segmentRefusal(
       const roots = words.slice(rootStart, expressionStart < 0 ? actionIndex : expressionStart);
       const effectiveRoots = roots.length ? roots : ["."];
       // `find` defaults to -P: a symlink given as a search root is not followed, so `-delete`
-      // unlinks the alias, not what it points at. -H and -L follow it.
+      // unlinks the alias, not what it points at. -H and -L before the roots follow it, and so
+      // does the `-follow` expression anywhere after them.
       const followsRoots = words.slice(0, rootStart).some((token) =>
-        ["-H", "-L"].includes(word(token, cwd, environment) ?? ""));
+        ["-H", "-L"].includes(word(token, cwd, environment) ?? "")) ||
+        words.some((token) => word(token, cwd, environment) === "-follow");
       const protectedRoot = effectiveRoots.some((token) =>
         operandTargetsProtected(token, cwd, environment, protections, followsRoots));
       const action = word(words[actionIndex], cwd, environment);
