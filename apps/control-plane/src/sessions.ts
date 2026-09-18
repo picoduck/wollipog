@@ -3527,16 +3527,12 @@ export class SessionsService {
             ? "The Claude ACP Orchestrator's provider permission contract is unaudited, so it still uses the Orchestrator preset permission mode with Strict Project Isolation."
             : "Independent provider permissions for an Orchestrator are supported only by a native Claude Code, Codex, or Pi harness on the host; other harnesses still use the Orchestrator preset permission mode.", 409);
         }
-        // Mirrors the ordinary-session rule above: every Pi permission mode that enforces approvals
-        // does so through the verified Agent Control bridge, and the additive launch keeps that
-        // mode. `withOrchestratorPreset` advertises "orchestrator" for Pi only once discovery has
-        // verified `piAgentControl`, so the capability check below already implies the bridge;
-        // re-assert it against the live agent row when there is one, so a pre-staged snapshot
-        // cannot outlive the bridge that authorized it.
-        const liveAgent = this.db.getRunner(req.runnerId)?.agents.find((agent) => agent.id === req.agentId);
-        if (launch.driver === "pi" && liveAgent && !liveAgent.piAgentControl?.protocolVersion) {
-          return fail("An Orchestrator with independent provider permissions requires the discovery-verified Pi Agent Control bridge on the host; update Pi or choose the Orchestrator preset permission mode.", 409);
-        }
+        // The Pi bridge rule is carried by the capability check below, not by a separate test here:
+        // `piAgentControl` is runner-side discovery state that this database does not persist (only
+        // `codexAppServer` and `wslAgentControl` have columns), so reading it here would refuse
+        // every Pi Orchestrator. The runner's `withOrchestratorPreset` advertises "orchestrator"
+        // for Pi only once discovery has verified the bridge, and `provisionAgentControl` re-checks
+        // the exact bridge against the live agent definition before launch.
         if (!runnerSupportsProtocol(runner.protocolVersion, additiveCapability)) {
           return fail(`An Orchestrator with independent provider permissions requires a protocol-v${
             RUNNER_CAPABILITY_MIN_PROTOCOL[additiveCapability]} runner for this harness; update the runner or choose the Orchestrator preset permission mode.`, 409);
@@ -3595,9 +3591,13 @@ export class SessionsService {
         launch.wslAgentControl.bwrapRuntime === "/usr/bin/bwrap" &&
         this.db.getRunner(req.runnerId)?.runtime?.executionIsolation?.mode === "bwrap";
       if (!(["codex", "codex-app-server", "claude-code"].includes(launch.driver) ||
-          (launch.driver === "acp" && req.launchSurface !== "native_tui")) ||
+          (launch.driver === "acp" && req.launchSurface !== "native_tui") ||
+          // Pi reaches the Orchestrator role only through the additive shape (#1294). The coupled
+          // preset has never been admitted here for Pi, and this issue does not add it: enabling an
+          // unaudited strict Pi preset is a separate change from decoupling the role.
+          (launch.driver === "pi" && !presetPermissions && req.launchSurface !== "native_tui")) ||
           (contextKind !== "native" && !wslDirect) || executionTarget.adapter !== "host") {
-        return fail("the orchestrator preset requires a supported native host harness or verified Direct WSL bridge", 409);
+        return fail("the orchestrator role requires a supported native host harness or verified Direct WSL bridge", 409);
       }
     }
     if (parentControl !== "off" && !orchestrator) {
@@ -5599,14 +5599,10 @@ export class SessionsService {
           !["linux", "macos"].includes(runner?.os ?? "")) {
         return fail("Provider-mode Codex Orchestrator requires its audited Linux or macOS sandbox.", 409);
       }
-      // Creation requires the discovery-verified Pi bridge, because the retained permission mode
-      // enforces its approvals through it. Rediscovery can drop that bridge (a Pi downgrade, a
-      // removed extension host) while the agent id still resolves, so re-assert it here rather than
-      // letting the runner fail the launch after the session has already been marked starting.
-      if (launch.driver === "pi" && !runner?.agents.find((agent) => agent.id === restartingAgentId)
-          ?.piAgentControl?.protocolVersion) {
-        return fail("An Orchestrator with independent provider permissions requires the discovery-verified Pi Agent Control bridge on the host; update Pi and retry.", 409);
-      }
+      // Pi's bridge rule mirrors creation through the advertised-capability check above: a
+      // rediscovery that loses the verified bridge drops "orchestrator" from the agent's permission
+      // modes, which is refused there. `piAgentControl` itself is not persisted, so it cannot be
+      // re-read here; the runner makes the final exact-bridge check before launch.
     }
     const agentId = session.agentId;
     const supportsIssueScope = runnerSupportsProtocol(
