@@ -322,3 +322,34 @@ test("removing a symlink that merely points at the worktree is not removing the 
   // An INTERMEDIATE symlink is always followed: alias/.. is the worktree's parent.
   assert.equal(commandTargetsManagedWorktree("rm -rf alias/../managed", sibling, protections), MANAGED_WORKTREE_REFUSAL);
 });
+
+test("an operand too deep to walk is refused, never collapsed textually", (t) => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-cwd-")));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const worktree = join(base, "managed");
+  mkdirSync(worktree);
+  mkdirSync(join(base, "sibling", "d"), { recursive: true });
+  symlinkSync(worktree, join(base, "sibling", "alias"));
+  const protections = [{ worktreePath: worktree, repoPath: join(base, "repo") }];
+  const deep = `${"d/../".repeat(127)}alias/../managed`;
+  assert.equal(deep.split("/").length, 257);
+  assert.equal(commandTargetsManagedWorktree(`rm -rf ${deep}`, join(base, "sibling"), protections),
+    MANAGED_WORKTREE_REFUSAL);
+  // The same shape within the bound is walked, and still reaches the worktree.
+  assert.equal(commandTargetsManagedWorktree(`rm -rf ${"d/../".repeat(20)}alias/../managed`, join(base, "sibling"), protections),
+    MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree(`rm -rf ${"d/../".repeat(20)}scratch`, join(base, "sibling"), protections), null);
+});
+
+test("on POSIX a backslash is a filename character, not a separator", { skip: process.platform === "win32" }, (t) => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-cwd-")));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const worktree = join(base, "managed");
+  mkdirSync(worktree);
+  mkdirSync(join(base, "sibling"));
+  symlinkSync(worktree, join(base, "sibling", "\\alias"));
+  const protections = [{ worktreePath: worktree, repoPath: join(base, "repo") }];
+  assert.equal(commandTargetsManagedWorktree("rm -rf '\\alias/../managed'", join(base, "sibling"), protections),
+    MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("rm -rf '\\alias/../scratch'", join(base, "sibling"), protections), null);
+});

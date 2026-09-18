@@ -1,6 +1,6 @@
 import { realpathSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
-import { basename, dirname, isAbsolute, matchesGlob, normalize, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, matchesGlob, normalize, parse as parsePath, resolve, sep } from "node:path";
 import { parse, type ParseEntry } from "shell-quote";
 
 const MAX_COMMAND_LENGTH = 32_768;
@@ -162,11 +162,15 @@ function physicalCwd(cwd: string): string {
  * `resolve()` collapses `alias/..` to nothing, which is exactly the step a symlink changes.
  */
 function physicalResolve(cwd: string, value: string, followFinalSymlink: boolean): string {
-  const rooted = /^(?:[a-zA-Z]:)?[\\/]+/u.exec(value);
-  let current = rooted ? canonicalPath(resolve(rooted[0])) : physicalCwd(cwd);
-  const parts = value.slice(rooted?.[0].length ?? 0).split(/[\\/]+/u).filter((part) => part && part !== ".");
-  // Provider-controlled depth: past a generous bound, fall back to the collapsed form.
-  if (parts.length > 256) return canonicalPath(normalize(isAbsolute(value) ? value : resolve(physicalCwd(cwd), value)));
+  // Platform path semantics, not a guess: on POSIX a backslash is an ordinary filename character.
+  const windows = process.platform === "win32";
+  const root = windows ? parsePath(value).root : value.startsWith("/") ? "/" : "";
+  let current = root ? canonicalPath(resolve(root)) : physicalCwd(cwd);
+  const parts = value.slice(root.length).split(windows ? /[\\/]+/u : /\/+/u)
+    .filter((part) => part && part !== ".");
+  // Provider-controlled depth. Past a generous bound the operand is refused outright: falling
+  // back to a textual collapse would restore exactly the blindness this walk exists to remove.
+  if (parts.length > 256) throw new UnclassifiableCommandError("operand path is too deep to resolve");
   parts.forEach((part, index) => {
     if (part === "..") {
       current = dirname(current);
@@ -198,7 +202,8 @@ function operandTargetsProtected(
   // kernel resolves it from the PHYSICAL directory: `..` beneath a symlink lands where the link
   // points, not where the shell prints. Judge that reading too, against the physical protections.
   const value = word(token, cwd, environment) ?? "";
-  const follows = followFinalSymlink || /[\\/]\.?$/u.test(value);
+  const follows = followFinalSymlink ||
+    (process.platform === "win32" ? /[\\/]\.?$/u : /\/\.?$/u).test(value);
   return protectedTarget(physicalResolve(cwd, value, follows), physicalProtections(protections));
 }
 

@@ -532,3 +532,33 @@ test("a new spawn starts the tracked shell directory at the session directory ag
   requestBash(run, "root", "cd ..");
   assert.deepEqual((await controlResponses(run)).map((r) => r.id), ["root"]);
 });
+
+test("a command that may move a shell hides the tracked directory from every other request while it runs", async (t) => {
+  const dir = tempDir(t);
+  const run = launch(provision(dir, "cwd-5", "auto", { protections: PROTECTIONS }), "auto", PROTECTIONS);
+  t.after(() => run.driver.dispose());
+  completeBash(run, "t1", "cd apps/runner");
+  // A background subagent starts a command that may move a (possibly shared) shell. No result yet.
+  run.child.stdout.write(JSON.stringify({
+    type: "assistant", parent_tool_use_id: "task-1",
+    message: { content: [{ type: "tool_use", id: "s1", name: "Bash", input: { command: "cd ../.. && sleep 30" } }] },
+  }) + "\n");
+  // An approval is not re-judged later, so the stale deeper directory must not be used meanwhile.
+  requestBash(run, "during", "rm -rf .");
+  assert.deepEqual(await controlResponses(run), [{ id: "during", behavior: "deny" }]);
+});
+
+test("a moving command's own request is still judged from the directory it starts in", async (t) => {
+  const dir = tempDir(t);
+  const run = launch(provision(dir, "cwd-6", "auto", { protections: PROTECTIONS }), "auto", PROTECTIONS);
+  t.after(() => run.driver.dispose());
+  completeBash(run, "t1", "cd apps/runner");
+  run.child.stdout.write(JSON.stringify({
+    type: "assistant", message: { content: [{ type: "tool_use", id: "t2", name: "Bash", input: { command: "cd .. && pnpm typecheck" } }] },
+  }) + "\n");
+  run.child.stdout.write(JSON.stringify({
+    type: "control_request", request_id: "own",
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "cd .. && pnpm typecheck" }, tool_use_id: "t2" },
+  }) + "\n");
+  assert.deepEqual(await controlResponses(run), [], "the #1333 case itself is still allowed");
+});
