@@ -550,6 +550,20 @@ no mode emulation and emits no mediation notice. The control-channel refusal in 
 `control_request` handler is retained as defense in depth for `default`/`auto`; a double refusal is
 harmless because Claude never reaches the control channel for a command the hook already denied.
 
+- **The guard's own state is vetoed.** The provider runs as the runner's OS user, so it could
+  rewrite the protection list. Every tool call that references the runner hook state directory is
+  refused — Bash by raw text and by every `cwd`-resolved operand, and `Edit`/`MultiEdit`/`Write`/
+  `NotebookEdit`/`Read` by their resolved path (all are in the hook matcher) — including reads.
+  The control-channel handler mirrors the same check for `default`/`auto`. The protections path is
+  never exported through the settings `env` block; it travels only in the hook command. The runner
+  also keeps a SHA-256 of the document it last wrote and compares before every rewrite. This is
+  tamper-EVIDENT best effort of the same strength class as the command-text worktree matcher — both
+  are defeated by indirection — not an isolation boundary; that is #1302.
+- **Invalidation.** A refresh that cannot be completed removes the protection list (so every later
+  guard invocation fails closed), marks the session for mediation on its next spawn, and emits a
+  visible notice; if the list cannot even be removed, the provider is stopped through the ordinary
+  stop path. The runner never writes an empty protection list, and the guard fails closed if it
+  reads one: when the last managed worktree goes away the guard state is retired instead.
 - **State.** `<dataDir>/hooks/<runnerHash>/<sessionId>.protections.json` (mode `0600`) holds the
   live protected worktree set. It is written at every Claude spawn, and refreshed synchronously
   whenever the session's attributed worktree inventory changes (creation, activation, attach,

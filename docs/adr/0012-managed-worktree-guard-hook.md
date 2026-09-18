@@ -97,6 +97,48 @@ is not new — it already happened for every launch that provisioned manager hoo
 applies to more launches. Restoring user settings under a runner-owned settings file is out of
 scope here and needs its own decision.
 
+## The guard's own state
+
+The protection list lives in a file, and the provider runs as the runner's OS user, so it can
+reach that file. Under #1256 the list lived in runner memory and could not be edited at all. This
+is a real reduction in integrity that cannot be fully repaired without an OS boundary (#1302).
+What is done instead:
+
+- **Veto.** Every tool call that references the runner's hook state directory is refused — by the
+  guard hook and, for `default`/`auto`, by the control-channel handler, through one shared
+  function. Bash commands are matched on raw text and on every `cwd`-resolved operand; the file
+  tools (`Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Read`) are matched on their resolved path
+  and are now part of the hook matcher. Reads are refused too: the provider has no need of them.
+- **No free advertising.** The protections path is not exported in the settings `env` block (which
+  reaches every tool process); it travels only in the hook command inside the 0600 settings file,
+  and the guard accepts it only from there — never from the environment.
+- **Tripwire.** The runner remembers the SHA-256 of the exact protections document it last wrote
+  and compares the file before every rewrite, at spawn and at refresh. A mismatch invalidates the
+  guard for that session (mediation from then on) and emits a visible notice.
+- **No empty list.** The runner never writes one, and the guard fails closed if it ever reads one.
+  When the last managed worktree goes away the guard state is retired instead.
+
+This is tamper-EVIDENT best effort of exactly the same strength class as #1256's command-text
+matcher: both are defeated by indirection (a script file, an interpreter, an unexpanded variable).
+It raises the cost and makes tampering visible; it is not enforcement. Enforcement belongs at the
+sandbox boundary (#1302).
+
+Measured on claude 2.1.270: the CLI does NOT re-read `--settings` mid-process. A hook that
+replaced the effective settings file with `{"hooks":{}}` on its first invocation was still invoked
+for the second and third Bash calls of the same run. So a provider cannot remove the hook from the
+process it is running in; the veto on that directory protects the NEXT spawn, and provisioning
+rewrites the settings file and its template immediately before every spawn anyway.
+
+## Invalidation
+
+"Guard invalidated" is an explicit state, not an inference. A refresh that cannot be completed —
+a tripwire mismatch, a write failure, or an exception — removes the protection list so every later
+guard invocation fails closed, marks the session so the next spawn is mediated until a guard
+provisions and self-tests cleanly, and emits a visible notice. If the list cannot even be removed,
+a running provider would keep trusting stale state, so it is stopped through the ordinary stop
+path and the next prompt relaunches it. The compromise marker lives in runner memory: a runner
+restart forgets it, and the next spawn re-provisions and re-proves the guard from scratch.
+
 ## Live protections
 
 The protections file is written at every Claude spawn and refreshed synchronously from the session
@@ -116,6 +158,9 @@ is the stricter of the two.
   it carries the guard whenever a structured launch persisted the settings argument and the file is
   still present, and `agentTuiLaunch` now drops a `--settings` pair whose file is gone — `claude`
   refuses to start with "Settings file not found", and a TUI never re-runs launch provisioning.
-- One extra short-lived process runs before each Bash call in a guarded session.
+- One extra short-lived process runs before each Bash, Edit, MultiEdit, Write, NotebookEdit, and
+  Read call in a guarded session.
+- The runner's hook state directory is invisible to the provider: reading it is refused as firmly
+  as writing it.
 - Native hooks remain a cooperative same-user governance mechanism, not an OS isolation boundary,
   exactly as §2.3.1 already states.

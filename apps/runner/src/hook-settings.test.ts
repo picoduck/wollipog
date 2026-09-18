@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -895,9 +895,13 @@ test("a refresh whose write fails INVALIDATES the guard instead of trusting the 
   provisionGuarded(dir, {}, { enabled: false });
   const protections = claudeHookSettingsPath(dir, "sess_hook_1").replace(/\.settings\.json$/u, ".protections.json");
   const next = [...PROTECTIONS, { worktreePath: "/repo-worktrees/s2", repoPath: "/repo" }];
-  // A symlinked target is refused by protectedWrite, which is how a write failure looks here.
+  // A symlink is refused by protectedWrite, which is how a write failure looks here. Point it at
+  // a copy of the CURRENT document so the tamper tripwire stays silent and the write itself is
+  // what fails — otherwise this test would prove the tripwire rather than the write path.
+  const target = join(dir, "elsewhere.json");
+  writeFileSync(target, readFileSync(protections, "utf8"), "utf8");
   rmSync(protections, { force: true });
-  symlinkSync(join(dir, "elsewhere.json"), protections);
+  symlinkSync(target, protections);
   const outcome = refreshClaudeGuardProtections("sess_hook_1", next, dir);
   assert.equal(outcome.state, "invalidated", "the stale list is removed, so the guard fails closed");
   assert.equal(existsSync(protections), false);
@@ -907,6 +911,21 @@ test("a refresh whose write fails INVALIDATES the guard instead of trusting the 
     ...config, enabled: false, managedWorktreeProtections: next, verifyGuardLaunch: guardVerifies,
   }, () => {}, host(dir));
   assert.deepEqual(relaunch.args, [], "no guard settings file: the driver mediates the mode");
+}));
+
+test("a refresh that cannot even retire the stale list reports the guard as unprotected", () => temp((dir) => {
+  if (process.getuid?.() === 0) return; // root ignores the directory mode bits
+  provisionGuarded(dir, {}, { enabled: false });
+  const next = [...PROTECTIONS, { worktreePath: "/repo-worktrees/s2", repoPath: "/repo" }];
+  chmodSync(dir, 0o500);
+  try {
+    const outcome = refreshClaudeGuardProtections("sess_hook_1", next, dir);
+    // Nothing could be written and nothing could be removed, so a running provider would keep
+    // trusting the stale list: the caller has to stop it.
+    assert.equal(outcome.state, "unprotected");
+  } finally {
+    chmodSync(dir, 0o700);
+  }
 }));
 
 test("the last managed worktree going away retires the guard rather than writing an empty list", () => temp((dir) => {
