@@ -335,3 +335,54 @@ test("protectedClaudePermissionMode expresses the two-branch contract", () => {
     assert.equal(protectedClaudePermissionMode(mode, true, true), mode);
   }
 });
+
+test("the control channel mirrors the guard's own-state veto for every tool that names a path", async (t) => {
+  const dir = tempDir(t);
+  const args = provision(dir, "state-1", "default", { protections: PROTECTIONS });
+  const run = launch(args, "default", PROTECTIONS);
+  t.after(() => run.driver.dispose());
+  const settings = claudeHookSettingsPath(dir, "state-1");
+  const calls: Array<[string, Record<string, unknown>]> = [
+    ["Bash", { command: `cat ${settings}` }],
+    ["Bash", { command: `rm -f ${settings.replace(/\.settings\.json$/u, ".protections.json")}` }],
+    ["Bash", { command: `rm -rf ${dir}` }],
+    ["Write", { file_path: settings }],
+    ["Edit", { file_path: settings.replace(/\.settings\.json$/u, ".template.json") }],
+    ["Read", { file_path: settings.replace(/\.settings\.json$/u, ".guard.json") }],
+    ["NotebookEdit", { notebook_path: `${dir}/x.ipynb` }],
+  ];
+  for (const [index, [tool, input]] of calls.entries()) {
+    run.child.stdout.write(JSON.stringify({
+      type: "control_request",
+      request_id: `state-${index}`,
+      request: { subtype: "can_use_tool", tool_name: tool, input },
+    }) + "\n");
+  }
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const responses = run.writes.join("").split("\n").filter(Boolean)
+    .map((line) => JSON.parse(line) as { type?: string; response?: { request_id?: string; response?: { behavior?: string; message?: string } } })
+    .filter((frame) => frame.type === "control_response");
+  assert.equal(responses.length, calls.length, "every guard-state call was answered by the runner");
+  for (const frame of responses) {
+    assert.equal(frame.response?.response?.behavior, "deny", frame.response?.request_id);
+    assert.ok(frame.response?.response?.message?.includes("managed-worktree guard state"),
+      frame.response?.request_id);
+  }
+});
+
+test("an ordinary edit outside the guard's state still reaches the normal approval path", async (t) => {
+  const dir = tempDir(t);
+  const args = provision(dir, "state-2", "default", { protections: PROTECTIONS });
+  const run = launch(args, "default", PROTECTIONS);
+  t.after(() => run.driver.dispose());
+  run.child.stdout.write(JSON.stringify({
+    type: "control_request",
+    request_id: "ordinary",
+    request: { subtype: "can_use_tool", tool_name: "Edit", input: { file_path: `${WORKTREE}/src/a.ts` } },
+  }) + "\n");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const responses = run.writes.join("").split("\n").filter(Boolean)
+    .map((line) => JSON.parse(line) as { type?: string })
+    .filter((frame) => frame.type === "control_response");
+  assert.deepEqual(responses, [], "the runner holds no opinion; it becomes an ordinary approval");
+});

@@ -572,3 +572,94 @@ export function commandTargetsManagedWorktree(
     return MANAGED_WORKTREE_REFUSAL;
   }
 }
+
+/* ---------------------------------------------------------------------------------------------
+ * Guard-state boundary.
+ *
+ * The managed-worktree guard keeps its protection list in a runner-owned file, and the provider
+ * runs as the same OS user, so a permitted command could rewrite that file and disarm the veto.
+ * Real integrity against a same-user process needs an OS boundary (#1302); what IS achievable is
+ * to refuse every tool call that references the runner's own hook state directory at all — reads
+ * included, since the provider never needs them — and to make tampering evident.
+ *
+ * The match is deliberately conservative and of the same strength class as
+ * `commandTargetsManagedWorktree`: it inspects command text and resolved tool paths, so both are
+ * defeated by indirection (a script file, an interpreter, an unexpanded variable).
+ * ------------------------------------------------------------------------------------------ */
+
+export const GUARD_STATE_REFUSAL =
+  "Wollipog protects its own managed-worktree guard state. That runner-owned directory is not part of this session's workspace and must not be read or modified.";
+
+/** Tools whose input names a file path and therefore has to respect the guard-state boundary. */
+export const GUARD_STATE_FILE_TOOLS: Readonly<Record<string, "file_path" | "notebook_path">> = {
+  Edit: "file_path",
+  MultiEdit: "file_path",
+  Write: "file_path",
+  Read: "file_path",
+  NotebookEdit: "notebook_path",
+};
+
+/** A path is out of bounds when it is inside the guard-state directory, or contains it. */
+export function pathTargetsGuardState(path: string, cwd: string, directory: string): boolean {
+  if (!directory || !path || path.includes("\0")) return false;
+  const resolved = isAbsolute(path) ? resolve(path) : resolve(cwd || ".", path);
+  const root = resolve(directory);
+  return pathContains(root, resolved) || pathContains(resolved, root);
+}
+
+/**
+ * Refuse a shell command that references the guard-state directory in any form. Unparsable input
+ * is refused rather than allowed: this is the state the veto itself depends on.
+ */
+export function commandTargetsGuardState(
+  command: string,
+  cwd: string,
+  directory: string,
+): string | null {
+  if (!directory || !command || command.length > MAX_COMMAND_LENGTH || command.includes("\0")) return null;
+  const root = resolve(directory);
+  const foldCase = process.platform === "win32" || process.platform === "darwin";
+  const haystack = foldCase ? command.toLowerCase() : command;
+  // Raw text first: concatenations, inline `--settings=<path>`, and quoting styles that tokenize
+  // in ways a path comparison would miss still name the directory verbatim.
+  for (const candidate of [root, root.split(sep).join("/")]) {
+    if (haystack.includes(foldCase ? candidate.toLowerCase() : candidate)) return GUARD_STATE_REFUSAL;
+  }
+  let tokens: ShellToken[];
+  try {
+    tokens = parse(command, (name) => ({ env: name })) as ShellToken[];
+  } catch {
+    return GUARD_STATE_REFUSAL;
+  }
+  for (const token of tokens) {
+    const value = typeof token === "string"
+      ? token
+      : token != null && typeof token === "object" && "op" in token && token.op === "glob" &&
+          "pattern" in token && typeof token.pattern === "string"
+        ? token.pattern
+        : null;
+    if (value === null) continue;
+    if (pathTargetsGuardState(value, cwd, root)) return GUARD_STATE_REFUSAL;
+  }
+  return null;
+}
+
+/**
+ * Refuse a file tool whose target resolves inside the guard-state directory. Returns `"malformed"`
+ * when a matched file tool carries no usable path: the caller must fail closed rather than guess.
+ */
+export function toolTargetsGuardState(
+  toolName: string,
+  input: unknown,
+  cwd: string,
+  directory: string,
+): string | "malformed" | null {
+  if (!directory) return null;
+  const key = GUARD_STATE_FILE_TOOLS[toolName];
+  if (!key) return null;
+  const value = input && typeof input === "object"
+    ? (input as Record<string, unknown>)[key]
+    : undefined;
+  if (typeof value !== "string" || !value) return "malformed";
+  return pathTargetsGuardState(value, cwd, directory) ? GUARD_STATE_REFUSAL : null;
+}

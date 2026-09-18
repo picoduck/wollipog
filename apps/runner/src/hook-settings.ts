@@ -23,10 +23,11 @@ import { basename, dirname, join, resolve } from "node:path";
 import type { AgentDefinition, ElicitationTransport, SessionLaunchSpec } from "@wollipog/protocol";
 import { protectedWrite as protectedFileWrite } from "./protected-file.js";
 import {
-  MANAGED_WORKTREE_GUARD_ENV,
+  MANAGED_WORKTREE_GUARD_MATCHER,
   MANAGED_WORKTREE_GUARD_MODE,
   MANAGED_WORKTREE_GUARD_PROTECTIONS_SUFFIX,
   managedWorktreeGuardProtectionsPath,
+  managedWorktreeGuardStateMatches,
   sameGuardPath,
   verifyManagedWorktreeGuardLaunch,
   writeManagedWorktreeGuardProtections,
@@ -199,8 +200,9 @@ function guardHookEntry(launch: { command: string; args: string[] }, protections
   validateInjectedArg(launch.command);
   for (const arg of args) validateInjectedArg(arg);
   return {
-    // Scoped to Bash: it is the only tool that can retire a worktree behind the runner's back.
-    matcher: "Bash",
+    // Bash can retire a worktree behind the runner's back; the file tools can rewrite the guard's
+    // own state. Every other tool is outside the veto's vocabulary.
+    matcher: MANAGED_WORKTREE_GUARD_MATCHER,
     hooks: [{
       type: "command",
       command: launch.command,
@@ -237,8 +239,10 @@ function claudeSettingsDocument(
 ): string {
   const circuitFile = claudeHookCircuitPath(file);
   const settings = {
+    // The guard's protections path is deliberately absent here: `env` is exported into every tool
+    // process, and the provider must not be handed the exact path to the guard's own state. The
+    // hook command inside this 0600 file carries it instead.
     env: {
-      ...(guard ? { [MANAGED_WORKTREE_GUARD_ENV]: guard.protectionsFile } : {}),
       ...(manager
         ? {
           MANAGER_TOKEN_FILE: manager.tokenFile,
@@ -322,6 +326,8 @@ export function sweepClaudeHookFiles(configDir = defaultHookConfigDir()): number
 }
 
 export function removeClaudeHookFiles(sessionId: string, configDir = defaultHookConfigDir()): void {
+  guardStateDigests.delete(sessionId);
+  compromisedGuardSessions.delete(sessionId);
   try {
     const settings = claudeHookSettingsPath(configDir, sessionId);
     const circuit = claudeHookCircuitPath(settings);
@@ -407,16 +413,22 @@ export function describeManagedSettings(file: string): ManagedSettingsDescriptio
   } catch {
     return null;
   }
-  const env = template.env;
-  if (!env || !template.hooks?.PreToolUse) return null;
+  const env = template.env ?? {};
+  if (!template.hooks?.PreToolUse) return null;
   const manager = Boolean(
     sameGuardPath(String(readCompatibleEnv(env, POLICY_HOOK_ENV.settingsFile, LEGACY_POLICY_HOOK_ENV.settingsFile) ?? ""), file) &&
     sameGuardPath(String(readCompatibleEnv(env, POLICY_HOOK_ENV.circuitFile, LEGACY_POLICY_HOOK_ENV.circuitFile) ?? ""), claudeHookCircuitPath(file)) &&
     sameGuardPath(String(readCompatibleEnv(env, POLICY_HOOK_ENV.readyFile, LEGACY_POLICY_HOOK_ENV.readyFile) ?? ""), claudeHookReadyPath(file)) &&
     sameGuardPath(String(env.MANAGER_TOKEN_FILE ?? ""), claudeHookTokenPath(file)),
   );
-  const guard = typeof env[MANAGED_WORKTREE_GUARD_ENV] === "string" &&
-    sameGuardPath(String(env[MANAGED_WORKTREE_GUARD_ENV]), claudeHookProtectionsPath(file));
+  const guard = (template.hooks?.PreToolUse as Array<{ hooks?: Array<{ args?: unknown }> }> | undefined)
+    ?.some((entry) => entry.hooks?.some((hook) => {
+      const args = Array.isArray(hook.args) ? hook.args.map(String) : [];
+      const index = args.indexOf("--protections");
+      return args.includes(MANAGED_WORKTREE_GUARD_MODE) && index >= 0 &&
+        args[index + 1] !== undefined &&
+        sameGuardPath(args[index + 1]!, claudeHookProtectionsPath(file));
+    })) === true;
   return manager || guard ? { manager, guard } : null;
 }
 
@@ -539,7 +551,11 @@ export function provisionClaudeHooks(
   // and the driver keeps mediating the permission mode instead.
   let guard: ClaudeGuardHookOptions | null = null;
   if (protections.length > 0) {
-    if (!native) {
+    if (compromisedGuardSessions.has(spec.sessionId)) {
+      // The guard's own state was tampered with or could not be kept in step for this session.
+      // Mediation (the pre-#1313 behaviour) is the honest fallback; it needs no trusted state.
+      log(`Claude managed worktree guard ${spec.sessionId}: guard state was invalidated; this launch is mediated`);
+    } else if (!native) {
       log(`Claude managed worktree guard ${spec.sessionId}: WSL/container hook path translation is not supported`);
     } else if (!targetIsHost) {
       log(`Claude managed worktree guard ${spec.sessionId}: container/cloud hook injection is not supported`);
@@ -553,10 +569,21 @@ export function provisionClaudeHooks(
           protectionsFile,
           protections,
         };
+        // Tripwire: compare what is on disk against the digest of what the runner last wrote,
+        // BEFORE overwriting it, so tampering is evident rather than silently repaired.
+        const baseline = guardStateDigests.get(spec.sessionId);
+        if (baseline && existsSync(protectionsFile) &&
+            !managedWorktreeGuardStateMatches(protectionsFile, baseline)) {
+          poisonClaudeGuardState(spec.sessionId, protectionsFile);
+          throw new Error("the protected worktree list was modified outside the runner");
+        }
         // The launch has to be PROVEN, not assumed: Claude blocks only on exit code 2, so a
         // sidecar that cannot start would silently wave every command through while the driver
         // stopped mediating on the strength of it.
-        writeManagedWorktreeGuardProtections(protectionsFile, protections);
+        guardStateDigests.set(
+          spec.sessionId,
+          writeManagedWorktreeGuardProtections(protectionsFile, protections),
+        );
         const verdict = verifiedGuardLaunch(candidate, config.verifyGuardLaunch);
         if (verdict.ok) guard = candidate;
         else log(`Claude managed worktree guard ${spec.sessionId}: launch self-test failed (${verdict.reason})`);
@@ -579,6 +606,7 @@ export function provisionClaudeHooks(
         log(`Claude hooks ${spec.sessionId}: disabled for this launch`);
       }
       discardGuardArtifacts(file);
+      guardStateDigests.delete(spec.sessionId);
     } else {
       try {
         writeClaudeSettingsSet(file, null, guard);
@@ -702,11 +730,6 @@ function verifiedGuardLaunch(
   return verdict;
 }
 
-/** Testing seam: forget the cached sidecar self-tests. */
-export function resetManagedWorktreeGuardVerification(): void {
-  verifiedGuardLaunches.clear();
-}
-
 /**
  * Drop a guard this session no longer needs (its last managed worktree was discarded, or the
  * launch cannot carry the hook). A guard-only settings file goes with it; a file that also
@@ -725,6 +748,63 @@ function discardGuardArtifacts(file: string): void {
   }
 }
 
+/* ------------------------------------------------------------------------------------------
+ * Guard state ledger.
+ *
+ * "Guard active" is a runner fact, so the runner remembers the digest of the exact protections
+ * document it last wrote and the sessions whose guard it no longer trusts. Both live in memory:
+ * a runner restart forgets them, and the next spawn re-provisions and re-proves the guard from
+ * scratch, which is the same clean boundary a fresh session gets.
+ * --------------------------------------------------------------------------------------- */
+
+const guardStateDigests = new Map<string, string>();
+const compromisedGuardSessions = new Set<string>();
+
+/** Testing seam: forget every remembered guard-state digest and compromise marker. */
+export function resetClaudeGuardState(): void {
+  guardStateDigests.clear();
+  compromisedGuardSessions.clear();
+  verifiedGuardLaunches.clear();
+}
+
+export type ClaudeGuardRefreshOutcome =
+  /** No guard is provisioned for this session; nothing to keep in step. */
+  | { state: "absent" }
+  /** The live protection set was rewritten and remains trusted. */
+  | { state: "refreshed" }
+  /**
+   * The guard is no longer trusted. Its state was removed, so every later invocation fails closed
+   * (the provider cannot proceed on stale data), and the next spawn must re-provision and
+   * re-prove it — or fall back to mediation.
+   */
+  | { state: "invalidated"; reason: string }
+  /**
+   * The guard is no longer trusted AND its state could not be removed, so a running provider
+   * would keep trusting a stale list. The caller must stop that provider.
+   */
+  | { state: "unprotected"; reason: string };
+
+/** Best-effort removal of the live protection list; reports whether the guard is now disarmed. */
+function guardStatePresent(file: string): boolean {
+  try {
+    lstatSync(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function poisonClaudeGuardState(sessionId: string, file: string): boolean {
+  guardStateDigests.delete(sessionId);
+  compromisedGuardSessions.add(sessionId);
+  try {
+    rmSync(file, { force: true });
+    return !guardStatePresent(file);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Refresh the live protection set for an ALREADY provisioned guard.
  *
@@ -737,12 +817,35 @@ export function refreshClaudeGuardProtections(
   sessionId: string,
   protections: readonly ManagedWorktreeProtection[],
   configDir = defaultHookConfigDir(),
-): boolean {
-  if (!isSafeSessionFileId(sessionId)) return false;
+): ClaudeGuardRefreshOutcome {
+  if (!isSafeSessionFileId(sessionId)) return { state: "absent" };
   const file = claudeHookSessionProtectionsPath(configDir, sessionId);
-  if (!existsSync(file)) return false;
-  writeManagedWorktreeGuardProtections(file, protections);
-  return true;
+  // lstat, not exists: a dangling symlink planted where the protection list belongs is a guard
+  // that has already been interfered with, not a guard that was never provisioned.
+  if (!guardStatePresent(file)) return { state: "absent" };
+  const reasonFor = (reason: string): ClaudeGuardRefreshOutcome =>
+    poisonClaudeGuardState(sessionId, file)
+      ? { state: "invalidated", reason }
+      : { state: "unprotected", reason };
+  // Tripwire first: a stale list that someone else wrote must never be re-trusted, and the
+  // rewrite below would silently erase the evidence.
+  const baseline = guardStateDigests.get(sessionId);
+  if (baseline && !managedWorktreeGuardStateMatches(file, baseline)) {
+    return reasonFor("the protected worktree list was modified outside the runner");
+  }
+  if (protections.length === 0) {
+    // The last managed worktree is gone. Retire the guard rather than write "nothing is
+    // protected"; the next spawn runs exactly like a session that never had a worktree.
+    return poisonClaudeGuardState(sessionId, file)
+      ? { state: "invalidated", reason: "this session no longer has a runner-owned worktree" }
+      : { state: "unprotected", reason: "this session no longer has a runner-owned worktree" };
+  }
+  try {
+    guardStateDigests.set(sessionId, writeManagedWorktreeGuardProtections(file, protections));
+    return { state: "refreshed" };
+  } catch (error) {
+    return reasonFor(`the protected worktree list could not be updated: ${(error as Error).message}`);
+  }
 }
 
 /** Persist the CP acknowledgement that fences the first HTTP hook request after provisioning. */
@@ -839,6 +942,11 @@ export interface PreparedClaudeHookArgs {
    * permission mode — never an assumption about protections being present.
    */
   guardActive: boolean;
+  /**
+   * The runner-owned hook state directory for this spawn, when one is in the launch argv. The
+   * driver mirrors the guard's own-state veto on the control channel with it.
+   */
+  guardStateDirectory?: string;
 }
 
 /** Driver-side exact-path heal and recoverable circuit check before every Claude process spawn. */
@@ -881,6 +989,7 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
           hookAskCapable,
           healed: false,
           guardActive: true,
+          guardStateDirectory: dirname(resolve(file)),
         };
       } catch {
         /* Without a readable guard-only copy the launch drops to the mediated path below. */
@@ -894,6 +1003,7 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
       hookAskCapable,
       healed: false,
       guardActive: false,
+      guardStateDirectory: dirname(resolve(file)),
     };
   }
   let healed = false;
@@ -909,6 +1019,7 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
       hookAskCapable,
       healed: false,
       guardActive: false,
+      guardStateDirectory: dirname(resolve(file)),
     };
   }
   let live: string | null = null;
@@ -933,6 +1044,7 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
     hookAskCapable,
     healed,
     guardActive: hasGuard,
+    guardStateDirectory: dirname(resolve(file)),
   };
 }
 

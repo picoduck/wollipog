@@ -22,7 +22,7 @@ import {
   POLICY_HOOK_ENV,
   readHookCircuitState,
   refreshClaudeGuardProtections,
-  resetManagedWorktreeGuardVerification,
+  resetClaudeGuardState,
   removeClaudeHookFiles,
   sweepClaudeHookFiles,
   writeHookCircuitState,
@@ -707,7 +707,7 @@ function provisionGuarded(
   } = {},
 ): SessionLaunchSpec {
   const launch = guardedSpec(overrides);
-  resetManagedWorktreeGuardVerification();
+  resetClaudeGuardState();
   provisionClaudeHooks(
     launch,
     {
@@ -741,7 +741,8 @@ test("the guard is provisioned when manager hooks are DISABLED", () => temp((dir
   assert.deepEqual(launch.args, ["--settings", file]);
   const guards = guardEntries(live);
   assert.equal(guards.length, 1, "exactly one guard entry");
-  assert.equal(guards[0]!.matcher, "Bash");
+  assert.deepEqual(guards[0]!.matcher!.split("|").sort(),
+    ["Bash", "Edit", "MultiEdit", "NotebookEdit", "Read", "Write"]);
   assert.ok(guards[0]!.hooks[0]!.args.includes("--protections"));
   assert.equal(live.hooks?.PostToolUse, undefined, "no manager hooks came along");
   assert.equal(live.env?.MANAGER_TOKEN_FILE, undefined, "and no credential reference");
@@ -769,14 +770,16 @@ test("the guard and the manager hooks share one settings file when both are on",
   assert.deepEqual(launch.args, ["--settings", file], "one and only one --settings argument");
   assert.equal(guardEntries(live).length, 1);
   assert.equal(live.hooks?.PreToolUse?.length, 2, "guard plus manager PreToolUse");
-  assert.equal(live.hooks!.PreToolUse![0]!.matcher, "Bash", "the guard runs first");
+  assert.ok(live.hooks!.PreToolUse![0]!.matcher?.includes("Bash"), "the guard runs first");
   assert.ok(live.hooks?.PostToolUse, "the manager hooks keep working exactly as before");
   assert.ok(live.hooks?.UserPromptSubmit);
   assert.equal(live.env?.MANAGER_TOKEN_FILE, claudeHookTokenPath(file));
-  // The guard's own state is a path, never a credential.
-  assert.equal(
-    live.env?.WOLLIPOG_MANAGED_WORKTREE_GUARD_FILE,
-    file.replace(/\.settings\.json$/u, ".protections.json"),
+  // The protections path is NOT exported through `env`: that block reaches every tool process,
+  // and the provider must not be handed the exact path to the guard's own state. It travels in
+  // the hook command inside this 0600 file instead.
+  assert.equal(JSON.stringify(live.env).includes("protections.json"), false);
+  assert.ok(
+    guardEntries(live)[0]!.hooks[0]!.args.includes(file.replace(/\.settings\.json$/u, ".protections.json")),
   );
 }));
 
@@ -877,14 +880,68 @@ test("a session with no managed worktree gets no guard, and discarding the last 
 }));
 
 test("refreshClaudeGuardProtections updates an existing guard and never creates one", () => temp((dir) => {
-  assert.equal(refreshClaudeGuardProtections("sess_hook_1", PROTECTIONS, dir), false,
+  assert.deepEqual(refreshClaudeGuardProtections("sess_hook_1", PROTECTIONS, dir), { state: "absent" },
     "a session with no provisioned guard is left alone");
   provisionGuarded(dir, {}, { enabled: false });
   const protections = claudeHookSettingsPath(dir, "sess_hook_1").replace(/\.settings\.json$/u, ".protections.json");
   const next = [...PROTECTIONS, { worktreePath: "/repo-worktrees/s2", repoPath: "/repo" }];
-  assert.equal(refreshClaudeGuardProtections("sess_hook_1", next, dir), true);
+  assert.deepEqual(refreshClaudeGuardProtections("sess_hook_1", next, dir), { state: "refreshed" });
   assert.deepEqual(JSON.parse(readFileSync(protections, "utf8")), { version: 1, protections: next });
-  assert.equal(refreshClaudeGuardProtections("../escape", next, dir), false, "an unsafe id is refused");
+  assert.deepEqual(refreshClaudeGuardProtections("../escape", next, dir), { state: "absent" },
+    "an unsafe id is refused");
+}));
+
+test("a refresh whose write fails INVALIDATES the guard instead of trusting the stale list", () => temp((dir) => {
+  provisionGuarded(dir, {}, { enabled: false });
+  const protections = claudeHookSettingsPath(dir, "sess_hook_1").replace(/\.settings\.json$/u, ".protections.json");
+  const next = [...PROTECTIONS, { worktreePath: "/repo-worktrees/s2", repoPath: "/repo" }];
+  // A symlinked target is refused by protectedWrite, which is how a write failure looks here.
+  rmSync(protections, { force: true });
+  symlinkSync(join(dir, "elsewhere.json"), protections);
+  const outcome = refreshClaudeGuardProtections("sess_hook_1", next, dir);
+  assert.equal(outcome.state, "invalidated", "the stale list is removed, so the guard fails closed");
+  assert.equal(existsSync(protections), false);
+  // And the next launch is mediated: the session is marked compromised, so no guard is provisioned.
+  const relaunch = spec();
+  provisionClaudeHooks(relaunch, {
+    ...config, enabled: false, managedWorktreeProtections: next, verifyGuardLaunch: guardVerifies,
+  }, () => {}, host(dir));
+  assert.deepEqual(relaunch.args, [], "no guard settings file: the driver mediates the mode");
+}));
+
+test("the last managed worktree going away retires the guard rather than writing an empty list", () => temp((dir) => {
+  provisionGuarded(dir, {}, { enabled: false });
+  const protections = claudeHookSettingsPath(dir, "sess_hook_1").replace(/\.settings\.json$/u, ".protections.json");
+  const outcome = refreshClaudeGuardProtections("sess_hook_1", [], dir);
+  assert.equal(outcome.state, "invalidated");
+  assert.equal(existsSync(protections), false, "no empty list is ever written");
+}));
+
+test("a tampered protections file invalidates the guard and mediates the next launch", () => temp((dir) => {
+  provisionGuarded(dir, {}, { enabled: false });
+  const protections = claudeHookSettingsPath(dir, "sess_hook_1").replace(/\.settings\.json$/u, ".protections.json");
+  writeFileSync(protections, JSON.stringify({ version: 1, protections: [] }), "utf8");
+  const outcome = refreshClaudeGuardProtections("sess_hook_1", PROTECTIONS, dir);
+  assert.equal(outcome.state, "invalidated");
+  assert.match((outcome as { reason: string }).reason, /modified outside the runner/u);
+  assert.equal(existsSync(protections), false);
+  const relaunch = spec();
+  provisionClaudeHooks(relaunch, {
+    ...config, enabled: false, managedWorktreeProtections: PROTECTIONS, verifyGuardLaunch: guardVerifies,
+  }, () => {}, host(dir));
+  assert.deepEqual(relaunch.args, []);
+}));
+
+test("a spawn-time tamper is caught before the runner overwrites the evidence", () => temp((dir) => {
+  const launch = provisionGuarded(dir, {}, { enabled: false });
+  const protections = claudeHookSettingsPath(dir, "sess_hook_1").replace(/\.settings\.json$/u, ".protections.json");
+  writeFileSync(protections, JSON.stringify({
+    version: 1, protections: [{ worktreePath: "/somewhere/else", repoPath: "/repo" }],
+  }), "utf8");
+  provisionClaudeHooks(launch, {
+    ...config, enabled: false, managedWorktreeProtections: PROTECTIONS, verifyGuardLaunch: guardVerifies,
+  }, () => {}, host(dir));
+  assert.deepEqual(launch.args, [], "the tampered session is mediated, not silently re-guarded");
 }));
 
 test("a non-native context or a non-host target cannot carry the guard", () => temp((dir) => {

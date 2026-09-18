@@ -700,13 +700,11 @@ sessions.setWorktreeShellRetirement((sessionId, context, path) =>
 // Keep the Claude managed-worktree guard's protection set live: a worktree created, activated,
 // attached, or discarded mid-session is reflected in the guard's next invocation, without waiting
 // for the next provider spawn.
-sessions.setManagedWorktreeGuardRefresh((meta, protections) => {
-  try {
-    refreshClaudeGuardProtections(meta.sessionId, protections, claudeHookHost.configDir);
-  } catch (error) {
-    log(`managed worktree guard ${meta.sessionId}: protection refresh failed (${errText(error)})`);
-  }
-});
+// A refresh that cannot be completed invalidates the guard rather than leaving a stale protection
+// list trusted; SessionManager acts on the outcome (fail closed, and stop the provider when the
+// state could not even be retired).
+sessions.setManagedWorktreeGuardRefresh((meta, protections) =>
+  refreshClaudeGuardProtections(meta.sessionId, protections, claudeHookHost.configDir));
 sessions.reconcileStore(); // demote stale sessions and replay cleanup only after shell retirement is wired
 
 // Buffer outbound events while the control-plane socket is down or mid-reconnect so a terminal

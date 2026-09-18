@@ -26,7 +26,12 @@ import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import { inspectClaudeBackgroundWork, inspectClaudeBackgroundWorkInContext, type ClaudeBackgroundWorkInspection } from "../claude-background-work.js";
 import { effectiveClaudePermissionMode } from "../claude-permission.js";
 import { prepareClaudeHookArgs } from "../hook-settings.js";
-import { commandTargetsManagedWorktree, type ManagedWorktreeProtection } from "../managed-worktree-protection.js";
+import {
+  commandTargetsGuardState,
+  commandTargetsManagedWorktree,
+  toolTargetsGuardState,
+  type ManagedWorktreeProtection,
+} from "../managed-worktree-protection.js";
 import { classifyRoutineClaudeOrchestratorPermission } from "../orchestrator-provider-permissions.js";
 import { killTree, spawnAgent, terminateDescendantBoundaries, trackPendingKill, type AgentProcess, type SpawnAgentOptions } from "../spawn.js";
 import type {
@@ -575,6 +580,8 @@ export class ClaudeCodeDriver implements Driver {
   /** Established by the last `preparedBaseArgs()`: the managed-worktree guard hook is in the
    * settings file this spawn launches with, so the runner does NOT have to mediate the mode. */
   private managedWorktreeGuardActive = false;
+  /** Runner-owned hook state directory for this spawn; the provider must not touch it. */
+  private managedWorktreeGuardStateDirectory = "";
   /** A fresh UUID is only a proposed coordinate until Claude confirms it in system/init. */
   private sessionEstablished: boolean;
 
@@ -670,6 +677,28 @@ export class ClaudeCodeDriver implements Driver {
   private routineControlChannelMode(): string | null {
     if (this.opts.capabilities && this.opts.capabilities.supportsApprovals !== true) return null;
     return claudeRoutineControlChannelMode(this.launchedPermissionMode(), this.opts.orchestrator != null);
+  }
+
+  /**
+   * The guard keeps its protection list in a runner-owned file, and the provider runs as the same
+   * OS user, so any tool call that names that directory — read or write — is refused. This is
+   * tamper-EVIDENT best effort of the same strength class as the command-text worktree matcher,
+   * not an isolation boundary; that belongs at the sandbox (#1302).
+   */
+  private managedWorktreeGuardStateVeto(toolName: unknown, input: unknown): string | null {
+    const directory = this.managedWorktreeGuardStateDirectory;
+    if (!directory || typeof toolName !== "string") return null;
+    const fileVerdict = toolTargetsGuardState(toolName, input, this.cwd, directory);
+    if (fileVerdict === "malformed") {
+      return "Wollipog could not read the target path of this tool call, so it was refused.";
+    }
+    if (fileVerdict) return fileVerdict;
+    const command = input && typeof input === "object"
+      ? (input as { command?: unknown }).command
+      : undefined;
+    return toolName === "Bash" && typeof command === "string"
+      ? commandTargetsGuardState(command, this.cwd, directory)
+      : null;
   }
 
   /** Whether this spawn still has to route permission decisions through the runner. */
@@ -2068,6 +2097,7 @@ export class ClaudeCodeDriver implements Driver {
   private preparedBaseArgs(): string[] {
     const prepared = prepareClaudeHookArgs(this.opts.args);
     this.managedWorktreeGuardActive = prepared.guardActive;
+    this.managedWorktreeGuardStateDirectory = prepared.guardStateDirectory ?? "";
     if (prepared.circuitOpen && !this.hookCircuitReported) {
       this.hookCircuitReported = true;
       this.hookCircuitOpenedAt = prepared.circuitOpenedAt ?? null;
@@ -2270,13 +2300,17 @@ export class ClaudeCodeDriver implements Driver {
         const req = msg.request;
         if (req?.subtype === "can_use_tool" && typeof msg.request_id === "string") {
           const protections = this.managedProtections();
-          const managedRefusal = req.tool_name === "Bash" && typeof req.input?.command === "string"
-            ? commandTargetsManagedWorktree(
-                req.input.command,
-                this.cwd,
-                protections,
-              )
-            : null;
+          // Defense in depth for `default`/`auto`, mirroring the guard hook exactly: the runner's
+          // own hook state is off limits to every tool, and only then does the worktree veto run.
+          const guardStateRefusal = this.managedWorktreeGuardStateVeto(req.tool_name, req.input);
+          const managedRefusal = guardStateRefusal ??
+            (req.tool_name === "Bash" && typeof req.input?.command === "string"
+              ? commandTargetsManagedWorktree(
+                  req.input.command,
+                  this.cwd,
+                  protections,
+                )
+              : null);
           if (managedRefusal) {
             try {
               this.child.stdin.write(JSON.stringify({

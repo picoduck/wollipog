@@ -26,7 +26,7 @@ if (entry.mode === "--state-doctor") {
   // Runs before every Claude Bash call; it must never start the daemon or write anything to
   // stdout except its own PreToolUse decision.
   void import("./managed-worktree-guard.js")
-    .then((m) => m.runManagedWorktreeGuardCli(process.argv, process.env))
+    .then((m) => m.runManagedWorktreeGuardCli(process.argv))
     .catch((error) => {
       // Fail closed: a guard that cannot start must block the tool call, never wave it through.
       console.error(`[managed-worktree-guard] ${error instanceof Error ? error.message : String(error)}`);

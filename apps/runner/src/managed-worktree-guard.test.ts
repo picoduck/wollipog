@@ -1,16 +1,17 @@
 import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { MANAGED_WORKTREE_REFUSAL } from "./managed-worktree-protection.js";
+import { GUARD_STATE_REFUSAL, MANAGED_WORKTREE_REFUSAL } from "./managed-worktree-protection.js";
 import { runnerReentryCommand } from "./runner-reentry.js";
 import {
-  MANAGED_WORKTREE_GUARD_ENV,
+  MANAGED_WORKTREE_GUARD_MATCHER,
   managedWorktreeGuardProtectionsArgument,
   managedWorktreeGuardProtectionsPath,
+  managedWorktreeGuardStateMatches,
   readManagedWorktreeGuardProtections,
   runManagedWorktreeGuardCli,
   runManagedWorktreeGuardDecision,
@@ -76,15 +77,30 @@ test("a harmless command produces no decision at all, so the selected mode decid
   assert.deepEqual(outcome, { stdout: "", stderr: "", exitCode: 0 });
 });
 
-test("a non-Bash tool produces no decision", (t) => {
+test("a tool outside the veto's vocabulary produces no decision", (t) => {
   const f = fixture();
   t.after(f.cleanup);
-  for (const toolName of ["Edit", "Write", "Read", "Task", "WebFetch"]) {
+  for (const toolName of ["Task", "WebFetch", "Glob", "Grep", "TodoWrite"]) {
     const outcome = runManagedWorktreeGuardDecision(
       hookInput({ tool_name: toolName, tool_input: { file_path: WORKTREE } }),
       f.protectionsFile,
     );
     assert.deepEqual(outcome, { stdout: "", stderr: "", exitCode: 0 }, `${toolName} has no guard opinion`);
+  }
+});
+
+test("an ordinary file-tool edit outside the guard's own state gets no opinion", (t) => {
+  const f = fixture();
+  t.after(f.cleanup);
+  for (const [toolName, key] of [
+    ["Edit", "file_path"], ["MultiEdit", "file_path"], ["Write", "file_path"],
+    ["Read", "file_path"], ["NotebookEdit", "notebook_path"],
+  ] as Array<[string, string]>) {
+    const outcome = runManagedWorktreeGuardDecision(
+      hookInput({ tool_name: toolName, tool_input: { [key]: `${WORKTREE}/src/app.ts` } }),
+      f.protectionsFile,
+    );
+    assert.deepEqual(outcome, { stdout: "", stderr: "", exitCode: 0 }, `${toolName} elsewhere is allowed`);
   }
 });
 
@@ -99,15 +115,16 @@ test("a Bash call made by a subagent is evaluated exactly like any other Bash ca
   assert.match(outcome.stdout, /"permissionDecision":"deny"/u);
 });
 
-test("an empty protection set allows everything (the last managed worktree was discarded)", (t) => {
+test("an empty protection list fails closed, and the runner refuses to write one", (t) => {
   const f = fixture();
   t.after(f.cleanup);
-  writeManagedWorktreeGuardProtections(f.protectionsFile, []);
-  const outcome = runManagedWorktreeGuardDecision(
-    hookInput({ tool_input: { command: `git worktree remove ${WORKTREE}` } }),
-    f.protectionsFile,
+  assert.throws(() => writeManagedWorktreeGuardProtections(f.protectionsFile, []), /empty/u);
+  // Only tampering or a half-finished retirement can produce one, and neither may be trusted.
+  writeFileSync(f.protectionsFile, JSON.stringify({ version: 1, protections: [] }), "utf8");
+  blocks(
+    runManagedWorktreeGuardDecision(hookInput({ tool_input: { command: "ls" } }), f.protectionsFile),
+    "an empty protection list",
   );
-  assert.deepEqual(outcome, { stdout: "", stderr: "", exitCode: 0 });
 });
 
 test("a refreshed protections file is picked up by the very next invocation", (t) => {
@@ -197,7 +214,7 @@ test("the CLI reads stdin, writes the decision, and fails closed when stdin expl
     const out: string[] = [];
     const err: string[] = [];
     let code: number | undefined;
-    await runManagedWorktreeGuardCli(argv, {}, {
+    await runManagedWorktreeGuardCli(argv, {
       stdin,
       stdout: (text) => out.push(text),
       stderr: (text) => err.push(text),
@@ -231,19 +248,21 @@ test("the CLI reads stdin, writes the decision, and fails closed when stdin expl
   assert.equal(noArgument.code, 2, "a guard launched without a protections file blocks");
 });
 
-test("the protections file path is taken from the argument first and the settings env marker second", () => {
+test("the protections path comes only from the hook command, never from the environment", () => {
   assert.equal(
     managedWorktreeGuardProtectionsArgument(
       ["node", "cli.js", "--managed-worktree-guard", "--protections", "/a/s1.protections.json"],
-      { [MANAGED_WORKTREE_GUARD_ENV]: "/b/other.protections.json" },
     ),
     "/a/s1.protections.json",
   );
-  assert.equal(
-    managedWorktreeGuardProtectionsArgument(["node", "cli.js"], { [MANAGED_WORKTREE_GUARD_ENV]: "/b/x.json" }),
-    "/b/x.json",
-  );
-  assert.equal(managedWorktreeGuardProtectionsArgument(["node", "cli.js"], {}), null);
+  // No environment fallback: `env` is exported into every tool process, and an environment the
+  // provider can influence must never be able to redirect the guard at a file of its choosing.
+  assert.equal(managedWorktreeGuardProtectionsArgument(["node", "cli.js"]), null);
+});
+
+test("the hook matcher covers Bash and every path-bearing file tool", () => {
+  assert.deepEqual(MANAGED_WORKTREE_GUARD_MATCHER.split("|").sort(),
+    ["Bash", "Edit", "MultiEdit", "NotebookEdit", "Read", "Write"]);
 });
 
 test("the protections path is derived from the settings file it belongs to", () => {
@@ -314,5 +333,133 @@ test("the self-test needs a protected worktree to probe with", () => {
   assert.deepEqual(
     verifyManagedWorktreeGuardLaunch({ command: "node", args: [] }, "/nowhere.json", []),
     { ok: false, reason: "no protected worktree to probe with" },
+  );
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * The guard's own state is provider-writable (same OS user), so every tool call that references
+ * the runner's hook state directory is refused — reads included. Tamper-EVIDENT best effort of the
+ * same strength class as the command-text worktree matcher; real enforcement belongs to #1302.
+ * ------------------------------------------------------------------------------------------ */
+
+test("every way of rewriting the guard's own state through Bash is refused", (t) => {
+  const f = fixture();
+  t.after(f.cleanup);
+  const dir = f.dir;
+  const settings = join(dir, "s1.settings.json");
+  const commands = [
+    `echo '{"version":1,"protections":[]}' > ${f.protectionsFile}`,
+    `rm -f ${f.protectionsFile}`,
+    `rm -rf ${dir}`,
+    `printf '' >> ${f.protectionsFile}`,
+    `cat ${f.protectionsFile}`,
+    `mv ${f.protectionsFile} /tmp/stolen.json`,
+    `cp /tmp/fake.json ${join(dir, "s1.protections.json")}`,
+    `sed -i 's/x/y/' ${settings}`,
+    `truncate -s 0 ${join(dir, "s1.template.json")}`,
+    `chmod 000 ${join(dir, "s1.guard.json")}`,
+    `ln -sf /dev/null ${f.protectionsFile}`,
+    // inline value forms and quoting styles
+    `claude --settings=${settings}`,
+    `cat "${f.protectionsFile}"`,
+    `cat '${f.protectionsFile}'`,
+    // an ancestor sweep takes the directory with it
+    `rm -rf ${dirname(dir)}`,
+  ];
+  for (const command of commands) {
+    const outcome = runManagedWorktreeGuardDecision(hookInput({ tool_input: { command } }), f.protectionsFile);
+    assert.equal(outcome.exitCode, 0, command);
+    assert.ok(outcome.stdout.includes(GUARD_STATE_REFUSAL), `refused: ${command}`);
+  }
+});
+
+test("a cwd-relative reference to the guard's state is resolved and refused", (t) => {
+  const f = fixture();
+  t.after(f.cleanup);
+  const outcome = runManagedWorktreeGuardDecision(
+    hookInput({ cwd: f.dir, tool_input: { command: "rm s1.protections.json" } }),
+    f.protectionsFile,
+  );
+  assert.ok(outcome.stdout.includes(GUARD_STATE_REFUSAL));
+});
+
+test("a file tool writing into the guard's state directory is refused", (t) => {
+  const f = fixture();
+  t.after(f.cleanup);
+  for (const [toolName, key] of [
+    ["Edit", "file_path"], ["MultiEdit", "file_path"], ["Write", "file_path"],
+    ["Read", "file_path"], ["NotebookEdit", "notebook_path"],
+  ] as Array<[string, string]>) {
+    const outcome = runManagedWorktreeGuardDecision(
+      hookInput({ tool_name: toolName, tool_input: { [key]: f.protectionsFile } }),
+      f.protectionsFile,
+    );
+    assert.ok(outcome.stdout.includes(GUARD_STATE_REFUSAL), `${toolName} into the guard state is refused`);
+  }
+});
+
+test("a matched file tool with no usable path fails closed", (t) => {
+  const f = fixture();
+  t.after(f.cleanup);
+  blocks(
+    runManagedWorktreeGuardDecision(hookInput({ tool_name: "Write", tool_input: {} }), f.protectionsFile),
+    "a Write with no file_path",
+  );
+  blocks(
+    runManagedWorktreeGuardDecision(
+      hookInput({ tool_name: "NotebookEdit", tool_input: { notebook_path: 7 } }),
+      f.protectionsFile,
+    ),
+    "a NotebookEdit with a non-string path",
+  );
+});
+
+test("the guard-state veto runs before the worktree veto and does not disturb ordinary commands", (t) => {
+  const f = fixture();
+  t.after(f.cleanup);
+  for (const command of ["git status", "ls -a", "pnpm -r typecheck", "echo hi > out.txt"]) {
+    assert.deepEqual(
+      runManagedWorktreeGuardDecision(hookInput({ tool_input: { command } }), f.protectionsFile),
+      { stdout: "", stderr: "", exitCode: 0 },
+      command,
+    );
+  }
+});
+
+test("the tamper tripwire notices any edit to the document the runner wrote", (t) => {
+  const f = fixture();
+  t.after(f.cleanup);
+  const digest = writeManagedWorktreeGuardProtections(f.protectionsFile, [
+    { worktreePath: WORKTREE, repoPath: REPO },
+  ]);
+  assert.equal(managedWorktreeGuardStateMatches(f.protectionsFile, digest), true);
+  writeFileSync(f.protectionsFile, JSON.stringify({ version: 1, protections: [] }), "utf8");
+  assert.equal(managedWorktreeGuardStateMatches(f.protectionsFile, digest), false);
+  rmSync(f.protectionsFile, { force: true });
+  assert.equal(managedWorktreeGuardStateMatches(f.protectionsFile, digest), false,
+    "a removed file is a mismatch, never a pass");
+});
+
+test("the launch self-test quotes a protected path containing spaces and a quote", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-guard-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  // The worktree must live OUTSIDE the guard's own state directory, as it always does in reality:
+  // a path inside it would be refused by the guard-state veto instead, proving nothing here.
+  const awkward = join(dir, "trees", "my work's trees", "issue 42");
+  const protectionsFile = join(dir, "state", "s1.protections.json");
+  writeManagedWorktreeGuardProtections(protectionsFile, [{ worktreePath: awkward, repoPath: REPO }]);
+  const launch = runnerReentryCommand(
+    {
+      isSea: false,
+      execPath: process.execPath,
+      execArgv: process.execArgv,
+      scriptPath: fileURLToPath(new URL("./index.ts", import.meta.url)),
+    },
+    "--managed-worktree-guard",
+  );
+  assert.deepEqual(
+    verifyManagedWorktreeGuardLaunch(launch, protectionsFile, [{ worktreePath: awkward, repoPath: REPO }]),
+    { ok: true },
+    "an unquoted path would split into several operands and the probe would see no refusal",
   );
 });
