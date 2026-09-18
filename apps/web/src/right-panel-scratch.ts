@@ -235,7 +235,11 @@ function usePanelScratchValue<T extends string>(
   const setValue = useCallback((next: T | ((prior: T) => T)) => {
     setEntry((prior) => {
       const resolved = typeof next === "function" ? next(prior.value) : next;
-      if (resolved === prior.value) return prior.dirty ? prior : { ...prior, dirty: true };
+      // Only a value that actually moves takes ownership. Bodies re-report what they are already
+      // holding — the Files loader announces the root directory it just listed on every mount —
+      // and treating that as ownership would store a meaningless entry for every session merely
+      // opened, spending the scope budget and evicting a session whose drafts someone still wants.
+      if (resolved === prior.value) return prior;
       return { ...prior, value: resolved, dirty: true };
     });
   }, []);

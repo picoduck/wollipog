@@ -17,7 +17,7 @@ import { ApiProvider } from "../api-context.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime } from "../ui-transport.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
-import { clearPanelScratch } from "../right-panel-scratch.js";
+import { PANEL_SCRATCH_SESSION_LIMIT, clearPanelScratch } from "../right-panel-scratch.js";
 import { RightPanel, useRightPanelState, type RightPanelState } from "./RightPanel.js";
 import type { GitStatus } from "./useGitStatus.js";
 
@@ -533,6 +533,29 @@ test("a resumed listing superseded by an opened file is still owed its directory
   } finally {
     heldListing = false;
     releaseListing?.();
+    await panel.dispose();
+  }
+});
+
+test("merely opening Files in other sessions cannot evict a draft", async () => {
+  // Scratch is bounded by scope, so anything that manufactures a scope spends that budget. A body
+  // re-reporting the value it already holds — the Files loader announcing the root — must not.
+  const panel = await mountPanel();
+  try {
+    await panel.show("review");
+    await type(field(panel, "PR Description")!, "the draft that must outlive the tour");
+
+    await panel.show("files");
+    for (let visit = 0; visit <= PANEL_SCRATCH_SESSION_LIMIT; visit += 1) {
+      await panel.switchSession(`tour-session-${visit}`);
+      assert.equal(crumbs(panel), "root", "each visited session lists its own root and nothing else");
+    }
+
+    await panel.switchSession("session-1");
+    await panel.show("review");
+    assert.equal(field(panel, "PR Description")!.value, "the draft that must outlive the tour",
+      "sessions that were only looked at must not push a real draft out of the cache");
+  } finally {
     await panel.dispose();
   }
 });
