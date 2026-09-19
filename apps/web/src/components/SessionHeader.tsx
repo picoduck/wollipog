@@ -23,7 +23,7 @@ import { pullRequestStateLabel } from "../worktree-identity.js";
 import type { SessionChangeStatus } from "../session-status.js";
 import { CONTROL_PLANE_HTTP, DASHBOARD_ORIGIN, hasSameOriginMarker } from "../config.js";
 import { reachableTranscriptShareOrigin, transcriptShareUrl } from "../transcript-share-client.js";
-import type { ConversationForkAvailability } from "../session-actions.js";
+import { pendingQueuedPromptCount, type ConversationForkAvailability } from "../session-actions.js";
 import {
   ActiveSubagentsBadge,
   BackgroundDeliveryBadge,
@@ -861,7 +861,7 @@ export function SessionHeader({
                       className="menu-item"
                       type="button"
                       role="menuitem"
-                      disabled={busy || session.status !== "idle" || (session.queued?.length ?? 0) > 0}
+                      disabled={busy || session.status !== "idle" || pendingQueuedPromptCount(session.queued) > 0}
                       title="Uses this ACP agent's negotiated logout capability; credentials stay on the runner host"
                       onClick={() => {
                         closeMenu(false);

@@ -114,10 +114,13 @@ import { transcriptPresentation, transcriptRendersRequestRow } from "../transcri
 import {
   acquireSessionFork,
   canStopActiveTurn,
+  checkpointHandoffUnavailableReason,
   composerPrimaryAction,
   conversationForkAvailability,
   editInForkAvailability,
   forkFailureIsAmbiguous,
+  isTerminalDeliveryReceipt,
+  pendingQueuedPromptCount,
   sessionForkInProgress,
   subscribeSessionForks,
   type ConversationForkAvailability,
@@ -3322,6 +3325,9 @@ function SessionDetailLoaded({
       : latest,
     0,
   ) || undefined, [items]);
+  // Settled delivery receipts stay listed so they can be dismissed, but they are not pending work:
+  // counting them would report an idle Session as busy until each one was dismissed.
+  const pendingQueuedPrompts = pendingQueuedPromptCount(session.queued);
   const forkContext = useMemo(() => ({
     driver: session.driver,
     providerSupported: supportsConversationFork,
@@ -3329,16 +3335,16 @@ function SessionDetailLoaded({
     runnerOnline,
     runnerProtocolVersion: runner?.protocolVersion,
     status: session.status,
-    queuedPrompts: session.queued?.length ?? 0,
+    queuedPrompts: pendingQueuedPrompts,
     busy,
     forkInProgress,
   }), [
     busy,
     forkInProgress,
+    pendingQueuedPrompts,
     runner?.protocolVersion,
     runnerOnline,
     session.driver,
-    session.queued?.length,
     session.status,
     session.worktreePath,
     supportsConversationFork,
@@ -3349,12 +3355,16 @@ function SessionDetailLoaded({
   ])), [conversationCheckpointTurns, forkContext, latestKnownTurn]);
   const handoffControls = useMemo(() => ({
     open: setHandoffTurn,
-    reason: !runnerOnline ? "The runner is offline."
-      : !runnerSupportsProtocol(runner?.protocolVersion, "conversationHandoff") ? "Update the runner to support checkpoint handoffs."
-      : !session.worktreePath ? "A worktree is required."
-      : busy || forkInProgress || session.queued?.length || ["running", "starting", "queued", "input_required"].includes(session.status) ? "The source session is busy."
-      : undefined,
-  }), [runnerOnline, runner?.protocolVersion, session.worktreePath, session.queued?.length, session.status, busy, forkInProgress]);
+    reason: checkpointHandoffUnavailableReason({
+      runnerOnline,
+      runnerProtocolVersion: runner?.protocolVersion,
+      hasWorktree: Boolean(session.worktreePath),
+      status: session.status,
+      queuedPrompts: pendingQueuedPrompts,
+      busy,
+      forkInProgress,
+    }),
+  }), [runnerOnline, runner?.protocolVersion, session.worktreePath, pendingQueuedPrompts, session.status, busy, forkInProgress]);
   const rewindUnavailableReason = session.worktreePath == null
     ? "A worktree is required."
     : !runnerSupportsProtocol(runner?.protocolVersion, "checkpointRewind")
@@ -3385,13 +3395,13 @@ function SessionDetailLoaded({
         runnerOnline,
         runnerProtocolVersion: runner?.protocolVersion,
         status: session.status,
-        queuedPrompts: session.queued?.length ?? 0,
+        queuedPrompts: pendingQueuedPrompts,
         busy,
       });
       if (availability.available) targets.set(item.id, availability.forkTurn);
     }
     return targets;
-  }, [api, busy, completedConversationTurns, items, runner?.protocolVersion, runnerOnline, session.driver, session.queued?.length, session.status, session.worktreePath]);
+  }, [api, busy, completedConversationTurns, items, pendingQueuedPrompts, runner?.protocolVersion, runnerOnline, session.driver, session.status, session.worktreePath]);
 
   const openMessageAction = useCallback((next: MessageActionState) => {
     messageActionReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -5099,8 +5109,7 @@ function SessionDetailLoaded({
                   // settled evidence. The row's removal affordance must not be a disabled control —
                   // the transcript recovery card that used to carry Dismiss is suppressed as soon
                   // as `userEventSeq` lands, so this row is the only place the action can live.
-                  const terminalDurable = q.durableDeliveryState === "failed" ||
-                    q.durableDeliveryState === "uncertain";
+                  const terminalDurable = isTerminalDeliveryReceipt(q);
                   // Session-wide gates (a held queue, a busy turn) are checked before per-row state,
                   // so they would otherwise explain a receipt as waiting on the live FIFO. A settled
                   // receipt is waiting on nothing: it explains itself, and borrows no held styling.
