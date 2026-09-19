@@ -18294,3 +18294,87 @@ test("older runners and text-only models keep UI evidence human-owned with an ex
     }
   }
 });
+
+// --- Issue #1406: a message sent to a session that is mid-turn -----------------------------------
+// A parent Orchestrator reaching a descendant has neither the dashboard's visible queue nor its
+// explicit Steer control, so "accepted" has to mean something it can act on. These pin the three
+// lanes and, above all, that attempting to steer can never swallow the message.
+
+test("a prompt to an idle session reports immediate delivery", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "idle", Date.now());
+
+  const result = svc.prompt(id, "start here");
+  assert.equal(result.ok, true);
+  assert.equal(result.data?.promptDelivery?.lane, "immediate");
+  assert.equal(result.data?.promptDelivery?.admittedFrom, "idle");
+});
+
+test("a mid-turn prompt to a steerable session is steered into the running turn", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.activeTurnIds.set(id, "turn-live");
+  hub.sentToRunner.length = 0;
+  hub.requestHandler = (message) => {
+    assert.equal(message.type, "steer_session");
+    return {
+      type: "steer_session_result",
+      requestId: message.requestId,
+      submissionId: message.submissionId,
+      sessionId: id,
+      turnId: "turn-live",
+      disposition: "accepted",
+      reason: "accepted",
+      providerTurnId: "provider-turn",
+    };
+  };
+
+  const result = await svc.promptOrSteer(id, "stop polling and rebase onto main instead");
+  assert.equal(result.ok, true);
+  assert.equal(result.data?.promptDelivery?.lane, "steered");
+  assert.equal(result.data?.promptDelivery?.admittedFrom, "running");
+  assert.equal(hub.sentOfType("steer_session").length, 1);
+  // Steering owns the message: it must not also be queued as an ordinary prompt.
+  assert.equal(hub.sentOfType("prompt_session").length, 0);
+});
+
+test("a mid-turn prompt the provider cannot steer falls back to the queue and says so", async () => {
+  const { db, hub, svc } = makeHarness();
+  // The default agent has no verified steering capability, so steer() refuses before dispatch.
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.activeTurnIds.set(id, "turn-live");
+  hub.sentToRunner.length = 0;
+
+  const result = await svc.promptOrSteer(id, "redirect me");
+  assert.equal(result.ok, true);
+  assert.equal(result.data?.promptDelivery?.lane, "queued");
+  assert.equal(result.data?.promptDelivery?.admittedFrom, "running");
+  // The whole point of the fallback: a refused steer still delivers the message.
+  assert.equal(hub.sentOfType("steer_session").length, 0);
+  assert.equal(hub.sentOfType("prompt_session").length, 1);
+});
+
+test("a steering attempt the turn outran is reported as queued, not as steered", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.activeTurnIds.set(id, "turn-live");
+  hub.sentToRunner.length = 0;
+  hub.requestHandler = (message) => ({
+    type: "steer_session_result",
+    requestId: message.requestId,
+    submissionId: message.submissionId,
+    sessionId: id,
+    turnId: "turn-live",
+    disposition: "converted_to_queue",
+    reason: "no_active_turn",
+    queuedPromptId: "queued-1",
+  });
+
+  const result = await svc.promptOrSteer(id, "too late to steer");
+  assert.equal(result.ok, true);
+  assert.equal(result.data?.promptDelivery?.lane, "queued");
+});

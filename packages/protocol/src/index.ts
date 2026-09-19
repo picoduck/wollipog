@@ -8524,6 +8524,33 @@ export interface PromptRequest {
   slashCommand?: string;
 }
 
+/** Which lane a newly admitted prompt took.
+ *
+ * `immediate` — nothing was running, so the prompt becomes the session's current turn.
+ * `steered` — a turn was already running and the provider accepted the message into it, so the
+ * agent sees it at its next tool boundary rather than after the turn.
+ * `queued` — the session was already busy and could not be steered, so the prompt is held in the
+ * session's FIFO and runs once the work ahead of it finishes.
+ *
+ * A caller that cannot tell these apart cannot tell a delivered message from one parked behind an
+ * hour-long turn, which is how a parent Orchestrator and its child deadlocked in issue #1406. */
+export type PromptDeliveryLane = "immediate" | "steered" | "queued";
+
+/** Delivery report attached to a successful prompt admission. */
+export interface PromptDelivery {
+  lane: PromptDeliveryLane;
+  /** Session status observed at admission — why the prompt took this lane. */
+  admittedFrom: SessionStatus;
+  /** Sender-facing explanation, safe to relay verbatim to an agent or a person. */
+  detail: string;
+}
+
+/** Body of a successful POST /api/sessions/:id/prompt. Additive: it is the SessionView the route
+ * has always returned, plus the delivery report. A client reading only SessionView keys is
+ * unaffected, and one talking to a control plane that predates this sees `promptDelivery`
+ * undefined — which it must report as unknown rather than assume immediate delivery. */
+export type PromptAdmissionView = SessionView & { promptDelivery?: PromptDelivery };
+
 /** Body for POST /api/sessions/:id/steer. Exactly one of direct content or promotePromptId is
  * accepted by the route. A fresh submissionId identifies each user action, including promotion. */
 export interface SteerRequest {

@@ -349,6 +349,25 @@ async function resolveDescendantRequestTool(
   return textResult({ session: mapSession(r.data) });
 }
 
+/** Report how the control plane admitted a prompt. A control plane that predates the delivery
+ * report says nothing, and that is surfaced as `unknown` rather than guessed: telling the sender
+ * "delivered" when the message is in fact parked behind a running turn is the failure this exists
+ * to end (issue #1406). */
+function promptDelivery(s: Json): Json {
+  const report = s?.promptDelivery;
+  if (!report || typeof report !== "object") {
+    return {
+      lane: "unknown",
+      detail: "This control plane does not report prompt delivery; the message may be queued behind a running turn.",
+    };
+  }
+  return {
+    lane: report.lane ?? "unknown",
+    ...(report.admittedFrom ? { admittedFrom: report.admittedFrom } : {}),
+    ...(report.detail ? { detail: report.detail } : {}),
+  };
+}
+
 /** Field-map a SessionView to the compact shape every session-returning tool shares. */
 function mapSession(s: Json): Json {
   return {
@@ -1832,7 +1851,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "prompt_session",
-    description: "Send a message/task to a descendant session. Subject to session permissions and governance policies.",
+    description: "Send a message/task to a descendant session. The result reports whether the message was delivered immediately or queued behind work already running — a queued message is not lost, but a session inside a long tool call will not see it until that turn ends. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: { sessionId: { type: "string" }, text: { type: "string" } },
@@ -1850,7 +1869,7 @@ export const TOOLS: McpTool[] = [
         text: args.text,
       });
       if (!r.ok) return errorResult(r.message);
-      return textResult({ session: mapSession(r.data) });
+      return textResult({ session: mapSession(r.data), delivery: promptDelivery(r.data) });
     },
   },
   {

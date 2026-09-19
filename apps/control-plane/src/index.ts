@@ -3717,9 +3717,12 @@ app.post("/api/sessions/:id/prompt", async (req, reply) => {
     return reply.code(400).send({ error: "text, an image, or a slash command is required" });
   }
   const human = requestHuman(req);
+  // A person sending from the dashboard has the queue in front of them and an explicit Steer
+  // control; an agent parent sending to a descendant has neither, which is why its mid-turn
+  // message used to vanish (#1406). Give only the agent lane the steer-first admission.
   return respond(reply, human
     ? svc.promptFromUser(human.userId, id, text, images, slashCommand, body?.config)
-    : svc.prompt(id, text, images, slashCommand, body?.config));
+    : await svc.promptOrSteer(id, text, images, slashCommand, body?.config));
 });
 
 app.post("/api/sessions/:id/command-invocations", async (req, reply) => {
