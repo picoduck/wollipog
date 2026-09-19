@@ -28,6 +28,12 @@ import {
 import { handleRovingChoiceKeyDown } from "./interactions.js";
 import { StructuredQuestionText } from "./StructuredQuestionText.js";
 import { Checkbox } from "./ui/ChoiceControls.js";
+import {
+  EvidenceArtifactView,
+  evidenceStatusBlocksReview,
+  isRenderableEvidence,
+  type EvidenceArtifactStatus,
+} from "./EvidenceArtifactView.js";
 
 const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
@@ -391,7 +397,15 @@ export function SessionApprovalBanner({
   const contextId = useId();
   const isPolicy = isPolicyApproval(approval);
   const decisionNeedsRunner = approval.kind !== "policy_hook" && approval.kind !== "workflow_decision";
-  const evidenceComplete = evidence.every((item) => reviewedEvidence.includes(item.evidenceId));
+  // An artifact-backed item counts as reviewed only once its verified image was actually shown. A
+  // saved mark from an earlier visit does not survive the artifact turning out missing or mismatched.
+  const [artifactStatus, setArtifactStatus] = useState<Record<string, EvidenceArtifactStatus>>({});
+  const evidenceBlocked = (item: (typeof evidence)[number]) =>
+    isRenderableEvidence(item) && evidenceStatusBlocksReview(artifactStatus[item.evidenceId] ?? "pending");
+  const evidenceComplete = evidence.every((item) =>
+    reviewedEvidence.includes(item.evidenceId) && !evidenceBlocked(item));
+  const onArtifactStatus = (evidenceId: string, status: EvidenceArtifactStatus) =>
+    setArtifactStatus((current) => current[evidenceId] === status ? current : { ...current, [evidenceId]: status });
 
   useEffect(() => {
     setReviewedEvidence(evidenceDecision
@@ -489,21 +503,25 @@ export function SessionApprovalBanner({
                 <span className="evidence-review-index" aria-hidden="true">{index + 1}</span>
                 <div>
                   <strong>{item.evidenceId}</strong>
-                  <a
-                    className="btn ghost sm"
-                    href={item.uri}
-                    target="_blank"
-                    rel="noreferrer"
-                    aria-label={`View Evidence: ${item.evidenceId}`}
-                  >
-                    View Evidence
-                  </a>
+                  {!isRenderableEvidence(item) && (
+                    <a
+                      className="btn ghost sm"
+                      href={item.uri}
+                      target="_blank"
+                      rel="noreferrer"
+                      aria-label={`View External Evidence: ${item.evidenceId}`}
+                    >
+                      View External Evidence
+                    </a>
+                  )}
                 </div>
               </div>
+              {isRenderableEvidence(item) && <EvidenceArtifactView item={item} onStatusChange={onArtifactStatus} />}
               <label className="evidence-reviewed-control">
                 <Checkbox
                   label={`Mark ${item.evidenceId} as Reviewed`}
-                  checked={reviewedEvidence.includes(item.evidenceId)}
+                  checked={reviewedEvidence.includes(item.evidenceId) && !evidenceBlocked(item)}
+                  disabled={evidenceBlocked(item)}
                   onChange={(checked) => updateEvidence(item.evidenceId, checked)}
                 />
                 Reviewed
@@ -631,11 +649,17 @@ export function SessionApprovalBanner({
           <p>Open and inspect each evidence item, then mark it as reviewed.</p>
           {evidence.map((item) => (
             <div className="approval-evidence-item" key={item.evidenceId}>
-              <a href={item.uri} target="_blank" rel="noreferrer">Open Evidence: {item.evidenceId}</a>
+              {isRenderableEvidence(item)
+                ? <>
+                    <strong>{item.evidenceId}</strong>
+                    <EvidenceArtifactView item={item} onStatusChange={onArtifactStatus} />
+                  </>
+                : <a href={item.uri} target="_blank" rel="noreferrer">Open External Evidence: {item.evidenceId}</a>}
               <label>
                 <Checkbox
                   label={`Mark ${item.evidenceId} as Reviewed`}
-                  checked={reviewedEvidence.includes(item.evidenceId)}
+                  checked={reviewedEvidence.includes(item.evidenceId) && !evidenceBlocked(item)}
+                  disabled={evidenceBlocked(item)}
                   onChange={(checked) => updateEvidence(item.evidenceId, checked)}
                 />
                 I reviewed this evidence.
