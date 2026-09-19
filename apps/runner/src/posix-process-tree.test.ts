@@ -342,6 +342,47 @@ test("a root reaped mid-attempt hands the freeze to an identity-checked retry", 
   assert.equal(terminatePosixProcessBoundaries(owner).length, 0);
 });
 
+test("a freeze that cannot be proven lifted keeps the attempt incomplete", async (t) => {
+  t.mock.method(console, "error", () => {});
+  // The root is already a zombie, a same-group descendant is alive, and the descendant's marker
+  // is unreadable. Nothing in the snapshot is provably ours, so there is no identity to resume —
+  // which is not the same as nothing being stopped.
+  const survivor: PosixProcessIdentity = { pid: 101, ppid: 1, state: "T", startedAt: "survivor-start" };
+  const runtime = scriptedRuntime([
+    processTable(survivor), processTable(survivor), processTable(survivor), processTable(survivor),
+    processTable(survivor), processTable(survivor), processTable(), processTable(),
+  ]);
+  let markersReadable = false;
+  runtime.listMarkers = async (table) => (markersReadable
+    ? new Map([["owner-a", new Set(table.keys())]])
+    : new Map());
+  const owner = {};
+  const boundary = new PosixProcessBoundary(root.pid, owner, "owner-a", runtime);
+  const baseList = runtime.listProcesses.bind(runtime);
+  let reaped = false;
+  runtime.listProcesses = async () => {
+    if (!reaped) { reaped = true; boundary.markRootExited(); }
+    return baseList();
+  };
+
+  assert.equal(
+    await boundary.terminate(),
+    false,
+    "reporting success here would retire the only mechanism that could still resume the descendant",
+  );
+  assert.deepEqual(runtime.signals, [[-root.pid, "SIGSTOP"]]);
+
+  markersReadable = true;
+  const retry = terminatePosixProcessBoundaries(owner);
+  assert.equal(retry.length, 1, "the boundary stays registered for an identity-checked retry");
+  assert.equal(await retry[0], true);
+  assert.ok(
+    runtime.signals.some(([pid, signal]) => pid === survivor.pid && signal === "SIGCONT"),
+    "which resumes the stopped descendant once its identity is provable",
+  );
+  assert.equal(terminatePosixProcessBoundaries(owner).length, 0);
+});
+
 test("a marker-only boundary never group-signals the runner's own process group", async (t) => {
   t.mock.method(console, "error", () => {});
   const marked: PosixProcessIdentity = { pid: 101, ppid: 1, state: "S", startedAt: "marked-start" };

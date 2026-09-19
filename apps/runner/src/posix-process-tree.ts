@@ -470,6 +470,7 @@ export class PosixProcessBoundary {
     // the worktree after the caller was told it was killed. Stopping first makes the caller's
     // observation true immediately and closes the fork window the discovery passes exist to close.
     let outstandingFreeze = this.signalRootGroupUnverified("SIGSTOP");
+    let unrepairedFreeze = false;
 
     /** Lift the pre-enumeration freeze, at most once, and only while the bare PGID is still
      * provably this root's.
@@ -484,25 +485,31 @@ export class PosixProcessBoundary {
      * the resume follows the stop by microseconds in the overwhelmingly common case.
      *
      * When it does refuse, group members frozen here are resumed instead by identity, from the
-     * ownership snapshot, wherever the attempt holds one. An attempt that holds none failed
-     * outright and returns false, which keeps the boundary registered; the retry re-enumerates and
-     * signals survivors by proven identity. Leaving that narrow case to the retry is the
-     * deliberate trade: this file treats a recyclable numeric PGID as permanently unsafe after
-     * exit, and that rule outranks resuming promptly. */
+     * ownership snapshot. Finding none proven is not proof that none are stopped — a same-group
+     * descendant whose marker turned unreadable is simply invisible from here — so that case sets
+     * `unrepairedFreeze` and the attempt declines to report completion. This file treats a
+     * recyclable numeric PGID as permanently unsafe after exit, and that rule outranks both
+     * resuming promptly and finishing in one attempt. */
     const liftEarlyFreeze = (table?: PosixProcessTable): void => {
       if (!outstandingFreeze) return;
       outstandingFreeze = false;
       if (this.signalRootGroupUnverified("SIGCONT")) return;
-      if (table) for (const process of liveOwned(this.owned, table)) this.signal(process, table, "SIGCONT");
+      const members = table ? liveOwned(this.owned, table) : [];
+      for (const process of members) this.signal(process, table!, "SIGCONT");
+      if (!members.length) unrepairedFreeze = true;
     };
 
     try {
-      return await this.terminateFrozenTree(liftEarlyFreeze);
+      const complete = await this.terminateFrozenTree(liftEarlyFreeze);
+      // Lift before deciding completeness, not in the `finally`, which would run too late to
+      // affect the answer. A freeze this attempt cannot prove it lifted is unfinished business:
+      // reporting success here would deregister the boundary and retire the only mechanism that
+      // could still find and resume a descendant left stopped.
+      liftEarlyFreeze();
+      return complete && !unrepairedFreeze;
     } finally {
-      // Backstop only. Every phase above lifts its own freeze promptly, so by the time this runs
-      // the flag is normally already clear; it exists so that no path out of the attempt — an
-      // early return, or a throw from the enumeration or timer seams — can leave a group this
-      // call stopped stranded for good.
+      // Backstop for the throw path, where there is no answer left to adjust. Every phase above
+      // lifts its own freeze promptly, so by the time this runs the flag is normally clear.
       liftEarlyFreeze();
     }
   }
