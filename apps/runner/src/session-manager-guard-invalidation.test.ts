@@ -2,7 +2,7 @@
  * A managed-worktree guard whose protection list cannot be kept in step is not a guard.
  *
  * SessionManager mirrors the live worktree inventory into the guard's state file on every
- * `worktrees` patch. When that refresh fails, the session must NOT keep running in the permission
+ * `worktrees` patch, and on a legacy `worktreePath`/`worktreeBranch` patch that changes it. When that refresh fails, the session must NOT keep running in the permission
  * mode it was launched with while the guard trusts a stale list: the state is removed so every
  * later guard invocation fails closed, and when even that is impossible the provider is stopped
  * through the ordinary stop path (issue #1313, review round 1).
@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { RunnerToControlPlane } from "@wollipog/protocol";
 import type { ClaudeGuardRefreshOutcome } from "./hook-settings.js";
+import { UnguardedAgentTuiRegistry } from "./agent-tui-guard-notice.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 
@@ -46,15 +47,17 @@ function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
   };
 }
 
-function harness(outcome: ClaudeGuardRefreshOutcome) {
+function harness(outcome: ClaudeGuardRefreshOutcome, initial: Partial<SessionMeta> = {}) {
   const root = mkdtempSync(join(tmpdir(), "wollipog-sm-guard-"));
   const sent: RunnerToControlPlane[] = [];
   const store = new SessionStore(root);
-  store.create(meta());
+  store.create(meta(initial));
   const sm = new SessionManager((m) => sent.push(m), () => {}, store, "test-runner");
   const refreshes: string[] = [];
-  sm.setManagedWorktreeGuardRefresh((session) => {
+  const protected_: string[][] = [];
+  sm.setManagedWorktreeGuardRefresh((session, protections) => {
     refreshes.push(session.sessionId);
+    protected_.push(protections.map((protection) => protection.worktreePath));
     return outcome;
   });
   const disposals: string[] = [];
@@ -78,7 +81,7 @@ function harness(outcome: ClaudeGuardRefreshOutcome) {
     running: false,
     queue: [],
   });
-  return { sm, sent, store, refreshes, disposals, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  return { sm, sent, store, refreshes, protected: protected_, disposals, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
 const worktreePatch = (store: SessionStore) =>
@@ -155,4 +158,88 @@ test("an exception from the refresh is treated as unprotected, never as success"
   worktreePatch(store);
   assert.match(stderrNotices(sent).join("\n"), /disk exploded/u);
   assert.deepEqual(disposals, ["disposed"]);
+});
+
+// The protection list is built from the attributed worktrees, and those include the legacy
+// `worktreePath` field as a synthetic entry. A patch that moves only that field changes what the
+// guard must protect exactly as a `worktrees` patch does (#1474).
+
+test("a patch that sets only the legacy worktreePath refreshes the guard with the new path", (t) => {
+  const h = harness({ state: "refreshed" });
+  t.after(h.cleanup);
+  h.store.patchMeta("s_guard", { worktreePath: "/home/me/repo-worktrees/legacy-a" });
+  assert.deepEqual(h.protected, [["/home/me/repo-worktrees/legacy-a"]]);
+  h.store.patchMeta("s_guard", { worktreePath: "/home/me/repo-worktrees/legacy-b" });
+  assert.deepEqual(h.protected.at(-1), ["/home/me/repo-worktrees/legacy-b"]);
+  h.store.patchMeta("s_guard", { worktreePath: null });
+  assert.deepEqual(h.protected.at(-1), [], "clearing the legacy field retires its protection");
+  assert.equal(h.refreshes.length, 3);
+});
+
+test("a patch that changes only the legacy worktreeBranch refreshes the guard", (t) => {
+  const h = harness({ state: "refreshed" }, { worktreePath: "/home/me/repo-worktrees/legacy-a" });
+  t.after(h.cleanup);
+  h.store.patchMeta("s_guard", { worktreeBranch: "fix/renamed" });
+  assert.deepEqual(h.protected, [["/home/me/repo-worktrees/legacy-a"]]);
+});
+
+test("a failed refresh from a worktreePath-only patch is handled like any other", (t) => {
+  const h = harness({ state: "unprotected", reason: "the protected worktree list could not be updated" });
+  t.after(h.cleanup);
+  h.store.patchMeta("s_guard", { worktreePath: "/home/me/repo-worktrees/legacy-a" });
+  assert.match(stderrNotices(h.sent).join("\n"), /provider is being stopped/u);
+  assert.deepEqual(h.disposals, ["disposed"]);
+});
+
+test("a patch that leaves the attributed worktrees alone does not refresh the guard", (t) => {
+  const h = harness({ state: "refreshed" }, {
+    worktreePath: "/home/me/repo-worktrees/s_guard",
+    worktreeBranch: "agent/s_guard",
+    worktrees: [{
+      id: "wt_1",
+      path: "/home/me/repo-worktrees/s_guard",
+      branch: "agent/s_guard",
+      source: "created",
+      createdAt: 1000,
+    }] as SessionMeta["worktrees"],
+  });
+  t.after(h.cleanup);
+  h.store.patchMeta("s_guard", { title: "renamed" });
+  h.store.patchMeta("s_guard", { status: "running" });
+  // The fields are carried but name what is already attributed: nothing to protect changed.
+  h.store.patchMeta("s_guard", { worktreePath: "/home/me/repo-worktrees/s_guard" });
+  h.store.patchMeta("s_guard", { worktreePath: "/home/me/repo-worktrees/s_guard", worktreeBranch: "agent/s_guard" });
+  // The branch of a path already recorded in `worktrees` is that record's, not the legacy field's.
+  h.store.patchMeta("s_guard", { worktreeBranch: "fix/renamed" });
+  assert.deepEqual(h.refreshes, []);
+});
+
+test("a worktreeBranch patch with no legacy worktree does not refresh the guard", (t) => {
+  const h = harness({ state: "refreshed" });
+  t.after(h.cleanup);
+  h.store.patchMeta("s_guard", { worktreeBranch: "fix/renamed" });
+  assert.deepEqual(h.refreshes, []);
+});
+
+test("the unguarded-TUI notice is evaluated on a worktreePath-only patch", (t) => {
+  // Wired as the runner wires it: the notice rides the refresh callback (#1438), so whatever
+  // triggers the refresh is what evaluates the notice.
+  const root = mkdtempSync(join(tmpdir(), "wollipog-sm-guard-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const store = new SessionStore(root);
+  store.create(meta());
+  const sm = new SessionManager(() => {}, () => {}, store, "test-runner");
+  const unguarded = new UnguardedAgentTuiRegistry();
+  const notices: string[] = [];
+  sm.setManagedWorktreeGuardRefresh((session, protections) => {
+    const notice = unguarded.protectionsChanged(session.sessionId, protections.length);
+    if (notice) notices.push(notice);
+    return { state: "absent" };
+  });
+  assert.equal(unguarded.opened("shell_1", "s_guard", { active: false, reason: "untrusted hooks" }, 0), null);
+  store.patchMeta("s_guard", { title: "renamed" });
+  assert.deepEqual(notices, []);
+  store.patchMeta("s_guard", { worktreePath: "/home/me/repo-worktrees/legacy-a" });
+  assert.equal(notices.length, 1);
+  assert.match(notices[0]!, /started without Wollipog managed worktree protection \(untrusted hooks\)/u);
 });
