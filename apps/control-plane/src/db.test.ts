@@ -352,6 +352,26 @@ test("startup indexes prompt-image references from previously committed user mes
   }
 });
 
+test("a pre-v166 workflow decision table gains the child-facing message column on open", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-workflow-child-message-migration-"));
+  const path = join(root, "control-plane.db");
+  let db: ControlPlaneDb | undefined;
+  try {
+    ControlPlaneDb.open(path).close();
+    const legacy = new DatabaseSync(path);
+    legacy.exec("ALTER TABLE workflow_decisions DROP COLUMN child_message");
+    legacy.close();
+
+    db = ControlPlaneDb.open(path);
+    const columns = (db.raw().prepare("SELECT name FROM pragma_table_info('workflow_decisions')").all() as unknown as
+      Array<{ name: string }>).map((column) => column.name);
+    assert.ok(columns.includes("child_message"));
+  } finally {
+    db?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("legacy global event-artifact identity migrates to reusable event-scoped references", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-event-artifact-key-migration-"));
   const path = join(root, "control-plane.db");

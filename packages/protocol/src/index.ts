@@ -485,7 +485,15 @@
 //      compute it (the change set exceeds the read's hashing budget, or HEAD is unborn); an
 //      absent field means a pre-v165 runner, and clients fall back to the status entries exactly
 //      as before. Additive + optional; no new runner behaviour is required of it.
-export const PROTOCOL_VERSION = 165;
+// 166: an Orchestrator resolving a descendant's typed workflow decision may attach a bounded
+//      child-facing message. Unlike the audit rationale it is retained on the decision, shown in
+//      the child's own decision view, and delivered to the child as the prompt that resumes it;
+//      the governance audit records only its digest. The gate runs the other way from most
+//      entries: the runner's management tool refuses to send a message to a pre-v166 control
+//      plane, which would drop the unknown field and let the resolver believe the child was told.
+//      Nothing new is required of either runner — the delivery is an ordinary prompt and the view
+//      field is passed through verbatim.
+export const PROTOCOL_VERSION = 166;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -671,6 +679,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   typedWorkflowDecisionDelegation: 139,
   workflowDecisionActionAdmission: 151,
   workflowDecisionActionReconciliation: 153,
+  /** Control plane retains and delivers a resolver's child-facing workflow-decision message. */
+  workflowDecisionChildMessage: 166,
   orchestratorCampaignManagement: 140,
   campaignContinuations: 149,
   orchestratorExecutionPolicy: 144,
@@ -3130,7 +3140,12 @@ export interface WorkflowDecisionActionAdmission extends WorkflowDecisionAction 
   runnerHistoryEpoch?: number;
 }
 
-/** One exact workflow gate. Raw rationale is never retained; only its digest reaches audit. */
+/** Longest child-facing message a resolver may attach to a typed workflow decision. */
+export const WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS = 2000;
+
+/** One exact workflow gate. Raw rationale is never retained; only its digest reaches audit. The
+ * child-facing message is the exception by design: its audience is the child, so it is retained
+ * on the decision and delivered, while audit still records only its digest. */
 export interface WorkflowDecisionView {
   requestId: string;
   occurrenceId: string;
@@ -3149,6 +3164,8 @@ export interface WorkflowDecisionView {
   resolvedAt?: number;
   consumedAt?: number;
   actionAdmission?: WorkflowDecisionActionAdmission;
+  /** v166: the resolver's message to the child, present only when one was attached. */
+  childMessage?: string;
 }
 
 export interface CreateWorkflowDecisionRequest {
@@ -3164,7 +3181,11 @@ export interface ResolveWorkflowDecisionRequest {
   selectedOptionId?: string;
   /** Required to approve UI evidence and must exactly cover the requested evidence ids. */
   evidenceReviewed?: string[];
+  /** Audit-only: never retained, never shown to the child; only its digest reaches audit. */
   rationale?: string;
+  /** v166: retained on the decision for the child to read and delivered as the prompt that resumes
+   * it. At most WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS; audit records only its digest. */
+  childMessage?: string;
 }
 
 export interface ConsumeWorkflowDecisionRequest {
@@ -3424,6 +3445,8 @@ export interface GovernanceAuditEntry {
     resourceDigest: string;
     evidenceReferences?: string[];
     rationaleDigest?: string;
+    /** v166: digest of the child-facing message; its text lives only on the decision. */
+    childMessageDigest?: string;
   };
   timestamp: number;
 }

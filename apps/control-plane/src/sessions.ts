@@ -29,6 +29,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   HUMAN_ONLY_PARENT_CONTROL_POLICY,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   WORKFLOW_DECISION_CATEGORIES,
+  WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
   type AgentContext,
   type AgentDriverKind,
   type AcpSessionContextConfig,
@@ -416,6 +417,21 @@ function fail<T>(error: string, status = 400): ServiceResult<T> {
 function boundedDecisionString(value: unknown, max: number): value is string {
   return typeof value === "string" && value.trim().length > 0 && value.length <= max &&
     !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value);
+}
+
+/** The prompt that resumes a child after its decision resolves with a child-facing message. The
+ * decision record stays authoritative: a child polling inside its turn may already have read it. */
+function workflowDecisionChildMessagePrompt(decision: WorkflowDecisionView): string {
+  const resolver = decision.authority === "orchestrator" ? "Your Orchestrator" : "A human reviewer";
+  return [
+    `[Wollipog Workflow Decision — ${decision.occurrenceId}]`,
+    `${resolver} ${decision.status} your ${decision.category} decision ${decision.occurrenceId} ` +
+      `(resource ${decision.resourceKey}) and left this message for you:`,
+    decision.childMessage,
+    "The decision record is authoritative: read it with get_workflow_decision before acting. " +
+      "If you have already acted on this outcome, continue from where you are.",
+    "[End Wollipog Workflow Decision]",
+  ].join("\n");
 }
 
 export function validateParentControlDecisions(value: unknown): value is ParentControlDecisionPolicy {
@@ -6205,10 +6221,22 @@ export class SessionsService {
       checked.data.selectedOptionId,
       checked.data.evidenceReviewed,
       auditDigest(checked.data.rationale),
+      checked.data.childMessage,
     );
     if (!resolved) return fail("workflow decision was resolved concurrently", 409);
     const child = this.db.getSession(childSessionId);
-    if (child) this.settleWorkflowDecisionPause(childSessionId, occurrenceId, now);
+    // Ordinary prompt delivery wakes an idle child and queues behind a turn still in progress.
+    // A refusal (runner offline, a guardrail pause) leaves the message on the decision record.
+    const deliverChildMessage = resolved.childMessage
+      ? () => {
+          const delivered = this.prompt(childSessionId, workflowDecisionChildMessagePrompt(resolved));
+          if (!delivered.ok) {
+            this.log.warn(`workflow decision ${occurrenceId} message not delivered to ${childSessionId}: ${delivered.error}`);
+          }
+          return delivered.ok;
+        }
+      : undefined;
+    if (child) this.settleWorkflowDecisionPause(childSessionId, occurrenceId, now, deliverChildMessage);
     this.recordWorkflowDecisionAudit(
       resolved,
       checked.data.outcome === "approve" ? "allowed" : "denied",
@@ -6730,6 +6758,13 @@ export class SessionsService {
         (!boundedDecisionString(resolution.rationale, 4000))) {
       return fail("workflow decision rationale is invalid", 400);
     }
+    if (resolution.childMessage !== undefined &&
+        !boundedDecisionString(resolution.childMessage, WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS)) {
+      return fail(
+        `workflow decision childMessage must be non-empty text of at most ${WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS} characters`,
+        400,
+      );
+    }
     const snapshot = decision.resourceSnapshot;
     if (snapshot.category === "implementation_question") {
       if (resolution.outcome === "approve" &&
@@ -6768,14 +6803,35 @@ export class SessionsService {
     this.publishCampaignAttentionTransition(controllerBefore);
   }
 
-  /** Settle a server-owned workflow card against the provider state it temporarily covered. */
-  private settleWorkflowDecisionPause(sessionId: string, occurrenceId: string, now: number): void {
+  /** Settle a server-owned workflow card against the provider state it temporarily covered.
+   * `resume` delivers a turn that continues the child; it returns whether the turn was admitted. */
+  private settleWorkflowDecisionPause(
+    sessionId: string,
+    occurrenceId: string,
+    now: number,
+    resume?: () => boolean,
+  ): void {
     const current = this.db.getSession(sessionId);
     if (!current) return;
     const remaining = removePendingRequest(current.pendingApproval, occurrenceId);
     const restoreIdle = !remaining && current.status === "input_required" &&
       this.db.policyResumeStatus(sessionId) === "idle";
     this.db.setPendingApproval(sessionId, remaining);
+    if (restoreIdle && resume && !this.pendingPolicyAsk(this.db.getSession(sessionId)!) &&
+        this.db.listOpenPolicyHookApprovals(sessionId).length === 0) {
+      // An admitted resuming turn continues the work the card interrupted, so the child leaves the
+      // pause straight into it. Passing through idle would publish a session.idle the turn
+      // contradicts, and replaying that edge would settle pods, workflow attempts, campaign
+      // readiness, and push-to-wake early; the resumed turn's own idle settles them instead.
+      // The running write clears swallowed-idle markers, so an open policy-hook approval, whose
+      // marker a refused prompt could not restore, keeps the ordinary idle restoration below.
+      this.db.updateSessionStatus(sessionId, "running", now);
+      if (resume()) return;
+      // Refused: the child really is idle, so restore it exactly as a card without a resume would.
+      this.db.updateSessionStatus(sessionId, "idle", now);
+      this.replayRestoredPolicyIdle(current, sessionId, now);
+      return;
+    }
     if (!remaining && current.status === "input_required") {
       this.db.updateSessionStatus(
         sessionId,
@@ -6784,12 +6840,15 @@ export class SessionsService {
       );
     }
     if (restoreIdle) {
+      // No resume, a guardrail that would gate it (and parks the child here), or an open hook
+      // approval: any message stays on the decision record.
       this.replayRestoredPolicyIdle(current, sessionId, now);
     } else {
       // Typed decisions do not suspend the provider turn. Usage can cross a soft checkpoint while
       // the card is present, so the last settlement must immediately surface any deferred gate.
       if (!remaining) this.gateOnPolicy(sessionId, now);
       this.clearSettledPolicyResumeStatus(sessionId);
+      resume?.();
     }
   }
 
@@ -6839,6 +6898,8 @@ export class SessionsService {
     const evidenceReferences = decision.resourceSnapshot.category === "ui_evidence_approval"
       ? decision.resourceSnapshot.evidence.map((item) => item.evidenceId)
       : undefined;
+    // Only the resolving record carries the message digest; later consume/revoke records do not.
+    const resolvingRecord = outcome === "allowed" || outcome === "denied";
     this.db.appendGovernanceAudit({
       requestId: decision.occurrenceId,
       approvalKind: "workflow_decision",
@@ -6857,6 +6918,9 @@ export class SessionsService {
         resourceDigest: decision.resourceDigest,
         ...(evidenceReferences?.length ? { evidenceReferences } : {}),
         ...(rationale ? { rationaleDigest: auditDigest(rationale)! } : {}),
+        ...(resolvingRecord && decision.childMessage
+          ? { childMessageDigest: auditDigest(decision.childMessage)! }
+          : {}),
       },
       timestamp: now,
     });
@@ -9527,25 +9591,33 @@ export class SessionsService {
     });
   }
 
-  private gateOnPolicy(sessionId: string, now: number, fanOut = true, softOnly = false): boolean {
-    const s = this.db.getSession(sessionId);
-    if (!s) return false;
+  /** The guardrail ask gateOnPolicy would park on right now, without parking. */
+  private pendingPolicyAsk(s: SessionView, softOnly = false) {
     const occupied = pendingRequests(s.pendingApproval);
     // A typed workflow decision is an authorization record, not a provider turn barrier. Soft
     // guardrails must be able to park alongside it while other provider/user asks retain priority.
-    if (occupied.some((request) => request.kind !== "workflow_decision")) return false;
+    if (occupied.some((request) => request.kind !== "workflow_decision")) return null;
     const rules = rulesFromSession(this.guardrailFields(s));
-    if (rules.length === 0) return false;
+    if (rules.length === 0) return null;
     // sessionView already computed the count when the guardrail is armed — don't re-query.
     const toolCallCount = s.toolCallCount ?? 0;
     // The unpriced check costs a ledger read, so it runs only when a rule can act on it.
-    const unpriced = rules.some((rule) => rule.kind === "cost_unpriced") && this.db.sessionUsageUnpriced(sessionId);
+    const unpriced = rules.some((rule) => rule.kind === "cost_unpriced") && this.db.sessionUsageUnpriced(s.id);
     const ask = firstAsk(evaluatePolicies({ status: s.status, costUsd: s.costUsd, toolCallCount, unpriced }, rules));
-    if (!ask) return false;
+    if (!ask) return null;
     // A runner-enforced threshold armed on a live session is the runner's to trip: it receives
     // the threshold with the config write, cancels at the crossing, and settles into this gate.
     // Parking on it here would show a hard card the runner knows nothing about.
-    if (softOnly && runnerHoldFor(ask.rule.kind)) return false;
+    if (softOnly && runnerHoldFor(ask.rule.kind)) return null;
+    return ask;
+  }
+
+  private gateOnPolicy(sessionId: string, now: number, fanOut = true, softOnly = false): boolean {
+    const s = this.db.getSession(sessionId);
+    if (!s) return false;
+    const ask = this.pendingPolicyAsk(s, softOnly);
+    if (!ask) return false;
+    const occupied = pendingRequests(s.pendingApproval);
     const approval = approvalForDecision(ask, sessionId, now);
     if (s.status === "idle") this.db.notePolicyResumeStatus(sessionId, "idle");
     // A control-plane-only card must also stop the runner draining queued prompts behind the

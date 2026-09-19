@@ -287,6 +287,16 @@ rollout proof is accepted only when its thread, turn, and command item exactly m
 successful item; a failed, duplicate, partial, fenced, or natively mismatched live item still blocks
 the fallback.
 
+Protocol v166 lets the resolver tell the child why. `resolve_descendant_workflow_decision` accepts
+an optional `childMessage` of at most 2,000 characters, separate from the audit-only `rationale`.
+The rationale is still never retained. The message is: its audience is the child, so it is stored
+on the resolved occurrence, returned in the child's own `get_workflow_decision` view, and delivered
+to the child as an ordinary prompt that wakes an idle child or queues behind a turn still in
+progress. The governance audit records only the message's digest. The runner's tool refuses a
+message when the connected control plane predates v166, because an older control plane would drop
+the field and resolve the decision anyway. A child whose delivery was refused, for example while its
+runner is offline, still finds the message on the decision record.
+
 The control plane owns this lifecycle. A generic question answer or provider permission response
 cannot satisfy a typed workflow decision. Authentication, identity, governance-policy changes,
 secret access, and persistent permission grants are not typed categories and remain human-only.
