@@ -4122,15 +4122,20 @@ export class SessionsService {
     // governance_blocked, and a provider_rejected relayed from the driver all refuse ahead of the
     // write — so the ordinary queue is still owed the message.
     //
-    // `policy_blocked` is the exception, and the reason this is not a simple state check. The
-    // runner sets `providerStarted` immediately before awaiting the provider write, and a Stop,
-    // Restart, or sign-out landing inside that await settles the attempt as rejected/policy_blocked
-    // even though the text may already be in the provider conversation. Re-queueing that one would
-    // deliver the same instruction twice, so it is handed back to the sender instead. The same
-    // reason is also produced just before the write, which makes this conservative rather than
-    // exact — the safe direction, and only while the session is being torn down anyway.
+    // `policy_blocked` is the one reason the runner uses on both sides of that write, so it needs
+    // a second signal. It is produced before the write when the turn is owned by an automation or
+    // a provider command, and after it when a Stop, Restart, or sign-out lands inside the awaited
+    // provider call. Those differ in the only place the control plane can see: the first leaves
+    // the session running, the second is a lifecycle change that moves it off `running`.
+    //
+    // Treating them alike is wrong in both directions — always re-queueing can deliver a Stop-raced
+    // message twice, and always refusing would strand every message sent to a child that happens
+    // to be inside a provider command, which is an ordinary sustained state, not a teardown.
     if (steered.data.state === "rejected") {
       if (steered.data.reason !== "policy_blocked") return null;
+      // Re-read rather than trusting the pre-steer snapshot: the whole question is what the
+      // lifecycle did while the steer was in flight.
+      if (this.db.getSession(sessionId)?.status === "running") return null;
       return fail(
         "conversation steering was discarded by a session lifecycle change — the message may " +
           "already have reached the session, so check its steering attempts before sending it again",

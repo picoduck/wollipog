@@ -18431,15 +18431,19 @@ test("a lifecycle-discarded steer is not re-queued, because the provider may alr
   // The runner sets providerStarted immediately before awaiting the provider write, so a Stop or
   // Restart landing inside that await settles the attempt as rejected/policy_blocked even though
   // the text may already be in the provider conversation.
-  hub.requestHandler = (message) => ({
-    type: "steer_session_result",
-    requestId: message.requestId,
-    submissionId: message.submissionId,
-    sessionId: id,
-    turnId: "turn-live",
-    disposition: "rejected",
-    reason: "policy_blocked",
-  });
+  hub.requestHandler = (message) => {
+    // The Stop lands while the provider call is in flight, exactly as the runner sees it.
+    db.updateSessionStatus(id, "stopped", Date.now());
+    return {
+      type: "steer_session_result",
+      requestId: message.requestId,
+      submissionId: message.submissionId,
+      sessionId: id,
+      turnId: "turn-live",
+      disposition: "rejected",
+      reason: "policy_blocked",
+    };
+  };
 
   const result = await svc.promptOrSteer(id, "do not deliver me twice either");
   assert.equal(result.ok, false, "an ambiguous lifecycle rejection must not report success");
@@ -18472,4 +18476,30 @@ test("a steer the provider refused before writing still falls back to the queue"
   assert.equal(result.data?.promptDelivery?.lane, "queued");
   assert.equal(hub.sentOfType("steer_session").length, 1);
   assert.equal(hub.sentOfType("prompt_session").length, 1);
+});
+
+test("a policy_blocked steer on a still-running session falls back to the queue", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.activeTurnIds.set(id, "turn-live");
+  hub.sentToRunner.length = 0;
+  // steeringEligibility refuses with policy_blocked, before any provider write, whenever the turn
+  // is owned by an automation or a provider command. The session stays running, and the message is
+  // still owed to the queue: refusing it would strand every message sent to a child that happens
+  // to be inside a provider command.
+  hub.requestHandler = (message) => ({
+    type: "steer_session_result",
+    requestId: message.requestId,
+    submissionId: message.submissionId,
+    sessionId: id,
+    turnId: "turn-live",
+    disposition: "rejected",
+    reason: "policy_blocked",
+  });
+
+  const result = await svc.promptOrSteer(id, "the child is running a provider command");
+  assert.equal(result.ok, true);
+  assert.equal(result.data?.promptDelivery?.lane, "queued");
+  assert.equal(hub.sentOfType("prompt_session").length, 1, "the message is still delivered");
 });
