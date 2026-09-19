@@ -24,6 +24,7 @@ import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import type { Driver, DriverCallbacks, DriverOptions, StopReason } from "./driver.js";
 import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
 import { codexOrchestratorMcpArgs } from "../orchestrator-preset.js";
+import { decideCodexPermissionProfile } from "../codex-permission-profile.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any;
@@ -32,6 +33,8 @@ interface CodexDriverDeps {
   spawn: typeof spawnAgent;
   kill: typeof killTree;
   orchestratorMcpArgs: typeof codexOrchestratorMcpArgs;
+  /** Seam for the #1336 permission-profile decision, so tests never spawn a real `codex`. */
+  permissionProfile: typeof decideCodexPermissionProfile;
 }
 
 const SANDBOX_MODES = new Set(["read-only", "workspace-write", "danger-full-access"]);
@@ -120,6 +123,7 @@ export class CodexDriver implements Driver {
       spawn: deps.spawn ?? spawnAgent,
       kill: deps.kill ?? killTree,
       orchestratorMcpArgs: deps.orchestratorMcpArgs ?? codexOrchestratorMcpArgs,
+      permissionProfile: deps.permissionProfile ?? decideCodexPermissionProfile,
     };
     // Phase 2 resume: a persisted threadId makes the first turn use `codex resume <id>`.
     if (opts.resumeId) this.threadId = opts.resumeId;
@@ -192,15 +196,30 @@ export class CodexDriver implements Driver {
 
       // The prompt is passed as "-" and written to stdin so a multi-line prompt (or
       // one containing %VAR%, quotes, etc.) can't be mangled by the Windows shell.
-      const args = [...this.opts.args, ...isolationArgs, "exec"];
+      // #1336: where the mode IS a built-in permission profile, express it as that profile plus
+      // one deny entry for the runner's hook state directory and send NO `-s`. Codex silently
+      // ignores a profile whenever a legacy sandbox mode is also present, so the two never travel
+      // together. A mode with no exact equivalent keeps `-s` and is documented as unenforced.
+      const profile = this.deps.permissionProfile({
+        command: this.opts.command,
+        args: [...this.opts.args, ...isolationArgs],
+        // The real mode: `codexPermissionProfileBase` is what excludes `orchestrator` and
+        // `danger-full-access`. Passing a placeholder here would read as "the default mode".
+        permissionMode: cfg.permissionMode,
+        hookStateDir: this.opts.hookStateDir,
+        cwd: this.cwd,
+      });
+      const baseArgs = profile.active ? profile.args : [...this.opts.args, ...isolationArgs];
+      const sandboxArgs = profile.active ? [] : ["-s", sandbox];
+      const args = [...baseArgs, "exec"];
       if (this.threadId) {
         // Current Codex rebuilds resume policy from the invocation config and process cwd. Pin
         // Orchestrator explicitly as well so an upgraded thread can never recover its former
         // project cwd if provider resume semantics drift back to inheriting persisted state.
-        if (cfg.permissionMode === "orchestrator") args.push("-C", this.cwd, "-s", sandbox);
+        if (cfg.permissionMode === "orchestrator") args.push("-C", this.cwd, ...sandboxArgs);
         args.push("resume", "--json", "--skip-git-repo-check", ...modelEffort, ...imageArgs, this.threadId, "-");
       } else {
-        args.push("--json", "--skip-git-repo-check", "-C", this.cwd, "-s", sandbox, ...modelEffort, ...imageArgs, "-");
+        args.push("--json", "--skip-git-repo-check", "-C", this.cwd, ...sandboxArgs, ...modelEffort, ...imageArgs, "-");
       }
 
       let child: AgentProcess;

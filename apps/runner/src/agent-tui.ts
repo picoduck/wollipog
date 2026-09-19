@@ -14,6 +14,8 @@ import {
 } from "./orchestrator-preset.js";
 import { windowsCmdInvocationSpec } from "./windows-cmd.js";
 
+import { decideCodexPermissionProfile } from "./codex-permission-profile.js";
+
 const TUI_DRIVERS = new Set(["claude-code", "codex", "codex-app-server"]);
 
 /** Durable metadata intentionally omits credentials. Rebuild runner-owned launch state for
@@ -47,10 +49,15 @@ export async function prepareAgentTuiLaunch(
     probe?: typeof codexOrchestratorMcpArgs;
     platform?: NodeJS.Platform;
     executionIsolationMode?: OrchestratorIsolationMode;
+    /** The runner's hook state directory, denied to a Codex TUI at the OS level (#1336). */
+    hookStateDir?: string;
+    permissionProfile?: typeof decideCodexPermissionProfile;
   },
 ): Promise<ShellProcessLaunch | null> {
   if (!isOrchestratorLaunch(meta)) {
-    return agentTuiLaunch(await withManagedWorktreeGuard(meta, dependencies));
+    return agentTuiLaunch(
+      withCodexPermissionProfile(await withManagedWorktreeGuard(meta, dependencies), dependencies),
+    );
   }
   if (!usesOrchestratorPresetPermissions(meta.config)) {
     // No runner control channel exists inside a TUI, so the additive role's routine-operation
@@ -94,6 +101,40 @@ export async function prepareAgentTuiLaunch(
     { platform, comspec: process.env.ComSpec },
   );
   return launch ? { ...launch, cwd } : null;
+}
+
+/** Codex TUI launches that can carry the #1336 permission-profile deny. */
+const CODEX_TUI_DRIVERS: ReadonlySet<string> = new Set(["codex", "codex-app-server"]);
+
+/**
+ * Deny the runner's hook state directory to a Codex TUI at the OS level (#1336).
+ *
+ * A TUI passes no `-s` of its own, so it already runs under Codex's implicit default — which IS
+ * the `:workspace` built-in. Re-expressing the session's mode as the equivalent profile therefore
+ * changes nothing the person at the terminal can observe, except that the hook state directory
+ * becomes unreachable.
+ *
+ * Unlike the guard, a profile that cannot be established is NOT a refusal: it leaves the launch
+ * exactly as it is today. The guard is a worktree-lifecycle veto with no other enforcement point,
+ * while this is defence in depth over runner-owned state that the command-text veto still covers.
+ */
+function withCodexPermissionProfile(
+  meta: SessionMeta,
+  dependencies: {
+    hookStateDir?: string;
+    permissionProfile?: typeof decideCodexPermissionProfile;
+  },
+): SessionMeta {
+  if (!CODEX_TUI_DRIVERS.has(meta.driver) || !meta.command) return meta;
+  const decide = dependencies.permissionProfile ?? decideCodexPermissionProfile;
+  const profile = decide({
+    command: meta.command,
+    args: meta.args,
+    permissionMode: meta.config.permissionMode,
+    hookStateDir: dependencies.hookStateDir,
+    cwd: meta.worktreePath ?? meta.repoPath,
+  });
+  return profile.active ? { ...meta, args: profile.args } : meta;
 }
 
 const GUARDED_TUI_DRIVERS: ReadonlySet<string> = new Set(["claude-code", "codex", "codex-app-server"]);

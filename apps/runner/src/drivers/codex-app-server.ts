@@ -46,6 +46,11 @@ import { providerRejectionShape } from "./provider-rejection-shape.js";
 import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
 import { stagePromptImages, type StagedPromptImages } from "./prompt-images.js";
 import { codexOrchestratorMcpArgs } from "../orchestrator-preset.js";
+import {
+  codexPermissionProfileBase,
+  decideCodexPermissionProfile,
+  type CodexPermissionProfileBase,
+} from "../codex-permission-profile.js";
 import { readCodexRolloutCompletedCommand } from "./codex-rollout-proof.js";
 import { commandTargetsManagedWorktree } from "../managed-worktree-protection.js";
 
@@ -222,6 +227,13 @@ export function buildCodexTurnParams(
   input: Json[],
   capabilities?: AgentCapabilities,
   protectManagedWorktrees = false,
+  /**
+   * The permission-profile base the RUNNING app-server was launched with, or null when it carries
+   * none (#1336). Codex silently ignores a profile whenever a legacy sandbox policy is also sent,
+   * and `sandboxPolicy` persists for the thread's remaining turns, so the policy is omitted
+   * exactly when this turn's mode is the profile already in force — never mixed with it.
+   */
+  activeProfileBase: CodexPermissionProfileBase | null = null,
 ): Json {
   const configuredMode = cfg.permissionMode || AUTO_REVIEW_MODE;
   // Full access would let the provider unlink the worktree root or its shared Git registration
@@ -252,11 +264,16 @@ export function buildCodexTurnParams(
       ? "on-request"
       : null;
   const sandboxType = autoReview || ASK_MODES.has(mode) ? "workspaceWrite" : SANDBOX_TYPE[mode] ?? "workspaceWrite";
+  // The profile carries this mode already, and its legacy projection is exactly the policy below,
+  // so omitting the policy changes nothing except that the hook state directory stays denied. A
+  // mode the running profile does NOT express keeps its policy and is documented as unenforced.
+  const carriedByProfile = activeProfileBase !== null &&
+    codexPermissionProfileBase(mode) === activeProfileBase;
   const params: Json = {
     threadId,
     input,
     approvalPolicy: autoReview ? "on-request" : askMode ?? "never",
-    sandboxPolicy: { type: sandboxType },
+    ...(carriedByProfile ? {} : { sandboxPolicy: { type: sandboxType } }),
     cwd,
   };
   // Guardian owns ordinary automatic review, but it cannot know which host paths belong to the
@@ -412,6 +429,13 @@ export class CodexAppServerDriver implements Driver {
   private readonly kill: typeof killTree;
   private readonly readRolloutProof: typeof readCodexRolloutCompletedCommand;
   private readonly descendantOwner = {};
+  private readonly deps: { permissionProfile: typeof decideCodexPermissionProfile };
+  /**
+   * The permission-profile base the running app-server carries, or null when it carries none.
+   * Bound at spawn, because a profile is selected by config and `turn/start` has no per-turn
+   * selection (#1336).
+   */
+  private permissionProfileBase: CodexPermissionProfileBase | null = null;
 
   constructor(
     private readonly opts: DriverOptions,
@@ -421,6 +445,7 @@ export class CodexAppServerDriver implements Driver {
       spawn: typeof spawnAgent;
       kill: typeof killTree;
       readRolloutProof: typeof readCodexRolloutCompletedCommand;
+      permissionProfile: typeof decideCodexPermissionProfile;
     }> = {},
   ) {
     this.cwd = opts.cwd;
@@ -428,6 +453,7 @@ export class CodexAppServerDriver implements Driver {
     this.spawn = deps.spawn ?? spawnAgent;
     this.kill = deps.kill ?? killTree;
     this.readRolloutProof = deps.readRolloutProof ?? readCodexRolloutCompletedCommand;
+    this.deps = { permissionProfile: deps.permissionProfile ?? decideCodexPermissionProfile };
   }
 
   get pid(): number | undefined {
@@ -605,9 +631,23 @@ export class CodexAppServerDriver implements Driver {
     const isolationArgs = presetPermissions || this.opts.orchestrator?.integrationIsolation === true
       ? await codexOrchestratorMcpArgs(this.opts, this.cwd, {}, !presetPermissions) : [];
     if (this.disposed) throw new Error("session disposed before provider launch");
+    // #1336: bind the permission profile to the mode this app-server starts under. A profile is
+    // selected by config, and `turn/start` carries no per-turn selection, so the base is fixed for
+    // the life of the process; a turn whose mode it does not express keeps its legacy policy
+    // instead (see `buildCodexTurnParams`). The Orchestrator preset is excluded deliberately: its
+    // policy has non-default writable roots that no projection reads back.
+    const profile = this.deps.permissionProfile({
+      command: this.opts.command,
+      args: [...this.opts.args, ...isolationArgs],
+      permissionMode: this.config.permissionMode,
+      hookStateDir: this.opts.hookStateDir,
+      cwd: this.cwd,
+    });
+    this.permissionProfileBase = profile.active ? profile.base : null;
+    const launchArgs = profile.active ? profile.args : [...this.opts.args, ...isolationArgs];
     const child = this.spawn({
       command: this.opts.command,
-      args: codexAppServerArgs([...this.opts.args, ...isolationArgs], enableDefaultModeQuestions),
+      args: codexAppServerArgs(launchArgs, enableDefaultModeQuestions),
       cwd: this.cwd,
       env: this.opts.env,
       context: this.opts.context,
@@ -837,6 +877,7 @@ export class CodexAppServerDriver implements Driver {
         input,
         this.opts.capabilities,
         (this.opts.managedWorktreeProtections?.().length ?? 0) > 0,
+        this.permissionProfileBase,
       );
 
       this.peer!.request("turn/start", params).then((response: Json) => {

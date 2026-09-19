@@ -194,6 +194,12 @@ export interface DriverOptions {
   descendantMarker?: string;
   /** Live runner-owned roots whose retirement must stay behind the managed discard lifecycle. */
   managedWorktreeProtections?: () => ManagedWorktreeProtection[];
+  /**
+   * The runner's hook state directory. A Codex launch denies it at the OS level through a
+   * permission profile (#1336), which is the only control in `provider` mode, where the runner
+   * sandboxes nothing. Absent on runners that provision no hook state.
+   */
+  hookStateDir?: string;
 }
 
 export interface Driver {
