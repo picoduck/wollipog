@@ -19,6 +19,7 @@ test("a config without an exclude list has no debt", () => {
 });
 
 test("a malformed exclude list is refused rather than read as empty", () => {
+  assert.throws(() => parseTestTypecheckDebt('{ "exclude": null }'), TypeError);
   assert.throws(() => parseTestTypecheckDebt('{ "exclude": "src/a.test.ts" }'), TypeError);
   assert.throws(() => parseTestTypecheckDebt('{ "exclude": ["src/a.test.ts", 3] }'), TypeError);
 });

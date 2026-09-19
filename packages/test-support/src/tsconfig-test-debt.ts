@@ -16,7 +16,8 @@ const DEBT_ENTRY = /^src\/[^\s]*\.test\.tsx?$/;
  * list, which plain JSON rejects, so whole-line comments are stripped before parsing. */
 export function parseTestTypecheckDebt(configText: string): string[] {
   const config = JSON.parse(configText.replace(/^\s*\/\/.*$/gm, "")) as { exclude?: unknown };
-  const exclude = config.exclude ?? [];
+  // Only an absent list means no debt; `?? []` would also read an explicit `null` as empty.
+  const exclude = config.exclude === undefined ? [] : config.exclude;
   if (!Array.isArray(exclude) || !exclude.every((entry) => typeof entry === "string")) {
     throw new TypeError("tsconfig.test.json `exclude` must be an array of strings");
   }
