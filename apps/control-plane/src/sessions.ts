@@ -6817,6 +6817,18 @@ export class SessionsService {
     const restoreIdle = !remaining && current.status === "input_required" &&
       this.db.policyResumeStatus(sessionId) === "idle";
     this.db.setPendingApproval(sessionId, remaining);
+    if (restoreIdle && resume && !this.pendingPolicyAsk(this.db.getSession(sessionId)!)) {
+      // An admitted resuming turn continues the work the card interrupted, so the child leaves the
+      // pause straight into it. Passing through idle would publish a session.idle the turn
+      // contradicts, and replaying that edge would settle pods, workflow attempts, campaign
+      // readiness, and push-to-wake early; the resumed turn's own idle settles them instead.
+      this.db.updateSessionStatus(sessionId, "running", now);
+      if (resume()) return;
+      // Refused: the child really is idle, so restore it exactly as a card without a resume would.
+      this.db.updateSessionStatus(sessionId, "idle", now);
+      this.replayRestoredPolicyIdle(current, sessionId, now);
+      return;
+    }
     if (!remaining && current.status === "input_required") {
       this.db.updateSessionStatus(
         sessionId,
@@ -6825,14 +6837,9 @@ export class SessionsService {
       );
     }
     if (restoreIdle) {
-      // An admitted resuming turn continues the work the card interrupted, so the swallowed idle
-      // edge is not replayed: pods, workflow attempts, campaign readiness, and push-to-wake settle
-      // on that turn's own idle instead of seeing a stale idle followed by a new turn.
-      if (resume && !this.gateOnPolicy(sessionId, now) && resume()) {
-        this.clearSettledPolicyResumeStatus(sessionId);
-      } else {
-        this.replayRestoredPolicyIdle(current, sessionId, now);
-      }
+      // No resume, or a guardrail would gate it: that gate parks the child here, and any message
+      // stays on the decision record.
+      this.replayRestoredPolicyIdle(current, sessionId, now);
     } else {
       // Typed decisions do not suspend the provider turn. Usage can cross a soft checkpoint while
       // the card is present, so the last settlement must immediately surface any deferred gate.
@@ -9581,25 +9588,33 @@ export class SessionsService {
     });
   }
 
-  private gateOnPolicy(sessionId: string, now: number, fanOut = true, softOnly = false): boolean {
-    const s = this.db.getSession(sessionId);
-    if (!s) return false;
+  /** The guardrail ask gateOnPolicy would park on right now, without parking. */
+  private pendingPolicyAsk(s: SessionView, softOnly = false) {
     const occupied = pendingRequests(s.pendingApproval);
     // A typed workflow decision is an authorization record, not a provider turn barrier. Soft
     // guardrails must be able to park alongside it while other provider/user asks retain priority.
-    if (occupied.some((request) => request.kind !== "workflow_decision")) return false;
+    if (occupied.some((request) => request.kind !== "workflow_decision")) return null;
     const rules = rulesFromSession(this.guardrailFields(s));
-    if (rules.length === 0) return false;
+    if (rules.length === 0) return null;
     // sessionView already computed the count when the guardrail is armed — don't re-query.
     const toolCallCount = s.toolCallCount ?? 0;
     // The unpriced check costs a ledger read, so it runs only when a rule can act on it.
-    const unpriced = rules.some((rule) => rule.kind === "cost_unpriced") && this.db.sessionUsageUnpriced(sessionId);
+    const unpriced = rules.some((rule) => rule.kind === "cost_unpriced") && this.db.sessionUsageUnpriced(s.id);
     const ask = firstAsk(evaluatePolicies({ status: s.status, costUsd: s.costUsd, toolCallCount, unpriced }, rules));
-    if (!ask) return false;
+    if (!ask) return null;
     // A runner-enforced threshold armed on a live session is the runner's to trip: it receives
     // the threshold with the config write, cancels at the crossing, and settles into this gate.
     // Parking on it here would show a hard card the runner knows nothing about.
-    if (softOnly && runnerHoldFor(ask.rule.kind)) return false;
+    if (softOnly && runnerHoldFor(ask.rule.kind)) return null;
+    return ask;
+  }
+
+  private gateOnPolicy(sessionId: string, now: number, fanOut = true, softOnly = false): boolean {
+    const s = this.db.getSession(sessionId);
+    if (!s) return false;
+    const ask = this.pendingPolicyAsk(s, softOnly);
+    if (!ask) return false;
+    const occupied = pendingRequests(s.pendingApproval);
     const approval = approvalForDecision(ask, sessionId, now);
     if (s.status === "idle") this.db.notePolicyResumeStatus(sessionId, "idle");
     // A control-plane-only card must also stop the runner draining queued prompts behind the

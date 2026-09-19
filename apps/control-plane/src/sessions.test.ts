@@ -3573,6 +3573,12 @@ test("a resolver's child-facing message reaches the child's decision view and re
       return decision.data;
     };
     const promptsToChild = () => hub.sentOfType("prompt_session").filter((message) => message.sessionId === child.id);
+    const idleWrites: string[] = [];
+    const updateSessionStatus = db.updateSessionStatus.bind(db);
+    db.updateSessionStatus = (...args: Parameters<typeof db.updateSessionStatus>) => {
+      if (args[0] === child.id && args[1] === "idle") idleWrites.push(args[0]);
+      return updateSessionStatus(...args);
+    };
 
     // The child ended its turn waiting on the card, so the resolution must be what resumes it.
     const denied = requestMerge(501);
@@ -3602,6 +3608,8 @@ test("a resolver's child-facing message reaches the child's decision view and re
     assert.equal(db.getSession(child.id)?.status, "running");
     assert.equal(idleEdges.filter((id) => id === child.id).length, 0,
       "the resumed turn continues the work, so the idle edge swallowed by the card is not replayed first");
+    assert.equal(idleWrites.length, 0,
+      "the child leaves the pause straight into the resumed turn, so no stale session.idle is published");
 
     const audits = svc.governanceAudit(child.id);
     const resolution = audits.find((entry) => entry.requestId === denied.occurrenceId && entry.outcome === "denied");
@@ -3623,6 +3631,20 @@ test("a resolver's child-facing message reaches the child's decision view and re
     assert.match(promptsToChild().at(-1)!.text, /Your Orchestrator approved your pr_merge decision/);
     assert.equal(promptsToChild().length, 2);
 
+    // A refused delivery (runner offline) restores the idle child exactly as before and keeps the
+    // message on the record for the child to read.
+    const offline = requestMerge(504);
+    svc.onSessionStatus(child.id, "idle");
+    hub.online = false;
+    assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, offline.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "deny", childMessage: "Offline note." }, () => true).ok);
+    hub.online = true;
+    assert.equal(db.getSession(child.id)?.status, "idle");
+    assert.equal(promptsToChild().length, 2);
+    assert.equal(svc.workflowDecision(child.id, offline.occurrenceId).data?.childMessage, "Offline note.");
+    assert.equal(idleEdges.filter((id) => id === child.id).length, 1);
+    assert.equal(idleWrites.length, 1);
+
     // Without a message nothing changes: no field, no digest, no prompt, and an idle child's
     // swallowed idle edge is replayed exactly as before.
     const silent = requestMerge(503);
@@ -3630,7 +3652,8 @@ test("a resolver's child-facing message reaches the child's decision view and re
     assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, silent.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "deny" }, () => true).ok);
     assert.equal(db.getSession(child.id)?.status, "idle");
-    assert.equal(idleEdges.filter((id) => id === child.id).length, 1);
+    assert.equal(idleEdges.filter((id) => id === child.id).length, 2);
+    assert.equal(idleWrites.length, 2);
     assert.equal("childMessage" in (svc.workflowDecision(child.id, silent.occurrenceId).data ?? {}), false);
     assert.equal(promptsToChild().length, 2);
     assert.equal(svc.governanceAudit(child.id).find((entry) =>
