@@ -325,9 +325,12 @@ test("the protections path comes only from the hook command, never from the envi
   assert.equal(managedWorktreeGuardProtectionsArgument(["node", "cli.js"]), null);
 });
 
-test("the hook matcher covers Bash and every path-bearing file tool", () => {
+test("the hook matcher covers Bash, Codex's apply_patch, and every path-bearing file tool", () => {
   assert.deepEqual(MANAGED_WORKTREE_GUARD_MATCHER.split("|").sort(),
-    ["Bash", "Edit", "Glob", "Grep", "MultiEdit", "NotebookEdit", "Read", "Write"]);
+    ["Bash", "Edit", "Glob", "Grep", "MultiEdit", "NotebookEdit", "Read", "Write", "apply_patch"]);
+  // #1437: Codex's edit tool is named outright rather than reached through the `Edit` alias it
+  // also answers to. The runner installs this same string as its Codex hook matcher.
+  assert.ok(MANAGED_WORKTREE_GUARD_MATCHER.split("|").includes("apply_patch"));
 });
 
 test("the protections path is derived from the settings file it belongs to", () => {

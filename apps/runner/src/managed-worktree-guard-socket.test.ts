@@ -43,6 +43,16 @@ function payload(command: string, cwd = "/work") {
   return JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash", cwd, tool_input: { command } });
 }
 
+/** Codex's edit payload: the patch document under the same `command` key a shell call uses. */
+function patchPayload(lines: readonly string[], cwd = "/trees/one") {
+  return JSON.stringify({
+    hook_event_name: "PreToolUse",
+    tool_name: "apply_patch",
+    cwd,
+    tool_input: { command: lines.join("\n") },
+  });
+}
+
 async function runCli(argv: string[], input: string) {
   let stdout = "";
   let stderr = "";
@@ -79,6 +89,38 @@ test("the socket judges against the list of the session that owns it", { skip: !
   const stateRead = await requestManagedWorktreeGuardVerdict(one, payload(quote(["cat", join(configDir, "x")])));
   assert.ok(stateRead.stdout.includes(GUARD_STATE_REFUSAL));
   assert.deepEqual(await requestManagedWorktreeGuardVerdict(one, payload("git status")), { stdout: "", stderr: "", exitCode: 0 });
+});
+
+test("the socket judges a Codex apply_patch exactly as the file transport does", { skip: !POSIX }, async () => {
+  // #1437 put the patch-header judgment in the shared decision, so both transports #1447 left in
+  // place carry it. A sandboxed Codex launch reaches the guard only through this socket.
+  const { configDir, host } = fixture();
+  writeManagedWorktreeGuardProtections(claudeHookSessionProtectionsPath(configDir, "s_one"), [
+    { worktreePath: "/trees/one", repoPath: "/repo" },
+  ]);
+  const socket = await host.ensure("s_one");
+  const intoGuardState = await requestManagedWorktreeGuardVerdict(
+    socket,
+    patchPayload(["*** Begin Patch", `*** Add File: ${join(configDir, "planted.json")}`, "+{}", "*** End Patch"]),
+  );
+  assert.equal(intoGuardState.exitCode, 0);
+  assert.ok(intoGuardState.stdout.includes(GUARD_STATE_REFUSAL));
+  const intoWorktreeGit = await requestManagedWorktreeGuardVerdict(
+    socket,
+    patchPayload(["*** Begin Patch", "*** Delete File: /trees/one/.git", "*** End Patch"]),
+  );
+  assert.ok(intoWorktreeGit.stdout.includes(MANAGED_WORKTREE_REFUSAL));
+  assert.deepEqual(
+    await requestManagedWorktreeGuardVerdict(
+      socket,
+      patchPayload(["*** Begin Patch", "*** Add File: src/app.ts", "+x", "*** End Patch"]),
+    ),
+    { stdout: "", stderr: "", exitCode: 0 },
+    "an ordinary project file is the session's own workspace",
+  );
+  const unparseable = await requestManagedWorktreeGuardVerdict(socket, patchPayload(["just write it for me"]));
+  assert.equal(unparseable.exitCode, 2);
+  assert.ok(unparseable.stderr.includes(MANAGED_WORKTREE_REFUSAL));
 });
 
 test("an invalidated guard (its list removed) is a refusal over the socket too", { skip: !POSIX }, async () => {

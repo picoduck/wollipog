@@ -1177,8 +1177,16 @@ function expandHome(path: string, cwd = ""): string {
  * Follow symlinks as far as the filesystem allows: the nearest existing ancestor is resolved and
  * the not-yet-existing remainder is appended, so a link into the guard state is seen for what it
  * is even when the final component does not exist yet.
+ *
+ * `null` when the climb could not reach an existing ancestor within its bound. That is not the
+ * same as "the spelling is already physical", and the difference matters: a spelling with more
+ * not-yet-existing components than the bound has NO physical reading here, and a classifier that
+ * fell back to the unresolved spelling would compare a symlinked prefix textually and read
+ * `/proc/self/root<guard state>/<257 new directories>/file` as unrelated to the guard state, while
+ * the kernel — and a tool that creates missing parents — lands inside it. Every classifier below
+ * treats the exhaustion as out of bounds instead.
  */
-function canonicalPath(path: string): string {
+function canonicalPathOrNull(path: string): string | null {
   const missing: string[] = [];
   let current = path;
   for (let depth = 0; depth < 256; depth++) {
@@ -1186,12 +1194,18 @@ function canonicalPath(path: string): string {
       return resolve(realpathSync(current), ...missing);
     } catch {
       const parent = dirname(current);
-      if (parent === current) break;
+      // Nothing above to resolve: there is no symlink left to follow, so the spelling is physical.
+      if (parent === current) return path;
       missing.unshift(basename(current));
       current = parent;
     }
   }
-  return path;
+  return null;
+}
+
+/** Best-effort physical reading, for callers holding a location that already exists. */
+function canonicalPath(path: string): string {
+  return canonicalPathOrNull(path) ?? path;
 }
 
 /**
@@ -1265,6 +1279,10 @@ export const guardStateClassifierWork = { relations: 0, segments: 0 };
  * Where a spelling sits relative to the guard-state directory, or `null` when the two are
  * unrelated. Every candidate is judged twice — by its spelling and by its physical path, since a
  * symlink anywhere along either one lands elsewhere — and the most restrictive answer wins.
+ *
+ * A candidate with no physical reading at all is treated as `inside`, not as unrelated: see
+ * `canonicalPathOrNull`. No location a tool legitimately names has more not-yet-existing
+ * components than that bound, so nothing real is refused by it.
  */
 export function guardStateRelation(
   path: string,
@@ -1278,7 +1296,9 @@ export function guardStateRelation(
   // Each reading of the spelling, paired with the reading of the hook directory it is judged against.
   const pairs: Array<[string, string]> = [];
   for (const resolved of guardStateCandidates(path, cwd)) {
-    pairs.push([resolved, root], [canonicalPath(resolved), realRoot]);
+    const physical = canonicalPathOrNull(resolved);
+    if (physical === null) return { kind: "inside" };
+    pairs.push([resolved, root], [physical, realRoot]);
   }
   for (const raw of climbingSpellings(path, cwd)) {
     const physical = physicalSpelling(raw);
@@ -1612,4 +1632,189 @@ export function toolTargetsGuardState(
     }
   }
   return null;
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Codex `apply_patch`.
+ *
+ * Codex's edit tool is not a path-bearing file tool: it is one freeform patch document, and the
+ * locations it writes live in the patch's own headers (#1437). Measured against codex-cli 0.155.1
+ * on this machine (2026-09-19), in a throwaway `CODEX_HOME` against a throwaway repository, by
+ * capturing the real `PreToolUse` stdin of every call:
+ *
+ *   - The payload is the Bash-shaped one: `tool_name` is `apply_patch` and the patch text is
+ *     `tool_input.command`, the SAME key a shell call carries its command in. The observed key set
+ *     was `session_id`, `turn_id`, `transcript_path`, `cwd`, `hook_event_name`, `model`,
+ *     `permission_mode`, `tool_name`, `tool_input`, `tool_use_id`.
+ *   - Header paths may be absolute or relative, and a relative one is resolved against the
+ *     payload's `cwd`. Both spellings were produced and both applied.
+ *   - The grammar is the CLI's own, read out of the binary it ships, and only four of its
+ *     directives name a file:
+ *
+ *       start:          begin_patch environment_id? hunk+ end_patch
+ *       environment_id: "*** Environment ID: " filename LF
+ *       add_hunk:       "*** Add File: "    filename LF add_line+
+ *       delete_hunk:    "*** Delete File: " filename LF
+ *       update_hunk:    "*** Update File: " filename LF change_move? change?
+ *       change_move:    "*** Move to: "     filename LF
+ *       eof_line:       "*** End of File"   LF
+ *       filename:       /(.+)/
+ *
+ *     Every content line is prefixed (`+` in an add hunk, `+`/`-`/` ` in a change), so a line
+ *     beginning `*** ` is always a directive and never file content, and a directive is always a
+ *     whole line. That is what makes the line scan below both complete and safe.
+ *
+ * Judging is therefore a path question, not a command question: each header's filename is resolved
+ * the way a file tool's is and held to the same two boundaries — the runner's hook state directory
+ * and the managed-worktree rules. A patch this parser cannot account for names locations it cannot
+ * enumerate, so it is refused rather than guessed at, exactly as an unreadable command is.
+ * ------------------------------------------------------------------------------------------ */
+
+/** Codex's edit tool, as `tool_name` spells it in a `PreToolUse` payload. */
+export const APPLY_PATCH_TOOL = "apply_patch";
+
+/** The hook payload itself is capped at 1 MB upstream; a patch cannot be larger than its envelope. */
+const MAX_PATCH_LENGTH = 1_000_000;
+/**
+ * Header paths resolved for one patch. Each resolution walks the filesystem, and the bound keeps a
+ * provider-authored patch from turning one tool call into unbounded work. No real edit approaches
+ * it, and a patch that exceeds it is refused rather than partly judged.
+ */
+const MAX_PATCH_PATHS = 1_000;
+
+/** Every line that begins this way is a directive; file content is always prefixed by `+`/`-`/` `. */
+const PATCH_DIRECTIVE_PREFIX = "*** ";
+/** Directives whose remainder is a filename. */
+const PATCH_PATH_DIRECTIVES = [
+  "*** Add File: ",
+  "*** Update File: ",
+  "*** Delete File: ",
+  "*** Move to: ",
+] as const;
+/** Directives that name no location. `*** Environment ID: ` carries an opaque id, not a path. */
+const PATCH_BEGIN = "*** Begin Patch";
+const PATCH_END = "*** End Patch";
+const PATCH_END_OF_FILE = "*** End of File";
+const PATCH_ENVIRONMENT_ID = "*** Environment ID: ";
+
+/**
+ * The filenames an `apply_patch` document names, or `"malformed"` when it cannot be accounted for.
+ *
+ * Unparseable means: not a patch envelope, naming no file at all, or carrying a `*** ` directive
+ * this build does not know. The last one is the important case — an unknown directive may name a
+ * location, and a guard that skipped it would wave through exactly the write it exists to refuse.
+ */
+export function parseApplyPatchPaths(patch: string): string[] | "malformed" {
+  if (!patch || patch.length > MAX_PATCH_LENGTH || patch.includes("\0")) return "malformed";
+  const paths: string[] = [];
+  let begun = false;
+  let ended = false;
+  for (const rawLine of patch.split("\n")) {
+    // A patch written with CRLF endings would otherwise carry the carriage return into the path.
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (!line.startsWith(PATCH_DIRECTIVE_PREFIX)) continue;
+    if (line === PATCH_BEGIN) { begun = true; continue; }
+    if (line === PATCH_END) { ended = true; continue; }
+    if (line === PATCH_END_OF_FILE || line.startsWith(PATCH_ENVIRONMENT_ID)) continue;
+    const directive = PATCH_PATH_DIRECTIVES.find((candidate) => line.startsWith(candidate));
+    if (directive === undefined) return "malformed";
+    const filename = line.slice(directive.length);
+    // `filename: /(.+)/` — a header with no name is not a header this guard can judge.
+    if (!filename) return "malformed";
+    if (paths.length >= MAX_PATCH_PATHS) return "malformed";
+    paths.push(filename);
+  }
+  return begun && ended && paths.length > 0 ? paths : "malformed";
+}
+
+/**
+ * Trailing padding a header's filename loses before the file is opened.
+ *
+ * Unicode `White_Space` — which is exactly what Rust's `str::trim_end` removes, and so what
+ * codex-cli removes. Deliberately NOT JavaScript's `trimEnd`, whose set differs on precisely two
+ * code points, both of them measured here. U+0085 is `White_Space` but not JavaScript whitespace,
+ * and codex strips it: judging only `trimEnd`'s result let `*** Delete File: <worktree>/.git<U+0085>`
+ * read as an ordinary workspace path while codex resolved it to the protected gitdir pointer.
+ * U+FEFF is JavaScript whitespace but not `White_Space`, and codex keeps it: stripping it would
+ * refuse `*** Add File: .git<U+FEFF>`, an ordinary workspace file. Those two are the whole
+ * disagreement, so this set is pinned by measurement rather than chosen for safety margin.
+ */
+const PATCH_TRAILING_PAD = /\p{White_Space}+$/u;
+
+/**
+ * Where a patch header's filename can land.
+ *
+ * The grammar takes the rest of the line verbatim, but codex-cli does not. Measured at 0.155.1 by
+ * driving live calls and reading the bytes of the files created:
+ *
+ *     *** Add File: trailing.txt      ->  trailing.txt
+ *     *** Add File: nel.txt<U+0085>   ->  nel.txt
+ *     *** Add File: bom.txt<U+FEFF>   ->  bom.txt<U+FEFF>
+ *     *** Add File:  leading.txt      ->   leading.txt
+ *
+ * So a trailing pad names a SECOND location, which is judged alongside the verbatim one, while a
+ * LEADING space is part of the name: stripping it would refuse `*** Add File:  .git/x`, an
+ * ordinary workspace file whose trimmed spelling only looks like Git administration.
+ */
+function patchPathSpellings(filename: string): string[] {
+  const unpadded = filename.replace(PATCH_TRAILING_PAD, "");
+  return unpadded && unpadded !== filename ? [filename, unpadded] : [filename];
+}
+
+/**
+ * Whether a single path is something the managed-worktree rules protect: a worktree's Git
+ * administrative area, its registration under the repository, or a location that CONTAINS a
+ * protected worktree. Ordinary files inside a protected worktree are the session's own workspace
+ * and are not protected — the guard defends the worktree's existence and its Git state, not its
+ * contents.
+ *
+ * Every spelling is judged, the same way `guardStateRelation` judges one: the literal reading, the
+ * home-relative reading, the physical reading with symlinks followed, and — for a spelling that
+ * climbs with `..` — where the kernel actually lands, since a symlink before a `..` moves it. A
+ * spelling with no physical reading at all is protected rather than waved through, for the reason
+ * `canonicalPathOrNull` gives.
+ */
+export function pathTargetsManagedWorktree(
+  path: string,
+  cwd: string,
+  protections: readonly ManagedWorktreeProtection[],
+): boolean {
+  if (!path || path.includes("\0") || protections.length === 0) return false;
+  const physical = physicalProtections(protections);
+  for (const candidate of guardStateCandidates(path, cwd)) {
+    if (protectedTarget(candidate, protections)) return true;
+    const resolved = canonicalPathOrNull(candidate);
+    if (resolved === null || protectedTarget(resolved, physical)) return true;
+  }
+  for (const raw of climbingSpellings(path, cwd)) {
+    const landing = physicalSpelling(raw);
+    if (landing !== null && protectedTarget(landing, physical)) return true;
+  }
+  return false;
+}
+
+/**
+ * Judge one `apply_patch` document. Returns the refusal to show the model, `"malformed"` when the
+ * patch cannot be parsed (the caller must fail closed), or `null` when every file it names is an
+ * ordinary one.
+ *
+ * The guard's own state is judged first, for the same reason the Bash path judges it first: a
+ * patch that can rewrite the protection list would otherwise disarm every later check.
+ */
+export function applyPatchTargetsProtected(
+  patch: string,
+  cwd: string,
+  guardStateDirectory: string,
+  protections: readonly ManagedWorktreeProtection[],
+): string | "malformed" | null {
+  const filenames = parseApplyPatchPaths(patch);
+  if (filenames === "malformed") return "malformed";
+  const spellings = filenames.flatMap(patchPathSpellings);
+  if (guardStateDirectory &&
+      spellings.some((spelling) => pathTargetsGuardState(spelling, cwd, guardStateDirectory))) {
+    return GUARD_STATE_REFUSAL;
+  }
+  return spellings.some((spelling) => pathTargetsManagedWorktree(spelling, cwd, protections))
+    ? MANAGED_WORKTREE_REFUSAL
+    : null;
 }
