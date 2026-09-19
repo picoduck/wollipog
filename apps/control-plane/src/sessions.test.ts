@@ -1379,6 +1379,154 @@ test("an approved UI evidence decision does not block campaign child verificatio
   }
 });
 
+test("a stopped campaign child with a final report can still be verified, and archived by that verification", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    const planner = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+    planner.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const decisions = {
+      implementation_question: "human",
+      pr_merge: "human",
+      merged_branch_deletion: "human",
+      follow_up_issue_publication: "human",
+      ui_evidence_approval: "human",
+    } as const;
+    const created = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, prompt: "Orchestrate issue 1440.",
+      orchestrator: { behavior: { completion: "stop_and_archive" } },
+    }, undefined, undefined, false, false, false, {
+      defaultOwnerUserId: "owner",
+      orchestratorDefaults: {
+        source: "user_default",
+        defaults: {
+          behavior: {
+            childHarness: null, childModel: null, childEffort: null,
+            maximumConcurrentChildren: 4, followUps: "recommend_only", completion: "stop_and_archive",
+          },
+          delegation: { parentControl: "questions", decisions: { ...decisions } },
+          execution: { strictProjectIsolation: false, integrationIsolation: false },
+        },
+        capabilities: {
+          models: [], effortLevels: [], installations: 1, compatibleInstallations: 1, status: "available",
+        },
+      },
+      validateOrchestratorDefaults: () => null,
+    });
+    assert.ok(created.ok && created.data, created.error);
+    const parent = created.data;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    const spawn = (parentSessionId: string, prompt: string) => {
+      const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, prompt };
+      let session = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId });
+      if (session.status === 428) {
+        assert.ok(svc.approve(parentSessionId,
+          db.getSession(parentSessionId)!.pendingApproval!.requestId, "allow").ok);
+        session = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId });
+      }
+      assert.ok(session.ok && session.data, session.error);
+      db.updateSessionStatus(session.data.id, "running", Date.now());
+      return session.data.id;
+    };
+    const report = (sessionId: string, text: string) =>
+      db.appendEvent(sessionId, { kind: "agent_message", text, final: true }, Date.now()).seq;
+    const verify = (sessionId: string, reportEventSeq: number) => svc.verifyCampaignChild(parent.id, {
+      childSessionId: sessionId, reportEventSeq, followUpsAccounted: true,
+    });
+
+    const child = spawn(parent.id, "Implement the assigned issue");
+    assert.match(hub.sentOfType("start_session").find((message) => message.spec.sessionId === child)?.initialPrompt ?? "",
+      /Leave any helper session you spawn idle once it has posted its final report/,
+      "the server-derived policy tells a child what to do with a helper before its own verification");
+
+    // The helper a child stopped and archived on its way out. The deadlock in #1440 was that
+    // nobody could verify it, so its parent could never be verified either.
+    const helper = spawn(child, "Reproduce the bug");
+    svc.onSessionStatus(child, "idle");
+    const childReport = report(child, "Child final report");
+    assert.match(verify(child, childReport).error ?? "", new RegExp(`unfinished descendant ${helper}`),
+      "a helper nobody has verified still holds its parent's verification");
+
+    const helperReport = report(helper, "Helper final report");
+    svc.onSessionStatus(helper, "stopped");
+    db.raw().prepare("UPDATE sessions SET archived=1 WHERE id=?").run(helper);
+    const helperVerified = verify(helper, helperReport);
+    assert.ok(helperVerified.ok, helperVerified.error);
+    assert.equal(db.campaignChildReportVerified(parent.id, helper), true,
+      "a stopped helper's report is as final as a completed one and can be attested (#1440)");
+    assert.equal(db.getSession(helper)?.archived, true);
+    const verified = verify(child, childReport);
+    assert.ok(verified.ok, verified.error);
+
+    // Verifying a stopped child is also what archives it under Stop and Archive, with no human
+    // unarchive in between.
+    const secondChild = spawn(parent.id, "Implement another assigned issue");
+    const secondHelper = spawn(secondChild, "Reproduce the other bug");
+    const secondHelperReport = report(secondHelper, "Second helper final report");
+    svc.onSessionStatus(secondHelper, "stopped");
+    assert.equal(db.getSession(secondHelper)?.archived, false);
+    assert.ok(verify(secondHelper, secondHelperReport).ok);
+    assert.equal(db.getSession(secondHelper)?.archived, true,
+      "verifying a stopped helper completes the archive its campaign policy requires");
+
+    // A stopped session whose last word is not a report proves nothing.
+    const silentHelper = spawn(secondChild, "Helper that never reported");
+    svc.onSessionStatus(silentHelper, "stopped");
+    const silentEvent = db.appendEvent(silentHelper, { kind: "stderr", text: "died" }, Date.now()).seq;
+    assert.match(verify(silentHelper, silentEvent).error ?? "",
+      /must be idle, completed, or stopped with a final report/,
+      "a stopped helper that never posted a report cannot be verified");
+
+    const supersededReport = report(silentHelper, "Helper report");
+    db.appendEvent(silentHelper, { kind: "user_message", text: "Also check the logs" }, Date.now());
+    assert.match(verify(silentHelper, supersededReport).error ?? "",
+      /must be idle, completed, or stopped with a final report/,
+      "and a report a later assignment superseded is not its last word either");
+
+    const freshReport = report(silentHelper, "Helper report after the follow-up");
+    assert.ok(verify(silentHelper, freshReport).ok);
+
+    // A requested stop reads as `stopped` while its durable intent is still open, which proves
+    // nothing about what the child finished.
+    const stoppingHelper = spawn(secondChild, "Helper its parent stopped");
+    svc.onSessionStatus(stoppingHelper, "idle");
+    const stoppingReport = report(stoppingHelper, "Stopping helper final report");
+    assert.ok(svc.stop(stoppingHelper).ok);
+    assert.equal(db.getSession(stoppingHelper)?.status, "stopped");
+    assert.equal(db.hasSessionStopIntent(stoppingHelper), true);
+    assert.match(verify(stoppingHelper, stoppingReport).error ?? "", /stop is not settled yet/,
+      "an unconfirmed stop is not proof that the child finished");
+    svc.reconcileRunnerSessions(RUNNER_ID, [parent.id, secondChild]);
+    assert.equal(db.hasSessionStopIntent(stoppingHelper), false);
+    assert.ok(verify(stoppingHelper, stoppingReport).ok,
+      "settling that stop against the runner's own inventory makes the same report verifiable");
+
+    svc.onSessionStatus(secondChild, "idle");
+    const secondChildReport = report(secondChild, "Second child final report");
+    const secondVerified = verify(secondChild, secondChildReport);
+    assert.ok(secondVerified.ok, secondVerified.error);
+
+    // A stop the runner itself reported stays verifiable when that runner later goes away: the
+    // report is already durable, and a disconnect leaves an existing terminal row untouched.
+    const thirdChild = spawn(parent.id, "Implement a third assigned issue");
+    svc.onSessionStatus(thirdChild, "idle");
+    const thirdChildReport = report(thirdChild, "Third child final report");
+    svc.onSessionStatus(thirdChild, "stopped");
+    db.markOffline(RUNNER_ID, Date.now());
+    svc.failRunnerSessions(RUNNER_ID);
+    assert.equal(db.hasSessionStopIntent(thirdChild), false);
+    const thirdVerified = verify(thirdChild, thirdChildReport);
+    assert.ok(thirdVerified.ok, thirdVerified.error);
+  } finally {
+    db.close();
+  }
+});
+
 test("idle Orchestrators durably coalesce nested request and child-ready events into one bounded continuation", () => {
   const { db, svc, hub } = makeHarness();
   try {

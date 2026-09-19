@@ -6175,8 +6175,21 @@ export class SessionsService {
         !canAccess(campaignSessionId) || !canAccess(child.id)) {
       return fail("campaign child not found", 404);
     }
-    if (child.status !== "idle" && child.status !== "completed") {
-      return fail("campaign child must be idle or completed before its report can be verified", 409);
+    // A requested stop writes `stopped` before the runner confirms it and keeps a durable intent
+    // until terminal or absence evidence settles it, so that row is not yet proof of anything.
+    // `setArchived` reads the same intent for the same reason.
+    if (child.status === "stopped" && this.db.hasSessionStopIntent(child.id)) {
+      return fail("campaign child's stop is not settled yet: its runner has not confirmed it", 409);
+    }
+    // A settled stop is terminal: the session cannot be prompted again, so its last report is as
+    // final as a completed one. Refusing it stranded a helper a child stopped on its way out,
+    // which nothing but a human unarchive could bring back to a verifiable state (#1440).
+    if (child.status !== "idle" && child.status !== "completed" &&
+        !(child.status === "stopped" && this.db.durableFinalReportSeq(child.id) !== null)) {
+      return fail(
+        "campaign child must be idle, completed, or stopped with a final report before its report can be verified",
+        409,
+      );
     }
     if (!this.db.hasCompletedAgentReportAt(child.id, request.reportEventSeq)) {
       return fail("reportEventSeq is not a completed top-level agent response", 409);
@@ -6235,6 +6248,7 @@ export class SessionsService {
       `Campaign ${campaign.id}; Child Harness ${policy.behavior.childHarness?.agentId ?? "Automatic"}; Child Model ${policy.behavior.childModel ?? "Automatic"}; Child Effort ${policy.behavior.childEffort ?? "Automatic"}; Follow-Ups ${policy.behavior.followUps}; Completion ${policy.behavior.completion}.`,
       `Typed decision owners: ${owners}. This is not blanket approval. For implementation questions, PR merge, merged-branch deletion, follow-up issue publication, and UI evidence approval, create the exact typed request and consume an approval immediately before the matching action. For PR merge, pass and then execute the exact canonical gh pr merge URL --squash --match-head-commit SHA command; its matching one-shot runner permission completes consumption. Ordinary prompts cannot satisfy a typed gate.`,
       "Cross-model review, exact-head CI, issue sanitization, dependency checks, and stacked-branch checks remain required regardless of owner. An enqueued PR is unfinished until merge-group CI passes and the forge reports actual MERGED state. Authentication, secrets, persistent permission grants, governance, budgets, and tool guardrails remain human-only.",
+      "Leave any helper session you spawn idle once it has posted its final report, so the Orchestrator can verify it before verifying you; do not stop or archive one yourself, and never leave it working when you finish.",
       projection.uiEvidenceReview.effectiveOwner === "orchestrator"
         ? "The controlling Orchestrator can inspect artifact-backed image evidence and must review every item before approving. Children attach each capture from disk with attach_session_artifact (or `wollipog artifact attach --file`), never as base64 in a tool argument, and cite the returned artifactId, mediaType, and sha256; video or externally stored evidence is routed to a human."
         : `UI evidence remains human-owned: ${projection.uiEvidenceReview.reason ?? "the human owns UI Evidence Approval under this policy."}`,
