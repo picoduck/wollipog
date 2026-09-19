@@ -720,26 +720,27 @@ export const GUARD_STATE_FILE_TOOLS: Readonly<Record<string, GuardStateToolPath>
  * named user resolves to the current home when it is the current user and to a sibling of it
  * otherwise, which is where every conventional layout puts it. `~-` (OLDPWD) is unknowable.
  */
-function expandHome(path: string, cwd = ""): string {
-  if (!path.startsWith("~")) return path;
+function homeSpelling(path: string, cwd: string): { base: string; rest: string } | null {
+  if (!path.startsWith("~")) return null;
   const end = path.search(/[\\/]/u);
   const head = end < 0 ? path : path.slice(0, end);
   const rest = end < 0 ? "" : path.slice(end + 1);
-  let base: string;
-  if (head === "~") base = homedir();
-  else if (head === "~+") base = cwd || ".";
-  else if (head === "~-") return path;
-  else {
-    const name = head.slice(1);
-    let current = "";
-    try {
-      current = userInfo().username;
-    } catch {
-      /* no passwd entry for this uid: fall through to the sibling layout */
-    }
-    base = name === current ? homedir() : resolve(dirname(homedir()), name);
+  if (head === "~") return { base: homedir(), rest };
+  if (head === "~+") return { base: cwd || ".", rest };
+  if (head === "~-") return null;
+  const name = head.slice(1);
+  let current = "";
+  try {
+    current = userInfo().username;
+  } catch {
+    /* no passwd entry for this uid: fall through to the sibling layout */
   }
-  return resolve(base, rest);
+  return { base: name === current ? homedir() : resolve(dirname(homedir()), name), rest };
+}
+
+function expandHome(path: string, cwd = ""): string {
+  const home = homeSpelling(path, cwd);
+  return home === null ? path : resolve(home.base, home.rest);
 }
 
 /**
@@ -777,11 +778,50 @@ function guardStateCandidates(path: string, cwd: string): string[] {
 }
 
 /**
+ * Where the kernel lands on a spelling that climbs with `..`. Resolving it lexically first, as
+ * `resolve` does, is wrong once a symlink precedes the `..`: `<ancestor>/link/..` climbs out of the
+ * link's TARGET, which can be the hook directory itself. `null` when the spelling cannot resolve,
+ * because `..` past a component that does not exist fails before anything is read.
+ */
+function physicalSpelling(raw: string): string | null {
+  const missing: string[] = [];
+  let current = raw;
+  for (let depth = 0; depth < 256; depth++) {
+    try {
+      return resolve(realpathSync.native(current), ...missing);
+    } catch {
+      const name = basename(current);
+      if (name === "..") return null;
+      const parent = dirname(current);
+      if (parent === current) return null;
+      if (name !== "" && name !== ".") missing.unshift(name);
+      current = parent;
+    }
+  }
+  return null;
+}
+
+/** The unnormalized forms of a spelling that climbs with `..`, one per reading of a tilde. */
+function climbingSpellings(path: string, cwd: string): string[] {
+  if (!/(?:^|[\\/])\.\.(?:[\\/]|$)/u.test(path)) return [];
+  const raw = isAbsolute(path) ? [path] : [`${cwd || "."}${sep}${path}`];
+  const home = homeSpelling(path, cwd);
+  if (home !== null) raw.push(`${home.base}${sep}${home.rest}`);
+  return raw;
+}
+
+function componentCount(path: string): number {
+  return normalize(path).split(/[\\/]/u).filter(Boolean).length;
+}
+
+/**
  * How a spelling relates to the guard-state directory. `inside` is the directory itself or anything
  * beneath it. `ancestor` is a strict ancestor: a directory that contains it, which an inspection may
- * name but a walk would reach.
+ * name but a walk would reach. Its `depth` is how many components below it the hook directory sits,
+ * under the reading that puts it nearest, so a walk bounded to `depth` levels may name the hook
+ * directory but never read it.
  */
-export type GuardStateRelation = { kind: "inside" } | { kind: "ancestor" };
+export type GuardStateRelation = { kind: "inside" } | { kind: "ancestor"; depth: number };
 
 /**
  * Where a spelling sits relative to the guard-state directory, or `null` when the two are
@@ -795,17 +835,22 @@ export function guardStateRelation(
 ): GuardStateRelation | null {
   if (!directory || !path || path.includes("\0")) return null;
   const root = resolve(directory);
-  let realRoot: string | null = null;
-  let ancestor = false;
+  const realRoot = canonicalPath(root);
+  // Each reading of the spelling, paired with the reading of the hook directory it is judged against.
+  const pairs: Array<[string, string]> = [];
   for (const resolved of guardStateCandidates(path, cwd)) {
-    if (pathContains(root, resolved)) return { kind: "inside" };
-    if (pathContains(resolved, root)) ancestor = true;
-    realRoot ??= canonicalPath(root);
-    const realResolved = canonicalPath(resolved);
-    if (pathContains(realRoot, realResolved)) return { kind: "inside" };
-    if (pathContains(realResolved, realRoot)) ancestor = true;
+    pairs.push([resolved, root], [canonicalPath(resolved), realRoot]);
   }
-  return ancestor ? { kind: "ancestor" } : null;
+  for (const raw of climbingSpellings(path, cwd)) {
+    const physical = physicalSpelling(raw);
+    if (physical !== null) pairs.push([physical, realRoot], [physical, root]);
+  }
+  let depth = Number.POSITIVE_INFINITY;
+  for (const [reading, target] of pairs) {
+    if (pathContains(target, reading)) return { kind: "inside" };
+    if (pathContains(reading, target)) depth = Math.min(depth, componentCount(target) - componentCount(reading));
+  }
+  return Number.isFinite(depth) ? { kind: "ancestor", depth } : null;
 }
 
 /** A path is out of bounds when it is inside the guard-state directory, or contains it. */
@@ -819,17 +864,25 @@ export function pathTargetsGuardState(path: string, cwd: string, directory: stri
  * Refusing every operand that CONTAINS the hook directory also refused `ls /home` and a listing of
  * the home directory in every session whose data directory lives under it (#1334), though neither
  * reads anything the guard owns. The carve-out below is deliberately narrow and fails closed: an
- * operand that is a strict ancestor is allowed only for `ls` without a recursive option and for
- * `stat`, and only when the WHOLE command is such an inspection and nothing else. A recursive
- * removal or a recursive search rooted at an ancestor is refused as before.
+ * operand that is a strict ancestor is allowed only for `ls` without a recursive option, `stat`,
+ * `du` with value-free options, and `find START... -maxdepth N` whose bound stops at or above the
+ * hook directory — and only when the WHOLE command is such an inspection and nothing else. A
+ * recursive removal or a recursive search rooted at an ancestor is refused as before.
  *
- * `du` and `find` are deliberately NOT here, though #1334 lists both among the commands that should
- * be allowed. Each walks the tree it is given and each can be pointed at a file through an option
- * value, which is not an operand and so is never compared against the guard state: three of the
- * bypasses found while reviewing this change came out of bounding `find`'s walk, and two more out of
- * `du`'s file-valued options. `ls` and `stat` do neither — neither descends, and neither takes an
- * option that names a file to open — so they need no depth reasoning and no option parsing. A
- * bounded `du` or `find` is worth its own change, with that reasoning as the whole subject.
+ * `du` and `find` came back in a change of their own (#1390), because each needs reasoning `ls` and
+ * `stat` do not: both walk the tree they are given, and both can be pointed at a file through an
+ * option value, which is not an operand and so is never compared against the guard state. Neither
+ * is parsed in general. Each is admitted only in exact argv shapes:
+ *
+ * - `du` takes only options from a closed list of value-free flags spelled in full, plus a numeric
+ *   `--max-depth=`. No option value can name a file, so none needs resolving — `-X`,
+ *   `--exclude-from`, and `--files0-from` are simply absent, and a bare value naming a symlink into
+ *   the hook directory never gets a chance. `du` does walk the whole ancestor, hook directory
+ *   included: it learns the directory's shape and size but opens no file (#1334 accepts that).
+ * - `find` takes one or more explicit starts and then exactly `-maxdepth N`. The walk is bounded by
+ *   the directory it actually starts in, measured under every reading of that start — spelling,
+ *   physical path, and the physical landing of a `..` — with the nearest one deciding. Without an
+ *   explicit start it walks the working directory, which no operand names, so it is refused.
  *
  * What disqualifies a command, and why each one has to:
  *
@@ -850,15 +903,16 @@ export function pathTargetsGuardState(path: string, cwd: string, directory: stri
  *   `--recursive` long before this classifier would see it.
  * - A `NAME=value` assignment: a `PATH=` prefix decides what the command name resolves to.
  * - A command word that is not a bare name: `./ls` and `/tmp/ls` are whatever was planted there.
- * - An option word carrying a path separator. Neither `ls` nor `stat` has an option that opens a
- *   file, so this refuses nothing either needs to read; it is kept so that a path inside an option
- *   is never the one thing the classifier waves through, whatever the option turns out to mean.
+ * - An option word carrying a path separator. None of the admitted forms has an option that opens a
+ *   file, so this refuses nothing they need to read; it is kept so that a path inside an option is
+ *   never the one thing the classifier waves through, whatever the option turns out to mean.
  * - A working directory inside the guard state, since a command with no operand acts there.
  *
  * It over-refuses where the safe direction is to do so. A short-option cluster is scanned for `R`
  * without modelling which options take an attached value, so GNU's `ls -IREADME` reads as recursive
  * and is refused; the alternative, a hard-coded list of value-taking options, fails OPEN the day
- * that list is wrong.
+ * that list is wrong. And `find <ancestor> -maxdepth 1 2>/dev/null` is refused: the tokenizer drops
+ * the adjacency that makes `2>` a redirection, so the `2` reads as one more word after the bound.
  * ------------------------------------------------------------------------------------------ */
 
 /** Operators that end one command and begin another. */
@@ -936,11 +990,61 @@ function recursiveListing(word: string): boolean {
 }
 
 /**
- * Whether this segment only inspects the directories it names, without enumerating what is inside
- * them. An empty segment — a stray separator, or a bare redirection — commands nothing and can
- * rebind nothing, so it qualifies vacuously.
+ * `du` options that take no value, spelled exactly: a short cluster made only of these letters, or
+ * one of these long names in full. Anything else — `-X`, `--exclude-from`, `--files0-from`, an
+ * abbreviation, an unknown option — disqualifies the command. The list names options that are SAFE,
+ * so an option missing from it is refused, never waved through.
  */
-function inspectsAncestorOnly(words: readonly string[]): boolean {
+const DU_SHORT_FLAGS = /^-[abchkmsx]+$/u;
+const DU_LONG_FLAGS = new Set([
+  "--all", "--apparent-size", "--bytes", "--human-readable", "--one-file-system", "--si", "--summarize",
+  "--total",
+]);
+
+/** `du` with nothing but value-free options, a numeric `--max-depth=`, and operands. */
+function plainDiskUsage(words: readonly string[]): boolean {
+  let options = true;
+  for (const word of words.slice(1)) {
+    if (!options || !word.startsWith("-")) continue;
+    if (word === "--") options = false;
+    else if (!DU_SHORT_FLAGS.test(word) && !DU_LONG_FLAGS.has(word) && !/^--max-depth=\d{1,9}$/u.test(word)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Exactly `find START... -maxdepth N`, with at least one START and no other word. A walk bounded to
+ * `N` levels reads the directories above level `N` and only names what sits at it, so it never
+ * reads the hook directory when every START holds it at least `N` levels down. Everything else
+ * `find` accepts is refused: a leading `-L` follows links out of the tree, a test such as `-empty`
+ * opens the directory it names at the bound, and an action acts on it. A walk with no START begins
+ * in the working directory, which no operand names, so it is never an inspection here.
+ */
+function boundedFind(words: readonly string[], depthBelow: (start: string) => number | null): boolean {
+  if (words.length < 4 || words.at(-2) !== "-maxdepth") return false;
+  const bound = words.at(-1) ?? "";
+  if (!/^\d{1,9}$/u.test(bound)) return false;
+  for (const start of words.slice(1, -2)) {
+    // `find` reads these as the start of its expression, not as a place to walk.
+    if (start === "" || start.startsWith("-") || ["!", "(", ")", ","].includes(start)) return false;
+    const depth = depthBelow(start);
+    if (depth !== null && Number(bound) > depth) return false;
+  }
+  return true;
+}
+
+/**
+ * Whether this segment only inspects the directories it names, without reading what is inside the
+ * hook directory. `depthBelow` reports how far below a word the hook directory sits, or `null` when
+ * that word is unrelated to it. An empty segment — a stray separator, or a bare redirection —
+ * commands nothing and can rebind nothing, so it qualifies vacuously.
+ */
+function inspectsAncestorOnly(
+  words: readonly string[],
+  depthBelow: (start: string) => number | null,
+): boolean {
   if (words.length === 0) return true;
   // The shell expands these into words this classifier never sees.
   if (words.some((word) => /[*?[\]{}]/u.test(word))) return false;
@@ -957,6 +1061,10 @@ function inspectsAncestorOnly(words: readonly string[]): boolean {
       return !words.some(recursiveListing);
     case "stat":
       return true;
+    case "du":
+      return plainDiskUsage(words);
+    case "find":
+      return boundedFind(words, depthBelow);
     default:
       return false;
   }
@@ -1001,10 +1109,13 @@ export function commandTargetsGuardState(
     return null;
   }
   let namesAncestor = false;
+  // Each distinct word is resolved once, and a bounded `find` reads its START depths back from here.
+  const relations = new Map<string, GuardStateRelation | null>();
   for (const { operands } of segments) {
     for (const value of operands) {
-      if (value === null) continue;
+      if (value === null || relations.has(value)) continue;
       const relation = guardStateRelation(value, cwd, root);
+      relations.set(value, relation);
       if (relation === null) continue;
       if (relation.kind === "inside") return GUARD_STATE_REFUSAL;
       namesAncestor = true;
@@ -1016,7 +1127,12 @@ export function commandTargetsGuardState(
   if (guardStateRelation(cwd, cwd, root)?.kind === "inside") return GUARD_STATE_REFUSAL;
   // Every command in the list has to be an inspection, not only the ones naming an ancestor: an
   // earlier `hash -p`, `PATH=`, or function definition decides what a later `ls` runs.
-  const inspection = segments.every(({ words }) => words !== null && inspectsAncestorOnly(words));
+  const depthBelow = (start: string): number | null => {
+    // Every word is an operand, so it was resolved above.
+    const relation = relations.has(start) ? relations.get(start) : guardStateRelation(start, cwd, root);
+    return relation?.kind === "ancestor" ? relation.depth : null;
+  };
+  const inspection = segments.every(({ words }) => words !== null && inspectsAncestorOnly(words, depthBelow));
   return inspection ? null : GUARD_STATE_REFUSAL;
 }
 
