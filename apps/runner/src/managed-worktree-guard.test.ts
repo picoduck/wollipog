@@ -755,6 +755,98 @@ test("a command cannot launder itself into the ancestor carve-out", (t) => {
   }
 });
 
+test("every bypass found while reviewing #1371 stays refused with du and find in the carve-out", (t) => {
+  // The fourteen bypasses #1390 lists, in a session whose hook directory is
+  // `<ancestor>/.wollipog-data/hooks`. Each one reaches the hook directory while looking like an
+  // inspection; re-admitting `du` and a bounded `find` must not reopen any of them.
+  const home = mkdtempSync(join(tmpdir(), "wollipog-guard-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const project = join(home, "project");
+  const data = join(home, ".wollipog-data");
+  const directory = join(data, "hooks");
+  mkdirSync(project);
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, "s1.protections.json"), "{}", "utf8");
+  symlinkSync(join(directory, "s1.protections.json"), join(home, "state-link"));
+  const intoHooks = "../.wollipog-data/hooks/s1.protections.json";
+  const refusedFrom = (cwd: string, commands: readonly string[]): void => {
+    for (const command of commands) {
+      assert.equal(commandTargetsGuardState(command, cwd, directory), GUARD_STATE_REFUSAL, command);
+    }
+  };
+  refusedFrom(project, [
+    // A leading redirection whose target reads like an allowed command name.
+    `>ls rm -rf ${home}`,
+    `>du rm -rf ${home}`,
+    `>find rm -rf ${home}`,
+    // An abbreviated recursive option.
+    `ls --recurs ${home}`,
+    `ls --recursi ${home}`,
+    `ls --r ${home}`,
+    // A pipe into another command.
+    `ls ${home} | xargs rm -rf`,
+    `find ${home} -maxdepth 1 | xargs rm -rf`,
+    `du -sh ${home} | sh`,
+    // A command substitution, a subshell, or a process substitution.
+    `rm -rf $(ls ${home})`,
+    `rm -rf $(find ${home} -maxdepth 1)`,
+    `(rm -rf ${home})`,
+    `(du -sh ${home})`,
+    `cat <(rm -rf ${home})`,
+    // An assignment prefix, standalone or leading.
+    `PATH=${project} ls ${home}`,
+    `LC_ALL=C ls ${home}`,
+    `PATH=${project}; ls ${home}`,
+    `PATH=${project} du -sh ${home}`,
+    `PATH=${project}; find ${home} -maxdepth 1`,
+    // A command word that is not a bare name.
+    `./ls ${home}`,
+    `${join(project, "ls")} ${home}`,
+    `./du -sh ${home}`,
+    `${join(project, "find")} ${home} -maxdepth 1`,
+    // Brace expansion producing a recursive option.
+    `ls --recurs{ive,} ${home}`,
+    `find ${home} -maxdepth {1,5}`,
+    // A newline or carriage return joining two commands; a backslash-newline splitting an option.
+    `ls ${home}\nrm -rf ${home}`,
+    `ls ${home}\rrm -rf ${home}`,
+    `du -sh ${home}\nrm -rf ${home}`,
+    `ls -\\\nR ${home}`,
+    `find ${home} -maxdepth 1 -\\\nempty`,
+    // An earlier command rebinding a later name.
+    `hash -p /bin/rm ls; ls -rf ${home}`,
+    `alias ls=rm; ls -rf ${home}`,
+    `hash -p /bin/rm du; du -rf ${home}`,
+    `alias find=rm; find ${home} -maxdepth 1`,
+    // `find -empty` at the depth bound opens the directory it names there.
+    `find ${home} -maxdepth 1 -empty`,
+    `find ${home} -maxdepth 2 -empty`,
+    `find ${data} -maxdepth 1 -empty`,
+    // A `du` option whose value names a file, with or without a path separator.
+    `du --exclude-from=${intoHooks} ${home}`,
+    `du -X${intoHooks} ${home}`,
+    `ls ${home}; du --files0-from=${intoHooks}`,
+  ]);
+  // The same three with a bare value naming a symlink to the protections file, from its directory.
+  refusedFrom(home, [
+    `du --files0-from=state-link ${home}`,
+    `ls ${home}; du --files0-from=state-link`,
+    `du -Xstate-link ${home}`,
+    `du --exclude-from=state-link ${home}`,
+  ]);
+  // An operand-less walk beside an ancestor-naming command, judged from the working directory: the
+  // home directory is two components above the hook directory, so neither bound stops above it.
+  refusedFrom(home, [
+    `ls /; find -maxdepth 3`,
+    `ls ${home}; find -maxdepth 999`,
+  ]);
+  // A spaced numeric argument is not an IO number: this walk is judged on its bound of three.
+  refusedFrom(project, [`find ${home} -maxdepth 3 > ${join(project, "listing.txt")}`]);
+  // Over-refusals the review found, which must stay fixed: a leading IO number belongs to its
+  // redirection.
+  assert.equal(commandTargetsGuardState(`2>/dev/null ls ${home}`, project, directory), null);
+});
+
 test("a file-valued option cannot reach the guard state through a symlink it names", (t) => {
   // Review round 6: a separator-free option value is a bare name, so no path check on the option's
   // spelling can see that it is a symlink to the protections file. `du` opens it, and echoes its
