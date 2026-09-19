@@ -340,25 +340,47 @@ test("an agent may remove scratch it created inside its managed worktree", () =>
   }
 });
 
+test("piping filenames into a remover is refused even when they are all scratch", () => {
+  // The allowance above stops at the pipe. What reaches `xargs` on stdin is decided at runtime, so
+  // the classifier cannot tell a list of scratch files from a list containing the root and refuses
+  // every remover run through `xargs` from inside a managed worktree. That is a deliberate
+  // over-refusal, not root protection: the same pipeline is allowed from outside the worktree, and
+  // the same operands are allowed when `rm` names them directly.
+  assert.equal(commandTargetsManagedWorktree("printf 'scratch.txt\\0' | xargs -0 rm -f", protectedPath, protection),
+    MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("printf 'scratch.txt\\0' | xargs -0 rm -f", "/elsewhere", protection),
+    null, "outside a managed worktree the fallback does not apply");
+  assert.equal(commandTargetsManagedWorktree("printf 'scratch.txt\\0' | xargs -0 cat", protectedPath, protection),
+    null, "the fallback is scoped to removers, not to pipelines in general");
+  assert.equal(commandTargetsManagedWorktree("rm -f scratch.txt", protectedPath, protection), null,
+    "and naming the same operand directly stays allowed");
+});
+
 test("removal of the worktree root and its Git administrative state stays refused", () => {
   for (const [command, cwd] of [
     // The root itself, by every spelling.
     ["rm -rf .", protectedPath],
     [`rm -rf ${protectedPath}`, protectedPath],
-    ["rm -rf ..", `${protectedPath}/apps`],
     [`rm -rf ${protectedPath}/`, protectedPath],
+    [`rm -rf ${protectedPath}/tmp-harness/..`, protectedPath],
+    // An ancestor of the root takes the root with it.
+    ["rm -rf ..", `${protectedPath}/apps`],
     [`rm -rf ${protectedPath}/tmp-harness/../..`, protectedPath],
-    // The worktree's own `.git` link file, which Git needs to find the real admin directory.
+    // The worktree's own `.git` link file, which Git needs to find the real admin directory. It
+    // sits BENEATH the root, so "beneath the root is allowed" holds only outside the admin trees.
     ["rm -rf .git", protectedPath],
     [`rm -rf ${protectedPath}/.git`, protectedPath],
-    // The repository's registry entry for it.
+    [`rm -rf ${protectedPath}/.git/config`, protectedPath],
+    // The repository's registry entry for it, anything inside that entry, and any ancestor of it.
     ["rm -rf /projects/repo/.git/worktrees", protectedPath],
     ["rm -rf /projects/repo/.git/worktrees/managed", protectedPath],
-    // Bulk removal forms that reach the root, which `-delete`/`-exec`/`xargs` would otherwise walk.
+    ["rm -rf /projects/repo/.git", protectedPath],
+    ["rm -rf /projects/repo", protectedPath],
+    // Bulk removal forms whose ROOT is the worktree, which `-delete`/`-exec`/`xargs` would walk.
     ["find . -delete", protectedPath],
     ["find . -name '*.tmp' -delete", protectedPath],
     ["find . -maxdepth 1 -name '*.tmp' -exec rm -f {} +", protectedPath],
-    ["printf 'scratch.txt\\0' | xargs -0 rm -f", protectedPath],
+    ["printf '.\\0' | xargs -0 rm -rf", protectedPath],
     // Moving the root away retires it just as surely as deleting it.
     ["mv . /tmp/moved", protectedPath],
   ] as const) {
