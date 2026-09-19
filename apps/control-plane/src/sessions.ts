@@ -6225,7 +6225,18 @@ export class SessionsService {
     );
     if (!resolved) return fail("workflow decision was resolved concurrently", 409);
     const child = this.db.getSession(childSessionId);
-    if (child) this.settleWorkflowDecisionPause(childSessionId, occurrenceId, now);
+    // Ordinary prompt delivery wakes an idle child and queues behind a turn still in progress.
+    // A refusal (runner offline, a guardrail pause) leaves the message on the decision record.
+    const deliverChildMessage = resolved.childMessage
+      ? () => {
+          const delivered = this.prompt(childSessionId, workflowDecisionChildMessagePrompt(resolved));
+          if (!delivered.ok) {
+            this.log.warn(`workflow decision ${occurrenceId} message not delivered to ${childSessionId}: ${delivered.error}`);
+          }
+          return delivered.ok;
+        }
+      : undefined;
+    if (child) this.settleWorkflowDecisionPause(childSessionId, occurrenceId, now, deliverChildMessage);
     this.recordWorkflowDecisionAudit(
       resolved,
       checked.data.outcome === "approve" ? "allowed" : "denied",
@@ -6235,14 +6246,6 @@ export class SessionsService {
     );
     this.hub.sessionChangedById(childSessionId);
     this.publishCampaignAttentionTransition(currentParent);
-    if (resolved.childMessage && child) {
-      // Ordinary prompt delivery wakes an idle child and queues behind a turn still in progress.
-      // A refusal (runner offline, a guardrail pause) leaves the message on the decision record.
-      const delivered = this.prompt(childSessionId, workflowDecisionChildMessagePrompt(resolved));
-      if (!delivered.ok) {
-        this.log.warn(`workflow decision ${occurrenceId} message not delivered to ${childSessionId}: ${delivered.error}`);
-      }
-    }
     return ok(resolved);
   }
 
@@ -6800,8 +6803,14 @@ export class SessionsService {
     this.publishCampaignAttentionTransition(controllerBefore);
   }
 
-  /** Settle a server-owned workflow card against the provider state it temporarily covered. */
-  private settleWorkflowDecisionPause(sessionId: string, occurrenceId: string, now: number): void {
+  /** Settle a server-owned workflow card against the provider state it temporarily covered.
+   * `resume` delivers a turn that continues the child; it returns whether the turn was admitted. */
+  private settleWorkflowDecisionPause(
+    sessionId: string,
+    occurrenceId: string,
+    now: number,
+    resume?: () => boolean,
+  ): void {
     const current = this.db.getSession(sessionId);
     if (!current) return;
     const remaining = removePendingRequest(current.pendingApproval, occurrenceId);
@@ -6816,12 +6825,20 @@ export class SessionsService {
       );
     }
     if (restoreIdle) {
-      this.replayRestoredPolicyIdle(current, sessionId, now);
+      // An admitted resuming turn continues the work the card interrupted, so the swallowed idle
+      // edge is not replayed: pods, workflow attempts, campaign readiness, and push-to-wake settle
+      // on that turn's own idle instead of seeing a stale idle followed by a new turn.
+      if (resume && !this.gateOnPolicy(sessionId, now) && resume()) {
+        this.clearSettledPolicyResumeStatus(sessionId);
+      } else {
+        this.replayRestoredPolicyIdle(current, sessionId, now);
+      }
     } else {
       // Typed decisions do not suspend the provider turn. Usage can cross a soft checkpoint while
       // the card is present, so the last settlement must immediately surface any deferred gate.
       if (!remaining) this.gateOnPolicy(sessionId, now);
       this.clearSettledPolicyResumeStatus(sessionId);
+      resume?.();
     }
   }
 

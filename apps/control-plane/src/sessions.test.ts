@@ -3518,7 +3518,10 @@ test("typed workflow decisions isolate categories and fail closed across stale p
 
 test("a resolver's child-facing message reaches the child's decision view and resuming prompt while audit keeps a digest", () => {
   const { db, hub } = makeHarness();
-  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  const idleEdges: string[] = [];
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG, (previous, current) => {
+    if (previous.status !== "idle" && current.status === "idle") idleEdges.push(current.id);
+  });
   try {
     const meta = runnerMeta();
     const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
@@ -3597,6 +3600,8 @@ test("a resolver's child-facing message reaches the child's decision view and re
     assert.match(prompts[0]!.text, /Your Orchestrator denied your pr_merge decision/);
     assert.equal(prompts[0]!.text.includes(rationale), false, "the audit rationale never reaches the child");
     assert.equal(db.getSession(child.id)?.status, "running");
+    assert.equal(idleEdges.filter((id) => id === child.id).length, 0,
+      "the resumed turn continues the work, so the idle edge swallowed by the card is not replayed first");
 
     const audits = svc.governanceAudit(child.id);
     const resolution = audits.find((entry) => entry.requestId === denied.occurrenceId && entry.outcome === "denied");
@@ -3618,10 +3623,14 @@ test("a resolver's child-facing message reaches the child's decision view and re
     assert.match(promptsToChild().at(-1)!.text, /Your Orchestrator approved your pr_merge decision/);
     assert.equal(promptsToChild().length, 2);
 
-    // Without a message nothing changes: no field, no digest, no prompt.
+    // Without a message nothing changes: no field, no digest, no prompt, and an idle child's
+    // swallowed idle edge is replayed exactly as before.
     const silent = requestMerge(503);
+    svc.onSessionStatus(child.id, "idle");
     assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, silent.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "deny" }, () => true).ok);
+    assert.equal(db.getSession(child.id)?.status, "idle");
+    assert.equal(idleEdges.filter((id) => id === child.id).length, 1);
     assert.equal("childMessage" in (svc.workflowDecision(child.id, silent.occurrenceId).data ?? {}), false);
     assert.equal(promptsToChild().length, 2);
     assert.equal(svc.governanceAudit(child.id).find((entry) =>
