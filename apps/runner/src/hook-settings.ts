@@ -26,6 +26,7 @@ import {
   MANAGED_WORKTREE_GUARD_MATCHER,
   MANAGED_WORKTREE_GUARD_MODE,
   MANAGED_WORKTREE_GUARD_PROTECTIONS_SUFFIX,
+  MANAGED_WORKTREE_GUARD_ABSTRACT_PREFIX,
   MANAGED_WORKTREE_GUARD_SOCKET_FLAG,
   managedWorktreeGuardProtectionsPath,
   managedWorktreeGuardStateMatches,
@@ -327,14 +328,31 @@ export function writeClaudeSettingsSet(
   guard: ClaudeGuardHookOptions | null,
   preserveGuardState = false,
 ): void {
-  if (guard) {
-    if (!preserveGuardState) writeManagedWorktreeGuardProtections(guard.protectionsFile, guard.protections);
-    protectedWrite(claudeHookGuardPath(file), claudeSettingsDocument(file, null, guard));
+  // A guard that answers from runner memory (#1336 slice 3) keeps its real documents in memory too.
+  // What goes to disk is the same document WITHOUT the socket: it keeps every path-keyed mechanism
+  // working (the persisted `--settings` argument, self-description, the manager hook's own files),
+  // it never discloses the socket name, and if it were ever launched its guard would find no list
+  // and refuse every matched call rather than pass one.
+  const memoryGuard = guard !== null && guardAnswersFromMemory(guard.socketPath);
+  const diskGuard = memoryGuard ? { ...guard, socketPath: undefined } : guard;
+  if (guard && diskGuard) {
+    if (!preserveGuardState && !memoryGuard) {
+      writeManagedWorktreeGuardProtections(guard.protectionsFile, guard.protections);
+    }
+    protectedWrite(claudeHookGuardPath(file), claudeSettingsDocument(file, null, diskGuard));
   } else if (!preserveGuardState) {
     rmSync(claudeHookGuardPath(file), { force: true });
     rmSync(claudeHookProtectionsPath(file), { force: true });
   }
-  const contents = claudeSettingsDocument(file, manager, guard);
+  if (memoryGuard) {
+    memorySettingsDocuments.set(resolve(file), {
+      combined: claudeSettingsDocument(file, manager, guard),
+      guardOnly: claudeSettingsDocument(file, null, guard),
+    });
+  } else if (guard || !preserveGuardState) {
+    memorySettingsDocuments.delete(resolve(file));
+  }
+  const contents = claudeSettingsDocument(file, manager, diskGuard);
   protectedWrite(claudeHookTemplatePath(file), contents);
   protectedWrite(file, contents);
 }
@@ -367,8 +385,10 @@ export function removeClaudeHookFiles(sessionId: string, configDir = defaultHook
   guardStateDigests.delete(sessionId);
   compromisedGuardSessions.delete(sessionId);
   guardSockets.delete(sessionId);
+  guardMemoryLists.delete(sessionId);
   try {
     const settings = claudeHookSettingsPath(configDir, sessionId);
+    memorySettingsDocuments.delete(resolve(settings));
     const circuit = claudeHookCircuitPath(settings);
     for (const file of [
       settings,
@@ -722,21 +742,26 @@ export function provisionClaudeHooks(
           protections,
           ...(socketPath ? { socketPath } : {}),
         };
-        // Tripwire: compare what is on disk against the digest of what the runner last wrote,
-        // BEFORE overwriting it, so tampering is evident rather than silently repaired.
-        const baseline = guardStateDigests.get(spec.sessionId);
-        if (baseline && existsSync(protectionsFile) &&
-            !managedWorktreeGuardStateMatches(protectionsFile, baseline)) {
-          poisonClaudeGuardState(spec.sessionId, protectionsFile);
-          throw new Error("the protected worktree list was modified outside the runner");
+        if (guardAnswersFromMemory(socketPath)) {
+          // The list is the runner's own memory: there is no file to tripwire, and none is written.
+          guardMemoryLists.set(spec.sessionId, protections.map((entry) => ({ ...entry })));
+        } else {
+          // Tripwire: compare what is on disk against the digest of what the runner last wrote,
+          // BEFORE overwriting it, so tampering is evident rather than silently repaired.
+          const baseline = guardStateDigests.get(spec.sessionId);
+          if (baseline && existsSync(protectionsFile) &&
+              !managedWorktreeGuardStateMatches(protectionsFile, baseline)) {
+            poisonClaudeGuardState(spec.sessionId, protectionsFile);
+            throw new Error("the protected worktree list was modified outside the runner");
+          }
+          guardStateDigests.set(
+            spec.sessionId,
+            writeManagedWorktreeGuardProtections(protectionsFile, protections),
+          );
         }
         // The launch has to be PROVEN, not assumed: Claude blocks only on exit code 2, so a
         // sidecar that cannot start would silently wave every command through while the driver
         // stopped mediating on the strength of it.
-        guardStateDigests.set(
-          spec.sessionId,
-          writeManagedWorktreeGuardProtections(protectionsFile, protections),
-        );
         const verdict = verifiedGuardLaunch(candidate, config.verifyGuardLaunch);
         if (verdict.ok) guard = candidate;
         else log(`Claude managed worktree guard ${spec.sessionId}: launch self-test failed (${verdict.reason})`);
@@ -761,6 +786,7 @@ export function provisionClaudeHooks(
       if (guardRequested && !concurrentLaunch) {
         discardGuardArtifacts(file);
         guardStateDigests.delete(spec.sessionId);
+        guardMemoryLists.delete(spec.sessionId);
       }
     } else {
       try {
@@ -803,8 +829,10 @@ export function provisionClaudeHooks(
   const preserveGuardState = !guardRequested || (concurrentLaunch && !guard);
   const carriedGuard: ClaudeGuardHookOptions | null = preserveGuardState &&
       !compromisedGuardSessions.has(spec.sessionId) &&
-      describeManagedSettings(file)?.guard === true &&
-      guardStatePresent(claudeHookProtectionsPath(file))
+      (guardAnswersFromMemory(socketPath)
+        ? memorySettingsDocuments.has(resolve(file)) && guardMemoryLists.has(spec.sessionId)
+        : describeManagedSettings(file)?.guard === true &&
+          guardStatePresent(claudeHookProtectionsPath(file)))
     ? {
       launch: runnerReentryCommand(host, MANAGED_WORKTREE_GUARD_MODE),
       protectionsFile: claudeHookProtectionsPath(file),
@@ -926,6 +954,7 @@ function discardGuardArtifacts(file: string): void {
   // A protections file can also be left behind by a failed launch self-test, which writes it
   // before the guard is committed to.
   rmSync(claudeHookProtectionsPath(file), { force: true });
+  memorySettingsDocuments.delete(resolve(file));
   const described = describeManagedSettings(file);
   if (!described?.guard) return;
   rmSync(claudeHookGuardPath(file), { force: true });
@@ -946,8 +975,44 @@ function discardGuardArtifacts(file: string): void {
 
 const guardStateDigests = new Map<string, string>();
 const compromisedGuardSessions = new Set<string>();
-/** Sessions whose guard answers through the runner's verdict socket (#1336), and its path. */
+/** Sessions whose guard answers through the runner's verdict socket (#1336), and its address. */
 const guardSockets = new Map<string, string>();
+/**
+ * The protection list of every session whose guard answers from runner memory (#1336 slice 3): a
+ * launch the runner does not sandbox, asking an abstract-namespace socket. No file holds this list,
+ * so nothing a same-user process can reach decides a verdict. A session with no entry has no list,
+ * and its socket refuses every call — which is what an invalidated guard means here.
+ */
+const guardMemoryLists = new Map<string, ManagedWorktreeProtection[]>();
+/**
+ * The real settings documents of those same launches, keyed by the resolved settings path the
+ * persisted `--settings` argument names. `prepareClaudeHookArgs` hands Claude one of them INLINE, so
+ * the hook command comes from runner memory as well, and the file at that path is never opened.
+ */
+const memorySettingsDocuments = new Map<string, { combined: string; guardOnly: string }>();
+
+/** An abstract-namespace address: the list and the settings live in runner memory. */
+function guardAnswersFromMemory(socket: string | undefined): boolean {
+  return socket?.startsWith(MANAGED_WORKTREE_GUARD_ABSTRACT_PREFIX) === true;
+}
+
+/** Give a memory-mode session its list before the verdict socket is first asked (its self-test). */
+export function seedManagedWorktreeGuardMemory(
+  sessionId: string,
+  protections: readonly ManagedWorktreeProtection[],
+): void {
+  assertSafeSessionFileId(sessionId);
+  guardMemoryLists.set(sessionId, protections.map((entry) => ({ ...entry })));
+}
+
+/** The verdict socket's list loader for a memory-mode session. Throwing is a refusal. */
+export function managedWorktreeGuardMemoryProtections(sessionId: string): ManagedWorktreeProtection[] {
+  const protections = guardMemoryLists.get(sessionId);
+  if (!protections || compromisedGuardSessions.has(sessionId)) {
+    throw new Error("the runner holds no protected worktree list for this session");
+  }
+  return protections;
+}
 
 /** Testing seam: forget every remembered guard-state digest and compromise marker. */
 export function resetClaudeGuardState(): void {
@@ -955,6 +1020,8 @@ export function resetClaudeGuardState(): void {
   compromisedGuardSessions.clear();
   verifiedGuardLaunches.clear();
   guardSockets.clear();
+  guardMemoryLists.clear();
+  memorySettingsDocuments.clear();
 }
 
 export type ClaudeGuardRefreshOutcome =
@@ -986,6 +1053,7 @@ function guardStatePresent(file: string): boolean {
 
 function poisonClaudeGuardState(sessionId: string, file: string): boolean {
   guardStateDigests.delete(sessionId);
+  guardMemoryLists.delete(sessionId);
   compromisedGuardSessions.add(sessionId);
   try {
     rmSync(file, { force: true });
@@ -1011,10 +1079,15 @@ export function refreshClaudeGuardProtections(
   configDir = defaultHookConfigDir(),
 ): ClaudeGuardRefreshOutcome {
   if (!isSafeSessionFileId(sessionId)) return { state: "absent" };
+  // Runner memory: nothing outside the runner can have changed it, and a Map write cannot fail. A
+  // session can hold both forms for a while (a TUI opened under one, a later launch under the
+  // other), and each running provider reads its own, so both are kept in step.
+  const inMemory = guardMemoryLists.has(sessionId);
+  if (inMemory) guardMemoryLists.set(sessionId, protections.map((entry) => ({ ...entry })));
   const file = claudeHookSessionProtectionsPath(configDir, sessionId);
   // lstat, not exists: a dangling symlink planted where the protection list belongs is a guard
   // that has already been interfered with, not a guard that was never provisioned.
-  if (!guardStatePresent(file)) return { state: "absent" };
+  if (!guardStatePresent(file)) return inMemory ? { state: "refreshed" } : { state: "absent" };
   const reasonFor = (reason: string): ClaudeGuardRefreshOutcome =>
     poisonClaudeGuardState(sessionId, file)
       ? { state: "invalidated", reason }
@@ -1071,6 +1144,11 @@ export async function provisionCodexGuard(
     verifyGuardLaunch?: typeof verifyManagedWorktreeGuardLaunch;
     /** Seam for tests: enumerate the launch's effective Codex hooks. */
     readHookInventory?: typeof readCodexHookInventory;
+    /**
+     * The runner's abstract verdict socket for this session (#1336 slice 3). With it the list lives
+     * in runner memory and no protections file is written; without it the file decides, as before.
+     */
+    guardSocket?: string;
   },
   log: (message: string) => void,
   host: ClaudeHookHost = defaultClaudeHookHost(),
@@ -1101,22 +1179,39 @@ export async function provisionCodexGuard(
   let guardCommand: string;
   try {
     const launch = runnerReentryCommand(host, MANAGED_WORKTREE_GUARD_MODE);
-    const hookLaunch = { command: launch.command, args: [...launch.args, "--protections", protectionsFile] };
+    const fromMemory = guardAnswersFromMemory(config.guardSocket);
+    // The protections path stays in the command either way: it is what the guard-state veto takes
+    // the hook state directory from, and a sidecar given a socket never opens it.
+    const hookLaunch = {
+      command: launch.command,
+      args: [
+        ...launch.args,
+        "--protections", protectionsFile,
+        ...(fromMemory ? [MANAGED_WORKTREE_GUARD_SOCKET_FLAG, config.guardSocket!] : []),
+      ],
+    };
     override = codexGuardConfigOverride(hookLaunch);
     guardCommand = codexGuardCommandString(hookLaunch);
-    // Tripwire BEFORE overwriting, exactly as for Claude: tampering is made evident, not repaired.
-    const baseline = guardStateDigests.get(spec.sessionId);
-    if (baseline && existsSync(protectionsFile) &&
-        !managedWorktreeGuardStateMatches(protectionsFile, baseline)) {
-      poisonClaudeGuardState(spec.sessionId, protectionsFile);
-      return inactive("the protected worktree list was modified outside the runner");
+    if (fromMemory) {
+      // Codex's hook command is already argv-only, so with the list in runner memory nothing in
+      // the hook state directory decides this launch's verdicts.
+      guardMemoryLists.set(spec.sessionId, config.protections.map((entry) => ({ ...entry })));
+    } else {
+      // A TUI still open from a memory-mode launch keeps asking the socket, so its list stays.
+      // Tripwire BEFORE overwriting, exactly as for Claude: tampering is made evident, not repaired.
+      const baseline = guardStateDigests.get(spec.sessionId);
+      if (baseline && existsSync(protectionsFile) &&
+          !managedWorktreeGuardStateMatches(protectionsFile, baseline)) {
+        poisonClaudeGuardState(spec.sessionId, protectionsFile);
+        return inactive("the protected worktree list was modified outside the runner");
+      }
+      // Written even if this launch then refuses: a Codex TUI already open for this session loads
+      // the same file on every matched tool call, so it is refreshed and never retired here.
+      guardStateDigests.set(
+        spec.sessionId,
+        writeManagedWorktreeGuardProtections(protectionsFile, config.protections),
+      );
     }
-    // Written even if this launch then refuses: a Codex TUI already open for this session loads
-    // the same file on every matched tool call, so it is refreshed and never retired here.
-    guardStateDigests.set(
-      spec.sessionId,
-      writeManagedWorktreeGuardProtections(protectionsFile, config.protections),
-    );
     // Codex, like Claude, treats a hook that fails to START as a failed hook and runs the call.
     const verdict = verifiedGuardLaunch(
       { launch, protectionsFile, protections: config.protections },
@@ -1259,6 +1354,7 @@ export interface PreparedClaudeHookArgs {
 function claudeGuardStateTrusted(settingsFile: string): boolean {
   const sessionId = basename(settingsFile).slice(0, -SETTINGS_SUFFIX.length);
   if (compromisedGuardSessions.has(sessionId)) return false;
+  if (memorySettingsDocuments.has(resolve(settingsFile))) return guardMemoryLists.has(sessionId);
   const protectionsFile = claudeHookProtectionsPath(settingsFile);
   const baseline = guardStateDigests.get(sessionId);
   try {
@@ -1282,7 +1378,9 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
   let file = "";
   for (let candidate = 0; candidate < args.length - 1; candidate++) {
     const value = args[candidate + 1]!;
-    if (args[candidate] !== "--settings" || !selfDescribingManagedSettings(value)) continue;
+    // A memory-held document is recognised by the runner's own record, not by what is on disk.
+    if (args[candidate] !== "--settings" ||
+        !(memorySettingsDocuments.has(resolve(value)) || selfDescribingManagedSettings(value))) continue;
     index = candidate;
     file = value;
   }
@@ -1296,6 +1394,8 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
       guardActive: false,
     };
   }
+  const memory = memorySettingsDocuments.get(resolve(file));
+  if (memory) return prepareMemorySettingsArgs(args, index, file, memory, now);
   const described = describeManagedSettings(file);
   const hasGuard = described?.guard === true;
   const hookAskCapable = managedSettingsAskCapable(file);
@@ -1389,6 +1489,67 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
     healed,
     guardActive: hasGuard,
     guardStateDirectory: dirname(resolve(file)),
+  };
+}
+
+/**
+ * A single argv string on Linux is capped at 128 KiB (`MAX_ARG_STRLEN`); the documents the runner
+ * writes are a few KiB. One that would not fit is not launched at all, so the driver mediates.
+ */
+export const MAX_INLINE_SETTINGS_BYTES = 96 * 1024;
+
+/**
+ * The memory-held form of the pre-spawn step (#1336 slice 3).
+ *
+ * The persisted argv still names the settings PATH, which keeps every path-keyed mechanism intact.
+ * For the spawn itself that path is replaced by the document the runner holds, passed inline
+ * (`--settings <json>`, measured on claude 2.1.278), so Claude never opens a file in the hook state
+ * directory and nothing written there can change the hook command it runs. Nothing is healed,
+ * because nothing on disk is launched. The manager hook's circuit is the one thing still read from
+ * disk: it only chooses between the combined document and the guard-only one, and both carry the
+ * guard.
+ */
+function prepareMemorySettingsArgs(
+  args: string[],
+  index: number,
+  file: string,
+  memory: { combined: string; guardOnly: string },
+  now: number,
+): PreparedClaudeHookArgs {
+  const guardStateDirectory = dirname(resolve(file));
+  const circuit = readHookCircuitState(claudeHookCircuitPath(file));
+  const reprobePending = circuit.open && circuit.openedAt != null &&
+    now - circuit.openedAt >= CLAUDE_HOOK_CIRCUIT_COOLDOWN_MS;
+  const circuitHolds = (circuit.open && !reprobePending) || circuit.probeStartedAt != null;
+  const document = circuitHolds ? memory.guardOnly : memory.combined;
+  if (!claudeGuardStateTrusted(file) || Buffer.byteLength(document, "utf8") > MAX_INLINE_SETTINGS_BYTES) {
+    return {
+      args: [...args.slice(0, index), ...args.slice(index + 2)],
+      circuitOpen: circuit.open,
+      circuitReprobePending: false,
+      ...(circuit.open && circuit.openedAt != null ? { circuitOpenedAt: circuit.openedAt } : {}),
+      hookAskCapable: false,
+      healed: false,
+      guardActive: false,
+      guardStateDirectory,
+    };
+  }
+  let hookAskCapable = false;
+  try {
+    const env = (JSON.parse(memory.combined) as { env?: Record<string, unknown> }).env ?? {};
+    hookAskCapable = readCompatibleEnv(env, POLICY_HOOK_ENV.askCapable, LEGACY_POLICY_HOOK_ENV.askCapable) === "1";
+  } catch {
+    /* The runner serialized this document itself; an unreadable one simply claims no ask support. */
+  }
+  return {
+    args: [...args.slice(0, index + 1), document, ...args.slice(index + 2)],
+    circuitOpen: circuitHolds,
+    circuitReprobePending: !circuitHolds && reprobePending,
+    ...((circuitHolds || reprobePending) && circuit.openedAt != null ? { circuitOpenedAt: circuit.openedAt } : {}),
+    hookAskCapable,
+    healed: false,
+    guardActive: true,
+    guardStateDirectory,
   };
 }
 

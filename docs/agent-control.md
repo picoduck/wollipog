@@ -225,10 +225,13 @@ the provider at creation time, not changing the sandbox rule.
 > **Two separate rules, by execution isolation mode.** Where the runner sandboxes its providers
 > (`executionIsolation.mode` of `bwrap` or `seatbelt`), the runner's own sandbox hides the directory
 > from every provider. In the default `provider` mode the runner sandboxes nothing, and a **Codex**
-> launch denies the directory through Codex's own permission profile instead; a **Claude** launch in
-> that mode still has only the guard-state command-text veto in
-> [ADR 0012](adr/0012-managed-worktree-guard-hook.md). Issue #1336 stays open for Claude in
-> `provider` mode, and for MCP servers under every provider.
+> launch denies the directory through Codex's own permission profile instead. A **Claude** launch in
+> that mode has no OS boundary at all: the directory stays readable and writable to anything running
+> as the runner's user. What changed there (#1336 slice 3, native Linux only) is that **nothing in
+> the directory decides the guard's verdict any more** — see "The Guard's Verdict in `provider`
+> Mode". Reading it is still possible, and it still holds the manager policy hook's credential, so
+> issue #1336 stays open for Claude in `provider` mode and for MCP servers under every provider.
+> The veto and its history are in [ADR 0012](adr/0012-managed-worktree-guard-hook.md).
 
 The managed-worktree guard keeps its protection list in the runner's hook state directory
 (`<data dir>/hooks/<runner key>`), and the provider runs as the same OS user as the runner. A veto on
@@ -271,12 +274,13 @@ runs, against the list of the session that owns the socket:
 | --- | --- | --- | --- |
 | Runner `bwrap`, native Linux | Yes: reads, enumeration, writes, `git clean` | Verdict socket | Real-kernel test in the Platform Isolation Ubuntu job (`managed-worktree-guard-sandbox.integration.test.ts`) |
 | Runner `seatbelt`, native macOS | Yes: reads, enumeration, writes | Verdict socket | **macOS CI only** (`managed-worktree-guard-seatbelt.integration.test.ts`), not verified on a developer machine |
-| Runner `provider` (the default), Codex | **Yes, by Codex's own permission profile** (see below) | Protections file (Codex hooks run outside its sandbox) | `codex-permission-profile.test.ts` and `codex-permission-profile-launch.test.ts`, over behaviour measured on codex-cli 0.155.1 |
-| Runner `provider` (the default), Claude | **No** | Protections file, unchanged | Existing guard tests; the command-text veto is the only control |
+| Runner `provider` (the default), Codex structured launch | **Yes, by Codex's own permission profile** (see below) | No hook: the driver's own structured protection, from runner memory | `codex-permission-profile.test.ts` and `codex-permission-profile-launch.test.ts`, over behaviour measured on codex-cli 0.155.1 |
+| Runner `provider` (the default), Claude, native Linux | **No.** Readable and writable by the runner's OS user | **Runner memory, over an abstract verdict socket; the settings document is passed inline.** No file in the directory is consulted | `hook-settings.test.ts`, `managed-worktree-guard-socket.test.ts`, and a real claude 2.1.278 run (see below) |
+| Runner `provider`, Claude, macOS and Windows | **No** | Protections file and settings files, unchanged: neither platform has an abstract socket namespace | Existing guard tests; the command-text veto and the list tripwire are the only controls |
 | Direct WSL `bwrap` | No | No guard (WSL hook paths are not translated) | Unchanged |
 | `windows-job` | No: Job Objects do not restrict the filesystem | Protections file, unchanged | Unchanged |
 | `container` and `cloud` targets | Not reachable: the hook state directory is not in the workspace bind or snapshot | No guard (not provisioned there) | Unchanged |
-| Native TUI launches | Not by the runner, which does not sandbox a TUI. A native **Codex** TUI on Linux denies it through Codex's own permission profile when its configured sandbox is the plain `:workspace` built-in (see "Codex in `provider` Mode"); a Claude TUI does not | Protections file, or the session's socket when a sandboxed launch already provisioned one | Codex: `agent-tui-codex-permission-profile.test.ts`. Claude: unchanged |
+| Native TUI launches | Not by the runner, which does not sandbox a TUI. A native **Codex** TUI on Linux denies it through Codex's own permission profile when its configured sandbox is the plain `:workspace` built-in (see "Codex in `provider` Mode"); a Claude TUI does not | In `provider` mode on native Linux, Claude and Codex alike: runner memory over the abstract verdict socket. Elsewhere the protections file, or the session's path socket when a sandboxed launch already provisioned one | `agent-tui-memory-guard.test.ts` (real provisioning, real socket, real sidecar entry point), and a real Claude TUI under a pty. Codex deny: `agent-tui-codex-permission-profile.test.ts` |
 
 What the providers' own sandboxes can do in `provider` mode was measured (Linux, Claude Code 2.1.278,
 codex-cli 0.155.1). Claude's is not used; Codex's is, and carries the rule in `provider` mode:
@@ -315,6 +319,102 @@ Known limits of the runner-sandboxed form:
 - **The mask is bound at launch.** Like every other filesystem boundary here, it covers the entries
   that exist when the provider starts. The hook state directory is created before the sandbox is
   built, so nothing written into it later becomes visible.
+
+### The Guard's Verdict in `provider` Mode
+
+In `provider` mode nothing stands between the hook state directory and a process running as the
+runner's OS user: an MCP filesystem server, an interpreter under Claude, or a Codex launch that
+keeps its legacy policy. Until #1336 slice 3 that directory was also the **authority** for the
+guard. Two things in it decided whether a protected worktree could be removed:
+
+- **The protections list.** Rewriting it removed a protection for every later tool call. The digest
+  tripwire noticed only at the next spawn or refresh.
+- **Claude's settings document.** Measured with the runner's own functions: with the hook `command`
+  rewritten to `/bin/true` in the live file, the heal template, and the guard-only copy, and the
+  arguments left alone, `prepareClaudeHookArgs` still reported `guardActive: true`. The
+  self-description reads the arguments, never the command, and **no tripwire ever covered these
+  documents**. The next Claude spawn ran with a no-op hook and with mediation switched off.
+
+On a native Linux host launch in `provider` mode, neither is an authority now:
+
+- **The list lives in runner memory.** Provisioning and the live refresh write a map in the runner
+  process. No protections file is written for such a session, and one planted there is never read.
+- **The verdict comes over an abstract-namespace Unix socket.** The hook command carries
+  `--guard-socket @wollipog-guard-<name>`, and the sidecar sends the hook payload **and its own
+  environment** to the runner, which judges with the same decision function the file form runs.
+  Slice 1's path socket was not reused, because it does not hold here. Measured: a second process
+  of the same OS user unlinked the `0600` socket inside its `0700` directory, bound its own listener
+  at the same path, and the sidecar's next request got the forged answer. Under `bwrap` and
+  Seatbelt the sandbox binds that directory read-only, so the path form is sound there and is
+  unchanged. An abstract name has no filesystem entry to unlink, and a second bind while the runner
+  listens failed with `EADDRINUSE`. The name carries 192 random bits, is generated once per session
+  per runner process, and is never logged or written to disk.
+- **Claude gets its settings document inline.** The persisted launch arguments still name the
+  settings path, which keeps every path-keyed mechanism working. For the spawn itself,
+  `prepareClaudeHookArgs` replaces that path with the document the runner holds in memory
+  (`--settings <json>`, measured on claude 2.1.278: the hook ran and exit 2 blocked the call). Claude
+  therefore opens no file in the hook state directory, and nothing written there changes the hook
+  command it runs. The files still written there are the same documents **without** the socket:
+  if one were ever launched, its guard would find no list and refuse every matched call. Codex's
+  hook command was already argv-only (`-c hooks.PreToolUse=…`).
+- **Every failure to reach a verdict exits 2.** A closed socket (`ECONNREFUSED`, measured against a
+  real Claude run: `echo` was blocked), a timeout, an oversized or malformed answer, a request that
+  is not the sidecar's envelope, or a session for which the runner holds no list. The sidecar never
+  falls back to a file.
+- **The socket is proven before it is relied on.** Once per address, the runner runs the real
+  sidecar against the real socket with a payload the guard refuses only after loading the session's
+  list. If that fails, or the socket cannot be created, the launch keeps the file form exactly as it
+  was before this slice, and the runner log says so.
+
+Measured against the real CLIs with the runner's own provisioning (claude 2.1.278, codex-cli
+0.155.1, a throwaway repository and worktree). Before the Claude run, every document on disk had its
+hook command rewritten to `/bin/true` and an allow-everything list was planted:
+
+- Claude `-p` in `bypassPermissions`: `git worktree remove --force <worktree>` was refused with the
+  managed-worktree refusal, at the top level **and from a subagent**; `git status` and the
+  subagent's `echo` ran; the worktree was still there afterwards.
+- A real interactive Claude TUI under a pty, with the argv `prepareAgentTuiLaunch` builds: it
+  started with no settings error, ran the `PreToolUse` hook, showed the refusal, and left the
+  worktree in place.
+- `codex exec` with the arguments `provisionCodexGuard` builds: the removal was refused
+  (`Command blocked by PreToolUse hook`), `git status` ran, and the hook state directory stayed
+  **empty**.
+- A user's own settings combine exactly as they did with a file. Run both ways, a project
+  `.claude/settings.json` hook and the runner's hook both fired, and a hook from an earlier
+  `--settings` argument did not: Claude applies only the last `--settings`, inline or not. The #1303
+  rule that leaves a user-supplied `--settings` unshadowed while the session owns no worktree is
+  unchanged.
+
+What this does **not** deliver, stated plainly:
+
+- **It is not an OS boundary.** The #1336 criteria about reads failing at the OS level, walks from
+  an ancestor, `git clean -dfx`, and MCP filesystem tools are still **not met** for Claude in
+  `provider` mode. The directory can be read, enumerated, and deleted. Deleting it no longer
+  disarms or blocks a memory-held guard; it still disturbs the manager policy hook, below.
+- **Any local user can ask for a verdict.** An abstract socket has no permission bits, and its name
+  is listed in `/proc/net/unix`. A caller that connects learns deny or allow for a payload it
+  supplies, which is to say which paths are that session's managed worktrees. The protocol has no
+  request that changes anything, and a request names no session, so a socket answers only for the
+  session it was created for. A process of the runner's own user can query every session's socket;
+  that cannot be prevented against the same UID, and it is no more than reading the list file gave.
+- **The name is visible in the provider's own argv and errors.** It is in the inline document, so in
+  `/proc/<pid>/cmdline` of that session's provider. On an exit-2 refusal Claude itself prints the
+  whole hook command, name included, into the error the model reads, and so into that session's own
+  timeline. The sidecar's own message does not repeat it. Both disclose nothing beyond
+  `/proc/net/unix`.
+- **The manager policy hook still keeps its state there.** Its credential, acknowledgement, and
+  circuit files are read and rewritten by a provider-spawned re-entry. A reader gets that
+  credential, and a writer can open the circuit, which drops the manager hooks for the next spawn.
+  Neither touches the guard: an open circuit selects the guard-only document, which is also held in
+  memory.
+- **Not the runner itself.** A process of the same OS user can still kill the runner (every verdict
+  then refuses), rewrite the runner's own code on disk, or remove the worktree directly. None of
+  that is new, and no file-level design can close it; only an OS boundary or a separate user can.
+- **macOS, Windows, WSL, container, and cloud launches are unchanged.** There is no abstract socket
+  namespace outside Linux, and the file form with its list tripwire remains. The settings documents
+  there are still untripwired.
+- **An inline document must fit one argv string.** Linux caps a single argument at 128 KiB; the
+  documents are about 1 to 4 KiB. One above 96 KiB is not launched, and the driver mediates.
 
 ### Codex in `provider` Mode
 
@@ -381,7 +481,9 @@ Known limits of the `provider`-mode form:
 - **The guard hook is unaffected, by design.** Codex hooks run outside the sandbox: in a single run
   the model's own shell call reached the directory indirectly through a script and got
   `Permission denied`, while the `PreToolUse` hook process read its protection list normally. So the
-  sidecar needs no verdict socket here, unlike a runner-sandboxed launch.
+  sidecar did not NEED a verdict socket here. A Codex TUI on native Linux now asks the abstract
+  socket anyway (see "The Guard's Verdict in `provider` Mode"), because the deny does not cover the
+  unenforced launches in the table above, MCP servers, or anything else outside Codex's sandbox.
 - **Codex tells the model the path is denied.** Asked directly, it declines before issuing any tool
   call, naming the directory. Indirection through a script still runs and still hits the OS deny.
 - **The app-server binds one base per process.** A profile is selected by configuration and
@@ -401,9 +503,10 @@ Known limits of the `provider`-mode form:
   is compared. A setting that changes enforcement without appearing in that report would not be
   caught; the legacy `sandbox_permissions` key is one that does not appear, and whether 0.155.1
   still honours it was not measured.
-- **Claude in `provider` mode is unchanged.** Claude's own sandbox covers Bash only, needs `socat`,
-  and would confine writes and network for every session, so it is not used. There the command-text
-  veto remains the only control.
+- **Claude in `provider` mode has no OS boundary.** Claude's own sandbox covers Bash only, needs
+  `socat`, and would confine writes and network for every session, so it is not used. The
+  command-text veto remains the only control over READING the directory; what the directory no
+  longer does, on native Linux, is decide the guard's verdict.
 
 ## Typed Parent Control Decisions
 

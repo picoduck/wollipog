@@ -78,6 +78,7 @@ import {
   managedSettingsGuardSocket,
   provisionClaudeHooks,
   refreshClaudeGuardProtections,
+  seedManagedWorktreeGuardMemory,
   removeClaudeHookFiles,
   runnerSettingsArgument,
   sweepClaudeHookFiles,
@@ -89,6 +90,7 @@ import {
   verifyManagedWorktreeGuardInSandbox,
 } from "./managed-worktree-guard-socket.js";
 import { MANAGED_WORKTREE_GUARD_MODE } from "./managed-worktree-guard.js";
+import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
 import { runnerReentryCommand } from "./runner-reentry.js";
 import {
   defaultAgentControlHost,
@@ -358,11 +360,46 @@ const claudeHookHost = {
 };
 const agentControlHost = defaultAgentControlHost(config.dataDir);
 sweepClaudeHookFiles(claudeHookHost.configDir);
-// Verdict sockets for guards whose sandbox hides the hook state directory (#1336). Only a runner
-// that sandboxes its providers ever listens; in provider mode the guard reads its file as before.
+// Verdict sockets (#1336). A runner that sandboxes its providers serves a path socket inside the
+// hidden hook state directory. One that does not (`provider` mode) serves an abstract-namespace
+// socket on Linux and answers from its own memory; elsewhere the guard reads its file as before.
 const guardSockets = new ManagedWorktreeGuardSockets(claudeHookHost.configDir);
 const sandboxHidesGuardState = config.executionIsolation.mode === "bwrap" ||
   config.executionIsolation.mode === "seatbelt";
+const provenMemoryGuardSockets = new Set<string>();
+
+/**
+ * The abstract verdict socket for a launch the runner does not sandbox, proven once per address by
+ * running the real sidecar against it. `undefined` means the guard keeps reading its protections
+ * file, exactly as before this existed. The address is never logged.
+ */
+async function memoryGuardSocket(
+  meta: Pick<SessionMeta, "sessionId" | "context" | "executionTarget" | "worktreePath" | "repoPath">,
+  protections: () => readonly ManagedWorktreeProtection[],
+): Promise<string | undefined> {
+  if (sandboxHidesGuardState || process.platform !== "linux" || meta.context.kind !== "native" ||
+      (meta.executionTarget && meta.executionTarget.adapter !== "host")) return undefined;
+  try {
+    const address = await guardSockets.ensure(meta.sessionId, "abstract");
+    if (provenMemoryGuardSockets.has(address)) return address;
+    // The probe is refused only after the runner has loaded this session's list, so the list has
+    // to exist first. It is the live one, which provisioning is about to set again anyway.
+    seedManagedWorktreeGuardMemory(meta.sessionId, protections());
+    const verdict = await verifyManagedWorktreeGuardInSandbox({
+      launch: runnerReentryCommand(claudeHookHost, MANAGED_WORKTREE_GUARD_MODE),
+      protectionsFile: claudeHookSessionProtectionsPath(claudeHookHost.configDir, meta.sessionId),
+      socketPath: address,
+    }, "unsandboxed", meta.worktreePath ?? meta.repoPath, 20_000);
+    if (verdict.ok) {
+      provenMemoryGuardSockets.add(address);
+      return address;
+    }
+    log(`Managed worktree guard ${meta.sessionId}: verdict socket self-test failed (${verdict.reason}); the guard reads its file`);
+  } catch (error) {
+    log(`Managed worktree guard ${meta.sessionId}: verdict socket unavailable (${errText(error)}); the guard reads its file`);
+  }
+  return undefined;
+}
 sweepAgentControlFiles(agentControlHost.configDir);
 
 const runnerHostname = hostname();
@@ -642,6 +679,8 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
         managedWorktreeGuardSocket = null;
         log(`Claude managed worktree guard ${meta.sessionId}: verdict socket unavailable (${errText(error)})`);
       }
+    } else if (meta.driver === "claude-code") {
+      managedWorktreeGuardSocket = await memoryGuardSocket(meta, () => sessions.managedWorktreeProtections(meta));
     }
     provisionClaudeHooks(
       meta,
@@ -2302,6 +2341,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               protections: () => sessions.managedWorktreeProtections(
                 agentTuiSessionMeta(prepared.sessionId),
               ),
+              guardSocket: () => memoryGuardSocket(prepared, () => sessions.managedWorktreeProtections(
+                agentTuiSessionMeta(prepared.sessionId),
+              )),
             },
             log,
             claudeHookHost,
