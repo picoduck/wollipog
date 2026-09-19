@@ -394,11 +394,16 @@ async function memoryGuardSocket(
       provenMemoryGuardSockets.add(address);
       return address;
     }
-    log(`Managed worktree guard ${meta.sessionId}: verdict socket self-test failed (${verdict.reason}); the guard reads its file`);
+    log(`Managed worktree guard ${meta.sessionId}: verdict socket self-test failed (${withoutGuardSocketName(verdict.reason)}); the guard reads its file`);
   } catch (error) {
-    log(`Managed worktree guard ${meta.sessionId}: verdict socket unavailable (${errText(error)}); the guard reads its file`);
+    log(`Managed worktree guard ${meta.sessionId}: verdict socket unavailable (${withoutGuardSocketName(errText(error))}); the guard reads its file`);
   }
   return undefined;
+}
+
+/** A failed bind spells the abstract name out in its message; the runner log must not (review CR-1.2). */
+function withoutGuardSocketName(text: string): string {
+  return text.replace(/wollipog-guard-[A-Za-z0-9_-]+/gu, "<verdict socket>");
 }
 sweepAgentControlFiles(agentControlHost.configDir);
 

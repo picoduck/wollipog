@@ -143,8 +143,12 @@ async function provisionAgentTuiCodexManagedWorktreeGuard(
   host: ClaudeHookHost,
   cwd: string,
 ): Promise<AgentTuiGuardProvisioning> {
-  const protections = config.protections();
+  // Refuses a deleted session before a socket is opened for it, exactly as the Claude form does.
+  config.protections();
   const guardSocket = await config.guardSocket?.(spec.sessionId);
+  // Resolved AFTER the wait: a worktree the session acquired meanwhile was put into the live list
+  // by the refresh, and provisioning must not overwrite that with the older snapshot (review CR-1.1).
+  const protections = config.protections();
   const guard = await provisionCodexGuard(
     spec,
     {

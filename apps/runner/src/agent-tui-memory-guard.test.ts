@@ -20,6 +20,7 @@ import { provisionAgentTuiManagedWorktreeGuard } from "./agent-tui-guard.js";
 import type { CodexHookEntry, CodexHookInventoryProbe } from "./codex-managed-worktree-guard.js";
 import {
   claudeHookSessionProtectionsPath,
+  managedWorktreeGuardMemoryProtections,
   refreshClaudeGuardProtections,
   resetClaudeGuardState,
   seedManagedWorktreeGuardMemory,
@@ -91,7 +92,14 @@ function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
 }
 
 /** The wiring `index.ts` gives `prepareAgentTuiLaunch`, with the verdict socket it now supplies. */
-function dependencies(dir: string, sockets: ManagedWorktreeGuardSockets, logs: string[]) {
+function dependencies(
+  dir: string,
+  sockets: ManagedWorktreeGuardSockets,
+  logs: string[],
+  protections: () => typeof PROTECTED = () => PROTECTED,
+  /** Runs while the socket is being prepared, before provisioning reads the list. */
+  duringSocketWait: () => void = () => {},
+) {
   return {
     controlPlaneProtocolVersion: PROTOCOL_VERSION,
     platform: "linux" as const,
@@ -107,7 +115,7 @@ function dependencies(dir: string, sockets: ManagedWorktreeGuardSockets, logs: s
         controlPlaneUrl: "ws://127.0.0.1:4317/runner",
         controlPlaneProtocolVersion: PROTOCOL_VERSION,
         enabled: false,
-        protections: () => PROTECTED,
+        protections,
         verifyGuardLaunch: () => ({ ok: true as const }),
         readCodexHookInventory: async (probe: CodexHookInventoryProbe): Promise<CodexHookEntry[]> => {
           const command = /command=("(?:[^"\\]|\\.)*")/u.exec(probe.args[probe.args.length - 1]!)?.[1];
@@ -121,8 +129,10 @@ function dependencies(dir: string, sockets: ManagedWorktreeGuardSockets, logs: s
         },
         platform: "linux",
         guardSocket: async (sessionId) => {
-          seedManagedWorktreeGuardMemory(sessionId, PROTECTED);
-          return sockets.ensure(sessionId, "abstract");
+          seedManagedWorktreeGuardMemory(sessionId, protections());
+          const address = await sockets.ensure(sessionId, "abstract");
+          duringSocketWait();
+          return address;
         },
       },
       (line) => logs.push(line),
@@ -217,3 +227,21 @@ test("a Codex TUI in provider mode asks the same socket, with no list on disk", 
   assert.ok(refused.stdout.includes(MANAGED_WORKTREE_REFUSAL));
   assert.deepEqual(await sidecar(hookArgs, "git status"), { stdout: "", stderr: "", code: 0 });
 });
+
+for (const driver of ["claude-code", "codex-app-server"] as const) {
+  test(`a ${driver} TUI provisions the list as it is AFTER the socket wait, not a snapshot from before (review CR-1.1)`, { skip: !LINUX }, async () => {
+    // The socket proof can take seconds. A worktree the session acquires meanwhile reaches the live
+    // list through the refresh; provisioning must not overwrite it with the older snapshot.
+    const { dir, sockets } = fixture();
+    const later = { worktreePath: "/repo-worktrees/created-during-the-wait", repoPath: REPO };
+    let live = PROTECTED;
+    const launch = await prepareAgentTuiLaunch(
+      meta(driver === "claude-code" ? {} : {
+        agentId: "codex", driver, command: "codex", args: [], config: { permissionMode: "danger-full-access" },
+      }),
+      dependencies(dir, sockets, [], () => live, () => { live = [...PROTECTED, later]; }),
+    );
+    assert.ok(launch);
+    assert.deepEqual(managedWorktreeGuardMemoryProtections("s1336"), [...PROTECTED, later]);
+  });
+}
