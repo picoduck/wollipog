@@ -401,7 +401,7 @@ export function clearPanelScratchIf(
   if (panelScratchRevision(scope, key) !== revision) return;
   if (readPanelScratch(scope, key) !== expected) return;
   writePanelScratch(scope, key, null);
-  consumedRevisions.set(consumedListenerKey(scope, key), revision);
+  consumedRevisions.set(consumedListenerKey(scope, key), { revision, leaveShown });
   if (leaveShown) return;
   // A body mounted since the draft was consumed restored it into its own state, and would show it
   // — and write it straight back — until told (#1284). Removing the stored copy is only half of
@@ -412,15 +412,19 @@ export function clearPanelScratchIf(
 }
 
 /**
- * The revision each key last had consumed. A body can restore a value and then have it consumed
- * before its effects have run — too early to have been listening, and early enough that its
- * write-back would put the sent text straight back. Revisions are global stamps, so a body that
- * restored exactly this one is holding exactly what was consumed. One entry per key ever consumed.
+ * The revision each key last had consumed, and whether the consumer asked for it to stay on screen.
+ * A body can restore a value and then have it consumed before its effects have run — too early to
+ * have been listening, and early enough that its write-back would put the sent text straight back.
+ * Revisions are global stamps, so a body that restored exactly this one is holding exactly what was
+ * consumed. One entry per key ever consumed.
  */
-const consumedRevisions = new Map<string, number>();
+const consumedRevisions = new Map<string, { revision: number; leaveShown: boolean }>();
 
-function wasConsumed(scope: string, key: string, revision: number): boolean {
-  return consumedRevisions.get(consumedListenerKey(scope, key)) === revision;
+/** How the value a body restored was consumed since, or null when it was not. */
+function consumedAs(scope: string, key: string, revision: number): "cleared" | "shown" | null {
+  const consumed = consumedRevisions.get(consumedListenerKey(scope, key));
+  if (consumed?.revision !== revision) return null;
+  return consumed.leaveShown ? "shown" : "cleared";
 }
 
 /** Bodies currently showing one scope's value, told when that value is consumed out from under them. */
@@ -633,12 +637,16 @@ function usePanelScratchValue<T extends string>(
 
   const { scope: liveScope, key: liveKey, value, dirty, restoredRevision } = current;
   useEffect(() => {
-    if (restoredRevision !== null && wasConsumed(liveScope, liveKey, restoredRevision)) {
+    const consumed = restoredRevision === null ? null : consumedAs(liveScope, liveKey, restoredRevision);
+    if (consumed !== null) {
       // Consumed between this body restoring it and this effect running: writing it back would
-      // resurrect sent text in the store and, through it, after a reload.
-      setEntry((prior) => prior.restoredRevision === restoredRevision
-        ? { ...prior, value: prior.fallback, dirty: false, restoredRevision: null }
-        : prior);
+      // resurrect sent text in the store and, through it, after a reload. A value its consumer left
+      // on screen stays there, unstored, exactly as it does in a body that was already listening.
+      if (consumed === "cleared") {
+        setEntry((prior) => prior.restoredRevision === restoredRevision
+          ? { ...prior, value: prior.fallback, dirty: false, restoredRevision: null }
+          : prior);
+      }
       return;
     }
     syncPanelScratch(liveScope, liveKey, dirty ? value : null, retention);

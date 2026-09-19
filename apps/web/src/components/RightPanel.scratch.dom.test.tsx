@@ -21,9 +21,15 @@ import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import {
   PANEL_SCRATCH_SESSION_LIMIT,
   clearPanelScratch,
+  clearPanelScratchIf,
   dropPanelScratchMemory,
+  panelScratchRevision,
   panelScratchScopeCount,
+  panelScratchScopeKey,
+  readPanelScratch,
+  writePanelScratch,
 } from "../right-panel-scratch.js";
+import { ReviewPanel } from "./ReviewPanel.js";
 import { RightPanel, useRightPanelState, type RightPanelState } from "./RightPanel.js";
 import type { GitStatus } from "./useGitStatus.js";
 
@@ -896,5 +902,49 @@ test("text typed while the request is in flight is a new draft and survives it",
   } finally {
     releaseGit?.();
     await panel.dispose();
+  }
+});
+
+/**
+ * Cross-model review CR-1.1 on #1409. A commit can land after a remounted Review body restored the
+ * message but before that body's effects run — too early for it to be listening. The stored copy
+ * must still not be written back, and the message must still stay on screen, exactly as it does in
+ * a body that was already mounted when the commit landed.
+ */
+test("a commit message consumed before the remounted body's effects run stays shown but unstored", async () => {
+  const scope = panelScratchScopeKey("session-1");
+  writePanelScratch(scope, "review.commitMessage", "fix: committed mid-remount", "draft");
+  const committedRevision = panelScratchRevision(scope, "review.commitMessage");
+
+  /** Renders after the body in the same pass, so it runs after the restore and before any effect. */
+  function LandTheCommit() {
+    clearPanelScratchIf(scope, "review.commitMessage", "fix: committed mid-remount", committedRevision,
+      { leaveShown: true });
+    return null;
+  }
+
+  const host = domWindow.document.createElement("div");
+  domWindow.document.body.append(host);
+  const container = host as unknown as HTMLElement;
+  const root = createRoot(container as unknown as Element);
+  try {
+    await act(async () => {
+      root.render(
+        <ApiProvider client={client}><StoreProvider connection={connection}>
+          <ReviewPanel session={sessionOf("session-1")} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
+            git={git} onOpenSourceLocation={() => {}} />
+          <LandTheCommit />
+        </StoreProvider></ApiProvider>,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(commitInput({ container } as Panel).value, "fix: committed mid-remount",
+      "the committed message stays on screen for the next commit");
+    assert.equal(readPanelScratch(scope, "review.commitMessage"), undefined, "but it is not written back");
+    dropPanelScratchMemory();
+    assert.equal(readPanelScratch(scope, "review.commitMessage"), undefined, "nor restored by a reload");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
   }
 });
