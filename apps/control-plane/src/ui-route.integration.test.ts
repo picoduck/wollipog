@@ -1923,6 +1923,13 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   });
   assert.equal(runnerInbox.has((message) => message.type === "start_session" &&
     (message.spec as { sessionId?: string } | undefined)?.sessionId === "session-pre-v76"), false);
+  // A session that no longer exists has no archive state to report. An `archived: false` receipt
+  // here would tell the client the session was already restored.
+  const missingRestore = await ownerFetch("/api/sessions/session-deleted-before-restore/unarchive-and-restart", {
+    method: "POST",
+  });
+  assert.equal(missingRestore.status, 404);
+  assert.deepEqual(Object.keys(await missingRestore.json() as Record<string, unknown>), ["error"]);
 });
 
 test("legacy workspace rename cannot bypass durable Project management authority", { timeout: 30_000 }, async (t) => {
