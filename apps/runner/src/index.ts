@@ -742,6 +742,7 @@ sessions.setWorktreeShellRetirement((sessionId, context, path) =>
 // list trusted; SessionManager acts on the outcome (fail closed, and stop the provider when the
 // state could not even be retired).
 sessions.setGuardStateSandbox({
+  hookStateDir: claudeHookHost.configDir,
   // Everything in the hook state directory is hidden; the session gets back, read-only, only the
   // settings documents Claude reads at start and its own verdict socket directory.
   mask: (meta) => {
@@ -2263,6 +2264,8 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             // Even the no-turn MCP configuration probe may initialize provider HOME.
             sessions.acquireAgentTuiProviderHome(prepared);
           },
+          // A Codex TUI denies the runner's hook state directory through its own sandbox (#1336).
+          hookStateDir: claudeHookHost.configDir,
           // The TUI is a spawn like any other: it gets the same fresh settings document and the
           // same live protection list a runner-driven launch gets (#1337).
           provisionManagedWorktreeGuard: (prepared, cwd) => provisionAgentTuiManagedWorktreeGuard(
