@@ -283,6 +283,24 @@ matcher: both are defeated by indirection (a script file, an interpreter, an une
 It raises the cost and makes tampering visible; it is not enforcement. Enforcement belongs at the
 sandbox boundary (#1302).
 
+Amended by #1336: **where the runner sandboxes the provider, the sandbox is now the primary
+control, and the veto above is defence in depth.** Three attempts to close this gap by command
+text (#1371, #1403, and the abandoned draft #1423) took 16 review rounds, and nearly every round
+found a new fail-open. The classes command text could not close included walkers it did not model,
+`git clean -dfx`, option values the shell rewrites, file-valued options naming a symlink, and
+indirection. Under runner `bwrap` and Seatbelt the hook state directory is now hidden from the
+provider and from everything it spawns, the guard sidecar included. So the sidecar no longer reads
+the list: it asks a per-session Unix socket the runner serves, and the runner judges it with
+`runManagedWorktreeGuardDecision`, the same function the file-mode sidecar runs. The launch proves
+this from inside its own sandbox before the provider starts, and a guard that cannot reach the
+runner fails the launch rather than every tool call. The mechanism, its failure behaviour, and the
+per-platform matrix are in docs/agent-control.md ("Runner Hook State at the Sandbox Boundary").
+
+This does not change the veto, the carve-outs above, the tripwire, or anything else in
+`provider` mode. `provider` is the default and has no runner boundary, so there the veto is still
+the only control over the hook state directory, and #1336 remains open for it. #1398, the
+operand-less recursive walk from an ancestor, is closed at the OS level for sandboxed launches only.
+
 Measured on claude 2.1.270: the CLI does NOT re-read `--settings` mid-process. A hook that
 replaced the effective settings file with `{"hooks":{}}` on its first invocation was still invoked
 for the second and third Bash calls of the same run. So a provider cannot remove the hook from the
@@ -419,6 +437,7 @@ control-channel veto keeps reading the live inventory.
 - One extra short-lived process runs before each Bash, Edit, MultiEdit, Write, NotebookEdit, Read,
   Grep, and Glob call in a guarded session — since #1303, every guardable session.
 - The runner's hook state directory is invisible to the provider: reading it is refused as firmly
-  as writing it.
+  as writing it. In `provider` mode that refusal is the command-text veto. Under runner `bwrap` and
+  Seatbelt it is the sandbox itself (#1336).
 - Native hooks remain a cooperative same-user governance mechanism, not an OS isolation boundary,
   exactly as §2.3.1 already states.

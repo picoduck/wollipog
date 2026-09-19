@@ -364,8 +364,12 @@ test("native Linux isolation CI proves the managed-worktree read-only rule again
 
   assert.match(platform, /apt-get install -y bubblewrap\r?$/mu,
     "the Linux leg must install the sandbox it claims to enforce");
-  assert.match(platform, /node --import tsx --test --test-reporter=tap apps\/runner\/src\/managed-worktree-sandbox\.integration\.test\.ts < \/dev\/null/u,
-    "the enforcement test must run with stdin closed so a sandboxed child cannot block the job");
+  assert.match(platform, /node --import tsx --test --test-reporter=tap apps\/runner\/src\/managed-worktree-sandbox\.integration\.test\.ts apps\/runner\/src\/managed-worktree-guard-sandbox\.integration\.test\.ts < \/dev\/null/u,
+    "the enforcement tests must run with stdin closed so a sandboxed child cannot block the job");
+  assert.match(platform, /node --import tsx --test --test-reporter=tap apps\/runner\/src\/managed-worktree-guard-seatbelt\.integration\.test\.ts < \/dev\/null/u,
+    "the Seatbelt hook-state mask (#1336) can only be verified on the macOS leg, so it must run there");
+  assert.equal(platform.match(/grep -q '\^# skipped 0\$'/gu)?.length, 2,
+    "neither sandbox's enforcement test may pass by skipping");
   assert.match(platform, /grep -q '\^# skipped 0\$'/u,
     "a host that cannot create a user namespace must fail the job rather than report skipped coverage");
 });

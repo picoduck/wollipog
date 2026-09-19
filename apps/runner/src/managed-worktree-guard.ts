@@ -20,12 +20,18 @@
  *
  * This process runs before every Bash tool call, so it stays dependency-light: no network, no
  * control-plane round trip, no credentials. Anything it cannot evaluate confidently BLOCKS.
+ *
+ * Inside a runner-owned sandbox the hook state directory is hidden from the provider and from
+ * everything it spawns, this sidecar included (#1336). There the hook command carries
+ * `--guard-socket`, and the sidecar hands its payload to a per-session Unix socket the runner
+ * serves from outside the sandbox (managed-worktree-guard-socket.ts) instead of reading the list.
  */
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { connect } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import {
   GUARD_STATE_FILE_TOOLS,
@@ -220,10 +226,82 @@ export function managedWorktreeGuardProtectionsArgument(argv: readonly string[])
   return (index >= 0 ? argv[index + 1] : undefined) ?? null;
 }
 
+export const MANAGED_WORKTREE_GUARD_SOCKET_FLAG = "--guard-socket";
+/** A guard verdict is a local file read and a classification; anything slower is a stuck runner. */
+export const MANAGED_WORKTREE_GUARD_SOCKET_TIMEOUT_MS = 30_000;
+const MAX_VERDICT_BYTES = 256 * 1024;
+
+/**
+ * The runner's verdict socket for this session (#1336), present only when the launch runs inside a
+ * runner-owned sandbox that hides the hook state directory. Its presence is a commitment: the
+ * sidecar then asks the runner and never reads the protections file, which it cannot see.
+ */
+export function managedWorktreeGuardSocketArgument(argv: readonly string[]): string | null | undefined {
+  const index = argv.indexOf(MANAGED_WORKTREE_GUARD_SOCKET_FLAG);
+  if (index < 0) return undefined;
+  const value = argv[index + 1];
+  return value && !value.startsWith("--") ? value : null;
+}
+
 export interface ManagedWorktreeGuardOutcome {
   stdout: string;
   stderr: string;
   exitCode: number;
+}
+
+/** A verdict from the runner is exactly the outcome shape, and only the two exit codes Claude and
+ * Codex give a meaning to. Anything else is not a verdict. */
+export function parseManagedWorktreeGuardVerdict(text: string): ManagedWorktreeGuardOutcome {
+  const parsed = JSON.parse(text) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("verdict is not an object");
+  const { stdout, stderr, exitCode } = parsed as Record<string, unknown>;
+  if (typeof stdout !== "string" || typeof stderr !== "string" || (exitCode !== 0 && exitCode !== 2)) {
+    throw new Error("verdict has an unexpected shape");
+  }
+  return { stdout, stderr, exitCode };
+}
+
+/**
+ * Ask the runner to judge one hook payload. The runner judges it against the protection list of
+ * the session that owns this socket, with the same `runManagedWorktreeGuardDecision` a file-mode
+ * sidecar runs. Every failure — no socket, a refused or reset connection, a timeout, an oversized
+ * or malformed answer — rejects, and the caller turns that into exit 2.
+ */
+export function requestManagedWorktreeGuardVerdict(
+  socketPath: string,
+  hookInput: string,
+  timeoutMs = MANAGED_WORKTREE_GUARD_SOCKET_TIMEOUT_MS,
+): Promise<ManagedWorktreeGuardOutcome> {
+  return new Promise((resolvePromise, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let settled = false;
+    const finish = (error: Error | null, outcome?: ManagedWorktreeGuardOutcome) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      if (error) reject(error);
+      else resolvePromise(outcome!);
+    };
+    const socket = connect(socketPath);
+    const timer = setTimeout(() => finish(new Error("the runner did not answer in time")), timeoutMs);
+    socket.on("connect", () => socket.end(hookInput));
+    socket.on("data", (chunk: Buffer) => {
+      total += chunk.length;
+      if (total > MAX_VERDICT_BYTES) finish(new Error("the runner's answer is too large"));
+      else chunks.push(chunk);
+    });
+    socket.on("end", () => {
+      try {
+        finish(null, parseManagedWorktreeGuardVerdict(Buffer.concat(chunks).toString("utf8")));
+      } catch (error) {
+        finish(new Error(`the runner's answer is not a verdict: ${(error as Error).message}`));
+      }
+    });
+    socket.on("error", (error) => finish(error));
+    socket.on("close", () => finish(new Error("the runner closed the connection without a verdict")));
+  });
 }
 
 export function runManagedWorktreeGuardDecision(
@@ -284,10 +362,31 @@ export async function runManagedWorktreeGuardCli(
   let outcome: ManagedWorktreeGuardOutcome;
   try {
     const hookInput = await readAllStdin(io.stdin ?? process.stdin);
-    outcome = runManagedWorktreeGuardDecision(
-      hookInput,
-      managedWorktreeGuardProtectionsArgument(argv),
-    );
+    const socketPath = managedWorktreeGuardSocketArgument(argv);
+    if (socketPath === null) {
+      outcome = {
+        stdout: "",
+        stderr: `${MANAGED_WORKTREE_REFUSAL} (managed worktree guard was launched with an empty verdict socket)\n`,
+        exitCode: 2,
+      };
+    } else if (socketPath !== undefined) {
+      // Sandboxed launch: the protections file is hidden from this process by design, so there is
+      // nothing to fall back to. An unreachable runner is a refusal, never a pass.
+      try {
+        outcome = await requestManagedWorktreeGuardVerdict(socketPath, hookInput);
+      } catch (error) {
+        outcome = {
+          stdout: "",
+          stderr: `${MANAGED_WORKTREE_REFUSAL} (managed worktree guard could not get a verdict from the runner: ${(error as Error).message})\n`,
+          exitCode: 2,
+        };
+      }
+    } else {
+      outcome = runManagedWorktreeGuardDecision(
+        hookInput,
+        managedWorktreeGuardProtectionsArgument(argv),
+      );
+    }
   } catch (error) {
     outcome = {
       stdout: "",

@@ -112,6 +112,19 @@ import { assertExecutionIsolationContextSupported } from "./execution-isolation-
 import { wslBwrapSessionRoot } from "./wsl-bwrap-launcher.js";
 import { supportsNativeOrchestratorBoundary } from "./orchestrator-preset.js";
 import type { SpawnIsolation } from "./spawn.js";
+import type { GuardStateMask } from "./managed-worktree-guard-socket.js";
+
+/** Runner-local wiring for the hook state directory at the sandbox boundary (#1336). */
+export interface GuardStateSandbox {
+  /** What a native bwrap/Seatbelt launch of this session hides, and what it re-exposes. */
+  mask: (meta: SessionMeta) => GuardStateMask;
+  /** `undefined` when this launch carries no socket-mode guard, so there is nothing to prove. */
+  verify: (
+    meta: SessionMeta,
+    isolation: SpawnIsolation | undefined,
+    cwd: string,
+  ) => Promise<{ ok: true } | { ok: false; reason: string } | undefined>;
+}
 import type { SubscriptionUsageProbeAuthorization } from "./subscription-usage.js";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import { cleanupPiExternalSession } from "./external/sources.js";
@@ -1033,6 +1046,8 @@ export class SessionManager {
     resolves: Array<(result: { accepted: boolean; auditId: string; eventSeq?: number; error?: string }) => void>;
     timer: ReturnType<typeof setTimeout>;
   }>();
+  /** Runner-local hook state directory mask and in-sandbox guard probe (#1336). */
+  private guardStateSandbox?: GuardStateSandbox;
   /** Runner-local mirror of the live protection set consulted by the Claude guard hook. */
   private refreshManagedWorktreeGuard?: (
     meta: SessionMeta,
@@ -1440,6 +1455,13 @@ export class SessionManager {
   private attributedWorktreeForPath(meta: SessionMeta, path: string): SessionWorktreeView | undefined {
     return this.attributedWorktrees(meta)
       .find((worktree) => sameWorktreePath(meta.context, worktree.path, path));
+  }
+
+  /** Install the runner-local description of the hook state directory a runner-owned sandbox
+   * hides from the provider, and the in-sandbox guard probe that must pass before a launch that
+   * relies on the guard's verdict socket starts (#1336). */
+  setGuardStateSandbox(sandbox: GuardStateSandbox): void {
+    this.guardStateSandbox = sandbox;
   }
 
   /** Install the runner-local writer that mirrors the live protection set for the Claude
@@ -6341,6 +6363,13 @@ export class SessionManager {
         await this.ensureProviderStateLayout(meta, launchGeneration);
       }
       isolation = await this.resolveLaunchIsolation(meta, cwd, launchGeneration);
+      // A guard that answers through the verdict socket has to be proven from inside this exact
+      // sandbox. Failing here is the deliberate outcome: the session reports why it cannot start,
+      // instead of launching a provider whose every matched tool call would be refused.
+      const guardProbe = await this.guardStateSandbox?.verify(meta, isolation, cwd);
+      if (guardProbe && !guardProbe.ok) {
+        throw new Error(`the managed worktree guard cannot reach the runner from inside the sandbox (${guardProbe.reason})`);
+      }
       const runtimeSetupEnvironment = this.worktreeSetupRuntimeEnvironment(
         isolation,
         setupEnvironment,
@@ -6773,6 +6802,14 @@ export class SessionManager {
     const readOnlyPaths = meta.context.kind === "native"
       ? managedWorktreeReadOnlyPaths(this.managedWorktreeProtections(meta))
       : [];
+    // The runner's hook state directory is hidden from every native sandboxed launch (#1336),
+    // whatever the driver: nothing a provider runs has a use for it, and only the guard's own
+    // re-entry needed it, which now asks the runner instead. Native only for the same reason as
+    // above; the modes that cannot express it are documented in docs/agent-control.md.
+    const guardStateMask = meta.context.kind === "native" &&
+        (this.executionIsolation.mode === "bwrap" || this.executionIsolation.mode === "seatbelt")
+      ? this.guardStateSandbox?.mask(meta)
+      : undefined;
     return this.requestedWorktreeIsolation(meta).then((additionalWritableRoots) => this.resolveIsolation(this.executionIsolation, meta.context, {}, {
       driver: meta.driver,
       dataDir: this.stateDir,
@@ -6780,6 +6817,7 @@ export class SessionManager {
       sessionId: meta.sessionId,
       cwd,
       ...(readOnlyPaths.length ? { readOnlyPaths } : {}),
+      ...(guardStateMask ? { guardStateMask } : {}),
       ...(this.strictProjectIsolation(meta) ? { orchestratorScratchOnly: true } : {}),
       ...((additionalWritableRoots.length || meta.adoptedProviderState)
         ? { additionalWritableRoots: [
