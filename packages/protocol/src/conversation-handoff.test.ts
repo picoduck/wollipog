@@ -6,7 +6,7 @@ import type { AgentDefinition, SessionEventPayload, PromptImageReference } from 
 const agent: AgentDefinition = {
   id: "claude", name: "Claude", driver: "claude-code", command: "claude", args: [], env: {},
   available: true, authStatus: "authenticated",
-  capabilities: { models: [{ id: "model", name: "Model", inputModalities: ["text", "image"] }],
+  capabilities: { models: [{ id: "model", displayName: "Model", inputModalities: ["text", "image"] }],
     effortLevels: ["high"], permissionModes: ["default"], slashCommands: [], supportsImages: true, supportsApprovals: true },
 };
 const events = (...payloads: SessionEventPayload[]) => payloads.map((payload, i) => ({ seq: i + 1, payload }));
