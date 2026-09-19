@@ -57,9 +57,11 @@ Only the current owner may resolve the exact pending occurrence. Authentication,
 persistent grants, governance, budgets, and tool guardrails remain human-only.
 If an exact armed PR merge command already succeeded but its approved occurrence remained
 unconsumed, use `reconcile_workflow_decision` with that occurrence's unchanged resource snapshot.
-It proves the exact completed admission, provider command, and merged forge head; it never reruns the
-command. Resume the same App Server session first, and treat any unavailable or mismatched proof as
-a blocker rather than requesting a replacement approval or replaying the action.
+It never reruns the command. For a Codex App Server child it proves the exact completed admission,
+provider command, and merged forge head; resume the same App Server session first. A Claude Code
+child's enqueue produces no permission receipt in auto or Full Access mode, so call it once the
+forge reports the PR merged; its proof is that merged approved head. Treat any unavailable or
+mismatched proof as a blocker rather than requesting a replacement approval or replaying the action.
 
 Record each proposed follow-up with `record_campaign_follow_up` before starting it. Server-side
 repository/title normalization deduplicates recommendations across children. `Recommend Only`
