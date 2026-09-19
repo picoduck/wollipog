@@ -1,4 +1,5 @@
 import {
+  AGENT_SPAWN_OBSERVATION_CAP,
   pendingRequests,
   type ChildSessionRegistryEntry,
   type ChildSessionRegistryPage,
@@ -37,7 +38,8 @@ export type StructuredAgentSpawnObservation = Pick<ToolCall,
 export function collapseAgentSpawnObservations(
   observations: readonly StructuredAgentSpawnObservation[],
 ): StructuredAgentSpawnObservation | null {
-  if (observations.length < 1 || observations.length > 2 || observations.some((value) => value.toolKind !== "agent")) return null;
+  if (observations.length < 1 || observations.length >= AGENT_SPAWN_OBSERVATION_CAP ||
+      observations.some((value) => value.toolKind !== "agent")) return null;
   if (observations.length === 2) {
     const [partial, full] = observations;
     if (partial!.toolCallId !== full!.toolCallId || partial!.status !== "pending" || full!.status !== "in_progress" ||
@@ -105,7 +107,7 @@ export class ChildSessionRegistryProjector {
         };
         if (candidates.has(payload.toolCallId)) {
           const observations = this.spawns.get(payload.toolCallId) ?? [];
-          if (observations.length < 3) observations.push(call);
+          if (observations.length < AGENT_SPAWN_OBSERVATION_CAP) observations.push(call);
           this.spawns.set(payload.toolCallId, observations);
         }
         if (parentId && candidates.has(parentId)) {

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { AGENT_SPAWN_OBSERVATION_CAP } from "@wollipog/protocol";
 import type { PendingApproval, SessionEvent } from "@wollipog/protocol";
 import { ChildSessionRegistryProjector, projectChildSessionRegistry } from "./child-session-registry.js";
 
@@ -163,4 +164,30 @@ test("collapses Claude partial and full spawn observations but rejects conflicti
   ], null, 0, 0, 10);
   assert.equal(crossKindReuse.children.length, 0);
   assert.equal(crossKindReuse.unidentifiedChildren, 1);
+});
+
+test("spawn-observation ambiguity begins exactly at the shared cap the web client saturates on", () => {
+  const spawn = (seq: number, status: "pending" | "in_progress"): SessionEvent =>
+    event(seq, { kind: "tool_call", toolCallId: "task", toolKind: "agent", title: "Task", status });
+
+  // One observation short of the cap, Claude's partial stream plus its full assistant record still
+  // resolve exactly one child.
+  const belowCap = Array.from({ length: AGENT_SPAWN_OBSERVATION_CAP - 1 },
+    (_, index) => spawn(index + 1, index === 0 ? "pending" : "in_progress"));
+  const resolved = projectChildSessionRegistry(belowCap, null, 0, 0, 10);
+  assert.equal(resolved.children.length, 1, "below the cap the id still identifies one child");
+  assert.equal(resolved.unidentifiedChildren, 0);
+
+  // Reaching the cap is what makes the id permanently ambiguous. The web client's re-statement
+  // count saturates at this same constant (#1385), so its roster fingerprint carries every
+  // classification the registry can still reach — and nothing beyond it.
+  const atCap = projectChildSessionRegistry([...belowCap, spawn(AGENT_SPAWN_OBSERVATION_CAP, "in_progress")], null, 0, 0, 10);
+  assert.equal(atCap.children.length, 0);
+  assert.equal(atCap.unidentifiedChildren, 1, "the cap-th observation is the one that loses the identity");
+
+  // Which is why saturating the client count is safe: past the cap nothing can reclassify the id.
+  const pastCap = projectChildSessionRegistry([...belowCap,
+    ...Array.from({ length: 20 }, (_, index) => spawn(AGENT_SPAWN_OBSERVATION_CAP + index, "in_progress"))], null, 0, 0, 10);
+  assert.equal(pastCap.children.length, 0);
+  assert.equal(pastCap.unidentifiedChildren, 1, "further statements cannot move the classification either way");
 });

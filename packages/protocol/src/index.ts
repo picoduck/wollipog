@@ -2738,6 +2738,19 @@ export interface SessionAttentionStatus {
   description: string;
 }
 
+/** How many `tool_call` observations of one agent tool-call id the control plane retains before
+ * that id stops identifying exactly one child. `collapseAgentSpawnObservations` resolves no
+ * identity at this many observations — Claude's partial stream plus its full assistant record are
+ * the legitimate pair, and a third statement means the provider reused the id — and the projector
+ * stops accumulating there, because nothing past the cap can change the classification.
+ *
+ * The web client's per-id re-statement count saturates at the same value (#1385), which is what
+ * keeps the Agents panel's roster fingerprint bounded: it carries every classification the
+ * registry can still reach while moving at most twice per child over a whole session, rather than
+ * once per streamed event (#1289). Both sides read this constant, so the caps move together;
+ * neither may restate it as a literal. */
+export const AGENT_SPAWN_OBSERVATION_CAP = 3;
+
 /** One exact child identity projected from the runner-owned session history. `toolCallId` is the
  * spawning agent tool; `parentToolUseId` is copied only from that structured spawn event. */
 export interface ChildSessionRegistryEntry {
