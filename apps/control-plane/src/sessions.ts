@@ -4117,9 +4117,26 @@ export class SessionsService {
       );
     }
     if (!steered.data) return null;
-    // A rejected attempt is refused before anything is written to the provider, so the ordinary
-    // queue is still owed the message. Every other state means the runner has taken ownership.
-    if (steered.data.state === "rejected") return null;
+    // Almost every rejection is decided before anything is written to the provider — stale_turn,
+    // no_active_provider_turn, queue_item_absent, queue_capacity_exceeded, unsupported_driver,
+    // governance_blocked, and a provider_rejected relayed from the driver all refuse ahead of the
+    // write — so the ordinary queue is still owed the message.
+    //
+    // `policy_blocked` is the exception, and the reason this is not a simple state check. The
+    // runner sets `providerStarted` immediately before awaiting the provider write, and a Stop,
+    // Restart, or sign-out landing inside that await settles the attempt as rejected/policy_blocked
+    // even though the text may already be in the provider conversation. Re-queueing that one would
+    // deliver the same instruction twice, so it is handed back to the sender instead. The same
+    // reason is also produced just before the write, which makes this conservative rather than
+    // exact — the safe direction, and only while the session is being torn down anyway.
+    if (steered.data.state === "rejected") {
+      if (steered.data.reason !== "policy_blocked") return null;
+      return fail(
+        "conversation steering was discarded by a session lifecycle change — the message may " +
+          "already have reached the session, so check its steering attempts before sending it again",
+        409,
+      );
+    }
     return ok({
       ...this.db.getSession(sessionId)!,
       promptDelivery: steeredPromptDeliveryReport(session.status, steered.data.state),

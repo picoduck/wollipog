@@ -18421,3 +18421,55 @@ test("a steering refusal that never reached the runner still falls back to the q
   assert.equal(hub.sentOfType("steer_session").length, 0);
   assert.equal(hub.sentOfType("prompt_session").length, 1);
 });
+
+test("a lifecycle-discarded steer is not re-queued, because the provider may already have it", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.activeTurnIds.set(id, "turn-live");
+  hub.sentToRunner.length = 0;
+  // The runner sets providerStarted immediately before awaiting the provider write, so a Stop or
+  // Restart landing inside that await settles the attempt as rejected/policy_blocked even though
+  // the text may already be in the provider conversation.
+  hub.requestHandler = (message) => ({
+    type: "steer_session_result",
+    requestId: message.requestId,
+    submissionId: message.submissionId,
+    sessionId: id,
+    turnId: "turn-live",
+    disposition: "rejected",
+    reason: "policy_blocked",
+  });
+
+  const result = await svc.promptOrSteer(id, "do not deliver me twice either");
+  assert.equal(result.ok, false, "an ambiguous lifecycle rejection must not report success");
+  assert.equal(result.status, 409);
+  assert.match(result.error ?? "", /may already have reached the session/);
+  assert.equal(hub.sentOfType("steer_session").length, 1);
+  assert.equal(hub.sentOfType("prompt_session").length, 0, "the message must not also be queued");
+});
+
+test("a steer the provider refused before writing still falls back to the queue", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.activeTurnIds.set(id, "turn-live");
+  hub.sentToRunner.length = 0;
+  // provider_rejected relayed from the driver is decided ahead of the write, so the queue is
+  // still owed the message and must receive it.
+  hub.requestHandler = (message) => ({
+    type: "steer_session_result",
+    requestId: message.requestId,
+    submissionId: message.submissionId,
+    sessionId: id,
+    turnId: "turn-live",
+    disposition: "rejected",
+    reason: "provider_rejected",
+  });
+
+  const result = await svc.promptOrSteer(id, "deliver me the ordinary way");
+  assert.equal(result.ok, true);
+  assert.equal(result.data?.promptDelivery?.lane, "queued");
+  assert.equal(hub.sentOfType("steer_session").length, 1);
+  assert.equal(hub.sentOfType("prompt_session").length, 1);
+});
