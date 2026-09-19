@@ -496,7 +496,7 @@ test("UI evidence approval requires an explicit review acknowledgement and sends
       .find((button) => button.textContent?.includes("Approve"))!;
     assert.equal(approve.disabled, true);
     assert.equal(container.querySelector<HTMLAnchorElement>('[href="https://evidence.example/after.png"]')?.textContent,
-      "Open Evidence: desktop-after");
+      "Open External Evidence: desktop-after");
     const reviewed = container.querySelector<HTMLInputElement>('.approval-evidence input[type="checkbox"]')!;
     await act(async () => { reviewed.click(); });
     assert.equal(approve.disabled, false);

@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { DescendantRequestView, SessionView } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { CampaignContinuationNotice } from "../components/SessionDetail.js";
 import { RightPanel, type RightPanelState } from "../components/RightPanel.js";
@@ -22,6 +22,7 @@ declare global {
       openedChild(): DescendantRequestView | null;
       submissions(): unknown[];
       workerReviewOpened(): boolean;
+      artifactRequests(): string[];
     };
   }
 }
@@ -33,16 +34,71 @@ const includeDescendants = scenario === "descendants" ||
 const requestedPollStatus = new URLSearchParams(window.location.search).get("pollStatus");
 const descendantRequestStatus: DescendantRequestStatus = requestedPollStatus === "loading" ||
   requestedPollStatus === "unavailable" ? requestedPollStatus : "ready";
+// `artifacts` makes the evidence artifact-backed: `ready` (every item), `mixed` (artifact, URI-only,
+// and video items together), `mismatch` (item 2's bytes do not match its digest), `unavailable`
+// (item 2 is gone), or `undecodable` (item 2 has a PNG signature, a correct digest, and a body no
+// browser can draw, which is exactly what the artifact validator's signature check admits). The captures are drawn here so the fixture needs no binary files.
+const artifactMode = new URLSearchParams(window.location.search).get("artifacts");
+const artifactBytes = new Map<string, ArrayBuffer>();
+const artifactDigests = new Map<string, string>();
+const artifactRequests: string[] = [];
+
+async function drawCapture(index: number): Promise<ArrayBuffer> {
+  const wide = index % 2 === 0;
+  const canvas = document.createElement("canvas");
+  canvas.width = wide ? 960 : 390;
+  canvas.height = wide ? 600 : 760;
+  const context = canvas.getContext("2d")!;
+  context.fillStyle = "#0f1720";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = "#1c2b3a";
+  context.fillRect(0, 0, canvas.width, 56);
+  context.fillStyle = ["#2f8f83", "#c9772e", "#5b7fd6", "#a65bb5"][index % 4]!;
+  context.fillRect(24, 88, canvas.width - 48, 140);
+  context.fillStyle = "#223446";
+  for (let row = 0; row < 5; row += 1) context.fillRect(24, 260 + row * 56, canvas.width - 48 - row * 40, 36);
+  context.fillStyle = "#e6edf3";
+  context.font = "600 22px system-ui, sans-serif";
+  context.fillText(`Capture ${index + 1} — ${wide ? "Desktop" : "Mobile"} After`, 24, 36);
+  const blob = await new Promise<Blob>((resolve) => canvas.toBlob((value) => resolve(value!), "image/png"));
+  return blob.arrayBuffer();
+}
+
+async function prepareArtifacts(): Promise<void> {
+  if (!artifactMode) return;
+  for (let index = 0; index < evidenceCount; index += 1) {
+    const bytes = artifactMode === "undecodable" && index === 1
+      ? new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...new TextEncoder().encode("not an image")]).buffer
+      : await drawCapture(index);
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    artifactBytes.set(`art_${index + 1}`, bytes);
+    artifactDigests.set(`art_${index + 1}`, [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join(""));
+  }
+}
+
 let openedChild: DescendantRequestView | null = null;
 const submissions: unknown[] = [];
 let workerReviewOpened = false;
 
 function evidenceSession(): SessionView {
-  const evidence = Array.from({ length: evidenceCount }, (_, index) => ({
-    evidenceId: `viewport-${index + 1}`,
-    uri: `https://evidence.example/item-${index + 1}.png?signature=hidden-${index + 1}`,
-    sha256: String(index).padStart(64, "0"),
-  }));
+  const evidence = Array.from({ length: evidenceCount }, (_, index) => {
+    const base = {
+      evidenceId: `viewport-${index + 1}`,
+      uri: `https://evidence.example/item-${index + 1}.png?signature=hidden-${index + 1}`,
+      sha256: String(index).padStart(64, "0"),
+    };
+    if (!artifactMode) return base;
+    if (artifactMode === "mixed" && index === 1) return base;
+    if (artifactMode === "mixed" && index === 2) {
+      return { ...base, evidenceId: "interaction-clip", artifactId: "art_clip", mediaType: "video/webm" };
+    }
+    return {
+      ...base,
+      artifactId: `art_${index + 1}`,
+      mediaType: "image/png",
+      sha256: artifactMode === "mismatch" && index === 1 ? "f".repeat(64) : artifactDigests.get(`art_${index + 1}`)!,
+    };
+  });
   return {
     id: "evidence-session",
     runnerId: "runner",
@@ -289,6 +345,14 @@ function Fixture() {
   };
   const client = {
     ...api,
+    artifactExport: async (artifactId: string) => {
+      artifactRequests.push(artifactId);
+      const bytes = artifactBytes.get(artifactId);
+      if (!bytes || (artifactMode === "unavailable" && artifactId === "art_2")) {
+        throw new ApiError("artifact not found", 404);
+      }
+      return new Blob([bytes], { type: "application/octet-stream" });
+    },
     approve: async (_sessionId: string, body: unknown) => {
       submissions.push(structuredClone(body));
       const updated = { ...session, status: "running", pendingApproval: null } as SessionView;
@@ -441,6 +505,7 @@ window.__WOLLIPOG_REQUEST_SURFACES_E2E__ = {
   openedChild: () => openedChild,
   submissions: () => submissions,
   workerReviewOpened: () => workerReviewOpened,
+  artifactRequests: () => [...artifactRequests],
 };
 
-createRoot(document.getElementById("root")!).render(<Fixture />);
+void prepareArtifacts().then(() => createRoot(document.getElementById("root")!).render(<Fixture />));

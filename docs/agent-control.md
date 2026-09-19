@@ -426,6 +426,23 @@ unavailability is reported as `uiEvidenceReview.reasonCode` and `reason` on the 
 A human fallback is scoped to that one decision: other children and other assigned categories are
 unaffected.
 
+#### What the Human Reviewer Sees
+
+The human review card shows an artifact-backed raster image in place rather than linking out, so the
+human and an assigned Orchestrator review the same bytes. The card fetches the artifact through the
+authenticated export route with the reviewer's own session access, recomputes its SHA-256 in the
+browser, and compares it with the digest in the decision snapshot before displaying anything. A
+mismatch, a missing artifact, and an artifact the reviewer may not access each show their own state,
+display no image, and cannot be marked reviewed, so approval stays blocked while rejection stays
+possible; a reviewed mark saved on an earlier visit does not survive the artifact turning out wrong.
+Images load as they approach the viewport, a few at a time, and are held only as short-lived object
+URLs that are released when the card closes.
+
+The `uri` remains the reviewer's route only for an item with no artifact, for video or any
+non-raster media type, and in a browser context without SubtleCrypto (plain HTTP on a non-localhost
+origin), where unverifiable bytes are not shown as the evidence the request names. Those links are
+labelled as external.
+
 #### Attaching Evidence From a File
 
 A child makes an item reviewable by attaching the capture to its own session with
