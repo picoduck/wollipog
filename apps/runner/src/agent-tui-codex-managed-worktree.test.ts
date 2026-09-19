@@ -372,6 +372,27 @@ test("the probe replays config and feature flags only", () => {
   assert.deepEqual(probe.env, { PATH: "/bin", CODEX_HOME: "/ch" });
   assert.throws(() => codexHookInventoryProbe({ command: "codex", args: ["-p", "x"] }, "/", "o"), /profile/u);
   assert.throws(() => codexHookInventoryProbe({ command: "codex", args: ["--profile=x"] }, "/", "o"), /profile/u);
+  assert.throws(() => codexHookInventoryProbe({ command: "codex", args: ["-pteam"] }, "/", "o"), /profile/u);
+});
+
+test("the probe replays every accepted spelling and follows -C/--cd (review CR-1.1, CR-1.2)", () => {
+  const probe = codexHookInventoryProbe(
+    {
+      command: "codex",
+      args: ["--disable=hooks", "--config=a=1", "-cb=2", "--enable=x", "-C", "sub"],
+    },
+    "/work",
+    "hooks.PreToolUse=[]",
+    {},
+  );
+  // `--disable=hooks` has to reach the probe, or it approves a launch whose hooks are all off.
+  assert.deepEqual(probe.args, [
+    "app-server", "--disable=hooks", "--config=a=1", "-cb=2", "--enable=x", "-c", "hooks.PreToolUse=[]",
+  ]);
+  assert.equal(probe.cwd, "/work/sub");
+  assert.equal(codexHookInventoryProbe({ command: "codex", args: ["--cd=/abs"] }, "/work", "o", {}).cwd, "/abs");
+  assert.equal(codexHookInventoryProbe({ command: "codex", args: ["-C/abs2"] }, "/work", "o", {}).cwd, "/abs2");
+  assert.equal(codexHookInventoryProbe({ command: "codex", args: ["--cd", "../up"] }, "/work/a", "o", {}).cwd, "/work/up");
 });
 
 /** A stand-in app-server that answers initialize and hooks/list over stdio. */
@@ -408,6 +429,14 @@ test("the inventory client reads hooks/list over stdio and fails closed on anyth
       readCodexHookInventory(fakeAppServer(dir, JSON.stringify({ id: 2, error: { message: "nope" } }))),
       /no inventory/u,
     );
+    // A discovery error leaves part of the inventory unknown (review CR-1.3).
+    await assert.rejects(
+      readCodexHookInventory(fakeAppServer(dir, JSON.stringify({
+        id: 2,
+        result: { data: [{ cwd: dir, hooks: [], warnings: [], errors: [{ path: "/p/hooks.json", message: "bad" }] }] },
+      }))),
+      /hook discovery errors \(\/p\/hooks\.json\)/u,
+    );
     await assert.rejects(
       readCodexHookInventory({ command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"], cwd: dir, env: process.env }, undefined, 300),
       /timed out/u,
@@ -441,5 +470,23 @@ test("against the installed codex, the override installs an enabled session-flag
     const ours = entries.find((entry) => entry.command === codexGuardCommandString(launch));
     assert.equal(ours?.source, "sessionFlags");
     assert.equal(ours?.trustStatus, "untrusted");
+
+    // `--disable=hooks` in the launch turns the guard off; the replayed probe must see that.
+    const disabled = await readCodexHookInventory(codexHookInventoryProbe(
+      { command: "codex", args: ["--disable=hooks"], env: { CODEX_HOME: home } }, dir, override,
+    ));
+    assert.equal(codexHookInventoryVerdict(disabled, codexGuardCommandString(launch)).ok, false);
+    // An attached `-c` hook the user supplied is seen, and counted as foreign.
+    const attached = await readCodexHookInventory(codexHookInventoryProbe(
+      {
+        command: "codex",
+        args: ['-chooks.PostToolUse=[{hooks=[{type="command",command="/x/attached.sh"}]}]'],
+        env: { CODEX_HOME: home },
+      },
+      dir,
+      override,
+    ));
+    const verdict = codexHookInventoryVerdict(attached, codexGuardCommandString(launch));
+    assert.equal(verdict.ok, false);
   });
 });

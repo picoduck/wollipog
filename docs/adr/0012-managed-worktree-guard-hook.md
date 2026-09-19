@@ -347,13 +347,16 @@ control-channel veto keeps reading the live inventory.
   launch has to carry `--dangerously-bypass-hook-trust`. That flag un-gates EVERY enabled hook for
   the invocation, not just the runner's. So before launching, the runner enumerates the effective
   hook inventory (`codex app-server` → `hooks/list`, replaying the launch's own `-c`/`--config`/
-  `--enable`/`--disable` flags plus the guard override, in the TUI's directory) and passes the flag
+  `--enable`/`--disable` flags in every spelling Codex accepts — `--disable=hooks` turns every hook
+  off and `-cVALUE` adds one — plus the guard override, in the directory the TUI resolves
+  project-scoped hooks from, which a `-C`/`--cd` in the launch moves) and passes the flag
   only when the runner's hook is present, enabled, and the sole enabled hook that is neither
   `trusted` nor `managed`. Otherwise the TUI is refused for a session that owns a runner-created
   worktree, with an error that names the offending hooks and says to trust (`/hooks`) or disable
   them. The same enumeration is the Codex half of the self-test: a runner hook absent from the
   inventory (`--disable hooks`, a changed config schema, a quoting mistake) is a guard that would
-  never have run. Enumeration that fails or times out refuses; so does a launch carrying a
+  never have run. Enumeration that fails, times out, or reports a hook discovery error refuses;
+  so does a launch carrying a
   `--profile`, which may declare hooks and which `app-server` cannot replay; so do WSL/container
   contexts, non-host targets, and Windows, where how Codex runs a hook command was not measured.
   A Codex session that owns no runner-created worktree opens exactly as before: nothing is

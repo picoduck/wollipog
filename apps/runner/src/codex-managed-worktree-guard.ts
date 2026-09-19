@@ -42,6 +42,7 @@
  */
 
 import { spawn as spawnProcess, type ChildProcess } from "node:child_process";
+import { resolve } from "node:path";
 import { quote } from "shell-quote";
 import {
   MANAGED_WORKTREE_GUARD_MATCHER,
@@ -68,6 +69,8 @@ const CODEX_FEATURE_FLAGS: ReadonlySet<string> = new Set(["--enable", "--disable
  * a profiled launch is treated as un-enumerable rather than enumerated incorrectly.
  */
 const CODEX_PROFILE_FLAGS: ReadonlySet<string> = new Set(["-p", "--profile"]);
+/** `-C`/`--cd` moves the directory Codex resolves project-scoped hooks from. */
+const CODEX_CWD_FLAGS: ReadonlySet<string> = new Set(["-C", "--cd"]);
 /** Trust states under which Codex runs an enabled hook without the invocation-wide bypass. */
 const CODEX_TRUSTED_STATUSES: ReadonlySet<string> = new Set(["trusted", "managed"]);
 const CODEX_HOOK_INVENTORY_TIMEOUT_MS = 20_000;
@@ -219,8 +222,13 @@ export interface CodexHookInventoryProbe {
  * Build the enumeration probe. `codex app-server` is the only Codex entry point that can report
  * the effective hook inventory (`hooks/list`), and it accepts only the config-shaped flags, so the
  * launch's own `-c`/`--config`/`--enable`/`--disable` arguments are replayed and nothing else is.
- * A launch carrying a flag that could change the inventory without being replayable (a profile)
- * has no faithful probe and is rejected here.
+ *
+ * Every spelling Codex accepts is handled, not only the spaced one: `--disable=hooks` turns every
+ * hook off and `-cVALUE` adds one, and a probe that missed either would approve a launch it never
+ * saw (measured on codex-cli 0.155.1). The probe also runs where the TUI will resolve
+ * project-scoped hooks, which a `-C`/`--cd` in the launch moves. A launch carrying a flag that
+ * could change the inventory without being replayable (a profile) has no faithful probe and is
+ * rejected here.
  */
 export function codexHookInventoryProbe(
   launch: { command: string; args: readonly string[]; env?: Record<string, string> },
@@ -229,10 +237,11 @@ export function codexHookInventoryProbe(
   hostEnv: NodeJS.ProcessEnv = process.env,
 ): CodexHookInventoryProbe {
   const replayed: string[] = [];
+  let probeCwd = cwd;
   const args = withoutCodexGuardArgs(launch.args);
   for (let index = 0; index < args.length; index++) {
     const argument = args[index]!;
-    if (CODEX_PROFILE_FLAGS.has(argument) || /^--profile=/u.test(argument)) {
+    if (CODEX_PROFILE_FLAGS.has(argument) || /^--profile=/u.test(argument) || /^-p./u.test(argument)) {
       throw new Error("a Codex profile may declare hooks that the inventory probe cannot enumerate");
     }
     if (CODEX_CONFIG_FLAGS.has(argument) || CODEX_FEATURE_FLAGS.has(argument)) {
@@ -240,17 +249,33 @@ export function codexHookInventoryProbe(
       if (value === undefined) throw new Error(`${argument} carries no value`);
       replayed.push(argument, value);
       index += 1;
+      continue;
     }
+    // Attached spellings are replayed verbatim; Codex parses them identically in both places.
+    if (/^--(?:config|enable|disable)=/u.test(argument) || /^-c./u.test(argument)) {
+      replayed.push(argument);
+      continue;
+    }
+    if (CODEX_CWD_FLAGS.has(argument)) {
+      const value = args[index + 1];
+      if (value === undefined) throw new Error(`${argument} carries no value`);
+      probeCwd = resolve(cwd, value);
+      index += 1;
+      continue;
+    }
+    const attachedCwd = /^--cd=(.*)$/su.exec(argument)?.[1] ?? /^-C=?(.+)$/su.exec(argument)?.[1];
+    if (attachedCwd !== undefined) probeCwd = resolve(cwd, attachedCwd);
   }
   return {
     command: launch.command,
     args: ["app-server", ...replayed, "-c", override],
-    cwd,
+    cwd: probeCwd,
     env: { ...hostEnv, ...launch.env },
   };
 }
 
 interface HooksListEntry {
+  errors?: { path?: unknown; message?: unknown }[];
   hooks?: { key?: unknown; enabled?: unknown; trustStatus?: unknown; command?: unknown; source?: unknown }[];
 }
 
@@ -259,6 +284,12 @@ function parseHookEntries(payload: unknown): CodexHookEntry[] {
   if (!Array.isArray(data)) throw new Error("hooks/list returned no inventory");
   const entries: CodexHookEntry[] = [];
   for (const group of data as HooksListEntry[]) {
+    // A discovery error means part of the inventory is unknown, and an unknown hook is not
+    // evidence that the runner's is the only one the trust bypass would run.
+    if (Array.isArray(group.errors) && group.errors.length > 0) {
+      const paths = group.errors.map((error) => String(error?.path ?? "unknown")).slice(0, 3).join(", ");
+      throw new Error(`hooks/list reported hook discovery errors (${paths})`);
+    }
     for (const hook of group.hooks ?? []) {
       // An entry the runner cannot classify is not evidence that the inventory is clean.
       if (typeof hook.key !== "string" || typeof hook.enabled !== "boolean" ||
@@ -333,6 +364,9 @@ export async function readCodexHookInventory(
           return;
         }
       });
+      // A probe that exits before reading its input makes these writes fail with EPIPE; the
+      // exit handler above already settles that case, and an unhandled stream error would not.
+      child.stdin?.on("error", () => {});
       const send = (message: unknown) => child.stdin?.write(`${JSON.stringify(message)}\n`);
       send({
         jsonrpc: "2.0", id: 1, method: "initialize",
