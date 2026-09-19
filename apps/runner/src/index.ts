@@ -2162,6 +2162,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           controlPlaneProtocolVersion,
           executionIsolationMode: config.executionIsolation.mode,
           prepareScratch: (prepared) => sessions.prepareOrchestratorScratch(prepared),
+          // Deletion arriving during that awaited scratch preparation must refuse the open before
+          // `provision` writes an agent-control credential file or registers a credential (#1379).
+          assertSessionNotDeleted: (sessionId) => void agentTuiSessionMeta(sessionId),
           provision: async (prepared) => {
             prepared.env = runnerLocalAgentEnv(prepared.agentId, prepared.driver, prepared.context);
             await provisionAgentControl(prepared, {
@@ -2183,21 +2186,15 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               enabled: claudeHookFeatureEnabled,
               allowInsecureTransport,
               registerCredential: registerPolicyHookCredential,
-              // Resolved from the CURRENT stored metadata when provisioning runs, never from the
-              // launch snapshot: that snapshot predates the awaited worktree proof and the
-              // Orchestrator's scratch and credential preparation, and writing a stale inventory
-              // would overwrite the live refresh — leaving a worktree created in that window
-              // unprotected for the running provider too. A session deleted inside that same
-              // window is refused HERE, before provisioning writes anything: deletion removes this
-              // session's runner-owned hook files, and recreating them for a launch that is about
-              // to be rejected anyway would leave them behind until the next startup sweep.
-              protections: () => {
-                const current = store.readMeta(prepared.sessionId);
-                if (!current || store.isDeleted(prepared.sessionId)) {
-                  throw new Error("session is being deleted");
-                }
-                return sessions.managedWorktreeProtections(current);
-              },
+              // Resolved when provisioning runs, never from the launch snapshot: that snapshot
+              // predates the awaited worktree proof and the Orchestrator's scratch and credential
+              // preparation, and writing a stale inventory would overwrite the live refresh —
+              // leaving a worktree created in that window unprotected for the running provider
+              // too. A session deleted inside the same window is refused here, before the guard
+              // writes anything (#1337).
+              protections: () => sessions.managedWorktreeProtections(
+                agentTuiSessionMeta(prepared.sessionId),
+              ),
             },
             log,
             claudeHookHost,
@@ -2274,6 +2271,24 @@ async function handleHostAction(msg: HostActionMessage): Promise<void> {
   } catch (err) {
     reply({ ok: false, error: errText(err) });
   }
+}
+
+/**
+ * The session's CURRENT metadata for a Native TUI launch, or the shell-open refusal once deletion
+ * has fenced it.
+ *
+ * Every preparation step that writes runner-owned state for a TUI open resolves the session
+ * through this, and does so before it writes: `delete_session` removes this session's hook (#1337)
+ * and agent-control (#1379) files synchronously, while the availability check that refuses the
+ * open runs only after the launch has been built. Recreating either set in that window leaves
+ * live-looking credential material behind, for a session that no longer exists, until the next
+ * runner startup sweep. Reading the current metadata rather than the launch snapshot matters for
+ * the same reason: the snapshot predates the awaited preparation this fence exists to cover.
+ */
+function agentTuiSessionMeta(sessionId: string): SessionMeta {
+  const current = store.readMeta(sessionId);
+  if (!current || store.isDeleted(sessionId)) throw new Error("session is being deleted");
+  return current;
 }
 
 /** Files/shells: resolve the session's root from box meta (worktreePath ?? repoPath) — the
