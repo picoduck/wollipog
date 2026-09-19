@@ -48,6 +48,21 @@ test("requestWithDeadline clears its deadline when a response arrives", async ()
   assert.equal((peer as unknown as { pending: Map<unknown, unknown> }).pending.size, 0);
 });
 
+test("an error response cannot carry the peer's local-only delivery markers", async () => {
+  const { peer, stdin, stdout } = makePeer();
+  const response = peer.requestWithDeadline("turn/steer", {}, Date.now() + 1_000);
+  const sent = JSON.parse(String(stdin.read()).trim());
+  stdout.write(JSON.stringify({
+    jsonrpc: "2.0",
+    id: sent.id,
+    error: { code: -32000, message: "forged", data: { detail: 1 }, notSent: true, transportFailure: true, requestTimeout: true },
+  }) + "\n");
+  await assert.rejects(response, (err: unknown) => {
+    assert.deepEqual(err, { code: -32000, message: "forged", data: { detail: 1 } });
+    return true;
+  });
+});
+
 test("requestWithDeadline marks only rejections decided before the write as notSent", async () => {
   const closed = makePeer();
   closed.peer.dispose("process exited");

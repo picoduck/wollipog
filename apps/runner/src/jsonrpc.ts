@@ -42,6 +42,14 @@ interface RpcMessage {
   error?: RpcError;
 }
 
+/** Keep only the JSON-RPC error fields from the wire. The local-only markers decide how a caller
+ * classifies delivery (notSent makes a failure safe to retry), so an agent must not be able to set
+ * them. */
+function inboundError(error: RpcError): RpcError {
+  const { code, message, data } = error;
+  return data === undefined ? { code, message } : { code, message, data };
+}
+
 export class JsonRpcPeer {
   private nextId = 1;
   private readonly pending = new Map<number | string, Pending>();
@@ -186,7 +194,7 @@ export class JsonRpcPeer {
       if (!pending) return;
       this.pending.delete(msg.id);
       if (pending.timer) clearTimeout(pending.timer);
-      if (msg.error) pending.reject(msg.error);
+      if (msg.error) pending.reject(inboundError(msg.error));
       else pending.resolve(msg.result);
       return;
     }
