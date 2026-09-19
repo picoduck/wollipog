@@ -308,9 +308,10 @@ test("the filesystem root is an ancestor of the worktree like any other", () => 
  *
  * #1393 was filed on the premise that the guard refuses every removal inside a runner-owned
  * worktree, leaving an agent unable to delete a scratch file it had just created. It does not, and
- * never did: `protectedTarget` matches only the worktree ROOT, an ancestor of it, and the two Git
- * administrative roots, so a path BENEATH the root has always been an ordinary mutation — exactly
- * what #1209 asked for ("Normal file creation, editing, Git commits, tests, and other expected work
+ * never did: `protectedTarget` matches the worktree ROOT and its ancestors, anything inside either
+ * Git administrative tree, and any ancestor of those trees. A path beneath the root and OUTSIDE
+ * those trees — which `<worktree>/.git` is not — has always been an ordinary mutation, exactly what
+ * #1209 asked for ("Normal file creation, editing, Git commits, tests, and other expected work
  * inside the selected worktree remain available").
  *
  * The tests below pin that contract in both directions so neither half can drift: an agent's own
@@ -341,19 +342,26 @@ test("an agent may remove scratch it created inside its managed worktree", () =>
 });
 
 test("piping filenames into a remover is refused even when they are all scratch", () => {
-  // The allowance above stops at the pipe. What reaches `xargs` on stdin is decided at runtime, so
-  // the classifier cannot tell a list of scratch files from a list containing the root and refuses
-  // every remover run through `xargs` from inside a managed worktree. That is a deliberate
-  // over-refusal, not root protection: the same pipeline is allowed from outside the worktree, and
-  // the same operands are allowed when `rm` names them directly.
+  // The allowance above stops at the pipe. What reaches `xargs` on stdin is decided at runtime and
+  // is INVISIBLE here, so the classifier cannot tell a list of scratch files from one naming the
+  // root, and refuses every remover run through `xargs` from inside a managed worktree. That is a
+  // deliberate over-refusal standing in for a judgement it cannot make — not root matching.
   assert.equal(commandTargetsManagedWorktree("printf 'scratch.txt\\0' | xargs -0 rm -f", protectedPath, protection),
     MANAGED_WORKTREE_REFUSAL);
+  // Both halves of the fallback's condition, isolated: it needs a managed cwd AND a remover.
   assert.equal(commandTargetsManagedWorktree("printf 'scratch.txt\\0' | xargs -0 rm -f", "/elsewhere", protection),
     null, "outside a managed worktree the fallback does not apply");
   assert.equal(commandTargetsManagedWorktree("printf 'scratch.txt\\0' | xargs -0 cat", protectedPath, protection),
     null, "the fallback is scoped to removers, not to pipelines in general");
   assert.equal(commandTargetsManagedWorktree("rm -f scratch.txt", protectedPath, protection), null,
     "and naming the same operand directly stays allowed");
+  // The cost of that blindness, stated rather than implied: piping the root itself is NOT caught
+  // by root matching. From outside a managed worktree nothing refuses it, because the operand only
+  // ever exists at runtime. Only a root named in the command text is an operand the guard can see.
+  assert.equal(commandTargetsManagedWorktree(`printf '${protectedPath}\\0' | xargs -0 rm -rf`, "/elsewhere", protection),
+    null, "stdin is opaque, so a piped root is not matched as an operand");
+  assert.equal(commandTargetsManagedWorktree(`xargs -0 rm -rf ${protectedPath}`, "/elsewhere", protection),
+    MANAGED_WORKTREE_REFUSAL, "while a root named in the command IS matched, wherever the shell is");
 });
 
 test("removal of the worktree root and its Git administrative state stays refused", () => {
@@ -376,11 +384,13 @@ test("removal of the worktree root and its Git administrative state stays refuse
     ["rm -rf /projects/repo/.git/worktrees/managed", protectedPath],
     ["rm -rf /projects/repo/.git", protectedPath],
     ["rm -rf /projects/repo", protectedPath],
-    // Bulk removal forms whose ROOT is the worktree, which `-delete`/`-exec`/`xargs` would walk.
+    // Bulk removal forms whose ROOT is the worktree, which `-delete`/`-exec` would walk.
     ["find . -delete", protectedPath],
     ["find . -name '*.tmp' -delete", protectedPath],
     ["find . -maxdepth 1 -name '*.tmp' -exec rm -f {} +", protectedPath],
-    ["printf '.\\0' | xargs -0 rm -rf", protectedPath],
+    // `xargs` appends its stdin to the command it is given, so a root named in the command itself
+    // IS an operand the classifier can see. What arrives on stdin is not; that is the next test.
+    [`xargs -0 rm -rf ${protectedPath}`, protectedPath],
     // Moving the root away retires it just as surely as deleting it.
     ["mv . /tmp/moved", protectedPath],
   ] as const) {
