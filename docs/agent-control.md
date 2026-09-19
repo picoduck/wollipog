@@ -362,8 +362,16 @@ response never echoes the bytes. A session credential may attach only to its own
 descendant, an ancestor, or any other session it can see, because an artifact's session is what
 proves who produced it. The route is outside the Orchestrator allowlist, since an Orchestrator
 reviews evidence rather than producing it. Because attaching is cheap, what agents attach to one
-session is bounded at 256 screenshots and 512 MiB, refused with `409` before the upload is decoded;
-prompt images and a human's own uploads are neither counted nor limited. Against a pre-v168 control plane the tool refuses with the
+session is bounded at 256 screenshots and 512 MiB, refused with `409` before anything is stored;
+prompt images and a human's own uploads are neither counted nor limited.
+
+Attaching is idempotent. The same bytes, name, and type attached again to the same session by the
+same author return the existing artifact with `200` instead of creating another, and are answered
+even when the session is at its bound. An upload of several megabytes can time out after the control
+plane has committed it; the tool then reports that the outcome is unknown and that attaching the same
+file again is safe. Uploads get a three-minute deadline rather than the ordinary RPC one. The reader
+takes one byte more than the size it checked, so a file that grows after the check cannot make it
+allocate without bound, and a file whose size changes either way during the read is refused. Against a pre-v168 control plane the tool refuses with the
 version to upgrade to instead of falling back to a base64 argument.
 
 The Orchestrator inspects evidence with `review_descendant_ui_evidence` (`sessionId`,

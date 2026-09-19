@@ -1748,6 +1748,21 @@ test("attach_session_artifact refuses before reading or uploading when the reque
     }
     assert.ok(current.calls.every((call) => call.method === "GET"), "an unusable file is never uploaded");
 
+    // A request that dies in transit may already have been committed. The tool must say so and say
+    // what is safe, rather than report a plain failure that invites a blind duplicate.
+    const dropped = makeDeps((call) => {
+      if (call.url.endsWith("/api/compatibility")) return { status: 200, body: { protocolVersion: PROTOCOL_VERSION } };
+      throw new Error("socket hang up");
+    });
+    const unknown = await callTool(dropped.deps, "attach_session_artifact", { path: file });
+    assert.equal(unknown.isError, true);
+    assert.match(resultText(unknown), /outcome is unknown\. Attach the same file again/u);
+    const rejected = makeDeps((call) => call.url.endsWith("/api/compatibility")
+      ? { status: 200, body: { protocolVersion: PROTOCOL_VERSION } }
+      : { status: 409, body: { error: "this session already has 256 attached screenshots" } });
+    assert.doesNotMatch(resultText(await callTool(rejected.deps, "attach_session_artifact", { path: file })),
+      /outcome is unknown/u, "a definite refusal is not dressed up as uncertainty");
+
     // A paired device has no session of its own, so it names one; nothing is refused client-side.
     const device = makeDeps((call) => call.url.endsWith("/api/compatibility")
       ? { status: 200, body: { protocolVersion: PROTOCOL_VERSION } }

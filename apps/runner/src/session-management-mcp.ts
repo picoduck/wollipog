@@ -289,6 +289,10 @@ async function workflowDecisionChildMessageCompatibilityError(deps: McpDeps): Pr
       );
 }
 
+/** An 8 MiB image is about 10.7 MiB of base64. The ordinary RPC deadline would fail a valid upload
+ * on a tunnelled or slow link, so an attach gets its own. */
+const ARTIFACT_UPLOAD_TIMEOUT_MS = 180_000;
+
 /** A pre-v168 control plane has no session-scoped attach route. Refuse by name instead of letting
  * the upload 404, and never fall back to the base64 tool argument this tool exists to replace. */
 async function sessionArtifactFileAttachCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
@@ -1647,8 +1651,16 @@ export const TOOLS: McpTool[] = [
           mimeType: file.mediaType,
           data: file.bytes.toString("base64"),
         },
+        deps.requestTimeoutMs ?? ARTIFACT_UPLOAD_TIMEOUT_MS,
       );
-      if (!r.ok) return errorResult(r.message);
+      if (!r.ok) {
+        // No HTTP status means the request died in transit or timed out, possibly after the control
+        // plane committed it. The route answers a repeat of the same file with the artifact it
+        // already made, so the honest instruction is to attach again, not to guess.
+        return errorResult(r.status === undefined
+          ? `${r.message}. The upload's outcome is unknown. Attach the same file again: if it was stored, the same artifact is returned rather than a duplicate.`
+          : r.message);
+      }
       // The digest an agent cites must be the digest of what was stored. If the control plane's
       // differs from the file's, the upload was altered in transit; say so instead of returning an
       // id that would later fail review as a digest mismatch.

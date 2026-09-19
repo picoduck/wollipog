@@ -67,7 +67,7 @@ function positional(args: string[]): string[] {
     "--url", "--token-file", "--runner", "--agent", "--workspace", "--path", "--prompt",
     "--title", "--model", "--effort", "--permission-mode", "--after", "--limit", "--for", "--timeout",
     "--interval", "--cost-budget", "--max-tool-calls", "--session", "--branch", "--base", "--base-ref",
-    "--max-child-sessions", "--offset", "--file", "--name",
+    "--max-child-sessions", "--offset",
   ]);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -129,6 +129,8 @@ function invocationArgs(argv: string[]): string[] {
 
 function command(args: string[]): { tool: string; input: Record<string, unknown> } | { error: string } {
   const words = positional(args);
+  // Only the group and verb are read positionally, so --file and --name are deliberately not added
+  // to the shared value-option set: doing so would change how every other command counts its words.
   if (words[0] === "artifact" || words[0] === "artifacts") {
     if (words[1] !== "attach") return { error: artifactHelp() };
     const file = option(args, "--file");

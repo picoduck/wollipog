@@ -324,9 +324,13 @@ test("HTTP agent management scopes descendants and composes governance policy vi
         }
         assert.equal((await request(mode, "artifacts/screenshots", attachBody)).status, 401,
           "an Orchestrator credential reviews evidence; the attach route is not on its allowlist");
-        assert.equal((await childRequest("artifacts/screenshots", {
+        const repeated = await childRequest("artifacts/screenshots", {
           ...attachBody, kind: "patch", encoding: "utf8", sessionId: mode,
-        })).status, 201, "kind, encoding, and session in the body are ignored, not honored");
+        });
+        assert.equal(repeated.status, 200,
+          "kind, encoding, and session in the body are ignored, so this is the same attachment again");
+        assert.equal((await repeated.json() as { artifactId: string }).artifactId, artifact.artifactId,
+          "a retry returns the artifact it already made instead of a duplicate");
         assert.equal((await childRequest("artifacts/screenshots", {
           ...attachBody, data: Buffer.from("not an image").toString("base64"),
         })).status, 400, "content that does not match its claimed type is rejected");

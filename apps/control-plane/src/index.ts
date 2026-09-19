@@ -5016,10 +5016,7 @@ app.post("/api/artifacts/screenshots", { bodyLimit: 11 * 1024 * 1024 }, async (r
 app.post("/api/sessions/:id/artifacts/screenshots", { bodyLimit: 11 * 1024 * 1024 }, async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const body = (req.body ?? {}) as Partial<AttachSessionScreenshotRequest>;
-  const created = svc.attachSessionScreenshot(id, body, workflowActor(req));
-  if (!created.ok || !created.data) return respond(reply, created);
-  const { data: _bytes, ...artifact } = created.data;
-  return reply.code(201).send(artifact);
+  return respond(reply, svc.attachSessionScreenshot(id, body, workflowActor(req)));
 });
 
 app.get("/api/artifacts/:artifactId", async (req, reply) =>

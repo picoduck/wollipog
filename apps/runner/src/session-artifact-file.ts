@@ -34,7 +34,11 @@ function failure(path: string, error: unknown): ImageFileRead {
   return { ok: false, error: `could not read ${path}: ${code ?? (error as Error)?.message ?? String(error)}` };
 }
 
-export async function readImageFileForAttach(path: string): Promise<ImageFileRead> {
+export async function readImageFileForAttach(
+  path: string,
+  /** Test seam: runs after the size is checked and before the read, where a writer could race. */
+  afterSizeCheck?: () => void | Promise<void>,
+): Promise<ImageFileRead> {
   // The management server's working directory is the provider's launch directory, not the agent's
   // current one, so a relative path would silently name a different file. The CLI resolves relative
   // paths against its own working directory before it gets here.
@@ -64,10 +68,21 @@ export async function readImageFileForAttach(path: string): Promise<ImageFileRea
         error: `file is ${info.size} bytes; an attached image may be at most ${MAX_PROMPT_IMAGE_BYTES} bytes: ${path}`,
       };
     }
-    const bytes = await handle.readFile();
-    if (bytes.length === 0) return { ok: false, error: `file is empty: ${path}` };
-    if (bytes.length > MAX_PROMPT_IMAGE_BYTES) {
-      return { ok: false, error: `file grew past ${MAX_PROMPT_IMAGE_BYTES} bytes while it was being read: ${path}` };
+    await afterSizeCheck?.();
+    // Read into a buffer sized from the size just checked, plus one byte to detect growth.
+    // `readFile()` would take its own fstat and allocate whatever the file had become by then, so a
+    // file grown after the check above could make this process allocate without bound.
+    const buffer = Buffer.allocUnsafe(Math.min(info.size, MAX_PROMPT_IMAGE_BYTES) + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    const bytes = buffer.subarray(0, length);
+    // Either direction means a writer is still at work; a half-written capture is not evidence.
+    if (bytes.length !== info.size) {
+      return { ok: false, error: `file changed size while it was being read; attach it once it is complete: ${path}` };
     }
     const mediaType = sniffImageMediaType(bytes);
     if (!mediaType) {

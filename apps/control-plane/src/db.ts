@@ -19821,6 +19821,24 @@ export class ControlPlaneDb {
     }
   }
 
+  /** The artifact an identical earlier attach already made: same session, bytes, name, type, and
+   * author. Metadata only, so answering a replay never reloads the image. */
+  findAttachedScreenshot(
+    sessionId: string,
+    sha256: string,
+    name: string,
+    mimeType: string,
+    actor: GovernanceActor,
+  ): WorkflowArtifactView | null {
+    const row = this.stmt(
+      `SELECT id FROM artifacts
+       WHERE session_id=? AND kind='screenshot' AND sha256=? AND name=? AND mime_type=?
+         AND created_by_kind=? AND created_by_id IS ?
+       ORDER BY created_at, id LIMIT 1`,
+    ).get(sessionId, sha256, name, mimeType, actor.kind, actor.id ?? null) as unknown as { id: string } | undefined;
+    return row ? this.workflowArtifactExportPreflight(row.id)?.artifact ?? null : null;
+  }
+
   /** How much agents have attached to one session. Sizes are summed per artifact, so identical
    * captures that share one content-addressed blob still count each time: the bound is on what was
    * asked for, which is what a runaway loop controls. */

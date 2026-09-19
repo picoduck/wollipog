@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -79,6 +79,33 @@ test("every unusable file fails with a specific message and yields no bytes", as
     writeFileSync(join(dir, "exact.png"), PNG);
     truncateSync(join(dir, "exact.png"), MAX_PROMPT_IMAGE_BYTES);
     assert.ok((await readImageFileForAttach(join(dir, "exact.png"))).ok, "exactly the limit is accepted");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a file that changes size after it was checked is refused without an unbounded read", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "artifact-file-"));
+  try {
+    // Grows far past the limit between the size check and the read. A whole-file read would size
+    // its buffer from the new length; the bounded read takes one byte more than it checked.
+    const growing = join(dir, "growing.png");
+    writeFileSync(growing, PNG);
+    const grown = await readImageFileForAttach(growing, () => truncateSync(growing, MAX_PROMPT_IMAGE_BYTES * 4));
+    assert.equal(grown.ok, false);
+    assert.match(grown.ok ? "" : grown.error, /changed size while it was being read/u);
+
+    const appended = join(dir, "appended.png");
+    writeFileSync(appended, PNG);
+    const longer = await readImageFileForAttach(appended, () => appendFileSync(appended, "x"));
+    assert.match(longer.ok ? "" : longer.error, /changed size/u, "even one extra byte is a different file");
+
+    const shrinking = join(dir, "shrinking.png");
+    writeFileSync(shrinking, PNG);
+    const shorter = await readImageFileForAttach(shrinking, () => truncateSync(shrinking, 9));
+    assert.match(shorter.ok ? "" : shorter.error, /changed size/u, "a half-written capture is not evidence");
+
+    assert.ok((await readImageFileForAttach(appended, () => {})).ok, "an untouched file still reads");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

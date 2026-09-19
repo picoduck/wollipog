@@ -18872,6 +18872,8 @@ test("file-based screenshot attach fixes the session, kind, and encoding and bou
     assert.equal(redirected.data.kind, "screenshot");
     assert.equal(redirected.data.encoding, "base64");
     assert.deepEqual(redirected.data.createdBy, agent);
+    assert.equal("data" in redirected.data, false, "the answer is metadata; the bytes are never returned");
+    assert.equal(redirected.status, 201);
     assert.equal(svc.attachSessionScreenshot("missing", body("x"), agent).status, 404);
     assert.equal(svc.attachSessionScreenshot(session.data.id, { ...body("x"), mimeType: "image/svg+xml" }, agent).status, 400);
     assert.equal(svc.attachSessionScreenshot(session.data.id, null, agent).status, 400);
@@ -18885,6 +18887,21 @@ test("file-based screenshot attach fixes the session, kind, and encoding and bou
     assert.match(overCount.error ?? "", /already has 3 attached screenshots; at most 3/u);
     assert.ok(svc.attachSessionScreenshot(other.data.id, body("fourth"), { kind: "agent", id: other.data.id }, limits).ok,
       "another session has its own budget");
+
+    // A retry after an uncertain upload is safe: the same file, name, type, and author get the
+    // artifact that already exists, even though this session is now at its bound.
+    const replay = svc.attachSessionScreenshot(session.data.id, body("second"), agent, limits);
+    assert.ok(replay.ok && replay.data, replay.error);
+    assert.equal(replay.status, 200, "a replay reports that nothing new was created");
+    const original = db.findAttachedScreenshot(
+      session.data.id, replay.data.sha256, "second.png", "image/png", agent,
+    );
+    assert.equal(replay.data.artifactId, original?.artifactId);
+    assert.equal(db.sessionAgentScreenshotUsage(session.data.id).count, 3, "a replay stores nothing");
+    // Anything that is not the same attachment is a new one, and the bound applies to it.
+    assert.equal(svc.attachSessionScreenshot(session.data.id, { ...body("second"), name: "renamed.png" }, agent, limits).status, 409);
+    assert.equal(svc.attachSessionScreenshot(session.data.id, body("second"), { kind: "agent", id: other.data.id }, limits).status, 409,
+      "another author's identical file is not this author's artifact");
 
     // The byte bound counts what is already attached plus the incoming file.
     const used = db.sessionAgentScreenshotUsage(session.data.id);

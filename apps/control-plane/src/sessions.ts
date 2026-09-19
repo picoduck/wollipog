@@ -8395,7 +8395,10 @@ export class SessionsService {
   }
 
   /** The file-based attach path. Session, kind, and encoding are fixed by the caller's route, never
-   * by the body, and an agent's attachments to one session are bounded. */
+   * by the body; an agent's attachments to one session are bounded; and attaching the same file to
+   * the same session again returns the artifact it already made. That last property is what makes a
+   * retry safe: an upload of several megabytes can time out after the control plane has committed
+   * it, and the caller then cannot tell whether it landed. */
   attachSessionScreenshot(
     sessionId: string,
     body: { name?: unknown; mimeType?: unknown; data?: unknown; metadata?: unknown } | null | undefined,
@@ -8404,7 +8407,24 @@ export class SessionsService {
       count: MAX_SESSION_ATTACHED_SCREENSHOTS,
       bytes: MAX_SESSION_ATTACHED_SCREENSHOT_BYTES,
     },
-  ): ServiceResult<WorkflowArtifact> {
+  ): ServiceResult<WorkflowArtifactView> {
+    const validated = validateWorkflowArtifact({
+      sessionId,
+      kind: "screenshot",
+      encoding: "base64",
+      name: body?.name,
+      mimeType: body?.mimeType,
+      data: body?.data,
+      ...(body?.metadata !== undefined ? { metadata: body.metadata } : {}),
+    });
+    if (!validated.ok) return fail(validated.error, 400);
+    if (!this.db.getSession(sessionId)) return fail("session not found", 404);
+    const existing = this.db.findAttachedScreenshot(
+      sessionId, validated.value.sha256, validated.value.name, validated.value.mimeType, actor,
+    );
+    // A replay is answered before the bounds are consulted: it stores nothing new, so a session at
+    // its limit can still recover the id of an upload whose response it never received.
+    if (existing) return ok(existing, 200);
     if (actor.kind === "agent") {
       const usage = this.db.sessionAgentScreenshotUsage(sessionId);
       if (usage.count >= limits.count) {
@@ -8413,34 +8433,29 @@ export class SessionsService {
           409,
         );
       }
-      // The decoded size of canonical base64, computed from its length and padding so an over-budget
-      // upload is refused before it is decoded. Non-canonical input is rejected by the validator
-      // below, so a wrong estimate for it can only refuse, never admit.
-      const encoded = typeof body?.data === "string" ? body.data : "";
-      const padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
-      const incoming = Math.max(0, Math.floor(encoded.length * 3 / 4) - padding);
-      if (usage.bytes + incoming > limits.bytes) {
+      if (usage.bytes + validated.value.sizeBytes > limits.bytes) {
         return fail(
           `attaching this file would exceed the ${limits.bytes}-byte limit on screenshots attached to one session (${usage.bytes} bytes used)`,
           409,
         );
       }
     }
-    return this.createWorkflowArtifact({
-      sessionId,
-      kind: "screenshot",
-      encoding: "base64",
-      name: body?.name,
-      mimeType: body?.mimeType,
-      data: body?.data,
-      ...(body?.metadata !== undefined ? { metadata: body.metadata } : {}),
-    }, actor);
+    const created = this.storeWorkflowArtifact(validated.value, actor);
+    if (!created.ok || !created.data) return fail(created.error!, created.status);
+    const { data: _bytes, ...view } = created.data;
+    return ok(view, 201);
   }
 
   createWorkflowArtifact(input: unknown, actor: GovernanceActor = { kind: "human", id: "local" }): ServiceResult<WorkflowArtifact> {
     const validated = validateWorkflowArtifact(input);
     if (!validated.ok) return fail(validated.error, 400);
-    const value = validated.value;
+    return this.storeWorkflowArtifact(validated.value, actor);
+  }
+
+  private storeWorkflowArtifact(
+    value: Extract<ReturnType<typeof validateWorkflowArtifact>, { ok: true }>["value"],
+    actor: GovernanceActor,
+  ): ServiceResult<WorkflowArtifact> {
     const run = value.runId ? this.db.getRun(value.runId) : null;
     const session = value.sessionId ? this.db.getSession(value.sessionId) : null;
     if (value.runId && !run) return fail("run not found", 404);
