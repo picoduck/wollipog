@@ -26,6 +26,7 @@ import {
   MANAGED_WORKTREE_GUARD_MATCHER,
   MANAGED_WORKTREE_GUARD_MODE,
   MANAGED_WORKTREE_GUARD_PROTECTIONS_SUFFIX,
+  MANAGED_WORKTREE_GUARD_SOCKET_FLAG,
   managedWorktreeGuardProtectionsPath,
   managedWorktreeGuardStateMatches,
   readManagedWorktreeGuardProtections,
@@ -147,6 +148,13 @@ export function claudeHookCircuitPath(settingsFile: string): string {
     : `${settingsFile}${CIRCUIT_SUFFIX}`;
 }
 
+/** The cross-process lock `updateHookCircuitState` takes around a circuit read-modify-write. */
+export function claudeHookCircuitLockPath(circuitFile: string): string {
+  return circuitFile.endsWith(CIRCUIT_SUFFIX)
+    ? `${circuitFile.slice(0, -CIRCUIT_SUFFIX.length)}${CIRCUIT_LOCK_SUFFIX}`
+    : `${circuitFile}${CIRCUIT_LOCK_SUFFIX}`;
+}
+
 export function claudeHookTokenPath(settingsFile: string): string {
   return settingsFile.endsWith(SETTINGS_SUFFIX)
     ? `${settingsFile.slice(0, -SETTINGS_SUFFIX.length)}${TOKEN_SUFFIX}`
@@ -207,8 +215,18 @@ function hookHandler(launch: { command: string; args: string[] }, event: string)
  * per-session protections file, passed as an explicit argument AND advertised in `env` (the
  * non-secret marker that makes a guard-only settings file self-describing).
  */
-function guardHookEntry(launch: { command: string; args: string[] }, protectionsFile: string) {
-  const args = [...launch.args, "--protections", protectionsFile];
+function guardHookEntry(
+  launch: { command: string; args: string[] },
+  protectionsFile: string,
+  socketPath?: string,
+) {
+  // The protections path stays in the command even with a socket: it is what makes the document
+  // self-describing (`describeManagedSettings`), and the sidecar never reads it in socket mode.
+  const args = [
+    ...launch.args,
+    "--protections", protectionsFile,
+    ...(socketPath ? [MANAGED_WORKTREE_GUARD_SOCKET_FLAG, socketPath] : []),
+  ];
   validateInjectedArg(launch.command);
   for (const arg of args) validateInjectedArg(arg);
   return {
@@ -230,6 +248,8 @@ export interface ClaudeGuardHookOptions {
   launch: { command: string; args: string[] };
   protectionsFile: string;
   protections: readonly ManagedWorktreeProtection[];
+  /** The runner's verdict socket, for a launch whose sandbox hides the hook state dir (#1336). */
+  socketPath?: string;
 }
 
 export interface ClaudeManagerHookOptions {
@@ -278,7 +298,7 @@ function claudeSettingsDocument(
       PreToolUse: [
         // The guard runs first; its refusal is the security property and must not depend on the
         // manager hook being enabled, reachable, or healthy.
-        ...(guard ? [guardHookEntry(guard.launch, guard.protectionsFile)] : []),
+        ...(guard ? [guardHookEntry(guard.launch, guard.protectionsFile, guard.socketPath)] : []),
         ...(manager ? [{ hooks: [hookHandler(manager.launch, "PreToolUse")] }] : []),
       ],
       ...(manager
@@ -346,6 +366,7 @@ export function sweepClaudeHookFiles(configDir = defaultHookConfigDir()): number
 export function removeClaudeHookFiles(sessionId: string, configDir = defaultHookConfigDir()): void {
   guardStateDigests.delete(sessionId);
   compromisedGuardSessions.delete(sessionId);
+  guardSockets.delete(sessionId);
   try {
     const settings = claudeHookSettingsPath(configDir, sessionId);
     const circuit = claudeHookCircuitPath(settings);
@@ -353,7 +374,7 @@ export function removeClaudeHookFiles(sessionId: string, configDir = defaultHook
       settings,
       claudeHookTemplatePath(settings),
       circuit,
-      circuit.replace(CIRCUIT_SUFFIX, CIRCUIT_LOCK_SUFFIX),
+      claudeHookCircuitLockPath(circuit),
       claudeHookTokenPath(settings),
       claudeHookReadyPath(settings),
       claudeHookGuardPath(settings),
@@ -448,6 +469,43 @@ export function describeManagedSettings(file: string): ManagedSettingsDescriptio
         sameGuardPath(args[index + 1]!, claudeHookProtectionsPath(file));
     })) === true;
   return manager || guard ? { manager, guard } : null;
+}
+
+/**
+ * The runner-owned settings argument this session's launch carries, in the spelling the provider
+ * will open, matched exactly as provisioning matches it (resolved, case-folded).
+ */
+export function runnerSettingsArgument(args: readonly string[], configDir: string, sessionId: string): string | null {
+  const expected = resolve(claudeHookSettingsPath(configDir, sessionId)).toLowerCase();
+  for (let index = args.length - 2; index >= 0; index--) {
+    if (args[index] === "--settings" && resolve(args[index + 1]!).toLowerCase() === expected) return args[index + 1]!;
+  }
+  return null;
+}
+
+/**
+ * The verdict socket the guard in this runner-owned settings document answers through, or `null`
+ * when it has no guard or a file-mode one (#1336). Read from the heal template, like the rest of
+ * the self-description.
+ */
+export function managedSettingsGuardSocket(file: string): string | null {
+  if (describeManagedSettings(file)?.guard !== true) return null;
+  try {
+    const template = JSON.parse(readFileSync(claudeHookTemplatePath(file), "utf8")) as {
+      hooks?: { PreToolUse?: Array<{ hooks?: Array<{ args?: unknown }> }> };
+    };
+    for (const entry of template.hooks?.PreToolUse ?? []) {
+      for (const hook of entry.hooks ?? []) {
+        const args = Array.isArray(hook.args) ? hook.args.map(String) : [];
+        if (!args.includes(MANAGED_WORKTREE_GUARD_MODE)) continue;
+        const index = args.indexOf(MANAGED_WORKTREE_GUARD_SOCKET_FLAG);
+        if (index >= 0 && args[index + 1]) return args[index + 1]!;
+      }
+    }
+  } catch {
+    /* No readable template: no guard this launch could rely on either. */
+  }
+  return null;
 }
 
 function selfDescribingManagedSettings(file: string): boolean {
@@ -562,6 +620,16 @@ export function provisionClaudeHooks(
     concurrentLaunch?: boolean;
     /** Seam for tests: prove the guard sidecar actually refuses before relying on it. */
     verifyGuardLaunch?: typeof verifyManagedWorktreeGuardLaunch;
+    /**
+     * How the guard sidecar gets its verdict (#1336). Absent: from the protections file, as in
+     * provider mode. A path: the launch runs in a runner-owned sandbox that hides the hook state
+     * directory, so the sidecar asks this session's verdict socket instead. `null`: the launch is
+     * sandboxed but no socket could be established, so no guard is provisioned at all — a
+     * file-mode guard there would refuse every matched tool call, and the driver mediates instead.
+     * A launch that does not say (a native TUI, which the runner does not sandbox) keeps whatever
+     * the session was last provisioned with, so it never downgrades the shared document.
+     */
+    managedWorktreeGuardSocket?: string | null;
   },
   log: (message: string) => void,
   host: ClaudeHookHost = defaultClaudeHookHost(),
@@ -587,6 +655,12 @@ export function provisionClaudeHooks(
   const file = persistedFile ?? expectedFile;
   const guardRequested = config.managedWorktreeProtections !== undefined;
   const concurrentLaunch = config.concurrentLaunch === true;
+  if (typeof config.managedWorktreeGuardSocket === "string") {
+    guardSockets.set(spec.sessionId, config.managedWorktreeGuardSocket);
+  } else if (config.managedWorktreeGuardSocket === null) {
+    guardSockets.delete(spec.sessionId);
+  }
+  const socketPath = guardSockets.get(spec.sessionId);
   const protections = config.managedWorktreeProtections ?? [];
 
   // "Guard active" is established here, at provisioning time, and is observable in the argv the
@@ -631,15 +705,22 @@ export function provisionClaudeHooks(
       log(`Claude managed worktree guard ${spec.sessionId}: WSL/container hook path translation is not supported`);
     } else if (!targetIsHost) {
       log(`Claude managed worktree guard ${spec.sessionId}: container/cloud hook injection is not supported`);
+    } else if (config.managedWorktreeGuardSocket === null) {
+      log(
+        `Claude managed worktree guard ${spec.sessionId}: the sandbox hides the guard's state and ` +
+        "its verdict socket is unavailable; this launch is mediated",
+      );
     } else {
       const protectionsFile = claudeHookProtectionsPath(file);
       try {
         validateInjectedArg(file);
         validateInjectedArg(protectionsFile);
+        if (socketPath) validateInjectedArg(socketPath);
         const candidate: ClaudeGuardHookOptions = {
           launch: runnerReentryCommand(host, MANAGED_WORKTREE_GUARD_MODE),
           protectionsFile,
           protections,
+          ...(socketPath ? { socketPath } : {}),
         };
         // Tripwire: compare what is on disk against the digest of what the runner last wrote,
         // BEFORE overwriting it, so tampering is evident rather than silently repaired.
@@ -729,6 +810,7 @@ export function provisionClaudeHooks(
       protectionsFile: claudeHookProtectionsPath(file),
       // Never written: `preserveGuardState` leaves the live list exactly as the runner last wrote it.
       protections: [],
+      ...(socketPath ? { socketPath } : {}),
     }
     : null;
   // `managerHooksBlocked` already rejected a null/too-old control plane.
@@ -864,12 +946,15 @@ function discardGuardArtifacts(file: string): void {
 
 const guardStateDigests = new Map<string, string>();
 const compromisedGuardSessions = new Set<string>();
+/** Sessions whose guard answers through the runner's verdict socket (#1336), and its path. */
+const guardSockets = new Map<string, string>();
 
 /** Testing seam: forget every remembered guard-state digest and compromise marker. */
 export function resetClaudeGuardState(): void {
   guardStateDigests.clear();
   compromisedGuardSessions.clear();
   verifiedGuardLaunches.clear();
+  guardSockets.clear();
 }
 
 export type ClaudeGuardRefreshOutcome =
@@ -1334,9 +1419,7 @@ export function updateHookCircuitState(
   file: string,
   update: (prior: HookCircuitState) => HookCircuitState,
 ): HookCircuitState {
-  const lock = file.endsWith(CIRCUIT_SUFFIX)
-    ? `${file.slice(0, -CIRCUIT_SUFFIX.length)}${CIRCUIT_LOCK_SUFFIX}`
-    : `${file}${CIRCUIT_LOCK_SUFFIX}`;
+  const lock = claudeHookCircuitLockPath(file);
   mkdirSync(dirname(lock), { recursive: true });
   const deadline = Date.now() + 250;
   let fd: number;

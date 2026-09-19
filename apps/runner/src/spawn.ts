@@ -148,6 +148,11 @@ export interface BwrapSpawnIsolation {
   /** Runner-owned administrative entries bound read-only over themselves. Rendered after every
    * writable bind, including the cwd, so the narrower rule is the one that lands. */
   readOnlyBinds?: string[];
+  /** The runner's hook state directory, replaced by an empty read-only tmpfs so neither the
+   * provider nor anything it spawns can read, list, or change it (#1336). `readable` entries are
+   * bound back read-only; `socket` is the verdict socket inside one of them. Rendered LAST, so no
+   * earlier bind can re-expose what it hides. */
+  guardStateMask?: { directory: string; readable: string[]; socket?: string };
   /** Ephemeral authenticated bridge state; never persisted or advertised. WSL only. */
   wslAgentControl?: WslAgentControlLaunch;
 }
@@ -175,6 +180,8 @@ export interface SeatbeltSpawnIsolation {
   writableRoots: string[];
   /** Runner-owned entries the profile denies writes to even though a writable root contains them. */
   readOnlyPaths?: string[];
+  /** The hook state directory the profile denies, with the entries it re-exposes (#1336). */
+  guardStateMask?: { directory: string; readable: string[]; socket?: string };
 }
 
 export interface WindowsJobSpawnIsolation {
@@ -318,6 +325,15 @@ export function buildBwrapArgs(opts: Pick<SpawnAgentOptions, "command" | "args" 
     ...(isolation.writableBinds ?? []).flatMap((bind) => ["--bind", bind.source, bind.target]),
     "--bind", opts.cwd, opts.cwd,
     ...(isolation.readOnlyBinds ?? []).flatMap((path) => ["--ro-bind", path, path]),
+    ...(isolation.guardStateMask
+      ? [
+        "--tmpfs", isolation.guardStateMask.directory,
+        ...isolation.guardStateMask.readable.flatMap((path) => ["--ro-bind", path, path]),
+        // The tmpfs is writable until remounted; a file the provider wrote there would vanish with
+        // the sandbox, but a read-only mask leaves nothing to reason about.
+        "--remount-ro", isolation.guardStateMask.directory,
+      ]
+      : []),
     "--chdir", opts.cwd,
     "--",
     opts.command,

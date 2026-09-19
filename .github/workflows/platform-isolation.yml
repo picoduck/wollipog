@@ -48,9 +48,10 @@ jobs:
       - name: Verify Native Isolation Adapter
         run: node --import tsx --test apps/runner/src/execution-isolation.test.ts apps/runner/src/runner-data-dir.test.ts apps/runner/src/spawn.test.ts
 
-      # The managed-worktree read-only rule is only meaningful against a real kernel mount, so this
-      # job installs bubblewrap and runs the enforcement test without its skip. A host that cannot
-      # create a user namespace would silently skip it, which would report coverage nobody has.
+      # The managed-worktree read-only rule and the hook-state mask (#1336) are only meaningful
+      # against a real kernel mount, so this job installs bubblewrap and runs the enforcement tests
+      # without their skip. A host that cannot create a user namespace would silently skip them,
+      # which would report coverage nobody has.
       - name: Install Bubblewrap
         if: startsWith(matrix.os, 'ubuntu-')
         run: |
@@ -63,10 +64,22 @@ jobs:
         run: |
           set -euo pipefail
           bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --unshare-pid -- /bin/true
-          output=$(node --import tsx --test --test-reporter=tap apps/runner/src/managed-worktree-sandbox.integration.test.ts < /dev/null)
+          output=$(node --import tsx --test --test-reporter=tap apps/runner/src/managed-worktree-sandbox.integration.test.ts apps/runner/src/managed-worktree-guard-sandbox.integration.test.ts < /dev/null)
           printf '%s\n' "$output"
           if printf '%s' "$output" | grep -q '^# skipped 0$'; then exit 0; fi
           echo "the bubblewrap enforcement test must run rather than skip on this job" >&2
+          exit 1
+
+      # The Seatbelt half of the hook-state mask (#1336) can only run here, so it must not skip.
+      - name: Verify Guard State Seatbelt Boundary
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          output=$(node --import tsx --test --test-reporter=tap apps/runner/src/managed-worktree-guard-seatbelt.integration.test.ts < /dev/null)
+          printf '%s\n' "$output"
+          if printf '%s' "$output" | grep -q '^# skipped 0$'; then exit 0; fi
+          echo "the Seatbelt hook-state test must run rather than skip on this job" >&2
           exit 1
 
       - name: Verify Native macOS Skill Filesystem Adapter

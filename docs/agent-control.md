@@ -220,6 +220,92 @@ exactly as the **Attach** notice already reports for the worktree root itself. T
 same-turn window the command-approval boundary has, tracked separately; closing it means retiring
 the provider at creation time, not changing the sandbox rule.
 
+## Runner Hook State at the Sandbox Boundary
+
+> **Only runner-sandboxed launches are covered.** The rule below applies only when the runner
+> sandboxes its providers (`executionIsolation.mode` set to `bwrap` or `seatbelt`). The default mode
+> is `provider`, and a host running it gains **nothing** from this rule. There, the guard-state
+> command-text veto in [ADR 0012](adr/0012-managed-worktree-guard-hook.md) is still the only control,
+> and issue #1336 stays open for that mode.
+
+The managed-worktree guard keeps its protection list in the runner's hook state directory
+(`<data dir>/hooks/<runner key>`), and the provider runs as the same OS user as the runner. A veto on
+tool calls cannot see indirection: a script, an interpreter, a command held in a variable, a
+recursive walk started from an ancestor directory, or an MCP filesystem tool. So a runner-owned
+sandbox hides the directory from the provider **and from everything it spawns**, including its
+tools, its MCP servers, and the guard sidecar itself:
+
+- **`bwrap`** mounts an empty tmpfs over the directory, after every other bind, and remounts it
+  read-only. It then binds back, read-only, only the session's own settings documents (Claude reads
+  them at start) and the session's own verdict-socket directory. Reads get `ENOENT`, walks from an
+  ancestor see an empty directory, and writes get `EROFS`. This includes `git clean -dfx` run from a
+  repository that contains the data directory.
+- **Seatbelt** denies `file-read*` and `file-write*` on the directory. The deny comes after the
+  allow that makes the data directory writable, and Seatbelt takes the last matching rule. It then
+  re-allows reading those same entries, plus an outbound connection to the session's socket when the
+  network is denied. It also grants back the session's manager policy hook state (see the known
+  limits below).
+
+The guard sidecar can no longer read its list, so a guarded launch in these modes carries
+`--guard-socket`. The sidecar sends the hook payload to a per-session Unix socket that the runner
+serves from outside the sandbox. The runner judges it with the same function a file-mode sidecar
+runs, against the list of the session that owns the socket:
+
+- **One socket per session.** Each socket sits in an owner-only directory. A request carries no
+  session identity, so a caller cannot name another session's list, and the sandbox binds only that
+  session's socket directory back into view.
+- **The sidecar never falls back to the file.** A missing socket, a refused or reset connection, a
+  30-second timeout, or a malformed answer all exit 2, which blocks the tool call.
+- **No socket means no guard.** If the socket cannot be established (for example, its path would not
+  fit in `sun_path`), the launch gets no guard and the driver mediates the permission mode. A
+  file-mode guard would refuse every matched tool call instead.
+- **The launch proves the guard from inside its own sandbox.** Before the provider starts, the
+  runner runs the real sidecar through the launch's exact sandbox wrapper. The probe payload names
+  the session's own protections file, which the guard refuses only after loading the list. If the
+  mask would hide the socket or stop the sidecar starting, the **launch fails** with the reason. It
+  never starts a provider whose every matched tool call would be refused.
+
+| Launch | Hook state directory hidden | How the guard gets its verdict | Verified by |
+| --- | --- | --- | --- |
+| Runner `bwrap`, native Linux | Yes: reads, enumeration, writes, `git clean` | Verdict socket | Real-kernel test in the Platform Isolation Ubuntu job (`managed-worktree-guard-sandbox.integration.test.ts`) |
+| Runner `seatbelt`, native macOS | Yes: reads, enumeration, writes | Verdict socket | **macOS CI only** (`managed-worktree-guard-seatbelt.integration.test.ts`), not verified on a developer machine |
+| Runner `provider` (the default) | **No** | Protections file, unchanged | Existing guard tests; the command-text veto is the only control |
+| Direct WSL `bwrap` | No | No guard (WSL hook paths are not translated) | Unchanged |
+| `windows-job` | No: Job Objects do not restrict the filesystem | Protections file, unchanged | Unchanged |
+| `container` and `cloud` targets | Not reachable: the hook state directory is not in the workspace bind or snapshot | No guard (not provisioned there) | Unchanged |
+| Native TUI launches | No: the runner does not sandbox a TUI | Protections file, or the session's socket when a sandboxed launch already provisioned one | Unchanged |
+
+What the providers' own sandboxes can do in `provider` mode was measured (Linux, Claude Code 2.1.278,
+codex-cli 0.155.1). Neither is used by this rule:
+
+- **Claude Code's sandbox** covers only Bash and the processes it starts. Hooks and MCP servers run
+  outside it. It needs `bubblewrap` and `socat`; without them it warns and runs commands
+  **unsandboxed** unless `sandbox.failIfUnavailable` is set. Enabling it also confines writes to the
+  working directory and puts the network behind a domain allowlist for every session.
+- **Codex's sandbox** enforces a `deny` entry in a named permission profile at the OS level, for
+  reads, walks from an ancestor, writes, and renames. Hooks and MCP servers run outside it. The
+  runner drives Codex with the legacy `sandbox_mode`/`sandboxPolicy`, which Codex refuses to combine
+  with permission profiles, and `danger-full-access` has no sandbox at all.
+
+Known limits of the sandboxed form:
+
+- **A stalled runner delays verdicts.** The verdict is served by the runner's main event loop, so a
+  long synchronous operation there (the guard's own host-side self-test is one, typically about a
+  second) delays every guarded tool call behind it. A stall longer than 30 seconds refuses the call;
+  it never passes it.
+- **Manager policy hooks keep their own state under Seatbelt only.** The manager policy hook is
+  also a re-entry the provider spawns. It reads its credential and acknowledgement and rewrites its
+  circuit file on every call, all inside the hidden directory. Seatbelt grants exactly those paths
+  back (the circuit, its lock, and the circuit's atomic-write temporaries), so the hook keeps
+  working, while the protection list and every other session's files stay hidden. That grants
+  nothing new: before this rule the whole directory was readable and writable there. `bwrap` cannot
+  grant a write inside its read-only data root. There, the manager hook already failed closed on
+  every call before this change, because its circuit write failed, and it still does. That is a
+  pre-existing limit, not something the mask introduces.
+- **The mask is bound at launch.** Like every other filesystem boundary here, it covers the entries
+  that exist when the provider starts. The hook state directory is created before the sandbox is
+  built, so nothing written into it later becomes visible.
+
 ## Typed Parent Control Decisions
 
 An Orchestrator that cannot continue without a human response must create a structured blocking

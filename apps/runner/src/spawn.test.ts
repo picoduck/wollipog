@@ -465,6 +465,33 @@ test("buildBwrapArgs mounts runner-owned entries read-only after every writable 
   assert.deepEqual(args.slice(args.indexOf("--chdir")), ["--chdir", "/work/tree", "--", "/usr/bin/agent"]);
 });
 
+test("buildBwrapArgs hides the hook state directory last and re-exposes only the named entries", () => {
+  const args = buildBwrapArgs({ command: "/usr/bin/agent", args: [], cwd: "/data/worktrees/s1" }, {
+    backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "deny",
+    writableBinds: [{ source: "/data/provider-state/claude/k/projects", target: "/home/me/.claude/projects" }],
+    readOnlyBinds: ["/data/worktrees/s1/.git"],
+    guardStateMask: {
+      directory: "/data/hooks/k",
+      readable: ["/data/hooks/k/s1.settings.json", "/data/hooks/k/s1.guard"],
+      socket: "/data/hooks/k/s1.guard/sock",
+    },
+  });
+  // #1336: bwrap mounts in argv order, so the mask comes after every other bind — no later mount
+  // may re-expose what it hides — and is remounted read-only once its exposures are in place.
+  const mask = args.indexOf("/data/hooks/k");
+  assert.ok(mask > args.lastIndexOf("/data/worktrees/s1/.git"), `the mask must follow every bind: ${args.join(" ")}`);
+  assert.deepEqual(args.slice(mask - 1, args.indexOf("--chdir")), [
+    "--tmpfs", "/data/hooks/k",
+    "--ro-bind", "/data/hooks/k/s1.settings.json", "/data/hooks/k/s1.settings.json",
+    "--ro-bind", "/data/hooks/k/s1.guard", "/data/hooks/k/s1.guard",
+    "--remount-ro", "/data/hooks/k",
+  ]);
+  const unmasked = buildBwrapArgs({ command: "/usr/bin/agent", args: [], cwd: "/work" }, {
+    backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "inherit",
+  });
+  assert.equal(unmasked.includes("--remount-ro"), false, "no mask requested, no mask rendered");
+});
+
 test("spawnAgent scrubs inherited env keys but explicit env still wins", async () => {
   process.env.WOLLIPOG_TEST_SCRUB_A = "leaked-from-daemon";
   process.env.WOLLIPOG_TEST_SCRUB_B = "leaked-from-daemon";

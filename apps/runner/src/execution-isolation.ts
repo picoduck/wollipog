@@ -1,7 +1,7 @@
 import type { AgentContext } from "@wollipog/protocol";
 import type { AgentDriverKind } from "@wollipog/protocol";
 import { createHash } from "node:crypto";
-import { cp, mkdir, opendir, realpath, rm, stat } from "node:fs/promises";
+import { cp, lstat, mkdir, opendir, realpath, rm, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import type { RunnerExecutionIsolation } from "./config.js";
@@ -43,6 +43,9 @@ interface IsolationDeps {
   existsNative: (path: string) => Promise<boolean>;
   existsWsl: (context: Extract<AgentContext, { kind: "wsl" }>, path: string) => Promise<boolean>;
   isRunnerOwnedEntryNative: (path: string) => Promise<boolean>;
+  /** A real file, directory, or socket at exactly this path — never a symlink, which a bind or a
+   * Seatbelt allow would follow somewhere the runner did not choose. */
+  isExposableEntryNative: (path: string) => Promise<boolean>;
   forkSizeNative: (location: ProviderStateLocation, driver: AgentDriverKind, providerSessionId: string) => Promise<number | null>;
   forkSizeWsl: (context: Extract<AgentContext, { kind: "wsl" }>, location: ProviderStateLocation, driver: AgentDriverKind, providerSessionId: string) => Promise<number | null>;
   wait: (ms: number) => Promise<void>;
@@ -103,6 +106,10 @@ const defaultDeps: IsolationDeps = {
     context, "test", ["-d", path], { cwd: "/", timeoutMs: 5_000 },
   ).then(() => true, () => false),
   isRunnerOwnedEntryNative: async (path) => stat(path).then((value) => value.isFile(), () => false),
+  isExposableEntryNative: async (path) => lstat(path).then(
+    (value) => value.isFile() || value.isDirectory() || value.isSocket(),
+    () => false,
+  ),
   forkSizeNative: async (location, driver, providerSessionId) => {
     return findProviderForkSizeNative(location.leaf, driver, providerSessionId, 0);
   },
@@ -141,6 +148,10 @@ export interface IsolationStateOptions {
    * must stay read-only to the provider. Sandbox modes that can express a per-path rule apply it;
    * the modes that cannot are documented as unenforcing rather than silently assumed safe. */
   readOnlyPaths?: string[];
+  /** The runner's hook state directory, hidden from the provider and everything it spawns, and
+   * the few entries inside it the provider must still read (#1336). Native bwrap and Seatbelt
+   * express it; every other mode is documented as not enforcing it. */
+  guardStateMask?: GuardStateMaskOptions;
   /** Stable attested runner/control-plane owner for state outside dataDir (currently WSL). */
   ownerHash?: string;
   /** Canonical shared provider leaf used by Seatbelt when a home component is symlinked. */
@@ -148,6 +159,14 @@ export interface IsolationStateOptions {
 }
 
 interface ProviderStateLocation { root: string; leaf: string; }
+
+/** See `GuardStateMask` in managed-worktree-guard-socket.ts, which the runner fills in. */
+interface GuardStateMaskOptions {
+  directory: string;
+  readable: string[];
+  socket?: string;
+  managerTransport?: { readable: string[]; atomicWritable: string[]; writable: string[] };
+}
 
 export function parseWslIsolationProbe(stdout: string): { command: string; uid: number; home: string } | null {
   const lines = stdout.trim().split(/\r?\n/).map((line) => line.trim());
@@ -271,13 +290,43 @@ export function buildSeatbeltProfile(
   network: "inherit" | "deny",
   nativeTmp = tmpdir(),
 ): string {
-  return renderSeatbeltProfile(seatbeltWritableRoots(state, home, nativeTmp), network, state.readOnlyPaths ?? []);
+  return renderSeatbeltProfile(
+    seatbeltWritableRoots(state, home, nativeTmp),
+    network,
+    state.readOnlyPaths ?? [],
+    state.guardStateMask
+      ? {
+        directories: [state.guardStateMask.directory],
+        readableFiles: state.guardStateMask.readable,
+        readableDirectories: [],
+        sockets: state.guardStateMask.socket ? [state.guardStateMask.socket] : [],
+        transportReadable: state.guardStateMask.managerTransport?.readable ?? [],
+        transportAtomicWritable: state.guardStateMask.managerTransport?.atomicWritable ?? [],
+        transportWritable: state.guardStateMask.managerTransport?.writable ?? [],
+      }
+      : undefined,
+  );
+}
+
+/** The mask as Seatbelt sees it, with every spelling of each path, so a path Seatbelt
+ * canonicalizes differently from the runner (`/var` and `/private/var`) is still covered. */
+interface SeatbeltGuardStateMask {
+  directories: string[];
+  readableFiles: string[];
+  readableDirectories: string[];
+  sockets: string[];
+  /** Manager policy hook state: read-only files, files rewritten through an atomic-write temporary
+   * sibling, and files written in place. */
+  transportReadable: string[];
+  transportAtomicWritable: string[];
+  transportWritable: string[];
 }
 
 function renderSeatbeltProfile(
   writableRoots: string[],
   network: "inherit" | "deny",
   readOnlyPaths: readonly string[] = [],
+  guardStateMask?: SeatbeltGuardStateMask,
 ): string {
   const writeRules = writableRoots
     .map((path) => `    (subpath ${seatbeltLiteral(path)})`).join("\n");
@@ -311,9 +360,166 @@ function renderSeatbeltProfile(
         ")",
       ]
       : []),
+    // The runner's hook state directory (#1336): unreadable and unwritable, although the data
+    // directory that contains it is a writable root above. The later allows re-expose, read-only,
+    // exactly the entries the provider needs: its own settings documents and its own verdict
+    // socket. Last matching rule wins, so the order here is the rule.
+    ...(guardStateMask?.directories.length
+      ? [
+        "(deny file-read* file-write*",
+        ...guardStateMask.directories.map((path) => `    (subpath ${seatbeltLiteral(path)})`),
+        ")",
+        // Only the directory's own metadata, so a lookup through it to an exposed entry resolves.
+        "(allow file-read-metadata",
+        ...guardStateMask.directories.map((path) => `    (literal ${seatbeltLiteral(path)})`),
+        ")",
+        ...(guardStateMask.readableFiles.length || guardStateMask.readableDirectories.length
+          ? [
+            "(allow file-read*",
+            ...guardStateMask.readableFiles.map((path) => `    (literal ${seatbeltLiteral(path)})`),
+            ...guardStateMask.readableDirectories.map((path) => `    (subpath ${seatbeltLiteral(path)})`),
+            ")",
+          ]
+          : []),
+        ...(guardStateMask.transportReadable.length || guardStateMask.transportAtomicWritable.length ||
+            guardStateMask.transportWritable.length
+          ? [
+            "(allow file-read*",
+            ...[
+              ...guardStateMask.transportReadable,
+              ...guardStateMask.transportAtomicWritable,
+              ...guardStateMask.transportWritable,
+            ].map((path) => `    (literal ${seatbeltLiteral(path)})`),
+            ")",
+          ]
+          : []),
+        ...(guardStateMask.transportAtomicWritable.length || guardStateMask.transportWritable.length
+          ? [
+            "(allow file-write*",
+            ...guardStateMask.transportAtomicWritable.flatMap((path) => [
+              `    (literal ${seatbeltLiteral(path)})`,
+              `    (regex ${seatbeltAtomicWriteSiblings(path)})`,
+            ]),
+            ...guardStateMask.transportWritable.map((path) => `    (literal ${seatbeltLiteral(path)})`),
+            ")",
+          ]
+          : []),
+      ]
+      : []),
     ...(network === "inherit" ? ["(allow network*)"] : []),
+    // With the network denied the verdict socket still has to be reachable; nothing else is.
+    ...(network === "deny" && guardStateMask?.sockets.length
+      ? [
+        "(allow network-outbound",
+        ...guardStateMask.sockets.map((path) => `    (remote unix-socket (path-literal ${seatbeltLiteral(path)}))`),
+        ")",
+      ]
+      : []),
     "",
   ].join("\n");
+}
+
+/**
+ * The temporary siblings `protectedWrite` creates next to `path` before renaming over it:
+ * `.<name>.<pid>.<uuid>.tmp` in the same directory. A path the regex literal cannot carry safely is
+ * refused, which fails the launch rather than granting a broader write.
+ */
+function seatbeltAtomicWriteSiblings(path: string): string {
+  if (!path.startsWith("/") || /["\\\0\r\n]/u.test(path)) {
+    throw new Error(`Seatbelt isolation cannot express a write rule for ${JSON.stringify(path)}`);
+  }
+  const escape = (value: string) => value.replace(/[.^$*+?()[\]{}|]/gu, (character) => `\\${character}`);
+  // `randomUUID()` is lowercase 8-4-4-4-12 hex. Spelled out rather than with `{n}` intervals, so
+  // the pattern means the same thing under any regex dialect Seatbelt has used.
+  const hex = (count: number) => "[0-9a-f]".repeat(count);
+  const uuid = [hex(8), hex(4), hex(4), hex(4), hex(12)].join("-");
+  return `#"^${escape(posix.dirname(path))}/\\.${escape(posix.basename(path))}\\.[0-9]+\\.${uuid}\\.tmp$"`;
+}
+
+/** Whether `path` lies strictly inside `directory` (both POSIX; bwrap and Seatbelt are POSIX-only). */
+function strictlyInside(directory: string, path: string): boolean {
+  const rel = posix.relative(directory, path);
+  return rel !== "" && rel !== ".." && !rel.startsWith("../") && !posix.isAbsolute(rel);
+}
+
+/**
+ * Resolve the hook-state mask against the real filesystem. The directory is created when missing,
+ * because a directory that appears after the sandbox is built would not be hidden by it. Exposed
+ * entries must exist, sit strictly inside the directory, and not be symlinks; anything else is
+ * dropped, which only ever hides more.
+ */
+async function resolveGuardStateMask(
+  mask: IsolationStateOptions["guardStateMask"],
+  runtime: IsolationDeps,
+): Promise<GuardStateMaskOptions | undefined> {
+  if (!mask) return undefined;
+  const directory = posix.normalize(mask.directory);
+  if (!posix.isAbsolute(directory)) throw new Error("the guard state mask needs an absolute directory");
+  await runtime.mkdirNative([directory]);
+  const readable: string[] = [];
+  for (const entry of mask.readable) {
+    const path = posix.normalize(entry);
+    if (!strictlyInside(directory, path) || readable.includes(path)) continue;
+    if (await runtime.isExposableEntryNative(path)) readable.push(path);
+  }
+  const socket = mask.socket && readable.some((entry) => strictlyInside(entry, mask.socket!))
+    ? posix.normalize(mask.socket)
+    : undefined;
+  // The manager transport's files may not exist yet (the circuit is written on its first failure),
+  // so they are kept by position, not by presence; only a path inside the directory is kept.
+  const inside = (paths: readonly string[]) => paths.map((path) => posix.normalize(path))
+    .filter((path) => strictlyInside(directory, path));
+  const managerTransport = mask.managerTransport
+    ? {
+      readable: inside(mask.managerTransport.readable),
+      atomicWritable: inside(mask.managerTransport.atomicWritable),
+      writable: inside(mask.managerTransport.writable),
+    }
+    : undefined;
+  return {
+    directory,
+    readable,
+    ...(socket ? { socket } : {}),
+    ...(managerTransport ? { managerTransport } : {}),
+  };
+}
+
+async function seatbeltGuardStateMask(
+  mask: GuardStateMaskOptions,
+  runtime: IsolationDeps,
+): Promise<SeatbeltGuardStateMask> {
+  const spellings = async (path: string) => {
+    const canonical = await runtime.realpathNative(path).catch(() => path);
+    return canonical === path ? [path] : [path, canonical];
+  };
+  const result: SeatbeltGuardStateMask = {
+    directories: await spellings(mask.directory),
+    readableFiles: [],
+    readableDirectories: [],
+    sockets: [],
+    transportReadable: [],
+    transportAtomicWritable: [],
+    transportWritable: [],
+  };
+  // A file that does not exist yet has no canonical form of its own; its directory's does.
+  const fileSpellings = async (path: string) => (await spellings(posix.dirname(path)))
+    .map((parent) => posix.join(parent, posix.basename(path)));
+  for (const path of mask.managerTransport?.readable ?? []) result.transportReadable.push(...await fileSpellings(path));
+  for (const path of mask.managerTransport?.atomicWritable ?? []) result.transportAtomicWritable.push(...await fileSpellings(path));
+  for (const path of mask.managerTransport?.writable ?? []) result.transportWritable.push(...await fileSpellings(path));
+  for (const entry of mask.readable) {
+    const names = await spellings(entry);
+    if (await runtime.existsNative(entry)) result.readableDirectories.push(...names);
+    else result.readableFiles.push(...names);
+  }
+  // A socket's canonical path is its directory's canonical path plus its name, and the directory
+  // is what exists to be resolved.
+  if (mask.socket) {
+    for (const parent of await spellings(posix.dirname(mask.socket))) {
+      result.sockets.push(posix.join(parent, posix.basename(mask.socket)));
+    }
+  }
+  return result;
 }
 
 /** Deny rules are monotone: an extra entry only ever removes access. Keeping the pathname next to
@@ -467,14 +673,21 @@ export async function resolveExecutionIsolation(
       runtime.isRunnerOwnedEntryNative,
       runtime.realpathNative,
     );
+    const guardStateMask = await resolveGuardStateMask(state.guardStateMask, runtime);
     return {
       backend: "seatbelt",
       command: binary.launch.command,
       args: binary.launch.args,
       network: policy.network,
-      profile: renderSeatbeltProfile(writableRoots, policy.network, readOnlyPaths),
+      profile: renderSeatbeltProfile(
+        writableRoots,
+        policy.network,
+        readOnlyPaths,
+        guardStateMask ? await seatbeltGuardStateMask(guardStateMask, runtime) : undefined,
+      ),
       writableRoots,
       ...(readOnlyPaths.length ? { readOnlyPaths } : {}),
+      ...(guardStateMask ? { guardStateMask } : {}),
     };
   }
   if (policy.mode === "windows-job") {
@@ -512,6 +725,12 @@ export async function resolveExecutionIsolation(
   // Resolved after the writable binds are materialized: the entries live inside those roots, and
   // the launcher renders them last so the narrower read-only rule wins over the containing mount.
   const readOnlyBinds = await bwrapReadOnlyBinds(state?.readOnlyPaths, runtime.isRunnerOwnedEntryNative);
+  // bwrap renders the directory read-only as a whole, so the manager transport's writes cannot be
+  // granted there; its entries are not carried (docs/agent-control.md, "Known limits").
+  const resolvedMask = await resolveGuardStateMask(state?.guardStateMask, runtime);
+  const guardStateMask = resolvedMask
+    ? { directory: resolvedMask.directory, readable: resolvedMask.readable, ...(resolvedMask.socket ? { socket: resolvedMask.socket } : {}) }
+    : undefined;
   return {
     backend: "bwrap",
     command: binary.launch.command,
@@ -519,6 +738,7 @@ export async function resolveExecutionIsolation(
     network: policy.network,
     ...(writableBinds.length ? { writableBinds } : {}),
     ...(readOnlyBinds.length ? { readOnlyBinds } : {}),
+    ...(guardStateMask ? { guardStateMask } : {}),
   };
 }
 

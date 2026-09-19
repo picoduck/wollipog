@@ -736,3 +736,177 @@ test("sessions without a managed worktree keep exactly today's sandbox boundary"
   assert.equal(mac?.backend === "seatbelt" ? mac.readOnlyPaths : "absent", undefined);
   assert.doesNotMatch(mac?.backend === "seatbelt" ? mac.profile : "", /deny file-write\*/);
 });
+
+test("bwrap hides the hook state directory and re-exposes only real entries inside it", async () => {
+  const created: string[][] = [];
+  const entries = new Set([
+    "/data/hooks/k/s1.settings.json",
+    "/data/hooks/k/s1.guard",
+    "/data/elsewhere.json",
+  ]);
+  const resolved = await resolveExecutionIsolation(bwrap, { kind: "native" }, {
+    platform: "linux",
+    uid: () => 1000,
+    mkdirNative: async (paths) => { created.push(paths); },
+    resolveNative: async (name) => name === "bwrap" ? {
+      path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] },
+    } : null,
+    // Missing entries and symlinks both answer false here; either way nothing is bound.
+    isExposableEntryNative: async (path) => entries.has(path),
+  }, {
+    driver: "claude-code",
+    dataDir: "/data",
+    env: { HOME: "/home/me" },
+    sessionId: "s1",
+    cwd: "/data/worktrees/s1",
+    guardStateMask: {
+      directory: "/data/hooks/k",
+      readable: [
+        "/data/hooks/k/s1.settings.json",
+        "/data/hooks/k/s1.guard-missing.json",
+        "/data/hooks/k/s1.guard",
+        // Outside the hidden directory: never bound through the mask, whatever it is.
+        "/data/elsewhere.json",
+        "/data/hooks/k/../elsewhere.json",
+      ],
+      socket: "/data/hooks/k/s1.guard/sock",
+    },
+  });
+  assert.equal(resolved?.backend, "bwrap");
+  assert.deepEqual(resolved?.backend === "bwrap" ? resolved.guardStateMask : undefined, {
+    directory: "/data/hooks/k",
+    readable: ["/data/hooks/k/s1.settings.json", "/data/hooks/k/s1.guard"],
+    socket: "/data/hooks/k/s1.guard/sock",
+  });
+  // A directory that appeared only after the sandbox was built would not be hidden by it.
+  assert.ok(created.some((paths) => paths.includes("/data/hooks/k")));
+
+  // A socket outside every exposed directory is not claimed as reachable.
+  const hidden = await resolveExecutionIsolation(bwrap, { kind: "native" }, {
+    platform: "linux", uid: () => 1000, mkdirNative: async () => {},
+    resolveNative: async (name) => name === "bwrap" ? {
+      path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] },
+    } : null,
+    isExposableEntryNative: async () => false,
+  }, {
+    driver: "claude-code", dataDir: "/data", env: { HOME: "/home/me" }, sessionId: "s1", cwd: "/data/worktrees/s1",
+    guardStateMask: { directory: "/data/hooks/k", readable: ["/data/hooks/k/s1.guard"], socket: "/data/hooks/k/s1.guard/sock" },
+  });
+  assert.deepEqual(hidden?.backend === "bwrap" ? hidden.guardStateMask : undefined, {
+    directory: "/data/hooks/k",
+    readable: [],
+  });
+});
+
+test("Seatbelt denies the hook state directory after the writable data root and re-allows only its exposures", async () => {
+  const resolved = await resolveExecutionIsolation(
+    { mode: "seatbelt", network: "deny" }, { kind: "native" }, {
+      platform: "darwin",
+      nativeHome: () => "/Users/me",
+      nativeTmp: () => "/private/var/folders/tmp",
+      realpathNative: async (path) => path.startsWith("/var/")
+        ? `/private${path}`
+        : path,
+      mkdirNative: async () => {},
+      existsNative: async (path) => path === "/var/wollipog/hooks/k/s1.guard",
+      isExposableEntryNative: async (path) => path.startsWith("/var/wollipog/hooks/k/s1."),
+      resolveNative: async (name) => name === "sandbox-exec" ? {
+        path: "/usr/bin/sandbox-exec", via: "path", launch: { command: "/usr/bin/sandbox-exec", args: [] },
+      } : null,
+    }, {
+      driver: "claude-code",
+      dataDir: "/var/wollipog",
+      env: {},
+      sessionId: "s1",
+      cwd: "/Users/me/Work/tree",
+      guardStateMask: {
+        directory: "/var/wollipog/hooks/k",
+        readable: ["/var/wollipog/hooks/k/s1.settings.json", "/var/wollipog/hooks/k/s1.guard"],
+        socket: "/var/wollipog/hooks/k/s1.guard/sock",
+        managerTransport: {
+          readable: ["/var/wollipog/hooks/k/s1.token", "/var/wollipog/hooks/k/s1.ready"],
+          atomicWritable: ["/var/wollipog/hooks/k/s1.circuit.json"],
+          writable: ["/var/wollipog/hooks/k/s1.circuit.lock"],
+        },
+      },
+    },
+  );
+  assert.equal(resolved?.backend, "seatbelt");
+  const profile = resolved?.backend === "seatbelt" ? resolved.profile : "";
+  // The data directory is a writable root, and Seatbelt takes the LAST matching rule: the deny has
+  // to follow that allow, and the re-exposures have to follow the deny.
+  const writable = profile.indexOf('(subpath "/private/var/wollipog")');
+  const deny = profile.indexOf("(deny file-read* file-write*");
+  const reallow = profile.indexOf("(allow file-read*\n");
+  assert.ok(writable > 0 && deny > writable && reallow > deny, profile);
+  assert.match(profile, new RegExp([
+    "\\(deny file-read\\* file-write\\*",
+    '    \\(subpath "/var/wollipog/hooks/k"\\)',
+    '    \\(subpath "/private/var/wollipog/hooks/k"\\)',
+    "\\)",
+  ].join("\n")));
+  assert.match(profile, /\(literal "\/private\/var\/wollipog\/hooks\/k\/s1\.settings\.json"\)/u);
+  assert.match(profile, /\(subpath "\/private\/var\/wollipog\/hooks\/k\/s1\.guard"\)/u);
+  // The network is denied, so the socket needs its own outbound allow, under both spellings.
+  assert.match(profile, /\(remote unix-socket \(path-literal "\/var\/wollipog\/hooks\/k\/s1\.guard\/sock"\)\)/u);
+  assert.match(profile, /\(remote unix-socket \(path-literal "\/private\/var\/wollipog\/hooks\/k\/s1\.guard\/sock"\)\)/u);
+  // The only writes re-allowed inside the hidden directory are the manager policy hook's circuit,
+  // its lock, and the circuit's atomic-write temporaries — never the protection list.
+  const writeAllows = profile.slice(deny).split("(allow file-write*").slice(1).map((block) => block.slice(0, block.indexOf("\n)")));
+  assert.equal(writeAllows.length, 1, profile);
+  const grantedWrites = writeAllows[0]!.trim().split("\n").map((line) => line.trim());
+  assert.deepEqual(grantedWrites.filter((line) => line.startsWith("(literal")), [
+    '(literal "/var/wollipog/hooks/k/s1.circuit.json")',
+    '(literal "/private/var/wollipog/hooks/k/s1.circuit.json")',
+    '(literal "/var/wollipog/hooks/k/s1.circuit.lock")',
+    '(literal "/private/var/wollipog/hooks/k/s1.circuit.lock")',
+  ]);
+  // The temp-file pattern, read as the regular expression it is, admits exactly protectedWrite's
+  // `.<name>.<pid>.<uuid>.tmp` siblings of the circuit and nothing else in the directory.
+  const patterns = grantedWrites.filter((line) => line.startsWith("(regex"))
+    .map((line) => new RegExp(line.slice('(regex #"'.length, -'")'.length), "u"));
+  assert.ok(patterns.some((pattern) =>
+    pattern.test("/var/wollipog/hooks/k/.s1.circuit.json.4242.0f8c6a1e-2b3d-4c5e-8f90-123456789abc.tmp")));
+  // Only the circuit is rewritten through a temporary; the lock is created in place and gets no
+  // temporary-file pattern, and a name that is not a real `randomUUID()` temporary is not admitted.
+  assert.equal(patterns.length, 2, "one pattern per spelling of the circuit, none for the lock");
+  for (const path of [
+    "/var/wollipog/hooks/k/.s1.circuit.lock.4242.0f8c6a1e-2b3d-4c5e-8f90-123456789abc.tmp",
+    "/var/wollipog/hooks/k/.s1.circuit.json.1.a.tmp",
+    "/var/wollipog/hooks/k/s1.protections.json",
+    "/var/wollipog/hooks/k/.s1.protections.json.4242.0f8c6a1e-2b3d-4c5e-8f90-123456789abc.tmp",
+    "/var/wollipog/hooks/k/s1.settings.json",
+    "/var/wollipog/hooks/k/xs1Xcircuit.json.1.a.tmp",
+  ]) {
+    assert.equal(patterns.some((pattern) => pattern.test(path)), false, path);
+    assert.equal(grantedWrites.some((line) => line.includes(`"${path}"`)), false, path);
+  }
+  // Reads of the manager's credential and acknowledgement come back; the list does not.
+  assert.match(profile, /\(literal "\/var\/wollipog\/hooks\/k\/s1\.token"\)/u);
+  assert.doesNotMatch(profile, /s1\.protections\.json/u);
+});
+
+test("bwrap does not carry manager-transport writes it cannot express", async () => {
+  const resolved = await resolveExecutionIsolation(bwrap, { kind: "native" }, {
+    platform: "linux", uid: () => 1000, mkdirNative: async () => {},
+    resolveNative: async (name) => name === "bwrap" ? {
+      path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] },
+    } : null,
+    isExposableEntryNative: async () => false,
+  }, {
+    driver: "claude-code", dataDir: "/data", env: { HOME: "/home/me" }, sessionId: "s1", cwd: "/data/worktrees/s1",
+    guardStateMask: {
+      directory: "/data/hooks/k",
+      readable: [],
+      managerTransport: {
+        readable: ["/data/hooks/k/s1.token"],
+        atomicWritable: ["/data/hooks/k/s1.circuit.json"],
+        writable: ["/data/hooks/k/s1.circuit.lock"],
+      },
+    },
+  });
+  assert.deepEqual(resolved?.backend === "bwrap" ? resolved.guardStateMask : undefined, {
+    directory: "/data/hooks/k",
+    readable: [],
+  });
+});

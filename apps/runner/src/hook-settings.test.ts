@@ -15,7 +15,9 @@ import {
   claudeHookTokenPath,
   claudeHooksEnabled,
   CLAUDE_GUARD_LAUNCH_RETRY_COOLDOWN_MS,
+  describeManagedSettings,
   LEGACY_POLICY_HOOK_ENV,
+  managedSettingsGuardSocket,
   markClaudeHookCredentialRejected,
   markClaudeHookCredentialReady,
   prepareClaudeHookArgs,
@@ -25,6 +27,7 @@ import {
   refreshClaudeGuardProtections,
   resetClaudeGuardState,
   removeClaudeHookFiles,
+  runnerSettingsArgument,
   sweepClaudeHookFiles,
   writeHookCircuitState,
   type ClaudeHookHost,
@@ -878,6 +881,74 @@ test("a session with no managed worktree is guarded from spawn with an empty lis
   assert.deepEqual(refreshClaudeGuardProtections("sess_hook_1", PROTECTIONS, dir), { state: "refreshed" });
   assert.deepEqual(JSON.parse(readFileSync(protections, "utf8")), { version: 1, protections: PROTECTIONS });
   assert.equal(prepareClaudeHookArgs(launch.args).guardActive, true);
+}));
+
+/* ---------------------------------------------------------------------------------------------
+ * Issue #1336: inside a runner-owned sandbox the hook state directory is hidden, so the guard asks
+ * the runner's per-session verdict socket instead of reading its list.
+ * ------------------------------------------------------------------------------------------ */
+
+test("a sandboxed launch's guard answers through the verdict socket", () => temp((dir) => {
+  const socket = join(dir, "sess_hook_1.guard", "sock");
+  const launch = provisionGuarded(dir, {}, { enabled: false, managedWorktreeGuardSocket: socket });
+  const { file, live } = settingsOf(dir);
+  assert.deepEqual(launch.args, ["--settings", file]);
+  const args = guardEntries(live)[0]!.hooks[0]!.args;
+  assert.equal(args[args.indexOf("--guard-socket") + 1], socket);
+  // The protections path stays, so the document still describes itself as guarded.
+  assert.ok(args.includes("--protections"));
+  assert.equal(describeManagedSettings(file)?.guard, true);
+  assert.equal(managedSettingsGuardSocket(file), socket);
+  assert.equal(prepareClaudeHookArgs(launch.args).guardActive, true);
+}));
+
+test("a sandboxed launch with no verdict socket gets no guard, never a file-mode one", () => temp((dir) => {
+  const messages: string[] = [];
+  const launch = guardedSpec();
+  resetClaudeGuardState();
+  provisionClaudeHooks(launch, {
+    ...config,
+    enabled: false,
+    managedWorktreeProtections: PROTECTIONS,
+    verifyGuardLaunch: guardVerifies,
+    managedWorktreeGuardSocket: null,
+  }, (message) => messages.push(message), host(dir));
+  // A file-mode guard behind the mask would refuse every matched tool call; the driver mediates.
+  assert.deepEqual(launch.args, []);
+  assert.equal(prepareClaudeHookArgs(launch.args).guardActive, false);
+  assert.ok(messages.some((message) => /verdict socket is unavailable; this launch is mediated/u.test(message)), messages.join("\n"));
+}));
+
+test("a launch that does not say how the guard answers keeps the session's verdict socket", () => temp((dir) => {
+  const socket = join(dir, "sess_hook_1.guard", "sock");
+  provisionGuarded(dir, {}, { enabled: false, managedWorktreeGuardSocket: socket });
+  // A native TUI provisions alongside the sandboxed provider without knowing about the sandbox. It
+  // must not rewrite the shared document into file mode, which the next sandboxed spawn reads.
+  const tui = guardedSpec();
+  provisionClaudeHooks(tui, {
+    ...config,
+    enabled: false,
+    managedWorktreeProtections: PROTECTIONS,
+    verifyGuardLaunch: guardVerifies,
+    concurrentLaunch: true,
+  }, () => {}, host(dir));
+  assert.equal(managedSettingsGuardSocket(settingsOf(dir).file), socket);
+}));
+
+test("the runner's settings argument is found in any spelling provisioning accepts", () => temp((dir) => {
+  const file = claudeHookSettingsPath(dir, "sess_hook_1");
+  const dotted = join(dir, ".", "sess_hook_1.settings.json");
+  assert.equal(runnerSettingsArgument(["--settings", file], dir, "sess_hook_1"), file);
+  assert.equal(runnerSettingsArgument(["-p", "--settings", dotted], dir, "sess_hook_1"), dotted);
+  assert.equal(runnerSettingsArgument(["--settings", join(dir, "sess_other.settings.json")], dir, "sess_hook_1"), null);
+  assert.equal(runnerSettingsArgument(["--settings"], dir, "sess_hook_1"), null);
+}));
+
+test("provider mode keeps the file-mode guard exactly as before", () => temp((dir) => {
+  provisionGuarded(dir, {}, { enabled: false });
+  const { file, live } = settingsOf(dir);
+  assert.equal(guardEntries(live)[0]!.hooks[0]!.args.includes("--guard-socket"), false);
+  assert.equal(managedSettingsGuardSocket(file), null);
 }));
 
 test("a provisioning call that supplies no worktree set provisions no guard", () => temp((dir) => {

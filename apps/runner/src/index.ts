@@ -62,16 +62,34 @@ import {
 import { stageRunnerCredentialFile } from "./runner-credential-file.js";
 import {
   applyClaudeHookCapability,
+  claudeHookCircuitLockPath,
+  claudeHookCircuitPath,
+  claudeHookGuardPath,
+  claudeHookReadyPath,
   claudeHookRunnerConfigDir,
+  claudeHookSessionProtectionsPath,
+  claudeHookSettingsPath,
+  claudeHookTokenPath,
   claudeHooksEnabled,
   defaultClaudeHookHost,
   markClaudeHookCredentialReady,
   markClaudeHookCredentialRejected,
+  describeManagedSettings,
+  managedSettingsGuardSocket,
   provisionClaudeHooks,
   refreshClaudeGuardProtections,
   removeClaudeHookFiles,
+  runnerSettingsArgument,
   sweepClaudeHookFiles,
 } from "./hook-settings.js";
+import {
+  ManagedWorktreeGuardSockets,
+  managedWorktreeGuardSocketDirectory,
+  managedWorktreeGuardSocketPath,
+  verifyManagedWorktreeGuardInSandbox,
+} from "./managed-worktree-guard-socket.js";
+import { MANAGED_WORKTREE_GUARD_MODE } from "./managed-worktree-guard.js";
+import { runnerReentryCommand } from "./runner-reentry.js";
 import {
   defaultAgentControlHost,
   markAgentControlCredentialReady,
@@ -339,6 +357,11 @@ const claudeHookHost = {
 };
 const agentControlHost = defaultAgentControlHost(config.dataDir);
 sweepClaudeHookFiles(claudeHookHost.configDir);
+// Verdict sockets for guards whose sandbox hides the hook state directory (#1336). Only a runner
+// that sandboxes its providers ever listens; in provider mode the guard reads its file as before.
+const guardSockets = new ManagedWorktreeGuardSockets(claudeHookHost.configDir);
+const sandboxHidesGuardState = config.executionIsolation.mode === "bwrap" ||
+  config.executionIsolation.mode === "seatbelt";
 sweepAgentControlFiles(agentControlHost.configDir);
 
 const runnerHostname = hostname();
@@ -606,6 +629,19 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
   async (meta) => {
     meta.env = runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context);
     const localAgent = metadata.agents.find((candidate) => candidate.id === meta.agentId);
+    // A sandboxed native host launch cannot see the protections file, so its guard asks the
+    // runner. No socket means no guard for that launch (and so mediation), never a file-mode guard
+    // that would refuse every matched tool call.
+    let managedWorktreeGuardSocket: string | null | undefined;
+    if (sandboxHidesGuardState && meta.driver === "claude-code" && meta.context.kind === "native" &&
+        (!meta.executionTarget || meta.executionTarget.adapter === "host")) {
+      try {
+        managedWorktreeGuardSocket = await guardSockets.ensure(meta.sessionId);
+      } catch (error) {
+        managedWorktreeGuardSocket = null;
+        log(`Claude managed worktree guard ${meta.sessionId}: verdict socket unavailable (${errText(error)})`);
+      }
+    }
     provisionClaudeHooks(
       meta,
       {
@@ -618,6 +654,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
         // guard's list. The guard is provisioned even while it is empty (#1303), which is what
         // protects a worktree created later in the same turn and lets the launch keep the user's mode.
         managedWorktreeProtections: sessions.managedWorktreeProtections(meta),
+        ...(managedWorktreeGuardSocket !== undefined ? { managedWorktreeGuardSocket } : {}),
       },
       log,
       claudeHookHost,
@@ -704,6 +741,55 @@ sessions.setWorktreeShellRetirement((sessionId, context, path) =>
 // A refresh that cannot be completed invalidates the guard rather than leaving a stale protection
 // list trusted; SessionManager acts on the outcome (fail closed, and stop the provider when the
 // state could not even be retired).
+sessions.setGuardStateSandbox({
+  // Everything in the hook state directory is hidden; the session gets back, read-only, only the
+  // settings documents Claude reads at start and its own verdict socket directory.
+  mask: (meta) => {
+    const settings = claudeHookSettingsPath(claudeHookHost.configDir, meta.sessionId);
+    // The spelling in the launch argv is the one Claude opens; expose it as well as the canonical
+    // one, so an equivalent spelling is never hidden from the provider that must read it.
+    const launched = meta.driver === "claude-code"
+      ? runnerSettingsArgument(meta.args, claudeHookHost.configDir, meta.sessionId)
+      : null;
+    // The manager policy hook is a provider-spawned re-entry too, and it keeps its credential and
+    // circuit here. Only a launch that actually carries it gets those back (Seatbelt only; bwrap
+    // cannot grant the writes).
+    const managerHook = launched !== null && describeManagedSettings(settings)?.manager === true;
+    const circuit = claudeHookCircuitPath(settings);
+    return {
+      directory: claudeHookHost.configDir,
+      readable: [
+        settings,
+        ...(launched && launched !== settings ? [launched] : []),
+        claudeHookGuardPath(settings),
+        managedWorktreeGuardSocketDirectory(claudeHookHost.configDir, meta.sessionId),
+      ],
+      socket: managedWorktreeGuardSocketPath(claudeHookHost.configDir, meta.sessionId),
+      ...(managerHook
+        ? {
+          managerTransport: {
+            readable: [claudeHookTokenPath(settings), claudeHookReadyPath(settings)],
+            atomicWritable: [circuit],
+            writable: [claudeHookCircuitLockPath(circuit)],
+          },
+        }
+        : {}),
+    };
+  },
+  verify: async (meta, isolation, cwd) => {
+    if (isolation?.backend !== "bwrap" && isolation?.backend !== "seatbelt") return undefined;
+    // Matched the way provisioning matches it, so an equivalent spelling is still probed.
+    const settings = runnerSettingsArgument(meta.args, claudeHookHost.configDir, meta.sessionId);
+    if (!settings) return undefined;
+    const socketPath = managedSettingsGuardSocket(settings);
+    if (!socketPath) return undefined;
+    return verifyManagedWorktreeGuardInSandbox({
+      launch: runnerReentryCommand(claudeHookHost, MANAGED_WORKTREE_GUARD_MODE),
+      protectionsFile: claudeHookSessionProtectionsPath(claudeHookHost.configDir, meta.sessionId),
+      socketPath,
+    }, isolation, cwd);
+  },
+});
 sessions.setManagedWorktreeGuardRefresh((meta, protections) =>
   refreshClaudeGuardProtections(meta.sessionId, protections, claudeHookHost.configDir));
 sessions.reconcileStore(); // demote stale sessions and replay cleanup only after shell retirement is wired
@@ -1727,6 +1813,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       });
       shells.closeForSession(msg.sessionId);
       removeClaudeHookFiles(msg.sessionId, claudeHookHost.configDir);
+      void guardSockets.close(msg.sessionId);
       removeAgentControlFiles(msg.sessionId, agentControlHost.configDir);
       break;
     case "resolve_permission":
@@ -2827,6 +2914,7 @@ function shutdown(exitCode = 0): void {
     sessionsCleanlyShutDown = sessions.shutdownAll();
   });
   bestEffort("dispose shells", () => shells.dispose());
+  bestEffort("close guard sockets", () => { void guardSockets.closeAll(); });
   // Providers that exited normally may have intentional background descendants retained under
   // their session boundary. Runner shutdown is the final owner and must drain every such scope.
   bestEffort("register retained descendant cleanup", () => terminateDescendantBoundariesAfterPendingKills());
