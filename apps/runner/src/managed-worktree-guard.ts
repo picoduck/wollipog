@@ -311,6 +311,14 @@ export function parseManagedWorktreeGuardVerdict(text: string): ManagedWorktreeG
 }
 
 const VERDICT_REQUEST_VERSION = 1;
+/**
+ * Linux caps one environment string at 128 KiB (`MAX_ARG_STRLEN`), so a longer value cannot have
+ * come from `execve` on a default host. One that did (a raised stack limit) is left out rather than
+ * sent: a command that references it is then refused as unresolvable, while every other command is
+ * still judged. Every string is bounded, so the runner's request cap can be sized for the worst
+ * JSON escaping (six bytes per control character) and never refuses a legal environment.
+ */
+export const MAX_FORWARDED_ENVIRONMENT_VALUE_BYTES = 128 * 1024;
 
 /**
  * What the sidecar sends: the hook payload, and the environment it was started in.
@@ -327,7 +335,9 @@ export function managedWorktreeGuardVerdictRequest(
 ): string {
   const forwarded: Record<string, string> = {};
   for (const [name, value] of Object.entries(environment)) {
-    if (typeof value === "string") forwarded[name] = value;
+    if (typeof value === "string" && Buffer.byteLength(value, "utf8") <= MAX_FORWARDED_ENVIRONMENT_VALUE_BYTES) {
+      forwarded[name] = value;
+    }
   }
   return JSON.stringify({ version: VERDICT_REQUEST_VERSION, hookInput, environment: forwarded });
 }

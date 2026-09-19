@@ -45,8 +45,13 @@ const GUARD_SOCKET_NAME = "sock";
 /** `sun_path` is 108 bytes on Linux and 104 on macOS, both including the terminator. A path that
  * does not fit cannot be bound at all, so the guard is not provisioned rather than half-working. */
 export const MAX_GUARD_SOCKET_PATH_BYTES = 100;
-// The hook payload (at most 1 MB) plus the sidecar's environment, JSON-escaped.
-const MAX_REQUEST_BYTES = 4_000_000;
+/**
+ * The hook payload (at most 1 MB) plus the sidecar's environment, both JSON-escaped, which can
+ * cost six bytes per control character. A Linux environment is at most `ARG_MAX` (2 MiB on a
+ * default stack limit), so the worst legal request is about 6 + 12 MiB (review CR-2.1). The cap
+ * bounds one connection's memory; it must never refuse an environment `execve` accepted.
+ */
+const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
 
 export function managedWorktreeGuardSocketDirectory(configDir: string, sessionId: string): string {

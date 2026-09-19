@@ -14,7 +14,9 @@ import {
   verifyManagedWorktreeGuardInSandbox,
 } from "./managed-worktree-guard-socket.js";
 import {
+  MAX_FORWARDED_ENVIRONMENT_VALUE_BYTES,
   managedWorktreeGuardSocketAddress,
+  managedWorktreeGuardVerdictRequest,
   parseManagedWorktreeGuardVerdict,
   requestManagedWorktreeGuardVerdict,
   runManagedWorktreeGuardCli,
@@ -391,4 +393,28 @@ test("an abstract socket is refused where the platform has none", async () => {
   assert.throws(() => managedWorktreeGuardSocketAddress("@name", "darwin"), /only on Linux/u);
   assert.equal(managedWorktreeGuardSocketAddress("/a/path", "darwin"), "/a/path");
   assert.equal(managedWorktreeGuardSocketAddress("@name", "linux"), "\0name");
+});
+
+test("a legal environment is never refused for its size, however badly it escapes (review CR-2.1)", { skip: !POSIX }, async () => {
+  // Seven 100 KiB values of control characters fit Linux's execve limits but serialize to over
+  // 4 MB of `\u0001`; the request cap is sized for that. A value longer than one Linux string can
+  // be is left out, so only a command that references it is refused, never every command.
+  const { configDir, host } = fixture();
+  writeManagedWorktreeGuardProtections(claudeHookSessionProtectionsPath(configDir, "s_big"), [
+    { worktreePath: "/trees/big", repoPath: "/repo" },
+  ]);
+  const socket = await host.ensure("s_big");
+  const environment: Record<string, string> = { BIG_TARGET: "/trees/big" };
+  for (let index = 0; index < 7; index++) environment[`NOISE_${index}`] = "\u0001".repeat(100 * 1024);
+  const request = managedWorktreeGuardVerdictRequest(payload("git status"), environment);
+  assert.ok(request.length > 4_000_000, `the escaped request is ${request.length} bytes`);
+  const judged = await requestManagedWorktreeGuardVerdict(socket, payload('git worktree remove "$BIG_TARGET"'), 10_000, environment);
+  assert.ok(judged.stdout.includes(MANAGED_WORKTREE_REFUSAL), "the request was judged, with the forwarded variable resolved");
+  assert.deepEqual(await requestManagedWorktreeGuardVerdict(socket, payload("git status"), 10_000, environment), { stdout: "", stderr: "", exitCode: 0 });
+
+  const tooLong = { ...environment, HUGE: "x".repeat(MAX_FORWARDED_ENVIRONMENT_VALUE_BYTES + 1) };
+  assert.equal(Object.keys(JSON.parse(managedWorktreeGuardVerdictRequest("{}", tooLong)).environment).includes("HUGE"), false);
+  const unresolved = await requestManagedWorktreeGuardVerdict(socket, payload('git worktree remove "$HUGE"'), 10_000, tooLong);
+  assert.match(unresolved.stdout, /"permissionDecision":"deny".*cannot tell where/u, "a reference to the dropped variable is refused as unresolvable");
+  assert.deepEqual(await requestManagedWorktreeGuardVerdict(socket, payload("git status"), 10_000, tooLong), { stdout: "", stderr: "", exitCode: 0 });
 });
