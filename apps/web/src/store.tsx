@@ -286,6 +286,8 @@ export interface State {
   stopBeforeArchiveSupported: boolean;
   /** False against older control planes without the correlated Stop recovery route. */
   stopFailureRecoverySupported: boolean;
+  /** The control plane restores and relaunches an archived session in one preflighted operation. */
+  unarchiveAndRestartSupported: boolean;
   /** True when the control plane provides durable, user-scoped reminder snapshots and deltas. */
   sessionRemindersSupported: boolean;
   worktreeSetupConfigSupported: boolean;
@@ -1084,6 +1086,7 @@ function reducer(state: State, action: Action): State {
             nativeTuiLaunchSupported: msg.capabilities?.nativeTuiLaunch === true,
             stopBeforeArchiveSupported: msg.capabilities?.stopBeforeArchive === true,
             stopFailureRecoverySupported: msg.capabilities?.stopFailureRecovery === true,
+            unarchiveAndRestartSupported: msg.capabilities?.unarchiveAndRestart === true,
             sessionRemindersSupported: msg.capabilities?.sessionReminders === true,
             worktreeSetupConfigSupported: msg.capabilities?.worktreeSetupConfig === true,
             orchestratorRoleSupported: msg.capabilities?.orchestratorRole === true,
@@ -1464,6 +1467,7 @@ function initialState(
     nativeTuiLaunchSupported: false,
     stopBeforeArchiveSupported: false,
     stopFailureRecoverySupported: false,
+    unarchiveAndRestartSupported: false,
     sessionRemindersSupported: false,
     worktreeSetupConfigSupported: false,
     orchestratorRoleSupported: false,

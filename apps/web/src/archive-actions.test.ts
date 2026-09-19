@@ -6,7 +6,9 @@ import {
   sessionArchiveActionLabel,
   sessionArchiveRequiresStop,
   setArchivedForSessions,
+  unarchiveAndRestartFailureMessage,
 } from "./archive-actions.js";
+import { ApiError } from "./api.js";
 
 test("bulk archive applies every id and needs no compensation on success", async () => {
   const calls: Array<[string, boolean]> = [];
@@ -98,4 +100,43 @@ test("stop-pending and archived sessions retain truthful action labels", () => {
     sessionArchiveActionLabel({ archived: true, status: "running", archiveStatus: "stop_pending" }, false),
     "Unarchive",
   );
+});
+
+test("archived sessions offer Unarchive and Restart only when the control plane owns it", () => {
+  const archived = { archived: true, status: "completed" as const };
+  assert.equal(sessionArchiveActionLabel(archived, true, true), "Unarchive and Restart");
+  assert.equal(sessionArchiveActionLabel(archived, true, false), "Unarchive",
+    "an older control plane keeps the plain Unarchive rather than a client-side emulation");
+  assert.equal(sessionArchiveActionLabel(archived, true), "Unarchive");
+  assert.equal(
+    sessionArchiveActionLabel({ archived: true, status: "stopped", archiveStatus: "stop_failed" }, true, true),
+    "Unarchive",
+    "Stop Failed keeps its recovery path instead of racing a restart",
+  );
+  assert.equal(sessionArchiveActionLabel({
+    archived: true,
+    status: "stopped",
+    stopOperation: { status: "stop_failed" } as never,
+  }, true, true), "Unarchive");
+  assert.equal(sessionArchiveActionLabel({ archived: false, status: "completed" }, true, true), "Archive");
+});
+
+test("Unarchive and Restart failures are classified by the server receipt, not the status code", () => {
+  assert.deepEqual(unarchiveAndRestartFailureMessage(
+    new ApiError("runner is offline", 409, undefined, { error: "runner is offline", archived: true }),
+  ), {
+    message: "Could not unarchive and restart session: runner is offline. The session is still archived.",
+    ambiguous: false,
+  });
+  assert.deepEqual(unarchiveAndRestartFailureMessage(new ApiError(
+    "session is not archived; use Restart instead", 409, undefined,
+    { error: "session is not archived; use Restart instead", archived: false },
+  )), {
+    message: "This session was already restored. Reloading the current session state.",
+    ambiguous: true,
+  }, "a state conflict is not proof that the session stayed archived");
+  assert.equal(unarchiveAndRestartFailureMessage(new ApiError("Not Found", 404)).ambiguous, true,
+    "a 4xx with no receipt (a proxy error page, a deleted session) is unknown, not archived");
+  assert.equal(unarchiveAndRestartFailureMessage(new ApiError("Bad Gateway", 502)).ambiguous, true);
+  assert.equal(unarchiveAndRestartFailureMessage(new TypeError("Failed to fetch")).ambiguous, true);
 });

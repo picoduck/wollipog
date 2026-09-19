@@ -9,7 +9,12 @@ import {
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { RenameSessionDialog } from "./RenameSessionDialog.js";
-import { sessionArchiveActionLabel, sessionArchiveRequiresStop } from "../archive-actions.js";
+import {
+  sessionArchiveActionLabel,
+  sessionArchiveRequiresStop,
+  sessionUnarchiveRestarts,
+  unarchiveAndRestartFailureMessage,
+} from "../archive-actions.js";
 import { titleCaseLabel } from "../format.js";
 import { removeFromInstanceKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { discardComposerDraft } from "../composer-drafts.js";
@@ -82,6 +87,8 @@ export function SessionHeader({
   runnerProtocolVersion,
   providerLogoutSupported,
   stopBeforeArchiveSupported,
+  unarchiveAndRestartSupported = false,
+  onReloadSession,
   exportReady,
   onArchive,
   onSnooze,
@@ -109,6 +116,10 @@ export function SessionHeader({
   runnerProtocolVersion: number | null | undefined;
   providerLogoutSupported: boolean;
   stopBeforeArchiveSupported: boolean;
+  /** The control plane owns one preflighted Unarchive and Restart; absent on older control planes. */
+  unarchiveAndRestartSupported?: boolean;
+  /** Re-read this session from the server after an outcome the client could not confirm. */
+  onReloadSession?: () => Promise<void>;
   exportReady: boolean;
   onArchive?: () => void;
   onSnooze?: () => void;
@@ -151,7 +162,7 @@ export function SessionHeader({
   const instances = useInstances();
   const instanceScope = useInstanceScope();
   const isMobile = useIsMobile();
-  const { confirm, showUndo } = useFeedback();
+  const { confirm, showToast, showUndo } = useFeedback();
   const [busy, setBusy] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [shareMenuOpen, setShareMenuOpen] = useState(false);
@@ -806,6 +817,30 @@ export function SessionHeader({
                         onArchive();
                         return;
                       }
+                      if (sessionUnarchiveRestarts(session, unarchiveAndRestartSupported)) {
+                        // No Undo: re-archiving a relaunched session without a Stop would hide live work.
+                        void run(async () => {
+                          try {
+                            await api.unarchiveAndRestart(session.id);
+                            showToast("Session restored and restarting.");
+                          } catch (cause) {
+                            const failure = unarchiveAndRestartFailureMessage(cause);
+                            showToast(failure.message, { tone: "error" });
+                            // The server may have restored and relaunched this session before the
+                            // response was lost; the header would otherwise keep showing it archived.
+                            // The reload can fail for the very reason the outcome was unconfirmed —
+                            // the toast already says so, and an escaping rejection would be unhandled.
+                            if (failure.ambiguous) {
+                              try {
+                                await onReloadSession?.();
+                              } catch {
+                                /* the session state stays as it was; the toast already reports the uncertainty */
+                              }
+                            }
+                          }
+                        });
+                        return;
+                      }
                       void run(async () => {
                         const nextArchived = !session.archived;
                         if (nextArchived && sessionArchiveRequiresStop(session, stopBeforeArchiveSupported)) {
@@ -836,7 +871,7 @@ export function SessionHeader({
                       });
                     }}
                   >
-                    {sessionArchiveActionLabel(session, stopBeforeArchiveSupported)}
+                    {sessionArchiveActionLabel(session, stopBeforeArchiveSupported, unarchiveAndRestartSupported)}
                   </button>
                   {(session.adopted || (session.driver === "acp" && !terminal && runnerOnline && logoutSupported && providerLogoutSupported)) && (
                     <div className="menu-label" role="presentation">Maintenance</div>
@@ -902,7 +937,8 @@ export function SessionHeader({
                       Retry Stop
                     </button>
                   )}
-                  {terminal && runnerOnline && session.stopOperation?.status !== "stop_failed" && (
+                  {terminal && runnerOnline && session.stopOperation?.status !== "stop_failed" &&
+                    !sessionUnarchiveRestarts(session, unarchiveAndRestartSupported) && (
                     <button
                       className="menu-item"
                       type="button"

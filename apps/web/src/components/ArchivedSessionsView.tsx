@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isTerminal, type SessionStatus, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
+import { sessionUnarchiveRestarts, unarchiveAndRestartFailureMessage } from "../archive-actions.js";
 import {
   archiveSessionMetadata,
   canonicalLifecycleLabel,
@@ -121,6 +122,7 @@ export function ArchivedSessionsView() {
   const liveRevalidationTimerRef = useRef<number | null>(null);
   const revalidatedLiveVersionsRef = useRef(new Map<string, string>());
   const stopFailureRecoverySupported = useStoreSelector((state) => state.stopFailureRecoverySupported);
+  const unarchiveAndRestartSupported = useStoreSelector((state) => state.unarchiveAndRestartSupported);
   const deletedSessionIdsRef = useRef(new Set<string>());
   const liveSessionsRef = useRef(liveSessions);
   const requestSequenceRef = useRef(0);
@@ -360,6 +362,23 @@ export function ArchivedSessionsView() {
     }
   };
 
+  // No Undo: the session is running again, and re-archiving it without a Stop would hide live work.
+  const unarchiveAndRestart = async (session: SessionView) => {
+    setBusy(session.id, true);
+    try {
+      const restarted = await api.unarchiveAndRestart(session.id);
+      updateSession(restarted);
+      showToast("Session restored and restarting.");
+      navigate({ name: "session", id: restarted.id });
+    } catch (cause) {
+      const failure = unarchiveAndRestartFailureMessage(cause);
+      showToast(failure.message, { tone: "error" });
+      if (failure.ambiguous) void refreshCatalogRef.current();
+    } finally {
+      setBusy(session.id, false);
+    }
+  };
+
   const retryStop = async (session: SessionView) => {
     setBusy(session.id, true);
     try {
@@ -543,7 +562,9 @@ export function ArchivedSessionsView() {
                     <td><time dateTime={timestamp?.dateTime} title={timestamp?.title}>{formatRecordedRelativeTime(session.createdAt)}</time></td>
                     <td><div className="archive-row-actions">
                       <button type="button" className="btn ghost sm" disabled={busy} onClick={() => { loadSession(session); navigate(target); }}>Open</button>
-                      {session.archived && <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void unarchive(session)}>Unarchive</button>}
+                      {session.archived && (sessionUnarchiveRestarts(session, unarchiveAndRestartSupported)
+                        ? <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void unarchiveAndRestart(session)}>Unarchive and Restart</button>
+                        : <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void unarchive(session)}>Unarchive</button>)}
                       {stopPending || stopFailed
                         ? <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void retryStop(session)}>Retry Stop</button>
                         : !isTerminal(session.status) && <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void stop(session)}>Stop</button>}

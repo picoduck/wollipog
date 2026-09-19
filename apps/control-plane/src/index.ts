@@ -4740,6 +4740,27 @@ app.post("/api/sessions/:id/archive", async (req, reply) => {
   return respond(reply, svc.setArchived(id, body.archived));
 });
 
+// One server-owned restore: restart preflight runs before the archive flag changes, so no client
+// ever composes unarchive + restart and observes a half-applied result. Session credentials never
+// authenticate here (the route is absent from their allowlists); the explicit refusal keeps the
+// plain-unarchive rule if the route is ever added to one.
+app.post("/api/sessions/:id/unarchive-and-restart", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  if (requestPrincipal(req)?.kind === "agent") {
+    return reply.code(403).send({ error: "session credentials may archive descendants, but cannot unarchive them" });
+  }
+  const result = svc.unarchiveAndRestart(id);
+  if (result.ok) return respond(reply, result);
+  // A refusal reports the archive state it left behind. Status alone cannot carry this: a 409 can
+  // mean "refused by preflight, still archived" or "already restored by an earlier request", and a
+  // client that guesses would tell the user the opposite of what happened. A session that no longer
+  // exists has no archive state, so it carries no receipt rather than a misleading `false`.
+  const current = db.getSession(id);
+  return reply.code(result.status).send(
+    current ? { error: result.error, archived: current.archived } : { error: result.error },
+  );
+});
+
 app.post("/api/sessions/:id/retry-stop", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   return respond(reply, svc.retryStop(id));

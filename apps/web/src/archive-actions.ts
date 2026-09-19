@@ -1,6 +1,18 @@
 import { archiveRequiresStop, type SessionView } from "@wollipog/protocol";
 
-type ArchiveActionSession = Pick<SessionView, "archiveStatus" | "archived" | "status">;
+type ArchiveActionSession = Pick<SessionView, "archiveStatus" | "archived" | "status"> &
+  Partial<Pick<SessionView, "stopOperation">>;
+
+/** An archived session is restored with one preflighted Unarchive and Restart only when the control
+ * plane owns that operation. Stop Pending and Stop Failed keep their Stop recovery path first, and an
+ * older control plane keeps the plain Unarchive: two client requests would not be atomic. */
+export function sessionUnarchiveRestarts(
+  session: ArchiveActionSession,
+  unarchiveAndRestartSupported: boolean,
+): boolean {
+  return unarchiveAndRestartSupported && session.archived && !session.archiveStatus &&
+    session.stopOperation?.status !== "stop_failed";
+}
 
 export function sessionArchiveRequiresStop(
   session: Pick<ArchiveActionSession, "archiveStatus" | "status">,
@@ -10,10 +22,38 @@ export function sessionArchiveRequiresStop(
     (stopBeforeArchiveSupported && archiveRequiresStop(session.status));
 }
 
-export function sessionArchiveActionLabel(session: ArchiveActionSession, stopBeforeArchiveSupported: boolean): "Archive" | "Archive and Stop" | "Retry Stop" | "Unarchive" {
-  if (session.archived) return "Unarchive";
+export function sessionArchiveActionLabel(
+  session: ArchiveActionSession,
+  stopBeforeArchiveSupported: boolean,
+  unarchiveAndRestartSupported = false,
+): "Archive" | "Archive and Stop" | "Retry Stop" | "Unarchive" | "Unarchive and Restart" {
+  if (session.archived) {
+    return sessionUnarchiveRestarts(session, unarchiveAndRestartSupported) ? "Unarchive and Restart" : "Unarchive";
+  }
   if (session.archiveStatus === "stop_failed") return "Retry Stop";
   return sessionArchiveRequiresStop(session, stopBeforeArchiveSupported) ? "Archive and Stop" : "Archive";
+}
+
+/** A refused Unarchive and Restart reports the archive state the server left behind, and only that
+ * receipt makes the outcome certain: the same 409 can mean "refused by preflight, still archived" or
+ * "an earlier request already restored this session". Without the receipt — a dropped connection, a
+ * gateway error, a proxy's own error page — the outcome is unknown and must be reconciled. */
+export function unarchiveAndRestartFailureMessage(cause: unknown): { message: string; ambiguous: boolean } {
+  const detail = cause instanceof Error ? cause.message : String(cause);
+  const details = typeof cause === "object" && cause !== null && "details" in cause
+    ? (cause as { details?: Record<string, unknown> }).details
+    : undefined;
+  if (details?.archived === true) {
+    return { message: `Could not unarchive and restart session: ${detail}. The session is still archived.`, ambiguous: false };
+  }
+  if (details?.archived === false) {
+    // The server refused because the session is no longer archived — an earlier request restored it.
+    return { message: "This session was already restored. Reloading the current session state.", ambiguous: true };
+  }
+  return {
+    message: `Could not confirm Unarchive and Restart: ${detail}. Reloading the current session state.`,
+    ambiguous: true,
+  };
 }
 
 export type SetSessionArchived = (sessionId: string, archived: boolean) => Promise<unknown>;

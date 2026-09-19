@@ -4,7 +4,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { SessionView } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
 import { SessionHeader } from "./SessionHeader.js";
@@ -268,6 +268,175 @@ test("archive Stop Failed does not leave an empty Runtime section", async () => 
     "the Session section retains the archive retry action");
   assert.equal(container.textContent?.includes("Runtime"), false,
     "Runtime must not render without a following runtime action");
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("an archived session header offers one Unarchive and Restart without Undo or a separate Restart", async () => {
+  const restores: string[] = [];
+  const toasts: string[] = [];
+  let undos = 0;
+  const session = {
+    id: "session-archived-completed",
+    runnerId: "runner-1",
+    title: "Archived Work",
+    status: "completed",
+    archived: true,
+  } as SessionView;
+  const client = {
+    ...api,
+    setArchived: async () => { throw new Error("the combined action must not compose a plain unarchive"); },
+    restart: async () => { throw new Error("the combined action must not compose a separate restart"); },
+    unarchiveAndRestart: async (id: string) => {
+      restores.push(id);
+      return { ...session, archived: false, status: "starting" as const };
+    },
+  } as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <ApiProvider client={client}>
+        <FeedbackContext.Provider value={{
+          confirm: async () => { throw new Error("the labelled action needs no confirmation"); },
+          showToast: (message: string) => { toasts.push(message); return 1; },
+          showUndo: () => { undos += 1; return 1; },
+          dismissToast: () => undefined,
+        }}>
+          <SessionHeader
+            session={session}
+            onBack={() => undefined}
+            runnerOnline
+            runnerProtocolVersion={85}
+            providerLogoutSupported={false}
+            stopBeforeArchiveSupported
+            unarchiveAndRestartSupported
+            exportReady={false}
+          />
+        </FeedbackContext.Provider>
+      </ApiProvider>,
+    );
+  });
+
+  await act(async () => { button(container, "More Actions").click(); await tick(); });
+  const actionLabels = [...container.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+    .map((item) => item.textContent?.trim());
+  assert.ok(actionLabels.includes("Unarchive and Restart"));
+  assert.equal(actionLabels.includes("Unarchive"), false);
+  assert.equal(actionLabels.includes("Restart"), false, "the two-step Restart is replaced, not duplicated");
+  await act(async () => { button(container, "Unarchive and Restart").click(); await tick(); await tick(); });
+
+  assert.deepEqual(restores, [session.id]);
+  assert.deepEqual(toasts, ["Session restored and restarting."]);
+  assert.equal(undos, 0, "Undo would re-archive a running session without stopping it");
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("an unconfirmed Unarchive and Restart reconciles the header against the server", async () => {
+  const toasts: string[] = [];
+  let reloads = 0;
+  const session = {
+    id: "session-archived-ambiguous",
+    runnerId: "runner-1",
+    title: "Archived Work",
+    status: "completed",
+    archived: true,
+  } as SessionView;
+  const client = {
+    ...api,
+    unarchiveAndRestart: async () => { throw new ApiError("Bad Gateway", 502); },
+  } as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <ApiProvider client={client}>
+        <FeedbackContext.Provider value={{
+          confirm: async () => { throw new Error("the labelled action needs no confirmation"); },
+          showToast: (message: string) => { toasts.push(message); return 1; },
+          showUndo: () => 1,
+          dismissToast: () => undefined,
+        }}>
+          <SessionHeader
+            session={session}
+            onBack={() => undefined}
+            runnerOnline
+            runnerProtocolVersion={85}
+            providerLogoutSupported={false}
+            stopBeforeArchiveSupported
+            unarchiveAndRestartSupported
+            onReloadSession={async () => { reloads += 1; }}
+            exportReady={false}
+          />
+        </FeedbackContext.Provider>
+      </ApiProvider>,
+    );
+  });
+
+  await act(async () => { button(container, "More Actions").click(); await tick(); });
+  await act(async () => { button(container, "Unarchive and Restart").click(); await tick(); await tick(); });
+
+  assert.equal(toasts.length, 1);
+  assert.match(toasts[0] ?? "", /Could not confirm Unarchive and Restart/);
+  assert.equal(reloads, 1, "the server may have restored the session, so the header re-reads it");
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("a reconciliation reload that fails leaves no unhandled rejection", async () => {
+  const toasts: string[] = [];
+  const rejections: unknown[] = [];
+  const onRejection = (event: { reason?: unknown }) => { rejections.push(event.reason); };
+  domWindow.addEventListener("unhandledrejection", onRejection as never);
+  const session = {
+    id: "session-archived-reload-fails",
+    runnerId: "runner-1",
+    title: "Archived Work",
+    status: "completed",
+    archived: true,
+  } as SessionView;
+  const client = {
+    ...api,
+    unarchiveAndRestart: async () => { throw new ApiError("Bad Gateway", 502); },
+  } as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <ApiProvider client={client}>
+        <FeedbackContext.Provider value={{
+          confirm: async () => { throw new Error("the labelled action needs no confirmation"); },
+          showToast: (message: string) => { toasts.push(message); return 1; },
+          showUndo: () => 1,
+          dismissToast: () => undefined,
+        }}>
+          <SessionHeader
+            session={session}
+            onBack={() => undefined}
+            runnerOnline
+            runnerProtocolVersion={85}
+            providerLogoutSupported={false}
+            stopBeforeArchiveSupported
+            unarchiveAndRestartSupported
+            onReloadSession={async () => { throw new Error("offline"); }}
+            exportReady={false}
+          />
+        </FeedbackContext.Provider>
+      </ApiProvider>,
+    );
+  });
+
+  await act(async () => { button(container, "More Actions").click(); await tick(); });
+  await act(async () => { button(container, "Unarchive and Restart").click(); await tick(); await tick(); });
+
+  assert.deepEqual(rejections, [], "the connectivity failure that made the outcome uncertain also fails the reload");
+  assert.equal(toasts.length, 1, "the uncertainty is reported once");
+  assert.match(toasts[0] ?? "", /Could not confirm Unarchive and Restart/);
+  domWindow.removeEventListener("unhandledrejection", onRejection as never);
   await act(async () => root.unmount());
   container.remove();
 });
