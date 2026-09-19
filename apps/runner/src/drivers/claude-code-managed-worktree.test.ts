@@ -567,17 +567,41 @@ test("with the guard active, a captured subagent frame is judged exactly like a 
     );
     t.after(() => run.driver.dispose());
 
-    // The channel adds only the refusals that hold wherever the shell is: an absolute operand at
-    // the worktree, or an absolute `cd` into it followed by a relative removal. Every captured
-    // command naming the worktree is one of those; the relative-only ones are the hook's to judge.
-    const expected = capture.frames
-      .filter((entry) => (entry.frame.request.input?.command ?? "").includes("__WORKTREE__"))
-      .map((entry) => entry.frame.request_id);
     for (const { frame } of capture.frames) {
       run.child.stdout.write(JSON.stringify(placeCaptured(frame)) + "\n");
     }
     const denied = await deniedRequests(run);
 
+    // The issue's claim, asserted with nothing derived from the fixture: several of these commands
+    // were issued VERBATIM at both levels in the captured run, so their two verdicts can simply be
+    // compared against each other. This is the check that fails if a subagent is ever judged by a
+    // different rule than the top-level agent.
+    const verdicts = (issuer: "top-level" | "subagent") => new Map(capture.frames
+      .filter((entry) => entry.issuer === issuer)
+      .map((entry) => [
+        entry.frame.request.input?.command ?? "",
+        denied.includes(entry.frame.request_id),
+      ]));
+    const top = verdicts("top-level");
+    const sub = verdicts("subagent");
+    const shared = [...sub.keys()].filter((command) => top.has(command));
+    assert.ok(shared.length >= 2,
+      `${capture.permissionMode}: at least two commands were issued at both levels`);
+    assert.ok(shared.some((command) => sub.get(command) === true)
+      && shared.some((command) => sub.get(command) === false),
+      `${capture.permissionMode}: the shared commands span both verdicts, so agreement means something`);
+    for (const command of shared) {
+      assert.equal(sub.get(command), top.get(command),
+        `${capture.permissionMode}: \`${command}\` is judged the same however it was issued`);
+    }
+
+    // And the verdicts are the right ones, not merely consistent. The channel adds only the
+    // refusals that hold wherever the shell is: an absolute operand at the worktree, or an
+    // absolute `cd` into it followed by a relative removal. Every captured command naming the
+    // worktree is one of those; the relative-only ones are the hook's to judge.
+    const expected = capture.frames
+      .filter((entry) => (entry.frame.request.input?.command ?? "").includes("__WORKTREE__"))
+      .map((entry) => entry.frame.request_id);
     assert.deepEqual(denied, expected,
       `${capture.permissionMode}: the verdict follows the command, never the issuer`);
     for (const issuer of ["top-level", "subagent"] as const) {

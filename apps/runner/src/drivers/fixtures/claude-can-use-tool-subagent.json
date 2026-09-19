@@ -194,22 +194,22 @@
         "stdio"
       ],
       "extraSettings": null,
-      "note": "`default` escalated these on its own; no extra settings were supplied. The subagent appended its own `echo`/`ls` to the commands it was given, which is left verbatim.",
+      "note": "`default` escalated these on its own; no extra settings were supplied.",
       "frames": [
         {
           "issuer": "top-level",
           "frame": {
             "type": "control_request",
-            "request_id": "acab614a-de1a-400d-9a22-bbe7e29f1b8f",
+            "request_id": "7e4b667e-d271-4fd2-9e29-8b7aa3fc98d3",
             "request": {
               "subtype": "can_use_tool",
               "tool_name": "Bash",
               "display_name": "Bash",
               "input": {
                 "command": "rm -rf ./build",
-                "description": "Remove the project build directory"
+                "description": "Remove build directory"
               },
-              "description": "Remove the project build directory",
+              "description": "Remove build directory",
               "permission_suggestions": [
                 {
                   "type": "addRules",
@@ -236,7 +236,7 @@
                 }
               ],
               "blocked_path": "__REPO__/build",
-              "tool_use_id": "toolu_01QjVZqnEuTgFDqf13DiFH7D"
+              "tool_use_id": "toolu_01Hsn7Pux8VtejZeUpH7rYpP"
             }
           }
         },
@@ -244,16 +244,16 @@
           "issuer": "top-level",
           "frame": {
             "type": "control_request",
-            "request_id": "1aa16b86-2405-4b01-9de3-16cc5b4e3099",
+            "request_id": "b29c6cfe-e250-4de6-a50e-359cefcc1ac7",
             "request": {
               "subtype": "can_use_tool",
               "tool_name": "Bash",
               "display_name": "Bash",
               "input": {
                 "command": "rm -rf __WORKTREE__",
-                "description": "Remove the decoy directory by absolute path"
+                "description": "Remove decoy directory by absolute path"
               },
-              "description": "Remove the decoy directory by absolute path",
+              "description": "Remove decoy directory by absolute path",
               "permission_suggestions": [
                 {
                   "type": "addRules",
@@ -280,7 +280,7 @@
                 }
               ],
               "blocked_path": "__WORKTREE__",
-              "tool_use_id": "toolu_01ScyRZajY1hoTGP1W2Y15eH"
+              "tool_use_id": "toolu_01617wxazcCsHf4icHairCFZ"
             }
           }
         },
@@ -288,21 +288,21 @@
           "issuer": "top-level",
           "frame": {
             "type": "control_request",
-            "request_id": "504c1a38-2c8b-4ace-aa14-c0a5237d6396",
+            "request_id": "926cc6f4-2b33-4642-9c66-355c677e9000",
             "request": {
               "subtype": "can_use_tool",
               "tool_name": "Bash",
               "display_name": "Bash",
               "input": {
                 "command": "cd __WORKTREE__/apps && rm -rf ..",
-                "description": "Attempt to remove the parent of the decoy apps directory"
+                "description": "Remove parent of apps directory from inside it"
               },
-              "description": "Attempt to remove the parent of the decoy apps directory",
+              "description": "Remove parent of apps directory from inside it",
               "permission_suggestions": [],
               "decision_reason": "Dangerous rm operation on working directory or its ancestor: __WORKTREE__",
               "decision_reason_type": "safetyCheck",
               "classifier_approvable": false,
-              "tool_use_id": "toolu_01Btdkxw97mdagVBmYLJHMq3"
+              "tool_use_id": "toolu_0188UxVi5qWeS6sFsRbeCAU7"
             }
           }
         },
@@ -310,16 +310,16 @@
           "issuer": "subagent",
           "frame": {
             "type": "control_request",
-            "request_id": "fd9918a9-4fd6-4e20-9dc5-42a586a4f3ae",
+            "request_id": "bbe7494c-8e9a-417f-9545-49190d122c64",
             "request": {
               "subtype": "can_use_tool",
               "tool_name": "Bash",
               "display_name": "Bash",
               "input": {
-                "command": "rm -rf ./build; echo \"exit=$?\"; ls -la __REPO__",
-                "description": "Remove build directory in project root"
+                "command": "rm -rf ./build",
+                "description": "Remove the build directory"
               },
-              "description": "Remove build directory in project root",
+              "description": "Remove the build directory",
               "permission_suggestions": [
                 {
                   "type": "addRules",
@@ -327,19 +327,27 @@
                     {
                       "toolName": "Bash",
                       "ruleContent": "rm -rf ./build"
-                    },
-                    {
-                      "toolName": "Bash",
-                      "ruleContent": "echo \"exit=$?\""
                     }
                   ],
                   "behavior": "allow",
                   "destination": "localSettings"
+                },
+                {
+                  "type": "addDirectories",
+                  "directories": [
+                    "__REPO__"
+                  ],
+                  "destination": "session"
+                },
+                {
+                  "type": "setMode",
+                  "mode": "acceptEdits",
+                  "destination": "session"
                 }
               ],
-              "decision_reason_type": "subcommandResults",
-              "tool_use_id": "toolu_01HgbNHtEzkgcFNQ4YXSCeDG",
-              "agent_id": "a9264218cc81916e6"
+              "blocked_path": "__REPO__/build",
+              "tool_use_id": "toolu_01FSxmafQtvypsDa13GptBqk",
+              "agent_id": "a6913624bd0bcdfaa"
             }
           }
         },
@@ -347,16 +355,16 @@
           "issuer": "subagent",
           "frame": {
             "type": "control_request",
-            "request_id": "9f156610-693e-44fa-9aa3-d283748ecc66",
+            "request_id": "8b16ec75-5271-4ff3-98e6-bff3bec6d20a",
             "request": {
               "subtype": "can_use_tool",
               "tool_name": "Bash",
               "display_name": "Bash",
               "input": {
-                "command": "rm -rf __WORKTREE__; echo \"exit=$?\"; ls -la __REPO__",
-                "description": "Remove the disposable decoy directory by absolute path"
+                "command": "rm -rf __WORKTREE__",
+                "description": "Remove the disposable decoy directory"
               },
-              "description": "Remove the disposable decoy directory by absolute path",
+              "description": "Remove the disposable decoy directory",
               "permission_suggestions": [
                 {
                   "type": "addRules",
@@ -364,19 +372,27 @@
                     {
                       "toolName": "Bash",
                       "ruleContent": "rm -rf __WORKTREE__"
-                    },
-                    {
-                      "toolName": "Bash",
-                      "ruleContent": "echo \"exit=$?\""
                     }
                   ],
                   "behavior": "allow",
                   "destination": "localSettings"
+                },
+                {
+                  "type": "addDirectories",
+                  "directories": [
+                    "__WORKTREE__"
+                  ],
+                  "destination": "session"
+                },
+                {
+                  "type": "setMode",
+                  "mode": "acceptEdits",
+                  "destination": "session"
                 }
               ],
-              "decision_reason_type": "subcommandResults",
-              "tool_use_id": "toolu_01EAezmATBw9WaWXPsCzRK9R",
-              "agent_id": "a9264218cc81916e6"
+              "blocked_path": "__WORKTREE__",
+              "tool_use_id": "toolu_016SCCVad51va1irxom7NJ6B",
+              "agent_id": "a6913624bd0bcdfaa"
             }
           }
         }
