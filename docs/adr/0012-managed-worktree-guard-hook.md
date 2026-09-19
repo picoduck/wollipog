@@ -155,19 +155,35 @@ What is done instead:
   planted in the workspace is judged by where it lands. Third-party MCP filesystem tools are not
   classifiable by name and remain outside the veto, like any other indirection.
 - **One carve-out: inspecting an ancestor.** A Bash operand that merely CONTAINS the directory is
-  allowed when the whole command is `ls` without a recursive option or `stat`, and nothing else
-  (#1334). Such a command may NAME the hook directory; it never enumerates what is in it. The
-  file tools stay refused on an ancestor, so the path-level predicate keeps its old meaning.
+  allowed when the whole command is made of `ls` without a recursive option, `stat`, `du` with
+  value-free options, and `find START... -maxdepth N` whose walk stops at or above the hook
+  directory, and nothing else (#1334, #1390). Such a command may NAME the hook directory; `ls`,
+  `stat`, and `find` never enumerate what is in it. The file tools stay refused on an ancestor, so
+  the path-level predicate keeps its old meaning.
 
-  `du` and `find` are deliberately outside the carve-out, though #1334 lists both among the
-  commands that should be allowed. Each walks the tree it is given, and each can be pointed at a
-  file through an option value, which is not an operand and so is never compared against the guard
-  state. Three of the bypasses found while reviewing #1334 came out of bounding `find`'s walk, and
-  two more out of `du`'s file-valued options — the last of them a bare option value naming a symlink
-  to the protections file, which no check on the option's spelling can see. `ls` and `stat` neither
-  descend nor take an option that names a file to open, so they need no depth reasoning and no
-  option parsing. A bounded `du` or `find` belongs in its own change, with that reasoning as the
-  subject.
+  `du` and `find` came back in a change of their own (#1390), after five of the fourteen bypasses
+  found while reviewing #1334 came out of them: three from bounding `find`'s walk, two from `du`'s
+  file-valued options — the last a bare option value naming a symlink to the protections file,
+  which no check on the option's spelling can see. So neither is parsed in general; each is
+  admitted in exact argv shapes only. `du` takes options from a closed list of value-free flags
+  spelled in full, plus a numeric `--max-depth=`: no option value can name a file, so none needs
+  resolving. `-a`/`--all` is not on the list, because it prints every file and so would enumerate
+  the hook directory's protections files; plain `du` prints directories only. `find` takes one or more explicit starts followed by exactly `-maxdepth N`, and `N` may
+  not exceed the depth of the hook directory below any related start, measured under every reading
+  of it (spelling, physical path, and where a `..` after a symlink really lands), nearest reading
+  deciding. A walk to that depth reads the directories above the hook directory and only names the
+  hook directory itself; every other `find` word is refused, because a test such as `-empty` opens
+  the directory it names at the bound. A `find` with no explicit start walks the working directory,
+  which no operand names, so it is refused.
+
+  The trade-off `du` carries, restated as #1334 accepts it: `du` on an ancestor walks the hook
+  directory too, so it learns that directory's total size and prints the names of any
+  subdirectories in it. It opens no file and reads no contents, and neither does any option it is
+  allowed.
+
+  An operand that climbs with `..` is also judged by where the kernel lands. Lexical normalization
+  folds `<ancestor>/link/..` into `<ancestor>` before the symlink is seen, although the kernel
+  follows `link` first and climbs out of its target, which can be the hook directory itself.
 
   The carve-out fails closed, because a command-text classifier is easy to talk past. EVERY command
   in the list has to be an inspection, not merely the one holding the ancestor operand: the shell
@@ -181,8 +197,8 @@ What is done instead:
   number belongs to the redirection rather than to the command. A glob or brace metacharacter
   disqualifies the command, because the shell expands `--recurs{ive,}` into `--recursive` first. So
   does a `NAME=value` assignment, a command word that is not a bare name, since `./ls` is whatever
-  was planted there, and an option word carrying a path separator: neither `ls` nor `stat` has an
-  option that opens a file, so that refuses nothing either needs, and a path inside an option is
+  was planted there, and an option word carrying a path separator: none of the admitted forms has an
+  option that opens a file, so that refuses nothing they need, and a path inside an option is
   never waved through. Long options are matched as GNU `getopt_long` accepts them, so `ls --recurs` counts as
   recursive. A working directory inside the guard state disqualifies the command too, since one
   with no operand acts there.
@@ -190,6 +206,8 @@ What is done instead:
   Where the two directions conflict, it over-refuses. A short-option cluster is scanned for `R`
   without modelling which options take an attached value, so GNU's `ls -IREADME` reads as recursive
   and is refused; a hard-coded list of value-taking options would fail OPEN the day it is wrong.
+  And `find <ancestor> -maxdepth 1 2>/dev/null` is refused, because the tokenizer drops the adjacency
+  that makes `2>` a redirection, so its `2` reads as one more word after the bound.
 
 - **No free advertising.** The protections path is not exported in the settings `env` block (which
   reaches every tool process); it travels only in the hook command inside the 0600 settings file,
