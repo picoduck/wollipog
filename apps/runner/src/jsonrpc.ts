@@ -19,6 +19,9 @@ export interface RpcError {
   transportFailure?: true;
   /** Local-only marker: this request exhausted its caller-supplied deadline. */
   requestTimeout?: true;
+  /** Local-only marker: the request was refused before anything was written to the transport, so
+   * the agent provably never saw it. Absent whenever a write may have happened. */
+  notSent?: true;
 }
 
 export type RequestHandler = (params: Params, requestId: number | string) => Promise<unknown> | unknown;
@@ -92,6 +95,7 @@ export class JsonRpcPeer {
         code: -32000,
         message: `connection closed (cannot call ${method})`,
         transportFailure: true,
+        notSent: true,
       });
     }
     if (deadlineAt !== undefined && (!Number.isFinite(deadlineAt) || deadlineAt <= Date.now())) {
@@ -99,6 +103,7 @@ export class JsonRpcPeer {
         code: -32002,
         message: `request deadline exceeded (cannot call ${method})`,
         requestTimeout: true,
+        notSent: true,
       });
     }
     const id = this.nextId++;

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import type {
   PromptImage,
@@ -12,7 +13,9 @@ import type {
   SteerSessionMessage,
   SteerSessionResultMessage,
 } from "@wollipog/protocol";
+import { CodexAppServerDriver } from "./drivers/codex-app-server.js";
 import type { Driver, DriverCallbacks, DriverSteerResult } from "./drivers/driver.js";
+import { JsonRpcPeer } from "./jsonrpc.js";
 import {
   SessionManager,
   type DurableCommandLifecycle,
@@ -578,6 +581,54 @@ test("driver turn-closure outcomes convert direct input while generic rejection 
     assert.deepEqual((rejected.manager as any).active.get("s_steer").queue, []);
   } finally {
     rejected.cleanup();
+  }
+});
+
+/** A real Codex driver whose steer reaches a real JSON-RPC peer, so the peer's own refusal decides
+ * the outcome. `written` returns every frame that reached the provider's stdin. */
+function codexSteerDriver(): { codex: CodexAppServerDriver; peer: JsonRpcPeer; written: () => string } {
+  const stdin = new PassThrough();
+  const peer = new JsonRpcPeer(stdin, new PassThrough());
+  const codex = new CodexAppServerDriver(
+    { command: "codex", args: [], cwd: "/tmp/work", env: {}, config: {}, context: { kind: "native" } },
+    { onEvent: () => {}, onStderr: () => {}, onExit: () => {} },
+  );
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  Object.assign(codex as any, { threadId: "thread-1", turnId: "provider-turn-a", promptBusy: true, peer });
+  return { codex, peer, written: () => String(stdin.read() ?? "") };
+}
+
+test("a Codex steer refused before any provider write is queued instead of stranded as uncertain", async (t) => {
+  for (const scenario of ["closed", "elapsed"] as const) {
+    const { codex, peer, written } = codexSteerDriver();
+    if (scenario === "closed") peer.dispose("process exited");
+    else {
+      const requestWithDeadline = peer.requestWithDeadline.bind(peer);
+      // The deadline passes between the runner's last check and the peer's, so the peer refuses
+      // the request without writing it.
+      t.mock.method(peer, "requestWithDeadline", (method: string, params: unknown, deadlineAt: number) => {
+        t.mock.method(Date, "now", () => deadlineAt);
+        return requestWithDeadline(method, params, deadlineAt);
+      });
+    }
+    const h = harness({ steer: (input) => codex.steer(input) });
+    try {
+      const result = await h.manager.steerSession({
+        submissionId: `unsent-${scenario}`,
+        sessionId: "s_steer",
+        turnId: "turn-a",
+        text: `exact ${scenario} payload`,
+      });
+      assert.equal(written(), "", `${scenario}: nothing reached the provider`);
+      assert.equal(result.disposition, "converted_to_queue", scenario);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const queue = (h.manager as any).active.get("s_steer").queue;
+      assert.deepEqual(queue.map((prompt: { text: string }) => prompt.text), [`exact ${scenario} payload`]);
+      assert.equal(queue[0].id, result.queuedPromptId);
+    } finally {
+      h.cleanup();
+      t.mock.restoreAll();
+    }
   }
 });
 
