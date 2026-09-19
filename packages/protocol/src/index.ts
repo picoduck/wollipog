@@ -500,7 +500,12 @@
 //      the controlling Orchestrator as MCP image content and makes the control plane record a
 //      review receipt; approval by an Orchestrator requires a receipt for every item. A pre-v167
 //      runner has no such reader, so the control plane keeps those decisions human-owned.
-export const PROTOCOL_VERSION = 167;
+// 168: the Pi driver reports a steer that Pi acknowledged after its run settled as `uncertain`
+//      instead of a definite `stale_turn`, so the runner no longer re-queues text the provider may
+//      already hold. No wire shape changes; the control plane uses the version only to decide
+//      whether a Pi session may join the automatic mid-turn steering lane. A pre-v168 runner keeps
+//      Pi on queue-only admission, because its driver can still deliver such a message twice.
+export const PROTOCOL_VERSION = 168;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -705,6 +710,10 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * MCP image content. Without it an Orchestrator cannot inspect evidence bytes, so the control
    * plane keeps UI Evidence Approval human-owned whatever the saved policy says. */
   orchestratorUiEvidenceReview: 167,
+  /** Pi driver never reports a provider-acknowledged steer as a definite `stale_turn` (#1433).
+   * Gates Pi's admission to the automatic mid-turn steering lane; an older runner would re-queue
+   * such a steer as an ordinary prompt and deliver the message twice. */
+  piAcknowledgedSteerUncertain: 168,
   worktreeSetup: 141,
   worktreeTeardownPorts: 145,
   worktreeSetupConfig: 146,

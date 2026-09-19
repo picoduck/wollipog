@@ -668,13 +668,11 @@ const WORKING_SESSION_STATUSES = new Set<SessionStatus>([
 ]);
 
 /** Drivers whose steering result can be trusted to say whether the provider received the text.
- * Pi is deliberately absent: `PiRpcDriver.steer` awaits a successful steer RPC and only then
- * reports `stale_turn` if the run has settled, which the runner converts into an ordinary queued
- * prompt — so the provider may hold the text and the queue submit it again. That defect predates
- * this lane and the dashboard's Steer control already reaches it, but automatic steering must not
- * widen its blast radius; Pi keeps today's queue-only behaviour until the driver distinguishes a
- * pre-write refusal from a post-acknowledgement one. */
-const AUTO_STEER_DRIVERS = new Set(["claude-code", "codex-app-server"]);
+ * Pi joins only on a runner whose driver reports a provider-acknowledged steer as `uncertain`
+ * (#1433): an older `PiRpcDriver.steer` reported `stale_turn` when the run settled under an
+ * acknowledged RPC, which the runner converts into an ordinary queued prompt — so the provider may
+ * hold the text and the queue submit it again. Such a runner keeps Pi on queue-only admission. */
+const AUTO_STEER_DRIVERS = new Set(["claude-code", "codex-app-server", "pi"]);
 
 /** Classify a message the runner accepted onto the steering lane. `converted_to_queue` is the
  * runner telling us the turn ended under the attempt and it became an ordinary queued prompt, so
@@ -4120,6 +4118,10 @@ export class SessionsService {
     const session = this.db.getSession(sessionId);
     if (!session || session.status !== "running") return null;
     if (!AUTO_STEER_DRIVERS.has(session.driver)) return null;
+    if (session.driver === "pi" &&
+        !runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "piAcknowledgedSteerUncertain")) {
+      return null;
+    }
     const turnId = this.hub.activeTurnIdForSession(sessionId);
     if (!turnId) return null;
     const steered = await this.steer(sessionId, {
