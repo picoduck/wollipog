@@ -476,8 +476,12 @@ export class PiRpcDriver implements Driver {
         message: text,
         ...(images.length ? { images: promptImages(images) } : {}),
       }, remaining);
+      // Pi acknowledged the steer, so it may already hold the text even though the run settled
+      // underneath the request. A definite stale_turn would let the runner re-queue the message as
+      // an ordinary prompt and deliver it twice; the only pre-write stale case is the synchronous
+      // check above, which returns before anything reaches Pi.
       if (this.turnId !== expectedTurnId || !this.promptBusy) {
-        return { outcome: "stale_turn", reason: "Pi run settled while steering was submitted" };
+        return { outcome: "uncertain", reason: "Pi acknowledged steering after its run had settled" };
       }
       return { outcome: "accepted", providerTurnId: expectedTurnId };
     } catch (error) {

@@ -18803,3 +18803,49 @@ test("a policy_blocked steer while the session waits on input still falls back t
   assert.equal(hub.sentOfType("prompt_session").length, 1, "the message is still delivered");
 });
 
+test("a mid-turn prompt to a Pi session is steered only on a runner whose driver reports acknowledged steers as uncertain", async () => {
+  // Issue #1433: a pre-v168 Pi driver reported a steer Pi had already acknowledged as a definite
+  // stale_turn, which the runner re-queues as an ordinary prompt — so the same instruction could
+  // run twice. Pi joins the automatic lane only on a runner with the fixed driver.
+  const PI_AGENT = "pi-steerable";
+  for (const [protocolVersion, expectedLane] of [
+    [RUNNER_CAPABILITY_MIN_PROTOCOL.piAcknowledgedSteerUncertain, "steered"],
+    [RUNNER_CAPABILITY_MIN_PROTOCOL.piAcknowledgedSteerUncertain - 1, "queued"],
+  ] as const) {
+    const { db, hub, svc } = makeHarness();
+    const meta = runnerMeta();
+    db.registerRunner({
+      ...meta,
+      agents: [...meta.agents, {
+        id: PI_AGENT, name: "Pi", command: "pi", args: [] as string[], env: {}, driver: "pi" as const,
+        available: true, context: { kind: "native" as const },
+        capabilities: {
+          models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+          supportsSteering: true,
+        },
+      }],
+    }, Date.now(), protocolVersion);
+    const id = seedSession(svc, hub, { agentId: PI_AGENT });
+    db.updateSessionStatus(id, "running", Date.now());
+    hub.activeTurnIds.set(id, "turn-live");
+    hub.sentToRunner.length = 0;
+    hub.requestHandler = (message) => ({
+      type: "steer_session_result",
+      requestId: message.requestId,
+      submissionId: message.submissionId,
+      sessionId: id,
+      turnId: "turn-live",
+      disposition: "accepted",
+      reason: "accepted",
+      providerTurnId: "turn-live",
+    });
+
+    const result = await svc.promptOrSteer(id, "switch to the other fixture");
+    assert.equal(result.ok, true, result.error);
+    assert.equal(result.data?.promptDelivery?.lane, expectedLane, `protocol v${protocolVersion}`);
+    assert.equal(hub.sentOfType("steer_session").length, expectedLane === "steered" ? 1 : 0);
+    assert.equal(hub.sentOfType("prompt_session").length, expectedLane === "steered" ? 0 : 1,
+      "exactly one lane owns the message");
+  }
+});
+

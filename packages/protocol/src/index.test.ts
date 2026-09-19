@@ -185,8 +185,10 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 167", () => {
-  assert.equal(PROTOCOL_VERSION, 167);
+test("PROTOCOL_VERSION is 168", () => {
+  assert.equal(PROTOCOL_VERSION, 168);
+  assert.equal(runnerSupportsProtocol(167, "piAcknowledgedSteerUncertain"), false);
+  assert.equal(runnerSupportsProtocol(168, "piAcknowledgedSteerUncertain"), true);
   assert.equal(runnerSupportsProtocol(165, "workflowDecisionChildMessage"), false);
   assert.equal(runnerSupportsProtocol(166, "workflowDecisionChildMessage"), true);
   assert.equal(runnerSupportsProtocol(166, "orchestratorUiEvidenceReview"), false);

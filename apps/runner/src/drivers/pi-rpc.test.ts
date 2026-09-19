@@ -513,6 +513,36 @@ test("Pi RPC receipts steering, cancels, and resumes the exact provider session"
   assert.equal(await turn, "cancelled");
 });
 
+test("Pi RPC reports an acknowledged steer as uncertain when the run settled under it (#1433)", async (t) => {
+  // The runner re-queues a definite stale_turn as an ordinary prompt. Once Pi has acknowledged
+  // the steer it may already hold the text, so that re-queue would deliver the instruction twice.
+  const driver = new PiRpcDriver(options(), callbacks([]));
+  t.after(() => driver.dispose());
+  const turn = new Promise((resolve) => { (driver as any).turnResolve = resolve; });
+  (driver as any).promptBusy = true;
+  (driver as any).turnId = "pi-turn-live";
+  const requests: Record<string, unknown>[] = [];
+  (driver as any).peer = {
+    request: async (command: Record<string, unknown>) => {
+      requests.push(command);
+      // The run settles after Pi received the steer but before its acknowledgement is observed.
+      (driver as any).settleTurn("end_turn");
+      return { type: "response", command: "steer", success: true };
+    },
+    dispose: () => {},
+  };
+
+  const steered = await driver.steer({ submissionId: "steer-1", text: "change direction", deadlineAt: Date.now() + 2_000 });
+  assert.equal(steered.outcome, "uncertain");
+  assert.deepEqual(requests.map((command) => command.type), ["steer"]);
+  assert.equal(await turn, "end_turn");
+
+  // A steer that finds the run already settled never reaches Pi, so it stays a definite refusal.
+  const late = await driver.steer({ submissionId: "steer-2", text: "too late", deadlineAt: Date.now() + 2_000 });
+  assert.equal(late.outcome, "no_active_turn");
+  assert.equal(requests.length, 1);
+});
+
 test("Pi RPC fails closed when the requested provider session does not exist", async (t) => {
   const driver = new PiRpcDriver(options("normal", "missing-pi-session"), callbacks([]));
   t.after(() => driver.dispose());
