@@ -1118,8 +1118,8 @@ CREATE TABLE IF NOT EXISTS review_findings (
   remote_outdated INTEGER,
   remote_subject_type TEXT,
   remote_synchronized_at INTEGER,
-  -- The anchored line's own text (#1286). Last in the column order on purpose: the v106 rebuild
-  -- below copies an older table positionally, and appending keeps that copy well-formed.
+  -- The anchored line's own text (#1286). The v106 rebuild below does not declare it; the additive
+  -- column loop that follows the rebuild restores it.
   -- NULL means "not recorded" (pre-#1286, or a line past the stored ceiling); '' is a blank line.
   anchor_text TEXT,
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
@@ -3895,6 +3895,9 @@ export class ControlPlaneDb {
       "SELECT sql FROM sqlite_master WHERE type='table' AND name='review_findings'",
     ).get() as { sql?: string } | undefined)?.sql ?? "";
     if (!reviewFindingSql.includes("'gitlab'")) {
+      const reviewFindingColumns = (table: string) => new Set(
+        (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name),
+      );
       db.exec("BEGIN");
       try {
         db.exec(`CREATE TABLE review_findings_v106 (
@@ -3912,8 +3915,13 @@ export class ControlPlaneDb {
           CHECK (severity IN ('blocker','major','minor','nit')), CHECK (required IN (0,1)),
           CHECK (status IN ('open','sent','resolved','dismissed')),
           CHECK (source IN ('local','github','gitlab'))
-        );
-        INSERT INTO review_findings_v106 SELECT * FROM review_findings;
+        )`);
+        // Copy by name, not position: a table older than the remote_* columns (#1381) is narrower
+        // than v106, and the additive loop that would widen it runs later in open(). Columns the
+        // old table never had stay NULL.
+        const source = reviewFindingColumns("review_findings");
+        const shared = [...reviewFindingColumns("review_findings_v106")].filter((name) => source.has(name)).join(", ");
+        db.exec(`INSERT INTO review_findings_v106 (${shared}) SELECT ${shared} FROM review_findings;
         DROP TABLE review_findings;
         ALTER TABLE review_findings_v106 RENAME TO review_findings;
         CREATE INDEX idx_review_findings_session ON review_findings(session_id, status, created_at, finding_id);
