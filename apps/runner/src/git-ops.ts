@@ -1230,12 +1230,13 @@ export const MAX_STATUS_CONTENT_HASH_BYTES = 8 * 1024 * 1024;
  *
  * The cost, measured rather than assumed. The probe itself is cheap — a first-bytes read, about
  * 6 us a file natively, so ~2.5 ms for 256 — but it would run on the status cadence, and that
- * cadence is wider than the Review pane: `useGitStatus` polls every 60 s for each EXPANDED session
- * view whose tab is visible while its turn is idle, because the composer's branch chip shares the
- * read, so it runs whether or not anyone has the Review panel open — plus a read at every turn
- * boundary. Each of those reads would walk an untracked set this one does not cap the way it caps
- * `files`, and under WSL every probe is a separate wsl.exe spawn. An honest version is therefore a
- * cap, a batched WSL probe, and a third framed digest input. What that buys is one muted note on a
+ * cadence is wider than the Review pane: `useGitStatus` polls every 60 s for each EXPANDED view of
+ * an online, unarchived rich-git session while its tab is visible and its turn is idle, because the
+ * composer's branch chip shares the read — so it runs whether or not anyone has the Review panel
+ * open — plus a read when a turn settles or the session reconnects. Each of those reads would walk
+ * an untracked set this one does not cap the way it caps `files`, and under WSL every probe is a
+ * separate wsl.exe spawn. An honest version is therefore a cap, a batched WSL probe, and a third
+ * framed digest input. What that buys is one muted note on a
  * card whose content the pane never renders, which a turn boundary, the active-turn cadence, or a
  * manual refresh already corrects. Affordable, but not worth its own moving parts.
  *
