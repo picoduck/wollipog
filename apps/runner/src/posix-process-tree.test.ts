@@ -241,7 +241,7 @@ test("concurrent termination callers share one active attempt", async () => {
   assert.equal(terminatePosixProcessBoundaries(owner).length, 0);
 });
 
-test("the root group is frozen before any descendant enumeration runs", async () => {
+test("the root is stopped before any descendant enumeration runs, and only the root", async () => {
   const owner = {};
   const runtime = scriptedRuntime([processTable(root), processTable(root), processTable(), processTable()]);
   const baseList = runtime.listProcesses.bind(runtime);
@@ -253,175 +253,74 @@ test("the root group is frozen before any descendant enumeration runs", async ()
   const boundary = new PosixProcessBoundary(root.pid, owner, undefined, runtime);
 
   assert.equal(await boundary.terminate(), true);
-  // Enumeration reads the whole process table and is slow under load. A stop that waits for it
-  // lets the process it is stopping run on — and keep writing — long after the caller was told it
-  // had been killed, so the freeze has to be the first thing that happens.
-  assert.deepEqual(
-    signalsBeforeFirstEnumeration,
-    [[-root.pid, "SIGSTOP"]],
-    "the root group is stopped before the first process-table read, not after it",
-  );
-  assert.ok(
-    runtime.signals.some(([pid, signal]) => pid === -root.pid && signal === "SIGCONT"),
-    "a group frozen before enumeration is always resumed",
-  );
+  // Enumeration reads the whole process table and is slow under load. A stop that waits for it lets
+  // the process it is stopping run on — and keep writing — long after the caller was told it had
+  // been killed. The early stop targets the root PID alone: a group stop could freeze descendants
+  // the boundary cannot later prove it owns, and so could never be safely resumed.
+  assert.deepEqual(signalsBeforeFirstEnumeration, [[root.pid, "SIGSTOP"]]);
+  const stop = runtime.signals.findIndex(([pid, signal]) => pid === root.pid && signal === "SIGSTOP");
+  const term = runtime.signals.findIndex(([pid, signal]) => pid === root.pid && signal === "SIGTERM");
+  const resume = runtime.signals.findLastIndex(([pid, signal]) => pid === root.pid && signal === "SIGCONT");
+  assert.ok(stop < term && term < resume, "the stopped root is resumed after its SIGTERM is queued");
   assert.equal(terminatePosixProcessBoundaries(owner).length, 0);
 });
 
-test("no root-group signal trails the graceful wait", async () => {
-  const owner = {};
-  const runtime = scriptedRuntime([processTable(root), processTable(root), processTable(), processTable()]);
-  const boundary = new PosixProcessBoundary(root.pid, owner, undefined, runtime);
-  const baseSignal = runtime.signal.bind(runtime);
-  const baseSleep = runtime.sleep.bind(runtime);
-  let waiting = false;
-  const trailing: NodeJS.Signals[] = [];
-  runtime.signal = (pid, signal) => {
-    if (waiting && pid === -root.pid) trailing.push(signal);
-    baseSignal(pid, signal);
-  };
-  runtime.sleep = async (milliseconds) => { waiting = true; return baseSleep(milliseconds); };
-
-  assert.equal(await boundary.terminate(), true);
-  // Once the root exits, the kernel may reissue its PGID to unrelated work, so a resume that
-  // trails the graceful window by seconds could stop being a repair and start being an intrusion.
-  // Every bare-PID group signal therefore belongs to the SIGTERM phase, alongside its own SIGTERM.
-  assert.deepEqual(trailing, [], "the pre-enumeration freeze is lifted before the graceful wait");
-  assert.ok(
-    runtime.signals.some(([pid, signal]) => pid === -root.pid && signal === "SIGCONT"),
-    "and it is lifted",
-  );
-  assert.equal(terminatePosixProcessBoundaries(owner).length, 0);
-});
-
-test("a root reaped mid-attempt hands the freeze to an identity-checked retry", async (t) => {
+test("an enumeration failure still resumes a root stopped before enumeration", async (t) => {
   t.mock.method(console, "error", () => {});
-  const survivor: PosixProcessIdentity = { pid: 101, ppid: 1, state: "T", startedAt: "survivor-start" };
+  const owner = {};
   const runtime = scriptedRuntime([
     new Error("injected initial enumeration failure"),
-    processTable(survivor),
-    processTable(survivor),
-    processTable(),
-    processTable(),
+    processTable(root), processTable(root), processTable(), processTable(),
   ]);
-  runtime.listMarkers = async (table) => new Map([["owner-a", new Set(table.keys())]]);
-  const owner = {};
-  const boundary = new PosixProcessBoundary(root.pid, owner, "owner-a", runtime);
-  const baseList = runtime.listProcesses.bind(runtime);
-  // Node observes the root's exit while the first enumeration is still in flight — after the early
-  // freeze has been delivered, and before anything that could resume it has run.
-  let reaped = false;
-  runtime.listProcesses = async () => {
-    if (!reaped) { reaped = true; boundary.markRootExited(); }
-    return baseList();
-  };
+  const boundary = new PosixProcessBoundary(root.pid, owner, undefined, runtime);
 
   assert.equal(await boundary.terminate(), false);
-  // A successful group stop proves a member existed, not that the root was among the live ones,
-  // so once the root is reaped the bare PGID may already belong to unrelated work. The attempt
-  // refuses to resume blind and leaves the repair to a retry that can prove identity.
-  assert.deepEqual(
-    runtime.signals,
-    [[-root.pid, "SIGSTOP"]],
-    "no bare-PGID signal follows the reap",
-  );
+  // With no snapshot, the dependency-free fallback signals the group by the unreaped root PID. The
+  // root stopped earlier cannot act on that SIGTERM until it is continued, and a stopped child
+  // cannot be reaped, so the same unreaped PID is still safe to resume.
+  assert.deepEqual(runtime.signals.slice(0, 3), [
+    [root.pid, "SIGSTOP"],
+    [-root.pid, "SIGTERM"],
+    [root.pid, "SIGCONT"],
+  ]);
 
   const retry = terminatePosixProcessBoundaries(owner);
   assert.equal(retry.length, 1, "the failed boundary remains registered for retry");
   assert.equal(await retry[0], true);
-  assert.ok(
-    runtime.signals.some(([pid, signal]) => pid === survivor.pid && signal === "SIGCONT"),
-    "the retry resumes the frozen survivor by proven identity",
-  );
-  assert.ok(runtime.signals.some(([pid, signal]) => pid === survivor.pid && signal === "SIGTERM"));
-  assert.equal(
-    runtime.signals.filter(([pid]) => pid === -root.pid).length,
-    1,
-    "and never reaches for the recyclable root PGID again",
-  );
-  assert.equal(terminatePosixProcessBoundaries(owner).length, 0);
 });
 
-test("a freeze that cannot be proven lifted keeps the attempt incomplete", async (t) => {
-  t.mock.method(console, "error", () => {});
-  // The root is already a zombie, a same-group descendant is alive, and the descendant's marker
-  // is unreadable. Nothing in the snapshot is provably ours, so there is no identity to resume —
-  // which is not the same as nothing being stopped.
-  const survivor: PosixProcessIdentity = { pid: 101, ppid: 1, state: "T", startedAt: "survivor-start" };
-  const runtime = scriptedRuntime([
-    processTable(survivor), processTable(survivor), processTable(survivor), processTable(survivor),
-    processTable(survivor), processTable(survivor), processTable(), processTable(),
-  ]);
-  let markersReadable = false;
-  runtime.listMarkers = async (table) => (markersReadable
-    ? new Map([["owner-a", new Set(table.keys())]])
-    : new Map());
-  const owner = {};
-  const boundary = new PosixProcessBoundary(root.pid, owner, "owner-a", runtime);
-  const baseList = runtime.listProcesses.bind(runtime);
-  let reaped = false;
-  runtime.listProcesses = async () => {
-    if (!reaped) { reaped = true; boundary.markRootExited(); }
-    return baseList();
-  };
-
-  assert.equal(
-    await boundary.terminate(),
-    false,
-    "reporting success here would retire the only mechanism that could still resume the descendant",
-  );
-  assert.deepEqual(runtime.signals, [[-root.pid, "SIGSTOP"]]);
-
-  markersReadable = true;
-  const retry = terminatePosixProcessBoundaries(owner);
-  assert.equal(retry.length, 1, "the boundary stays registered for an identity-checked retry");
-  assert.equal(await retry[0], true);
-  assert.ok(
-    runtime.signals.some(([pid, signal]) => pid === survivor.pid && signal === "SIGCONT"),
-    "which resumes the stopped descendant once its identity is provable",
-  );
-  assert.equal(terminatePosixProcessBoundaries(owner).length, 0);
-});
-
-test("a marker-only boundary never group-signals the runner's own process group", async (t) => {
+test("a marker-only boundary never signals the runner's own process group", async (t) => {
   t.mock.method(console, "error", () => {});
   const marked: PosixProcessIdentity = { pid: 101, ppid: 1, state: "S", startedAt: "marked-start" };
   const runtime = scriptedRuntime([
     new Error("injected initial enumeration failure"),
-    processTable(marked),
-    processTable(marked),
-    processTable(),
-    processTable(),
+    processTable(marked), processTable(marked), processTable(), processTable(),
   ]);
   runtime.listMarkers = async (table) => new Map([["runner-marker", new Set(table.keys())]]);
-  // Reconstructed marker-backed boundaries carry root PID 0, which `kill(-pid)` resolves to the
-  // runner's own process group. Both the stop path and its enumeration-failure fallback must
-  // refuse it outright rather than signal the runner and everything it is hosting.
+  // Reconstructed marker-backed boundaries carry root PID 0, and `kill(0)` / `kill(-0)` resolve to
+  // the runner's own process group. The early stop and the enumeration-failure fallback must both
+  // refuse it outright rather than signal the runner and everything it hosts.
   const boundary = new PosixProcessBoundary(0, undefined, "runner-marker", runtime);
 
   assert.equal(await boundary.terminate(), false, "an enumeration failure keeps the boundary retryable");
   assert.equal(await boundary.terminate(), true);
-  assert.equal(
-    runtime.signals.some(([pid]) => pid <= 0),
-    false,
-    "no signal is ever addressed to PID 0 or a negative group derived from it",
-  );
+  assert.equal(runtime.signals.some(([pid]) => pid <= 1), false, "nothing is addressed to PID 0, 1, or a group");
   assert.ok(runtime.signals.some(([pid, signal]) => pid === marked.pid && signal === "SIGTERM"));
 });
 
-test("a reaped root is never signalled through its recyclable process group", async () => {
+test("a reaped root is never signalled by its recyclable PID", async () => {
   const marked: PosixProcessIdentity = { pid: 101, ppid: 1, state: "S", startedAt: "marked-start" };
   const runtime = scriptedRuntime([processTable(marked), processTable(marked), processTable(), processTable()]);
   runtime.listMarkers = async (table) => new Map([["owner-a", new Set(table.keys())]]);
   const boundary = new PosixProcessBoundary(root.pid, undefined, "owner-a", runtime);
-  // Once Node has waited on the root, its PID may already name somebody else's process group.
+  // Once Node has waited on the root, its PID may already belong to somebody else.
   boundary.markRootExited();
 
   assert.equal(await boundary.terminate(), true);
   assert.equal(
-    runtime.signals.some(([pid]) => pid < 0),
+    runtime.signals.some(([pid]) => pid === root.pid || pid === -root.pid),
     false,
-    "a reaped root PID is never used as a process group",
+    "neither the reaped root PID nor its group is signalled",
   );
   assert.ok(
     runtime.signals.some(([pid, signal]) => pid === marked.pid && signal === "SIGTERM"),

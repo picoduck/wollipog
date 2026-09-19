@@ -413,20 +413,20 @@ export class PosixProcessBoundary {
     }
   }
 
-  /** Signal the whole root group without an ownership snapshot.
+  /** The root PID, while it may still be signalled by number without an ownership snapshot.
    *
-   * Two conditions make the bare negative PID safe, and neither may be skipped:
-   *
-   * - The root PID must name a real process group. A marker-only boundary carries root PID 0, and
-   *   `kill(-0, …)` signals the RUNNER'S OWN process group; `kill(-1, …)` signals every process the
-   *   runner may signal. Both are catastrophic, so only a root PID above 1 may be used this way.
-   * - Node must not have reaped the root yet. A PID that has not been waited on cannot be recycled,
-   *   so the group carrying that ID is still exactly this root's group. After waitpid-backed exit
-   *   the numeric PGID may belong to anyone and is permanently unsafe. */
-  private signalRootGroupUnverified(signal: NodeJS.Signals): boolean {
-    if (this.rootPid <= 1 || this.rootExited) return false;
+   * Node has not reaped it yet, so the PID cannot have been recycled. PIDs 0 and 1 never qualify:
+   * a marker-only boundary carries root PID 0, and `kill(0)` / `kill(-0)` address the runner's own
+   * process group, while `kill(-1)` addresses every process the runner may signal. */
+  private unreapedRootPid(): number | undefined {
+    return this.rootPid > 1 && !this.rootExited ? this.rootPid : undefined;
+  }
+
+  private signalUnreapedRoot(signal: NodeJS.Signals): boolean {
+    const pid = this.unreapedRootPid();
+    if (pid === undefined) return false;
     try {
-      (this.testRuntime?.signal ?? globalThis.process.kill.bind(globalThis.process))(-this.rootPid, signal);
+      (this.testRuntime?.signal ?? globalThis.process.kill.bind(globalThis.process))(pid, signal);
       return true;
     } catch {
       return false;
@@ -434,11 +434,17 @@ export class PosixProcessBoundary {
   }
 
   private async fallbackRootGroupAfterEnumerationFailure(): Promise<void> {
-    // Preserve main's dependency-free TERM/KILL path. Callers lift any pre-enumeration freeze
-    // before reaching here, so this SIGTERM is not delivered to a group that cannot act on it.
-    if (!this.signalRootGroupUnverified("SIGTERM")) return;
+    // Preserve main's dependency-free TERM/KILL path only while Node has not observed root exit.
+    // After waitpid-backed exit, the numeric PGID may be recycled and is permanently unsafe.
+    const pid = this.unreapedRootPid();
+    if (pid === undefined) return;
+    const kill = this.testRuntime?.signal ?? globalThis.process.kill.bind(globalThis.process);
+    try { kill(-pid, "SIGTERM"); } catch { return; }
+    // A root stopped before enumeration cannot act on that SIGTERM until it is resumed.
+    this.signalUnreapedRoot("SIGCONT");
     await this.sleep(2_000);
-    this.signalRootGroupUnverified("SIGKILL");
+    if (this.rootExited) return;
+    try { kill(-pid, "SIGKILL"); } catch { /* already gone */ }
   }
 
   /** Freeze the original group first, then close over escaped process groups by parent identity.
@@ -464,59 +470,19 @@ export class PosixProcessBoundary {
   }
 
   private async terminateOnce(): Promise<boolean> {
-    // Freeze the root group before anything is enumerated. Descendant discovery reads the whole
-    // process table, which on a loaded machine takes long enough — seconds, with a marker scan over
-    // a thousand processes — for the step being stopped to run to completion and keep writing to
-    // the worktree after the caller was told it was killed. Stopping first makes the caller's
-    // observation true immediately and closes the fork window the discovery passes exist to close.
-    let outstandingFreeze = this.signalRootGroupUnverified("SIGSTOP");
-    let unrepairedFreeze = false;
-
-    /** Lift the pre-enumeration freeze, at most once, and only while the bare PGID is still
-     * provably this root's.
-     *
-     * It is tempting to resume unconditionally, on the argument that the matching SIGSTOP already
-     * reached this PID's group so the SIGCONT only repairs it. That argument does not survive the
-     * root being reaped mid-attempt: a successful group stop proves a member existed, not that the
-     * root was among the live ones, and once Node has waited on the root the kernel may reissue
-     * the PGID to unrelated work that a stray SIGCONT would resume. So this shares
-     * `signalRootGroupUnverified`'s refusals — root PID 0 or 1, or an already-reaped root — and
-     * every caller lifts within the same phase as its own SIGTERM rather than across a sleep, so
-     * the resume follows the stop by microseconds in the overwhelmingly common case.
-     *
-     * When it does refuse, group members frozen here are resumed instead by identity, from the
-     * ownership snapshot. Finding none proven is not proof that none are stopped — a same-group
-     * descendant whose marker turned unreadable is simply invisible from here — so that case sets
-     * `unrepairedFreeze` and the attempt declines to report completion. This file treats a
-     * recyclable numeric PGID as permanently unsafe after exit, and that rule outranks both
-     * resuming promptly and finishing in one attempt. */
-    const liftEarlyFreeze = (table?: PosixProcessTable): void => {
-      if (!outstandingFreeze) return;
-      outstandingFreeze = false;
-      if (this.signalRootGroupUnverified("SIGCONT")) return;
-      const members = table ? liveOwned(this.owned, table) : [];
-      for (const process of members) this.signal(process, table!, "SIGCONT");
-      if (!members.length) unrepairedFreeze = true;
-    };
-
-    try {
-      const complete = await this.terminateFrozenTree(liftEarlyFreeze);
-      // Lift before deciding completeness, not in the `finally`, which would run too late to
-      // affect the answer. A freeze this attempt cannot prove it lifted is unfinished business:
-      // reporting success here would deregister the boundary and retire the only mechanism that
-      // could still find and resume a descendant left stopped.
-      liftEarlyFreeze();
-      return complete && !unrepairedFreeze;
-    } finally {
-      // Backstop for the throw path, where there is no answer left to adjust. Every phase above
-      // lifts its own freeze promptly, so by the time this runs the flag is normally clear.
-      liftEarlyFreeze();
-    }
-  }
-
-  private async terminateFrozenTree(liftEarlyFreeze: (table?: PosixProcessTable) => void): Promise<boolean> {
     let table: PosixProcessTable | undefined;
     const frozen = new Map<number, PosixProcessIdentity>();
+    // Stop the root itself before anything is enumerated. Descendant discovery reads the whole
+    // process table, which on a loaded machine takes long enough — about a second with a marker
+    // scan over a thousand processes — for the process being stopped to run to completion and keep
+    // writing after the caller was told it was killed.
+    //
+    // Only the root PID is stopped here, never its group. A stopped child cannot be reaped, so while
+    // it stays stopped `rootExited` cannot flip, its PID cannot be reissued, and the ownership
+    // snapshot below always names it — every path out of this attempt resumes it by identity or by
+    // that same unreaped PID. A zombie root ignores the signal and leaves nothing to resume. Its
+    // descendants are frozen at the same point, and through the same identity checks, as before.
+    this.signalUnreapedRoot("SIGSTOP");
     try {
       // Do not make an ownership-critical stop decision from a possibly stale shared monitor read.
       table = await this.refreshFresh();
@@ -547,24 +513,23 @@ export class PosixProcessBoundary {
         for (const process of frozen.values()) this.signal(process, table, "SIGCONT");
         this.signalRootGroup(table, "SIGCONT");
       }
-      // Lift here, before the fallback's two-second escalation sleep rather than after it, so the
-      // resume never trails the stop by long enough for the PGID to be reissued.
-      liftEarlyFreeze(table);
       await this.fallbackRootGroupAfterEnumerationFailure();
       return false;
     }
 
     // The successful try path always assigns table before any later use.
-    if (!table) return false;
+    if (!table) {
+      this.signalUnreapedRoot("SIGCONT");
+      return false;
+    }
 
     for (const process of liveOwned(this.owned, table)) this.signal(process, table, "SIGTERM");
     this.signalRootGroup(table, "SIGTERM");
     for (const process of liveOwned(this.owned, table)) this.signal(process, table, "SIGCONT");
     this.signalRootGroup(table, "SIGCONT");
-    // Lift here, in the same phase as the SIGTERM above, rather than leaving it to the backstop:
-    // the graceful window below gives a TERM handler up to two seconds to unwind and it cannot
-    // use them while stopped, and a resume deferred that long could reach a reissued PGID.
-    liftEarlyFreeze(table);
+    // The identity-checked resumes above cover the root whenever the snapshot names it; resume it by
+    // its unreaped PID too, so the early stop never depends on what a process-table read returned.
+    this.signalUnreapedRoot("SIGCONT");
 
     const gracefulDeadline = this.now() + 2_000;
     while (this.now() < gracefulDeadline) {
