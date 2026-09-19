@@ -155,6 +155,34 @@ help and app-server schema (`codex app-server generate-json-schema`) and by runn
 - A sidecar that cannot start (a bare `--import tsx` resolved from the wrong directory) is shown as
   a failed hook and the command RUNS, exactly the fail-open hole described below for Claude.
 
+## Measurements (codex-cli 0.155.1, this machine, 2026-09-19)
+
+What exactly does Codex send for an edit, and does the runner's matcher reach it (#1437)? Measured
+the same way — a throwaway `CODEX_HOME` against a throwaway repository — by installing a
+`PreToolUse` hook that recorded its raw stdin and driving real `apply_patch` calls through it:
+
+- An edit arrives as `tool_name: "apply_patch"` with the patch document in `tool_input.command`,
+  the SAME key a shell call carries its command in. The full key set observed was `session_id`,
+  `turn_id`, `transcript_path`, `cwd`, `hook_event_name`, `model`, `permission_mode`, `tool_name`,
+  `tool_input`, `tool_use_id`.
+- Header paths are spelled either absolutely or relatively, and a relative one resolves against the
+  payload's `cwd`. Both were produced by the model and both applied.
+- The header grammar is the CLI's own, read out of the binary it ships. Four directives name a
+  file — `*** Add File: `, `*** Update File: `, `*** Delete File: `, and `*** Move to: ` — and the
+  filename is the rest of the line verbatim. `*** Begin Patch`, `*** End Patch`, `*** End of File`,
+  and `*** Environment ID: ` name no location. Every content line is prefixed (`+` in an add hunk,
+  `+`/`-`/` ` in a change), so a line beginning `*** ` is always a directive and never file content.
+- The matcher is respected — `ZZZNOPE` hooked nothing — and Codex answers to a Claude-shaped alias:
+  an `apply_patch` call was matched by `apply_patch` AND by `Edit`, while `Bash` matched only the
+  shell call. So the alternation written before #1437 already reached the hook, through an alias no
+  contract promises; the guard now names `apply_patch` outright.
+- `apply_patch` invoked from the SHELL (`apply_patch <<'PATCH' … PATCH`) arrives as an ordinary
+  `Bash` call with that whole command as its text, which the Bash classifier already judges.
+- End to end with the real sidecar: a patch naming a file inside the hook state directory was
+  refused with `Command blocked by PreToolUse hook:` and the managed-worktree refusal, and the file
+  was not created; against the same payload the pre-#1437 sidecar wrote it. Ordinary edits inside
+  the protected worktree (an update and an add) applied unchanged with the guard installed.
+
 ## Fail closed, and the fail-safe
 
 Two different failure domains, two different answers:
@@ -414,12 +442,29 @@ control-channel veto keeps reading the live inventory.
   A Codex session that owns no runner-created worktree opens exactly as before: nothing is
   written and no probe runs.
 
+  Amended by #1437: Codex's edit tool is judged too. `apply_patch` is neither a shell call nor a
+  path-bearing file tool — it is one freeform patch document whose file headers carry the locations
+  it writes — so the veto classified nothing and every `apply_patch` call passed, including one
+  writing into the hook state directory. The shared decision now parses those headers
+  (`*** Add File: `, `*** Update File: `, `*** Delete File: `, `*** Move to: `, measured from the
+  CLI's own grammar; see "Measurements (codex-cli 0.155.1, this machine, 2026-09-19)"), resolves
+  each filename against the payload's `cwd` under the same containment rules the file-tool veto
+  uses — tilde forms, symlinks, and `..` that climbs through one included — and refuses a patch
+  reaching the hook state directory or the Git administrative area of a protected worktree.
+  Ordinary files inside the worktree are the session's own workspace and stay writable.
+
+  A patch whose headers cannot be accounted for is refused rather than guessed at, which is the
+  same rule an unreadable command already follows. That covers a document with no envelope, one
+  naming no file, one with an empty filename, and — the case the rule exists for — one carrying a
+  `*** ` directive this build does not model, since an unknown directive may name a location the
+  guard would otherwise skip. The judging lives in `managedWorktreeGuardDecision`, so both
+  transports #1336 left in place carry it: the provider-mode sidecar reading the protections file,
+  and the sandboxed launch asking the runner's verdict socket. The matcher names `apply_patch`
+  outright; Codex also matches that tool through an `Edit` alias, which is how the pre-#1437
+  alternation reached the hook at all, but no contract promises it.
+
   Residual limits of the Codex form:
 
-  - Codex's edit tool is `apply_patch`, whose input is patch text rather than a path, so the
-    guard-state file-tool veto does not classify it. Worktree removal is a Bash-level operation
-    and is covered; an edit of the protections document through `apply_patch` is not refused, but
-    the tripwire makes it evident and invalidates the guard for the next spawn.
   - A Codex TUI opened while the session owned no runner-created worktree carries no hook, so a
     worktree the session creates from inside that TUI is unprotected there until the TUI is
     reopened. (A Claude TUI is guarded over an empty list since #1303; a Codex one is not, because
@@ -435,7 +480,8 @@ control-channel veto keeps reading the live inventory.
     check fails closed if a later build stops installing the hook, but not if one changes how a
     deny is honoured.
 - One extra short-lived process runs before each Bash, Edit, MultiEdit, Write, NotebookEdit, Read,
-  Grep, and Glob call in a guarded session — since #1303, every guardable session.
+  Grep, Glob, and — for Codex since #1437 — `apply_patch` call in a guarded session; since #1303,
+  every guardable session.
 - The runner's hook state directory is invisible to the provider: reading it is refused as firmly
   as writing it. In `provider` mode that refusal is the command-text veto. Under runner `bwrap` and
   Seatbelt it is the sandbox itself (#1336).

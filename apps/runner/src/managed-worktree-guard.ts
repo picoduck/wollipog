@@ -34,8 +34,10 @@ import { tmpdir } from "node:os";
 import { connect } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import {
+  APPLY_PATCH_TOOL,
   GUARD_STATE_FILE_TOOLS,
   MANAGED_WORKTREE_REFUSAL,
+  applyPatchTargetsProtected,
   commandTargetsGuardState,
   commandTargetsManagedWorktree,
   toolTargetsGuardState,
@@ -46,9 +48,19 @@ import { protectedWrite } from "./protected-file.js";
 
 /** Runner re-entry mode that runs this guard. */
 export const MANAGED_WORKTREE_GUARD_MODE = "--managed-worktree-guard";
-/** Tools the guard hook must be invoked for: Bash plus every tool that names a file path. */
+/**
+ * Tools the guard hook must be invoked for: Bash, Codex's `apply_patch`, and every tool that names
+ * a file path.
+ *
+ * Codex is named explicitly rather than relied on. Measured at codex-cli 0.155.1 (2026-09-19), an
+ * `apply_patch` call is matched by `apply_patch` AND by `Edit`, so the alternation the runner wrote
+ * before #1437 already reached the hook — but only through an undocumented alias, and a build that
+ * dropped it would have silenced the guard on every edit without saying so. A matcher Codex does
+ * not recognise simply never fires, and Claude has no tool by this name, so the addition costs
+ * neither provider anything.
+ */
 export const MANAGED_WORKTREE_GUARD_MATCHER =
-  ["Bash", ...Object.keys(GUARD_STATE_FILE_TOOLS)].join("|");
+  ["Bash", APPLY_PATCH_TOOL, ...Object.keys(GUARD_STATE_FILE_TOOLS)].join("|");
 export const MANAGED_WORKTREE_GUARD_PROTECTIONS_SUFFIX = ".protections.json";
 const PROTECTIONS_VERSION = 1;
 const MAX_HOOK_INPUT_BYTES = 1_000_000;
@@ -174,8 +186,9 @@ export function managedWorktreeGuardDecision(
   // an invalidated guard has NO list, which `loadProtections` has already turned into a block.
   const isBash = toolName === "Bash";
   const isFileTool = Object.hasOwn(GUARD_STATE_FILE_TOOLS, toolName);
+  const isApplyPatch = toolName === APPLY_PATCH_TOOL;
   // Every other tool is outside the veto's vocabulary, so the guard holds no opinion.
-  if (!isBash && !isFileTool) return { kind: "allow" };
+  if (!isBash && !isFileTool && !isApplyPatch) return { kind: "allow" };
   const cwd = payload.cwd;
   if (typeof cwd !== "string" || !cwd) {
     return { kind: "block", reason: "managed worktree guard received a tool call with no working directory" };
@@ -192,6 +205,22 @@ export function managedWorktreeGuardDecision(
     const command = toolInput && typeof toolInput === "object"
       ? (toolInput as { command?: unknown }).command
       : undefined;
+    if (isApplyPatch) {
+      // Codex carries the patch document in the same `command` key a shell call carries its
+      // command in (measured; see `applyPatchTargetsProtected`). Anything else is not a patch this
+      // guard can read, and an unreadable edit is refused rather than passed.
+      if (typeof command !== "string") {
+        return { kind: "block", reason: `managed worktree guard received an ${APPLY_PATCH_TOOL} call with no patch text` };
+      }
+      const verdict = applyPatchTargetsProtected(command, cwd, guardStateDirectory, protections);
+      if (verdict === "malformed") {
+        return {
+          kind: "block",
+          reason: `managed worktree guard could not read the file headers of an ${APPLY_PATCH_TOOL} patch`,
+        };
+      }
+      return verdict ? { kind: "deny", reason: verdict } : { kind: "allow" };
+    }
     if (typeof command !== "string") {
       return { kind: "block", reason: "managed worktree guard received a Bash call with no command text" };
     }
