@@ -373,6 +373,13 @@ control-channel veto keeps reading the live inventory.
     worktree the session creates from inside that TUI is unprotected there until the TUI is
     reopened. (A Claude TUI is guarded over an empty list since #1303; a Codex one is not, because
     that would mean passing the trust bypass on every Codex TUI launch.)
+  - The inventory is a check, not a pin: a hook configuration written between the probe's answer
+    and the TUI's start is loaded by the TUI under the trust bypass. Codex offers no flag that
+    restricts an invocation to the hooks it was shown, so the window cannot be closed from the
+    runner, only narrowed. It is accepted because it grants nothing new: a hook appearing in that
+    window needs an active writer running as the same OS user, which can already run that code
+    directly, while the hooks the trust gate exists for — ones acquired passively, such as a cloned
+    repository's project hooks — are present before the probe and are refused.
   - Everything above rests on Codex hook behaviour measured at codex-cli 0.155.1. The inventory
     check fails closed if a later build stops installing the hook, but not if one changes how a
     deny is honoured.
