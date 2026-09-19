@@ -1164,11 +1164,14 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.equal(duplicateFollowUp.data?.duplicate, true, "normalized repository and title deduplicate across caller ids");
     assert.deepEqual(hub.sessionChangedByIdCalls, [parent.id, parent.id],
       "each persisted follow-up refreshes the campaign summary for connected clients");
+    hub.sessionChangedByIdCalls.length = 0;
     const nestedFollowUp = svc.recordCampaignFollowUp(child.data.id, {
       originSessionId: grandchild.data.id, repository: "picoduck/wollipog", title: "Nested Follow-Up",
     });
     assert.equal(nestedFollowUp.data?.campaignSessionId, parent.id,
       "a nested Orchestrator records into the root campaign that get_campaign projects (#1278)");
+    assert.deepEqual(hub.sessionChangedByIdCalls, [parent.id, child.data.id],
+      "a nested record refreshes both campaign views, since both embed the root projection");
     const nestedDuplicate = svc.recordCampaignFollowUp(child.data.id, {
       originSessionId: grandchild.data.id, repository: "picoduck/wollipog", title: "Bounded Follow-Up",
     });

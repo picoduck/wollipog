@@ -13100,15 +13100,17 @@ export class ControlPlaneDb {
     };
   }
 
-  campaignProjection(campaignSessionId: string): OrchestratorCampaignProjection | null {
+  /** The campaign every projection and every campaign-keyed write must resolve to: the outermost
+   * Orchestrator above this session, or null when the ancestry is malformed. Nested Orchestrators
+   * carry a creation-time policy snapshot for assignment continuity, but the outermost campaign
+   * remains the live authority, so a root revision or newly human-owned descendant decision cannot
+   * be hidden by the copied child snapshot. The bounded/seen walk fails closed for malformed legacy
+   * ancestry. Resolving writes through this same walk keeps rows where the projection counts them. */
+  private resolvedCampaignSession(campaignSessionId: string): SessionRow | null {
     let campaign = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignSessionId) as unknown as
       | SessionRow
       | undefined;
     if (!campaign || !orchestratorCampaignPolicyFromJson(campaign.orchestrator_policy)) return null;
-    // Nested Orchestrators carry a creation-time policy snapshot for assignment continuity, but
-    // the outermost campaign remains the live authority. Resolve the projection to that root so a
-    // root revision or newly human-owned descendant decision cannot be hidden by the copied child
-    // snapshot. The bounded/seen walk also fails closed for malformed legacy ancestry.
     const seen = new Set<string>([campaign.id]);
     for (let depth = 0; campaign.parent_session_id && depth < 64; depth += 1) {
       if (seen.has(campaign.parent_session_id)) return null;
@@ -13124,6 +13126,18 @@ export class ControlPlaneDb {
       }
       if (!parent.parent_session_id) break;
     }
+    return orchestratorCampaignPolicyFromJson(campaign.orchestrator_policy) ? campaign : null;
+  }
+
+  /** The campaign id every campaign-keyed write must use, so rows land where the projection
+   * counts them. Null whenever campaignProjection would refuse this session's ancestry. */
+  resolvedCampaignSessionId(campaignSessionId: string): string | null {
+    return this.resolvedCampaignSession(campaignSessionId)?.id ?? null;
+  }
+
+  campaignProjection(campaignSessionId: string): OrchestratorCampaignProjection | null {
+    const campaign = this.resolvedCampaignSession(campaignSessionId);
+    if (!campaign) return null;
     const policy = orchestratorCampaignPolicyFromJson(campaign.orchestrator_policy);
     if (!policy) return null;
     const resolvedCampaignId = campaign.id;

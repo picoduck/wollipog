@@ -6114,18 +6114,23 @@ export class SessionsService {
       return fail("follow-up origin is not a visible campaign child", 404);
     }
     // get_campaign projects the outermost campaign, so a nested Orchestrator records into it too;
-    // keyed by its own id, the follow-up would be counted and deduplicated nowhere.
-    const root = this.orchestratorCampaignController(campaign) ?? campaign;
+    // keyed by its own id, the follow-up would be counted and deduplicated nowhere. Resolve through
+    // the projection's own walk, which also fails closed on the ancestry it refuses to project.
+    const rootId = this.db.resolvedCampaignSessionId(campaignSessionId);
+    const root = rootId ? this.db.getSession(rootId) : null;
+    if (!root?.orchestratorPolicy) return fail("Orchestrator campaign not found", 404);
     const followUp = this.db.recordCampaignFollowUp({
       campaignSessionId: root.id,
       originSessionId: request.originSessionId,
       repository: request.repository,
       title: request.title,
       ...(request.recommendationKey ? { recommendationKey: request.recommendationKey } : {}),
-      followUpsMode: root.orchestratorPolicy!.behavior.followUps,
+      followUpsMode: root.orchestratorPolicy.behavior.followUps,
       now: Date.now(),
     });
+    // Both views embed the root-derived projection, so a nested caller's own view also changed.
     this.hub.sessionChangedById(root.id);
+    if (root.id !== campaignSessionId) this.hub.sessionChangedById(campaignSessionId);
     return ok(followUp, 201);
   }
 
