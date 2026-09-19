@@ -816,6 +816,51 @@ test("a rebuilt draft editor restores a whole selection, not just a collapsed ca
   }
 });
 
+/* -------------------------------------------------------------------------- */
+/* #1392 — a selection keeps its direction across a rebuild                    */
+/* -------------------------------------------------------------------------- */
+
+for (const { direction, start, end, why } of [
+  {
+    direction: "backward",
+    start: 8,
+    end: 12,
+    why: "a selection made with Shift+ArrowLeft keeps its anchor on the right, so the next " +
+      "Shift+ArrowLeft extends it leftwards instead of shrinking it from the wrong end",
+  },
+  { direction: "forward", start: 8, end: 12, why: "a forward selection restores unchanged" },
+  { direction: "none", start: 6, end: 6, why: "a collapsed caret restores unchanged" },
+] as const) {
+  test(`a rebuilt draft editor keeps a ${direction} selection ${direction}`, async () => {
+    const harness = await mountPanel();
+    try {
+      await act(async () => {
+        fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
+      });
+      const before = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
+      await act(async () => {
+        before.value = "replace this phrase";
+        fireDomEvent.change(before);
+      });
+      before.setSelectionRange(start, end, direction);
+      assert.equal(before.selectionDirection, direction, "the selection really has that direction first");
+
+      harness.serveDiff(diffOf("2", [fileA(), fileB({ context: "keep-rewritten" })]));
+      await harness.render({ status: statusOf({ addedLines: 8 }) });
+
+      const after = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
+      assert.notEqual(after, before, "a different textarea node, so the editor was genuinely rebuilt");
+      assert.deepEqual(
+        [after.selectionStart, after.selectionEnd, after.selectionDirection],
+        [start, end, direction],
+        why,
+      );
+    } finally {
+      await harness.unmount();
+    }
+  });
+}
+
 test("a submitted draft leaves no caret behind for the next finding written on its line", async () => {
   // Submitting drops the draft, so the offset it was holding must go with it — otherwise the next
   // finding written against this anchor opens with its caret aimed at text that is no longer there.
