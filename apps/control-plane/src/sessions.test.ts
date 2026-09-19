@@ -1258,7 +1258,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
   }
 });
 
-test("an approved UI evidence decision does not block campaign child verification, unlike every other open decision", async () => {
+test("approved UI evidence and implementation-question decisions do not block campaign child verification, and a blocking 409 names each decision", async () => {
   const { db, svc } = makeHarness();
   try {
     const meta = runnerMeta();
@@ -1286,7 +1286,7 @@ test("an approved UI evidence decision does not block campaign child verificatio
         defaults: {
           behavior: {
             childHarness: null, childModel: null, childEffort: null,
-            maximumConcurrentChildren: 3, followUps: "recommend_only", completion: "retain",
+            maximumConcurrentChildren: 8, followUps: "recommend_only", completion: "retain",
           },
           delegation: { parentControl: "questions", decisions: { ...decisions } },
           execution: { strictProjectIsolation: false, integrationIsolation: false },
@@ -1357,23 +1357,67 @@ test("an approved UI evidence decision does not block campaign child verificatio
     requestEvidence(pendingChild);
     assert.equal(verify(pendingChild).status, 409, "an evidence decision nobody has answered still blocks");
 
-    // Every other category authorizes an action the child must still consume itself.
+    // An answered implementation question admits no action, so the child that had its answer is
+    // not held for a consume nobody reminds it to make (#1279).
     const questionChild = spawn();
+    const questionSnapshot = {
+      category: "implementation_question" as const,
+      question: "Which fix?",
+      options: [
+        { optionId: "a", label: "Option A", description: "First." },
+        { optionId: "b", label: "Option B", description: "Second." },
+      ],
+    };
     const question = svc.createWorkflowDecision(questionChild, {
-      requestId: "question", resourceKey: "question", resourceSnapshot: {
-        category: "implementation_question",
-        question: "Which fix?",
-        options: [
-          { optionId: "a", label: "Option A", description: "First." },
-          { optionId: "b", label: "Option B", description: "Second." },
-        ],
-      },
+      requestId: "question", resourceKey: "question", resourceSnapshot: questionSnapshot,
     });
     assert.ok(question.ok && question.data, question.error);
     approveAsHuman(questionChild, question.data.occurrenceId, { selectedOptionId: "a" });
     assert.equal(db.workflowDecisionByOccurrence(question.data.occurrenceId)?.status, "approved");
-    assert.equal(verify(questionChild).status, 409, "an approved action grant still requires its own consume");
-    assert.equal(db.workflowDecisionByOccurrence(question.data.occurrenceId)?.status, "approved");
+    const questionVerified = verify(questionChild);
+    assert.ok(questionVerified.ok, questionVerified.error);
+    assert.equal(db.workflowDecisionByOccurrence(question.data.occurrenceId)?.status, "consumed",
+      "verification settles the answered question rather than leaving it to be revoked on stop");
+
+    // Every other category authorizes an action the child must still consume itself.
+    const deletionChild = spawn();
+    const deletionSnapshot = {
+      category: "merged_branch_deletion" as const, repository: "picoduck/wollipog", branch: "fix/verify",
+      merged: true, mergeCommitSha: "d".repeat(40), dependentPullRequests: { checkedAt: 20, open: [] },
+    };
+    const deletion = svc.createWorkflowDecision(deletionChild, {
+      requestId: "deletion", resourceKey: "deletion", resourceSnapshot: deletionSnapshot,
+    });
+    assert.ok(deletion.ok && deletion.data, deletion.error);
+    approveAsHuman(deletionChild, deletion.data.occurrenceId, {});
+    const deletionBlocked = verify(deletionChild);
+    assert.equal(deletionBlocked.status, 409, "an approved action grant still requires its own consume");
+    assert.ok(deletionBlocked.error?.includes(
+      `${deletion.data.occurrenceId} (merged_branch_deletion, approved)`), deletionBlocked.error);
+    assert.equal(db.workflowDecisionByOccurrence(deletion.data.occurrenceId)?.status, "approved");
+
+    // Once the child consumes it, every decision is terminal and the child verifies. A consumed
+    // decision stays readable by its own child; the parent's 404 is the read's session scope,
+    // not a post-consumption state (#1279).
+    db.updateSessionStatus(deletionChild, "running", Date.now());
+    const consumed = await svc.consumeWorkflowDecision(deletionChild, deletion.data.occurrenceId,
+      { resourceSnapshot: deletionSnapshot });
+    assert.ok(consumed.ok, consumed.error);
+    assert.equal(svc.workflowDecision(deletionChild, deletion.data.occurrenceId).data?.status, "consumed");
+    assert.equal(svc.workflowDecision(parent.id, deletion.data.occurrenceId).status, 404);
+    const deletionVerified = verify(deletionChild);
+    assert.ok(deletionVerified.ok, deletionVerified.error);
+
+    // A revoked grant is terminal too, whatever revoked it.
+    const revokedChild = spawn();
+    const revoked = svc.createWorkflowDecision(revokedChild, {
+      requestId: "revoked", resourceKey: "revoked", resourceSnapshot: { ...deletionSnapshot, branch: "fix/revoked" },
+    });
+    assert.ok(revoked.ok && revoked.data, revoked.error);
+    approveAsHuman(revokedChild, revoked.data.occurrenceId, {});
+    db.markWorkflowDecisionRevoked(revoked.data.occurrenceId, Date.now());
+    const revokedVerified = verify(revokedChild);
+    assert.ok(revokedVerified.ok, revokedVerified.error);
   } finally {
     db.close();
   }
