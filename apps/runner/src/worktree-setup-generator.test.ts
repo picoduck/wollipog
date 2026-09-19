@@ -11,6 +11,7 @@ import {
   resolveWorktreeSetupRepositoryRoot,
   writeStarterWorktreeSetupConfig,
 } from "./worktree-setup-generator.js";
+import { isolateFromAmbientIgnores } from "./git-test-repo.js";
 import { parseWorktreeSetupConfig, WORKTREE_SETUP_CONFIG } from "./worktree-setup.js";
 
 const native = { kind: "native" as const };
@@ -18,6 +19,7 @@ const native = { kind: "native" as const };
 function repository(): string {
   const root = mkdtempSync(join(tmpdir(), "wollipog-setup-generator-"));
   execFileSync("git", ["init", "-q"], { cwd: root });
+  isolateFromAmbientIgnores(root);
   execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: root });
   execFileSync("git", ["config", "user.name", "Test"], { cwd: root });
   writeFileSync(join(root, ".gitignore"), ".env\nrunner.config.json\n");

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gitStatus, gitSummary, runGitAction } from "./git-ops.js";
+import { isolateFromAmbientIgnores } from "./git-test-repo.js";
 
 const GIT_ENV = {
   ...process.env,
@@ -33,6 +34,7 @@ function initRepository(root: string, name: string): string {
   const repo = join(root, name);
   mkdirSync(repo, { recursive: true });
   git(repo, ["init", "-b", "main"]);
+  isolateFromAmbientIgnores(repo);
   writeFileSync(join(repo, "tracked.txt"), "base\n");
   git(repo, ["add", "tracked.txt"]);
   git(repo, ["commit", "-m", "base"]);
@@ -132,6 +134,7 @@ test("Git facts preserve unborn, shallow, bare, rebase, and conflicted states", 
   const unborn = join(root, "unborn");
   mkdirSync(unborn);
   git(unborn, ["init", "-b", "main"]);
+  isolateFromAmbientIgnores(unborn);
   const unbornStatus = await gitStatus(unborn);
   assert.equal(unbornStatus.branch, "main");
   assert.equal(unbornStatus.headSha, null);
@@ -186,6 +189,7 @@ test("legacy divergence falls back to the configured upstream without a default-
   const repo = join(root, "repo");
   mkdirSync(repo);
   git(repo, ["init", "-b", "develop"]);
+  isolateFromAmbientIgnores(repo);
   writeFileSync(join(repo, "tracked.txt"), "base\n");
   git(repo, ["add", "tracked.txt"]);
   git(repo, ["commit", "-m", "base"]);

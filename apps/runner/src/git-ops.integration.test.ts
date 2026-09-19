@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, w
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { adoptLegacyCheckpointRefs, anchorForkRef, anchorTurnRef, captureWorktreeTree, clearGhPrCacheForTests, computeDiffHash, deleteTurnRef, deleteTurnRefs, gitDiff, gitStatus, gitSummary, readTurnRef, restoreWorktreeToTree, runPodReconcile, synchronizeCheckpointRefs } from "./git-ops.js";
+import { initRepo } from "./git-test-repo.js";
 
 function gitAvailable(): boolean {
   try {
@@ -26,27 +27,6 @@ const GIT = gitAvailable();
 /** Run git in `cwd`, returning stdout (throws on non-zero, like production `git()`). */
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
-}
-
-/** Init a repo with a deterministic identity + config so diff output is stable across environments. */
-function initRepo(cwd: string): void {
-  git(cwd, ["init", "-q"]);
-  git(cwd, ["config", "user.email", "test@example.com"]);
-  git(cwd, ["config", "user.name", "Test"]);
-  git(cwd, ["config", "commit.gpgsign", "false"]);
-  git(cwd, ["config", "core.autocrlf", "false"]);
-  // Ambient ignore rules must not reach these fixtures: production reads untracked files through
-  // `ls-files --others --exclude-standard`, so a machine that happens to ignore a fixture name
-  // (*.dat, say) would hide a file the assertions depend on. Both standard sources are neutralised
-  // — the user's core.excludesFile is replaced by an empty one of this repo's own, and info/exclude
-  // is truncated because init.templateDir can seed it with rules core.excludesFile cannot disable.
-  // The excludes file lives in the git dir, where it cannot itself show up as untracked, and is a
-  // real path rather than /dev/null, which is not one on every platform.
-  mkdirSync(join(cwd, ".git", "info"), { recursive: true });
-  const excludes = join(cwd, ".git", "info", "wollipog-empty-excludes");
-  writeFileSync(excludes, "");
-  writeFileSync(join(cwd, ".git", "info", "exclude"), "");
-  git(cwd, ["config", "core.excludesFile", excludes]);
 }
 
 function usesLooseRefFiles(cwd: string): boolean {

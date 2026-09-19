@@ -7,6 +7,7 @@ import { test } from "node:test";
 import type { AgentDefinition, AgentDriverKind, RunnerToControlPlane } from "@wollipog/protocol";
 import type { Driver, DriverCallbacks, DriverOptions } from "./drivers/driver.js";
 import { anchorForkRef, captureWorktreeTree } from "./git-ops.js";
+import { isolateFromAmbientIgnores } from "./git-test-repo.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { ShellManager } from "./shell-manager.js";
@@ -38,6 +39,7 @@ for (const sourceDriver of ["codex-app-server", "claude-code"] as const) {
     const root = mkdtempSync(join(tmpdir(), "wollipog-handoff-"));
     const repo = join(root, "repo");
     git(root, ["init", "-q", repo]);
+    isolateFromAmbientIgnores(repo);
     git(repo, ["config", "user.email", "test@example.com"]);
     git(repo, ["config", "user.name", "Test"]);
     writeFileSync(join(repo, "file.txt"), "base");
@@ -156,6 +158,7 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
   const storeRoot = mkdtempSync(join(tmpdir(), "wollipog-fork-store-"));
   try {
     git(repo, ["init", "-q"]);
+    isolateFromAmbientIgnores(repo);
     git(repo, ["config", "user.email", "test@example.com"]);
     git(repo, ["config", "user.name", "Test"]);
     writeFileSync(join(repo, "a.txt"), "base\n");
