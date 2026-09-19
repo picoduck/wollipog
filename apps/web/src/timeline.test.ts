@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { AGENT_SPAWN_OBSERVATION_CAP } from "@wollipog/protocol";
 import type { EventPayloadReference, SessionEvent, SessionEventPayload } from "@wollipog/protocol";
 import {
   deriveSidePaneContent,
   deriveTimeline,
   groupTimeline,
   MAX_OPEN_PROVIDER_TEXT_ITEMS,
+  MAX_TRACKED_TOOL_CALL_STATEMENTS,
   nestSubagents,
   SubagentTreeProjector,
   TimelineBuilder,
@@ -1372,4 +1374,26 @@ test("a turn's parentless usage is stamped on its user message and later reports
   }, "subagent usage never lands on the turn; every parentless report for the turn adds to it");
   assert.deepEqual(users[1]!.turnUsage, { inputTokens: 7, outputTokens: 3, cachedInputTokens: 0, cacheCreationTokens: 0 });
   assert.equal("costUsd" in users[1]!.turnUsage!, false, "an unpriced turn carries no cost rather than $0");
+});
+
+test("the re-statement count saturates at the control plane's shared spawn-observation cap", () => {
+  // The saturation point IS the control plane's cap rather than a copy of it, so the two cannot
+  // drift apart and latently reintroduce the late warning of #1289 (#1385).
+  assert.equal(MAX_TRACKED_TOOL_CALL_STATEMENTS, AGENT_SPAWN_OBSERVATION_CAP);
+
+  const builder = new TimelineBuilder();
+  const counts: number[] = [];
+  for (let statement = 1; statement <= AGENT_SPAWN_OBSERVATION_CAP + 20; statement += 1) {
+    builder.push({ id: statement, sessionId: "s", seq: statement, ts: 1_000 + statement,
+      payload: { kind: "tool_call", toolCallId: "child", title: "Agent: Audit", toolKind: "agent", status: "in_progress" } });
+    const tool = builder.snapshot().find((item) => item.kind === "tool_call") as
+      Extract<TimelineItem, { kind: "tool_call" }>;
+    counts.push(tool.statementCount ?? 1);
+  }
+
+  assert.deepEqual(counts.slice(0, AGENT_SPAWN_OBSERVATION_CAP),
+    Array.from({ length: AGENT_SPAWN_OBSERVATION_CAP }, (_, index) => index + 1),
+    "every statement the registry can still reclassify on has to move the count");
+  assert.deepEqual([...new Set(counts.slice(AGENT_SPAWN_OBSERVATION_CAP))], [AGENT_SPAWN_OBSERVATION_CAP],
+    "past the cap no statement can change the registry's classification, so the count must stop moving");
 });

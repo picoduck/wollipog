@@ -1,4 +1,5 @@
 import {
+  AGENT_SPAWN_OBSERVATION_CAP,
   pendingRequests,
   type ChildSessionRegistryEntry,
   type ChildSessionRegistryPage,
@@ -37,10 +38,14 @@ export type StructuredAgentSpawnObservation = Pick<ToolCall,
 export function collapseAgentSpawnObservations(
   observations: readonly StructuredAgentSpawnObservation[],
 ): StructuredAgentSpawnObservation | null {
-  if (observations.length < 1 || observations.length > 2 || observations.some((value) => value.toolKind !== "agent")) return null;
-  if (observations.length === 2) {
+  if (observations.length < 1 || observations.length >= AGENT_SPAWN_OBSERVATION_CAP ||
+      observations.some((value) => value.toolKind !== "agent")) return null;
+  if (observations.length > 1) {
+    // The partial/full pair is the only validated multi-observation shape, so a longer run — which
+    // only a raised cap could admit — stays ambiguous rather than collapsing unvalidated.
     const [partial, full] = observations;
-    if (partial!.toolCallId !== full!.toolCallId || partial!.status !== "pending" || full!.status !== "in_progress" ||
+    if (observations.length !== 2 ||
+        partial!.toolCallId !== full!.toolCallId || partial!.status !== "pending" || full!.status !== "in_progress" ||
         partial!.parentToolUseId !== full!.parentToolUseId ||
         partial!.subagentLifecycle !== undefined || partial!.subagentName !== undefined ||
         partial!.subagentRole !== undefined || full!.subagentLifecycle !== undefined ||
@@ -105,7 +110,7 @@ export class ChildSessionRegistryProjector {
         };
         if (candidates.has(payload.toolCallId)) {
           const observations = this.spawns.get(payload.toolCallId) ?? [];
-          if (observations.length < 3) observations.push(call);
+          if (observations.length < AGENT_SPAWN_OBSERVATION_CAP) observations.push(call);
           this.spawns.set(payload.toolCallId, observations);
         }
         if (parentId && candidates.has(parentId)) {

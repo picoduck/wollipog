@@ -1,3 +1,4 @@
+import { AGENT_SPAWN_OBSERVATION_CAP } from "@wollipog/protocol";
 import type { GovernanceDecision } from "./governance.js";
 import type {
   AgentQuestion,
@@ -246,12 +247,16 @@ export interface SubagentRollup {
 export const MAX_OPEN_PROVIDER_TEXT_ITEMS = 128;
 
 /**
- * The control plane stops accumulating spawn observations for one tool-call id at three, and a third
- * observation is permanently ambiguous, so a count saturating at three carries every classification
- * the registry can still reach. Saturation is what keeps the signal bounded: over a whole session an
- * id can move this number at most twice, never once per streamed event.
+ * The control plane stops accumulating spawn observations for one tool-call id at
+ * `AGENT_SPAWN_OBSERVATION_CAP`, and an observation at that cap is permanently ambiguous, so a
+ * count saturating there carries every classification the registry can still reach. Saturation is
+ * what keeps the signal bounded: over a whole session an id can move this number at most twice,
+ * never once per streamed event.
+ *
+ * This is the control plane's cap, not a copy of it (#1385): raising one raises both, so the
+ * fingerprint cannot silently stop observing a reclassification the registry can still make.
  */
-export const MAX_TRACKED_TOOL_CALL_STATEMENTS = 3;
+export const MAX_TRACKED_TOOL_CALL_STATEMENTS = AGENT_SPAWN_OBSERVATION_CAP;
 
 const GOVERNANCE_ACTOR_LABELS: Record<GovernanceActor["kind"], string> = {
   human: "You",
