@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, w
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GitOpError, captureWorktreeTree, commitAll, discardFile, gitDiff, runGitAction, stageHunk, stageLines } from "./git-ops.js";
+import { initRepo } from "./git-test-repo.js";
 import { worktreeDiff } from "./worktree.js";
 
 function gitAvailable(): boolean {
@@ -27,14 +28,6 @@ const CTX = { useWorktree: false };
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
-}
-
-function initRepo(cwd: string): void {
-  git(cwd, ["init", "-q"]);
-  git(cwd, ["config", "user.email", "test@example.com"]);
-  git(cwd, ["config", "user.name", "Test"]);
-  git(cwd, ["config", "commit.gpgsign", "false"]);
-  git(cwd, ["config", "core.autocrlf", "false"]);
 }
 
 /** A 12-line file whose top and bottom edits produce two separate hunks at unified=3. */

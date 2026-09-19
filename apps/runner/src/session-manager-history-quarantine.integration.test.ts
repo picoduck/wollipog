@@ -19,6 +19,7 @@ import {
   type PoisonedProviderHistory,
 } from "./drivers/poisoned-provider-history.js";
 import { anchorForkRef, captureWorktreeTree } from "./git-ops.js";
+import { isolateFromAmbientIgnores } from "./git-test-repo.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { createWorkspaceReference } from "./session-files.js";
@@ -59,6 +60,7 @@ async function setup(sessionId = "s_poisoned") {
   const root = mkdtempSync(join(tmpdir(), "wollipog-quarantine-"));
   const repo = join(root, "repo");
   git(root, ["init", "-q", repo]);
+  isolateFromAmbientIgnores(repo);
   git(repo, ["config", "user.email", "test@example.com"]);
   git(repo, ["config", "user.name", "Test"]);
   writeFileSync(join(repo, "committed.txt"), "base\n");
