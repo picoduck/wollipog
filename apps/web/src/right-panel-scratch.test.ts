@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
 import {
-  PANEL_SCRATCH_CLEARED_MARKER_TTL_MS,
   PANEL_SCRATCH_CLEARED_SCOPE_LIMIT,
   PANEL_SCRATCH_PERSIST_CHAR_LIMIT,
   PANEL_SCRATCH_SESSION_LIMIT,
@@ -657,23 +656,141 @@ test("deletion markers are bounded too, and never at live scratch's expense", ()
   assert.ok(storedRecord(marked.at(-1)!)?.cleared["sidechat.draft"], "the newest are kept");
 });
 
-test("a deletion marker is retired once it is older than any page still holding the draft", () => {
+test("the ceiling sheds drafts before it sheds a deletion marker", () => {
+  // Cross-model review, CR-1.6. Markers are what keep a sent draft from coming back, and the whole
+  // layer is kilobytes against a 256KB budget — so collecting one to make room for a newer draft
+  // would reintroduce, through the bound, exactly the resurrection this change exists to prevent.
+  const sent = panelScratchScopeKey("session-sent");
+  writePanelScratch(sent, "sidechat.draft", "on its way", "draft");
+  clearPanelScratchIf(sent, "sidechat.draft", "on its way", panelScratchRevision(sent, "sidechat.draft"));
+  const markerChars = storedChars();
+  assert.ok(markerChars > 8, "the marker record costs something");
+
+  // A draft sized so that it fits on its own and the marker beside it does not: the ceiling has to
+  // choose between them, which is the only state where the order of preference is observable.
+  const big = panelScratchScopeKey("session-big");
+  writePanelScratch(big, "review.requestBody", "x", "draft");
+  const overhead = storedChars() - markerChars - 1;
+  const target = PANEL_SCRATCH_PERSIST_CHAR_LIMIT - 8;
+  writePanelScratch(big, "review.requestBody", "x".repeat(target - overhead), "draft");
+
+  assert.ok(storedChars() <= PANEL_SCRATCH_PERSIST_CHAR_LIMIT,
+    `stored ${storedChars()} characters, ceiling ${PANEL_SCRATCH_PERSIST_CHAR_LIMIT}`);
+  assert.ok(storedRecord(sent)?.cleared["sidechat.draft"],
+    "the marker is kept, however much newer text wanted its few hundred characters");
+  assert.equal(storedRecord(big), null, "the draft is what the ceiling spent instead");
+
+  reload();
+  assert.equal(readPanelScratch(sent, "sidechat.draft"), undefined, "and the send stays sent");
+});
+
+test("a marker retires the copy that was sent, not a replacement typed since", () => {
+  // Cross-model review, CR-1.1. A marker stamped "now" is newer than every stored value, including
+  // one another tab typed while this page's send was in flight — so it would delete unsent text
+  // the deletion was never about. Stamping it with the value actually removed keeps the stale copy
+  // suppressed and leaves the replacement alone.
   const scope = panelScratchScopeKey("session-1");
   writePanelScratch(scope, "sidechat.draft", "on its way", "draft");
-  clearPanelScratchIf(scope, "sidechat.draft", "on its way", panelScratchRevision(scope, "sidechat.draft"));
-  const record = storedRecord(scope)!;
-  assert.ok(record.cleared["sidechat.draft"]);
+  const sent = panelScratchRevision(scope, "sidechat.draft");
 
-  // Age it past the window. Nothing can still be holding the sent message by then, so the marker is
-  // only costing storage.
+  // The other tab's replacement, as it reaches the shared record: a newer stamp under the same key.
+  const record = storedRecord(scope)!;
+  const replacedAt = record.values["sidechat.draft"]!.updatedAt + 1000;
   backing.set(`${RECORD_PREFIX}${scope}`, JSON.stringify({
     ...record,
-    cleared: { "sidechat.draft": Date.now() - PANEL_SCRATCH_CLEARED_MARKER_TTL_MS - 1 },
+    writer: "another-page",
+    values: { "sidechat.draft": { value: "a second thought", retention: "draft", updatedAt: replacedAt } },
   }));
+
+  clearPanelScratchIf(scope, "sidechat.draft", "on its way", sent);
+
+  reload();
+  assert.equal(readPanelScratch(scope, "sidechat.draft"), "a second thought",
+    "the replacement nobody else has a copy of survives the send it was not part of");
+});
+
+test("the key a mutation moved wins over a stored value stamped in the future", () => {
+  // Cross-model review, CR-1.5. `observeStamps` refuses a stamp more than a minute ahead, so a
+  // skewed clock or a hand-edited record could otherwise leave the user typing into a value that is
+  // never persisted and never recovers — the stored future copy would win every merge.
+  const scope = panelScratchScopeKey("session-1");
+  writePanelScratch(scope, "files.directory", "apps/web");
+  const record = storedRecord(scope)!;
+  backing.set(`${RECORD_PREFIX}${scope}`, JSON.stringify({
+    ...record,
+    writer: "another-page",
+    values: {
+      "files.directory": {
+        value: "from a clock a year ahead",
+        retention: "disposable",
+        updatedAt: Date.now() + 365 * 24 * 60 * 60 * 1000,
+      },
+    },
+  }));
+
+  writePanelScratch(scope, "files.directory", "packages/protocol");
+
+  reload();
+  assert.equal(readPanelScratch(scope, "files.directory"), "packages/protocol",
+    "what the user just chose is what a reload restores");
+});
+
+test("the whole-map record is kept until its contents are stored somewhere else", () => {
+  // Cross-model review, CR-1.3. Removing the only durable copy before the replacement writes land
+  // destroys the unsent text the import exists to rescue, whenever storage refuses those writes.
+  const writing = panelScratchScopeKey("session-writing");
+  const wholeMap = JSON.stringify({
+    version: 1,
+    scopes: [{
+      scope: writing,
+      values: { "review.requestBody": { value: "half a description", retention: "draft" } },
+    }],
+  });
+  backing.set(WHOLE_MAP_KEY, wholeMap);
+
+  denyWrites = true;
+  reload();
+
+  assert.equal(readPanelScratch(writing, "review.requestBody"), "half a description",
+    "the page still gets the draft, because memory never needed storage to agree");
+  assert.equal(backing.get(WHOLE_MAP_KEY), wholeMap,
+    "and the only durable copy is still there for the next load");
+
+  denyWrites = false;
+  reload();
+  assert.equal(readPanelScratch(writing, "review.requestBody"), "half a description");
+  assert.equal(backing.get(WHOLE_MAP_KEY), undefined, "retired once its contents are safely stored");
+});
+
+test("a whole-map record that could not be removed cannot overwrite newer edits", () => {
+  // The other half of CR-1.3: a refused removal replays the import on every load, so an imported
+  // value has to lose to anything written since — including a deletion.
+  const scope = panelScratchScopeKey("session-1");
+  backing.set(WHOLE_MAP_KEY, JSON.stringify({
+    version: 1,
+    scopes: [{
+      scope,
+      values: {
+        "review.requestBody": { value: "the old draft", retention: "draft" },
+        "sidechat.draft": { value: "already sent since", retention: "draft" },
+      },
+    }],
+  }));
+
+  denyRemovals = true;
+  reload();
+  assert.equal(readPanelScratch(scope, "review.requestBody"), "the old draft");
+
+  // Edit one key and send the other, exactly as the user would after the upgrade.
+  writePanelScratch(scope, "review.requestBody", "rewritten since", "draft");
+  clearPanelScratchIf(scope, "sidechat.draft", "already sent since",
+    panelScratchRevision(scope, "sidechat.draft"));
+  assert.ok(backing.get(WHOLE_MAP_KEY), "the record this storage would not let go of is still there");
 
   reload();
 
-  assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined);
-  assert.equal(backing.get(`${RECORD_PREFIX}${scope}`), undefined,
-    "an expired marker leaves nothing behind to pay for");
+  assert.equal(readPanelScratch(scope, "review.requestBody"), "rewritten since",
+    "the replayed import does not take the edit back");
+  assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined,
+    "nor does it resurrect what was sent");
 });

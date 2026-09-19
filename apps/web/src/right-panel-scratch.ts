@@ -248,17 +248,22 @@ const WHOLE_MAP_KEY = "wollipog.right-panel-scratch.v1";
 export const PANEL_SCRATCH_PERSIST_CHAR_LIMIT = 256 * 1024;
 
 /**
- * How many scopes may keep a deletion marker once their last value is gone.
+ * How many scopes may keep a deletion marker once their last value is gone. The only bound on the
+ * marker layer, and deliberately the only one.
  *
- * A marker only has to outlive the other tab's live copy of the scope it retires, which lasts as
- * long as that tab has the panel open on that session — so this is generous at four times the scope
- * bound, and still a hard stop rather than one more thing that grows with every session ever
- * opened. `PANEL_SCRATCH_CLEARED_MARKER_TTL_MS` retires the rest by age.
+ * A marker has to outlive every page still holding the copy it retires, and a browser tab lives as
+ * long as someone leaves it open — weeks, in this app's own usage. So there is no age at which a
+ * marker is provably spent, and an expiry by wall clock would simply hand the oldest markers back
+ * to whichever stale tab was still holding the sent draft: its next mutation would write that text
+ * into the record again, and a reload would restore a message the user sent a fortnight ago.
+ *
+ * A count is a bound that does not make that claim. Four times the scope bound is generous against
+ * the handful of sessions two tabs have open, it is a hard stop rather than one more thing that
+ * grows with every session ever opened, and at a few hundred characters each the whole layer is
+ * kilobytes. It is not free of the same hazard — the thirty-third send retires the oldest marker —
+ * but it spends markers in the order they stop mattering rather than on a timer.
  */
 export const PANEL_SCRATCH_CLEARED_SCOPE_LIMIT = 32;
-
-/** How long a deletion marker is honoured. Well past any tab still holding the sent draft. */
-export const PANEL_SCRATCH_CLEARED_MARKER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * This page's identity as a writer of records, so a refused write can recognise exactly the record
@@ -386,7 +391,7 @@ function listRecordKeys(): string[] {
  * value a marker still covers is dropped, and a marker a newer value has overtaken is retired.
  * Returns null when nothing usable is left, which is the caller's cue to collect the key.
  */
-function parseRecord(raw: string, now: number): PersistedRecord | null {
+function parseRecord(raw: string): PersistedRecord | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -416,10 +421,9 @@ function parseRecord(raw: string, now: number): PersistedRecord | null {
   }
 
   const cleared = new Map<string, number>();
-  const expiry = now - PANEL_SCRATCH_CLEARED_MARKER_TTL_MS;
   if (record.cleared && typeof record.cleared === "object" && !Array.isArray(record.cleared)) {
     for (const [key, at] of Object.entries(record.cleared as Record<string, unknown>)) {
-      if (key === "" || typeof at !== "number" || !Number.isFinite(at) || at < expiry) continue;
+      if (key === "" || typeof at !== "number" || !Number.isFinite(at)) continue;
       cleared.set(key, at);
     }
   }
@@ -454,9 +458,9 @@ function applyClearedMarkers(
   }
 }
 
-function readRecord(scope: string, now: number): PersistedRecord | null {
+function readRecord(scope: string): PersistedRecord | null {
   const raw = readRaw(recordKey(scope));
-  return raw === null ? null : parseRecord(raw, now);
+  return raw === null ? null : parseRecord(raw);
 }
 
 /** Fill the map from storage exactly once. Anything unreadable leaves it empty. */
@@ -464,13 +468,13 @@ function hydrate(): void {
   if (hydrated) return;
   // Set before reading: a parse that throws must not re-run on every subsequent read.
   hydrated = true;
-  importWholeMapRecord();
+  const imported = importWholeMapRecord();
   const now = Date.now();
   const loaded: Array<{ scope: string; record: PersistedRecord; raw: string }> = [];
   for (const storageKey of listRecordKeys()) {
     const scope = storageKey.slice(RECORD_PREFIX.length);
     const raw = readRaw(storageKey);
-    const record = raw === null ? null : parseRecord(raw, now);
+    const record = raw === null ? null : parseRecord(raw);
     if (raw === null || record === null || scope === "") {
       deleteRaw(storageKey);
       continue;
@@ -492,6 +496,16 @@ function hydrate(): void {
     }
     scratch.set(scope, values);
   }
+  // Anything the whole-map import could not get into storage still belongs to this page. Storage
+  // that refused those writes costs the reload after this one, not the drafts in front of the user
+  // now — memory is authoritative, and it has no reason to wait for storage to agree.
+  for (const { scope, values } of imported) {
+    const held = scratch.get(scope) ?? new Map<string, ScratchValue>();
+    for (const [key, value] of values) {
+      if (!held.has(key)) held.set(key, { ...value, revision: nextRevision++ });
+    }
+    if (held.size > 0 && !scratch.has(scope)) scratch.set(scope, held);
+  }
   // Records written under a larger bound still have to obey this build's: nothing here is spared as
   // "just touched", because nothing here has been.
   evictDisposableScopes("");
@@ -499,42 +513,77 @@ function hydrate(): void {
 }
 
 /**
- * Take over whatever the single whole-map record still holds, once, and retire it.
+ * The stamp imported whole-map values are given.
+ *
+ * Older than anything this build can mint, deliberately. The import may run more than once — its
+ * source is only removed when every scope has been written, and that removal can itself be refused
+ * — so an imported value must never outrank a v2 value the user has edited since. It must still
+ * lose to any deletion marker, which is exactly what a stamp below every marker's gives.
+ */
+const IMPORTED_VALUE_STAMP = 1;
+
+/**
+ * Take over whatever the single whole-map record still holds and retire it, in that order.
  *
  * The drafts in it are the same unsent text this module exists to keep, so a deploy that simply
- * ignored it would destroy exactly what #1282 was for. Imported values are stamped now rather than
- * back-dated: no deletion marker can predate a record that was written before markers existed.
+ * ignored it would destroy exactly what #1282 was for — and so would removing it before its
+ * contents were safely somewhere else. Storage that refuses the writes keeps the old record for
+ * the next load; storage that refuses the removal replays an import that can no longer overwrite
+ * anything, because imported values are stamped below everything.
+ *
+ * Returns what was imported, so a page whose writes were all refused still hands the drafts to
+ * the reader. Memory is authoritative, and it has no reason to wait for storage to agree.
  */
-function importWholeMapRecord(): void {
+function importWholeMapRecord(): Array<{ scope: string; values: Map<string, PersistedValue> }> {
   const raw = readRaw(WHOLE_MAP_KEY);
-  if (raw === null) return;
-  deleteRaw(WHOLE_MAP_KEY);
+  if (raw === null) return [];
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return;
+    // Unreadable as a whole, so there is nothing to salvage and no reason to keep paying for it.
+    deleteRaw(WHOLE_MAP_KEY);
+    return [];
   }
   const record = parsed as { version?: unknown; scopes?: unknown };
-  if (record?.version !== 1 || !Array.isArray(record.scopes)) return;
+  if (record?.version !== 1 || !Array.isArray(record.scopes)) {
+    deleteRaw(WHOLE_MAP_KEY);
+    return [];
+  }
+  const imported: Array<{ scope: string; values: Map<string, PersistedValue> }> = [];
+  let allStored = true;
   // Stored least-recently-used first, and a stamp per scope in that order keeps the ordering.
   for (const entry of record.scopes) {
     if (!entry || typeof entry !== "object") continue;
     const { scope, values } = entry as { scope?: unknown; values?: unknown };
     if (typeof scope !== "string" || scope === "") continue;
     if (!values || typeof values !== "object" || Array.isArray(values)) continue;
-    const at = stamp();
-    const imported = new Map<string, PersistedValue>();
-    for (const [key, held] of Object.entries(values as Record<string, unknown>)) {
-      if (key === "" || !held || typeof held !== "object") continue;
-      const { value, retention } = held as Partial<PersistedValue>;
+    const held = new Map<string, PersistedValue>();
+    for (const [key, stored] of Object.entries(values as Record<string, unknown>)) {
+      if (key === "" || !stored || typeof stored !== "object") continue;
+      const { value, retention } = stored as Partial<PersistedValue>;
       if (typeof value !== "string") continue;
       if (retention !== "draft" && retention !== "disposable") continue;
-      imported.set(key, { value, retention, updatedAt: at });
+      held.set(key, { value, retention, updatedAt: IMPORTED_VALUE_STAMP });
     }
-    if (imported.size === 0) continue;
-    writeRecord(scope, at, imported, new Map());
+    if (held.size === 0) continue;
+    // Merged into whatever is already there rather than written over it, on the same terms every
+    // other write uses: a v2 value or a marker from a previous run of this import wins.
+    const existing = readRecord(scope);
+    const merged = new Map<string, PersistedValue>(existing?.values);
+    const markers = new Map<string, number>(existing?.cleared);
+    for (const [key, value] of held) if (!merged.has(key)) merged.set(key, value);
+    applyClearedMarkers(merged, markers);
+    // What survived the markers, captured before `writeRecord` may shed values for its own ceiling.
+    // Reporting the raw import instead would hand the reader a draft the markers just retired — a
+    // message already sent, back in the box, which is the whole thing those markers are for.
+    imported.push({ scope, values: new Map(merged) });
+    allStored = writeRecord(scope, stamp(), merged, markers) && allStored;
   }
+  // Only once every scope is somewhere else. A removal that is itself refused simply replays a
+  // now-harmless import on the next load.
+  if (allStored) deleteRaw(WHOLE_MAP_KEY);
+  return imported;
 }
 
 /**
@@ -553,19 +602,28 @@ function importWholeMapRecord(): void {
  * otherwise write to storage. What is at stake is only which scope a later sweep collects first,
  * and `scopeTouchedAt` already carries that without spending a write.
  */
-function persistScope(scope: string, mutated: { key: string; removed: boolean } | null): void {
+function persistScope(scope: string, mutated: Mutation | null): void {
   const now = Date.now();
-  const stored = readRecord(scope, now);
+  const stored = readRecord(scope);
   if (stored !== null) observeStamps(stored, now);
   const values = new Map<string, PersistedValue>(stored?.values);
   const cleared = new Map<string, number>(stored?.cleared);
-  if (mutated?.removed === true) cleared.set(mutated.key, stamp());
+  if (mutated?.removed === true) {
+    // Stamped with the value that was actually removed, never with "now". A marker's job is to
+    // retire one copy of one value, and a marker stamped now would also retire a replacement
+    // another tab typed while this page's send was in flight — text nobody else has, destroyed by
+    // a deletion that was never about it. Another tab's stale copy carries the same stamp as the
+    // value removed here, so it is still suppressed, which is all the marker was ever for.
+    const previous = cleared.get(mutated.key) ?? 0;
+    cleared.set(mutated.key, Math.max(previous, mutated.removedAt));
+  }
   if (mutated?.removed === false) {
-    // Re-stamped now that what is stored has been seen. A page whose clock sits behind another
-    // tab's would otherwise write the value it just produced under a stamp that reads older than
-    // the copy it is replacing, and lose to it until the clock caught up.
+    // Re-stamped now that what is stored has been seen, so this page's mutation outranks the copy
+    // it replaces. A page whose clock sits behind another tab's — or behind a stored stamp too far
+    // ahead for `observeStamps` to adopt — would otherwise write the value the user just typed
+    // under a stamp that reads older than what it replaces, and silently lose to it.
     const held = scratch.get(scope)?.get(mutated.key);
-    if (held !== undefined) held.updatedAt = stamp();
+    if (held !== undefined) held.updatedAt = Math.max(stamp(), values.get(mutated.key)?.updatedAt ?? 0);
   }
   for (const [key, held] of scratch.get(scope) ?? []) {
     const rival = values.get(key);
@@ -578,6 +636,14 @@ function persistScope(scope: string, mutated: { key: string; removed: boolean } 
   writeRecord(scope, scopeTouchedAt.get(scope) ?? stamp(), values, cleared);
   enforceRecordBounds(scope);
 }
+
+/**
+ * What one mutation did to one key.
+ *
+ * A removal carries the stamp of the value it removed rather than the moment it happened, because
+ * that is what the marker it becomes has to be measured against.
+ */
+type Mutation = { key: string; removed: false } | { key: string; removed: true; removedAt: number };
 
 function serializeRecord(
   touchedAt: number,
@@ -605,7 +671,7 @@ function writeRecord(
   touchedAt: number,
   values: Map<string, PersistedValue>,
   cleared: Map<string, number>,
-): void {
+): boolean {
   const storageKey = recordKey(scope);
   const budget = PANEL_SCRATCH_PERSIST_CHAR_LIMIT - storageKey.length;
   let serialized = serializeRecord(touchedAt, values, cleared);
@@ -622,11 +688,11 @@ function writeRecord(
     // and this mutation added nothing to it.
     deleteRaw(storageKey);
     hydratedRaw.delete(scope);
-    return;
+    return true;
   }
   if (writeRaw(storageKey, serialized)) {
     hydratedRaw.delete(scope);
-    return;
+    return true;
   }
   // A refusal (private mode, a full quota, a restricted webview) is not an error here — but a record
   // this page left behind is now a lie. It describes a scope this page has moved past, so a reload
@@ -634,6 +700,7 @@ function writeRecord(
   // Degrading to no restore is the honest failure; the next mutation that is allowed through puts
   // the scope back, so the exposure is one mutation wide.
   retractOwnRecord(scope);
+  return false;
 }
 
 /**
@@ -704,7 +771,7 @@ function enforceRecordBounds(keep: string | null): void {
   }
   const candidates: Candidate[] = [];
   for (const { scope, storageKey, raw, bytes } of raws) {
-    const record = parseRecord(raw, now);
+    const record = parseRecord(raw);
     if (record === null || scope === "") {
       deleteRaw(storageKey);
       continue;
@@ -753,12 +820,20 @@ function enforceRecordBounds(keep: string | null): void {
     markerOnly -= 1;
   }
 
-  // The ceiling, spent most-recently-used first so it goes on the freshest state, and skipping
-  // rather than stopping so one outsized scope costs only itself.
+  // The ceiling. Markers are charged against it first, and are never what it sheds: they are what
+  // keeps a sent draft from coming back, they are already held to their own count above, and the
+  // whole layer is a few kilobytes against a 256KB budget. Shedding one to make room for a newer
+  // draft would let the tab still holding the sent text write it back — which is the defect this
+  // change exists to close, reintroduced by its own bound. `writeRecord` takes the same side.
   let size = 0;
+  for (const candidate of candidates) {
+    if (kept.has(candidate) && candidate.markerOnly) size += candidate.bytes;
+  }
+  // Values, most-recently-used first so the ceiling goes on the freshest state, and skipping rather
+  // than stopping so one outsized scope costs only itself.
   for (let index = candidates.length - 1; index >= 0; index -= 1) {
     const candidate = candidates[index]!;
-    if (!kept.has(candidate)) continue;
+    if (!kept.has(candidate) || candidate.markerOnly) continue;
     if (size + candidate.bytes > PANEL_SCRATCH_PERSIST_CHAR_LIMIT) collect(candidate);
     else size += candidate.bytes;
   }
@@ -796,14 +871,16 @@ export function writePanelScratch(
     // Only a value that was actually there is a deletion. A body mounting reports that it owns
     // nothing under keys it never wrote, and recording a marker for each of those would retire
     // values other tabs are still holding — and spend the marker budget on nothing.
-    if (!values.delete(key)) {
+    const removed = values.get(key);
+    if (removed === undefined) {
       evictDisposableScopes(scope);
       return;
     }
+    values.delete(key);
     if (values.size === 0) forgetScope(scope);
     else touch(scope, values);
     evictDisposableScopes(scope);
-    persistScope(scope, { key, removed: true });
+    persistScope(scope, { key, removed: true, removedAt: removed.updatedAt });
     return;
   }
   const next = values ?? new Map<string, ScratchValue>();
