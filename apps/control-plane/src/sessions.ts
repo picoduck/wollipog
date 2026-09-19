@@ -6150,12 +6150,11 @@ export class SessionsService {
         !canAccess(campaignSessionId) || !canAccess(child.id)) {
       return fail("campaign child not found", 404);
     }
-    // Not every `stopped` row is settled: a stop the runner has not confirmed keeps its durable
-    // intent, and a disconnect marks live sessions stopped provisionally until reconnect
-    // reconciliation restores or ends them. Neither has proven this child finished anything.
-    if (child.status === "stopped" && (this.db.hasSessionStopIntent(child.id) ||
-        this.db.getRunner(child.runnerId)?.status !== "online")) {
-      return fail("campaign child's stop is not settled: its runner has not confirmed it", 409);
+    // A requested stop writes `stopped` before the runner confirms it and keeps a durable intent
+    // until terminal or absence evidence settles it, so that row is not yet proof of anything.
+    // `setArchived` reads the same intent for the same reason.
+    if (child.status === "stopped" && this.db.hasSessionStopIntent(child.id)) {
+      return fail("campaign child's stop is not settled yet: its runner has not confirmed it", 409);
     }
     // A settled stop is terminal: the session cannot be prompted again, so its last report is as
     // final as a completed one. Refusing it stranded a helper a child stopped on its way out,

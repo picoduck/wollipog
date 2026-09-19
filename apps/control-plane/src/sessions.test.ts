@@ -1491,16 +1491,18 @@ test("a stopped campaign child with a final report can still be verified, and ar
     const freshReport = report(silentHelper, "Helper report after the follow-up");
     assert.ok(verify(silentHelper, freshReport).ok);
 
-    // A stop the runner has not confirmed reads as `stopped` while its durable intent is still
-    // open, which proves nothing about what the child finished.
+    // A requested stop reads as `stopped` while its durable intent is still open, which proves
+    // nothing about what the child finished.
     const stoppingHelper = spawn(secondChild, "Helper its parent stopped");
     svc.onSessionStatus(stoppingHelper, "idle");
     const stoppingReport = report(stoppingHelper, "Stopping helper final report");
     assert.ok(svc.stop(stoppingHelper).ok);
     assert.equal(db.getSession(stoppingHelper)?.status, "stopped");
-    assert.match(verify(stoppingHelper, stoppingReport).error ?? "", /stop is not settled/,
+    assert.equal(db.hasSessionStopIntent(stoppingHelper), true);
+    assert.match(verify(stoppingHelper, stoppingReport).error ?? "", /stop is not settled yet/,
       "an unconfirmed stop is not proof that the child finished");
     svc.reconcileRunnerSessions(RUNNER_ID, [parent.id, secondChild]);
+    assert.equal(db.hasSessionStopIntent(stoppingHelper), false);
     assert.ok(verify(stoppingHelper, stoppingReport).ok,
       "settling that stop against the runner's own inventory makes the same report verifiable");
 
@@ -1509,18 +1511,15 @@ test("a stopped campaign child with a final report can still be verified, and ar
     const secondVerified = verify(secondChild, secondChildReport);
     assert.ok(secondVerified.ok, secondVerified.error);
 
-    // A disconnect marks every live session on the runner stopped, and reconnecting can restore
-    // this exact run, so that status is not terminal evidence either.
+    // A stop the runner itself reported stays verifiable when that runner later goes away: the
+    // report is already durable, and a disconnect leaves an existing terminal row untouched.
     const thirdChild = spawn(parent.id, "Implement a third assigned issue");
     svc.onSessionStatus(thirdChild, "idle");
     const thirdChildReport = report(thirdChild, "Third child final report");
+    svc.onSessionStatus(thirdChild, "stopped");
     db.markOffline(RUNNER_ID, Date.now());
     svc.failRunnerSessions(RUNNER_ID);
-    assert.equal(db.getSession(thirdChild)?.status, "stopped");
-    assert.match(verify(thirdChild, thirdChildReport).error ?? "", /stop is not settled/,
-      "a disconnected runner's session may still be alive and resume this exact run");
-    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
-    svc.reconcileRunnerSessions(RUNNER_ID, [parent.id]);
+    assert.equal(db.hasSessionStopIntent(thirdChild), false);
     const thirdVerified = verify(thirdChild, thirdChildReport);
     assert.ok(thirdVerified.ok, thirdVerified.error);
   } finally {
