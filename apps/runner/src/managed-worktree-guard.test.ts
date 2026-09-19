@@ -9,6 +9,7 @@ import fc from "fast-check";
 import {
   GUARD_STATE_REFUSAL,
   MANAGED_WORKTREE_REFUSAL,
+  MANAGED_WORKTREE_UNRESOLVED_REFUSAL,
   commandTargetsGuardState,
   guardStateClassifierWork,
   guardStateRelation,
@@ -65,6 +66,35 @@ test("a destructive command against a protected worktree is denied with the mana
     permissionDecision: "deny",
     permissionDecisionReason: MANAGED_WORKTREE_REFUSAL,
   });
+});
+
+test("the guard resolves a worktree path held in its own environment (#1324)", (t) => {
+  const f = fixture();
+  t.after(f.cleanup);
+  // This process is spawned by the provider, so its environment is the one the provider's shell
+  // starts from — which is where the runner put `WOLLIPOG_WORKTREE_PATH`. Passing it explicitly
+  // here is what the real launch does implicitly through `process.env`.
+  const environment = { WOLLIPOG_WORKTREE_PATH: WORKTREE, WOLLIPOG_PRIMARY_CHECKOUT: REPO };
+  for (const command of ['rm -rf "$WOLLIPOG_WORKTREE_PATH"', "rm -rf ${WOLLIPOG_WORKTREE_PATH}",
+    'git worktree remove "$WOLLIPOG_WORKTREE_PATH"']) {
+    const outcome = runManagedWorktreeGuardDecision(
+      hookInput({ tool_input: { command } }), f.protectionsFile, environment);
+    assert.equal(outcome.exitCode, 0, command);
+    assert.equal(JSON.parse(outcome.stdout).hookSpecificOutput.permissionDecisionReason,
+      MANAGED_WORKTREE_REFUSAL, command);
+  }
+  // A destructive operand that resolves nowhere is denied with the message that says so...
+  const unresolved = runManagedWorktreeGuardDecision(
+    hookInput({ tool_input: { command: 'rm -rf "$SCRATCH_DIR"' } }), f.protectionsFile, environment);
+  assert.equal(JSON.parse(unresolved.stdout).hookSpecificOutput.permissionDecisionReason,
+    MANAGED_WORKTREE_UNRESOLVED_REFUSAL);
+  // ...while work beneath the worktree, and reads naming the same unknown variable, still run.
+  for (const command of ['rm -rf "$WOLLIPOG_WORKTREE_PATH/node_modules/.cache"', 'ls "$SCRATCH_DIR"',
+    "pnpm test"]) {
+    assert.deepEqual(
+      runManagedWorktreeGuardDecision(hookInput({ tool_input: { command } }), f.protectionsFile, environment),
+      { stdout: "", stderr: "", exitCode: 0 }, command);
+  }
 });
 
 test("rm -rf of a protected worktree is denied too", (t) => {

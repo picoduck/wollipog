@@ -1250,6 +1250,9 @@ export class CodexAppServerDriver implements Driver {
               command,
               typeof params?.cwd === "string" ? params.cwd : this.cwd,
               this.opts.managedWorktreeProtections?.() ?? [],
+              // Codex runs each approved command from the environment this process launched it
+              // with, so a worktree path held in one of those variables resolves here (#1324).
+              this.opts.env,
             )
           : null;
         if (refusal) {
