@@ -1145,7 +1145,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "consume_workflow_decision",
-    description: "Immediately before the approved external action begins, consume its one-shot authorization using the exact current resource snapshot. PR merge approvals instead arm one canonical enqueue command pinned with --match-head-commit and are consumed only when its matching runner permission is delivered. Revoked, changed, replayed, stale, or superseded grants fail closed.",
+    description: "Immediately before the approved external action begins, consume its one-shot authorization using the exact current resource snapshot. PR merge approvals instead arm one canonical enqueue command pinned with --match-head-commit and are consumed when its matching runner permission is delivered, or, when no permission prompt occurs (Claude Code in auto or Full Access), by reconcile_workflow_decision after the PR reads MERGED. Revoked, changed, replayed, stale, or superseded grants fail closed.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1186,7 +1186,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "reconcile_workflow_decision",
-    description: "Reconcile an already-successful canonical PR merge action without executing it again. The runner must prove one exact successful provider-history command and the forge must report the approved head as merged; stale, mismatched, replayed, unavailable, and mixed-version evidence fails closed.",
+    description: "Reconcile an already-successful canonical PR merge action without executing it again. For a Codex App Server child the runner must prove one exact successful provider-history command and the forge must report the approved head as merged. A Claude Code child produces no command receipt, so call this once the PR reads MERGED; the forge's merged approved head is its proof. Stale, mismatched, replayed, unavailable, and mixed-version evidence fails closed.",
     inputSchema: {
       type: "object",
       properties: {

@@ -12969,6 +12969,36 @@ export class SessionManager {
         !bounded(raw.actionProviderTurnId, 512))) {
       return fail(occurrenceId, "reconciliation runner fence is invalid");
     }
+    const claudeMeta = this.store.readMeta(sessionId);
+    if (claudeMeta?.driver === "claude-code") {
+      // Claude Code exposes no correlated command receipt: in auto or Full Access mode the enqueue
+      // runs without a permission prompt. The forge's merged head is the proof, and it does not
+      // need a live provider, so a stopped child can still settle its armed approval.
+      if (hasRunnerFence) return fail(occurrenceId, "Claude Code reconciliation has no runner fence");
+      const pullRequestUrl = raw.pullRequestUrl as string;
+      const roots = [...new Set([claudeMeta.worktreePath, claudeMeta.repoPath].filter(
+        (root): root is string => typeof root === "string" && root.length > 0,
+      ))];
+      let forge: Awaited<ReturnType<typeof worktreePullRequestState>> = null;
+      // A merged PR's worktree may already have been reclaimed; the repository still resolves it.
+      for (const root of roots) {
+        forge = await this.resolveWorktreePullRequestState(
+          root,
+          pullRequestUrl,
+          { context: claudeMeta.context, provider: "github" },
+        );
+        if (forge) break;
+      }
+      if (forge?.state !== "merged" || forge.headOid?.toLowerCase() !== raw.expectedHeadSha) {
+        return fail(occurrenceId, "forge did not prove the exact approved head was merged");
+      }
+      return {
+        accepted: true,
+        occurrenceId,
+        commandDigest: createHash("sha256").update(raw.command as string, "utf8").digest("hex"),
+        forgeHeadSha: forge.headOid.toLowerCase(),
+      };
+    }
     let localRunnerHistoryEpoch = raw.runnerHistoryEpoch as number | undefined;
     let localArmedAfterEventSeq = raw.armedAfterEventSeq as number | undefined;
     if (hasRunnerFence && protocolVersion !== undefined) {

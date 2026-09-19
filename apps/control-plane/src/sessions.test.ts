@@ -10,6 +10,7 @@ import type {
   PodView,
   ProjectView,
   QueuedPromptView,
+  ReconcileWorkflowActionMessage,
   ResourceScope,
   RunnerMetadata,
   RunView,
@@ -4399,6 +4400,160 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       svc.onSessionEvent(child.id, receipt(armed.command));
       assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "approved");
     } finally { db.close(); }
+  });
+
+  const forgeProof = (
+    child: SessionView,
+    armed: { decision: { occurrenceId: string }; command: string; snapshot: { headSha: string } },
+    merged: () => boolean = () => true,
+    seen: ReconcileWorkflowActionMessage[] = [],
+  ) => (message: ControlPlaneToRunner): RunnerRequestResult => {
+    if (message.type !== "reconcile_workflow_action") throw new Error(`unexpected runner request ${message.type}`);
+    seen.push(message);
+    return merged() ? {
+      type: "workflow_action_reconciliation_result",
+      requestId: message.requestId,
+      sessionId: child.id,
+      occurrenceId: armed.decision.occurrenceId,
+      accepted: true,
+      commandDigest: createHash("sha256").update(armed.command, "utf8").digest("hex"),
+      forgeHeadSha: armed.snapshot.headSha,
+    } : {
+      type: "workflow_action_reconciliation_result",
+      requestId: message.requestId,
+      sessionId: child.id,
+      occurrenceId: armed.decision.occurrenceId,
+      accepted: false,
+      error: "forge did not prove the exact approved head was merged",
+    };
+  };
+  const settled = async (db: ControlPlaneDb, occurrenceId: string) => {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const status = db.workflowDecisionByOccurrence(occurrenceId)?.status;
+      if (status !== "approved") return status;
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    return db.workflowDecisionByOccurrence(occurrenceId)?.status;
+  };
+
+  await t.test("a Claude Code child's receipt-less merge is consumed by forge reconciliation (#1351)", async () => {
+    const { db, hub, svc, child, arm } = setup(AGENT_ID);
+    try {
+      // Auto and Full Access run the enqueue without a permission prompt, so no receipt ever arrives.
+      const armed = await arm(1351);
+      assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "approved");
+      const seen: ReconcileWorkflowActionMessage[] = [];
+      hub.requestHandler = forgeProof(child, armed, () => true, seen);
+
+      const result = await svc.reconcileWorkflowDecision(
+        child.id,
+        armed.decision.occurrenceId,
+        { resourceSnapshot: armed.snapshot },
+        () => true,
+      );
+      assert.ok(result.ok, result.error);
+      assert.equal(result.data?.status, "consumed");
+      assert.equal(seen.length, 1);
+      assert.equal(seen[0]!.command, armed.command);
+      assert.equal(seen[0]!.pullRequestUrl, "https://github.com/picoduck/wollipog/pull/1351");
+      assert.equal(seen[0]!.expectedHeadSha, armed.snapshot.headSha);
+      assert.equal(seen[0]!.armedAfterEventSeq, undefined, "a Claude Code arm carries no App Server fence");
+      assert.ok(svc.governanceAudit(child.id).some((entry) =>
+        entry.requestId === armed.decision.occurrenceId && entry.outcome === "consumed" &&
+        entry.actor.id === "workflow-decision-forge-reconciliation"));
+
+      const replay = await svc.reconcileWorkflowDecision(
+        child.id,
+        armed.decision.occurrenceId,
+        { resourceSnapshot: armed.snapshot },
+        () => true,
+      );
+      assert.equal(replay.status, 409, "the consumed occurrence cannot be reconciled twice");
+
+      const twin = await arm(1351);
+      hub.requestHandler = forgeProof(child, twin);
+      const reused = await svc.reconcileWorkflowDecision(
+        child.id,
+        twin.decision.occurrenceId,
+        { resourceSnapshot: twin.snapshot },
+        () => true,
+      );
+      assert.equal(reused.status, 409, "one merged head cannot settle a second occurrence");
+      assert.equal(db.workflowDecisionByOccurrence(twin.decision.occurrenceId)?.status, "approved");
+    } finally { db.close(); }
+  });
+
+  await t.test("Claude Code forge reconciliation fails closed until the approved head merged", async () => {
+    const { db, hub, svc, child, arm } = setup(AGENT_ID);
+    try {
+      const armed = await arm(1352);
+      let merged = false;
+      hub.requestHandler = forgeProof(child, armed, () => merged);
+      const pending = await svc.reconcileWorkflowDecision(
+        child.id,
+        armed.decision.occurrenceId,
+        { resourceSnapshot: armed.snapshot },
+        () => true,
+      );
+      assert.equal(pending.status, 409);
+      assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "approved",
+        "a merge still in the queue keeps its armed approval");
+
+      merged = true;
+      const inner = hub.requestHandler;
+      hub.requestHandler = (message) => {
+        const result = inner(message) as Extract<RunnerRequestResult, { type: "workflow_action_reconciliation_result" }>;
+        return { ...result, forgeHeadSha: "f".repeat(40) };
+      };
+      const wrongHead = await svc.reconcileWorkflowDecision(
+        child.id,
+        armed.decision.occurrenceId,
+        { resourceSnapshot: armed.snapshot },
+        () => true,
+      );
+      assert.equal(wrongHead.status, 409, "a different merged head is not the approved action");
+
+      hub.requestHandler = inner;
+      const landed = await svc.reconcileWorkflowDecision(
+        child.id,
+        armed.decision.occurrenceId,
+        { resourceSnapshot: armed.snapshot },
+        () => true,
+      );
+      assert.ok(landed.ok, landed.error);
+      assert.equal(landed.data?.status, "consumed");
+    } finally { db.close(); }
+  });
+
+  await t.test("stopping a Claude Code child records its landed merge consumed, not revoked", async () => {
+    const { db, hub, svc, child, arm } = setup(AGENT_ID);
+    try {
+      const armed = await arm(1353);
+      hub.requestHandler = forgeProof(child, armed);
+      assert.ok(svc.stop(child.id).ok);
+      assert.equal(await settled(db, armed.decision.occurrenceId), "consumed");
+      const outcomes = svc.governanceAudit(child.id)
+        .filter((entry) => entry.requestId === armed.decision.occurrenceId)
+        .map((entry) => entry.outcome);
+      assert.ok(outcomes.includes("consumed"));
+      assert.ok(!outcomes.includes("revoked"), "a landed merge never reads revoked");
+    } finally { db.close(); }
+  });
+
+  await t.test("stopping a Claude Code child still revokes an armed merge the forge cannot prove", async () => {
+    for (const outcome of ["open", "offline"] as const) {
+      const { db, hub, svc, child, arm } = setup(AGENT_ID);
+      try {
+        const armed = await arm(1354);
+        if (outcome === "open") hub.requestHandler = forgeProof(child, armed, () => false);
+        else hub.requestHandler = () => { throw new Error("runner did not respond in time"); };
+        assert.ok(svc.stop(child.id).ok);
+        assert.equal(await settled(db, armed.decision.occurrenceId), "revoked", `${outcome} forge state`);
+        assert.ok(svc.governanceAudit(child.id).some((entry) =>
+          entry.requestId === armed.decision.occurrenceId && entry.outcome === "revoked" &&
+          entry.actor.id === "session-stopped"));
+      } finally { db.close(); }
+    }
   });
 
   await t.test("native Codex fails closed before arming because it has no approval receipt", async () => {

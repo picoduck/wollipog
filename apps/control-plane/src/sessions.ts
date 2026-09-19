@@ -1284,6 +1284,8 @@ export class SessionsService {
   private readonly titleGenerationEpochs = new Map<string, number>();
   private readonly titleGenerationControllers = new Map<string, AbortController>();
   private readonly titleGenerationOwnership = new Map<string, "generated" | "user">();
+  /** Armed merge occurrences whose lifecycle-end forge read is in flight. */
+  private readonly forgeMergeSettlements = new Set<string>();
 
   constructor(
     private readonly db: ControlPlaneDb,
@@ -6657,7 +6659,8 @@ export class SessionsService {
 
   /** Reconcile a command that already completed without replaying it. This exists for durable
    * approved admissions whose provider took the Guardian-direct path before correlated receipts
-   * were available. The runner must prove the exact command item and the forge's merged head. */
+   * were available. The runner must prove the exact command item and the forge's merged head.
+   * Claude Code has no correlated command receipt at all, so its proof is the forge alone. */
   async reconcileWorkflowDecision(
     sessionId: string,
     occurrenceId: string,
@@ -6682,7 +6685,8 @@ export class SessionsService {
     const child = this.db.getSession(sessionId);
     const parent = this.db.getSession(decision.controllingSessionId);
     const policy = parent?.parentControlPolicy;
-    if (!child || child.driver !== "codex-app-server" || !parent || isTerminal(child.status) ||
+    if (!child || (child.driver !== "codex-app-server" && child.driver !== "claude-code") ||
+        !parent || isTerminal(child.status) ||
         isTerminal(parent.status) || !canAccess(child.id) || !canAccess(parent.id) ||
         !this.db.isSessionDescendant(parent.id, child.id) || !policy ||
         policy.revision !== decision.policyRevision ||
@@ -6707,6 +6711,15 @@ export class SessionsService {
         admission.commandDigest !== auditDigest(action) || !Number.isSafeInteger(admission.armedAt) ||
         admission.armedAt < 1) {
       return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
+    }
+    if (child.driver === "claude-code") {
+      const proven = await this.forgeAttestedMergeProof(child, decision, normalized.data);
+      if (!proven.ok) return fail(proven.error!, 409);
+      const current = this.forgeAttestedMergeAuthority(decision, true, canAccess);
+      if (!current) return fail("workflow decision authority or ancestry changed during reconciliation", 409);
+      const consumed = this.consumeForgeAttestedMerge(decision, normalized.data, proven.data!);
+      if (!consumed) return fail("workflow action proof was already used or the decision changed", 409);
+      return ok(consumed);
     }
     const requestId = `workflow_action_reconcile_${randomUUID()}`;
     const message: ReconcileWorkflowActionMessage = {
@@ -7256,9 +7269,156 @@ export class SessionsService {
   }
 
   private revokeUnconsumedWorkflowDecisionsForSession(sessionId: string, actorId: string): void {
+    const child = this.db.getSession(sessionId);
     for (const decision of this.db.unconsumedWorkflowDecisionsForSession(sessionId)) {
+      if (child && this.forgeSettlesArmedMerge(child, decision)) {
+        void this.settleArmedMergeFromForge(child, decision, actorId);
+        continue;
+      }
       this.revokeWorkflowDecision(decision, { kind: "system", id: actorId });
     }
+  }
+
+  /** A Claude Code child's armed enqueue never produces a permission receipt in auto or Full Access
+   * mode, so a lifecycle end would revoke a merge that already landed. Those decisions ask the forge
+   * first and are recorded consumed when it reports the approved head merged. */
+  private forgeSettlesArmedMerge(child: SessionView, decision: WorkflowDecisionView): boolean {
+    return child.driver === "claude-code" && decision.status === "approved" &&
+      decision.category === "pr_merge" && decision.actionAdmission?.kind === "pr_merge_enqueue" &&
+      !this.capabilityFailure(
+        child.runnerId,
+        "workflowDecisionActionReconciliation",
+        "Workflow decision action reconciliation",
+      );
+  }
+
+  private async settleArmedMergeFromForge(
+    child: SessionView,
+    decision: WorkflowDecisionView,
+    actorId: string,
+  ): Promise<void> {
+    if (this.forgeMergeSettlements.has(decision.occurrenceId)) return;
+    this.forgeMergeSettlements.add(decision.occurrenceId);
+    try {
+      const snapshot = decision.resourceSnapshot as Extract<
+        WorkflowDecisionResourceSnapshot, { category: "pr_merge" }
+      >;
+      const proven = await this.forgeAttestedMergeProof(child, decision, snapshot);
+      if (proven.ok && this.forgeAttestedMergeAuthority(decision, false) &&
+          this.consumeForgeAttestedMerge(decision, snapshot, proven.data!)) return;
+    } catch (error) {
+      this.log.warn(`forge settlement of workflow decision ${decision.occurrenceId} failed: ${
+        error instanceof Error ? error.message : "unknown error"
+      }`);
+    } finally {
+      this.forgeMergeSettlements.delete(decision.occurrenceId);
+    }
+    const current = this.db.workflowDecisionByOccurrence(decision.occurrenceId);
+    if (current?.status === "approved") this.revokeWorkflowDecision(current, { kind: "system", id: actorId });
+  }
+
+  /** Ask the child's runner whether the forge merged the exact approved head. The runner never runs
+   * the enqueue; it only reads the pull request. */
+  private async forgeAttestedMergeProof(
+    child: SessionView,
+    decision: WorkflowDecisionView,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
+  ): Promise<ServiceResult<{ forgeHeadSha: string }>> {
+    const admission = decision.actionAdmission;
+    const command = canonicalPrMergeEnqueueCommand(snapshot);
+    if (!admission || admission.kind !== "pr_merge_enqueue" || admission.command !== command ||
+        admission.commandDigest !== auditDigest({ kind: "pr_merge_enqueue", command })) {
+      return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
+    }
+    const pullRequestUrl = `https://github.com/${snapshot.repository}/pull/${snapshot.pullRequest}`;
+    const requestId = `workflow_action_reconcile_${randomUUID()}`;
+    const message: ReconcileWorkflowActionMessage = {
+      type: "reconcile_workflow_action",
+      requestId,
+      sessionId: child.id,
+      occurrenceId: decision.occurrenceId,
+      command,
+      commandDigest: admission.commandDigest,
+      pullRequestUrl,
+      expectedHeadSha: snapshot.headSha,
+    };
+    let proof;
+    try {
+      proof = await this.hub.requestFromRunner(child.runnerId, requestId, message, 45_000);
+    } catch (error) {
+      return fail(isRunnerRequestTimeoutError(error)
+        ? "workflow action reconciliation timed out"
+        : isRunnerRequestNotSentError(error)
+          ? "runner is offline"
+          : "workflow action reconciliation failed", 409);
+    }
+    if (proof.type !== "workflow_action_reconciliation_result") {
+      return fail("forge did not prove the exact approved head was merged", 409);
+    }
+    if (proof.requestId !== requestId || proof.sessionId !== child.id ||
+        proof.occurrenceId !== decision.occurrenceId || !proof.accepted ||
+        proof.commandDigest !== createHash("sha256").update(command, "utf8").digest("hex") ||
+        proof.forgeHeadSha !== snapshot.headSha) {
+      return fail(proof.error ?? "forge did not prove the exact approved head was merged", 409);
+    }
+    return ok({ forgeHeadSha: proof.forgeHeadSha });
+  }
+
+  /** The approving authority must still stand after the forge read. A live reconcile also needs a
+   * live child; a lifecycle settlement records a merge that landed before its child ended. */
+  private forgeAttestedMergeAuthority(
+    decision: WorkflowDecisionView,
+    requireLive: boolean,
+    canAccess: (sessionId: string) => boolean = () => true,
+  ): boolean {
+    const child = this.db.getSession(decision.sessionId);
+    const parent = this.db.getSession(decision.controllingSessionId);
+    const policy = parent?.parentControlPolicy;
+    if (!child || !parent || !policy || child.driver !== "claude-code" ||
+        (requireLive && (isTerminal(child.status) || isTerminal(parent.status))) ||
+        !canAccess(child.id) || !canAccess(parent.id) ||
+        !this.db.isSessionDescendant(parent.id, child.id) ||
+        policy.revision !== decision.policyRevision ||
+        this.effectiveWorkflowDecisionAuthority(parent, policy, "pr_merge") !== decision.authority) {
+      return false;
+    }
+    return [child, parent].every((owner) => !this.capabilityFailure(
+      owner.runnerId,
+      "workflowDecisionActionReconciliation",
+      "Workflow decision action reconciliation",
+    ));
+  }
+
+  private consumeForgeAttestedMerge(
+    decision: WorkflowDecisionView,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
+    proof: { forgeHeadSha: string },
+  ): WorkflowDecisionView | null {
+    // One merged head is one action: the same forge fact cannot settle a second occurrence.
+    const receiptDigest = auditDigest({
+      transport: "forge",
+      repository: snapshot.repository,
+      pullRequest: snapshot.pullRequest,
+      headSha: proof.forgeHeadSha,
+    })!;
+    const now = Date.now();
+    const consumed = this.db.consumeReconciledWorkflowDecisionActionWithReceipt(
+      decision.sessionId,
+      decision.occurrenceId,
+      decision.actionAdmission!.commandDigest,
+      receiptDigest,
+      now,
+    );
+    if (!consumed) return null;
+    this.recordWorkflowDecisionAudit(
+      consumed,
+      "consumed",
+      { kind: "system", id: "workflow-decision-forge-reconciliation" },
+      now,
+    );
+    this.hub.sessionChangedById(consumed.sessionId);
+    this.hub.sessionChangedById(consumed.controllingSessionId);
+    return consumed;
   }
 
   private recordWorkflowDecisionAudit(

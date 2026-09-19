@@ -6,7 +6,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import {
@@ -149,6 +149,15 @@ function runnerMetadata(): RunnerMetadata {
         context: { kind: "native" },
       },
       {
+        id: "claude-agent",
+        name: "Claude Code",
+        command: "claude",
+        args: [],
+        env: {},
+        driver: "claude-code",
+        context: { kind: "native" },
+      },
+      {
         id: "codex-agent",
         name: "Codex",
         command: "codex",
@@ -161,7 +170,10 @@ function runnerMetadata(): RunnerMetadata {
   };
 }
 
-function seed(database: string): string {
+type ChildDriver = "claude-code" | "codex-app-server";
+const CHILD_AGENT: Record<ChildDriver, string> = { "claude-code": "claude-agent", "codex-app-server": "codex-agent" };
+
+function seed(database: string, childDriver: ChildDriver = "codex-app-server"): string {
   const db = ControlPlaneDb.open(database);
   try {
     const now = Date.now();
@@ -209,10 +221,10 @@ function seed(database: string): string {
       parentSessionId: PARENT_SESSION_ID,
       runnerId: RUNNER_ID,
       workspaceId: WORKSPACE_ID,
-      agentId: "codex-agent",
+      agentId: CHILD_AGENT[childDriver],
       title: "Workflow Action Child",
       useWorktree: false,
-      driver: "codex-app-server",
+      driver: childDriver,
       config: {},
       scope,
       now: now + 1,
@@ -235,6 +247,18 @@ function seed(database: string): string {
     assert.ok(created);
     assert.ok(db.resolveWorkflowDecision(OCCURRENCE_ID, "orchestrator", "approved", now + 4));
     const command = canonicalPrMergeEnqueueCommand(SNAPSHOT);
+    if (childDriver === "claude-code") {
+      // Claude Code arms without a runner fence and, in auto or Full Access mode, never produces
+      // the permission receipt that would consume the approval.
+      assert.ok(db.armWorkflowDecisionAction(OCCURRENCE_ID, {
+        kind: "pr_merge_enqueue",
+        command,
+        commandDigest: digest({ kind: "pr_merge_enqueue", command }),
+        armedAt: now + 5,
+      }));
+      assert.equal(db.setAgentControlCredential(CHILD_SESSION_ID, RUNNER_ID, hashToken(AGENT_TOKEN), now + 6), true);
+      return command;
+    }
     assert.ok(db.armWorkflowDecisionAction(OCCURRENCE_ID, {
       kind: "pr_merge_enqueue",
       command,
@@ -324,11 +348,11 @@ function sessionSnapshot(id: string, agentId: string, driver: "claude-code" | "c
   };
 }
 
-test("the real runner socket reconciles a CLI-armed lifecycle-revoked workflow action", { timeout: 30_000 }, async (t) => {
+async function startControlPlane(t: TestContext, childDriver: ChildDriver) {
   const temp = mkdtempSync(join(tmpdir(), "wollipog-workflow-action-reconciliation-"));
   const database = join(temp, "control-plane.db");
   const port = await reservePort();
-  const command = seed(database);
+  const command = seed(database, childDriver);
   let logs = "";
   const child = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
     cwd: REPO_ROOT,
@@ -366,12 +390,15 @@ test("the real runner socket reconciles a CLI-armed lifecycle-revoked workflow a
     runner: runnerMetadata(),
     sessionSnapshots: [
       sessionSnapshot(PARENT_SESSION_ID, "orchestrator-agent", "claude-code"),
-      sessionSnapshot(CHILD_SESSION_ID, "codex-agent", "codex-app-server"),
+      sessionSnapshot(CHILD_SESSION_ID, CHILD_AGENT[childDriver], childDriver),
     ],
   }));
   await inbox.take((message) => message.type === "registered");
+  return { database, port, command, runner, inbox };
+}
 
-  const responsePromise = fetch(
+function reconcileRoute(port: number): Promise<Response> {
+  return fetch(
     `http://127.0.0.1:${port}/api/sessions/${CHILD_SESSION_ID}/workflow-decisions/${OCCURRENCE_ID}/reconcile`,
     {
       method: "POST",
@@ -383,6 +410,22 @@ test("the real runner socket reconciles a CLI-armed lifecycle-revoked workflow a
       body: JSON.stringify({ resourceSnapshot: SNAPSHOT }),
     },
   );
+}
+
+function decisionStatus(database: string): string | undefined {
+  const db = new DatabaseSync(database);
+  try {
+    db.exec("PRAGMA busy_timeout=5000");
+    return (db.prepare("SELECT status FROM workflow_decisions WHERE occurrence_id=?")
+      .get(OCCURRENCE_ID) as { status: string } | undefined)?.status;
+  } finally {
+    db.close();
+  }
+}
+
+test("the real runner socket reconciles a CLI-armed lifecycle-revoked workflow action", { timeout: 30_000 }, async (t) => {
+  const { database, port, command, runner, inbox } = await startControlPlane(t, "codex-app-server");
+  const responsePromise = reconcileRoute(port);
   const request = await inbox.take((message) => message.type === "reconcile_workflow_action");
   assert.equal(request.sessionId, CHILD_SESSION_ID);
   assert.equal(request.occurrenceId, OCCURRENCE_ID);
@@ -413,13 +456,34 @@ test("the real runner socket reconciles a CLI-armed lifecycle-revoked workflow a
   const body = await response.json() as { status?: string; error?: string };
   assert.equal(response.status, 200, body.error);
   assert.equal(body.status, "consumed");
-  const db = new DatabaseSync(database);
-  try {
-    db.exec("PRAGMA busy_timeout=5000");
-    const row = db.prepare("SELECT status FROM workflow_decisions WHERE occurrence_id=?")
-      .get(OCCURRENCE_ID) as { status: string } | undefined;
-    assert.equal(row?.status, "consumed");
-  } finally {
-    db.close();
-  }
+  assert.equal(decisionStatus(database), "consumed");
+});
+
+test("a Claude Code child's receipt-less armed merge reconciles from the forge over the real route (#1351)", {
+  timeout: 30_000,
+}, async (t) => {
+  const { database, port, command, runner, inbox } = await startControlPlane(t, "claude-code");
+  assert.equal(decisionStatus(database), "approved", "no permission receipt consumed the armed approval");
+  const responsePromise = reconcileRoute(port);
+  const request = await inbox.take((message) => message.type === "reconcile_workflow_action");
+  assert.equal(request.sessionId, CHILD_SESSION_ID);
+  assert.equal(request.command, command);
+  assert.equal(request.pullRequestUrl, "https://github.com/picoduck/wollipog/pull/1109");
+  assert.equal(request.expectedHeadSha, HEAD_SHA);
+  assert.equal(request.armedAfterEventSeq, undefined);
+  runner.send(JSON.stringify({
+    type: "workflow_action_reconciliation_result",
+    requestId: request.requestId,
+    sessionId: CHILD_SESSION_ID,
+    occurrenceId: OCCURRENCE_ID,
+    accepted: true,
+    commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
+    forgeHeadSha: HEAD_SHA,
+  }));
+
+  const response = await responsePromise;
+  const body = await response.json() as { status?: string; error?: string };
+  assert.equal(response.status, 200, body.error);
+  assert.equal(body.status, "consumed");
+  assert.equal(decisionStatus(database), "consumed");
 });
