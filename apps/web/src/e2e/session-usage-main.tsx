@@ -338,7 +338,8 @@ if (composerFixture) {
         uiEvidenceReview: {
           status: "unavailable",
           effectiveOwner: "human",
-          reason: "This Orchestrator client cannot inspect the evidence bytes.",
+          reasonCode: "model_unsupported",
+          reason: "The Orchestrator model \"text-only\" does not advertise image input.",
         },
         children: { total: 4, active: 2, waitingHuman: 1, blocked: 0, verified: 1, cleanupPending: 0 },
         pendingDecisions: { human: 1, orchestrator: 0 },

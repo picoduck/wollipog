@@ -18033,3 +18033,264 @@ test("Integration Isolation is its own policy, gated separately and fixed at cre
     db.close();
   }
 });
+
+function uiEvidenceReviewHarness(protocolVersion = PROTOCOL_VERSION, imageModel = true) {
+  const { db, hub } = makeHarness();
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  const meta = runnerMeta();
+  meta.agents.find((agent) => agent.id === "test-orchestrator")!.capabilities = {
+    models: [{ id: "vision", name: "Vision", default: true, inputModalities: imageModel ? ["text", "image"] : ["text"] }],
+    effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+    permissionModes: ["default", "orchestrator"],
+  };
+  db.registerRunner(meta, Date.now(), protocolVersion);
+  const parent = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+    config: { permissionMode: "orchestrator" }, parentControl: "off",
+  });
+  assert.ok(parent.ok && parent.data, parent.error);
+  db.updateSessionStatus(parent.data.id, "running", Date.now());
+  const createChild = (title: string) => {
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, title };
+    let created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data!.id });
+    if (created.status === 428) {
+      assert.ok(svc.approve(parent.data!.id, db.getSession(parent.data!.id)!.pendingApproval!.requestId, "allow").ok);
+      created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data!.id });
+    }
+    assert.ok(created.ok && created.data, created.error);
+    db.updateSessionStatus(created.data.id, "running", Date.now());
+    return created.data;
+  };
+  const decisions = {
+    implementation_question: "human", pr_merge: "orchestrator", merged_branch_deletion: "human",
+    follow_up_issue_publication: "human", ui_evidence_approval: "orchestrator",
+  } as const;
+  assert.ok(svc.setParentControlPolicy(parent.data.id, decisions, 0).ok);
+  const screenshot = (sessionId: string, label: string) => {
+    const bytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from(label)]);
+    const artifact = svc.createWorkflowArtifact({
+      sessionId, kind: "screenshot", name: `${label}.png`, mimeType: "image/png", encoding: "base64",
+      data: bytes.toString("base64"),
+    }, { kind: "agent", id: sessionId });
+    assert.ok(artifact.ok && artifact.data, artifact.error);
+    return {
+      bytes,
+      item: {
+        evidenceId: label, uri: `https://evidence.example/${label}.png?X-Amz-Signature=secret`,
+        sha256: artifact.data.sha256, artifactId: artifact.data.artifactId, mediaType: "image/png",
+      },
+    };
+  };
+  const request = (childId: string, requestId: string, evidence: unknown[]) => svc.createWorkflowDecision(childId, {
+    requestId, resourceKey: `${requestId}-ui`,
+    resourceSnapshot: { category: "ui_evidence_approval", evidence } as never,
+  });
+  /** A complete review: delivery plus the runner's acknowledgement of the verified handoff. */
+  const review = (childId: string, occurrenceId: string, evidenceId: string) => {
+    const delivered = svc.reviewDescendantUiEvidence(parent.data!.id, childId, occurrenceId, evidenceId, () => true);
+    if (delivered.ok && delivered.data) {
+      assert.ok(svc.acknowledgeDescendantUiEvidence(
+        parent.data!.id, delivered.data.receipt.receiptId, delivered.data.receipt.sha256,
+      ).ok);
+    }
+    return delivered;
+  };
+  return { db, svc, parent: parent.data, createChild, decisions, screenshot, request, review };
+}
+
+test("an assigned Orchestrator reviews exact image evidence and resolves it only with server receipts", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const before = h.screenshot(child.id, "before");
+    const after = h.screenshot(child.id, "after");
+    assert.deepEqual(h.db.campaignProjection(h.parent.id)?.uiEvidenceReview,
+      { status: "available", effectiveOwner: "orchestrator" });
+    const decision = h.request(child.id, "ui-approve", [before.item, after.item]);
+    assert.ok(decision.ok && decision.data, decision.error);
+    assert.equal(decision.data.authority, "orchestrator");
+    assert.equal(decision.data.humanFallback, undefined);
+    const resolve = (occurrenceId: string, outcome: "approve" | "deny", evidenceReviewed?: string[]) =>
+      h.svc.resolveDescendantRequest(h.parent.id, child.id, occurrenceId,
+        { action: "resolve_workflow_decision", outcome, ...(evidenceReviewed ? { evidenceReviewed } : {}) }, () => true);
+
+    assert.equal(resolve(decision.data.occurrenceId, "approve", ["before", "after"]).status, 409,
+      "repeating evidence identifiers is not a review");
+    const dropped = h.svc.reviewDescendantUiEvidence(h.parent.id, child.id, decision.data.occurrenceId, "before", () => true);
+    assert.ok(dropped.ok && dropped.data, dropped.error);
+    assert.ok(h.review(child.id, decision.data.occurrenceId, "after").ok);
+    assert.match(resolve(decision.data.occurrenceId, "approve", ["before", "after"]).error ?? "", /"before"/u,
+      "a delivery the runner never acknowledged supports no approval");
+    assert.equal(h.svc.acknowledgeDescendantUiEvidence(h.parent.id, dropped.data.receipt.receiptId, "f".repeat(64)).status, 409,
+      "an acknowledgement must name the delivered digest");
+    h.db.revokeUiEvidenceReviewReceipts(decision.data.occurrenceId, Date.now());
+    const delivered = h.review(child.id, decision.data.occurrenceId, "before");
+    assert.ok(delivered.ok && delivered.data, delivered.error);
+    assert.equal(h.svc.acknowledgeDescendantUiEvidence(h.parent.id, dropped.data.receipt.receiptId, before.item.sha256).status, 409,
+      "a receipt id replaced by a redelivery acknowledges nothing");
+    assert.equal(delivered.data.data, before.bytes.toString("base64"), "the exact artifact bytes are delivered");
+    assert.equal(delivered.data.receipt.sha256, before.item.sha256);
+    assert.equal(delivered.data.receipt.policyRevision, 1);
+    assert.match(resolve(decision.data.occurrenceId, "approve", ["before", "after"]).error ?? "", /"after"/u,
+      "one reviewed item does not cover the other");
+    assert.ok(h.review(child.id, decision.data.occurrenceId, "after").ok);
+    assert.equal(h.svc.reviewDescendantUiEvidence(h.parent.id, child.id, decision.data.occurrenceId, "missing", () => true).status, 404);
+    assert.equal(h.svc.reviewDescendantUiEvidence(h.parent.id, child.id, decision.data.occurrenceId, "after", () => false).status, 404,
+      "delivery honors the campaign audience");
+    const approved = resolve(decision.data.occurrenceId, "approve", ["before", "after"]);
+    assert.ok(approved.ok, approved.error);
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.data.occurrenceId)?.status, "approved");
+    assert.deepEqual(h.db.validUiEvidenceReviewReceipts(decision.data.occurrenceId, h.parent.id, Date.now()), [],
+      "receipts are spent by the resolution");
+    assert.equal(h.svc.reviewDescendantUiEvidence(h.parent.id, child.id, decision.data.occurrenceId, "after", () => true).status, 409,
+      "a resolved occurrence delivers nothing further");
+
+    const audit = h.db.listGovernanceAudit(child.id);
+    const allowed = audit.find((entry) => entry.outcome === "allowed" && entry.requestId === decision.data!.occurrenceId);
+    assert.equal(allowed?.actor.id, h.parent.id);
+    assert.equal(allowed?.workflowDecision?.reviewReceiptIds?.length, 2);
+    assert.deepEqual(allowed?.workflowDecision?.evidenceDigests,
+      [{ evidenceId: "before", sha256: before.item.sha256 }, { evidenceId: "after", sha256: after.item.sha256 }]);
+    const serialized = JSON.stringify(audit);
+    assert.ok(!serialized.includes("X-Amz-Signature") && !serialized.includes(before.bytes.toString("base64")),
+      "audit holds neither signed query parameters nor evidence bytes");
+    assert.ok(!JSON.stringify(h.db.campaignProjection(h.parent.id)).includes("X-Amz-Signature"));
+
+    // Rejection needs no receipts, and a sibling campaign can neither read nor decide.
+    const rejected = h.request(child.id, "ui-deny", [h.screenshot(child.id, "broken").item]);
+    assert.ok(rejected.ok && rejected.data);
+    const stranger = h.svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator", config: { permissionMode: "orchestrator" },
+    });
+    assert.ok(stranger.ok && stranger.data);
+    assert.equal(h.svc.reviewDescendantUiEvidence(stranger.data.id, child.id, rejected.data.occurrenceId, "broken", () => true).status, 404);
+    assert.ok(resolve(rejected.data.occurrenceId, "deny").ok);
+    assert.equal(h.db.workflowDecisionByOccurrence(rejected.data.occurrenceId)?.status, "denied");
+    assert.notEqual(h.db.campaignProjection(h.parent.id)?.status, "waiting_human", "the campaign continues without a human");
+  } finally {
+    h.db.close();
+  }
+});
+
+test("unreviewable UI evidence falls back to the human with a specific reason and never blocks other work", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const other = h.createChild("Other Child");
+    const image = h.screenshot(child.id, "after");
+    const cases: Array<[string, unknown, string]> = [
+      ["video", { ...image.item, evidenceId: "clip", mediaType: "video/webm" }, "media_video_unsupported"],
+      ["external", { evidenceId: "after", uri: image.item.uri, sha256: image.item.sha256 }, "provider_untrusted"],
+      ["unknown-media", { ...image.item, mediaType: undefined }, "media_unsupported"],
+      ["svg", { ...image.item, mediaType: "image/svg+xml" }, "media_unsupported"],
+      ["digest", { ...image.item, sha256: "c".repeat(64) }, "artifact_mismatch"],
+      ["foreign", h.screenshot(other.id, "foreign").item, "artifact_unavailable"],
+    ];
+    for (const [requestId, item, code] of cases) {
+      const evidence = [JSON.parse(JSON.stringify(item)) as { evidenceId: string }];
+      const decision = h.request(child.id, requestId, evidence);
+      assert.ok(decision.ok && decision.data, `${requestId}: ${decision.error}`);
+      assert.equal(decision.data.authority, "human", requestId);
+      assert.equal(decision.data.humanFallback?.code, code, requestId);
+      assert.ok(decision.data.humanFallback?.reason, requestId);
+      assert.equal(h.svc.reviewDescendantUiEvidence(h.parent.id, child.id, decision.data.occurrenceId,
+        evidence[0]!.evidenceId, () => true).status, 403, `${requestId}: a human-owned decision delivers nothing`);
+      assert.equal(h.svc.resolveDescendantRequest(h.parent.id, child.id, decision.data.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: [evidence[0]!.evidenceId] }, () => true).status, 403);
+    }
+    const pending = h.db.pendingWorkflowDecisionsForSession(child.id).at(-1)!;
+    assert.ok(h.svc.resolveWorkflowDecision(h.parent.id, child.id, pending.occurrenceId,
+      { outcome: "approve", evidenceReviewed: [pending.resourceSnapshot.category === "ui_evidence_approval"
+        ? pending.resourceSnapshot.evidence[0]!.evidenceId : ""] },
+      "human", { kind: "human", id: "owner" }, () => true).ok, "the human can still resolve the fallback");
+
+    // Human fallback on one child leaves the Orchestrator's other categories and children working.
+    const merge = h.svc.createWorkflowDecision(other.id, {
+      requestId: "merge", resourceKey: "picoduck/wollipog#9",
+      resourceSnapshot: {
+        category: "pr_merge", repository: "picoduck/wollipog", pullRequest: 9, headSha: "a".repeat(40),
+        reviewResult: "merge",
+        requiredChecks: { headSha: "a".repeat(40), status: "passed", checkedAt: 1,
+          checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" }] },
+      },
+    });
+    assert.ok(merge.ok && merge.data, merge.error);
+    assert.ok(h.svc.resolveDescendantRequest(h.parent.id, other.id, merge.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+  } finally {
+    h.db.close();
+  }
+});
+
+test("delegated UI evidence review fails closed on tampering, policy change, supersession, and expiry", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const approve = (occurrenceId: string, ids: string[]) => h.svc.resolveDescendantRequest(h.parent.id, child.id, occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ids }, () => true);
+
+    // Stored bytes that can no longer be verified revoke the decision instead of being shown.
+    const tampered = h.screenshot(child.id, "tampered");
+    const tamperedDecision = h.request(child.id, "tampered", [tampered.item]);
+    assert.ok(tamperedDecision.ok && tamperedDecision.data);
+    h.db.deleteWorkflowArtifact(tampered.item.artifactId);
+    assert.equal(h.svc.reviewDescendantUiEvidence(h.parent.id, child.id, tamperedDecision.data.occurrenceId, "tampered", () => true).status, 409);
+    assert.equal(h.db.workflowDecisionByOccurrence(tamperedDecision.data.occurrenceId)?.status, "revoked");
+
+    // A replacement occurrence supersedes the reviewed one; its receipts do not carry over.
+    const first = h.screenshot(child.id, "first");
+    const stale = h.request(child.id, "stale-1", [first.item]);
+    assert.ok(stale.ok && stale.data);
+    assert.ok(h.review(child.id, stale.data.occurrenceId, "first").ok);
+    const replacement = h.svc.createWorkflowDecision(child.id, {
+      requestId: "stale-2", resourceKey: "stale-1-ui",
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [first.item] },
+    });
+    assert.ok(replacement.ok && replacement.data);
+    assert.equal(approve(stale.data.occurrenceId, ["first"]).status, 409, "a stale occurrence cannot be approved");
+    assert.equal(approve(replacement.data.occurrenceId, ["first"]).status, 409, "a receipt is bound to its occurrence");
+
+    // Receipts expire.
+    assert.ok(h.review(child.id, replacement.data.occurrenceId, "first").ok);
+    assert.equal(h.db.validUiEvidenceReviewReceipts(replacement.data.occurrenceId, h.parent.id, Date.now()).length, 1);
+    assert.equal(h.db.validUiEvidenceReviewReceipts(replacement.data.occurrenceId, h.parent.id, Date.now() + 2 * 60 * 60 * 1000).length, 0);
+
+    // A human policy change invalidates the unconsumed receipts together with the decision.
+    assert.ok(h.svc.setParentControlPolicy(h.parent.id, { ...h.decisions, ui_evidence_approval: "human" }, 1,
+      { kind: "human", id: "owner" }).ok);
+    assert.equal(h.db.workflowDecisionByOccurrence(replacement.data.occurrenceId)?.status, "revoked");
+    assert.deepEqual(h.db.validUiEvidenceReviewReceipts(replacement.data.occurrenceId, h.parent.id, Date.now()), []);
+    assert.equal(approve(replacement.data.occurrenceId, ["first"]).status, 409);
+    const humanOwned = h.request(child.id, "after-revocation", [first.item]);
+    assert.equal(humanOwned.data?.authority, "human");
+    assert.equal(humanOwned.data?.humanFallback, undefined, "a human-owned gate by choice is not a fallback");
+  } finally {
+    h.db.close();
+  }
+});
+
+test("older runners and text-only models keep UI evidence human-owned with an explanation", () => {
+  for (const [protocol, imageModel, code] of [
+    [RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorUiEvidenceReview - 1, true, "runner_unsupported"],
+    [PROTOCOL_VERSION, false, "model_unsupported"],
+    // A selected model the catalog does not know must not inherit the default's image capability.
+    [PROTOCOL_VERSION, "unknown", "model_unsupported"],
+  ] as const) {
+    const h = uiEvidenceReviewHarness(protocol, imageModel !== false);
+    try {
+      if (imageModel === "unknown") h.db.updateSessionConfig(h.parent.id, { model: "uncatalogued-model", permissionMode: "orchestrator" }, Date.now());
+      const child = h.createChild("UI Child");
+      const projection = h.db.campaignProjection(h.parent.id)!;
+      assert.equal(projection.decisionOwners.ui_evidence_approval, "human");
+      assert.equal(projection.uiEvidenceReview.status, "unavailable");
+      assert.equal(projection.uiEvidenceReview.reasonCode, code);
+      assert.equal(h.db.getSession(h.parent.id)?.parentControlPolicy?.decisions.ui_evidence_approval, "orchestrator",
+        "the saved preference is preserved");
+      const decision = h.request(child.id, "ui", [h.screenshot(child.id, "after").item]);
+      assert.equal(decision.data?.authority, "human");
+      assert.equal(decision.data?.humanFallback?.code, code);
+    } finally {
+      h.db.close();
+    }
+  }
+});

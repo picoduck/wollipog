@@ -148,6 +148,8 @@ const ORCHESTRATOR_API_ROUTES = new Set([
   "POST /api/sessions", "POST /api/sessions/:id/prompt", "POST /api/sessions/:id/stop",
   "POST /api/sessions/:id/restart", "POST /api/sessions/:id/config", "POST /api/sessions/:id/archive",
   "GET /api/sessions/:id/descendant-requests", "POST /api/sessions/:id/descendant-requests/resolve",
+  "POST /api/sessions/:id/descendant-requests/review-ui-evidence",
+  "POST /api/sessions/:id/descendant-requests/review-ui-evidence/acknowledge",
   "POST /api/sessions/:id/worktrees", "POST /api/sessions/:id/worktrees/attach",
   "POST /api/sessions/:id/worktrees/select", "POST /api/sessions/:id/worktrees/discard",
 ]);

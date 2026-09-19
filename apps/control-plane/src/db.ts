@@ -215,6 +215,8 @@ import {
   type WorkflowNodeOutcome,
   sessionRole,
   type SessionRole,
+  mergeSessionCapabilities,
+  type UiEvidenceReviewReceipt,
 } from "@wollipog/protocol";
 
 const OUTBOUND_EVENT_PENDING_LIMIT = 100;
@@ -233,6 +235,7 @@ const OUTBOUND_EVENT_KINDS = new Set<OutboundEventKind>([
   "cost.budget_exhausted",
 ]);
 import { DEFAULT_POD_ORCHESTRATION_POLICY, type PodContextSelectionWindow } from "./pod-orchestration.js";
+import { evaluateUiEvidenceReviewClient, type UiEvidenceReviewClient } from "./ui-evidence-review.js";
 import {
   LOCAL_OWNER_USER_ID,
   PERSONAL_ORGANIZATION_ID,
@@ -572,6 +575,7 @@ CREATE TABLE IF NOT EXISTS workflow_decisions (
   selected_option_id    TEXT,
   evidence_reviewed     TEXT,
   rationale_digest      TEXT,
+  human_fallback        TEXT,
   created_at            INTEGER NOT NULL,
   resolved_at           INTEGER,
   consumed_at           INTEGER,
@@ -603,6 +607,29 @@ CREATE TABLE IF NOT EXISTS workflow_decision_action_receipts (
   observed_at     INTEGER NOT NULL,
   PRIMARY KEY (session_id, receipt_digest),
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+-- One row per evidence item actually delivered to the reviewing Orchestrator. Identifiers and
+-- digests only: evidence bytes and storage credentials never reach this table. A redelivery
+-- replaces the row, so a receipt id observed earlier cannot be replayed.
+CREATE TABLE IF NOT EXISTS ui_evidence_review_receipts (
+  receipt_id          TEXT PRIMARY KEY,
+  occurrence_id       TEXT NOT NULL,
+  reviewer_session_id TEXT NOT NULL,
+  child_session_id    TEXT NOT NULL,
+  policy_revision     INTEGER NOT NULL,
+  evidence_id         TEXT NOT NULL,
+  artifact_id         TEXT NOT NULL,
+  sha256              TEXT NOT NULL,
+  delivered_at        INTEGER NOT NULL,
+  expires_at          INTEGER NOT NULL,
+  -- Set only when the reviewer's runner confirms it verified and handed over the bytes. A row
+  -- without it records an attempted delivery and supports no approval.
+  acknowledged_at     INTEGER,
+  consumed_at         INTEGER,
+  revoked_at          INTEGER,
+  UNIQUE (occurrence_id, reviewer_session_id, evidence_id),
+  FOREIGN KEY (occurrence_id) REFERENCES workflow_decisions(occurrence_id) ON DELETE CASCADE
 );
 
 -- Orchestrator completion is an explicit verification boundary. A child merely becoming Idle or
@@ -4438,6 +4465,7 @@ export class ControlPlaneDb {
       "action_provider_thread_id TEXT",
       "action_runner_history_epoch INTEGER",
       "child_message TEXT",
+      "human_fallback TEXT",
     ]) {
       try { db.exec(`ALTER TABLE workflow_decisions ADD COLUMN ${column}`); } catch { /* already present */ }
     }
@@ -13152,9 +13180,18 @@ export class ControlPlaneDb {
        FROM orchestrator_campaign_follow_ups WHERE campaign_session_id=?`,
     ).get(resolvedCampaignId) as { unique_count: number | null; duplicate_count: number | null };
     const effectiveOwners = { ...policy.delegation.decisions };
-    // Current managed clients expose links and digests but no binary evidence reader to the
-    // isolated Orchestrator. Preserve the saved choice while routing the effective gate to human.
-    effectiveOwners.ui_evidence_approval = "human";
+    // Preserve the saved choice while routing the effective gate to the human whenever this
+    // Orchestrator's runner, harness, or model cannot inspect evidence bytes. A supported client
+    // can still see one decision fall back when that decision's own evidence is unreviewable.
+    // Read the row directly: a full SessionView embeds this projection and would recurse.
+    const uiEvidenceReview = evaluateUiEvidenceReviewClient(this.uiEvidenceReviewClient({
+      runnerId: campaign.runner_id,
+      agentId: campaign.agent_id,
+      driver: campaign.driver,
+      model: campaign.model,
+      agentCapabilities: parseJson<SessionCapabilities>(campaign.agent_capabilities) ?? undefined,
+    }, policy.delegation.decisions.ui_evidence_approval));
+    effectiveOwners.ui_evidence_approval = uiEvidenceReview.effectiveOwner;
     const total = rows.length;
     const status = waitingHuman > 0 ? "waiting_human" as const
       : active > 0 || pendingOrchestrator.length > 0 || cleanupPending > 0 || total === 0 ? "active" as const
@@ -13174,11 +13211,17 @@ export class ControlPlaneDb {
         costBudgetUsd: campaign.cost_budget_usd ?? null,
         maxToolCalls: campaign.max_tool_calls ?? null,
       },
-      uiEvidenceReview: {
-        status: "unavailable",
-        effectiveOwner: "human",
-        reason: "This Orchestrator client cannot inspect the evidence bytes. Route the exact UI evidence decision to a human.",
-      },
+      uiEvidenceReview: uiEvidenceReview.effectiveOwner === "orchestrator"
+        ? { status: "available", effectiveOwner: "orchestrator" }
+        : uiEvidenceReview.fallback
+          ? {
+              status: "unavailable",
+              effectiveOwner: "human",
+              reasonCode: uiEvidenceReview.fallback.code,
+              reason: uiEvidenceReview.fallback.reason,
+            }
+          // The human owns the gate by choice; nothing is unavailable.
+          : { status: "available", effectiveOwner: "human" },
       children: { total, active, waitingHuman, blocked, verified: fullyVerified, cleanupPending },
       pendingDecisions: { human: pendingHuman.length, orchestrator: pendingOrchestrator.length },
       ...(resolvedCampaignId === campaignSessionId ? { pendingRequests: {
@@ -13287,12 +13330,13 @@ export class ControlPlaneDb {
       this.stmt(
         `INSERT INTO workflow_decisions
          (request_id, occurrence_id, session_id, controlling_session_id, category, resource_key,
-          resource_snapshot, resource_digest, policy_revision, authority, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+          resource_snapshot, resource_digest, policy_revision, authority, status, human_fallback, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
       ).run(
         input.requestId, input.occurrenceId, input.sessionId, input.controllingSessionId,
         input.category, input.resourceKey, JSON.stringify(input.resourceSnapshot), input.resourceDigest,
-        input.policyRevision, input.authority, input.createdAt,
+        input.policyRevision, input.authority,
+        input.humanFallback ? JSON.stringify(input.humanFallback) : null, input.createdAt,
       );
       this.db.exec("COMMIT");
     } catch (error) {
@@ -13380,7 +13424,110 @@ export class ControlPlaneDb {
       `UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?)
        WHERE occurrence_id=? AND status IN ('pending','approved')`,
     ).run(now, occurrenceId);
+    this.revokeUiEvidenceReviewReceipts(occurrenceId, now);
     return this.workflowDecisionByOccurrence(occurrenceId);
+  }
+
+  /** Record one delivery. Redelivering the same item replaces its receipt and restarts its expiry. */
+  recordUiEvidenceReviewReceipt(
+    receipt: UiEvidenceReviewReceipt,
+    expiresAt: number,
+  ): UiEvidenceReviewReceipt {
+    this.stmt(
+      `INSERT INTO ui_evidence_review_receipts
+       (receipt_id, occurrence_id, reviewer_session_id, child_session_id, policy_revision, evidence_id,
+        artifact_id, sha256, delivered_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(occurrence_id, reviewer_session_id, evidence_id) DO UPDATE SET
+         receipt_id=excluded.receipt_id, child_session_id=excluded.child_session_id,
+         policy_revision=excluded.policy_revision, artifact_id=excluded.artifact_id,
+         sha256=excluded.sha256, delivered_at=excluded.delivered_at, expires_at=excluded.expires_at,
+         acknowledged_at=NULL, consumed_at=NULL, revoked_at=NULL`,
+    ).run(
+      receipt.receiptId, receipt.occurrenceId, receipt.reviewerSessionId, receipt.childSessionId,
+      receipt.policyRevision, receipt.evidenceId, receipt.artifactId, receipt.sha256,
+      receipt.deliveredAt, expiresAt,
+    );
+    return receipt;
+  }
+
+  /** The runner confirms one exact delivery. Only the current receipt id of a live row matches, so
+   * an id replaced by a redelivery, or one already spent, revoked, or expired, acknowledges nothing. */
+  acknowledgeUiEvidenceReviewReceipt(
+    receiptId: string,
+    reviewerSessionId: string,
+    sha256: string,
+    now: number,
+  ): boolean {
+    return Number(this.stmt(
+      `UPDATE ui_evidence_review_receipts SET acknowledged_at=COALESCE(acknowledged_at, ?)
+       WHERE receipt_id=? AND reviewer_session_id=? AND sha256=? AND consumed_at IS NULL
+         AND revoked_at IS NULL AND expires_at>?`,
+    ).run(now, receiptId, reviewerSessionId, sha256, now).changes) === 1;
+  }
+
+  /** Receipts still able to support an approval: acknowledged, unexpired, unconsumed, unrevoked. */
+  validUiEvidenceReviewReceipts(
+    occurrenceId: string,
+    reviewerSessionId: string,
+    now: number,
+  ): UiEvidenceReviewReceipt[] {
+    return (this.stmt(
+      `SELECT * FROM ui_evidence_review_receipts
+       WHERE occurrence_id=? AND reviewer_session_id=? AND acknowledged_at IS NOT NULL
+         AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at>? ORDER BY evidence_id`,
+    ).all(occurrenceId, reviewerSessionId, now) as unknown as Array<{
+      receipt_id: string; occurrence_id: string; reviewer_session_id: string; child_session_id: string;
+      policy_revision: number; evidence_id: string; artifact_id: string; sha256: string; delivered_at: number;
+    }>).map((row) => ({
+      receiptId: row.receipt_id,
+      occurrenceId: row.occurrence_id,
+      reviewerSessionId: row.reviewer_session_id,
+      childSessionId: row.child_session_id,
+      policyRevision: row.policy_revision,
+      evidenceId: row.evidence_id,
+      artifactId: row.artifact_id,
+      sha256: row.sha256,
+      deliveredAt: row.delivered_at,
+    }));
+  }
+
+  consumeUiEvidenceReviewReceipts(occurrenceId: string, now: number): void {
+    this.stmt(
+      `UPDATE ui_evidence_review_receipts SET consumed_at=?
+       WHERE occurrence_id=? AND consumed_at IS NULL AND revoked_at IS NULL`,
+    ).run(now, occurrenceId);
+  }
+
+  revokeUiEvidenceReviewReceipts(occurrenceId: string, now: number): void {
+    this.stmt(
+      `UPDATE ui_evidence_review_receipts SET revoked_at=?
+       WHERE occurrence_id=? AND consumed_at IS NULL AND revoked_at IS NULL`,
+    ).run(now, occurrenceId);
+  }
+
+  /** The reviewing client as the control plane currently knows it. */
+  uiEvidenceReviewClient(
+    controller: {
+      runnerId: string;
+      agentId?: string | null;
+      driver: string;
+      model?: string | null;
+      agentCapabilities?: SessionCapabilities;
+    },
+    savedOwner: WorkflowDecisionAuthority,
+  ): UiEvidenceReviewClient {
+    const runner = this.getRunner(controller.runnerId);
+    return {
+      savedOwner,
+      runnerProtocolVersion: runner?.protocolVersion ?? undefined,
+      driver: controller.driver,
+      capabilities: mergeSessionCapabilities(
+        runner?.agents.find((agent) => agent.id === controller.agentId)?.capabilities,
+        controller.agentCapabilities,
+      ),
+      modelId: controller.model,
+    };
   }
 
   consumeWorkflowDecision(occurrenceId: string, now: number): WorkflowDecisionView | null {
@@ -22259,6 +22406,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     status?: WorkflowDecisionStatus;
     selected_option_id?: string | null;
     evidence_reviewed?: string | null;
+    human_fallback?: string | null;
     created_at?: number;
     resolved_at?: number | null;
     consumed_at?: number | null;
@@ -22280,6 +22428,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
   const resourceSnapshot = parseJson<WorkflowDecisionView["resourceSnapshot"]>(row.resource_snapshot);
   if (!resourceSnapshot) return null;
   const evidenceReviewed = parseJson<string[]>(row.evidence_reviewed ?? null);
+  const humanFallback = parseJson<NonNullable<WorkflowDecisionView["humanFallback"]>>(row.human_fallback ?? null);
   return {
     requestId: row.request_id,
     occurrenceId: row.occurrence_id,
@@ -22291,6 +22440,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     resourceDigest: row.resource_digest,
     policyRevision: row.policy_revision!,
     authority: row.authority,
+    ...(humanFallback ? { humanFallback } : {}),
     status: row.status,
     ...(row.selected_option_id ? { selectedOptionId: row.selected_option_id } : {}),
     ...(evidenceReviewed ? { evidenceReviewed } : {}),

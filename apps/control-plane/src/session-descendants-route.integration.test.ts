@@ -316,6 +316,23 @@ test("HTTP agent management scopes descendants and composes governance policy vi
         assert.equal((await humanRequest("descendant-requests/resolve", {
           sessionId: `${mode}-child`, occurrenceId: "request", resolution: { action: "dismiss" },
         })).status, 403, "human credentials cannot use the parent-agent resolution route");
+        const evidenceCoordinate = { sessionId: `${mode}-child`, occurrenceId: "workflow_missing", evidenceId: "after" };
+        assert.equal((await humanRequest("descendant-requests/review-ui-evidence", evidenceCoordinate)).status, 403,
+          "human credentials read evidence through the artifact routes, not the Orchestrator delivery route");
+        assert.equal((await request(`${mode}-child`, "descendant-requests/review-ui-evidence", evidenceCoordinate)).status, 403,
+          "an orchestrator credential cannot read evidence as its descendant");
+        assert.equal((await request(mode, "descendant-requests/review-ui-evidence", evidenceCoordinate)).status, 404,
+          "evidence is delivered only for an exact pending decision this Orchestrator controls");
+        assert.equal((await request(mode, "descendant-requests/review-ui-evidence", {
+          ...evidenceCoordinate, evidenceId: "",
+        })).status, 400);
+        const acknowledgement = { receiptId: "uireceipt_missing", sha256: "a".repeat(64) };
+        assert.equal((await humanRequest("descendant-requests/review-ui-evidence/acknowledge", acknowledgement)).status, 403);
+        assert.equal((await request(mode, "descendant-requests/review-ui-evidence/acknowledge", acknowledgement)).status, 409,
+          "an unknown receipt acknowledges nothing");
+        assert.equal((await request(mode, "descendant-requests/review-ui-evidence/acknowledge", {
+          ...acknowledgement, sha256: "not-a-digest",
+        })).status, 400);
         assert.equal((await request(`${mode}-child`, "descendant-requests", undefined, "GET")).status, 404,
           "an orchestrator credential cannot pose as its descendant");
         assert.equal((await request(mode, "descendant-requests", undefined, "GET")).status, 200,
