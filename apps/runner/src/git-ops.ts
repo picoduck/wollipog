@@ -1229,13 +1229,15 @@ export const MAX_STATUS_CONTENT_HASH_BYTES = 8 * 1024 * 1024;
  * it guards.
  *
  * The cost, measured rather than assumed. The probe itself is cheap — a first-bytes read, about
- * 6 us a file natively, so ~2.5 ms for 256 — but it would run on the status cadence (a 60 s idle
- * poll per open panel, plus every turn boundary) over an untracked set this read does not cap the
- * way it caps `files`, and under WSL every probe is a separate wsl.exe spawn. An honest version is
- * therefore a cap, a batched WSL probe, and a third framed digest input. What that buys is one
- * muted note on a card whose content the pane never renders, which a turn boundary, the
- * active-turn cadence, or a manual refresh already corrects. Affordable, but not worth its own
- * moving parts.
+ * 6 us a file natively, so ~2.5 ms for 256 — but it would run on the status cadence, and that
+ * cadence is wider than the Review pane: `useGitStatus` polls every 60 s for each EXPANDED session
+ * view whose tab is visible while its turn is idle, because the composer's branch chip shares the
+ * read, so it runs whether or not anyone has the Review panel open — plus a read at every turn
+ * boundary. Each of those reads would walk an untracked set this one does not cap the way it caps
+ * `files`, and under WSL every probe is a separate wsl.exe spawn. An honest version is therefore a
+ * cap, a batched WSL probe, and a third framed digest input. What that buys is one muted note on a
+ * card whose content the pane never renders, which a turn boundary, the active-turn cadence, or a
+ * manual refresh already corrects. Affordable, but not worth its own moving parts.
  *
  * The exclusion is pinned by the untracked-turns-binary test in git-ops.integration.test.ts: a
  * change that closes the gap must retire that test and this record together.

@@ -35,6 +35,15 @@ function initRepo(cwd: string): void {
   git(cwd, ["config", "user.name", "Test"]);
   git(cwd, ["config", "commit.gpgsign", "false"]);
   git(cwd, ["config", "core.autocrlf", "false"]);
+  // Ambient ignore rules must not reach these fixtures: production reads untracked files through
+  // `ls-files --others --exclude-standard`, so a machine whose global core.excludesFile happens to
+  // match a fixture name (*.dat, say) would hide a file the assertions depend on. Point the repo at
+  // an empty excludes file of its own — inside the git dir, where it cannot itself show up as
+  // untracked — rather than at /dev/null, which is not a path on every platform.
+  const excludes = join(cwd, ".git", "info", "wollipog-empty-excludes");
+  mkdirSync(join(cwd, ".git", "info"), { recursive: true });
+  writeFileSync(excludes, "");
+  git(cwd, ["config", "core.excludesFile", excludes]);
 }
 
 function usesLooseRefFiles(cwd: string): boolean {
