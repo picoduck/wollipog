@@ -395,12 +395,25 @@ export function clearPanelScratchIf(
   if (panelScratchRevision(scope, key) !== revision) return;
   if (readPanelScratch(scope, key) !== expected) return;
   writePanelScratch(scope, key, null);
+  consumedRevisions.set(consumedListenerKey(scope, key), revision);
   // A body mounted since the draft was consumed restored it into its own state, and would show it
   // — and write it straight back — until told (#1284). Removing the stored copy is only half of
   // consuming it.
   for (const listener of [...(consumedListeners.get(consumedListenerKey(scope, key)) ?? [])]) {
     listener(expected);
   }
+}
+
+/**
+ * The revision each key last had consumed. A body can restore a value and then have it consumed
+ * before its effects have run — too early to have been listening, and early enough that its
+ * write-back would put the sent text straight back. Revisions are global stamps, so a body that
+ * restored exactly this one is holding exactly what was consumed. One entry per key ever consumed.
+ */
+const consumedRevisions = new Map<string, number>();
+
+function wasConsumed(scope: string, key: string, revision: number): boolean {
+  return consumedRevisions.get(consumedListenerKey(scope, key)) === revision;
 }
 
 /** Bodies currently showing one scope's value, told when that value is consumed out from under them. */
@@ -444,6 +457,7 @@ function syncPanelScratch(
 /** Forget everything, persisted included. Test-only: state would otherwise leak between cases. */
 export function clearPanelScratch(): void {
   scratch.clear();
+  consumedRevisions.clear();
   hydrated = false;
   lastWritten = null;
   removeBrowserStorageValue(PERSIST_KEY);
@@ -456,6 +470,7 @@ export function clearPanelScratch(): void {
  */
 export function dropPanelScratchMemory(): void {
   scratch.clear();
+  consumedRevisions.clear();
   hydrated = false;
   // A reload is a fresh module: it has written nothing yet, and learns what is in storage by
   // hydrating from it.
@@ -488,6 +503,12 @@ interface ScratchEntry<T extends string> {
    * same text mark the value untouched and a later rename silently overwrite what was typed.
    */
   dirty: boolean;
+  /**
+   * The stored revision `value` was restored from, for as long as `value` is still exactly that;
+   * null once it moves or when nothing was restored. How the body recognises a restored value that
+   * was consumed before it could subscribe.
+   */
+  restoredRevision: number | null;
 }
 
 /**
@@ -503,7 +524,14 @@ function restored<T extends string>(
 ): ScratchEntry<T> {
   const stored = readPanelScratch(scope, key);
   const usable = stored !== undefined && (accept === undefined || accept(stored));
-  return { scope, key, fallback, value: usable ? (stored as T) : fallback, dirty: usable };
+  return {
+    scope,
+    key,
+    fallback,
+    value: usable ? (stored as T) : fallback,
+    dirty: usable,
+    restoredRevision: usable ? panelScratchRevision(scope, key) : null,
+  };
 }
 
 /**
@@ -591,24 +619,32 @@ function usePanelScratchValue<T extends string>(
     // The default moved under a mounted body — Review's commit message defaults to the session
     // title, and the session can be renamed while the panel is open. A value nobody has taken
     // ownership of follows it; anything the user made theirs stays exactly as they left it.
-    current = { ...entry, fallback, value: fallback };
+    current = { ...entry, fallback, value: fallback, restoredRevision: null };
     setEntry(current);
   } else if (entry.fallback !== fallback) {
     current = { ...entry, fallback };
     setEntry(current);
   }
 
-  const { scope: liveScope, key: liveKey, value, dirty } = current;
+  const { scope: liveScope, key: liveKey, value, dirty, restoredRevision } = current;
   useEffect(() => {
+    if (restoredRevision !== null && wasConsumed(liveScope, liveKey, restoredRevision)) {
+      // Consumed between this body restoring it and this effect running: writing it back would
+      // resurrect sent text in the store and, through it, after a reload.
+      setEntry((prior) => prior.restoredRevision === restoredRevision
+        ? { ...prior, value: prior.fallback, dirty: false, restoredRevision: null }
+        : prior);
+      return;
+    }
     syncPanelScratch(liveScope, liveKey, dirty ? value : null, retention);
-  }, [dirty, liveKey, liveScope, retention, value]);
+  }, [dirty, liveKey, liveScope, restoredRevision, retention, value]);
 
   // A value consumed elsewhere — a send that landed after this body remounted — must leave the box
   // as well as the store. Only while the box still holds exactly what was consumed: anything the
   // user has typed since is theirs.
   useEffect(() => onPanelScratchConsumed(liveScope, liveKey, (consumed) => {
     setEntry((prior) => prior.scope === liveScope && prior.key === liveKey && prior.value === consumed
-      ? { ...prior, value: prior.fallback, dirty: false }
+      ? { ...prior, value: prior.fallback, dirty: false, restoredRevision: null }
       : prior);
   }), [liveKey, liveScope]);
 
@@ -620,7 +656,7 @@ function usePanelScratchValue<T extends string>(
       // and treating that as ownership would store a meaningless entry for every session merely
       // opened, spending the scope budget and evicting a session whose drafts someone still wants.
       if (resolved === prior.value) return prior;
-      return { ...prior, value: resolved, dirty: true };
+      return { ...prior, value: resolved, dirty: true, restoredRevision: null };
     });
   }, []);
 

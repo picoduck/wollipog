@@ -13,9 +13,12 @@ import type { View, ViewNavigation } from "../navigation.js";
 import { SideChatPanel, sideChatComposerUnavailable } from "./SideChatPanel.js";
 import {
   clearPanelScratch,
+  clearPanelScratchIf,
   dropPanelScratchMemory,
+  panelScratchRevision,
   panelScratchScopeKey,
   readPanelScratch,
+  writePanelScratch,
 } from "../right-panel-scratch.js";
 
 /**
@@ -513,5 +516,48 @@ test("a late send never clears what the user typed into the remounted composer",
       "the unsent follow-up still survives a reload");
   } finally {
     await harness.restore();
+  }
+});
+
+/**
+ * Cross-model review CR-1.1. A send can land after a remounted panel restored its draft but before
+ * that panel's effects run — too early for it to be listening — and its write-back then put the
+ * sent text straight back into the store, and so into the next reload.
+ */
+test("a draft consumed before the remounted panel's effects run is not written back", async () => {
+  const originals = { sideChat: api.sideChat, session: api.session, getSessionEventPage: api.getSessionEventPage };
+  api.sideChat = async () => ({ sideChat: relation });
+  api.session = async () => ({ session: child });
+  api.getSessionEventPage = async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true });
+  const scope = panelScratchScopeKey(parent.id);
+  writePanelScratch(scope, "sidechat.draft", "on its way", "draft");
+  const sentRevision = panelScratchRevision(scope, "sidechat.draft");
+
+  /** Renders after the panel in the same pass, so it runs after the restore and before any effect. */
+  function LandTheSend() {
+    clearPanelScratchIf(scope, "sidechat.draft", "on its way", sentRevision);
+    return null;
+  }
+
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(mount(<>
+        <SideChatPanel session={parent} runnerOnline onInsertDraft={() => {}} />
+        <LandTheSend />
+      </>, []));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined, "the sent draft is not written back");
+    assert.equal((container.querySelector("textarea") as HTMLTextAreaElement).value, "");
+    dropPanelScratchMemory();
+    assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined, "nor restored by a reload");
+  } finally {
+    await act(async () => { root.unmount(); });
+    Object.assign(api, originals);
+    container.remove();
   }
 });
