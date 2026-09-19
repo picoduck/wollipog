@@ -250,7 +250,10 @@ command permission is then admitted and the decision is marked consumed only aft
 response is delivered to the runner. A changed command, failed delivery, stale policy, changed
 ancestry, ambiguous match, persistent grant, or unsupported provider cannot consume the grant.
 Other categories retain immediate consumption. Consumption records that the external action may
-have started. A later policy change can revoke only approvals that have not been consumed; it does
+have started. A UI-evidence approval gates a later action rather than authorizing one, so campaign
+child verification settles an approved evidence decision as consumed instead of requiring the child
+to consume it first; a pending evidence decision, and every other approved category, still blocks
+verification. A later policy change can revoke only approvals that have not been consumed; it does
 not claim to roll back an action already in progress.
 
 Protocol v150 adds a read-only reconciliation path for a PR merge that completed before its exact

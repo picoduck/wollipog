@@ -1241,6 +1241,127 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
   }
 });
 
+test("an approved UI evidence decision does not block campaign child verification, unlike every other open decision", async () => {
+  const { db, svc } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    const planner = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+    planner.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const decisions = {
+      implementation_question: "human",
+      pr_merge: "human",
+      merged_branch_deletion: "human",
+      follow_up_issue_publication: "human",
+      ui_evidence_approval: "human",
+    } as const;
+    const created = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, prompt: "Orchestrate issue 1404.",
+      orchestrator: { behavior: { completion: "retain" } },
+    }, undefined, undefined, false, false, false, {
+      defaultOwnerUserId: "owner",
+      orchestratorDefaults: {
+        source: "user_default",
+        defaults: {
+          behavior: {
+            childHarness: null, childModel: null, childEffort: null,
+            maximumConcurrentChildren: 3, followUps: "recommend_only", completion: "retain",
+          },
+          delegation: { parentControl: "questions", decisions: { ...decisions } },
+          execution: { strictProjectIsolation: false, integrationIsolation: false },
+        },
+        capabilities: {
+          models: [], effortLevels: [], installations: 1, compatibleInstallations: 1, status: "available",
+        },
+      },
+      validateOrchestratorDefaults: () => null,
+    });
+    assert.ok(created.ok && created.data, created.error);
+    const parent = created.data;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    const spawn = () => {
+      const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, prompt: "Fix a UI bug" };
+      let child = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+      if (child.status === 428) {
+        assert.ok(svc.approve(parent.id, db.getSession(parent.id)!.pendingApproval!.requestId, "allow").ok);
+        child = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+      }
+      assert.ok(child.ok && child.data, child.error);
+      db.updateSessionStatus(child.data.id, "running", Date.now());
+      return child.data.id;
+    };
+    const uiSnapshot = {
+      category: "ui_evidence_approval" as const,
+      evidence: [{ evidenceId: "after", uri: "https://evidence.example/after.png", sha256: "c".repeat(64) }],
+    };
+    const requestEvidence = (childId: string) => {
+      const decision = svc.createWorkflowDecision(childId, {
+        requestId: `ui-${childId}`, resourceKey: `ui-${childId}`, resourceSnapshot: uiSnapshot,
+      });
+      assert.ok(decision.ok && decision.data, decision.error);
+      assert.equal(decision.data.authority, "human");
+      return decision.data.occurrenceId;
+    };
+    const approveAsHuman = (
+      childId: string,
+      occurrenceId: string,
+      resolution: { evidenceReviewed?: string[]; selectedOptionId?: string },
+    ) => {
+      const resolved = svc.resolveWorkflowDecision(parent.id, childId, occurrenceId,
+        { outcome: "approve", ...resolution }, "human",
+        { kind: "human", id: "owner" }, () => true);
+      assert.ok(resolved.ok, resolved.error);
+    };
+    const verify = (childId: string) => {
+      svc.onSessionStatus(childId, "idle");
+      const report = db.appendEvent(childId, { kind: "agent_message", text: "Done", final: true }, Date.now());
+      return svc.verifyCampaignChild(parent.id, {
+        childSessionId: childId, reportEventSeq: report.seq, followUpsAccounted: true,
+      });
+    };
+
+    // The evidence gate only guarded the enqueue; the finished child never consumed it, and its
+    // provider may refuse to (a Claude auto-mode classifier reads that consume as self-approval).
+    const evidenceChild = spawn();
+    const evidence = requestEvidence(evidenceChild);
+    approveAsHuman(evidenceChild, evidence, { evidenceReviewed: ["after"] });
+    assert.equal(db.workflowDecisionByOccurrence(evidence)?.status, "approved");
+    const verified = verify(evidenceChild);
+    assert.ok(verified.ok, verified.error);
+    assert.equal(db.campaignChildReportVerified(parent.id, evidenceChild), true);
+    assert.equal(db.workflowDecisionByOccurrence(evidence)?.status, "consumed",
+      "verification settles the spent evidence approval rather than leaving it to be revoked on stop");
+
+    const pendingChild = spawn();
+    requestEvidence(pendingChild);
+    assert.equal(verify(pendingChild).status, 409, "an evidence decision nobody has answered still blocks");
+
+    // Every other category authorizes an action the child must still consume itself.
+    const questionChild = spawn();
+    const question = svc.createWorkflowDecision(questionChild, {
+      requestId: "question", resourceKey: "question", resourceSnapshot: {
+        category: "implementation_question",
+        question: "Which fix?",
+        options: [
+          { optionId: "a", label: "Option A", description: "First." },
+          { optionId: "b", label: "Option B", description: "Second." },
+        ],
+      },
+    });
+    assert.ok(question.ok && question.data, question.error);
+    approveAsHuman(questionChild, question.data.occurrenceId, { selectedOptionId: "a" });
+    assert.equal(db.workflowDecisionByOccurrence(question.data.occurrenceId)?.status, "approved");
+    assert.equal(verify(questionChild).status, 409, "an approved action grant still requires its own consume");
+    assert.equal(db.workflowDecisionByOccurrence(question.data.occurrenceId)?.status, "approved");
+  } finally {
+    db.close();
+  }
+});
+
 test("idle Orchestrators durably coalesce nested request and child-ready events into one bounded continuation", () => {
   const { db, svc, hub } = makeHarness();
   try {
