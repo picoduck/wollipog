@@ -84,6 +84,7 @@ function dependencies(
     controlPlaneProtocolVersion: PROTOCOL_VERSION,
     platform: "linux" as const,
     prepareScratch: async () => assert.fail("an ordinary TUI must not prepare scratch"),
+    assertSessionNotDeleted: () => {},
     provision: () => assert.fail("an ordinary TUI must not reprovision agent control"),
     provisionManagedWorktreeGuard: (spec: SessionMeta) => provisionAgentTuiManagedWorktreeGuard(
       spec,

@@ -45,6 +45,10 @@ function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
  */
 const unguarded = (spec: SessionMeta) => ({ protections: [], args: spec.args, guardActive: false });
 
+/** The session is still there when its preparation settles: the case every test here predates.
+ * `agent-tui-agent-control.test.ts` covers a delete landing inside that window (#1379). */
+const stillPresent = () => {};
+
 const CLAUDE_RUNNER_ENV = [
   "ANTHROPIC_API_KEY",
   "WOLLIPOG_CLAUDE_PERSISTENT",
@@ -170,6 +174,7 @@ test("orchestrator TUIs rebuild credentials and restrictions without mutating du
         executionIsolationMode: "bwrap",
         platform: "linux",
         prepareScratch: async () => "/scratch",
+        assertSessionNotDeleted: stillPresent,
         provisionManagedWorktreeGuard: unguarded,
         provision: (prepared) => provisionAgentControl(prepared, {
           controlPlaneUrl: "ws://127.0.0.1:8787/runner",
@@ -226,6 +231,7 @@ test("provider-mode Claude Orchestrator TUI keeps the project cwd and provider t
       platform,
       prepareScratch: async () => "/repo-wt",
       provision: () => {},
+      assertSessionNotDeleted: stillPresent,
       provisionManagedWorktreeGuard: unguarded,
     });
     assert.ok(launch);
@@ -242,6 +248,7 @@ test("orchestrator TUI preparation fails closed for old peers, unsupported targe
   const dependencies = {
     controlPlaneProtocolVersion: PROTOCOL_VERSION, platform: "linux" as const,
     provision: () => {}, prepareScratch: async () => "/scratch",
+    assertSessionNotDeleted: stillPresent,
     provisionManagedWorktreeGuard: unguarded,
   };
   await assert.rejects(prepareAgentTuiLaunch(source, { ...dependencies, controlPlaneProtocolVersion: 111 }), /current native/);
@@ -264,6 +271,7 @@ test("orchestrator TUI preparation fails closed for old peers, unsupported targe
   assert.deepEqual(await prepareAgentTuiLaunch(meta(), {
     controlPlaneProtocolVersion: 58, provision: () => assert.fail("ordinary TUI must not reprovision"),
     prepareScratch: async () => assert.fail("ordinary TUI must not prepare scratch"),
+    assertSessionNotDeleted: stillPresent,
     provisionManagedWorktreeGuard: unguarded,
   }), agentTuiLaunch(meta()));
 });
@@ -276,6 +284,7 @@ test("an Orchestrator with independent provider permissions has no Native TUI fo
       platform: "linux",
       prepareScratch: async () => "/scratch",
       provision: () => {},
+      assertSessionNotDeleted: stillPresent,
       provisionManagedWorktreeGuard: unguarded,
     }),
     /independent provider permissions/,

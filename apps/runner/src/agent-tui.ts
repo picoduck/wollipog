@@ -23,6 +23,18 @@ export async function prepareAgentTuiLaunch(
   dependencies: {
     controlPlaneProtocolVersion: number | null;
     provision(meta: SessionMeta): Promise<void> | void;
+    /**
+     * Refuse a session deleted while this launch was awaiting its preparation, BEFORE `provision`
+     * writes a runner-owned credential file or registers a credential (#1379).
+     *
+     * `delete_session` removes this session's agent-control files synchronously, and the
+     * availability check that refuses the open (`sessionCanOpen`, in the shell-open handler) runs
+     * only AFTER the launch has been built. Provisioning in that window therefore recreates
+     * live-looking credential material for a session that no longer exists, and nothing removes it
+     * until the next runner startup sweep. This is the agent-control counterpart of the refusal
+     * #1337 gave the guard's protection source: refuse before the write, never clean up after it.
+     */
+    assertSessionNotDeleted(sessionId: string): void;
     /** Runner-owned managed-worktree guard provisioning for this spawn (#1337). */
     provisionManagedWorktreeGuard(
       spec: SessionMeta,
@@ -57,6 +69,9 @@ export async function prepareAgentTuiLaunch(
     throw new Error("Orchestrator Native TUI requires an active session; resume the session first.");
   }
   const cwd = await dependencies.prepareScratch(meta);
+  // Scratch preparation is awaited, so `meta` is a snapshot that predates it. A session deleted
+  // inside that window is refused here, while provisioning still has written nothing (#1379).
+  dependencies.assertSessionNotDeleted(meta.sessionId);
   const prepared = { ...meta, args: [...meta.args], env: { ...meta.env } };
   await dependencies.provision(prepared);
   if (strictProjectIsolation) {
