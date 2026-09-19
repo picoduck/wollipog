@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedWorktreePullRequestForBranch, parseWorktreePullRequestState, readRepositoryDefaultBranch, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type WorktreeCleanupRecord } from "./worktree.js";
 import { createHash, randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
+import { isolateFromAmbientIgnores } from "./git-test-repo.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { SessionManager } from "./session-manager.js";
 import { WorktreePortAllocator } from "./worktree-port-allocator.js";
@@ -32,6 +33,7 @@ function initRepoWithOrigin(root: string): { repo: string; remote: string } {
   const remote = join(root, "origin.git");
   execFileSync("git", ["init", "--bare", remote]);
   execFileSync("git", ["init", repo]);
+  isolateFromAmbientIgnores(repo);
   execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
   execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
   execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);

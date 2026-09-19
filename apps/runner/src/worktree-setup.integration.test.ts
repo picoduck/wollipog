@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { PROTOCOL_VERSION, type RunnerToControlPlane } from "@wollipog/protocol";
+import { isolateFromAmbientIgnores } from "./git-test-repo.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore } from "./session-store.js";
 import { WorktreeCleanupJournal } from "./worktree.js";
@@ -15,6 +16,7 @@ const exec = promisify(execFile);
 async function repository(root: string): Promise<string> {
   const repo = join(root, "repo");
   await exec("git", ["init", "-q", repo]);
+  isolateFromAmbientIgnores(repo);
   await exec("git", ["-C", repo, "config", "user.email", "test@example.invalid"]);
   await exec("git", ["-C", repo, "config", "user.name", "Wollipog Test"]);
   writeFileSync(join(repo, ".gitignore"), ".env.local\n", "utf8");
