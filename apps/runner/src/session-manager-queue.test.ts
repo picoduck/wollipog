@@ -1465,3 +1465,71 @@ test("a control-plane hold survives a provider exit: recovery keeps the queue un
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+/** The control plane deduplicates a terminal delivery receipt against the live queue by exact id
+ * (`overlayLiveQueue` in the hub), which is correct only because a durable prompt is queued under
+ * its own command id. Each admission path below asserts that, so a path that minted a fresh id
+ * would fail here instead of silently listing one message twice above the composer. */
+function durableLifecycle(commandId: string) {
+  return { commandId, queued() {}, started() {}, completed() {}, failed() {}, uncertain() {} };
+}
+
+test("a durable prompt admitted to the recovery queue keeps its command id", () => {
+  const { sm, cleanup } = harness();
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = sm as any;
+    const recovery: Array<{ id: string }> = [];
+    internals.recoveryQueues.set("s_q", recovery);
+    const durable = durableLifecycle("prompt_durable_recovery");
+
+    assert.equal(sm.prompt("s_q", "queued while recovering", [], undefined, undefined, durable), true);
+    assert.deepEqual(recovery.map((prompt) => prompt.id), [durable.commandId],
+      "the recovery queue entry is the durable command, under its own id");
+  } finally {
+    cleanup();
+  }
+});
+
+test("a durable prompt admitted while awaiting runner admission keeps its command id", () => {
+  const { sm, cleanup } = harness();
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = sm as any;
+    internals.active.delete("s_q");
+    const preLaunch: Array<{ id: string }> = [];
+    internals.preLaunchQueues.set("s_q", preLaunch);
+    internals.launchGenerations.set("s_q", 7);
+    internals.preLaunchAdmissionGenerations.set("s_q", 7);
+    const durable = durableLifecycle("prompt_durable_admission");
+
+    assert.equal(sm.prompt("s_q", "queued before admission", [], undefined, undefined, durable), true);
+    assert.deepEqual(preLaunch.map((prompt) => prompt.id), [durable.commandId],
+      "the pre-admission queue entry is the durable command, under its own id");
+  } finally {
+    cleanup();
+  }
+});
+
+test("a durable prompt queued before launch keeps its command id", async () => {
+  const { sm, cleanup } = harness();
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = sm as any;
+    internals.active.delete("s_q");
+    const durable = durableLifecycle("prompt_durable_prelaunch");
+
+    // queueBeforeLaunch routes through the launch path, which parks the prompt before it tries to
+    // acquire admission; the launch itself never completes in this harness and does not need to.
+    sm.prompt("s_q", "queued before launch", [], undefined, undefined, durable, false, undefined, true);
+    await waitFor(() => (internals.preLaunchQueues.get("s_q") ?? []).length > 0,
+      "the prompt is parked in the pre-launch queue");
+    assert.deepEqual(
+      (internals.preLaunchQueues.get("s_q") as Array<{ id: string }>).map((prompt) => prompt.id),
+      [durable.commandId],
+      "the pre-launch queue entry is the durable command, under its own id",
+    );
+  } finally {
+    cleanup();
+  }
+});
