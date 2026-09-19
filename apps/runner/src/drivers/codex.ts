@@ -24,6 +24,7 @@ import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import type { Driver, DriverCallbacks, DriverOptions, StopReason } from "./driver.js";
 import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
 import { codexOrchestratorMcpArgs } from "../orchestrator-preset.js";
+import { decideCodexPermissionProfile } from "../codex-permission-profile.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any;
@@ -32,6 +33,8 @@ interface CodexDriverDeps {
   spawn: typeof spawnAgent;
   kill: typeof killTree;
   orchestratorMcpArgs: typeof codexOrchestratorMcpArgs;
+  /** Seam for the #1336 permission-profile decision, so tests never spawn a real `codex`. */
+  permissionProfile: typeof decideCodexPermissionProfile;
 }
 
 const SANDBOX_MODES = new Set(["read-only", "workspace-write", "danger-full-access"]);
@@ -120,6 +123,7 @@ export class CodexDriver implements Driver {
       spawn: deps.spawn ?? spawnAgent,
       kill: deps.kill ?? killTree,
       orchestratorMcpArgs: deps.orchestratorMcpArgs ?? codexOrchestratorMcpArgs,
+      permissionProfile: deps.permissionProfile ?? decideCodexPermissionProfile,
     };
     // Phase 2 resume: a persisted threadId makes the first turn use `codex resume <id>`.
     if (opts.resumeId) this.threadId = opts.resumeId;
@@ -172,6 +176,26 @@ export class CodexDriver implements Driver {
       }
       if (this.disposed || this.cancelled) return "cancelled";
     }
+    // #1336: where this launch's legacy sandbox IS a built-in permission profile, express it as
+    // that profile plus one deny entry for the runner's hook state directory and send NO `-s`.
+    // Codex silently ignores a profile whenever a legacy sandbox mode is also present, so the two
+    // never travel together. Anything the proof cannot show to be equivalent keeps `-s`.
+    //
+    // A fresh thread passes `-s <mode>` (explicit). A resumed non-Orchestrator thread has always
+    // passed NO `-s` and let Codex resolve its own default (implicit), so that is what it is
+    // compared against — never the session's structured mode.
+    const profile = !this.opts.hookStateDir ? null : await this.deps.permissionProfile({
+      command: this.opts.command,
+      args: [...this.opts.args, ...isolationArgs],
+      legacy: this.threadId && !preset
+        ? { kind: "implicit" }
+        : { kind: "explicit", permissionMode: this.config.permissionMode },
+      env: { ...process.env, ...this.opts.env },
+      nativeHostLaunch: this.opts.context.kind === "native" && !this.opts.isolation,
+      hookStateDir: this.opts.hookStateDir,
+      cwd: this.cwd,
+    });
+    if (profile && (this.disposed || this.cancelled)) return "cancelled";
     return new Promise<StopReason>((resolve) => {
       this.seenItems.clear(); // dedup is per-turn; each turn re-emits item.started ids
       const promptText = slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text;
@@ -192,15 +216,17 @@ export class CodexDriver implements Driver {
 
       // The prompt is passed as "-" and written to stdin so a multi-line prompt (or
       // one containing %VAR%, quotes, etc.) can't be mangled by the Windows shell.
-      const args = [...this.opts.args, ...isolationArgs, "exec"];
+      const baseArgs = profile?.active ? profile.args : [...this.opts.args, ...isolationArgs];
+      const sandboxArgs = profile?.active ? [] : ["-s", sandbox];
+      const args = [...baseArgs, "exec"];
       if (this.threadId) {
         // Current Codex rebuilds resume policy from the invocation config and process cwd. Pin
         // Orchestrator explicitly as well so an upgraded thread can never recover its former
         // project cwd if provider resume semantics drift back to inheriting persisted state.
-        if (cfg.permissionMode === "orchestrator") args.push("-C", this.cwd, "-s", sandbox);
+        if (cfg.permissionMode === "orchestrator") args.push("-C", this.cwd, ...sandboxArgs);
         args.push("resume", "--json", "--skip-git-repo-check", ...modelEffort, ...imageArgs, this.threadId, "-");
       } else {
-        args.push("--json", "--skip-git-repo-check", "-C", this.cwd, "-s", sandbox, ...modelEffort, ...imageArgs, "-");
+        args.push("--json", "--skip-git-repo-check", "-C", this.cwd, ...sandboxArgs, ...modelEffort, ...imageArgs, "-");
       }
 
       let child: AgentProcess;

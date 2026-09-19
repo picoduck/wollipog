@@ -116,6 +116,12 @@ import type { GuardStateMask } from "./managed-worktree-guard-socket.js";
 
 /** Runner-local wiring for the hook state directory at the sandbox boundary (#1336). */
 export interface GuardStateSandbox {
+  /**
+   * The runner's hook state directory itself. A runner-owned sandbox hides it (slice 1), and in
+   * `provider` mode a Codex launch denies it through a permission profile (slice 2), so the drivers
+   * need the path even where the runner sandboxes nothing.
+   */
+  hookStateDir: string;
   /** What a native bwrap/Seatbelt launch of this session hides, and what it re-exposes. */
   mask: (meta: SessionMeta) => GuardStateMask;
   /** `undefined` when this launch carries no socket-mode guard, so there is nothing to prove. */
@@ -6429,6 +6435,7 @@ export class SessionManager {
           managedWorktreeProtections: () => this.managedWorktreeProtections(
             this.store.readMeta(sessionId) ?? meta,
           ),
+          hookStateDir: this.guardStateSandbox?.hookStateDir,
         },
         {
         supportsWorkerAttention: () => runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "workerAttention"),
@@ -10693,6 +10700,7 @@ export class SessionManager {
             managedWorktreeProtections: () => this.managedWorktreeProtections(
               this.store.readMeta(source.sessionId) ?? source,
             ),
+            hookStateDir: this.guardStateSandbox?.hookStateDir,
           },
           { onEvent: () => {}, onStderr: (text) => this.log(`provider fork: ${text}`), onExit: () => {} },
         );
