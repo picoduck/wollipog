@@ -69,6 +69,8 @@ export function EvidenceArtifactView({
   const enlargeRef = useRef<HTMLButtonElement>(null);
   const onStatusChangeRef = useRef(onStatusChange);
   onStatusChangeRef.current = onStatusChange;
+  const statusRef = useRef<LoadState["status"]>("pending");
+  statusRef.current = state.status;
 
   useEffect(() => {
     if (visible || !containerRef.current || typeof IntersectionObserver === "undefined") return;
@@ -147,6 +149,13 @@ export function EvidenceArtifactView({
     setState((current) => current.status === "decoding" ? { status: "ready", url: current.url } : current);
   }, []);
   const onImageError = useCallback(() => {
+    // Told to the card here, in the same event, rather than left to the status effect below. That
+    // effect is passive: between this component committing "unavailable" and the effect running,
+    // the card would still hold "ready" and leave Reviewed and Approve live for a queued click.
+    // Both updates now land in one commit. The report is made under the same condition as the
+    // state change below, so the card and this component can never disagree about an ignored event.
+    if (statusRef.current !== "decoding" && statusRef.current !== "ready") return;
+    onStatusChangeRef.current(item.evidenceId, "unavailable");
     setState((current) => current.status === "decoding" || current.status === "ready"
       ? {
           status: "unavailable",
@@ -154,7 +163,7 @@ export function EvidenceArtifactView({
           retryable: false,
         }
       : current);
-  }, []);
+  }, [item.evidenceId]);
 
   const retry = useCallback(() => setAttempt((current) => current + 1), []);
 

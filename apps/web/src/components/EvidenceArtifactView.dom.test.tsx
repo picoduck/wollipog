@@ -216,6 +216,23 @@ test("a digest mismatch or an unavailable artifact shows no image and cannot cou
     domWindow.localStorage.clear();
   }
 
+  // An image that was shown and marked can still fail afterwards. The mark must stop counting in
+  // the same update that removes the image, not an effect later.
+  const regressed = await mount(sessionWith([artifactItem()]), async () => new Blob([PNG]));
+  try {
+    await regressed.decode("load");
+    await act(async () => regressed.checkbox("desktop-after").click());
+    assert.equal(regressed.button("Approve").disabled, false, "a shown and marked item enables approval");
+    await regressed.decode("error");
+    assert.equal(regressed.container.querySelector(".evidence-artifact img"), null);
+    assert.equal(regressed.checkbox("desktop-after").disabled, true);
+    assert.equal(regressed.checkbox("desktop-after").checked, false, "the earlier mark no longer reads as a review");
+    assert.equal(regressed.button("Approve").disabled, true, "approval is withdrawn with the image");
+  } finally {
+    await regressed.unmount();
+    domWindow.localStorage.clear();
+  }
+
   let failures = 1;
   const flaky = await mount(sessionWith([artifactItem()]), async () => {
     if (failures-- > 0) throw new Error("network down");
