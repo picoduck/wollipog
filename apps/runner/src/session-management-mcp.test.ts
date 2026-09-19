@@ -239,6 +239,38 @@ test("PR merge reconciliation fails closed against mixed-version control planes"
   assert.equal(calls.length, 0, "an old peer never receives a reconciliation request");
 });
 
+test("a child-facing decision message is forwarded to a current control plane and refused by an older one", async () => {
+  const current = makeDeps();
+  current.deps.orchestrator = true;
+  current.deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionChildMessage;
+  await callTool(current.deps, "resolve_descendant_workflow_decision", {
+    sessionId: "child", occurrenceId: "workflow_2", outcome: "deny",
+    rationale: "Audit note.", childMessage: "Re-run review over the full diff.",
+  });
+  assert.deepEqual(current.calls.at(-1)?.body, {
+    sessionId: "child", occurrenceId: "workflow_2",
+    resolution: { action: "resolve_workflow_decision", outcome: "deny",
+      rationale: "Audit note.", childMessage: "Re-run review over the full diff." },
+  });
+
+  const older = makeDeps();
+  older.deps.orchestrator = true;
+  older.deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionChildMessage - 1;
+  const refused = await callTool(older.deps, "resolve_descendant_workflow_decision", {
+    sessionId: "child", occurrenceId: "workflow_2", outcome: "deny", childMessage: "Re-run review.",
+  });
+  assert.equal(refused.isError, true);
+  assert.match(resultText(refused), new RegExp(
+    `protocol v${RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionChildMessage}`, "u",
+  ));
+  assert.equal(older.calls.length, 0,
+    "an older control plane would drop the message and still resolve, so it is never asked to");
+  await callTool(older.deps, "resolve_descendant_workflow_decision", {
+    sessionId: "child", occurrenceId: "workflow_2", outcome: "deny",
+  });
+  assert.equal(older.calls.length, 1, "a resolution without a message still reaches an older control plane");
+});
+
 /* -------------------------------------------------------------------------- */
 /* Protocol surface                                                            */
 /* -------------------------------------------------------------------------- */

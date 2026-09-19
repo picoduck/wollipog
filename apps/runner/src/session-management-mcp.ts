@@ -6,6 +6,7 @@ import {
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
+  WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
 } from "@wollipog/protocol";
 import { VERSION } from "./version.js";
 
@@ -255,6 +256,27 @@ async function workflowDecisionActionCompatibilityError(deps: McpDeps): Promise<
     ? null
     : errorResult(
         `PR merge action admission requires control plane protocol v${required}; connected control plane reports v${String(actual ?? "unknown")}. Update Wollipog before consuming this approval.`,
+      );
+}
+
+/** A pre-v166 control plane drops an unknown childMessage and still resolves the decision, so the
+ * resolver would believe the child was told. Refuse before the resolution instead. */
+async function workflowDecisionChildMessageCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionChildMessage;
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const result = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!result.ok) {
+      return errorResult(
+        `A child-facing decision message requires control plane protocol v${required}, but compatibility could not be verified: ${result.message}`,
+      );
+    }
+    actual = result.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= required
+    ? null
+    : errorResult(
+        `A child-facing decision message requires control plane protocol v${required}; connected control plane reports v${String(actual ?? "unknown")}. Resolve without childMessage and send it with prompt_session, or update Wollipog.`,
       );
 }
 
@@ -953,7 +975,13 @@ export const TOOLS: McpTool[] = [
         outcome: { type: "string", enum: ["approve", "deny"] },
         selectedOptionId: { type: "string", description: "Required approved option for implementation questions only" },
         evidenceReviewed: { type: "array", items: { type: "string" }, description: "Every evidence id actually inspected; required for UI evidence approval" },
-        rationale: { type: "string" },
+        rationale: { type: "string", description: "Audit-only: never retained or shown to the child; only its digest is recorded" },
+        childMessage: {
+          type: "string",
+          minLength: 1,
+          maxLength: WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
+          description: "Optional message for the child: shown in its get_workflow_decision view and delivered as the prompt that resumes it. Say what to change after a denial.",
+        },
       },
       required: ["sessionId", "occurrenceId", "outcome"],
       additionalProperties: false,
@@ -964,6 +992,11 @@ export const TOOLS: McpTool[] = [
           typeof args?.occurrenceId !== "string" || !args.occurrenceId ||
           (args?.outcome !== "approve" && args?.outcome !== "deny")) {
         return errorResult("sessionId, occurrenceId, and an approve or deny outcome are required");
+      }
+      if (args?.childMessage !== undefined) {
+        if (typeof args.childMessage !== "string") return errorResult("childMessage must be a string");
+        const compatibilityError = await workflowDecisionChildMessageCompatibilityError(deps);
+        if (compatibilityError) return compatibilityError;
       }
       const r = await cpFetch(
         deps,
@@ -978,6 +1011,7 @@ export const TOOLS: McpTool[] = [
             ...(typeof args.selectedOptionId === "string" ? { selectedOptionId: args.selectedOptionId } : {}),
             ...(Array.isArray(args.evidenceReviewed) ? { evidenceReviewed: args.evidenceReviewed } : {}),
             ...(typeof args.rationale === "string" ? { rationale: args.rationale } : {}),
+            ...(typeof args.childMessage === "string" ? { childMessage: args.childMessage } : {}),
           },
         },
       );

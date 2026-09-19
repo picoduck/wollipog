@@ -584,6 +584,7 @@ CREATE TABLE IF NOT EXISTS workflow_decisions (
   action_provider_turn_id TEXT,
   action_provider_thread_id TEXT,
   action_runner_history_epoch INTEGER,
+  child_message         TEXT,
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
   FOREIGN KEY (controlling_session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
@@ -4428,6 +4429,7 @@ export class ControlPlaneDb {
       "action_provider_turn_id TEXT",
       "action_provider_thread_id TEXT",
       "action_runner_history_epoch INTEGER",
+      "child_message TEXT",
     ]) {
       try { db.exec(`ALTER TABLE workflow_decisions ADD COLUMN ${column}`); } catch { /* already present */ }
     }
@@ -13352,14 +13354,15 @@ export class ControlPlaneDb {
     selectedOptionId?: string,
     evidenceReviewed?: string[],
     rationaleDigest?: string,
+    childMessage?: string,
   ): WorkflowDecisionView | null {
     const result = this.stmt(
       `UPDATE workflow_decisions SET status=?, selected_option_id=?, evidence_reviewed=?,
-       rationale_digest=?, resolved_at=?
+       rationale_digest=?, child_message=?, resolved_at=?
        WHERE occurrence_id=? AND status='pending' AND authority=?`,
     ).run(
       outcome, selectedOptionId ?? null, evidenceReviewed ? JSON.stringify(evidenceReviewed) : null,
-      rationaleDigest ?? null, now, occurrenceId, expectedAuthority,
+      rationaleDigest ?? null, childMessage ?? null, now, occurrenceId, expectedAuthority,
     );
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
   }
@@ -22260,6 +22263,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     action_provider_turn_id?: string | null;
     action_provider_thread_id?: string | null;
     action_runner_history_epoch?: number | null;
+    child_message?: string | null;
   } | undefined;
   if (!row?.request_id || !row.occurrence_id || !row.session_id || !row.controlling_session_id ||
       !row.category || !row.resource_key || !row.resource_snapshot || !row.resource_digest ||
@@ -22303,6 +22307,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
             : {}),
         } }
       : {}),
+    ...(row.child_message ? { childMessage: row.child_message } : {}),
   };
 }
 

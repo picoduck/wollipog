@@ -29,6 +29,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   HUMAN_ONLY_PARENT_CONTROL_POLICY,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   WORKFLOW_DECISION_CATEGORIES,
+  WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
   type AgentContext,
   type AgentDriverKind,
   type AcpSessionContextConfig,
@@ -416,6 +417,21 @@ function fail<T>(error: string, status = 400): ServiceResult<T> {
 function boundedDecisionString(value: unknown, max: number): value is string {
   return typeof value === "string" && value.trim().length > 0 && value.length <= max &&
     !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value);
+}
+
+/** The prompt that resumes a child after its decision resolves with a child-facing message. The
+ * decision record stays authoritative: a child polling inside its turn may already have read it. */
+function workflowDecisionChildMessagePrompt(decision: WorkflowDecisionView): string {
+  const resolver = decision.authority === "orchestrator" ? "Your Orchestrator" : "A human reviewer";
+  return [
+    `[Wollipog Workflow Decision — ${decision.occurrenceId}]`,
+    `${resolver} ${decision.status} your ${decision.category} decision ${decision.occurrenceId} ` +
+      `(resource ${decision.resourceKey}) and left this message for you:`,
+    decision.childMessage,
+    "The decision record is authoritative: read it with get_workflow_decision before acting. " +
+      "If you have already acted on this outcome, continue from where you are.",
+    "[End Wollipog Workflow Decision]",
+  ].join("\n");
 }
 
 export function validateParentControlDecisions(value: unknown): value is ParentControlDecisionPolicy {
@@ -6205,6 +6221,7 @@ export class SessionsService {
       checked.data.selectedOptionId,
       checked.data.evidenceReviewed,
       auditDigest(checked.data.rationale),
+      checked.data.childMessage,
     );
     if (!resolved) return fail("workflow decision was resolved concurrently", 409);
     const child = this.db.getSession(childSessionId);
@@ -6218,6 +6235,14 @@ export class SessionsService {
     );
     this.hub.sessionChangedById(childSessionId);
     this.publishCampaignAttentionTransition(currentParent);
+    if (resolved.childMessage && child) {
+      // Ordinary prompt delivery wakes an idle child and queues behind a turn still in progress.
+      // A refusal (runner offline, a guardrail pause) leaves the message on the decision record.
+      const delivered = this.prompt(childSessionId, workflowDecisionChildMessagePrompt(resolved));
+      if (!delivered.ok) {
+        this.log.warn(`workflow decision ${occurrenceId} message not delivered to ${childSessionId}: ${delivered.error}`);
+      }
+    }
     return ok(resolved);
   }
 
@@ -6730,6 +6755,13 @@ export class SessionsService {
         (!boundedDecisionString(resolution.rationale, 4000))) {
       return fail("workflow decision rationale is invalid", 400);
     }
+    if (resolution.childMessage !== undefined &&
+        !boundedDecisionString(resolution.childMessage, WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS)) {
+      return fail(
+        `workflow decision childMessage must be non-empty text of at most ${WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS} characters`,
+        400,
+      );
+    }
     const snapshot = decision.resourceSnapshot;
     if (snapshot.category === "implementation_question") {
       if (resolution.outcome === "approve" &&
@@ -6839,6 +6871,8 @@ export class SessionsService {
     const evidenceReferences = decision.resourceSnapshot.category === "ui_evidence_approval"
       ? decision.resourceSnapshot.evidence.map((item) => item.evidenceId)
       : undefined;
+    // Only the resolving record carries the message digest; later consume/revoke records do not.
+    const resolvingRecord = outcome === "allowed" || outcome === "denied";
     this.db.appendGovernanceAudit({
       requestId: decision.occurrenceId,
       approvalKind: "workflow_decision",
@@ -6857,6 +6891,9 @@ export class SessionsService {
         resourceDigest: decision.resourceDigest,
         ...(evidenceReferences?.length ? { evidenceReferences } : {}),
         ...(rationale ? { rationaleDigest: auditDigest(rationale)! } : {}),
+        ...(resolvingRecord && decision.childMessage
+          ? { childMessageDigest: auditDigest(decision.childMessage)! }
+          : {}),
       },
       timestamp: now,
     });
