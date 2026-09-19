@@ -12696,6 +12696,34 @@ export class ControlPlaneDb {
     ).get(sessionId, eventSeq));
   }
 
+  /** Seq of the session's last top-level report when no later report or assignment superseded it,
+   * and null when its last word is not a report. The same predicate that keeps a stored
+   * attestation valid, so a stopped session's report stays attestable after it ends (#1440). */
+  durableFinalReportSeq(sessionId: string): number | null {
+    const row = this.stmt(
+      `SELECT target.seq AS seq FROM session_events target
+       WHERE target.session_id=? AND (
+         target.kind='agent_response_completed' OR
+         (target.kind='agent_message' AND json_extract(target.payload, '$.final')=1
+          AND trim(json_extract(target.payload, '$.text'))!=''
+          AND json_type(target.payload, '$.parentToolUseId') IS NULL)
+       ) AND NOT EXISTS (
+         SELECT 1 FROM session_events later
+         WHERE later.session_id=target.session_id AND later.seq>target.seq AND (
+           later.kind='agent_response_completed' OR
+           (later.kind='agent_message' AND json_extract(later.payload, '$.final')=1
+            AND trim(json_extract(later.payload, '$.text'))!=''
+            AND json_type(later.payload, '$.parentToolUseId') IS NULL)
+         )
+       ) AND NOT EXISTS (
+         SELECT 1 FROM session_events assignment
+         WHERE assignment.session_id=target.session_id AND assignment.seq>target.seq
+           AND assignment.kind='user_message'
+       ) LIMIT 1`,
+    ).get(sessionId) as { seq: number } | undefined;
+    return row?.seq ?? null;
+  }
+
   verifyCampaignChildReport(
     campaignSessionId: string,
     childSessionId: string,
