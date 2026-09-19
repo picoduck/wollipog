@@ -88,6 +88,7 @@ export function SessionHeader({
   providerLogoutSupported,
   stopBeforeArchiveSupported,
   unarchiveAndRestartSupported = false,
+  onReloadSession,
   exportReady,
   onArchive,
   onSnooze,
@@ -117,6 +118,8 @@ export function SessionHeader({
   stopBeforeArchiveSupported: boolean;
   /** The control plane owns one preflighted Unarchive and Restart; absent on older control planes. */
   unarchiveAndRestartSupported?: boolean;
+  /** Re-read this session from the server after an outcome the client could not confirm. */
+  onReloadSession?: () => Promise<void>;
   exportReady: boolean;
   onArchive?: () => void;
   onSnooze?: () => void;
@@ -821,7 +824,11 @@ export function SessionHeader({
                             await api.unarchiveAndRestart(session.id);
                             showToast("Session restored and restarting.");
                           } catch (cause) {
-                            showToast(unarchiveAndRestartFailureMessage(cause).message, { tone: "error" });
+                            const failure = unarchiveAndRestartFailureMessage(cause);
+                            showToast(failure.message, { tone: "error" });
+                            // The server may have restored and relaunched this session before the
+                            // response was lost; the header would otherwise keep showing it archived.
+                            if (failure.ambiguous) await onReloadSession?.();
                           }
                         });
                         return;

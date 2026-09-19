@@ -5809,9 +5809,11 @@ export class SessionsService {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     if (!session.archived) {
-      // A duplicate request, or a second client, lands after the first one already restored and
-      // relaunched the session. Report that launch instead of sending another replacement process.
-      if (!session.archiveStatus && !isTerminal(session.status)) return ok(session);
+      // `starting` is the only state this operation itself produces, so it is the only evidence
+      // that a duplicate request (or a second client) is observing an accepted launch rather than
+      // an unrelated session that was never archived. Anything else is refused rather than
+      // reported as a restart that this request never performed.
+      if (!session.archiveStatus && session.status === "starting") return ok(session);
       return fail("session is not archived; use Restart instead", 409);
     }
     if (this.db.sideChatParent(sessionId)) {

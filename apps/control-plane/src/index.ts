@@ -4748,7 +4748,12 @@ app.post("/api/sessions/:id/unarchive-and-restart", async (req, reply) => {
   if (requestPrincipal(req)?.kind === "agent") {
     return reply.code(403).send({ error: "session credentials may archive descendants, but cannot unarchive them" });
   }
-  return respond(reply, svc.unarchiveAndRestart(id));
+  const result = svc.unarchiveAndRestart(id);
+  if (result.ok) return respond(reply, result);
+  // A refusal reports the archive state it left behind. Status alone cannot carry this: a 409 can
+  // mean "refused by preflight, still archived" or "already restored by an earlier request", and a
+  // client that guesses would tell the user the opposite of what happened.
+  return reply.code(result.status).send({ error: result.error, archived: db.getSession(id)?.archived === true });
 });
 
 app.post("/api/sessions/:id/retry-stop", async (req, reply) => {

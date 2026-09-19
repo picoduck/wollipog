@@ -13017,14 +13017,16 @@ test("duplicate and concurrent unarchive-and-restart requests launch exactly one
 test("unarchive and restart refuses a session that is not archived without launching", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
-  db.updateSessionStatus(id, "completed", Date.now());
   hub.sentToRunner.length = 0;
-
-  const result = svc.unarchiveAndRestart(id);
-
-  assert.equal(result.status, 409);
-  assert.match(result.error ?? "", /not archived/u);
-  assert.equal(hub.sentOfType("start_session").length, 0);
+  // Being active is not evidence of an accepted restore: a session that was never archived must not
+  // be reported as restarted by an operation that sent nothing.
+  for (const status of ["running", "idle", "input_required", "completed"] as const) {
+    db.updateSessionStatus(id, status, Date.now());
+    const result = svc.unarchiveAndRestart(id);
+    assert.equal(result.status, 409, status);
+    assert.match(result.error ?? "", /not archived/u, status);
+    assert.equal(hub.sentOfType("start_session").length, 0, status);
+  }
   assert.equal(svc.unarchiveAndRestart("missing").status, 404);
 });
 

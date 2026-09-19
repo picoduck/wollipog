@@ -391,7 +391,7 @@ test("an Unarchive and Restart preflight refusal keeps the row archived with an 
   const archived = session(1, { status: "completed" });
   const fixture = await mount([archived], {
     unarchiveAndRestart: async () => {
-      throw new ApiError("runner is offline", 409);
+      throw new ApiError("runner is offline", 409, undefined, { error: "runner is offline", archived: true });
     },
   }, { unarchiveAndRestart: true });
   const loadsBefore = fixture.archivePageCalls();

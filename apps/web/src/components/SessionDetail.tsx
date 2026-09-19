@@ -4486,6 +4486,7 @@ function SessionDetailLoaded({
           runnerProtocolVersion={runner?.protocolVersion}
           stopBeforeArchiveSupported={stopBeforeArchiveSupported}
           unarchiveAndRestartSupported={unarchiveAndRestartSupported}
+          onReloadSession={async () => { loadSession((await api.session(session.id)).session); }}
           providerLogoutSupported={runner?.agents.find((agent) => agent.id === session.agentId)?.acp?.logout === true}
           exportReady={eventHistory?.everComplete === true}
           onBack={onBack ?? (() => navigate({ name: "inbox" }))}

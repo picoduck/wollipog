@@ -121,11 +121,19 @@ test("archived sessions offer Unarchive and Restart only when the control plane 
   assert.equal(sessionArchiveActionLabel({ archived: false, status: "completed" }, true, true), "Archive");
 });
 
-test("Unarchive and Restart failures distinguish preflight refusals from ambiguous delivery", () => {
-  assert.deepEqual(unarchiveAndRestartFailureMessage(new ApiError("runner is offline", 409)), {
+test("Unarchive and Restart failures are classified by the server receipt, not the status code", () => {
+  assert.deepEqual(unarchiveAndRestartFailureMessage(
+    new ApiError("runner is offline", 409, undefined, { error: "runner is offline", archived: true }),
+  ), {
     message: "Could not unarchive and restart session: runner is offline. The session is still archived.",
     ambiguous: false,
   });
+  assert.equal(unarchiveAndRestartFailureMessage(new ApiError(
+    "session is not archived; use Restart instead", 409, undefined,
+    { error: "session is not archived; use Restart instead", archived: false },
+  )).ambiguous, true, "a state conflict is not proof that the session stayed archived");
+  assert.equal(unarchiveAndRestartFailureMessage(new ApiError("Not Found", 404)).ambiguous, true,
+    "a 4xx with no receipt (a proxy error page, a deleted session) is unknown, not archived");
   assert.equal(unarchiveAndRestartFailureMessage(new ApiError("Bad Gateway", 502)).ambiguous, true);
   assert.equal(unarchiveAndRestartFailureMessage(new TypeError("Failed to fetch")).ambiguous, true);
 });

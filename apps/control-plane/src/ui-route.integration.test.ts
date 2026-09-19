@@ -1907,6 +1907,17 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   assert.equal(runnerInbox.has((message) => message.type === "start_session" &&
     (message.spec as { sessionId?: string } | undefined)?.sessionId === "session-history"), false,
   "the second client observes the accepted launch instead of sending another");
+  // A refusal reports the archive state it left behind, so a client never has to infer it from the
+  // status code. An ordinary active session was never archived and is refused, not reported as
+  // restarted by a request that sent nothing.
+  const refusedRestore = await ownerFetch("/api/sessions/session-pre-v76/unarchive-and-restart", { method: "POST" });
+  assert.equal(refusedRestore.status, 409);
+  assert.deepEqual(await refusedRestore.json() as { error: string; archived: boolean }, {
+    error: "session is not archived; use Restart instead",
+    archived: false,
+  });
+  assert.equal(runnerInbox.has((message) => message.type === "start_session" &&
+    (message.spec as { sessionId?: string } | undefined)?.sessionId === "session-pre-v76"), false);
 });
 
 test("legacy workspace rename cannot bypass durable Project management authority", { timeout: 30_000 }, async (t) => {

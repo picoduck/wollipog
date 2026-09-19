@@ -34,13 +34,16 @@ export function sessionArchiveActionLabel(
   return sessionArchiveRequiresStop(session, stopBeforeArchiveSupported) ? "Archive and Stop" : "Archive";
 }
 
-/** The server refuses Unarchive and Restart with a 4xx only from its preflight, before the archive
- * flag changes, so the session is known to be archived still. Anything else (a dropped connection,
- * a gateway error) is ambiguous and must be reconciled against the server, never assumed. */
+/** A refused Unarchive and Restart reports the archive state the server left behind, and only that
+ * receipt makes the outcome certain: the same 409 can mean "refused by preflight, still archived" or
+ * "an earlier request already restored this session". Without the receipt — a dropped connection, a
+ * gateway error, a proxy's own error page — the outcome is unknown and must be reconciled. */
 export function unarchiveAndRestartFailureMessage(cause: unknown): { message: string; ambiguous: boolean } {
   const detail = cause instanceof Error ? cause.message : String(cause);
-  const status = typeof cause === "object" && cause !== null && "status" in cause ? (cause as { status: unknown }).status : null;
-  if (typeof status === "number" && status >= 400 && status < 500) {
+  const details = typeof cause === "object" && cause !== null && "details" in cause
+    ? (cause as { details?: Record<string, unknown> }).details
+    : undefined;
+  if (details?.archived === true) {
     return { message: `Could not unarchive and restart session: ${detail}. The session is still archived.`, ambiguous: false };
   }
   return {
