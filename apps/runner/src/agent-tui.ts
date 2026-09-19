@@ -35,9 +35,13 @@ export async function prepareAgentTuiLaunch(
      * #1337 gave the guard's protection source: refuse before the write, never clean up after it.
      */
     assertSessionNotDeleted(sessionId: string): void;
-    /** Runner-owned managed-worktree guard provisioning for this spawn (#1337). */
+    /**
+     * Runner-owned managed-worktree guard provisioning for this spawn (#1337, #1377). `cwd` is the
+     * directory the TUI will run in, where a Codex launch's project-scoped hooks are resolved.
+     */
     provisionManagedWorktreeGuard(
       spec: SessionMeta,
+      cwd?: string,
     ): AgentTuiGuardProvisioning | Promise<AgentTuiGuardProvisioning>;
     prepareScratch(meta: SessionMeta): Promise<string>;
     probe?: typeof codexOrchestratorMcpArgs;
@@ -86,14 +90,16 @@ export async function prepareAgentTuiLaunch(
     ));
   }
   const launch = agentTuiLaunch(
-    await withManagedWorktreeGuard(prepared, dependencies),
+    await withManagedWorktreeGuard(prepared, dependencies, cwd),
     { platform, comspec: process.env.ComSpec },
   );
   return launch ? { ...launch, cwd } : null;
 }
 
+const GUARDED_TUI_DRIVERS: ReadonlySet<string> = new Set(["claude-code", "codex", "codex-app-server"]);
+
 /**
- * Carry the managed-worktree guard into a TUI launch, or refuse the launch (#1337).
+ * Carry the managed-worktree guard into a TUI launch, or refuse the launch (#1337, #1377).
  *
  * Before this, a TUI replayed the session's persisted arguments and never re-ran launch
  * provisioning, so a runner-owned worktree opened in the TUI had neither the control-channel veto
@@ -103,23 +109,28 @@ export async function prepareAgentTuiLaunch(
  * will use — the refusal the bug report allows, rather than an unprotected launch. A session that
  * owns none launches as it always did, guarded whenever the guard is provisionable.
  *
- * Other providers' worktree protection is likewise driver-side and has no TUI form
- * (docs/adr/0012), so only a Claude launch is provisioned here; nothing about theirs changes.
+ * Codex's structured protection is driver-side as well, but Codex offers the same kind of
+ * `PreToolUse` hook, so a Codex launch carries the same sidecar through `-c` (#1377). Its
+ * provisioning can refuse for a reason the person opening the TUI can act on (untrusted hooks of
+ * their own), so that reason is part of the error. Other providers have no guard mechanism and
+ * are unchanged.
  */
 async function withManagedWorktreeGuard(
   meta: SessionMeta,
   dependencies: Pick<
     Parameters<typeof prepareAgentTuiLaunch>[1], "provisionManagedWorktreeGuard"
   >,
+  cwd?: string,
 ): Promise<SessionMeta> {
-  if (meta.driver !== "claude-code" || !meta.command) return meta;
+  if (!GUARDED_TUI_DRIVERS.has(meta.driver) || !meta.command) return meta;
   // Provisioning rewrites the launch arguments; durable metadata must not move under it.
   const prepared = { ...meta, args: [...meta.args] };
-  const guard = await dependencies.provisionManagedWorktreeGuard(prepared);
+  const guard = await dependencies.provisionManagedWorktreeGuard(prepared, cwd);
   if (guard.protections.length > 0 && !guard.guardActive) {
     throw new Error(
       "Native TUI is unavailable for this session: its managed worktree guard could not be " +
-      "provisioned, and a TUI carries no other refusal for a runner-owned worktree.",
+      "provisioned, and a TUI carries no other refusal for a runner-owned worktree." +
+      (guard.reason ? ` Reason: ${guard.reason}.` : ""),
     );
   }
   return { ...prepared, args: guard.args };

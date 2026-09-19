@@ -8,12 +8,18 @@
  * runner-driven launch runs — a fresh settings document and a fresh protection list — and then the
  * driver's own pre-spawn preparation, so `guardActive` is read from the argv the TUI will launch
  * with rather than inferred from the protections existing.
+ *
+ * A Codex TUI (#1377) carries the same sidecar as a Codex `PreToolUse` hook installed through `-c`,
+ * over the same per-session protections file; see `codex-managed-worktree-guard.ts` for what was
+ * measured and why the launch's hook inventory is enumerated first.
  */
 
+import { CODEX_GUARD_DRIVERS } from "./codex-managed-worktree-guard.js";
 import {
   defaultClaudeHookHost,
   prepareClaudeHookArgs,
   provisionClaudeHooks,
+  provisionCodexGuard,
   type ClaudeHookHost,
 } from "./hook-settings.js";
 import type { verifyManagedWorktreeGuardLaunch } from "./managed-worktree-guard.js";
@@ -25,8 +31,10 @@ export interface AgentTuiGuardProvisioning {
   protections: readonly ManagedWorktreeProtection[];
   /** The argv this TUI spawn must use, with the runner-owned `--settings` injected or healed. */
   args: string[];
-  /** Whether the guard really is in `args`, read from the settings document it names. */
+  /** Whether the guard really is in `args`, read from the settings document or argv it names. */
   guardActive: boolean;
+  /** Why the guard is not active, when provisioning knows (the refusal carries it). */
+  reason?: string;
 }
 
 export interface AgentTuiGuardConfig {
@@ -45,6 +53,9 @@ export interface AgentTuiGuardConfig {
   protections: () => readonly ManagedWorktreeProtection[];
   /** Seam for tests: prove the guard sidecar actually refuses before relying on it. */
   verifyGuardLaunch?: typeof verifyManagedWorktreeGuardLaunch;
+  /** Seam for tests: enumerate a Codex launch's effective hooks (#1377). */
+  readCodexHookInventory?: Parameters<typeof provisionCodexGuard>[1]["readHookInventory"];
+  platform?: NodeJS.Platform;
 }
 
 /**
@@ -56,8 +67,17 @@ export function provisionAgentTuiManagedWorktreeGuard(
   config: AgentTuiGuardConfig,
   log: (message: string) => void,
   host: ClaudeHookHost = defaultClaudeHookHost(),
-): AgentTuiGuardProvisioning {
-  const { protections: resolveProtections, ...hookConfig } = config;
+  cwd: string = spec.worktreePath ?? spec.repoPath,
+): AgentTuiGuardProvisioning | Promise<AgentTuiGuardProvisioning> {
+  if (CODEX_GUARD_DRIVERS.has(spec.driver)) {
+    return provisionAgentTuiCodexManagedWorktreeGuard(spec, config, log, host, cwd);
+  }
+  const {
+    protections: resolveProtections,
+    readCodexHookInventory: _readCodexHookInventory,
+    platform: _platform,
+    ...hookConfig
+  } = config;
   // Resolved BEFORE anything is written, so a caller that refuses the launch from here (a session
   // deleted while the TUI was preparing) leaves no runner-owned files behind for it.
   const protections = resolveProtections();
@@ -77,4 +97,33 @@ export function provisionAgentTuiManagedWorktreeGuard(
   // Claude process it starts. A TUI is one more such spawn.
   const prepared = prepareClaudeHookArgs(spec.args);
   return { protections, args: prepared.args, guardActive: prepared.guardActive };
+}
+
+/**
+ * The Codex form (#1377). A session that owns no runner-created worktree opens exactly as before:
+ * nothing is written and no probe runs. One that owns any is guarded or, through the caller,
+ * refused — never opened unguarded.
+ */
+async function provisionAgentTuiCodexManagedWorktreeGuard(
+  spec: SessionMeta,
+  config: AgentTuiGuardConfig,
+  log: (message: string) => void,
+  host: ClaudeHookHost,
+  cwd: string,
+): Promise<AgentTuiGuardProvisioning> {
+  const protections = config.protections();
+  if (protections.length === 0) return { protections, args: spec.args, guardActive: false };
+  const guard = await provisionCodexGuard(
+    spec,
+    {
+      protections,
+      cwd,
+      platform: config.platform,
+      verifyGuardLaunch: config.verifyGuardLaunch,
+      readHookInventory: config.readCodexHookInventory,
+    },
+    log,
+    host,
+  );
+  return { protections, ...guard };
 }
