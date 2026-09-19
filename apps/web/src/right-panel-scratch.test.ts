@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
 import {
+  PANEL_SCRATCH_CLEARED_MARKER_TTL_MS,
+  PANEL_SCRATCH_CLEARED_SCOPE_LIMIT,
   PANEL_SCRATCH_PERSIST_CHAR_LIMIT,
   PANEL_SCRATCH_SESSION_LIMIT,
   clearPanelScratch,
@@ -14,13 +16,20 @@ import {
   writePanelScratch,
 } from "./right-panel-scratch.js";
 
-/** The record the map is mirrored into, spelled the way the module writes it. */
-const PERSIST_KEY = "wollipog.right-panel-scratch.v1";
+/** Where one scope's record lives, spelled the way the module writes it. */
+const RECORD_PREFIX = "wollipog.right-panel-scratch.v2:";
+
+/** The single whole-map record #1282 wrote, which #1391 imports once and then retires. */
+const WHOLE_MAP_KEY = "wollipog.right-panel-scratch.v1";
 
 const backing = new Map<string, string>();
 let denyWrites = false;
 let denyRemovals = false;
 (globalThis as { localStorage?: unknown }).localStorage = {
+  get length(): number {
+    return backing.size;
+  },
+  key: (index: number): string | null => [...backing.keys()][index] ?? null,
   getItem: (key: string) => backing.get(key) ?? null,
   setItem: (key: string, value: string) => {
     if (denyWrites) throw new DOMException("Storage quota exceeded", "QuotaExceededError");
@@ -31,6 +40,28 @@ let denyRemovals = false;
     backing.delete(key);
   },
 };
+
+interface StoredRecord {
+  version: number;
+  writer: string;
+  touchedAt: number;
+  values: Record<string, { value: string; retention: string; updatedAt: number }>;
+  cleared: Record<string, number>;
+}
+
+function storedRecordKeys(): string[] {
+  return [...backing.keys()].filter((key) => key.startsWith(RECORD_PREFIX));
+}
+
+function storedRecord(scope: string): StoredRecord | null {
+  const raw = backing.get(`${RECORD_PREFIX}${scope}`);
+  return raw === undefined ? null : (JSON.parse(raw) as StoredRecord);
+}
+
+/** Everything the origin is spending on scratch, keys included: the ceiling covers the lot. */
+function storedChars(): number {
+  return storedRecordKeys().reduce((total, key) => total + key.length + backing.get(key)!.length, 0);
+}
 
 /** A page reload, as far as this module is concerned: memory goes, storage stays. */
 function reload(): void {
@@ -294,13 +325,32 @@ test("a sent draft stays sent across a reload", () => {
   reload();
 
   assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined);
-  assert.equal(backing.get(PERSIST_KEY), undefined, "an empty map leaves no record behind");
+  const record = storedRecord(scope);
+  assert.deepEqual(record?.values, {}, "nothing is left for a reload to restore");
+  assert.ok(record?.cleared["sidechat.draft"], "only the marker that keeps it sent (#1391)");
+});
+
+test("a scope with nothing left to say is collected rather than kept as an empty record", () => {
+  const scope = panelScratchScopeKey("session-1");
+  // Never a value, so nothing about this deletion is worth a marker: a body reporting that it owns
+  // no value under a key it never wrote must not spend the marker budget on saying so.
+  writePanelScratch(scope, "files.directory", null);
+  assert.equal(storedRecordKeys().length, 0);
+
+  writePanelScratch(scope, "files.directory", "apps/web");
+  assert.equal(storedRecordKeys().length, 1);
+  writePanelScratch(scope, "files.directory", null);
+  assert.deepEqual(storedRecord(scope)?.values, {}, "the value is gone");
+  assert.ok(storedRecord(scope)?.cleared["files.directory"], "and a marker keeps it gone");
 });
 
 test("what the bound evicted does not come back on reload", () => {
   const scopes = Array.from({ length: PANEL_SCRATCH_SESSION_LIMIT + 1 },
     (_unused, index) => panelScratchScopeKey(`session-${index}`));
   for (const scope of scopes) writePanelScratch(scope, "files.directory", scope);
+
+  assert.equal(storedRecordKeys().length, PANEL_SCRATCH_SESSION_LIMIT,
+    "the sweep holds the records to the same bound the map holds");
 
   reload();
 
@@ -310,15 +360,53 @@ test("what the bound evicted does not come back on reload", () => {
   assert.equal(readPanelScratch(scopes.at(-1)!, "files.directory"), scopes.at(-1));
 });
 
+test("what the whole-map record was holding is taken over and the record retired", () => {
+  // #1282's record is where a user's unsent text actually is when this build first runs, so
+  // ignoring it would destroy exactly what that change was for.
+  const writing = panelScratchScopeKey("session-writing");
+  const browsing = panelScratchScopeKey("session-browsing");
+  backing.set(WHOLE_MAP_KEY, JSON.stringify({
+    version: 1,
+    scopes: [
+      { scope: browsing, values: { "files.directory": { value: "apps/web", retention: "disposable" } } },
+      { scope: writing, values: { "review.requestBody": { value: "half a description", retention: "draft" } } },
+    ],
+  }));
+
+  reload();
+
+  assert.equal(readPanelScratch(writing, "review.requestBody"), "half a description");
+  assert.equal(readPanelScratch(browsing, "files.directory"), "apps/web");
+  assert.equal(backing.get(WHOLE_MAP_KEY), undefined, "and the record it came from is retired");
+  assert.equal(storedRecordKeys().length, 2, "as a record per scope");
+
+  // Retention comes across with it, or the restored draft would lose the exemption that protects
+  // it from the very next tour of other sessions.
+  for (let index = 0; index < PANEL_SCRATCH_SESSION_LIMIT; index += 1) {
+    writePanelScratch(panelScratchScopeKey(`session-${index}`), "files.directory", "apps");
+  }
+  reload();
+  assert.equal(readPanelScratch(writing, "review.requestBody"), "half a description");
+  assert.equal(readPanelScratch(browsing, "files.directory"), undefined);
+});
+
+test("a whole-map record that is unreadable is retired rather than retried forever", () => {
+  backing.set(WHOLE_MAP_KEY, "{not json at all");
+  reload();
+  assert.equal(panelScratchScopeCount(), 0);
+  assert.equal(backing.get(WHOLE_MAP_KEY), undefined);
+});
+
 test("a corrupt record degrades to no scratch rather than wedging the panel", () => {
   const scope = panelScratchScopeKey("session-1");
   writePanelScratch(scope, "files.directory", "apps/web");
-  backing.set(PERSIST_KEY, "{not json at all");
+  backing.set(`${RECORD_PREFIX}${scope}`, "{not json at all");
 
   reload();
 
   assert.equal(readPanelScratch(scope, "files.directory"), undefined);
-  assert.equal(backing.get(PERSIST_KEY), undefined, "unreadable bytes are not left paying rent");
+  assert.equal(backing.get(`${RECORD_PREFIX}${scope}`), undefined,
+    "unreadable bytes are not left paying rent");
   // And the panel goes on working: the next thing written is remembered, and survives the next one.
   writePanelScratch(scope, "files.directory", "apps");
   reload();
@@ -326,46 +414,61 @@ test("a corrupt record degrades to no scratch rather than wedging the panel", ()
 });
 
 test("a record of the wrong shape or version is refused whole", () => {
-  for (const raw of ['{"version":2,"scopes":[]}', '{"version":1,"scopes":{}}', '"scopes"', "null"]) {
+  const scope = panelScratchScopeKey("session-1");
+  const refused = [
+    '{"version":1,"scopes":[]}',
+    '{"version":2,"values":{}}',
+    '{"version":2,"touchedAt":"soon","values":{}}',
+    '{"version":2,"touchedAt":1,"values":[],"cleared":[]}',
+    '"values"',
+    "null",
+  ];
+  for (const raw of refused) {
     clearPanelScratch();
-    backing.set(PERSIST_KEY, raw);
+    backing.set(`${RECORD_PREFIX}${scope}`, raw);
     reload();
     assert.equal(panelScratchScopeCount(), 0, `refused: ${raw}`);
+    assert.equal(backing.get(`${RECORD_PREFIX}${scope}`), undefined, `collected: ${raw}`);
   }
 });
 
 test("one corrupt entry costs only itself", () => {
   // A single hand-edited or stale value must not be able to wipe every other session's drafts on
-  // every reload, so validation is per value and per scope rather than all or nothing.
+  // every reload, so validation is per value and per record rather than all or nothing.
   const scope = panelScratchScopeKey("session-1");
-  backing.set(PERSIST_KEY, JSON.stringify({
-    version: 1,
-    scopes: [
-      "not a scope at all",
-      { scope: "", values: { "files.directory": { value: "apps", retention: "disposable" } } },
-      { scope: panelScratchScopeKey("session-empty"), values: null },
-      {
-        scope,
-        values: {
-          "files.directory": { value: "apps/web", retention: "disposable" },
-          "review.requestBody": { value: "kept", retention: "draft" },
-          "review.branch": { value: 42, retention: "draft" },
-          "review.requestTitle": { value: "no retention" },
-          "browser.mode": { value: "web", retention: "sometimes" },
-          "browser.address": "a bare string",
-        },
-      },
-    ],
+  const other = panelScratchScopeKey("session-2");
+  backing.set(`${RECORD_PREFIX}${other}`, "{ not a record");
+  backing.set(`${RECORD_PREFIX}`, JSON.stringify({
+    version: 2, writer: "another-page", touchedAt: 1,
+    values: { "files.directory": { value: "no scope at all", retention: "disposable", updatedAt: 1 } },
+    cleared: {},
+  }));
+  backing.set(`${RECORD_PREFIX}${scope}`, JSON.stringify({
+    version: 2,
+    writer: "another-page",
+    touchedAt: 2,
+    values: {
+      "files.directory": { value: "apps/web", retention: "disposable", updatedAt: 1 },
+      "review.requestBody": { value: "kept", retention: "draft", updatedAt: 1 },
+      "review.branch": { value: 42, retention: "draft", updatedAt: 1 },
+      "review.requestTitle": { value: "no retention", updatedAt: 1 },
+      "browser.mode": { value: "web", retention: "sometimes", updatedAt: 1 },
+      "browser.address": "a bare string",
+      "review.diffLayout": { value: "split", retention: "disposable" },
+    },
+    cleared: { "sidechat.draft": "whenever" },
   }));
 
   reload();
 
-  assert.equal(panelScratchScopeCount(), 1, "only the one usable scope was restored");
+  assert.equal(panelScratchScopeCount(), 1, "only the one usable record was restored");
   assert.equal(readPanelScratch(scope, "files.directory"), "apps/web");
   assert.equal(readPanelScratch(scope, "review.requestBody"), "kept");
-  for (const key of ["review.branch", "review.requestTitle", "browser.mode", "browser.address"]) {
+  for (const key of ["review.branch", "review.requestTitle", "browser.mode", "browser.address",
+    "review.diffLayout"]) {
     assert.equal(readPanelScratch(scope, key), undefined, `dropped: ${key}`);
   }
+  assert.equal(backing.get(`${RECORD_PREFIX}${other}`), undefined, "and the unreadable one is collected");
 });
 
 test("storage that refuses every write leaves the panel exactly as it was", () => {
@@ -386,30 +489,52 @@ test("storage that refuses every write leaves the panel exactly as it was", () =
     "a storage that comes back is used again");
 });
 
+test("storage that cannot be enumerated degrades to no restore", () => {
+  // The prefix is the index, so a storage without `key`/`length` has no records to find. That is
+  // the same no-restore every other unusable storage degrades to, and it must not throw.
+  const scope = panelScratchScopeKey("session-1");
+  writePanelScratch(scope, "review.requestBody", "half a description", "draft");
+  const enumerable = (globalThis as { localStorage?: unknown }).localStorage;
+  (globalThis as { localStorage?: unknown }).localStorage = {
+    getItem: (key: string) => backing.get(key) ?? null,
+    setItem: (key: string, value: string) => { backing.set(key, value); },
+    removeItem: (key: string) => { backing.delete(key); },
+  };
+  try {
+    reload();
+    assert.equal(readPanelScratch(scope, "review.requestBody"), undefined);
+    writePanelScratch(scope, "files.directory", "apps/web");
+    assert.equal(readPanelScratch(scope, "files.directory"), "apps/web",
+      "and the panel goes on working");
+  } finally {
+    (globalThis as { localStorage?: unknown }).localStorage = enumerable;
+  }
+});
+
 test("a refused write leaves no older record behind to restore instead", () => {
   // A refusal after something was already stored is the dangerous one: the record left in place
-  // describes a map the page has moved past. Restoring it would hand back superseded text — and in
-  // the worst case a message the user already sent, back in the box, inviting a second send.
+  // describes a scope the page has moved past. Restoring it would hand back superseded text — and
+  // in the worst case a message the user already sent, back in the box, inviting a second send.
   const scope = panelScratchScopeKey("session-1");
   writePanelScratch(scope, "sidechat.draft", "on its way", "draft");
   // A second value, so the scope outlives the send and the mirror has a record to write rather than
-  // an empty map to remove — the refusal has to be what clears it.
+  // an empty one to remove — the refusal has to be what clears it.
   writePanelScratch(scope, "files.directory", "apps/web");
-  assert.ok(backing.get(PERSIST_KEY), "the first writes were stored");
+  assert.ok(backing.get(`${RECORD_PREFIX}${scope}`), "the first writes were stored");
 
   denyWrites = true;
   clearPanelScratchIf(scope, "sidechat.draft", "on its way", panelScratchRevision(scope, "sidechat.draft"));
   assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined, "memory is right either way");
-  assert.equal(backing.get(PERSIST_KEY), undefined,
+  assert.equal(backing.get(`${RECORD_PREFIX}${scope}`), undefined,
     "the record that could only tell the older story is gone with it");
 
   reload();
   assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined,
     "no restore, rather than a restore of the sent message");
   assert.equal(readPanelScratch(scope, "files.directory"), undefined,
-    "the whole record went, because the record is only ever written whole");
+    "this scope's record went, because that is the unit a page can speak for");
 
-  // The next write that is allowed through puts the whole map back, so the gap is one mutation wide.
+  // The next write that is allowed through puts the scope back, so the gap is one mutation wide.
   denyWrites = false;
   writePanelScratch(scope, "files.directory", "apps");
   reload();
@@ -417,66 +542,74 @@ test("a refused write leaves no older record behind to restore instead", () => {
   assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined);
 });
 
-test("a refused write takes back only this tab's own record, never another's", () => {
-  // Taking a record back is a correction of this tab's own stale story. Another tab writing since
-  // makes the record that tab's latest state, and deleting it would cost that tab exactly the
-  // reload this module exists for — to fix a lie it never told.
+test("a refused write takes back only this page's own records, never another's", () => {
+  // Taking a record back is a correction of this page's own stale story. Another tab's record is
+  // that tab's latest state, and deleting it would cost that tab exactly the reload this module
+  // exists for — to fix a story it never told. See right-panel-scratch.tabs.test.ts for the same
+  // rule driven through two real pages.
   const mine = panelScratchScopeKey("session-mine");
+  const theirs = panelScratchScopeKey("session-theirs");
   writePanelScratch(mine, "review.requestBody", "my draft", "draft");
   const foreign = JSON.stringify({
-    version: 1,
-    scopes: [{
-      scope: panelScratchScopeKey("session-theirs"),
-      values: { "review.requestBody": { value: "the other tab's unsent draft", retention: "draft" } },
-    }],
+    version: 2,
+    writer: "another-page",
+    touchedAt: Date.now(),
+    values: {
+      "review.requestBody": { value: "the other tab's unsent draft", retention: "draft", updatedAt: 1 },
+    },
+    cleared: {},
   });
-  backing.set(PERSIST_KEY, foreign);
+  backing.set(`${RECORD_PREFIX}${theirs}`, foreign);
 
   denyWrites = true;
   writePanelScratch(mine, "review.requestBody", "my draft, longer", "draft");
-  assert.equal(backing.get(PERSIST_KEY), foreign, "the record that is not ours is left where it is");
+  assert.equal(backing.get(`${RECORD_PREFIX}${theirs}`), foreign,
+    "the record that is not ours is left where it is");
+  assert.equal(backing.get(`${RECORD_PREFIX}${mine}`), undefined, "and ours is taken back");
 
   denyWrites = false;
   reload();
-  assert.equal(readPanelScratch(panelScratchScopeKey("session-theirs"), "review.requestBody"),
-    "the other tab's unsent draft", "and it is still there to be restored from");
+  assert.equal(readPanelScratch(theirs, "review.requestBody"), "the other tab's unsent draft",
+    "and it is still there to be restored from");
 });
 
-test("a removal that did not take leaves the record still this tab's to take back", () => {
+test("a removal that did not take leaves the record still this page's to take back", () => {
   // Removal is best-effort and reports nothing, so a storage refusing writes can refuse the removal
-  // too. Assuming it worked would hand back ownership of a record still sitting there, and the next
-  // refused write would no longer recognise it — leaving the obsolete record to be restored.
+  // too. Surrendering ownership then would leave the obsolete record with nobody entitled to
+  // correct it, which is the whole reason the writer id is stored rather than inferred.
   const scope = panelScratchScopeKey("session-1");
   writePanelScratch(scope, "sidechat.draft", "on its way", "draft");
   writePanelScratch(scope, "files.directory", "apps/web");
-  const stale = backing.get(PERSIST_KEY);
+  const stale = backing.get(`${RECORD_PREFIX}${scope}`);
 
   denyWrites = true;
   denyRemovals = true;
   clearPanelScratchIf(scope, "sidechat.draft", "on its way", panelScratchRevision(scope, "sidechat.draft"));
-  assert.equal(backing.get(PERSIST_KEY), stale, "nothing could be written and nothing could be removed");
+  assert.equal(backing.get(`${RECORD_PREFIX}${scope}`), stale,
+    "nothing could be written and nothing could be removed");
 
   // Removals come back while writes are still refused — a quota that eased, a permission that did
-  // not. The record is still the one this tab left, so this write is the one that retracts it.
+  // not. The record is still the one this page left, so this write is the one that retracts it.
   denyRemovals = false;
   writePanelScratch(scope, "files.directory", "apps");
-  assert.equal(backing.get(PERSIST_KEY), undefined, "taken back on the first chance to do it");
+  assert.equal(backing.get(`${RECORD_PREFIX}${scope}`), undefined,
+    "taken back on the first chance to do it");
 
   reload();
   assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined,
     "the sent message never comes back");
 });
 
-test("the stored record is bounded even where the map deliberately is not", () => {
+test("what is stored is bounded even where the map deliberately is not", () => {
   // Unsent text is exempt from the scope bound, and a form that keeps its text after submitting
   // holds its scope for as long as it is mounted (#1375). In memory that overshoot ends with the
-  // tab; persisted it would not, so the record has a ceiling that waits on nobody.
+  // tab; persisted it would not, so storage has a ceiling that waits on nobody.
   const long = "x".repeat(50_000);
   const scopes = Array.from({ length: 12 }, (_unused, index) => panelScratchScopeKey(`session-${index}`));
   for (const scope of scopes) writePanelScratch(scope, "review.requestBody", `${scope}:${long}`, "draft");
   assert.equal(panelScratchScopeCount(), scopes.length, "memory still holds every draft");
-  assert.ok(backing.get(PERSIST_KEY)!.length <= PANEL_SCRATCH_PERSIST_CHAR_LIMIT,
-    "the record stays under its ceiling");
+  assert.ok(storedChars() <= PANEL_SCRATCH_PERSIST_CHAR_LIMIT,
+    `stored ${storedChars()} characters, ceiling ${PANEL_SCRATCH_PERSIST_CHAR_LIMIT}`);
 
   reload();
 
@@ -486,7 +619,7 @@ test("the stored record is bounded even where the map deliberately is not", () =
     "the oldest draft is the one the ceiling could not carry");
 });
 
-test("one outsized draft costs only its own scope its place in the record", () => {
+test("one outsized draft costs only its own scope its place", () => {
   const huge = panelScratchScopeKey("session-huge");
   const modest = panelScratchScopeKey("session-modest");
   writePanelScratch(modest, "review.requestBody", "a paragraph", "draft");
@@ -498,4 +631,49 @@ test("one outsized draft costs only its own scope its place in the record", () =
   // recently used, and stopping there would have cost every older scope its persistence too.
   assert.equal(readPanelScratch(huge, "review.requestBody"), undefined);
   assert.equal(readPanelScratch(modest, "review.requestBody"), "a paragraph");
+});
+
+test("deletion markers are bounded too, and never at live scratch's expense", () => {
+  // A marker outlives the value it retires, which is the point — but a marker per session ever sent
+  // from would grow with the tracker, so the layer that keeps drafts from coming back has a bound
+  // of its own, counted apart from the scopes still holding something.
+  const marked = Array.from({ length: PANEL_SCRATCH_CLEARED_SCOPE_LIMIT + 4 },
+    (_unused, index) => panelScratchScopeKey(`session-sent-${index}`));
+  for (const scope of marked) {
+    writePanelScratch(scope, "sidechat.draft", "on its way", "draft");
+    clearPanelScratchIf(scope, "sidechat.draft", "on its way", panelScratchRevision(scope, "sidechat.draft"));
+  }
+  const live = Array.from({ length: PANEL_SCRATCH_SESSION_LIMIT },
+    (_unused, index) => panelScratchScopeKey(`session-live-${index}`));
+  for (const scope of live) writePanelScratch(scope, "files.directory", "apps/web");
+
+  const records = storedRecordKeys().map((key) => key.slice(RECORD_PREFIX.length));
+  const markerOnly = records.filter((scope) => Object.keys(storedRecord(scope)!.values).length === 0);
+  assert.equal(markerOnly.length, PANEL_SCRATCH_CLEARED_SCOPE_LIMIT,
+    "the marker layer has its own bound");
+  assert.equal(records.length - markerOnly.length, PANEL_SCRATCH_SESSION_LIMIT,
+    "and it did not spend the budget live scratch needs");
+  assert.equal(storedRecord(marked[0]!), null, "the oldest markers are what the bound took");
+  assert.ok(storedRecord(marked.at(-1)!)?.cleared["sidechat.draft"], "the newest are kept");
+});
+
+test("a deletion marker is retired once it is older than any page still holding the draft", () => {
+  const scope = panelScratchScopeKey("session-1");
+  writePanelScratch(scope, "sidechat.draft", "on its way", "draft");
+  clearPanelScratchIf(scope, "sidechat.draft", "on its way", panelScratchRevision(scope, "sidechat.draft"));
+  const record = storedRecord(scope)!;
+  assert.ok(record.cleared["sidechat.draft"]);
+
+  // Age it past the window. Nothing can still be holding the sent message by then, so the marker is
+  // only costing storage.
+  backing.set(`${RECORD_PREFIX}${scope}`, JSON.stringify({
+    ...record,
+    cleared: { "sidechat.draft": Date.now() - PANEL_SCRATCH_CLEARED_MARKER_TTL_MS - 1 },
+  }));
+
+  reload();
+
+  assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined);
+  assert.equal(backing.get(`${RECORD_PREFIX}${scope}`), undefined,
+    "an expired marker leaves nothing behind to pay for");
 });
