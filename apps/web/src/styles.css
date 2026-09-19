@@ -2325,6 +2325,11 @@ textarea {
   background: var(--bg-elev-2);
   cursor: zoom-in;
 }
+/* `display: block` above would otherwise defeat the hidden attribute, and an image that is still
+   decoding, or that failed to, must not be visible as if it were evidence. */
+.evidence-artifact-thumb[hidden] {
+  display: none;
+}
 .evidence-artifact-thumb:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;

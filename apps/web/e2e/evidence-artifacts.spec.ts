@@ -87,6 +87,27 @@ for (const viewport of [
   });
 }
 
+test("an artifact that matches its digest but cannot be drawn is never shown and cannot be marked reviewed", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openReview(page, "items=3&artifacts=undecodable");
+  const broken = page.locator(".evidence-review-item", { hasText: "viewport-2" });
+  await broken.scrollIntoViewIfNeeded();
+  await expect(broken.getByRole("alert")).toContainText("matches its recorded digest but could not be displayed as an image");
+  // No broken-image placeholder is left on screen, and nothing offers to enlarge it.
+  await expect(broken.locator("img:visible")).toHaveCount(0);
+  await expect(broken.getByRole("button", { name: /Enlarge Evidence/ })).toHaveCount(0);
+  await expect(broken.getByRole("checkbox")).toBeDisabled();
+  for (const id of ["viewport-1", "viewport-3"]) {
+    const item = page.locator(".evidence-review-item", { hasText: id });
+    await item.scrollIntoViewIfNeeded();
+    await expect(item.getByRole("img", { name: `Evidence: ${id}` })).toBeVisible();
+    await item.getByRole("checkbox").check();
+  }
+  await expect(page.getByRole("button", { name: "Approve" })).toBeDisabled();
+  await broken.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: `${SHOT}/desktop-undecodable.png` });
+});
+
 test("mixed decisions show artifacts in place and keep a labelled external link for everything else", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openReview(page, "items=4&artifacts=mixed");

@@ -35,8 +35,9 @@ const requestedPollStatus = new URLSearchParams(window.location.search).get("pol
 const descendantRequestStatus: DescendantRequestStatus = requestedPollStatus === "loading" ||
   requestedPollStatus === "unavailable" ? requestedPollStatus : "ready";
 // `artifacts` makes the evidence artifact-backed: `ready` (every item), `mixed` (artifact, URI-only,
-// and video items together), `mismatch` (item 2's bytes do not match its digest), or `unavailable`
-// (item 2 is gone). The captures are drawn here so the fixture needs no binary files.
+// and video items together), `mismatch` (item 2's bytes do not match its digest), `unavailable`
+// (item 2 is gone), or `undecodable` (item 2 has a PNG signature, a correct digest, and a body no
+// browser can draw, which is exactly what the artifact validator's signature check admits). The captures are drawn here so the fixture needs no binary files.
 const artifactMode = new URLSearchParams(window.location.search).get("artifacts");
 const artifactBytes = new Map<string, ArrayBuffer>();
 const artifactDigests = new Map<string, string>();
@@ -66,7 +67,9 @@ async function drawCapture(index: number): Promise<ArrayBuffer> {
 async function prepareArtifacts(): Promise<void> {
   if (!artifactMode) return;
   for (let index = 0; index < evidenceCount; index += 1) {
-    const bytes = await drawCapture(index);
+    const bytes = artifactMode === "undecodable" && index === 1
+      ? new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...new TextEncoder().encode("not an image")]).buffer
+      : await drawCapture(index);
     const digest = await crypto.subtle.digest("SHA-256", bytes);
     artifactBytes.set(`art_${index + 1}`, bytes);
     artifactDigests.set(`art_${index + 1}`, [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join(""));

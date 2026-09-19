@@ -44,6 +44,9 @@ async function withLoadSlot<T>(task: () => Promise<T>): Promise<T> {
 
 type LoadState =
   | { status: "pending" | "loading" }
+  // The bytes matched the digest, but the browser has not yet proved it can draw them. A digest
+  // match says the file is the one the request names; it does not say the file is a picture.
+  | { status: "decoding"; url: string }
   | { status: "ready"; url: string }
   | { status: "mismatch" | "unverifiable" }
   | { status: "unavailable"; reason: string; retryable: boolean };
@@ -107,12 +110,21 @@ export function EvidenceArtifactView({
       // Without SubtleCrypto (plain HTTP on a non-localhost origin) the bytes cannot be checked, and
       // unchecked bytes are not shown as the evidence the request names.
       if (!globalThis.crypto?.subtle) return { status: "unverifiable" };
-      const bytes = await blob.arrayBuffer();
-      if ((await sha256Hex(bytes)) !== item.sha256.toLowerCase()) return { status: "mismatch" };
-      // Typed from the snapshot's allowlisted media type rather than the response header, so the
-      // browser never interprets the bytes as anything but the raster image they were checked as.
-      objectUrl = URL.createObjectURL(new Blob([bytes], { type: item.mediaType.toLowerCase() }));
-      return { status: "ready", url: objectUrl };
+      try {
+        const bytes = await blob.arrayBuffer();
+        if ((await sha256Hex(bytes)) !== item.sha256.toLowerCase()) return { status: "mismatch" };
+        // Typed from the snapshot's allowlisted media type rather than the response header, so the
+        // browser never interprets the bytes as anything but the raster image they were checked as.
+        objectUrl = URL.createObjectURL(new Blob([bytes], { type: item.mediaType.toLowerCase() }));
+        return { status: "decoding", url: objectUrl };
+      } catch (error) {
+        // Reading or hashing failed. Without this the item would sit on "Loading" forever.
+        return {
+          status: "unavailable",
+          reason: `This artifact could not be checked: ${error instanceof Error ? error.message : String(error)}`,
+          retryable: true,
+        };
+      }
     }).then((next) => {
       if (active) setState(next);
       else if (objectUrl) URL.revokeObjectURL(objectUrl);
@@ -124,36 +136,56 @@ export function EvidenceArtifactView({
     };
   }, [api, item.artifactId, item.mediaType, item.sha256, visible, attempt]);
 
+  // To the card, an image still being decoded is an image that has not been shown.
+  const reportedStatus: EvidenceArtifactStatus = state.status === "decoding" ? "loading" : state.status;
   useEffect(() => {
-    onStatusChangeRef.current(item.evidenceId, state.status);
-  }, [item.evidenceId, state.status]);
+    onStatusChangeRef.current(item.evidenceId, reportedStatus);
+  }, [item.evidenceId, reportedStatus]);
+
+  const imageUrl = state.status === "decoding" || state.status === "ready" ? state.url : null;
+  const onImageLoad = useCallback(() => {
+    setState((current) => current.status === "decoding" ? { status: "ready", url: current.url } : current);
+  }, []);
+  const onImageError = useCallback(() => {
+    setState((current) => current.status === "decoding" || current.status === "ready"
+      ? {
+          status: "unavailable",
+          reason: "This artifact matches its recorded digest but could not be displayed as an image.",
+          retryable: false,
+        }
+      : current);
+  }, []);
 
   const retry = useCallback(() => setAttempt((current) => current + 1), []);
 
   return (
     <div className="evidence-artifact" ref={containerRef} data-status={state.status}>
-      {(state.status === "pending" || state.status === "loading") && (
+      {(state.status === "pending" || state.status === "loading" || state.status === "decoding") && (
         <p className="evidence-artifact-state muted" role="status">Loading evidence…</p>
       )}
-      {state.status === "ready" && (
+      {imageUrl && (
         <>
+          {/* Mounted while decoding so the browser attempts the draw, but hidden and inert until it
+              succeeds: a broken image must never look like evidence that was shown. */}
           <button
             type="button"
             className="evidence-artifact-thumb"
             ref={enlargeRef}
+            hidden={state.status !== "ready"}
+            disabled={state.status !== "ready"}
             onClick={() => setEnlarged(true)}
             aria-label={`Enlarge Evidence: ${item.evidenceId}`}
           >
-            <img src={state.url} alt={`Evidence: ${item.evidenceId}`} />
+            <img src={imageUrl} alt={`Evidence: ${item.evidenceId}`} onLoad={onImageLoad} onError={onImageError} />
           </button>
-          {enlarged && (
+          {enlarged && state.status === "ready" && (
             <Modal
               title={item.evidenceId}
               onClose={() => setEnlarged(false)}
               wide
               returnFocusRef={enlargeRef}
             >
-              <img className="evidence-artifact-full" src={state.url} alt={`Evidence: ${item.evidenceId}`} />
+              <img className="evidence-artifact-full" src={imageUrl} alt={`Evidence: ${item.evidenceId}`} />
             </Modal>
           )}
         </>

@@ -127,8 +127,15 @@ async function mount(session: SessionView, artifactExport: ApiClient["artifactEx
     .find((candidate) => candidate.textContent === name)!;
   const checkbox = (evidenceId: string) =>
     container.querySelector<HTMLInputElement>(`input[aria-label="Mark ${evidenceId} as Reviewed"]`)!;
+  // happy-dom never decodes an image, so the browser's verdict is delivered by hand: "load" for a
+  // picture it could draw, "error" for bytes it could not.
+  const decode = async (verdict: "load" | "error") => {
+    for (const image of container.querySelectorAll<HTMLImageElement>(".evidence-artifact img")) {
+      await act(async () => { image.dispatchEvent(new domWindow.Event(verdict) as unknown as Event); });
+    }
+  };
   return {
-    container, requests, button, checkbox,
+    container, requests, button, checkbox, decode,
     unmount: async () => { await act(async () => root.unmount()); container.remove(); },
   };
 }
@@ -138,6 +145,13 @@ test("artifact-backed evidence is shown in place, verified against the decision 
   const view = await mount(sessionWith([artifactItem()]), async () => new Blob([PNG], { type: "application/octet-stream" }));
   try {
     assert.deepEqual(view.requests, ["art_desktop"]);
+    // A digest match says the file is the one the request names, not that it is a picture. Until
+    // the browser has drawn it, nothing is visible and nothing can be marked reviewed.
+    assert.equal(view.container.querySelector<HTMLButtonElement>(".evidence-artifact-thumb")?.hidden, true);
+    assert.equal(view.checkbox("desktop-after").disabled, true, "a verified but undrawn image is not yet shown");
+    assert.match(view.container.querySelector('.evidence-artifact [role="status"]')?.textContent ?? "", /Loading evidence/u);
+    await view.decode("load");
+    assert.equal(view.container.querySelector<HTMLButtonElement>(".evidence-artifact-thumb")?.hidden, false);
     const image = view.container.querySelector<HTMLImageElement>(".evidence-artifact img");
     assert.ok(image, "the verified artifact is rendered inside the card");
     assert.equal(image.getAttribute("alt"), "Evidence: desktop-after");
@@ -184,6 +198,24 @@ test("a digest mismatch or an unavailable artifact shows no image and cannot cou
     await gone.unmount();
   }
 
+  // The artifact validator checks only a file's signature, so a PNG header over junk is storable
+  // and its digest matches. The browser cannot draw it, and an undrawn image was never reviewed.
+  saveEvidenceReviewDraft("local", "session-artifact-evidence", "occurrence-1", RESOURCE_DIGEST, ["desktop-after"]);
+  const undrawable = await mount(sessionWith([artifactItem()]), async () => new Blob([PNG]));
+  try {
+    await undrawable.decode("error");
+    assert.match(undrawable.container.querySelector('.evidence-artifact [role="alert"]')?.textContent ?? "",
+      /matches its recorded digest but could not be displayed as an image/u);
+    assert.equal(undrawable.container.querySelector(".evidence-artifact img"), null, "no broken image is left on screen");
+    assert.equal(undrawable.container.querySelector('.evidence-artifact [role="alert"] button'), null,
+      "the same bytes will not decode on a retry");
+    assert.equal(undrawable.checkbox("desktop-after").disabled, true);
+    assert.equal(undrawable.button("Approve").disabled, true);
+  } finally {
+    await undrawable.unmount();
+    domWindow.localStorage.clear();
+  }
+
   let failures = 1;
   const flaky = await mount(sessionWith([artifactItem()]), async () => {
     if (failures-- > 0) throw new Error("network down");
@@ -194,6 +226,7 @@ test("a digest mismatch or an unavailable artifact shows no image and cannot cou
     assert.equal(retry?.textContent, "Retry", "a transport failure can be retried");
     await act(async () => retry!.click());
     for (let turn = 0; turn < 6; turn += 1) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await flaky.decode("load");
     assert.ok(flaky.container.querySelector(".evidence-artifact img"), "the retry loads and verifies the artifact");
     assert.equal(flaky.checkbox("desktop-after").disabled, false);
   } finally {
@@ -211,6 +244,7 @@ test("URI-only, video, and non-raster evidence keep a labelled external link, an
   ]), async () => new Blob([PNG]));
   try {
     assert.deepEqual(view.requests, ["art_desktop"], "only a renderable raster artifact is fetched");
+    await view.decode("load");
     assert.equal(view.container.querySelectorAll(".evidence-artifact").length, 1);
     for (const evidenceId of ["legacy", "clip", "vector"]) {
       const link = view.container.querySelector(`a[aria-label="View External Evidence: ${evidenceId}"]`);
