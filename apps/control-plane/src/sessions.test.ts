@@ -6730,6 +6730,14 @@ test("restart refuses a placement that cannot express the session's workspace st
   assert.equal(hub.sentOfType("start_session").length, 0, "no launch is sent when restart refuses");
   assert.deepEqual(db.getSession(id)?.executionTarget?.id, container.id,
     "a refused restart leaves the stored placement exactly as it was");
+  db.updateSessionStatus(id, "completed", Date.now());
+  db.setSessionArchived(id, true, Date.now());
+  const refusedRestore = svc.unarchiveAndRestart(id);
+  assert.equal(refusedRestore.status, 409, "Unarchive and Restart runs the same target preflight");
+  assert.match(refusedRestore.error ?? "", /container execution target always runs in an isolated workspace/);
+  assert.equal(db.getSession(id)?.archived, true, "an incompatible target leaves the session archived");
+  assert.equal(hub.sentOfType("start_session").length, 0);
+  db.setSessionArchived(id, false, Date.now());
 
   // With its workspace intact the same session restarts on its own target, untouched.
   svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({
