@@ -723,3 +723,43 @@ test("a quoted expansion carrying an IFS character is refused rather than missed
   assert.equal(commandTargetsManagedWorktree('rm -rf "$SAFE"', "/elsewhere", protection,
     { ...environment, SAFE: "/tmp/a:/tmp/b" }), null);
 });
+
+test("argv is expanded by the outer shell, not by the process that receives it", () => {
+  // `xargs` and `find -exec` receive ARGV: the outer shell expanded these words before the prefix
+  // assignment applied, so the stale prefix cannot hide the root behind them.
+  const stale = { W: protectedPath };
+  assert.equal(commandTargetsManagedWorktree('W=/tmp xargs rm -rf "$W"', "/elsewhere", protection, stale),
+    MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree('W=/tmp find . -name x -exec rm -rf "$W" +', "/elsewhere", protection,
+    stale), MANAGED_WORKTREE_REFUSAL);
+  // A bare `cd` enters the HOME of the environment the builtin is GIVEN, prefix included.
+  assert.equal(commandTargetsManagedWorktree(`HOME=${protectedPath} cd && rm -rf .`, "/tmp", protection,
+    { HOME: "/tmp" }), MANAGED_WORKTREE_REFUSAL);
+  // In `/bin/sh` a prefix assignment before a POSIX special builtin survives the command.
+  assert.equal(commandTargetsManagedWorktree(`sh -c 'W=${protectedPath} :; rm -rf "$W"'`, "/elsewhere", protection,
+    { W: "/tmp" }), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree(`sh -c 'W=${protectedPath} export X=1; rm -rf "$W"'`, "/elsewhere",
+    protection, { W: "/tmp" }), MANAGED_WORKTREE_REFUSAL);
+  // `env` reads its own argv, so an assignment that arrived through an expansion is one.
+  assert.equal(commandTargetsManagedWorktree(`env "$ASSIGNMENT" sh -c 'rm -rf "$W"'`, "/tmp", protection,
+    { ASSIGNMENT: `W=${protectedPath}` }), MANAGED_WORKTREE_REFUSAL);
+});
+
+test("roles are assigned to fields, not to the text that produced them", () => {
+  // `mv $PAIR` supplies TWO operands, so the root is a source and not the destination it would be
+  // if the expansion were counted as one word.
+  assert.equal(commandTargetsManagedWorktree("mv $PAIR", "/tmp", protection,
+    { PAIR: `${protectedPath} /tmp/away` }), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("mv $PAIR", "/tmp", protection, { PAIR: "/tmp/a /tmp/b" }), null,
+    "while an ordinary pair of scratch paths still moves");
+  // The same splitting reveals a `find` action hidden inside an expansion.
+  assert.equal(commandTargetsManagedWorktree("find $ARGS", "/tmp", protection,
+    { ARGS: `${protectedPath} -delete` }), MANAGED_WORKTREE_REFUSAL);
+  // ...and the UNSPLIT reading is judged too, so a protected path that itself contains a separator
+  // is still matched where field splitting would have torn it apart.
+  const spaced: ManagedWorktreeProtection[] = [{ worktreePath: "/runner/my worktree", repoPath: "/projects/repo" }];
+  assert.equal(commandTargetsManagedWorktree('rm -rf "$W"', "/elsewhere", spaced, { W: "/runner/my worktree" }),
+    MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree('mv "$W" /tmp/away', "/elsewhere", spaced, { W: "/runner/my worktree" }),
+    MANAGED_WORKTREE_REFUSAL);
+});
