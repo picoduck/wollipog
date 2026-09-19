@@ -293,7 +293,7 @@ async function workflowDecisionChildMessageCompatibilityError(deps: McpDeps): Pr
  * on a tunnelled or slow link, so an attach gets its own. */
 const ARTIFACT_UPLOAD_TIMEOUT_MS = 180_000;
 
-/** A pre-v168 control plane has no session-scoped attach route. Refuse by name instead of letting
+/** A pre-v169 control plane has no session-scoped attach route. Refuse by name instead of letting
  * the upload 404, and never fall back to the base64 tool argument this tool exists to replace. */
 async function sessionArtifactFileAttachCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
   const required = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionArtifactFileAttach;

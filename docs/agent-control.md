@@ -344,7 +344,7 @@ unaffected.
 
 A child makes an item reviewable by attaching the capture to its own session with
 `attach_session_artifact` (`path`, optional `name`), or from a shell with
-`wollipog artifact attach --file <path>`. Protocol v168. The file is read on the runner host and
+`wollipog artifact attach --file <path>`. Protocol v169. The file is read on the runner host and
 uploaded directly, so its bytes never enter the model's context; passing an image as base64 through
 `create_workflow_artifact` costs tens of thousands of tokens per capture and is not a usable path.
 
@@ -371,7 +371,7 @@ even when the session is at its bound. An upload of several megabytes can time o
 plane has committed it; the tool then reports that the outcome is unknown and that attaching the same
 file again is safe. Uploads get a three-minute deadline rather than the ordinary RPC one. The reader
 takes one byte more than the size it checked, so a file that grows after the check cannot make it
-allocate without bound, and a file whose size changes either way during the read is refused. Against a pre-v168 control plane the tool refuses with the
+allocate without bound, and a file whose size changes either way during the read is refused. Against a pre-v169 control plane the tool refuses with the
 version to upgrade to instead of falling back to a base64 argument.
 
 The Orchestrator inspects evidence with `review_descendant_ui_evidence` (`sessionId`,
