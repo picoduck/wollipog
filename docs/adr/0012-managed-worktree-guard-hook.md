@@ -622,8 +622,10 @@ immediately — a worktree created mid-turn is protected from the guard's next i
 
 The list is built from the attributed worktrees, which also count the legacy `worktreePath` field as
 one synthetic entry. The observer therefore fires as well for a patch that carries only
-`worktreePath` or `worktreeBranch`, when — and only when — it changes that attributed set (#1474):
-selection re-carries those fields constantly, and a field merely carried protects nothing new. The
+`worktreePath` or `worktreeBranch` — or `context`, which decides whether the legacy path is the same
+worktree as a recorded one — when, and only when, it changes that attributed set (#1474). Those are
+every field the attribution reads; selection re-carries the legacy pair constantly, and a field
+merely carried protects nothing new. The
 unguarded-TUI notice below rides the same refresh, so it is evaluated on the same trigger.
 
 As first shipped, a session that owned no worktree at spawn had no guard in its running process,

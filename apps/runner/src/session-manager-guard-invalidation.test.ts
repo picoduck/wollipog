@@ -214,6 +214,26 @@ test("a patch that leaves the attributed worktrees alone does not refresh the gu
   assert.deepEqual(h.refreshes, []);
 });
 
+test("a context patch that stops the legacy path matching a recorded worktree refreshes the guard", (t) => {
+  // Whether the legacy path is the recorded worktree is decided per context: natively the two
+  // spellings below resolve to one path, and under WSL they are compared as written.
+  const h = harness({ state: "refreshed" }, {
+    worktreePath: "/home/me/repo-worktrees/s_guard//",
+    worktrees: [{
+      id: "wt_1",
+      path: "/home/me/repo-worktrees/s_guard",
+      branch: "agent/s_guard",
+      source: "created",
+      createdAt: 1000,
+    }] as SessionMeta["worktrees"],
+  });
+  t.after(h.cleanup);
+  h.store.patchMeta("s_guard", { context: { kind: "native" } });
+  assert.deepEqual(h.refreshes, [], "a context carried unchanged attributes nothing new");
+  h.store.patchMeta("s_guard", { context: { kind: "wsl", distro: "Ubuntu" } });
+  assert.deepEqual(h.protected, [["/home/me/repo-worktrees/s_guard", "/home/me/repo-worktrees/s_guard//"]]);
+});
+
 test("a worktreeBranch patch with no legacy worktree does not refresh the guard", (t) => {
   const h = harness({ state: "refreshed" });
   t.after(h.cleanup);
