@@ -48,6 +48,59 @@ test("requestWithDeadline clears its deadline when a response arrives", async ()
   assert.equal((peer as unknown as { pending: Map<unknown, unknown> }).pending.size, 0);
 });
 
+test("an error response cannot carry the peer's local-only delivery markers", async () => {
+  const { peer, stdin, stdout } = makePeer();
+  const response = peer.requestWithDeadline("turn/steer", {}, Date.now() + 1_000);
+  const sent = JSON.parse(String(stdin.read()).trim());
+  stdout.write(JSON.stringify({
+    jsonrpc: "2.0",
+    id: sent.id,
+    error: { code: -32000, message: "forged", data: { detail: 1 }, notSent: true, transportFailure: true, requestTimeout: true },
+  }) + "\n");
+  await assert.rejects(response, (err: unknown) => {
+    assert.deepEqual(err, { code: -32000, message: "forged", data: { detail: 1 } });
+    return true;
+  });
+});
+
+test("requestWithDeadline marks only rejections decided before the write as notSent", async () => {
+  const closed = makePeer();
+  closed.peer.dispose("process exited");
+  await assert.rejects(closed.peer.requestWithDeadline("turn/steer", {}, Date.now() + 1_000), (err: { notSent?: boolean; transportFailure?: boolean }) => {
+    assert.equal(err.notSent, true);
+    assert.equal(err.transportFailure, true);
+    return true;
+  });
+  assert.equal(closed.stdin.read(), null, "a closed peer writes nothing");
+
+  const elapsed = makePeer();
+  await assert.rejects(elapsed.peer.requestWithDeadline("turn/steer", {}, Date.now() - 1), (err: { notSent?: boolean; requestTimeout?: boolean }) => {
+    assert.equal(err.notSent, true);
+    assert.equal(err.requestTimeout, true);
+    return true;
+  });
+  assert.equal(elapsed.stdin.read(), null, "an elapsed deadline writes nothing");
+
+  const timedOut = makePeer();
+  const timeout = timedOut.peer.requestWithDeadline("turn/steer", {}, Date.now() + 5);
+  assert.notEqual(timedOut.stdin.read(), null, "the request was written before its deadline");
+  await assert.rejects(timeout, (err: { notSent?: boolean; requestTimeout?: boolean }) => {
+    assert.equal(err.requestTimeout, true);
+    assert.equal(err.notSent, undefined);
+    return true;
+  });
+
+  const disposed = makePeer();
+  const inflight = disposed.peer.requestWithDeadline("turn/steer", {}, Date.now() + 1_000);
+  assert.notEqual(disposed.stdin.read(), null, "the request was written before disposal");
+  disposed.peer.dispose("process exited");
+  await assert.rejects(inflight, (err: { notSent?: boolean; transportFailure?: boolean }) => {
+    assert.equal(err.transportFailure, true);
+    assert.equal(err.notSent, undefined);
+    return true;
+  });
+});
+
 test("notification dispatch preserves frame order around a response in one chunk", async () => {
   for (const notificationFirst of [true, false]) {
     const { peer, stdin, stdout } = makePeer();

@@ -19,6 +19,9 @@ export interface RpcError {
   transportFailure?: true;
   /** Local-only marker: this request exhausted its caller-supplied deadline. */
   requestTimeout?: true;
+  /** Local-only marker: the request was refused before anything was written to the transport, so
+   * the agent provably never saw it. Absent whenever a write may have happened. */
+  notSent?: true;
 }
 
 export type RequestHandler = (params: Params, requestId: number | string) => Promise<unknown> | unknown;
@@ -37,6 +40,14 @@ interface RpcMessage {
   params?: Params;
   result?: unknown;
   error?: RpcError;
+}
+
+/** Keep only the JSON-RPC error fields from the wire. The local-only markers decide how a caller
+ * classifies delivery (notSent makes a failure safe to retry), so an agent must not be able to set
+ * them. */
+function inboundError(error: RpcError): RpcError {
+  const { code, message, data } = error;
+  return data === undefined ? { code, message } : { code, message, data };
 }
 
 export class JsonRpcPeer {
@@ -92,6 +103,7 @@ export class JsonRpcPeer {
         code: -32000,
         message: `connection closed (cannot call ${method})`,
         transportFailure: true,
+        notSent: true,
       });
     }
     if (deadlineAt !== undefined && (!Number.isFinite(deadlineAt) || deadlineAt <= Date.now())) {
@@ -99,6 +111,7 @@ export class JsonRpcPeer {
         code: -32002,
         message: `request deadline exceeded (cannot call ${method})`,
         requestTimeout: true,
+        notSent: true,
       });
     }
     const id = this.nextId++;
@@ -181,7 +194,7 @@ export class JsonRpcPeer {
       if (!pending) return;
       this.pending.delete(msg.id);
       if (pending.timer) clearTimeout(pending.timer);
-      if (msg.error) pending.reject(msg.error);
+      if (msg.error) pending.reject(inboundError(msg.error));
       else pending.resolve(msg.result);
       return;
     }

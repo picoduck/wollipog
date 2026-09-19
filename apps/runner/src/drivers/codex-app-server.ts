@@ -914,19 +914,37 @@ export class CodexAppServerDriver implements Driver {
       }
       return { outcome: "accepted", providerTurnId: expectedTurnId };
     } catch (error) {
-      const rpc = error as { message?: string; transportFailure?: true; requestTimeout?: true };
+      const rpc = error as { message?: string; transportFailure?: true; requestTimeout?: true; notSent?: true };
+      // The peer refused before writing (connection already closed, or the deadline elapsed after
+      // the check above), so Codex provably never saw this steer. Report a definite refusal and
+      // let the ordinary queue deliver it; every post-write failure below stays uncertain.
+      if (rpc.notSent) {
+        this.releaseDefiniteSteer(submissionId);
+        if (rpc.transportFailure) {
+          return { outcome: "no_active_turn", reason: "Codex connection closed before steering submission" };
+        }
+        return { outcome: "rejected", reason: "Steering submission deadline expired before provider delivery" };
+      }
       if (rpc.requestTimeout) {
         return { outcome: "uncertain", reason: "Codex did not acknowledge steering before the submission deadline" };
       }
       if (rpc.transportFailure) {
         return { outcome: "uncertain", reason: rpc.message ?? "Codex steering transport failed" };
       }
-      this.steerClientIds.delete(submissionId);
-      const rejected = this.stagedSteerImages.get(submissionId);
-      this.stagedSteerImages.delete(submissionId);
-      if (rejected) await this.cleanupOneStagedSteer(submissionId, rejected);
+      this.releaseDefiniteSteer(submissionId);
       return { outcome: "rejected", reason: rpc.message ?? String(error) };
     }
+  }
+
+  /** A definitely-refused steer will never be echoed or settled by Codex, so drop its echo filter
+   * and clean its staged images now instead of at turn end. Cleanup is not awaited: a slow cleanup
+   * (a WSL subprocess) must not hold the refusal past the runner's steering deadline, which would
+   * turn it into an uncertain result and strand a message Codex never saw. */
+  private releaseDefiniteSteer(submissionId: string): void {
+    this.steerClientIds.delete(submissionId);
+    const staged = this.stagedSteerImages.get(submissionId);
+    this.stagedSteerImages.delete(submissionId);
+    if (staged) void this.cleanupOneStagedSteer(submissionId, staged);
   }
 
   cancel(): void {

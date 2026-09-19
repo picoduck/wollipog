@@ -20,6 +20,7 @@ import {
 } from "./codex-app-server.js";
 import type { DriverCallbacks, DriverOptions } from "./driver.js";
 import type { StagedPromptImages } from "./prompt-images.js";
+import { JsonRpcPeer } from "../jsonrpc.js";
 import type { AgentProcess } from "../spawn.js";
 
 function fakeAgentProcess(): AgentProcess {
@@ -712,6 +713,92 @@ test("steer deadline resolves uncertain and keeps images held", async () => {
   assert.equal(cleaned, 0);
   await (h.driver as any).cleanupStagedImages();
   assert.equal(cleaned, 1);
+});
+
+/** Arm a steer against a real JSON-RPC peer so its own pre-write and post-write rejections reach
+ * the driver unmodified. `written` returns every frame the peer put on the wire. */
+function activateSteerWithPeer(driver: CodexAppServerDriver): { peer: JsonRpcPeer; written: () => string } {
+  const stdin = new PassThrough();
+  const peer = new JsonRpcPeer(stdin, new PassThrough());
+  (driver as any).threadId = "thread-steer";
+  (driver as any).turnId = "provider-turn-steer";
+  (driver as any).promptBusy = true;
+  (driver as any).peer = peer;
+  return { peer, written: () => String(stdin.read() ?? "") };
+}
+
+function countingStager(counter: { cleaned: number }) {
+  return async () => ({ paths: ["/tmp/steer.png"], inputs: [], cleanup: async () => { counter.cleaned++; } });
+}
+
+const steerImage = [{ mimeType: "image/png", data: "YQ==" }];
+
+test("steer on an already-closed peer is a definite refusal that writes nothing and releases the submission", async () => {
+  const counter = { cleaned: 0 };
+  const h = makeHarness({}, countingStager(counter));
+  const { peer, written } = activateSteerWithPeer(h.driver);
+  peer.dispose("process exited");
+  const result = await h.driver.steer!({
+    submissionId: "submission-closed",
+    text: "hello",
+    images: steerImage,
+    deadlineAt: futureDeadline(),
+  });
+  assert.deepEqual(result, { outcome: "no_active_turn", reason: "Codex connection closed before steering submission" });
+  assert.equal(written(), "", "nothing reached the provider");
+  assert.equal(counter.cleaned, 1, "staged images are released immediately");
+  assert.equal((h.driver as any).steerClientIds.size, 0);
+  assert.equal((h.driver as any).stagedSteerImages.size, 0);
+});
+
+test("steer whose deadline elapses before the peer writes is a definite refusal that writes nothing", async (t) => {
+  const counter = { cleaned: 0 };
+  const h = makeHarness({}, countingStager(counter));
+  const { peer, written } = activateSteerWithPeer(h.driver);
+  const requestWithDeadline = peer.requestWithDeadline.bind(peer);
+  // The driver's own deadline check passes; the clock then reaches the deadline before the peer
+  // checks it, which is the window the peer's pre-write refusal covers.
+  t.mock.method(peer, "requestWithDeadline", (method: string, params: unknown, deadlineAt: number) => {
+    t.mock.method(Date, "now", () => deadlineAt);
+    return requestWithDeadline(method, params, deadlineAt);
+  });
+  const result = await h.driver.steer!({
+    submissionId: "submission-elapsed",
+    text: "hello",
+    images: steerImage,
+    deadlineAt: futureDeadline(),
+  });
+  assert.deepEqual(result, {
+    outcome: "rejected",
+    reason: "Steering submission deadline expired before provider delivery",
+  });
+  assert.equal(written(), "", "nothing reached the provider");
+  assert.equal(counter.cleaned, 1, "staged images are released immediately");
+  assert.equal((h.driver as any).steerClientIds.size, 0);
+  assert.equal((h.driver as any).stagedSteerImages.size, 0);
+});
+
+test("steer failures after the peer wrote the request stay uncertain and keep the submission held", async () => {
+  for (const scenario of ["transport", "deadline"] as const) {
+    const counter = { cleaned: 0 };
+    const h = makeHarness({}, countingStager(counter));
+    const { peer, written } = activateSteerWithPeer(h.driver);
+    const submissionId = `submission-written-${scenario}`;
+    const steering = h.driver.steer!({
+      submissionId,
+      text: "hello",
+      images: steerImage,
+      deadlineAt: scenario === "deadline" ? Date.now() + 200 : futureDeadline(),
+    });
+    await waitForCondition(() => written().includes('"method":"turn/steer"'));
+    if (scenario === "transport") peer.dispose("process exited");
+    const result = await steering;
+    assert.equal(result.outcome, "uncertain", scenario);
+    assert.equal(counter.cleaned, 0, "an uncertain steer keeps its images until turn cleanup");
+    assert.equal((h.driver as any).steerClientIds.has(submissionId), true);
+    await (h.driver as any).cleanupStagedImages();
+    assert.equal(counter.cleaned, 1);
+  }
 });
 
 test("steer suppresses Codex userMessage echoes by client id", () => {
