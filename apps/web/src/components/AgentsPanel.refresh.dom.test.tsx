@@ -592,3 +592,79 @@ test("a quiet session still gets the owed full sweep, and then nothing more", as
     container.remove();
   }
 });
+
+/** A registry of `size` children served in exact `page()` shape, with `child-1` the one still running. */
+const servedRegistry = (size: number) => Array.from({ length: size }, (_value, index): ChildSessionRegistryEntry => ({
+  toolCallId: `child-${index + 1}`, name: `Child ${index + 1}`,
+  status: index === 0 ? "in_progress" : "completed",
+  lifecycle: index === 0 ? "running" : "completed",
+  sourceSeq: index + 1, startedAt: now - 30_000, lastActivityAt: now - 20_000,
+  ...(index === 0 ? {} : { completedAt: now - 20_000 }),
+  toolCount: 1,
+}));
+const servePage = (all: readonly ChildSessionRegistryEntry[], after: number, limit: number): ChildSessionRegistryPage => {
+  const eligible = all.filter((child) => child.sourceSeq > after);
+  const children = eligible.slice(0, limit);
+  const truncated = eligible.length > children.length;
+  return { children, attentionOwners: [], unidentifiedChildren: 0, eventEpoch: 0,
+    nextAfter: truncated ? children.at(-1)!.sourceSeq : null, truncated };
+};
+
+/**
+ * The debt stays owed until a full read lands. A backstop sweep that the control plane rejects is
+ * retried one backstop interval after it began — not in a hot loop, and not only if the session
+ * happens to produce another event.
+ */
+test("a rejected owed sweep is retried without another render", async () => {
+  const all = servedRegistry(150);
+  const realNow = Date.now;
+  let skew = 0;
+  const cursors: number[] = [];
+  const childSessions = async (
+    _id: string, _epoch: number, after = 0, limit = 50,
+  ): Promise<ChildSessionRegistryPage> => {
+    cursors.push(after);
+    // The fourth request is the targeted refresh: the backstop falls due while it is in flight.
+    if (cursors.length === 4) skew = REGISTRY_SWEEP_BACKSTOP_MS;
+    // The sixth is the owed sweep. It fails, and the retry interval passes while it does.
+    if (cursors.length === 6) {
+      skew = 2 * REGISTRY_SWEEP_BACKSTOP_MS;
+      throw new Error("registry unavailable");
+    }
+    return servePage(all, after, limit);
+  };
+  const client: ApiClient = { ...api, childSessions };
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const render = (session: SessionView, items: TimelineItem[]) =>
+    root.render(<ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
+      <AgentsPanel session={session} items={items} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
+        requestedId={null} onSelect={() => {}} parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
+    </StoreProvider></FeedbackProvider></ApiProvider>);
+  Date.now = () => realNow() + skew;
+
+  try {
+    await act(async () => { render(baseSession, [startedTool("child-1", 1)]); });
+    await advance(50);
+    for (let page = 1; page < 3; page += 1) {
+      const loadMore = Array.from(container.querySelectorAll("button"))
+        .find((button) => button.textContent === "Load More Recorded Workers")!;
+      await act(async () => { (loadMore as HTMLButtonElement).click(); });
+      await advance(60);
+    }
+    await act(async () => {
+      render({ ...baseSession, messageCount: 11, lastEventAt: now + 1_000 }, [settledTool("child-1", 1)]);
+    });
+    await advance(1_500);
+    assert.deepEqual(cursors.slice(3), [0, 100, 0, 0, 50, 100],
+      "targeted refresh, a rejected sweep, then the retried sweep — with no render in between");
+    await advance(1_000);
+    assert.equal(cursors.length, 9, "once a sweep lands, the debt is paid and the panel goes quiet");
+  } finally {
+    Date.now = realNow;
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
