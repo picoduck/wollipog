@@ -1,0 +1,77 @@
+// Typecheck for this package's test files (see #1435). `exclude` is the shrinking list of
+// test files that do not typecheck yet: every other test file, and every new one, is
+// covered. Entries come off this list as they are fixed; adding one is a reviewable edit.
+// `tsconfig-test-debt.test.ts` keeps the list honest.
+//
+// `rootDir` is widened to the repo root because tests here import across packages, which the
+// production `rootDir: "src"` rejects with TS6059. Nothing is emitted, so this only affects
+// which files tsc accepts as inputs; the production config is untouched.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "../.."
+  },
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "src/acp-auth-status.test.ts",
+    "src/acp-conformance.test.ts",
+    "src/acp-lifecycle.test.ts",
+    "src/agent-control.test.ts",
+    "src/checkpoint-ref-ownership.test.ts",
+    "src/control-plane-attestation.test.ts",
+    "src/control-plane-transport.test.ts",
+    "src/discovery/acp-registry.test.ts",
+    "src/discovery/claude-commands.test.ts",
+    "src/discovery/discover.test.ts",
+    "src/discovery/models.test.ts",
+    "src/discovery/pi-rpc.test.ts",
+    "src/drivers/claude-code-managed-worktree.test.ts",
+    "src/drivers/claude-code-same-turn-worktree.test.ts",
+    "src/drivers/claude-code.test.ts",
+    "src/drivers/codex-app-server.test.ts",
+    "src/drivers/codex-rollout-proof.test.ts",
+    "src/drivers/codex.test.ts",
+    "src/drivers/pi-rpc.test.ts",
+    "src/execution-isolation.test.ts",
+    "src/external/sources.test.ts",
+    "src/heartbeat-liveness.integration.test.ts",
+    "src/hook-settings.test.ts",
+    "src/host-actions.test.ts",
+    "src/managed-worktree-guard-sandbox.integration.test.ts",
+    "src/managed-worktree-guard-socket.test.ts",
+    "src/managed-worktree-sandbox.integration.test.ts",
+    "src/orchestrator-preset.test.ts",
+    "src/policy-hook.test.ts",
+    "src/posix-process-tree.test.ts",
+    "src/prompt-image-fetch.test.ts",
+    "src/provider-auth-recovery.test.ts",
+    "src/release-assets.test.ts",
+    "src/runner-data-dir.test.ts",
+    "src/session-command-authority.test.ts",
+    "src/session-command-receipt-store.test.ts",
+    "src/session-management-mcp.test.ts",
+    "src/session-manager-admission.test.ts",
+    "src/session-manager-approvals.test.ts",
+    "src/session-manager-command.test.ts",
+    "src/session-manager-fork.integration.test.ts",
+    "src/session-manager-guard-invalidation.test.ts",
+    "src/session-manager-history-integrity.test.ts",
+    "src/session-manager-history-quarantine.integration.test.ts",
+    "src/session-manager-isolation.test.ts",
+    "src/session-manager-resume.test.ts",
+    "src/session-manager-steering.test.ts",
+    "src/session-naming-custom-model.test.ts",
+    "src/session-store.test.ts",
+    "src/skill-adoption-command.test.ts",
+    "src/skill-snapshots.test.ts",
+    "src/state-doctor.test.ts",
+    "src/subscription-usage.test.ts",
+    "src/worktree-setup.integration.test.ts",
+    "src/worktree-setup.test.ts",
+    "src/worktree.test.ts",
+    "src/wsl-agent-control.test.ts"
+  ]
+}
