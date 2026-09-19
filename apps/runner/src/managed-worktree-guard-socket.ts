@@ -16,16 +16,27 @@
  */
 
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { quote } from "shell-quote";
-import { claudeHookSessionProtectionsPath } from "./hook-settings.js";
+import { claudeHookSessionProtectionsPath, managedWorktreeGuardMemoryProtections } from "./hook-settings.js";
 import {
+  MANAGED_WORKTREE_GUARD_ABSTRACT_PREFIX,
   MANAGED_WORKTREE_GUARD_SOCKET_FLAG,
-  runManagedWorktreeGuardDecision,
+  managedWorktreeGuardDecision,
+  managedWorktreeGuardOutcome,
+  managedWorktreeGuardSocketAddress,
+  parseManagedWorktreeGuardVerdictRequest,
+  readManagedWorktreeGuardProtections,
+  type ManagedWorktreeGuardOutcome,
 } from "./managed-worktree-guard.js";
-import { GUARD_STATE_REFUSAL } from "./managed-worktree-protection.js";
+import {
+  GUARD_STATE_REFUSAL,
+  MANAGED_WORKTREE_REFUSAL,
+  type ManagedWorktreeProtection,
+} from "./managed-worktree-protection.js";
 import { isSafeSessionFileId } from "./session-file-id.js";
 import { buildBwrapArgs, type SpawnIsolation } from "./spawn.js";
 
@@ -34,7 +45,13 @@ const GUARD_SOCKET_NAME = "sock";
 /** `sun_path` is 108 bytes on Linux and 104 on macOS, both including the terminator. A path that
  * does not fit cannot be bound at all, so the guard is not provisioned rather than half-working. */
 export const MAX_GUARD_SOCKET_PATH_BYTES = 100;
-const MAX_REQUEST_BYTES = 1_000_000 + 1;
+/**
+ * The hook payload (at most 1 MB, up to six bytes per byte once JSON-escaped) plus the sidecar's
+ * environment, which the sidecar itself bounds at `MAX_FORWARDED_ENVIRONMENT_BYTES` serialized
+ * (review CR-2.1, CR-3.1). So a request from the runner's own sidecar always fits, whatever the
+ * host's `ARG_MAX`; the cap bounds one connection's memory against anything else that connects.
+ */
+const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
 
 export function managedWorktreeGuardSocketDirectory(configDir: string, sessionId: string): string {
@@ -71,7 +88,27 @@ function socketIdentity(path: string): string | null {
   }
 }
 
-function serveVerdict(socket: Socket, protectionsFile: string): void {
+/** Where a session's protection list comes from; throwing is a refusal, exactly as a missing file is. */
+export type GuardProtectionsLoader = () => ManagedWorktreeProtection[];
+
+function judge(request: string, loadProtections: GuardProtectionsLoader, guardStateDirectory: string): ManagedWorktreeGuardOutcome {
+  let parsed: ReturnType<typeof parseManagedWorktreeGuardVerdictRequest>;
+  try {
+    parsed = parseManagedWorktreeGuardVerdictRequest(request);
+  } catch (error) {
+    return {
+      stdout: "",
+      stderr: `${MANAGED_WORKTREE_REFUSAL} (managed worktree guard received an unreadable verdict request: ${(error as Error).message})\n`,
+      exitCode: 2,
+    };
+  }
+  // Judged in the SIDECAR's environment, which is the provider's, never the runner's own (#1324).
+  return managedWorktreeGuardOutcome(
+    managedWorktreeGuardDecision(parsed.hookInput, loadProtections, guardStateDirectory, parsed.environment),
+  );
+}
+
+function serveVerdict(socket: Socket, loadProtections: GuardProtectionsLoader, guardStateDirectory: string): void {
   const chunks: Buffer[] = [];
   let total = 0;
   socket.setTimeout(REQUEST_TIMEOUT_MS, () => socket.destroy());
@@ -84,25 +121,55 @@ function serveVerdict(socket: Socket, protectionsFile: string): void {
   });
   socket.on("end", () => {
     if (socket.destroyed) return;
-    const outcome = runManagedWorktreeGuardDecision(Buffer.concat(chunks).toString("utf8"), protectionsFile);
-    socket.end(JSON.stringify(outcome));
+    socket.end(JSON.stringify(judge(Buffer.concat(chunks).toString("utf8"), loadProtections, guardStateDirectory)));
   });
 }
 
 /**
- * One verdict server per session, alive for as long as the runner may launch that session inside
- * a sandbox. The protections file itself is unchanged: written, refreshed, tripwired, and removed
- * exactly as in provider mode, so an invalidated guard (its list removed) blocks here as well.
+ * How a session's verdict socket is addressed, which also decides where its list lives.
+ *
+ * `path`: a socket file in the session's owner-only directory, for a launch inside a runner-owned
+ * sandbox. The sandbox binds that directory read-only, so the provider cannot replace the socket,
+ * and the protections file stays the list: written, refreshed, tripwired, and removed as before.
+ *
+ * `abstract`: a Linux abstract-namespace name, for a launch the runner does NOT sandbox (`provider`
+ * mode, #1336 slice 3). Measured: a second process of the same OS user can unlink a path socket and
+ * listen at the same path, and the sidecar then takes its answer; the same attempt on an abstract
+ * name the runner is listening on fails with EADDRINUSE, and there is no entry to delete. The list
+ * is held in runner memory, so no file in the hook state directory decides a verdict. The name
+ * carries 192 random bits, is generated per session per runner process, and is never logged.
+ * An abstract name has no permission bits: any local user can connect and ask for a verdict.
+ */
+export type GuardSocketKind = "path" | "abstract";
+
+const ABSTRACT_NAME_RANDOM_BYTES = 24;
+
+/**
+ * One verdict server per session, alive for as long as the runner may launch that session with a
+ * socket-mode guard.
  */
 export class ManagedWorktreeGuardSockets {
-  private readonly servers = new Map<string, { server: Server; path: string; identity: string }>();
+  private readonly servers = new Map<string, {
+    server: Server;
+    kind: GuardSocketKind;
+    /** What the hook command carries: the socket path, or `@name` for an abstract one. */
+    address: string;
+    /** Device and inode of a path socket; an abstract name cannot be replaced while we listen. */
+    identity: string | null;
+  }>();
 
   /** Per-session tail of in-flight `ensure`/`close` work. Two launch preparations of one session
    * can overlap (an older generation being superseded), and a deletion can race both; each
    * operation runs only after the previous one for that session has settled. */
   private readonly pending = new Map<string, Promise<unknown>>();
 
-  constructor(private readonly configDir: string) {}
+  constructor(
+    private readonly configDir: string,
+    /** The in-memory list of an `abstract` session; throws when the runner holds none. */
+    private readonly memoryProtections: (sessionId: string) => ManagedWorktreeProtection[] =
+      managedWorktreeGuardMemoryProtections,
+    private readonly platform: NodeJS.Platform = process.platform,
+  ) {}
 
   private serialized<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
     const next = (this.pending.get(sessionId) ?? Promise.resolve()).then(operation, operation);
@@ -112,16 +179,44 @@ export class ManagedWorktreeGuardSockets {
     return next;
   }
 
-  /** Listen for this session (idempotent) and return the socket path, or throw when it cannot. */
-  ensure(sessionId: string): Promise<string> {
-    return this.serialized(sessionId, () => this.ensureNow(sessionId));
+  /** Listen for this session (idempotent) and return the address the hook command carries, or
+   * throw when it cannot. */
+  ensure(sessionId: string, kind: GuardSocketKind = "path"): Promise<string> {
+    return this.serialized(sessionId, () => this.ensureNow(sessionId, kind));
   }
 
   close(sessionId: string): Promise<void> {
     return this.serialized(sessionId, () => this.closeNow(sessionId));
   }
 
-  private async ensureNow(sessionId: string): Promise<string> {
+  private listen(server: Server, address: string): Promise<void> {
+    return new Promise<void>((resolvePromise, reject) => {
+      server.once("error", reject);
+      server.listen(managedWorktreeGuardSocketAddress(address, this.platform), () => {
+        server.off("error", reject);
+        resolvePromise();
+      });
+    });
+  }
+
+  private async ensureNow(sessionId: string, kind: GuardSocketKind): Promise<string> {
+    if (!isSafeSessionFileId(sessionId)) throw new Error("unsafe session id for the guard socket");
+    const guardStateDirectory = resolve(this.configDir);
+    if (kind === "abstract") {
+      if (this.platform !== "linux") throw new Error("abstract-namespace sockets exist only on Linux");
+      const existing = this.servers.get(sessionId);
+      // A running provider has this name in the hook command it already loaded, so it is kept for
+      // as long as the runner listens on it.
+      if (existing?.kind === "abstract" && existing.server.listening) return existing.address;
+      await this.closeNow(sessionId);
+      const address = `${MANAGED_WORKTREE_GUARD_ABSTRACT_PREFIX}wollipog-guard-${randomBytes(ABSTRACT_NAME_RANDOM_BYTES).toString("base64url")}`;
+      const server = createServer((socket) =>
+        serveVerdict(socket, () => this.memoryProtections(sessionId), guardStateDirectory));
+      await this.listen(server, address);
+      server.on("error", () => { /* a per-connection failure never takes the server down */ });
+      this.servers.set(sessionId, { server, kind, address, identity: null });
+      return address;
+    }
     const path = managedWorktreeGuardSocketPath(this.configDir, sessionId);
     if (Buffer.byteLength(path, "utf8") > MAX_GUARD_SOCKET_PATH_BYTES) {
       throw new Error(`guard socket path is longer than ${MAX_GUARD_SOCKET_PATH_BYTES} bytes: ${path}`);
@@ -130,21 +225,16 @@ export class ManagedWorktreeGuardSockets {
     // Still ours only while the path on disk is the very socket this server bound. A removed entry
     // reaches nothing, and a replaced one — any other socket at the same path — would answer for
     // this session without being the runner, so either way the runner listens afresh.
-    if (existing?.server.listening && socketIdentity(path) === existing.identity) return path;
+    if (existing?.kind === "path" && existing.server.listening && socketIdentity(path) === existing.identity) return path;
     await this.closeNow(sessionId);
     const protectionsFile = claudeHookSessionProtectionsPath(this.configDir, sessionId);
     const directory = managedWorktreeGuardSocketDirectory(this.configDir, sessionId);
     mkdirSync(this.configDir, { recursive: true, mode: 0o700 });
     ensurePrivateDirectory(directory);
     rmSync(path, { force: true });
-    const server = createServer((socket) => serveVerdict(socket, protectionsFile));
-    await new Promise<void>((resolvePromise, reject) => {
-      server.once("error", reject);
-      server.listen(path, () => {
-        server.off("error", reject);
-        resolvePromise();
-      });
-    });
+    const server = createServer((socket) =>
+      serveVerdict(socket, () => readManagedWorktreeGuardProtections(protectionsFile), guardStateDirectory));
+    await this.listen(server, path);
     server.on("error", () => { /* a per-connection failure never takes the server down */ });
     chmodSync(path, 0o600);
     const identity = socketIdentity(path);
@@ -152,7 +242,7 @@ export class ManagedWorktreeGuardSockets {
       await new Promise<void>((resolvePromise) => server.close(() => resolvePromise()));
       throw new Error("the guard socket was replaced while it was being created");
     }
-    this.servers.set(sessionId, { server, path, identity });
+    this.servers.set(sessionId, { server, kind, address: path, identity });
     return path;
   }
 
@@ -213,7 +303,8 @@ export interface GuardSandboxProbe {
  */
 export async function verifyManagedWorktreeGuardInSandbox(
   probe: GuardSandboxProbe,
-  isolation: SpawnIsolation | undefined,
+  /** `"unsandboxed"` is the `provider`-mode launch: the same sidecar, asked directly. */
+  isolation: SpawnIsolation | "unsandboxed" | undefined,
   cwd: string,
   timeoutMs = 60_000,
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
@@ -224,7 +315,10 @@ export async function verifyManagedWorktreeGuardInSandbox(
   ];
   let file: string;
   let args: string[];
-  if (isolation?.backend === "bwrap") {
+  if (isolation === "unsandboxed") {
+    file = probe.launch.command;
+    args = sidecarArgs;
+  } else if (isolation?.backend === "bwrap") {
     file = isolation.command;
     args = buildBwrapArgs({ command: probe.launch.command, args: sidecarArgs, cwd }, isolation);
   } else if (isolation?.backend === "seatbelt") {
@@ -265,7 +359,7 @@ export async function verifyManagedWorktreeGuardInSandbox(
     child.on("error", (error) => done({ ok: false, reason: `sandboxed guard probe failed: ${error.message}` }));
     child.on("close", (code) => {
       if (code !== 0) {
-        done({ ok: false, reason: `sandboxed guard probe exited ${String(code)}: ${stderr.trim().slice(0, 300)}` });
+        done({ ok: false, reason: `guard socket probe exited ${String(code)}: ${stderr.trim().slice(0, 300)}` });
       } else if (!stdout.includes('"permissionDecision":"deny"') || !stdout.includes(GUARD_STATE_REFUSAL)) {
         done({ ok: false, reason: "sandboxed guard probe did not produce the guard-state refusal" });
       } else {

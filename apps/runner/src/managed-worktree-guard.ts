@@ -260,6 +260,22 @@ export function managedWorktreeGuardProtectionsArgument(argv: readonly string[])
 }
 
 export const MANAGED_WORKTREE_GUARD_SOCKET_FLAG = "--guard-socket";
+/**
+ * Marks a `--guard-socket` value as a Linux abstract-namespace name rather than a path. An argv
+ * cannot carry the NUL byte such a name starts with, and the runner only ever passes an absolute
+ * path otherwise, so the two spellings cannot be confused.
+ */
+export const MANAGED_WORKTREE_GUARD_ABSTRACT_PREFIX = "@";
+
+/** What `net` listens on or connects to for a `--guard-socket` value. */
+export function managedWorktreeGuardSocketAddress(
+  value: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (!value.startsWith(MANAGED_WORKTREE_GUARD_ABSTRACT_PREFIX)) return value;
+  if (platform !== "linux") throw new Error("an abstract verdict socket exists only on Linux");
+  return `\0${value.slice(MANAGED_WORKTREE_GUARD_ABSTRACT_PREFIX.length)}`;
+}
 /** A guard verdict is a local file read and a classification; anything slower is a stuck runner. */
 export const MANAGED_WORKTREE_GUARD_SOCKET_TIMEOUT_MS = 30_000;
 const MAX_VERDICT_BYTES = 256 * 1024;
@@ -294,9 +310,70 @@ export function parseManagedWorktreeGuardVerdict(text: string): ManagedWorktreeG
   return { stdout, stderr, exitCode };
 }
 
+const VERDICT_REQUEST_VERSION = 1;
+/**
+ * Linux caps one environment string at 128 KiB (`MAX_ARG_STRLEN`), so a longer value cannot have
+ * come from `execve` on a default host. One that did is left out rather than sent: a command that
+ * references it is then refused as unresolvable, while every other command is still judged.
+ */
+export const MAX_FORWARDED_ENVIRONMENT_VALUE_BYTES = 128 * 1024;
+/**
+ * The serialized environment as a whole is bounded too, so the request never exceeds the runner's
+ * cap whatever the host's `ARG_MAX` (a raised stack limit lifts it) and however badly the values
+ * escape (six bytes per control character). Past the budget the largest values are left out
+ * first, with the same consequence as above. Real environments are a few kilobytes.
+ */
+export const MAX_FORWARDED_ENVIRONMENT_BYTES = 8 * 1024 * 1024;
+
+/**
+ * What the sidecar sends: the hook payload, and the environment it was started in.
+ *
+ * The environment travels because the sidecar's is the PROVIDER's — the one its shell starts from,
+ * which is what resolves a variable holding a protected path (#1324). The runner's own can differ
+ * (a leased provider home, the settings `env` block), and judging `$HOME/..` against the wrong one
+ * places the operand somewhere the command does not run. It is no more trusted than it was when the
+ * sidecar judged for itself: either way it is what the provider handed its hook.
+ */
+export function managedWorktreeGuardVerdictRequest(
+  hookInput: string,
+  environment: ProviderEnvironment = process.env,
+): string {
+  const kept: Array<{ name: string; value: string; bytes: number }> = [];
+  let total = 0;
+  for (const [name, value] of Object.entries(environment)) {
+    if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > MAX_FORWARDED_ENVIRONMENT_VALUE_BYTES) continue;
+    const bytes = Buffer.byteLength(JSON.stringify(name), "utf8") + Buffer.byteLength(JSON.stringify(value), "utf8") + 2;
+    kept.push({ name, value, bytes });
+    total += bytes;
+  }
+  if (total > MAX_FORWARDED_ENVIRONMENT_BYTES) {
+    kept.sort((left, right) => right.bytes - left.bytes);
+    while (total > MAX_FORWARDED_ENVIRONMENT_BYTES && kept.length > 0) total -= kept.shift()!.bytes;
+  }
+  const forwarded: Record<string, string> = {};
+  for (const { name, value } of kept) forwarded[name] = value;
+  return JSON.stringify({ version: VERDICT_REQUEST_VERSION, hookInput, environment: forwarded });
+}
+
+/** Anything but the exact request shape throws, which the runner answers with a refusal. */
+export function parseManagedWorktreeGuardVerdictRequest(
+  text: string,
+): { hookInput: string; environment: Record<string, string> } {
+  const parsed = JSON.parse(text) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("request is not an object");
+  const { version, hookInput, environment } = parsed as Record<string, unknown>;
+  if (version !== VERDICT_REQUEST_VERSION) throw new Error("unsupported request version");
+  if (typeof hookInput !== "string") throw new Error("request carries no hook payload");
+  if (!environment || typeof environment !== "object" || Array.isArray(environment) ||
+      Object.values(environment).some((value) => typeof value !== "string")) {
+    throw new Error("request carries no usable environment");
+  }
+  return { hookInput, environment: { ...(environment as Record<string, string>) } };
+}
+
 /**
  * Ask the runner to judge one hook payload. The runner judges it against the protection list of
- * the session that owns this socket, with the same `runManagedWorktreeGuardDecision` a file-mode
+ * the session that owns this socket, with the same `managedWorktreeGuardDecision` a file-mode
  * sidecar runs. Every failure — no socket, a refused or reset connection, a timeout, an oversized
  * or malformed answer — rejects, and the caller turns that into exit 2.
  */
@@ -304,6 +381,7 @@ export function requestManagedWorktreeGuardVerdict(
   socketPath: string,
   hookInput: string,
   timeoutMs = MANAGED_WORKTREE_GUARD_SOCKET_TIMEOUT_MS,
+  environment: ProviderEnvironment = process.env,
 ): Promise<ManagedWorktreeGuardOutcome> {
   return new Promise((resolvePromise, reject) => {
     const chunks: Buffer[] = [];
@@ -317,9 +395,9 @@ export function requestManagedWorktreeGuardVerdict(
       if (error) reject(error);
       else resolvePromise(outcome!);
     };
-    const socket = connect(socketPath);
+    const socket = connect(managedWorktreeGuardSocketAddress(socketPath));
     const timer = setTimeout(() => finish(new Error("the runner did not answer in time")), timeoutMs);
-    socket.on("connect", () => socket.end(hookInput));
+    socket.on("connect", () => socket.end(managedWorktreeGuardVerdictRequest(hookInput, environment)));
     socket.on("data", (chunk: Buffer) => {
       total += chunk.length;
       if (total > MAX_VERDICT_BYTES) finish(new Error("the runner's answer is too large"));
@@ -349,12 +427,16 @@ export function runManagedWorktreeGuardDecision(
       exitCode: 2,
     };
   }
-  const decision = managedWorktreeGuardDecision(
+  return managedWorktreeGuardOutcome(managedWorktreeGuardDecision(
     hookInput,
     () => readManagedWorktreeGuardProtections(protectionsFile),
     dirname(resolve(protectionsFile)),
     environment,
-  );
+  ));
+}
+
+/** A decision as the process outcome Claude and Codex give a meaning to. */
+export function managedWorktreeGuardOutcome(decision: ManagedWorktreeGuardDecision): ManagedWorktreeGuardOutcome {
   if (decision.kind === "deny") {
     return { stdout: `${managedWorktreeGuardDenyPayload(decision.reason)}\n`, stderr: "", exitCode: 0 };
   }
@@ -410,9 +492,15 @@ export async function runManagedWorktreeGuardCli(
       try {
         outcome = await requestManagedWorktreeGuardVerdict(socketPath, hookInput);
       } catch (error) {
+        // This text reaches the model and so the session's timeline. A connection error spells out
+        // the address it failed on, and an abstract name is not something to repeat there.
+        const name = socketPath.startsWith(MANAGED_WORKTREE_GUARD_ABSTRACT_PREFIX)
+          ? socketPath.slice(MANAGED_WORKTREE_GUARD_ABSTRACT_PREFIX.length)
+          : "";
+        const message = name ? (error as Error).message.split(name).join("<verdict socket>") : (error as Error).message;
         outcome = {
           stdout: "",
-          stderr: `${MANAGED_WORKTREE_REFUSAL} (managed worktree guard could not get a verdict from the runner: ${(error as Error).message})\n`,
+          stderr: `${MANAGED_WORKTREE_REFUSAL} (managed worktree guard could not get a verdict from the runner: ${message})\n`,
           exitCode: 2,
         };
       }

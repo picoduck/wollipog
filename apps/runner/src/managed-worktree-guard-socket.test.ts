@@ -14,12 +14,20 @@ import {
   verifyManagedWorktreeGuardInSandbox,
 } from "./managed-worktree-guard-socket.js";
 import {
+  MAX_FORWARDED_ENVIRONMENT_BYTES,
+  MAX_FORWARDED_ENVIRONMENT_VALUE_BYTES,
+  managedWorktreeGuardSocketAddress,
+  managedWorktreeGuardVerdictRequest,
   parseManagedWorktreeGuardVerdict,
   requestManagedWorktreeGuardVerdict,
   runManagedWorktreeGuardCli,
   writeManagedWorktreeGuardProtections,
 } from "./managed-worktree-guard.js";
-import { GUARD_STATE_REFUSAL, MANAGED_WORKTREE_REFUSAL } from "./managed-worktree-protection.js";
+import {
+  GUARD_STATE_REFUSAL,
+  MANAGED_WORKTREE_REFUSAL,
+  type ManagedWorktreeProtection,
+} from "./managed-worktree-protection.js";
 
 const POSIX = process.platform !== "win32";
 const roots: string[] = [];
@@ -263,4 +271,166 @@ test("the in-sandbox probe has nothing to prove without a runner-owned sandbox, 
     tmpdir(),
   );
   assert.equal(verdict.ok, false);
+});
+
+/* ------------------------------------------------------------------------------------------
+ * #1336 slice 3: the sidecar's environment, and the abstract socket that answers from memory.
+ * --------------------------------------------------------------------------------------- */
+
+const LINUX = process.platform === "linux";
+
+test("a verdict is judged in the sidecar's environment, never the runner's", { skip: !POSIX }, async () => {
+  // Regression for slice 1's socket mode: the runner judged with its OWN environment, so a variable
+  // only the provider defines was unresolvable, and one both define could resolve somewhere else.
+  const { configDir, host } = fixture();
+  writeManagedWorktreeGuardProtections(claudeHookSessionProtectionsPath(configDir, "s_env"), [
+    { worktreePath: "/trees/env", repoPath: "/repo" },
+  ]);
+  const socket = await host.ensure("s_env");
+  const name = "WOLLIPOG_TEST_ONLY_THE_PROVIDER_HAS_THIS";
+  assert.equal(process.env[name], undefined);
+  const command = `git worktree remove "$${name}"`;
+  const resolved = await requestManagedWorktreeGuardVerdict(socket, payload(command), 5_000, { [name]: "/trees/env" });
+  assert.ok(resolved.stdout.includes(MANAGED_WORKTREE_REFUSAL), "the provider's value places the operand in the worktree");
+  const elsewhere = await requestManagedWorktreeGuardVerdict(socket, payload(command), 5_000, { [name]: "/trees/other" });
+  assert.deepEqual(elsewhere, { stdout: "", stderr: "", exitCode: 0 }, "and a value elsewhere is judged there");
+  // A variable both sides define is read from the sidecar's side.
+  const home = await requestManagedWorktreeGuardVerdict(
+    socket, payload('git worktree remove "$HOME/env"'), 5_000, { HOME: "/trees" },
+  );
+  assert.ok(home.stdout.includes(MANAGED_WORKTREE_REFUSAL));
+});
+
+test("a request that is not the sidecar's envelope is refused, not judged", { skip: !POSIX }, async () => {
+  const { configDir, host } = fixture();
+  writeManagedWorktreeGuardProtections(claudeHookSessionProtectionsPath(configDir, "s_raw"), []);
+  const socket = await host.ensure("s_raw");
+  const { connect } = await import("node:net");
+  const answer = await new Promise<string>((resolvePromise, reject) => {
+    const client = connect(socket);
+    let text = "";
+    client.on("connect", () => client.end(payload("git status")));
+    client.on("data", (chunk) => { text += chunk.toString("utf8"); });
+    client.on("end", () => resolvePromise(text));
+    client.on("error", reject);
+  });
+  const verdict = parseManagedWorktreeGuardVerdict(answer);
+  assert.equal(verdict.exitCode, 2);
+  assert.match(verdict.stderr, /unreadable verdict request/u);
+});
+
+test("an abstract socket answers from the runner's memory and writes nothing", { skip: !LINUX }, async () => {
+  const { root, configDir } = fixture();
+  const lists = new Map<string, ManagedWorktreeProtection[]>([
+    ["s_one", [{ worktreePath: "/trees/one", repoPath: "/repo" }]],
+    ["s_two", [{ worktreePath: "/trees/two", repoPath: "/repo" }]],
+  ]);
+  const host = new ManagedWorktreeGuardSockets(configDir, (sessionId) => {
+    const list = lists.get(sessionId);
+    if (!list) throw new Error("no list");
+    return list;
+  });
+  hosts.push(host);
+  const one = await host.ensure("s_one", "abstract");
+  const two = await host.ensure("s_two", "abstract");
+  assert.match(one, /^@wollipog-guard-[A-Za-z0-9_-]{32}$/u, "24 random bytes: 192 bits, above the 128 required");
+  assert.notEqual(one, two);
+  assert.equal(await host.ensure("s_one", "abstract"), one, "a running provider's hook keeps its address");
+  assert.equal(statSync(configDir, { throwIfNoEntry: false }), undefined, "nothing was created on disk");
+
+  const remove = payload(quote(["git", "worktree", "remove", "/trees/one"]));
+  assert.ok((await requestManagedWorktreeGuardVerdict(one, remove)).stdout.includes(MANAGED_WORKTREE_REFUSAL));
+  assert.deepEqual(await requestManagedWorktreeGuardVerdict(two, remove), { stdout: "", stderr: "", exitCode: 0 });
+  // The guard-state veto still names this runner's hook state directory.
+  const stateRead = await requestManagedWorktreeGuardVerdict(one, payload(quote(["cat", join(configDir, "x")])));
+  assert.ok(stateRead.stdout.includes(GUARD_STATE_REFUSAL));
+  // A list on DISK that would allow the call is not consulted.
+  writeManagedWorktreeGuardProtections(claudeHookSessionProtectionsPath(configDir, "s_one"), []);
+  assert.ok((await requestManagedWorktreeGuardVerdict(one, remove)).stdout.includes(MANAGED_WORKTREE_REFUSAL));
+  // A live refresh is simply the next read of memory.
+  lists.set("s_one", []);
+  assert.deepEqual(await requestManagedWorktreeGuardVerdict(one, remove), { stdout: "", stderr: "", exitCode: 0 });
+  // No list at all is an invalidated guard: a refusal.
+  lists.delete("s_one");
+  const invalidated = await requestManagedWorktreeGuardVerdict(one, payload("git status"));
+  assert.equal(invalidated.exitCode, 2);
+
+  // The sidecar itself, given the address: a verdict while the runner listens, exit 2 once it stops.
+  const allowed = await runCli(["--protections", join(root, "unused"), "--guard-socket", two], payload("git status"));
+  assert.equal(allowed.code, 0);
+  await host.close("s_two");
+  const gone = await runCli(["--protections", join(root, "unused"), "--guard-socket", two], payload("git status"));
+  assert.equal(gone.code, 2);
+  assert.match(gone.stderr, /could not get a verdict from the runner/u);
+  // The refusal reaches the model, and so the session's timeline: it does not repeat the name.
+  assert.ok(!gone.stderr.includes(two.slice(1)), gone.stderr);
+});
+
+test("an abstract socket the runner listens on cannot be taken over by another listener", { skip: !LINUX }, async () => {
+  // The measurement behind the design: a PATH socket can be unlinked and re-bound by any process of
+  // the same OS user (see "a socket replaced at the same path" above, which only recovers at the
+  // next ensure). An abstract name has no entry to unlink, and a second bind is refused outright.
+  const { configDir } = fixture();
+  const host = new ManagedWorktreeGuardSockets(configDir, () => [{ worktreePath: "/trees/held", repoPath: "/repo" }]);
+  hosts.push(host);
+  const address = await host.ensure("s_held", "abstract");
+  const impostor = createServer((socket) => socket.on("end", () => socket.end('{"stdout":"","stderr":"","exitCode":0}')));
+  const bound = await new Promise<NodeJS.ErrnoException | null>((resolvePromise) => {
+    impostor.once("error", (error) => resolvePromise(error as NodeJS.ErrnoException));
+    impostor.listen(`\0${address.slice(1)}`, () => resolvePromise(null));
+  });
+  try {
+    assert.equal(bound?.code, "EADDRINUSE");
+    const verdict = await requestManagedWorktreeGuardVerdict(address, payload(quote(["git", "worktree", "remove", "/trees/held"])));
+    assert.ok(verdict.stdout.includes(MANAGED_WORKTREE_REFUSAL), "the runner still answers");
+  } finally {
+    impostor.close();
+  }
+});
+
+test("an abstract socket is refused where the platform has none", async () => {
+  const host = new ManagedWorktreeGuardSockets(join(tmpdir(), "wgs-none"), () => [], "darwin");
+  await assert.rejects(host.ensure("s_mac", "abstract"), /only on Linux/u);
+  assert.throws(() => managedWorktreeGuardSocketAddress("@name", "darwin"), /only on Linux/u);
+  assert.equal(managedWorktreeGuardSocketAddress("/a/path", "darwin"), "/a/path");
+  assert.equal(managedWorktreeGuardSocketAddress("@name", "linux"), "\0name");
+});
+
+test("a legal environment is never refused for its size, however badly it escapes (review CR-2.1)", { skip: !POSIX }, async () => {
+  // Seven 100 KiB values of control characters fit Linux's execve limits but serialize to over
+  // 4 MB of `\u0001`; the request cap is sized for that. A value longer than one Linux string can
+  // be is left out, so only a command that references it is refused, never every command.
+  const { configDir, host } = fixture();
+  writeManagedWorktreeGuardProtections(claudeHookSessionProtectionsPath(configDir, "s_big"), [
+    { worktreePath: "/trees/big", repoPath: "/repo" },
+  ]);
+  const socket = await host.ensure("s_big");
+  const environment: Record<string, string> = { BIG_TARGET: "/trees/big" };
+  for (let index = 0; index < 7; index++) environment[`NOISE_${index}`] = "\u0001".repeat(100 * 1024);
+  const request = managedWorktreeGuardVerdictRequest(payload("git status"), environment);
+  assert.ok(request.length > 4_000_000, `the escaped request is ${request.length} bytes`);
+  const judged = await requestManagedWorktreeGuardVerdict(socket, payload('git worktree remove "$BIG_TARGET"'), 10_000, environment);
+  assert.ok(judged.stdout.includes(MANAGED_WORKTREE_REFUSAL), "the request was judged, with the forwarded variable resolved");
+  assert.deepEqual(await requestManagedWorktreeGuardVerdict(socket, payload("git status"), 10_000, environment), { stdout: "", stderr: "", exitCode: 0 });
+
+  const tooLong = { ...environment, HUGE: "x".repeat(MAX_FORWARDED_ENVIRONMENT_VALUE_BYTES + 1) };
+  assert.equal(Object.keys(JSON.parse(managedWorktreeGuardVerdictRequest("{}", tooLong)).environment).includes("HUGE"), false);
+  const unresolved = await requestManagedWorktreeGuardVerdict(socket, payload('git worktree remove "$HUGE"'), 10_000, tooLong);
+  assert.match(unresolved.stdout, /"permissionDecision":"deny".*cannot tell where/u, "a reference to the dropped variable is refused as unresolvable");
+  assert.deepEqual(await requestManagedWorktreeGuardVerdict(socket, payload("git status"), 10_000, tooLong), { stdout: "", stderr: "", exitCode: 0 });
+
+  // A host with a raised stack limit permits far more than 2 MiB of environment (review CR-3.1):
+  // sixty legal values of 127 KiB of control characters would escape to about 47 MB. The sidecar
+  // bounds what it forwards, largest values first, so the request always fits the runner's cap and
+  // the small variable that matters still arrives.
+  const raised: Record<string, string> = { BIG_TARGET: "/trees/big" };
+  for (let index = 0; index < 60; index++) raised[`RAISED_${index}`] = "\u0001".repeat(127 * 1024);
+  const bounded = managedWorktreeGuardVerdictRequest(payload("git status"), raised);
+  assert.ok(bounded.length <= MAX_FORWARDED_ENVIRONMENT_BYTES + 4096, `the request is bounded: ${bounded.length} bytes`);
+  const kept = JSON.parse(bounded).environment as Record<string, string>;
+  assert.equal(kept.BIG_TARGET, "/trees/big");
+  assert.ok(Object.keys(kept).length < 61 && Object.keys(kept).length > 1, "only the largest values were left out");
+  const raisedVerdict = await requestManagedWorktreeGuardVerdict(socket, payload('git worktree remove "$BIG_TARGET"'), 10_000, raised);
+  assert.ok(raisedVerdict.stdout.includes(MANAGED_WORKTREE_REFUSAL));
+  assert.deepEqual(await requestManagedWorktreeGuardVerdict(socket, payload("git status"), 10_000, raised), { stdout: "", stderr: "", exitCode: 0 });
 });

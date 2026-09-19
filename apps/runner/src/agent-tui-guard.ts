@@ -56,6 +56,11 @@ export interface AgentTuiGuardConfig {
   /** Seam for tests: enumerate a Codex launch's effective hooks (#1377). */
   readCodexHookInventory?: Parameters<typeof provisionCodexGuard>[1]["readHookInventory"];
   platform?: NodeJS.Platform;
+  /**
+   * The runner's abstract verdict socket for this session, already proven (#1336 slice 3), or
+   * `undefined` where there is none and the guard reads its file as before.
+   */
+  guardSocket?: (sessionId: string) => Promise<string | undefined>;
 }
 
 /**
@@ -76,8 +81,27 @@ export function provisionAgentTuiManagedWorktreeGuard(
     protections: resolveProtections,
     readCodexHookInventory: _readCodexHookInventory,
     platform: _platform,
+    guardSocket,
     ...hookConfig
   } = config;
+  if (guardSocket) {
+    // A session deleted while the TUI was preparing is refused before a socket is opened for it;
+    // the list itself is resolved again after the wait, so it is never older than the launch.
+    resolveProtections();
+    return guardSocket(spec.sessionId).then((socket) =>
+      provisionClaudeTuiGuard(spec, hookConfig, resolveProtections, socket, log, host));
+  }
+  return provisionClaudeTuiGuard(spec, hookConfig, resolveProtections, undefined, log, host);
+}
+
+function provisionClaudeTuiGuard(
+  spec: SessionMeta,
+  hookConfig: Omit<AgentTuiGuardConfig, "protections" | "readCodexHookInventory" | "platform" | "guardSocket">,
+  resolveProtections: AgentTuiGuardConfig["protections"],
+  guardSocket: string | undefined,
+  log: (message: string) => void,
+  host: ClaudeHookHost,
+): AgentTuiGuardProvisioning {
   // Resolved BEFORE anything is written, so a caller that refuses the launch from here (a session
   // deleted while the TUI was preparing) leaves no runner-owned files behind for it.
   const protections = resolveProtections();
@@ -86,6 +110,7 @@ export function provisionAgentTuiManagedWorktreeGuard(
     {
       ...hookConfig,
       managedWorktreeProtections: protections,
+      ...(guardSocket ? { managedWorktreeGuardSocket: guardSocket } : {}),
       // A TUI does not replace the session's structured provider; both run against the same
       // per-session documents. So this provisioning may refresh the guard but never retire it.
       concurrentLaunch: true,
@@ -118,12 +143,18 @@ async function provisionAgentTuiCodexManagedWorktreeGuard(
   host: ClaudeHookHost,
   cwd: string,
 ): Promise<AgentTuiGuardProvisioning> {
+  // Refuses a deleted session before a socket is opened for it, exactly as the Claude form does.
+  config.protections();
+  const guardSocket = await config.guardSocket?.(spec.sessionId);
+  // Resolved AFTER the wait: a worktree the session acquired meanwhile was put into the live list
+  // by the refresh, and provisioning must not overwrite that with the older snapshot (review CR-1.1).
   const protections = config.protections();
   const guard = await provisionCodexGuard(
     spec,
     {
       protections,
       cwd,
+      ...(guardSocket ? { guardSocket } : {}),
       platform: config.platform,
       verifyGuardLaunch: config.verifyGuardLaunch,
       readHookInventory: config.readCodexHookInventory,

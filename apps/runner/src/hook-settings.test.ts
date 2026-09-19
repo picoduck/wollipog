@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -8,6 +8,8 @@ import type { AgentDefinition, SessionLaunchSpec } from "@wollipog/protocol";
 import {
   applyClaudeHookCapability,
   claudeHookCircuitPath,
+  claudeHookGuardPath,
+  claudeHookProtectionsPath,
   claudeHookRunnerConfigDir,
   claudeHookReadyPath,
   claudeHookSettingsPath,
@@ -18,6 +20,8 @@ import {
   describeManagedSettings,
   LEGACY_POLICY_HOOK_ENV,
   managedSettingsGuardSocket,
+  managedWorktreeGuardMemoryProtections,
+  MAX_INLINE_SETTINGS_BYTES,
   markClaudeHookCredentialRejected,
   markClaudeHookCredentialReady,
   prepareClaudeHookArgs,
@@ -1241,4 +1245,158 @@ test("a failed launch self-test is retried only after a cooldown, a success neve
   }
   assert.equal(probes, 1, "every guardable launch would otherwise pay for a failing process start");
   assert.ok(CLAUDE_GUARD_LAUNCH_RETRY_COOLDOWN_MS > 0);
+}));
+
+/* ---------------------------------------------------------------------------------------------
+ * Issue #1336 slice 3: a launch the runner does NOT sandbox (`provider` mode) asks an
+ * abstract-namespace verdict socket. Its list and its settings documents live in runner memory, so
+ * no file in the hook state directory decides a verdict or names the hook command Claude runs.
+ * ------------------------------------------------------------------------------------------ */
+
+const MEMORY_SOCKET = "@wollipog-guard-test-0123456789abcdefghijklmnop";
+
+function inlineSettings(args: string[]): ReturnType<typeof settingsOf>["live"] {
+  const value = args[args.indexOf("--settings") + 1]!;
+  assert.ok(value.startsWith("{"), `the launch carries the document inline, not a path: ${value.slice(0, 40)}`);
+  return JSON.parse(value);
+}
+
+test("a memory-held guard launches from an inline document, and no list is written", () => temp((dir) => {
+  const messages: string[] = [];
+  const launch = guardedSpec();
+  resetClaudeGuardState();
+  provisionClaudeHooks(launch, {
+    ...config,
+    enabled: false,
+    managedWorktreeProtections: PROTECTIONS,
+    verifyGuardLaunch: guardVerifies,
+    managedWorktreeGuardSocket: MEMORY_SOCKET,
+  }, (message) => messages.push(message), host(dir));
+  const { file } = settingsOf(dir);
+  // The PERSISTED argv still names the path, so every path-keyed mechanism is untouched.
+  assert.deepEqual(launch.args, ["--settings", file]);
+  assert.equal(existsSync(claudeHookProtectionsPath(file)), false, "the list is not on disk");
+  assert.deepEqual(managedWorktreeGuardMemoryProtections("sess_hook_1"), PROTECTIONS);
+
+  const prepared = prepareClaudeHookArgs(launch.args);
+  assert.equal(prepared.guardActive, true);
+  assert.equal(prepared.healed, false);
+  const args = guardEntries(inlineSettings(prepared.args))[0]!.hooks[0]!.args;
+  assert.equal(args[args.indexOf("--guard-socket") + 1], MEMORY_SOCKET);
+  assert.deepEqual(launch.args, ["--settings", file], "preparing a spawn never rewrites the persisted argv");
+
+  // The socket name reaches the provider's argv and nowhere else the runner writes.
+  for (const name of readdirSync(dir)) {
+    assert.ok(!readFileSync(join(dir, name), "utf8").includes(MEMORY_SOCKET), `${name} discloses the socket name`);
+  }
+  assert.ok(!messages.join("\n").includes(MEMORY_SOCKET), "the socket name is never logged");
+  // What IS on disk still describes a guard, in the file form, which has no list: if it were ever
+  // launched it would refuse every matched call rather than pass one.
+  assert.equal(describeManagedSettings(file)?.guard, true);
+  assert.equal(managedSettingsGuardSocket(file), null);
+}));
+
+test("nothing written into the hook state directory changes a memory-held guard's launch", () => temp((dir) => {
+  const launch = provisionGuarded(dir, {}, { managedWorktreeGuardSocket: MEMORY_SOCKET });
+  const { file } = settingsOf(dir);
+  const before = prepareClaudeHookArgs(launch.args);
+  assert.equal(before.guardActive, true);
+  // The measured attack on the file form: the hook command swapped for a no-op in every document,
+  // args untouched, which `describeManagedSettings` still reads as "guarded".
+  for (const target of [file, claudeHookTemplatePath(file), claudeHookGuardPath(file)]) {
+    const document = JSON.parse(readFileSync(target, "utf8"));
+    for (const entry of document.hooks.PreToolUse) for (const hook of entry.hooks) hook.command = "/bin/true";
+    writeFileSync(target, JSON.stringify(document));
+  }
+  // ... and a list that would allow everything, planted where the file form would read it.
+  writeFileSync(claudeHookProtectionsPath(file), JSON.stringify({ version: 1, protections: [] }));
+  const after = prepareClaudeHookArgs(launch.args);
+  assert.deepEqual(after.args, before.args, "the launched document is the runner's own");
+  assert.equal(guardEntries(inlineSettings(after.args))[0]!.hooks[0]!.command, "/usr/bin/node");
+  assert.deepEqual(managedWorktreeGuardMemoryProtections("sess_hook_1"), PROTECTIONS);
+  // Removing every file does not remove the guard either.
+  for (const name of readdirSync(dir)) rmSync(join(dir, name), { force: true });
+  assert.deepEqual(prepareClaudeHookArgs(launch.args).args, before.args);
+}));
+
+test("a memory-held guard survives an open manager circuit as the guard-only document", () => temp((dir) => {
+  const launch = provisionGuarded(dir, {}, { managedWorktreeGuardSocket: MEMORY_SOCKET });
+  const { file } = settingsOf(dir);
+  const combined = inlineSettings(prepareClaudeHookArgs(launch.args).args);
+  assert.ok(combined.hooks?.PostToolUse, "the manager hooks share the inline document");
+  writeHookCircuitState(claudeHookCircuitPath(file), { consecutiveFailures: 3, open: true, openedAt: Date.now() });
+  const prepared = prepareClaudeHookArgs(launch.args);
+  assert.equal(prepared.circuitOpen, true);
+  assert.equal(prepared.guardActive, true);
+  const guardOnly = inlineSettings(prepared.args);
+  assert.equal(guardOnly.hooks?.PostToolUse, undefined);
+  assert.equal(guardEntries(guardOnly).length, 1);
+  // The live file is not swapped for anything: nothing on disk is launched.
+  assert.ok(JSON.parse(readFileSync(file, "utf8")).hooks.PostToolUse);
+}));
+
+test("a memory-held list follows the live refresh, and an invalidated one refuses", () => temp((dir) => {
+  const launch = provisionGuarded(dir, {}, { enabled: false, managedWorktreeGuardSocket: MEMORY_SOCKET });
+  const next = [...PROTECTIONS, { worktreePath: "/repo-worktrees/s2", repoPath: "/repo" }];
+  assert.deepEqual(refreshClaudeGuardProtections("sess_hook_1", next, dir), { state: "refreshed" });
+  assert.deepEqual(managedWorktreeGuardMemoryProtections("sess_hook_1"), next);
+  assert.equal(existsSync(claudeHookProtectionsPath(settingsOf(dir).file)), false, "a refresh writes no list either");
+  assert.deepEqual(refreshClaudeGuardProtections("sess_hook_1", [], dir), { state: "refreshed" });
+  assert.deepEqual(managedWorktreeGuardMemoryProtections("sess_hook_1"), [], "an empty list is a valid state (#1303)");
+
+  removeClaudeHookFiles("sess_hook_1", dir);
+  assert.throws(() => managedWorktreeGuardMemoryProtections("sess_hook_1"), /holds no protected worktree list/u);
+  assert.equal(prepareClaudeHookArgs(launch.args).guardActive, false);
+}));
+
+test("a concurrent launch keeps the session's memory-held guard, and a file-form one replaces it", () => temp((dir) => {
+  provisionGuarded(dir, {}, { enabled: false, managedWorktreeGuardSocket: MEMORY_SOCKET });
+  const tui = guardedSpec();
+  provisionClaudeHooks(tui, {
+    ...config,
+    enabled: false,
+    managedWorktreeProtections: PROTECTIONS,
+    verifyGuardLaunch: guardVerifies,
+    concurrentLaunch: true,
+  }, () => {}, host(dir));
+  const args = guardEntries(inlineSettings(prepareClaudeHookArgs(tui.args).args))[0]!.hooks[0]!.args;
+  assert.equal(args[args.indexOf("--guard-socket") + 1], MEMORY_SOCKET);
+
+  // A pre-authorization provisioning that does not know the worktree set carries it too.
+  const restart = guardedSpec();
+  provisionClaudeHooks(restart, { ...config, verifyGuardLaunch: guardVerifies }, () => {}, host(dir));
+  assert.equal(prepareClaudeHookArgs(restart.args).guardActive, true);
+  assert.ok(prepareClaudeHookArgs(restart.args).args[1]!.includes(MEMORY_SOCKET));
+
+  // A later launch in the file form (a socket that could not be established) is the old behaviour.
+  const fileForm = provisionGuarded(dir, {}, { enabled: false });
+  const prepared = prepareClaudeHookArgs(fileForm.args);
+  assert.deepEqual(prepared.args, ["--settings", settingsOf(dir).file]);
+  assert.equal(prepared.guardActive, true);
+  assert.equal(existsSync(claudeHookProtectionsPath(settingsOf(dir).file)), true);
+}));
+
+test("a user's own --settings is shadowed by a memory-held guard exactly as by a file one", () => temp((dir) => {
+  const user = join(dir, "user-settings.json");
+  writeFileSync(user, "{}");
+  // Owns a worktree: guarded, runner document LAST, the user's argument left in place before it.
+  const owning = provisionGuarded(dir, { args: ["--settings", user] }, { enabled: false, managedWorktreeGuardSocket: MEMORY_SOCKET });
+  const prepared = prepareClaudeHookArgs(owning.args);
+  assert.deepEqual(prepared.args.slice(0, 3), ["--settings", user, "--settings"]);
+  assert.equal(guardEntries(inlineSettings(prepared.args.slice(2))).length, 1);
+  // Owns none: the #1303 exception is unchanged, so the user's settings keep applying.
+  const empty = provisionGuarded(dir, { args: ["--settings", user] }, {
+    enabled: false, managedWorktreeProtections: [], managedWorktreeGuardSocket: MEMORY_SOCKET,
+  });
+  assert.deepEqual(prepareClaudeHookArgs(empty.args).args, ["--settings", user]);
+}));
+
+test("an inline document that would not fit an argv string is not launched", () => temp((dir) => {
+  const launch = provisionGuarded(dir, {}, {
+    enabled: false,
+    managedWorktreeGuardSocket: `@${"x".repeat(MAX_INLINE_SETTINGS_BYTES)}`,
+  });
+  const prepared = prepareClaudeHookArgs(launch.args);
+  assert.equal(prepared.guardActive, false, "the driver mediates instead");
+  assert.deepEqual(prepared.args, []);
 }));
