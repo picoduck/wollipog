@@ -5937,7 +5937,14 @@ export class SessionsService {
     if (!this.db.hasCompletedAgentReportAt(child.id, request.reportEventSeq)) {
       return fail("reportEventSeq is not a completed top-level agent response", 409);
     }
-    if (this.db.unconsumedWorkflowDecisionsForSession(child.id).length > 0) {
+    // An approved UI evidence decision gates a later enqueue rather than authorizing an action of
+    // its own, so consuming it has no effect beyond its status. A finished child need not consume
+    // it first, which a provider's auto-mode classifier may refuse as self-approval (#1404).
+    // Every other approved decision still authorizes an action the child must consume itself.
+    const openDecisions = this.db.unconsumedWorkflowDecisionsForSession(child.id);
+    const spentEvidence = openDecisions.filter((decision) =>
+      decision.status === "approved" && decision.category === "ui_evidence_approval");
+    if (openDecisions.length > spentEvidence.length) {
       return fail("campaign child still has an unresolved or unconsumed workflow decision", 409);
     }
     const unfinishedDescendantId = this.db.campaignDescendantIds(child.id)
@@ -5950,7 +5957,16 @@ export class SessionsService {
     if (unfinishedDescendantId) {
       return fail(`campaign child still has unfinished descendant ${unfinishedDescendantId}`, 409);
     }
-    this.db.verifyCampaignChildReport(campaignSessionId, child.id, request.reportEventSeq, Date.now());
+    // Settle the spent approvals now, so a later stop or archive does not audit them as revoked.
+    const now = Date.now();
+    for (const decision of spentEvidence) {
+      const consumed = this.db.consumeWorkflowDecision(decision.occurrenceId, now);
+      if (consumed) {
+        this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "system", id: "campaign-child-verified" }, now);
+      }
+    }
+    if (spentEvidence.length > 0) this.hub.sessionChangedById(child.id);
+    this.db.verifyCampaignChildReport(campaignSessionId, child.id, request.reportEventSeq, now);
     let updated = this.db.getSession(child.id)!;
     if (campaign.orchestratorPolicy.behavior.completion === "stop_and_archive") {
       const archived = this.setArchived(child.id, true);
