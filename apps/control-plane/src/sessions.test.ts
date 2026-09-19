@@ -3574,9 +3574,11 @@ test("a resolver's child-facing message reaches the child's decision view and re
     };
     const promptsToChild = () => hub.sentOfType("prompt_session").filter((message) => message.sessionId === child.id);
     const idleWrites: string[] = [];
+    const runningWrites: string[] = [];
     const updateSessionStatus = db.updateSessionStatus.bind(db);
     db.updateSessionStatus = (...args: Parameters<typeof db.updateSessionStatus>) => {
       if (args[0] === child.id && args[1] === "idle") idleWrites.push(args[0]);
+      if (args[0] === child.id && args[1] === "running") runningWrites.push(args[0]);
       return updateSessionStatus(...args);
     };
 
@@ -3645,6 +3647,24 @@ test("a resolver's child-facing message reaches the child's decision view and re
     assert.equal(idleEdges.filter((id) => id === child.id).length, 1);
     assert.equal(idleWrites.length, 1);
 
+    // An open policy-hook approval records its own swallowed idle, which the running write would
+    // clear and a refused prompt could not restore, so the child is restored to idle as before.
+    const hooked = requestMerge(505);
+    svc.onSessionStatus(child.id, "idle");
+    const listOpenPolicyHookApprovals = db.listOpenPolicyHookApprovals.bind(db);
+    db.listOpenPolicyHookApprovals = (sessionId: string) => sessionId === child.id
+      ? [{ requestId: "queued-hook" } as ReturnType<typeof db.listOpenPolicyHookApprovals>[number]]
+      : listOpenPolicyHookApprovals(sessionId);
+    const runningWritesBeforeHook = runningWrites.length;
+    assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, hooked.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "deny", childMessage: "Hook note." }, () => true).ok);
+    db.listOpenPolicyHookApprovals = listOpenPolicyHookApprovals;
+    assert.equal(runningWrites.length, runningWritesBeforeHook,
+      "no running write clears the hook approval's swallowed-idle marker");
+    assert.equal(db.getSession(child.id)?.status, "idle");
+    assert.equal(svc.workflowDecision(child.id, hooked.occurrenceId).data?.childMessage, "Hook note.");
+    assert.equal(idleWrites.length, 2);
+
     // Without a message nothing changes: no field, no digest, no prompt, and an idle child's
     // swallowed idle edge is replayed exactly as before.
     const silent = requestMerge(503);
@@ -3652,8 +3672,8 @@ test("a resolver's child-facing message reaches the child's decision view and re
     assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, silent.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "deny" }, () => true).ok);
     assert.equal(db.getSession(child.id)?.status, "idle");
-    assert.equal(idleEdges.filter((id) => id === child.id).length, 2);
-    assert.equal(idleWrites.length, 2);
+    assert.equal(idleEdges.filter((id) => id === child.id).length, 3);
+    assert.equal(idleWrites.length, 3);
     assert.equal("childMessage" in (svc.workflowDecision(child.id, silent.occurrenceId).data ?? {}), false);
     assert.equal(promptsToChild().length, 2);
     assert.equal(svc.governanceAudit(child.id).find((entry) =>

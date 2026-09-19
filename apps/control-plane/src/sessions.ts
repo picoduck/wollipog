@@ -6817,11 +6817,14 @@ export class SessionsService {
     const restoreIdle = !remaining && current.status === "input_required" &&
       this.db.policyResumeStatus(sessionId) === "idle";
     this.db.setPendingApproval(sessionId, remaining);
-    if (restoreIdle && resume && !this.pendingPolicyAsk(this.db.getSession(sessionId)!)) {
+    if (restoreIdle && resume && !this.pendingPolicyAsk(this.db.getSession(sessionId)!) &&
+        this.db.listOpenPolicyHookApprovals(sessionId).length === 0) {
       // An admitted resuming turn continues the work the card interrupted, so the child leaves the
       // pause straight into it. Passing through idle would publish a session.idle the turn
       // contradicts, and replaying that edge would settle pods, workflow attempts, campaign
       // readiness, and push-to-wake early; the resumed turn's own idle settles them instead.
+      // The running write clears swallowed-idle markers, so an open policy-hook approval, whose
+      // marker a refused prompt could not restore, keeps the ordinary idle restoration below.
       this.db.updateSessionStatus(sessionId, "running", now);
       if (resume()) return;
       // Refused: the child really is idle, so restore it exactly as a card without a resume would.
@@ -6837,8 +6840,8 @@ export class SessionsService {
       );
     }
     if (restoreIdle) {
-      // No resume, or a guardrail would gate it: that gate parks the child here, and any message
-      // stays on the decision record.
+      // No resume, a guardrail that would gate it (and parks the child here), or an open hook
+      // approval: any message stays on the decision record.
       this.replayRestoredPolicyIdle(current, sessionId, now);
     } else {
       // Typed decisions do not suspend the provider turn. Usage can cross a soft checkpoint while
