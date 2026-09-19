@@ -10,6 +10,7 @@ import {
   GUARD_STATE_REFUSAL,
   MANAGED_WORKTREE_REFUSAL,
   commandTargetsGuardState,
+  guardStateClassifierWork,
   guardStateRelation,
   pathTargetsGuardState,
 } from "./managed-worktree-protection.js";
@@ -1025,18 +1026,24 @@ test("the guard hook allows an ancestor listing and still refuses an ancestor sw
 test("a long list of inspections is classified in linear time", () => {
   // The first cut of the all-segments rule re-scanned every segment for every ancestor operand,
   // which made a command list quadratic: 30,000 characters of `ls /;` took over three seconds
-  // inside a hook that runs synchronously before every Bash call.
-  const measure = (repetitions: number): number => {
-    const command = "ls /;".repeat(repetitions);
-    const started = performance.now();
-    assert.equal(commandTargetsGuardState(command, WORKTREE, "/a/b"), null);
-    return performance.now() - started;
+  // inside a hook that runs synchronously before every Bash call. The classifier's own work is
+  // counted rather than timed, so machine load cannot move the result (#1428).
+  const measure = (repetitions: number): { relations: number; segments: number } => {
+    guardStateClassifierWork.relations = 0;
+    guardStateClassifierWork.segments = 0;
+    assert.equal(commandTargetsGuardState("ls /;".repeat(repetitions), WORKTREE, "/a/b"), null);
+    return { ...guardStateClassifierWork };
   };
-  measure(500); // Warm the module and the JIT before either measurement counts.
-  const small = Math.max(measure(500), 1);
+  const small = measure(500);
   const large = measure(6_000);
-  // Twelve times the input. Linear work lands near 12x; the quadratic form measured about 69x.
-  assert.ok(large / small < 25, `12x the input took ${(large / small).toFixed(1)}x the time`);
+  // Every segment is judged and the ancestor resolved, so no count passes by skipping its work.
+  assert.ok(small.segments >= 500, `500 inspections judged ${small.segments} segments`);
+  assert.ok(small.relations >= 1, "the ancestor operand was never resolved");
+  // Twelve times the input. Linear work is at most 12x; re-judging the list per segment is 144x.
+  for (const count of ["segments", "relations"] as const) {
+    assert.ok(large[count] <= 12 * small[count],
+      `12x the input took ${(large[count] / small[count]).toFixed(1)}x the ${count}`);
+  }
 });
 
 test("every strict ancestor is an ancestor, and every descendant is inside", () => {

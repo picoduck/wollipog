@@ -855,6 +855,13 @@ function componentCount(path: string): number {
 export type GuardStateRelation = { kind: "inside" } | { kind: "ancestor"; depth: number };
 
 /**
+ * Test-only: how much work the guard-state classifier has done, so a test can assert it grows
+ * linearly with a command list without timing it (#1428). `relations` counts path resolutions and
+ * `segments` counts per-segment inspection checks. Reset both before measuring.
+ */
+export const guardStateClassifierWork = { relations: 0, segments: 0 };
+
+/**
  * Where a spelling sits relative to the guard-state directory, or `null` when the two are
  * unrelated. Every candidate is judged twice — by its spelling and by its physical path, since a
  * symlink anywhere along either one lands elsewhere — and the most restrictive answer wins.
@@ -864,6 +871,7 @@ export function guardStateRelation(
   cwd: string,
   directory: string,
 ): GuardStateRelation | null {
+  guardStateClassifierWork.relations += 1;
   if (!directory || !path || path.includes("\0")) return null;
   const root = resolve(directory);
   const realRoot = canonicalPath(root);
@@ -1077,6 +1085,7 @@ function inspectsAncestorOnly(
   words: readonly string[],
   depthBelow: (start: string) => number | null,
 ): boolean {
+  guardStateClassifierWork.segments += 1;
   if (words.length === 0) return true;
   // The shell expands these into words this classifier never sees.
   if (words.some((word) => /[*?[\]{}]/u.test(word))) return false;
