@@ -297,6 +297,14 @@ message when the connected control plane predates v166, because an older control
 the field and resolve the decision anyway. A child whose delivery was refused, for example while its
 runner is offline, still finds the message on the decision record.
 
+Every approval or denial resumes the child, whether or not it carries a message. A typed decision
+does not suspend the provider turn, so a child that ended its turn behind the card has nothing else
+to wake it. Resolution therefore delivers a short system-authored prompt naming the occurrence,
+category, resource, outcome, and any selected option (followed by the message, when there is one)
+through the same ordinary prompt path. A child still polling inside its turn receives that prompt
+after the turn ends; the prompt tells it the decision record is authoritative and to continue if it
+has already acted. Revocation and supersession do not send a prompt.
+
 The control plane owns this lifecycle. A generic question answer or provider permission response
 cannot satisfy a typed workflow decision. Authentication, identity, governance-policy changes,
 secret access, and persistent permission grants are not typed categories and remain human-only.

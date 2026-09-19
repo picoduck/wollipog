@@ -427,15 +427,20 @@ function boundedDecisionString(value: unknown, max: number): value is string {
     !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value);
 }
 
-/** The prompt that resumes a child after its decision resolves with a child-facing message. The
+/** The prompt that resumes a child after its decision resolves. Typed decisions do not suspend the
+ * provider turn, so a child that ended its turn behind the card has nothing else to wake it. The
  * decision record stays authoritative: a child polling inside its turn may already have read it. */
-function workflowDecisionChildMessagePrompt(decision: WorkflowDecisionView): string {
+function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): string {
   const resolver = decision.authority === "orchestrator" ? "Your Orchestrator" : "A human reviewer";
+  const option = decision.selectedOptionId === undefined
+    ? ""
+    : ` with option ${JSON.stringify(decision.selectedOptionId)}`;
   return [
     `[Wollipog Workflow Decision — ${decision.occurrenceId}]`,
     `${resolver} ${decision.status} your ${decision.category} decision ${decision.occurrenceId} ` +
-      `(resource ${decision.resourceKey}) and left this message for you:`,
-    decision.childMessage,
+      `(resource ${decision.resourceKey})${option}` +
+      (decision.childMessage ? " and left this message for you:" : "."),
+    ...(decision.childMessage ? [decision.childMessage] : []),
     "The decision record is authoritative: read it with get_workflow_decision before acting. " +
       "If you have already acted on this outcome, continue from where you are.",
     "[End Wollipog Workflow Decision]",
@@ -6266,18 +6271,17 @@ export class SessionsService {
     if (!resolved) return fail("workflow decision was resolved concurrently", 409);
     this.db.consumeUiEvidenceReviewReceipts(occurrenceId, now);
     const child = this.db.getSession(childSessionId);
-    // Ordinary prompt delivery wakes an idle child and queues behind a turn still in progress.
-    // A refusal (runner offline, a guardrail pause) leaves the message on the decision record.
-    const deliverChildMessage = resolved.childMessage
-      ? () => {
-          const delivered = this.prompt(childSessionId, workflowDecisionChildMessagePrompt(resolved));
-          if (!delivered.ok) {
-            this.log.warn(`workflow decision ${occurrenceId} message not delivered to ${childSessionId}: ${delivered.error}`);
-          }
-          return delivered.ok;
-        }
-      : undefined;
-    if (child) this.settleWorkflowDecisionPause(childSessionId, occurrenceId, now, deliverChildMessage);
+    // Every resolution resumes the child: ordinary prompt delivery wakes an idle child and queues
+    // behind a turn still in progress. A refusal (runner offline, a guardrail pause) leaves the
+    // outcome, and any message, on the decision record.
+    const deliverResolution = () => {
+      const delivered = this.prompt(childSessionId, workflowDecisionResolutionPrompt(resolved));
+      if (!delivered.ok) {
+        this.log.warn(`workflow decision ${occurrenceId} resolution not delivered to ${childSessionId}: ${delivered.error}`);
+      }
+      return delivered.ok;
+    };
+    if (child) this.settleWorkflowDecisionPause(childSessionId, occurrenceId, now, deliverResolution);
     this.recordWorkflowDecisionAudit(
       resolved,
       checked.data.outcome === "approve" ? "allowed" : "denied",

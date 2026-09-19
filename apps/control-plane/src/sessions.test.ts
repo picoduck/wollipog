@@ -3503,8 +3503,10 @@ test("typed workflow decisions isolate categories and fail closed across stale p
       "a restored card remembers that the provider had already settled idle");
     assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, reconnect.data.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
-    assert.equal(db.getSession(child.id)?.status, "idle",
-      "resolving a restored card returns to the remembered provider state");
+    assert.equal(db.getSession(child.id)?.status, "running",
+      "resolving a restored card resumes the provider that had settled idle behind it");
+    assert.ok(hub.sentOfType("prompt_session").some((message) => message.sessionId === child.id &&
+      message.text.includes(`[Wollipog Workflow Decision — ${reconnect.data!.occurrenceId}]`)));
     const terminal = svc.createWorkflowDecision(child.id, {
       requestId: "merge-terminal", resourceKey: "picoduck/wollipog#129",
       resourceSnapshot: { ...mergeSnapshot, pullRequest: 129 },
@@ -3665,20 +3667,147 @@ test("a resolver's child-facing message reaches the child's decision view and re
     assert.equal(svc.workflowDecision(child.id, hooked.occurrenceId).data?.childMessage, "Hook note.");
     assert.equal(idleWrites.length, 2);
 
-    // Without a message nothing changes: no field, no digest, no prompt, and an idle child's
-    // swallowed idle edge is replayed exactly as before.
+    // Without a message there is no field and no digest, but the resolution still resumes the
+    // child: typed decisions do not suspend its turn, so nothing else would wake it (#1405).
     const silent = requestMerge(503);
     svc.onSessionStatus(child.id, "idle");
     assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, silent.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "deny" }, () => true).ok);
-    assert.equal(db.getSession(child.id)?.status, "idle");
-    assert.equal(idleEdges.filter((id) => id === child.id).length, 3);
-    assert.equal(idleWrites.length, 3);
+    assert.equal(db.getSession(child.id)?.status, "running");
+    assert.equal(idleEdges.filter((id) => id === child.id).length, 2);
+    assert.equal(idleWrites.length, 2);
     assert.equal("childMessage" in (svc.workflowDecision(child.id, silent.occurrenceId).data ?? {}), false);
-    assert.equal(promptsToChild().length, 2);
+    assert.equal(promptsToChild().length, 3);
+    assert.match(promptsToChild().at(-1)!.text,
+      new RegExp(`Your Orchestrator denied your pr_merge decision ${silent.occurrenceId} \\(resource picoduck/wollipog#503\\)\\.\n`));
     assert.equal(svc.governanceAudit(child.id).find((entry) =>
       entry.requestId === silent.occurrenceId && entry.outcome === "denied")?.workflowDecision?.childMessageDigest,
     undefined);
+  } finally { db.close(); }
+});
+
+test("resolving any Orchestrator-owned typed decision resumes the idle child with the outcome (#1405)", () => {
+  const { db, hub } = makeHarness();
+  const idleEdges: string[] = [];
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG, (previous, current) => {
+    if (previous.status !== "idle" && current.status === "idle") idleEdges.push(current.id);
+  });
+  try {
+    const meta = runnerMeta();
+    const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+    orchestrator.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const parent = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, parentControl: "off",
+    });
+    assert.ok(parent.ok && parent.data, parent.error);
+    db.updateSessionStatus(parent.data.id, "running", Date.now());
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, title: "Campaign Child" };
+    let created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    if (created.status === 428) {
+      const spawnApproval = db.getSession(parent.data.id)!.pendingApproval!;
+      assert.ok(svc.approve(parent.data.id, spawnApproval.requestId, "allow").ok);
+      created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    }
+    assert.ok(created.ok && created.data, created.error);
+    const child = created.data;
+    db.updateSessionStatus(child.id, "running", Date.now());
+    assert.ok(svc.setParentControlPolicy(parent.data.id, {
+      implementation_question: "orchestrator",
+      pr_merge: "orchestrator",
+      merged_branch_deletion: "orchestrator",
+      follow_up_issue_publication: "orchestrator",
+      ui_evidence_approval: "human",
+    }, 0).ok);
+    const snapshots = {
+      implementation_question: {
+        category: "implementation_question" as const,
+        question: "Which wake-up should the resolution deliver?",
+        options: [
+          { optionId: "prompt", label: "Prompt", description: "Deliver a turn input." },
+          { optionId: "poll", label: "Poll", description: "Leave the child to poll." },
+        ],
+      },
+      pr_merge: {
+        category: "pr_merge" as const,
+        repository: "picoduck/wollipog",
+        pullRequest: 700,
+        headSha: "b".repeat(40),
+        reviewResult: "merge" as const,
+        requiredChecks: {
+          headSha: "b".repeat(40), status: "passed" as const, checkedAt: 10,
+          checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }],
+        },
+      },
+      merged_branch_deletion: {
+        category: "merged_branch_deletion" as const, repository: "picoduck/wollipog", branch: "fix/wake",
+        merged: true, mergeCommitSha: "d".repeat(40), dependentPullRequests: { checkedAt: 20, open: [] },
+      },
+      follow_up_issue_publication: {
+        category: "follow_up_issue_publication" as const,
+        repository: "picoduck/wollipog",
+        sanitizedTitle: "Bounded Follow-Up",
+        sanitizedBody: "Exact sanitized issue body.",
+        labels: ["enhancement"],
+      },
+    };
+    const promptsToChild = () => hub.sentOfType("prompt_session").filter((message) => message.sessionId === child.id);
+    let sequence = 0;
+    for (const [category, snapshot] of Object.entries(snapshots)) {
+      for (const outcome of ["approve", "deny"] as const) {
+        sequence += 1;
+        const decision = svc.createWorkflowDecision(child.id, {
+          requestId: `wake-${sequence}`, resourceKey: `wake:${category}:${outcome}`, resourceSnapshot: snapshot,
+        });
+        assert.ok(decision.ok && decision.data, decision.error);
+        assert.equal(decision.data.authority, "orchestrator");
+        // The child ended its turn behind the card; only the resolution can resume it.
+        svc.onSessionStatus(child.id, "idle");
+        assert.equal(db.getSession(child.id)?.status, "input_required");
+        const before = promptsToChild().length;
+        const selectedOptionId = category === "implementation_question" && outcome === "approve" ? "prompt" : undefined;
+        assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, decision.data.occurrenceId, {
+          action: "resolve_workflow_decision", outcome, ...(selectedOptionId ? { selectedOptionId } : {}),
+        }, () => true).ok);
+        const label = `${category}/${outcome}`;
+        assert.equal(db.getSession(child.id)?.status, "running", `${label}: the child leaves idle into the resumed turn`);
+        assert.equal(promptsToChild().length, before + 1, `${label}: exactly one resuming prompt`);
+        const text = promptsToChild().at(-1)!.text;
+        assert.ok(text.includes(`[Wollipog Workflow Decision — ${decision.data.occurrenceId}]\n`), label);
+        assert.ok(text.includes(`Your Orchestrator ${outcome === "approve" ? "approved" : "denied"} your ${category} ` +
+          `decision ${decision.data.occurrenceId} (resource wake:${category}:${outcome})`), label);
+        assert.equal(text.includes('with option "prompt"'), selectedOptionId !== undefined,
+          `${label}: the selected option is named only when one was selected`);
+        assert.match(text, /read it with get_workflow_decision before acting/);
+      }
+    }
+    assert.equal(idleEdges.filter((id) => id === child.id).length, 0,
+      "no stale session.idle is replayed ahead of any resumed turn");
+
+    // The human resolution path shares the same wake-up.
+    assert.ok(svc.setParentControlPolicy(parent.data.id, {
+      implementation_question: "human",
+      pr_merge: "orchestrator",
+      merged_branch_deletion: "orchestrator",
+      follow_up_issue_publication: "orchestrator",
+      ui_evidence_approval: "human",
+    }, 1).ok);
+    const human = svc.createWorkflowDecision(child.id, {
+      requestId: "wake-human", resourceKey: "wake:human", resourceSnapshot: snapshots.implementation_question,
+    });
+    assert.ok(human.ok && human.data, human.error);
+    assert.equal(human.data.authority, "human");
+    svc.onSessionStatus(child.id, "idle");
+    const beforeHuman = promptsToChild().length;
+    assert.ok(svc.approve(child.id, human.data.occurrenceId, "poll", { kind: "human", id: "owner" }).ok);
+    assert.equal(db.getSession(child.id)?.status, "running");
+    assert.equal(promptsToChild().length, beforeHuman + 1);
+    assert.match(promptsToChild().at(-1)!.text,
+      /A human reviewer approved your implementation_question decision .* with option "poll"\./);
   } finally { db.close(); }
 });
 
@@ -4745,8 +4874,8 @@ test("typed workflow decisions preserve provider settlement and cannot be replac
       { kind: "human", id: "owner" }, undefined, () => true).ok);
     assert.equal(db.workflowDecisionByOccurrence(choice.data.occurrenceId)?.selectedOptionId, "deny",
       "an offered option named deny is selected rather than treated as the synthetic denial action");
-    assert.equal(db.getSession(child.data.id)?.status, "idle",
-      "resolving a control-plane gate restores the provider's swallowed idle");
+    assert.equal(db.getSession(child.data.id)?.status, "running",
+      "resolving a control-plane gate resumes the provider's swallowed idle with the outcome");
     assert.equal(db.policyResumeStatus(child.data.id), null);
     assert.ok((await svc.consumeWorkflowDecision(child.data.id, choice.data.occurrenceId, {
       resourceSnapshot: implementationSnapshot,
@@ -4860,8 +4989,8 @@ test("typed workflow decisions preserve provider settlement and cannot be replac
     assert.equal(db.policyResumeStatus(child.data.id), "idle");
     assert.ok(svc.approve(child.data.id, idleDecision.data.occurrenceId, "approve",
       { kind: "human", id: "owner" }, undefined, () => true).ok);
-    assert.equal(db.getSession(child.data.id)?.status, "idle",
-      "a decision created from provider Idle restores Idle when settled");
+    assert.equal(db.getSession(child.data.id)?.status, "running",
+      "a decision created from provider Idle resumes the child when settled");
     assert.ok((await svc.consumeWorkflowDecision(child.data.id, idleDecision.data.occurrenceId, {
       resourceSnapshot: implementationSnapshot,
     })).ok);
@@ -4884,7 +5013,8 @@ test("typed workflow decisions preserve provider settlement and cannot be replac
       "supersession preserves the swallowed Idle proof for the replacement occurrence");
     assert.ok(svc.approve(child.data.id, replacementIdle.data.occurrenceId, "approve",
       { kind: "human", id: "owner" }, undefined, () => true).ok);
-    assert.equal(db.getSession(child.data.id)?.status, "idle");
+    assert.equal(db.getSession(child.data.id)?.status, "running",
+      "the replacement occurrence inherits the swallowed Idle, so its resolution resumes the child");
 
     const terminalApproval = svc.createWorkflowDecision(child.data.id, {
       requestId: "approved-before-terminal", resourceKey: "implementation:terminal-consume",
