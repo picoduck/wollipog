@@ -231,6 +231,11 @@ What is done instead:
     rounds.) Everything else run from an ancestor
     is left alone: judging every command there would refuse `git status` and `npm test` in any home
     directory that contains the data directory, which is the over-refusal #1334 was opened about.
+    A walking NAME is matched on its last component, so `/usr/bin/find` counts as `find`, and the
+    words beside an unexpanded variable are still read, so `grep -r "$PATTERN"` counts as a walk
+    while a command that is nothing but a variable stays outside the matcher (both found by
+    cross-model review). A DETACHED `rec` counts only directly after `-d`/`--directories`, where
+    `grep` would read it as a value, so an ordinary `cat rec` is not refused.
 
   An operand-less `find -maxdepth N` is admitted on exactly the terms an explicit START is, with the
   bound measured from the working directory, so `find -maxdepth 2` from two levels above the hook

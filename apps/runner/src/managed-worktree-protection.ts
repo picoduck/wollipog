@@ -1023,7 +1023,7 @@ const RECURSE_VALUES = new Set(["rec", "recu", "recur", "recurs", "recurse"]);
 const RECURSIVE_LONG_OPTIONS = ["recursive", "dereference-recursive"];
 
 /**
- * A word that asks for recursion, in any of the spellings GNU tools use.
+ * A word that asks for recursion by itself, in any of the spellings GNU tools use.
  *
  * - The letter as a short option. EITHER case: the listing gate above reads only `-R`, because
  *   `ls -r` is reverse order and reading it as recursion would refuse `ls -ltr`; but every tool
@@ -1032,28 +1032,46 @@ const RECURSIVE_LONG_OPTIONS = ["recursive", "dereference-recursive"];
  *   a short option, since `grep -drec` carries its `r` in the same word.
  * - A long option that abbreviates `--recursive` or `--dereference-recursive`. Both are prefix-
  *   matched, so `--recurs` and `--dereference-recu` count, as `getopt_long` makes them.
- * - An option VALUE, attached with `=` or standing as its own word: `grep --directories=rec` and
- *   `grep -d rec` recurse without the command carrying `-r` or `--recursive` anywhere.
+ * - An option value attached with `=`: `grep --directories=rec` recurses while the command carries
+ *   neither `-r` nor `--recursive`. A DETACHED value is judged by position instead, below, so that
+ *   an ordinary `cat rec` is not read as a recursion request.
  * - The stem `recurs` anywhere in a word, which covers spellings this list has not met.
- *
- * It refuses more than it needs to — from an ancestor, a command with `recurse` or a bare `rec`
- * anywhere in it is refused — which is the safe direction for this question.
  */
 function recursiveWalkWord(word: string): boolean {
   if (/recurs/iu.test(word)) return true;
   const equals = word.indexOf("=");
-  if (RECURSE_VALUES.has((equals < 0 ? word : word.slice(equals + 1)).toLowerCase())) return true;
+  if (equals >= 0 && RECURSE_VALUES.has(word.slice(equals + 1).toLowerCase())) return true;
   if (word.startsWith("--")) return longOptionAbbreviates(word, RECURSIVE_LONG_OPTIONS);
   return /^-[^-]/u.test(word) && /[Rr]/u.test(word);
+}
+
+/** `grep -d` / `--directories`, the one option whose detached VALUE can ask for a walk. */
+function directoriesAction(word: string): boolean {
+  if (word.startsWith("--")) return longOptionAbbreviates(word, ["directories"]);
+  return /^-[^-]*d$/u.test(word);
+}
+
+/** The last component of a word: `/usr/bin/find` and `./find` run the same program as `find`. */
+function commandBasename(word: string): string {
+  const cut = Math.max(word.lastIndexOf("/"), word.lastIndexOf("\\"));
+  return cut < 0 ? word : word.slice(cut + 1);
 }
 
 /**
  * Whether these words are a walk, and so reach everything below where the command starts. A word
  * counts wherever it sits, not only in the command position: `PATH=x du -a` has its name in second
- * place, and a command the tokenizer gave up on has no command position at all.
+ * place, and a command the tokenizer gave up on has no command position at all. A walking name is
+ * matched on its last component, because `/usr/bin/find` walks exactly as `find` does.
+ *
+ * It refuses more than it needs to — from an ancestor, a command merely mentioning `find` or
+ * `recurse` is refused — which is the safe direction for this question.
  */
 function walksWorkingDirectory(words: readonly string[]): boolean {
-  return words.some((word) => WALKING_COMMANDS.has(word) || recursiveWalkWord(word));
+  return words.some((word, index) =>
+    WALKING_COMMANDS.has(commandBasename(word)) || recursiveWalkWord(word) ||
+    // A detached value counts only where `grep` would read it as one.
+    (index > 0 && RECURSE_VALUES.has(word.toLowerCase()) &&
+      directoriesAction(words[index - 1] ?? "")));
 }
 
 /**
@@ -1221,10 +1239,14 @@ export function commandTargetsGuardState(
       if (relation.kind === "inside") return GUARD_STATE_REFUSAL;
       namesAncestor = true;
     }
-    // A walk names the directory it starts in without spelling it. `words === null` is an
-    // unexpanded variable: what the command is stays unknown, the documented limit of a
-    // command-text matcher.
-    if (workingDepth !== null && words !== null && walksWorkingDirectory(words)) namesAncestor = true;
+    // A walk names the directory it starts in without spelling it. An unexpanded variable makes
+    // `words` null, but the words BESIDE it are still known — `grep -r "$PATTERN"` hides only the
+    // pattern — so the walk test reads every word the tokenizer did resolve. What stays hidden is
+    // a command that is nothing but a variable, the documented limit of a command-text matcher.
+    if (workingDepth !== null &&
+        walksWorkingDirectory(operands.filter((value): value is string => value !== null))) {
+      namesAncestor = true;
+    }
   }
   if (!namesAncestor) return null;
   // Every command in the list has to be an inspection, not only the ones naming an ancestor: an

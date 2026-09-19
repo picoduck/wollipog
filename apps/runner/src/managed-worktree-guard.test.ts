@@ -1069,10 +1069,25 @@ test("an operand-less recursive command is judged against the directory it walks
     assert.equal(commandTargetsGuardState(command, home, directory), GUARD_STATE_REFUSAL, command);
     assert.equal(commandTargetsGuardState(command, project, directory), null, command);
   }
-  // Documented limit, unchanged by this rule: an unexpanded variable hides what the command is,
-  // and indirection through a script or an interpreter hides it the same way.
-  assert.equal(commandTargetsGuardState("$SWEEP", home, directory), null);
-  assert.equal(commandTargetsGuardState("./sweep.sh", home, directory), null);
+  // Cross-model review, round 3: a walking command names the same program through a path, and an
+  // opaque token beside an explicit recursion flag hides only itself.
+  for (const command of ["/usr/bin/find -maxdepth 999", "/usr/bin/du -a", "./find -maxdepth 999",
+    "/usr/bin/find -maxdepth 999 | cat", 'grep -r "$PATTERN"', "du -a $EXTRA", "ls -R $FLAGS",
+    'grep -d rec "$PATTERN"']) {
+    assert.equal(commandTargetsGuardState(command, home, directory), GUARD_STATE_REFUSAL, command);
+    assert.equal(commandTargetsGuardState(command, project, directory), null, command);
+  }
+  // Cross-model review, round 3: a detached `rec` is a recursion request only where `grep` reads
+  // one, so an ordinary command that happens to carry the word stays allowed.
+  for (const command of ["cat rec", "cat recipe.txt", "echo rec", "git checkout rec",
+    "grep -d read secret", "grep -d skip secret"]) {
+    assert.equal(commandTargetsGuardState(command, home, directory), null, command);
+  }
+  // Documented limit, unchanged by this rule: a command that is nothing but an unexpanded variable
+  // hides what it is, and indirection through a script or an interpreter hides it the same way.
+  for (const command of ["$SWEEP", "./sweep.sh", "npm test $ARGS", "echo $X"]) {
+    assert.equal(commandTargetsGuardState(command, home, directory), null, command);
+  }
 });
 
 test("a working directory inside the guard state leaves no command to allow", (t) => {
