@@ -993,12 +993,19 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
   return segments;
 }
 
+/**
+ * Whether a long option is an abbreviation of one of `names`. GNU `getopt_long` accepts any
+ * unambiguous prefix, so `--recurs`, `--recursi`, and `--r` all reach `--recursive`.
+ */
+function longOptionAbbreviates(word: string, names: readonly string[]): boolean {
+  if (!word.startsWith("--")) return false;
+  const name = word.slice(2).split("=")[0] ?? "";
+  return name.length > 0 && names.some((candidate) => candidate.startsWith(name));
+}
+
 /** `-R`, or any abbreviation of `--recursive` that GNU `getopt_long` accepts. */
 function recursiveListing(word: string): boolean {
-  if (word.startsWith("--")) {
-    const name = word.slice(2).split("=")[0] ?? "";
-    return name.length > 0 && "recursive".startsWith(name);
-  }
+  if (word.startsWith("--")) return longOptionAbbreviates(word, ["recursive"]);
   return /^-[^-]/u.test(word) && word.includes("R");
 }
 
@@ -1006,21 +1013,37 @@ function recursiveListing(word: string): boolean {
 const WALKING_COMMANDS = new Set(["find", "du"]);
 
 /**
- * A word that asks for recursion, in any of the three spellings GNU tools use.
+ * The values GNU `argmatch` accepts for `grep -d` / `--directories` as an unambiguous abbreviation
+ * of `recurse`. Measured against GNU grep 3.11: `r` and `re` are rejected as ambiguous with
+ * `read`, and everything from `rec` on recurses.
+ */
+const RECURSE_VALUES = new Set(["rec", "recu", "recur", "recurs", "recurse"]);
+
+/** Long options that ask for a recursive walk, named in full so their abbreviations count too. */
+const RECURSIVE_LONG_OPTIONS = ["recursive", "dereference-recursive"];
+
+/**
+ * A word that asks for recursion, in any of the spellings GNU tools use.
  *
  * - The letter as a short option. EITHER case: the listing gate above reads only `-R`, because
  *   `ls -r` is reverse order and reading it as recursion would refuse `ls -ltr`; but every tool
  *   that takes a lowercase `-r` for recursion (`grep`, `cp`, `rm`) really does walk with it, so
- *   the question "does this command walk?" has to read both.
- * - An abbreviation of `--recursive` that `getopt_long` accepts.
- * - The word inside an option's NAME or VALUE. `grep -d recurse`, `grep --directories=recurse`,
- *   and `grep --dereference-recursive` all recurse without being spelled `--recursive`, and the
- *   value is a word of its own. Matching the stem refuses more than it needs to — a command from
- *   an ancestor with `recurse` anywhere in it is refused — which is the safe direction here.
+ *   the question "does this command walk?" has to read both. This also catches a value attached to
+ *   a short option, since `grep -drec` carries its `r` in the same word.
+ * - A long option that abbreviates `--recursive` or `--dereference-recursive`. Both are prefix-
+ *   matched, so `--recurs` and `--dereference-recu` count, as `getopt_long` makes them.
+ * - An option VALUE, attached with `=` or standing as its own word: `grep --directories=rec` and
+ *   `grep -d rec` recurse without the command carrying `-r` or `--recursive` anywhere.
+ * - The stem `recurs` anywhere in a word, which covers spellings this list has not met.
+ *
+ * It refuses more than it needs to — from an ancestor, a command with `recurse` or a bare `rec`
+ * anywhere in it is refused — which is the safe direction for this question.
  */
 function recursiveWalkWord(word: string): boolean {
   if (/recurs/iu.test(word)) return true;
-  if (word.startsWith("--")) return recursiveListing(word);
+  const equals = word.indexOf("=");
+  if (RECURSE_VALUES.has((equals < 0 ? word : word.slice(equals + 1)).toLowerCase())) return true;
+  if (word.startsWith("--")) return longOptionAbbreviates(word, RECURSIVE_LONG_OPTIONS);
   return /^-[^-]/u.test(word) && /[Rr]/u.test(word);
 }
 

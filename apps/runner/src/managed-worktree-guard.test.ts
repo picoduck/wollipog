@@ -1050,10 +1050,15 @@ test("an operand-less recursive command is judged against the directory it walks
     `du -a ${elsewhere}`, `grep -r secret ${project}`]) {
     assert.equal(commandTargetsGuardState(command, home, directory), GUARD_STATE_REFUSAL, command);
   }
-  // Cross-model review, round 1: recursion has three spellings, and one of them is the value of
-  // an option that is not `--recursive` at all. Each of these walks the working directory.
+  // Cross-model review, rounds 1 and 2: recursion is spelled several ways, and GNU abbreviates
+  // both the option NAME and its VALUE. Measured against GNU grep 3.11, every `-d` value from
+  // `rec` on recurses (`r` and `re` are rejected as ambiguous with `read`). Each of these walks
+  // the working directory.
   for (const command of ["grep --directories=recurse secret", "grep --directories recurse secret",
-    "grep -d recurse secret", "grep --dereference-recursive secret", "ls --recurs", "ls --r"]) {
+    "grep -d recurse secret", "grep --dereference-recursive secret", "ls --recurs", "ls --r",
+    "grep -d rec secret", "grep -d recu secret", "grep -d recur secret", "grep -d recurs secret",
+    "grep --directories=rec secret", "grep --di=rec secret", "grep --dereference-recu secret",
+    "grep -drec secret"]) {
     assert.equal(commandTargetsGuardState(command, home, directory), GUARD_STATE_REFUSAL, command);
     assert.equal(commandTargetsGuardState(command, project, directory), null, command);
   }

@@ -223,9 +223,12 @@ What is done instead:
     are given — or one carrying a word that asks for recursion. Recursion has three spellings and
     all three count: the letter in either case (`grep -r` walks, while the `ls` gate keeps reading
     only `-R`, because `ls -r` is reverse order and `ls -ltr` must stay allowed), a `getopt_long`
-    abbreviation of `--recursive`, and the stem inside an option's name or value, since
-    `grep -d recurse`, `--directories=recurse`, and `--dereference-recursive` all recurse without
-    being spelled `--recursive` (found by cross-model review). Everything else run from an ancestor
+    abbreviation of `--recursive` or of `--dereference-recursive`, and an option VALUE, since
+    `grep -d recurse` and `--directories=recurse` recurse without the command carrying `-r` or
+    `--recursive` anywhere. GNU abbreviates the value as well as the name: measured against GNU
+    grep 3.11, every `-d` value from `rec` on recurses, while `r` and `re` are rejected as
+    ambiguous with `read`. (Both spellings were found by cross-model review, in successive
+    rounds.) Everything else run from an ancestor
     is left alone: judging every command there would refuse `git status` and `npm test` in any home
     directory that contains the data directory, which is the over-refusal #1334 was opened about.
 
