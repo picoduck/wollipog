@@ -247,6 +247,19 @@ test("prompts already queued when the quarantine fires are settled, and the firs
       "a FIFO that can never drain is not left parked",
     );
     assert.deepEqual(state.prompts, ["the turn that fails"], "no queued prompt reaches the provider");
+    // Only the retained prompt survives in providerHistoryBlock.retry. The rest lose their text
+    // here, so each must be named on the timeline instead of vanishing (#1406).
+    const discardNotices = fixture.store.readEvents(fixture.sessionId)
+      .filter((event) => event.payload.kind === "error" &&
+        /A queued message was discarded/.test(event.payload.message))
+      .map((event) => (event.payload as { message: string }).message);
+    assert.equal(discardNotices.length, 1, "exactly the unretained prompt is reported");
+    assert.match(discardNotices[0]!, /queued second/, "the discarded prompt is quoted so it can be resent");
+    assert.equal(
+      discardNotices.some((message) => /queued before the quarantine/.test(message)),
+      false,
+      "the retained prompt is preserved, not reported as lost",
+    );
   } finally {
     manager.shutdownAll();
     fixture.cleanup();

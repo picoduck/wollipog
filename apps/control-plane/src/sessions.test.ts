@@ -18566,3 +18566,240 @@ test("older runners and text-only models keep UI evidence human-owned with an ex
     }
   }
 });
+
+// --- Issue #1406: a message sent to a session that is mid-turn -----------------------------------
+// A parent Orchestrator reaching a descendant has neither the dashboard's visible queue nor its
+// explicit Steer control, so "accepted" has to mean something it can act on. These pin the three
+// lanes and, above all, that attempting to steer can never swallow the message.
+
+test("a prompt to an idle session reports immediate delivery", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "idle", Date.now());
+
+  const result = svc.prompt(id, "start here");
+  assert.equal(result.ok, true);
+  assert.equal(result.data?.promptDelivery?.lane, "immediate");
+  assert.equal(result.data?.promptDelivery?.admittedFrom, "idle");
+});
+
+test("a mid-turn prompt to a steerable session is steered into the running turn", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.activeTurnIds.set(id, "turn-live");
+  hub.sentToRunner.length = 0;
+  hub.requestHandler = (message) => {
+    assert.equal(message.type, "steer_session");
+    return {
+      type: "steer_session_result",
+      requestId: message.requestId,
+      submissionId: message.submissionId,
+      sessionId: id,
+      turnId: "turn-live",
+      disposition: "accepted",
+      reason: "accepted",
+      providerTurnId: "provider-turn",
+    };
+  };
+
+  const result = await svc.promptOrSteer(id, "stop polling and rebase onto main instead");
+  assert.equal(result.ok, true);
+  assert.equal(result.data?.promptDelivery?.lane, "steered");
+  assert.equal(result.data?.promptDelivery?.admittedFrom, "running");
+  assert.equal(hub.sentOfType("steer_session").length, 1);
+  // Steering owns the message: it must not also be queued as an ordinary prompt.
+  assert.equal(hub.sentOfType("prompt_session").length, 0);
+});
+
+test("a mid-turn prompt the provider cannot steer falls back to the queue and says so", async () => {
+  const { db, hub, svc } = makeHarness();
+  // The default agent has no verified steering capability, so steer() refuses before dispatch.
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.activeTurnIds.set(id, "turn-live");
+  hub.sentToRunner.length = 0;
+
+  const result = await svc.promptOrSteer(id, "redirect me");
+  assert.equal(result.ok, true);
+  assert.equal(result.data?.promptDelivery?.lane, "queued");
+  assert.equal(result.data?.promptDelivery?.admittedFrom, "running");
+  // The whole point of the fallback: a refused steer still delivers the message.
+  assert.equal(hub.sentOfType("steer_session").length, 0);
+  assert.equal(hub.sentOfType("prompt_session").length, 1);
+});
+
+test("a steering attempt the turn outran is reported as queued, not as steered", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.activeTurnIds.set(id, "turn-live");
+  hub.sentToRunner.length = 0;
+  hub.requestHandler = (message) => ({
+    type: "steer_session_result",
+    requestId: message.requestId,
+    submissionId: message.submissionId,
+    sessionId: id,
+    turnId: "turn-live",
+    disposition: "converted_to_queue",
+    reason: "stale_turn",
+    queuedPromptId: "queued-1",
+  });
+
+  const result = await svc.promptOrSteer(id, "too late to steer");
+  assert.equal(result.ok, true);
+  assert.equal(result.data?.promptDelivery?.lane, "queued");
+});
+
+test("a steering failure that already reached the runner is not re-queued as a second delivery", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.activeTurnIds.set(id, "turn-live");
+  hub.sentToRunner.length = 0;
+  // The runner answered with a well-formed receipt the control plane cannot correlate to the
+  // attempt. The steer request crossed the runner boundary, so the message may already be with
+  // the provider: re-queueing it would deliver the same instruction twice.
+  hub.requestHandler = (message) => ({
+    type: "steer_session_result",
+    requestId: message.requestId,
+    submissionId: "a-submission-that-was-never-created",
+    sessionId: id,
+    turnId: "turn-live",
+    disposition: "accepted",
+    reason: "accepted",
+    providerTurnId: "provider-turn",
+  });
+
+  const result = await svc.promptOrSteer(id, "do not deliver me twice");
+  assert.equal(result.ok, false, "an ambiguous post-dispatch steer must not report success");
+  assert.equal(result.status, 502);
+  assert.match(result.error ?? "", /may already have reached the session/);
+  assert.equal(hub.sentOfType("steer_session").length, 1);
+  assert.equal(hub.sentOfType("prompt_session").length, 0, "the message must not also be queued");
+});
+
+test("a steering refusal that never reached the runner still falls back to the queue", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.updateSessionStatus(id, "running", Date.now());
+  // No active turn id: steer() refuses with 409 before dispatching anything.
+  hub.activeTurnIds.delete(id);
+  hub.sentToRunner.length = 0;
+
+  const result = await svc.promptOrSteer(id, "still deliver me");
+  assert.equal(result.ok, true);
+  assert.equal(result.data?.promptDelivery?.lane, "queued");
+  assert.equal(hub.sentOfType("steer_session").length, 0);
+  assert.equal(hub.sentOfType("prompt_session").length, 1);
+});
+
+test("a lifecycle-discarded steer is not re-queued, because the provider may already have it", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.activeTurnIds.set(id, "turn-live");
+  hub.sentToRunner.length = 0;
+  // The runner sets providerStarted immediately before awaiting the provider write, so a Stop or
+  // Restart landing inside that await settles the attempt as rejected/policy_blocked even though
+  // the text may already be in the provider conversation.
+  hub.requestHandler = (message) => {
+    // The Stop lands while the provider call is in flight, exactly as the runner sees it.
+    db.updateSessionStatus(id, "stopped", Date.now());
+    return {
+      type: "steer_session_result",
+      requestId: message.requestId,
+      submissionId: message.submissionId,
+      sessionId: id,
+      turnId: "turn-live",
+      disposition: "rejected",
+      reason: "policy_blocked",
+    };
+  };
+
+  const result = await svc.promptOrSteer(id, "do not deliver me twice either");
+  assert.equal(result.ok, false, "an ambiguous lifecycle rejection must not report success");
+  assert.equal(result.status, 409);
+  assert.match(result.error ?? "", /may already have reached the session/);
+  assert.equal(hub.sentOfType("steer_session").length, 1);
+  assert.equal(hub.sentOfType("prompt_session").length, 0, "the message must not also be queued");
+});
+
+test("a steer the provider refused before writing still falls back to the queue", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.activeTurnIds.set(id, "turn-live");
+  hub.sentToRunner.length = 0;
+  // provider_rejected relayed from the driver is decided ahead of the write, so the queue is
+  // still owed the message and must receive it.
+  hub.requestHandler = (message) => ({
+    type: "steer_session_result",
+    requestId: message.requestId,
+    submissionId: message.submissionId,
+    sessionId: id,
+    turnId: "turn-live",
+    disposition: "rejected",
+    reason: "provider_rejected",
+  });
+
+  const result = await svc.promptOrSteer(id, "deliver me the ordinary way");
+  assert.equal(result.ok, true);
+  assert.equal(result.data?.promptDelivery?.lane, "queued");
+  assert.equal(hub.sentOfType("steer_session").length, 1);
+  assert.equal(hub.sentOfType("prompt_session").length, 1);
+});
+
+test("a policy_blocked steer on a still-running session falls back to the queue", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.activeTurnIds.set(id, "turn-live");
+  hub.sentToRunner.length = 0;
+  // steeringEligibility refuses with policy_blocked, before any provider write, whenever the turn
+  // is owned by an automation or a provider command. The session stays running, and the message is
+  // still owed to the queue: refusing it would strand every message sent to a child that happens
+  // to be inside a provider command.
+  hub.requestHandler = (message) => ({
+    type: "steer_session_result",
+    requestId: message.requestId,
+    submissionId: message.submissionId,
+    sessionId: id,
+    turnId: "turn-live",
+    disposition: "rejected",
+    reason: "policy_blocked",
+  });
+
+  const result = await svc.promptOrSteer(id, "the child is running a provider command");
+  assert.equal(result.ok, true);
+  assert.equal(result.data?.promptDelivery?.lane, "queued");
+  assert.equal(hub.sentOfType("prompt_session").length, 1, "the message is still delivered");
+});
+
+test("a policy_blocked steer while the session waits on input still falls back to the queue", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.activeTurnIds.set(id, "turn-live");
+  hub.sentToRunner.length = 0;
+  // A permission or question arriving mid-turn makes the runner refuse steering with
+  // policy_blocked BEFORE any provider write, and moves the session to input_required. That is a
+  // working state, not a teardown: the message must still be queued.
+  hub.requestHandler = (message) => {
+    db.updateSessionStatus(id, "input_required", Date.now());
+    return {
+      type: "steer_session_result",
+      requestId: message.requestId,
+      submissionId: message.submissionId,
+      sessionId: id,
+      turnId: "turn-live",
+      disposition: "rejected",
+      reason: "policy_blocked",
+    };
+  };
+
+  const result = await svc.promptOrSteer(id, "the child is waiting on a permission card");
+  assert.equal(result.ok, true);
+  assert.equal(hub.sentOfType("prompt_session").length, 1, "the message is still delivered");
+});
+

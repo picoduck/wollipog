@@ -95,8 +95,11 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type SessionFileEntry,
   type WorkspaceReference,
   type WorkspaceReferenceCandidate,
+  type PromptAdmissionView,
+  type PromptDelivery,
   type PromptImageInput,
   type PromptImageReference,
+  type SteeringAttemptState,
   type QueuedPromptView,
   type RelayPodRequest,
   type ResolveSteeringAttemptMessage,
@@ -621,6 +624,88 @@ export function normalizeWorkflowDecisionAction(
     return fail("enqueue command does not match the approved repository and pull request", 409);
   }
   return ok({ kind: "pr_merge_enqueue", command: canonical });
+}
+
+/** Classify an accepted prompt by the lane it took, using the session status observed BEFORE
+ * admission moved it to `running`. Only a session that was idle starts this prompt as its current
+ * turn; every other admission state means work is already in flight and the prompt waits behind
+ * it. Reporting this is the difference between a sender that knows its message is parked and one
+ * that assumes it was delivered — see issue #1406. */
+function promptDeliveryReport(
+  admittedFrom: SessionStatus,
+  pendingInputBarrier: boolean,
+): PromptDelivery {
+  if (admittedFrom === "idle" && !pendingInputBarrier) {
+    return { lane: "immediate", admittedFrom, detail: "Delivered immediately: it starts the session's next turn." };
+  }
+  if (pendingInputBarrier) {
+    return {
+      lane: "queued",
+      admittedFrom,
+      detail: "Queued behind input the session is still waiting on; it runs once that input resolves.",
+    };
+  }
+  if (admittedFrom === "queued" || admittedFrom === "starting") {
+    return {
+      lane: "queued",
+      admittedFrom,
+      detail: "Queued: the session has not finished starting, so the message runs once it is admitted.",
+    };
+  }
+  return {
+    lane: "queued",
+    admittedFrom,
+    detail: "Queued behind the turn already running; it is delivered when that turn ends, " +
+      "which can be many minutes if the session is inside a long tool call.",
+  };
+}
+
+/** Statuses a session that is still doing its job can hold. A lifecycle teardown always leaves
+ * one of these behind before its effects reach the runner, so being in this set is proof that no
+ * Stop, Restart, or sign-out raced the message. */
+const WORKING_SESSION_STATUSES = new Set<SessionStatus>([
+  "queued", "starting", "running", "input_required", "idle",
+]);
+
+/** Drivers whose steering result can be trusted to say whether the provider received the text.
+ * Pi is deliberately absent: `PiRpcDriver.steer` awaits a successful steer RPC and only then
+ * reports `stale_turn` if the run has settled, which the runner converts into an ordinary queued
+ * prompt — so the provider may hold the text and the queue submit it again. That defect predates
+ * this lane and the dashboard's Steer control already reaches it, but automatic steering must not
+ * widen its blast radius; Pi keeps today's queue-only behaviour until the driver distinguishes a
+ * pre-write refusal from a post-acknowledgement one. */
+const AUTO_STEER_DRIVERS = new Set(["claude-code", "codex-app-server"]);
+
+/** Classify a message the runner accepted onto the steering lane. `converted_to_queue` is the
+ * runner telling us the turn ended under the attempt and it became an ordinary queued prompt, so
+ * it is reported as queued — the sender's next move differs, and saying "steered" there would be
+ * the same comfortable lie #1406 is about. */
+function steeredPromptDeliveryReport(
+  admittedFrom: SessionStatus,
+  state: SteeringAttemptState,
+): PromptDelivery {
+  if (state === "converted_to_queue") {
+    return {
+      lane: "queued",
+      admittedFrom,
+      detail: "The running turn ended while the message was being steered into it, " +
+        "so it was queued instead and runs as the next turn's input.",
+    };
+  }
+  if (state === "uncertain" || state === "pending") {
+    return {
+      lane: "steered",
+      admittedFrom,
+      detail: "Steered into the running turn, but the provider has not acknowledged it. " +
+        "Resolve the steering attempt rather than resending — it may already have been delivered.",
+    };
+  }
+  return {
+    lane: "steered",
+    admittedFrom,
+    detail: "Steered into the running turn: the session sees it at its next tool boundary, " +
+      "without waiting for the turn to end.",
+  };
 }
 
 /** HTTP bodies are structurally cast at the route boundary. Validate the guardrail values before
@@ -3955,7 +4040,7 @@ export class SessionsService {
     images: PromptImageInput[] = [],
     slashCommand?: string,
     config?: SessionConfig,
-  ): ServiceResult<SessionView> {
+  ): ServiceResult<PromptAdmissionView> {
     // Capture the exact fired row before admission. If another client snoozes again while the
     // prompt is being delivered, its revision or identity changes and the acknowledgment cannot
     // remove that newer intent.
@@ -3981,6 +4066,117 @@ export class SessionsService {
     return result;
   }
 
+  /** A campaign child's assignment carries its Orchestrator's server-derived policy preamble. It
+   * is applied here rather than inline so every delivery lane wraps identically — a message that
+   * reaches the child by steering must not arrive stripped of the policy a queued one carries. */
+  private campaignWrappedText(session: SessionView, text: string): string {
+    const controller = this.orchestratorCampaignController(
+      session.parentSessionId ? this.db.getSession(session.parentSessionId) : null,
+    );
+    const campaign = controller ? this.db.campaignProjection(controller.id) : null;
+    return controller && campaign ? this.campaignAssignment(controller, campaign, text) : text;
+  }
+
+  /** Admit a message for a session that may already be mid-turn.
+   *
+   * Ordinary admission puts the message on the session's FIFO, where it waits for the running
+   * turn to end. For an agent parked in a multi-minute tool call — polling a typed decision, say —
+   * that wait is the whole problem reported in issue #1406: the sender is told the send succeeded
+   * while the recipient cannot see the message until it stops doing the very thing the message is
+   * meant to interrupt. When a turn really is in flight, deliver through the steering lane so the
+   * agent sees it at its next tool boundary instead.
+   *
+   * Steering is strictly best-effort and never the only chance: every refusal it can produce — a
+   * pending guardrail decision, workflow/automation/pod ownership, a provider without verified
+   * steering, an unsupported runner, or the turn ending underneath us — falls through to the
+   * ordinary queue, which behaves exactly as before. Attempting to steer can therefore delay a
+   * message by one round trip but can never lose it. */
+  async promptOrSteer(
+    sessionId: string,
+    text: string,
+    images: PromptImageInput[] = [],
+    slashCommand?: string,
+    config?: SessionConfig,
+  ): Promise<ServiceResult<PromptAdmissionView>> {
+    const steered = await this.steerMidTurnPrompt(sessionId, text, images, slashCommand, config);
+    return steered ?? this.prompt(sessionId, text, images, slashCommand, config);
+  }
+
+  /** Try the steering lane for a mid-turn message. Returns null to mean "not steered — use the
+   * ordinary queue"; an ok result means the provider owns the message and it must NOT also be
+   * queued. An uncertain steering attempt counts as owned: the runner may already have written it
+   * to the provider, and re-queueing would risk delivering the same instruction twice. */
+  private async steerMidTurnPrompt(
+    sessionId: string,
+    text: string,
+    images: PromptImageInput[],
+    slashCommand: string | undefined,
+    config: SessionConfig | undefined,
+  ): Promise<ServiceResult<PromptAdmissionView> | null> {
+    // The steering lane carries plain conversational text only. A slash command, an attachment, or
+    // a per-turn config change is turn-scoped work that must start a turn of its own.
+    if (slashCommand || images.length > 0 || config) return null;
+    if (!text.trim()) return null;
+    const session = this.db.getSession(sessionId);
+    if (!session || session.status !== "running") return null;
+    if (!AUTO_STEER_DRIVERS.has(session.driver)) return null;
+    const turnId = this.hub.activeTurnIdForSession(sessionId);
+    if (!turnId) return null;
+    const steered = await this.steer(sessionId, {
+      submissionId: `prompt_steer_${randomUUID().slice(0, 12)}`,
+      turnId,
+      text: this.campaignWrappedText(session, text),
+    });
+    if (!steered.ok) {
+      // Falling back to the queue after a failure that already crossed the runner boundary would
+      // deliver the same instruction twice. steer() refuses with 400/404/409/500 only before it
+      // dispatches — including the explicit markSteeringAttemptNotSent "runner is offline" — and
+      // reserves 502 for its three post-dispatch ambiguities: an unrecognised result frame, a
+      // result that could not be matched to the attempt, and a transport failure or timeout after
+      // the send. Re-queue the first group; hand the second back so the sender checks the steering
+      // attempt instead of blindly resending.
+      if (steered.status !== 502) return null;
+      return fail(
+        `${steered.error ?? "conversation steering failed"} — the message may already have reached ` +
+          "the session, so check its steering attempts before sending it again",
+        502,
+      );
+    }
+    if (!steered.data) return null;
+    // Almost every rejection is decided before anything is written to the provider — stale_turn,
+    // no_active_provider_turn, queue_item_absent, queue_capacity_exceeded, unsupported_driver,
+    // governance_blocked, and a provider_rejected relayed from the driver all refuse ahead of the
+    // write — so the ordinary queue is still owed the message.
+    //
+    // `policy_blocked` is the one reason the runner uses on both sides of that write, so it needs
+    // a second signal. Before the write it means the turn is owned by an automation or a provider
+    // command, or the session is waiting on agent input — all ordinary, sustained states in which
+    // the message is still owed to the queue. After the write it means a Stop, Restart, or sign-out
+    // landed inside the awaited provider call, and the text may already be in the conversation.
+    //
+    // Only a teardown can produce the second, and a teardown always moves the session off the
+    // working statuses first: the control plane writes `stopped` when it requests a Stop and
+    // `starting` when it restarts, before the runner's steering reply can arrive. So re-read the
+    // session and refuse only from a status no working session holds. Erring the other way is not
+    // symmetric — re-queueing a Stop-raced message delivers it twice, while refusing an
+    // input_required or provider-command block strands it entirely.
+    if (steered.data.state === "rejected") {
+      if (steered.data.reason !== "policy_blocked") return null;
+      // Re-read rather than trusting the pre-steer snapshot: the whole question is what the
+      // lifecycle did while the steer was in flight.
+      if (WORKING_SESSION_STATUSES.has(this.db.getSession(sessionId)?.status ?? "stopped")) return null;
+      return fail(
+        "conversation steering was discarded by a session lifecycle change — the message may " +
+          "already have reached the session, so check its steering attempts before sending it again",
+        409,
+      );
+    }
+    return ok({
+      ...this.db.getSession(sessionId)!,
+      promptDelivery: steeredPromptDeliveryReport(session.status, steered.data.state),
+    });
+  }
+
   prompt(
     sessionId: string,
     text: string,
@@ -3990,7 +4186,7 @@ export class SessionsService {
     delivery?: PreStagedDeliveryOptions,
     imageScope: "session" | "run" = "session",
     retainAcrossWorktreeRecovery = false,
-  ): ServiceResult<SessionView> {
+  ): ServiceResult<PromptAdmissionView> {
     const snapshotCommand = delivery?.commandSnapshots?.[0];
     if (delivery?.commandSnapshots &&
         (delivery.commandSnapshots.length !== 1 || snapshotCommand?.type !== "prompt_session" ||
@@ -4054,13 +4250,7 @@ export class SessionsService {
     let effectiveText = snapshotCommand?.type === "prompt_session" ? snapshotCommand.text : text;
     const effectiveImages = snapshotCommand?.type === "prompt_session" ? (snapshotCommand.images ?? []) : images;
     if (!snapshotCommand && (effectiveText.trim() || effectiveImages.length > 0)) {
-      const campaignController = this.orchestratorCampaignController(
-        session.parentSessionId ? this.db.getSession(session.parentSessionId) : null,
-      );
-      const campaign = campaignController ? this.db.campaignProjection(campaignController.id) : null;
-      if (campaignController && campaign) {
-        effectiveText = this.campaignAssignment(campaignController, campaign, effectiveText);
-      }
+      effectiveText = this.campaignWrappedText(session, effectiveText);
     }
     const effectiveSlashCommand = snapshotCommand?.type === "prompt_session" ? snapshotCommand.slashCommand : slashCommand;
     const effectiveConfig = requestedConfig;
@@ -4265,7 +4455,10 @@ export class SessionsService {
     }
     this.db.invalidateCampaignChildReports(sessionId);
     this.hub.sessionChangedById(sessionId);
-    return ok(this.db.getSession(sessionId)!);
+    return ok({
+      ...this.db.getSession(sessionId)!,
+      promptDelivery: promptDeliveryReport(session.status, pendingInputBarrier),
+    });
   }
 
   retryDuePrompts(now = Date.now(), runnerId?: string): number {

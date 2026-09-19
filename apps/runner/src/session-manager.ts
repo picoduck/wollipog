@@ -345,6 +345,10 @@ interface QueuedPrompt {
     expectedExecutionMode: "passthrough" | "structured";
     lifecycle: SessionCommandInvocationLifecycle;
   };
+  /** Owning session, stamped when the entry joins a FIFO. A prompt admitted on the non-durable
+   * lane carries no receipt, so an involuntary discard has no other way to name where the message
+   * was lost (see reportDiscardedQueuedPrompt). */
+  sessionId?: string;
   /** Runner-owned continuation used only to consume orphaned Claude task notifications. */
   syntheticRecovery?: boolean;
   /** Durable managed jobs whose barrier terminal observation caused this continuation. */
@@ -689,6 +693,10 @@ const MAX_QUEUED_PROMPTS = 100;
 /** Byte budget for a session's queue — a count cap alone lets 100 × 32MB pasted-screenshot
  * prompts sit in runner memory. Text chars + base64 image chars, both ~1 byte each. */
 const MAX_QUEUED_BYTES = 64 * 1024 * 1024;
+
+/** How much of a discarded queued message is quoted back onto the timeline. Enough to recognise
+ * and resend the instruction; short enough that a pasted-in wall of text cannot bloat the log. */
+const DISCARDED_PROMPT_QUOTE_CHARS = 400;
 const PROVIDER_CLOSE_TIMEOUT_MS = 5_000;
 const CHECKPOINT_REF_MAINTENANCE_CONCURRENCY = 4;
 const ORPHAN_RECOVERY_RETRY_MS = 30_000;
@@ -7041,6 +7049,7 @@ export class SessionManager {
   }
 
   private insertQueuedPrompt(sessionId: string, queue: QueuedPrompt[], prompt: QueuedPrompt): void {
+    prompt.sessionId ??= sessionId;
     const ordinal = this.ensureQueueOrdinal(sessionId, prompt);
     const index = queue.findIndex((candidate) => this.ensureQueueOrdinal(sessionId, candidate) > ordinal);
     if (index < 0) queue.push(prompt);
@@ -8178,7 +8187,7 @@ export class SessionManager {
       });
       this.store.flush(sessionId);
     }
-    this.failQueuedPrompt(prompt, PROVIDER_HISTORY_QUARANTINE_GUIDANCE, "COMMAND_CANCELLED");
+    this.failQueuedPrompt(prompt, PROVIDER_HISTORY_QUARANTINE_GUIDANCE, "COMMAND_CANCELLED", true);
     return true;
   }
 
@@ -8686,7 +8695,7 @@ export class SessionManager {
     if (entry) entry.queue = retained;
     else if (retained.length) this.preLaunchQueues.set(sessionId, retained);
     else this.preLaunchQueues.delete(sessionId);
-    this.rejectQueued(removed, "queued command was cancelled");
+    this.cancelQueued(removed, "queued command was cancelled");
     if (retained.length !== before) {
       if (entry && retained.length === 0 && !entry.running && this.cancelActiveTurnWait(sessionId) &&
           this.store.readMeta(sessionId)?.status === "queued") {
@@ -8698,6 +8707,12 @@ export class SessionManager {
 
   private rejectQueued(queue: QueuedPrompt[], error: string): void {
     for (const prompt of queue) this.failQueuedPrompt(prompt, error, "COMMAND_CANCELLED");
+  }
+
+  /** Discard a FIFO the caller deliberately cancelled. Identical to rejectQueued except that the
+   * loss is intended, so it is not reported as a dropped message. */
+  private cancelQueued(queue: QueuedPrompt[], error: string): void {
+    for (const prompt of queue) this.failQueuedPrompt(prompt, error, "COMMAND_CANCELLED", true);
   }
 
   /** Another durable recovery path has terminalized this command. Remove its in-memory copy from
@@ -8733,9 +8748,36 @@ export class SessionManager {
     prompt: QueuedPrompt,
     error: string,
     code: "COMMAND_CANCELLED" | "INVALID_COMMAND" | "QUEUE_FULL",
+    intentional = false,
   ): void {
     prompt.durable?.failed(error, code);
     prompt.sessionCommand?.lifecycle.failed(error, code === "QUEUE_FULL" ? "INVALID_COMMAND" : code);
+    if (!intentional) this.reportDiscardedQueuedPrompt(prompt, error);
+  }
+
+  /** A durable command settles its own receipt and a session command its own lifecycle, so both
+   * report their loss to the sender. A prompt admitted on the plain `prompt_session` lane — which
+   * is how a parent Orchestrator and the dashboard reach a descendant — has neither: settling it
+   * used to be a complete no-op, so an involuntary discard (Stop, Restart, provider exit, drain
+   * containment) dropped the message with no receipt, no error and nothing on the child's
+   * timeline. Record it where both sides can see it, quoting enough to resend. */
+  private reportDiscardedQueuedPrompt(prompt: QueuedPrompt, reason: string): void {
+    if (prompt.durable || prompt.sessionCommand || prompt.syntheticRecovery ||
+        prompt.recoveredQuestion || !prompt.sessionId) return;
+    const text = (prompt.slashCommand ? `/${prompt.slashCommand} ${prompt.text}` : prompt.text).trim();
+    // An attachment-only prompt is valid and just as lost, so it is named by its attachments
+    // rather than skipped for having nothing to quote.
+    const images = prompt.images?.length ?? 0;
+    if (!text && images === 0) return;
+    const quoted = !text
+      ? `(${images} attachment${images === 1 ? "" : "s"}, no text)`
+      : text.length > DISCARDED_PROMPT_QUOTE_CHARS
+        ? `${text.slice(0, DISCARDED_PROMPT_QUOTE_CHARS)}…`
+        : text;
+    this.emitEvent(prompt.sessionId, {
+      kind: "error",
+      message: `A queued message was discarded before it ran (${reason}) and must be sent again: ${quoted}`,
+    });
   }
 
   /** Fire-and-forget drains are always observed. Event-history errors are contained at emitEvent;
@@ -9150,7 +9192,7 @@ export class SessionManager {
             if (entry.interruptRequested && entry.holdQueuedPromptsAfterInterrupt) {
               this.emitEvent(sessionId, { kind: "turn_interrupted" });
               this.emitStatus(sessionId, "idle");
-              this.failQueuedPrompt(next, "provider cancelled", "COMMAND_CANCELLED");
+              this.failQueuedPrompt(next, "provider cancelled", "COMMAND_CANCELLED", true);
               entry.activeTurnId = undefined;
               this.settleTurnInterruption(sessionId, entry);
               // Leave this drain generation before dispatching another entry. The loop-tail
@@ -9172,7 +9214,7 @@ export class SessionManager {
               break;
             }
             this.emitStatus(sessionId, "idle", "agent rejected the requested session configuration");
-            this.failQueuedPrompt(next, "agent rejected the requested session configuration", "INVALID_COMMAND");
+            this.failQueuedPrompt(next, "agent rejected the requested session configuration", "INVALID_COMMAND", true);
             entry.activeTurnId = undefined;
             continue;
           }
@@ -14082,7 +14124,15 @@ export class SessionManager {
     this.store.flush(sessionId);
     if (entry) entry.historyQuarantined = true;
     for (const queued of stranded) {
-      this.failQueuedPrompt(queued, PROVIDER_HISTORY_QUARANTINE_GUIDANCE, "COMMAND_CANCELLED");
+      // Only `retained` survives in providerHistoryBlock.retry, so only it is genuinely preserved
+      // by the quarantine guidance already on the timeline. Every other stranded prompt loses its
+      // text here and needs the discard notice to stay recoverable.
+      this.failQueuedPrompt(
+        queued,
+        PROVIDER_HISTORY_QUARANTINE_GUIDANCE,
+        "COMMAND_CANCELLED",
+        queued === retained,
+      );
     }
     if (stranded.length) this.emitQueue(sessionId);
   }
