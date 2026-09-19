@@ -1050,6 +1050,20 @@ test("an operand-less recursive command is judged against the directory it walks
     `du -a ${elsewhere}`, `grep -r secret ${project}`]) {
     assert.equal(commandTargetsGuardState(command, home, directory), GUARD_STATE_REFUSAL, command);
   }
+  // Cross-model review, round 1: recursion has three spellings, and one of them is the value of
+  // an option that is not `--recursive` at all. Each of these walks the working directory.
+  for (const command of ["grep --directories=recurse secret", "grep --directories recurse secret",
+    "grep -d recurse secret", "grep --dereference-recursive secret", "ls --recurs", "ls --r"]) {
+    assert.equal(commandTargetsGuardState(command, home, directory), GUARD_STATE_REFUSAL, command);
+    assert.equal(commandTargetsGuardState(command, project, directory), null, command);
+  }
+  // Cross-model review, round 1: where the tokenizer gave up, the raw text alone loses a command
+  // name that quoting split, so the words are read both ways.
+  for (const command of ['f""ind -maxdepth 999 | cat', "'d'u -a | cat", 'd"u" -a',
+    "(gre'p' -r secret)"]) {
+    assert.equal(commandTargetsGuardState(command, home, directory), GUARD_STATE_REFUSAL, command);
+    assert.equal(commandTargetsGuardState(command, project, directory), null, command);
+  }
   // Documented limit, unchanged by this rule: an unexpanded variable hides what the command is,
   // and indirection through a script or an interpreter hides it the same way.
   assert.equal(commandTargetsGuardState("$SWEEP", home, directory), null);

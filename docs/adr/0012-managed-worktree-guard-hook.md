@@ -220,11 +220,14 @@ What is done instead:
     starts there. #1371 already refused this, but only once some operand named an ancestor.
   - **An ancestor: only a WALK is judged**, and then the carve-out above decides it. A walk is a
     command named `find` or `du` — the two the classifier already models as walking whatever they
-    are given — or one carrying a recursive option, read here under either spelling of the letter
-    (`grep -r` walks; the `ls` gate keeps reading only `-R`, because `ls -r` is reverse order and
-    `ls -ltr` must stay allowed). Everything else run from an ancestor is left alone: judging every
-    command there would refuse `git status` and `npm test` in any home directory that contains the
-    data directory, which is the over-refusal #1334 was opened about.
+    are given — or one carrying a word that asks for recursion. Recursion has three spellings and
+    all three count: the letter in either case (`grep -r` walks, while the `ls` gate keeps reading
+    only `-R`, because `ls -r` is reverse order and `ls -ltr` must stay allowed), a `getopt_long`
+    abbreviation of `--recursive`, and the stem inside an option's name or value, since
+    `grep -d recurse`, `--directories=recurse`, and `--dereference-recursive` all recurse without
+    being spelled `--recursive` (found by cross-model review). Everything else run from an ancestor
+    is left alone: judging every command there would refuse `git status` and `npm test` in any home
+    directory that contains the data directory, which is the over-refusal #1334 was opened about.
 
   An operand-less `find -maxdepth N` is admitted on exactly the terms an explicit START is, with the
   bound measured from the working directory, so `find -maxdepth 2` from two levels above the hook
@@ -236,14 +239,25 @@ What is done instead:
   never touch the hook directory. Telling a start from an option value, a pattern, or a destination
   is the general parsing this classifier declines to do, and the alternative — believing an operand
   and skipping the working directory — fails OPEN on `grep -r <pattern>`, whose one operand-looking
-  word is the pattern. A command the tokenizer gave up on (a pipe, a subshell, a backtick) is read
-  for walk words in its raw text, because a backtick leaves `` `find `` glued into one token;
-  nothing in such a command was ever an inspection, so reading it crudely only refuses more.
+  word is the pattern. A command the tokenizer gave up on (a pipe, a subshell, a backtick) has its
+  walk words read BOTH from the raw text and from the tokenizer, because each spelling hides what
+  the other shows: a backtick leaves `` `find `` glued into one token, while `f""ind` is one word
+  only once the quotes are removed (both found by cross-model review). Nothing in such a command
+  was ever an inspection, so reading it twice only refuses more.
 
   The limit this leaves, unchanged in kind: a tool that recurses by default with no option and no
   operand (`rg`, `tree`, `fd`) is not modelled, and neither is an unexpanded variable or a script.
   That is the same indirection this whole mechanism is defeated by, restated at the end of this
   section.
+
+  One caller judges this rule from a directory that may not be the shell's. The control-channel
+  veto in `claude-code.ts` passes the SESSION directory (the worktree veto beside it passes
+  `PLACELESS_CWD` instead, #1333/#1361). So in `default`/`auto`, a session whose workspace is
+  itself a strict ancestor of the hook directory can have a walk refused by the channel even after
+  the hook — which sees the real directory — allowed it. That is over-refusal in a configuration
+  that is rare by construction, and the hook remains the authority; giving the channel a placeless
+  directory for the guard-state veto too would drop the relative-operand refusals it exists for,
+  and is left to its own decision.
 
 - **No free advertising.** The protections path is not exported in the settings `env` block (which
   reaches every tool process); it travels only in the hook command inside the 0600 settings file,

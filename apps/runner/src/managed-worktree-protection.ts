@@ -913,10 +913,10 @@ export function pathTargetsGuardState(path: string, cwd: string, directory: stri
  * The working directory is an operand the command never has to spell (#1398). A recursive walk
  * started from an ancestor enumerates the hook directory without naming anything, so `walksWorkingDirectory`
  * decides which commands are judged against the directory they run in as well as against their
- * operands: `find` and `du`, which walk whatever they are given, and any command carrying a
- * recursive option. Only a WALK is judged that way, because a strict ancestor of the hook directory
- * is normally the user's home directory, and judging every command from there would refuse
- * ordinary work — exactly the over-refusal #1334 was opened about.
+ * operands: `find` and `du`, which walk whatever they are given, and any command carrying a word
+ * that asks for recursion. Only a WALK is judged that way, because a strict ancestor of the hook
+ * directory is normally the user's home directory, and judging every command from there would
+ * refuse ordinary work — exactly the over-refusal #1334 was opened about.
  *
  * It over-refuses where the safe direction is to do so. A short-option cluster is scanned for `R`
  * without modelling which options take an attached value, so GNU's `ls -IREADME` reads as recursive
@@ -1006,12 +1006,20 @@ function recursiveListing(word: string): boolean {
 const WALKING_COMMANDS = new Set(["find", "du"]);
 
 /**
- * A recursive option under EITHER spelling of the letter. The listing gate above reads only `-R`,
- * because `ls -r` is reverse order and reading it as recursion would refuse `ls -ltr`. Every tool
- * that takes a lowercase `-r` for recursion (`grep`, `cp`, `rm`) really does walk with it, so the
- * question "does this command walk?" has to read both.
+ * A word that asks for recursion, in any of the three spellings GNU tools use.
+ *
+ * - The letter as a short option. EITHER case: the listing gate above reads only `-R`, because
+ *   `ls -r` is reverse order and reading it as recursion would refuse `ls -ltr`; but every tool
+ *   that takes a lowercase `-r` for recursion (`grep`, `cp`, `rm`) really does walk with it, so
+ *   the question "does this command walk?" has to read both.
+ * - An abbreviation of `--recursive` that `getopt_long` accepts.
+ * - The word inside an option's NAME or VALUE. `grep -d recurse`, `grep --directories=recurse`,
+ *   and `grep --dereference-recursive` all recurse without being spelled `--recursive`, and the
+ *   value is a word of its own. Matching the stem refuses more than it needs to — a command from
+ *   an ancestor with `recurse` anywhere in it is refused — which is the safe direction here.
  */
-function recursiveWalkOption(word: string): boolean {
+function recursiveWalkWord(word: string): boolean {
+  if (/recurs/iu.test(word)) return true;
   if (word.startsWith("--")) return recursiveListing(word);
   return /^-[^-]/u.test(word) && /[Rr]/u.test(word);
 }
@@ -1022,13 +1030,15 @@ function recursiveWalkOption(word: string): boolean {
  * place, and a command the tokenizer gave up on has no command position at all.
  */
 function walksWorkingDirectory(words: readonly string[]): boolean {
-  return words.some((word) => WALKING_COMMANDS.has(word) || recursiveWalkOption(word));
+  return words.some((word) => WALKING_COMMANDS.has(word) || recursiveWalkWord(word));
 }
 
 /**
- * Every run of word characters in the raw text. Used only where the tokenizer gave up: a backtick
- * leaves `` `find `` glued into one token, so the words of such a command are read from the text
- * instead. Nothing in a command like that is an inspection, so reading it crudely only refuses more.
+ * Every run of word characters in the raw text. Used only where the tokenizer gave up, and only
+ * ALONGSIDE the tokenizer's own words, because each spelling hides what the other shows: a backtick
+ * leaves `` `find `` glued into one token here, while `f""ind` is one word only after the tokenizer
+ * has removed the quotes. Nothing in such a command is an inspection, so reading it both ways only
+ * refuses more.
  */
 function rawWords(command: string): string[] {
   return command.split(/[^\w.+\/\\=-]+/u).filter(Boolean);
@@ -1165,13 +1175,16 @@ export function commandTargetsGuardState(
   // two commands into one; nothing in either is inspectable.
   const segments = /[`\n\r]/u.test(command) ? null : commandSegments(tokens);
   if (segments === null) {
+    // Nothing in an unmodelled command is an inspection, so a walk starting here has nowhere to be
+    // admitted. Its words are read both as the text spells them and as the tokenizer joins them.
+    const words: string[] = workingDepth === null ? [] : rawWords(command);
     for (const token of tokens) {
       const value = tokenText(token);
-      if (value !== null && pathTargetsGuardState(value, cwd, root)) return GUARD_STATE_REFUSAL;
+      if (value === null) continue;
+      if (pathTargetsGuardState(value, cwd, root)) return GUARD_STATE_REFUSAL;
+      words.push(value);
     }
-    // Nothing in an unmodelled command is an inspection, so a walk starting here has nowhere to be
-    // admitted; its words are read from the raw text because the tokenizer's are not trustworthy.
-    return workingDepth !== null && walksWorkingDirectory(rawWords(command)) ? GUARD_STATE_REFUSAL : null;
+    return workingDepth !== null && walksWorkingDirectory(words) ? GUARD_STATE_REFUSAL : null;
   }
   let namesAncestor = false;
   // Each distinct word is resolved once, and a bounded `find` reads its START depths back from here.
