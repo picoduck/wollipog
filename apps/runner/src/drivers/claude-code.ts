@@ -2325,6 +2325,11 @@ export class ClaudeCodeDriver implements Driver {
                   // not the session directory. So the session directory is the wrong place for a
                   // subagent's operand as well, and the guard is the authority for both. Only a
                   // mediated launch, which has no hook at all, keeps the session directory.
+                  // Measured for #1397 on the same two versions, this time through the control
+                  // channel itself: a subagent's Bash call DOES arrive here in `default` and
+                  // `auto`, and its frame carries no cwd either — it is marked by
+                  // `request.agent_id`, never by `parent_tool_use_id`. Real frames of both kinds
+                  // are replayed against this line in claude-code-managed-worktree.test.ts.
                   this.managedWorktreeGuardActive ? PLACELESS_CWD : this.cwd,
                   protections,
                 )
@@ -2463,6 +2468,14 @@ export class ClaudeCodeDriver implements Driver {
           if (this.pendingApprovals.size === 0) this.pendingAttentionOwners.clear();
           this.pendingApprovals.set(msg.request_id, req.input ?? {});
           this.pendingAttentionOwners.delete(msg.request_id);
+          // Attention ownership needs the id of the Task call that spawned the asker. #1397
+          // measured that a real `can_use_tool` frame carries no `parent_tool_use_id` at all
+          // (claude 2.1.270 and 2.1.277, `default` and `auto`), so `parentId` is null here today
+          // and a subagent's card is attributed to the session rather than to its Task block.
+          // The frame does mark a subagent — `request.agent_id` — but that opaque id is NOT the
+          // Task tool_use id this field needs, so routing it would take a correlation table this
+          // driver does not keep. Kept as written: it costs nothing while the field is absent and
+          // starts working unchanged if a CLI release begins parenting these frames.
           if (this.cb.supportsWorkerAttention?.() && parentId) {
             this.pendingAttentionOwners.set(msg.request_id, { owner: parentId, question: req.tool_name === "AskUserQuestion" });
           }
