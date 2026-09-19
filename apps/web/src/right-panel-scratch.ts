@@ -470,6 +470,10 @@ function hydrate(): void {
   hydrated = true;
   const imported = importWholeMapRecord();
   const now = Date.now();
+  // The markers each record carried when this page read it, which is later than the moment the
+  // import captured what it captured. Another tab can send a draft in between, and the fold below
+  // has to answer to the newer of the two views.
+  const markersWhenLoaded = new Map<string, Map<string, number>>();
   const loaded: Array<{ scope: string; record: PersistedRecord; raw: string }> = [];
   for (const storageKey of listRecordKeys()) {
     const scope = storageKey.slice(RECORD_PREFIX.length);
@@ -480,6 +484,7 @@ function hydrate(): void {
       continue;
     }
     loaded.push({ scope, record, raw });
+    markersWhenLoaded.set(scope, record.cleared);
     observeStamps(record, now);
   }
   // Least-recently-used first, so the map arrives in eviction order.
@@ -499,10 +504,19 @@ function hydrate(): void {
   // Anything the whole-map import could not get into storage still belongs to this page. Storage
   // that refused those writes costs the reload after this one, not the drafts in front of the user
   // now — memory is authoritative, and it has no reason to wait for storage to agree.
+  //
+  // Against the markers this page has just read, not the ones the import saw. A key missing from a
+  // record is not the same as a key nobody has spoken for: another tab sending that draft between
+  // the import and this read leaves a marker and no value, and folding the imported copy in on the
+  // strength of its absence would put a sent message back in front of the reader.
   for (const { scope, values } of imported) {
+    const markers = markersWhenLoaded.get(scope);
     const held = scratch.get(scope) ?? new Map<string, ScratchValue>();
     for (const [key, value] of values) {
-      if (!held.has(key)) held.set(key, { ...value, revision: nextRevision++ });
+      if (held.has(key)) continue;
+      const clearedAt = markers?.get(key);
+      if (clearedAt !== undefined && value.updatedAt <= clearedAt) continue;
+      held.set(key, { ...value, revision: nextRevision++ });
     }
     if (held.size > 0 && !scratch.has(scope)) scratch.set(scope, held);
   }
@@ -622,8 +636,15 @@ function persistScope(scope: string, mutated: Mutation | null): void {
     // it replaces. A page whose clock sits behind another tab's — or behind a stored stamp too far
     // ahead for `observeStamps` to adopt — would otherwise write the value the user just typed
     // under a stamp that reads older than what it replaces, and silently lose to it.
+    //
+    // Strictly past the rival, never level with it. Two pages both forced up to the same
+    // unreachable stamp would otherwise write successive values that all read as simultaneous, and
+    // a marker for the first of them — stamped with the value it removed, which is that same
+    // number — would retire every later one: the replacement another tab typed, destroyed by a
+    // send it was never part of.
+    const rival = values.get(mutated.key)?.updatedAt ?? 0;
     const held = scratch.get(scope)?.get(mutated.key);
-    if (held !== undefined) held.updatedAt = Math.max(stamp(), values.get(mutated.key)?.updatedAt ?? 0);
+    if (held !== undefined) held.updatedAt = Math.max(stamp(), rival + 1);
   }
   for (const [key, held] of scratch.get(scope) ?? []) {
     const rival = values.get(key);

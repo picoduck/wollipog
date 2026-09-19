@@ -20,6 +20,7 @@ const RECORD_PREFIX = "wollipog.right-panel-scratch.v2:";
 const backing = new Map<string, string>();
 let denyWrites = false;
 let denyRemovals = false;
+let onNextWrite: (() => void) | null = null;
 (globalThis as { localStorage?: unknown }).localStorage = {
   get length(): number {
     return backing.size;
@@ -29,6 +30,14 @@ let denyRemovals = false;
   setItem: (key: string, value: string): void => {
     if (denyWrites) throw new DOMException("Storage quota exceeded", "QuotaExceededError");
     backing.set(key, value);
+    // A hook for the one thing two synchronous pages cannot otherwise be made to do in a test:
+    // interleave. The other tab acts in the middle of this page's storage call, which is exactly
+    // where a real second tab's turn can fall.
+    const interleave = onNextWrite;
+    if (interleave !== null && key.startsWith(RECORD_PREFIX)) {
+      onNextWrite = null;
+      interleave();
+    }
   },
   removeItem: (key: string): void => {
     if (denyRemovals) throw new DOMException("Storage is not available", "SecurityError");
@@ -62,6 +71,7 @@ function openOnEmptyOrigin(tab: PanelScratch): void {
 beforeEach(() => {
   denyWrites = false;
   denyRemovals = false;
+  onNextWrite = null;
   tabA.clearPanelScratch();
   tabB.clearPanelScratch();
   backing.clear();
@@ -251,4 +261,67 @@ test("a tab that can write again takes back only its own stale record", () => {
   assert.equal(tabA.readPanelScratch(mine, "sidechat.draft"), undefined,
     "no restore, rather than a restore of the sent message");
   assert.equal(tabA.readPanelScratch(theirs, "review.requestBody"), "the other tab's draft");
+});
+
+test("a send does not retire a replacement when a future stamp forced both to adopt it", () => {
+  // Cross-model review round 2, CR-2.1. A stored stamp too far ahead for `observeStamps` to adopt
+  // forces every mutation of that key up to it. If they all land on exactly that number, they read
+  // as simultaneous — and a marker stamped with the value it removed then retires the replacement
+  // another tab typed after it. Each mutation therefore has to land strictly past the rival.
+  const scope = tabA.panelScratchScopeKey("session-1");
+  const nextYear = Date.now() + 365 * 24 * 60 * 60 * 1000;
+  backing.set(`${RECORD_PREFIX}${scope}`, JSON.stringify({
+    version: 2,
+    writer: "a-page-whose-clock-is-a-year-ahead",
+    touchedAt: nextYear,
+    values: { "sidechat.draft": { value: "from next year", retention: "draft", updatedAt: nextYear } },
+    cleared: {},
+  }));
+
+  tabA.writePanelScratch(scope, "sidechat.draft", "on its way", "draft");
+  const sent = tabA.panelScratchRevision(scope, "sidechat.draft");
+
+  // Tab B sees that message and replaces it while tab A's send is still in flight.
+  assert.equal(tabB.readPanelScratch(scope, "sidechat.draft"), "on its way");
+  tabB.writePanelScratch(scope, "sidechat.draft", "a second thought", "draft");
+
+  tabA.clearPanelScratchIf(scope, "sidechat.draft", "on its way", sent);
+
+  tabB.dropPanelScratchMemory();
+  assert.equal(tabB.readPanelScratch(scope, "sidechat.draft"), "a second thought",
+    "the replacement nobody else has a copy of outlives a send that was not about it");
+});
+
+test("a send landing during the whole-map import is not undone by the import", () => {
+  // Cross-model review round 2, CR-2.2. The import captures what it captured, and this page reads
+  // the records a moment later. Another tab can send a draft in between, leaving a marker and no
+  // value — and a fold that reads a missing key as "nobody has spoken for this" would put the sent
+  // message back in front of the reader.
+  const scope = tabA.panelScratchScopeKey("session-1");
+  backing.set("wollipog.right-panel-scratch.v1", JSON.stringify({
+    version: 1,
+    scopes: [{
+      scope,
+      values: { "sidechat.draft": { value: "written before the upgrade", retention: "draft" } },
+    }],
+  }));
+
+  // Tab B takes its turn inside tab A's import write: it reads the freshly imported draft and
+  // sends it, which is the interleave this case is about.
+  onNextWrite = () => {
+    assert.equal(tabB.readPanelScratch(scope, "sidechat.draft"), "written before the upgrade");
+    tabB.clearPanelScratchIf(scope, "sidechat.draft", "written before the upgrade",
+      tabB.panelScratchRevision(scope, "sidechat.draft"));
+  };
+
+  // Tab A's own hydration, which is what runs the import.
+  const restored = tabA.readPanelScratch(scope, "sidechat.draft");
+
+  assert.equal(restored, undefined,
+    "the page that migrated the record does not hand back a message sent out from under it");
+  assert.equal(tabB.readPanelScratch(scope, "sidechat.draft"), undefined);
+
+  tabA.dropPanelScratchMemory();
+  tabB.dropPanelScratchMemory();
+  assert.equal(tabA.readPanelScratch(scope, "sidechat.draft"), undefined, "and it stays sent");
 });
