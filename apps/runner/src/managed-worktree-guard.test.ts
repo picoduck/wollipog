@@ -646,7 +646,7 @@ test("a directory that merely contains the guard state can be inspected without 
     `du ${home}`,
     `du ${data}`,
     `du -sh ~`,
-    `du -ahx --total -- ${home}`,
+    `du -chx --total -- ${home}`,
     `du -h --max-depth=1 ${home}`,
     `du --summarize --human-readable --apparent-size --si ${home}`,
     `du -sh ${home} 2>/dev/null`,
@@ -712,6 +712,10 @@ test("recursive or unclassifiable work on an ancestor of the guard state stays r
     `du --max-depth ${home}`,
     `du --time ${home}`,
     `du - ${home}`,
+    // `-a` prints every file, which would enumerate the hook directory's protections files.
+    `du -a ${home}`,
+    `du -sah ${home}`,
+    `du --all ${home}`,
     // An unexpanded variable could be a recursion flag or another operand.
     `ls $FLAGS ${home}`,
     // A wrapper is not the command it wraps, and is not classifiable here.
@@ -930,6 +934,18 @@ test("a bounded find is measured from the directory it actually starts in", (t) 
     GUARD_STATE_REFUSAL);
 });
 
+test("a backslash in a POSIX name is not a separator when measuring a walk", { skip: process.platform === "win32" }, (t) => {
+  // Review of #1390: counting `\` as a separator put a hook directory under `foo\bar` one level
+  // deeper than it is, so a walk one level too deep was allowed and listed the hook directory.
+  const home = mkdtempSync(join(tmpdir(), "wollipog-guard-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const directory = join(home, "foo\\bar", "hooks");
+  mkdirSync(directory, { recursive: true });
+  assert.deepEqual(guardStateRelation(home, home, directory), { kind: "ancestor", depth: 2 });
+  assert.equal(commandTargetsGuardState(`find ${home} -maxdepth 2`, home, directory), null);
+  assert.equal(commandTargetsGuardState(`find ${home} -maxdepth 3`, home, directory), GUARD_STATE_REFUSAL);
+});
+
 test("a spelling that climbs out of a symlink is judged by where the kernel lands", (t) => {
   // `resolve` folds `link/..` away before the symlink is ever seen, but the kernel follows the link
   // first and climbs out of its TARGET. Here that target is a subdirectory of the hook directory, so
@@ -1048,7 +1064,7 @@ test("an inspection never reaches into the guard state, whatever the command", (
   // Each ancestor with the number of levels the hook directory sits below it.
   const ancestors = fc.constantFrom(["/wollipog-fc-root", 2], ["/wollipog-fc-root/data", 1], ["/", 3]) as
     fc.Arbitrary<[string, number]>;
-  const inspection = fc.constantFrom("ls", "ls -la", "stat", "du", "du -sh", "du -ac --");
+  const inspection = fc.constantFrom("ls", "ls -la", "stat", "du", "du -sh", "du -bc --");
   const reaching = fc.constantFrom("rm -rf", "rm -r", "grep -r pattern", "ls -R", "cp -r", "mv",
     "find", "find -maxdepth 1", "find -L", "du -X state", "du --files0-from=state", "du --exclude-from state");
   fc.assert(fc.property(inspection, ancestors, (prefix, [target]) => {

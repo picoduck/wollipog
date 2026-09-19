@@ -167,7 +167,8 @@ What is done instead:
   which no check on the option's spelling can see. So neither is parsed in general; each is
   admitted in exact argv shapes only. `du` takes options from a closed list of value-free flags
   spelled in full, plus a numeric `--max-depth=`: no option value can name a file, so none needs
-  resolving. `find` takes one or more explicit starts followed by exactly `-maxdepth N`, and `N` may
+  resolving. `-a`/`--all` is not on the list, because it prints every file and so would enumerate
+  the hook directory's protections files; plain `du` prints directories only. `find` takes one or more explicit starts followed by exactly `-maxdepth N`, and `N` may
   not exceed the depth of the hook directory below any related start, measured under every reading
   of it (spelling, physical path, and where a `..` after a symlink really lands), nearest reading
   deciding. A walk to that depth reads the directories above the hook directory and only names the
@@ -176,8 +177,9 @@ What is done instead:
   which no operand names, so it is refused.
 
   The trade-off `du` carries, restated as #1334 accepts it: `du` on an ancestor walks the hook
-  directory too, so it learns that directory's shape and the sizes of the files in it. It opens no
-  file and reads no contents, and neither does any option it is allowed.
+  directory too, so it learns that directory's total size and prints the names of any
+  subdirectories in it. It opens no file and reads no contents, and neither does any option it is
+  allowed.
 
   An operand that climbs with `..` is also judged by where the kernel lands. Lexical normalization
   folds `<ancestor>/link/..` into `<ancestor>` before the symlink is seen, although the kernel

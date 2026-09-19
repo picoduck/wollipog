@@ -810,8 +810,9 @@ function climbingSpellings(path: string, cwd: string): string[] {
   return raw;
 }
 
+/** Components under the platform's own separator: on POSIX a backslash is part of a name. */
 function componentCount(path: string): number {
-  return normalize(path).split(/[\\/]/u).filter(Boolean).length;
+  return normalize(path).split(sep).filter(Boolean).length;
 }
 
 /**
@@ -993,12 +994,13 @@ function recursiveListing(word: string): boolean {
  * `du` options that take no value, spelled exactly: a short cluster made only of these letters, or
  * one of these long names in full. Anything else — `-X`, `--exclude-from`, `--files0-from`, an
  * abbreviation, an unknown option — disqualifies the command. The list names options that are SAFE,
- * so an option missing from it is refused, never waved through.
+ * so an option missing from it is refused, never waved through. `-a`/`--all` is deliberately absent:
+ * it prints every FILE, which would enumerate the hook directory, where plain `du` prints only
+ * directories.
  */
-const DU_SHORT_FLAGS = /^-[abchkmsx]+$/u;
+const DU_SHORT_FLAGS = /^-[bchkmsx]+$/u;
 const DU_LONG_FLAGS = new Set([
-  "--all", "--apparent-size", "--bytes", "--human-readable", "--one-file-system", "--si", "--summarize",
-  "--total",
+  "--apparent-size", "--bytes", "--human-readable", "--one-file-system", "--si", "--summarize", "--total",
 ]);
 
 /** `du` with nothing but value-free options, a numeric `--max-depth=`, and operands. */
