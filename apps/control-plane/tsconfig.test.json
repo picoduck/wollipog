@@ -1,0 +1,60 @@
+// Typecheck for this package's test files (see #1435). `exclude` is the shrinking list of
+// test files that do not typecheck yet: every other test file, and every new one, is
+// covered. Entries come off this list as they are fixed; adding one is a reviewable edit.
+// `tsconfig-test-debt.test.ts` keeps the list honest.
+//
+// `rootDir` is widened to the repo root because tests here import across packages, which the
+// production `rootDir: "src"` rejects with TS6059. Nothing is emitted, so this only affects
+// which files tsc accepts as inputs; the production config is untouched.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "../.."
+  },
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "src/auth.test.ts",
+    "src/automation-command-outbox.test.ts",
+    "src/automation-trigger-ingress.test.ts",
+    "src/automations.test.ts",
+    "src/box-legacy-adoption-route.test.ts",
+    "src/box-lifecycle.test.ts",
+    "src/db.test.ts",
+    "src/event-payloads.test.ts",
+    "src/execution-targets.test.ts",
+    "src/git-route.test.ts",
+    "src/http-auth.test.ts",
+    "src/hub.test.ts",
+    "src/hydrate.test.ts",
+    "src/identity-scope.test.ts",
+    "src/orchestrator-settings.test.ts",
+    "src/orchestrator-tui-route.integration.test.ts",
+    "src/outbound-events-db.test.ts",
+    "src/policy-hook-route.integration.test.ts",
+    "src/projects.db.test.ts",
+    "src/question-policy.test.ts",
+    "src/registry-approval.test.ts",
+    "src/release-version.test.ts",
+    "src/runner-prompt-image.test.ts",
+    "src/session-command-invocations.test.ts",
+    "src/session-descendants-route.integration.test.ts",
+    "src/session-naming-route.test.ts",
+    "src/session-prompt-outbox.test.ts",
+    "src/sessions.test.ts",
+    "src/share-projection.test.ts",
+    "src/skill-git-route.test.ts",
+    "src/skill-machine-route.test.ts",
+    "src/skills-route.test.ts",
+    "src/subscription-usage.test.ts",
+    "src/ui-route.integration.test.ts",
+    "src/usage-routes.test.ts",
+    "src/web-dist.test.ts",
+    "src/wire-compat.test.ts",
+    "src/workflow-action-reconciliation-route.integration.test.ts",
+    "src/workflow-graphs.test.ts",
+    "src/workflow-persistence.test.ts"
+  ]
+}
