@@ -1164,6 +1164,18 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.equal(duplicateFollowUp.data?.duplicate, true, "normalized repository and title deduplicate across caller ids");
     assert.deepEqual(hub.sessionChangedByIdCalls, [parent.id, parent.id],
       "each persisted follow-up refreshes the campaign summary for connected clients");
+    const nestedFollowUp = svc.recordCampaignFollowUp(child.data.id, {
+      originSessionId: grandchild.data.id, repository: "picoduck/wollipog", title: "Nested Follow-Up",
+    });
+    assert.equal(nestedFollowUp.data?.campaignSessionId, parent.id,
+      "a nested Orchestrator records into the root campaign that get_campaign projects (#1278)");
+    const nestedDuplicate = svc.recordCampaignFollowUp(child.data.id, {
+      originSessionId: grandchild.data.id, repository: "picoduck/wollipog", title: "Bounded Follow-Up",
+    });
+    assert.equal(nestedDuplicate.data?.duplicate, true, "nested records deduplicate against the root campaign");
+    assert.deepEqual(svc.campaignProjection(child.data.id).data?.followUps, { unique: 2, duplicates: 2 },
+      "both the root and the nested Orchestrator's get_campaign count the nested record");
+    assert.deepEqual(svc.campaignProjection(parent.id).data?.followUps, { unique: 2, duplicates: 2 });
     db.setWorktreePath(child.data.id, `/worktrees/${child.data.id}`);
     db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?").run(JSON.stringify([{
       id: "campaign-worktree", path: `/worktrees/${child.data.id}`, branch: "fix/campaign-child", source: "created",
@@ -1184,7 +1196,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       .run(child.data.id);
     assert.equal(db.campaignProjection(parent.id)?.status, "verified_complete");
     assert.deepEqual(db.campaignProjection(parent.id)?.followUps, {
-      unique: 1, duplicates: 1,
+      unique: 2, duplicates: 2,
     });
     let failedChild = svc.createSession(childRequest, undefined, undefined, false, false, false, {
       parentSessionId: parent.id,

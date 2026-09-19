@@ -6113,16 +6113,19 @@ export class SessionsService {
         !canAccess(campaignSessionId) || !canAccess(request.originSessionId)) {
       return fail("follow-up origin is not a visible campaign child", 404);
     }
+    // get_campaign projects the outermost campaign, so a nested Orchestrator records into it too;
+    // keyed by its own id, the follow-up would be counted and deduplicated nowhere.
+    const root = this.orchestratorCampaignController(campaign) ?? campaign;
     const followUp = this.db.recordCampaignFollowUp({
-      campaignSessionId,
+      campaignSessionId: root.id,
       originSessionId: request.originSessionId,
       repository: request.repository,
       title: request.title,
       ...(request.recommendationKey ? { recommendationKey: request.recommendationKey } : {}),
-      followUpsMode: campaign.orchestratorPolicy.behavior.followUps,
+      followUpsMode: root.orchestratorPolicy!.behavior.followUps,
       now: Date.now(),
     });
-    this.hub.sessionChangedById(campaignSessionId);
+    this.hub.sessionChangedById(root.id);
     return ok(followUp, 201);
   }
 
