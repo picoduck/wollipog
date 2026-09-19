@@ -237,8 +237,9 @@ test("a trailing-padded apply_patch header is judged by both spellings, a leadin
   // Measured at codex-cli 0.155.1 by reading the bytes of the files it created:
   // `*** Add File: trailing.txt ` -> `trailing.txt`; `*** Add File: nel.txt<U+0085>` -> `nel.txt`;
   // `*** Add File: bom.txt<U+FEFF>` -> `bom.txt<U+FEFF>`; `*** Add File:  leading.txt` ->
-  // ` leading.txt`. So trailing padding names a second location, the trim set is neither
-  // JavaScript's nor exactly Rust's, and a leading space is part of the name.
+  // ` leading.txt`. So trailing padding names a second location, the trim set is Rust's — Unicode
+  // `White_Space`, which U+0085 and U+FEFF distinguish from JavaScript's — and a leading space is
+  // part of the name.
   const directory = join(homedir(), ".wollipog-test-data", "hooks");
   // Padding only matters where the STRIPPED spelling is the protected location itself: a padded
   // path beneath a protected directory is already inside it under the verbatim reading. So these
