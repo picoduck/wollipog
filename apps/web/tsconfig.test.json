@@ -1,7 +1,8 @@
 // Typecheck for this package's test files (see #1435). `exclude` is the shrinking list of
 // test files that do not typecheck yet: every other test file, and every new one, is
 // covered. Entries come off this list as they are fixed; adding one is a reviewable edit.
-// `tsconfig-test-debt.test.ts` keeps the list honest.
+// `src/tsconfig-test-debt.test.ts` keeps the list honest, via the shared guard in
+// `@wollipog/test-support/tsconfig-test-debt`.
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {

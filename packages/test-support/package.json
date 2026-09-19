@@ -10,6 +10,10 @@
     "./bounded-child-process": {
       "types": "./src/bounded-child-process.ts",
       "default": "./src/bounded-child-process.ts"
+    },
+    "./tsconfig-test-debt": {
+      "types": "./src/tsconfig-test-debt.ts",
+      "default": "./src/tsconfig-test-debt.ts"
     }
   },
   "scripts": {
