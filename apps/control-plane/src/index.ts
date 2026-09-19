@@ -4739,6 +4739,17 @@ app.post("/api/sessions/:id/archive", async (req, reply) => {
   return respond(reply, svc.setArchived(id, body.archived));
 });
 
+// One server-owned restore: restart preflight runs before the archive flag changes, so no client
+// ever composes unarchive + restart and observes a half-applied result. Session credentials are
+// refused exactly as they are for a plain unarchive (and the route is absent from their allowlists).
+app.post("/api/sessions/:id/unarchive-and-restart", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  if (requestPrincipal(req)?.kind === "agent") {
+    return reply.code(403).send({ error: "session credentials may archive descendants, but cannot unarchive them" });
+  }
+  return respond(reply, svc.unarchiveAndRestart(id));
+});
+
 app.post("/api/sessions/:id/retry-stop", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   return respond(reply, svc.retryStop(id));

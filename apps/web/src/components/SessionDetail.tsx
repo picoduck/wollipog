@@ -842,6 +842,7 @@ function SessionDetailLoaded({
   const runnerOnline = runner?.status === "online";
   const snapshotLoaded = useStoreSelector((s) => s.snapshotLoaded);
   const stopBeforeArchiveSupported = useStoreSelector((s) => s.stopBeforeArchiveSupported);
+  const unarchiveAndRestartSupported = useStoreSelector((s) => s.unarchiveAndRestartSupported);
   const richGitSupported = runnerSupportsProtocol(runner?.protocolVersion, "gitVisibility");
   const box = useStoreSelector((s) => [...s.boxes.values()].find((candidate) => candidate.runnerId === session.runnerId));
   const conn = useStoreSelector((s) => s.conn);
@@ -4484,6 +4485,7 @@ function SessionDetailLoaded({
           runnerOnline={runnerOnline}
           runnerProtocolVersion={runner?.protocolVersion}
           stopBeforeArchiveSupported={stopBeforeArchiveSupported}
+          unarchiveAndRestartSupported={unarchiveAndRestartSupported}
           providerLogoutSupported={runner?.agents.find((agent) => agent.id === session.agentId)?.acp?.logout === true}
           exportReady={eventHistory?.everComplete === true}
           onBack={onBack ?? (() => navigate({ name: "inbox" }))}

@@ -5802,7 +5802,25 @@ export class SessionsService {
     return ok(session);
   }
 
-  restart(sessionId: string): ServiceResult<SessionView> {
+  /** Restore an archived session to the Inbox and relaunch it as one server-owned operation. Every
+   * restart preflight runs while the session is still archived, and the archive flag is cleared only
+   * after the launch is handed to the runner, so a refusal leaves it archived and untouched. */
+  unarchiveAndRestart(sessionId: string): ServiceResult<SessionView> {
+    const session = this.db.getSession(sessionId);
+    if (!session) return fail("session not found", 404);
+    if (!session.archived) {
+      // A duplicate request, or a second client, lands after the first one already restored and
+      // relaunched the session. Report that launch instead of sending another replacement process.
+      if (!session.archiveStatus && !isTerminal(session.status)) return ok(session);
+      return fail("session is not archived; use Restart instead", 409);
+    }
+    if (this.db.sideChatParent(sessionId)) {
+      return fail("side chat sessions remain hidden from ordinary session lists", 409);
+    }
+    return this.restart(sessionId, { unarchive: true });
+  }
+
+  restart(sessionId: string, options: { unarchive?: boolean } = {}): ServiceResult<SessionView> {
     let session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     const campaignBefore = this.campaignAttentionController(session);
@@ -5812,7 +5830,7 @@ export class SessionsService {
     if (session.archiveStatus) {
       return fail("archive is waiting for runtime capacity to be released", 409);
     }
-    if (session.archived) {
+    if (session.archived && !options.unarchive) {
       return fail("unarchive the session before restarting it", 409);
     }
     if (session.parentSessionId && isTerminal(session.status)) {
@@ -6001,12 +6019,19 @@ export class SessionsService {
     if (relaunchTarget.target && relaunchTarget.target !== session.executionTarget) {
       this.db.setSessionExecutionTarget(sessionId, relaunchTarget.target);
     }
+    // Restore visibility in the same synchronous step that records `starting`: a second request can
+    // never observe an archived session whose launch was already sent, nor a restored one that was not.
+    const unarchived = options.unarchive === true && session.archived;
+    if (unarchived) {
+      this.db.cancelSessionArchiveAfterStop(sessionId);
+      this.db.setSessionArchived(sessionId, false, now);
+    }
     this.db.updateSessionStatus(sessionId, "starting", now);
     // The runner replaces any existing process for this sessionId (no separate
     // stop_session, which would emit a terminal 'stopped' that blocks the restart).
     this.hub.sessionChangedById(sessionId);
     this.publishCampaignAttentionTransition(campaignBefore);
-    this.log.info(`session restarted ${sessionId}`);
+    this.log.info(unarchived ? `session unarchived and restarted ${sessionId}` : `session restarted ${sessionId}`);
     return ok(this.db.getSession(sessionId)!);
   }
 

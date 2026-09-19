@@ -1,6 +1,18 @@
 import { archiveRequiresStop, type SessionView } from "@wollipog/protocol";
 
-type ArchiveActionSession = Pick<SessionView, "archiveStatus" | "archived" | "status">;
+type ArchiveActionSession = Pick<SessionView, "archiveStatus" | "archived" | "status"> &
+  Partial<Pick<SessionView, "stopOperation">>;
+
+/** An archived session is restored with one preflighted Unarchive and Restart only when the control
+ * plane owns that operation. Stop Pending and Stop Failed keep their Stop recovery path first, and an
+ * older control plane keeps the plain Unarchive: two client requests would not be atomic. */
+export function sessionUnarchiveRestarts(
+  session: ArchiveActionSession,
+  unarchiveAndRestartSupported: boolean,
+): boolean {
+  return unarchiveAndRestartSupported && session.archived && !session.archiveStatus &&
+    session.stopOperation?.status !== "stop_failed";
+}
 
 export function sessionArchiveRequiresStop(
   session: Pick<ArchiveActionSession, "archiveStatus" | "status">,
@@ -10,10 +22,31 @@ export function sessionArchiveRequiresStop(
     (stopBeforeArchiveSupported && archiveRequiresStop(session.status));
 }
 
-export function sessionArchiveActionLabel(session: ArchiveActionSession, stopBeforeArchiveSupported: boolean): "Archive" | "Archive and Stop" | "Retry Stop" | "Unarchive" {
-  if (session.archived) return "Unarchive";
+export function sessionArchiveActionLabel(
+  session: ArchiveActionSession,
+  stopBeforeArchiveSupported: boolean,
+  unarchiveAndRestartSupported = false,
+): "Archive" | "Archive and Stop" | "Retry Stop" | "Unarchive" | "Unarchive and Restart" {
+  if (session.archived) {
+    return sessionUnarchiveRestarts(session, unarchiveAndRestartSupported) ? "Unarchive and Restart" : "Unarchive";
+  }
   if (session.archiveStatus === "stop_failed") return "Retry Stop";
   return sessionArchiveRequiresStop(session, stopBeforeArchiveSupported) ? "Archive and Stop" : "Archive";
+}
+
+/** The server refuses Unarchive and Restart with a 4xx only from its preflight, before the archive
+ * flag changes, so the session is known to be archived still. Anything else (a dropped connection,
+ * a gateway error) is ambiguous and must be reconciled against the server, never assumed. */
+export function unarchiveAndRestartFailureMessage(cause: unknown): { message: string; ambiguous: boolean } {
+  const detail = cause instanceof Error ? cause.message : String(cause);
+  const status = typeof cause === "object" && cause !== null && "status" in cause ? (cause as { status: unknown }).status : null;
+  if (typeof status === "number" && status >= 400 && status < 500) {
+    return { message: `Could not unarchive and restart session: ${detail}. The session is still archived.`, ambiguous: false };
+  }
+  return {
+    message: `Could not confirm Unarchive and Restart: ${detail}. Reloading the current session state.`,
+    ambiguous: true,
+  };
 }
 
 export type SetSessionArchived = (sessionId: string, archived: boolean) => Promise<unknown>;

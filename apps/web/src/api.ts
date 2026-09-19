@@ -783,6 +783,8 @@ export function createApiClient(transport: ApiTransport) {
     ),
 
   restart: (id: string) => req<SessionView>(`/api/sessions/${id}/restart`, { method: "POST" }),
+  unarchiveAndRestart: (id: string) =>
+    req<SessionView>(`/api/sessions/${id}/unarchive-and-restart`, { method: "POST" }),
 
   /** Progress-aware create. A current control plane acknowledges with an `in_progress` operation
    * that repeating the exact coordinates joins; an older one ignores `progress` and answers with

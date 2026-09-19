@@ -896,6 +896,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     nativeTuiLaunch: true,
     stopFailureRecovery: true,
     stopBeforeArchive: true,
+    unarchiveAndRestart: true,
     sessionReminders: true,
     worktreeSetupConfig: true,
     orchestratorRole: true,
@@ -1870,6 +1871,41 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     () => oversized.send("x".repeat(MAX_UI_CLIENT_MESSAGE_BYTES + 1)),
   );
   assert.equal(oversizedClose.code, 1009, "transport-level maxPayload enforcement must close oversized frames");
+
+  // Unarchive and Restart is one server-owned operation behind the ordinary lifecycle and archive
+  // authorization: anonymous and session-credential callers are refused before anything changes,
+  // and two concurrent human clients launch exactly one replacement process.
+  const restorePath = "/api/sessions/session-history/unarchive-and-restart";
+  assert.equal((await fetch(`${httpBase}${restorePath}`, { method: "POST" })).status, 401);
+  const agentRestore = await fetch(`${httpBase}${restorePath}`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${parentAgentToken}`,
+      [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: "session-agent-parent",
+    },
+  });
+  assert.equal(agentRestore.status, 403, "session credentials cannot unarchive, so they cannot unarchive and restart");
+  assert.equal(runnerInbox.has((message) =>
+    message.type === "start_session" &&
+      (message.spec as { sessionId?: string } | undefined)?.sessionId === "session-history"), false);
+  assert.equal((await (await ownerFetch("/api/sessions/session-history")).json() as {
+    session: { archived: boolean };
+  }).session.archived, true);
+  const concurrentRestores = await Promise.all([
+    ownerFetch(restorePath, { method: "POST" }),
+    ownerFetch(restorePath, { method: "POST" }),
+  ]);
+  for (const response of concurrentRestores) {
+    assert.equal(response.status, 200);
+    const restored = await response.json() as { archived: boolean; status: string };
+    assert.equal(restored.archived, false);
+    assert.equal(restored.status, "starting");
+  }
+  await runnerInbox.take((message) => message.type === "start_session" &&
+    (message.spec as { sessionId?: string } | undefined)?.sessionId === "session-history");
+  assert.equal(runnerInbox.has((message) => message.type === "start_session" &&
+    (message.spec as { sessionId?: string } | undefined)?.sessionId === "session-history"), false,
+  "the second client observes the accepted launch instead of sending another");
 });
 
 test("legacy workspace rename cannot bypass durable Project management authority", { timeout: 30_000 }, async (t) => {

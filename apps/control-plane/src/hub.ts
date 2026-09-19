@@ -555,6 +555,7 @@ export class Hub {
         nativeTuiLaunch: true,
         stopBeforeArchive: true,
         stopFailureRecovery: true,
+        unarchiveAndRestart: true,
         sessionReminders: true,
         worktreeSetupConfig: true,
         orchestratorRole: true,

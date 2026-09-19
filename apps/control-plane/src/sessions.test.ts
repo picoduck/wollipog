@@ -12950,6 +12950,140 @@ test("restart rejects an archived session before sending a replacement launch", 
   assert.equal(hub.sentOfType("stop_session").length, 0);
 });
 
+function seedArchivedSession(harness: ReturnType<typeof makeHarness>): string {
+  const { db, hub, svc } = harness;
+  const id = seedSession(svc, hub, { config: { model: "opus", effort: "high" } });
+  db.appendEvent(id, { kind: "user_message", text: "Keep this transcript." }, Date.now());
+  db.updateSessionStatus(id, "completed", Date.now());
+  assert.equal(svc.setArchived(id, true).data?.archived, true);
+  hub.sentToRunner.length = 0;
+  hub.sessionChangedByIdCalls.length = 0;
+  return id;
+}
+
+function assertStillArchived(harness: ReturnType<typeof makeHarness>, id: string): void {
+  const stored = harness.db.getSession(id)!;
+  assert.equal(stored.archived, true, "a preflight refusal leaves the session archived");
+  assert.equal(stored.status, "completed");
+  assert.equal(harness.hub.sentOfType("start_session").length, 0, "no replacement process was requested");
+}
+
+test("unarchive and restart restores the archived session and relaunches it in Starting state", () => {
+  const harness = makeHarness();
+  const { db, hub, svc } = harness;
+  const id = seedArchivedSession(harness);
+  const eventsBefore = db.listEvents(id).length;
+
+  const result = svc.unarchiveAndRestart(id);
+
+  assert.equal(result.status, 200, result.error);
+  assert.equal(result.data?.archived, false);
+  assert.equal(result.data?.status, "starting");
+  const launches = hub.sentOfType("start_session");
+  assert.equal(launches.length, 1);
+  assert.equal(launches[0]!.spec.sessionId, id, "the provider resume identity is the same session");
+  assert.equal(launches[0]!.spec.workspacePath, WORKSPACE_PATH);
+  assert.equal(launches[0]!.spec.config.model, "opus");
+  assert.equal(launches[0]!.spec.config.effort, "high");
+  assert.deepEqual(hub.sentToRunner.map((sent) => sent.msg.type), ["start_session"],
+    "no canceled prompt or queued work is replayed alongside the launch");
+  assert.equal(db.listEvents(id).length, eventsBefore, "the transcript is preserved untouched");
+  assert.ok(hub.sessionChangedByIdCalls.includes(id), "every Inbox observes the restored session");
+  assert.equal(db.getSession(id)?.archived, false);
+});
+
+test("duplicate and concurrent unarchive-and-restart requests launch exactly one replacement process", () => {
+  const harness = makeHarness();
+  const { hub, svc } = harness;
+  const id = seedArchivedSession(harness);
+
+  const first = svc.unarchiveAndRestart(id);
+  const duplicate = svc.unarchiveAndRestart(id);
+
+  assert.equal(first.status, 200);
+  assert.equal(duplicate.status, 200, "the second client observes the accepted launch");
+  assert.equal(duplicate.data?.status, "starting");
+  assert.equal(hub.sentOfType("start_session").length, 1);
+});
+
+test("unarchive and restart refuses a session that is not archived without launching", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "completed", Date.now());
+  hub.sentToRunner.length = 0;
+
+  const result = svc.unarchiveAndRestart(id);
+
+  assert.equal(result.status, 409);
+  assert.match(result.error ?? "", /not archived/u);
+  assert.equal(hub.sentOfType("start_session").length, 0);
+  assert.equal(svc.unarchiveAndRestart("missing").status, 404);
+});
+
+test("unarchive and restart preflight failures leave the session archived with an actionable error", () => {
+  const offline = makeHarness();
+  const offlineId = seedArchivedSession(offline);
+  offline.hub.online = false;
+  const offlineResult = offline.svc.unarchiveAndRestart(offlineId);
+  assert.equal(offlineResult.status, 409);
+  assert.match(offlineResult.error ?? "", /runner is offline/u);
+  assertStillArchived(offline, offlineId);
+
+  const undelivered = makeHarness();
+  const undeliveredId = seedArchivedSession(undelivered);
+  undelivered.hub.deliver = false;
+  const undeliveredResult = undelivered.svc.unarchiveAndRestart(undeliveredId);
+  assert.equal(undeliveredResult.status, 409, "a launch the socket refused is not reported as accepted");
+  assert.equal(undelivered.db.getSession(undeliveredId)?.archived, true);
+  assert.equal(undelivered.db.getSession(undeliveredId)?.status, "completed");
+
+  const missingWorkspace = makeHarness();
+  const missingWorkspaceId = seedArchivedSession(missingWorkspace);
+  missingWorkspace.db.registerRunner({ ...runnerMeta(), workspaces: [] }, Date.now(), PROTOCOL_VERSION);
+  const workspaceResult = missingWorkspace.svc.unarchiveAndRestart(missingWorkspaceId);
+  assert.equal(workspaceResult.status, 400);
+  assert.match(workspaceResult.error ?? "", /workspace/u);
+  assertStillArchived(missingWorkspace, missingWorkspaceId);
+
+  const missingAgent = makeHarness();
+  const missingAgentId = seedArchivedSession(missingAgent);
+  missingAgent.db.registerRunner({ ...runnerMeta(), agents: [] }, Date.now(), PROTOCOL_VERSION);
+  const agentResult = missingAgent.svc.unarchiveAndRestart(missingAgentId);
+  assert.equal(agentResult.status, 404);
+  assert.match(agentResult.error ?? "", /unknown agent/u);
+  assertStillArchived(missingAgent, missingAgentId);
+});
+
+test("unarchive and restart cannot race a pending archive Stop", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  assert.equal(svc.setArchived(id, true).data?.archiveStatus, "stop_pending");
+  hub.sentToRunner.length = 0;
+
+  const result = svc.unarchiveAndRestart(id);
+
+  assert.equal(result.status, 409);
+  assert.equal(db.getSession(id)?.archiveStatus, "stop_pending", "the Stop recovery path is unchanged");
+  assert.equal(hub.sentOfType("start_session").length, 0);
+});
+
+test("a runner disconnect after an accepted unarchive and restart leaves a durable, restartable Inbox session", () => {
+  const harness = makeHarness();
+  const { db, hub, svc } = harness;
+  const id = seedArchivedSession(harness);
+  assert.equal(svc.unarchiveAndRestart(id).status, 200);
+
+  hub.online = false;
+  svc.failRunnerSessions(RUNNER_ID);
+
+  const stored = db.getSession(id)!;
+  assert.equal(stored.archived, false, "the session stays in the Inbox where Restart can recover it");
+  assert.equal(stored.status, "stopped", "an unconfirmed launch is never reported as running");
+  hub.online = true;
+  assert.equal(svc.restart(id).status, 200);
+});
+
 test("archive is idempotently stop-pending until terminal runner evidence confirms capacity release", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);

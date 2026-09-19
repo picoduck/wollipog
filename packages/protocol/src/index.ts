@@ -8284,6 +8284,8 @@ export interface UiSnapshotMessage {
     stopBeforeArchive?: boolean;
     /** Durable Stop operations expose bounded failure metadata and an idempotent recovery API. */
     stopFailureRecovery?: boolean;
+    /** Archived sessions can be restored and relaunched by one preflighted server operation. */
+    unarchiveAndRestart?: boolean;
     /** Per-user durable session reminders and scoped live reminder events are available. */
     sessionReminders?: boolean;
     /** Per-user worktree setup notices and runner-owned generation are available. */

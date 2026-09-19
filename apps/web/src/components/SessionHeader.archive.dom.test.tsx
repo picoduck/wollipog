@@ -271,3 +271,65 @@ test("archive Stop Failed does not leave an empty Runtime section", async () => 
   await act(async () => root.unmount());
   container.remove();
 });
+
+test("an archived session header offers one Unarchive and Restart without Undo or a separate Restart", async () => {
+  const restores: string[] = [];
+  const toasts: string[] = [];
+  let undos = 0;
+  const session = {
+    id: "session-archived-completed",
+    runnerId: "runner-1",
+    title: "Archived Work",
+    status: "completed",
+    archived: true,
+  } as SessionView;
+  const client = {
+    ...api,
+    setArchived: async () => { throw new Error("the combined action must not compose a plain unarchive"); },
+    restart: async () => { throw new Error("the combined action must not compose a separate restart"); },
+    unarchiveAndRestart: async (id: string) => {
+      restores.push(id);
+      return { ...session, archived: false, status: "starting" as const };
+    },
+  } as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <ApiProvider client={client}>
+        <FeedbackContext.Provider value={{
+          confirm: async () => { throw new Error("the labelled action needs no confirmation"); },
+          showToast: (message: string) => { toasts.push(message); return 1; },
+          showUndo: () => { undos += 1; return 1; },
+          dismissToast: () => undefined,
+        }}>
+          <SessionHeader
+            session={session}
+            onBack={() => undefined}
+            runnerOnline
+            runnerProtocolVersion={85}
+            providerLogoutSupported={false}
+            stopBeforeArchiveSupported
+            unarchiveAndRestartSupported
+            exportReady={false}
+          />
+        </FeedbackContext.Provider>
+      </ApiProvider>,
+    );
+  });
+
+  await act(async () => { button(container, "More Actions").click(); await tick(); });
+  const actionLabels = [...container.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+    .map((item) => item.textContent?.trim());
+  assert.ok(actionLabels.includes("Unarchive and Restart"));
+  assert.equal(actionLabels.includes("Unarchive"), false);
+  assert.equal(actionLabels.includes("Restart"), false, "the two-step Restart is replaced, not duplicated");
+  await act(async () => { button(container, "Unarchive and Restart").click(); await tick(); await tick(); });
+
+  assert.deepEqual(restores, [session.id]);
+  assert.deepEqual(toasts, ["Session restored and restarting."]);
+  assert.equal(undos, 0, "Undo would re-archive a running session without stopping it");
+  await act(async () => root.unmount());
+  container.remove();
+});

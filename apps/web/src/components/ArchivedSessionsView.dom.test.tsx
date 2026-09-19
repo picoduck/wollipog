@@ -5,7 +5,7 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { ControlPlaneToUi, SessionView, UiSnapshotMessage } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { View, ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
@@ -84,10 +84,16 @@ class FakeSocket implements UiSocket {
   push(message: ControlPlaneToUi) { this.onmessage?.({ data: JSON.stringify(message) }); }
 }
 
-function snapshot(): UiSnapshotMessage {
+function snapshot(capabilities: UiSnapshotMessage["capabilities"] = {}): UiSnapshotMessage {
   return {
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+    capabilities: {
+      sessionSubscriptions: false,
+      boundedDelivery: false,
+      paginatedSessionHistory: false,
+      projects: true,
+      ...capabilities,
+    },
     runners: [], boxes: [], projects: [], sessions: [], runs: [], pods: [],
   };
 }
@@ -116,7 +122,7 @@ let sequence = 0;
 async function mount(
   sessions: SessionView[],
   overrides: Partial<ApiClient> = {},
-  options: { initialConnection?: "online" | "unauthorized" } = {},
+  options: { initialConnection?: "online" | "unauthorized"; unarchiveAndRestart?: boolean } = {},
 ) {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
@@ -195,7 +201,7 @@ async function mount(
   });
   await act(async () => {
     if (options.initialConnection === "unauthorized") socket.onclose?.({ code: 1008 });
-    else socket.push(snapshot());
+    else socket.push(snapshot(options.unarchiveAndRestart ? { unarchiveAndRestart: true } : {}));
     await Promise.resolve();
   });
   return {
@@ -344,6 +350,121 @@ test("unarchive uses the existing authorized mutation and removes the row from t
   await act(async () => { fireDomEvent.click(button(fixture.container, "Unarchive")); await Promise.resolve(); });
   assert.deepEqual(calls, [[archived.id, false]]);
   assert.match(fixture.container.textContent ?? "", /No Archived Sessions/);
+  await fixture.unmount();
+});
+
+function hasButton(container: HTMLElement, label: string): boolean {
+  return [...container.querySelectorAll("button")].some((candidate) => candidate.textContent?.trim() === label);
+}
+
+test("Unarchive and Restart is one server request that opens the restarting session without Undo", async () => {
+  const restoreCalls: string[] = [];
+  const archived = session(1, { status: "completed" });
+  const fixture = await mount([archived], {
+    setArchived: async () => {
+      throw new Error("the combined action must not compose a plain unarchive");
+    },
+    restart: async () => {
+      throw new Error("the combined action must not compose a separate restart");
+    },
+    unarchiveAndRestart: async (id) => {
+      restoreCalls.push(id);
+      return { ...archived, archived: false, status: "starting", updatedAt: archived.updatedAt + 1 };
+    },
+  }, { unarchiveAndRestart: true });
+
+  assert.equal(hasButton(fixture.container, "Unarchive"), false, "one combined action replaces the two-step flow");
+  await act(async () => {
+    fireDomEvent.click(button(fixture.container, "Unarchive and Restart"));
+    await Promise.resolve();
+  });
+
+  assert.deepEqual(restoreCalls, [archived.id]);
+  assert.deepEqual(fixture.navigated, [{ name: "session", id: archived.id }]);
+  assert.match(fixture.container.textContent ?? "", /Session restored and restarting\./);
+  assert.equal(hasButton(fixture.container, "Undo"), false,
+    "Undo would re-archive a running session without stopping it");
+  await fixture.unmount();
+});
+
+test("an Unarchive and Restart preflight refusal keeps the row archived with an actionable error", async () => {
+  const archived = session(1, { status: "completed" });
+  const fixture = await mount([archived], {
+    unarchiveAndRestart: async () => {
+      throw new ApiError("runner is offline", 409);
+    },
+  }, { unarchiveAndRestart: true });
+  const loadsBefore = fixture.archivePageCalls();
+
+  await act(async () => {
+    fireDomEvent.click(button(fixture.container, "Unarchive and Restart"));
+    await Promise.resolve();
+  });
+
+  assert.match(fixture.container.textContent ?? "",
+    /Could not unarchive and restart session: runner is offline\. The session is still archived\./);
+  assert.equal(button(fixture.container, "Unarchive and Restart").disabled, false, "the action can be retried");
+  assert.deepEqual(fixture.navigated, []);
+  assert.equal(fixture.archivePageCalls(), loadsBefore, "a definite refusal needs no reconciliation");
+  await fixture.unmount();
+});
+
+test("an ambiguous Unarchive and Restart failure reconciles the row against the server", async () => {
+  const archived = session(1, { status: "completed" });
+  const fixture = await mount([archived], {
+    unarchiveAndRestart: async () => {
+      throw new TypeError("Failed to fetch");
+    },
+  }, { unarchiveAndRestart: true });
+  const loadsBefore = fixture.archivePageCalls();
+
+  await act(async () => {
+    fireDomEvent.click(button(fixture.container, "Unarchive and Restart"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  assert.match(fixture.container.textContent ?? "", /Could not confirm Unarchive and Restart: Failed to fetch\./);
+  assert.ok(fixture.archivePageCalls() > loadsBefore, "delivery uncertainty is resolved from the server");
+  await fixture.unmount();
+});
+
+test("an older control plane keeps the plain Unarchive and never emulates the combined action", async () => {
+  const archived = session(1, { status: "completed" });
+  const calls: string[] = [];
+  const fixture = await mount([archived], {
+    setArchived: async (id, value) => {
+      calls.push(`archive:${id}:${value}`);
+      return { ...archived, archived: value, updatedAt: archived.updatedAt + 1 };
+    },
+    restart: async (id) => {
+      calls.push(`restart:${id}`);
+      return archived;
+    },
+    unarchiveAndRestart: async (id) => {
+      calls.push(`combined:${id}`);
+      return archived;
+    },
+  });
+
+  assert.equal(hasButton(fixture.container, "Unarchive and Restart"), false);
+  await act(async () => {
+    fireDomEvent.click(button(fixture.container, "Unarchive"));
+    await Promise.resolve();
+  });
+  assert.deepEqual(calls, [`archive:${archived.id}:false`], "no restart is composed on the client");
+  await fixture.unmount();
+});
+
+test("Stopping sessions keep their Stop recovery path instead of Unarchive and Restart", async () => {
+  const pending = session(2, {
+    archived: false,
+    status: "stopped",
+    archiveStatus: "stop_pending",
+  } as Partial<SessionView>);
+  const fixture = await mount([pending], {}, { unarchiveAndRestart: true });
+
+  assert.equal(hasButton(fixture.container, "Unarchive and Restart"), false);
+  assert.ok(button(fixture.container, "Retry Stop"));
   await fixture.unmount();
 });
 
