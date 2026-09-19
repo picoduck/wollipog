@@ -987,6 +987,108 @@ test("a command with no operand is judged against the directory it would run in"
   assert.equal(commandTargetsGuardState(`ls ${home}; ls`, home, directory), null);
 });
 
+test("an operand-less recursive command is judged against the directory it walks", (t) => {
+  // #1398. The command text is held constant and only the WORKING DIRECTORY changes: a walk that
+  // names nothing still reaches everything below where it starts.
+  const home = mkdtempSync(join(tmpdir(), "wollipog-guard-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const data = join(home, ".wollipog-data");
+  const directory = join(data, "hooks");
+  mkdirSync(directory, { recursive: true });
+  const project = join(home, "project");
+  mkdirSync(project);
+  const elsewhere = mkdtempSync(join(tmpdir(), "wollipog-guard-away-"));
+  t.after(() => rmSync(elsewhere, { recursive: true, force: true }));
+  const walks = [
+    "find -maxdepth 999",
+    "find -maxdepth 3",
+    "grep -r secret .",
+    "grep -r secret",
+    "grep -R secret",
+    "du -a",
+    "du -a .",
+    "ls -R",
+  ];
+  // From a strict ancestor every one of them enumerates the hook directory.
+  for (const command of walks) {
+    assert.equal(commandTargetsGuardState(command, home, directory), GUARD_STATE_REFUSAL, command);
+    assert.equal(commandTargetsGuardState(command, data, directory), GUARD_STATE_REFUSAL, command);
+  }
+  // From a directory that contains nothing of the guard's, the same text is ordinary work.
+  for (const command of walks) {
+    assert.equal(commandTargetsGuardState(command, project, directory), null, command);
+    assert.equal(commandTargetsGuardState(command, elsewhere, directory), null, command);
+  }
+  // A command that does not walk keeps acting only where it stands, so an ancestor is no reason to
+  // refuse it: #1334's listings stay allowed, and one of them cannot poison the rest of a list.
+  for (const command of ["ls", "ls -ltr", "ls -la", "stat", "stat .", "du", "du -sh", "pwd",
+    "git status", "ls && npm test", "cat notes.txt"]) {
+    assert.equal(commandTargetsGuardState(command, home, directory), null, command);
+  }
+  // The bound of an operand-less `find` is measured from the working directory, exactly as an
+  // explicit START's is, and admits the same walks.
+  assert.equal(commandTargetsGuardState("find -maxdepth 2", home, directory), null);
+  assert.equal(commandTargetsGuardState("find . -maxdepth 2", home, directory), null);
+  assert.equal(commandTargetsGuardState("find -maxdepth 3", home, directory), GUARD_STATE_REFUSAL);
+  assert.equal(commandTargetsGuardState("find -maxdepth 1", data, directory), null);
+  assert.equal(commandTargetsGuardState("find -maxdepth 2", data, directory), GUARD_STATE_REFUSAL);
+  // Nothing broader than that shape is admitted without an operand.
+  for (const command of ["find -maxdepth 1 -empty", "find -maxdepth 1 -delete", "find -L -maxdepth 1",
+    "find -maxdepth 1 -maxdepth 9", "find -maxdepth -1", "find", "find -maxdepth 1 2>/dev/null"]) {
+    assert.equal(commandTargetsGuardState(command, home, directory), GUARD_STATE_REFUSAL, command);
+  }
+  // A walk the classifier cannot take apart — a pipe, a subshell, a backtick — has nowhere to be
+  // admitted, and is refused from an ancestor on its words alone.
+  for (const command of ["find -maxdepth 999 | cat", "du -a | sort", "(grep -r secret)",
+    "echo `find -maxdepth 999`"]) {
+    assert.equal(commandTargetsGuardState(command, home, directory), GUARD_STATE_REFUSAL, command);
+    assert.equal(commandTargetsGuardState(command, project, directory), null, command);
+  }
+  // Accepted over-refusals: the classifier does not decide WHICH tree a recursive command walks,
+  // so from an ancestor it refuses one that walks somewhere else entirely.
+  for (const command of [`rm -rf ${join(project, "node_modules")}`, "cp -r a b", "sort -r notes.txt",
+    `du -a ${elsewhere}`, `grep -r secret ${project}`]) {
+    assert.equal(commandTargetsGuardState(command, home, directory), GUARD_STATE_REFUSAL, command);
+  }
+  // Documented limit, unchanged by this rule: an unexpanded variable hides what the command is,
+  // and indirection through a script or an interpreter hides it the same way.
+  assert.equal(commandTargetsGuardState("$SWEEP", home, directory), null);
+  assert.equal(commandTargetsGuardState("./sweep.sh", home, directory), null);
+});
+
+test("a working directory inside the guard state leaves no command to allow", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-guard-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const directory = join(home, ".wollipog-data", "hooks");
+  mkdirSync(join(directory, "sub"), { recursive: true });
+  // Every command with no operand acts on the directory it runs in, so a shell standing in the
+  // guard state has no inspection-only form of one — and nor has a walk started below it.
+  for (const command of ["ls", "ls -ltr", "stat", "du", "find -maxdepth 0", "cat notes.txt",
+    "echo hi", "ls | cat",
+    // Not one of these names a relative path, so nothing but the working directory relates them
+    // to the guard state.
+    "/bin/ls /tmp", "/usr/bin/env true", "/bin/du -a /tmp"]) {
+    assert.equal(commandTargetsGuardState(command, directory, directory), GUARD_STATE_REFUSAL, command);
+    assert.equal(commandTargetsGuardState(command, join(directory, "sub"), directory),
+      GUARD_STATE_REFUSAL, command);
+  }
+});
+
+test("a walk is classified in linear time from an ancestor too", () => {
+  // The working-directory operand is resolved once per command, not once per segment: a long list
+  // of walks from an ancestor must stay as cheap as the same list from anywhere else (#1403).
+  const measure = (repetitions: number): number => {
+    const command = "du -sh .;".repeat(repetitions);
+    const started = performance.now();
+    assert.equal(commandTargetsGuardState(command, "/a", "/a/b/c"), null);
+    return performance.now() - started;
+  };
+  measure(500); // Warm the module and the JIT before either measurement counts.
+  const small = Math.max(bestOf(3, () => measure(500)), 1);
+  const large = bestOf(3, () => measure(6_000));
+  assert.ok(large / small < 25, `12x the input took ${(large / small).toFixed(1)}x the time`);
+});
+
 test("the reported home-directory listings are allowed while the file tools stay closed", () => {
   const directory = join(homedir(), ".wollipog-test-data", "hooks");
   for (const command of ["ls ~", "ls -la ~/", "ls /", "stat ~", "du -sh ~", "find ~ -maxdepth 1"]) {
@@ -1022,6 +1124,17 @@ test("the guard hook allows an ancestor listing and still refuses an ancestor sw
   }
 });
 
+/**
+ * The fastest of several runs. A single timing is at the mercy of one GC pause, which made the
+ * ratio below flake on an otherwise healthy machine; the minimum is the run that was not
+ * interrupted.
+ */
+function bestOf(runs: number, measure: () => number): number {
+  let best = Number.POSITIVE_INFINITY;
+  for (let run = 0; run < runs; run++) best = Math.min(best, measure());
+  return best;
+}
+
 test("a long list of inspections is classified in linear time", () => {
   // The first cut of the all-segments rule re-scanned every segment for every ancestor operand,
   // which made a command list quadratic: 30,000 characters of `ls /;` took over three seconds
@@ -1033,8 +1146,8 @@ test("a long list of inspections is classified in linear time", () => {
     return performance.now() - started;
   };
   measure(500); // Warm the module and the JIT before either measurement counts.
-  const small = Math.max(measure(500), 1);
-  const large = measure(6_000);
+  const small = Math.max(bestOf(3, () => measure(500)), 1);
+  const large = bestOf(3, () => measure(6_000));
   // Twelve times the input. Linear work lands near 12x; the quadratic form measured about 69x.
   assert.ok(large / small < 25, `12x the input took ${(large / small).toFixed(1)}x the time`);
 });
