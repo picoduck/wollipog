@@ -751,6 +751,25 @@ test("a Codex Orchestrator TUI whose foreign hook stays enabled keeps --disable 
   });
 });
 
+test("a foreign hook whose key the override cannot spell leaves the Codex Orchestrator TUI as the preset wrote it (#1473)", async () => {
+  await withDir(async (dir) => {
+    const harness: Harness = { probes: [], logs: [] };
+    const source = orchestratorMeta();
+    const launch = await prepareAgentTuiLaunch(source, orchestratorDependencies(dir, {
+      protections: [],
+      inventory: (probe) => [
+        runnerHookEntry(probe),
+        { key: "/home/u/odd\nname/config.toml:pre_tool_use:0:0", enabled: true, trustStatus: "trusted", command: "/x.sh" },
+      ],
+    }, harness));
+    assert.ok(launch);
+    assert.equal(launch.managedWorktreeGuard?.active, false);
+    assert.match(launch.managedWorktreeGuard?.reason ?? "", /could not be disabled.*control character/u);
+    assert.deepEqual(launch.args, source.args);
+    assert.equal(harness.probes.length, 1, "no second enumeration was attempted");
+  });
+});
+
 test("an ordinary Codex TUI still admits a trusted foreign hook and never rewrites --disable hooks (#1473)", async () => {
   await withDir(async (dir) => {
     const harness: Harness = { probes: [], logs: [] };

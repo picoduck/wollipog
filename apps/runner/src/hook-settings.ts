@@ -1250,13 +1250,15 @@ export async function provisionCodexGuard(
     // result is READ BACK rather than assumed: the override's spelling is what makes it work.
     const foreign = entries.filter((entry) => entry.enabled && entry.command !== guardCommand);
     if (foreign.length > 0) {
-      launchArgs = [...args, "-c", codexHookStateDisableOverride(foreign.map((entry) => entry.key))];
       try {
+        // A key the override cannot spell (a control character) is a hook that cannot be switched
+        // off from argv, so the launch keeps the preset's own flag rather than failing outright.
+        launchArgs = [...args, "-c", codexHookStateDisableOverride(foreign.map((entry) => entry.key))];
         entries = await readInventory(
           codexHookInventoryProbe({ ...spec, args: launchArgs }, config.cwd, override),
         );
       } catch (error) {
-        return inactive(`its Codex hook inventory could not be enumerated (${(error as Error).message})`);
+        return inactive(`its foreign Codex hooks could not be disabled for this launch (${(error as Error).message})`);
       }
     }
   }
