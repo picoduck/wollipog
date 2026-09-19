@@ -90,10 +90,16 @@ export interface DiffDraft {
 /** Frozen: every editor with no stored draft seeds its state from this one object. */
 const EMPTY_DRAFT: DiffDraft = Object.freeze({ body: "", severity: "major", required: true, anchorText: "" });
 
-/** Where the caret sat in a draft's body, as offsets into it. Collapsed when start equals end. */
+/**
+ * Where the caret sat in a draft's body, as offsets into it. Collapsed when start equals end.
+ *
+ * The direction says which end is the anchor: a backwards selection restored as a forward one
+ * covers the same text but moves the wrong end on the next Shift+Arrow (#1392).
+ */
 interface DraftSelection {
   start: number;
   end: number;
+  direction: "forward" | "backward" | "none";
 }
 
 /**
@@ -450,12 +456,16 @@ function DiffCommentEditor({
       const limit = body.value.length;
       const end = Math.min(remembered.end, limit);
       const start = Math.min(remembered.start, end);
-      body.setSelectionRange(start, end);
+      body.setSelectionRange(start, end, remembered.direction);
     }
     return () => {
-      const { selectionStart, selectionEnd } = body;
+      const { selectionStart, selectionEnd, selectionDirection } = body;
       if (selectionStart === null || selectionEnd === null) return;
-      drafts.rememberSelection(anchorKey, { start: selectionStart, end: selectionEnd });
+      drafts.rememberSelection(anchorKey, {
+        start: selectionStart,
+        end: selectionEnd,
+        direction: selectionDirection ?? "none",
+      });
     };
     // Mount and teardown only: `anchorKey` is this editor's identity, and `drafts` is rebuilt on
     // every render of the viewer root while reading and writing nothing but refs.
