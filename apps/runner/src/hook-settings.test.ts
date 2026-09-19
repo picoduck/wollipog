@@ -27,6 +27,7 @@ import {
   refreshClaudeGuardProtections,
   resetClaudeGuardState,
   removeClaudeHookFiles,
+  runnerSettingsArgument,
   sweepClaudeHookFiles,
   writeHookCircuitState,
   type ClaudeHookHost,
@@ -932,6 +933,15 @@ test("a launch that does not say how the guard answers keeps the session's verdi
     concurrentLaunch: true,
   }, () => {}, host(dir));
   assert.equal(managedSettingsGuardSocket(settingsOf(dir).file), socket);
+}));
+
+test("the runner's settings argument is found in any spelling provisioning accepts", () => temp((dir) => {
+  const file = claudeHookSettingsPath(dir, "sess_hook_1");
+  const dotted = join(dir, ".", "sess_hook_1.settings.json");
+  assert.equal(runnerSettingsArgument(["--settings", file], dir, "sess_hook_1"), file);
+  assert.equal(runnerSettingsArgument(["-p", "--settings", dotted], dir, "sess_hook_1"), dotted);
+  assert.equal(runnerSettingsArgument(["--settings", join(dir, "sess_other.settings.json")], dir, "sess_hook_1"), null);
+  assert.equal(runnerSettingsArgument(["--settings"], dir, "sess_hook_1"), null);
 }));
 
 test("provider mode keeps the file-mode guard exactly as before", () => temp((dir) => {

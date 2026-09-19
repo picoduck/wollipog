@@ -472,6 +472,18 @@ export function describeManagedSettings(file: string): ManagedSettingsDescriptio
 }
 
 /**
+ * The runner-owned settings argument this session's launch carries, in the spelling the provider
+ * will open, matched exactly as provisioning matches it (resolved, case-folded).
+ */
+export function runnerSettingsArgument(args: readonly string[], configDir: string, sessionId: string): string | null {
+  const expected = resolve(claudeHookSettingsPath(configDir, sessionId)).toLowerCase();
+  for (let index = args.length - 2; index >= 0; index--) {
+    if (args[index] === "--settings" && resolve(args[index + 1]!).toLowerCase() === expected) return args[index + 1]!;
+  }
+  return null;
+}
+
+/**
  * The verdict socket the guard in this runner-owned settings document answers through, or `null`
  * when it has no guard or a file-mode one (#1336). Read from the heal template, like the rest of
  * the self-description.

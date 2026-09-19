@@ -162,7 +162,8 @@ test("the manager policy hook keeps its own state inside the mask, and only that
       socket: f.socketPath,
       managerTransport: {
         readable: [claudeHookTokenPath(f.settings), claudeHookReadyPath(f.settings)],
-        writable: [circuit, claudeHookCircuitLockPath(circuit)],
+        atomicWritable: [circuit],
+        writable: [claudeHookCircuitLockPath(circuit)],
       },
     },
   }) as Seatbelt;

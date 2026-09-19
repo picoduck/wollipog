@@ -97,10 +97,31 @@ function serveVerdict(socket: Socket, protectionsFile: string): void {
 export class ManagedWorktreeGuardSockets {
   private readonly servers = new Map<string, { server: Server; path: string; identity: string }>();
 
+  /** Per-session tail of in-flight `ensure`/`close` work. Two launch preparations of one session
+   * can overlap (an older generation being superseded), and a deletion can race both; each
+   * operation runs only after the previous one for that session has settled. */
+  private readonly pending = new Map<string, Promise<unknown>>();
+
   constructor(private readonly configDir: string) {}
 
+  private serialized<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+    const next = (this.pending.get(sessionId) ?? Promise.resolve()).then(operation, operation);
+    const settled = next.then(() => undefined, () => undefined);
+    this.pending.set(sessionId, settled);
+    void settled.then(() => { if (this.pending.get(sessionId) === settled) this.pending.delete(sessionId); });
+    return next;
+  }
+
   /** Listen for this session (idempotent) and return the socket path, or throw when it cannot. */
-  async ensure(sessionId: string): Promise<string> {
+  ensure(sessionId: string): Promise<string> {
+    return this.serialized(sessionId, () => this.ensureNow(sessionId));
+  }
+
+  close(sessionId: string): Promise<void> {
+    return this.serialized(sessionId, () => this.closeNow(sessionId));
+  }
+
+  private async ensureNow(sessionId: string): Promise<string> {
     const path = managedWorktreeGuardSocketPath(this.configDir, sessionId);
     if (Buffer.byteLength(path, "utf8") > MAX_GUARD_SOCKET_PATH_BYTES) {
       throw new Error(`guard socket path is longer than ${MAX_GUARD_SOCKET_PATH_BYTES} bytes: ${path}`);
@@ -110,7 +131,7 @@ export class ManagedWorktreeGuardSockets {
     // reaches nothing, and a replaced one — any other socket at the same path — would answer for
     // this session without being the runner, so either way the runner listens afresh.
     if (existing?.server.listening && socketIdentity(path) === existing.identity) return path;
-    await this.close(sessionId);
+    await this.closeNow(sessionId);
     const protectionsFile = claudeHookSessionProtectionsPath(this.configDir, sessionId);
     const directory = managedWorktreeGuardSocketDirectory(this.configDir, sessionId);
     mkdirSync(this.configDir, { recursive: true, mode: 0o700 });
@@ -135,7 +156,7 @@ export class ManagedWorktreeGuardSockets {
     return path;
   }
 
-  async close(sessionId: string): Promise<void> {
+  private async closeNow(sessionId: string): Promise<void> {
     const entry = this.servers.get(sessionId);
     this.servers.delete(sessionId);
     if (entry) await new Promise<void>((resolvePromise) => entry.server.close(() => resolvePromise()));
@@ -145,7 +166,8 @@ export class ManagedWorktreeGuardSockets {
   }
 
   async closeAll(): Promise<void> {
-    await Promise.all([...this.servers.keys()].map((sessionId) => this.close(sessionId)));
+    const sessions = new Set([...this.servers.keys(), ...this.pending.keys()]);
+    await Promise.all([...sessions].map((sessionId) => this.close(sessionId)));
   }
 }
 
@@ -162,7 +184,14 @@ export interface GuardStateMask {
   /** The manager policy hook's own state for this session, which that hook (a provider-spawned
    * re-entry, like the guard) reads and rewrites on every call. Seatbelt grants exactly these
    * paths back; bwrap cannot grant a write inside its read-only data root at all. */
-  managerTransport?: { readable: string[]; writable: string[] };
+  managerTransport?: {
+    /** Read only: the credential and its acknowledgement. */
+    readable: string[];
+    /** Rewritten through `protectedWrite` (temp sibling, then rename): the circuit. */
+    atomicWritable: string[];
+    /** Created and removed in place: the circuit lock. */
+    writable: string[];
+  };
 }
 
 export interface GuardSandboxProbe {

@@ -74,10 +74,12 @@ import {
   defaultClaudeHookHost,
   markClaudeHookCredentialReady,
   markClaudeHookCredentialRejected,
+  describeManagedSettings,
   managedSettingsGuardSocket,
   provisionClaudeHooks,
   refreshClaudeGuardProtections,
   removeClaudeHookFiles,
+  runnerSettingsArgument,
   sweepClaudeHookFiles,
 } from "./hook-settings.js";
 import {
@@ -744,29 +746,41 @@ sessions.setGuardStateSandbox({
   // settings documents Claude reads at start and its own verdict socket directory.
   mask: (meta) => {
     const settings = claudeHookSettingsPath(claudeHookHost.configDir, meta.sessionId);
+    // The spelling in the launch argv is the one Claude opens; expose it as well as the canonical
+    // one, so an equivalent spelling is never hidden from the provider that must read it.
+    const launched = meta.driver === "claude-code"
+      ? runnerSettingsArgument(meta.args, claudeHookHost.configDir, meta.sessionId)
+      : null;
+    // The manager policy hook is a provider-spawned re-entry too, and it keeps its credential and
+    // circuit here. Only a launch that actually carries it gets those back (Seatbelt only; bwrap
+    // cannot grant the writes).
+    const managerHook = launched !== null && describeManagedSettings(settings)?.manager === true;
+    const circuit = claudeHookCircuitPath(settings);
     return {
       directory: claudeHookHost.configDir,
       readable: [
         settings,
+        ...(launched && launched !== settings ? [launched] : []),
         claudeHookGuardPath(settings),
         managedWorktreeGuardSocketDirectory(claudeHookHost.configDir, meta.sessionId),
       ],
       socket: managedWorktreeGuardSocketPath(claudeHookHost.configDir, meta.sessionId),
-      // The manager policy hook is a provider-spawned re-entry too, and it keeps its credential
-      // and circuit here. Seatbelt hands exactly these back so it keeps working; bwrap cannot.
-      managerTransport: {
-        readable: [claudeHookTokenPath(settings), claudeHookReadyPath(settings)],
-        writable: [
-          claudeHookCircuitPath(settings),
-          claudeHookCircuitLockPath(claudeHookCircuitPath(settings)),
-        ],
-      },
+      ...(managerHook
+        ? {
+          managerTransport: {
+            readable: [claudeHookTokenPath(settings), claudeHookReadyPath(settings)],
+            atomicWritable: [circuit],
+            writable: [claudeHookCircuitLockPath(circuit)],
+          },
+        }
+        : {}),
     };
   },
   verify: async (meta, isolation, cwd) => {
     if (isolation?.backend !== "bwrap" && isolation?.backend !== "seatbelt") return undefined;
-    const settings = claudeHookSettingsPath(claudeHookHost.configDir, meta.sessionId);
-    if (!meta.args.some((arg, index) => arg === "--settings" && meta.args[index + 1] === settings)) return undefined;
+    // Matched the way provisioning matches it, so an equivalent spelling is still probed.
+    const settings = runnerSettingsArgument(meta.args, claudeHookHost.configDir, meta.sessionId);
+    if (!settings) return undefined;
     const socketPath = managedSettingsGuardSocket(settings);
     if (!socketPath) return undefined;
     return verifyManagedWorktreeGuardInSandbox({

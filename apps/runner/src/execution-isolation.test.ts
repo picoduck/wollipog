@@ -825,7 +825,8 @@ test("Seatbelt denies the hook state directory after the writable data root and 
         socket: "/var/wollipog/hooks/k/s1.guard/sock",
         managerTransport: {
           readable: ["/var/wollipog/hooks/k/s1.token", "/var/wollipog/hooks/k/s1.ready"],
-          writable: ["/var/wollipog/hooks/k/s1.circuit.json", "/var/wollipog/hooks/k/s1.circuit.lock"],
+          atomicWritable: ["/var/wollipog/hooks/k/s1.circuit.json"],
+          writable: ["/var/wollipog/hooks/k/s1.circuit.lock"],
         },
       },
     },
@@ -866,7 +867,12 @@ test("Seatbelt denies the hook state directory after the writable data root and 
     .map((line) => new RegExp(line.slice('(regex #"'.length, -'")'.length), "u"));
   assert.ok(patterns.some((pattern) =>
     pattern.test("/var/wollipog/hooks/k/.s1.circuit.json.4242.0f8c6a1e-2b3d-4c5e-8f90-123456789abc.tmp")));
+  // Only the circuit is rewritten through a temporary; the lock is created in place and gets no
+  // temporary-file pattern, and a name that is not a real `randomUUID()` temporary is not admitted.
+  assert.equal(patterns.length, 2, "one pattern per spelling of the circuit, none for the lock");
   for (const path of [
+    "/var/wollipog/hooks/k/.s1.circuit.lock.4242.0f8c6a1e-2b3d-4c5e-8f90-123456789abc.tmp",
+    "/var/wollipog/hooks/k/.s1.circuit.json.1.a.tmp",
     "/var/wollipog/hooks/k/s1.protections.json",
     "/var/wollipog/hooks/k/.s1.protections.json.4242.0f8c6a1e-2b3d-4c5e-8f90-123456789abc.tmp",
     "/var/wollipog/hooks/k/s1.settings.json",
@@ -892,7 +898,11 @@ test("bwrap does not carry manager-transport writes it cannot express", async ()
     guardStateMask: {
       directory: "/data/hooks/k",
       readable: [],
-      managerTransport: { readable: ["/data/hooks/k/s1.token"], writable: ["/data/hooks/k/s1.circuit.json"] },
+      managerTransport: {
+        readable: ["/data/hooks/k/s1.token"],
+        atomicWritable: ["/data/hooks/k/s1.circuit.json"],
+        writable: ["/data/hooks/k/s1.circuit.lock"],
+      },
     },
   });
   assert.deepEqual(resolved?.backend === "bwrap" ? resolved.guardStateMask : undefined, {

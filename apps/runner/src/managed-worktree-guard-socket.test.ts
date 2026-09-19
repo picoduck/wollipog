@@ -178,6 +178,37 @@ test("a socket replaced at the same path is not reused as the runner's", { skip:
   }
 });
 
+test("overlapping ensure and close for one session settle in order, leaving one listener or none", { skip: !POSIX }, async () => {
+  const { configDir, host } = fixture();
+  writeManagedWorktreeGuardProtections(claudeHookSessionProtectionsPath(configDir, "s_race"), []);
+  // An untracked listener is the failure this guards against, and the map cannot see one, so count
+  // the process's live pipe handles instead.
+  const pipes = () => process.getActiveResourcesInfo().filter((name) => name === "PipeWrap").length;
+  const before = pipes();
+  // Two launch preparations at once: both get the same, working socket, backed by one server.
+  const [first, second] = await Promise.all([host.ensure("s_race"), host.ensure("s_race")]);
+  assert.equal(first, second);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  assert.equal((host as any).servers.size, 1);
+  assert.equal((await requestManagedWorktreeGuardVerdict(first, payload("git status"))).exitCode, 0);
+  // A deletion racing a launch preparation: whichever was asked last wins, and nothing is left
+  // listening behind a close that was asked for after the ensure.
+  await Promise.all([host.ensure("s_race"), host.close("s_race")]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  assert.equal((host as any).servers.size, 0);
+  assert.equal(statSync(managedWorktreeGuardSocketDirectory(configDir, "s_race"), { throwIfNoEntry: false }), undefined);
+  const [, , again] = await Promise.all([host.close("s_race"), host.ensure("s_race"), host.ensure("s_race")]);
+  assert.equal((await requestManagedWorktreeGuardVerdict(again, payload("git status"))).exitCode, 0);
+  await host.closeAll();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  assert.equal((host as any).servers.size, 0);
+  // Client connections finish closing a few ticks later; a leaked listener never does.
+  for (let attempt = 0; attempt < 50 && pipes() > before; attempt++) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+  }
+  assert.equal(pipes(), before, "every listener this test started is closed");
+});
+
 test("a socket path that cannot be bound is refused before anything is created", async () => {
   const host = new ManagedWorktreeGuardSockets(join(tmpdir(), "x".repeat(MAX_GUARD_SOCKET_PATH_BYTES)));
   await assert.rejects(host.ensure("s_long"), /longer than/u);

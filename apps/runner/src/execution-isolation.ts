@@ -165,7 +165,7 @@ interface GuardStateMaskOptions {
   directory: string;
   readable: string[];
   socket?: string;
-  managerTransport?: { readable: string[]; writable: string[] };
+  managerTransport?: { readable: string[]; atomicWritable: string[]; writable: string[] };
 }
 
 export function parseWslIsolationProbe(stdout: string): { command: string; uid: number; home: string } | null {
@@ -301,6 +301,7 @@ export function buildSeatbeltProfile(
         readableDirectories: [],
         sockets: state.guardStateMask.socket ? [state.guardStateMask.socket] : [],
         transportReadable: state.guardStateMask.managerTransport?.readable ?? [],
+        transportAtomicWritable: state.guardStateMask.managerTransport?.atomicWritable ?? [],
         transportWritable: state.guardStateMask.managerTransport?.writable ?? [],
       }
       : undefined,
@@ -314,9 +315,10 @@ interface SeatbeltGuardStateMask {
   readableFiles: string[];
   readableDirectories: string[];
   sockets: string[];
-  /** Manager policy hook state: read-only files, and files it rewrites (with their atomic-write
-   * temporary siblings). */
+  /** Manager policy hook state: read-only files, files rewritten through an atomic-write temporary
+   * sibling, and files written in place. */
   transportReadable: string[];
+  transportAtomicWritable: string[];
   transportWritable: string[];
 }
 
@@ -379,21 +381,26 @@ function renderSeatbeltProfile(
             ")",
           ]
           : []),
-        ...(guardStateMask.transportReadable.length || guardStateMask.transportWritable.length
+        ...(guardStateMask.transportReadable.length || guardStateMask.transportAtomicWritable.length ||
+            guardStateMask.transportWritable.length
           ? [
             "(allow file-read*",
-            ...[...guardStateMask.transportReadable, ...guardStateMask.transportWritable]
-              .map((path) => `    (literal ${seatbeltLiteral(path)})`),
+            ...[
+              ...guardStateMask.transportReadable,
+              ...guardStateMask.transportAtomicWritable,
+              ...guardStateMask.transportWritable,
+            ].map((path) => `    (literal ${seatbeltLiteral(path)})`),
             ")",
           ]
           : []),
-        ...(guardStateMask.transportWritable.length
+        ...(guardStateMask.transportAtomicWritable.length || guardStateMask.transportWritable.length
           ? [
             "(allow file-write*",
-            ...guardStateMask.transportWritable.flatMap((path) => [
+            ...guardStateMask.transportAtomicWritable.flatMap((path) => [
               `    (literal ${seatbeltLiteral(path)})`,
               `    (regex ${seatbeltAtomicWriteSiblings(path)})`,
             ]),
+            ...guardStateMask.transportWritable.map((path) => `    (literal ${seatbeltLiteral(path)})`),
             ")",
           ]
           : []),
@@ -422,7 +429,11 @@ function seatbeltAtomicWriteSiblings(path: string): string {
     throw new Error(`Seatbelt isolation cannot express a write rule for ${JSON.stringify(path)}`);
   }
   const escape = (value: string) => value.replace(/[.^$*+?()[\]{}|]/gu, (character) => `\\${character}`);
-  return `#"^${escape(posix.dirname(path))}/\\.${escape(posix.basename(path))}\\.[0-9]+\\.[0-9a-f-]+\\.tmp$"`;
+  // `randomUUID()` is lowercase 8-4-4-4-12 hex. Spelled out rather than with `{n}` intervals, so
+  // the pattern means the same thing under any regex dialect Seatbelt has used.
+  const hex = (count: number) => "[0-9a-f]".repeat(count);
+  const uuid = [hex(8), hex(4), hex(4), hex(4), hex(12)].join("-");
+  return `#"^${escape(posix.dirname(path))}/\\.${escape(posix.basename(path))}\\.[0-9]+\\.${uuid}\\.tmp$"`;
 }
 
 /** Whether `path` lies strictly inside `directory` (both POSIX; bwrap and Seatbelt are POSIX-only). */
@@ -459,7 +470,11 @@ async function resolveGuardStateMask(
   const inside = (paths: readonly string[]) => paths.map((path) => posix.normalize(path))
     .filter((path) => strictlyInside(directory, path));
   const managerTransport = mask.managerTransport
-    ? { readable: inside(mask.managerTransport.readable), writable: inside(mask.managerTransport.writable) }
+    ? {
+      readable: inside(mask.managerTransport.readable),
+      atomicWritable: inside(mask.managerTransport.atomicWritable),
+      writable: inside(mask.managerTransport.writable),
+    }
     : undefined;
   return {
     directory,
@@ -483,12 +498,14 @@ async function seatbeltGuardStateMask(
     readableDirectories: [],
     sockets: [],
     transportReadable: [],
+    transportAtomicWritable: [],
     transportWritable: [],
   };
   // A file that does not exist yet has no canonical form of its own; its directory's does.
   const fileSpellings = async (path: string) => (await spellings(posix.dirname(path)))
     .map((parent) => posix.join(parent, posix.basename(path)));
   for (const path of mask.managerTransport?.readable ?? []) result.transportReadable.push(...await fileSpellings(path));
+  for (const path of mask.managerTransport?.atomicWritable ?? []) result.transportAtomicWritable.push(...await fileSpellings(path));
   for (const path of mask.managerTransport?.writable ?? []) result.transportWritable.push(...await fileSpellings(path));
   for (const entry of mask.readable) {
     const names = await spellings(entry);
