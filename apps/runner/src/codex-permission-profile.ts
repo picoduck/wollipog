@@ -499,10 +499,12 @@ export function readCodexSandboxProjection(
     }
     // A command that exits before reading its input (an older CLI, a rejected argument, a config
     // error) turns every write into EPIPE. Unhandled, that is an 'error' event that terminates the
-    // RUNNER; handled, it is just one more way the launch keeps its legacy policy.
-    child.stdin?.on("error", (error) => finish({
-      ok: false, reason: withStderr(`sandbox projection input failed: ${error.message}`),
-    }));
+    // RUNNER. It is only recorded here, not settled on: the process is exiting, and its 'close'
+    // arrives after stderr has been drained, so settling there reports WHY it exited. Settling on
+    // the EPIPE itself raced that stderr and usually lost it. The timeout still bounds a process
+    // that errors on input yet never exits.
+    let inputError: Error | undefined;
+    child.stdin?.on("error", (error) => { inputError = error; });
     // Drained under the same bound as stdout: a full stderr pipe would stall the reply behind it.
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) => { if (stderr.length < PROBE_OUTPUT_LIMIT) stderr += chunk; });
@@ -554,7 +556,9 @@ export function readCodexSandboxProjection(
     });
     child.on("error", (error) => finish({ ok: false, reason: `sandbox projection failed: ${error.message}` }));
     child.on("close", (code) => finish({
-      ok: false, reason: withStderr(`app-server exited ${String(code)} before reporting a sandbox`),
+      ok: false,
+      reason: withStderr(`app-server exited ${String(code)} before reporting a sandbox` +
+        (inputError ? ` (its input failed: ${inputError.message})` : "")),
     }));
     send(1, "initialize", { clientInfo: { name: "wollipog-profile-probe", version: "0" } });
   });
