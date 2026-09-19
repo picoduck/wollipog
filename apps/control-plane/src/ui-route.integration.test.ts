@@ -1884,7 +1884,8 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
       [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: "session-agent-parent",
     },
   });
-  assert.equal(agentRestore.status, 403, "session credentials cannot unarchive, so they cannot unarchive and restart");
+  assert.equal(agentRestore.status, 401,
+    "the route is absent from every agent-credential allowlist, so a session credential never authenticates for it");
   assert.equal(runnerInbox.has((message) =>
     message.type === "start_session" &&
       (message.spec as { sessionId?: string } | undefined)?.sessionId === "session-history"), false);

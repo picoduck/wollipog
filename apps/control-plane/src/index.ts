@@ -4740,8 +4740,9 @@ app.post("/api/sessions/:id/archive", async (req, reply) => {
 });
 
 // One server-owned restore: restart preflight runs before the archive flag changes, so no client
-// ever composes unarchive + restart and observes a half-applied result. Session credentials are
-// refused exactly as they are for a plain unarchive (and the route is absent from their allowlists).
+// ever composes unarchive + restart and observes a half-applied result. Session credentials never
+// authenticate here (the route is absent from their allowlists); the explicit refusal keeps the
+// plain-unarchive rule if the route is ever added to one.
 app.post("/api/sessions/:id/unarchive-and-restart", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   if (requestPrincipal(req)?.kind === "agent") {
