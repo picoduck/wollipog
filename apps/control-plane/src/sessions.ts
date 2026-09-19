@@ -651,6 +651,22 @@ function promptDeliveryReport(
   };
 }
 
+/** Statuses a session that is still doing its job can hold. A lifecycle teardown always leaves
+ * one of these behind before its effects reach the runner, so being in this set is proof that no
+ * Stop, Restart, or sign-out raced the message. */
+const WORKING_SESSION_STATUSES = new Set<SessionStatus>([
+  "queued", "starting", "running", "input_required", "idle",
+]);
+
+/** Drivers whose steering result can be trusted to say whether the provider received the text.
+ * Pi is deliberately absent: `PiRpcDriver.steer` awaits a successful steer RPC and only then
+ * reports `stale_turn` if the run has settled, which the runner converts into an ordinary queued
+ * prompt — so the provider may hold the text and the queue submit it again. That defect predates
+ * this lane and the dashboard's Steer control already reaches it, but automatic steering must not
+ * widen its blast radius; Pi keeps today's queue-only behaviour until the driver distinguishes a
+ * pre-write refusal from a post-acknowledgement one. */
+const AUTO_STEER_DRIVERS = new Set(["claude-code", "codex-app-server"]);
+
 /** Classify a message the runner accepted onto the steering lane. `converted_to_queue` is the
  * runner telling us the turn ended under the attempt and it became an ordinary queued prompt, so
  * it is reported as queued — the sender's next move differs, and saying "steered" there would be
@@ -4094,6 +4110,7 @@ export class SessionsService {
     if (!text.trim()) return null;
     const session = this.db.getSession(sessionId);
     if (!session || session.status !== "running") return null;
+    if (!AUTO_STEER_DRIVERS.has(session.driver)) return null;
     const turnId = this.hub.activeTurnIdForSession(sessionId);
     if (!turnId) return null;
     const steered = await this.steer(sessionId, {
@@ -4123,19 +4140,22 @@ export class SessionsService {
     // write — so the ordinary queue is still owed the message.
     //
     // `policy_blocked` is the one reason the runner uses on both sides of that write, so it needs
-    // a second signal. It is produced before the write when the turn is owned by an automation or
-    // a provider command, and after it when a Stop, Restart, or sign-out lands inside the awaited
-    // provider call. Those differ in the only place the control plane can see: the first leaves
-    // the session running, the second is a lifecycle change that moves it off `running`.
+    // a second signal. Before the write it means the turn is owned by an automation or a provider
+    // command, or the session is waiting on agent input — all ordinary, sustained states in which
+    // the message is still owed to the queue. After the write it means a Stop, Restart, or sign-out
+    // landed inside the awaited provider call, and the text may already be in the conversation.
     //
-    // Treating them alike is wrong in both directions — always re-queueing can deliver a Stop-raced
-    // message twice, and always refusing would strand every message sent to a child that happens
-    // to be inside a provider command, which is an ordinary sustained state, not a teardown.
+    // Only a teardown can produce the second, and a teardown always moves the session off the
+    // working statuses first: the control plane writes `stopped` when it requests a Stop and
+    // `starting` when it restarts, before the runner's steering reply can arrive. So re-read the
+    // session and refuse only from a status no working session holds. Erring the other way is not
+    // symmetric — re-queueing a Stop-raced message delivers it twice, while refusing an
+    // input_required or provider-command block strands it entirely.
     if (steered.data.state === "rejected") {
       if (steered.data.reason !== "policy_blocked") return null;
       // Re-read rather than trusting the pre-steer snapshot: the whole question is what the
       // lifecycle did while the steer was in flight.
-      if (this.db.getSession(sessionId)?.status === "running") return null;
+      if (WORKING_SESSION_STATUSES.has(this.db.getSession(sessionId)?.status ?? "stopped")) return null;
       return fail(
         "conversation steering was discarded by a session lifecycle change — the message may " +
           "already have reached the session, so check its steering attempts before sending it again",

@@ -18503,3 +18503,31 @@ test("a policy_blocked steer on a still-running session falls back to the queue"
   assert.equal(result.data?.promptDelivery?.lane, "queued");
   assert.equal(hub.sentOfType("prompt_session").length, 1, "the message is still delivered");
 });
+
+test("a policy_blocked steer while the session waits on input still falls back to the queue", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.activeTurnIds.set(id, "turn-live");
+  hub.sentToRunner.length = 0;
+  // A permission or question arriving mid-turn makes the runner refuse steering with
+  // policy_blocked BEFORE any provider write, and moves the session to input_required. That is a
+  // working state, not a teardown: the message must still be queued.
+  hub.requestHandler = (message) => {
+    db.updateSessionStatus(id, "input_required", Date.now());
+    return {
+      type: "steer_session_result",
+      requestId: message.requestId,
+      submissionId: message.submissionId,
+      sessionId: id,
+      turnId: "turn-live",
+      disposition: "rejected",
+      reason: "policy_blocked",
+    };
+  };
+
+  const result = await svc.promptOrSteer(id, "the child is waiting on a permission card");
+  assert.equal(result.ok, true);
+  assert.equal(hub.sentOfType("prompt_session").length, 1, "the message is still delivered");
+});
+
