@@ -268,6 +268,40 @@ test("the root group is frozen before any descendant enumeration runs", async ()
   assert.equal(terminatePosixProcessBoundaries(owner).length, 0);
 });
 
+test("a root reaped mid-attempt still lifts the freeze the attempt delivered", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const runtime = scriptedRuntime([
+    new Error("injected initial enumeration failure"),
+    processTable(root),
+    processTable(root),
+    processTable(),
+    processTable(),
+  ]);
+  const owner = {};
+  const boundary = new PosixProcessBoundary(root.pid, owner, undefined, runtime);
+  const baseList = runtime.listProcesses.bind(runtime);
+  // Node observes the root's exit while the first enumeration is still in flight — after the early
+  // freeze has been delivered, and before anything that could resume it has run. Every
+  // ownership-checked resume then refuses, and the failure path has no snapshot to resume from.
+  let reaped = false;
+  runtime.listProcesses = async () => {
+    if (!reaped) { reaped = true; boundary.markRootExited(); }
+    return baseList();
+  };
+
+  assert.equal(await boundary.terminate(), false);
+  assert.deepEqual(
+    runtime.signals,
+    [[-root.pid, "SIGSTOP"], [-root.pid, "SIGCONT"]],
+    "a group stopped by this attempt is never left stranded in state T",
+  );
+
+  const retry = terminatePosixProcessBoundaries(owner);
+  assert.equal(retry.length, 1, "the failed boundary remains registered for retry");
+  assert.equal(await retry[0], true);
+  assert.equal(terminatePosixProcessBoundaries(owner).length, 0);
+});
+
 test("a marker-only boundary never group-signals the runner's own process group", async (t) => {
   t.mock.method(console, "error", () => {});
   const marked: PosixProcessIdentity = { pid: 101, ppid: 1, state: "S", startedAt: "marked-start" };

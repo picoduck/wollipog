@@ -464,15 +464,40 @@ export class PosixProcessBoundary {
     return this.terminating;
   }
 
+  /** Lift a freeze this call delivered.
+   *
+   * Deliberately NOT gated on `rootExited`, unlike every other bare-PID group signal: the SIGSTOP
+   * already reached whatever group carries this PID, so the matching SIGCONT repairs that rather
+   * than intruding somewhere new, and SIGCONT does nothing at all to a process that is not
+   * stopped. Gating it would strand the group whenever the root is reaped mid-terminate. */
+  private resumeEarlyFrozenRootGroup(): void {
+    try {
+      (this.testRuntime?.signal ?? globalThis.process.kill.bind(globalThis.process))(-this.rootPid, "SIGCONT");
+    } catch { /* already gone */ }
+  }
+
   private async terminateOnce(): Promise<boolean> {
-    let table: PosixProcessTable | undefined;
-    const frozen = new Map<number, PosixProcessIdentity>();
     // Freeze the root group before anything is enumerated. Descendant discovery reads the whole
     // process table, which on a loaded machine takes long enough — seconds, with a marker scan over
     // a thousand processes — for the step being stopped to run to completion and keep writing to
     // the worktree after the caller was told it was killed. Stopping first makes the caller's
     // observation true immediately and closes the fork window the discovery passes exist to close.
     const earlyFrozen = this.signalRootGroupUnverified("SIGSTOP");
+    try {
+      return await this.terminateFrozenTree(earlyFrozen);
+    } finally {
+      // Total guarantee: no path out of the attempt may leave this freeze outstanding. The
+      // ownership-checked resumes inside cover the identities a snapshot names, but each of them
+      // refuses once the root has been reaped or has left the table — exactly the interleavings
+      // the early freeze makes reachable — and the enumeration-failure path may have no snapshot
+      // at all. Without this, a group stopped here is stranded in state T for good.
+      if (earlyFrozen) this.resumeEarlyFrozenRootGroup();
+    }
+  }
+
+  private async terminateFrozenTree(earlyFrozen: boolean): Promise<boolean> {
+    let table: PosixProcessTable | undefined;
+    const frozen = new Map<number, PosixProcessIdentity>();
     try {
       // Do not make an ownership-critical stop decision from a possibly stale shared monitor read.
       table = await this.refreshFresh();
@@ -503,27 +528,22 @@ export class PosixProcessBoundary {
         for (const process of frozen.values()) this.signal(process, table, "SIGCONT");
         this.signalRootGroup(table, "SIGCONT");
       }
-      // fallbackRootGroupAfterEnumerationFailure resumes the group after its SIGTERM; without a
-      // table the ownership-checked resume above cannot run, and this is the only path back.
+      // fallbackRootGroupAfterEnumerationFailure resumes the group after its SIGTERM; the caller's
+      // finally lifts the early freeze whether or not that fallback was able to run.
       await this.fallbackRootGroupAfterEnumerationFailure();
       return false;
     }
 
     // The successful try path always assigns table before any later use.
-    if (!table) {
-      if (earlyFrozen) this.signalRootGroupUnverified("SIGCONT");
-      return false;
-    }
+    if (!table) return false;
 
     for (const process of liveOwned(this.owned, table)) this.signal(process, table, "SIGTERM");
     this.signalRootGroup(table, "SIGTERM");
     for (const process of liveOwned(this.owned, table)) this.signal(process, table, "SIGCONT");
     this.signalRootGroup(table, "SIGCONT");
-    // The ownership-checked resume above is skipped once the root leaves the process table, which
-    // freezing this early makes reachable: the last snapshot can lose the root before Node has
-    // dispatched the exit event that would retire the boundary. Resume the group directly too, so
-    // surviving members of a group this call froze are never left stopped for good.
-    if (earlyFrozen) this.signalRootGroupUnverified("SIGCONT");
+    // Resume promptly rather than waiting for the caller's finally: the graceful window below
+    // gives a TERM handler up to two seconds to unwind, and it cannot use them while stopped.
+    if (earlyFrozen) this.resumeEarlyFrozenRootGroup();
 
     const gracefulDeadline = this.now() + 2_000;
     while (this.now() < gracefulDeadline) {
