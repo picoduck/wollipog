@@ -22,6 +22,7 @@ import {
   MANAGED_WORKTREE_REFUSAL,
   applyPatchTargetsProtected,
   parseApplyPatchPaths,
+  pathTargetsGuardState,
   pathTargetsManagedWorktree,
 } from "./managed-worktree-protection.js";
 import {
@@ -232,7 +233,10 @@ test("a home-relative apply_patch header is expanded before the guard state is c
   );
 });
 
-test("a padded apply_patch header is judged by the verbatim and the trimmed filename alike", () => {
+test("a trailing-padded apply_patch header is judged by both spellings, a leading space by neither", () => {
+  // Measured at codex-cli 0.155.1: `*** Add File: trailing.txt ` created `trailing.txt`, while
+  // `*** Add File:  leading.txt` created ` leading.txt`. So a trailing pad names a second location
+  // and both are judged — and a leading space is part of the name, never stripped.
   const directory = join(homedir(), ".wollipog-test-data", "hooks");
   assert.equal(
     applyPatchTargetsProtected(
@@ -242,7 +246,50 @@ test("a padded apply_patch header is judged by the verbatim and the trimmed file
       PROTECTIONS,
     ),
     GUARD_STATE_REFUSAL,
+    "the location codex would actually write is inside the guard state",
   );
+  // A file whose name begins with a space is an ordinary, if odd, workspace file: codex creates
+  // `<cwd>/ .git/probe`, which is nothing to do with the worktree's Git administration.
+  assert.equal(
+    applyPatchTargetsProtected(patch("*** Add File:  .git/probe", "+x"), WORKTREE, directory, PROTECTIONS),
+    null,
+    "trimming the leading space would refuse an ordinary workspace file",
+  );
+  assert.equal(
+    applyPatchTargetsProtected(
+      patch("*** Add File:  ~/.wollipog-test-data/hooks/s1.protections.json", "+{}"),
+      WORKTREE,
+      directory,
+      PROTECTIONS,
+    ),
+    null,
+    "and codex would write ` ~/…` beneath the cwd, not into the guard state",
+  );
+});
+
+test("a spelling with no physical reading is out of bounds, not unrelated", (t) => {
+  // A symlinked prefix plus more not-yet-existing components than the resolution walk's bound:
+  // `canonicalPath` used to give up and hand back the unresolved spelling, which compares as
+  // unrelated, while the kernel — and a tool that creates missing parents — lands inside the
+  // guard state. `/proc/self/root` is such a prefix on Linux.
+  const f = fixture();
+  t.after(f.cleanup);
+  const deep = Array.from({ length: 300 }, (_, index) => `d${index}`).join("/");
+  const throughSymlink = `/proc/self/root${f.dir}/${deep}/planted.json`;
+  if (process.platform === "linux") {
+    assert.equal(pathTargetsGuardState(throughSymlink, WORKTREE, f.dir), true);
+    const outcome = runManagedWorktreeGuardDecision(
+      applyPatchInput(patch(`*** Add File: ${throughSymlink}`, "+{}")),
+      f.protectionsFile,
+    );
+    assert.deepEqual(denial(outcome), { decision: "deny", reason: GUARD_STATE_REFUSAL });
+  }
+  // The same shape against a protected worktree, on any platform: unresolvable is protected.
+  assert.equal(pathTargetsManagedWorktree(`/proc/self/root${WORKTREE}/${deep}/x`, WORKTREE, PROTECTIONS),
+    process.platform === "linux");
+  // A short path with a few not-yet-existing components still resolves and is judged normally.
+  assert.equal(pathTargetsGuardState(join(f.dir, "a", "b", "c.json"), WORKTREE, f.dir), true);
+  assert.equal(pathTargetsGuardState(join(WORKTREE, "a", "b", "c.ts"), WORKTREE, f.dir), false);
 });
 
 test("the guard's own state is judged before the worktree, so a patch touching both names it", () => {

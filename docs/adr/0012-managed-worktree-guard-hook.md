@@ -178,6 +178,9 @@ the same way — a throwaway `CODEX_HOME` against a throwaway repository — by 
   contract promises; the guard now names `apply_patch` outright.
 - `apply_patch` invoked from the SHELL (`apply_patch <<'PATCH' … PATCH`) arrives as an ordinary
   `Bash` call with that whole command as its text, which the Bash classifier already judges.
+- A header's filename is not taken quite verbatim: `*** Add File: trailing.txt ` created
+  `trailing.txt`, while `*** Add File:  leading.txt` created ` leading.txt`. Trailing whitespace is
+  stripped; a leading space is part of the name.
 - End to end with the real sidecar: a patch naming a file inside the hook state directory was
   refused with `Command blocked by PreToolUse hook:` and the managed-worktree refusal, and the file
   was not created; against the same payload the pre-#1437 sidecar wrote it. Ordinary edits inside
@@ -452,6 +455,23 @@ control-channel veto keeps reading the live inventory.
   uses — tilde forms, symlinks, and `..` that climbs through one included — and refuses a patch
   reaching the hook state directory or the Git administrative area of a protected worktree.
   Ordinary files inside the worktree are the session's own workspace and stay writable.
+
+  Two things the cross-model review of #1437 turned up, both measured rather than argued:
+
+  - codex-cli does not take a header's filename quite verbatim. At 0.155.1,
+    `*** Add File: trailing.txt ` created `trailing.txt` while `*** Add File:  leading.txt` created
+    ` leading.txt`. So a trailing pad names a second location and both readings are judged, and a
+    leading space is part of the name — stripping it would refuse `*** Add File:  .git/x`, an
+    ordinary workspace file whose trimmed spelling only looks like Git administration.
+  - The shared physical-path resolver gave up quietly. It climbs to the nearest existing ancestor
+    and appends the not-yet-existing remainder, bounded at 256 steps, and on exhaustion returned the
+    spelling unresolved — which a classifier then compares textually. A spelling like
+    `/proc/self/root<hook state>/<257 new directories>/file` therefore read as unrelated to the hook
+    state while the kernel, and any tool that creates missing parents, lands inside it. This
+    predates #1437 and applied to Claude's file tools as well (Bash was never affected: its
+    classifier matches the directory in the raw command text first). Exhaustion is now distinct
+    from "already physical" and every classifier treats it as out of bounds. No location a tool
+    legitimately names has that many not-yet-existing components, so nothing real is refused by it.
 
   A patch whose headers cannot be accounted for is refused rather than guessed at, which is the
   same rule an unreadable command already follows. That covers a document with no envelope, one

@@ -777,8 +777,16 @@ function expandHome(path: string, cwd = ""): string {
  * Follow symlinks as far as the filesystem allows: the nearest existing ancestor is resolved and
  * the not-yet-existing remainder is appended, so a link into the guard state is seen for what it
  * is even when the final component does not exist yet.
+ *
+ * `null` when the climb could not reach an existing ancestor within its bound. That is not the
+ * same as "the spelling is already physical", and the difference matters: a spelling with more
+ * not-yet-existing components than the bound has NO physical reading here, and a classifier that
+ * fell back to the unresolved spelling would compare a symlinked prefix textually and read
+ * `/proc/self/root<guard state>/<257 new directories>/file` as unrelated to the guard state, while
+ * the kernel — and a tool that creates missing parents — lands inside it. Every classifier below
+ * treats the exhaustion as out of bounds instead.
  */
-function canonicalPath(path: string): string {
+function canonicalPathOrNull(path: string): string | null {
   const missing: string[] = [];
   let current = path;
   for (let depth = 0; depth < 256; depth++) {
@@ -786,12 +794,18 @@ function canonicalPath(path: string): string {
       return resolve(realpathSync(current), ...missing);
     } catch {
       const parent = dirname(current);
-      if (parent === current) break;
+      // Nothing above to resolve: there is no symlink left to follow, so the spelling is physical.
+      if (parent === current) return path;
       missing.unshift(basename(current));
       current = parent;
     }
   }
-  return path;
+  return null;
+}
+
+/** Best-effort physical reading, for callers holding a location that already exists. */
+function canonicalPath(path: string): string {
+  return canonicalPathOrNull(path) ?? path;
 }
 
 /**
@@ -865,6 +879,10 @@ export const guardStateClassifierWork = { relations: 0, segments: 0 };
  * Where a spelling sits relative to the guard-state directory, or `null` when the two are
  * unrelated. Every candidate is judged twice — by its spelling and by its physical path, since a
  * symlink anywhere along either one lands elsewhere — and the most restrictive answer wins.
+ *
+ * A candidate with no physical reading at all is treated as `inside`, not as unrelated: see
+ * `canonicalPathOrNull`. No location a tool legitimately names has more not-yet-existing
+ * components than that bound, so nothing real is refused by it.
  */
 export function guardStateRelation(
   path: string,
@@ -878,7 +896,9 @@ export function guardStateRelation(
   // Each reading of the spelling, paired with the reading of the hook directory it is judged against.
   const pairs: Array<[string, string]> = [];
   for (const resolved of guardStateCandidates(path, cwd)) {
-    pairs.push([resolved, root], [canonicalPath(resolved), realRoot]);
+    const physical = canonicalPathOrNull(resolved);
+    if (physical === null) return { kind: "inside" };
+    pairs.push([resolved, root], [physical, realRoot]);
   }
   for (const raw of climbingSpellings(path, cwd)) {
     const physical = physicalSpelling(raw);
@@ -1308,13 +1328,17 @@ export function parseApplyPatchPaths(patch: string): string[] | "malformed" {
 }
 
 /**
- * Where a patch header's filename can land. The grammar takes the rest of the line verbatim, so a
- * model that pads a header with trailing whitespace has named a path whose trimmed form is the one
- * that exists; both readings are judged and either one landing out of bounds refuses the patch.
+ * Where a patch header's filename can land.
+ *
+ * The grammar takes the rest of the line verbatim, but codex-cli does not: measured at 0.155.1,
+ * `*** Add File: trailing.txt ` created `trailing.txt` while `*** Add File:  leading.txt` created
+ * ` leading.txt`. So a trailing pad names a second location and is judged as well, and a LEADING
+ * space is part of the name — trimming it would refuse `*** Add File:  .git/x`, an ordinary
+ * workspace file whose trimmed spelling only looks like Git administration.
  */
 function patchPathSpellings(filename: string): string[] {
-  const trimmed = filename.trim();
-  return trimmed && trimmed !== filename ? [filename, trimmed] : [filename];
+  const unpadded = filename.trimEnd();
+  return unpadded && unpadded !== filename ? [filename, unpadded] : [filename];
 }
 
 /**
@@ -1326,7 +1350,9 @@ function patchPathSpellings(filename: string): string[] {
  *
  * Every spelling is judged, the same way `guardStateRelation` judges one: the literal reading, the
  * home-relative reading, the physical reading with symlinks followed, and — for a spelling that
- * climbs with `..` — where the kernel actually lands, since a symlink before a `..` moves it.
+ * climbs with `..` — where the kernel actually lands, since a symlink before a `..` moves it. A
+ * spelling with no physical reading at all is protected rather than waved through, for the reason
+ * `canonicalPathOrNull` gives.
  */
 export function pathTargetsManagedWorktree(
   path: string,
@@ -1337,7 +1363,8 @@ export function pathTargetsManagedWorktree(
   const physical = physicalProtections(protections);
   for (const candidate of guardStateCandidates(path, cwd)) {
     if (protectedTarget(candidate, protections)) return true;
-    if (protectedTarget(canonicalPath(candidate), physical)) return true;
+    const resolved = canonicalPathOrNull(candidate);
+    if (resolved === null || protectedTarget(resolved, physical)) return true;
   }
   for (const raw of climbingSpellings(path, cwd)) {
     const landing = physicalSpelling(raw);
