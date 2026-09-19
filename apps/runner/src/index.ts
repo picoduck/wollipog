@@ -62,10 +62,14 @@ import {
 import { stageRunnerCredentialFile } from "./runner-credential-file.js";
 import {
   applyClaudeHookCapability,
+  claudeHookCircuitLockPath,
+  claudeHookCircuitPath,
   claudeHookGuardPath,
+  claudeHookReadyPath,
   claudeHookRunnerConfigDir,
   claudeHookSessionProtectionsPath,
   claudeHookSettingsPath,
+  claudeHookTokenPath,
   claudeHooksEnabled,
   defaultClaudeHookHost,
   markClaudeHookCredentialReady,
@@ -748,6 +752,15 @@ sessions.setGuardStateSandbox({
         managedWorktreeGuardSocketDirectory(claudeHookHost.configDir, meta.sessionId),
       ],
       socket: managedWorktreeGuardSocketPath(claudeHookHost.configDir, meta.sessionId),
+      // The manager policy hook is a provider-spawned re-entry too, and it keeps its credential
+      // and circuit here. Seatbelt hands exactly these back so it keeps working; bwrap cannot.
+      managerTransport: {
+        readable: [claudeHookTokenPath(settings), claudeHookReadyPath(settings)],
+        writable: [
+          claudeHookCircuitPath(settings),
+          claudeHookCircuitLockPath(claudeHookCircuitPath(settings)),
+        ],
+      },
     };
   },
   verify: async (meta, isolation, cwd) => {

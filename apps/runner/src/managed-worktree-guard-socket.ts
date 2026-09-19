@@ -61,6 +61,16 @@ function ensurePrivateDirectory(directory: string): void {
   chmodSync(directory, 0o700);
 }
 
+/** Device and inode of the socket at `path`, or null when nothing (or not a socket) is there. */
+function socketIdentity(path: string): string | null {
+  try {
+    const entry = lstatSync(path, { bigint: true });
+    return entry.isSocket() ? `${entry.dev}:${entry.ino}` : null;
+  } catch {
+    return null;
+  }
+}
+
 function serveVerdict(socket: Socket, protectionsFile: string): void {
   const chunks: Buffer[] = [];
   let total = 0;
@@ -85,7 +95,7 @@ function serveVerdict(socket: Socket, protectionsFile: string): void {
  * exactly as in provider mode, so an invalidated guard (its list removed) blocks here as well.
  */
 export class ManagedWorktreeGuardSockets {
-  private readonly servers = new Map<string, { server: Server; path: string }>();
+  private readonly servers = new Map<string, { server: Server; path: string; identity: string }>();
 
   constructor(private readonly configDir: string) {}
 
@@ -96,13 +106,10 @@ export class ManagedWorktreeGuardSockets {
       throw new Error(`guard socket path is longer than ${MAX_GUARD_SOCKET_PATH_BYTES} bytes: ${path}`);
     }
     const existing = this.servers.get(sessionId);
-    if (existing?.server.listening) {
-      // Still ours only while the path on disk is still a socket: a removed or replaced entry
-      // means the sidecar would reach nothing, or something else, so listen afresh.
-      try {
-        if (lstatSync(path).isSocket()) return path;
-      } catch { /* re-listen below */ }
-    }
+    // Still ours only while the path on disk is the very socket this server bound. A removed entry
+    // reaches nothing, and a replaced one — any other socket at the same path — would answer for
+    // this session without being the runner, so either way the runner listens afresh.
+    if (existing?.server.listening && socketIdentity(path) === existing.identity) return path;
     await this.close(sessionId);
     const protectionsFile = claudeHookSessionProtectionsPath(this.configDir, sessionId);
     const directory = managedWorktreeGuardSocketDirectory(this.configDir, sessionId);
@@ -119,7 +126,12 @@ export class ManagedWorktreeGuardSockets {
     });
     server.on("error", () => { /* a per-connection failure never takes the server down */ });
     chmodSync(path, 0o600);
-    this.servers.set(sessionId, { server, path });
+    const identity = socketIdentity(path);
+    if (!identity) {
+      await new Promise<void>((resolvePromise) => server.close(() => resolvePromise()));
+      throw new Error("the guard socket was replaced while it was being created");
+    }
+    this.servers.set(sessionId, { server, path, identity });
     return path;
   }
 
@@ -147,6 +159,10 @@ export interface GuardStateMask {
   /** The verdict socket, inside one of the `readable` directories; Seatbelt needs it named to
    * allow the connection when the network is denied. */
   socket?: string;
+  /** The manager policy hook's own state for this session, which that hook (a provider-spawned
+   * re-entry, like the guard) reads and rewrites on every call. Seatbelt grants exactly these
+   * paths back; bwrap cannot grant a write inside its read-only data root at all. */
+  managerTransport?: { readable: string[]; writable: string[] };
 }
 
 export interface GuardSandboxProbe {

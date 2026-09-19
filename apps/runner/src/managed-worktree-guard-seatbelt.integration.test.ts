@@ -17,7 +17,10 @@ import { quote } from "shell-quote";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import {
+  claudeHookCircuitLockPath,
+  claudeHookCircuitPath,
   claudeHookGuardPath,
+  claudeHookReadyPath,
   claudeHookSessionProtectionsPath,
   claudeHookSettingsPath,
   claudeHookTokenPath,
@@ -141,6 +144,46 @@ test("Seatbelt hides the hook state directory from reads, walks, and writes", { 
   shell(masked, f.worktreePath, `printf tampered > ${quote([f.protectionsFile])}; rm -f ${quote([f.protectionsFile])}`);
   assert.equal(readFileSync(f.protectionsFile, "utf8"), before, "the writable data root does not reach the hidden directory");
   assert.equal(shell(masked, f.worktreePath, `cat ${quote([f.settings])}`).status, 0, "the settings document stays readable");
+});
+
+test("the manager policy hook keeps its own state inside the mask, and only that", { skip: SKIP }, async () => {
+  const f = await fixture();
+  const circuit = claudeHookCircuitPath(f.settings);
+  writeFileSync(claudeHookReadyPath(f.settings), "ready-hash");
+  const isolation = await resolveExecutionIsolation({ mode: "seatbelt", network: "deny" }, { kind: "native" }, {}, {
+    driver: "claude-code",
+    dataDir: f.dataDir,
+    env: {},
+    sessionId: "s_mac",
+    cwd: f.worktreePath,
+    guardStateMask: {
+      directory: f.configDir,
+      readable: [f.settings, managedWorktreeGuardSocketDirectory(f.configDir, "s_mac")],
+      socket: f.socketPath,
+      managerTransport: {
+        readable: [claudeHookTokenPath(f.settings), claudeHookReadyPath(f.settings)],
+        writable: [circuit, claudeHookCircuitLockPath(circuit)],
+      },
+    },
+  }) as Seatbelt;
+  // Exactly what runPolicyHook does to its state on every call: read the credential and its
+  // acknowledgement, then a locked read-modify-write of the circuit through protectedWrite.
+  const script = join(f.root, "manager-transport.mts");
+  writeFileSync(script, [
+    `import { readFileSync } from "node:fs";`,
+    `const hooks = await import(${JSON.stringify(fileURLToPath(new URL("./hook-settings.ts", import.meta.url)))});`,
+    `readFileSync(${JSON.stringify(claudeHookTokenPath(f.settings))}, "utf8");`,
+    `readFileSync(${JSON.stringify(claudeHookReadyPath(f.settings))}, "utf8");`,
+    `hooks.updateHookCircuitState(${JSON.stringify(circuit)}, (prior) => ({ ...prior, consecutiveFailures: prior.consecutiveFailures + 1 }));`,
+    `let listed = true;`,
+    `try { readFileSync(${JSON.stringify(f.protectionsFile)}, "utf8"); } catch { listed = false; }`,
+    `console.log(listed ? "LIST-READABLE" : "MANAGER-OK");`,
+  ].join("\n"));
+  const loader = GUARD.args.slice(0, -2);
+  const result = run(isolation.command, [...isolation.args, "-p", isolation.profile, process.execPath, ...loader, script], f.worktreePath);
+  assert.equal(result.status, 0, result.output);
+  assert.match(result.stdout, /MANAGER-OK/u);
+  assert.equal(JSON.parse(readFileSync(circuit, "utf8")).consecutiveFailures, 1);
 });
 
 test("the guard sidecar gets its verdict through Seatbelt with the network denied", { skip: SKIP }, async () => {

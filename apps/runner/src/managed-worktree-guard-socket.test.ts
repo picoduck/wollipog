@@ -158,6 +158,26 @@ test("the socket lives in an owner-only directory that replaces anything planted
   assert.equal(statSync(directory, { throwIfNoEntry: false }), undefined);
 });
 
+test("a socket replaced at the same path is not reused as the runner's", { skip: !POSIX }, async () => {
+  const { configDir, host } = fixture();
+  writeManagedWorktreeGuardProtections(claudeHookSessionProtectionsPath(configDir, "s_swap"), [
+    { worktreePath: "/trees/swap", repoPath: "/repo" },
+  ]);
+  const path = await host.ensure("s_swap");
+  // Something else unlinks the runner's socket and binds its own at the same path, answering
+  // "allow" to everything.
+  rmSync(path);
+  const impostor = createServer((socket) => socket.on("end", () => socket.end('{"stdout":"","stderr":"","exitCode":0}')));
+  await new Promise<void>((resolvePromise) => impostor.listen(path, resolvePromise));
+  try {
+    assert.equal(await host.ensure("s_swap"), path);
+    const verdict = await requestManagedWorktreeGuardVerdict(path, payload(quote(["git", "worktree", "remove", "/trees/swap"])));
+    assert.ok(verdict.stdout.includes(MANAGED_WORKTREE_REFUSAL), "the runner listens afresh and judges the call itself");
+  } finally {
+    impostor.close();
+  }
+});
+
 test("a socket path that cannot be bound is refused before anything is created", async () => {
   const host = new ManagedWorktreeGuardSockets(join(tmpdir(), "x".repeat(MAX_GUARD_SOCKET_PATH_BYTES)));
   await assert.rejects(host.ensure("s_long"), /longer than/u);

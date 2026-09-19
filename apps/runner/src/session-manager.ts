@@ -6363,13 +6363,7 @@ export class SessionManager {
         await this.ensureProviderStateLayout(meta, launchGeneration);
       }
       isolation = await this.resolveLaunchIsolation(meta, cwd, launchGeneration);
-      // A guard that answers through the verdict socket has to be proven from inside this exact
-      // sandbox. Failing here is the deliberate outcome: the session reports why it cannot start,
-      // instead of launching a provider whose every matched tool call would be refused.
-      const guardProbe = await this.guardStateSandbox?.verify(meta, isolation, cwd);
-      if (guardProbe && !guardProbe.ok) {
-        throw new Error(`the managed worktree guard cannot reach the runner from inside the sandbox (${guardProbe.reason})`);
-      }
+      await this.proveGuardInsideSandbox(meta, isolation, cwd);
       const runtimeSetupEnvironment = this.worktreeSetupRuntimeEnvironment(
         isolation,
         setupEnvironment,
@@ -6827,6 +6821,22 @@ export class SessionManager {
         : {}),
       ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
     }));
+  }
+
+  /**
+   * A guard that answers through the verdict socket has to be proven from inside the exact sandbox
+   * a provider is about to start in (#1336). Failing is the deliberate outcome: the caller reports
+   * why nothing started, instead of starting a provider whose every matched tool call is refused.
+   */
+  private async proveGuardInsideSandbox(
+    meta: SessionMeta,
+    isolation: SpawnIsolation | undefined,
+    cwd: string,
+  ): Promise<void> {
+    const probe = await this.guardStateSandbox?.verify(meta, isolation, cwd);
+    if (probe && !probe.ok) {
+      throw new Error(`the managed worktree guard cannot reach the runner from inside the sandbox (${probe.reason})`);
+    }
   }
 
   private assertHostIsolationContextSupported(
@@ -10658,6 +10668,8 @@ export class SessionManager {
           return { ok: false, error: `source worktree could not be verified before fork: ${unverified}` };
         }
         const isolation = await this.resolveLaunchIsolation(source, source.worktreePath);
+        // The temporary provider is a provider like any other: its guard is proven first too.
+        await this.proveGuardInsideSandbox(source, isolation, source.worktreePath);
         this.providerHomeLeases?.acquire({
           driver: source.driver,
           command: source.command,

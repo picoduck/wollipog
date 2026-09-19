@@ -242,7 +242,8 @@ tools, its MCP servers, and the guard sidecar itself:
 - **Seatbelt** denies `file-read*` and `file-write*` on the directory. The deny comes after the
   allow that makes the data directory writable, and Seatbelt takes the last matching rule. It then
   re-allows reading those same entries, plus an outbound connection to the session's socket when the
-  network is denied.
+  network is denied. It also grants back the session's manager policy hook state (see the known
+  limits below).
 
 The guard sidecar can no longer read its list, so a guarded launch in these modes carries
 `--guard-socket`. The sidecar sends the hook payload to a per-session Unix socket that the runner
@@ -291,10 +292,15 @@ Known limits of the sandboxed form:
   long synchronous operation there (the guard's own host-side self-test is one, typically about a
   second) delays every guarded tool call behind it. A stall longer than 30 seconds refuses the call;
   it never passes it.
-- **Manager policy hooks under `bwrap` fail as before.** They read their token, circuit, and ready
-  files from the same directory, which the mask now hides. Under `bwrap` they already failed on
-  every call, because the data directory is read-only there and their circuit write fails. The mask
-  changes only where they fail, not whether.
+- **Manager policy hooks keep their own state under Seatbelt only.** The manager policy hook is
+  also a re-entry the provider spawns. It reads its credential and acknowledgement and rewrites its
+  circuit file on every call, all inside the hidden directory. Seatbelt grants exactly those paths
+  back (the circuit, its lock, and the circuit's atomic-write temporaries), so the hook keeps
+  working, while the protection list and every other session's files stay hidden. That grants
+  nothing new: before this rule the whole directory was readable and writable there. `bwrap` cannot
+  grant a write inside its read-only data root. There, the manager hook already failed closed on
+  every call before this change, because its circuit write failed, and it still does. That is a
+  pre-existing limit, not something the mask introduces.
 - **The mask is bound at launch.** Like every other filesystem boundary here, it covers the entries
   that exist when the provider starts. The hook state directory is created before the sandbox is
   built, so nothing written into it later becomes visible.

@@ -148,6 +148,13 @@ export function claudeHookCircuitPath(settingsFile: string): string {
     : `${settingsFile}${CIRCUIT_SUFFIX}`;
 }
 
+/** The cross-process lock `updateHookCircuitState` takes around a circuit read-modify-write. */
+export function claudeHookCircuitLockPath(circuitFile: string): string {
+  return circuitFile.endsWith(CIRCUIT_SUFFIX)
+    ? `${circuitFile.slice(0, -CIRCUIT_SUFFIX.length)}${CIRCUIT_LOCK_SUFFIX}`
+    : `${circuitFile}${CIRCUIT_LOCK_SUFFIX}`;
+}
+
 export function claudeHookTokenPath(settingsFile: string): string {
   return settingsFile.endsWith(SETTINGS_SUFFIX)
     ? `${settingsFile.slice(0, -SETTINGS_SUFFIX.length)}${TOKEN_SUFFIX}`
@@ -367,7 +374,7 @@ export function removeClaudeHookFiles(sessionId: string, configDir = defaultHook
       settings,
       claudeHookTemplatePath(settings),
       circuit,
-      circuit.replace(CIRCUIT_SUFFIX, CIRCUIT_LOCK_SUFFIX),
+      claudeHookCircuitLockPath(circuit),
       claudeHookTokenPath(settings),
       claudeHookReadyPath(settings),
       claudeHookGuardPath(settings),
@@ -1400,9 +1407,7 @@ export function updateHookCircuitState(
   file: string,
   update: (prior: HookCircuitState) => HookCircuitState,
 ): HookCircuitState {
-  const lock = file.endsWith(CIRCUIT_SUFFIX)
-    ? `${file.slice(0, -CIRCUIT_SUFFIX.length)}${CIRCUIT_LOCK_SUFFIX}`
-    : `${file}${CIRCUIT_LOCK_SUFFIX}`;
+  const lock = claudeHookCircuitLockPath(file);
   mkdirSync(dirname(lock), { recursive: true });
   const deadline = Date.now() + 250;
   let fd: number;

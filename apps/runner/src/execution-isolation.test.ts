@@ -823,6 +823,10 @@ test("Seatbelt denies the hook state directory after the writable data root and 
         directory: "/var/wollipog/hooks/k",
         readable: ["/var/wollipog/hooks/k/s1.settings.json", "/var/wollipog/hooks/k/s1.guard"],
         socket: "/var/wollipog/hooks/k/s1.guard/sock",
+        managerTransport: {
+          readable: ["/var/wollipog/hooks/k/s1.token", "/var/wollipog/hooks/k/s1.ready"],
+          writable: ["/var/wollipog/hooks/k/s1.circuit.json", "/var/wollipog/hooks/k/s1.circuit.lock"],
+        },
       },
     },
   );
@@ -845,6 +849,54 @@ test("Seatbelt denies the hook state directory after the writable data root and 
   // The network is denied, so the socket needs its own outbound allow, under both spellings.
   assert.match(profile, /\(remote unix-socket \(path-literal "\/var\/wollipog\/hooks\/k\/s1\.guard\/sock"\)\)/u);
   assert.match(profile, /\(remote unix-socket \(path-literal "\/private\/var\/wollipog\/hooks\/k\/s1\.guard\/sock"\)\)/u);
-  // The re-exposures are read-only: nothing re-allows a write inside the hidden directory.
-  assert.doesNotMatch(profile.slice(deny), /\(allow file-write/u);
+  // The only writes re-allowed inside the hidden directory are the manager policy hook's circuit,
+  // its lock, and the circuit's atomic-write temporaries — never the protection list.
+  const writeAllows = profile.slice(deny).split("(allow file-write*").slice(1).map((block) => block.slice(0, block.indexOf("\n)")));
+  assert.equal(writeAllows.length, 1, profile);
+  const grantedWrites = writeAllows[0]!.trim().split("\n").map((line) => line.trim());
+  assert.deepEqual(grantedWrites.filter((line) => line.startsWith("(literal")), [
+    '(literal "/var/wollipog/hooks/k/s1.circuit.json")',
+    '(literal "/private/var/wollipog/hooks/k/s1.circuit.json")',
+    '(literal "/var/wollipog/hooks/k/s1.circuit.lock")',
+    '(literal "/private/var/wollipog/hooks/k/s1.circuit.lock")',
+  ]);
+  // The temp-file pattern, read as the regular expression it is, admits exactly protectedWrite's
+  // `.<name>.<pid>.<uuid>.tmp` siblings of the circuit and nothing else in the directory.
+  const patterns = grantedWrites.filter((line) => line.startsWith("(regex"))
+    .map((line) => new RegExp(line.slice('(regex #"'.length, -'")'.length), "u"));
+  assert.ok(patterns.some((pattern) =>
+    pattern.test("/var/wollipog/hooks/k/.s1.circuit.json.4242.0f8c6a1e-2b3d-4c5e-8f90-123456789abc.tmp")));
+  for (const path of [
+    "/var/wollipog/hooks/k/s1.protections.json",
+    "/var/wollipog/hooks/k/.s1.protections.json.4242.0f8c6a1e-2b3d-4c5e-8f90-123456789abc.tmp",
+    "/var/wollipog/hooks/k/s1.settings.json",
+    "/var/wollipog/hooks/k/xs1Xcircuit.json.1.a.tmp",
+  ]) {
+    assert.equal(patterns.some((pattern) => pattern.test(path)), false, path);
+    assert.equal(grantedWrites.some((line) => line.includes(`"${path}"`)), false, path);
+  }
+  // Reads of the manager's credential and acknowledgement come back; the list does not.
+  assert.match(profile, /\(literal "\/var\/wollipog\/hooks\/k\/s1\.token"\)/u);
+  assert.doesNotMatch(profile, /s1\.protections\.json/u);
+});
+
+test("bwrap does not carry manager-transport writes it cannot express", async () => {
+  const resolved = await resolveExecutionIsolation(bwrap, { kind: "native" }, {
+    platform: "linux", uid: () => 1000, mkdirNative: async () => {},
+    resolveNative: async (name) => name === "bwrap" ? {
+      path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] },
+    } : null,
+    isExposableEntryNative: async () => false,
+  }, {
+    driver: "claude-code", dataDir: "/data", env: { HOME: "/home/me" }, sessionId: "s1", cwd: "/data/worktrees/s1",
+    guardStateMask: {
+      directory: "/data/hooks/k",
+      readable: [],
+      managerTransport: { readable: ["/data/hooks/k/s1.token"], writable: ["/data/hooks/k/s1.circuit.json"] },
+    },
+  });
+  assert.deepEqual(resolved?.backend === "bwrap" ? resolved.guardStateMask : undefined, {
+    directory: "/data/hooks/k",
+    readable: [],
+  });
 });

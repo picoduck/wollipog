@@ -1349,6 +1349,44 @@ test("a native sandboxed launch hides the hook state directory and must prove it
   }
 });
 
+test("an idle Claude fork proves its guard before constructing the temporary provider (#1336)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-guard-fork-"));
+  try {
+    const { repoPath, worktreePath } = hostWorktree(root, "s1");
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({
+      ...meta(),
+      repoPath,
+      worktreePath,
+      worktrees: [{ id: "legacy", path: worktreePath, branch: "agent/s1", baseRef: "main", baseCommit: "main", source: "legacy" }],
+      agentSessionId: "claude-source",
+      status: "idle",
+      turnCount: 1,
+      capabilities: { supportsConversationFork: true } as never,
+      forkPoints: { "1": { agentTurnId: "turn-1", tree: "0".repeat(40), baseCommit: "0".repeat(40), eventSeq: 1 } },
+    });
+    let constructed = 0;
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, guardProbeDriver(() => { constructed++; }) as never,
+      join(root, ".runner-data"), 1, undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      { mode: "bwrap", network: "deny" },
+      async () => ({ backend: "bwrap" as const, command: "/usr/bin/bwrap", args: [], network: "deny" as const }),
+      async () => {}, async () => {}, async () => {},
+    );
+    manager.setGuardStateSandbox({
+      mask: () => ({ directory: "/state/runner-hooks", readable: [] }),
+      verify: async () => ({ ok: false, reason: "socket hidden" }),
+    });
+    const forked = await manager.forkConversation("s1", "child", 1, "child");
+    assert.equal(forked.ok, false);
+    assert.match(forked.error ?? "", /cannot reach the runner from inside the sandbox \(socket hidden\)/u);
+    assert.equal(constructed, 0, "no temporary provider starts behind a guard that was not proven");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("provider mode passes no hook state mask at all (#1336)", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-guard-provider-"));
   try {
