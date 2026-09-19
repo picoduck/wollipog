@@ -100,9 +100,16 @@ export function provisionAgentTuiManagedWorktreeGuard(
 }
 
 /**
- * The Codex form (#1377). A session that owns no runner-created worktree opens exactly as before:
- * nothing is written and no probe runs. One that owns any is guarded or, through the caller,
- * refused — never opened unguarded.
+ * The Codex form (#1377). A session that owns a runner-created worktree is guarded or, through the
+ * caller, refused — never opened unguarded.
+ *
+ * Since #1438 one that owns none is provisioned too, over an EMPTY list, exactly as a Claude TUI
+ * has been since #1303: a TUI cannot be given a hook after it starts, so a worktree the session
+ * acquires later is protected only if the hook was there from the beginning, reading the list the
+ * live refresh keeps in step. The hook-trust rule is unchanged — the bypass is passed only when the
+ * runner's hook is the sole untrusted one — but for a session with nothing to protect a failed
+ * provisioning is NOT a refusal: the caller opens that TUI unguarded, as it always has, and the
+ * runner says so if a worktree appears while it is still open.
  */
 async function provisionAgentTuiCodexManagedWorktreeGuard(
   spec: SessionMeta,
@@ -112,7 +119,6 @@ async function provisionAgentTuiCodexManagedWorktreeGuard(
   cwd: string,
 ): Promise<AgentTuiGuardProvisioning> {
   const protections = config.protections();
-  if (protections.length === 0) return { protections, args: spec.args, guardActive: false };
   const guard = await provisionCodexGuard(
     spec,
     {

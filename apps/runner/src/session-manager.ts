@@ -1506,6 +1506,13 @@ export class SessionManager {
     if (this.active.has(sessionId)) this.stop(sessionId);
   }
 
+  /** Surface a runner-side fact about this session's managed-worktree guard as a visible notice,
+   * through the same channel an invalidated guard is announced on. */
+  noticeManagedWorktreeGuard(sessionId: string, notice: string): void {
+    this.log(`managed worktree guard ${boundedSessionIdForLog(sessionId)}: ${notice}`);
+    this.onDriverStderr(sessionId, notice);
+  }
+
   /** Every runner-created identity remains protected even while a sibling is selected or its
    * cleanup is pending. Attached operator worktrees deliberately stay outside this boundary.
    * Public because launch provisioning needs the same set the driver's veto uses. */

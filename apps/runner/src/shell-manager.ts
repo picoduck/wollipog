@@ -64,6 +64,12 @@ export interface ShellProcessLaunch {
   env?: Record<string, string>;
   scrubInheritedEnv?: string[];
   verbatimCommandLine?: string;
+  /**
+   * For an agent TUI of a guardable provider: whether the managed-worktree guard really is in this
+   * launch, and why not when provisioning knows. A TUI opened without it cannot be given one later,
+   * so the runner remembers it and says so when the session acquires a worktree (#1438).
+   */
+  managedWorktreeGuard?: { active: boolean; reason?: string };
 }
 
 export function agentTuiPlatformSupported(platform: NodeJS.Platform, context: AgentContext): boolean {
