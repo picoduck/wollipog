@@ -1,0 +1,353 @@
+{
+  "provenance": {
+    "issue": "picoduck/wollipog#1397",
+    "capturedOn": "2026-09-18",
+    "question": "In `default` and `auto` permission modes, with the stdio control channel the runner uses, does a SUBAGENT's Bash call produce a `can_use_tool` control_request, does that frame carry `parent_tool_use_id`, and what placement fields does it carry?",
+    "method": "A throwaway project under /tmp, driven by headless `claude` launched with the exact interactive arg set apps/runner/src/drivers/claude-code.ts builds. A harness read the stdout stream, answered every can_use_tool frame the way ClaudeCodeDriver.resolvePermission does, and joined each frame against the Bash tool_use the model actually issued (whose own `parent_tool_use_id` names the spawning Task call). No hook was installed, so nothing could suppress or fabricate a frame. The probe harness is not committed.",
+    "claudeVersions": {
+      "2.1.277": "the version `claude` on PATH resolves to, i.e. the one the runner launches",
+      "2.1.270": "the version docs/DRIVERS.md records its other measurements against; also measured, same result, frames omitted here because 2.1.277 is what the runner launches"
+    },
+    "finding": "A subagent's Bash call DOES produce a can_use_tool frame in both modes. The frame never carries `parent_tool_use_id` — the message envelope is exactly {type, request_id, request} — and carries no `cwd`. A subagent is distinguished by `request.agent_id`, the same opaque id the PreToolUse hook payload carries (#1361). The only placement field is `request.blocked_path`, present only when the escalation reason is a specific path; it is absolute and resolved from the issuer's real shell directory.",
+    "sanitization": "__REPO__ is the throwaway project directory; __WORKTREE__ is a disposable directory inside it that stands in for a runner-managed worktree. No tokens, credentials, or real home paths were present in or removed from these frames."
+  },
+  "captures": [
+    {
+      "claudeVersion": "2.1.277",
+      "permissionMode": "auto",
+      "launchArgs": [
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+        "--session-id",
+        "<uuid>",
+        "--input-format",
+        "stream-json",
+        "--permission-prompt-tool",
+        "stdio",
+        "--permission-mode",
+        "auto",
+        "--settings",
+        "<settings>"
+      ],
+      "extraSettings": {
+        "permissions": {
+          "ask": [
+            "Bash(rm:*)",
+            "Bash(cd:*)"
+          ]
+        }
+      },
+      "note": "`auto` approved these commands on its own, so a `permissions.ask` rule was supplied to force the escalation. The rule decides WHETHER the CLI asks; it does not shape the frame.",
+      "frames": [
+        {
+          "type": "control_request",
+          "request_id": "773dd9d3-09e3-483c-a5ee-a8a0ec91f605",
+          "request": {
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "display_name": "Bash",
+            "input": {
+              "command": "rm -rf ./build",
+              "description": "Remove build directory at project root"
+            },
+            "description": "Remove build directory at project root",
+            "decision_reason_type": "rule",
+            "tool_use_id": "toolu_0169ip5eFCxcgA7fbkZc8tGL"
+          }
+        },
+        {
+          "type": "control_request",
+          "request_id": "610b3774-0dd3-440e-a4d2-1a0490731917",
+          "request": {
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "display_name": "Bash",
+            "input": {
+              "command": "rm -rf __WORKTREE__",
+              "description": "Remove the decoy directory by absolute path"
+            },
+            "description": "Remove the decoy directory by absolute path",
+            "decision_reason_type": "rule",
+            "tool_use_id": "toolu_01XJzAJgMbJvBRrW39gFAxJy"
+          }
+        },
+        {
+          "type": "control_request",
+          "request_id": "c362283d-15dd-4566-84b4-403571c978e4",
+          "request": {
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "display_name": "Bash",
+            "input": {
+              "command": "cd __WORKTREE__/apps && rm -rf ..",
+              "description": "Attempt to remove parent directory from inside decoy/apps"
+            },
+            "description": "Attempt to remove parent directory from inside decoy/apps",
+            "permission_suggestions": [],
+            "decision_reason": "Dangerous rm operation on working directory or its ancestor: __WORKTREE__",
+            "decision_reason_type": "safetyCheck",
+            "matched_ask_rule": {
+              "source": "flagSettings",
+              "tool_name": "Bash",
+              "rule_content": "cd:*"
+            },
+            "classifier_approvable": false,
+            "tool_use_id": "toolu_01SJJsU48pKeqH4zZLTuzdD2"
+          }
+        },
+        {
+          "type": "control_request",
+          "request_id": "0a295ffd-87f6-4a96-b9f3-33186db589b3",
+          "request": {
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "display_name": "Bash",
+            "input": {
+              "command": "rm -rf ./build",
+              "description": "Remove the build directory"
+            },
+            "description": "Remove the build directory",
+            "decision_reason_type": "rule",
+            "tool_use_id": "toolu_0138nu9VvMEGZvfQhM8q5c2Y",
+            "agent_id": "a7ada115d635f95e3"
+          }
+        },
+        {
+          "type": "control_request",
+          "request_id": "96c9d6ac-6219-4546-b3d9-453e88ce4ac2",
+          "request": {
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "display_name": "Bash",
+            "input": {
+              "command": "cd __WORKTREE__/apps && rm -rf ..",
+              "description": "Change into the decoy apps directory and attempt to remove its parent"
+            },
+            "description": "Change into the decoy apps directory and attempt to remove its parent",
+            "permission_suggestions": [],
+            "decision_reason": "Dangerous rm operation on working directory or its ancestor: __WORKTREE__",
+            "decision_reason_type": "safetyCheck",
+            "matched_ask_rule": {
+              "source": "flagSettings",
+              "tool_name": "Bash",
+              "rule_content": "cd:*"
+            },
+            "classifier_approvable": false,
+            "tool_use_id": "toolu_016p9ZrNGqRGNKJtwDBQUipZ",
+            "agent_id": "a7ada115d635f95e3"
+          }
+        },
+        {
+          "type": "control_request",
+          "request_id": "b0d280aa-f48a-4111-abf5-d3df6429854a",
+          "request": {
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "display_name": "Bash",
+            "input": {
+              "command": "rm -rf __WORKTREE__",
+              "description": "Remove the disposable decoy directory"
+            },
+            "description": "Remove the disposable decoy directory",
+            "decision_reason_type": "rule",
+            "tool_use_id": "toolu_01RT5sCoqnVFhmsVvnfe72Uq",
+            "agent_id": "a7ada115d635f95e3"
+          }
+        }
+      ]
+    },
+    {
+      "claudeVersion": "2.1.277",
+      "permissionMode": "default",
+      "launchArgs": [
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+        "--session-id",
+        "<uuid>",
+        "--input-format",
+        "stream-json",
+        "--permission-prompt-tool",
+        "stdio"
+      ],
+      "extraSettings": null,
+      "note": "`default` escalated these on its own; no extra settings were supplied. The subagent appended its own `echo`/`ls` to the commands it was given, which is left verbatim.",
+      "frames": [
+        {
+          "type": "control_request",
+          "request_id": "acab614a-de1a-400d-9a22-bbe7e29f1b8f",
+          "request": {
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "display_name": "Bash",
+            "input": {
+              "command": "rm -rf ./build",
+              "description": "Remove the project build directory"
+            },
+            "description": "Remove the project build directory",
+            "permission_suggestions": [
+              {
+                "type": "addRules",
+                "rules": [
+                  {
+                    "toolName": "Bash",
+                    "ruleContent": "rm -rf ./build"
+                  }
+                ],
+                "behavior": "allow",
+                "destination": "localSettings"
+              },
+              {
+                "type": "addDirectories",
+                "directories": [
+                  "__REPO__/build"
+                ],
+                "destination": "session"
+              },
+              {
+                "type": "setMode",
+                "mode": "acceptEdits",
+                "destination": "session"
+              }
+            ],
+            "blocked_path": "__REPO__/build",
+            "tool_use_id": "toolu_01QjVZqnEuTgFDqf13DiFH7D"
+          }
+        },
+        {
+          "type": "control_request",
+          "request_id": "1aa16b86-2405-4b01-9de3-16cc5b4e3099",
+          "request": {
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "display_name": "Bash",
+            "input": {
+              "command": "rm -rf __WORKTREE__",
+              "description": "Remove the decoy directory by absolute path"
+            },
+            "description": "Remove the decoy directory by absolute path",
+            "permission_suggestions": [
+              {
+                "type": "addRules",
+                "rules": [
+                  {
+                    "toolName": "Bash",
+                    "ruleContent": "rm -rf __WORKTREE__"
+                  }
+                ],
+                "behavior": "allow",
+                "destination": "localSettings"
+              },
+              {
+                "type": "addDirectories",
+                "directories": [
+                  "__WORKTREE__"
+                ],
+                "destination": "session"
+              },
+              {
+                "type": "setMode",
+                "mode": "acceptEdits",
+                "destination": "session"
+              }
+            ],
+            "blocked_path": "__WORKTREE__",
+            "tool_use_id": "toolu_01ScyRZajY1hoTGP1W2Y15eH"
+          }
+        },
+        {
+          "type": "control_request",
+          "request_id": "504c1a38-2c8b-4ace-aa14-c0a5237d6396",
+          "request": {
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "display_name": "Bash",
+            "input": {
+              "command": "cd __WORKTREE__/apps && rm -rf ..",
+              "description": "Attempt to remove the parent of the decoy apps directory"
+            },
+            "description": "Attempt to remove the parent of the decoy apps directory",
+            "permission_suggestions": [],
+            "decision_reason": "Dangerous rm operation on working directory or its ancestor: __WORKTREE__",
+            "decision_reason_type": "safetyCheck",
+            "classifier_approvable": false,
+            "tool_use_id": "toolu_01Btdkxw97mdagVBmYLJHMq3"
+          }
+        },
+        {
+          "type": "control_request",
+          "request_id": "fd9918a9-4fd6-4e20-9dc5-42a586a4f3ae",
+          "request": {
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "display_name": "Bash",
+            "input": {
+              "command": "rm -rf ./build; echo \"exit=$?\"; ls -la __REPO__",
+              "description": "Remove build directory in project root"
+            },
+            "description": "Remove build directory in project root",
+            "permission_suggestions": [
+              {
+                "type": "addRules",
+                "rules": [
+                  {
+                    "toolName": "Bash",
+                    "ruleContent": "rm -rf ./build"
+                  },
+                  {
+                    "toolName": "Bash",
+                    "ruleContent": "echo \"exit=$?\""
+                  }
+                ],
+                "behavior": "allow",
+                "destination": "localSettings"
+              }
+            ],
+            "decision_reason_type": "subcommandResults",
+            "tool_use_id": "toolu_01HgbNHtEzkgcFNQ4YXSCeDG",
+            "agent_id": "a9264218cc81916e6"
+          }
+        },
+        {
+          "type": "control_request",
+          "request_id": "9f156610-693e-44fa-9aa3-d283748ecc66",
+          "request": {
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "display_name": "Bash",
+            "input": {
+              "command": "rm -rf __WORKTREE__; echo \"exit=$?\"; ls -la __REPO__",
+              "description": "Remove the disposable decoy directory by absolute path"
+            },
+            "description": "Remove the disposable decoy directory by absolute path",
+            "permission_suggestions": [
+              {
+                "type": "addRules",
+                "rules": [
+                  {
+                    "toolName": "Bash",
+                    "ruleContent": "rm -rf __WORKTREE__"
+                  },
+                  {
+                    "toolName": "Bash",
+                    "ruleContent": "echo \"exit=$?\""
+                  }
+                ],
+                "behavior": "allow",
+                "destination": "localSettings"
+              }
+            ],
+            "decision_reason_type": "subcommandResults",
+            "tool_use_id": "toolu_01EAezmATBw9WaWXPsCzRK9R",
+            "agent_id": "a9264218cc81916e6"
+          }
+        }
+      ]
+    }
+  ]
+}
