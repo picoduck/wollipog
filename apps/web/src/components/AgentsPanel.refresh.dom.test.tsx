@@ -12,7 +12,7 @@ import { FeedbackProvider } from "./FeedbackProvider.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime } from "../ui-transport.js";
 import { TimelineBuilder, type TimelineItem } from "../timeline.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
-import { AgentsPanel, REGISTRY_SWEEP_BACKSTOP_MS } from "./AgentsPanel.js";
+import { AgentsPanel, REGISTRY_SWEEP_EVERY_IDLE_REFRESHES } from "./AgentsPanel.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 const globals: Record<string, unknown> = {
@@ -434,101 +434,15 @@ test("a rejected refresh leaves its evidence unspent, so the next one still read
 });
 
 /**
- * The skip rules trust that a settled child stays settled. If the control plane ever reports one
- * as running again while its transcript row is not loaded, no rule selects its page — so a bounded
- * periodic full sweep backs them up. Targeted refreshes stay targeted until the backstop falls due;
- * the first refresh after that reads every loaded page, chained from the control plane's own
- * cursors, and the one after it is targeted again.
- */
-test("a periodic full sweep backs up the skip rules without replacing them", async () => {
-  const entry = (index: number): ChildSessionRegistryEntry => ({
-    toolCallId: `child-${index}`, name: `Child ${index}`,
-    status: index === 1 ? "in_progress" : "completed",
-    lifecycle: index === 1 ? "running" : "completed",
-    sourceSeq: index, startedAt: now - 30_000, lastActivityAt: now - 20_000,
-    ...(index === 1 ? {} : { completedAt: now - 20_000 }),
-    toolCount: 1,
-  });
-  const all = Array.from({ length: 250 }, (_value, index) => entry(index + 1));
-  const cursors: number[] = [];
-  const childSessions = async (
-    _id: string, _epoch: number, after = 0, limit = 50,
-  ): Promise<ChildSessionRegistryPage> => {
-    cursors.push(after);
-    const eligible = all.filter((child) => child.sourceSeq > after);
-    const children = eligible.slice(0, limit);
-    const truncated = eligible.length > children.length;
-    return { children, attentionOwners: [], unidentifiedChildren: 0, eventEpoch: 0,
-      nextAfter: truncated ? children.at(-1)!.sourceSeq : null, truncated };
-  };
-  const client: ApiClient = { ...api, childSessions };
-  const happyContainer = domWindow.document.createElement("div");
-  domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
-  const render = (session: SessionView, items: TimelineItem[]) =>
-    root.render(<ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
-      <AgentsPanel session={session} items={items} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
-        requestedId={null} onSelect={() => {}} parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
-    </StoreProvider></FeedbackProvider></ApiProvider>);
-  // Only the wall clock the panel reads is skewed; timers keep running in real time.
-  const realNow = Date.now;
-  let skew = 0;
-  Date.now = () => realNow() + skew;
-
-  try {
-    await act(async () => { render(baseSession, [startedTool("child-1", 1)]); });
-    await advance(50);
-    for (let page = 1; page < 5; page += 1) {
-      const loadMore = Array.from(container.querySelectorAll("button"))
-        .find((button) => button.textContent === "Load More Recorded Workers")!;
-      await act(async () => { (loadMore as HTMLButtonElement).click(); });
-      await advance(60);
-    }
-    assert.deepEqual(cursors, [0, 50, 100, 150, 200]);
-
-    await act(async () => {
-      render({ ...baseSession, messageCount: 11, lastEventAt: now + 1_000 }, [settledTool("child-1", 1)]);
-    });
-    await advance(1_200);
-    assert.deepEqual(cursors.slice(5), [0, 200], "before the backstop falls due, the refresh is targeted");
-
-    // A settled child off the loaded transcript reopens. Nothing the skip rules watch has moved.
-    all[99] = { ...all[99]!, status: "in_progress", lifecycle: "running" };
-    delete all[99]!.completedAt;
-    skew = REGISTRY_SWEEP_BACKSTOP_MS;
-    await act(async () => {
-      render({ ...baseSession, messageCount: 12, lastEventAt: now + 2_000 },
-        [settledTool("child-1", 1), startedTool("child-240", 2)]);
-    });
-    await advance(1_200);
-    assert.deepEqual(cursors.slice(7), [0, 50, 100, 150, 200],
-      "once the backstop is due, the refresh sweeps every loaded page from the control plane's cursors");
-
-    await act(async () => {
-      render({ ...baseSession, messageCount: 13, lastEventAt: now + 3_000 },
-        [settledTool("child-1", 1), settledTool("child-240", 2)]);
-    });
-    await advance(1_200);
-    assert.deepEqual(cursors.slice(12), [50, 200],
-      "the sweep resets the backstop, so the next refresh is targeted — and the reopened child it found now keeps its own page");
-  } finally {
-    Date.now = realNow;
-    await act(async () => { root.unmount(); });
-    container.remove();
-  }
-});
-
-/**
- * Refreshes are scheduled by transcript evidence, so a session that goes quiet schedules none. A
- * backstop that only rode on the next refresh would never run there — exactly when a skipped page
- * is most likely to stay stale. A targeted refresh therefore leaves a full read owed, paid on its
- * own timer at the deadline with no further render; once paid, a quiet panel costs nothing more.
+ * The backstop is a count of idle-cadence refreshes, not a timer: every
+ * `REGISTRY_SWEEP_EVERY_IDLE_REFRESHES`th idle refresh reads every loaded page, whatever the skip
+ * rules say, so a predicate that is ever wrong costs bounded staleness. Active-tier refreshes are
+ * roster changes, and neither count toward it nor sweep — the Nth of those stays targeted.
  *
- * The control plane moves the panel's clock past the deadline while the targeted refresh is in
- * flight, so the owed sweep falls due the moment that refresh lands, without waiting a real minute.
+ * Only the wall clock the panel reads is advanced, a cadence floor at a time, so each refresh falls
+ * due immediately while timers keep running in real time.
  */
-test("a quiet session still gets the owed full sweep, and then nothing more", async () => {
+test("the Nth idle refresh sweeps every loaded page, and the Nth active refresh does not", async () => {
   const entry = (index: number): ChildSessionRegistryEntry => ({
     toolCallId: `child-${index}`, name: `Child ${index}`,
     status: index === 1 ? "in_progress" : "completed",
@@ -538,15 +452,11 @@ test("a quiet session still gets the owed full sweep, and then nothing more", as
     toolCount: 1,
   });
   const all = Array.from({ length: 150 }, (_value, index) => entry(index + 1));
-  const realNow = Date.now;
-  let skew = 0;
   const cursors: number[] = [];
   const childSessions = async (
     _id: string, _epoch: number, after = 0, limit = 50,
   ): Promise<ChildSessionRegistryPage> => {
     cursors.push(after);
-    // The fourth request is the targeted refresh; the deadline passes while it is in flight.
-    if (cursors.length === 4) skew = REGISTRY_SWEEP_BACKSTOP_MS;
     const eligible = all.filter((child) => child.sourceSeq > after);
     const children = eligible.slice(0, limit);
     const truncated = eligible.length > children.length;
@@ -563,87 +473,10 @@ test("a quiet session still gets the owed full sweep, and then nothing more", as
       <AgentsPanel session={session} items={items} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
         requestedId={null} onSelect={() => {}} parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
     </StoreProvider></FeedbackProvider></ApiProvider>);
-  Date.now = () => realNow() + skew;
-
-  try {
-    await act(async () => { render(baseSession, [startedTool("child-1", 1)]); });
-    await advance(50);
-    for (let page = 1; page < 3; page += 1) {
-      const loadMore = Array.from(container.querySelectorAll("button"))
-        .find((button) => button.textContent === "Load More Recorded Workers")!;
-      await act(async () => { (loadMore as HTMLButtonElement).click(); });
-      await advance(60);
-    }
-    assert.deepEqual(cursors, [0, 50, 100]);
-
-    // One last change, then silence: no further render happens in this test.
-    await act(async () => {
-      render({ ...baseSession, messageCount: 11, lastEventAt: now + 1_000 }, [settledTool("child-1", 1)]);
-    });
-    await advance(1_500);
-    assert.deepEqual(cursors.slice(3), [0, 100, 0, 50, 100],
-      "the targeted refresh reads its page and the tail, then the owed sweep reads every page unprompted");
-
-    await advance(1_500);
-    assert.equal(cursors.length, 8, "with the debt paid, a quiet panel makes no further requests");
-  } finally {
-    Date.now = realNow;
-    await act(async () => { root.unmount(); });
-    container.remove();
-  }
-});
-
-/** A registry of `size` children served in exact `page()` shape, with `child-1` the one still running. */
-const servedRegistry = (size: number) => Array.from({ length: size }, (_value, index): ChildSessionRegistryEntry => ({
-  toolCallId: `child-${index + 1}`, name: `Child ${index + 1}`,
-  status: index === 0 ? "in_progress" : "completed",
-  lifecycle: index === 0 ? "running" : "completed",
-  sourceSeq: index + 1, startedAt: now - 30_000, lastActivityAt: now - 20_000,
-  ...(index === 0 ? {} : { completedAt: now - 20_000 }),
-  toolCount: 1,
-}));
-const servePage = (all: readonly ChildSessionRegistryEntry[], after: number, limit: number): ChildSessionRegistryPage => {
-  const eligible = all.filter((child) => child.sourceSeq > after);
-  const children = eligible.slice(0, limit);
-  const truncated = eligible.length > children.length;
-  return { children, attentionOwners: [], unidentifiedChildren: 0, eventEpoch: 0,
-    nextAfter: truncated ? children.at(-1)!.sourceSeq : null, truncated };
-};
-
-/**
- * The debt stays owed until a full read lands. A backstop sweep that the control plane rejects is
- * retried one backstop interval after it began — not in a hot loop, and not only if the session
- * happens to produce another event.
- */
-test("a rejected owed sweep is retried without another render", async () => {
-  const all = servedRegistry(150);
   const realNow = Date.now;
   let skew = 0;
-  const cursors: number[] = [];
-  const childSessions = async (
-    _id: string, _epoch: number, after = 0, limit = 50,
-  ): Promise<ChildSessionRegistryPage> => {
-    cursors.push(after);
-    // The fourth request is the targeted refresh: the backstop falls due while it is in flight.
-    if (cursors.length === 4) skew = REGISTRY_SWEEP_BACKSTOP_MS;
-    // The sixth is the owed sweep. It fails, and the retry interval passes while it does.
-    if (cursors.length === 6) {
-      skew = 2 * REGISTRY_SWEEP_BACKSTOP_MS;
-      throw new Error("registry unavailable");
-    }
-    return servePage(all, after, limit);
-  };
-  const client: ApiClient = { ...api, childSessions };
-  const happyContainer = domWindow.document.createElement("div");
-  domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
-  const render = (session: SessionView, items: TimelineItem[]) =>
-    root.render(<ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
-      <AgentsPanel session={session} items={items} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
-        requestedId={null} onSelect={() => {}} parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
-    </StoreProvider></FeedbackProvider></ApiProvider>);
   Date.now = () => realNow() + skew;
+  let messageCount = 10;
 
   try {
     await act(async () => { render(baseSession, [startedTool("child-1", 1)]); });
@@ -654,14 +487,35 @@ test("a rejected owed sweep is retried without another render", async () => {
       await act(async () => { (loadMore as HTMLButtonElement).click(); });
       await advance(60);
     }
-    await act(async () => {
-      render({ ...baseSession, messageCount: 11, lastEventAt: now + 1_000 }, [settledTool("child-1", 1)]);
-    });
-    await advance(1_500);
-    assert.deepEqual(cursors.slice(3), [0, 100, 0, 0, 50, 100],
-      "targeted refresh, a rejected sweep, then the retried sweep — with no render in between");
-    await advance(1_000);
-    assert.equal(cursors.length, 9, "once a sweep lands, the debt is paid and the panel goes quiet");
+    assert.deepEqual(cursors, [0, 50, 100], "three pages loaded");
+
+    // Active tier: N roster changes in a row — `child-1` flips between running and settled. Each
+    // reads its own page and the tail; none sweeps, and none counts toward the backstop.
+    for (let step = 1; step <= REGISTRY_SWEEP_EVERY_IDLE_REFRESHES; step += 1) {
+      skew += 1_000;
+      messageCount += 1;
+      const row = step % 2 === 1 ? settledTool("child-1", 1) : startedTool("child-1", 1);
+      await act(async () => { render({ ...baseSession, messageCount, lastEventAt: now + messageCount }, [row]); });
+      await advance(150);
+    }
+    // The row as the last active step left it, so the idle steps below leave the roster alone.
+    const lastRow = REGISTRY_SWEEP_EVERY_IDLE_REFRESHES % 2 === 1 ? settledTool("child-1", 1) : startedTool("child-1", 1);
+    assert.deepEqual(cursors.slice(3), Array.from({ length: REGISTRY_SWEEP_EVERY_IDLE_REFRESHES }, () => [0, 100]).flat(),
+      "the Nth active refresh is as targeted as the first");
+
+    // Idle tier: transcript progress with the roster unchanged. The first N - 1 read only the tail;
+    // the Nth sweeps every loaded page from the control plane's own cursors.
+    const beforeIdle = cursors.length;
+    for (let step = 1; step <= REGISTRY_SWEEP_EVERY_IDLE_REFRESHES; step += 1) {
+      skew += 15_000;
+      messageCount += 1;
+      await act(async () => { render({ ...baseSession, messageCount, lastEventAt: now + messageCount }, [lastRow]); });
+      await advance(150);
+    }
+    assert.deepEqual(cursors.slice(beforeIdle), [
+      ...Array.from({ length: REGISTRY_SWEEP_EVERY_IDLE_REFRESHES - 1 }, () => 100),
+      0, 50, 100,
+    ], "idle refreshes read the tail until the Nth, which reads every loaded page");
   } finally {
     Date.now = realNow;
     await act(async () => { root.unmount(); });

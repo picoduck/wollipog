@@ -32,14 +32,14 @@ const REGISTRY_IDLE_REFRESH_MS = 15_000;
 const REGISTRY_ACTIVE_REFRESH_MS = 1_000;
 /**
  * The page-selection rules decide what a refresh may skip, and each rests on a predicate about the
- * control plane — that a settled child stays settled, that a loaded transcript row is current. A
- * refresh at least this long after the last full read sweeps every loaded page regardless, and a
- * targeted refresh leaves a full read owed that is paid at this deadline even if the session goes
- * quiet. A predicate that is ever wrong therefore costs at most this much staleness, never a
- * permanently stale row, and full reads happen at most once per interval instead of on every
- * refresh (#1290). A panel with nothing owed still costs no requests at all.
+ * control plane — that a settled child stays settled, that a loaded transcript row is current. Every
+ * Nth idle-cadence refresh sweeps every loaded page regardless (N = 4, about once a minute at the
+ * 15 s idle tick), so a predicate that is ever wrong costs bounded staleness, never a permanently
+ * stale row (#1290). The backstop is a count, not a timer: it arms nothing, so nothing outlives the
+ * panel, and a rejected sweep is simply retried at the next Nth idle refresh. Active-tier refreshes
+ * neither count nor sweep, so roster changes keep their targeted cost.
  */
-export const REGISTRY_SWEEP_BACKSTOP_MS = 60_000;
+export const REGISTRY_SWEEP_EVERY_IDLE_REFRESHES = 4;
 type RegistryRetry = { generation: string; after: number; attempt: number };
 
 export function mergeDurableAgents(
@@ -229,7 +229,8 @@ export type RegistryRefreshPlan =
  * A changed child the registry has not placed defeats all three rules: it has no page, and the
  * tail cursor cannot return it if the control plane sorted it in mid-registry. That case sweeps
  * every loaded page, as every refresh did before #1290, rather than losing the child. So does a
- * refresh the caller marks `sweepDue`, the periodic backstop behind all of the rules above.
+ * refresh the caller marks `sweepDue`: every Nth idle-cadence refresh, the backstop behind all
+ * of the rules above.
  */
 export function registryRefreshPlan(
   registry: readonly ChildSessionRegistryEntry[],
@@ -376,23 +377,7 @@ export function AgentsPanel(props: Props) {
   const registryRequest = useRef<string | null>(null);
   const registryRef = useRef<ChildSessionRegistryEntry[] | null>(null);
   const lastRegistryRefresh = useRef(0);
-  const lastRegistrySweep = useRef(0);
-  // The earliest a failed sweep is retried: one backstop interval after it began, so a failing
-  // control plane sees at most one sweep attempt per interval rather than a hot retry loop.
-  const sweepRetryAt = useRef(0);
-  const sweepTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const panelDisposed = useRef(false);
-  // The owed sweep fires after the render that armed it, so it reads the evidence current then.
-  const latestRefreshInputs = useRef({ rosterKey, progressKey, agentFingerprints, loadedAgentIds });
-  useEffect(() => { latestRefreshInputs.current = { rosterKey, progressKey, agentFingerprints, loadedAgentIds }; });
-  useEffect(() => {
-    panelDisposed.current = false;
-    return () => {
-      panelDisposed.current = true;
-      clearTimeout(sweepTimer.current);
-      sweepTimer.current = undefined;
-    };
-  }, []);
+  const idleRefreshes = useRef(0);
   const registryGeneration = `${session.id}:${session.eventEpoch ?? 0}`;
   useEffect(() => { registryRef.current = registry; }, [registry]);
   const loadRegistry = (after: number, attempt = 0) => {
@@ -444,35 +429,13 @@ export function AgentsPanel(props: Props) {
       }
     });
   };
-  const sweepDeadline = () => Math.max(lastRegistrySweep.current + REGISTRY_SWEEP_BACKSTOP_MS, sweepRetryAt.current);
-  // A full read is owed from the moment a refresh reads less than everything, and stays owed until
-  // one lands: a targeted refresh arms it, and so does any refresh that is rejected or superseded.
-  // Nothing else schedules a refresh once the session goes quiet, so the debt is paid on its own
-  // timer at the backstop deadline.
-  const oweSweep = () => {
-    if (panelDisposed.current || sweepTimer.current !== undefined) return;
-    const fire = () => {
-      const remaining = sweepDeadline() - Date.now();
-      // Never take the request slot from a page load or retry in flight; come back shortly.
-      if (remaining > 0 || registryRequest.current !== null) {
-        sweepTimer.current = setTimeout(fire, Math.max(remaining, REGISTRY_ACTIVE_REFRESH_MS));
-        return;
-      }
-      sweepTimer.current = undefined;
-      const latest = latestRefreshInputs.current;
-      refreshedRosterKey.current = latest.rosterKey;
-      refreshRegistry(`${latest.progressKey}:backstop`,
-        changedRosterIds(refreshedFingerprints.current, latest.agentFingerprints), latest.loadedAgentIds,
-        latest.agentFingerprints);
-    };
-    sweepTimer.current = setTimeout(fire, Math.max(0, sweepDeadline() - Date.now()));
-  };
   const refreshRegistry = (
     progress: string, changedIds: ReadonlySet<string>, loadedIds: ReadonlySet<string>,
     // Banked only once the pages are merged: a refresh that fails or is abandoned must leave the
     // evidence it was chasing unspent, or its pages are never selected again and the panel keeps
     // showing what it failed to re-read.
     refreshedTo: ReadonlyMap<string, string>,
+    sweepDue: boolean,
   ) => {
     const key = `${session.id}:${session.eventEpoch ?? 0}:refresh:${progress}`;
     if (registryRequest.current === key) return;
@@ -480,27 +443,12 @@ export function AgentsPanel(props: Props) {
     lastRegistryRefresh.current = Date.now();
     setRegistryLoading(true);
     const held = registryRef.current ?? [];
-    const startedAt = Date.now();
-    const plan = registryRefreshPlan(held, changedIds, loadedIds, PAGE_SIZE,
-      startedAt - lastRegistrySweep.current >= REGISTRY_SWEEP_BACKSTOP_MS);
-    // Whatever becomes of this refresh, a full read stays owed unless one has landed since it began.
-    // The generation reset counts as one, so a refresh superseded by it arms nothing.
-    const stillOwed = () => lastRegistrySweep.current < startedAt;
+    const plan = registryRefreshPlan(held, changedIds, loadedIds, PAGE_SIZE, sweepDue);
     void (async () => {
       const { pages, last } = await readRegistryRefresh(plan,
         (after) => api.childSessions(session.id, session.eventEpoch ?? 0, after, PAGE_SIZE));
-      if (registryRequest.current !== key) {
-        if (stillOwed()) oweSweep();
-        return;
-      }
+      if (registryRequest.current !== key) return;
       refreshedFingerprints.current = refreshedTo;
-      if (plan.kind === "sweep") {
-        lastRegistrySweep.current = startedAt;
-        clearTimeout(sweepTimer.current);
-        sweepTimer.current = undefined;
-      } else {
-        oweSweep();
-      }
       setRegistry(mergeRefreshedRegistryPages(held, pages));
       setAttentionOwners(last.attentionOwners);
       setUnidentifiedChildren(last.unidentifiedChildren);
@@ -510,8 +458,6 @@ export function AgentsPanel(props: Props) {
       setRegistryRetryAfter(null);
       setRegistryRetryExhausted(false);
     })().catch(() => {
-      if (plan.kind === "sweep") sweepRetryAt.current = startedAt + REGISTRY_SWEEP_BACKSTOP_MS;
-      if (stillOwed()) oweSweep();
       if (registryRequest.current !== key) return;
       setRegistryUnavailable(true);
     }).finally(() => {
@@ -533,11 +479,7 @@ export function AgentsPanel(props: Props) {
     registryRequest.current = null;
     refreshedRosterKey.current = rosterKey;
     refreshedFingerprints.current = agentFingerprints;
-    // The opening load reads the only page the panel holds, which is a full read.
-    lastRegistrySweep.current = Date.now();
-    sweepRetryAt.current = 0;
-    clearTimeout(sweepTimer.current);
-    sweepTimer.current = undefined;
+    idleRefreshes.current = 0;
     loadRegistry(0);
     // Registry generations are scoped by exact session + event epoch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -572,9 +514,13 @@ export function AgentsPanel(props: Props) {
         // request slot away from the page load still in flight.
         if (remaining() > 0) return arm();
         refreshedRosterKey.current = rosterKey;
+        // Only the idle tier counts toward the backstop, so a burst of roster changes on the 1 s
+        // tier never turns into full sweeps.
+        const sweepDue = !rosterChanged &&
+          (idleRefreshes.current = idleRefreshes.current + 1) % REGISTRY_SWEEP_EVERY_IDLE_REFRESHES === 0;
         refreshRegistry(progressKey,
           changedRosterIds(refreshedFingerprints.current, agentFingerprints), loadedAgentIds,
-          agentFingerprints);
+          agentFingerprints, sweepDue);
       }, remaining());
     };
     arm();
