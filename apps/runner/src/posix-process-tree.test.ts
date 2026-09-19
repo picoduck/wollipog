@@ -240,3 +240,76 @@ test("concurrent termination callers share one active attempt", async () => {
   assert.equal(await first, true);
   assert.equal(terminatePosixProcessBoundaries(owner).length, 0);
 });
+
+test("the root group is frozen before any descendant enumeration runs", async () => {
+  const owner = {};
+  const runtime = scriptedRuntime([processTable(root), processTable(root), processTable(), processTable()]);
+  const baseList = runtime.listProcesses.bind(runtime);
+  let signalsBeforeFirstEnumeration: Array<[number, NodeJS.Signals]> | undefined;
+  runtime.listProcesses = async () => {
+    signalsBeforeFirstEnumeration ??= [...runtime.signals];
+    return baseList();
+  };
+  const boundary = new PosixProcessBoundary(root.pid, owner, undefined, runtime);
+
+  assert.equal(await boundary.terminate(), true);
+  // Enumeration reads the whole process table and is slow under load. A stop that waits for it
+  // lets the process it is stopping run on — and keep writing — long after the caller was told it
+  // had been killed, so the freeze has to be the first thing that happens.
+  assert.deepEqual(
+    signalsBeforeFirstEnumeration,
+    [[-root.pid, "SIGSTOP"]],
+    "the root group is stopped before the first process-table read, not after it",
+  );
+  assert.ok(
+    runtime.signals.some(([pid, signal]) => pid === -root.pid && signal === "SIGCONT"),
+    "a group frozen before enumeration is always resumed",
+  );
+  assert.equal(terminatePosixProcessBoundaries(owner).length, 0);
+});
+
+test("a marker-only boundary never group-signals the runner's own process group", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const marked: PosixProcessIdentity = { pid: 101, ppid: 1, state: "S", startedAt: "marked-start" };
+  const runtime = scriptedRuntime([
+    new Error("injected initial enumeration failure"),
+    processTable(marked),
+    processTable(marked),
+    processTable(),
+    processTable(),
+  ]);
+  runtime.listMarkers = async (table) => new Map([["runner-marker", new Set(table.keys())]]);
+  // Reconstructed marker-backed boundaries carry root PID 0, which `kill(-pid)` resolves to the
+  // runner's own process group. Both the stop path and its enumeration-failure fallback must
+  // refuse it outright rather than signal the runner and everything it is hosting.
+  const boundary = new PosixProcessBoundary(0, undefined, "runner-marker", runtime);
+
+  assert.equal(await boundary.terminate(), false, "an enumeration failure keeps the boundary retryable");
+  assert.equal(await boundary.terminate(), true);
+  assert.equal(
+    runtime.signals.some(([pid]) => pid <= 0),
+    false,
+    "no signal is ever addressed to PID 0 or a negative group derived from it",
+  );
+  assert.ok(runtime.signals.some(([pid, signal]) => pid === marked.pid && signal === "SIGTERM"));
+});
+
+test("a reaped root is never signalled through its recyclable process group", async () => {
+  const marked: PosixProcessIdentity = { pid: 101, ppid: 1, state: "S", startedAt: "marked-start" };
+  const runtime = scriptedRuntime([processTable(marked), processTable(marked), processTable(), processTable()]);
+  runtime.listMarkers = async (table) => new Map([["owner-a", new Set(table.keys())]]);
+  const boundary = new PosixProcessBoundary(root.pid, undefined, "owner-a", runtime);
+  // Once Node has waited on the root, its PID may already name somebody else's process group.
+  boundary.markRootExited();
+
+  assert.equal(await boundary.terminate(), true);
+  assert.equal(
+    runtime.signals.some(([pid]) => pid < 0),
+    false,
+    "a reaped root PID is never used as a process group",
+  );
+  assert.ok(
+    runtime.signals.some(([pid, signal]) => pid === marked.pid && signal === "SIGTERM"),
+    "descendants proven by the exact marker are still terminated by identity",
+  );
+});

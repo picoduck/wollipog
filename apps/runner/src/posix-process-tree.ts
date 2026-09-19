@@ -413,15 +413,33 @@ export class PosixProcessBoundary {
     }
   }
 
+  /** Signal the whole root group without an ownership snapshot.
+   *
+   * Two conditions make the bare negative PID safe, and neither may be skipped:
+   *
+   * - The root PID must name a real process group. A marker-only boundary carries root PID 0, and
+   *   `kill(-0, …)` signals the RUNNER'S OWN process group; `kill(-1, …)` signals every process the
+   *   runner may signal. Both are catastrophic, so only a root PID above 1 may be used this way.
+   * - Node must not have reaped the root yet. A PID that has not been waited on cannot be recycled,
+   *   so the group carrying that ID is still exactly this root's group. After waitpid-backed exit
+   *   the numeric PGID may belong to anyone and is permanently unsafe. */
+  private signalRootGroupUnverified(signal: NodeJS.Signals): boolean {
+    if (this.rootPid <= 1 || this.rootExited) return false;
+    try {
+      (this.testRuntime?.signal ?? globalThis.process.kill.bind(globalThis.process))(-this.rootPid, signal);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private async fallbackRootGroupAfterEnumerationFailure(): Promise<void> {
-    // Preserve main's dependency-free TERM/KILL path only while Node has not observed root exit.
-    // After waitpid-backed exit, the numeric PGID may be recycled and is permanently unsafe.
-    if (this.rootExited) return;
-    const kill = this.testRuntime?.signal ?? globalThis.process.kill.bind(globalThis.process);
-    try { kill(-this.rootPid, "SIGTERM"); } catch { return; }
+    // Preserve main's dependency-free TERM/KILL path.
+    if (!this.signalRootGroupUnverified("SIGTERM")) return;
+    // A group frozen before enumeration cannot act on SIGTERM until it is resumed.
+    this.signalRootGroupUnverified("SIGCONT");
     await this.sleep(2_000);
-    if (this.rootExited) return;
-    try { kill(-this.rootPid, "SIGKILL"); } catch { /* already gone */ }
+    this.signalRootGroupUnverified("SIGKILL");
   }
 
   /** Freeze the original group first, then close over escaped process groups by parent identity.
@@ -449,6 +467,12 @@ export class PosixProcessBoundary {
   private async terminateOnce(): Promise<boolean> {
     let table: PosixProcessTable | undefined;
     const frozen = new Map<number, PosixProcessIdentity>();
+    // Freeze the root group before anything is enumerated. Descendant discovery reads the whole
+    // process table, which on a loaded machine takes long enough — seconds, with a marker scan over
+    // a thousand processes — for the step being stopped to run to completion and keep writing to
+    // the worktree after the caller was told it was killed. Stopping first makes the caller's
+    // observation true immediately and closes the fork window the discovery passes exist to close.
+    const earlyFrozen = this.signalRootGroupUnverified("SIGSTOP");
     try {
       // Do not make an ownership-critical stop decision from a possibly stale shared monitor read.
       table = await this.refreshFresh();
@@ -479,17 +503,27 @@ export class PosixProcessBoundary {
         for (const process of frozen.values()) this.signal(process, table, "SIGCONT");
         this.signalRootGroup(table, "SIGCONT");
       }
+      // fallbackRootGroupAfterEnumerationFailure resumes the group after its SIGTERM; without a
+      // table the ownership-checked resume above cannot run, and this is the only path back.
       await this.fallbackRootGroupAfterEnumerationFailure();
       return false;
     }
 
     // The successful try path always assigns table before any later use.
-    if (!table) return false;
+    if (!table) {
+      if (earlyFrozen) this.signalRootGroupUnverified("SIGCONT");
+      return false;
+    }
 
     for (const process of liveOwned(this.owned, table)) this.signal(process, table, "SIGTERM");
     this.signalRootGroup(table, "SIGTERM");
     for (const process of liveOwned(this.owned, table)) this.signal(process, table, "SIGCONT");
     this.signalRootGroup(table, "SIGCONT");
+    // The ownership-checked resume above is skipped once the root leaves the process table, which
+    // freezing this early makes reachable: the last snapshot can lose the root before Node has
+    // dispatched the exit event that would retire the boundary. Resume the group directly too, so
+    // surviving members of a group this call froze are never left stopped for good.
+    if (earlyFrozen) this.signalRootGroupUnverified("SIGCONT");
 
     const gracefulDeadline = this.now() + 2_000;
     while (this.now() < gracefulDeadline) {
