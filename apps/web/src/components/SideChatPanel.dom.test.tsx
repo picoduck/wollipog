@@ -11,7 +11,15 @@ import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime } from "../ui-transport.js";
 import type { View, ViewNavigation } from "../navigation.js";
 import { SideChatPanel, sideChatComposerUnavailable } from "./SideChatPanel.js";
-import { clearPanelScratch } from "../right-panel-scratch.js";
+import {
+  clearPanelScratch,
+  clearPanelScratchIf,
+  dropPanelScratchMemory,
+  panelScratchRevision,
+  panelScratchScopeKey,
+  readPanelScratch,
+  writePanelScratch,
+} from "../right-panel-scratch.js";
 
 /**
  * Panel scratch survives unmount on purpose (#1202), and these cases share one session id — so
@@ -386,6 +394,167 @@ test("a replaced child carries neither the retired transcript nor its insert act
     assert.equal(button("Insert Latest Response into Primary Draft"), undefined,
       "nor its route back into the primary composer");
     assert.deepEqual(inserted, []);
+  } finally {
+    await act(async () => { root.unmount(); });
+    Object.assign(api, originals);
+    container.remove();
+  }
+});
+
+/**
+ * Shared set-up for the late-send cases (#1284): a live side chat whose prompt stays pending until
+ * the test releases it, and a way to mount the panel again in a fresh root — which is what a right
+ * panel mode switch there and back does to it.
+ */
+function lateSendHarness() {
+  const originals = {
+    sideChat: api.sideChat,
+    session: api.session,
+    getSessionEventPage: api.getSessionEventPage,
+    prompt: api.prompt,
+  };
+  const prompted: string[] = [];
+  let release: (() => void) | undefined;
+  api.sideChat = async () => ({ sideChat: relation });
+  api.session = async () => ({ session: child });
+  api.getSessionEventPage = async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true });
+  api.prompt = (_id: string, text: string) => {
+    prompted.push(text);
+    return new Promise<SessionView>((resolve) => { release = () => resolve(child); });
+  };
+  const mounted: Array<{ root: ReturnType<typeof createRoot>; container: HTMLDivElement }> = [];
+  const open = async () => {
+    const happyContainer = domWindow.document.createElement("div");
+    domWindow.document.body.append(happyContainer);
+    const container = happyContainer as unknown as HTMLDivElement;
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    await act(async () => {
+      root.render(mount(<SideChatPanel session={parent} runnerOnline onInsertDraft={() => {}} />, []));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const textarea = () => container.querySelector("textarea") as HTMLTextAreaElement;
+    const sendButton = () => Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent === "Send" || button.textContent === "Sending…") as HTMLButtonElement;
+    const close = async () => { await act(async () => { root.unmount(); }); container.remove(); };
+    return { textarea, sendButton, close };
+  };
+  const resolveSend = async () => {
+    await act(async () => {
+      release!();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  };
+  const restore = async () => {
+    for (const { root, container } of mounted) {
+      await act(async () => { root.unmount(); });
+      container.remove();
+    }
+    Object.assign(api, originals);
+  };
+  return { open, resolveSend, restore, prompted };
+}
+
+test("a send that lands after the panel was switched away and back empties the remounted composer", async () => {
+  const harness = lateSendHarness();
+  try {
+    const first = await harness.open();
+    await act(async () => {
+      first.textarea().value = "sent while switching away";
+      fireDomEvent.change(first.textarea());
+    });
+    await act(async () => { first.sendButton().click(); });
+    assert.deepEqual(harness.prompted, ["sent while switching away"]);
+
+    // The user switches right panel mode, and back, before the control plane answers.
+    await first.close();
+    const second = await harness.open();
+    assert.equal(second.textarea().value, "sent while switching away",
+      "the draft is still preserved while its send has not landed");
+    assert.equal(second.sendButton().disabled, true, "the remounted panel does not offer a duplicate send");
+    assert.equal(second.sendButton().textContent, "Sending…");
+
+    await harness.resolveSend();
+    assert.equal(second.textarea().value, "", "sent text is not left in the remounted composer");
+    assert.equal(harness.prompted.length, 1);
+
+    // A reload after that send must not bring the text back from the persisted record either.
+    await second.close();
+    dropPanelScratchMemory();
+    assert.equal(readPanelScratch(panelScratchScopeKey(parent.id), "sidechat.draft"), undefined);
+    const reloaded = await harness.open();
+    assert.equal(reloaded.textarea().value, "", "a reload does not restore text that was sent");
+  } finally {
+    await harness.restore();
+  }
+});
+
+test("a late send never clears what the user typed into the remounted composer", async () => {
+  const harness = lateSendHarness();
+  try {
+    const first = await harness.open();
+    await act(async () => {
+      first.textarea().value = "first message";
+      fireDomEvent.change(first.textarea());
+    });
+    await act(async () => { first.sendButton().click(); });
+    await first.close();
+
+    const second = await harness.open();
+    await act(async () => {
+      second.textarea().value = "a follow-up written while it was sending";
+      fireDomEvent.change(second.textarea());
+    });
+    await harness.resolveSend();
+    assert.equal(second.textarea().value, "a follow-up written while it was sending");
+    assert.equal(second.sendButton().disabled, false, "the send settled, so the new draft can go");
+
+    await second.close();
+    dropPanelScratchMemory();
+    const reloaded = await harness.open();
+    assert.equal(reloaded.textarea().value, "a follow-up written while it was sending",
+      "the unsent follow-up still survives a reload");
+  } finally {
+    await harness.restore();
+  }
+});
+
+/**
+ * Cross-model review CR-1.1. A send can land after a remounted panel restored its draft but before
+ * that panel's effects run — too early for it to be listening — and its write-back then put the
+ * sent text straight back into the store, and so into the next reload.
+ */
+test("a draft consumed before the remounted panel's effects run is not written back", async () => {
+  const originals = { sideChat: api.sideChat, session: api.session, getSessionEventPage: api.getSessionEventPage };
+  api.sideChat = async () => ({ sideChat: relation });
+  api.session = async () => ({ session: child });
+  api.getSessionEventPage = async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true });
+  const scope = panelScratchScopeKey(parent.id);
+  writePanelScratch(scope, "sidechat.draft", "on its way", "draft");
+  const sentRevision = panelScratchRevision(scope, "sidechat.draft");
+
+  /** Renders after the panel in the same pass, so it runs after the restore and before any effect. */
+  function LandTheSend() {
+    clearPanelScratchIf(scope, "sidechat.draft", "on its way", sentRevision);
+    return null;
+  }
+
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(mount(<>
+        <SideChatPanel session={parent} runnerOnline onInsertDraft={() => {}} />
+        <LandTheSend />
+      </>, []));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined, "the sent draft is not written back");
+    assert.equal((container.querySelector("textarea") as HTMLTextAreaElement).value, "");
+    dropPanelScratchMemory();
+    assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined, "nor restored by a reload");
   } finally {
     await act(async () => { root.unmount(); });
     Object.assign(api, originals);
