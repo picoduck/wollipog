@@ -19821,6 +19821,17 @@ export class ControlPlaneDb {
     }
   }
 
+  /** How much agents have attached to one session. Sizes are summed per artifact, so identical
+   * captures that share one content-addressed blob still count each time: the bound is on what was
+   * asked for, which is what a runaway loop controls. */
+  sessionAgentScreenshotUsage(sessionId: string): { count: number; bytes: number } {
+    const row = this.stmt(
+      `SELECT COUNT(*) AS count, COALESCE(SUM(size_bytes), 0) AS bytes FROM artifacts
+       WHERE session_id=? AND kind='screenshot' AND created_by_kind='agent'`,
+    ).get(sessionId) as unknown as { count: number; bytes: number };
+    return { count: Number(row.count), bytes: Number(row.bytes) };
+  }
+
   /** Exact verified bytes for authenticated raw delivery. */
   readWorkflowArtifactBytes(artifactId: string): Buffer | null {
     const row = this.stmt(

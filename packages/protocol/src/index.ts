@@ -505,7 +505,14 @@
 //      already hold. No wire shape changes; the control plane uses the version only to decide
 //      whether a Pi session may join the automatic mid-turn steering lane. A pre-v168 runner keeps
 //      Pi on queue-only admission, because its driver can still deliver such a message twice.
-export const PROTOCOL_VERSION = 168;
+// 169: an agent can attach an image file to its own session without the bytes entering the
+//      model's context. The control plane gains POST /api/sessions/:id/artifacts/screenshots,
+//      which confines a session credential to its own session and answers with metadata only; the
+//      runner's management tool attach_session_artifact (CLI: `wollipog artifact attach`) reads a
+//      named file on the runner host, uploads it there, and returns the artifact id, media type,
+//      size, and SHA-256. The gate runs runner-to-control-plane: the tool refuses a pre-v169
+//      control plane, which has no such route, rather than falling back to a base64 tool argument.
+export const PROTOCOL_VERSION = 169;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -714,6 +721,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * Gates Pi's admission to the automatic mid-turn steering lane; an older runner would re-queue
    * such a steer as an ordinary prompt and deliver the message twice. */
   piAcknowledgedSteerUncertain: 168,
+  /** Control plane serves the session-scoped screenshot attach route. Checked by the runner's
+   * attach_session_artifact tool against the connected control plane, not against a runner. */
+  sessionArtifactFileAttach: 169,
   worktreeSetup: 141,
   worktreeTeardownPorts: 145,
   worktreeSetupConfig: 146,
@@ -5644,6 +5654,16 @@ export interface CreateWorkflowArtifactRequest {
   name: string;
   mimeType: string;
   encoding: WorkflowArtifactEncoding;
+  data: string;
+  metadata?: Record<string, WorkflowArtifactMetadataValue>;
+}
+
+/** Body of POST /api/sessions/:id/artifacts/screenshots. The session comes from the route and the
+ * kind and encoding are fixed, so a caller cannot redirect or retype the upload. */
+export interface AttachSessionScreenshotRequest {
+  name: string;
+  mimeType: string;
+  /** Base64 of the exact file bytes. */
   data: string;
   metadata?: Record<string, WorkflowArtifactMetadataValue>;
 }

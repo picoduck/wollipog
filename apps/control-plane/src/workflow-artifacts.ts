@@ -18,6 +18,12 @@ const KIND_CONTRACT: Record<WorkflowArtifactKind, { encoding: CreateWorkflowArti
 export type ValidatedWorkflowArtifact = CreateWorkflowArtifactRequest & { sizeBytes: number; sha256: string };
 export type ArtifactValidation = { ok: true; value: ValidatedWorkflowArtifact } | { ok: false; error: string };
 
+/** Attaching from a file is cheap for an agent, so a loop could otherwise fill the control plane's
+ * disk. These bound what agents may attach to one session; they are far above any real review
+ * (a thorough one has tens of captures) and do not limit prompt images or human uploads. */
+export const MAX_SESSION_ATTACHED_SCREENSHOTS = 256;
+export const MAX_SESSION_ATTACHED_SCREENSHOT_BYTES = 512 * 1024 * 1024;
+
 export function screenshotBytesMatchMime(mimeType: string, bytes: Buffer): boolean {
   if (mimeType === "image/png") {
     return bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));

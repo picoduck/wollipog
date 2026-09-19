@@ -67,6 +67,7 @@ import {
   type CompleteWorkflowAttemptRequest,
   type DispatchWorkflowNodeRequest,
   type CreateWorkflowArtifactRequest,
+  type AttachSessionScreenshotRequest,
   type CreateSessionRequest,
   type DescendantRequestResolution,
   type CreateWorkflowDecisionRequest,
@@ -5006,6 +5007,19 @@ app.post("/api/artifacts/screenshots", { bodyLimit: 11 * 1024 * 1024 }, async (r
   const body = req.body as CreateWorkflowArtifactRequest;
   if (body?.kind !== "screenshot") return reply.code(400).send({ error: "this route accepts screenshot artifacts only" });
   return respond(reply, svc.createWorkflowArtifact(body, workflowActor(req)));
+});
+
+// The file-based attach path. The session is the route parameter, so the auth gate confines a
+// session credential to its own row before this runs; kind and encoding are fixed here rather than
+// taken from the caller. The answer is metadata only — the uploaded bytes are never echoed back,
+// because the caller is a tool whose result reaches a model.
+app.post("/api/sessions/:id/artifacts/screenshots", { bodyLimit: 11 * 1024 * 1024 }, async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const body = (req.body ?? {}) as Partial<AttachSessionScreenshotRequest>;
+  const created = svc.attachSessionScreenshot(id, body, workflowActor(req));
+  if (!created.ok || !created.data) return respond(reply, created);
+  const { data: _bytes, ...artifact } = created.data;
+  return reply.code(201).send(artifact);
 });
 
 app.get("/api/artifacts/:artifactId", async (req, reply) =>

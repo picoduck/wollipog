@@ -38,12 +38,13 @@ wollipog worktree create [--session ID] --branch NAME [--base REF] --json
 wollipog worktree attach [--session ID] --path PATH --json
 wollipog worktree select [--session ID] --path PATH --json
 wollipog worktree discard [--session ID] --path PATH --json
+wollipog artifact attach --file PATH [--name NAME] [--session ID] --json
 wollipog admin <pairing-url|status|user list|device list|device create|device revoke|runner-credential ...> [--json]
 wollipog service <install|status|restart|logs|upgrade|uninstall> [options]
 wollipog doctor
 wollipog update
 wollipog pair <create|list|revoke|url> [options]
-wollipog help [doctor|update|pair|service|admin|session|worktree]
+wollipog help [doctor|update|pair|service|admin|session|worktree|artifact]
 ```
 
 `wollipog admin` is host administration for an SSH operator on the control-plane machine. It
@@ -338,6 +339,32 @@ fetches a child-supplied URL; the URI is display material for the human reviewer
 unavailability is reported as `uiEvidenceReview.reasonCode` and `reason` on the campaign projection.
 A human fallback is scoped to that one decision: other children and other assigned categories are
 unaffected.
+
+#### Attaching Evidence From a File
+
+A child makes an item reviewable by attaching the capture to its own session with
+`attach_session_artifact` (`path`, optional `name`), or from a shell with
+`wollipog artifact attach --file <path>`. Protocol v168. The file is read on the runner host and
+uploaded directly, so its bytes never enter the model's context; passing an image as base64 through
+`create_workflow_artifact` costs tens of thousands of tokens per capture and is not a usable path.
+
+The tool takes an absolute path because the management server's working directory is the provider's
+launch directory, not the agent's; the CLI resolves a relative `--file` against its own. It accepts a
+regular file of at most 8 MiB whose **content** is PNG, JPEG, GIF, or WebP — the media type is sniffed
+from the bytes, never taken from the name — and refuses a missing, unreadable, empty, oversized, or
+non-regular file without creating anything. It answers with `artifactId`, `mediaType`, `sizeBytes`,
+and `sha256` only, after checking that the control plane's digest of the stored bytes equals the
+file's. Those are exactly the values to cite in the evidence item.
+
+The upload goes to `POST /api/sessions/:id/artifacts/screenshots`, where the session is the route
+parameter and the kind and encoding are fixed, so a body cannot redirect or retype it, and the
+response never echoes the bytes. A session credential may attach only to its own session: not to a
+descendant, an ancestor, or any other session it can see, because an artifact's session is what
+proves who produced it. The route is outside the Orchestrator allowlist, since an Orchestrator
+reviews evidence rather than producing it. Because attaching is cheap, what agents attach to one
+session is bounded at 256 screenshots and 512 MiB, refused with `409` before the upload is decoded;
+prompt images and a human's own uploads are neither counted nor limited. Against a pre-v168 control plane the tool refuses with the
+version to upgrade to instead of falling back to a base64 argument.
 
 The Orchestrator inspects evidence with `review_descendant_ui_evidence` (`sessionId`,
 `occurrenceId`, `evidenceId`). Delivery re-runs every gate that guards resolution — root campaign

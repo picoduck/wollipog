@@ -134,6 +134,7 @@ const AGENT_CONTROL_API_ROUTES = new Set([
   "POST /api/workflow-attempts/:attemptId/complete",
   "POST /api/artifacts",
   "POST /api/artifacts/screenshots",
+  "POST /api/sessions/:id/artifacts/screenshots",
 ]);
 
 const ORCHESTRATOR_API_ROUTES = new Set([

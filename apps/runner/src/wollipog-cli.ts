@@ -1,6 +1,7 @@
 /** Provider-neutral Wollipog CLI plus the general stdio MCP entrypoint. */
 
 import { readFileSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 import { createHash } from "node:crypto";
 import {
   PROTOCOL_VERSION,
@@ -17,7 +18,7 @@ import {
 import { VERSION } from "./version.js";
 import { defaultHostAdminIo, hostAdminUsage, runHostAdminCli, type HostAdminIo } from "./host-admin-cli.js";
 import { defaultServiceHost, defaultServiceIo, runServiceCli, serviceUsage } from "./service-cli.js";
-import { expandCommandAlias, initHelp, pairHelp, resolveHelp, rootHelp, sessionHelp, worktreeHelp } from "./wollipog-help.js";
+import { artifactHelp, expandCommandAlias, initHelp, pairHelp, resolveHelp, rootHelp, sessionHelp, worktreeHelp } from "./wollipog-help.js";
 import { resolveWorktreeSetupRepositoryRoot, writeStarterWorktreeSetupConfig } from "./worktree-setup-generator.js";
 
 type Write = (text: string) => void;
@@ -66,7 +67,7 @@ function positional(args: string[]): string[] {
     "--url", "--token-file", "--runner", "--agent", "--workspace", "--path", "--prompt",
     "--title", "--model", "--effort", "--permission-mode", "--after", "--limit", "--for", "--timeout",
     "--interval", "--cost-budget", "--max-tool-calls", "--session", "--branch", "--base", "--base-ref",
-    "--max-child-sessions", "--offset",
+    "--max-child-sessions", "--offset", "--file", "--name",
   ]);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -128,6 +129,23 @@ function invocationArgs(argv: string[]): string[] {
 
 function command(args: string[]): { tool: string; input: Record<string, unknown> } | { error: string } {
   const words = positional(args);
+  if (words[0] === "artifact" || words[0] === "artifacts") {
+    if (words[1] !== "attach") return { error: artifactHelp() };
+    const file = option(args, "--file");
+    if (!file) return { error: "artifact attach requires --file" };
+    const sessionId = option(args, "--session");
+    const name = option(args, "--name");
+    return {
+      tool: "attach_session_artifact",
+      input: {
+        // The tool requires an absolute path because the MCP server's working directory is not the
+        // agent's. Here the working directory IS the caller's, so a relative path means what it says.
+        path: resolvePath(file),
+        ...(name ? { name } : {}),
+        ...(sessionId ? { sessionId } : {}),
+      },
+    };
+  }
   if (words[0] === "worktree" || words[0] === "worktrees") {
     const verb = words[1];
     const sessionId = option(args, "--session");
@@ -393,6 +411,8 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControlReasoningEffort
     : parsed.tool === "discard_worktree"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRetirement
+    : parsed.tool === "attach_session_artifact"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionArtifactFileAttach
     : worktreeTools.has(parsed.tool)
       ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktrees
       : RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControl;
