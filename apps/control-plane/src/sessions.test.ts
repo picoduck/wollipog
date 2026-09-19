@@ -4026,7 +4026,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
         eventSeq: runnerSeq,
       };
     };
-    const arm = async (pullRequest = 1140, expectedStatus: 200 | 409 = 200) => {
+    const arm = async (pullRequest = 1140, expectedStatus: 200 | 409 = 200, target: SessionView = child) => {
       const headSha = String(pullRequest).padStart(40, "a").slice(-40);
       const snapshot = {
         category: "pr_merge" as const,
@@ -4039,16 +4039,16 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
           checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }],
         },
       };
-      const decision = svc.createWorkflowDecision(child.id, {
+      const decision = svc.createWorkflowDecision(target.id, {
         requestId: `guardian-${pullRequest}-${++sequence}`,
         resourceKey: `picoduck/wollipog#${pullRequest}`,
         resourceSnapshot: snapshot,
       });
       assert.ok(decision.ok && decision.data, decision.error);
-      assert.ok(svc.resolveDescendantRequest(parent.data!.id, child.id, decision.data.occurrenceId,
+      assert.ok(svc.resolveDescendantRequest(parent.data!.id, target.id, decision.data.occurrenceId,
         { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
       const command = canonicalPrMergeEnqueueCommand(snapshot);
-      const armed = await svc.consumeWorkflowDecision(child.id, decision.data.occurrenceId, {
+      const armed = await svc.consumeWorkflowDecision(target.id, decision.data.occurrenceId, {
         resourceSnapshot: snapshot,
         action: { kind: "pr_merge_enqueue", command },
       });
@@ -4437,7 +4437,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
   };
 
   await t.test("a Claude Code child's receipt-less merge is consumed by forge reconciliation (#1351)", async () => {
-    const { db, hub, svc, child, arm } = setup(AGENT_ID);
+    const { db, hub, svc, child, createChild, arm } = setup(AGENT_ID);
     try {
       // Auto and Full Access run the enqueue without a permission prompt, so no receipt ever arrives.
       const armed = await arm(1351);
@@ -4480,6 +4480,18 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       );
       assert.equal(reused.status, 409, "one merged head cannot settle a second occurrence");
       assert.equal(db.workflowDecisionByOccurrence(twin.decision.occurrenceId)?.status, "approved");
+
+      const sibling = createChild(AGENT_ID);
+      const foreign = await arm(1351, 200, sibling);
+      hub.requestHandler = forgeProof(sibling, foreign);
+      const crossSession = await svc.reconcileWorkflowDecision(
+        sibling.id,
+        foreign.decision.occurrenceId,
+        { resourceSnapshot: foreign.snapshot },
+        () => true,
+      );
+      assert.equal(crossSession.status, 409, "another child cannot settle its grant with the same merge");
+      assert.equal(db.workflowDecisionByOccurrence(foreign.decision.occurrenceId)?.status, "approved");
     } finally { db.close(); }
   });
 

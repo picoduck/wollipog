@@ -13732,15 +13732,23 @@ export class ControlPlaneDb {
     commandDigest: string,
     receiptDigest: string,
     now: number,
-    revocationActors: readonly string[] = RECOVERABLE_ACTION_REVOCATION_ACTORS,
+    options: { forgeAttested?: boolean } = {},
   ): WorkflowDecisionView | null {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const decision = this.workflowDecisionByOccurrence(occurrenceId);
       const eligible = decision?.sessionId === sessionId &&
         (decision.status === "approved" ||
-          this.isRecoverableWorkflowDecisionActionRevocation(sessionId, occurrenceId, revocationActors));
-      if (!eligible || decision?.actionAdmission?.commandDigest !== commandDigest ||
+          this.isRecoverableWorkflowDecisionActionRevocation(
+            sessionId,
+            occurrenceId,
+            options.forgeAttested ? FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS : RECOVERABLE_ACTION_REVOCATION_ACTORS,
+          ));
+      // A provider receipt names one session's command; a forge merge is one fact for every session.
+      const claimedElsewhere = options.forgeAttested === true && this.stmt(
+        "SELECT 1 FROM workflow_decision_action_receipts WHERE receipt_digest=? LIMIT 1",
+      ).get(receiptDigest) !== undefined;
+      if (!eligible || decision?.actionAdmission?.commandDigest !== commandDigest || claimedElsewhere ||
           !this.claimWorkflowDecisionActionReceipt(sessionId, receiptDigest, commandDigest, now)) {
         this.db.exec("COMMIT");
         return null;

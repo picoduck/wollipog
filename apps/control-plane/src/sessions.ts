@@ -157,7 +157,6 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type SessionRole,
 } from "@wollipog/protocol";
 import {
-  FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS,
   MAX_PENDING_STEERING_RESOLUTION_REPLAYS,
   MAX_UNRESOLVED_STEERING_ATTEMPTS,
   type AgentLaunch,
@@ -7392,7 +7391,8 @@ export class SessionsService {
     snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
     proof: { forgeHeadSha: string },
   ): WorkflowDecisionView | null {
-    // One merged head is one action: the same forge fact cannot settle a second occurrence.
+    // One merged head is one action: the same forge fact cannot settle a second occurrence in any
+    // session.
     const receiptDigest = auditDigest({
       transport: "forge",
       repository: snapshot.repository,
@@ -7406,7 +7406,7 @@ export class SessionsService {
       decision.actionAdmission!.commandDigest,
       receiptDigest,
       now,
-      FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS,
+      { forgeAttested: true },
     );
     if (!consumed) return null;
     this.recordWorkflowDecisionAudit(
