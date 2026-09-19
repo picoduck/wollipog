@@ -9,6 +9,7 @@ import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { saveEvidenceReviewDraft } from "../evidence-review-drafts.js";
+import { EvidenceArtifactView, type EvidenceArtifactStatus } from "./EvidenceArtifactView.js";
 import { SessionRequestPanel, sessionRequestPanelKey } from "./SessionRequestPanel.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -295,5 +296,49 @@ test("without SubtleCrypto the artifact is not shown unverified and the reviewer
     }
   } finally {
     Object.defineProperty(globalThis.crypto, "subtle", subtle);
+  }
+});
+
+test("a failed image is reported to the card inside the error event, before any effect runs", async () => {
+  // The card blocks approval from the status it is told. A passive effect also reports status, but
+  // it runs after the commit, which would leave one commit where the image is gone and the card
+  // still believes it was shown. `act` drains effects before returning, so the only place to see
+  // the difference is inside the event itself: the report must already have happened there.
+  const reports: EvidenceArtifactStatus[] = [];
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const client = { ...api, artifactExport: async () => new Blob([PNG]) } as ApiClient;
+  try {
+    await act(async () => root.render(
+      <ApiProvider client={client}>
+        <EvidenceArtifactView
+          item={artifactItem() as never}
+          onStatusChange={(_evidenceId, status) => { reports.push(status); }}
+        />
+      </ApiProvider>,
+    ));
+    for (let turn = 0; turn < 6; turn += 1) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    const image = container.querySelector<HTMLImageElement>(".evidence-artifact img")!;
+    await act(async () => { image.dispatchEvent(new domWindow.Event("load") as unknown as Event); });
+    assert.equal(reports.at(-1), "ready");
+
+    let duringEvent: EvidenceArtifactStatus | undefined;
+    await act(async () => {
+      image.dispatchEvent(new domWindow.Event("error") as unknown as Event);
+      // Still inside the event's own turn: no commit has happened and no effect has run.
+      duringEvent = reports.at(-1);
+    });
+    assert.equal(duringEvent, "unavailable", "the card is told in the event, not by a later effect");
+    assert.equal(reports.at(-1), "unavailable");
+    assert.equal(container.querySelector(".evidence-artifact img"), null);
+
+    // An error with nothing to fail is ignored by the component and must not be reported either.
+    const before = reports.length;
+    await act(async () => { container.querySelector(".evidence-artifact")!.dispatchEvent(new domWindow.Event("error") as unknown as Event); });
+    assert.equal(reports.length, before);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
   }
 });
