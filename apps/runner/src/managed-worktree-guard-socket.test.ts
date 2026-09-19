@@ -14,6 +14,7 @@ import {
   verifyManagedWorktreeGuardInSandbox,
 } from "./managed-worktree-guard-socket.js";
 import {
+  MAX_FORWARDED_ENVIRONMENT_BYTES,
   MAX_FORWARDED_ENVIRONMENT_VALUE_BYTES,
   managedWorktreeGuardSocketAddress,
   managedWorktreeGuardVerdictRequest,
@@ -417,4 +418,19 @@ test("a legal environment is never refused for its size, however badly it escape
   const unresolved = await requestManagedWorktreeGuardVerdict(socket, payload('git worktree remove "$HUGE"'), 10_000, tooLong);
   assert.match(unresolved.stdout, /"permissionDecision":"deny".*cannot tell where/u, "a reference to the dropped variable is refused as unresolvable");
   assert.deepEqual(await requestManagedWorktreeGuardVerdict(socket, payload("git status"), 10_000, tooLong), { stdout: "", stderr: "", exitCode: 0 });
+
+  // A host with a raised stack limit permits far more than 2 MiB of environment (review CR-3.1):
+  // sixty legal values of 127 KiB of control characters would escape to about 47 MB. The sidecar
+  // bounds what it forwards, largest values first, so the request always fits the runner's cap and
+  // the small variable that matters still arrives.
+  const raised: Record<string, string> = { BIG_TARGET: "/trees/big" };
+  for (let index = 0; index < 60; index++) raised[`RAISED_${index}`] = "\u0001".repeat(127 * 1024);
+  const bounded = managedWorktreeGuardVerdictRequest(payload("git status"), raised);
+  assert.ok(bounded.length <= MAX_FORWARDED_ENVIRONMENT_BYTES + 4096, `the request is bounded: ${bounded.length} bytes`);
+  const kept = JSON.parse(bounded).environment as Record<string, string>;
+  assert.equal(kept.BIG_TARGET, "/trees/big");
+  assert.ok(Object.keys(kept).length < 61 && Object.keys(kept).length > 1, "only the largest values were left out");
+  const raisedVerdict = await requestManagedWorktreeGuardVerdict(socket, payload('git worktree remove "$BIG_TARGET"'), 10_000, raised);
+  assert.ok(raisedVerdict.stdout.includes(MANAGED_WORKTREE_REFUSAL));
+  assert.deepEqual(await requestManagedWorktreeGuardVerdict(socket, payload("git status"), 10_000, raised), { stdout: "", stderr: "", exitCode: 0 });
 });

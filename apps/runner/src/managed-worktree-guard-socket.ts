@@ -46,10 +46,10 @@ const GUARD_SOCKET_NAME = "sock";
  * does not fit cannot be bound at all, so the guard is not provisioned rather than half-working. */
 export const MAX_GUARD_SOCKET_PATH_BYTES = 100;
 /**
- * The hook payload (at most 1 MB) plus the sidecar's environment, both JSON-escaped, which can
- * cost six bytes per control character. A Linux environment is at most `ARG_MAX` (2 MiB on a
- * default stack limit), so the worst legal request is about 6 + 12 MiB (review CR-2.1). The cap
- * bounds one connection's memory; it must never refuse an environment `execve` accepted.
+ * The hook payload (at most 1 MB, up to six bytes per byte once JSON-escaped) plus the sidecar's
+ * environment, which the sidecar itself bounds at `MAX_FORWARDED_ENVIRONMENT_BYTES` serialized
+ * (review CR-2.1, CR-3.1). So a request from the runner's own sidecar always fits, whatever the
+ * host's `ARG_MAX`; the cap bounds one connection's memory against anything else that connects.
  */
 const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;

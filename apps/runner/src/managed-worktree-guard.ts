@@ -313,12 +313,17 @@ export function parseManagedWorktreeGuardVerdict(text: string): ManagedWorktreeG
 const VERDICT_REQUEST_VERSION = 1;
 /**
  * Linux caps one environment string at 128 KiB (`MAX_ARG_STRLEN`), so a longer value cannot have
- * come from `execve` on a default host. One that did (a raised stack limit) is left out rather than
- * sent: a command that references it is then refused as unresolvable, while every other command is
- * still judged. Every string is bounded, so the runner's request cap can be sized for the worst
- * JSON escaping (six bytes per control character) and never refuses a legal environment.
+ * come from `execve` on a default host. One that did is left out rather than sent: a command that
+ * references it is then refused as unresolvable, while every other command is still judged.
  */
 export const MAX_FORWARDED_ENVIRONMENT_VALUE_BYTES = 128 * 1024;
+/**
+ * The serialized environment as a whole is bounded too, so the request never exceeds the runner's
+ * cap whatever the host's `ARG_MAX` (a raised stack limit lifts it) and however badly the values
+ * escape (six bytes per control character). Past the budget the largest values are left out
+ * first, with the same consequence as above. Real environments are a few kilobytes.
+ */
+export const MAX_FORWARDED_ENVIRONMENT_BYTES = 8 * 1024 * 1024;
 
 /**
  * What the sidecar sends: the hook payload, and the environment it was started in.
@@ -333,12 +338,20 @@ export function managedWorktreeGuardVerdictRequest(
   hookInput: string,
   environment: ProviderEnvironment = process.env,
 ): string {
-  const forwarded: Record<string, string> = {};
+  const kept: Array<{ name: string; value: string; bytes: number }> = [];
+  let total = 0;
   for (const [name, value] of Object.entries(environment)) {
-    if (typeof value === "string" && Buffer.byteLength(value, "utf8") <= MAX_FORWARDED_ENVIRONMENT_VALUE_BYTES) {
-      forwarded[name] = value;
-    }
+    if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > MAX_FORWARDED_ENVIRONMENT_VALUE_BYTES) continue;
+    const bytes = Buffer.byteLength(JSON.stringify(name), "utf8") + Buffer.byteLength(JSON.stringify(value), "utf8") + 2;
+    kept.push({ name, value, bytes });
+    total += bytes;
   }
+  if (total > MAX_FORWARDED_ENVIRONMENT_BYTES) {
+    kept.sort((left, right) => right.bytes - left.bytes);
+    while (total > MAX_FORWARDED_ENVIRONMENT_BYTES && kept.length > 0) total -= kept.shift()!.bytes;
+  }
+  const forwarded: Record<string, string> = {};
+  for (const { name, value } of kept) forwarded[name] = value;
   return JSON.stringify({ version: VERDICT_REQUEST_VERSION, hookInput, environment: forwarded });
 }
 
