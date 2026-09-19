@@ -6196,13 +6196,26 @@ export class SessionsService {
     }
     // An approved UI evidence decision gates a later enqueue rather than authorizing an action of
     // its own, so consuming it has no effect beyond its status. A finished child need not consume
-    // it first, which a provider's auto-mode classifier may refuse as self-approval (#1404).
-    // Every other approved decision still authorizes an action the child must consume itself.
+    // it first, which a provider's auto-mode classifier may refuse as self-approval (#1404). An
+    // answered implementation question is the same: it admits no action, only an answer the child
+    // has had since resolution (#1279). Every other approved decision still authorizes an action
+    // the child must consume itself.
     const openDecisions = this.db.unconsumedWorkflowDecisionsForSession(child.id);
-    const spentEvidence = openDecisions.filter((decision) =>
-      decision.status === "approved" && decision.category === "ui_evidence_approval");
-    if (openDecisions.length > spentEvidence.length) {
-      return fail("campaign child still has an unresolved or unconsumed workflow decision", 409);
+    const spentApprovals = openDecisions.filter((decision) =>
+      decision.status === "approved" &&
+      (decision.category === "ui_evidence_approval" || decision.category === "implementation_question"));
+    const blocking = openDecisions.filter((decision) => !spentApprovals.includes(decision));
+    if (blocking.length > 0) {
+      // Name each blocker: the Orchestrator cannot read a child's decision by occurrence, so an
+      // anonymous 409 left it guessing which one to chase (#1279).
+      const named = blocking.slice(0, 8)
+        .map((decision) => `${decision.occurrenceId} (${decision.category}, ${decision.status})`);
+      if (blocking.length > named.length) named.push(`and ${blocking.length - named.length} more`);
+      return fail(
+        `campaign child still has an unresolved or unconsumed workflow decision: ${named.join(", ")}; ` +
+          "the child must consume an approved one (a landed pr_merge through reconcile_workflow_decision)",
+        409,
+      );
     }
     const unfinishedDescendantId = this.db.campaignDescendantIds(child.id)
       .find((id) => {
@@ -6216,13 +6229,13 @@ export class SessionsService {
     }
     // Settle the spent approvals now, so a later stop or archive does not audit them as revoked.
     const now = Date.now();
-    for (const decision of spentEvidence) {
+    for (const decision of spentApprovals) {
       const consumed = this.db.consumeWorkflowDecision(decision.occurrenceId, now);
       if (consumed) {
         this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "system", id: "campaign-child-verified" }, now);
       }
     }
-    if (spentEvidence.length > 0) this.hub.sessionChangedById(child.id);
+    if (spentApprovals.length > 0) this.hub.sessionChangedById(child.id);
     this.db.verifyCampaignChildReport(campaignSessionId, child.id, request.reportEventSeq, now);
     let updated = this.db.getSession(child.id)!;
     if (campaign.orchestratorPolicy.behavior.completion === "stop_and_archive") {
