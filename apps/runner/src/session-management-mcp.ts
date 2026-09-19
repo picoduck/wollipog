@@ -1,5 +1,6 @@
 /** Shared session-management tools for the session-scoped CLI and MCP server. */
 
+import { createHash } from "node:crypto";
 import type { Readable, Writable } from "node:stream";
 import {
   isOrchestratorOnlyCapabilities,
@@ -7,6 +8,7 @@ import {
   SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
+  type UiEvidenceReviewDelivery,
 } from "@wollipog/protocol";
 import { VERSION } from "./version.js";
 
@@ -69,8 +71,13 @@ export interface McpDeps {
   controlPlaneProtocolVersion?: number;
 }
 
+export type ToolContent =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+
+/** The first block is always text, so text-only consumers (the CLI) never see image bytes. */
 export interface ToolResult {
-  content: { type: "text"; text: string }[];
+  content: [{ type: "text"; text: string }, ...ToolContent[]];
   isError?: boolean;
 }
 
@@ -605,6 +612,8 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
         evidence: { type: "array", minItems: 1, maxItems: 32, items: { type: "object", properties: {
           evidenceId: { type: "string" }, uri: { type: "string" },
           sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+          artifactId: { type: "string", description: "Screenshot Session artifact of this session holding the exact bytes. Required for an Orchestrator to review the item; without it the decision goes to a human." },
+          mediaType: { type: "string", description: "Exact media type of the artifact, such as image/png. Video and unknown types go to a human." },
         }, required: ["evidenceId", "uri", "sha256"], additionalProperties: false } },
       },
       required: ["category", "evidence"], additionalProperties: false,
@@ -619,7 +628,7 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
 const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "list_sessions", "get_session", "get_session_events",
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child",
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question", "resolve_descendant_approval",
-  "resolve_descendant_workflow_decision", "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
+  "resolve_descendant_workflow_decision", "review_descendant_ui_evidence", "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
   "reconcile_workflow_decision",
   "wait_session", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "stop_session", "restart_session", "archive_session", "set_guardrails", "create_worktree", "attach_worktree",
@@ -627,7 +636,7 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
 const PARENT_CONTROL_TOOLS = new Set([
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child",
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
-  "resolve_descendant_approval", "resolve_descendant_workflow_decision",
+  "resolve_descendant_approval", "resolve_descendant_workflow_decision", "review_descendant_ui_evidence",
 ]);
 
 export const TOOLS: McpTool[] = [
@@ -1016,6 +1025,49 @@ export const TOOLS: McpTool[] = [
         },
       );
       return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
+    },
+  },
+  {
+    name: "review_descendant_ui_evidence",
+    description: "Inspect one evidence image of an exact pending descendant ui_evidence_approval decision that this Orchestrator owns. Returns the digest-verified image and makes the server record a review receipt. Approval requires a current receipt for every evidence item, so call this once per evidenceId, actually look at each image, and only then resolve the decision.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string" },
+        occurrenceId: { type: "string" },
+        evidenceId: { type: "string" },
+      },
+      required: ["sessionId", "occurrenceId", "evidenceId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      if (typeof args?.sessionId !== "string" || !args.sessionId ||
+          typeof args?.occurrenceId !== "string" || !args.occurrenceId ||
+          typeof args?.evidenceId !== "string" || !args.evidenceId) {
+        return errorResult("sessionId, occurrenceId, and evidenceId are required");
+      }
+      const r = await cpFetch(
+        deps,
+        "POST",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/descendant-requests/review-ui-evidence`,
+        { sessionId: args.sessionId, occurrenceId: args.occurrenceId, evidenceId: args.evidenceId },
+      );
+      if (!r.ok) return errorResult(r.message);
+      const delivery = r.data as UiEvidenceReviewDelivery;
+      // Recompute the digest over the bytes this process is about to hand to the model. The
+      // receipt names what the server sent; this proves the same bytes arrived.
+      const bytes = Buffer.from(delivery.data, "base64");
+      if (createHash("sha256").update(bytes).digest("hex") !== delivery.receipt.sha256 ||
+          bytes.byteLength !== delivery.sizeBytes) {
+        return errorResult("delivered evidence does not match the digest bound to this workflow decision; do not approve it");
+      }
+      return {
+        content: [
+          { type: "text", text: JSON.stringify({ receipt: delivery.receipt, mimeType: delivery.mimeType, sizeBytes: delivery.sizeBytes }) },
+          { type: "image", data: delivery.data, mimeType: delivery.mimeType },
+        ],
+      };
     },
   },
   {

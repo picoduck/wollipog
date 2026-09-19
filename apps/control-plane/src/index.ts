@@ -3333,6 +3333,31 @@ app.post("/api/sessions/:id/descendant-requests/resolve", async (req, reply) => 
   ));
 });
 
+// Evidence bytes leave the control plane only here, only to the exact controlling Orchestrator's
+// own credential, and only for a pending decision it currently owns. The body is never logged.
+app.post("/api/sessions/:id/descendant-requests/review-ui-evidence", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching parent session credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  const body = req.body as { sessionId?: unknown; occurrenceId?: unknown; evidenceId?: unknown };
+  if (!validParentControlCoordinate(body?.sessionId) ||
+      !validParentControlCoordinate(body.occurrenceId) ||
+      typeof body.evidenceId !== "string" || !body.evidenceId || body.evidenceId.length > 256) {
+    return reply.code(400).send({ error: "sessionId, occurrenceId, and evidenceId are required" });
+  }
+  reply.header("cache-control", "no-store");
+  return respond(reply, svc.reviewDescendantUiEvidence(
+    id,
+    body.sessionId,
+    body.occurrenceId,
+    body.evidenceId,
+    (sessionId) => db.canAccessSession(principal, sessionId),
+  ));
+});
+
 app.get("/api/sessions/:id/child-sessions", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const query = req.query as { after?: string; limit?: string; eventEpoch?: string };

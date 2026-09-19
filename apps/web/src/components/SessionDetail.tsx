@@ -6675,7 +6675,8 @@ export function ComposerPlusMenu({
                         <div><dt>Follow-Up Recommendations</dt><dd>{session.orchestratorCampaign.followUps.unique}<small>{session.orchestratorCampaign.followUps.duplicates} Duplicates Skipped</small></dd></div>
                       </>}
                     </dl>
-                    {session.orchestratorCampaign?.uiEvidenceReview.status === "unavailable" && <span className="muted" role="status">UI evidence is routed to a human because this Orchestrator client cannot inspect the evidence bytes.</span>}
+                    {session.orchestratorCampaign?.uiEvidenceReview.status === "unavailable" && <span className="muted" role="status">UI Evidence Approval is assigned to the Orchestrator but is routed to a human. {session.orchestratorCampaign.uiEvidenceReview.reason ?? "This Orchestrator client cannot inspect the evidence bytes."}</span>}
+                    {session.orchestratorCampaign?.uiEvidenceReview.status === "available" && session.orchestratorCampaign.uiEvidenceReview.effectiveOwner === "orchestrator" && <span className="muted" role="status">The Orchestrator reviews image evidence attached as Session artifacts. Video and externally stored evidence is still routed to a human.</span>}
                   </section>}
                   <div className="parent-control-setting">
                     <span className="parent-control-setting-label">Descendant Requests</span>

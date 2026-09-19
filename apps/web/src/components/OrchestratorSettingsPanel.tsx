@@ -444,7 +444,9 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         title={DECISION_LABELS[category]}
         options={[
           { value: "human", label: "Human", description: "Require a human decision for this exact workflow gate." },
-          { value: "orchestrator", label: "Orchestrator", description: "Allow the campaign Orchestrator to resolve this typed gate." },
+          { value: "orchestrator", label: "Orchestrator", description: category === "ui_evidence_approval"
+            ? "Let the campaign Orchestrator see each evidence image and resolve this gate. Takes effect only when its runner, harness, and model can inspect images and the evidence is an image attached as a Session artifact. Video, externally stored evidence, and unsupported clients are still routed to a human, and the campaign shows why."
+            : "Allow the campaign Orchestrator to resolve this typed gate." },
         ]}
         value={draft.delegation.decisions[category]}
         onChange={(value) => updateDelegation(category, value as "human" | "orchestrator")}

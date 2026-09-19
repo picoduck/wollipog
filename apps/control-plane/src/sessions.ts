@@ -163,6 +163,14 @@ import {
 } from "./db.js";
 import { questionPolicyAnswers } from "./question-policy.js";
 import type { SessionEvent } from "@wollipog/protocol";
+import type { UiEvidenceReviewDelivery, UiEvidenceReviewReceipt } from "@wollipog/protocol";
+import {
+  MAX_UI_EVIDENCE_REVIEW_BYTES,
+  UI_EVIDENCE_REVIEW_RECEIPT_TTL_MS,
+  evaluateUiEvidenceItems,
+  evaluateUiEvidenceReviewClient,
+  type UiEvidenceReviewEvaluation,
+} from "./ui-evidence-review.js";
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
 import { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { childSessionGuardrails, DEFAULT_CHILD_SPAWN_CAP } from "./child-session-guardrails.js";
@@ -557,7 +565,17 @@ export function normalizeWorkflowDecisionSnapshot(
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
     const item = raw as Record<string, unknown>;
     if (!boundedDecisionString(item.evidenceId, 256) || !safeHttpsUrl(item.uri) || !sha(item.sha256, 64)) return [];
-    return [{ evidenceId: item.evidenceId, uri: item.uri as string, sha256: item.sha256 as string }];
+    if (item.artifactId !== undefined && !boundedDecisionString(item.artifactId, 256)) return [];
+    if (item.mediaType !== undefined &&
+        (typeof item.mediaType !== "string" || !/^[a-z0-9][a-z0-9.+-]{0,62}\/[a-z0-9][a-z0-9.+-]{0,62}$/u.test(item.mediaType))) return [];
+    // Optional fields are emitted only when present so a pre-v167 snapshot keeps its digest.
+    return [{
+      evidenceId: item.evidenceId,
+      uri: item.uri as string,
+      sha256: item.sha256 as string,
+      ...(item.artifactId !== undefined ? { artifactId: item.artifactId as string } : {}),
+      ...(item.mediaType !== undefined ? { mediaType: item.mediaType as string } : {}),
+    }];
   });
   if (evidence.length !== value.evidence.length ||
       new Set(evidence.map((item) => item.evidenceId)).size !== evidence.length) {
@@ -5957,9 +5975,9 @@ export class SessionsService {
       `Campaign ${campaign.id}; Child Harness ${policy.behavior.childHarness?.agentId ?? "Automatic"}; Child Model ${policy.behavior.childModel ?? "Automatic"}; Child Effort ${policy.behavior.childEffort ?? "Automatic"}; Follow-Ups ${policy.behavior.followUps}; Completion ${policy.behavior.completion}.`,
       `Typed decision owners: ${owners}. This is not blanket approval. For implementation questions, PR merge, merged-branch deletion, follow-up issue publication, and UI evidence approval, create the exact typed request and consume an approval immediately before the matching action. For PR merge, pass and then execute the exact canonical gh pr merge URL --squash --match-head-commit SHA command; its matching one-shot runner permission completes consumption. Ordinary prompts cannot satisfy a typed gate.`,
       "Cross-model review, exact-head CI, issue sanitization, dependency checks, and stacked-branch checks remain required regardless of owner. An enqueued PR is unfinished until merge-group CI passes and the forge reports actual MERGED state. Authentication, secrets, persistent permission grants, governance, budgets, and tool guardrails remain human-only.",
-      projection.uiEvidenceReview.status === "available"
-        ? "The controlling Orchestrator can inspect UI evidence for this campaign."
-        : `UI evidence remains human-owned: ${projection.uiEvidenceReview.reason}`,
+      projection.uiEvidenceReview.effectiveOwner === "orchestrator"
+        ? "The controlling Orchestrator can inspect artifact-backed image evidence with review_descendant_ui_evidence, and must review every item before approving. Children should attach each capture as a screenshot Session artifact and cite its artifactId and mediaType; video or externally stored evidence is routed to a human."
+        : `UI evidence remains human-owned: ${projection.uiEvidenceReview.reason ?? "the human owns UI Evidence Approval under this policy."}`,
       "Higher-priority repository and harness restrictions still apply. A task may narrow this policy but cannot broaden its authority.",
       "[End Wollipog Campaign Policy]",
     ].join("\n");
@@ -6111,7 +6129,10 @@ export class SessionsService {
       return fail("workflow decision controller is outside the current audience", 404);
     }
     const category = normalized.data.category;
-    const authority = this.effectiveWorkflowDecisionAuthority(controller.session, controller.policy, category);
+    const evaluated = this.evaluateWorkflowDecisionAuthority(
+      controller.session, controller.policy, sessionId, normalized.data,
+    );
+    const authority = evaluated.effectiveOwner;
     if (authority === "orchestrator") {
       const parentUnsupported = this.capabilityFailure(
         controller.session.runnerId,
@@ -6133,6 +6154,7 @@ export class SessionsService {
       resourceDigest,
       policyRevision: controller.policy.revision,
       authority,
+      ...(evaluated.effectiveOwner === "human" && evaluated.fallback ? { humanFallback: evaluated.fallback } : {}),
       createdAt: now,
     });
     if (!created) return fail("requestId was already used for different workflow decision content", 409);
@@ -6203,7 +6225,7 @@ export class SessionsService {
     const currentPolicy = currentParent?.parentControlPolicy;
     if (!currentChild || !currentParent || isTerminal(currentChild.status) || isTerminal(currentParent.status) ||
         !currentPolicy || currentPolicy.revision !== decision.policyRevision ||
-        this.effectiveWorkflowDecisionAuthority(currentParent, currentPolicy, decision.category) !== decision.authority) {
+        !this.workflowDecisionAuthorityCurrent(currentParent, currentPolicy, decision)) {
       this.revokeWorkflowDecision(decision, actor);
       return fail("workflow decision authority was revoked or superseded", 409);
     }
@@ -6213,6 +6235,24 @@ export class SessionsService {
     const checked = this.validateWorkflowDecisionResolution(decision, resolution);
     if (!checked.ok || !checked.data) return fail(checked.error!, checked.status);
     const now = Date.now();
+    // Repeating evidence identifiers proves nothing. An Orchestrator approval is backed only by
+    // receipts the server itself recorded when it delivered each exact artifact to this reviewer.
+    let reviewReceipts: UiEvidenceReviewReceipt[] = [];
+    if (decision.resourceSnapshot.category === "ui_evidence_approval" && authority === "orchestrator") {
+      reviewReceipts = this.db.validUiEvidenceReviewReceipts(occurrenceId, parentSessionId, now);
+      const unreviewed = decision.resourceSnapshot.evidence.filter((item) => !reviewReceipts.some((receipt) =>
+        receipt.evidenceId === item.evidenceId && receipt.sha256 === item.sha256 &&
+        receipt.artifactId === item.artifactId && receipt.childSessionId === childSessionId &&
+        receipt.policyRevision === decision.policyRevision));
+      if (checked.data.outcome === "approve" && unreviewed.length) {
+        return fail(
+          `UI evidence approval requires a current review receipt for every evidence item; review ${
+            unreviewed.map((item) => JSON.stringify(item.evidenceId)).join(", ")
+          } with review_descendant_ui_evidence first`,
+          409,
+        );
+      }
+    }
     const resolved = this.db.resolveWorkflowDecision(
       occurrenceId,
       authority,
@@ -6224,6 +6264,7 @@ export class SessionsService {
       checked.data.childMessage,
     );
     if (!resolved) return fail("workflow decision was resolved concurrently", 409);
+    this.db.consumeUiEvidenceReviewReceipts(occurrenceId, now);
     const child = this.db.getSession(childSessionId);
     // Ordinary prompt delivery wakes an idle child and queues behind a turn still in progress.
     // A refusal (runner offline, a guardrail pause) leaves the message on the decision record.
@@ -6243,6 +6284,7 @@ export class SessionsService {
       actor,
       now,
       checked.data.rationale,
+      reviewReceipts.map((receipt) => receipt.receiptId),
     );
     this.hub.sessionChangedById(childSessionId);
     this.publishCampaignAttentionTransition(currentParent);
@@ -6284,7 +6326,7 @@ export class SessionsService {
         !canAccess(child.id) || !canAccess(parent.id) ||
         !this.db.isSessionDescendant(parent.id, child.id) || !policy ||
         policy.revision !== decision.policyRevision ||
-        this.effectiveWorkflowDecisionAuthority(parent, policy, decision.category) !== decision.authority) {
+        !this.workflowDecisionAuthorityCurrent(parent, policy, decision)) {
       this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
       return fail("workflow decision authority was revoked or ancestry changed before action start", 409);
     }
@@ -6702,12 +6744,117 @@ export class SessionsService {
   private effectiveWorkflowDecisionAuthority(
     controller: SessionView,
     policy: ParentControlPolicy,
-    category: WorkflowDecisionCategory,
+    category: Exclude<WorkflowDecisionCategory, "ui_evidence_approval">,
   ): WorkflowDecisionAuthority {
-    if (category !== "ui_evidence_approval") return policy.decisions[category];
-    // Current audited clients cannot expose private evidence bytes to an isolated Orchestrator.
-    // Avoid rebuilding the full campaign projection for every decision in list/recovery loops.
-    return "human";
+    return policy.decisions[category];
+  }
+
+  /** UI evidence is the one category whose saved owner is not automatically effective: the
+   * Orchestrator owns it only when its client and every required artifact support audited review.
+   * Reads the runner, the session row, and artifact metadata — never the campaign projection, so
+   * it stays cheap inside list and recovery loops. */
+  private evaluateWorkflowDecisionAuthority(
+    controller: SessionView,
+    policy: ParentControlPolicy,
+    childSessionId: string,
+    snapshot: WorkflowDecisionResourceSnapshot,
+  ): UiEvidenceReviewEvaluation {
+    if (snapshot.category !== "ui_evidence_approval") {
+      return { effectiveOwner: this.effectiveWorkflowDecisionAuthority(controller, policy, snapshot.category) };
+    }
+    const client = evaluateUiEvidenceReviewClient(
+      this.db.uiEvidenceReviewClient(controller, policy.decisions.ui_evidence_approval),
+    );
+    if (client.effectiveOwner === "human") return client;
+    return evaluateUiEvidenceItems(
+      controller.driver,
+      childSessionId,
+      snapshot.evidence,
+      (artifactId) => this.db.workflowArtifactExportPreflight(artifactId)?.artifact ?? null,
+    );
+  }
+
+  /** Whether a stored decision's owner still holds under the current policy and capabilities.
+   * A human-owned UI evidence decision stays valid when capabilities later improve: human review
+   * never broadens access, and a saved-owner change is caught by the policy revision instead. */
+  private workflowDecisionAuthorityCurrent(
+    controller: SessionView,
+    policy: ParentControlPolicy,
+    decision: WorkflowDecisionView,
+  ): boolean {
+    if (decision.category === "ui_evidence_approval" && decision.authority === "human") return true;
+    return this.evaluateWorkflowDecisionAuthority(
+      controller, policy, decision.sessionId, decision.resourceSnapshot,
+    ).effectiveOwner === decision.authority;
+  }
+
+  /** Deliver one exact evidence artifact of a pending descendant decision to the Orchestrator that
+   * owns it, and record the receipt an approval will later require. Every gate that guards
+   * resolution guards delivery too, so evidence is never readable more widely than it is decidable. */
+  reviewDescendantUiEvidence(
+    parentSessionId: string,
+    childSessionId: string,
+    occurrenceId: string,
+    evidenceId: string,
+    canAccess: (sessionId: string) => boolean,
+  ): ServiceResult<UiEvidenceReviewDelivery> {
+    const parent = this.db.getSession(parentSessionId);
+    if (!parent) return fail("session not found", 404);
+    const rootCampaign = this.orchestratorCampaignController(parent);
+    if (rootCampaign && rootCampaign.id !== parent.id) {
+      return fail("Parent Control for this descendant belongs to the root campaign Orchestrator", 403);
+    }
+    const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+    if (!decision || decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
+        decision.resourceSnapshot.category !== "ui_evidence_approval" ||
+        !this.db.isSessionDescendant(parentSessionId, childSessionId) ||
+        !canAccess(parentSessionId) || !canAccess(childSessionId)) {
+      return fail("workflow decision not found", 404);
+    }
+    if (decision.status !== "pending") return fail("workflow decision is stale or already resolved", 409);
+    const child = this.db.getSession(childSessionId);
+    const policy = parent.parentControlPolicy;
+    if (!child || isTerminal(child.status) || isTerminal(parent.status) || !policy ||
+        policy.revision !== decision.policyRevision ||
+        !this.workflowDecisionAuthorityCurrent(parent, policy, decision)) {
+      this.revokeWorkflowDecision(decision, { kind: "agent", id: parentSessionId });
+      return fail("workflow decision authority was revoked or superseded", 409);
+    }
+    if (decision.authority !== "orchestrator") {
+      return fail(`this workflow decision requires a ${decision.authority} response`, 403);
+    }
+    const item = decision.resourceSnapshot.evidence.find((candidate) => candidate.evidenceId === evidenceId);
+    if (!item?.artifactId) return fail("evidence item not found on this workflow decision", 404);
+    // Verify the bytes themselves, not only the metadata the authority check read: the digest in
+    // the decision snapshot is the identity the human delegated, and it must be what is delivered.
+    let bytes: Buffer | null;
+    try {
+      bytes = this.db.readWorkflowArtifactBytes(item.artifactId);
+    } catch {
+      bytes = null;
+    }
+    if (!bytes || bytes.byteLength > MAX_UI_EVIDENCE_REVIEW_BYTES ||
+        createHash("sha256").update(bytes).digest("hex") !== item.sha256) {
+      this.revokeWorkflowDecision(decision, { kind: "agent", id: parentSessionId });
+      return fail("evidence content no longer matches the digest bound to this workflow decision", 409);
+    }
+    const now = Date.now();
+    const receipt = this.db.recordUiEvidenceReviewReceipt({
+      receiptId: `uireceipt_${randomUUID().replace(/-/gu, "")}`,
+      occurrenceId,
+      reviewerSessionId: parentSessionId,
+      childSessionId,
+      policyRevision: decision.policyRevision,
+      evidenceId: item.evidenceId,
+      artifactId: item.artifactId,
+      sha256: item.sha256,
+      deliveredAt: now,
+    }, now + UI_EVIDENCE_REVIEW_RECEIPT_TTL_MS);
+    // A "review" stage entry, so it never displaces the child's request as the card's provenance.
+    this.recordWorkflowDecisionAudit(
+      decision, "answered", { kind: "agent", id: parentSessionId }, now, undefined, [receipt.receiptId], "review",
+    );
+    return ok({ receipt, mimeType: item.mediaType!, sizeBytes: bytes.byteLength, data: bytes.toString("base64") });
   }
 
   private workflowDecisionApproval(decision: WorkflowDecisionView): PendingApproval {
@@ -6863,9 +7010,7 @@ export class SessionsService {
     for (const decision of this.db.pendingWorkflowDecisionsForSession(sessionId)) {
       if (!controller || decision.controllingSessionId !== controller.session.id ||
           decision.policyRevision !== controller.policy.revision ||
-          decision.authority !== this.effectiveWorkflowDecisionAuthority(
-            controller.session, controller.policy, decision.category,
-          )) {
+          !this.workflowDecisionAuthorityCurrent(controller.session, controller.policy, decision)) {
         pending = removePendingRequest(pending, decision.occurrenceId);
         this.revokeWorkflowDecision(decision, { kind: "system", id: "workflow-recovery" });
         continue;
@@ -6892,6 +7037,8 @@ export class SessionsService {
     actor: GovernanceActor,
     now: number,
     rationale?: string,
+    reviewReceiptIds?: string[],
+    stage: GovernanceAuditStage = outcome === "pending" ? "request" : "resolution",
   ): void {
     const child = this.db.getSession(decision.sessionId);
     if (!child) return;
@@ -6900,10 +7047,14 @@ export class SessionsService {
       : undefined;
     // Only the resolving record carries the message digest; later consume/revoke records do not.
     const resolvingRecord = outcome === "allowed" || outcome === "denied";
+    // Identity and digest only: never the URI (it may carry a signed query) and never the bytes.
+    const evidenceDigests = decision.resourceSnapshot.category === "ui_evidence_approval"
+      ? decision.resourceSnapshot.evidence.map((item) => ({ evidenceId: item.evidenceId, sha256: item.sha256 }))
+      : undefined;
     this.db.appendGovernanceAudit({
       requestId: decision.occurrenceId,
       approvalKind: "workflow_decision",
-      stage: outcome === "pending" ? "request" : "resolution",
+      stage,
       outcome,
       actor,
       scope: approvalScope(child, {}),
@@ -6917,6 +7068,8 @@ export class SessionsService {
         policyRevision: decision.policyRevision,
         resourceDigest: decision.resourceDigest,
         ...(evidenceReferences?.length ? { evidenceReferences } : {}),
+        ...(evidenceDigests?.length ? { evidenceDigests } : {}),
+        ...(reviewReceiptIds?.length ? { reviewReceiptIds } : {}),
         ...(rationale ? { rationaleDigest: auditDigest(rationale)! } : {}),
         ...(resolvingRecord && decision.childMessage
           ? { childMessageDigest: auditDigest(decision.childMessage)! }
@@ -6951,7 +7104,7 @@ export class SessionsService {
       (decision): DescendantRequestView[] => {
         if ((viewer === "orchestrator" && decision.authority !== "orchestrator") ||
             decision.policyRevision !== typedPolicy.revision ||
-            this.effectiveWorkflowDecisionAuthority(parent, typedPolicy, decision.category) !== decision.authority ||
+            !this.workflowDecisionAuthorityCurrent(parent, typedPolicy, decision) ||
             !this.db.isSessionDescendant(parentSessionId, decision.sessionId) || !canAccess(decision.sessionId)) return [];
         const session = this.db.getSession(decision.sessionId);
         if (!session || isTerminal(session.status) || !runnerSupportsProtocol(

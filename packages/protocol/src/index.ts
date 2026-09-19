@@ -493,7 +493,14 @@
 //      plane, which would drop the unknown field and let the resolver believe the child was told.
 //      Nothing new is required of either runner — the delivery is an ordinary prompt and the view
 //      field is passed through verbatim.
-export const PROTOCOL_VERSION = 166;
+// 167: an Orchestrator assigned UI Evidence Approval can inspect the evidence it decides on.
+//      A ui_evidence_approval evidence item gains an optional artifactId (+ mediaType) naming a
+//      first-class Session artifact that holds the exact bytes. The runner's session-management
+//      MCP server gains review_descendant_ui_evidence, which delivers one digest-verified image to
+//      the controlling Orchestrator as MCP image content and makes the control plane record a
+//      review receipt; approval by an Orchestrator requires a receipt for every item. A pre-v167
+//      runner has no such reader, so the control plane keeps those decisions human-owned.
+export const PROTOCOL_VERSION = 167;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -694,6 +701,10 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * untouched. The coupled preset already launches without integrations on every runner, so this
    * gate gates only the additive shape. */
   orchestratorIntegrationIsolation: 164,
+  /** Runner's session-management MCP server exposes review_descendant_ui_evidence and can return
+   * MCP image content. Without it an Orchestrator cannot inspect evidence bytes, so the control
+   * plane keeps UI Evidence Approval human-owned whatever the saved policy says. */
+  orchestratorUiEvidenceReview: 167,
   worktreeSetup: 141,
   worktreeTeardownPorts: 145,
   worktreeSetupConfig: 146,
@@ -1687,6 +1698,40 @@ export type OrchestratorCampaignStatus =
   | "blocked"
   | "verified_complete";
 
+/** Why an Orchestrator assigned UI Evidence Approval cannot exercise it. Client-scoped codes
+ * describe the campaign; evidence-scoped codes describe one exact decision. */
+export type UiEvidenceReviewUnavailableCode =
+  | "runner_unsupported"
+  | "harness_unsupported"
+  | "model_unsupported"
+  | "provider_untrusted"
+  | "media_video_unsupported"
+  | "media_unsupported"
+  | "artifact_unavailable"
+  | "artifact_mismatch";
+
+/** Server-recorded proof that one exact artifact was delivered to the reviewing Orchestrator. */
+export interface UiEvidenceReviewReceipt {
+  receiptId: string;
+  occurrenceId: string;
+  reviewerSessionId: string;
+  childSessionId: string;
+  policyRevision: number;
+  evidenceId: string;
+  artifactId: string;
+  sha256: string;
+  deliveredAt: number;
+}
+
+/** One digest-verified evidence item as delivered to the reviewing Orchestrator's runner. */
+export interface UiEvidenceReviewDelivery {
+  receipt: UiEvidenceReviewReceipt;
+  mimeType: string;
+  sizeBytes: number;
+  /** Base64 of the exact verified bytes. Never logged, projected, or audited. */
+  data: string;
+}
+
 /** Credential-free, server-derived campaign state. The stored policy remains the source of truth;
  * this projection applies runtime compatibility fallbacks without mutating or broadening it. */
 export interface OrchestratorCampaignProjection {
@@ -1703,6 +1748,8 @@ export interface OrchestratorCampaignProjection {
   uiEvidenceReview: {
     status: "available" | "unavailable";
     effectiveOwner: WorkflowDecisionAuthority;
+    /** Present whenever the saved Orchestrator choice is not effective for this client. */
+    reasonCode?: UiEvidenceReviewUnavailableCode;
     reason?: string;
   };
   children: {
@@ -3107,6 +3154,11 @@ export type WorkflowDecisionResourceSnapshot =
         evidenceId: string;
         uri: string;
         sha256: string;
+        /** First-class Session artifact holding the exact bytes. Only artifact-backed evidence can
+         * be delivered to an Orchestrator; a bare URI is never fetched by the control plane. */
+        artifactId?: string;
+        /** Declared media type. Absent means unknown, which is never Orchestrator-reviewable. */
+        mediaType?: string;
       }>;
     };
 
@@ -3157,6 +3209,8 @@ export interface WorkflowDecisionView {
   resourceDigest: string;
   policyRevision: number;
   authority: WorkflowDecisionAuthority;
+  /** Why a decision whose saved owner is the Orchestrator was routed to the human instead. */
+  humanFallback?: { code: UiEvidenceReviewUnavailableCode; reason: string };
   status: WorkflowDecisionStatus;
   selectedOptionId?: string;
   evidenceReviewed?: string[];
@@ -3444,6 +3498,9 @@ export interface GovernanceAuditEntry {
     policyRevision: number;
     resourceDigest: string;
     evidenceReferences?: string[];
+    /** Evidence identity + content digest pairs, and the receipts an Orchestrator approval spent. */
+    evidenceDigests?: Array<{ evidenceId: string; sha256: string }>;
+    reviewReceiptIds?: string[];
     rationaleDigest?: string;
     /** v166: digest of the child-facing message; its text lives only on the decision. */
     childMessageDigest?: string;

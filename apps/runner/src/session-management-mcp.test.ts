@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createHash } from "node:crypto";
 import { PassThrough } from "node:stream";
 import {
   PROTOCOL_VERSION,
@@ -82,7 +83,7 @@ test("orchestrator MCP lists only management tools and leaves self-worktree poli
   for (const name of [
     "get_campaign", "record_campaign_follow_up", "verify_campaign_child",
     "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
-    "resolve_descendant_approval", "resolve_descendant_workflow_decision",
+    "resolve_descendant_approval", "resolve_descendant_workflow_decision", "review_descendant_ui_evidence",
   ]) assert.ok(names.includes(name), name);
   for (const name of ["create_run", "set_session_config", "upsert_governance_policy", "create_workflow"]) {
     assert.equal(names.includes(name), false);
@@ -193,6 +194,38 @@ test("typed workflow decision tools preserve exact request, resolution, and cons
       evidenceReviewed: ["desktop"], rationale: "Inspected the exact evidence." },
   });
   assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/descendant-requests/resolve`);
+});
+
+test("review_descendant_ui_evidence returns the verified image and refuses bytes that miss the bound digest", async () => {
+  const bytes = Buffer.from("exact evidence bytes");
+  const receipt = {
+    receiptId: "uireceipt_1", occurrenceId: "workflow_1", reviewerSessionId: SELF_ID, childSessionId: "child",
+    policyRevision: 3, evidenceId: "desktop", artifactId: "art_1",
+    sha256: createHash("sha256").update(bytes).digest("hex"), deliveredAt: 10,
+  };
+  let data = bytes.toString("base64");
+  const { deps, calls } = makeDeps(() => ({
+    status: 200, body: { receipt, mimeType: "image/png", sizeBytes: bytes.byteLength, data },
+  }));
+  assert.equal((await callTool(deps, "review_descendant_ui_evidence",
+    { sessionId: "child", occurrenceId: "workflow_1", evidenceId: "desktop" })).isError, true,
+  "only an Orchestrator can read descendant evidence");
+  assert.equal(calls.length, 0);
+
+  deps.orchestrator = true;
+  const reviewed = await callTool(deps, "review_descendant_ui_evidence",
+    { sessionId: "child", occurrenceId: "workflow_1", evidenceId: "desktop" });
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/descendant-requests/review-ui-evidence`);
+  assert.deepEqual(calls.at(-1)?.body, { sessionId: "child", occurrenceId: "workflow_1", evidenceId: "desktop" });
+  assert.deepEqual(resultJson(reviewed), { receipt, mimeType: "image/png", sizeBytes: bytes.byteLength },
+    "the text block carries identity and digest, never the bytes");
+  assert.deepEqual(reviewed.content[1], { type: "image", data, mimeType: "image/png" });
+
+  data = Buffer.from("substituted bytes").toString("base64");
+  const substituted = await callTool(deps, "review_descendant_ui_evidence",
+    { sessionId: "child", occurrenceId: "workflow_1", evidenceId: "desktop" });
+  assert.equal(substituted.isError, true);
+  assert.equal(substituted.content.length, 1, "mismatched bytes are never shown to the model");
 });
 
 test("PR merge action admission fails closed against mixed-version control planes", async () => {

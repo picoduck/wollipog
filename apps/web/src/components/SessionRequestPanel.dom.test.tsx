@@ -189,6 +189,39 @@ test("eight-item evidence review stays bounded, persists acknowledgement drafts,
   }
 });
 
+test("a human fallback explains why the assigned Orchestrator could not review the evidence", async () => {
+  domWindow.localStorage.clear();
+  const session = evidenceSession();
+  session.pendingApproval!.workflowDecision!.humanFallback = {
+    code: "media_video_unsupported",
+    reason: "Evidence \"clip\" is video, which no Orchestrator client can review yet.",
+  };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(
+      <ApiProvider client={api as ApiClient}>
+        <SessionRequestPanel
+          session={session}
+          runnerOnline
+          descendants={[]}
+          selectedKey={sessionRequestPanelKey(session.id, session.pendingApproval!.occurrenceId!)}
+          onSelectedKeyChange={() => {}}
+          onSessionUpdate={() => {}}
+          onDescendantsUpdate={() => {}}
+          onOpenChild={() => {}}
+        />
+      </ApiProvider>,
+    ));
+    assert.match(container.querySelector(".evidence-review-summary")?.textContent ?? "",
+      /assigned to the Orchestrator, but this request needs a human\. Evidence "clip" is video/);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("standalone approval review keeps request context collapsed and submits through the existing API", async () => {
   const session = standaloneApprovalSession();
   const approvals: unknown[] = [];

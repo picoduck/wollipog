@@ -306,6 +306,44 @@ commit and requires an explicit empty dependent-pull-request check. Follow-up pu
 sanitized repository, title, body, and labels. UI approval binds immutable evidence identifiers,
 URIs, and SHA-256 digests, and resolution records which evidence was actually inspected.
 
+### Orchestrator Review of UI Evidence
+
+**UI Evidence Approval** is the one category whose saved owner is not automatically effective.
+Assigning it to the Orchestrator is the human's opt-in to both decision ownership and the narrowly
+scoped evidence access needed to exercise it; there is no separate access toggle. The Orchestrator
+owns a decision only when all of the following hold, and otherwise the decision is created
+human-owned with a `humanFallback` code and reason shown on the request card:
+
+- the Orchestrator's runner speaks protocol v167 (`orchestratorUiEvidenceReview`);
+- its harness hands MCP image content to the model (Claude Code, Codex App Server), its installation
+  supports images, and its exact model advertises `image` input — unknown is treated as unsupported;
+- every evidence item names an `artifactId` of a `screenshot` Session artifact owned by the requesting
+  child, declares an allowed image `mediaType`, and matches that artifact's type, size, and SHA-256.
+
+Video (`media_video_unsupported`), unknown or non-raster media (`media_unsupported`), and evidence
+that lives only behind a URI (`provider_untrusted`) always go to the human. The control plane never
+fetches a child-supplied URL; the URI is display material for the human reviewer only. Campaign-level
+unavailability is reported as `uiEvidenceReview.reasonCode` and `reason` on the campaign projection.
+A human fallback is scoped to that one decision: other children and other assigned categories are
+unaffected.
+
+The Orchestrator inspects evidence with `review_descendant_ui_evidence` (`sessionId`,
+`occurrenceId`, `evidenceId`). Delivery re-runs every gate that guards resolution — root campaign
+controller, ancestry, audience, pending status, policy revision, and current authority — then reads
+the artifact bytes, recomputes their SHA-256 against the digest in the decision snapshot, and revokes
+the decision on mismatch instead of showing anything. The runner recomputes the digest again before
+returning the image as MCP image content. The text block carries only the receipt, so the CLI path,
+transcripts of tool text, campaign projections, and audit never hold evidence bytes or signed query
+parameters.
+
+Each delivery records a server-side review receipt bound to the reviewer, child, occurrence, policy
+revision, evidence identifier, artifact, and digest. `resolve_descendant_workflow_decision` approves a
+UI-evidence decision only when an unexpired (one hour), unconsumed, unrevoked receipt exists for every
+item; repeating `evidenceReviewed` identifiers is not sufficient. Denial needs no receipts. Receipts
+are spent by resolution and revoked with the decision, so a policy-revision or ownership change,
+supersession, or revocation invalidates them. The resolution audit lists evidence identifier and
+digest pairs and the receipt ids spent; each delivery is a `review`-stage audit entry.
+
 This boundary governs actions performed through Wollipog's workflow-decision tools. It cannot
 intercept a separate shell, forge client, browser, or other credential that can independently
 perform the action. Orchestrator instructions must therefore require `request_workflow_decision`,

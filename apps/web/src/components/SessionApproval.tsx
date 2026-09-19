@@ -474,6 +474,9 @@ export function SessionApprovalBanner({
           <div>
             <h3>{approval.title}</h3>
             <p>Review every artifact before approving this request.</p>
+            {evidenceDecision.humanFallback && <p className="muted">
+              UI Evidence Approval is assigned to the Orchestrator, but this request needs a human. {evidenceDecision.humanFallback.reason}
+            </p>}
           </div>
           <strong role="status" aria-live="polite">
             {reviewedEvidence.length} of {evidence.length} Reviewed

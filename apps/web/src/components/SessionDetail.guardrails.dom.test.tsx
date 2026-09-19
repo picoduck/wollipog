@@ -283,7 +283,7 @@ test("the Composer exposes human-controlled Parent Control only for Orchestrator
         ui_evidence_approval: "human",
       },
       limits: { maximumConcurrentChildren: 6, occupied: 2, remaining: 4, costBudgetUsd: null, maxToolCalls: null },
-      uiEvidenceReview: { status: "unavailable", effectiveOwner: "human", reason: "No image reader." },
+      uiEvidenceReview: { status: "unavailable", effectiveOwner: "human", reasonCode: "harness_unsupported", reason: "No image reader." },
       children: { total: 3, active: 2, waitingHuman: 1, blocked: 0, verified: 0, cleanupPending: 0 },
       pendingDecisions: { human: 1, orchestrator: 0 },
       followUps: { unique: 2, duplicates: 1 },
@@ -317,7 +317,8 @@ test("the Composer exposes human-controlled Parent Control only for Orchestrator
     assert.match(container.textContent ?? "", /Waiting for HumanPolicy Revision 3/);
     assert.match(container.textContent ?? "", /0 Verified/);
     assert.match(container.textContent ?? "", /1 Duplicates Skipped/);
-    assert.match(container.textContent ?? "", /UI evidence is routed to a human/);
+    assert.match(container.textContent ?? "", /assigned to the Orchestrator but is routed to a human\. No image reader\./,
+      "the campaign explains the specific reason instead of a generic one");
     await act(async () => fireDomEvent.click(select));
     const questions = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
       .find((option) => option.textContent?.includes("Questions") && !option.textContent?.includes("Approvals"));
