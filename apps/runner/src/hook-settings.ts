@@ -1054,9 +1054,11 @@ export interface CodexGuardProvisioning {
  * session store's live refresh (`refreshClaudeGuardProtections`) keeps it in step too, and why the
  * tripwire, the compromise marker, and the launch self-test are shared with Claude's.
  *
- * Only called for a session that owns a runner-created worktree: one that owns none opens exactly
- * as it did before, with nothing written and no probe run. Every failure returns an inactive guard
- * with a reason, and the caller refuses the TUI; nothing here launches a Codex TUI unguarded.
+ * Called for every Codex TUI launch since #1438, including one whose session owns no runner-created
+ * worktree yet: `config.protections` is then empty, the guard holds no opinion beyond its own
+ * state, and the live refresh fills the list in when the first worktree appears. Every failure
+ * returns an inactive guard with a reason. The caller refuses the TUI when there is a worktree to
+ * protect, and otherwise opens it unguarded and remembers that; nothing here decides either.
  */
 export async function provisionCodexGuard(
   spec: Pick<SessionLaunchSpec, "sessionId" | "command" | "args" | "env" | "context" | "executionTarget">,

@@ -55,8 +55,10 @@ export async function prepareAgentTuiLaunch(
   },
 ): Promise<ShellProcessLaunch | null> {
   if (!isOrchestratorLaunch(meta)) {
-    return agentTuiLaunch(
-      await withCodexPermissionProfile(await withManagedWorktreeGuard(meta, dependencies), dependencies),
+    const guarded = await withManagedWorktreeGuard(meta, dependencies);
+    return withGuardState(
+      agentTuiLaunch(await withCodexPermissionProfile(guarded.meta, dependencies)),
+      guarded.guard,
     );
   }
   if (!usesOrchestratorPresetPermissions(meta.config)) {
@@ -96,11 +98,19 @@ export async function prepareAgentTuiLaunch(
       prepared, cwd,
     ));
   }
-  const launch = agentTuiLaunch(
-    await withManagedWorktreeGuard(prepared, dependencies, cwd),
-    { platform, comspec: process.env.ComSpec },
+  const guarded = await withManagedWorktreeGuard(prepared, dependencies, cwd);
+  const launch = withGuardState(
+    agentTuiLaunch(guarded.meta, { platform, comspec: process.env.ComSpec }),
+    guarded.guard,
   );
   return launch ? { ...launch, cwd } : null;
+}
+
+function withGuardState(
+  launch: ShellProcessLaunch | null,
+  guard: ShellProcessLaunch["managedWorktreeGuard"],
+): ShellProcessLaunch | null {
+  return launch && guard ? { ...launch, managedWorktreeGuard: guard } : launch;
 }
 
 /** Codex TUI launches that can carry the #1336 permission-profile deny. */
@@ -154,7 +164,9 @@ const GUARDED_TUI_DRIVERS: ReadonlySet<string> = new Set(["claude-code", "codex"
  * (`protectedClaudePermissionMode`) is driver-side, and a TUI runs no driver. So a session that
  * owns a runner-created worktree launches only when the guard really is in the argv this spawn
  * will use — the refusal the bug report allows, rather than an unprotected launch. A session that
- * owns none launches as it always did, guarded whenever the guard is provisionable.
+ * owns none launches as it always did, guarded whenever the guard is provisionable. Whether it was
+ * is returned with the launch, because a TUI opened without the guard stays without it: the runner
+ * tells the session so when it later acquires a worktree (#1438).
  *
  * Codex's structured protection is driver-side as well, but Codex offers the same kind of
  * `PreToolUse` hook, so a Codex launch carries the same sidecar through `-c` (#1377). Its
@@ -168,8 +180,8 @@ async function withManagedWorktreeGuard(
     Parameters<typeof prepareAgentTuiLaunch>[1], "provisionManagedWorktreeGuard"
   >,
   cwd?: string,
-): Promise<SessionMeta> {
-  if (!GUARDED_TUI_DRIVERS.has(meta.driver) || !meta.command) return meta;
+): Promise<{ meta: SessionMeta; guard?: ShellProcessLaunch["managedWorktreeGuard"] }> {
+  if (!GUARDED_TUI_DRIVERS.has(meta.driver) || !meta.command) return { meta };
   // Provisioning rewrites the launch arguments; durable metadata must not move under it.
   const prepared = { ...meta, args: [...meta.args] };
   const guard = await dependencies.provisionManagedWorktreeGuard(prepared, cwd);
@@ -180,7 +192,10 @@ async function withManagedWorktreeGuard(
       (guard.reason ? ` Reason: ${guard.reason}.` : ""),
     );
   }
-  return { ...prepared, args: guard.args };
+  return {
+    meta: { ...prepared, args: guard.args },
+    guard: { active: guard.guardActive, ...(guard.reason ? { reason: guard.reason } : {}) },
+  };
 }
 
 function scrubInheritedEnv(driver: SessionMeta["driver"]): string[] {

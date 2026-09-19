@@ -162,6 +162,7 @@ import {
 import { ShellManager } from "./shell-manager.js";
 import { prepareAgentTuiLaunch } from "./agent-tui.js";
 import { provisionAgentTuiManagedWorktreeGuard } from "./agent-tui-guard.js";
+import { UnguardedAgentTuiRegistry } from "./agent-tui-guard-notice.js";
 import { capabilitiesFor } from "./catalog.js";
 import { createPromptImageFetcher } from "./prompt-image-fetch.js";
 import {
@@ -724,14 +725,18 @@ const pendingShellOpenCancellations = new PendingShellOpenCancellations();
 // Per-session shells (Shells panel). Live output bypasses the general outbox so console spam
 // cannot evict session events. ShellManager retains a bounded sequenced tail and replays an
 // authoritative inventory after every registration instead.
+/** Agent TUIs running without the managed-worktree guard, which a later worktree cannot reach (#1438). */
+const unguardedAgentTuis = new UnguardedAgentTuiRegistry();
 const shells = new ShellManager({
   onOutput: (shellId, sessionId, stream, data, seq) => {
     if (ws && ws.readyState === WebSocket.OPEN && registered) {
       ws.send(JSON.stringify({ type: "shell_output", sessionId, shellId, stream, data, seq }));
     }
   },
-  onExit: (shellId, sessionId, code, outputSeq) =>
-    sendUp({ type: "shell_exit", sessionId, shellId, code, outputSeq }),
+  onExit: (shellId, sessionId, code, outputSeq) => {
+    unguardedAgentTuis.exited(shellId);
+    sendUp({ type: "shell_exit", sessionId, shellId, code, outputSeq });
+  },
 });
 sessions.setWorktreeShellRetirement((sessionId, context, path) =>
   shells.closeForWorktree(sessionId, context, path));
@@ -791,8 +796,20 @@ sessions.setGuardStateSandbox({
     }, isolation, cwd);
   },
 });
-sessions.setManagedWorktreeGuardRefresh((meta, protections) =>
-  refreshClaudeGuardProtections(meta.sessionId, protections, claudeHookHost.configDir));
+sessions.setManagedWorktreeGuardRefresh((meta, protections) => {
+  const outcome = refreshClaudeGuardProtections(meta.sessionId, protections, claudeHookHost.configDir);
+  // A TUI opened without the guard cannot be given one, so the refresh above does nothing for it.
+  // The first worktree the session acquires under such a TUI is announced instead (#1438).
+  // The caller reads an exception from here as a failed refresh and stops the provider, so a
+  // notice that cannot be delivered is logged and never thrown.
+  try {
+    const notice = unguardedAgentTuis.protectionsChanged(meta.sessionId, protections.length);
+    if (notice) sessions.noticeManagedWorktreeGuard(meta.sessionId, notice);
+  } catch (error) {
+    log(`managed worktree guard notice failed: ${errText(error)}`);
+  }
+  return outcome;
+});
 sessions.reconcileStore(); // demote stale sessions and replay cleanup only after shell retirement is wired
 
 // Buffer outbound events while the control-plane socket is down or mid-reconnect so a terminal
@@ -2293,7 +2310,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         }),
         open: (message, target, launch, cleanupBoundary) => {
           if (launch) sessions.acquireAgentTuiProviderHome({ ...target.meta, env: launch.env ?? {} });
-          return shells.open(
+          const opened = shells.open(
             message.shellId,
             message.sessionId,
             target.root,
@@ -2307,6 +2324,23 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               ...cleanupBoundary,
             },
           );
+          // Recorded only once the TUI really is running. The protection set is read NOW, not from
+          // the launch: a worktree created while the launch was being prepared is as unprotected in
+          // an unguarded TUI as one created afterwards (#1438).
+          // The shell is already running, so bookkeeping must not fail the open it follows.
+          try {
+            const current = launch ? store.readMeta(message.sessionId) : null;
+            const notice = launch && unguardedAgentTuis.opened(
+              message.shellId,
+              message.sessionId,
+              launch.managedWorktreeGuard,
+              current ? sessions.managedWorktreeProtections(current).length : 0,
+            );
+            if (notice) sessions.noticeManagedWorktreeGuard(message.sessionId, notice);
+          } catch (error) {
+            log(`managed worktree guard notice failed: ${errText(error)}`);
+          }
+          return opened;
         },
         send: (result) => sendUp(result),
         errorText: (error) => errText(error),

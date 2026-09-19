@@ -190,6 +190,35 @@ the same way — a throwaway `CODEX_HOME` against a throwaway repository — by 
   was not created; against the same payload the pre-#1437 sidecar wrote it. Ordinary edits inside
   the protected worktree (an update and an add) applied unchanged with the guard installed.
 
+## Measurements (codex-cli 0.155.1, this machine, 2026-09-19): guarding every Codex TUI
+
+What does it cost to guard a Codex TUI whose session owns no worktree (#1438)? #1377 declined to,
+naming two costs: the hook-inventory probe and the trust bypass on every launch. Measured with the
+runner's own probe client and sidecar, in a throwaway `CODEX_HOME` and against this machine's real
+one (read-only: `hooks/list` only, counts printed, never commands):
+
+- **The inventory probe** (`codex app-server` → `initialize` → `hooks/list`, then killed) took
+  133–143 ms in a throwaway home and 169–175 ms against the real one, over eight and six runs; the
+  first run after a pause took about 370 ms. It is paid once per TUI open.
+- **The sidecar over an empty list** took 55–63 ms per matched tool call in the development form
+  (`node --import tsx`), the same process Claude sessions have paid for since #1303. It allowed
+  `git status` and `git worktree remove ../wt`, and refused only a command naming its own state
+  file, which is the "no opinion beyond its own state" #1303 describes.
+- **A person's own untrusted hook** (a `config.toml` `PreToolUse` command, source `user`,
+  `trustStatus: untrusted`) is reported beside the runner's, and the verdict declines the bypass
+  and names it. So an always-guarded design that REFUSED on that verdict would take the TUI away
+  from such a person even when they own no worktree. That is the regression the amendment avoids
+  by opening that launch unguarded instead.
+- **Not measured:** whether an authenticated TUI shows anything when started with
+  `--dangerously-bypass-hook-trust`. An unauthenticated throwaway home stops at the login screen,
+  where the output with and without the flag was identical and mentioned neither hooks nor trust;
+  the probe was not pointed at real credentials. This is not a new exposure either way: since
+  #1377 every worktree session's TUI already starts with the flag.
+- A measurement trap worth recording: a protections file placed in the PARENT of the test `cwd`
+  made the sidecar refuse `git status`, because a working directory inside the guard's state
+  directory disqualifies every command. The runner's hook directory is `<dataDir>/hooks/<runnerKey>`, a leaf of
+  runner state rather than a parent of a workspace, so this is a property of the probe layout.
+
 ## Measurements: Codex Permission Profiles (codex-cli 0.155.1, this machine, 2026-09-19)
 
 Can Codex's OWN sandbox deny the hook state directory in `provider` mode, where the runner does not
@@ -595,8 +624,8 @@ control-channel veto keeps reading the live inventory.
   `--profile`, which may declare hooks and which `app-server` cannot replay, or a `--remote` or
   `--worktree`, which run the session where a local probe cannot see; so do WSL/container
   contexts, non-host targets, and Windows, where how Codex runs a hook command was not measured.
-  A Codex session that owns no runner-created worktree opens exactly as before: nothing is
-  written and no probe runs.
+  As first shipped, a Codex session that owned no runner-created worktree opened exactly as
+  before: nothing was written and no probe ran. #1438 changed that; see the amendment below.
 
   Amended by #1437: Codex's edit tool is judged too. `apply_patch` is neither a shell call nor a
   path-bearing file tool — it is one freeform patch document whose file headers carry the locations
@@ -643,12 +672,43 @@ control-channel veto keeps reading the live inventory.
   outright; Codex also matches that tool through an `Edit` alias, which is how the pre-#1437
   alternation reached the hook at all, but no contract promises it.
 
+  Amended by #1438: a Codex TUI is guarded from the start, over an empty list. A provider loads
+  its hooks when it starts, so a TUI opened before the session's first worktree could never be
+  given the guard afterwards, and that worktree was unprotected inside it until it was reopened.
+  Every Codex TUI launch is therefore provisioned exactly as a worktree session's is — the
+  protections file (empty), the launch self-test, the inventory probe, and the `-c` override — and
+  the live refresh that already keeps that file in step fills the list in when the first worktree
+  appears. This is what a Claude TUI has done since #1303. The cost #1377 deferred this over was
+  measured rather than assumed (see "Measurements (codex-cli 0.155.1, this machine, 2026-09-19):
+  guarding every Codex TUI"), and is small.
+
+  The #1377 hook-trust rule is unchanged and is applied to every launch: the bypass is passed only
+  when the runner's hook is present, enabled, and the sole enabled hook that is neither `trusted`
+  nor `managed`. What differs with nothing to protect is the consequence of failing it. A session
+  that owns a worktree is still REFUSED the TUI. One that owns none is opened as it was before
+  #1438 — the same argv, no override, no bypass, so a person's own untrusted hooks stay gated
+  exactly as Codex gates them — because refusing a TUI to protect nothing would take the TUI away
+  from everyone who keeps an untrusted hook, a profile, or a `--remote`. The same holds for every
+  other reason the guard cannot be provisioned.
+
+  That leaves a TUI running without the guard, which the first worktree cannot reach. It cannot be
+  repaired from outside the process, so it is announced instead: a launch reports whether the guard
+  really is in its argv, the runner remembers each open agent TUI that lacks it, and the first time
+  such a session owns a runner-created worktree — from the `worktrees` patch observer, or at open
+  for one created while the launch was being prepared — the session shows a notice, once per TUI,
+  naming the reason and saying to close the TUI and open it again. Reopening provisions with the
+  worktree present, which guards or refuses. The registry is provider-independent, so it also
+  covers the Claude launch "Live protections" leaves unguarded (no worktree and a user-supplied
+  `--settings`). It lives in runner memory: a runner restart ends every TUI it hosts, so there is
+  nothing to remember across one.
+
   Residual limits of the Codex form:
 
-  - A Codex TUI opened while the session owned no runner-created worktree carries no hook, so a
-    worktree the session creates from inside that TUI is unprotected there until the TUI is
-    reopened. (A Claude TUI is guarded over an empty list since #1303; a Codex one is not, because
-    that would mean passing the trust bypass on every Codex TUI launch.)
+  - The notice is tamper-evident best effort like everything else here: it tells the person, and
+    does not stop the unguarded TUI from touching the new worktree in the meantime.
+  - The inventory probe and the trust bypass now apply to every Codex TUI launch, so the
+    check-not-a-pin window below does too, including for sessions that own no worktree. It grants
+    nothing new there for the same reason it grants nothing new anywhere else.
   - The inventory is a check, not a pin: a hook configuration written between the probe's answer
     and the TUI's start is loaded by the TUI under the trust bypass. Codex offers no flag that
     restricts an invocation to the hooks it was shown, so the window cannot be closed from the

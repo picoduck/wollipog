@@ -20,6 +20,7 @@ import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { parse as shellParse } from "shell-quote";
 import { prepareAgentTuiLaunch } from "./agent-tui.js";
 import { provisionAgentTuiManagedWorktreeGuard } from "./agent-tui-guard.js";
+import { UnguardedAgentTuiRegistry, unguardedAgentTuiNotice } from "./agent-tui-guard-notice.js";
 import {
   CODEX_HOOK_TRUST_BYPASS_FLAG,
   codexGuardArgsActive,
@@ -33,6 +34,7 @@ import {
 } from "./codex-managed-worktree-guard.js";
 import {
   claudeHookSessionProtectionsPath,
+  refreshClaudeGuardProtections,
   resetClaudeGuardState,
   type ClaudeHookHost,
 } from "./hook-settings.js";
@@ -253,6 +255,98 @@ test("a foreign enabled-but-untrusted hook refuses the Codex TUI and names the h
       },
     );
   });
+});
+
+test("a Codex TUI opened before the first worktree is guarded over an empty list, and the worktree that appears later is protected inside it (#1438)", async () => {
+  await withDir(async (dir) => {
+    const harness: Harness = { probes: [], logs: [] };
+    const launch = await prepareAgentTuiLaunch(
+      meta({ worktreePath: undefined }),
+      dependencies(dir, { protections: [] }, harness),
+    );
+
+    assert.ok(launch);
+    const override = overrideArgument(launch.args);
+    assert.ok(override && codexGuardArgsActive(launch.args, override));
+    assert.deepEqual(launch.managedWorktreeGuard, { active: true });
+    // The #1377 rule was applied, not skipped: the inventory was enumerated for this launch too.
+    assert.equal(harness.probes.length, 1);
+    assert.equal(harness.probes[0]!.cwd, REPO);
+
+    // Over an empty list the guard holds no opinion beyond its own state.
+    const protectionsFile = protectionsFileOf(override);
+    assert.deepEqual(readManagedWorktreeGuardProtections(protectionsFile), []);
+    const removal = bashCall(`git worktree remove ${WORKTREE}`, REPO);
+    assert.deepEqual(
+      runManagedWorktreeGuardDecision(removal, protectionsFile),
+      { stdout: "", stderr: "", exitCode: 0 },
+    );
+
+    // The worktree appears AFTER the launch was prepared. The session store's patch observer calls
+    // exactly this, and the hook the running TUI already carries reads the same file.
+    assert.deepEqual(refreshClaudeGuardProtections("s1377", PROTECTED, dir), { state: "refreshed" });
+    const refused = runManagedWorktreeGuardDecision(removal, protectionsFile);
+    assert.match(refused.stdout, /"permissionDecision":"deny"/u);
+    assert.ok(refused.stdout.includes(MANAGED_WORKTREE_REFUSAL));
+  });
+});
+
+test("with nothing to protect, a foreign untrusted hook neither refuses the Codex TUI nor earns the trust bypass (#1438)", async () => {
+  await withDir(async (dir) => {
+    const foreign = "/home/u/.codex/config.toml:pre_tool_use:0:0";
+    const source = meta({ worktreePath: undefined });
+    const launch = await prepareAgentTuiLaunch(source, dependencies(dir, {
+      protections: [],
+      inventory: (probe) => [
+        runnerHookEntry(probe),
+        { key: foreign, enabled: true, trustStatus: "untrusted", command: "/home/u/hook.sh" },
+      ],
+    }));
+
+    assert.ok(launch);
+    // Exactly the launch this person had before #1438: their untrusted hook stays gated.
+    assert.deepEqual(launch.args, source.args);
+    assert.ok(!launch.args.includes(CODEX_HOOK_TRUST_BYPASS_FLAG));
+    assert.equal(launch.managedWorktreeGuard?.active, false);
+    assert.ok(launch.managedWorktreeGuard?.reason?.includes(foreign));
+
+    // That TUI cannot be given the guard later, so the first worktree is announced, once.
+    const registry = new UnguardedAgentTuiRegistry();
+    assert.equal(registry.opened("shell-1", "s1377", launch.managedWorktreeGuard, 0), null);
+    assert.equal(registry.protectionsChanged("other-session", 1), null);
+    const notice = registry.protectionsChanged("s1377", 1);
+    assert.ok(notice);
+    assert.match(notice, /Close the TUI and open it again/u);
+    assert.ok(notice.includes(foreign));
+    assert.equal(registry.protectionsChanged("s1377", 2), null);
+  });
+});
+
+test("the reopen notice is for an unguarded, still-open TUI only (#1438)", () => {
+  const registry = new UnguardedAgentTuiRegistry();
+  // A guarded TUI is kept in step by the live refresh, and a provider with no guard has no state.
+  assert.equal(registry.opened("guarded", "s1", { active: true }, 0), null);
+  assert.equal(registry.opened("plain", "s1", undefined, 0), null);
+  assert.equal(registry.protectionsChanged("s1", 1), null);
+
+  // Closed before the worktree appeared: nothing is left open to reopen.
+  assert.equal(registry.opened("closed", "s2", { active: false }, 0), null);
+  registry.exited("closed");
+  assert.equal(registry.protectionsChanged("s2", 1), null);
+
+  // A worktree created while the launch was being prepared is announced at open.
+  assert.equal(
+    registry.opened("raced", "s3", { active: false }, 1),
+    unguardedAgentTuiNotice(),
+  );
+  assert.equal(registry.protectionsChanged("s3", 2), null);
+
+  // Discarding down to nothing is not news, and a reopened TUI is judged afresh.
+  assert.equal(registry.opened("first", "s4", { active: false, reason: "why" }, 0), null);
+  assert.equal(registry.protectionsChanged("s4", 0), null);
+  registry.exited("first");
+  assert.equal(registry.opened("second", "s4", { active: false, reason: "why" }, 0), null);
+  assert.equal(registry.protectionsChanged("s4", 1), unguardedAgentTuiNotice("why"));
 });
 
 test("a modified (re-hashed) hook counts as untrusted", () => {

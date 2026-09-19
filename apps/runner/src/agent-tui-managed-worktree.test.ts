@@ -11,13 +11,14 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { test } from "node:test";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { prepareAgentTuiLaunch } from "./agent-tui.js";
 import { provisionAgentTuiManagedWorktreeGuard } from "./agent-tui-guard.js";
 import {
   claudeHookProtectionsPath,
+  claudeHookSessionProtectionsPath,
   claudeHookSettingsPath,
   describeManagedSettings,
   refreshClaudeGuardProtections,
@@ -338,7 +339,7 @@ test("a refusal from the protection source leaves no runner-owned files behind",
   }
 });
 
-test("a Codex TUI for a session with no managed worktree opens unchanged, with no probe", async () => {
+test("an unguardable Codex TUI for a session with no managed worktree opens unchanged, and says it is unguarded (#1438)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wollipog-tui-guard-"));
   resetClaudeGuardState();
   try {
@@ -354,8 +355,8 @@ test("a Codex TUI for a session with no managed worktree opens unchanged, with n
             controlPlaneProtocolVersion: PROTOCOL_VERSION,
             enabled: false,
             protections: () => [],
-            verifyGuardLaunch: () => assert.fail("no worktree means no self-test"),
-            readCodexHookInventory: () => assert.fail("no worktree means no hook inventory probe"),
+            verifyGuardLaunch: () => ({ ok: true as const }),
+            readCodexHookInventory: () => assert.fail("a profiled launch has no faithful probe to run"),
           },
           () => {},
           hookHost(dir),
@@ -364,9 +365,14 @@ test("a Codex TUI for a session with no managed worktree opens unchanged, with n
       },
     );
     assert.ok(launch);
-    // Even a profile, which a guarded launch cannot enumerate, is untouched here (#1377).
+    // A profile cannot be enumerated, so this launch cannot be guarded. With nothing to protect
+    // that is not a refusal: the argv is untouched (#1377), and the launch reports itself
+    // unguarded so the runner can say so if a worktree appears while it is open (#1438).
     assert.deepEqual(launch.args, ["--profile", "team"]);
-    assert.deepEqual(readdirSync(dir), []);
+    assert.equal(launch.managedWorktreeGuard?.active, false);
+    assert.match(launch.managedWorktreeGuard?.reason ?? "", /profile/u);
+    // Only the (empty) protection list was written; it names no worktree and nothing reads it.
+    assert.deepEqual(readdirSync(dir), [basename(claudeHookSessionProtectionsPath(dir, "s1337cdx"))]);
   } finally {
     resetClaudeGuardState();
     rmSync(dir, { recursive: true, force: true });

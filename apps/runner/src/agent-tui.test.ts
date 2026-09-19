@@ -273,7 +273,7 @@ test("orchestrator TUI preparation fails closed for old peers, unsupported targe
     prepareScratch: async () => assert.fail("ordinary TUI must not prepare scratch"),
     assertSessionNotDeleted: stillPresent,
     provisionManagedWorktreeGuard: unguarded,
-  }), agentTuiLaunch(meta()));
+  }), { ...agentTuiLaunch(meta()), managedWorktreeGuard: { active: false } });
 });
 
 test("an Orchestrator with independent provider permissions has no Native TUI form", async () => {
