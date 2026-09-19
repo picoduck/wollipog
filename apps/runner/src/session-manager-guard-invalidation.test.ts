@@ -262,6 +262,7 @@ test("the unguarded-TUI notice is evaluated on a worktreePath-only patch", (t) =
   store.patchMeta("s_guard", { worktreePath: "/home/me/repo-worktrees/legacy-a" });
   assert.equal(notices.length, 1);
   assert.match(notices[0]!, /started without Wollipog managed worktree protection \(untrusted hooks\)/u);
+});
 
 test("an Orchestrator's guard list is every runner-created worktree on the runner, kept in step by any session's change (#1473)", (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-sm-guard-"));
