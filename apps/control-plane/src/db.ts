@@ -263,6 +263,18 @@ import {
 
 export const GOVERNANCE_AUDIT_RETENTION_MS = 90 * 24 * 60 * 60_000;
 export const MAX_PROJECTED_STEERING_ATTEMPTS = 50;
+/** Lifecycle revocations an exact provider proof may recover from. */
+export const RECOVERABLE_ACTION_REVOCATION_ACTORS: readonly string[] = [
+  "session-restarted",
+  "provider-session-ended",
+];
+/** A forge-proven Claude Code merge recovers from every lifecycle revocation (#1351). */
+export const FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS: readonly string[] = [
+  ...RECOVERABLE_ACTION_REVOCATION_ACTORS,
+  "session-stopped",
+  "guardrail-stopped",
+  "provider-session-absent",
+];
 export const MAX_UNRESOLVED_STEERING_ATTEMPTS = 50;
 export const MAX_PENDING_STEERING_RESOLUTION_REPLAYS = 50;
 const SESSION_PROMPT_TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60_000;
@@ -13655,10 +13667,12 @@ export class ControlPlaneDb {
 
   /** A lifecycle cleanup may revoke an exact action admission before its delayed provider receipt
    * is reconciled. Only the original request -> Orchestrator allow -> compatible lifecycle revoke
-   * audit sequence is recoverable; every other revoked decision remains terminal. */
+   * audit sequence is recoverable; every other revoked decision remains terminal. A forge-proven
+   * merge also recovers from the stop and guardrail revocations its caller names. */
   isRecoverableWorkflowDecisionActionRevocation(
     sessionId: string,
     occurrenceId: string,
+    revocationActors: readonly string[] = RECOVERABLE_ACTION_REVOCATION_ACTORS,
   ): boolean {
     const decision = this.workflowDecisionByOccurrence(occurrenceId);
     const admission = decision?.actionAdmission;
@@ -13692,7 +13706,7 @@ export class ControlPlaneDb {
         allowed.created_at !== decision.resolvedAt ||
         revoked.stage !== "resolution" || revoked.outcome !== "revoked" ||
         revoked.actor_kind !== "system" ||
-        (revoked.actor_id !== "session-restarted" && revoked.actor_id !== "provider-session-ended") ||
+        !revoked.actor_id || !revocationActors.includes(revoked.actor_id) ||
         admission.armedAt < allowed.created_at || admission.armedAt > revoked.created_at) return false;
     for (const row of rows) {
       if (row.content_digest !== decision.resourceDigest || !row.workflow_decision) return false;
@@ -13718,13 +13732,14 @@ export class ControlPlaneDb {
     commandDigest: string,
     receiptDigest: string,
     now: number,
+    revocationActors: readonly string[] = RECOVERABLE_ACTION_REVOCATION_ACTORS,
   ): WorkflowDecisionView | null {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const decision = this.workflowDecisionByOccurrence(occurrenceId);
       const eligible = decision?.sessionId === sessionId &&
         (decision.status === "approved" ||
-          this.isRecoverableWorkflowDecisionActionRevocation(sessionId, occurrenceId));
+          this.isRecoverableWorkflowDecisionActionRevocation(sessionId, occurrenceId, revocationActors));
       if (!eligible || decision?.actionAdmission?.commandDigest !== commandDigest ||
           !this.claimWorkflowDecisionActionReceipt(sessionId, receiptDigest, commandDigest, now)) {
         this.db.exec("COMMIT");

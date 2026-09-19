@@ -376,9 +376,9 @@ A Claude Code child has no correlated command receipt: in auto or Full Access mo
 without a permission prompt, so nothing consumes the armed occurrence live. For such a child the
 proof is the forge alone: the runner reads the pull request and reconciliation succeeds only when
 it reports the approved head merged. One merged head settles one occurrence. When the child stops,
-restarts, or its provider session ends with an armed merge still approved, the control plane asks
-the forge first and records the occurrence consumed if the merge landed; otherwise it is revoked as
-before.
+restarts, or its provider session ends with an armed merge still approved, the occurrence is revoked
+at once as before, so a relaunched provider cannot reuse it; the control plane then reads the forge
+and moves it to consumed if the approved head merged.
 
 Before creating a child, an Orchestrator can call `get_agent_capabilities` with an exact `runnerId`
 and `agentId`. The matching CLI command is:

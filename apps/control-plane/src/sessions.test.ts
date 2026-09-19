@@ -4427,10 +4427,10 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       error: "forge did not prove the exact approved head was merged",
     };
   };
-  const settled = async (db: ControlPlaneDb, occurrenceId: string) => {
+  const settled = async (db: ControlPlaneDb, occurrenceId: string, from = "approved") => {
     for (let attempt = 0; attempt < 100; attempt += 1) {
       const status = db.workflowDecisionByOccurrence(occurrenceId)?.status;
-      if (status !== "approved") return status;
+      if (status !== from) return status;
       await new Promise((resolve) => setImmediate(resolve));
     }
     return db.workflowDecisionByOccurrence(occurrenceId)?.status;
@@ -4525,18 +4525,51 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     } finally { db.close(); }
   });
 
-  await t.test("stopping a Claude Code child records its landed merge consumed, not revoked", async () => {
+  await t.test("stopping a Claude Code child records its landed merge consumed after revoking the grant", async () => {
     const { db, hub, svc, child, arm } = setup(AGENT_ID);
     try {
       const armed = await arm(1353);
-      hub.requestHandler = forgeProof(child, armed);
+      let answer!: () => void;
+      const answered = new Promise<void>((resolve) => { answer = resolve; });
+      const proof = forgeProof(child, armed);
+      hub.requestHandler = async (message) => {
+        await answered;
+        return proof(message);
+      };
       assert.ok(svc.stop(child.id).ok);
-      assert.equal(await settled(db, armed.decision.occurrenceId), "consumed");
+      assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "revoked",
+        "the grant is revoked before the forge read, so a crash mid-read leaves it terminal");
+      answer();
+      assert.equal(await settled(db, armed.decision.occurrenceId, "revoked"), "consumed");
       const outcomes = svc.governanceAudit(child.id)
         .filter((entry) => entry.requestId === armed.decision.occurrenceId)
-        .map((entry) => entry.outcome);
-      assert.ok(outcomes.includes("consumed"));
-      assert.ok(!outcomes.includes("revoked"), "a landed merge never reads revoked");
+        .map((entry) => `${entry.outcome}:${entry.actor.id}`);
+      assert.deepEqual(outcomes.slice(-2), [
+        "revoked:session-stopped",
+        "consumed:workflow-decision-forge-reconciliation",
+      ]);
+    } finally { db.close(); }
+  });
+
+  await t.test("a restarted Claude Code child cannot re-arm its old grant while the forge is read", async () => {
+    const { db, hub, svc, child, arm } = setup(AGENT_ID);
+    try {
+      const armed = await arm(1355);
+      let answer!: () => void;
+      const answered = new Promise<void>((resolve) => { answer = resolve; });
+      const proof = forgeProof(child, armed);
+      hub.requestHandler = async (message) => {
+        await answered;
+        return proof(message);
+      };
+      assert.ok(svc.restart(child.id).ok);
+      const rearmed = await svc.consumeWorkflowDecision(child.id, armed.decision.occurrenceId, {
+        resourceSnapshot: armed.snapshot,
+        action: { kind: "pr_merge_enqueue", command: armed.command },
+      });
+      assert.equal(rearmed.status, 409, "the relaunched provider cannot reuse a pre-restart authorization");
+      answer();
+      assert.equal(await settled(db, armed.decision.occurrenceId, "revoked"), "consumed");
     } finally { db.close(); }
   });
 
@@ -4548,7 +4581,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
         if (outcome === "open") hub.requestHandler = forgeProof(child, armed, () => false);
         else hub.requestHandler = () => { throw new Error("runner did not respond in time"); };
         assert.ok(svc.stop(child.id).ok);
-        assert.equal(await settled(db, armed.decision.occurrenceId), "revoked", `${outcome} forge state`);
+        assert.equal(await settled(db, armed.decision.occurrenceId, "revoked"), "revoked", `${outcome} forge state`);
         assert.ok(svc.governanceAudit(child.id).some((entry) =>
           entry.requestId === armed.decision.occurrenceId && entry.outcome === "revoked" &&
           entry.actor.id === "session-stopped"));

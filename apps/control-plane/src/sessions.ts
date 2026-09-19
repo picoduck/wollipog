@@ -157,6 +157,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type SessionRole,
 } from "@wollipog/protocol";
 import {
+  FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS,
   MAX_PENDING_STEERING_RESOLUTION_REPLAYS,
   MAX_UNRESOLVED_STEERING_ATTEMPTS,
   type AgentLaunch,
@@ -7271,17 +7272,16 @@ export class SessionsService {
   private revokeUnconsumedWorkflowDecisionsForSession(sessionId: string, actorId: string): void {
     const child = this.db.getSession(sessionId);
     for (const decision of this.db.unconsumedWorkflowDecisionsForSession(sessionId)) {
-      if (child && this.forgeSettlesArmedMerge(child, decision)) {
-        void this.settleArmedMergeFromForge(child, decision, actorId);
-        continue;
-      }
+      const settle = child ? this.forgeSettlesArmedMerge(child, decision) : false;
       this.revokeWorkflowDecision(decision, { kind: "system", id: actorId });
+      if (settle) void this.settleArmedMergeFromForge(child!, decision);
     }
   }
 
   /** A Claude Code child's armed enqueue never produces a permission receipt in auto or Full Access
-   * mode, so a lifecycle end would revoke a merge that already landed. Those decisions ask the forge
-   * first and are recorded consumed when it reports the approved head merged. */
+   * mode, so a lifecycle end would leave a merge that already landed revoked. The grant is still
+   * revoked first, so a relaunched provider can never reuse it and a crash leaves it terminal; the
+   * forge then moves it to consumed only when it reports the approved head merged. */
   private forgeSettlesArmedMerge(child: SessionView, decision: WorkflowDecisionView): boolean {
     return child.driver === "claude-code" && decision.status === "approved" &&
       decision.category === "pr_merge" && decision.actionAdmission?.kind === "pr_merge_enqueue" &&
@@ -7295,7 +7295,6 @@ export class SessionsService {
   private async settleArmedMergeFromForge(
     child: SessionView,
     decision: WorkflowDecisionView,
-    actorId: string,
   ): Promise<void> {
     if (this.forgeMergeSettlements.has(decision.occurrenceId)) return;
     this.forgeMergeSettlements.add(decision.occurrenceId);
@@ -7304,8 +7303,9 @@ export class SessionsService {
         WorkflowDecisionResourceSnapshot, { category: "pr_merge" }
       >;
       const proven = await this.forgeAttestedMergeProof(child, decision, snapshot);
-      if (proven.ok && this.forgeAttestedMergeAuthority(decision, false) &&
-          this.consumeForgeAttestedMerge(decision, snapshot, proven.data!)) return;
+      if (proven.ok && this.forgeAttestedMergeAuthority(decision, false)) {
+        this.consumeForgeAttestedMerge(decision, snapshot, proven.data!);
+      }
     } catch (error) {
       this.log.warn(`forge settlement of workflow decision ${decision.occurrenceId} failed: ${
         error instanceof Error ? error.message : "unknown error"
@@ -7313,8 +7313,6 @@ export class SessionsService {
     } finally {
       this.forgeMergeSettlements.delete(decision.occurrenceId);
     }
-    const current = this.db.workflowDecisionByOccurrence(decision.occurrenceId);
-    if (current?.status === "approved") this.revokeWorkflowDecision(current, { kind: "system", id: actorId });
   }
 
   /** Ask the child's runner whether the forge merged the exact approved head. The runner never runs
@@ -7408,6 +7406,7 @@ export class SessionsService {
       decision.actionAdmission!.commandDigest,
       receiptDigest,
       now,
+      FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS,
     );
     if (!consumed) return null;
     this.recordWorkflowDecisionAudit(
