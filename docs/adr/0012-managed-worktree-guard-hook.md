@@ -234,8 +234,8 @@ What is done instead:
     A walking NAME is matched on its last component, so `/usr/bin/find` counts as `find`, and the
     words beside an unexpanded variable are still read, so `grep -r "$PATTERN"` counts as a walk
     while a command that is nothing but a variable stays outside the matcher (both found by
-    cross-model review). A DETACHED `rec` counts only directly after `-d`/`--directories`, where
-    `grep` would read it as a value, so an ordinary `cat rec` is not refused.
+    cross-model review). A DETACHED `rec` counts only as the value a `-d`/`--directories`
+    option consumes, so an ordinary `cat rec` is not refused.
 
   An operand-less `find -maxdepth N` is admitted on exactly the terms an explicit START is, with the
   bound measured from the working directory, so `find -maxdepth 2` from two levels above the hook
@@ -253,11 +253,15 @@ What is done instead:
   only once the quotes are removed (both found by cross-model review). Nothing in such a command
   was ever an inspection, so reading it twice only refuses more.
 
-  A detached recurse value counts once the command carries a `-d`/`--directories` option at all,
-  rather than only in the word straight after it, because adjacency is not knowable from this text:
-  a redirection appears among these words but not in the argv the kernel builds, so
+  That value is the first ARGV word after the option, which is not always the next word of the
+  text: a redirection appears among these words but not in the argv the kernel builds, so
   `grep -d 2>/dev/null rec` reaches `grep` as `-d rec` and recurses (found by cross-model review,
-  and measured — it printed a planted protections file's contents).
+  and measured — it printed a planted protections file's contents). So the value is found by
+  skipping redirection targets, bare numbers that may be IO numbers, and unexpanded variables that
+  may expand to nothing; the first other word is the value, and `read` or `skip` there consumes the
+  option without a walk, leaving the later `rec` in `grep -d read rec file` as a mere pattern. For a
+  command the tokenizer gave up on, nothing says which word is argv, so the option stays pending
+  to the end of the command, which only refuses more.
 
   The limit this leaves, unchanged in kind: a tool that walks under a name the classifier does not
   model is not judged. That covers one that recurses by default with no option and no operand
@@ -266,7 +270,9 @@ What is done instead:
   working directory, and which `git clean -ndfx` confirms would take an ignored data directory with
   it. Neither is an unexpanded variable or a script modelled. That is the same indirection this
   whole mechanism is defeated by, restated at the end of this section; closing it means a growing
-  list of tool names, which needs its own decision rather than being added here.
+  list of tool names, which needs its own decision rather than being added here. Deleting the
+  guard state that way fails closed rather than open: the hook blocks every call once its
+  protections file is gone. The durable answer is enforcement at the OS boundary (#1302).
 
   One caller judges this rule from a directory that may not be the shell's. The control-channel
   veto in `claude-code.ts` passes the SESSION directory (the worktree veto beside it passes

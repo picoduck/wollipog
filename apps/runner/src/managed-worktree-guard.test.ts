@@ -1092,6 +1092,20 @@ test("an operand-less recursive command is judged against the directory it walks
     assert.equal(commandTargetsGuardState(command, home, directory), GUARD_STATE_REFUSAL, command);
     assert.equal(commandTargetsGuardState(command, project, directory), null, command);
   }
+  // Cross-model review, round 5: `-d` consumes ONE value. `read` and `skip` are consumed without a
+  // walk, so a later `rec` is only the pattern (measured against GNU grep 3.11).
+  for (const command of ["grep -d read rec secret", "grep -d skip rec secret",
+    "grep --directories read rec secret", "grep --directories=read rec secret",
+    "grep -d 2>/dev/null read rec secret"]) {
+    assert.equal(commandTargetsGuardState(command, home, directory), null, command);
+  }
+  // ...while what the shell removes, or may remove, never stands in for that value.
+  for (const command of ["grep -d >read rec secret", "grep -d 2>read rec secret",
+    "grep -d $EMPTY rec secret", "grep -d 2 rec secret", "grep -d read -d rec secret",
+    "grep -d >read rec secret | cat"]) {
+    assert.equal(commandTargetsGuardState(command, home, directory), GUARD_STATE_REFUSAL, command);
+    assert.equal(commandTargetsGuardState(command, project, directory), null, command);
+  }
   // Accepted limit, recorded in ADR 0012: a subcommand that walks under a name the classifier does
   // not model is not judged, exactly as `rg` and `tree` are not.
   assert.equal(commandTargetsGuardState("git clean -dfx", home, directory), null);

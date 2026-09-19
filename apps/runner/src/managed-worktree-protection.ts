@@ -950,9 +950,10 @@ function tokenText(token: ShellToken): string | null {
 /**
  * One command out of a list: every word that names a location, and separately the words that decide
  * what the command DOES. `words` is null when the segment carries an unexpanded variable, since one
- * opaque word could be a recursion flag or another operand.
+ * opaque word could be a recursion flag or another operand. `targets` holds the positions in
+ * `operands` of redirection targets, which the shell removes before the program sees its argv.
  */
-interface CommandSegment { operands: Array<string | null>; words: string[] | null }
+interface CommandSegment { operands: Array<string | null>; words: string[] | null; targets: Set<number> }
 
 /**
  * Split a parsed command into segments, or `null` when it contains a construct this classifier does
@@ -963,6 +964,7 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
   const segments: CommandSegment[] = [];
   let operands: Array<string | null> = [];
   let words: string[] | null = [];
+  let targets = new Set<number>();
   let redirected = false;
   let previousWord: string | null = null;
   for (const token of tokens) {
@@ -970,8 +972,10 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
     if (op === null) {
       const text = tokenText(token);
       operands.push(text);
-      if (redirected) redirected = false;
-      else if (words !== null) {
+      if (redirected) {
+        redirected = false;
+        targets.add(operands.length - 1);
+      } else if (words !== null) {
         if (text === null) words = null;
         else words.push(text);
       }
@@ -979,9 +983,10 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
       continue;
     }
     if (SEGMENT_SEPARATORS.has(op)) {
-      segments.push({ operands, words });
+      segments.push({ operands, words, targets });
       operands = [];
       words = [];
+      targets = new Set<number>();
       redirected = false;
       previousWord = null;
       continue;
@@ -995,7 +1000,7 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
     redirected = true;
     previousWord = null;
   }
-  segments.push({ operands, words });
+  segments.push({ operands, words, targets });
   return segments;
 }
 
@@ -1054,9 +1059,12 @@ function recursiveWalkWord(word: string): boolean {
   return /^-[^-]/u.test(word) && /[Rr]/u.test(word);
 }
 
-/** `grep -d` / `--directories`, the one option whose detached VALUE can ask for a walk. */
+/**
+ * `grep -d` / `--directories` spelled so that its VALUE is the next argv word. An attached value
+ * (`--directories=read`) is judged where it stands, by `recursiveWalkWord`, and consumes nothing.
+ */
 function directoriesAction(word: string): boolean {
-  if (word.startsWith("--")) return longOptionAbbreviates(word, ["directories"]);
+  if (word.startsWith("--")) return !word.includes("=") && longOptionAbbreviates(word, ["directories"]);
   return /^-[^-]*d$/u.test(word);
 }
 
@@ -1072,23 +1080,34 @@ function commandBasename(word: string): string {
  * place, and a command the tokenizer gave up on has no command position at all. A walking name is
  * matched on its last component, because `/usr/bin/find` walks exactly as `find` does.
  *
- * A DETACHED recurse value counts once the command carries a `-d`/`--directories` option at all,
- * not only in the word straight after it. Adjacency is not knowable here: a redirection sits in
- * these words but not in the argv the kernel gets, so `grep -d 2>/dev/null rec` reaches `grep` as
- * `-d rec` and recurses while `2` and `/dev/null` stand between the two words (found by
- * cross-model review). Requiring the option keeps `cat rec` allowed, which is the whole point of
- * not matching a bare value everywhere.
+ * A DETACHED recurse value counts when it is the value a `-d`/`--directories` option consumes:
+ * the first argv word after it. These words are not argv, so that word is found by skipping what the
+ * shell removes or what cannot be told apart from it — a redirection target, a bare number that may
+ * be an IO number (`grep -d 2>/dev/null rec` reaches `grep` as `-d rec`), and an unexpanded
+ * variable that may expand to nothing. Any other word is the value: `rec` through `recurse` make
+ * the command a walk, and anything else — `read`, `skip` — is consumed without one, so the later
+ * `rec` in `grep -d read rec file` is only a pattern. When `targets` is null — a command the
+ * tokenizer gave up on, where nothing says which word is argv — the option stays pending to the end
+ * instead, which only refuses more. Requiring the option at all keeps `cat rec` allowed.
  *
  * It refuses more than it needs to — from an ancestor, a command merely mentioning `find` or
  * `recurse` is refused — which is the safe direction for this question.
  */
-function walksWorkingDirectory(words: readonly string[]): boolean {
-  let directories = false;
-  for (const word of words) {
+function walksWorkingDirectory(
+  words: ReadonlyArray<string | null>,
+  targets: ReadonlySet<number> | null,
+): boolean {
+  let pending = false;
+  for (let index = 0; index < words.length; index++) {
+    const word = words[index];
+    if (word === null || word === undefined) continue;
     if (WALKING_COMMANDS.has(commandBasename(word).toLowerCase())) return true;
     if (recursiveWalkWord(word)) return true;
-    if (directories && RECURSE_VALUES.has(word.toLowerCase())) return true;
-    if (directoriesAction(word)) directories = true;
+    if (pending) {
+      if (RECURSE_VALUES.has(word.toLowerCase())) return true;
+      if (targets !== null && !targets.has(index) && !/^\d+$/u.test(word)) pending = false;
+    }
+    if (directoriesAction(word)) pending = true;
   }
   return false;
 }
@@ -1244,12 +1263,12 @@ export function commandTargetsGuardState(
       if (pathTargetsGuardState(value, cwd, root)) return GUARD_STATE_REFUSAL;
       words.push(value);
     }
-    return workingDepth !== null && walksWorkingDirectory(words) ? GUARD_STATE_REFUSAL : null;
+    return workingDepth !== null && walksWorkingDirectory(words, null) ? GUARD_STATE_REFUSAL : null;
   }
   let namesAncestor = false;
   // Each distinct word is resolved once, and a bounded `find` reads its START depths back from here.
   const relations = new Map<string, GuardStateRelation | null>();
-  for (const { operands, words } of segments) {
+  for (const { operands, targets } of segments) {
     for (const value of operands) {
       if (value === null || relations.has(value)) continue;
       const relation = guardStateRelation(value, cwd, root);
@@ -1262,10 +1281,7 @@ export function commandTargetsGuardState(
     // `words` null, but the words BESIDE it are still known — `grep -r "$PATTERN"` hides only the
     // pattern — so the walk test reads every word the tokenizer did resolve. What stays hidden is
     // a command that is nothing but a variable, the documented limit of a command-text matcher.
-    if (workingDepth !== null &&
-        walksWorkingDirectory(operands.filter((value): value is string => value !== null))) {
-      namesAncestor = true;
-    }
+    if (workingDepth !== null && walksWorkingDirectory(operands, targets)) namesAncestor = true;
   }
   if (!namesAncestor) return null;
   // Every command in the list has to be an inspection, not only the ones naming an ancestor: an
