@@ -41,6 +41,7 @@ import {
   WORKSPACE_REFERENCE_MIME_TYPE,
   pendingRequests,
 } from "@wollipog/protocol";
+import { dispatch as dispatchManagerTool } from "../../runner/src/session-management-mcp.js";
 import { ControlPlaneDb } from "./db.js";
 import { parseRateTable } from "./usage-pricing.js";
 import { automationCommandDigest, canonicalAutomationCommandJson } from "./automation-command-outbox.js";
@@ -18567,8 +18568,43 @@ function uiEvidenceReviewHarness(protocolVersion = PROTOCOL_VERSION, imageModel 
     }
     return delivered;
   };
-  return { db, svc, parent: parent.data, createChild, decisions, screenshot, request, review };
+  return { db, hub, svc, parent: parent.data, createChild, decisions, screenshot, request, review };
 }
+
+test("campaign policy delivered to a child names no manager tool the child toolset lacks (#1278)", async () => {
+  const listTools = async (orchestrator: boolean) => {
+    const response = await dispatchManagerTool({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { orchestrator } as never);
+    return new Set((response!.result as { tools: { name: string }[] }).tools.map((tool) => tool.name));
+  };
+  const childTools = await listTools(false);
+  const orchestratorTools = await listTools(true);
+  const withheld = [...orchestratorTools].filter((name) => !childTools.has(name));
+  assert.ok(withheld.includes("record_campaign_follow_up") && withheld.includes("review_descendant_ui_evidence"),
+    "the enumeration reaches the Orchestrator-only tools this guard exists for");
+  for (const imageModel of [true, false]) {
+    const h = uiEvidenceReviewHarness(PROTOCOL_VERSION, imageModel);
+    try {
+      const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, prompt: "Implement the assigned issue" };
+      let child = h.svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: h.parent.id });
+      if (child.status === 428) {
+        assert.ok(h.svc.approve(h.parent.id, h.db.getSession(h.parent.id)!.pendingApproval!.requestId, "allow").ok);
+        child = h.svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: h.parent.id });
+      }
+      assert.ok(child.ok && child.data, child.error);
+      const assignment = h.hub.sentOfType("start_session")
+        .find((message) => message.spec.sessionId === child.data!.id)?.initialPrompt ?? "";
+      const policy = assignment.slice(0, assignment.indexOf("[End Wollipog Campaign Policy]"));
+      assert.match(policy, /Wollipog Campaign Policy — server-derived/);
+      assert.match(policy, imageModel ? /controlling Orchestrator can inspect/ : /UI evidence remains human-owned/);
+      for (const name of withheld) {
+        assert.equal(new RegExp(`\\b${name}\\b`).test(policy), false, `child policy names ${name}, which the child cannot call`);
+      }
+      assert.match(policy, /Report every follow-up you identify in your final report/);
+    } finally {
+      h.db.close();
+    }
+  }
+});
 
 test("an assigned Orchestrator reviews exact image evidence and resolves it only with server receipts", () => {
   const h = uiEvidenceReviewHarness();
