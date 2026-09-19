@@ -10,7 +10,7 @@
     "build": "tsc --noEmit && vite build && node scripts/verify-icon-bundle.mjs",
     "build:e2e": "vite build --mode production-e2e",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json"
   },
   "dependencies": {
     "@tanstack/react-virtual": "3.14.10",
