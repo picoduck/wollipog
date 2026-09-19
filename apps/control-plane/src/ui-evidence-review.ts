@@ -63,8 +63,11 @@ export function evaluateUiEvidenceReviewClient(client: UiEvidenceReviewClient): 
   if (!capabilities?.supportsImages) {
     return human("harness_unsupported", "This Orchestrator's agent installation does not support image input.");
   }
-  const model = capabilities.models.find((candidate) => candidate.id === client.modelId)
-    ?? capabilities.models.find((candidate) => candidate.default && !candidate.hidden);
+  // The default model stands in only when no model was selected. A selected model the catalog does
+  // not know has advertised nothing, so it must not inherit the default's image capability.
+  const model = client.modelId
+    ? capabilities.models.find((candidate) => candidate.id === client.modelId)
+    : capabilities.models.find((candidate) => candidate.default && !candidate.hidden);
   if (!model?.inputModalities?.includes("image")) {
     return human(
       "model_unsupported",

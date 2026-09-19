@@ -204,9 +204,10 @@ test("review_descendant_ui_evidence returns the verified image and refuses bytes
     sha256: createHash("sha256").update(bytes).digest("hex"), deliveredAt: 10,
   };
   let data = bytes.toString("base64");
-  const { deps, calls } = makeDeps(() => ({
-    status: 200, body: { receipt, mimeType: "image/png", sizeBytes: bytes.byteLength, data },
-  }));
+  let acknowledgeStatus = 200;
+  const { deps, calls } = makeDeps((call) => call.url.endsWith("/acknowledge")
+    ? { status: acknowledgeStatus, body: acknowledgeStatus === 200 ? { acknowledged: true } : { error: "replaced" } }
+    : { status: 200, body: { receipt, mimeType: "image/png", sizeBytes: bytes.byteLength, data } });
   assert.equal((await callTool(deps, "review_descendant_ui_evidence",
     { sessionId: "child", occurrenceId: "workflow_1", evidenceId: "desktop" })).isError, true,
   "only an Orchestrator can read descendant evidence");
@@ -215,17 +216,29 @@ test("review_descendant_ui_evidence returns the verified image and refuses bytes
   deps.orchestrator = true;
   const reviewed = await callTool(deps, "review_descendant_ui_evidence",
     { sessionId: "child", occurrenceId: "workflow_1", evidenceId: "desktop" });
-  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/descendant-requests/review-ui-evidence`);
-  assert.deepEqual(calls.at(-1)?.body, { sessionId: "child", occurrenceId: "workflow_1", evidenceId: "desktop" });
+  assert.equal(calls.at(-2)?.url, `${CP_URL}/api/sessions/${SELF_ID}/descendant-requests/review-ui-evidence`);
+  assert.deepEqual(calls.at(-2)?.body, { sessionId: "child", occurrenceId: "workflow_1", evidenceId: "desktop" });
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/descendant-requests/review-ui-evidence/acknowledge`);
+  assert.deepEqual(calls.at(-1)?.body, { receiptId: "uireceipt_1", sha256: receipt.sha256 },
+    "the verified handoff is acknowledged before the image is shown");
   assert.deepEqual(resultJson(reviewed), { receipt, mimeType: "image/png", sizeBytes: bytes.byteLength },
     "the text block carries identity and digest, never the bytes");
   assert.deepEqual(reviewed.content[1], { type: "image", data, mimeType: "image/png" });
 
+  acknowledgeStatus = 409;
+  const unrecorded = await callTool(deps, "review_descendant_ui_evidence",
+    { sessionId: "child", occurrenceId: "workflow_1", evidenceId: "desktop" });
+  assert.equal(unrecorded.isError, true);
+  assert.equal(unrecorded.content.length, 1, "an image is never shown without a usable receipt");
+
+  acknowledgeStatus = 200;
   data = Buffer.from("substituted bytes").toString("base64");
+  const before = calls.length;
   const substituted = await callTool(deps, "review_descendant_ui_evidence",
     { sessionId: "child", occurrenceId: "workflow_1", evidenceId: "desktop" });
   assert.equal(substituted.isError, true);
   assert.equal(substituted.content.length, 1, "mismatched bytes are never shown to the model");
+  assert.equal(calls.length, before + 1, "refused bytes are never acknowledged");
 });
 
 test("PR merge action admission fails closed against mixed-version control planes", async () => {

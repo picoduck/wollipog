@@ -18085,7 +18085,17 @@ function uiEvidenceReviewHarness(protocolVersion = PROTOCOL_VERSION, imageModel 
     requestId, resourceKey: `${requestId}-ui`,
     resourceSnapshot: { category: "ui_evidence_approval", evidence } as never,
   });
-  return { db, svc, parent: parent.data, createChild, decisions, screenshot, request };
+  /** A complete review: delivery plus the runner's acknowledgement of the verified handoff. */
+  const review = (childId: string, occurrenceId: string, evidenceId: string) => {
+    const delivered = svc.reviewDescendantUiEvidence(parent.data!.id, childId, occurrenceId, evidenceId, () => true);
+    if (delivered.ok && delivered.data) {
+      assert.ok(svc.acknowledgeDescendantUiEvidence(
+        parent.data!.id, delivered.data.receipt.receiptId, delivered.data.receipt.sha256,
+      ).ok);
+    }
+    return delivered;
+  };
+  return { db, svc, parent: parent.data, createChild, decisions, screenshot, request, review };
 }
 
 test("an assigned Orchestrator reviews exact image evidence and resolves it only with server receipts", () => {
@@ -18106,14 +18116,24 @@ test("an assigned Orchestrator reviews exact image evidence and resolves it only
 
     assert.equal(resolve(decision.data.occurrenceId, "approve", ["before", "after"]).status, 409,
       "repeating evidence identifiers is not a review");
-    const delivered = h.svc.reviewDescendantUiEvidence(h.parent.id, child.id, decision.data.occurrenceId, "before", () => true);
+    const dropped = h.svc.reviewDescendantUiEvidence(h.parent.id, child.id, decision.data.occurrenceId, "before", () => true);
+    assert.ok(dropped.ok && dropped.data, dropped.error);
+    assert.ok(h.review(child.id, decision.data.occurrenceId, "after").ok);
+    assert.match(resolve(decision.data.occurrenceId, "approve", ["before", "after"]).error ?? "", /"before"/u,
+      "a delivery the runner never acknowledged supports no approval");
+    assert.equal(h.svc.acknowledgeDescendantUiEvidence(h.parent.id, dropped.data.receipt.receiptId, "f".repeat(64)).status, 409,
+      "an acknowledgement must name the delivered digest");
+    h.db.revokeUiEvidenceReviewReceipts(decision.data.occurrenceId, Date.now());
+    const delivered = h.review(child.id, decision.data.occurrenceId, "before");
     assert.ok(delivered.ok && delivered.data, delivered.error);
+    assert.equal(h.svc.acknowledgeDescendantUiEvidence(h.parent.id, dropped.data.receipt.receiptId, before.item.sha256).status, 409,
+      "a receipt id replaced by a redelivery acknowledges nothing");
     assert.equal(delivered.data.data, before.bytes.toString("base64"), "the exact artifact bytes are delivered");
     assert.equal(delivered.data.receipt.sha256, before.item.sha256);
     assert.equal(delivered.data.receipt.policyRevision, 1);
     assert.match(resolve(decision.data.occurrenceId, "approve", ["before", "after"]).error ?? "", /"after"/u,
       "one reviewed item does not cover the other");
-    assert.ok(h.svc.reviewDescendantUiEvidence(h.parent.id, child.id, decision.data.occurrenceId, "after", () => true).ok);
+    assert.ok(h.review(child.id, decision.data.occurrenceId, "after").ok);
     assert.equal(h.svc.reviewDescendantUiEvidence(h.parent.id, child.id, decision.data.occurrenceId, "missing", () => true).status, 404);
     assert.equal(h.svc.reviewDescendantUiEvidence(h.parent.id, child.id, decision.data.occurrenceId, "after", () => false).status, 404,
       "delivery honors the campaign audience");
@@ -18221,7 +18241,7 @@ test("delegated UI evidence review fails closed on tampering, policy change, sup
     const first = h.screenshot(child.id, "first");
     const stale = h.request(child.id, "stale-1", [first.item]);
     assert.ok(stale.ok && stale.data);
-    assert.ok(h.svc.reviewDescendantUiEvidence(h.parent.id, child.id, stale.data.occurrenceId, "first", () => true).ok);
+    assert.ok(h.review(child.id, stale.data.occurrenceId, "first").ok);
     const replacement = h.svc.createWorkflowDecision(child.id, {
       requestId: "stale-2", resourceKey: "stale-1-ui",
       resourceSnapshot: { category: "ui_evidence_approval", evidence: [first.item] },
@@ -18231,7 +18251,8 @@ test("delegated UI evidence review fails closed on tampering, policy change, sup
     assert.equal(approve(replacement.data.occurrenceId, ["first"]).status, 409, "a receipt is bound to its occurrence");
 
     // Receipts expire.
-    assert.ok(h.svc.reviewDescendantUiEvidence(h.parent.id, child.id, replacement.data.occurrenceId, "first", () => true).ok);
+    assert.ok(h.review(child.id, replacement.data.occurrenceId, "first").ok);
+    assert.equal(h.db.validUiEvidenceReviewReceipts(replacement.data.occurrenceId, h.parent.id, Date.now()).length, 1);
     assert.equal(h.db.validUiEvidenceReviewReceipts(replacement.data.occurrenceId, h.parent.id, Date.now() + 2 * 60 * 60 * 1000).length, 0);
 
     // A human policy change invalidates the unconsumed receipts together with the decision.
@@ -18252,9 +18273,12 @@ test("older runners and text-only models keep UI evidence human-owned with an ex
   for (const [protocol, imageModel, code] of [
     [RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorUiEvidenceReview - 1, true, "runner_unsupported"],
     [PROTOCOL_VERSION, false, "model_unsupported"],
+    // A selected model the catalog does not know must not inherit the default's image capability.
+    [PROTOCOL_VERSION, "unknown", "model_unsupported"],
   ] as const) {
-    const h = uiEvidenceReviewHarness(protocol, imageModel);
+    const h = uiEvidenceReviewHarness(protocol, imageModel !== false);
     try {
+      if (imageModel === "unknown") h.db.updateSessionConfig(h.parent.id, { model: "uncatalogued-model", permissionMode: "orchestrator" }, Date.now());
       const child = h.createChild("UI Child");
       const projection = h.db.campaignProjection(h.parent.id)!;
       assert.equal(projection.decisionOwners.ui_evidence_approval, "human");

@@ -316,7 +316,8 @@ human-owned with a `humanFallback` code and reason shown on the request card:
 
 - the Orchestrator's runner speaks protocol v167 (`orchestratorUiEvidenceReview`);
 - its harness hands MCP image content to the model (Claude Code, Codex App Server), its installation
-  supports images, and its exact model advertises `image` input — unknown is treated as unsupported;
+  supports images, and its exact model advertises `image` input — unknown is treated as unsupported,
+  and a selected model missing from the catalog never inherits the default model's capability;
 - every evidence item names an `artifactId` of a `screenshot` Session artifact owned by the requesting
   child, declares an allowed image `mediaType`, and matches that artifact's type, size, and SHA-256.
 
@@ -331,14 +332,16 @@ The Orchestrator inspects evidence with `review_descendant_ui_evidence` (`sessio
 `occurrenceId`, `evidenceId`). Delivery re-runs every gate that guards resolution — root campaign
 controller, ancestry, audience, pending status, policy revision, and current authority — then reads
 the artifact bytes, recomputes their SHA-256 against the digest in the decision snapshot, and revokes
-the decision on mismatch instead of showing anything. The runner recomputes the digest again before
-returning the image as MCP image content. The text block carries only the receipt, so the CLI path,
+the decision on mismatch instead of showing anything. The runner recomputes the digest again, then
+acknowledges the exact receipt id and digest; only then does it return the image as MCP image
+content. An unacknowledged receipt supports no approval, and a failed acknowledgement withholds the
+image, so a dropped response or refused bytes can never stand in for a review. The text block carries only the receipt, so the CLI path,
 transcripts of tool text, campaign projections, and audit never hold evidence bytes or signed query
 parameters.
 
 Each delivery records a server-side review receipt bound to the reviewer, child, occurrence, policy
 revision, evidence identifier, artifact, and digest. `resolve_descendant_workflow_decision` approves a
-UI-evidence decision only when an unexpired (one hour), unconsumed, unrevoked receipt exists for every
+UI-evidence decision only when an acknowledged, unexpired (one hour), unconsumed, unrevoked receipt exists for every
 item; repeating `evidenceReviewed` identifiers is not sufficient. Denial needs no receipts. Receipts
 are spent by resolution and revoked with the decision, so a policy-revision or ownership change,
 supersession, or revocation invalidates them. The resolution audit lists evidence identifier and

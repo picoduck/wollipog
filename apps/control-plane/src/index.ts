@@ -3358,6 +3358,21 @@ app.post("/api/sessions/:id/descendant-requests/review-ui-evidence", async (req,
   ));
 });
 
+app.post("/api/sessions/:id/descendant-requests/review-ui-evidence/acknowledge", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching parent session credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  const body = req.body as { receiptId?: unknown; sha256?: unknown };
+  if (!validParentControlCoordinate(body?.receiptId) ||
+      typeof body.sha256 !== "string" || !/^[0-9a-f]{64}$/u.test(body.sha256)) {
+    return reply.code(400).send({ error: "receiptId and sha256 are required" });
+  }
+  return respond(reply, svc.acknowledgeDescendantUiEvidence(id, body.receiptId, body.sha256));
+});
+
 app.get("/api/sessions/:id/child-sessions", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const query = req.query as { after?: string; limit?: string; eventEpoch?: string };

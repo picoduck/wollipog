@@ -326,6 +326,13 @@ test("HTTP agent management scopes descendants and composes governance policy vi
         assert.equal((await request(mode, "descendant-requests/review-ui-evidence", {
           ...evidenceCoordinate, evidenceId: "",
         })).status, 400);
+        const acknowledgement = { receiptId: "uireceipt_missing", sha256: "a".repeat(64) };
+        assert.equal((await humanRequest("descendant-requests/review-ui-evidence/acknowledge", acknowledgement)).status, 403);
+        assert.equal((await request(mode, "descendant-requests/review-ui-evidence/acknowledge", acknowledgement)).status, 409,
+          "an unknown receipt acknowledges nothing");
+        assert.equal((await request(mode, "descendant-requests/review-ui-evidence/acknowledge", {
+          ...acknowledgement, sha256: "not-a-digest",
+        })).status, 400);
         assert.equal((await request(`${mode}-child`, "descendant-requests", undefined, "GET")).status, 404,
           "an orchestrator credential cannot pose as its descendant");
         assert.equal((await request(mode, "descendant-requests", undefined, "GET")).status, 200,

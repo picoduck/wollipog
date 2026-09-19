@@ -6774,6 +6774,19 @@ export class SessionsService {
     );
   }
 
+  /** Second half of a delivery: the reviewer's runner re-hashed the bytes and is handing them to
+   * the model. Until this succeeds the receipt supports nothing, so a dropped response or bytes the
+   * runner refused can never stand in for a review. */
+  acknowledgeDescendantUiEvidence(
+    parentSessionId: string,
+    receiptId: string,
+    sha256: string,
+  ): ServiceResult<{ acknowledged: true }> {
+    return this.db.acknowledgeUiEvidenceReviewReceipt(receiptId, parentSessionId, sha256, Date.now())
+      ? ok({ acknowledged: true })
+      : fail("review receipt is unknown, replaced, expired, or no longer usable", 409);
+  }
+
   /** Whether a stored decision's owner still holds under the current policy and capabilities.
    * A human-owned UI evidence decision stays valid when capabilities later improve: human review
    * never broadens access, and a saved-owner change is caught by the policy revision instead. */

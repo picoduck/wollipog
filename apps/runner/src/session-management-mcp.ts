@@ -1062,6 +1062,15 @@ export const TOOLS: McpTool[] = [
           bytes.byteLength !== delivery.sizeBytes) {
         return errorResult("delivered evidence does not match the digest bound to this workflow decision; do not approve it");
       }
+      // The receipt counts only once this runner confirms the verified handoff. If that fails the
+      // image is withheld too, so the model never holds evidence without a receipt or the reverse.
+      const acknowledged = await cpFetch(
+        deps,
+        "POST",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/descendant-requests/review-ui-evidence/acknowledge`,
+        { receiptId: delivery.receipt.receiptId, sha256: delivery.receipt.sha256 },
+      );
+      if (!acknowledged.ok) return errorResult(`evidence review could not be recorded: ${acknowledged.message}`);
       return {
         content: [
           { type: "text", text: JSON.stringify({ receipt: delivery.receipt, mimeType: delivery.mimeType, sizeBytes: delivery.sizeBytes }) },

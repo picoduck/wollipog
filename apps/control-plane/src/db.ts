@@ -623,6 +623,9 @@ CREATE TABLE IF NOT EXISTS ui_evidence_review_receipts (
   sha256              TEXT NOT NULL,
   delivered_at        INTEGER NOT NULL,
   expires_at          INTEGER NOT NULL,
+  -- Set only when the reviewer's runner confirms it verified and handed over the bytes. A row
+  -- without it records an attempted delivery and supports no approval.
+  acknowledged_at     INTEGER,
   consumed_at         INTEGER,
   revoked_at          INTEGER,
   UNIQUE (occurrence_id, reviewer_session_id, evidence_id),
@@ -13431,7 +13434,7 @@ export class ControlPlaneDb {
          receipt_id=excluded.receipt_id, child_session_id=excluded.child_session_id,
          policy_revision=excluded.policy_revision, artifact_id=excluded.artifact_id,
          sha256=excluded.sha256, delivered_at=excluded.delivered_at, expires_at=excluded.expires_at,
-         consumed_at=NULL, revoked_at=NULL`,
+         acknowledged_at=NULL, consumed_at=NULL, revoked_at=NULL`,
     ).run(
       receipt.receiptId, receipt.occurrenceId, receipt.reviewerSessionId, receipt.childSessionId,
       receipt.policyRevision, receipt.evidenceId, receipt.artifactId, receipt.sha256,
@@ -13440,7 +13443,22 @@ export class ControlPlaneDb {
     return receipt;
   }
 
-  /** Receipts still able to support an approval: unexpired, unconsumed, and unrevoked. */
+  /** The runner confirms one exact delivery. Only the current receipt id of a live row matches, so
+   * an id replaced by a redelivery, or one already spent, revoked, or expired, acknowledges nothing. */
+  acknowledgeUiEvidenceReviewReceipt(
+    receiptId: string,
+    reviewerSessionId: string,
+    sha256: string,
+    now: number,
+  ): boolean {
+    return Number(this.stmt(
+      `UPDATE ui_evidence_review_receipts SET acknowledged_at=COALESCE(acknowledged_at, ?)
+       WHERE receipt_id=? AND reviewer_session_id=? AND sha256=? AND consumed_at IS NULL
+         AND revoked_at IS NULL AND expires_at>?`,
+    ).run(now, receiptId, reviewerSessionId, sha256, now).changes) === 1;
+  }
+
+  /** Receipts still able to support an approval: acknowledged, unexpired, unconsumed, unrevoked. */
   validUiEvidenceReviewReceipts(
     occurrenceId: string,
     reviewerSessionId: string,
@@ -13448,8 +13466,8 @@ export class ControlPlaneDb {
   ): UiEvidenceReviewReceipt[] {
     return (this.stmt(
       `SELECT * FROM ui_evidence_review_receipts
-       WHERE occurrence_id=? AND reviewer_session_id=? AND consumed_at IS NULL AND revoked_at IS NULL
-         AND expires_at>? ORDER BY evidence_id`,
+       WHERE occurrence_id=? AND reviewer_session_id=? AND acknowledged_at IS NOT NULL
+         AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at>? ORDER BY evidence_id`,
     ).all(occurrenceId, reviewerSessionId, now) as unknown as Array<{
       receipt_id: string; occurrence_id: string; reviewer_session_id: string; child_session_id: string;
       policy_revision: number; evidence_id: string; artifact_id: string; sha256: string; delivered_at: number;
