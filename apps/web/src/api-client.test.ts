@@ -243,7 +243,7 @@ test("queued prompt editing reads exact content and posts the opaque revision wi
     submissionId: "submission-1",
     expectedRevision: read.prompt.editRevision,
     text: "Revised prompt",
-    images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+    images: [{ data: "aGVsbG8=", mimeType: "image/png" }],
   });
 
   assert.deepEqual(calls, [
@@ -259,7 +259,7 @@ test("queued prompt editing reads exact content and posts the opaque revision wi
         submissionId: "submission-1",
         expectedRevision: "qer_opaque",
         text: "Revised prompt",
-        images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+        images: [{ data: "aGVsbG8=", mimeType: "image/png" }],
       },
     },
   ]);

@@ -1,0 +1,53 @@
+// Typecheck for this package's test files (see #1435). `exclude` is the shrinking list of
+// test files that do not typecheck yet: every other test file, and every new one, is
+// covered. Entries come off this list as they are fixed; adding one is a reviewable edit.
+// `tsconfig-test-debt.test.ts` keeps the list honest.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": [
+    "src",
+    "vite.config.ts"
+  ],
+  "exclude": [
+    "src/caps.test.ts",
+    "src/colour-schemes.test.ts",
+    "src/comparison-selectors.test.ts",
+    "src/components/AgentsPanel.test.ts",
+    "src/components/EventTimeline.test.ts",
+    "src/components/InboxView.test.ts",
+    "src/components/SessionApproval.test.ts",
+    "src/composer-commands.test.ts",
+    "src/composer-focus.test.ts",
+    "src/conversation-steering.test.ts",
+    "src/desktop-local-pairing.test.ts",
+    "src/diff-view.test.ts",
+    "src/focus-zones.test.ts",
+    "src/light-theme.test.ts",
+    "src/native-ipc-codec.test.ts",
+    "src/native-tui-availability.test.ts",
+    "src/pinned-summary.test.ts",
+    "src/projects.test.ts",
+    "src/reminder-schedule.test.ts",
+    "src/review-queue-details.test.ts",
+    "src/session-actions.test.ts",
+    "src/session-preset-defaults.test.ts",
+    "src/session-project-assignment.test.ts",
+    "src/session-reminders.test.ts",
+    "src/session-status.test.ts",
+    "src/settings-navigation.test.ts",
+    "src/shells-panel.test.ts",
+    "src/shortcuts.test.ts",
+    "src/store-navigation.test.ts",
+    "src/stylesheet-guardrails.test.ts",
+    "src/subagents.test.ts",
+    "src/terminal-focus.dom.test.ts",
+    "src/theme.test.ts",
+    "src/timeline.test.ts",
+    "src/ui-copy-style.test.ts",
+    "src/worker-roster.test.ts",
+    "src/worktree-setup-notice.test.ts"
+  ]
+}
