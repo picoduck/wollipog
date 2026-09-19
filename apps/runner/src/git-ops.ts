@@ -1217,6 +1217,31 @@ export const MAX_STATUS_CONTENT_HASH_BYTES = 8 * 1024 * 1024;
  * `--unified=0` deliberately. Context lines cannot distinguish two change sets whose changed lines
  * all agree, so they buy nothing here, and dropping them keeps the payload proportional to the
  * change rather than to the number of hunks.
+ *
+ * UNTRACKED CONTENT IS OUT OF SCOPE, BY DECISION (#1384, confirming #1285's exclusion).
+ *
+ * The residual is exactly one label. The diff read probes each untracked file's first bytes for a
+ * binary flag and the viewer tests that flag ahead of the untracked branch when it picks a card's
+ * note, so an untracked file rewritten in place from text to binary would draw a different note
+ * and nothing here sees it. Neither does the diff's own identity: `diffHash` and `fineDiffHash`
+ * fold untracked files in name-only, so both sides of the staleness check agree about untracked
+ * content today, and closing only this side would make the status identity stricter than the diff
+ * it guards.
+ *
+ * The cost, measured rather than assumed. The probe itself is cheap — a first-bytes read, about
+ * 6 us a file natively, so ~2.5 ms for 256 — but it would run on the status cadence, and that
+ * cadence is wider than the Review pane: `useGitStatus` polls every 60 s for each EXPANDED view of
+ * an online, unarchived rich-git session while its tab is visible and its turn is idle, because the
+ * composer's branch chip shares the read — so it runs whether or not anyone has the Review panel
+ * open — plus a read when a turn settles or the session reconnects. Each of those reads would walk
+ * an untracked set this one does not cap the way it caps `files`, and under WSL every probe is a
+ * separate wsl.exe spawn. An honest version is therefore a cap, a batched WSL probe, and a third
+ * framed digest input. What that buys is one muted note on a
+ * card whose content the pane never renders, which a turn boundary, the active-turn cadence, or a
+ * manual refresh already corrects. Affordable, but not worth its own moving parts.
+ *
+ * The exclusion is pinned by the untracked-turns-binary test in git-ops.integration.test.ts: a
+ * change that closes the gap must retire that test and this record together.
  */
 async function statusContentSignature(
   cwd: string,
@@ -1333,12 +1358,10 @@ async function collectGitStatus(
   const contentSignature = hashContent
     ? await statusContentSignature(cwd, {
         changedLines: addedLines + deletedLines,
-        // Untracked entries are deliberately not folded in. The rendered diff carries them
-        // without content, and their arrival or departure already moves the file list. The
-        // residual is narrow and knowingly accepted: the diff read also probes each untracked
-        // file's first bytes for a binary flag, so an untracked file rewritten in place from text
-        // to binary changes its card's note and nothing here sees it. Closing that would mean
-        // re-probing every untracked path on every observation — an unbounded cost for a label.
+        // Untracked entries are deliberately not folded in: the rendered diff carries them
+        // without content, and their arrival or departure already moves the file list. What that
+        // leaves uncovered, why it stays uncovered, and what it would cost to close are recorded
+        // with `statusContentSignature` above (#1384).
         trackedChanges: allFiles.some((file) => file.status !== "??"),
         stagedPaths: categories.stagedCount,
       })

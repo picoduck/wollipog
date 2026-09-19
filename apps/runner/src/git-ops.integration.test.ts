@@ -35,6 +35,18 @@ function initRepo(cwd: string): void {
   git(cwd, ["config", "user.name", "Test"]);
   git(cwd, ["config", "commit.gpgsign", "false"]);
   git(cwd, ["config", "core.autocrlf", "false"]);
+  // Ambient ignore rules must not reach these fixtures: production reads untracked files through
+  // `ls-files --others --exclude-standard`, so a machine that happens to ignore a fixture name
+  // (*.dat, say) would hide a file the assertions depend on. Both standard sources are neutralised
+  // — the user's core.excludesFile is replaced by an empty one of this repo's own, and info/exclude
+  // is truncated because init.templateDir can seed it with rules core.excludesFile cannot disable.
+  // The excludes file lives in the git dir, where it cannot itself show up as untracked, and is a
+  // real path rather than /dev/null, which is not one on every platform.
+  mkdirSync(join(cwd, ".git", "info"), { recursive: true });
+  const excludes = join(cwd, ".git", "info", "wollipog-empty-excludes");
+  writeFileSync(excludes, "");
+  writeFileSync(join(cwd, ".git", "info", "exclude"), "");
+  git(cwd, ["config", "core.excludesFile", excludes]);
 }
 
 function usesLooseRefFiles(cwd: string): boolean {
@@ -237,6 +249,50 @@ test("gitStatus (real git): an external restage that keeps a file MM still moves
       "as is every other status fact",
     );
     assert.notEqual(after.contentSignature, before.contentSignature);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("gitStatus (real git): an untracked file that turns binary in place is invisible to the content identity", { skip: !GIT }, async () => {
+  // #1384, pinning the exclusion recorded in collectGitStatus: untracked entries stay outside the
+  // status content identity by decision. The diff read probes an untracked file's first bytes for
+  // a binary flag and the viewer draws a different note for a binary card, so rewriting an
+  // untracked text file into binary IN PLACE changes what the panel would draw — while no status
+  // fact moves, the content identity included. Both diff identities are name-only about untracked
+  // files too, so the two sides of the staleness check agree. A change that closes the gap must
+  // retire this test and the note in git-ops.ts together.
+  const repo = mkdtempSync(join(tmpdir(), "wollipog-gitstatus-untracked-binary-"));
+  try {
+    initRepo(repo);
+    writeFileSync(join(repo, "tracked.txt"), "line1\nline2\n");
+    git(repo, ["add", "-A"]);
+    git(repo, ["commit", "-q", "-m", "baseline"]);
+
+    // Leave a tracked edit uncommitted as well, so the identity is a digest over a real patch
+    // rather than the clean-tree constant — the exclusion has to hold in the case that hashes.
+    writeFileSync(join(repo, "tracked.txt"), "line1\nEDITED\n");
+    writeFileSync(join(repo, "loose.dat"), "plain text\n");
+
+    const before = await gitStatus(repo);
+    assert.match(before.contentSignature ?? "", /^[0-9a-f]{64}$/);
+    const diffBefore = await gitDiff(repo, "uncommitted", { useWorktree: false });
+    assert.equal(diffBefore.files.find((file) => file.path === "loose.dat")?.binary, false);
+
+    // Same path, same untracked status, same byte length — only the first bytes change.
+    writeFileSync(join(repo, "loose.dat"), Buffer.from([0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a]));
+
+    const after = await gitStatus(repo);
+    assert.deepEqual(after, before, "no status fact, the content identity included, sees the reclassification");
+
+    const diffAfter = await gitDiff(repo, "uncommitted", { useWorktree: false });
+    assert.equal(
+      diffAfter.files.find((file) => file.path === "loose.dat")?.binary,
+      true,
+      "while a fresh diff read does classify it binary",
+    );
+    assert.equal(diffAfter.diffHash, diffBefore.diffHash, "the untracked manifest is name-only, so the diff identity is blind to it too");
+    assert.equal(diffAfter.fineDiffHash, diffBefore.fineDiffHash, "as is the fine identity");
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
