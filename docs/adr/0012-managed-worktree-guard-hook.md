@@ -49,6 +49,9 @@ in the mode the user selected whenever that guard is in place.
   Amended again by #1361: the hook was measured to run for a SUBAGENT's Bash calls too, carrying
   that subagent's real directory, so a subagent's request is judged from the placeless directory as
   well. Only a mediated launch, which has no hook at all, keeps the session-directory check.
+  Confirmed from the channel's own side by #1397: a subagent's call does arrive here in
+  `default`/`auto`, its frame carries no cwd either, and it is marked by `request.agent_id` rather
+  than `parent_tool_use_id`. Captured frames of both kinds now pin this path in the tests.
 - `commandTargetsManagedWorktree` itself is unchanged (its false positives are #1301), and the
   `plan` path is untouched.
 
@@ -92,9 +95,39 @@ repeated runs:
 
 Hence the session directory could not place a subagent's relative operand either, and the amendment
 above. The runs were made in `bypassPermissions`, which never consults the control channel, so they
-establish the hook's coverage of a subagent — not whether Claude emits a `can_use_tool` frame with
-`parent_tool_use_id` in `default`/`auto`. The handler has carried that branch since #1333/#1343
-regardless; #1361 only decides which directory it uses.
+establish the hook's coverage of a subagent — not what a subagent produces on the channel itself.
+That is the next section.
+
+## Measurement (claude 2.1.270 and 2.1.277, this machine, 2026-09-18)
+
+Does a SUBAGENT's Bash call produce a control-channel `can_use_tool` frame in `default`/`auto`,
+and what does that frame carry (#1397)? Measured by running headless Claude in a throwaway project
+with the exact interactive arg set the driver builds (`--input-format stream-json
+--permission-prompt-tool stdio`, plus `--permission-mode auto` for `auto`), answering each frame as
+`resolvePermission` does, and joining every frame against the `tool_use` block the model actually
+issued — whose own `parent_tool_use_id` names the spawning `Task` call, making "this came from a
+subagent" ground truth from the provider's stream rather than something read off the frame. No hook
+was installed, so nothing could suppress or fabricate a frame. Both versions behaved identically:
+
+- A subagent's Bash call that needs approval DOES produce a `can_use_tool` frame, in both modes.
+- The message envelope is exactly `{type, request_id, request}`. No frame of either kind carried
+  `parent_tool_use_id`, on the message or inside `request`.
+- A subagent's frame is marked by `request.agent_id` — the same opaque id the hook payload carries
+  — and a top-level frame has no such field. That id is not the spawning `Task` tool_use id.
+- The request carries no `cwd`. Its only placement field is `blocked_path`, present only when the
+  escalation reason is a specific path; it is absolute and resolved from the issuer's real shell
+  directory, agreeing with the hook's `cwd`.
+- In `auto`, whether the channel is reached at all is the classifier's decision: left alone it
+  approved every probe command at both levels, and a `permissions.ask` rule was needed to force the
+  escalation. The rule decides whether the CLI asks; it does not shape the frame.
+
+So the branch is live code, not dead code. The decision above is unchanged — a subagent's request
+is still judged from the placeless directory — and is now pinned by frames captured from these runs
+(`apps/runner/src/drivers/fixtures/claude-can-use-tool-subagent.json`, replayed through the real
+driver). What #1397 corrects is the discriminator: `parent_tool_use_id` never identifies a subagent
+on this channel, `request.agent_id` does. The placeless judgment stopped keying on the former in
+#1373; the one remaining consumer on this path, attention ownership, is unreachable for Claude
+today and is kept unchanged rather than re-keyed, because `agent_id` is the wrong id space for it.
 
 ## Fail closed, and the fail-safe
 

@@ -11,7 +11,7 @@
 
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -419,12 +419,24 @@ test("an ordinary edit outside the guard's state still reaches the normal approv
   assert.deepEqual(responses, [], "the runner holds no opinion; it becomes an ordinary approval");
 });
 
+/**
+ * Measured for #1397 (docs/DRIVERS.md §2.3.2): a real `can_use_tool` frame never carries
+ * `parent_tool_use_id` — its message envelope is exactly `{type, request_id, request}`. A subagent
+ * is marked by `request.agent_id`, so that is what this helper sets. The captured frames replayed
+ * further down are the primary evidence; this helper covers only the command texts that capture
+ * did not happen to produce.
+ */
 function requestBash(run: Launch, requestId: string, command: string, subagent = false): void {
   run.child.stdout.write(JSON.stringify({
     type: "control_request",
     request_id: requestId,
-    ...(subagent ? { parent_tool_use_id: "task-1" } : {}),
-    request: { subtype: "can_use_tool", tool_name: "Bash", input: { command }, tool_use_id: `use-${requestId}` },
+    request: {
+      subtype: "can_use_tool",
+      tool_name: "Bash",
+      input: { command },
+      tool_use_id: `use-${requestId}`,
+      ...(subagent ? { agent_id: "a1234567890abcdef" } : {}),
+    },
   }) + "\n");
 }
 
@@ -456,6 +468,7 @@ test("a subagent's request is judged from the placeless directory too (#1361)", 
   // really runs in — the top-level shell's current directory, NOT the session directory. So the
   // hook is the authority for a subagent's relative operands exactly as it is for a top-level
   // one, and judging them from the session directory only reproduced the #1333 false refusal.
+  // The subagent marker here is `request.agent_id`, the one #1397 measured on real frames.
   const dir = tempDir(t);
   const run = launch(provision(dir, "cwd-2", "auto", { protections: PROTECTIONS }), "auto", PROTECTIONS);
   t.after(() => run.driver.dispose());
@@ -477,4 +490,126 @@ test("a mediated launch has no hook, so it keeps the session-directory check ent
   requestBash(run, "sub-relative-rm", "rm -rf .", true);
   assert.deepEqual(await deniedRequests(run),
     ["relative-cd", "relative-rm", "sub-relative-cd", "sub-relative-rm"]);
+});
+
+/*
+ * Issue #1397: real captured `can_use_tool` frames.
+ *
+ * #1361 measured the hook, not the channel — its runs used `bypassPermissions`, in which the CLI
+ * never consults the control channel — so it left open whether a subagent's tool call produces a
+ * control-channel frame at all in `default`/`auto`, and what such a frame looks like. Measured for
+ * #1397 on claude 2.1.277 (the version `claude` on PATH resolves to, i.e. the one the runner
+ * launches) and 2.1.270: it does, in both modes, and the frame's shape is not what the handler's
+ * old subagent branch assumed. See docs/DRIVERS.md §2.3.2.
+ *
+ * The fixture holds those frames verbatim; only the throwaway project path was rewritten to the
+ * tokens substituted back here. Replaying them keeps the subagent path pinned to a real frame
+ * rather than a synthesized one, and fails if a CLI release moves the subagent marker.
+ */
+
+interface CapturedFrame {
+  type: string;
+  request_id: string;
+  request: {
+    subtype: string;
+    tool_name: string;
+    tool_use_id?: string;
+    agent_id?: string;
+    cwd?: string;
+    input?: { command?: string };
+  };
+}
+
+interface Capture {
+  claudeVersion: string;
+  permissionMode: string;
+  /** `issuer` is ground truth from the provider's own stdout stream, not read off the frame. */
+  frames: { issuer: "top-level" | "subagent"; frame: CapturedFrame }[];
+}
+
+const CAPTURES = (JSON.parse(readFileSync(
+  new URL("./fixtures/claude-can-use-tool-subagent.json", import.meta.url),
+  "utf8",
+)) as { captures: Capture[] }).captures;
+
+/** Put a captured frame's sanitized paths back on this test's worktree and repo. */
+function placeCaptured(frame: CapturedFrame): CapturedFrame {
+  return JSON.parse(
+    JSON.stringify(frame).split("__WORKTREE__").join(WORKTREE).split("__REPO__").join(REPO),
+  ) as CapturedFrame;
+}
+
+test("a captured subagent frame is marked by agent_id, carries no parent_tool_use_id and no cwd (#1397)", () => {
+  assert.deepEqual(CAPTURES.map((capture) => capture.permissionMode), ["auto", "default"],
+    "both modes that consult the control channel were captured");
+  for (const capture of CAPTURES) {
+    assert.ok(capture.frames.some((entry) => entry.issuer === "subagent"),
+      `${capture.permissionMode}: a subagent's Bash call DID produce a can_use_tool frame`);
+    for (const { issuer, frame } of capture.frames) {
+      assert.deepEqual(Object.keys(frame).sort(), ["request", "request_id", "type"],
+        `${capture.permissionMode}: the message envelope carries no parent_tool_use_id`);
+      assert.equal(frame.request.cwd, undefined,
+        `${capture.permissionMode}: the request carries no cwd, so it cannot place an operand`);
+      assert.equal(typeof frame.request.agent_id === "string", issuer === "subagent",
+        `${capture.permissionMode}: agent_id marks exactly the frames a subagent issued`);
+    }
+  }
+});
+
+test("with the guard active, a captured subagent frame is judged exactly like a top-level one (#1397)", async (t) => {
+  for (const capture of CAPTURES) {
+    const dir = tempDir(t);
+    const sessionId = `captured-${capture.permissionMode}`;
+    const run = launch(
+      provision(dir, sessionId, capture.permissionMode, { protections: PROTECTIONS }),
+      capture.permissionMode,
+      PROTECTIONS,
+    );
+    t.after(() => run.driver.dispose());
+
+    for (const { frame } of capture.frames) {
+      run.child.stdout.write(JSON.stringify(placeCaptured(frame)) + "\n");
+    }
+    const denied = await deniedRequests(run);
+
+    // The issue's claim, asserted with nothing derived from the fixture: several of these commands
+    // were issued VERBATIM at both levels in the captured run, so their two verdicts can simply be
+    // compared against each other. This is the check that fails if a subagent is ever judged by a
+    // different rule than the top-level agent.
+    const verdicts = (issuer: "top-level" | "subagent") => new Map(capture.frames
+      .filter((entry) => entry.issuer === issuer)
+      .map((entry) => [
+        entry.frame.request.input?.command ?? "",
+        denied.includes(entry.frame.request_id),
+      ]));
+    const top = verdicts("top-level");
+    const sub = verdicts("subagent");
+    const shared = [...sub.keys()].filter((command) => top.has(command));
+    assert.ok(shared.length >= 2,
+      `${capture.permissionMode}: at least two commands were issued at both levels`);
+    assert.ok(shared.some((command) => sub.get(command) === true)
+      && shared.some((command) => sub.get(command) === false),
+      `${capture.permissionMode}: the shared commands span both verdicts, so agreement means something`);
+    for (const command of shared) {
+      assert.equal(sub.get(command), top.get(command),
+        `${capture.permissionMode}: \`${command}\` is judged the same however it was issued`);
+    }
+
+    // And the verdicts are the right ones, not merely consistent. The channel adds only the
+    // refusals that hold wherever the shell is: an absolute operand at the worktree, or an
+    // absolute `cd` into it followed by a relative removal. Every captured command naming the
+    // worktree is one of those; the relative-only ones are the hook's to judge.
+    const expected = capture.frames
+      .filter((entry) => (entry.frame.request.input?.command ?? "").includes("__WORKTREE__"))
+      .map((entry) => entry.frame.request_id);
+    assert.deepEqual(denied, expected,
+      `${capture.permissionMode}: the verdict follows the command, never the issuer`);
+    for (const issuer of ["top-level", "subagent"] as const) {
+      const own = capture.frames.filter((entry) => entry.issuer === issuer);
+      assert.ok(own.some((entry) => denied.includes(entry.frame.request_id)),
+        `${capture.permissionMode}: a ${issuer} frame was refused, so the replay is not vacuous`);
+      assert.ok(own.some((entry) => !denied.includes(entry.frame.request_id)),
+        `${capture.permissionMode}: a ${issuer} frame was allowed through, so it refuses selectively`);
+    }
+  }
 });

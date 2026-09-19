@@ -617,11 +617,58 @@ harmless because Claude never reaches the control channel for a command the hook
   subagent's request exactly like a top-level one.
 
   What the measurement does NOT establish: it ran in `bypassPermissions`, where the CLI never
-  consults the control channel, so it proves the hook fires for a subagent — not that Claude emits
-  a `can_use_tool` frame carrying `parent_tool_use_id` in `default`/`auto`. That is unchanged by
-  #1361 either way: the handler has had a subagent branch since #1343, and if no such frame is ever
-  emitted the branch simply never runs. What #1361 settles is which directory it must use when it
-  does.
+  consults the control channel, so it proves the hook fires for a subagent — not what reaches the
+  channel in `default`/`auto`. That half is the next bullet.
+- **A subagent's Bash call DOES reach the control channel, marked by `agent_id` and never by
+  `parent_tool_use_id` (#1397).** Measured on claude 2.1.277 (the version `claude` on `PATH`
+  resolves to, i.e. the one the runner launches) and on 2.1.270 (the version the measurements
+  above were taken on), in both `default` and `auto`, by running headless Claude in a throwaway
+  project with the exact interactive arg set the driver builds
+  (`-p --output-format stream-json --verbose --include-partial-messages --session-id <uuid>
+  --input-format stream-json --permission-prompt-tool stdio`, plus `--permission-mode auto` for
+  `auto`). The probe answered every frame the way `resolvePermission` does and joined each frame's
+  `request.tool_use_id` against the `tool_use` block the model actually issued, whose own
+  `parent_tool_use_id` names the spawning `Task` call — so "this frame came from a subagent" is
+  ground truth from the provider's stream, not read off the frame. No hook was installed, so
+  nothing could suppress or fabricate a frame. Both versions behaved identically:
+
+  - **The frame is emitted.** Every subagent Bash call that needed approval produced a
+    `can_use_tool` `control_request`; none was missed. The calls that did not need approval (an
+    `echo`, a `pwd`) produced no frame — for a subagent and a top-level call alike.
+  - **The message envelope is exactly `{type, request_id, request}`.** There is no
+    `parent_tool_use_id`, on the message or inside `request`, on any frame of either kind. The
+    driver's `parentId` is therefore always null for a `control_request`.
+  - **A subagent is marked by `request.agent_id`** — the same opaque id the `PreToolUse` hook
+    payload carries (previous bullet) — present on a subagent's frame and absent from a top-level
+    one. It is NOT the spawning `Task` tool_use id.
+  - **The request carries no `cwd`.** The observed request keys were `subtype`, `tool_name`,
+    `display_name`, `description`, `input`, `tool_use_id`, plus, depending on why the CLI
+    escalated, `blocked_path`, `permission_suggestions`, `decision_reason`,
+    `decision_reason_type`, `classifier_approvable`, `matched_ask_rule` — and `agent_id` for a
+    subagent.
+  - **The only placement field is `blocked_path`,** and only when the escalation reason is a
+    specific path. It is absolute and resolved from the issuer's REAL shell directory: with the
+    top-level shell moved to `<proj>/sub`, a subagent's `rm -rf ./scratch-sub` reported
+    `<proj>/sub/scratch-sub`. That agrees with the hook's `cwd` and confirms the previous bullet
+    from the channel's own side. It is not a usable substitute for a cwd, because it is absent
+    whenever the reason is a rule or a plain "this command requires approval".
+  - **Reaching the channel in `auto` is the classifier's decision, not the issuer's.** Left to
+    itself, `auto` approved every probe command at both levels — including a recursive delete
+    outside the project and a `curl` — so no frame appeared at either level; in one run it denied
+    the `Task` dispatch outright ("[Auto-Mode Bypass]"). Supplying a `permissions.ask` rule to
+    force the escalation produced frames at both levels with the shape above. The rule decides
+    WHETHER the CLI asks; it does not shape the frame.
+
+  So the branch is live code, not dead code, and it is now pinned by real frames: the capture is
+  committed at `apps/runner/src/drivers/fixtures/claude-can-use-tool-subagent.json` and replayed
+  through the real driver in `claude-code-managed-worktree.test.ts`. What #1397 corrects is the
+  discriminator. The placeless judgment stopped keying on `parent_tool_use_id` in #1373, which in
+  the light of this measurement removed a condition that could never have been true. The one
+  remaining `parent_tool_use_id` consumer on this path — attention ownership, which attributes a
+  permission card to the Task block that spawned the asker — is unreachable for Claude today. It
+  is kept as written: it costs nothing while the field is absent, `agent_id` cannot stand in for
+  it (wrong id space), and it resumes working unchanged if a release starts parenting these
+  frames.
 - **Operands are judged physically as well as by spelling.** The shared matcher resolves each
   external operand one component at a time from the physical form of its directory, compares
   against the physical protections (a worktree reached through a symlinked prefix is not refused
