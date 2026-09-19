@@ -605,6 +605,27 @@ function segmentRefusal(
  * Return a provider-facing refusal when a shell command targets a runner-owned worktree root.
  * Ordinary mutations beneath that root remain allowed; retirement of the root itself belongs to
  * the managed discard lifecycle. The parser is deliberately shared by every provider boundary.
+ *
+ * What "ordinary mutations beneath that root" covers is easy to misread, and #1393 was filed on the
+ * opposite reading — that an agent cannot delete a scratch file it created moments earlier. It can,
+ * and always could. The protected set is the worktree ROOT, any ancestor of it, and the two Git
+ * administrative roots; a path BENEATH the root is never protected, so removing a file or directory
+ * inside the worktree is permitted whatever its Git status. That is deliberate and is #1209's own
+ * acceptance criterion ("Normal file creation, editing, Git commits, tests, and other expected work
+ * inside the selected worktree remain available"), not an oversight to be tightened later:
+ *
+ * - The boundary this guard owns is worktree LIFECYCLE. Deleting the root, or unregistering it,
+ *   strands the session's durable selection and breaks the next launch; deleting a file inside it
+ *   is the same class of act as editing one, which the provider must be able to do.
+ * - Consulting the Git index to spare tracked files would refuse ordinary work (`rm -rf dist`,
+ *   `rm -rf node_modules/.cache`, deleting a file mid-refactor) and would put a per-command
+ *   subprocess into a hook that deliberately does no I/O. Git is already the recovery path for
+ *   anything tracked.
+ * - "Created by this session" has no trustworthy record here in any case: the runner's `file_edit`
+ *   events go to the control plane, this hook is a short-lived process with no network, and nothing
+ *   observes files a Bash command creates.
+ *
+ * `managed-worktree-protection.test.ts` pins both halves of this contract.
  */
 function commandTargetsManagedWorktreeUnsafe(
   command: string,
