@@ -143,6 +143,17 @@ test("every exported icon is inventoried and follows its documented ownership de
   }
 });
 
+test("the documented icon bundle ceiling matches the contract and no measured figure can drift", () => {
+  const docs = readFileSync(INVENTORY_PATH, "utf8");
+  const contract = readFileSync(join(SRC, "../scripts/verify-icon-bundle.mjs"), "utf8");
+  const documented = docs.match(/([\d,]+)-byte ceiling/)?.[1]?.replace(/,/g, "");
+  const enforced = contract.match(/bytes < ([\d_]+),/)?.[1]?.replace(/_/g, "");
+  assert.ok(enforced, "verify-icon-bundle.mjs must enforce a byte ceiling");
+  assert.equal(documented, enforced, "docs/icon-system.md must state the ceiling the contract enforces");
+  assert.doesNotMatch(docs, /currently reports|bytes across \d+ exports/,
+    "record the live icon bundle size only in the contract output, never as a literal that goes stale");
+});
+
 test("every exported icon uses an approved adapter or is the documented GitHub brand mark", () => {
   const source = readFileSync(ICONS_PATH, "utf8");
   const customAdapter = new Set([
