@@ -40,12 +40,9 @@ export function collapseAgentSpawnObservations(
 ): StructuredAgentSpawnObservation | null {
   if (observations.length < 1 || observations.length >= AGENT_SPAWN_OBSERVATION_CAP ||
       observations.some((value) => value.toolKind !== "agent")) return null;
-  if (observations.length > 1) {
-    // The partial/full pair is the only validated multi-observation shape, so a longer run — which
-    // only a raised cap could admit — stays ambiguous rather than collapsing unvalidated.
+  if (observations.length === 2) {
     const [partial, full] = observations;
-    if (observations.length !== 2 ||
-        partial!.toolCallId !== full!.toolCallId || partial!.status !== "pending" || full!.status !== "in_progress" ||
+    if (partial!.toolCallId !== full!.toolCallId || partial!.status !== "pending" || full!.status !== "in_progress" ||
         partial!.parentToolUseId !== full!.parentToolUseId ||
         partial!.subagentLifecycle !== undefined || partial!.subagentName !== undefined ||
         partial!.subagentRole !== undefined || full!.subagentLifecycle !== undefined ||

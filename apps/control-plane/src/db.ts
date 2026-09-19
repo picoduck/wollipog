@@ -217,6 +217,7 @@ import {
   type SessionRole,
   mergeSessionCapabilities,
   type UiEvidenceReviewReceipt,
+  AGENT_SPAWN_OBSERVATION_CAP,
 } from "@wollipog/protocol";
 
 const OUTBOUND_EVENT_PENDING_LIMIT = 100;
@@ -17074,10 +17075,13 @@ export class ControlPlaneDb {
     return pendingRequests(pending).flatMap((request): ChildSessionAttentionOwner[] => {
       const toolCallId = request.ownerToolUseId;
       if (!toolCallId) return [];
+      // Read exactly as far as the registry itself retains: one observation past the collapsible
+      // pair is all this projection needs in order to see that the id became ambiguous, and
+      // reading fewer than the cap would resolve an owner the registry already calls unsafe.
       const rows = this.stmt(
         `SELECT payload FROM session_events
          WHERE session_id=? AND kind='tool_call' AND json_extract(payload,'$.toolCallId')=?
-         ORDER BY seq LIMIT 3`,
+         ORDER BY seq LIMIT ${AGENT_SPAWN_OBSERVATION_CAP}`,
       ).all(sessionId, toolCallId) as Array<{ payload: string }>;
       try {
         const observations = rows.map((row) => JSON.parse(row.payload) as SessionEventPayload)
