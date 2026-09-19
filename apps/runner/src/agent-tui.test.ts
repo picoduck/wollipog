@@ -199,6 +199,8 @@ test("orchestrator TUIs rebuild credentials and restrictions without mutating du
         assert.ok(launch.args.includes("--strict-mcp-config"));
         assert.match(launch.args[launch.args.indexOf("--tools") + 1] ?? "", /Read/);
         assert.ok(launch.args.includes("--setting-sources"));
+        // #1378: the preset's inline hook-disabling document is not a file path and must survive.
+        assert.equal(launch.args[launch.args.lastIndexOf("--settings") + 1], '{"disableAllHooks":true}');
       } else {
         assert.equal(probes, 1);
         const launchText = launch.args.join(" ");
@@ -294,6 +296,35 @@ test("a TUI launch drops a persisted --settings file that no longer exists, and 
       { platform: "linux" },
     );
     assert.deepEqual(launch?.args, ["--add-dir", "/notes", "--settings", present]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a TUI launch keeps an inline --settings JSON document and still drops a missing file (#1378)", () => {
+  // `claude` accepts an inline JSON object as the --settings value. It never names a file, so the
+  // missing-file rule must not treat it as one; anything else that is not an existing file still goes.
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-tui-"));
+  try {
+    const missing = join(dir, "gone.settings.json");
+    const inline = '{"disableAllHooks":true}';
+    const launch = agentTuiLaunch(
+      meta({
+        driver: "claude-code",
+        args: [
+          "--settings", inline, "--settings", missing, "--settings", " { } ",
+          "--settings", "[]", "--settings", "null", "--settings", "{not json",
+        ],
+      }),
+      { platform: "linux" },
+    );
+    assert.deepEqual(launch?.args, ["--settings", inline, "--settings", " { } "]);
+
+    const preset = orchestratorLaunchArgs("claude-code", {
+      command: "runner", args: ["--agent-control-mcp"], env: {},
+    }, ["/repo"]);
+    assert.deepEqual(preset.slice(-2), ["--settings", inline]);
+    assert.deepEqual(agentTuiLaunch(meta({ driver: "claude-code", args: preset }), { platform: "linux" })?.args, preset);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
