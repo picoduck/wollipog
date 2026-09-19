@@ -174,7 +174,7 @@ What is done instead:
   deciding. A walk to that depth reads the directories above the hook directory and only names the
   hook directory itself; every other `find` word is refused, because a test such as `-empty` opens
   the directory it names at the bound. A `find` with no explicit start walks the working directory,
-  which no operand names, so it is refused.
+  which #1398 measures the same way.
 
   The trade-off `du` carries, restated as #1334 accepts it: `du` on an ancestor walks the hook
   directory too, so it learns that directory's total size and prints the names of any
@@ -201,13 +201,49 @@ What is done instead:
   option that opens a file, so that refuses nothing they need, and a path inside an option is
   never waved through. Long options are matched as GNU `getopt_long` accepts them, so `ls --recurs` counts as
   recursive. A working directory inside the guard state disqualifies the command too, since one
-  with no operand acts there.
+  with no operand acts there — since #1398 before anything else about the command is considered.
 
   Where the two directions conflict, it over-refuses. A short-option cluster is scanned for `R`
   without modelling which options take an attached value, so GNU's `ls -IREADME` reads as recursive
   and is refused; a hard-coded list of value-taking options would fail OPEN the day it is wrong.
   And `find <ancestor> -maxdepth 1 2>/dev/null` is refused, because the tokenizer drops the adjacency
   that makes `2>` a redirection, so its `2` reads as one more word after the bound.
+
+- **The working directory is an operand (#1398).** A recursive command with no path operand walks
+  the directory it runs in, so a walk started from an ancestor enumerated the hook directory while
+  naming nothing the veto compared — `find -maxdepth 999`, `grep -r <pattern>`, and `du -a` from an
+  ancestor were allowed, though each is refused the moment it spells that ancestor out. The working
+  directory is now judged alongside the operands, in two strengths:
+
+  - **Inside the guard state: every command is refused**, whatever it is, because a command with no
+    operand acts there and a command whose operands are all elsewhere can still be a walk that
+    starts there. #1371 already refused this, but only once some operand named an ancestor.
+  - **An ancestor: only a WALK is judged**, and then the carve-out above decides it. A walk is a
+    command named `find` or `du` — the two the classifier already models as walking whatever they
+    are given — or one carrying a recursive option, read here under either spelling of the letter
+    (`grep -r` walks; the `ls` gate keeps reading only `-R`, because `ls -r` is reverse order and
+    `ls -ltr` must stay allowed). Everything else run from an ancestor is left alone: judging every
+    command there would refuse `git status` and `npm test` in any home directory that contains the
+    data directory, which is the over-refusal #1334 was opened about.
+
+  An operand-less `find -maxdepth N` is admitted on exactly the terms an explicit START is, with the
+  bound measured from the working directory, so `find -maxdepth 2` from two levels above the hook
+  directory is allowed exactly as `find . -maxdepth 2` already was. Nothing else is newly admitted.
+
+  The accepted over-refusals, all confined to a shell standing in an ancestor of the hook directory:
+  the classifier does not decide WHICH tree a recursive command walks, so `cp -r a b`,
+  `rm -rf <unrelated>`, `sort -r notes.txt`, and `du -a /elsewhere` are refused there although they
+  never touch the hook directory. Telling a start from an option value, a pattern, or a destination
+  is the general parsing this classifier declines to do, and the alternative — believing an operand
+  and skipping the working directory — fails OPEN on `grep -r <pattern>`, whose one operand-looking
+  word is the pattern. A command the tokenizer gave up on (a pipe, a subshell, a backtick) is read
+  for walk words in its raw text, because a backtick leaves `` `find `` glued into one token;
+  nothing in such a command was ever an inspection, so reading it crudely only refuses more.
+
+  The limit this leaves, unchanged in kind: a tool that recurses by default with no option and no
+  operand (`rg`, `tree`, `fd`) is not modelled, and neither is an unexpanded variable or a script.
+  That is the same indirection this whole mechanism is defeated by, restated at the end of this
+  section.
 
 - **No free advertising.** The protections path is not exported in the settings `env` block (which
   reaches every tool process); it travels only in the hook command inside the 0600 settings file,
