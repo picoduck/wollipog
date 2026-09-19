@@ -1116,9 +1116,13 @@ export class SessionManager {
     // Every worktree creation, activation, attach, and discard lands as a `worktrees` patch. The
     // managed-worktree guard reads its protections from a file, so refresh it here — synchronously
     // with the persisted change, which is what lets a worktree created mid-turn be protected from
-    // the guard's very next invocation rather than only from the next spawn.
-    store.observeMetaPatch((meta, patch) => {
-      if (!("worktrees" in patch) || !this.refreshManagedWorktreeGuard) return;
+    // the guard's very next invocation rather than only from the next spawn. The protections are
+    // built from the attributed worktrees, which also count the legacy `worktreePath` field, so a
+    // patch that moves only that field refreshes too (#1474) — but only when it changes the set:
+    // selection re-carries the field on almost every worktree patch.
+    store.observeMetaPatch((meta, patch, previous) => {
+      if (!this.refreshManagedWorktreeGuard) return;
+      if (!("worktrees" in patch) && !this.patchChangesAttributedWorktrees(meta, patch, previous)) return;
       let outcome: ManagedWorktreeGuardRefreshOutcome;
       try {
         outcome = this.refreshManagedWorktreeGuard(meta, this.managedWorktreeProtections(meta));
@@ -1456,6 +1460,22 @@ export class SessionManager {
       });
     }
     return worktrees;
+  }
+
+  /** Whether a patch with no `worktrees` key still changed `attributedWorktrees()`. The keys named
+   * here are every other field that function reads — the legacy pair, and `context`, which decides
+   * whether the legacy path is the same worktree as a recorded one — so no other patch can change
+   * the set, and the comparison (which resolves paths) stays off the hot lazy-patch path. */
+  private patchChangesAttributedWorktrees(
+    meta: SessionMeta,
+    patch: Partial<SessionMeta>,
+    previous: SessionMeta,
+  ): boolean {
+    if (!("worktreePath" in patch) && !("worktreeBranch" in patch) && !("context" in patch)) return false;
+    const identity = (of: SessionMeta) => JSON.stringify(
+      this.attributedWorktrees(of).map((worktree) => [worktree.id, worktree.path, worktree.branch, worktree.source]),
+    );
+    return identity(previous) !== identity(meta);
   }
 
   private attributedWorktreeForPath(meta: SessionMeta, path: string): SessionWorktreeView | undefined {

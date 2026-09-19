@@ -1633,7 +1633,7 @@ export class SessionStore {
     }
     if (this.metaPatchObserver) {
       try {
-        this.metaPatchObserver(next, patch);
+        this.metaPatchObserver(next, patch, cur);
       } catch {
         /* A post-patch side effect must never fail the persisted state change. */
       }
@@ -1641,14 +1641,17 @@ export class SessionStore {
     return next;
   }
 
-  private metaPatchObserver?: (meta: SessionMeta, patch: Partial<SessionMeta>) => void;
+  private metaPatchObserver?: (meta: SessionMeta, patch: Partial<SessionMeta>, previous: SessionMeta) => void;
 
   /**
    * One runner-owned post-patch observer. SessionManager uses it to keep launch-local material
    * that mirrors meta (the managed-worktree guard's protections file) in step with every change,
-   * including ones made deep inside a worktree operation.
+   * including ones made deep inside a worktree operation. `previous` is the meta the patch was
+   * applied to, for an observer that must tell a change from a field merely being carried.
    */
-  observeMetaPatch(observer: (meta: SessionMeta, patch: Partial<SessionMeta>) => void): void {
+  observeMetaPatch(
+    observer: (meta: SessionMeta, patch: Partial<SessionMeta>, previous: SessionMeta) => void,
+  ): void {
     this.metaPatchObserver = observer;
   }
 
