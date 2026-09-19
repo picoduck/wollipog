@@ -5386,6 +5386,73 @@ test("review finding v106 migration preserves legacy GitHub provenance and index
   }
 });
 
+test("review finding v106 migration upgrades a table that predates the remote columns (#1381)", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-review-pre-remote-migration-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    initial.registerRunner(meta(), 500);
+    initial.createSession(newSession());
+    const finding = {
+      findingId: "rf_preremote0001", sessionId: "sess-1", scope: "uncommitted",
+      diffHash: "a".repeat(64), filePath: "src/example.ts", side: "right", line: 12,
+      body: "Preserve the invariant.", severity: "major", required: true, status: "open",
+      source: "local", author: { kind: "human", id: "device-1" }, createdAt: 1_100, updatedAt: 1_100,
+    } satisfies ReviewFinding;
+    initial.createReviewFinding(finding);
+    initial.close();
+
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      PRAGMA foreign_keys = OFF;
+      BEGIN;
+      CREATE TABLE review_findings_pre_remote (
+        finding_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, scope TEXT NOT NULL,
+        diff_hash TEXT NOT NULL, file_path TEXT NOT NULL, side TEXT NOT NULL, line INTEGER NOT NULL,
+        body TEXT NOT NULL, severity TEXT NOT NULL, required INTEGER NOT NULL, status TEXT NOT NULL,
+        source TEXT NOT NULL, author_kind TEXT NOT NULL, author_id TEXT, created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL, sent_at INTEGER, resolved_at INTEGER, resolved_by_kind TEXT,
+        resolved_by_id TEXT,
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+        CHECK (scope IN ('uncommitted','all_branch','last_turn')),
+        CHECK (side IN ('left','right')), CHECK (line > 0),
+        CHECK (severity IN ('blocker','major','minor','nit')), CHECK (required IN (0,1)),
+        CHECK (status IN ('open','sent','resolved','dismissed')),
+        CHECK (source IN ('local','github'))
+      );
+      INSERT INTO review_findings_pre_remote SELECT
+        finding_id, session_id, scope, diff_hash, file_path, side, line, body, severity, required,
+        status, source, author_kind, author_id, created_at, updated_at, sent_at, resolved_at,
+        resolved_by_kind, resolved_by_id
+      FROM review_findings;
+      DROP TABLE review_findings;
+      ALTER TABLE review_findings_pre_remote RENAME TO review_findings;
+      CREATE INDEX idx_review_findings_session ON review_findings(session_id, status, created_at, finding_id);
+      COMMIT;
+      PRAGMA foreign_keys = ON;
+    `);
+    legacy.close();
+
+    const upgraded = ControlPlaneDb.open(path);
+    assert.deepEqual(upgraded.listReviewFindings("sess-1"), [finding]);
+    upgraded.close();
+    const verified = new DatabaseSync(path);
+    assert.deepEqual({ ...verified.prepare(
+      `SELECT remote_provider, remote_repository, remote_pr_number, remote_thread_id,
+        remote_comment_id, remote_url, remote_commit_id, remote_outdated, remote_subject_type,
+        remote_synchronized_at, anchor_text
+      FROM review_findings WHERE finding_id = ?`,
+    ).get(finding.findingId) }, {
+      remote_provider: null, remote_repository: null, remote_pr_number: null, remote_thread_id: null,
+      remote_comment_id: null, remote_url: null, remote_commit_id: null, remote_outdated: null,
+      remote_subject_type: null, remote_synchronized_at: null, anchor_text: null,
+    });
+    verified.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("createRun + run members reflected in runView via getRun/listRuns", () => {
   const db = withRunner();
   db.createSession(newSession({ id: "sess-1" }));
