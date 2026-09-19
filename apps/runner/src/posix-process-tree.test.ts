@@ -268,6 +268,32 @@ test("the root group is frozen before any descendant enumeration runs", async ()
   assert.equal(terminatePosixProcessBoundaries(owner).length, 0);
 });
 
+test("no root-group signal trails the graceful wait", async () => {
+  const owner = {};
+  const runtime = scriptedRuntime([processTable(root), processTable(root), processTable(), processTable()]);
+  const boundary = new PosixProcessBoundary(root.pid, owner, undefined, runtime);
+  const baseSignal = runtime.signal.bind(runtime);
+  const baseSleep = runtime.sleep.bind(runtime);
+  let waiting = false;
+  const trailing: NodeJS.Signals[] = [];
+  runtime.signal = (pid, signal) => {
+    if (waiting && pid === -root.pid) trailing.push(signal);
+    baseSignal(pid, signal);
+  };
+  runtime.sleep = async (milliseconds) => { waiting = true; return baseSleep(milliseconds); };
+
+  assert.equal(await boundary.terminate(), true);
+  // Once the root exits, the kernel may reissue its PGID to unrelated work, so a resume that
+  // trails the graceful window by seconds could stop being a repair and start being an intrusion.
+  // Every bare-PID group signal therefore belongs to the SIGTERM phase, alongside its own SIGTERM.
+  assert.deepEqual(trailing, [], "the pre-enumeration freeze is lifted before the graceful wait");
+  assert.ok(
+    runtime.signals.some(([pid, signal]) => pid === -root.pid && signal === "SIGCONT"),
+    "and it is lifted",
+  );
+  assert.equal(terminatePosixProcessBoundaries(owner).length, 0);
+});
+
 test("a root reaped mid-attempt still lifts the freeze the attempt delivered", async (t) => {
   t.mock.method(console, "error", () => {});
   const runtime = scriptedRuntime([

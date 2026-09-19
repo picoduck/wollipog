@@ -433,11 +433,14 @@ export class PosixProcessBoundary {
     }
   }
 
-  private async fallbackRootGroupAfterEnumerationFailure(): Promise<void> {
+  private async fallbackRootGroupAfterEnumerationFailure(liftEarlyFreeze: () => void): Promise<void> {
     // Preserve main's dependency-free TERM/KILL path.
-    if (!this.signalRootGroupUnverified("SIGTERM")) return;
-    // A group frozen before enumeration cannot act on SIGTERM until it is resumed.
-    this.signalRootGroupUnverified("SIGCONT");
+    const delivered = this.signalRootGroupUnverified("SIGTERM");
+    // A group frozen before enumeration cannot act on that SIGTERM until it is resumed, and the
+    // resume has to happen here rather than after the escalation sleep below: a resume deferred
+    // across two seconds can land on a PGID the kernel has since handed to somebody else.
+    liftEarlyFreeze();
+    if (!delivered) return;
     await this.sleep(2_000);
     this.signalRootGroupUnverified("SIGKILL");
   }
@@ -464,38 +467,43 @@ export class PosixProcessBoundary {
     return this.terminating;
   }
 
-  /** Lift a freeze this call delivered.
-   *
-   * Deliberately NOT gated on `rootExited`, unlike every other bare-PID group signal: the SIGSTOP
-   * already reached whatever group carries this PID, so the matching SIGCONT repairs that rather
-   * than intruding somewhere new, and SIGCONT does nothing at all to a process that is not
-   * stopped. Gating it would strand the group whenever the root is reaped mid-terminate. */
-  private resumeEarlyFrozenRootGroup(): void {
-    try {
-      (this.testRuntime?.signal ?? globalThis.process.kill.bind(globalThis.process))(-this.rootPid, "SIGCONT");
-    } catch { /* already gone */ }
-  }
-
   private async terminateOnce(): Promise<boolean> {
     // Freeze the root group before anything is enumerated. Descendant discovery reads the whole
     // process table, which on a loaded machine takes long enough — seconds, with a marker scan over
     // a thousand processes — for the step being stopped to run to completion and keep writing to
     // the worktree after the caller was told it was killed. Stopping first makes the caller's
     // observation true immediately and closes the fork window the discovery passes exist to close.
-    const earlyFrozen = this.signalRootGroupUnverified("SIGSTOP");
+    let outstandingFreeze = this.signalRootGroupUnverified("SIGSTOP");
+
+    /** Lift the pre-enumeration freeze, at most once, and never long after it was delivered.
+     *
+     * Not gated on `rootExited`, unlike every other bare-PID group signal, because the matching
+     * SIGSTOP already reached this PID's group: the resume repairs that rather than intruding
+     * somewhere new. That argument only survives while the two signals stay close together, so
+     * every caller lifts within the same phase as its own SIGTERM and never across a sleep — a
+     * resume deferred by seconds could reach a PGID the kernel has since reissued. `outstanding`
+     * also carries `signalRootGroupUnverified`'s own refusals, so a root PID of 0 or 1, or an
+     * already-reaped root, never reaches the send. */
+    const liftEarlyFreeze = (): void => {
+      if (!outstandingFreeze) return;
+      outstandingFreeze = false;
+      try {
+        (this.testRuntime?.signal ?? globalThis.process.kill.bind(globalThis.process))(-this.rootPid, "SIGCONT");
+      } catch { /* already gone */ }
+    };
+
     try {
-      return await this.terminateFrozenTree(earlyFrozen);
+      return await this.terminateFrozenTree(liftEarlyFreeze);
     } finally {
-      // Total guarantee: no path out of the attempt may leave this freeze outstanding. The
-      // ownership-checked resumes inside cover the identities a snapshot names, but each of them
-      // refuses once the root has been reaped or has left the table — exactly the interleavings
-      // the early freeze makes reachable — and the enumeration-failure path may have no snapshot
-      // at all. Without this, a group stopped here is stranded in state T for good.
-      if (earlyFrozen) this.resumeEarlyFrozenRootGroup();
+      // Backstop only. Every phase above lifts its own freeze promptly, so by the time this runs
+      // the flag is normally already clear; it exists so that no path out of the attempt — an
+      // early return, or a throw from the enumeration or timer seams — can leave a group this
+      // call stopped stranded for good.
+      liftEarlyFreeze();
     }
   }
 
-  private async terminateFrozenTree(earlyFrozen: boolean): Promise<boolean> {
+  private async terminateFrozenTree(liftEarlyFreeze: () => void): Promise<boolean> {
     let table: PosixProcessTable | undefined;
     const frozen = new Map<number, PosixProcessIdentity>();
     try {
@@ -528,9 +536,8 @@ export class PosixProcessBoundary {
         for (const process of frozen.values()) this.signal(process, table, "SIGCONT");
         this.signalRootGroup(table, "SIGCONT");
       }
-      // fallbackRootGroupAfterEnumerationFailure resumes the group after its SIGTERM; the caller's
-      // finally lifts the early freeze whether or not that fallback was able to run.
-      await this.fallbackRootGroupAfterEnumerationFailure();
+      // The fallback lifts the early freeze immediately after its own SIGTERM, before it sleeps.
+      await this.fallbackRootGroupAfterEnumerationFailure(liftEarlyFreeze);
       return false;
     }
 
@@ -541,9 +548,10 @@ export class PosixProcessBoundary {
     this.signalRootGroup(table, "SIGTERM");
     for (const process of liveOwned(this.owned, table)) this.signal(process, table, "SIGCONT");
     this.signalRootGroup(table, "SIGCONT");
-    // Resume promptly rather than waiting for the caller's finally: the graceful window below
-    // gives a TERM handler up to two seconds to unwind, and it cannot use them while stopped.
-    if (earlyFrozen) this.resumeEarlyFrozenRootGroup();
+    // Lift here, in the same phase as the SIGTERM above, rather than leaving it to the backstop:
+    // the graceful window below gives a TERM handler up to two seconds to unwind and it cannot
+    // use them while stopped, and a resume deferred that long could reach a reissued PGID.
+    liftEarlyFreeze();
 
     const gracefulDeadline = this.now() + 2_000;
     while (this.now() < gracefulDeadline) {
