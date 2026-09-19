@@ -46,6 +46,10 @@ export function unarchiveAndRestartFailureMessage(cause: unknown): { message: st
   if (details?.archived === true) {
     return { message: `Could not unarchive and restart session: ${detail}. The session is still archived.`, ambiguous: false };
   }
+  if (details?.archived === false) {
+    // The server refused because the session is no longer archived — an earlier request restored it.
+    return { message: "This session was already restored. Reloading the current session state.", ambiguous: true };
+  }
   return {
     message: `Could not confirm Unarchive and Restart: ${detail}. Reloading the current session state.`,
     ambiguous: true,

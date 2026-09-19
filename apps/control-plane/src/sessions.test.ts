@@ -13002,16 +13002,33 @@ test("unarchive and restart restores the archived session and relaunches it in S
 
 test("duplicate and concurrent unarchive-and-restart requests launch exactly one replacement process", () => {
   const harness = makeHarness();
-  const { hub, svc } = harness;
+  const { db, hub, svc } = harness;
   const id = seedArchivedSession(harness);
 
   const first = svc.unarchiveAndRestart(id);
   const duplicate = svc.unarchiveAndRestart(id);
 
   assert.equal(first.status, 200);
-  assert.equal(duplicate.status, 200, "the second client observes the accepted launch");
-  assert.equal(duplicate.data?.status, "starting");
+  assert.equal(first.data?.status, "starting");
+  // The duplicate is refused rather than credited with the first request's launch: no session state
+  // proves which request restored it, and the refusal's archive state tells the client what happened.
+  assert.equal(duplicate.status, 409);
+  assert.equal(db.getSession(id)?.archived, false);
   assert.equal(hub.sentOfType("start_session").length, 1);
+});
+
+test("an ordinary restart is never mistaken for an accepted unarchive and restart", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "completed", Date.now());
+  assert.equal(svc.restart(id).status, 200, "an ordinary restart also writes `starting`");
+  assert.equal(db.getSession(id)?.status, "starting");
+  hub.sentToRunner.length = 0;
+
+  const result = svc.unarchiveAndRestart(id);
+
+  assert.equal(result.status, 409, "a session this operation never restored is refused");
+  assert.equal(hub.sentOfType("start_session").length, 0);
 });
 
 test("unarchive and restart refuses a session that is not archived without launching", () => {
@@ -13020,7 +13037,7 @@ test("unarchive and restart refuses a session that is not archived without launc
   hub.sentToRunner.length = 0;
   // Being active is not evidence of an accepted restore: a session that was never archived must not
   // be reported as restarted by an operation that sent nothing.
-  for (const status of ["running", "idle", "input_required", "completed"] as const) {
+  for (const status of ["running", "idle", "input_required", "completed", "starting"] as const) {
     db.updateSessionStatus(id, status, Date.now());
     const result = svc.unarchiveAndRestart(id);
     assert.equal(result.status, 409, status);

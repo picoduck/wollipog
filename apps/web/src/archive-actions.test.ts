@@ -128,10 +128,13 @@ test("Unarchive and Restart failures are classified by the server receipt, not t
     message: "Could not unarchive and restart session: runner is offline. The session is still archived.",
     ambiguous: false,
   });
-  assert.equal(unarchiveAndRestartFailureMessage(new ApiError(
+  assert.deepEqual(unarchiveAndRestartFailureMessage(new ApiError(
     "session is not archived; use Restart instead", 409, undefined,
     { error: "session is not archived; use Restart instead", archived: false },
-  )).ambiguous, true, "a state conflict is not proof that the session stayed archived");
+  )), {
+    message: "This session was already restored. Reloading the current session state.",
+    ambiguous: true,
+  }, "a state conflict is not proof that the session stayed archived");
   assert.equal(unarchiveAndRestartFailureMessage(new ApiError("Not Found", 404)).ambiguous, true,
     "a 4xx with no receipt (a proxy error page, a deleted session) is unknown, not archived");
   assert.equal(unarchiveAndRestartFailureMessage(new ApiError("Bad Gateway", 502)).ambiguous, true);

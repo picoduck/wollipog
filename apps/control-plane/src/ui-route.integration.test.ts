@@ -1896,12 +1896,17 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     ownerFetch(restorePath, { method: "POST" }),
     ownerFetch(restorePath, { method: "POST" }),
   ]);
-  for (const response of concurrentRestores) {
-    assert.equal(response.status, 200);
-    const restored = await response.json() as { archived: boolean; status: string };
-    assert.equal(restored.archived, false);
-    assert.equal(restored.status, "starting");
-  }
+  const restoreStatuses = concurrentRestores.map((response) => response.status).sort();
+  assert.deepEqual(restoreStatuses, [200, 409], "exactly one client owns the restore");
+  const accepted = concurrentRestores.find((response) => response.status === 200)!;
+  const restored = await accepted.json() as { archived: boolean; status: string };
+  assert.equal(restored.archived, false);
+  assert.equal(restored.status, "starting");
+  const refused = concurrentRestores.find((response) => response.status === 409)!;
+  assert.deepEqual(await refused.json() as { error: string; archived: boolean }, {
+    error: "session is not archived; use Restart instead",
+    archived: false,
+  }, "the loser is told the session is already restored, not that it stayed archived");
   await runnerInbox.take((message) => message.type === "start_session" &&
     (message.spec as { sessionId?: string } | undefined)?.sessionId === "session-history");
   assert.equal(runnerInbox.has((message) => message.type === "start_session" &&

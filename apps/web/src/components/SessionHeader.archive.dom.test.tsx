@@ -385,3 +385,58 @@ test("an unconfirmed Unarchive and Restart reconciles the header against the ser
   await act(async () => root.unmount());
   container.remove();
 });
+
+test("a reconciliation reload that fails leaves no unhandled rejection", async () => {
+  const toasts: string[] = [];
+  const rejections: unknown[] = [];
+  const onRejection = (event: { reason?: unknown }) => { rejections.push(event.reason); };
+  domWindow.addEventListener("unhandledrejection", onRejection as never);
+  const session = {
+    id: "session-archived-reload-fails",
+    runnerId: "runner-1",
+    title: "Archived Work",
+    status: "completed",
+    archived: true,
+  } as SessionView;
+  const client = {
+    ...api,
+    unarchiveAndRestart: async () => { throw new ApiError("Bad Gateway", 502); },
+  } as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <ApiProvider client={client}>
+        <FeedbackContext.Provider value={{
+          confirm: async () => { throw new Error("the labelled action needs no confirmation"); },
+          showToast: (message: string) => { toasts.push(message); return 1; },
+          showUndo: () => 1,
+          dismissToast: () => undefined,
+        }}>
+          <SessionHeader
+            session={session}
+            onBack={() => undefined}
+            runnerOnline
+            runnerProtocolVersion={85}
+            providerLogoutSupported={false}
+            stopBeforeArchiveSupported
+            unarchiveAndRestartSupported
+            onReloadSession={async () => { throw new Error("offline"); }}
+            exportReady={false}
+          />
+        </FeedbackContext.Provider>
+      </ApiProvider>,
+    );
+  });
+
+  await act(async () => { button(container, "More Actions").click(); await tick(); });
+  await act(async () => { button(container, "Unarchive and Restart").click(); await tick(); await tick(); });
+
+  assert.deepEqual(rejections, [], "the connectivity failure that made the outcome uncertain also fails the reload");
+  assert.equal(toasts.length, 1, "the uncertainty is reported once");
+  assert.match(toasts[0] ?? "", /Could not confirm Unarchive and Restart/);
+  domWindow.removeEventListener("unhandledrejection", onRejection as never);
+  await act(async () => root.unmount());
+  container.remove();
+});

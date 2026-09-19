@@ -828,7 +828,15 @@ export function SessionHeader({
                             showToast(failure.message, { tone: "error" });
                             // The server may have restored and relaunched this session before the
                             // response was lost; the header would otherwise keep showing it archived.
-                            if (failure.ambiguous) await onReloadSession?.();
+                            // The reload can fail for the very reason the outcome was unconfirmed —
+                            // the toast already says so, and an escaping rejection would be unhandled.
+                            if (failure.ambiguous) {
+                              try {
+                                await onReloadSession?.();
+                              } catch {
+                                /* the session state stays as it was; the toast already reports the uncertainty */
+                              }
+                            }
                           }
                         });
                         return;

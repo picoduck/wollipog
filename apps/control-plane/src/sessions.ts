@@ -5808,14 +5808,12 @@ export class SessionsService {
   unarchiveAndRestart(sessionId: string): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
-    if (!session.archived) {
-      // `starting` is the only state this operation itself produces, so it is the only evidence
-      // that a duplicate request (or a second client) is observing an accepted launch rather than
-      // an unrelated session that was never archived. Anything else is refused rather than
-      // reported as a restart that this request never performed.
-      if (!session.archiveStatus && session.status === "starting") return ok(session);
-      return fail("session is not archived; use Restart instead", 409);
-    }
+    // No session state is evidence that THIS request was the one that restored the session: an
+    // ordinary restart also writes `starting`. Rather than claim a restore it may not have
+    // performed, the operation refuses every session that is not archived; the refusal carries the
+    // archive state (see the route), which is what lets a duplicate or retrying client tell "already
+    // restored" from "still archived" and reconcile. No second launch is ever sent either way.
+    if (!session.archived) return fail("session is not archived; use Restart instead", 409);
     if (this.db.sideChatParent(sessionId)) {
       return fail("side chat sessions remain hidden from ordinary session lists", 409);
     }
