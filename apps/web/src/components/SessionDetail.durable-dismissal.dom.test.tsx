@@ -162,6 +162,8 @@ async function mountFixture(options: {
   eventPayloads?: SessionEvent["payload"][];
   /** Leaves every prompt resolution in flight, so busy state stays observable. */
   holdResolutions?: boolean;
+  /** Renders the preview surface, which reports its fork availability through this callback. */
+  onPreviewForkReady?: React.ComponentProps<typeof SessionDetail>["onPreviewForkReady"];
 } = {}): Promise<Fixture> {
   fixtureSequence += 1;
   const currentSession = session(`durable-dismissal-${fixtureSequence}`);
@@ -219,6 +221,9 @@ async function mountFixture(options: {
             pinnedOpen={false}
             composerFocusIntent="message"
             composerDraftLoader={async () => null}
+            {...(options.onPreviewForkReady
+              ? { mode: "preview" as const, onPreviewForkReady: options.onPreviewForkReady }
+              : {})}
           />
         </StoreProvider>
       </ApiProvider>,
@@ -521,6 +526,54 @@ test("a terminal receipt listed beside a held live queue stays dismissible and i
     await unmountFixture(fixture);
   }
 });
+
+for (const { name, queued, available } of [
+  { name: "only settled receipts", queued: [...terminalQueueEntry("failed")!], available: true },
+  {
+    name: "a receipt beside a live entry",
+    queued: [
+      ...terminalQueueEntry("failed")!,
+      { id: "queue-live", text: "still waiting", steerable: true, liveQueueObserved: true },
+    ],
+    available: false,
+  },
+]) {
+  test(`an idle forkable Session listing ${name} reports fork ${available ? "available" : "blocked"}`, async () => {
+    const reported: Array<{ available: boolean; reason?: string }> = [];
+    const fixture = await mountFixture({
+      sessionPatch: {
+        status: "idle",
+        useWorktree: true,
+        worktreePath: "/tmp/durable-dismissal-worktree",
+        queued,
+        pendingPrompts: terminalPendingPrompt("failed", 1),
+      },
+      // A completed provider checkpoint makes turn 1 forkable, so the queued-work gate is the only
+      // one left to decide — without it an earlier gate would refuse and the test would prove nothing.
+      eventPayloads: [
+        { kind: "user_message", text: TEXT, images: [] },
+        { kind: "agent_message", text: "done", final: true },
+        { kind: "conversation_checkpoint", turn: 1 },
+      ],
+      onPreviewForkReady: (controls) => {
+        if (controls) reported.push(controls.availability as { available: boolean; reason?: string });
+      },
+    });
+    try {
+      const latest = reported.at(-1);
+      assert.ok(latest, "the preview surface reported its fork availability");
+      if (available) {
+        assert.deepEqual(latest, { available: true, forkTurn: 1 },
+          "a settled receipt is not pending work, so it must not block the fork");
+      } else {
+        assert.equal(latest.available, false, "genuinely queued work still blocks the fork");
+        assert.match(latest.reason ?? "", /queued messages/);
+      }
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+}
 
 test("a nonterminal durable entry keeps the existing pre-admission cancellation semantics", async () => {
   const fixture = await mountFixture({

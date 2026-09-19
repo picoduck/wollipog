@@ -1,14 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { RUNNER_CAPABILITY_MIN_PROTOCOL, type QueuedPromptView } from "@wollipog/protocol";
 import {
   acquireSessionFork,
   canStopActiveTurn,
+  checkpointHandoffUnavailableReason,
   composerPrimaryAction,
   conversationForkAvailability,
   editInForkAvailability,
   forkFailureIsAmbiguous,
+  isTerminalDeliveryReceipt,
+  pendingQueuedPromptCount,
   sessionForkInProgress,
   subscribeSessionForks,
+  type CheckpointHandoffContext,
   type EditInForkContext,
 } from "./session-actions.js";
 
@@ -88,6 +93,90 @@ test("plain conversation forks share runtime gates and preserve Claude and Pi la
   const noCheckpoint = conversationForkAvailability(undefined, undefined, context);
   assert.equal(noCheckpoint.available, false);
   if (!noCheckpoint.available) assert.match(noCheckpoint.reason, /Complete a conversation turn/);
+});
+
+const failedReceipt: QueuedPromptView = {
+  id: "cmd-failed", text: "failed", steerable: false, durableDeliveryState: "failed",
+};
+const uncertainReceipt: QueuedPromptView = { ...failedReceipt, id: "cmd-uncertain", durableDeliveryState: "uncertain" };
+const liveEntry: QueuedPromptView = { id: "queue-live", text: "live", steerable: true, liveQueueObserved: true };
+const durablePending: QueuedPromptView = { id: "cmd-pending", text: "pending", steerable: false, durableDeliveryState: "pending" };
+const durableQueued: QueuedPromptView = { ...durablePending, id: "cmd-queued", durableDeliveryState: "queued" };
+
+test("settled delivery receipts are listed entries but never pending work", () => {
+  assert.equal(isTerminalDeliveryReceipt(failedReceipt), true);
+  assert.equal(isTerminalDeliveryReceipt(uncertainReceipt), true);
+  for (const entry of [liveEntry, durablePending, durableQueued]) {
+    assert.equal(isTerminalDeliveryReceipt(entry), false, `${entry.id} is not a settled receipt`);
+  }
+  assert.equal(pendingQueuedPromptCount(undefined), 0);
+  assert.equal(pendingQueuedPromptCount([]), 0);
+  assert.equal(pendingQueuedPromptCount([failedReceipt, uncertainReceipt]), 0, "receipts alone are no pending work");
+  assert.equal(pendingQueuedPromptCount([liveEntry, durablePending, durableQueued]), 3);
+  assert.equal(pendingQueuedPromptCount([failedReceipt, liveEntry, uncertainReceipt, durablePending]), 2,
+    "receipts beside pending work neither add to it nor hide it");
+});
+
+test("forks and edit-in-fork ignore settled receipts but still wait for pending work", () => {
+  const forkContext = (queued: QueuedPromptView[]) => ({
+    ...base, providerSupported: true, forkInProgress: false, queuedPrompts: pendingQueuedPromptCount(queued),
+  });
+  const completed = new Set([1, 2]);
+
+  for (const queued of [[failedReceipt], [uncertainReceipt], [failedReceipt, uncertainReceipt]]) {
+    assert.deepEqual(conversationForkAvailability(2, 2, forkContext(queued)), { available: true, forkTurn: 2 });
+    assert.deepEqual(editInForkAvailability(2, completed, forkContext(queued)), { available: true, forkTurn: 1 });
+  }
+  for (const queued of [[liveEntry], [durablePending], [failedReceipt, liveEntry], [uncertainReceipt, durableQueued]]) {
+    const fork = conversationForkAvailability(2, 2, forkContext(queued));
+    const editFork = editInForkAvailability(2, completed, forkContext(queued));
+    assert.equal(fork.available, false);
+    assert.equal(editFork.available, false);
+    if (!fork.available) assert.match(fork.reason, /queued messages/);
+    if (!editFork.available) assert.match(editFork.reason, /queued messages/);
+  }
+});
+
+test("checkpoint handoff keeps its gates and their order, and ignores settled receipts", () => {
+  const ready: CheckpointHandoffContext = {
+    runnerOnline: true,
+    runnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.conversationHandoff,
+    hasWorktree: true,
+    status: "idle",
+    queuedPrompts: 0,
+    busy: false,
+    forkInProgress: false,
+  };
+  assert.equal(checkpointHandoffUnavailableReason(ready), undefined);
+  assert.equal(
+    checkpointHandoffUnavailableReason({ ...ready, queuedPrompts: pendingQueuedPromptCount([failedReceipt, uncertainReceipt]) }),
+    undefined,
+    "a Session whose only listed entries are settled receipts is not busy",
+  );
+
+  const blocked: Array<[Partial<CheckpointHandoffContext>, string]> = [
+    [{ runnerOnline: false }, "The runner is offline."],
+    [{ runnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.conversationHandoff - 1 },
+      "Update the runner to support checkpoint handoffs."],
+    [{ hasWorktree: false }, "A worktree is required."],
+    [{ busy: true }, "The source session is busy."],
+    [{ forkInProgress: true }, "The source session is busy."],
+    [{ queuedPrompts: pendingQueuedPromptCount([failedReceipt, liveEntry]) }, "The source session is busy."],
+    ...(["running", "starting", "queued", "input_required"] as const).map((status) =>
+      [{ status }, "The source session is busy."] as [Partial<CheckpointHandoffContext>, string]),
+  ];
+  for (const [patch, reason] of blocked) {
+    assert.equal(checkpointHandoffUnavailableReason({ ...ready, ...patch }), reason, JSON.stringify(patch));
+  }
+  // The earliest failing gate wins, exactly as the inline chain it replaces.
+  assert.equal(
+    checkpointHandoffUnavailableReason({ ...ready, runnerOnline: false, hasWorktree: false, busy: true }),
+    "The runner is offline.",
+  );
+  assert.equal(
+    checkpointHandoffUnavailableReason({ ...ready, hasWorktree: false, busy: true }),
+    "A worktree is required.",
+  );
 });
 
 test("a session fork lease survives view remounts and releases exactly once", () => {

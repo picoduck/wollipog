@@ -1,8 +1,21 @@
 import {
   runnerSupportsProtocol,
   type AgentDriverKind,
+  type QueuedPromptView,
   type SessionStatus,
 } from "@wollipog/protocol";
+
+/** A `failed` or `uncertain` durable delivery receipt. Its delivery has already ended, so it can be
+ * neither cancelled nor waited out; it stays in `SessionView.queued` only so it can be dismissed. */
+export function isTerminalDeliveryReceipt(prompt: QueuedPromptView): boolean {
+  return prompt.durableDeliveryState === "failed" || prompt.durableDeliveryState === "uncertain";
+}
+
+/** Prompts in `SessionView.queued` that are still pending work. Settled receipts are evidence, not
+ * work, so every "is this Session busy?" gate counts with this rather than `queued.length`. */
+export function pendingQueuedPromptCount(queued: readonly QueuedPromptView[] | undefined): number {
+  return (queued ?? []).filter((prompt) => !isTerminalDeliveryReceipt(prompt)).length;
+}
 
 export interface EditInForkContext {
   driver: AgentDriverKind;
@@ -86,6 +99,31 @@ export function acquireSessionFork(sessionId: string): (() => void) | null {
     activeSessionForks.delete(sessionId);
     notifySessionForkListeners();
   };
+}
+
+export interface CheckpointHandoffContext {
+  runnerOnline: boolean;
+  runnerProtocolVersion?: number | null;
+  hasWorktree: boolean;
+  status: SessionStatus;
+  queuedPrompts: number;
+  busy: boolean;
+  forkInProgress: boolean;
+}
+
+/** Why a checkpoint handoff cannot start, or `undefined` when it can. `queuedPrompts` counts pending
+ * work only (see `pendingQueuedPromptCount`), so a settled receipt never reports the Session busy. */
+export function checkpointHandoffUnavailableReason(context: CheckpointHandoffContext): string | undefined {
+  if (!context.runnerOnline) return "The runner is offline.";
+  if (!runnerSupportsProtocol(context.runnerProtocolVersion, "conversationHandoff")) {
+    return "Update the runner to support checkpoint handoffs.";
+  }
+  if (!context.hasWorktree) return "A worktree is required.";
+  if (context.busy || context.forkInProgress || context.queuedPrompts > 0 ||
+      ["running", "starting", "queued", "input_required"].includes(context.status)) {
+    return "The source session is busy.";
+  }
+  return undefined;
 }
 
 /** Shared fail-closed gate for every plain conversation-fork entry point. */
