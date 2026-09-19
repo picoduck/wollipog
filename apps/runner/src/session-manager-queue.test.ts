@@ -1517,18 +1517,24 @@ test("a durable prompt queued before launch keeps its command id", async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const internals = sm as any;
     internals.active.delete("s_q");
+    // The insertion under test happens immediately before the launch asks for admission. Holding
+    // admission open parks the launch exactly there, so no driver is constructed and no launch
+    // outlives this test — queueing the prompt is all this asserts.
+    let admissionRequested = false;
+    internals.acquireAdmission = () => {
+      admissionRequested = true;
+      return new Promise<boolean>(() => {});
+    };
     const durable = durableLifecycle("prompt_durable_prelaunch");
 
-    // queueBeforeLaunch routes through the launch path, which parks the prompt before it tries to
-    // acquire admission; the launch itself never completes in this harness and does not need to.
     sm.prompt("s_q", "queued before launch", [], undefined, undefined, durable, false, undefined, true);
-    await waitFor(() => (internals.preLaunchQueues.get("s_q") ?? []).length > 0,
-      "the prompt is parked in the pre-launch queue");
+    await waitFor(() => admissionRequested, "the launch reaches the admission boundary and parks there");
     assert.deepEqual(
       (internals.preLaunchQueues.get("s_q") as Array<{ id: string }>).map((prompt) => prompt.id),
       [durable.commandId],
       "the pre-launch queue entry is the durable command, under its own id",
     );
+    assert.equal(internals.active.has("s_q"), false, "no session was launched past the parked admission");
   } finally {
     cleanup();
   }
