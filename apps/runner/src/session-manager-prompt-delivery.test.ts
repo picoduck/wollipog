@@ -129,3 +129,23 @@ test("cancelling a queued prompt on purpose stays silent", () => {
     cleanup();
   }
 });
+
+test("an attachment-only queued prompt is reported by its attachments, not skipped", () => {
+  const { sm, events, cleanup } = harness();
+  try {
+    sm.prompt("s_mid", "", [{ mimeType: "image/png", data: "AAAA" }]);
+
+    const before = events().length;
+    sm.stop("s_mid");
+
+    const notices = events()
+      .slice(before)
+      .filter((message) => message.payload.kind === "error" &&
+        /queued message was discarded/i.test(message.payload.message))
+      .map((message) => (message.payload as { message: string }).message);
+    assert.equal(notices.length, 1, "a prompt carrying only attachments is just as lost");
+    assert.match(notices[0]!, /1 attachment, no text/);
+  } finally {
+    cleanup();
+  }
+});

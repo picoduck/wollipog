@@ -8765,10 +8765,15 @@ export class SessionManager {
     if (prompt.durable || prompt.sessionCommand || prompt.syntheticRecovery ||
         prompt.recoveredQuestion || !prompt.sessionId) return;
     const text = (prompt.slashCommand ? `/${prompt.slashCommand} ${prompt.text}` : prompt.text).trim();
-    if (!text) return;
-    const quoted = text.length > DISCARDED_PROMPT_QUOTE_CHARS
-      ? `${text.slice(0, DISCARDED_PROMPT_QUOTE_CHARS)}…`
-      : text;
+    // An attachment-only prompt is valid and just as lost, so it is named by its attachments
+    // rather than skipped for having nothing to quote.
+    const images = prompt.images?.length ?? 0;
+    if (!text && images === 0) return;
+    const quoted = !text
+      ? `(${images} attachment${images === 1 ? "" : "s"}, no text)`
+      : text.length > DISCARDED_PROMPT_QUOTE_CHARS
+        ? `${text.slice(0, DISCARDED_PROMPT_QUOTE_CHARS)}…`
+        : text;
     this.emitEvent(prompt.sessionId, {
       kind: "error",
       message: `A queued message was discarded before it ran (${reason}) and must be sent again: ${quoted}`,
@@ -14119,7 +14124,15 @@ export class SessionManager {
     this.store.flush(sessionId);
     if (entry) entry.historyQuarantined = true;
     for (const queued of stranded) {
-      this.failQueuedPrompt(queued, PROVIDER_HISTORY_QUARANTINE_GUIDANCE, "COMMAND_CANCELLED", true);
+      // Only `retained` survives in providerHistoryBlock.retry, so only it is genuinely preserved
+      // by the quarantine guidance already on the timeline. Every other stranded prompt loses its
+      // text here and needs the discard notice to stay recoverable.
+      this.failQueuedPrompt(
+        queued,
+        PROVIDER_HISTORY_QUARANTINE_GUIDANCE,
+        "COMMAND_CANCELLED",
+        queued === retained,
+      );
     }
     if (stranded.length) this.emitQueue(sessionId);
   }

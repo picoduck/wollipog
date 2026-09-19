@@ -4101,9 +4101,24 @@ export class SessionsService {
       turnId,
       text: this.campaignWrappedText(session, text),
     });
-    if (!steered.ok || !steered.data) return null;
-    // A rejected attempt never reached the provider, so the ordinary queue is still owed the
-    // message. Every other state means the runner has taken ownership of it.
+    if (!steered.ok) {
+      // Falling back to the queue after a failure that already crossed the runner boundary would
+      // deliver the same instruction twice. steer() refuses with 400/404/409/500 only before it
+      // dispatches — including the explicit markSteeringAttemptNotSent "runner is offline" — and
+      // reserves 502 for its three post-dispatch ambiguities: an unrecognised result frame, a
+      // result that could not be matched to the attempt, and a transport failure or timeout after
+      // the send. Re-queue the first group; hand the second back so the sender checks the steering
+      // attempt instead of blindly resending.
+      if (steered.status !== 502) return null;
+      return fail(
+        `${steered.error ?? "conversation steering failed"} — the message may already have reached ` +
+          "the session, so check its steering attempts before sending it again",
+        502,
+      );
+    }
+    if (!steered.data) return null;
+    // A rejected attempt is refused before anything is written to the provider, so the ordinary
+    // queue is still owed the message. Every other state means the runner has taken ownership.
     if (steered.data.state === "rejected") return null;
     return ok({
       ...this.db.getSession(sessionId)!,
