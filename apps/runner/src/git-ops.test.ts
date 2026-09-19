@@ -524,6 +524,25 @@ test("status sees an external restage that leaves the file MM and every total id
   assert.ok(calls.some((args) => args.includes("--cached") && args.includes("--unified=0")));
 });
 
+test("the content identity keeps two patch pairs apart even when their concatenations collide", async (t) => {
+  t.after(() => setGitRunnerForTests());
+  // #1386: git judges text versus binary from a blob's first bytes only, so a later NUL reaches the
+  // patch body verbatim. Any fixed separator can therefore be forged: moving it from the end of the
+  // combined patch to the start of the index patch leaves a naive join byte-identical.
+  const separator = "\u0000cached\n";
+  const middle = patchOf("forged").replace("+forged\n", `+forged${separator}`);
+  let pair = { patch: patchOf("TWO") + separator + middle, cached: patchOf("ONE") };
+  stubStatusRead(() => ({ ...pair, numstat: SAME_SHAPE_NUMSTAT, porcelain: "MM a.ts\n" }));
+
+  const before = await gitStatus("/repo");
+  const moved = { patch: patchOf("TWO"), cached: middle + separator + patchOf("ONE") };
+  assert.equal(moved.patch + separator + moved.cached, pair.patch + separator + pair.cached);
+  pair = moved;
+  const after = await gitStatus("/repo");
+  assert.deepEqual({ ...after, contentSignature: null }, { ...before, contentSignature: null });
+  assert.notEqual(after.contentSignature, before.contentSignature);
+});
+
 test("status skips the index read when porcelain reports nothing staged", async (t) => {
   t.after(() => setGitRunnerForTests());
   // The ordinary agent worktree: everything unstaged. A zero staged count means the index matches

@@ -1227,7 +1227,7 @@ async function statusContentSignature(
   // difference from HEAD — modes and renames included. With no tracked entry at all there is
   // nothing for either diff to print, so the ordinary clean-worktree observation hashes the empty
   // pair directly rather than spawning git to be told so.
-  if (!observed.trackedChanges) return computeDiffHash(statusContentInput("", ""));
+  if (!observed.trackedChanges) return statusContentDigest("", "");
   const read = (scope: string) => git(
     cwd,
     [...DIFF_CFG, "--no-optional-locks", "diff", "--no-ext-diff", "--unified=0", scope, "--"],
@@ -1240,7 +1240,7 @@ async function statusContentSignature(
       read("HEAD"),
       observed.stagedPaths > 0 ? read("--cached") : Promise.resolve(""),
     ]);
-    return computeDiffHash(statusContentInput(combined, cached));
+    return statusContentDigest(combined, cached);
   } catch {
     // Unborn HEAD, a patch past the byte budget, or a transient git failure. Null reports "not
     // observed"; hashing the empty pair instead would assert a clean diff the authoritative
@@ -1249,9 +1249,19 @@ async function statusContentSignature(
   }
 }
 
-/** The two patches as one hash input. NUL-delimited so no patch body can forge the boundary. */
-function statusContentInput(combined: string, cached: string): string {
-  return `${combined}\u0000cached\n${cached}`;
+/**
+ * The two patches as one digest. No delimiter can frame them: git judges text versus binary from a
+ * blob's first bytes only, so a patch body can carry any byte sequence verbatim. Prefixing the
+ * first patch's UTF-8 byte length fixes where it ends, so distinct pairs always hash distinct input.
+ * Both patches are hashed raw — `computeDiffHash`'s CR stripping and trailing-newline padding would
+ * let distinct pairs meet again after framing.
+ */
+function statusContentDigest(combined: string, cached: string): string {
+  return createHash("sha256")
+    .update(`${Buffer.byteLength(combined, "utf8")}\n`, "utf8")
+    .update(combined, "utf8")
+    .update(cached, "utf8")
+    .digest("hex");
 }
 
 /** Collect one coherent local snapshot. Divergence pairs each come from one rev-list invocation,
