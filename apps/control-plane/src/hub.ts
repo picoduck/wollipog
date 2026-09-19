@@ -98,6 +98,25 @@ export function isRunnerRequestNotSentError(error: unknown): error is RunnerRequ
   return error instanceof RunnerRequestNotSentError;
 }
 
+/** The runner's live queue supersedes the durable admission projection it overlays, with one
+ * exception: terminal delivery receipts. A `failed` or `uncertain` receipt never enters the runner's
+ * queue, so replacing it outright hid an undismissed failure — and its only Dismiss control, once a
+ * recorded transcript event suppresses the recovery card — for as long as anything else was queued.
+ * Those receipts are kept, ahead of the live FIFO. The runner uses the durable command id as the
+ * live queue id, so a receipt whose command the runner still holds is matched exactly and yields to
+ * that live entry rather than being listed twice. */
+export function overlayLiveQueue(
+  durable: QueuedPromptView[] | undefined,
+  live: QueuedPromptView[],
+): QueuedPromptView[] {
+  const liveIds = new Set(live.map((prompt) => prompt.id));
+  const receipts = (durable ?? []).filter((prompt) =>
+    (prompt.durableDeliveryState === "failed" || prompt.durableDeliveryState === "uncertain") &&
+    !liveIds.has(prompt.id)
+  );
+  return receipts.length ? [...receipts, ...live] : live;
+}
+
 export interface Socket {
   send(data: string, onComplete?: (error?: Error) => void): void;
   /** Bytes already queued by the WebSocket implementation. Test doubles may omit this; production
@@ -888,7 +907,7 @@ export class Hub {
     if (state && this.isRunnerOnline(session.runnerId)) {
       return {
         ...session,
-        ...(state.queue.length ? { queued: state.queue } : {}),
+        ...(state.queue.length ? { queued: overlayLiveQueue(session.queued, state.queue) } : {}),
         ...(state.held ? { queueHeld: true } : {}),
         ...(state.activeTurnId ? { activeTurnId: state.activeTurnId } : {}),
       };

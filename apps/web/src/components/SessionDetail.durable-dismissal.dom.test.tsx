@@ -443,6 +443,85 @@ test("an in-flight Retry does not make the composer row's Dismiss claim to be di
   }
 });
 
+test("a terminal receipt listed beside a held live queue stays dismissible and is not marked held", async () => {
+  const HELD_TITLE = "Waiting for the active turn or control-plane decision to settle; resolve any visible prompt to continue";
+  const fixture = await mountFixture({
+    sessionPatch: {
+      status: "running",
+      queueHeld: true,
+      activeTurnId: "turn-a",
+      // The shape the control plane now broadcasts while the runner holds prompts: the undismissed
+      // terminal receipt kept ahead of the live FIFO instead of being replaced by it.
+      queued: [
+        ...terminalQueueEntry("failed")!,
+        { id: "queue-live", text: "still waiting behind the turn", steerable: true, liveQueueObserved: true },
+      ],
+      pendingPrompts: terminalPendingPrompt("failed", 1),
+    },
+    eventPayloads: [{ kind: "user_message", text: TEXT, images: [] }],
+  });
+  try {
+    assert.equal(
+      fixture.container.querySelector(`[data-testid="pending-prompt-${COMMAND_ID}"]`),
+      null,
+      "the recovery card is suppressed, so the composer row is the receipt's only dismissal surface",
+    );
+
+    const receiptRow = fixture.container.querySelector<HTMLElement>(`[data-testid="queued-prompt-${COMMAND_ID}"]`);
+    assert.ok(receiptRow, "the terminal receipt is listed while the live queue is shown");
+    const receiptBadge = receiptRow.querySelector<HTMLElement>(".queued-badge");
+    assert.equal(receiptBadge?.textContent, "Delivery Failed");
+    assert.equal(receiptBadge?.classList.contains("held"), false, "a settled receipt is not paused by the held FIFO");
+    // Session-wide gates run before per-row state, so every surface that explains the row — badge,
+    // Steer, its info popover, and Edit — must carry the receipt's own reason, never a wait.
+    const RECEIPT_REASON = "Delivery attempts for this message have ended, so it cannot be steered or edited.";
+    const receiptExplanations = {
+      badge: receiptBadge?.getAttribute("title"),
+      steer: receiptRow.querySelector('button[aria-label="Steer Queued Message"]')?.getAttribute("title"),
+      steerInfo: receiptRow.querySelector('.queued-steer-info [role="status"]')?.textContent,
+      edit: receiptRow.querySelector('button[aria-label="Edit Queued Message"]')?.getAttribute("title"),
+    };
+    assert.deepEqual(receiptExplanations, {
+      badge: RECEIPT_REASON,
+      steer: RECEIPT_REASON,
+      steerInfo: RECEIPT_REASON,
+      edit: RECEIPT_REASON,
+    });
+    for (const [surface, text] of Object.entries(receiptExplanations)) {
+      assert.doesNotMatch(text ?? "", /active turn|settle|admission|wait/i,
+        `the receipt's ${surface} explanation must not present it as waiting on the queue`);
+    }
+    const dismiss = receiptRow.querySelector<HTMLButtonElement>('button[aria-label="Dismiss Failed Message"]');
+    assert.ok(dismiss);
+    assert.equal(dismiss.disabled, false);
+    assert.equal(receiptRow.querySelector('button[aria-label="Cancel Queued Message"]'), null);
+
+    const liveRow = fixture.container.querySelector<HTMLElement>('[data-testid="queued-prompt-queue-live"]');
+    assert.ok(liveRow);
+    const liveBadge = liveRow.querySelector<HTMLElement>(".queued-badge");
+    assert.equal(liveBadge?.textContent, "Held", "the live entry keeps its held presentation");
+    assert.equal(liveBadge?.classList.contains("held"), true);
+    assert.equal(liveBadge?.getAttribute("title"), HELD_TITLE);
+    assert.notEqual(
+      liveRow.querySelector('button[aria-label="Steer Queued Message"]')?.getAttribute("title"),
+      RECEIPT_REASON,
+      "live entries keep the session-wide steering explanation",
+    );
+    const cancel = liveRow.querySelector<HTMLButtonElement>('button[aria-label="Cancel Queued Message"]');
+    assert.ok(cancel, "the live entry keeps its cancellation control");
+    assert.equal(cancel.disabled, false);
+    assert.equal(liveRow.querySelector(".queued-dismiss"), null);
+
+    await act(async () => fireDomEvent.click(dismiss));
+    assert.deepEqual(fixture.calls.resolvePendingPrompt, [
+      { sessionId: fixture.sessionId, commandId: COMMAND_ID, action: "dismiss" },
+    ], "dismissal targets the durable command identity");
+    assert.deepEqual(fixture.calls.cancelQueuedPrompt, [], "dismissing the receipt never touches the live queue");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("a nonterminal durable entry keeps the existing pre-admission cancellation semantics", async () => {
   const fixture = await mountFixture({
     sessionPatch: {

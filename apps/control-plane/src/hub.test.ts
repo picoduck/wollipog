@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { GitActionRequestMessage, ProjectView, SessionEvent, SessionReminderView, SessionView } from "@wollipog/protocol";
+import type {
+  DurableSessionCommand,
+  GitActionRequestMessage,
+  ProjectView,
+  SessionEvent,
+  SessionReminderView,
+  SessionView,
+} from "@wollipog/protocol";
+import { automationCommandDigest, canonicalAutomationCommandJson } from "./automation-command-outbox.js";
 import { ControlPlaneDb } from "./db.js";
 import { LOCAL_OWNER_USER_ID } from "./identity.js";
 import {
@@ -616,6 +624,106 @@ test("runner queue updates fan out to every dashboard and clear hold state autho
   assert.equal(drained?.queued, undefined);
   assert.equal(drained?.activeTurnId, undefined);
   assert.equal(hub.activeTurnIdForSession(session.id), undefined);
+  db.close();
+});
+
+test("a live runner queue overlay keeps undismissed terminal receipts, deduplicated by command id", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const runnerId = "runner-queue-overlay";
+  db.registerRunner({
+    runnerId,
+    hostname: "queue-host",
+    os: "linux",
+    version: "1",
+    agents: [],
+    workspaces: [],
+  }, 1);
+  const session = db.createSession({
+    id: "session-queue-overlay",
+    runnerId,
+    workspaceId: null,
+    agentId: null,
+    title: "Queue Overlay",
+    useWorktree: false,
+    driver: "acp",
+    config: {},
+    now: 2,
+  });
+  const stage = (commandId: string, text: string, now: number) => {
+    const command: DurableSessionCommand = { type: "prompt_session", sessionId: session.id, text };
+    db.stageSessionPromptCommand({
+      commandId,
+      sessionId: session.id,
+      runnerId,
+      payloadJson: canonicalAutomationCommandJson(command),
+      payloadSha256: automationCommandDigest(command),
+      expiresAt: now + 30 * 24 * 60 * 60_000,
+      now,
+    });
+  };
+  const settle = (commandId: string, state: "failed" | "uncertain", userEventSeq?: number) => {
+    assert.ok(db.recordSessionPromptCommandReceipt({
+      commandId,
+      runnerId,
+      sessionId: session.id,
+      state,
+      revision: 4,
+      error: "provider cancelled",
+      code: "COMMAND_CANCELLED",
+      ...(userEventSeq === undefined ? {} : { userEventSeq }),
+      now: 10,
+    })?.advanced);
+  };
+  // A: delivery failed after its transcript event was recorded, so its recovery card is suppressed
+  // and the composer row is its only dismissal surface.
+  stage("cmd-failed", "A failed after its transcript event", 3);
+  settle("cmd-failed", "failed", 1);
+  // U: recorded as uncertain, yet the runner still holds it. The runner uses the durable command id
+  // as the live queue id, so the live entry supersedes the receipt instead of listing it twice.
+  stage("cmd-uncertain-live", "U is uncertain but still queued", 4);
+  settle("cmd-uncertain-live", "uncertain");
+  // P: not yet terminal. The live queue supersedes durable admission state, exactly as before.
+  stage("cmd-pending", "P awaits runner admission", 5);
+
+  const messages: Array<{ type: string; session?: SessionView }> = [];
+  const hub = new Hub(db);
+  hub.attachRunner(runnerId, { send() {} });
+  hub.addUiClient({
+    send: (data) => messages.push(JSON.parse(data) as { type: string; session?: SessionView }),
+  });
+  const latest = () => messages.findLast((message) => message.type === "session_upsert")?.session;
+  const liveQueue = [
+    { id: "cmd-uncertain-live", text: "U is uncertain but still queued", liveQueueObserved: true },
+    { id: "prompt-live-b", text: "B waits behind the running turn", liveQueueObserved: true },
+  ];
+
+  hub.setSessionQueue(session.id, liveQueue, true, "turn-a");
+  const overlaid = latest();
+  assert.deepEqual(overlaid?.queued?.map((prompt) => prompt.id), ["cmd-failed", "cmd-uncertain-live", "prompt-live-b"],
+    "the undismissed terminal receipt stays listed ahead of the live FIFO, which keeps its order");
+  const receipt = overlaid?.queued?.[0];
+  assert.equal(receipt?.durableDeliveryState, "failed");
+  assert.equal(receipt?.liveQueueObserved, undefined, "a terminal receipt is never presented as a live entry");
+  assert.equal(receipt?.steerable, false);
+  const superseding = overlaid?.queued?.find((prompt) => prompt.id === "cmd-uncertain-live");
+  assert.equal(superseding?.liveQueueObserved, true, "the runner's live entry wins over its own uncertain receipt");
+  assert.equal(superseding?.durableDeliveryState, undefined);
+  assert.equal(overlaid?.queued?.some((prompt) => prompt.id === "cmd-pending"), false,
+    "nonterminal durable admission state is still superseded by the live queue");
+  assert.equal(overlaid?.queueHeld, true, "the held flag and active turn are unchanged by the merge");
+  assert.equal(overlaid?.activeTurnId, "turn-a");
+  assert.equal(hub.queuedPromptForSession(session.id, "cmd-failed"), undefined,
+    "runner-bound queue lookups still see only what the runner actually holds");
+  assert.equal(hub.queuedPromptForSession(session.id, "prompt-live-b")?.id, "prompt-live-b");
+
+  // Dismissal removes the receipt from the overlaid projection on the next broadcast.
+  assert.equal(db.dismissTerminalSessionPromptCommand(session.id, "cmd-failed", 11), "dismissed");
+  hub.setSessionQueue(session.id, liveQueue, true, "turn-a");
+  assert.deepEqual(latest()?.queued?.map((prompt) => prompt.id), ["cmd-uncertain-live", "prompt-live-b"]);
+
+  // Once the runner drains, the durable projection is shown again, unchanged.
+  hub.setSessionQueue(session.id, [], false);
+  assert.deepEqual(latest()?.queued?.map((prompt) => prompt.id), ["cmd-uncertain-live", "cmd-pending"]);
   db.close();
 });
 
