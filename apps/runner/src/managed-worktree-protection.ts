@@ -913,7 +913,7 @@ export function pathTargetsGuardState(path: string, cwd: string, directory: stri
  * - `find` takes one or more explicit starts and then exactly `-maxdepth N`. The walk is bounded by
  *   the directory it actually starts in, measured under every reading of that start — spelling,
  *   physical path, and the physical landing of a `..` — with the nearest one deciding. Without an
- *   explicit start it walks the working directory, which no operand names, so it is refused.
+ *   explicit start it walks the WORKING directory, which is measured the same way (#1398).
  *
  * What disqualifies a command, and why each one has to:
  *
@@ -937,13 +937,31 @@ export function pathTargetsGuardState(path: string, cwd: string, directory: stri
  * - An option word carrying a path separator. None of the admitted forms has an option that opens a
  *   file, so this refuses nothing they need to read; it is kept so that a path inside an option is
  *   never the one thing the classifier waves through, whatever the option turns out to mean.
- * - A working directory inside the guard state, since a command with no operand acts there.
+ * - A working directory inside the guard state, since a command with no operand acts there. That
+ *   one is decided before anything else: from in there every command is refused, whatever it is.
+ *
+ * The classifier models the tools it knows walk. One that recurses by default under a name it does
+ * not model — `rg`, `tree`, `fd`, an alternate build such as `gfind`, or a subcommand such as
+ * `git clean -dfx`, whose operand-less form removes untracked trees rooted at the working
+ * directory — is not judged here. That is the same limit as any other indirection, and widening it
+ * needs its own decision rather than a growing list of names.
+ *
+ * The working directory is an operand the command never has to spell (#1398). A recursive walk
+ * started from an ancestor enumerates the hook directory without naming anything, so `walksWorkingDirectory`
+ * decides which commands are judged against the directory they run in as well as against their
+ * operands: `find` and `du`, which walk whatever they are given, and any command carrying a word
+ * that asks for recursion. Only a WALK is judged that way, because a strict ancestor of the hook
+ * directory is normally the user's home directory, and judging every command from there would
+ * refuse ordinary work — exactly the over-refusal #1334 was opened about.
  *
  * It over-refuses where the safe direction is to do so. A short-option cluster is scanned for `R`
  * without modelling which options take an attached value, so GNU's `ls -IREADME` reads as recursive
  * and is refused; the alternative, a hard-coded list of value-taking options, fails OPEN the day
  * that list is wrong. And `find <ancestor> -maxdepth 1 2>/dev/null` is refused: the tokenizer drops
  * the adjacency that makes `2>` a redirection, so the `2` reads as one more word after the bound.
+ * A walk is likewise refused from an ancestor without deciding WHICH tree it walks: `cp -r a b` and
+ * `du -a /elsewhere` name a start of their own, but telling that start from an option value, a
+ * pattern, or a destination is the general parsing this classifier declines to do.
  * ------------------------------------------------------------------------------------------ */
 
 /** Operators that end one command and begin another. */
@@ -962,9 +980,10 @@ function tokenText(token: ShellToken): string | null {
 /**
  * One command out of a list: every word that names a location, and separately the words that decide
  * what the command DOES. `words` is null when the segment carries an unexpanded variable, since one
- * opaque word could be a recursion flag or another operand.
+ * opaque word could be a recursion flag or another operand. `targets` holds the positions in
+ * `operands` of redirection targets, which the shell removes before the program sees its argv.
  */
-interface CommandSegment { operands: Array<string | null>; words: string[] | null }
+interface CommandSegment { operands: Array<string | null>; words: string[] | null; targets: Set<number> }
 
 /**
  * Split a parsed command into segments, or `null` when it contains a construct this classifier does
@@ -975,6 +994,7 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
   const segments: CommandSegment[] = [];
   let operands: Array<string | null> = [];
   let words: string[] | null = [];
+  let targets = new Set<number>();
   let redirected = false;
   let previousWord: string | null = null;
   for (const token of tokens) {
@@ -982,8 +1002,10 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
     if (op === null) {
       const text = tokenText(token);
       operands.push(text);
-      if (redirected) redirected = false;
-      else if (words !== null) {
+      if (redirected) {
+        redirected = false;
+        targets.add(operands.length - 1);
+      } else if (words !== null) {
         if (text === null) words = null;
         else words.push(text);
       }
@@ -991,9 +1013,10 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
       continue;
     }
     if (SEGMENT_SEPARATORS.has(op)) {
-      segments.push({ operands, words });
+      segments.push({ operands, words, targets });
       operands = [];
       words = [];
+      targets = new Set<number>();
       redirected = false;
       previousWord = null;
       continue;
@@ -1007,17 +1030,127 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
     redirected = true;
     previousWord = null;
   }
-  segments.push({ operands, words });
+  segments.push({ operands, words, targets });
   return segments;
+}
+
+/**
+ * Whether a long option is an abbreviation of one of `names`. GNU `getopt_long` accepts any
+ * unambiguous prefix, so `--recurs`, `--recursi`, and `--r` all reach `--recursive`.
+ */
+function longOptionAbbreviates(word: string, names: readonly string[]): boolean {
+  if (!word.startsWith("--")) return false;
+  const name = word.slice(2).split("=")[0] ?? "";
+  return name.length > 0 && names.some((candidate) => candidate.startsWith(name));
 }
 
 /** `-R`, or any abbreviation of `--recursive` that GNU `getopt_long` accepts. */
 function recursiveListing(word: string): boolean {
-  if (word.startsWith("--")) {
-    const name = word.slice(2).split("=")[0] ?? "";
-    return name.length > 0 && "recursive".startsWith(name);
-  }
+  if (word.startsWith("--")) return longOptionAbbreviates(word, ["recursive"]);
   return /^-[^-]/u.test(word) && word.includes("R");
+}
+
+/**
+ * Commands that walk the tree they are given, with or without an option that says so. Matched
+ * case-insensitively, because a case-insensitive filesystem runs `FIND` as `find`.
+ */
+const WALKING_COMMANDS = new Set(["find", "du"]);
+
+/**
+ * The values GNU `argmatch` accepts for `grep -d` / `--directories` as an unambiguous abbreviation
+ * of `recurse`. Measured against GNU grep 3.11: `r` and `re` are rejected as ambiguous with
+ * `read`, and everything from `rec` on recurses.
+ */
+const RECURSE_VALUES = new Set(["rec", "recu", "recur", "recurs", "recurse"]);
+
+/** Long options that ask for a recursive walk, named in full so their abbreviations count too. */
+const RECURSIVE_LONG_OPTIONS = ["recursive", "dereference-recursive"];
+
+/**
+ * A word that asks for recursion by itself, in any of the spellings GNU tools use.
+ *
+ * - The letter as a short option. EITHER case: the listing gate above reads only `-R`, because
+ *   `ls -r` is reverse order and reading it as recursion would refuse `ls -ltr`; but every tool
+ *   that takes a lowercase `-r` for recursion (`grep`, `cp`, `rm`) really does walk with it, so
+ *   the question "does this command walk?" has to read both. This also catches a value attached to
+ *   a short option, since `grep -drec` carries its `r` in the same word.
+ * - A long option that abbreviates `--recursive` or `--dereference-recursive`. Both are prefix-
+ *   matched, so `--recurs` and `--dereference-recu` count, as `getopt_long` makes them.
+ * - An option value attached with `=`: `grep --directories=rec` recurses while the command carries
+ *   neither `-r` nor `--recursive`. A DETACHED value is judged against the rest of its command
+ *   instead, below, so that an ordinary `cat rec` is not read as a recursion request.
+ * - The stem `recurs` anywhere in a word, which covers spellings this list has not met.
+ */
+function recursiveWalkWord(word: string): boolean {
+  if (/recurs/iu.test(word)) return true;
+  const equals = word.indexOf("=");
+  if (equals >= 0 && RECURSE_VALUES.has(word.slice(equals + 1).toLowerCase())) return true;
+  if (word.startsWith("--")) return longOptionAbbreviates(word, RECURSIVE_LONG_OPTIONS);
+  return /^-[^-]/u.test(word) && /[Rr]/u.test(word);
+}
+
+/**
+ * `grep -d` / `--directories` spelled so that its VALUE is the next argv word. An attached value
+ * (`--directories=read`) is judged where it stands, by `recursiveWalkWord`, and consumes nothing.
+ */
+function directoriesAction(word: string): boolean {
+  if (word.startsWith("--")) return !word.includes("=") && longOptionAbbreviates(word, ["directories"]);
+  return /^-[^-]*d$/u.test(word);
+}
+
+/** The last component of a word: `/usr/bin/find` and `./find` run the same program as `find`. */
+function commandBasename(word: string): string {
+  const cut = Math.max(word.lastIndexOf("/"), word.lastIndexOf("\\"));
+  return cut < 0 ? word : word.slice(cut + 1);
+}
+
+/**
+ * Whether these words are a walk, and so reach everything below where the command starts. A word
+ * counts wherever it sits, not only in the command position: `PATH=x du -a` has its name in second
+ * place, and a command the tokenizer gave up on has no command position at all. A walking name is
+ * matched on its last component, because `/usr/bin/find` walks exactly as `find` does.
+ *
+ * A DETACHED recurse value counts when it is the value a `-d`/`--directories` option consumes:
+ * the first argv word after it. These words are not argv, so that word is found by skipping what the
+ * shell removes or what cannot be told apart from it — a redirection target, a bare number that may
+ * be an IO number (`grep -d 2>/dev/null rec` reaches `grep` as `-d rec`), and an unexpanded
+ * variable that may expand to nothing. Any other word is the value: `rec` through `recurse` make
+ * the command a walk, and anything else — `read`, `skip` — is consumed without one, so the later
+ * `rec` in `grep -d read rec file` is only a pattern. When `targets` is null — a command the
+ * tokenizer gave up on, where nothing says which word is argv — the option stays pending to the end
+ * instead, which only refuses more. Requiring the option at all keeps `cat rec` allowed.
+ *
+ * It refuses more than it needs to — from an ancestor, a command merely mentioning `find` or
+ * `recurse` is refused — which is the safe direction for this question.
+ */
+function walksWorkingDirectory(
+  words: ReadonlyArray<string | null>,
+  targets: ReadonlySet<number> | null,
+): boolean {
+  let pending = false;
+  for (let index = 0; index < words.length; index++) {
+    const word = words[index];
+    if (word === null || word === undefined) continue;
+    if (WALKING_COMMANDS.has(commandBasename(word).toLowerCase())) return true;
+    if (recursiveWalkWord(word)) return true;
+    if (pending) {
+      if (RECURSE_VALUES.has(word.toLowerCase())) return true;
+      if (targets !== null && !targets.has(index) && !/^\d+$/u.test(word)) pending = false;
+    }
+    if (directoriesAction(word)) pending = true;
+  }
+  return false;
+}
+
+/**
+ * Every run of word characters in the raw text. Used only where the tokenizer gave up, and only
+ * ALONGSIDE the tokenizer's own words, because each spelling hides what the other shows: a backtick
+ * leaves `` `find `` glued into one token here, while `f""ind` is one word only after the tokenizer
+ * has removed the quotes. Nothing in such a command is an inspection, so reading it both ways only
+ * refuses more.
+ */
+function rawWords(command: string): string[] {
+  return command.split(/[^\w.+\/\\=-]+/u).filter(Boolean);
 }
 
 /**
@@ -1052,13 +1185,21 @@ function plainDiskUsage(words: readonly string[]): boolean {
  * reads the hook directory when every START holds it at least `N` levels down. Everything else
  * `find` accepts is refused: a leading `-L` follows links out of the tree, a test such as `-empty`
  * opens the directory it names at the bound, and an action acts on it. A walk with no START begins
- * in the working directory, which no operand names, so it is never an inspection here.
+ * in the working directory, and is admitted on exactly the same terms as one that names its start:
+ * `workingDepth` is how far the hook directory sits below that directory, or `null` when it is not
+ * below it at all (#1398).
  */
-function boundedFind(words: readonly string[], depthBelow: (start: string) => number | null): boolean {
-  if (words.length < 4 || words.at(-2) !== "-maxdepth") return false;
+function boundedFind(
+  words: readonly string[],
+  depthBelow: (start: string) => number | null,
+  workingDepth: number | null,
+): boolean {
+  if (words.length < 3 || words.at(-2) !== "-maxdepth") return false;
   const bound = words.at(-1) ?? "";
   if (!/^\d{1,9}$/u.test(bound)) return false;
-  for (const start of words.slice(1, -2)) {
+  const starts = words.slice(1, -2);
+  if (starts.length === 0) return workingDepth === null || Number(bound) <= workingDepth;
+  for (const start of starts) {
     // `find` reads these as the start of its expression, not as a place to walk.
     if (start === "" || start.startsWith("-") || ["!", "(", ")", ","].includes(start)) return false;
     const depth = depthBelow(start);
@@ -1076,6 +1217,7 @@ function boundedFind(words: readonly string[], depthBelow: (start: string) => nu
 function inspectsAncestorOnly(
   words: readonly string[],
   depthBelow: (start: string) => number | null,
+  workingDepth: number | null,
 ): boolean {
   if (words.length === 0) return true;
   // The shell expands these into words this classifier never sees.
@@ -1096,7 +1238,7 @@ function inspectsAncestorOnly(
     case "du":
       return plainDiskUsage(words);
     case "find":
-      return boundedFind(words, depthBelow);
+      return boundedFind(words, depthBelow, workingDepth);
     default:
       return false;
   }
@@ -1122,6 +1264,14 @@ export function commandTargetsGuardState(
   for (const candidate of [root, root.split(sep).join("/")]) {
     if (haystack.includes(foldCase ? candidate.toLowerCase() : candidate)) return GUARD_STATE_REFUSAL;
   }
+  // The working directory is the operand a command never has to spell. From INSIDE the guard
+  // state there is nothing left to allow: a command with no operand acts there, and one whose
+  // every operand is elsewhere can still be a walk that starts there. From an ANCESTOR only a walk
+  // is judged that way (below), because a strict ancestor is normally the user's home directory
+  // and judging every command from there would refuse ordinary work.
+  const workingRelation = guardStateRelation(cwd, cwd, root);
+  if (workingRelation?.kind === "inside") return GUARD_STATE_REFUSAL;
+  const workingDepth = workingRelation?.kind === "ancestor" ? workingRelation.depth : null;
   let tokens: ShellToken[];
   try {
     // `$HOME` is as direct a spelling of the data directory's parent as `~`; every other variable
@@ -1134,16 +1284,21 @@ export function commandTargetsGuardState(
   // two commands into one; nothing in either is inspectable.
   const segments = /[`\n\r]/u.test(command) ? null : commandSegments(tokens);
   if (segments === null) {
+    // Nothing in an unmodelled command is an inspection, so a walk starting here has nowhere to be
+    // admitted. Its words are read both as the text spells them and as the tokenizer joins them.
+    const words: string[] = workingDepth === null ? [] : rawWords(command);
     for (const token of tokens) {
       const value = tokenText(token);
-      if (value !== null && pathTargetsGuardState(value, cwd, root)) return GUARD_STATE_REFUSAL;
+      if (value === null) continue;
+      if (pathTargetsGuardState(value, cwd, root)) return GUARD_STATE_REFUSAL;
+      words.push(value);
     }
-    return null;
+    return workingDepth !== null && walksWorkingDirectory(words, null) ? GUARD_STATE_REFUSAL : null;
   }
   let namesAncestor = false;
   // Each distinct word is resolved once, and a bounded `find` reads its START depths back from here.
   const relations = new Map<string, GuardStateRelation | null>();
-  for (const { operands } of segments) {
+  for (const { operands, targets } of segments) {
     for (const value of operands) {
       if (value === null || relations.has(value)) continue;
       const relation = guardStateRelation(value, cwd, root);
@@ -1152,11 +1307,13 @@ export function commandTargetsGuardState(
       if (relation.kind === "inside") return GUARD_STATE_REFUSAL;
       namesAncestor = true;
     }
+    // A walk names the directory it starts in without spelling it. An unexpanded variable makes
+    // `words` null, but the words BESIDE it are still known — `grep -r "$PATTERN"` hides only the
+    // pattern — so the walk test reads every word the tokenizer did resolve. What stays hidden is
+    // a command that is nothing but a variable, the documented limit of a command-text matcher.
+    if (workingDepth !== null && walksWorkingDirectory(operands, targets)) namesAncestor = true;
   }
   if (!namesAncestor) return null;
-  // A command with no operand acts on the working directory, so from inside the guard state there
-  // is no inspection-only form of one.
-  if (guardStateRelation(cwd, cwd, root)?.kind === "inside") return GUARD_STATE_REFUSAL;
   // Every command in the list has to be an inspection, not only the ones naming an ancestor: an
   // earlier `hash -p`, `PATH=`, or function definition decides what a later `ls` runs.
   const depthBelow = (start: string): number | null => {
@@ -1164,7 +1321,8 @@ export function commandTargetsGuardState(
     const relation = relations.has(start) ? relations.get(start) : guardStateRelation(start, cwd, root);
     return relation?.kind === "ancestor" ? relation.depth : null;
   };
-  const inspection = segments.every(({ words }) => words !== null && inspectsAncestorOnly(words, depthBelow));
+  const inspection = segments.every(({ words }) =>
+    words !== null && inspectsAncestorOnly(words, depthBelow, workingDepth));
   return inspection ? null : GUARD_STATE_REFUSAL;
 }
 
