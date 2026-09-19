@@ -1757,6 +1757,17 @@ test("attach_session_artifact refuses before reading or uploading when the reque
     const unknown = await callTool(dropped.deps, "attach_session_artifact", { path: file });
     assert.equal(unknown.isError, true);
     assert.match(resultText(unknown), /outcome is unknown\. Attach the same file again/u);
+    // Committed, success status sent, body lost: the same unknown outcome one step later. It must
+    // not be reported as the control plane having stored different bytes.
+    for (const body of [null, "", { ok: true }, { artifactId: "art_1" }]) {
+      const truncated = makeDeps((call) => call.url.endsWith("/api/compatibility")
+        ? { status: 200, body: { protocolVersion: PROTOCOL_VERSION } }
+        : { status: 201, body });
+      const lost = await callTool(truncated.deps, "attach_session_artifact", { path: file });
+      assert.equal(lost.isError, true, JSON.stringify(body));
+      assert.match(resultText(lost), /answer did not arrive intact\. The upload's outcome is unknown\. Attach the same file again/u);
+      assert.doesNotMatch(resultText(lost), /stored different bytes/u, JSON.stringify(body));
+    }
     const rejected = makeDeps((call) => call.url.endsWith("/api/compatibility")
       ? { status: 200, body: { protocolVersion: PROTOCOL_VERSION } }
       : { status: 409, body: { error: "this session already has 256 attached screenshots" } });

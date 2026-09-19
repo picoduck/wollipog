@@ -1653,13 +1653,19 @@ export const TOOLS: McpTool[] = [
         },
         deps.requestTimeoutMs ?? ARTIFACT_UPLOAD_TIMEOUT_MS,
       );
-      if (!r.ok) {
-        // No HTTP status means the request died in transit or timed out, possibly after the control
-        // plane committed it. The route answers a repeat of the same file with the artifact it
-        // already made, so the honest instruction is to attach again, not to guess.
-        return errorResult(r.status === undefined
-          ? `${r.message}. The upload's outcome is unknown. Attach the same file again: if it was stored, the same artifact is returned rather than a duplicate.`
-          : r.message);
+      // The route answers a repeat of the same file with the artifact it already made, so whenever
+      // the outcome cannot be known the honest instruction is to attach again, not to guess.
+      const unknownOutcome = (detail: string) => errorResult(
+        `${detail}. The upload's outcome is unknown. Attach the same file again: if it was stored, the same artifact is returned rather than a duplicate.`,
+      );
+      // No HTTP status means the request died in transit or timed out, possibly after the control
+      // plane committed it.
+      if (!r.ok) return r.status === undefined ? unknownOutcome(r.message) : errorResult(r.message);
+      // A success status whose body was cut off or is not an artifact is the same situation one step
+      // later: committed, but the id never arrived. It is not evidence that the wrong bytes were stored.
+      if (typeof r.data?.artifactId !== "string" || typeof r.data?.sha256 !== "string" ||
+          typeof r.data?.sizeBytes !== "number") {
+        return unknownOutcome("the control plane accepted the upload but its answer did not arrive intact");
       }
       // The digest an agent cites must be the digest of what was stored. If the control plane's
       // differs from the file's, the upload was altered in transit; say so instead of returning an
