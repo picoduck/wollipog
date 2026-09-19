@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps } from "react";
 import { pendingRequests, sessionAttentionStatus, type ChildSessionAttentionOwner,
-  type ChildSessionRegistryEntry, type SessionView, type WorkflowInstanceView } from "@wollipog/protocol";
+  type ChildSessionRegistryEntry, type ChildSessionRegistryPage, type SessionView,
+  type WorkflowInstanceView } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { formatDuration, formatRecordedRelativeTime, titleCaseLabel } from "../format.js";
@@ -29,6 +30,16 @@ const REGISTRY_AUTO_RETRY_LIMIT = 2;
 const REGISTRY_IDLE_REFRESH_MS = 15_000;
 /** Roster-affecting evidence refreshes promptly, coalesced to at most one refresh per second. */
 const REGISTRY_ACTIVE_REFRESH_MS = 1_000;
+/**
+ * The page-selection rules decide what a refresh may skip, and each rests on a predicate about the
+ * control plane — that a settled child stays settled, that a loaded transcript row is current. Every
+ * Nth idle-cadence refresh sweeps every loaded page regardless (N = 4, about once a minute at the
+ * 15 s idle tick), so a predicate that is ever wrong costs bounded staleness, never a permanently
+ * stale row (#1290). The backstop is a count, not a timer: it arms nothing, so nothing outlives the
+ * panel, and a rejected sweep is simply retried at the next Nth idle refresh. Active-tier refreshes
+ * neither count nor sweep, so roster changes keep their targeted cost.
+ */
+export const REGISTRY_SWEEP_EVERY_IDLE_REFRESHES = 4;
 type RegistryRetry = { generation: string; after: number; attempt: number };
 
 export function mergeDurableAgents(
@@ -67,12 +78,37 @@ export function mergeDurableAgents(
   });
 }
 
-export function mergeRegistrySnapshotPages(
-  pages: readonly (readonly ChildSessionRegistryEntry[])[],
+/** One refreshed page, with the `after` cursor it was requested at. */
+export type RefreshedRegistryPage = {
+  after: number;
+  children: readonly ChildSessionRegistryEntry[];
+  truncated: boolean;
+};
+
+/**
+ * Fold refreshed pages into the registry the panel already holds, leaving the pages this refresh
+ * had no reason to re-read untouched. A page answers for the whole `sourceSeq` range it covers — up
+ * to its last entry when truncated, and to the end of the registry when not — so a child the control
+ * plane has stopped identifying is dropped rather than kept alive by a page nobody re-read (#1289).
+ *
+ * Pages apply in the order they were read, each replacing its own range, so where two responses
+ * overlap the later one wins: a child the control plane dropped between the two requests is not
+ * revived by the earlier response that still listed it.
+ */
+export function mergeRefreshedRegistryPages(
+  existing: readonly ChildSessionRegistryEntry[],
+  fetched: readonly RefreshedRegistryPage[],
 ): ChildSessionRegistryEntry[] {
-  const byId = new Map<string, ChildSessionRegistryEntry>();
-  for (const page of pages) for (const child of page) byId.set(child.toolCallId, child);
-  return [...byId.values()].sort((a, b) => a.sourceSeq - b.sourceSeq);
+  let merged: readonly ChildSessionRegistryEntry[] = existing;
+  for (const page of fetched) {
+    const through = page.truncated ? page.children.at(-1)?.sourceSeq ?? page.after : Number.POSITIVE_INFINITY;
+    const byId = new Map(merged
+      .filter((child) => child.sourceSeq <= page.after || child.sourceSeq > through)
+      .map((child) => [child.toolCallId, child]));
+    for (const child of page.children) byId.set(child.toolCallId, child);
+    merged = [...byId.values()];
+  }
+  return [...merged].sort((a, b) => a.sourceSeq - b.sourceSeq);
 }
 
 export function mergeCompactAttentionOwners(
@@ -132,6 +168,141 @@ export function childRegistryRosterKey(
   ]);
 }
 
+/**
+ * The same per-child evidence `childRegistryRosterKey` folds into its string, kept addressable so a
+ * refresh can tell *which* child moved rather than only that something did (#1290). The key itself
+ * stays the one value the cadence compares, so its format is unaffected.
+ */
+export function childRegistryAgentFingerprints(
+  agents: readonly Pick<SubagentDescriptor, "id" | "toolStatus" | "lifecycle" | "statementCount">[],
+): Map<string, string> {
+  return new Map(agents.map((agent) =>
+    [agent.id, JSON.stringify([agent.toolStatus, agent.lifecycle, agent.statementCount ?? 1])]));
+}
+
+/** The children whose own evidence moved between two refreshes, arrivals and departures included. */
+export function changedRosterIds(
+  previous: ReadonlyMap<string, string>,
+  next: ReadonlyMap<string, string>,
+): Set<string> {
+  const changed = new Set<string>();
+  for (const [id, fingerprint] of next) if (previous.get(id) !== fingerprint) changed.add(id);
+  for (const id of previous.keys()) if (!next.has(id)) changed.add(id);
+  return changed;
+}
+
+/**
+ * The control plane stamps `completedAt` exactly when it judges a child terminal, so a settled entry
+ * is readable here without a second copy of its status vocabulary. A control plane that omits the
+ * field reads as unsettled, which costs a re-read rather than a stale row.
+ */
+function isSettledRegistryEntry(child: ChildSessionRegistryEntry): boolean {
+  return child.completedAt != null;
+}
+
+/**
+ * How a refresh walks the registry: every loaded page chained from the control plane's own cursors,
+ * or only the pages chosen for it.
+ */
+export type RegistryRefreshPlan =
+  | { kind: "sweep"; pageCount: number }
+  | { kind: "targeted"; pages: { after: number; through: number }[] };
+
+/**
+ * The pages a refresh actually has to re-read (#1290). Re-reading all `ceil(n / PAGE_SIZE)` loaded
+ * pages for one child's change is the cost this removes: a page is worth a request only on
+ * evidence that its own contents moved.
+ *
+ * - It holds a child whose roster fingerprint changed since the last refresh — the targeted case,
+ *   and the one the 1 s active cadence fires on.
+ * - It holds a child that is neither settled in the registry nor present in the loaded transcript.
+ *   That child is the only one whose durable state can move with nothing observable in `items`,
+ *   which is what the idle cadence exists to catch; a loaded child's live state is already rendered
+ *   from the transcript, and a settled child cannot move again.
+ * - It is the last page, where a newly spawned child lands and where the `nextAfter` cursor behind
+ *   "Load More" is read from.
+ *
+ * Each chosen page is the held range `(after, through]`, read off the panel's own `sourceSeq`
+ * ordering; responses are merged only over the ranges they answer for, so a page the refresh
+ * skipped is simply left as held.
+ *
+ * A changed child the registry has not placed defeats all three rules: it has no page, and the
+ * tail cursor cannot return it if the control plane sorted it in mid-registry. That case sweeps
+ * every loaded page, as every refresh did before #1290, rather than losing the child. So does a
+ * refresh the caller marks `sweepDue`: every Nth idle-cadence refresh, the backstop behind all
+ * of the rules above.
+ */
+export function registryRefreshPlan(
+  registry: readonly ChildSessionRegistryEntry[],
+  changedIds: ReadonlySet<string>,
+  loadedIds: ReadonlySet<string>,
+  pageSize: number = PAGE_SIZE,
+  sweepDue = false,
+): RegistryRefreshPlan {
+  const pageCount = Math.max(1, Math.ceil(registry.length / pageSize));
+  const placed = new Set(registry.map((child) => child.toolCallId));
+  if (sweepDue || registry.length === 0 || [...changedIds].some((id) => !placed.has(id))) {
+    return { kind: "sweep", pageCount };
+  }
+  const pages: { after: number; through: number }[] = [];
+  for (let page = 0; page < pageCount; page += 1) {
+    const start = page * pageSize;
+    const children = registry.slice(start, start + pageSize);
+    const worthReading = page === pageCount - 1 || children.some((child) =>
+      changedIds.has(child.toolCallId) ||
+      (!isSettledRegistryEntry(child) && !loadedIds.has(child.toolCallId)));
+    if (worthReading) {
+      pages.push({ after: start === 0 ? 0 : registry[start - 1]!.sourceSeq, through: children.at(-1)!.sourceSeq });
+    }
+  }
+  return { kind: "targeted", pages };
+}
+
+/**
+ * Read the pages a plan names, returning them with the last response, whose `nextAfter` is where
+ * "Load More" continues. Boundaries read off the held registry go stale the moment the control
+ * plane inserts or drops an entry ahead of them, so neither mode trusts them past the first
+ * request. A sweep follows each response's own `nextAfter`, leaving no gap between pages for an
+ * entry the control plane dropped to survive in. A targeted page keeps reading until it has covered
+ * the held range it was chosen for: an entry sorted in ahead of it pushes the page's own last entry
+ * onto the next one, and that entry may be the very child the refresh was sent for. A page that
+ * earlier reads already reached is resumed where they stopped, or skipped once they cover it, so no
+ * range is read twice in one refresh. A cursor that fails to advance ends the read rather than
+ * looping on it.
+ */
+export async function readRegistryRefresh(
+  plan: RegistryRefreshPlan,
+  fetchPage: (after: number) => Promise<ChildSessionRegistryPage>,
+): Promise<{ pages: RefreshedRegistryPage[]; last: ChildSessionRegistryPage }> {
+  const pages: RefreshedRegistryPage[] = [];
+  const read = async (after: number) => {
+    const page = await fetchPage(after);
+    pages.push({ after, children: page.children, truncated: page.truncated });
+    return page;
+  };
+  if (plan.kind === "targeted") {
+    let last: ChildSessionRegistryPage | undefined;
+    for (const target of plan.pages) {
+      // Earlier reads answer through their own `nextAfter`, or to the end when it is null.
+      const reached = last?.nextAfter;
+      if (reached === null || (reached !== undefined && reached >= target.through)) continue;
+      let cursor = reached !== undefined && reached > target.after ? reached : target.after;
+      last = await read(cursor);
+      while (last.nextAfter !== null && last.nextAfter > cursor && last.nextAfter < target.through) {
+        cursor = last.nextAfter;
+        last = await read(cursor);
+      }
+    }
+    // The first target is always read, so `last` is set.
+    return { pages, last: last! };
+  }
+  let last = await read(0);
+  for (let page = 1; page < plan.pageCount && last.nextAfter !== null; page += 1) {
+    last = await read(last.nextAfter);
+  }
+  return { pages, last };
+}
+
 /** Milliseconds to wait before the next registry refresh, measured from the last one. */
 export function childRegistryRefreshDelay(rosterChanged: boolean, sinceLastRefresh: number): number {
   const floor = rosterChanged ? REGISTRY_ACTIVE_REFRESH_MS : REGISTRY_IDLE_REFRESH_MS;
@@ -188,7 +359,12 @@ export function AgentsPanel(props: Props) {
   const progressKey = useMemo(() => childRegistryProgressKey(session),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [session.messageCount, session.lastEventAt, session.status, session.pendingApproval]);
+  const agentFingerprints = useMemo(() => childRegistryAgentFingerprints(projection.descriptors),
+    [projection.descriptors]);
+  const loadedAgentIds = useMemo(() => new Set(projection.descriptors.map((agent) => agent.id)),
+    [projection.descriptors]);
   const refreshedRosterKey = useRef(rosterKey);
+  const refreshedFingerprints = useRef<ReadonlyMap<string, string>>(agentFingerprints);
   const [registry, setRegistry] = useState<ChildSessionRegistryEntry[] | null>(null);
   const [attentionOwners, setAttentionOwners] = useState<ChildSessionAttentionOwner[]>([]);
   const [registryAfter, setRegistryAfter] = useState<number | null>(0);
@@ -201,6 +377,7 @@ export function AgentsPanel(props: Props) {
   const registryRequest = useRef<string | null>(null);
   const registryRef = useRef<ChildSessionRegistryEntry[] | null>(null);
   const lastRegistryRefresh = useRef(0);
+  const idleRefreshes = useRef(0);
   const registryGeneration = `${session.id}:${session.eventEpoch ?? 0}`;
   useEffect(() => { registryRef.current = registry; }, [registry]);
   const loadRegistry = (after: number, attempt = 0) => {
@@ -252,32 +429,35 @@ export function AgentsPanel(props: Props) {
       }
     });
   };
-  const refreshRegistry = (progress: string) => {
+  const refreshRegistry = (
+    progress: string, changedIds: ReadonlySet<string>, loadedIds: ReadonlySet<string>,
+    // Banked only once the pages are merged: a refresh that fails or is abandoned must leave the
+    // evidence it was chasing unspent, or its pages are never selected again and the panel keeps
+    // showing what it failed to re-read.
+    refreshedTo: ReadonlyMap<string, string>,
+    idleTier: boolean,
+  ) => {
     const key = `${session.id}:${session.eventEpoch ?? 0}:refresh:${progress}`;
     if (registryRequest.current === key) return;
     registryRequest.current = key;
+    // Counted only once the refresh is accepted: a callback deduplicated against the same refresh
+    // still in flight reads nothing, and counting it could let the Nth idle refresh pass unswept.
+    // Only the idle tier counts, so a burst of roster changes on the 1 s tier never becomes sweeps.
+    const sweepDue = idleTier &&
+      (idleRefreshes.current = idleRefreshes.current + 1) % REGISTRY_SWEEP_EVERY_IDLE_REFRESHES === 0;
     lastRegistryRefresh.current = Date.now();
     setRegistryLoading(true);
-    const pageCount = Math.max(1, Math.ceil((registryRef.current?.length ?? 0) / PAGE_SIZE));
+    const held = registryRef.current ?? [];
+    const plan = registryRefreshPlan(held, changedIds, loadedIds, PAGE_SIZE, sweepDue);
     void (async () => {
-      const pages: ChildSessionRegistryEntry[][] = [];
-      let after = 0;
-      let latestOwners: ChildSessionAttentionOwner[] = [];
-      let latestUnidentified = 0;
-      let nextAfter: number | null = 0;
-      for (let pageIndex = 0; pageIndex < pageCount && nextAfter !== null; pageIndex += 1) {
-        const page = await api.childSessions(session.id, session.eventEpoch ?? 0, after, PAGE_SIZE);
-        pages.push(page.children);
-        latestOwners = page.attentionOwners;
-        latestUnidentified = page.unidentifiedChildren;
-        nextAfter = page.nextAfter;
-        if (nextAfter !== null) after = nextAfter;
-      }
+      const { pages, last } = await readRegistryRefresh(plan,
+        (after) => api.childSessions(session.id, session.eventEpoch ?? 0, after, PAGE_SIZE));
       if (registryRequest.current !== key) return;
-      setRegistry(mergeRegistrySnapshotPages(pages));
-      setAttentionOwners(latestOwners);
-      setUnidentifiedChildren(latestUnidentified);
-      setRegistryAfter(nextAfter);
+      refreshedFingerprints.current = refreshedTo;
+      setRegistry(mergeRefreshedRegistryPages(held, pages));
+      setAttentionOwners(last.attentionOwners);
+      setUnidentifiedChildren(last.unidentifiedChildren);
+      setRegistryAfter(last.nextAfter);
       setRegistryUnavailable(false);
       setRegistryRetry(null);
       setRegistryRetryAfter(null);
@@ -303,6 +483,8 @@ export function AgentsPanel(props: Props) {
     setRegistryRetryExhausted(false);
     registryRequest.current = null;
     refreshedRosterKey.current = rosterKey;
+    refreshedFingerprints.current = agentFingerprints;
+    idleRefreshes.current = 0;
     loadRegistry(0);
     // Registry generations are scoped by exact session + event epoch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -337,7 +519,9 @@ export function AgentsPanel(props: Props) {
         // request slot away from the page load still in flight.
         if (remaining() > 0) return arm();
         refreshedRosterKey.current = rosterKey;
-        refreshRegistry(progressKey);
+        refreshRegistry(progressKey,
+          changedRosterIds(refreshedFingerprints.current, agentFingerprints), loadedAgentIds,
+          agentFingerprints, !rosterChanged);
       }, remaining());
     };
     arm();

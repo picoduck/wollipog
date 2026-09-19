@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { deriveSubagentDescriptors, type SubagentDescriptor } from "../subagents.js";
 import { MAX_TRACKED_TOOL_CALL_STATEMENTS, TimelineBuilder } from "../timeline.js";
-import type { ChildSessionRegistryEntry, SessionEventPayload, SessionView } from "@wollipog/protocol";
-import { childRegistryProgressKey, childRegistryRefreshDelay, childRegistryRosterKey,
-  mergeCompactAttentionOwners, mergeDurableAgents, mergeRegistrySnapshotPages,
+import type { ChildSessionRegistryEntry, ChildSessionRegistryPage, SessionEventPayload,
+  SessionView } from "@wollipog/protocol";
+import { changedRosterIds, childRegistryAgentFingerprints, childRegistryProgressKey,
+  childRegistryRefreshDelay, childRegistryRosterKey, mergeCompactAttentionOwners, mergeDurableAgents,
+  mergeRefreshedRegistryPages, readRegistryRefresh, registryRefreshPlan,
   shouldOpenPrimaryRequestInSession } from "./AgentsPanel.js";
 
 const child = (id: string, lifecycle: SubagentDescriptor["lifecycle"], sourceIndex: number): SubagentDescriptor => ({
@@ -92,15 +94,295 @@ test("an authoritative unresolved compact owner suppresses a misleading loaded d
   ), [{ requestId: "ask", toolCallId: "conflicted-owner", resolved: false }]);
 });
 
-test("a refreshed paged snapshot replaces stale child lifecycle and activity", () => {
+test("a refreshed page replaces stale child lifecycle and activity across the range it covers", () => {
   const entry = (status: string, lastActivityAt: number, completedAt?: number): ChildSessionRegistryEntry => ({
     toolCallId: "off-window-child", name: "Subagent", status, sourceSeq: 80,
     startedAt: 100, lastActivityAt, ...(completedAt === undefined ? {} : { completedAt }), toolCount: 1,
   });
-  const first = mergeRegistrySnapshotPages([[entry("running", 120)], []]);
-  const refreshed = mergeRegistrySnapshotPages([[entry("completed", 200, 200)], []]);
+  const first = mergeRefreshedRegistryPages([],
+    [{ after: 0, children: [entry("running", 120)], truncated: false }]);
+  const refreshed = mergeRefreshedRegistryPages(first,
+    [{ after: 0, children: [entry("completed", 200, 200)], truncated: false }]);
   assert.equal(first[0]?.completedAt, undefined);
   assert.deepEqual(refreshed, [entry("completed", 200, 200)]);
+});
+
+/**
+ * #1289 made a child stop being identified mid-session, and #1290 stops re-reading every page, so
+ * the two meet here: the page that lost the child answers for its own range and drops it, while the
+ * entries beyond that range survive precisely because nobody re-read them.
+ */
+test("a page that no longer returns a child drops it without disturbing the pages it does not cover", () => {
+  const entry = (id: string, sourceSeq: number): ChildSessionRegistryEntry => ({
+    toolCallId: id, name: id, status: "running", sourceSeq,
+    startedAt: 100, lastActivityAt: 100, toolCount: 0,
+  });
+  const held = [entry("alpha", 10), entry("beta", 20), entry("gamma", 30)];
+  const merged = mergeRefreshedRegistryPages(held,
+    [{ after: 0, children: [entry("alpha", 10)], truncated: true }]);
+  assert.deepEqual(merged.map((child) => child.toolCallId), ["alpha", "beta", "gamma"],
+    "a truncated page answers only up to its last entry");
+  const settled = mergeRefreshedRegistryPages(held,
+    [{ after: 0, children: [entry("alpha", 10)], truncated: false }]);
+  assert.deepEqual(settled.map((child) => child.toolCallId), ["alpha"],
+    "an untruncated page answers for everything after its cursor, so a vanished child is dropped");
+});
+
+test("the changed-child set covers arrivals, departures and a folded re-statement", () => {
+  const previous = childRegistryAgentFingerprints([child("alpha", "working", 1), child("beta", "working", 2)]);
+  const restated = childRegistryAgentFingerprints([
+    { ...child("alpha", "working", 1), statementCount: 2 }, child("beta", "working", 2)]);
+  assert.deepEqual([...changedRosterIds(previous, restated)], ["alpha"]);
+  const departed = childRegistryAgentFingerprints([child("alpha", "working", 1)]);
+  assert.deepEqual([...changedRosterIds(previous, departed)], ["beta"]);
+  const arrived = childRegistryAgentFingerprints([
+    child("alpha", "working", 1), child("beta", "working", 2), child("gamma", "working", 3)]);
+  assert.deepEqual([...changedRosterIds(previous, arrived)], ["gamma"]);
+  assert.deepEqual([...changedRosterIds(previous, previous)], []);
+});
+
+/**
+ * #1290: the refresh used to cost one request per loaded page whatever moved. A page earns its
+ * request from its own contents, so a single child's change reaches the page holding it and the
+ * tail page where a new spawn would land — two requests against a ten-page registry, not ten.
+ */
+test("a single child's change re-reads its own page and the tail, not every loaded page", () => {
+  const settled = (index: number): ChildSessionRegistryEntry => ({
+    toolCallId: `child-${index}`, name: `Child ${index}`, status: "completed", lifecycle: "completed",
+    sourceSeq: index, startedAt: 100, lastActivityAt: 200, completedAt: 200, toolCount: 1,
+  });
+  const registry = Array.from({ length: 500 }, (_value, index) => settled(index + 1));
+  const loaded = new Set(registry.map((entry) => entry.toolCallId));
+  const pageCount = Math.ceil(registry.length / 50);
+  assert.equal(pageCount, 10);
+
+  // `child-120` sits on the third page: after the last entry of the second, through its own last.
+  assert.deepEqual(registryRefreshPlan(registry, new Set(["child-120"]), loaded, 50),
+    { kind: "targeted", pages: [{ after: 100, through: 150 }, { after: 450, through: 500 }] });
+  assert.deepEqual(registryRefreshPlan(registry, new Set(), loaded, 50),
+    { kind: "targeted", pages: [{ after: 450, through: 500 }] },
+    "with nothing to chase, only the page a new spawn would land on is worth a request");
+  assert.deepEqual(registryRefreshPlan(registry, new Set(["child-1"]), loaded, 50),
+    { kind: "targeted", pages: [{ after: 0, through: 50 }, { after: 450, through: 500 }] },
+    "the first page's cursor is the start of the registry, not a child's sourceSeq");
+  assert.deepEqual(registryRefreshPlan([], new Set(), new Set(), 50), { kind: "sweep", pageCount: 1 },
+    "an empty registry still reads its first page");
+});
+
+/**
+ * The control plane can sort a child in behind entries the panel already holds: a newly observed
+ * spawn recovers its own pre-spawn evidence from seq 0, so its `sourceSeq` can precede the tail.
+ * A changed child with no page therefore cannot be chased by the tail cursor, and a child absent
+ * from the registry is absent from the roster entirely, because `mergeDurableAgents` renders the
+ * registry's children rather than the transcript's.
+ */
+test("a changed child the registry has not placed sweeps every page rather than losing it", () => {
+  const settled = (index: number): ChildSessionRegistryEntry => ({
+    toolCallId: `child-${index}`, name: `Child ${index}`, status: "completed", lifecycle: "completed",
+    sourceSeq: index, startedAt: 100, lastActivityAt: 200, completedAt: 200, toolCount: 1,
+  });
+  const registry = Array.from({ length: 150 }, (_value, index) => settled(index + 1));
+  const loaded = new Set(registry.map((entry) => entry.toolCallId));
+
+  assert.deepEqual(registryRefreshPlan(registry, new Set(["not-yet-placed"]), loaded, 50),
+    { kind: "sweep", pageCount: 3 }, "with no page to target, the whole registry is re-read");
+  assert.deepEqual(registryRefreshPlan(registry, new Set(["child-60", "not-yet-placed"]), loaded, 50),
+    { kind: "sweep", pageCount: 3 }, "one unplaced child is enough: the others cannot be targeted around it");
+  assert.deepEqual(registryRefreshPlan(registry, new Set(["child-60"]), loaded, 50),
+    { kind: "targeted", pages: [{ after: 50, through: 100 }, { after: 100, through: 150 }] },
+    "a placed child is still targeted");
+});
+
+/**
+ * A sweep exists for the case where the held registry is no longer a reliable map, so it must not
+ * steer by that map. Here the control plane has sorted a recovered child in ahead of the first page
+ * boundary and dropped the child sitting on it. Cursors read off the held registry would ask for
+ * the first page and then everything after the old boundary entry; the first page now ends one
+ * entry earlier, so the old boundary entry falls between the two ranges and would be kept forever.
+ * Following the control plane's own `nextAfter` leaves no such gap.
+ */
+test("a sweep chains the control plane's own cursors, so no entry falls between two pages", async () => {
+  const entry = (id: string, sourceSeq: number): ChildSessionRegistryEntry => ({
+    toolCallId: id, name: id, status: "completed", lifecycle: "completed",
+    sourceSeq, startedAt: 100, lastActivityAt: 200, completedAt: 200, toolCount: 1,
+  });
+  // Held: 150 children at sourceSeq 10, 20, …, 1500; the first page ends on `child-50` at 500.
+  const held = Array.from({ length: 150 }, (_value, index) => entry(`child-${index + 1}`, (index + 1) * 10));
+  // Served: a recovered child at 245 sorts into the first page, and `child-50` is no longer identified.
+  const served = [...held.filter((child) => child.toolCallId !== "child-50"), entry("recovered", 245)]
+    .sort((a, b) => a.sourceSeq - b.sourceSeq);
+  const requested: number[] = [];
+  const fetchPage = async (after: number): Promise<ChildSessionRegistryPage> => {
+    requested.push(after);
+    const eligible = served.filter((child) => child.sourceSeq > after);
+    const children = eligible.slice(0, 50);
+    const truncated = eligible.length > children.length;
+    return { children, attentionOwners: [], unidentifiedChildren: 1, eventEpoch: 0,
+      nextAfter: truncated ? children.at(-1)!.sourceSeq : null, truncated };
+  };
+
+  const plan = registryRefreshPlan(held, new Set(["recovered"]), new Set(), 50);
+  assert.deepEqual(plan, { kind: "sweep", pageCount: 3 });
+  const { pages, last } = await readRegistryRefresh(plan, fetchPage);
+  assert.deepEqual(requested, [0, 490, 1000],
+    "the second page starts where the first one actually ended, not at the held boundary entry");
+  const merged = mergeRefreshedRegistryPages(held, pages).map((child) => child.toolCallId);
+  assert.ok(merged.includes("recovered"), "the recovered child is placed");
+  assert.ok(!merged.includes("child-50"), "the child the control plane dropped is dropped here too");
+  assert.equal(merged.length, 150);
+  assert.equal(last.nextAfter, null, "the sweep reached the end, so there is nothing left to Load More");
+});
+
+/**
+ * A targeted read has the same stale-boundary exposure, from the other side. A child the transcript
+ * cannot show is recovered ahead of the first page, pushing that page's last held entry onto the
+ * second — and that entry is the one whose change the refresh was sent for. A single read at the
+ * held cursor would return a page that ends just short of it and bank the change unfetched, so the
+ * read continues until the held range is covered.
+ */
+test("a targeted page keeps reading until it covers the held range it was chosen for", async () => {
+  const entry = (id: string, sourceSeq: number, status = "completed"): ChildSessionRegistryEntry => ({
+    toolCallId: id, name: id, status, sourceSeq, startedAt: 100, lastActivityAt: 200, toolCount: 1,
+    ...(status === "completed" ? { lifecycle: "completed" as const, completedAt: 200 } : {}),
+  });
+  // Held: 150 children at sourceSeq 10, 20, …, 1500; `child-50` at 500 ends the first page, running.
+  const held = Array.from({ length: 150 }, (_value, index) =>
+    entry(`child-${index + 1}`, (index + 1) * 10, index === 49 ? "running" : "completed"));
+  // Served: `child-50` has since failed, and a recovered child at 245 sorts in ahead of it.
+  const served = [...held.map((child) => child.toolCallId === "child-50" ? entry("child-50", 500, "failed") : child),
+    entry("recovered", 245)].sort((a, b) => a.sourceSeq - b.sourceSeq);
+  const requested: number[] = [];
+  const fetchPage = async (after: number): Promise<ChildSessionRegistryPage> => {
+    requested.push(after);
+    const eligible = served.filter((child) => child.sourceSeq > after);
+    const children = eligible.slice(0, 50);
+    const truncated = eligible.length > children.length;
+    return { children, attentionOwners: [], unidentifiedChildren: 0, eventEpoch: 0,
+      nextAfter: truncated ? children.at(-1)!.sourceSeq : null, truncated };
+  };
+
+  // Every row is loaded, so `child-50`'s own change is the only evidence behind the first page.
+  const loaded = new Set(held.map((child) => child.toolCallId));
+  const plan = registryRefreshPlan(held, new Set(["child-50"]), loaded, 50);
+  assert.deepEqual(plan, { kind: "targeted", pages: [{ after: 0, through: 500 }, { after: 1000, through: 1500 }] });
+  const { pages } = await readRegistryRefresh(plan, fetchPage);
+  assert.deepEqual(requested, [0, 490, 1000],
+    "the first page ended at 490, one entry short of its held range, so the read continued from there");
+  const merged = mergeRefreshedRegistryPages(held, pages);
+  assert.equal(merged.find((child) => child.toolCallId === "child-50")?.status, "failed",
+    "the child the refresh was sent for is refreshed, not banked unfetched");
+  assert.ok(merged.some((child) => child.toolCallId === "recovered"), "the recovered child is placed too");
+});
+
+/**
+ * Responses are not an atomic snapshot: the control plane is live between two requests of one
+ * refresh. Where two responses overlap, the later one is the fresher account of that range, so a
+ * child it omits is gone even though the earlier response still listed it.
+ */
+test("where two responses overlap, the later one's omission wins over the earlier one's listing", () => {
+  const entry = (id: string, sourceSeq: number): ChildSessionRegistryEntry => ({
+    toolCallId: id, name: id, status: "completed", sourceSeq, startedAt: 100, lastActivityAt: 200, toolCount: 1,
+  });
+  const held = [entry("alpha", 10), entry("beta", 20), entry("gamma", 30)];
+  const merged = mergeRefreshedRegistryPages(held, [
+    { after: 0, children: [entry("alpha", 10), entry("beta", 20), entry("gamma", 30)], truncated: true },
+    // `beta` was dropped between the two requests.
+    { after: 15, children: [entry("gamma", 30)], truncated: false },
+  ]);
+  assert.deepEqual(merged.map((child) => child.toolCallId), ["alpha", "gamma"]);
+});
+
+/**
+ * Adjacent targets after an insertion: the first page's continuation runs past the second page's
+ * held start. Restarting the second page at that stale start would read the overlap twice — and,
+ * across many adjacent pages, cost nearly double a sweep — so each target resumes where the reads
+ * before it stopped, and a target they already cover costs nothing.
+ */
+test("a target resumes where earlier reads stopped rather than re-reading the overlap", async () => {
+  const entry = (id: string, sourceSeq: number): ChildSessionRegistryEntry => ({
+    toolCallId: id, name: id, status: "completed", lifecycle: "completed",
+    sourceSeq, startedAt: 100, lastActivityAt: 200, completedAt: 200, toolCount: 1,
+  });
+  const held = Array.from({ length: 150 }, (_value, index) => entry(`child-${index + 1}`, (index + 1) * 10));
+  const served = [...held, entry("recovered", 245)].sort((a, b) => a.sourceSeq - b.sourceSeq);
+  const requested: number[] = [];
+  const fetchPage = async (after: number): Promise<ChildSessionRegistryPage> => {
+    requested.push(after);
+    const eligible = served.filter((child) => child.sourceSeq > after);
+    const children = eligible.slice(0, 50);
+    const truncated = eligible.length > children.length;
+    return { children, attentionOwners: [], unidentifiedChildren: 0, eventEpoch: 0,
+      nextAfter: truncated ? children.at(-1)!.sourceSeq : null, truncated };
+  };
+
+  const loaded = new Set(held.map((child) => child.toolCallId));
+  const plan = registryRefreshPlan(held, new Set(["child-10", "child-60"]), loaded, 50);
+  assert.deepEqual(plan, { kind: "targeted", pages: [
+    { after: 0, through: 500 }, { after: 500, through: 1000 }, { after: 1000, through: 1500 }] });
+  const { pages, last } = await readRegistryRefresh(plan, fetchPage);
+  assert.deepEqual(requested, [0, 490, 990, 1490],
+    "every read starts where the one before it ended; none restarts at a held boundary already passed");
+  assert.equal(new Set(requested).size, requested.length, "no cursor is read twice");
+  assert.equal(mergeRefreshedRegistryPages(held, pages).length, 151);
+  assert.equal(last.nextAfter, null);
+});
+
+/**
+ * The control plane's `nextAfter` is always past the cursor it answered, but the loop that follows
+ * it must not depend on that for termination: a cursor that fails to advance ends the read.
+ */
+test("a cursor that fails to advance ends a targeted read instead of looping on it", async () => {
+  const requested: number[] = [];
+  const fetchPage = async (after: number): Promise<ChildSessionRegistryPage> => {
+    requested.push(after);
+    if (requested.length > 5) throw new Error("the read did not stop");
+    return { children: [{ toolCallId: "stuck", name: "stuck", status: "running", sourceSeq: 5,
+      startedAt: 100, lastActivityAt: 200, toolCount: 0 }],
+    attentionOwners: [], unidentifiedChildren: 0, eventEpoch: 0, nextAfter: 5, truncated: true };
+  };
+  await readRegistryRefresh({ kind: "targeted", pages: [{ after: 5, through: 500 }] }, fetchPage);
+  assert.deepEqual(requested, [5]);
+});
+
+/**
+ * Every skip rule rests on a predicate about the control plane. The backstop does not: once it is
+ * due, a refresh reads every loaded page whatever the evidence says, so a predicate that is ever
+ * wrong costs bounded staleness rather than a permanently stale row.
+ */
+test("a due backstop sweeps every loaded page even when the evidence points at one", () => {
+  const settled = (index: number): ChildSessionRegistryEntry => ({
+    toolCallId: `child-${index}`, name: `Child ${index}`, status: "completed", lifecycle: "completed",
+    sourceSeq: index, startedAt: 100, lastActivityAt: 200, completedAt: 200, toolCount: 1,
+  });
+  const registry = Array.from({ length: 150 }, (_value, index) => settled(index + 1));
+  const loaded = new Set(registry.map((entry) => entry.toolCallId));
+  assert.deepEqual(registryRefreshPlan(registry, new Set(), loaded, 50, false),
+    { kind: "targeted", pages: [{ after: 100, through: 150 }] });
+  assert.deepEqual(registryRefreshPlan(registry, new Set(), loaded, 50, true), { kind: "sweep", pageCount: 3 });
+});
+
+/**
+ * The idle cadence exists for a child whose durable state moves with nothing observable in the
+ * loaded transcript (#1207). Only an unsettled child outside that window can do so, so only its
+ * page keeps costing an idle request.
+ */
+test("only an unsettled child outside the loaded transcript keeps its page in the idle sweep", () => {
+  const entry = (index: number, settled: boolean): ChildSessionRegistryEntry => ({
+    toolCallId: `child-${index}`, name: `Child ${index}`, status: settled ? "completed" : "running",
+    ...(settled ? { lifecycle: "completed" as const, completedAt: 200 } : { lifecycle: "running" as const }),
+    sourceSeq: index, startedAt: 100, lastActivityAt: 200, toolCount: 1,
+  });
+  // Three pages: one unsettled child on the first, one on the second, and the rest settled.
+  const registry = Array.from({ length: 150 }, (_value, index) =>
+    entry(index + 1, index !== 0 && index !== 60));
+
+  assert.deepEqual(registryRefreshPlan(registry, new Set(), new Set(), 50),
+    { kind: "targeted", pages: [
+      { after: 0, through: 50 }, { after: 50, through: 100 }, { after: 100, through: 150 }] },
+    "an unsettled child nobody can see in the transcript still earns its page a request");
+  assert.deepEqual(registryRefreshPlan(registry, new Set(), new Set(["child-1", "child-61"]), 50),
+    { kind: "targeted", pages: [{ after: 100, through: 150 }] },
+    "those same children rendered from the loaded transcript need no registry read at all");
 });
 
 test("message progress invalidates the registry even inside one timestamp millisecond", () => {

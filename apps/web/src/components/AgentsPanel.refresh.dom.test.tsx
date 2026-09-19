@@ -3,8 +3,8 @@ import { after, before, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { PROTOCOL_VERSION, type ChildSessionRegistryPage, type SessionEventPayload,
-  type SessionView } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, type ChildSessionRegistryEntry, type ChildSessionRegistryPage,
+  type SessionEventPayload, type SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { StoreProvider } from "../store.js";
@@ -12,7 +12,7 @@ import { FeedbackProvider } from "./FeedbackProvider.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime } from "../ui-transport.js";
 import { TimelineBuilder, type TimelineItem } from "../timeline.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
-import { AgentsPanel } from "./AgentsPanel.js";
+import { AgentsPanel, REGISTRY_SWEEP_EVERY_IDLE_REFRESHES } from "./AgentsPanel.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 const globals: Record<string, unknown> = {
@@ -63,6 +63,12 @@ const baseSession = {
 const startedTool = (toolCallId: string, id: number): TimelineItem => ({
   kind: "tool_call", id, toolCallId, title: toolCallId, text: "",
   toolKind: "agent", status: "in_progress", startedAt: now - 30_000,
+});
+
+/** The same agent row once its tool call has settled: the roster fingerprint moves, nothing else. */
+const settledTool = (toolCallId: string, id: number): TimelineItem => ({
+  kind: "tool_call", id, toolCallId, title: toolCallId, text: "",
+  toolKind: "agent", status: "completed", startedAt: now - 30_000,
 });
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -262,6 +268,351 @@ test("a folded re-statement refreshes promptly without restoring per-event regis
     assert.match(container.textContent ?? "", /1 worker has an ambiguous provider identity/,
       "the reclassification the re-statement caused is visible without waiting for the idle cadence");
   } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+/**
+ * #1290: #1207 reduced how often the panel refreshed its registry but not how much each refresh
+ * read — `refreshRegistry` looped `ceil(registry.length / PAGE_SIZE)` pages, so one child's change
+ * against a five-page registry cost five requests. Cursors are the assertion here: a refresh reads
+ * the page holding the child that moved and the tail page a new spawn would land on, and leaves the
+ * pages with no evidence behind them alone.
+ */
+test("a single child's change costs two requests against a five-page registry, not five", async () => {
+  const registrySize = 250;
+  const entry = (index: number): ChildSessionRegistryEntry => ({
+    toolCallId: `child-${index}`, name: `Child ${index}`,
+    status: index === 1 ? "in_progress" : "completed",
+    lifecycle: index === 1 ? "running" : "completed",
+    sourceSeq: index, startedAt: now - 30_000, lastActivityAt: now - 20_000,
+    // The control plane stamps `completedAt` exactly when it judges a child terminal, which is what
+    // lets a refresh skip a page of settled children.
+    ...(index === 1 ? {} : { completedAt: now - 20_000 }),
+    toolCount: 1,
+  });
+  const all = Array.from({ length: registrySize }, (_value, index) => entry(index + 1));
+  const cursors: number[] = [];
+  const childSessions = async (
+    _id: string, _epoch: number, after = 0, limit = 50,
+  ): Promise<ChildSessionRegistryPage> => {
+    cursors.push(after);
+    const eligible = all.filter((child) => child.sourceSeq > after);
+    const children = eligible.slice(0, limit);
+    const truncated = eligible.length > children.length;
+    return { children, attentionOwners: [], unidentifiedChildren: 0, eventEpoch: 0,
+      nextAfter: truncated ? children.at(-1)!.sourceSeq : null, truncated };
+  };
+  const client: ApiClient = { ...api, childSessions };
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const render = (session: SessionView, items: TimelineItem[]) =>
+    root.render(<ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
+      <AgentsPanel session={session} items={items} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
+        requestedId={null} onSelect={() => {}} parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
+    </StoreProvider></FeedbackProvider></ApiProvider>);
+
+  try {
+    // `child-1` is the one child still running, and its row is loaded, so the transcript already
+    // renders its live state and no idle sweep needs its page.
+    const items = [startedTool("child-1", 1)];
+    await act(async () => { render(baseSession, items); });
+    await advance(50);
+
+    // Read the whole registry in, the way a reader does: five pages, four of them behind Load More.
+    for (let page = 1; page < 5; page += 1) {
+      const loadMore = Array.from(container.querySelectorAll("button"))
+        .find((button) => button.textContent === "Load More Recorded Workers")!;
+      await act(async () => { (loadMore as HTMLButtonElement).click(); });
+      await advance(60);
+    }
+    assert.deepEqual(cursors, [0, 50, 100, 150, 200], "the reader loaded all five pages");
+
+    // That child completes. Its evidence is on the first page, so that page and the tail are the
+    // only ones with anything to say; the pre-fix refresh read all five.
+    await act(async () => {
+      render({ ...baseSession, messageCount: 11, lastEventAt: now + 1_000 },
+        [settledTool("child-1", 1)]);
+    });
+    await advance(1_200);
+    assert.deepEqual(cursors.slice(5), [0, 200],
+      "one child's change reads its own page and the tail, never every loaded page");
+
+    // A different child, five pages in, moves the roster. The request follows it rather than
+    // restarting at the front, and the settled pages on either side stay unread.
+    await act(async () => {
+      render({ ...baseSession, messageCount: 12, lastEventAt: now + 2_000 },
+        [settledTool("child-1", 1), startedTool("child-120", 2)]);
+    });
+    await advance(1_200);
+    assert.deepEqual(cursors.slice(7), [100, 200],
+      "the refresh reads the page holding the child that moved, not the pages that did not");
+    assert.ok(cursors.every((cursor) => cursor !== 50 || cursors.indexOf(cursor) < 5),
+      "no page was re-read without evidence behind it");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+/**
+ * The evidence a refresh is chasing is spent only when the pages come back. A refresh that rejects
+ * merges nothing, so banking its fingerprints at scheduling time would retire the change with it:
+ * the page holding the child would never be selected again, and the panel would keep showing what
+ * it failed to re-read. Before #1290 this healed by accident, because the next refresh re-read
+ * every page regardless.
+ */
+test("a rejected refresh leaves its evidence unspent, so the next one still reads that page", async () => {
+  const settled = (index: number): ChildSessionRegistryEntry => ({
+    toolCallId: `child-${index}`, name: `Child ${index}`,
+    status: index === 1 ? "in_progress" : "completed",
+    lifecycle: index === 1 ? "running" : "completed",
+    sourceSeq: index, startedAt: now - 30_000, lastActivityAt: now - 20_000,
+    ...(index === 1 ? {} : { completedAt: now - 20_000 }),
+    toolCount: 1,
+  });
+  const all = Array.from({ length: 150 }, (_value, index) => settled(index + 1));
+  const cursors: number[] = [];
+  let rejectNext = false;
+  const childSessions = async (
+    _id: string, _epoch: number, after = 0, limit = 50,
+  ): Promise<ChildSessionRegistryPage> => {
+    cursors.push(after);
+    if (rejectNext) { rejectNext = false; throw new Error("registry unavailable"); }
+    const eligible = all.filter((child) => child.sourceSeq > after);
+    const children = eligible.slice(0, limit);
+    const truncated = eligible.length > children.length;
+    return { children, attentionOwners: [], unidentifiedChildren: 0, eventEpoch: 0,
+      nextAfter: truncated ? children.at(-1)!.sourceSeq : null, truncated };
+  };
+  const client: ApiClient = { ...api, childSessions };
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const render = (session: SessionView, items: TimelineItem[]) =>
+    root.render(<ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
+      <AgentsPanel session={session} items={items} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
+        requestedId={null} onSelect={() => {}} parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
+    </StoreProvider></FeedbackProvider></ApiProvider>);
+
+  try {
+    await act(async () => { render(baseSession, [startedTool("child-1", 1)]); });
+    await advance(50);
+    for (let page = 1; page < 3; page += 1) {
+      const loadMore = Array.from(container.querySelectorAll("button"))
+        .find((button) => button.textContent === "Load More Recorded Workers")!;
+      await act(async () => { (loadMore as HTMLButtonElement).click(); });
+      await advance(60);
+    }
+    assert.deepEqual(cursors, [0, 50, 100], "three pages loaded");
+
+    // `child-1` settles, on the first page, and the refresh that goes to fetch it rejects.
+    rejectNext = true;
+    await act(async () => {
+      render({ ...baseSession, messageCount: 11, lastEventAt: now + 1_000 }, [settledTool("child-1", 1)]);
+    });
+    await advance(1_200);
+    assert.deepEqual(cursors.slice(3), [0], "the refresh reached for the first page and failed");
+
+    // A later change to a child on the tail page. Its own evidence points only at the tail, so the
+    // first page is requested again solely because the failed refresh never banked what it chased.
+    await act(async () => {
+      render({ ...baseSession, messageCount: 12, lastEventAt: now + 2_000 },
+        [settledTool("child-1", 1), startedTool("child-140", 2)]);
+    });
+    await advance(1_200);
+    assert.deepEqual(cursors.slice(4), [0, 100],
+      "the unspent first-page evidence is retried alongside the tail page the new change points at");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+/**
+ * The backstop is a count of idle-cadence refreshes, not a timer: every
+ * `REGISTRY_SWEEP_EVERY_IDLE_REFRESHES`th idle refresh reads every loaded page, whatever the skip
+ * rules say, so a predicate that is ever wrong costs bounded staleness. Active-tier refreshes are
+ * roster changes, and neither count toward it nor sweep — the Nth of those stays targeted.
+ *
+ * Only the wall clock the panel reads is advanced, a cadence floor at a time, so each refresh falls
+ * due immediately while timers keep running in real time.
+ */
+test("the Nth idle refresh sweeps every loaded page, and the Nth active refresh does not", async () => {
+  const entry = (index: number): ChildSessionRegistryEntry => ({
+    toolCallId: `child-${index}`, name: `Child ${index}`,
+    status: index === 1 ? "in_progress" : "completed",
+    lifecycle: index === 1 ? "running" : "completed",
+    sourceSeq: index, startedAt: now - 30_000, lastActivityAt: now - 20_000,
+    ...(index === 1 ? {} : { completedAt: now - 20_000 }),
+    toolCount: 1,
+  });
+  const all = Array.from({ length: 150 }, (_value, index) => entry(index + 1));
+  const cursors: number[] = [];
+  const childSessions = async (
+    _id: string, _epoch: number, after = 0, limit = 50,
+  ): Promise<ChildSessionRegistryPage> => {
+    cursors.push(after);
+    const eligible = all.filter((child) => child.sourceSeq > after);
+    const children = eligible.slice(0, limit);
+    const truncated = eligible.length > children.length;
+    return { children, attentionOwners: [], unidentifiedChildren: 0, eventEpoch: 0,
+      nextAfter: truncated ? children.at(-1)!.sourceSeq : null, truncated };
+  };
+  const client: ApiClient = { ...api, childSessions };
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const render = (session: SessionView, items: TimelineItem[]) =>
+    root.render(<ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
+      <AgentsPanel session={session} items={items} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
+        requestedId={null} onSelect={() => {}} parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
+    </StoreProvider></FeedbackProvider></ApiProvider>);
+  const realNow = Date.now;
+  let skew = 0;
+  Date.now = () => realNow() + skew;
+  let messageCount = 10;
+
+  try {
+    await act(async () => { render(baseSession, [startedTool("child-1", 1)]); });
+    await advance(50);
+    for (let page = 1; page < 3; page += 1) {
+      const loadMore = Array.from(container.querySelectorAll("button"))
+        .find((button) => button.textContent === "Load More Recorded Workers")!;
+      await act(async () => { (loadMore as HTMLButtonElement).click(); });
+      await advance(60);
+    }
+    assert.deepEqual(cursors, [0, 50, 100], "three pages loaded");
+
+    // Active tier: N roster changes in a row — `child-1` flips between running and settled. Each
+    // reads its own page and the tail; none sweeps, and none counts toward the backstop.
+    for (let step = 1; step <= REGISTRY_SWEEP_EVERY_IDLE_REFRESHES; step += 1) {
+      skew += 1_000;
+      messageCount += 1;
+      const row = step % 2 === 1 ? settledTool("child-1", 1) : startedTool("child-1", 1);
+      await act(async () => { render({ ...baseSession, messageCount, lastEventAt: now + messageCount }, [row]); });
+      await advance(150);
+    }
+    // The row as the last active step left it, so the idle steps below leave the roster alone.
+    const lastRow = REGISTRY_SWEEP_EVERY_IDLE_REFRESHES % 2 === 1 ? settledTool("child-1", 1) : startedTool("child-1", 1);
+    assert.deepEqual(cursors.slice(3), Array.from({ length: REGISTRY_SWEEP_EVERY_IDLE_REFRESHES }, () => [0, 100]).flat(),
+      "the Nth active refresh is as targeted as the first");
+
+    // Idle tier: transcript progress with the roster unchanged. The first N - 1 read only the tail;
+    // the Nth sweeps every loaded page from the control plane's own cursors.
+    const beforeIdle = cursors.length;
+    for (let step = 1; step <= REGISTRY_SWEEP_EVERY_IDLE_REFRESHES; step += 1) {
+      skew += 15_000;
+      messageCount += 1;
+      await act(async () => { render({ ...baseSession, messageCount, lastEventAt: now + messageCount }, [lastRow]); });
+      await advance(150);
+    }
+    assert.deepEqual(cursors.slice(beforeIdle), [
+      ...Array.from({ length: REGISTRY_SWEEP_EVERY_IDLE_REFRESHES - 1 }, () => 100),
+      0, 50, 100,
+    ], "idle refreshes read the tail until the Nth, which reads every loaded page");
+  } finally {
+    Date.now = realNow;
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+/**
+ * An idle callback can repeat the progress key of a refresh still in flight — the roster moves
+ * away and back with no transcript progress while a slow registry request is outstanding. The
+ * refresh deduplicates it and reads nothing, so it must not count toward the backstop, or the Nth
+ * idle refresh could be that empty callback and the sweep would slip a whole cycle.
+ */
+test("a deduplicated idle callback does not count toward the backstop", async () => {
+  const entry = (index: number): ChildSessionRegistryEntry => ({
+    toolCallId: `child-${index}`, name: `Child ${index}`,
+    status: index === 1 ? "in_progress" : "completed",
+    lifecycle: index === 1 ? "running" : "completed",
+    sourceSeq: index, startedAt: now - 30_000, lastActivityAt: now - 20_000,
+    ...(index === 1 ? {} : { completedAt: now - 20_000 }),
+    toolCount: 1,
+  });
+  const all = Array.from({ length: 150 }, (_value, index) => entry(index + 1));
+  const cursors: number[] = [];
+  let holdNext = false;
+  let release: (() => void) | undefined;
+  const childSessions = async (
+    _id: string, _epoch: number, after = 0, limit = 50,
+  ): Promise<ChildSessionRegistryPage> => {
+    cursors.push(after);
+    if (holdNext) {
+      holdNext = false;
+      await new Promise<void>((resolve) => { release = resolve; });
+    }
+    const eligible = all.filter((child) => child.sourceSeq > after);
+    const children = eligible.slice(0, limit);
+    const truncated = eligible.length > children.length;
+    return { children, attentionOwners: [], unidentifiedChildren: 0, eventEpoch: 0,
+      nextAfter: truncated ? children.at(-1)!.sourceSeq : null, truncated };
+  };
+  const client: ApiClient = { ...api, childSessions };
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const render = (session: SessionView, items: TimelineItem[]) =>
+    root.render(<ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
+      <AgentsPanel session={session} items={items} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
+        requestedId={null} onSelect={() => {}} parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
+    </StoreProvider></FeedbackProvider></ApiProvider>);
+  const realNow = Date.now;
+  let skew = 0;
+  Date.now = () => realNow() + skew;
+  let messageCount = 10;
+  const row = [startedTool("child-1", 1)];
+  const idleRefresh = async () => {
+    skew += 15_000;
+    messageCount += 1;
+    await act(async () => { render({ ...baseSession, messageCount, lastEventAt: now + messageCount }, row); });
+    await advance(150);
+  };
+
+  try {
+    await act(async () => { render(baseSession, row); });
+    await advance(50);
+    for (let page = 1; page < 3; page += 1) {
+      const loadMore = Array.from(container.querySelectorAll("button"))
+        .find((button) => button.textContent === "Load More Recorded Workers")!;
+      await act(async () => { (loadMore as HTMLButtonElement).click(); });
+      await advance(60);
+    }
+    assert.deepEqual(cursors, [0, 50, 100], "three pages loaded");
+
+    await idleRefresh();
+    await idleRefresh();
+    // The third idle refresh stays in flight.
+    holdNext = true;
+    await idleRefresh();
+    assert.equal(cursors.length, 6, "three idle refreshes issued");
+
+    // The roster moves away (not yet due on the 1 s tier) and back before anything fires, so the
+    // effect re-runs on the idle tier with the in-flight refresh's progress key, and is deduplicated.
+    const session = { ...baseSession, messageCount, lastEventAt: now + messageCount };
+    await act(async () => { render(session, [settledTool("child-1", 1)]); });
+    skew += 15_000;
+    await act(async () => { render(session, row); });
+    await advance(150);
+    assert.equal(cursors.length, 6, "the repeated key was deduplicated and read nothing");
+
+    release!();
+    await advance(150);
+    await idleRefresh();
+    assert.deepEqual(cursors.slice(3), [100, 100, 100, 0, 50, 100],
+      "the fourth accepted idle refresh sweeps; the deduplicated callback did not take its turn");
+  } finally {
+    Date.now = realNow;
+    release?.();
     await act(async () => { root.unmount(); });
     container.remove();
   }
