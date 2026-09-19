@@ -163,9 +163,9 @@ const PERSIST_KEY = "wollipog.right-panel-scratch.v1";
  * The hard ceiling, in characters of serialized JSON, on what is mirrored to storage.
  *
  * `PANEL_SCRATCH_SESSION_LIMIT` bounds the scope count but deliberately exempts scopes holding
- * unsent text, and a form that keeps its text after submitting holds its scope for as long as it is
- * mounted (#1375). In memory that overshoot ends with the tab; persisted, it would not, so the
- * record needs a bound that does not depend on anyone releasing anything. Scopes are mirrored
+ * unsent text, and a draft the user neither sends nor empties holds its scope for as long as it
+ * exists. In memory that overshoot ends with the tab; persisted, it would not, so the record needs a
+ * bound that does not depend on anyone releasing anything (#1375). Scopes are mirrored
  * most-recently-used first and whatever no longer fits is simply not written — it is still in
  * memory for the life of this page, and the newest state is what a reload most wants back.
  *
@@ -385,17 +385,24 @@ export function restorePanelScratch<T extends string>(
  * value compare alone is not enough: a user who retypes the same message after coming back would
  * have it deleted under them, and the mounted body would not even learn its scratch was gone. The
  * revision is what distinguishes an untouched draft from one that came back to the same bytes.
+ *
+ * `leaveShown` releases the stored copy without emptying a box that is showing it. Review's commit
+ * message is submitted by a commit yet stays on screen for the next one (#1375): once git holds it,
+ * it is no longer text only this panel knows, so it stops pinning the scope and a reload no longer
+ * brings it back, but the reviewer looking at it keeps it until they move on.
  */
 export function clearPanelScratchIf(
   scope: string,
   key: string,
   expected: string,
   revision: number,
+  { leaveShown = false }: { leaveShown?: boolean } = {},
 ): void {
   if (panelScratchRevision(scope, key) !== revision) return;
   if (readPanelScratch(scope, key) !== expected) return;
   writePanelScratch(scope, key, null);
-  consumedRevisions.set(consumedListenerKey(scope, key), revision);
+  consumedRevisions.set(consumedListenerKey(scope, key), { revision, leaveShown });
+  if (leaveShown) return;
   // A body mounted since the draft was consumed restored it into its own state, and would show it
   // — and write it straight back — until told (#1284). Removing the stored copy is only half of
   // consuming it.
@@ -405,15 +412,19 @@ export function clearPanelScratchIf(
 }
 
 /**
- * The revision each key last had consumed. A body can restore a value and then have it consumed
- * before its effects have run — too early to have been listening, and early enough that its
- * write-back would put the sent text straight back. Revisions are global stamps, so a body that
- * restored exactly this one is holding exactly what was consumed. One entry per key ever consumed.
+ * The revision each key last had consumed, and whether the consumer asked for it to stay on screen.
+ * A body can restore a value and then have it consumed before its effects have run — too early to
+ * have been listening, and early enough that its write-back would put the sent text straight back.
+ * Revisions are global stamps, so a body that restored exactly this one is holding exactly what was
+ * consumed. One entry per key ever consumed.
  */
-const consumedRevisions = new Map<string, number>();
+const consumedRevisions = new Map<string, { revision: number; leaveShown: boolean }>();
 
-function wasConsumed(scope: string, key: string, revision: number): boolean {
-  return consumedRevisions.get(consumedListenerKey(scope, key)) === revision;
+/** How the value a body restored was consumed since, or null when it was not. */
+function consumedAs(scope: string, key: string, revision: number): "cleared" | "shown" | null {
+  const consumed = consumedRevisions.get(consumedListenerKey(scope, key));
+  if (consumed?.revision !== revision) return null;
+  return consumed.leaveShown ? "shown" : "cleared";
 }
 
 /** Bodies currently showing one scope's value, told when that value is consumed out from under them. */
@@ -561,15 +572,13 @@ export function usePanelScratchText(
  * No `accept`: prose has no closed set to refuse it against, and a draft degraded to its default
  * would be the very loss this exemption exists to prevent.
  *
- * The exemption follows the text, not the form's fate. A body that consumes its draft says so —
- * Side Chat clears the message it sent, which releases the scope — while Review leaves the four
- * fields of a submitted commit or pull request exactly as the user left them, so that session keeps
- * its scope for as long as the text is still in the box. That is the same bargain as any other
- * unsent text: the map grows only where someone typed, and only while what they typed is on screen.
+ * The exemption follows the text, so a body that submits its draft must say so, or a scope pinned
+ * by text the forge already holds stays pinned for good — and, persisted, past the tab (#1375).
+ * Side Chat clears the message it sent; Review resets a pull request's fields once it is opened and
+ * releases the commit message once git has it. Both go through `clearPanelScratchIf`.
  *
- * Persistence does not widen that bargain, but it does remove the closing of the tab as the thing
- * that eventually ends it (#1375), which is why the stored record has a ceiling of its own rather
- * than trusting the exemption to be released.
+ * The stored record still keeps a ceiling of its own rather than trusting every body to do that:
+ * a draft nobody submits is exempt for as long as it exists, which persistence makes open-ended.
  */
 export function usePanelScratchDraft(
   scope: string,
@@ -628,12 +637,16 @@ function usePanelScratchValue<T extends string>(
 
   const { scope: liveScope, key: liveKey, value, dirty, restoredRevision } = current;
   useEffect(() => {
-    if (restoredRevision !== null && wasConsumed(liveScope, liveKey, restoredRevision)) {
+    const consumed = restoredRevision === null ? null : consumedAs(liveScope, liveKey, restoredRevision);
+    if (consumed !== null) {
       // Consumed between this body restoring it and this effect running: writing it back would
-      // resurrect sent text in the store and, through it, after a reload.
-      setEntry((prior) => prior.restoredRevision === restoredRevision
-        ? { ...prior, value: prior.fallback, dirty: false, restoredRevision: null }
-        : prior);
+      // resurrect sent text in the store and, through it, after a reload. A value its consumer left
+      // on screen stays there, unstored, exactly as it does in a body that was already listening.
+      if (consumed === "cleared") {
+        setEntry((prior) => prior.restoredRevision === restoredRevision
+          ? { ...prior, value: prior.fallback, dirty: false, restoredRevision: null }
+          : prior);
+      }
       return;
     }
     syncPanelScratch(liveScope, liveKey, dirty ? value : null, retention);

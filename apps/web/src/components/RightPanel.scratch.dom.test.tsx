@@ -7,6 +7,7 @@ import { Window } from "happy-dom";
 import {
   PROTOCOL_VERSION,
   type GitDiffInfo,
+  type GitPrInfo,
   type SessionFileEntry,
   type SessionView,
   type SideChatView,
@@ -20,8 +21,15 @@ import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import {
   PANEL_SCRATCH_SESSION_LIMIT,
   clearPanelScratch,
+  clearPanelScratchIf,
   dropPanelScratchMemory,
+  panelScratchRevision,
+  panelScratchScopeCount,
+  panelScratchScopeKey,
+  readPanelScratch,
+  writePanelScratch,
 } from "../right-panel-scratch.js";
+import { ReviewPanel } from "./ReviewPanel.js";
 import { RightPanel, useRightPanelState, type RightPanelState } from "./RightPanel.js";
 import type { GitStatus } from "./useGitStatus.js";
 
@@ -72,6 +80,9 @@ beforeEach(() => {
   releasePrompt = null;
   heldListing = false;
   releaseListing = null;
+  heldGit = false;
+  releaseGit = null;
+  requestCreated = true;
 });
 
 after(() => {
@@ -139,6 +150,11 @@ let releasePrompt: (() => void) | null = null;
 /** Set by the case that needs a directory listing still in flight when a source location arrives. */
 let heldListing = false;
 let releaseListing: (() => void) | null = null;
+/** Set by the case that needs a submit still in flight while the panel unmounts. */
+let heldGit = false;
+let releaseGit: (() => void) | null = null;
+/** Whether Push & Open really opens a request, or only returns the prefilled-link fallback. */
+let requestCreated = true;
 
 const client = {
   ...api,
@@ -169,6 +185,18 @@ const client = {
     return sessionOf(id);
   },
   childSessions: async () => { throw new Error("this fixture has no durable child-session registry"); },
+  git: async (_id: string, request: { action: string; message?: string }) => {
+    if (heldGit) await new Promise<void>((resolve) => { releaseGit = resolve; });
+    if (request.action === "commit") {
+      return { commit: { sha: "abc1234", message: request.message ?? "", filesChanged: 1 } };
+    }
+    const pr: GitPrInfo = requestCreated
+      ? { url: "https://github.com/acme/app/pull/7", branch: "fix/issue-1375", pushed: true,
+          createdWithGh: true, created: true, kind: "pull_request" }
+      : { url: "https://github.com/acme/app/compare/main...fix/issue-1375?expand=1", branch: "fix/issue-1375",
+          pushed: true, createdWithGh: false, created: false, kind: "pull_request" };
+    return { pr };
+  },
 } as unknown as ApiClient;
 
 function PanelHarness({ onState, onSwitchSession, onRename, onLocate }: {
@@ -714,5 +742,209 @@ test("a session whose draft was left blank is evicted like any other", async () 
     assert.equal(field(panel, "PR Description")!.value, "", "an emptied field has nothing to lose");
   } finally {
     await panel.dispose();
+  }
+});
+
+const button = (panel: Panel, name: string) =>
+  [...panel.container.querySelectorAll<HTMLButtonElement>(".git-action button")]
+    .find((candidate) => candidate.textContent === name)!;
+
+async function writeRequest(panel: Panel): Promise<void> {
+  await type(commitInput(panel), "fix: release submitted review drafts");
+  await type(field(panel, "PR Title")!, "Release Submitted Review Drafts");
+  await type(field(panel, "PR Description")!, "Already on the forge once this is opened.");
+  await type(field(panel, "Branch Name")!, "fix/issue-1375");
+}
+
+/** Leave a browsed directory behind in the current session: real scratch that eviction can take. */
+async function browseIntoApps(panel: Panel): Promise<void> {
+  await panel.show("files");
+  await act(async () => fireDomEvent.click(panel.container.querySelector<HTMLButtonElement>(".files-entry")!));
+  assert.equal(crumbs(panel), "root/apps");
+}
+
+test("an opened pull request releases its session: a reload restores none of it and the bound evicts it", async () => {
+  // #1375: the four Review fields are drafts, exempt from eviction while they hold text. Left filled
+  // after the request was opened, they pinned the session for the life of the tab and — persisted —
+  // came back after a reload, inviting the same request to be opened twice.
+  const before = await mountPanel();
+  await browseIntoApps(before);
+  await before.show("review");
+  await writeRequest(before);
+  await act(async () => fireDomEvent.click(button(before, "Push & Open Pull Request")));
+
+  assert.match(before.container.textContent ?? "", /Pull Request opened/, "the result line stays");
+  assert.equal(before.container.querySelector<HTMLAnchorElement>(".git-ok a")?.href,
+    "https://github.com/acme/app/pull/7", "and so does its link");
+  assert.equal(field(before, "PR Title")!.value, "Panel Scratch Fixture", "the title is back to its default");
+  assert.equal(field(before, "PR Description")!.value, "");
+  assert.equal(field(before, "Branch Name")!.value, "");
+  assert.equal(commitInput(before).value, "fix: release submitted review drafts",
+    "the commit message stays on screen for the next commit");
+
+  await reload(before);
+
+  const after = await mountPanel();
+  try {
+    await after.show("review");
+    assert.equal(field(after, "PR Title")!.value, "Panel Scratch Fixture");
+    assert.equal(field(after, "PR Description")!.value, "", "submitted text is not restored by a reload");
+    assert.equal(field(after, "Branch Name")!.value, "");
+    assert.equal(commitInput(after).value, "Panel Scratch Fixture", "nor is the committed message");
+    await after.show("files");
+    assert.equal(crumbs(after), "root/apps", "what was not submitted still survives the reload");
+
+    // Past the bound. Every session on the tour leaves a directory, so the scope count genuinely
+    // exceeds the limit and something has to go — and the completed session is the idle one.
+    for (let visit = 0; visit <= PANEL_SCRATCH_SESSION_LIMIT; visit += 1) {
+      await after.switchSession(`tour-session-${visit}`);
+      await browseIntoApps(after);
+    }
+    assert.equal(panelScratchScopeCount(), PANEL_SCRATCH_SESSION_LIMIT, "nothing is exempt, so the bound holds");
+
+    await after.switchSession("session-1");
+    assert.equal(crumbs(after), "root", "the completed session was evictable again, and was evicted");
+  } finally {
+    await after.dispose();
+  }
+});
+
+test("a commit releases the message it committed but leaves it on screen", async () => {
+  const panel = await mountPanel();
+  try {
+    await panel.show("review");
+    await type(commitInput(panel), "fix: committed once");
+    await type(field(panel, "PR Description")!, "not submitted yet");
+    await act(async () => fireDomEvent.click(button(panel, "Commit")));
+
+    assert.match(panel.container.textContent ?? "", /Committed abc1234/);
+    assert.equal(commitInput(panel).value, "fix: committed once", "a second commit usually reuses it");
+
+    await panel.show("files");
+    await panel.show("review");
+    assert.equal(commitInput(panel).value, "Panel Scratch Fixture",
+      "git holds the message now, so the panel no longer keeps a copy of its own");
+    assert.equal(field(panel, "PR Description")!.value, "not submitted yet",
+      "a commit submits nothing of the pull request form");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("a pull request that only got a prefilled link keeps its fields", async () => {
+  // The GitHub fallback link carries neither title nor description, so the reviewer still needs both
+  // for the page it opens: nothing was submitted anywhere yet.
+  requestCreated = false;
+  const panel = await mountPanel();
+  try {
+    await panel.show("review");
+    await writeRequest(panel);
+    await act(async () => fireDomEvent.click(button(panel, "Push & Open Pull Request")));
+    assert.match(panel.container.textContent ?? "", /Branch pushed/);
+
+    await panel.show("files");
+    await panel.show("review");
+    assert.equal(field(panel, "PR Title")!.value, "Release Submitted Review Drafts");
+    assert.equal(field(panel, "PR Description")!.value, "Already on the forge once this is opened.");
+    assert.equal(field(panel, "Branch Name")!.value, "fix/issue-1375");
+    assert.equal(commitInput(panel).value, "fix: release submitted review drafts");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("a pull request that opens after the panel remounted empties the remounted form", async () => {
+  heldGit = true;
+  const panel = await mountPanel();
+  try {
+    await panel.show("review");
+    await writeRequest(panel);
+    await act(async () => fireDomEvent.click(button(panel, "Push & Open Pull Request")));
+
+    // The reviewer glances at Files while the push runs and comes back before it lands, so the
+    // body showing the fields is not the one that submitted them.
+    await panel.show("files");
+    await panel.show("review");
+    assert.equal(field(panel, "PR Description")!.value, "Already on the forge once this is opened.");
+    await act(async () => { releaseGit?.(); });
+
+    assert.equal(field(panel, "PR Title")!.value, "Panel Scratch Fixture");
+    assert.equal(field(panel, "PR Description")!.value, "",
+      "a request that was already opened must not stay filled in and invite a second one");
+    assert.equal(field(panel, "Branch Name")!.value, "");
+
+    await panel.show("files");
+    await panel.show("review");
+    assert.equal(field(panel, "PR Description")!.value, "", "nor come back on the next mount");
+    assert.equal(commitInput(panel).value, "Panel Scratch Fixture");
+  } finally {
+    releaseGit?.();
+    await panel.dispose();
+  }
+});
+
+test("text typed while the request is in flight is a new draft and survives it", async () => {
+  heldGit = true;
+  const panel = await mountPanel();
+  try {
+    await panel.show("review");
+    await writeRequest(panel);
+    await act(async () => fireDomEvent.click(button(panel, "Push & Open Pull Request")));
+    await type(field(panel, "PR Description")!, "a follow-up note written during the push");
+    await act(async () => { releaseGit?.(); });
+
+    assert.equal(field(panel, "PR Title")!.value, "Panel Scratch Fixture", "the submitted title is spent");
+    assert.equal(field(panel, "PR Description")!.value, "a follow-up note written during the push",
+      "what was typed after the submit went out is the reviewer's");
+    await panel.show("files");
+    await panel.show("review");
+    assert.equal(field(panel, "PR Description")!.value, "a follow-up note written during the push");
+  } finally {
+    releaseGit?.();
+    await panel.dispose();
+  }
+});
+
+/**
+ * Cross-model review CR-1.1 on #1409. A commit can land after a remounted Review body restored the
+ * message but before that body's effects run — too early for it to be listening. The stored copy
+ * must still not be written back, and the message must still stay on screen, exactly as it does in
+ * a body that was already mounted when the commit landed.
+ */
+test("a commit message consumed before the remounted body's effects run stays shown but unstored", async () => {
+  const scope = panelScratchScopeKey("session-1");
+  writePanelScratch(scope, "review.commitMessage", "fix: committed mid-remount", "draft");
+  const committedRevision = panelScratchRevision(scope, "review.commitMessage");
+
+  /** Renders after the body in the same pass, so it runs after the restore and before any effect. */
+  function LandTheCommit() {
+    clearPanelScratchIf(scope, "review.commitMessage", "fix: committed mid-remount", committedRevision,
+      { leaveShown: true });
+    return null;
+  }
+
+  const host = domWindow.document.createElement("div");
+  domWindow.document.body.append(host);
+  const container = host as unknown as HTMLElement;
+  const root = createRoot(container as unknown as Element);
+  try {
+    await act(async () => {
+      root.render(
+        <ApiProvider client={client}><StoreProvider connection={connection}>
+          <ReviewPanel session={sessionOf("session-1")} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
+            git={git} onOpenSourceLocation={() => {}} />
+          <LandTheCommit />
+        </StoreProvider></ApiProvider>,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(commitInput({ container } as Panel).value, "fix: committed mid-remount",
+      "the committed message stays on screen for the next commit");
+    assert.equal(readPanelScratch(scope, "review.commitMessage"), undefined, "but it is not written back");
+    dropPanelScratchMemory();
+    assert.equal(readPanelScratch(scope, "review.commitMessage"), undefined, "nor restored by a reload");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
   }
 });

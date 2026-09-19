@@ -38,7 +38,13 @@ import { useFeedback } from "./FeedbackProvider.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { safeExternalHref } from "../external-href.js";
 import { sourceKind } from "../pinned-summary.js";
-import { usePanelScratchChoice, usePanelScratchDraft, usePanelScratchScope } from "../right-panel-scratch.js";
+import {
+  clearPanelScratchIf,
+  panelScratchRevision,
+  usePanelScratchChoice,
+  usePanelScratchDraft,
+  usePanelScratchScope,
+} from "../right-panel-scratch.js";
 
 /** No diff on screen means nothing is anchored; one shared empty set keeps that allocation-free. */
 const NO_ANCHORED_FINDINGS: ReadonlySet<string> = new Set<string>();
@@ -50,6 +56,44 @@ const NO_ANCHORED_FINDINGS: ReadonlySet<string> = new Set<string>();
  * (#1204). Staging controls are withheld during a turn, so nothing here can race a stage reply.
  */
 const ACTIVE_TURN_DIFF_RELOAD_MS = 10_000;
+
+const COMMIT_MESSAGE_KEY = "review.commitMessage";
+const REQUEST_TITLE_KEY = "review.requestTitle";
+const REQUEST_BODY_KEY = "review.requestBody";
+const BRANCH_KEY = "review.branch";
+
+/** The drafts a submit sent, as they stood when it was sent. */
+interface SubmittedDrafts {
+  scope: string;
+  drafts: { key: string; value: string; revision: number }[];
+}
+
+/**
+ * Taken before the request goes out, for the reason Side Chat takes its own: anything the reviewer
+ * types while it is in flight is a new draft, and must survive the submit that went before it.
+ */
+function captureSubmitted(scope: string, values: Record<string, string>): SubmittedDrafts {
+  return {
+    scope,
+    drafts: Object.entries(values).map(([key, value]) => ({ key, value, revision: panelScratchRevision(scope, key) })),
+  };
+}
+
+/**
+ * Give up the drafts a successful submit consumed (#1375). They are unsent text only until the
+ * forge or git holds them; left in scratch, they would keep this session's scope exempt from
+ * eviction forever and restore already-submitted text after a reload.
+ *
+ * The pull request fields reset, through the same consumed-draft path Side Chat uses (#1284), so a
+ * body remounted while the request was in flight is emptied too; the result line and its link are
+ * what remains. The commit message stays on screen because the next commit usually reuses it — its
+ * stored copy goes, so a remount or reload shows the default again.
+ */
+function releaseSubmitted({ scope, drafts }: SubmittedDrafts): void {
+  for (const { key, value, revision } of drafts) {
+    clearPanelScratchIf(scope, key, value, revision, { leaveShown: key === COMMIT_MESSAGE_KEY });
+  }
+}
 
 /**
  * Git / PR workflow for a worktree session: review the worktree status, commit the
@@ -83,13 +127,14 @@ export function ReviewPanel({
   // mode switch and by closing the panel, and losing a pull request description to a glance at
   // Files is exactly the defect in #1202. The four fields of the unsubmitted commit and pull
   // request forms are drafts rather than plain scratch, so visiting other sessions cannot evict
-  // this one out from under half a written description either (#1283).
+  // this one out from under half a written description either (#1283). Submitting them is what
+  // ends that claim (#1375): see `releaseSubmitted`.
   const panelScratch = usePanelScratchScope(session.id);
   const defaultMessage = session.title || "Agent changes";
-  const [commitMsg, setCommitMsg] = usePanelScratchDraft(panelScratch, "review.commitMessage", defaultMessage);
-  const [prTitle, setPrTitle] = usePanelScratchDraft(panelScratch, "review.requestTitle", defaultMessage);
-  const [prBody, setPrBody] = usePanelScratchDraft(panelScratch, "review.requestBody");
-  const [branch, setBranch] = usePanelScratchDraft(panelScratch, "review.branch");
+  const [commitMsg, setCommitMsg] = usePanelScratchDraft(panelScratch, COMMIT_MESSAGE_KEY, defaultMessage);
+  const [prTitle, setPrTitle] = usePanelScratchDraft(panelScratch, REQUEST_TITLE_KEY, defaultMessage);
+  const [prBody, setPrBody] = usePanelScratchDraft(panelScratch, REQUEST_BODY_KEY);
+  const [branch, setBranch] = usePanelScratchDraft(panelScratch, BRANCH_KEY);
   const [commit, setCommit] = useState<GitCommitInfo | null>(null);
   const [pr, setPr] = useState<GitPrInfo | null>(null);
   // Rich-diff pane (Phase 2, PR-A). Branch-relative scopes only make sense for worktree sessions;
@@ -458,6 +503,7 @@ export function ReviewPanel({
     setError(null);
     setCommit(null);
     setPr(null);
+    const submitted = captureSubmitted(panelScratch, { [COMMIT_MESSAGE_KEY]: commitMsg });
     try {
       const d = await api.git(session.id, {
         action: "commit",
@@ -469,6 +515,7 @@ export function ReviewPanel({
             { expectStaged: (status?.stagedCount ?? 0) > 0 }),
       });
       setCommit(d.commit ?? null);
+      releaseSubmitted(submitted);
       await loadStatus();
       await loadDiff();
     } catch (e) {
@@ -566,11 +613,21 @@ export function ReviewPanel({
     setError(null);
     setPr(null);
     setCommit(null);
+    const submitted = captureSubmitted(panelScratch, {
+      [COMMIT_MESSAGE_KEY]: commitMsg,
+      [REQUEST_TITLE_KEY]: prTitle,
+      [REQUEST_BODY_KEY]: prBody,
+      [BRANCH_KEY]: branch,
+    });
     try {
       // Pass the visible commit message so the one-click flow's auto-commit of any
       // pending changes uses it (not the PR title).
       const d = await api.git(session.id, { action: "open_pr", title: prTitle, body: prBody, branch, message: commitMsg });
       setPr(d.pr ?? null);
+      // Only a request that was actually opened holds the text. The fallback link GitHub gets when
+      // forge tooling is unavailable carries neither title nor description, so the reviewer still
+      // needs both to paste into the page it opens.
+      if (d.pr?.created ?? d.pr?.createdWithGh) releaseSubmitted(submitted);
       await loadStatus();
       await loadDiff();
     } catch (e) {
