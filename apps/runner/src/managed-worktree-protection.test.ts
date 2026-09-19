@@ -611,3 +611,47 @@ test("a protected target outranks an unresolved one in the same command", () => 
   // An unprotected session is not policed at all, resolvable or not.
   assert.equal(commandTargetsManagedWorktree('rm -rf "$SCRATCH_DIR"', "/elsewhere", [], providerEnvironment), null);
 });
+
+test("the shell's own expansion order and field splitting are what is judged", () => {
+  const environment = { ...providerEnvironment, TARGET: `/tmp/scratch:${protectedPath}`, CMD: "rm -rf" };
+  // A prefix assignment does not reach the words of its own command: the shell expands them first,
+  // so `$W` here is the value from the environment, and the assignment dies with the command.
+  assert.equal(
+    commandTargetsManagedWorktree('W=/tmp rm -rf "$WOLLIPOG_WORKTREE_PATH"', "/elsewhere", protection, environment),
+    MANAGED_WORKTREE_REFUSAL, "the pre-assignment value is the one that is removed");
+  assert.equal(
+    commandTargetsManagedWorktree('WOLLIPOG_WORKTREE_PATH=/tmp rm -rf "$WOLLIPOG_WORKTREE_PATH"', "/elsewhere",
+      protection, environment),
+    MANAGED_WORKTREE_REFUSAL, "and a prefix cannot shadow the protected value for its own command");
+  // A standalone assignment IS in effect for the commands after it.
+  assert.equal(commandTargetsManagedWorktree('safe=/tmp/x; rm -rf "$safe"', "/elsewhere", protection, environment),
+    null);
+  assert.equal(commandTargetsManagedWorktree('W2=$WOLLIPOG_WORKTREE_PATH; rm -rf "$W2"', "/elsewhere", protection,
+    environment), MANAGED_WORKTREE_REFUSAL);
+  // `IFS` decides where an unquoted expansion splits, so a protected root can be one field of a
+  // value that contains no whitespace at all.
+  assert.equal(commandTargetsManagedWorktree("IFS=:; rm -rf $TARGET", "/elsewhere", protection, environment),
+    MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("rm -rf $TARGET", "/elsewhere", protection,
+    { ...environment, IFS: ":" }), MANAGED_WORKTREE_REFUSAL, "including an IFS inherited from the environment");
+  assert.equal(commandTargetsManagedWorktree("rm -rf $TWO_WORDS", "/elsewhere", protection,
+    { ...environment, TWO_WORDS: `/tmp/scratch ${protectedPath}` }), MANAGED_WORKTREE_REFUSAL);
+  // An unquoted COMMAND word is field-split the same way, so the remover is found and its operand
+  // is judged rather than the whole value being mistaken for one executable name.
+  assert.equal(commandTargetsManagedWorktree('$CMD "$WOLLIPOG_WORKTREE_PATH"', "/elsewhere", protection, environment),
+    MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree('$CMD "$WOLLIPOG_WORKTREE_PATH/dist"', "/elsewhere", protection,
+    environment), null, "while the same split command against scratch stays allowed");
+});
+
+test("an option word is not a path when the working directory is unknown", () => {
+  // After a `cd` that cannot be followed, an operand that needs that directory is unresolved and
+  // one that does not is judged on its own: the refusal must follow the operand, not the flags.
+  const after = 'cd "$(git rev-parse --show-toplevel)" && ';
+  assert.equal(commandTargetsManagedWorktree(`${after}rm -rf build`, protectedPath, protection, providerEnvironment),
+    MANAGED_WORKTREE_UNRESOLVED_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree(`${after}rm -rf /tmp/scratch`, protectedPath, protection,
+    providerEnvironment), null);
+  assert.equal(commandTargetsManagedWorktree(`${after}rm -rf ${protectedPath}`, protectedPath, protection,
+    providerEnvironment), MANAGED_WORKTREE_REFUSAL, "and an absolute protected operand is still refused");
+});

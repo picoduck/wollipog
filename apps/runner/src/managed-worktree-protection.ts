@@ -143,6 +143,42 @@ function word(
 }
 
 /**
+ * The characters the shell splits an unquoted expansion on, or `null` when `IFS` is set to
+ * something this code cannot see. The default is whitespace; a custom `IFS` is taken as ADDITIONAL
+ * separators rather than as a replacement, so a field is never missed for splitting too eagerly.
+ */
+function fieldSeparators(cwd: string, environment: ReadonlyMap<string, string>): Set<string> | null {
+  const ifs = lookup("IFS", cwd, environment);
+  if (ifs != null && (ifs.includes("\0") || ifs.includes("`"))) return null;
+  return new Set([" ", "\t", "\n", ...(ifs ?? "")]);
+}
+
+/**
+ * The fields an unquoted expansion becomes. A word with no reference in it is one field whatever it
+ * contains — the shell does not re-split literal text — so only a word built from a reference is
+ * split. `null` when the separators themselves are unknown.
+ */
+function expansionFields(
+  text: string,
+  value: string,
+  cwd: string,
+  environment: ReadonlyMap<string, string>,
+): string[] | null {
+  if (!text.includes("\0")) return [value];
+  const separators = fieldSeparators(cwd, environment);
+  if (separators === null) return null;
+  const fields: string[] = [];
+  let current = "";
+  for (const character of value) {
+    if (!separators.has(character)) { current += character; continue; }
+    if (current) fields.push(current);
+    current = "";
+  }
+  if (current) fields.push(current);
+  return fields;
+}
+
+/**
  * A word rendered back into shell text for a nested parse (`sh -c`, `eval`). The outer shell has
  * already expanded what it can, so a resolved value is inlined as text and the nested parse splits
  * it as the nested shell would; a reference that cannot be resolved becomes one that never does,
@@ -296,12 +332,14 @@ function operandVerdict(
 ): Verdict {
   const value = word(token, cwd, environment);
   if (value == null) return wordText(token) == null ? null : "unresolved";
-  // An unquoted expansion is split on whitespace, and this parser no longer knows which ones were
-  // quoted. A value that came from a variable is judged whole AND field by field.
-  if (wordText(token)?.includes("\0") && /\s/u.test(value)) {
-    const verdicts = [value, ...value.split(/\s+/u).filter(Boolean)].map((field) =>
-      literalOperandVerdict(field, field, cwd, environment, protections, followFinalSymlink));
-    return verdicts.includes("protected") ? "protected" : verdicts.includes("unresolved") ? "unresolved" : null;
+  // An unquoted expansion is field-split by the shell, and this parser no longer knows which
+  // expansions were quoted. A value built from a reference is judged whole AND field by field; if
+  // the separators themselves cannot be read, the operand cannot be placed at all.
+  const fields = expansionFields(wordText(token) ?? "", value, cwd, environment);
+  if (fields === null) return "unresolved";
+  if (fields.length !== 1 || fields[0] !== value) {
+    return strongest([value, ...fields].map((field) =>
+      literalOperandVerdict(field, field, cwd, environment, protections, followFinalSymlink)));
   }
   return literalOperandVerdict(value, token, cwd, environment, protections, followFinalSymlink);
 }
@@ -314,7 +352,9 @@ function literalOperandVerdict(
   protections: readonly ManagedWorktreeProtection[],
   followFinalSymlink: boolean,
 ): Verdict {
-  if (cwd === UNKNOWN_CWD && !isAbsolute(value)) return "unresolved";
+  // An option word names no path, so it must not read as a relative operand once the working
+  // directory is unknown: `rm -rf /tmp/scratch` is placeable there and `rm -rf build` is not.
+  if (cwd === UNKNOWN_CWD && !isAbsolute(value) && !value.startsWith("-")) return "unresolved";
   const target = resolvedPath(value, cwd);
   if (target == null) {
     return globTargetsProtected(token, cwd, environment, protections) ||
@@ -451,11 +491,19 @@ function commandWords(
     }
     return parse(script, reference);
   };
+  // `W=/tmp rm -rf "$W"` removes the PRE-assignment `W`: the shell expands a command's words before
+  // its assignment prefix takes effect, and that prefix does not outlive the command either. So the
+  // assignments are applied to the environment only when they stand alone as their own command.
+  const assignments: Array<[string, string]> = [];
   while (typeof tokens[index] === "string" && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(tokens[index] as string)) {
     const assignment = tokens[index] as string;
     const equals = assignment.indexOf("=");
-    environment.set(assignment.slice(0, equals), expandReferences(assignment.slice(equals + 1), cwd, environment));
+    assignments.push([assignment.slice(0, equals), expandReferences(assignment.slice(equals + 1), cwd, environment)]);
     index += 1;
+  }
+  if (tokens[index] === undefined) {
+    for (const [name, value] of assignments) environment.set(name, value);
+    return null;
   }
   let executable = word(tokens[index], cwd, environment);
   while (executable) {
@@ -486,9 +534,9 @@ function commandWords(
       index += 1;
       while (typeof tokens[index] === "string") {
         const value = tokens[index] as string;
+        // Like a prefix assignment, this builds the environment of the command `env` runs; it is
+        // not in effect while the shell expands the words of this very command.
         if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(value)) {
-          const equals = value.indexOf("=");
-          environment.set(value.slice(0, equals), expandReferences(value.slice(equals + 1), cwd, environment));
           index += 1;
           continue;
         }
@@ -543,7 +591,12 @@ function commandWords(
     break;
   }
   if (!executable) return null;
-  return { words: tokens.slice(index + 1), executable: executableName(executable) };
+  // `CMD="rm -rf"; $CMD "$W"` runs `rm` with `-rf` and `$W`: an unquoted command word is field-split
+  // like any other expansion, so the extra fields are arguments and the first field is the command.
+  const fields = expansionFields(wordText(tokens[index]) ?? "", executable, cwd, environment);
+  if (fields === null) throw new UnclassifiableCommandError("IFS cannot be read for a command word");
+  const [name = executable, ...arguments_] = fields;
+  return { words: [...arguments_, ...tokens.slice(index + 1)], executable: executableName(name) };
 }
 
 /** The most severe of several verdicts: a protected target outranks one that cannot be placed. */
