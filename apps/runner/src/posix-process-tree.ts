@@ -413,15 +413,38 @@ export class PosixProcessBoundary {
     }
   }
 
+  /** The root PID, while it may still be signalled by number without an ownership snapshot.
+   *
+   * Node has not reaped it yet, so the PID cannot have been recycled. PIDs 0 and 1 never qualify:
+   * a marker-only boundary carries root PID 0, and `kill(0)` / `kill(-0)` address the runner's own
+   * process group, while `kill(-1)` addresses every process the runner may signal. */
+  private unreapedRootPid(): number | undefined {
+    return this.rootPid > 1 && !this.rootExited ? this.rootPid : undefined;
+  }
+
+  private signalUnreapedRoot(signal: NodeJS.Signals): boolean {
+    const pid = this.unreapedRootPid();
+    if (pid === undefined) return false;
+    try {
+      (this.testRuntime?.signal ?? globalThis.process.kill.bind(globalThis.process))(pid, signal);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private async fallbackRootGroupAfterEnumerationFailure(): Promise<void> {
     // Preserve main's dependency-free TERM/KILL path only while Node has not observed root exit.
     // After waitpid-backed exit, the numeric PGID may be recycled and is permanently unsafe.
-    if (this.rootExited) return;
+    const pid = this.unreapedRootPid();
+    if (pid === undefined) return;
     const kill = this.testRuntime?.signal ?? globalThis.process.kill.bind(globalThis.process);
-    try { kill(-this.rootPid, "SIGTERM"); } catch { return; }
+    try { kill(-pid, "SIGTERM"); } catch { return; }
+    // A root stopped before enumeration cannot act on that SIGTERM until it is resumed.
+    this.signalUnreapedRoot("SIGCONT");
     await this.sleep(2_000);
     if (this.rootExited) return;
-    try { kill(-this.rootPid, "SIGKILL"); } catch { /* already gone */ }
+    try { kill(-pid, "SIGKILL"); } catch { /* already gone */ }
   }
 
   /** Freeze the original group first, then close over escaped process groups by parent identity.
@@ -449,6 +472,17 @@ export class PosixProcessBoundary {
   private async terminateOnce(): Promise<boolean> {
     let table: PosixProcessTable | undefined;
     const frozen = new Map<number, PosixProcessIdentity>();
+    // Stop the root itself before anything is enumerated. Descendant discovery reads the whole
+    // process table, which on a loaded machine takes long enough — about a second with a marker
+    // scan over a thousand processes — for the process being stopped to run to completion and keep
+    // writing after the caller was told it was killed.
+    //
+    // Only the root PID is stopped here, never its group. A stopped child cannot be reaped, so while
+    // it stays stopped `rootExited` cannot flip, its PID cannot be reissued, and the ownership
+    // snapshot below always names it — every path out of this attempt resumes it by identity or by
+    // that same unreaped PID. A zombie root ignores the signal and leaves nothing to resume. Its
+    // descendants are frozen at the same point, and through the same identity checks, as before.
+    this.signalUnreapedRoot("SIGSTOP");
     try {
       // Do not make an ownership-critical stop decision from a possibly stale shared monitor read.
       table = await this.refreshFresh();
@@ -484,12 +518,18 @@ export class PosixProcessBoundary {
     }
 
     // The successful try path always assigns table before any later use.
-    if (!table) return false;
+    if (!table) {
+      this.signalUnreapedRoot("SIGCONT");
+      return false;
+    }
 
     for (const process of liveOwned(this.owned, table)) this.signal(process, table, "SIGTERM");
     this.signalRootGroup(table, "SIGTERM");
     for (const process of liveOwned(this.owned, table)) this.signal(process, table, "SIGCONT");
     this.signalRootGroup(table, "SIGCONT");
+    // The identity-checked resumes above cover the root whenever the snapshot names it; resume it by
+    // its unreaped PID too, so the early stop never depends on what a process-table read returned.
+    this.signalUnreapedRoot("SIGCONT");
 
     const gracefulDeadline = this.now() + 2_000;
     while (this.now() < gracefulDeadline) {
