@@ -260,7 +260,7 @@ const SYNCHRONOUS = new Set(["execFileSync", "spawnSync", "execSync"]);
 const importedNames = (clause: string | undefined): string[] =>
   (clause ?? "")
     .split(",")
-    .map((name) => name.trim().split(/\s+as\s+|:/)[0].trim())
+    .map((name) => (name.trim().split(/\s+as\s+|:/)[0] ?? "").trim())
     // `spawn` and `exec` are asynchronous, so --test-timeout already bounds them.
     .filter((name) => SYNCHRONOUS.has(name));
 

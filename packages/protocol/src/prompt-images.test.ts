@@ -74,10 +74,17 @@ test("prepared prompt image references share the aggregate base64 budget", () =>
   assert.match(validatePromptImageInputs(references).error!, /combined image payload/);
 });
 
+/** The error of a validation expected to fail. Fails the test plainly if the validation succeeded,
+ * rather than passing `undefined` on to `assert.match`. */
+function rejection<T>(result: { ok: true; value: T } | { ok: false; error: string }): string {
+  if (result.ok) assert.fail(`expected validation to fail, but it accepted ${JSON.stringify(result.value)}`);
+  return result.error;
+}
+
 test("workspace references reject traversal, incomplete ranges, and unbound diffs", () => {
-  assert.match(validateWorkspaceReference(workspaceReference({ path: "../secret" })).error!, /invalid identity or range/);
-  assert.match(validateWorkspaceReference(workspaceReference({ endLine: undefined })).error!, /invalid identity or range/);
-  assert.match(validateWorkspaceReference(workspaceReference({
+  assert.match(rejection(validateWorkspaceReference(workspaceReference({ path: "../secret" }))), /invalid identity or range/);
+  assert.match(rejection(validateWorkspaceReference(workspaceReference({ endLine: undefined }))), /invalid identity or range/);
+  assert.match(rejection(validateWorkspaceReference(workspaceReference({
     kind: "diff", side: "left", diffHash: undefined, diffScope: "uncommitted",
-  })).error!, /invalid identity or range/);
+  }))), /invalid identity or range/);
 });

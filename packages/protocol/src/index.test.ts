@@ -118,10 +118,11 @@ test("durable session command error-code validation accepts protocol values and 
   assert.equal(isDurableSessionCommandErrorCode(null), false);
 });
 
-/** This package's tsconfig excludes its test files from `tsc`, so a type-level guard here would be
- * inert. The coverage assertion below is a runtime one instead: it enumerates the exported
- * `DURABLE_DELIVERY_STATES` and fails when one is not classified here. The production record is
- * what makes an unclassified state fail the build. */
+/** Two guards keep this classification complete. `satisfies Record<DurableDeliveryState, boolean>`
+ * fails `pnpm typecheck` when a state is missing here, because this package's tests are typechecked
+ * (`tsconfig.test.json`). The runtime assertion below enumerates the exported
+ * `DURABLE_DELIVERY_STATES` and fails the test run as well, so the check still holds wherever tests
+ * run without a typecheck. */
 const EXPECTED_TERMINALITY = {
   // Delivery may still run: pending work the user can cancel or wait out.
   pending: false,
@@ -367,7 +368,7 @@ test("v99 queued prompt editing messages preserve opaque revisions and attachmen
     prompt: {
       promptId: read.promptId,
       text: "Original prompt",
-      images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+      images: [{ data: "aGVsbG8=", mimeType: "image/png" }],
       editRevision: "qer_opaque-generation-and-content",
     },
   } satisfies ReadQueuedPromptResultMessage;
@@ -586,7 +587,7 @@ test("conversation steering types keep old peers optional and preserve correlate
 
   assert.equal(parseMessage<SteerSessionMessage>(JSON.stringify(wire))?.submissionId, "submission-1");
   assert.equal(parseMessage<SteerSessionResultMessage>(JSON.stringify(result))?.providerTurnId, "provider-turn-1");
-  assert.equal(attempt.sourceQueueId, undefined);
+  assert.equal("sourceQueueId" in attempt, false, "a direct steering attempt carries no source queue id");
 });
 
 test("uncertain steering resolution remains a distinct correlated v73 exchange", () => {
@@ -941,7 +942,7 @@ test("provider-authentication receipts are projected for the peer only at send t
     type: "durable_session_command_update",
     commandId: "command-1",
     sessionId: "session-1",
-    state: "rejected",
+    state: "failed",
     revision: 2,
     code: "PROVIDER_AUTHENTICATION_REQUIRED",
   };
