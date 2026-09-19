@@ -8,7 +8,7 @@
  * The DB is the source of truth; the hub broadcasts deltas built from it.
  */
 
-import { isTerminal } from "@wollipog/protocol";
+import { isTerminal, isTerminalDurableDeliveryState } from "@wollipog/protocol";
 import type {
   ControlPlaneToRunner,
   ControlPlaneToUi,
@@ -111,8 +111,7 @@ export function overlayLiveQueue(
 ): QueuedPromptView[] {
   const liveIds = new Set(live.map((prompt) => prompt.id));
   const receipts = (durable ?? []).filter((prompt) =>
-    (prompt.durableDeliveryState === "failed" || prompt.durableDeliveryState === "uncertain") &&
-    !liveIds.has(prompt.id)
+    isTerminalDurableDeliveryState(prompt.durableDeliveryState) && !liveIds.has(prompt.id)
   );
   return receipts.length ? [...receipts, ...live] : live;
 }

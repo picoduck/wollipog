@@ -1,14 +1,16 @@
 import {
+  isTerminalDurableDeliveryState,
   runnerSupportsProtocol,
   type AgentDriverKind,
   type QueuedPromptView,
   type SessionStatus,
 } from "@wollipog/protocol";
 
-/** A `failed` or `uncertain` durable delivery receipt. Its delivery has already ended, so it can be
- * neither cancelled nor waited out; it stays in `SessionView.queued` only so it can be dismissed. */
+/** A settled durable delivery receipt. Its delivery has already ended, so it can be neither
+ * cancelled nor waited out; it stays in `SessionView.queued` only so it can be dismissed. Which
+ * delivery states are terminal is the protocol's to say; this only projects the entry onto it. */
 export function isTerminalDeliveryReceipt(prompt: QueuedPromptView): boolean {
-  return prompt.durableDeliveryState === "failed" || prompt.durableDeliveryState === "uncertain";
+  return isTerminalDurableDeliveryState(prompt.durableDeliveryState);
 }
 
 /** Prompts in `SessionView.queued` that are still pending work. Settled receipts are evidence, not

@@ -6,6 +6,9 @@ import {
   CONTROL_PLANE_SERVICE,
   isControlPlaneService,
   isDurableSessionCommandErrorCode,
+  isTerminalDurableDeliveryState,
+  DURABLE_DELIVERY_STATES,
+  type DurableDeliveryState,
   LEGACY_CONTROL_PLANE_SERVICE,
   LEGACY_POLICY_HOOK_POLL_CAPABILITY_HEADER,
   POLICY_HOOK_POLL_CAPABILITY_HEADER,
@@ -113,6 +116,32 @@ test("durable session command error-code validation accepts protocol values and 
   assert.equal(isDurableSessionCommandErrorCode("UNKNOWN_CODE"), false);
   assert.equal(isDurableSessionCommandErrorCode("toString"), false, "prototype properties are not codes");
   assert.equal(isDurableSessionCommandErrorCode(null), false);
+});
+
+/** This package's tsconfig excludes its test files from `tsc`, so a type-level guard here would be
+ * inert. The coverage assertion below is a runtime one instead: it enumerates the exported
+ * `DURABLE_DELIVERY_STATES` and fails when one is not classified here. The production record is
+ * what makes an unclassified state fail the build. */
+const EXPECTED_TERMINALITY = {
+  // Delivery may still run: pending work the user can cancel or wait out.
+  pending: false,
+  queued: false,
+  // Delivery has stopped: a settled receipt, dismissible and never pending work.
+  failed: true,
+  uncertain: true,
+} as const satisfies Record<DurableDeliveryState, boolean>;
+
+test("terminal durable delivery covers exactly the settled states", () => {
+  assert.deepEqual(
+    [...DURABLE_DELIVERY_STATES].sort(),
+    Object.keys(EXPECTED_TERMINALITY).sort(),
+    "every delivery state the protocol defines is classified by this test, and no extra one is",
+  );
+  for (const state of DURABLE_DELIVERY_STATES) {
+    assert.equal(isTerminalDurableDeliveryState(state), EXPECTED_TERMINALITY[state], state);
+  }
+  assert.equal(isTerminalDurableDeliveryState(undefined), false,
+    "an entry with no durable delivery state is a live runner queue entry, not a receipt");
 });
 
 test("control-plane discovery accepts both service markers while emission uses Wollipog", () => {
