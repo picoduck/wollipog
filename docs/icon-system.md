@@ -116,7 +116,7 @@ The pre-migration production entry bundle was 1,736,906 bytes (482,380 bytes gzi
 migration it is 1,739,444 bytes (484,263 bytes gzip), a 2,538-byte raw and 1,883-byte gzip increase.
 The dedicated icon bundle contract provides the durable regression guard: it bundles every stable
 icon export, rejects evidence of the full Lucide catalog, and enforces an icon-specific size budget
-independent of unrelated application growth. That budget is a 125,000-byte ceiling; the contract
-currently reports 27,937 bytes across 70 exports, up from 20,235 bytes at migration. Read the
-current figure from the contract itself rather than this paragraph: running
-`node apps/web/scripts/verify-icon-bundle.mjs` prints the export count and byte total it measured.
+independent of unrelated application growth. That budget is a 125,000-byte ceiling; the icon bundle
+measured 20,235 bytes at migration. This document deliberately does not record the current figure,
+which moves with every icon change: running `node apps/web/scripts/verify-icon-bundle.mjs` (also
+part of `pnpm --filter web build`) prints the export count and byte total it measured.
