@@ -4784,7 +4784,12 @@ export interface BackgroundDeliveryView {
   watchdogState?: BackgroundDeliveryWatchdogState;
 }
 
-export type DurableDeliveryState = "pending" | "queued" | "failed" | "uncertain";
+/** The union's single source, exported so a consumer can enumerate the states rather than restate
+ * them. Protocol test files are excluded from typechecking, so a type-level list in a test proves
+ * nothing; enumerating this one lets a test fail at runtime when a state goes unclassified. */
+export const DURABLE_DELIVERY_STATES = ["pending", "queued", "failed", "uncertain"] as const;
+
+export type DurableDeliveryState = typeof DURABLE_DELIVERY_STATES[number];
 
 /** Terminal delivery has already stopped: the entry is a settled receipt, retained only so it can
  * be dismissed. It is never pending work, can be neither cancelled nor waited out, and never
