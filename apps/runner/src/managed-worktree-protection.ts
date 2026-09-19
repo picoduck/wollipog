@@ -1009,7 +1009,10 @@ function recursiveListing(word: string): boolean {
   return /^-[^-]/u.test(word) && word.includes("R");
 }
 
-/** Commands that walk the tree they are given, with or without an option that says so. */
+/**
+ * Commands that walk the tree they are given, with or without an option that says so. Matched
+ * case-insensitively, because a case-insensitive filesystem runs `FIND` as `find`.
+ */
 const WALKING_COMMANDS = new Set(["find", "du"]);
 
 /**
@@ -1068,7 +1071,7 @@ function commandBasename(word: string): string {
  */
 function walksWorkingDirectory(words: readonly string[]): boolean {
   return words.some((word, index) =>
-    WALKING_COMMANDS.has(commandBasename(word)) || recursiveWalkWord(word) ||
+    WALKING_COMMANDS.has(commandBasename(word).toLowerCase()) || recursiveWalkWord(word) ||
     // A detached value counts only where `grep` would read it as one.
     (index > 0 && RECURSE_VALUES.has(word.toLowerCase()) &&
       directoriesAction(words[index - 1] ?? "")));

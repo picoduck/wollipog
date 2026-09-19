@@ -1073,7 +1073,9 @@ test("an operand-less recursive command is judged against the directory it walks
   // opaque token beside an explicit recursion flag hides only itself.
   for (const command of ["/usr/bin/find -maxdepth 999", "/usr/bin/du -a", "./find -maxdepth 999",
     "/usr/bin/find -maxdepth 999 | cat", 'grep -r "$PATTERN"', "du -a $EXTRA", "ls -R $FLAGS",
-    'grep -d rec "$PATTERN"']) {
+    'grep -d rec "$PATTERN"',
+    // A case-insensitive filesystem runs these as the same two programs.
+    "FIND -maxdepth 999", "/usr/bin/Du -a"]) {
     assert.equal(commandTargetsGuardState(command, home, directory), GUARD_STATE_REFUSAL, command);
     assert.equal(commandTargetsGuardState(command, project, directory), null, command);
   }
