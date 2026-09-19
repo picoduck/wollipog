@@ -637,3 +637,77 @@ test("CLI worktree commands adapt to the shared MCP operations", async () => {
   assert.equal(requests[5]!.url, "http://cp/api/sessions/s1/worktrees/discard");
   assert.deepEqual(JSON.parse(requests[5]!.body!), { path: "/repo/old" });
 });
+
+test("CLI artifact attach uploads a file by path and prints only its metadata", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-cli-artifact-"));
+  const previous = process.cwd();
+  try {
+    const bytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("mobile-after")]);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    writeFileSync(join(root, "mobile-after.png"), bytes);
+    const calls: Array<{ url: string; body?: string }> = [];
+    let protocolVersion: number = PROTOCOL_VERSION;
+    const fetch: McpFetch = async (url, init) => {
+      calls.push({ url, body: init?.body });
+      const body = url.endsWith("/api/compatibility") ? { protocolVersion } : {
+        artifactId: "art_9", sessionId: "self", kind: "screenshot", name: JSON.parse(init!.body!).name,
+        mimeType: "image/png", encoding: "base64", sizeBytes: bytes.length, sha256, createdAt: 1,
+      };
+      return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+    };
+    const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token", WOLLIPOG_SESSION_ID: "self" };
+    let stdout = "";
+    const io = { stdout: (text: string) => { stdout += text; }, stderr: () => {} };
+
+    // A relative path means the caller's directory, which is the CLI's — not the MCP server's.
+    process.chdir(root);
+    assert.equal(await runWollipogCli(
+      ["node", "cli.js", "--wollipog-cli", "artifact", "attach", "--file", "mobile-after.png", "--name", "Mobile After", "--json"],
+      env, io, fetch), 0);
+    const upload = calls.find((call) => call.url === "http://cp/api/sessions/self/artifacts/screenshots");
+    assert.ok(upload, "the session-scoped attach route is used");
+    assert.deepEqual(JSON.parse(upload.body!), { name: "Mobile After", mimeType: "image/png", data: bytes.toString("base64") });
+    assert.deepEqual(JSON.parse(stdout), { artifact: {
+      artifactId: "art_9", sessionId: "self", kind: "screenshot", name: "Mobile After",
+      mediaType: "image/png", sizeBytes: bytes.length, sha256,
+    } });
+    assert.ok(!stdout.includes(bytes.toString("base64")), "command output never carries the file's bytes");
+
+    stdout = "";
+    calls.length = 0;
+    assert.equal(await runWollipogCli(
+      ["node", "cli.js", "--wollipog-cli", "artifact", "attach", "--file", "mobile-after.png", "--session", "other", "--json"],
+      env, io, fetch), 1, "an injected session cannot attach to another session");
+    assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
+
+    stdout = "";
+    calls.length = 0;
+    protocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionArtifactFileAttach - 1;
+    assert.equal(await runWollipogCli(
+      ["node", "cli.js", "--wollipog-cli", "artifact", "attach", "--file", "mobile-after.png", "--json"],
+      env, io, fetch), 1);
+    assert.match(JSON.parse(stdout).error, new RegExp(`requires v${RUNNER_CAPABILITY_MIN_PROTOCOL.sessionArtifactFileAttach}`, "u"));
+    assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")), "an older control plane receives no upload");
+  } finally {
+    process.chdir(previous);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("CLI artifact help is discoverable and malformed artifact commands issue no request", async () => {
+  const rootHelpText = await captureCli(["help"]);
+  assert.match(rootHelpText.stdout, /^\s+artifact\s+Attach an image file/mu, "agent instructions detect the command from root help");
+  const topic = await captureCli(["help", "artifact"]);
+  assert.equal(topic.code, 0);
+  for (const text of ["artifact attach --file", "--name", "--session", "never the file's bytes", "ui_evidence_approval"]) {
+    assert.ok(topic.stdout.includes(text), `artifact help omits ${text}`);
+  }
+  assert.deepEqual(await captureCli(["help", "artifacts"]), topic);
+
+  const unknown = await captureCli(["artifact", "upload"]);
+  assert.equal(unknown.code, 2);
+  assert.match(unknown.stderr, /^Usage: wollipog artifact/u);
+  const missing = await captureCli(["artifact", "attach", "--json"]);
+  assert.equal(missing.code, 2);
+  assert.deepEqual(JSON.parse(missing.stdout), { error: "artifact attach requires --file" });
+});

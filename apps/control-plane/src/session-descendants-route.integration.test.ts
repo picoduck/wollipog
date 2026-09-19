@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -243,6 +244,100 @@ test("HTTP agent management scopes descendants and composes governance policy vi
         });
         assert.equal(createdResponse.status, 201, "the exact child credential can create a typed decision");
         const created = await createdResponse.json() as { occurrenceId: string };
+        // File-based attach: a session credential reaches only its own row, and the answer is
+        // metadata only.
+        const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from(`${mode}-evidence`)]);
+        const attachBody = { name: "after.png", mimeType: "image/png", data: png.toString("base64") };
+        const attached = await childRequest("artifacts/screenshots", attachBody);
+        assert.equal(attached.status, 201, "a child attaches an image to its own session");
+        const attachedText = await attached.text();
+        assert.ok(!attachedText.includes(attachBody.data), "the uploaded bytes are never echoed back");
+        const artifact = JSON.parse(attachedText) as Record<string, unknown>;
+        assert.equal("data" in artifact, false);
+        assert.equal(artifact.sessionId, `${mode}-child`);
+        assert.equal(artifact.kind, "screenshot");
+        assert.equal(artifact.encoding, "base64");
+        assert.equal(artifact.mimeType, "image/png");
+        assert.equal(artifact.sizeBytes, png.length);
+        assert.equal(artifact.sha256, createHash("sha256").update(png).digest("hex"),
+          "the digest an agent cites is the control plane's digest of the stored bytes");
+        assert.deepEqual(artifact.createdBy, { kind: "agent", id: `${mode}-child` });
+        // End to end through the real CLI process: bytes travel file -> CLI -> route -> blob store,
+        // and the only thing the command prints is metadata. The environment is rebuilt rather than
+        // inherited so a WOLLIPOG_* variable from a hosting session cannot stand in for the fixture's.
+        const capturePath = join(root, `${mode}-cli-capture.png`);
+        const cliPng = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from(`${mode}-cli-capture`)]);
+        writeFileSync(capturePath, cliPng);
+        const cliEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("WOLLIPOG_")));
+        const cli = await new Promise<{ code: number | null; stdout: string; stderr: string }>((done) => {
+          const attach = spawn(
+            process.execPath,
+            ["--import", "tsx", "apps/runner/src/cli.ts", "--wollipog-cli", "artifact", "attach", "--file", capturePath, "--json"],
+            {
+              cwd: resolve(fileURLToPath(new URL("../../..", import.meta.url))),
+              env: {
+                ...cliEnv,
+                WOLLIPOG_CONTROL_PLANE_URL: `http://127.0.0.1:${port}`,
+                WOLLIPOG_TOKEN: `token-${mode}-child`,
+                WOLLIPOG_SESSION_ID: `${mode}-child`,
+              },
+              stdio: ["ignore", "pipe", "pipe"],
+              windowsHide: true,
+            },
+          );
+          let stdout = "";
+          let stderr = "";
+          attach.stdout?.on("data", (chunk) => (stdout += String(chunk)));
+          attach.stderr?.on("data", (chunk) => (stderr += String(chunk)));
+          attach.on("close", (code) => done({ code, stdout, stderr }));
+        });
+        assert.equal(cli.code, 0, cli.stderr || cli.stdout);
+        assert.ok(!cli.stdout.includes(cliPng.toString("base64")) && !cli.stderr.includes(cliPng.toString("base64")),
+          "the command prints no file content");
+        const printed = (JSON.parse(cli.stdout) as { artifact: Record<string, unknown> }).artifact;
+        assert.deepEqual(Object.keys(printed).sort(),
+          ["artifactId", "kind", "mediaType", "name", "sessionId", "sha256", "sizeBytes"]);
+        assert.equal(printed.sessionId, `${mode}-child`);
+        assert.equal(printed.mediaType, "image/png");
+        assert.equal(printed.name, `${mode}-cli-capture.png`);
+        assert.equal(printed.sha256, createHash("sha256").update(cliPng).digest("hex"));
+        assert.ok(liveDb!.readWorkflowArtifactBytes(String(printed.artifactId))?.equals(cliPng),
+          "the stored artifact holds exactly the file's bytes");
+        const storedView = liveDb!.workflowArtifactExportPreflight(String(printed.artifactId))?.artifact;
+        assert.deepEqual(
+          { sessionId: storedView?.sessionId, kind: storedView?.kind, encoding: storedView?.encoding, mimeType: storedView?.mimeType, sha256: storedView?.sha256 },
+          { sessionId: `${mode}-child`, kind: "screenshot", encoding: "base64", mimeType: "image/png", sha256: printed.sha256 },
+          "these are exactly the fields the Orchestrator evidence evaluation requires of a cited artifact",
+        );
+        const childAs = (target: string, body: unknown) => fetch(
+          `http://127.0.0.1:${port}/api/sessions/${target}/artifacts/screenshots`, {
+            method: "POST", signal: AbortSignal.timeout(3000), headers: {
+              authorization: `Bearer token-${mode}-child`,
+              [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: `${mode}-child`,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify(body),
+          });
+        for (const target of [mode, `${mode}-grandchild`, other, "missing"]) {
+          assert.equal((await childAs(target, attachBody)).status, 404,
+            `a session credential cannot attach to ${target}: not an ancestor, a descendant, a stranger, or nothing`);
+        }
+        assert.equal((await request(mode, "artifacts/screenshots", attachBody)).status, 401,
+          "an Orchestrator credential reviews evidence; the attach route is not on its allowlist");
+        const repeated = await childRequest("artifacts/screenshots", {
+          ...attachBody, kind: "patch", encoding: "utf8", sessionId: mode,
+        });
+        assert.equal(repeated.status, 200,
+          "kind, encoding, and session in the body are ignored, so this is the same attachment again");
+        assert.equal((await repeated.json() as { artifactId: string }).artifactId, artifact.artifactId,
+          "a retry returns the artifact it already made instead of a duplicate");
+        assert.equal((await childRequest("artifacts/screenshots", {
+          ...attachBody, data: Buffer.from("not an image").toString("base64"),
+        })).status, 400, "content that does not match its claimed type is rejected");
+        assert.equal((await childRequest("artifacts/screenshots", { ...attachBody, mimeType: "image/svg+xml" })).status, 400);
+        assert.equal((await childRequest("artifacts/screenshots", { name: "after.png" })).status, 400);
+        assert.equal((await humanRequest("artifacts/screenshots", attachBody)).status, 201,
+          "a human who can see the session may attach to it");
         await settleStatus(`${mode}-child`, "idle");
         assert.equal((await request(mode, "orchestrator-campaign/verify-child", {
           childSessionId: `${mode}-child`, reportEventSeq: childReportSeq, followUpsAccounted: true,

@@ -23,6 +23,7 @@ export function rootHelp(): string {
     "Command Groups:",
     "  session             Manage agent sessions",
     "  worktree            Create, attach, select, and discard session worktrees",
+    "  artifact            Attach an image file to a session without passing its bytes through the model",
     "  admin               Administer a control plane from its host",
     "  service             Manage a headless Linux systemd deployment",
     "  help [topic]        Show root or topic-specific help",
@@ -44,7 +45,7 @@ export function rootHelp(): string {
     "  wollipog admin runner-credential rotate --runner RUNNER_ID --output ./runner.token",
     "  wollipog service uninstall  # preserves data by default",
     "",
-    "Topics: init, doctor, update, pair, service, admin, session, worktree",
+    "Topics: init, doctor, update, pair, service, admin, session, worktree, artifact",
     "Run `wollipog help <topic>` for complete commands and options. Help is always text; operational commands use --json for stable machine-readable output.",
   ].join("\n");
 }
@@ -89,6 +90,17 @@ export function worktreeHelp(): string {
     "  worktree discard [--session <session-id>] --path <absolute-path> [--json]",
     "Options: --url <control-plane-origin>, --token-file <credential-file>.",
     "An injected agent session defaults --session to itself. Use discard, not raw Git removal, for runner-owned worktrees; active retirement is durably deferred until provider exit and then replays on its own.",
+  ].join("\n");
+}
+
+export function artifactHelp(): string {
+  return [
+    "Usage: wollipog artifact <command> [options]",
+    "  artifact attach --file <path> [--name <display-name>] [--session <session-id>] [--json]",
+    "Options: --url <control-plane-origin>, --token-file <credential-file>.",
+    "Reads an image file (PNG, JPEG, GIF, or WebP, up to 8 MiB) on this host and attaches it to the session as a screenshot artifact. The media type is taken from the file's content, not its name.",
+    "Prints only the artifactId, mediaType, sizeBytes, and sha256 — never the file's bytes. Cite exactly those values in a ui_evidence_approval evidence item to make it reviewable by an Orchestrator.",
+    "An injected agent session attaches to itself and cannot name another session. A relative --file is resolved against the current directory.",
   ].join("\n");
 }
 
@@ -144,6 +156,9 @@ function helpForTopic(topic: string): string | null {
     case "worktree":
     case "worktrees":
       return worktreeHelp();
+    case "artifact":
+    case "artifacts":
+      return artifactHelp();
     default:
       return null;
   }

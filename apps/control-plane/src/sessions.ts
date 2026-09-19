@@ -206,7 +206,12 @@ import {
   externalizeSessionEventPayload,
   type ExternalizedSessionEventPayload,
 } from "./event-payloads.js";
-import { screenshotBytesMatchMime, validateWorkflowArtifact } from "./workflow-artifacts.js";
+import {
+  MAX_SESSION_ATTACHED_SCREENSHOTS,
+  MAX_SESSION_ATTACHED_SCREENSHOT_BYTES,
+  screenshotBytesMatchMime,
+  validateWorkflowArtifact,
+} from "./workflow-artifacts.js";
 import { BUILD_REVIEW_WORKFLOW, validateWorkflowDefinition } from "./workflow-graphs.js";
 import {
   formatReviewFindingsPrompt,
@@ -6198,7 +6203,7 @@ export class SessionsService {
       `Typed decision owners: ${owners}. This is not blanket approval. For implementation questions, PR merge, merged-branch deletion, follow-up issue publication, and UI evidence approval, create the exact typed request and consume an approval immediately before the matching action. For PR merge, pass and then execute the exact canonical gh pr merge URL --squash --match-head-commit SHA command; its matching one-shot runner permission completes consumption. Ordinary prompts cannot satisfy a typed gate.`,
       "Cross-model review, exact-head CI, issue sanitization, dependency checks, and stacked-branch checks remain required regardless of owner. An enqueued PR is unfinished until merge-group CI passes and the forge reports actual MERGED state. Authentication, secrets, persistent permission grants, governance, budgets, and tool guardrails remain human-only.",
       projection.uiEvidenceReview.effectiveOwner === "orchestrator"
-        ? "The controlling Orchestrator can inspect artifact-backed image evidence with review_descendant_ui_evidence, and must review every item before approving. Children should attach each capture as a screenshot Session artifact and cite its artifactId and mediaType; video or externally stored evidence is routed to a human."
+        ? "The controlling Orchestrator can inspect artifact-backed image evidence with review_descendant_ui_evidence, and must review every item before approving. Children attach each capture from disk with attach_session_artifact (or `wollipog artifact attach --file`), never as base64 in a tool argument, and cite the returned artifactId, mediaType, and sha256; video or externally stored evidence is routed to a human."
         : `UI evidence remains human-owned: ${projection.uiEvidenceReview.reason ?? "the human owns UI Evidence Approval under this policy."}`,
       "Higher-priority repository and harness restrictions still apply. A task may narrow this policy but cannot broaden its authority.",
       "[End Wollipog Campaign Policy]",
@@ -8548,10 +8553,68 @@ export class SessionsService {
     return ok({ deleted: true });
   }
 
+  /** The file-based attach path. Session, kind, and encoding are fixed by the caller's route, never
+   * by the body; an agent's attachments to one session are bounded; and attaching the same file to
+   * the same session again returns the artifact it already made. That last property is what makes a
+   * retry safe: an upload of several megabytes can time out after the control plane has committed
+   * it, and the caller then cannot tell whether it landed. */
+  attachSessionScreenshot(
+    sessionId: string,
+    body: { name?: unknown; mimeType?: unknown; data?: unknown; metadata?: unknown } | null | undefined,
+    actor: GovernanceActor,
+    limits: { count: number; bytes: number } = {
+      count: MAX_SESSION_ATTACHED_SCREENSHOTS,
+      bytes: MAX_SESSION_ATTACHED_SCREENSHOT_BYTES,
+    },
+  ): ServiceResult<WorkflowArtifactView> {
+    const validated = validateWorkflowArtifact({
+      sessionId,
+      kind: "screenshot",
+      encoding: "base64",
+      name: body?.name,
+      mimeType: body?.mimeType,
+      data: body?.data,
+      ...(body?.metadata !== undefined ? { metadata: body.metadata } : {}),
+    });
+    if (!validated.ok) return fail(validated.error, 400);
+    if (!this.db.getSession(sessionId)) return fail("session not found", 404);
+    const existing = this.db.findAttachedScreenshot(
+      sessionId, validated.value.sha256, validated.value.name, validated.value.mimeType, actor,
+    );
+    // A replay is answered before the bounds are consulted: it stores nothing new, so a session at
+    // its limit can still recover the id of an upload whose response it never received.
+    if (existing) return ok(existing, 200);
+    if (actor.kind === "agent") {
+      const usage = this.db.sessionAgentScreenshotUsage(sessionId);
+      if (usage.count >= limits.count) {
+        return fail(
+          `this session already has ${usage.count} attached screenshots; at most ${limits.count} may be attached to one session`,
+          409,
+        );
+      }
+      if (usage.bytes + validated.value.sizeBytes > limits.bytes) {
+        return fail(
+          `attaching this file would exceed the ${limits.bytes}-byte limit on screenshots attached to one session (${usage.bytes} bytes used)`,
+          409,
+        );
+      }
+    }
+    const created = this.storeWorkflowArtifact(validated.value, actor);
+    if (!created.ok || !created.data) return fail(created.error!, created.status);
+    const { data: _bytes, ...view } = created.data;
+    return ok(view, 201);
+  }
+
   createWorkflowArtifact(input: unknown, actor: GovernanceActor = { kind: "human", id: "local" }): ServiceResult<WorkflowArtifact> {
     const validated = validateWorkflowArtifact(input);
     if (!validated.ok) return fail(validated.error, 400);
-    const value = validated.value;
+    return this.storeWorkflowArtifact(validated.value, actor);
+  }
+
+  private storeWorkflowArtifact(
+    value: Extract<ReturnType<typeof validateWorkflowArtifact>, { ok: true }>["value"],
+    actor: GovernanceActor,
+  ): ServiceResult<WorkflowArtifact> {
     const run = value.runId ? this.db.getRun(value.runId) : null;
     const session = value.sessionId ? this.db.getSession(value.sessionId) : null;
     if (value.runId && !run) return fail("run not found", 404);

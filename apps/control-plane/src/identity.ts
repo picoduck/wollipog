@@ -131,6 +131,15 @@ export function agentCredentialSessionTargetError(
     return principal.credentialSessionId && targetIsDescendant &&
       targetSessionId !== principal.credentialSessionId ? null : "the session credential may manage only its descendants";
   }
+  // Evidence is attributed to the session that produced it. A credential may attach only to its own
+  // row — not to a descendant, and not to any other session it can merely see — so an artifact's
+  // session is proof of who made it. Unlike the worktree routes this fails closed for a credential
+  // that carries no session id at all.
+  if (routePath === "/api/sessions/:id/artifacts/screenshots") {
+    return principal.credentialSessionId === targetSessionId
+      ? null
+      : "the session credential may attach artifacts only to its own session";
+  }
   if (!worktreeRoute) return null;
   return principal.credentialSessionId && principal.credentialSessionId !== targetSessionId
     ? "the session credential may manage only its own session"

@@ -1,6 +1,7 @@
 /** Shared session-management tools for the session-scoped CLI and MCP server. */
 
 import { createHash } from "node:crypto";
+import { basename } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import {
   isOrchestratorOnlyCapabilities,
@@ -10,6 +11,7 @@ import {
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
   type UiEvidenceReviewDelivery,
 } from "@wollipog/protocol";
+import { readImageFileForAttach } from "./session-artifact-file.js";
 import { VERSION } from "./version.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -284,6 +286,31 @@ async function workflowDecisionChildMessageCompatibilityError(deps: McpDeps): Pr
     ? null
     : errorResult(
         `A child-facing decision message requires control plane protocol v${required}; connected control plane reports v${String(actual ?? "unknown")}. Resolve without childMessage and send it with prompt_session, or update Wollipog.`,
+      );
+}
+
+/** An 8 MiB image is about 10.7 MiB of base64. The ordinary RPC deadline would fail a valid upload
+ * on a tunnelled or slow link, so an attach gets its own. */
+const ARTIFACT_UPLOAD_TIMEOUT_MS = 180_000;
+
+/** A pre-v169 control plane has no session-scoped attach route. Refuse by name instead of letting
+ * the upload 404, and never fall back to the base64 tool argument this tool exists to replace. */
+async function sessionArtifactFileAttachCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionArtifactFileAttach;
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const result = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!result.ok) {
+      return errorResult(
+        `Attaching a file requires control plane protocol v${required}, but compatibility could not be verified: ${result.message}`,
+      );
+    }
+    actual = result.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= required
+    ? null
+    : errorResult(
+        `Attaching a file requires control plane protocol v${required}; connected control plane reports v${String(actual ?? "unknown")}. Update the Wollipog control plane, then attach again.`,
       );
 }
 
@@ -1587,8 +1614,81 @@ export const TOOLS: McpTool[] = [
     },
   },
   {
+    name: "attach_session_artifact",
+    description: "Attach an image file from disk to your own session as a screenshot artifact. Pass the file's absolute path; the file is read on the runner host and uploaded directly, so its bytes never enter your context. Returns only the artifactId, mediaType, sizeBytes, and sha256 — cite exactly those in a ui_evidence_approval evidence item to make it reviewable by an Orchestrator. Use this instead of create_workflow_artifact for any image: never base64 an image into a tool argument. PNG, JPEG, GIF, or WebP, up to 8 MiB. Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Absolute path of a regular image file on the runner host" },
+        name: { type: "string", description: "Display name; defaults to the file name" },
+        sessionId: { type: "string", description: "Only for a paired-device caller. A session credential always attaches to its own session." },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.path !== "string" || !args.path) return errorResult("path is required");
+      if (args.name !== undefined && (typeof args.name !== "string" || !args.name.trim())) {
+        return errorResult("name must be a non-empty string");
+      }
+      const sessionId = typeof args?.sessionId === "string" && args.sessionId ? args.sessionId : deps.selfSessionId;
+      if (!sessionId) return errorResult("sessionId is required");
+      // The control plane enforces this too; refusing here keeps a session credential from reading
+      // and uploading a file for a request that can only be rejected.
+      if (deps.actorHeader !== null && deps.selfSessionId && sessionId !== deps.selfSessionId) {
+        return errorResult("refusing: a session credential may attach artifacts only to its own session");
+      }
+      const incompatible = await sessionArtifactFileAttachCompatibilityError(deps);
+      if (incompatible) return incompatible;
+      const file = await readImageFileForAttach(args.path);
+      if (!file.ok) return errorResult(file.error);
+      const r = await cpFetch(
+        deps,
+        "POST",
+        `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/screenshots`,
+        {
+          name: typeof args.name === "string" ? args.name.trim() : basename(args.path),
+          mimeType: file.mediaType,
+          data: file.bytes.toString("base64"),
+        },
+        deps.requestTimeoutMs ?? ARTIFACT_UPLOAD_TIMEOUT_MS,
+      );
+      // The route answers a repeat of the same file with the artifact it already made, so whenever
+      // the outcome cannot be known the honest instruction is to attach again, not to guess.
+      const unknownOutcome = (detail: string) => errorResult(
+        `${detail}. The upload's outcome is unknown. Attach the same file again: if it was stored, the same artifact is returned rather than a duplicate.`,
+      );
+      // No HTTP status means the request died in transit or timed out, possibly after the control
+      // plane committed it.
+      if (!r.ok) return r.status === undefined ? unknownOutcome(r.message) : errorResult(r.message);
+      // A success status whose body was cut off or is not an artifact is the same situation one step
+      // later: committed, but the id never arrived. It is not evidence that the wrong bytes were stored.
+      if (typeof r.data?.artifactId !== "string" || typeof r.data?.sha256 !== "string" ||
+          typeof r.data?.sizeBytes !== "number") {
+        return unknownOutcome("the control plane accepted the upload but its answer did not arrive intact");
+      }
+      // The digest an agent cites must be the digest of what was stored. If the control plane's
+      // differs from the file's, the upload was altered in transit; say so instead of returning an
+      // id that would later fail review as a digest mismatch.
+      if (r.data?.sha256 !== file.sha256 || r.data?.sizeBytes !== file.sizeBytes) {
+        return errorResult("the control plane stored different bytes than the file holds; do not cite this artifact");
+      }
+      return textResult({
+        artifact: {
+          artifactId: r.data.artifactId,
+          sessionId: r.data.sessionId,
+          kind: r.data.kind,
+          name: r.data.name,
+          mediaType: r.data.mimeType,
+          sizeBytes: r.data.sizeBytes,
+          sha256: r.data.sha256,
+        },
+      });
+    },
+  },
+  {
     name: "create_workflow_artifact",
-    description: "Publish an immutable, attributed workflow artifact for a run or worker session. Subject to session permissions and governance policies.",
+    description: "Publish an immutable, attributed workflow artifact for a run or worker session. For an image file use attach_session_artifact instead, which reads the file from disk. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {

@@ -19049,3 +19049,74 @@ test("a mid-turn prompt to a Pi session is steered only on a runner whose driver
   }
 });
 
+test("file-based screenshot attach fixes the session, kind, and encoding and bounds what an agent attaches", () => {
+  const { db, hub } = makeHarness();
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  try {
+    db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+    const session = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+    const other = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+    assert.ok(session.ok && session.data && other.ok && other.data);
+    const agent = { kind: "agent" as const, id: session.data.id };
+    const png = (label: string) => Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from(label),
+    ]);
+    const body = (label: string) => ({ name: `${label}.png`, mimeType: "image/png", data: png(label).toString("base64") });
+
+    // A body cannot redirect the upload to another session or retype it.
+    const redirected = svc.attachSessionScreenshot(session.data.id, {
+      ...body("first"), sessionId: other.data.id, kind: "patch", encoding: "utf8",
+    } as never, agent);
+    assert.ok(redirected.ok && redirected.data, redirected.error);
+    assert.equal(redirected.data.sessionId, session.data.id);
+    assert.equal(redirected.data.kind, "screenshot");
+    assert.equal(redirected.data.encoding, "base64");
+    assert.deepEqual(redirected.data.createdBy, agent);
+    assert.equal("data" in redirected.data, false, "the answer is metadata; the bytes are never returned");
+    assert.equal(redirected.status, 201);
+    assert.equal(svc.attachSessionScreenshot("missing", body("x"), agent).status, 404);
+    assert.equal(svc.attachSessionScreenshot(session.data.id, { ...body("x"), mimeType: "image/svg+xml" }, agent).status, 400);
+    assert.equal(svc.attachSessionScreenshot(session.data.id, null, agent).status, 400);
+
+    // The count bound refuses the attach that would exceed it, and is per session.
+    const limits = { count: 3, bytes: 1_000 };
+    assert.ok(svc.attachSessionScreenshot(session.data.id, body("second"), agent, limits).ok);
+    assert.ok(svc.attachSessionScreenshot(session.data.id, body("third"), agent, limits).ok);
+    const overCount = svc.attachSessionScreenshot(session.data.id, body("fourth"), agent, limits);
+    assert.equal(overCount.status, 409);
+    assert.match(overCount.error ?? "", /already has 3 attached screenshots; at most 3/u);
+    assert.ok(svc.attachSessionScreenshot(other.data.id, body("fourth"), { kind: "agent", id: other.data.id }, limits).ok,
+      "another session has its own budget");
+
+    // A retry after an uncertain upload is safe: the same file, name, type, and author get the
+    // artifact that already exists, even though this session is now at its bound.
+    const replay = svc.attachSessionScreenshot(session.data.id, body("second"), agent, limits);
+    assert.ok(replay.ok && replay.data, replay.error);
+    assert.equal(replay.status, 200, "a replay reports that nothing new was created");
+    const original = db.findAttachedScreenshot(
+      session.data.id, replay.data.sha256, "second.png", "image/png", agent,
+    );
+    assert.equal(replay.data.artifactId, original?.artifactId);
+    assert.equal(db.sessionAgentScreenshotUsage(session.data.id).count, 3, "a replay stores nothing");
+    // Anything that is not the same attachment is a new one, and the bound applies to it.
+    assert.equal(svc.attachSessionScreenshot(session.data.id, { ...body("second"), name: "renamed.png" }, agent, limits).status, 409);
+    assert.equal(svc.attachSessionScreenshot(session.data.id, body("second"), { kind: "agent", id: other.data.id }, limits).status, 409,
+      "another author's identical file is not this author's artifact");
+
+    // The byte bound counts what is already attached plus the incoming file.
+    const used = db.sessionAgentScreenshotUsage(session.data.id);
+    assert.equal(used.count, 3);
+    assert.equal(used.bytes, png("first").length + png("second").length + png("third").length);
+    const overBytes = svc.attachSessionScreenshot(session.data.id, body("fifth"), agent, { count: 100, bytes: used.bytes + 5 });
+    assert.equal(overBytes.status, 409);
+    assert.match(overBytes.error ?? "", /would exceed the \d+-byte limit/u);
+    assert.ok(svc.attachSessionScreenshot(session.data.id, body("fifth"), agent,
+      { count: 100, bytes: used.bytes + png("fifth").length }).ok, "exactly the limit is admitted");
+
+    // A human's upload is neither counted nor bounded.
+    assert.ok(svc.attachSessionScreenshot(session.data.id, body("human"), { kind: "human", id: "owner" }, { count: 0, bytes: 0 }).ok);
+    assert.equal(db.sessionAgentScreenshotUsage(session.data.id).count, 4);
+  } finally {
+    db.close();
+  }
+});

@@ -260,3 +260,24 @@ test("mutation audit target extraction is bounded and never inspects request bod
   assert.equal(boundedTargetId({ userId: "u".repeat(300) })?.length, 256);
   assert.equal(boundedTargetId({ body: "secret" }), undefined);
 });
+
+test("a session credential attaches artifacts only to its own session", () => {
+  const route = "/api/sessions/:id/artifacts/screenshots";
+  const scope = { organizationId: "org_1", owner: { kind: "user" as const, userId: "usr_1" } };
+  const child: AgentPrincipal = {
+    kind: "agent", actorId: "s_child", credentialSessionId: "s_child", orchestrator: false,
+    organizationId: "org_1", delegatedScope: scope,
+  };
+  assert.equal(agentCredentialSessionTargetError(route, child, "s_child"), null);
+  // An artifact's session is proof of who produced it, so ancestry grants nothing here, unlike
+  // prompt or stop, where a parent legitimately manages its descendants.
+  for (const [target, descendant] of [["s_parent", false], ["s_grandchild", true], ["s_sibling", false]] as const) {
+    assert.match(agentCredentialSessionTargetError(route, child, target, descendant)!, /only to its own session/, target);
+  }
+  assert.match(agentCredentialSessionTargetError(route, { ...child, orchestrator: true }, "s_grandchild", true)!,
+    /only to its own session/, "the Orchestrator role does not widen it either");
+  assert.match(agentCredentialSessionTargetError(route, { ...child, credentialSessionId: undefined }, "s_child")!,
+    /only to its own session/, "a credential without a session fails closed");
+  assert.equal(agentDelegationAuthorizationError(route, child), null,
+    "a user-scoped session can attach, unlike the organization-wide /api/artifacts routes");
+});

@@ -39,6 +39,7 @@ test("orchestrator credentials expose only session management and governance rea
     ["POST", "/api/sessions/:id/parent-control"],
     ["POST", "/api/sessions/:id/parent-control-policy"],
     ["PUT", "/api/governance/policies/:policyId"], ["POST", "/api/artifacts/screenshots"],
+    ["POST", "/api/sessions/:id/artifacts/screenshots"],
     ["POST", "/api/workflow-instances/:instanceId/nodes/:nodeId/dispatch"],
   ]) assert.equal(isAgentControlApiRouteAllowed(method!, route!, "orchestrator"), false, route);
 });
@@ -111,6 +112,7 @@ test("session-management REST access is method- and route-scoped to its publishe
     ["POST", "/api/workflows/:workflowId/versions"],
     ["POST", "/api/workflow-instances/:instanceId/nodes/:nodeId/dispatch"],
     ["POST", "/api/artifacts/screenshots"],
+    ["POST", "/api/sessions/:id/artifacts/screenshots"],
   ] as const) {
     assert.equal(isAgentControlApiRouteAllowed(method, route), true, `${method} ${route}`);
   }

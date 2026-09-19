@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { PassThrough } from "node:stream";
 import {
@@ -372,6 +375,7 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "create_workflow_version",
       "create_workflow_run",
       "dispatch_workflow_node",
+      "attach_session_artifact",
       "create_workflow_artifact",
       "complete_workflow_attempt",
       "resolve_workflow_gate",
@@ -433,7 +437,7 @@ test("mutating tools describe governance instead of promising a now-optional hum
   const mutations = [
     "upsert_governance_policy", "delete_governance_policy",
     "create_workflow_definition", "create_workflow_version", "create_workflow_run",
-    "dispatch_workflow_node", "create_workflow_artifact", "complete_workflow_attempt",
+    "dispatch_workflow_node", "attach_session_artifact", "create_workflow_artifact", "complete_workflow_attempt",
     "resolve_workflow_gate", "create_session", "prompt_session", "stop_session", "restart_session",
     "set_guardrails", "create_run", "create_worktree", "attach_worktree", "select_worktree", "discard_worktree",
   ];
@@ -1651,4 +1655,135 @@ test("a non-JSON error body still surfaces the status (no crash)", async () => {
   const result = await callTool(deps, "list_runs");
   assert.equal(result.isError, true);
   assert.match(resultText(result), /HTTP 502/);
+});
+
+test("attach_session_artifact uploads a file from disk and returns metadata only", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "attach-tool-"));
+  try {
+    const bytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("desktop-after")]);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const file = join(dir, "desktop after.png");
+    writeFileSync(file, bytes);
+    let stored: Record<string, unknown> = { sha256, sizeBytes: bytes.length };
+    const { deps, calls } = makeDeps((call) => call.url.endsWith("/api/compatibility")
+      ? { status: 200, body: { protocolVersion: PROTOCOL_VERSION } }
+      : { status: 201, body: {
+          artifactId: "art_1", sessionId: SELF_ID, kind: "screenshot", name: call.body.name,
+          mimeType: call.body.mimeType, encoding: "base64", createdAt: 1, ...stored,
+        } });
+
+    const listed = await dispatch({ jsonrpc: "2.0", id: 1, method: "tools/list" }, deps);
+    assert.ok((listed!.result as { tools: { name: string }[] }).tools.some((tool) => tool.name === "attach_session_artifact"));
+
+    const attached = await callTool(deps, "attach_session_artifact", { path: file });
+    assert.equal(attached.isError, undefined, resultText(attached));
+    const upload = calls.at(-1)!;
+    assert.equal(upload.method, "POST");
+    assert.equal(upload.url, `${CP_URL}/api/sessions/${SELF_ID}/artifacts/screenshots`);
+    assert.deepEqual(Object.keys(upload.body).sort(), ["data", "mimeType", "name"],
+      "kind, encoding, and session are fixed by the route, never sent by the client");
+    assert.equal(upload.body.name, "desktop after.png");
+    assert.equal(upload.body.mimeType, "image/png", "the type is sniffed from the content");
+    assert.equal(upload.body.data, bytes.toString("base64"));
+    assert.deepEqual(resultJson(attached), { artifact: {
+      artifactId: "art_1", sessionId: SELF_ID, kind: "screenshot", name: "desktop after.png",
+      mediaType: "image/png", sizeBytes: bytes.length, sha256,
+    } });
+    assert.equal(attached.content.length, 1);
+    assert.ok(!resultText(attached).includes(bytes.toString("base64")), "the file's bytes never reach the tool result");
+
+    const named = await callTool(deps, "attach_session_artifact", { path: file, name: "  Desktop After  " });
+    assert.equal(calls.at(-1)?.body.name, "Desktop After");
+    assert.equal(named.isError, undefined);
+
+    // The digest an agent cites must be the digest of what was stored.
+    stored = { sha256: "0".repeat(64), sizeBytes: bytes.length };
+    const altered = await callTool(deps, "attach_session_artifact", { path: file });
+    assert.equal(altered.isError, true);
+    assert.match(resultText(altered), /stored different bytes/u);
+    assert.ok(!resultText(altered).includes("art_1"), "an unusable artifact id is not handed back");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("attach_session_artifact refuses before reading or uploading when the request cannot succeed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "attach-tool-"));
+  try {
+    const file = join(dir, "after.png");
+    writeFileSync(file, Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("x")]));
+
+    const own = makeDeps(() => ({ status: 200, body: { protocolVersion: PROTOCOL_VERSION } }));
+    const foreign = await callTool(own.deps, "attach_session_artifact", { path: file, sessionId: "someone-else" });
+    assert.equal(foreign.isError, true);
+    assert.match(resultText(foreign), /only to its own session/u);
+    assert.equal(own.calls.length, 0, "a cross-session attempt makes no request at all");
+
+    const orchestrator = makeDeps();
+    orchestrator.deps.orchestrator = true;
+    assert.equal((await callTool(orchestrator.deps, "attach_session_artifact", { path: file })).isError, true,
+      "an Orchestrator reviews evidence; it does not produce it");
+    assert.equal(orchestrator.calls.length, 0);
+
+    const old = makeDeps(() => ({
+      status: 200, body: { protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionArtifactFileAttach - 1 },
+    }));
+    const outdated = await callTool(old.deps, "attach_session_artifact", { path: file });
+    assert.equal(outdated.isError, true);
+    assert.match(resultText(outdated), /requires control plane protocol v\d+.*Update the Wollipog control plane/u);
+    assert.deepEqual(old.calls.map((call) => call.url), [`${CP_URL}/api/compatibility`],
+      "an older control plane is named, not probed with an upload and not worked around");
+
+    const current = makeDeps(() => ({ status: 200, body: { protocolVersion: PROTOCOL_VERSION } }));
+    for (const [args, expected] of [
+      [{}, /path is required/u],
+      [{ path: file, name: "   " }, /non-empty string/u],
+      [{ path: "relative/after.png" }, /absolute file path is required/u],
+      [{ path: join(dir, "absent.png") }, /file not found/u],
+      [{ path: dir }, /not a regular file/u],
+    ] as const) {
+      const refused = await callTool(current.deps, "attach_session_artifact", args);
+      assert.equal(refused.isError, true, JSON.stringify(args));
+      assert.match(resultText(refused), expected, JSON.stringify(args));
+    }
+    assert.ok(current.calls.every((call) => call.method === "GET"), "an unusable file is never uploaded");
+
+    // A request that dies in transit may already have been committed. The tool must say so and say
+    // what is safe, rather than report a plain failure that invites a blind duplicate.
+    const dropped = makeDeps((call) => {
+      if (call.url.endsWith("/api/compatibility")) return { status: 200, body: { protocolVersion: PROTOCOL_VERSION } };
+      throw new Error("socket hang up");
+    });
+    const unknown = await callTool(dropped.deps, "attach_session_artifact", { path: file });
+    assert.equal(unknown.isError, true);
+    assert.match(resultText(unknown), /outcome is unknown\. Attach the same file again/u);
+    // Committed, success status sent, body lost: the same unknown outcome one step later. It must
+    // not be reported as the control plane having stored different bytes.
+    for (const body of [null, "", { ok: true }, { artifactId: "art_1" }]) {
+      const truncated = makeDeps((call) => call.url.endsWith("/api/compatibility")
+        ? { status: 200, body: { protocolVersion: PROTOCOL_VERSION } }
+        : { status: 201, body });
+      const lost = await callTool(truncated.deps, "attach_session_artifact", { path: file });
+      assert.equal(lost.isError, true, JSON.stringify(body));
+      assert.match(resultText(lost), /answer did not arrive intact\. The upload's outcome is unknown\. Attach the same file again/u);
+      assert.doesNotMatch(resultText(lost), /stored different bytes/u, JSON.stringify(body));
+    }
+    const rejected = makeDeps((call) => call.url.endsWith("/api/compatibility")
+      ? { status: 200, body: { protocolVersion: PROTOCOL_VERSION } }
+      : { status: 409, body: { error: "this session already has 256 attached screenshots" } });
+    assert.doesNotMatch(resultText(await callTool(rejected.deps, "attach_session_artifact", { path: file })),
+      /outcome is unknown/u, "a definite refusal is not dressed up as uncertainty");
+
+    // A paired device has no session of its own, so it names one; nothing is refused client-side.
+    const device = makeDeps((call) => call.url.endsWith("/api/compatibility")
+      ? { status: 200, body: { protocolVersion: PROTOCOL_VERSION } }
+      : { status: 404, body: { error: "session not found" } });
+    device.deps.selfSessionId = "";
+    device.deps.actorHeader = null;
+    assert.match(resultText(await callTool(device.deps, "attach_session_artifact", { path: file })), /sessionId is required/u);
+    const denied = await callTool(device.deps, "attach_session_artifact", { path: file, sessionId: "s_hidden" });
+    assert.match(resultText(denied), /HTTP 404: session not found/u, "the control plane's answer is relayed");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
