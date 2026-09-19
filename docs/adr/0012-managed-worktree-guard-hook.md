@@ -253,10 +253,20 @@ What is done instead:
   only once the quotes are removed (both found by cross-model review). Nothing in such a command
   was ever an inspection, so reading it twice only refuses more.
 
-  The limit this leaves, unchanged in kind: a tool that recurses by default with no option and no
-  operand (`rg`, `tree`, `fd`) is not modelled, and neither is an unexpanded variable or a script.
-  That is the same indirection this whole mechanism is defeated by, restated at the end of this
-  section.
+  A detached recurse value counts once the command carries a `-d`/`--directories` option at all,
+  rather than only in the word straight after it, because adjacency is not knowable from this text:
+  a redirection appears among these words but not in the argv the kernel builds, so
+  `grep -d 2>/dev/null rec` reaches `grep` as `-d rec` and recurses (found by cross-model review,
+  and measured — it printed a planted protections file's contents).
+
+  The limit this leaves, unchanged in kind: a tool that walks under a name the classifier does not
+  model is not judged. That covers one that recurses by default with no option and no operand
+  (`rg`, `tree`, `fd`), an alternate build of a modelled tool (`gfind`), and a subcommand — in
+  particular `git clean -dfx`, whose operand-less form REMOVES untracked trees rooted at the
+  working directory, and which `git clean -ndfx` confirms would take an ignored data directory with
+  it. Neither is an unexpanded variable or a script modelled. That is the same indirection this
+  whole mechanism is defeated by, restated at the end of this section; closing it means a growing
+  list of tool names, which needs its own decision rather than being added here.
 
   One caller judges this rule from a directory that may not be the shell's. The control-channel
   veto in `claude-code.ts` passes the SESSION directory (the worktree veto beside it passes

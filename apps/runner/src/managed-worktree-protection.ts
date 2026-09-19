@@ -910,6 +910,12 @@ export function pathTargetsGuardState(path: string, cwd: string, directory: stri
  * - A working directory inside the guard state, since a command with no operand acts there. That
  *   one is decided before anything else: from in there every command is refused, whatever it is.
  *
+ * The classifier models the tools it knows walk. One that recurses by default under a name it does
+ * not model — `rg`, `tree`, `fd`, an alternate build such as `gfind`, or a subcommand such as
+ * `git clean -dfx`, whose operand-less form removes untracked trees rooted at the working
+ * directory — is not judged here. That is the same limit as any other indirection, and widening it
+ * needs its own decision rather than a growing list of names.
+ *
  * The working directory is an operand the command never has to spell (#1398). A recursive walk
  * started from an ancestor enumerates the hook directory without naming anything, so `walksWorkingDirectory`
  * decides which commands are judged against the directory they run in as well as against their
@@ -1036,8 +1042,8 @@ const RECURSIVE_LONG_OPTIONS = ["recursive", "dereference-recursive"];
  * - A long option that abbreviates `--recursive` or `--dereference-recursive`. Both are prefix-
  *   matched, so `--recurs` and `--dereference-recu` count, as `getopt_long` makes them.
  * - An option value attached with `=`: `grep --directories=rec` recurses while the command carries
- *   neither `-r` nor `--recursive`. A DETACHED value is judged by position instead, below, so that
- *   an ordinary `cat rec` is not read as a recursion request.
+ *   neither `-r` nor `--recursive`. A DETACHED value is judged against the rest of its command
+ *   instead, below, so that an ordinary `cat rec` is not read as a recursion request.
  * - The stem `recurs` anywhere in a word, which covers spellings this list has not met.
  */
 function recursiveWalkWord(word: string): boolean {
@@ -1066,15 +1072,25 @@ function commandBasename(word: string): string {
  * place, and a command the tokenizer gave up on has no command position at all. A walking name is
  * matched on its last component, because `/usr/bin/find` walks exactly as `find` does.
  *
+ * A DETACHED recurse value counts once the command carries a `-d`/`--directories` option at all,
+ * not only in the word straight after it. Adjacency is not knowable here: a redirection sits in
+ * these words but not in the argv the kernel gets, so `grep -d 2>/dev/null rec` reaches `grep` as
+ * `-d rec` and recurses while `2` and `/dev/null` stand between the two words (found by
+ * cross-model review). Requiring the option keeps `cat rec` allowed, which is the whole point of
+ * not matching a bare value everywhere.
+ *
  * It refuses more than it needs to — from an ancestor, a command merely mentioning `find` or
  * `recurse` is refused — which is the safe direction for this question.
  */
 function walksWorkingDirectory(words: readonly string[]): boolean {
-  return words.some((word, index) =>
-    WALKING_COMMANDS.has(commandBasename(word).toLowerCase()) || recursiveWalkWord(word) ||
-    // A detached value counts only where `grep` would read it as one.
-    (index > 0 && RECURSE_VALUES.has(word.toLowerCase()) &&
-      directoriesAction(words[index - 1] ?? "")));
+  let directories = false;
+  for (const word of words) {
+    if (WALKING_COMMANDS.has(commandBasename(word).toLowerCase())) return true;
+    if (recursiveWalkWord(word)) return true;
+    if (directories && RECURSE_VALUES.has(word.toLowerCase())) return true;
+    if (directoriesAction(word)) directories = true;
+  }
+  return false;
 }
 
 /**

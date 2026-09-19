@@ -1079,12 +1079,22 @@ test("an operand-less recursive command is judged against the directory it walks
     assert.equal(commandTargetsGuardState(command, home, directory), GUARD_STATE_REFUSAL, command);
     assert.equal(commandTargetsGuardState(command, project, directory), null, command);
   }
-  // Cross-model review, round 3: a detached `rec` is a recursion request only where `grep` reads
-  // one, so an ordinary command that happens to carry the word stays allowed.
+  // Cross-model review, round 3: a detached `rec` is a recursion request only in a command that
+  // asks for a directories action, so an ordinary command carrying the word stays allowed.
   for (const command of ["cat rec", "cat recipe.txt", "echo rec", "git checkout rec",
     "grep -d read secret", "grep -d skip secret"]) {
     assert.equal(commandTargetsGuardState(command, home, directory), null, command);
   }
+  // Cross-model review, round 4: a redirection stands between the option and its value here, but
+  // not in the argv the kernel builds, so `grep` still reads `-d rec` and recurses.
+  for (const command of ["grep -d 2>/dev/null rec secret", "grep -d rec 2>/dev/null secret",
+    "grep --directories 2>/dev/null rec secret", "grep -d rec secret > out.txt"]) {
+    assert.equal(commandTargetsGuardState(command, home, directory), GUARD_STATE_REFUSAL, command);
+    assert.equal(commandTargetsGuardState(command, project, directory), null, command);
+  }
+  // Accepted limit, recorded in ADR 0012: a subcommand that walks under a name the classifier does
+  // not model is not judged, exactly as `rg` and `tree` are not.
+  assert.equal(commandTargetsGuardState("git clean -dfx", home, directory), null);
   // Documented limit, unchanged by this rule: a command that is nothing but an unexpanded variable
   // hides what it is, and indirection through a script or an interpreter hides it the same way.
   for (const command of ["$SWEEP", "./sweep.sh", "npm test $ARGS", "echo $X"]) {
