@@ -302,3 +302,141 @@ test("the filesystem root is an ancestor of the worktree like any other", () => 
   assert.equal(commandTargetsManagedWorktree("rm -rf /", protectedPath, protection), MANAGED_WORKTREE_REFUSAL);
   assert.equal(commandTargetsManagedWorktree(`rm -rf ${"../".repeat(40)}`, protectedPath, protection), MANAGED_WORKTREE_REFUSAL);
 });
+
+/* ---------------------------------------------------------------------------------------------
+ * The removal contract inside a managed worktree (#1393).
+ *
+ * #1393 was filed on the premise that the guard refuses every removal inside a runner-owned
+ * worktree, leaving an agent unable to delete a scratch file it had just created. It does not, and
+ * never did: `protectedTarget` matches the worktree ROOT and its ancestors, anything inside either
+ * Git administrative tree, and any ancestor of those trees. A path beneath the root and OUTSIDE
+ * those trees — which `<worktree>/.git` is not — has always been an ordinary mutation, exactly what
+ * #1209 asked for ("Normal file creation, editing, Git commits, tests, and other expected work
+ * inside the selected worktree remain available").
+ *
+ * The tests below pin that contract in both directions so neither half can drift: an agent's own
+ * cleanup keeps working, and the root and administrative state stay unreachable.
+ * ------------------------------------------------------------------------------------------ */
+
+test("an agent may remove scratch it created inside its managed worktree", () => {
+  for (const [command, cwd] of [
+    // The issue's own examples: a one-off harness, a capture script, a temporary fixture.
+    ["rm -f scratch.txt", protectedPath],
+    ["rm -rf tmp-harness", protectedPath],
+    ["rm -rf tmp-harness/", protectedPath],
+    ["rmdir tmp-harness", protectedPath],
+    ["unlink scratch.txt", protectedPath],
+    ["trash-put scratch.txt", protectedPath],
+    ["gio trash scratch.txt", protectedPath],
+    // The same file named absolutely is the same file; spelling it out is not an escalation.
+    [`rm -f ${protectedPath}/scratch.txt`, protectedPath],
+    [`rm -rf ${protectedPath}/tmp-harness`, protectedPath],
+    // ...and from a subdirectory, including a `..` that stays inside the worktree.
+    ["rm -f scratch.txt", `${protectedPath}/apps`],
+    ["rm -rf ../tmp-harness", `${protectedPath}/apps`],
+    // Cleaning up before retirement, which `discard_worktree` requires to leave a clean tree.
+    ["git clean -fd", protectedPath],
+  ] as const) {
+    assert.equal(commandTargetsManagedWorktree(command, cwd, protection), null, command);
+  }
+});
+
+test("piping filenames into a remover is refused even when they are all scratch", () => {
+  // The allowance above stops at the pipe. What reaches `xargs` on stdin is decided at runtime and
+  // is INVISIBLE here, so the classifier cannot tell a list of scratch files from one naming the
+  // root, and refuses every remover run through `xargs` from inside a managed worktree. That is a
+  // deliberate over-refusal standing in for a judgement it cannot make — not root matching.
+  assert.equal(commandTargetsManagedWorktree("printf 'scratch.txt\\0' | xargs -0 rm -f", protectedPath, protection),
+    MANAGED_WORKTREE_REFUSAL);
+  // Both halves of the fallback's condition, isolated: it needs a managed cwd AND a remover.
+  assert.equal(commandTargetsManagedWorktree("printf 'scratch.txt\\0' | xargs -0 rm -f", "/elsewhere", protection),
+    null, "outside a managed worktree the fallback does not apply");
+  assert.equal(commandTargetsManagedWorktree("printf 'scratch.txt\\0' | xargs -0 cat", protectedPath, protection),
+    null, "the fallback is scoped to removers, not to pipelines in general");
+  assert.equal(commandTargetsManagedWorktree("rm -f scratch.txt", protectedPath, protection), null,
+    "and naming the same operand directly stays allowed");
+  // The cost of that blindness, stated rather than implied: piping the root itself is NOT caught
+  // by root matching. From outside a managed worktree nothing refuses it, because the operand only
+  // ever exists at runtime. Only a root named in the command text is an operand the guard can see.
+  assert.equal(commandTargetsManagedWorktree(`printf '${protectedPath}\\0' | xargs -0 rm -rf`, "/elsewhere", protection),
+    null, "stdin is opaque, so a piped root is not matched as an operand");
+  assert.equal(commandTargetsManagedWorktree(`xargs -0 rm -rf ${protectedPath}`, "/elsewhere", protection),
+    MANAGED_WORKTREE_REFUSAL, "while a root named in the command IS matched, wherever the shell is");
+});
+
+test("removal of the worktree root and its Git administrative state stays refused", () => {
+  for (const [command, cwd] of [
+    // The root itself, by every spelling.
+    ["rm -rf .", protectedPath],
+    [`rm -rf ${protectedPath}`, protectedPath],
+    [`rm -rf ${protectedPath}/`, protectedPath],
+    [`rm -rf ${protectedPath}/tmp-harness/..`, protectedPath],
+    // An ancestor of the root takes the root with it.
+    ["rm -rf ..", `${protectedPath}/apps`],
+    [`rm -rf ${protectedPath}/tmp-harness/../..`, protectedPath],
+    // The worktree's own `.git` link file, which Git needs to find the real admin directory. It
+    // sits BENEATH the root, so "beneath the root is allowed" holds only outside the admin trees.
+    ["rm -rf .git", protectedPath],
+    [`rm -rf ${protectedPath}/.git`, protectedPath],
+    [`rm -rf ${protectedPath}/.git/config`, protectedPath],
+    // The repository's registry entry for it, anything inside that entry, and any ancestor of it.
+    ["rm -rf /projects/repo/.git/worktrees", protectedPath],
+    ["rm -rf /projects/repo/.git/worktrees/managed", protectedPath],
+    ["rm -rf /projects/repo/.git", protectedPath],
+    ["rm -rf /projects/repo", protectedPath],
+    // Bulk removal forms whose ROOT is the worktree, which `-delete`/`-exec` would walk.
+    ["find . -delete", protectedPath],
+    ["find . -name '*.tmp' -delete", protectedPath],
+    ["find . -maxdepth 1 -name '*.tmp' -exec rm -f {} +", protectedPath],
+    // `xargs` appends its stdin to the command it is given, so a root named in the command itself
+    // IS an operand the classifier can see. What arrives on stdin is not; that is the next test.
+    [`xargs -0 rm -rf ${protectedPath}`, protectedPath],
+    // Moving the root away retires it just as surely as deleting it.
+    ["mv . /tmp/moved", protectedPath],
+  ] as const) {
+    assert.equal(commandTargetsManagedWorktree(command, cwd, protection), MANAGED_WORKTREE_REFUSAL, command);
+  }
+});
+
+test("a sibling whose name merely extends the worktree's is not the worktree", () => {
+  // `pathContains` compares separator-terminated prefixes, so a neighbouring path that begins with
+  // the same characters is a different directory and remains the operator's to remove.
+  assert.equal(commandTargetsManagedWorktree(`rm -rf ${protectedPath}-backup`, protectedPath, protection), null);
+  assert.equal(commandTargetsManagedWorktree(`rm -rf ${protectedPath}.old`, protectedPath, protection), null);
+});
+
+test("the guard classifies by path, not by Git status", () => {
+  // #1393's third criterion allows either refusing untracked files the agent did not create, or
+  // documenting a decision to allow them. This is that decision, made explicit: the guard consults
+  // no Git index, so a tracked file, an ignored build artifact, and another session's stray scratch
+  // are all ordinary contents of the worktree and are treated identically. Git itself is the
+  // recovery path for anything tracked; the runner-owned boundary is the root, not the file.
+  for (const command of [
+    "rm -f apps/runner/src/managed-worktree-protection.ts", // tracked
+    "rm -rf dist", // ignored build output
+    "rm -f someone-elses-scratch.txt", // untracked, not created by this session
+  ]) {
+    assert.equal(commandTargetsManagedWorktree(command, protectedPath, protection), null, command);
+  }
+});
+
+test("a symlink inside the worktree cannot be used to reach the root", (t) => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-1393-")));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const worktree = join(base, "managed");
+  mkdirSync(join(worktree, "tmp-harness"), { recursive: true });
+  // Exactly the alias an agent could create while tidying up inside its own worktree.
+  symlinkSync(worktree, join(worktree, "self"));
+  const protections: ManagedWorktreeProtection[] = [{ worktreePath: worktree, repoPath: join(base, "repo") }];
+
+  // Removing the alias removes the link itself, which is scratch like any other.
+  assert.equal(commandTargetsManagedWorktree("rm -f self", worktree, protections), null);
+  // A trailing slash (or `/.`) makes the kernel follow it, and then it IS the root.
+  assert.equal(commandTargetsManagedWorktree("rm -rf self/", worktree, protections), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("rm -rf self/.", worktree, protections), MANAGED_WORKTREE_REFUSAL);
+  // Climbing through the alias lands where it points, not where the spelling suggests.
+  assert.equal(commandTargetsManagedWorktree("rm -rf self/tmp-harness/..", worktree, protections),
+    MANAGED_WORKTREE_REFUSAL);
+  // Scratch reached THROUGH the alias is still scratch.
+  assert.equal(commandTargetsManagedWorktree("rm -rf self/tmp-harness", worktree, protections), null);
+});
