@@ -735,11 +735,21 @@ test("argv is expanded by the outer shell, not by the process that receives it",
   // A bare `cd` enters the HOME of the environment the builtin is GIVEN, prefix included.
   assert.equal(commandTargetsManagedWorktree(`HOME=${protectedPath} cd && rm -rf .`, "/tmp", protection,
     { HOME: "/tmp" }), MANAGED_WORKTREE_REFUSAL);
-  // In `/bin/sh` a prefix assignment before a POSIX special builtin survives the command.
+  // In `/bin/sh` a prefix assignment before a POSIX special builtin survives the command, and in
+  // bash outside POSIX mode it does not. The two readings name different directories — the root
+  // under `/bin/sh`, the stale `/tmp` under bash — and which shell runs is not knowable here, so
+  // the name stops being readable and the removal is refused as unplaceable rather than guessed.
   assert.equal(commandTargetsManagedWorktree(`sh -c 'W=${protectedPath} :; rm -rf "$W"'`, "/elsewhere", protection,
-    { W: "/tmp" }), MANAGED_WORKTREE_REFUSAL);
+    { W: "/tmp" }), MANAGED_WORKTREE_UNRESOLVED_REFUSAL);
   assert.equal(commandTargetsManagedWorktree(`sh -c 'W=${protectedPath} export X=1; rm -rf "$W"'`, "/elsewhere",
-    protection, { W: "/tmp" }), MANAGED_WORKTREE_REFUSAL);
+    protection, { W: "/tmp" }), MANAGED_WORKTREE_UNRESOLVED_REFUSAL);
+  // The other direction of the same ambiguity: the launch value is the protected one, and a
+  // prefix that bash would discard must not talk the classifier out of refusing it.
+  assert.equal(commandTargetsManagedWorktree(`sh -c 'W=/tmp :; rm -rf "$W"'`, "/elsewhere", protection,
+    { W: protectedPath }), MANAGED_WORKTREE_UNRESOLVED_REFUSAL);
+  // An ordinary command's prefix still dies with it, so a later reference reads the launch value.
+  assert.equal(commandTargetsManagedWorktree(`sh -c 'W=/tmp pnpm test; rm -rf "$W"'`, "/elsewhere", protection,
+    { W: protectedPath }), MANAGED_WORKTREE_REFUSAL);
   // `env` reads its own argv, so an assignment that arrived through an expansion is one.
   assert.equal(commandTargetsManagedWorktree(`env "$ASSIGNMENT" sh -c 'rm -rf "$W"'`, "/tmp", protection,
     { ASSIGNMENT: `W=${protectedPath}` }), MANAGED_WORKTREE_REFUSAL);
@@ -762,4 +772,24 @@ test("roles are assigned to fields, not to the text that produced them", () => {
     MANAGED_WORKTREE_REFUSAL);
   assert.equal(commandTargetsManagedWorktree('mv "$W" /tmp/away', "/elsewhere", spaced, { W: "/runner/my worktree" }),
     MANAGED_WORKTREE_REFUSAL);
+});
+
+test("moving files INTO a protected worktree is ordinary work", () => {
+  // The unsplit reading of a field-split expansion belongs to the role its first field takes. A
+  // protected path with a space in it splits, but as a DESTINATION it receives the move: the
+  // worktree is not retired by it, and refusing would break ordinary work (#1324 review round 4).
+  const spaced: ManagedWorktreeProtection[] = [{ worktreePath: "/runner/my worktree", repoPath: "/projects/repo" }];
+  const environment = { W: "/runner/my worktree" };
+  assert.equal(commandTargetsManagedWorktree('mv /tmp/a "$W"', "/elsewhere", spaced, environment), null);
+  assert.equal(commandTargetsManagedWorktree('mv -t "$W" /tmp/a', "/elsewhere", spaced, environment), null);
+  assert.equal(commandTargetsManagedWorktree('cp -r /tmp/a "$W"', "/elsewhere", spaced, environment), null);
+  // ...while the same path as a SOURCE is the worktree being moved away, and is refused.
+  assert.equal(commandTargetsManagedWorktree('mv "$W" /tmp/away', "/elsewhere", spaced, environment),
+    MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree('mv -t /tmp/away "$W"', "/elsewhere", spaced, environment),
+    MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree('rm -rf "$W"', "/elsewhere", spaced, environment),
+    MANAGED_WORKTREE_REFUSAL);
+  // A read of the same destination is untouched.
+  assert.equal(commandTargetsManagedWorktree('ls "$W"', "/elsewhere", spaced, environment), null);
 });

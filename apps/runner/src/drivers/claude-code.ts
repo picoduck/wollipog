@@ -2334,7 +2334,8 @@ export class ClaudeCodeDriver implements Driver {
                   protections,
                   // The environment this process gave Claude is the one its Bash tool starts
                   // from, so a worktree path held in a variable resolves here too (#1324).
-                  this.childEnv(),
+                  // `spawnAgent` overlays it on the inherited environment, so both halves count.
+                  { ...process.env, ...this.childEnv() },
                 )
               : null);
           if (managedRefusal) {

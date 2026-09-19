@@ -1252,7 +1252,8 @@ export class CodexAppServerDriver implements Driver {
               this.opts.managedWorktreeProtections?.() ?? [],
               // Codex runs each approved command from the environment this process launched it
               // with, so a worktree path held in one of those variables resolves here (#1324).
-              this.opts.env,
+              // `spawnAgent` overlays the explicit env on the inherited one, so both halves count.
+              { ...process.env, ...this.opts.env },
             )
           : null;
         if (refusal) {

@@ -541,23 +541,27 @@ function commandWords(
   // only when they stand alone as their own command. Within the prefix they apply left to right,
   // so `A=$B B=$A` leaves both holding B's original value.
   const childEnvironment = new Map(environment);
-  let assignmentsOnly = false;
+  const assigned: string[] = [];
   while (typeof tokens[index] === "string" && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(tokens[index] as string)) {
     const assignment = tokens[index] as string;
     const equals = assignment.indexOf("=");
-    childEnvironment.set(assignment.slice(0, equals),
-      expandReferences(assignment.slice(equals + 1), cwd, childEnvironment));
-    assignmentsOnly = true;
+    const name = assignment.slice(0, equals);
+    childEnvironment.set(name, expandReferences(assignment.slice(equals + 1), cwd, childEnvironment));
+    assigned.push(name);
     index += 1;
   }
   if (tokens[index] === undefined) {
     // Applied exactly once: the caller does not classify a segment that parsed to no command.
-    if (assignmentsOnly) for (const [name, value] of childEnvironment) environment.set(name, value);
+    for (const name of assigned) environment.set(name, childEnvironment.get(name) ?? "");
     return null;
   }
   let executable = commandWordAt(tokens, index, cwd, environment);
-  if (assignmentsOnly && executable != null && SPECIAL_BUILTINS.has(executableName(executable))) {
-    for (const [name, value] of childEnvironment) environment.set(name, value);
+  // Before a POSIX special builtin the assignment survives in `/bin/sh` and is discarded by bash
+  // outside POSIX mode. Which shell runs the command is not knowable here, and the two readings
+  // disagree about what a later `"$W"` names, so the name stops being readable at all: a later
+  // destructive operand built from it is unresolved rather than guessed in the wrong direction.
+  if (assigned.length > 0 && executable != null && SPECIAL_BUILTINS.has(executableName(executable))) {
+    for (const name of assigned) environment.set(name, UNRESOLVED_REFERENCE);
   }
   while (executable) {
     const name = executableName(executable);
@@ -743,35 +747,43 @@ function gitWorktreeVerdict(
 }
 
 /**
- * The words as the command receives them: an expansion that yields several fields becomes several
- * words, because roles — an `mv` destination, a `find` root, an option and its value — are assigned
- * to FIELDS, not to the text that produced them. `candidates` keeps the unsplit value of anything
- * that did split, since this parser cannot see quoting and a protected path may itself contain a
- * separator; judging both readings refuses either way round.
+ * Every reading of a command's words this classifier has to consider.
+ *
+ * `shell-quote` does not report whether an expansion was quoted, and the two possibilities are
+ * different commands: unquoted, `$PAIR` becomes as many words as it has fields; quoted, it stays
+ * one. Roles follow from that — an `mv` destination is its LAST word, a `find` root is a word
+ * before the expression — so a single hybrid reading gets them wrong in one direction or the
+ * other: `mv $PAIR` must read a protected first field as a source, while `mv /tmp/a "$W"` must
+ * read a protected path that merely contains a space as the destination it lands in.
+ *
+ * So both readings are classified in full and the stronger verdict stands. Where nothing splits,
+ * the two coincide and only one reading is produced.
  */
-function expandedWords(
+function wordReadings(
   words: readonly ShellToken[],
   cwd: string,
   environment: ReadonlyMap<string, string>,
-): { words: ShellToken[]; candidates: string[] } {
-  const expanded: ShellToken[] = [];
-  const candidates: string[] = [];
+): ShellToken[][] {
+  const split: ShellToken[] = [];
+  const whole: ShellToken[] = [];
+  let divided = false;
   for (const token of words) {
     const text = wordText(token);
     const value = text === null ? null : word(token, cwd, environment);
-    if (text === null || value == null || !text.includes("\0")) {
-      expanded.push(token);
+    const fields = text === null || value == null || !text.includes("\0")
+      ? null
+      : expansionFields(text, value, cwd, environment);
+    if (fields === null || value == null) {
+      // Unresolvable, or nothing to expand: the token is carried into both readings as it is.
+      split.push(token);
+      whole.push(token);
       continue;
     }
-    const fields = expansionFields(text, value, cwd, environment);
-    if (fields === null || (fields.length === 1 && fields[0] === value)) {
-      expanded.push(token);
-      continue;
-    }
-    expanded.push(...fields);
-    candidates.push(value);
+    split.push(...fields);
+    whole.push(value);
+    if (fields.length !== 1 || fields[0] !== value) divided = true;
   }
-  return { words: expanded, candidates };
+  return divided ? [split, whole] : [split];
 }
 
 function segmentVerdict(
@@ -785,16 +797,24 @@ function segmentVerdict(
   command: ParsedCommand | null = commandWords(tokens, cwd, environment),
 ): Verdict {
   if (!command) return null;
+  return strongest(wordReadings(command.words, cwd, environment).map((words) =>
+    commandVerdict(words, command, cwd, environment, protections, depth)));
+}
+
+/** One command, judged in one reading of its words. */
+function commandVerdict(
+  words: ShellToken[],
+  command: ParsedCommand,
+  cwd: string,
+  environment: Map<string, string>,
+  protections: readonly ManagedWorktreeProtection[],
+  depth: number,
+): Verdict {
   const { executable, childEnvironment } = command;
-  const expansion = expandedWords(command.words, cwd, environment);
-  const words = expansion.words;
-  // The unsplit reading of anything that field-split, judged wherever this command is destructive.
-  const unsplit = strongest(expansion.candidates.map((value) =>
-    literalOperandVerdict(value, value, cwd, environment, protections, false, true)));
   if (["sh", "bash", "zsh", "dash", "fish", "cmd"].includes(executable) && depth < 3) {
-    // A `-c` script is consumed WHOLE by the shell it is handed to, so it is read unsplit. Where
-    // the expansion really was unquoted the shell would keep only its first field as the script and
-    // pass the rest as positional parameters, which this reading over-refuses rather than misses.
+    // A `-c` script is consumed WHOLE by the shell it is handed to, so the unsplit words are read
+    // here whichever reading this is. Where the expansion really was unquoted the shell would keep
+    // only its first field as the script, which this over-refuses rather than misses.
     const words = command.words;
     const flag = words.findIndex((token) => {
       const value = word(token, cwd, environment)?.toLowerCase() ?? "";
@@ -829,18 +849,17 @@ function segmentVerdict(
     const verdict = segmentVerdict(nested, cwd, new Map(environment), protections, depth + 1, nestedCommand);
     const nestedExecutable = nestedCommand?.executable ?? "";
     if (!REMOVERS.includes(nestedExecutable)) return verdict;
-    if (unsplit === "protected") return unsplit;
     // What arrives on stdin is invisible, so a remover run from inside a managed root is refused
     // outright, and one run from a directory the classifier lost track of cannot be placed.
     if (shellInsideManagedRoot(cwd, protections)) return "protected";
     return strongest([verdict, cwd === UNKNOWN_CWD ? "unresolved" : null]);
   }
-  if (executable === "git") return strongest([gitWorktreeVerdict(words, cwd, environment, protections), unsplit]);
+  if (executable === "git") return gitWorktreeVerdict(words, cwd, environment, protections);
   if (["rm", "rmdir", "unlink", "trash", "trash-put", "remove-item", "del", "rd"].includes(executable)) {
-    return strongest([...removerVerdicts(words, cwd, environment, protections), unsplit]);
+    return strongest(removerVerdicts(words, cwd, environment, protections));
   }
   if (executable === "gio" && word(words[0], cwd, environment) === "trash") {
-    return strongest([...removerVerdicts(words.slice(1), cwd, environment, protections), unsplit]);
+    return strongest(removerVerdicts(words.slice(1), cwd, environment, protections));
   }
   if (["mv", "move", "rename-item"].includes(executable)) {
     let targetDirectory = false;
@@ -863,11 +882,11 @@ function segmentVerdict(
       }
       operands.push(token);
     }
-    // A word that cannot be resolved is taken as an operand, so it is judged as a source unless it
-    // is the final destination, which receives the move and is not itself retired.
+    // The last operand is where the files LAND unless `-t` named that directory already. Moving
+    // something into a protected worktree is ordinary work; moving the worktree away is not.
     const sources = targetDirectory ? operands : operands.slice(0, -1);
-    return strongest([...sources.map((source) =>
-      operandVerdict(source, cwd, environment, protections, false, optionsEnded)), unsplit]);
+    return strongest(sources.map((source) =>
+      operandVerdict(source, cwd, environment, protections, false, optionsEnded)));
   }
   if (executable === "find") {
     const actionIndex = words.findIndex((token) =>
@@ -899,7 +918,7 @@ function segmentVerdict(
       const rootVerdict = strongest(effectiveRoots.map((token) =>
         operandVerdict(token, cwd, environment, protections, followsRoots, true)));
       const action = word(words[actionIndex], cwd, environment);
-      if (action === "-delete") return strongest([rootVerdict, unsplit]);
+      if (action === "-delete") return rootVerdict;
       if (depth < 3) {
         const end = words.findIndex((token, index) => index > actionIndex &&
           [";", "+"].includes(word(token, cwd, environment) ?? ""));
@@ -908,7 +927,7 @@ function segmentVerdict(
         const verdict = segmentVerdict(nested, cwd, new Map(environment), protections, depth + 1, nestedCommand);
         const nestedExecutable = nestedCommand?.executable ?? "";
         const removal = REMOVERS.includes(nestedExecutable) ? rootVerdict : null;
-        if (verdict || removal || unsplit) return strongest([verdict, removal, unsplit]);
+        if (verdict || removal) return strongest([verdict, removal]);
       }
     }
   }
