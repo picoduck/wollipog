@@ -432,13 +432,17 @@ function boundedDecisionString(value: unknown, max: number): value is string {
  * decision record stays authoritative: a child polling inside its turn may already have read it. */
 function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): string {
   const resolver = decision.authority === "orchestrator" ? "Your Orchestrator" : "A human reviewer";
+  // The resource key and option ids come from the child's own request and may contain line breaks,
+  // so they are quoted as single-line literals and can never forge the envelope's framing lines.
+  const literal = (value: string) =>
+    JSON.stringify(value).replace(/\u2028/gu, "\\u2028").replace(/\u2029/gu, "\\u2029");
   const option = decision.selectedOptionId === undefined
     ? ""
-    : ` with option ${JSON.stringify(decision.selectedOptionId)}`;
+    : ` with option ${literal(decision.selectedOptionId)}`;
   return [
     `[Wollipog Workflow Decision — ${decision.occurrenceId}]`,
     `${resolver} ${decision.status} your ${decision.category} decision ${decision.occurrenceId} ` +
-      `(resource ${decision.resourceKey})${option}` +
+      `(resource ${literal(decision.resourceKey)})${option}` +
       (decision.childMessage ? " and left this message for you:" : "."),
     ...(decision.childMessage ? [decision.childMessage] : []),
     "The decision record is authoritative: read it with get_workflow_decision before acting. " +
