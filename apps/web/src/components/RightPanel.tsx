@@ -301,6 +301,10 @@ export function RightPanel({
     if (!state.open || state.mode !== "requests") return;
     const closeOnEscape = (event: globalThis.KeyboardEvent) => {
       if (event.defaultPrevented || event.key !== "Escape" || event.metaKey || event.ctrlKey || event.altKey) return;
+      // A modal opened from inside this panel (the enlarged evidence image) owns Escape. Both
+      // listeners sit on window and this one registered first, so without yielding here it would
+      // close the panel out from under the dialog and mark the event handled before the dialog saw it.
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
       event.preventDefault();
       state.close();
     };

@@ -2297,6 +2297,65 @@ textarea {
   color: var(--text-dim);
   cursor: pointer;
 }
+.evidence-reviewed-control:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+/* An artifact-backed evidence image, shown in place. The frame reserves its height before the
+   image arrives so a long review does not jump as items load. */
+.evidence-artifact {
+  display: grid;
+  min-width: 0;
+  min-height: 96px;
+  align-content: center;
+}
+/* Only a frame that is waiting for an image needs to hold its place. */
+.evidence-artifact[data-status="mismatch"],
+.evidence-artifact[data-status="unavailable"],
+.evidence-artifact[data-status="unverifiable"] {
+  min-height: 0;
+}
+.evidence-artifact-thumb {
+  display: block;
+  width: 100%;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev-2);
+  cursor: zoom-in;
+}
+.evidence-artifact-thumb:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.evidence-artifact-thumb img {
+  display: block;
+  width: 100%;
+  max-height: 320px;
+  object-fit: contain;
+}
+.evidence-artifact-state {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+  margin: 0;
+}
+.evidence-artifact-state p {
+  margin: 0;
+}
+.evidence-artifact-full {
+  display: block;
+  max-width: 100%;
+  max-height: 78vh;
+  margin: 0 auto;
+  object-fit: contain;
+}
+.approval-evidence-item:has(.evidence-artifact) {
+  display: grid;
+  align-items: start;
+  justify-content: stretch;
+}
 .evidence-review-details {
   margin: 12px 0;
   padding: 9px 0;
