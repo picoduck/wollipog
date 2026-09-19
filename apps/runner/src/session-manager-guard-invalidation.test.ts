@@ -262,4 +262,48 @@ test("the unguarded-TUI notice is evaluated on a worktreePath-only patch", (t) =
   store.patchMeta("s_guard", { worktreePath: "/home/me/repo-worktrees/legacy-a" });
   assert.equal(notices.length, 1);
   assert.match(notices[0]!, /started without Wollipog managed worktree protection \(untrusted hooks\)/u);
+
+test("an Orchestrator's guard list is every runner-created worktree on the runner, kept in step by any session's change (#1473)", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-sm-guard-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const store = new SessionStore(root);
+  const child = meta();
+  const orchestrator = meta({
+    sessionId: "s_orch",
+    repoPath: "/home/me/scratch",
+    config: { permissionMode: "orchestrator" },
+    orchestrator: { strictProjectIsolation: true },
+  });
+  const bystander = meta({
+    sessionId: "s_other",
+    worktrees: [{ id: "wt_o", path: "/home/me/repo-worktrees/s_other", branch: "agent/s_other", source: "created", createdAt: 1 }],
+  });
+  const attached = meta({
+    sessionId: "s_attached",
+    worktrees: [{ id: "wt_a", path: "/home/me/repo-worktrees/operator", branch: "main", source: "attached", createdAt: 1 }],
+  });
+  for (const session of [child, orchestrator, bystander, attached]) store.create(session);
+  const sm = new SessionManager(() => {}, () => {}, store, "test-runner");
+  const refreshed: Array<{ id: string; paths: string[] }> = [];
+  sm.setManagedWorktreeGuardRefresh((session, protections) => {
+    refreshed.push({ id: session.sessionId, paths: protections.map((entry) => entry.worktreePath) });
+    return { state: "refreshed" };
+  });
+
+  // The runner has no lineage record, so the Orchestrator's list is every runner-created worktree
+  // of every session here — never an attached operator worktree, and never a duplicate.
+  assert.deepEqual(sm.managedWorktreeGuardProtections(store.readMeta("s_orch")!),
+    [{ worktreePath: "/home/me/repo-worktrees/s_other", repoPath: "/home/me/repo" }]);
+  // An ordinary session's list is still its own.
+  assert.deepEqual(sm.managedWorktreeGuardProtections(store.readMeta("s_other")!),
+    [{ worktreePath: "/home/me/repo-worktrees/s_other", repoPath: "/home/me/repo" }]);
+  assert.deepEqual(sm.managedWorktreeGuardProtections(store.readMeta("s_guard")!), []);
+
+  // A child acquiring a worktree refreshes the child's own guard AND the Orchestrator's, with the
+  // new worktree in the Orchestrator's list; the bystander is left alone.
+  worktreePatch(store);
+  assert.deepEqual(refreshed.map((entry) => entry.id).sort(), ["s_guard", "s_orch"]);
+  assert.deepEqual(refreshed.find((entry) => entry.id === "s_guard")!.paths, ["/home/me/repo-worktrees/s_guard"]);
+  assert.deepEqual(refreshed.find((entry) => entry.id === "s_orch")!.paths.sort(),
+    ["/home/me/repo-worktrees/s_guard", "/home/me/repo-worktrees/s_other"]);
 });

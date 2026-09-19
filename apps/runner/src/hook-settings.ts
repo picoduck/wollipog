@@ -43,8 +43,11 @@ import {
   codexGuardLaunchArgs,
   codexHookInventoryProbe,
   codexHookInventoryVerdict,
+  codexHookIsolationVerdict,
+  codexHookStateDisableOverride,
   readCodexHookInventory,
   withoutCodexGuardArgs,
+  withoutCodexHooksFeatureDisable,
   type CodexHookEntry,
 } from "./codex-managed-worktree-guard.js";
 import { deriveCpHttpUrl } from "./runner-credential-file.js";
@@ -1149,16 +1152,27 @@ export async function provisionCodexGuard(
      * in runner memory and no protections file is written; without it the file decides, as before.
      */
     guardSocket?: string;
+    /**
+     * The Orchestrator preset (#1473). Its launch arrives with `--disable hooks`, which would keep
+     * the guard out too. That flag is dropped for the guarded argv, every foreign hook the
+     * inventory reports is disabled by key for the invocation, and the inventory is read again to
+     * prove that the runner's hook is then the ONLY enabled one — trusted user hooks included,
+     * which the ordinary rule admits and the preset's isolation does not. A launch that cannot
+     * prove it is returned exactly as it arrived, `--disable hooks` and all.
+     */
+    isolateForeignHooks?: boolean;
   },
   log: (message: string) => void,
   host: ClaudeHookHost = defaultClaudeHookHost(),
 ): Promise<CodexGuardProvisioning> {
   assertSafeSessionFileId(spec.sessionId);
   // A runner-owned override left in the argv would claim a guard this spawn has not proved.
-  const args = withoutCodexGuardArgs(spec.args);
+  const arrived = withoutCodexGuardArgs(spec.args);
+  const isolate = config.isolateForeignHooks === true;
+  const args = isolate ? withoutCodexHooksFeatureDisable(arrived) : arrived;
   const inactive = (reason: string): CodexGuardProvisioning => {
     log(`Codex managed worktree guard ${spec.sessionId}: ${reason}`);
-    return { args, guardActive: false, reason };
+    return { args: arrived, guardActive: false, reason };
   };
   if (compromisedGuardSessions.has(spec.sessionId)) {
     return inactive("its guard state was invalidated and has not been re-proved");
@@ -1223,17 +1237,34 @@ export async function provisionCodexGuard(
   }
   // Enumerate with the same flags the TUI will carry. This proves Codex installs the runner's hook
   // in THIS build and decides whether the invocation-wide trust bypass is acceptable at all.
+  const readInventory = config.readHookInventory ?? readCodexHookInventory;
   let entries: CodexHookEntry[];
   try {
-    entries = await (config.readHookInventory ?? readCodexHookInventory)(
-      codexHookInventoryProbe(spec, config.cwd, override),
-    );
+    entries = await readInventory(codexHookInventoryProbe({ ...spec, args }, config.cwd, override));
   } catch (error) {
     return inactive(`its Codex hook inventory could not be enumerated (${(error as Error).message})`);
   }
-  const inventory = codexHookInventoryVerdict(entries, guardCommand);
+  let launchArgs = args;
+  if (isolate) {
+    // Every enabled hook that is not the runner's is switched off for this invocation, and the
+    // result is READ BACK rather than assumed: the override's spelling is what makes it work.
+    const foreign = entries.filter((entry) => entry.enabled && entry.command !== guardCommand);
+    if (foreign.length > 0) {
+      launchArgs = [...args, "-c", codexHookStateDisableOverride(foreign.map((entry) => entry.key))];
+      try {
+        entries = await readInventory(
+          codexHookInventoryProbe({ ...spec, args: launchArgs }, config.cwd, override),
+        );
+      } catch (error) {
+        return inactive(`its Codex hook inventory could not be enumerated (${(error as Error).message})`);
+      }
+    }
+  }
+  const inventory = isolate
+    ? codexHookIsolationVerdict(entries, guardCommand)
+    : codexHookInventoryVerdict(entries, guardCommand);
   if (!inventory.ok) return inactive(inventory.reason);
-  const guarded = codexGuardLaunchArgs(args, override);
+  const guarded = codexGuardLaunchArgs(launchArgs, override);
   if (!codexGuardArgsActive(guarded, override)) {
     return inactive("a later hooks.PreToolUse override in the launch arguments would replace the guard");
   }

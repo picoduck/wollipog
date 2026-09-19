@@ -14,6 +14,7 @@
  * measured and why the launch's hook inventory is enumerated first.
  */
 
+import { isOrchestratorLaunch } from "@wollipog/protocol";
 import { CODEX_GUARD_DRIVERS } from "./codex-managed-worktree-guard.js";
 import {
   defaultClaudeHookHost,
@@ -135,6 +136,11 @@ function provisionClaudeTuiGuard(
  * runner's hook is the sole untrusted one — but for a session with nothing to protect a failed
  * provisioning is NOT a refusal: the caller opens that TUI unguarded, as it always has, and the
  * runner says so if a worktree appears while it is still open.
+ *
+ * An Orchestrator preset launch (#1473) arrives with `--disable hooks`, which would keep the guard
+ * out as well. For that launch alone the guard provisioning may drop the flag — provided it first
+ * disables every foreign hook by key and proves the runner's hook is the only enabled one, so the
+ * preset's "no user hooks" promise is kept exactly. A launch that cannot prove it keeps the flag.
  */
 async function provisionAgentTuiCodexManagedWorktreeGuard(
   spec: SessionMeta,
@@ -158,6 +164,7 @@ async function provisionAgentTuiCodexManagedWorktreeGuard(
       platform: config.platform,
       verifyGuardLaunch: config.verifyGuardLaunch,
       readHookInventory: config.readCodexHookInventory,
+      isolateForeignHooks: isOrchestratorLaunch(spec),
     },
     log,
     host,

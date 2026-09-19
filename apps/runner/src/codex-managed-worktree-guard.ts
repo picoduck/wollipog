@@ -230,6 +230,67 @@ export function codexHookInventoryVerdict(
   return { ok: true };
 }
 
+/**
+ * The Orchestrator preset's form of the rule (#1473). The preset's isolation promises that NO user
+ * hook runs, trusted or not, so for such a launch every enabled hook that is not the runner's is
+ * disqualifying — including ones the person has trusted, which the ordinary verdict admits.
+ */
+export function codexHookIsolationVerdict(
+  entries: readonly CodexHookEntry[],
+  guardCommand: string,
+): CodexHookInventoryVerdict {
+  const base = codexHookInventoryVerdict(entries, guardCommand);
+  if (!base.ok) return base;
+  const foreign = entries.filter((entry) => entry.command !== guardCommand && entry.enabled);
+  if (foreign.length > 0) {
+    return {
+      ok: false,
+      reason: `${foreign.length} hook(s) the runner does not own would still be enabled beside the ` +
+        `guard in an Orchestrator launch: ${foreign.map((entry) => entry.key).join(", ")}`,
+    };
+  }
+  return { ok: true };
+}
+
+const CODEX_HOOK_STATE_OVERRIDE_PREFIX = "hooks.state=";
+
+/**
+ * A `-c` override that disables each named hook for this invocation only, leaving the user's
+ * configuration untouched (#1473). Measured on codex-cli 0.155.1: the INLINE TABLE spelling
+ * `hooks.state={"<key>"={enabled=false}}` turns the hook off in `hooks/list`, while the dotted
+ * spelling `hooks.state."<key>".enabled=false` is accepted and changes nothing, because the key
+ * itself contains dots. Whether it took effect is read back from the inventory, never assumed.
+ */
+export function codexHookStateDisableOverride(keys: readonly string[]): string {
+  return `${CODEX_HOOK_STATE_OVERRIDE_PREFIX}{${keys.map((key) => `${tomlString(key)}={enabled=false}`).join(",")}}`;
+}
+
+/** Codex's `--disable hooks`, in every spelling the preset or a person could have written. */
+function disablesCodexHooksFeature(argument: string, next: string | undefined): number {
+  if (argument === "--disable" && next === "hooks") return 2;
+  if (argument === "--disable=hooks") return 1;
+  return 0;
+}
+
+/**
+ * Drop the preset's `--disable hooks` so the guard hook can load (#1473). Only the launch that
+ * proves, through the inventory, that the runner's hook is the sole enabled one may use the
+ * result; every other launch keeps the flag exactly as the preset wrote it.
+ */
+export function withoutCodexHooksFeatureDisable(args: readonly string[]): string[] {
+  const { options, rest } = splitAtOptionTerminator(args);
+  const result: string[] = [];
+  for (let index = 0; index < options.length; index++) {
+    const consumed = disablesCodexHooksFeature(options[index]!, options[index + 1]);
+    if (consumed > 0) {
+      index += consumed - 1;
+      continue;
+    }
+    result.push(options[index]!);
+  }
+  return [...result, ...rest];
+}
+
 export interface CodexHookInventoryProbe {
   command: string;
   args: string[];

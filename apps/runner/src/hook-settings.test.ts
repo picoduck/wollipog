@@ -773,6 +773,34 @@ test("the guard is provisioned for the Orchestrator preset, which manager hooks 
   assert.equal(guardEntries(live).length, 1);
 }));
 
+test("the Claude Orchestrator preset is guarded over an empty list with its sources emptied, and was not with its old inline document (#1473)", () => temp((dir) => {
+  // What the preset writes since #1473: `--setting-sources ""` and no settings document of its own.
+  // Measured on claude 2.1.278, that keeps every user hook out while the runner's inline document
+  // still runs — so the guard is provisioned exactly as for any other launch, empty list included.
+  const current = provisionGuarded(dir,
+    { args: ["--setting-sources", ""], config: { permissionMode: "orchestrator" } },
+    { managedWorktreeProtections: [] });
+  const { file, live } = settingsOf(dir);
+  assert.deepEqual(current.args, ["--setting-sources", "", "--settings", file]);
+  assert.equal(guardEntries(live).length, 1);
+  assert.equal(live.hooks?.PostToolUse, undefined, "the preset still carries no manager hooks");
+
+  // Before #1473 the preset ended with `--settings '{"disableAllHooks":true}'`: a user-supplied
+  // settings argument as far as provisioning can tell, so with nothing to protect the guard was
+  // skipped to avoid shadowing it — and where it was provisioned, that document switched it off.
+  removeClaudeHookFiles("sess_hook_1", dir);
+  const logs: string[] = [];
+  const legacy = guardedSpec({
+    args: ["--setting-sources", "", "--settings", '{"disableAllHooks":true}'],
+    config: { permissionMode: "orchestrator" },
+  });
+  resetClaudeGuardState();
+  provisionClaudeHooks(legacy, { ...config, managedWorktreeProtections: [], verifyGuardLaunch: guardVerifies },
+    (line) => logs.push(line), host(dir));
+  assert.equal(legacy.args.includes(file), false, "no guard document was injected beside the inline one");
+  assert.ok(logs.some((line) => line.includes("would shadow the agent's own --settings")));
+}));
+
 test("the guard and the manager hooks share one settings file when both are on", () => temp((dir) => {
   const launch = provisionGuarded(dir);
   const { file, live } = settingsOf(dir);

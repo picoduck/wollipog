@@ -365,7 +365,10 @@ test("native orchestrator flags enable bounded planning while disabling implemen
   assert.ok(claude.includes("--setting-sources"), "use the option recognized by the Claude CLI");
   assert.equal(claude[claude.indexOf("--setting-sources") + 1], "");
   assert.equal(claude.includes("--settings-sources"), false, "the historical spelling prevents launch");
-  assert.ok(claude.includes('{"disableAllHooks":true}'));
+  // #1473: `--setting-sources ""` alone keeps every user hook out (measured on claude 2.1.278), and
+  // `disableAllHooks` would stop the runner's own managed-worktree guard with them.
+  assert.equal(claude.includes("--settings"), false, "the preset injects no settings document of its own");
+  assert.equal(claude.join(" ").includes("disableAllHooks"), false);
   const codex = orchestratorLaunchArgs("codex", mcp, ["/repo"]);
   const pi = orchestratorLaunchArgs("pi", mcp, ["/repo"]);
   for (const flag of ["--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files"]) {
@@ -869,6 +872,29 @@ test("Integration Isolation changes only the integration surface of the additive
         ...additiveOrchestratorLaunchArgs(driver, mcp, projects, true)],
       isolated, `${driver}: provisioning an already-provisioned launch is idempotent`);
   }
+});
+
+test("the preset strip keeps the runner-owned Claude settings document and drops every other --settings (#1473)", () => {
+  const runnerOwned = "/data/hooks/k/sess_1.settings.json";
+  const keep = (value: string) => value === runnerOwned;
+  const persisted = [
+    "--model", "opus",
+    "--settings", '{"disableAllHooks":true}',
+    "--settings", runnerOwned,
+    "--settings=/home/u/own.json",
+    "--setting-sources", "",
+    "--strict-mcp-config",
+  ];
+  assert.deepEqual(stripOrchestratorLaunchArgs(persisted, "claude-code", keep),
+    ["--model", "opus", "--settings", runnerOwned],
+    "the guard's document survives the resume strip; the historical inline document does not");
+  assert.deepEqual(stripOrchestratorLaunchArgs(["--settings=" + runnerOwned, "--tools", "Read"], "claude-code", keep),
+    ["--settings=" + runnerOwned], "the inline spelling is kept as written");
+  assert.deepEqual(stripOrchestratorLaunchArgs(persisted, "claude-code"),
+    ["--model", "opus"], "without a keep predicate every --settings is stripped, as before");
+  // Re-provisioning is idempotent around the kept document.
+  const once = [...stripOrchestratorLaunchArgs(persisted, "claude-code", keep), ...orchestratorLaunchArgs("claude-code", mcp, ["/repo"])];
+  assert.deepEqual([...stripOrchestratorLaunchArgs(once, "claude-code", keep), ...orchestratorLaunchArgs("claude-code", mcp, ["/repo"])], once);
 });
 
 test("Integration Isolation uses the measured per-harness integration levers", () => {

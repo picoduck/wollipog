@@ -204,8 +204,10 @@ test("orchestrator TUIs rebuild credentials and restrictions without mutating du
         assert.ok(launch.args.includes("--strict-mcp-config"));
         assert.match(launch.args[launch.args.indexOf("--tools") + 1] ?? "", /Read/);
         assert.ok(launch.args.includes("--setting-sources"));
-        // #1378: the preset's inline hook-disabling document is not a file path and must survive.
-        assert.equal(launch.args[launch.args.lastIndexOf("--settings") + 1], '{"disableAllHooks":true}');
+        // #1473: the preset no longer disables hooks through a settings document of its own; the
+        // guard's runner-owned document (none here: the stub provisions no guard) is the only one.
+        assert.equal(launch.args.includes("--settings"), false);
+        assert.equal(launch.args.join(" ").includes("disableAllHooks"), false);
       } else {
         assert.equal(probes, 1);
         const launchText = launch.args.join(" ");
@@ -329,11 +331,14 @@ test("a TUI launch keeps an inline --settings JSON document and still drops a mi
     );
     assert.deepEqual(launch?.args, ["--settings", inline, "--settings", " { } "]);
 
+    // The preset carried that inline document until #1473; a persisted launch from then still
+    // replays through here unchanged, and the current preset has no --settings to drop.
     const preset = orchestratorLaunchArgs("claude-code", {
       command: "runner", args: ["--agent-control-mcp"], env: {},
     }, ["/repo"]);
-    assert.deepEqual(preset.slice(-2), ["--settings", inline]);
-    assert.deepEqual(agentTuiLaunch(meta({ driver: "claude-code", args: preset }), { platform: "linux" })?.args, preset);
+    assert.equal(preset.includes("--settings"), false);
+    assert.deepEqual(agentTuiLaunch(meta({ driver: "claude-code", args: [...preset, "--settings", inline] }), { platform: "linux" })?.args,
+      [...preset, "--settings", inline]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
