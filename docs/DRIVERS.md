@@ -592,9 +592,10 @@ harmless because Claude never reaches the control channel for a command the hook
   repeated runs:
   - A `PreToolUse` hook supplied through `--settings` DOES run for the Bash calls a subagent makes.
     Every subagent Bash call was hooked; none was missed. Measured both with a bare
-    `"matcher": "Bash"` and with the alternation the runner actually writes
-    (`MANAGED_WORKTREE_GUARD_MATCHER`, `Bash|Edit|MultiEdit|Write|Read|NotebookEdit|Grep|Glob`);
-    the two behaved identically, so the recorded result is the production configuration's.
+    `"matcher": "Bash"` and with the alternation the runner writes (`MANAGED_WORKTREE_GUARD_MATCHER`,
+    `Bash|Edit|MultiEdit|Write|Read|NotebookEdit|Grep|Glob` when this was measured; #1437 has since
+    added Codex's `apply_patch`, which Claude has no tool by the name of); the two behaved
+    identically, so the recorded result is the production configuration's.
   - The payload has the same shape as a top-level one and adds `agent_id` and `agent_type`
     (`"general-purpose"` here), which is how a subagent's call can be told apart in the hook. The
     full key set observed was `agent_id`, `agent_type`, `cwd`, `effort`, `hook_event_name`,

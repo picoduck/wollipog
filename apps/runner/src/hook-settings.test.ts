@@ -747,7 +747,7 @@ test("the guard is provisioned when manager hooks are DISABLED", () => temp((dir
   const guards = guardEntries(live);
   assert.equal(guards.length, 1, "exactly one guard entry");
   assert.deepEqual(guards[0]!.matcher!.split("|").sort(),
-    ["Bash", "Edit", "Glob", "Grep", "MultiEdit", "NotebookEdit", "Read", "Write"]);
+    ["Bash", "Edit", "Glob", "Grep", "MultiEdit", "NotebookEdit", "Read", "Write", "apply_patch"]);
   assert.ok(guards[0]!.hooks[0]!.args.includes("--protections"));
   assert.equal(live.hooks?.PostToolUse, undefined, "no manager hooks came along");
   assert.equal(live.env?.MANAGER_TOKEN_FILE, undefined, "and no credential reference");
