@@ -349,6 +349,38 @@ test("a stale runner override is replaced, never duplicated, and a later user ov
   });
 });
 
+test("guard flags go before an option terminator, and a prompt after it is never read as a flag (review CR-2.2)", async () => {
+  await withDir(async (dir) => {
+    const harness: Harness = { probes: [], logs: [] };
+    const launch = await prepareAgentTuiLaunch(
+      meta({ args: ["-c", "a=1", "--", "--disable=hooks please"] }),
+      dependencies(dir, {}, harness),
+    );
+    assert.ok(launch);
+    const terminator = launch.args.indexOf("--");
+    assert.deepEqual(launch.args.slice(terminator), ["--", "--disable=hooks please"]);
+    const override = overrideArgument(launch.args)!;
+    assert.ok(launch.args.indexOf(override) < terminator);
+    assert.ok(launch.args.indexOf(CODEX_HOOK_TRUST_BYPASS_FLAG) < terminator);
+    assert.ok(codexGuardArgsActive(launch.args, override));
+    // The prompt text is not replayed into the probe as an option.
+    assert.deepEqual(harness.probes[0]!.args, ["app-server", "-c", "a=1", "-c", override]);
+    // A guard flag that only appears after the terminator is a prompt, not a guard.
+    assert.equal(codexGuardArgsActive(["--", "-c", override, CODEX_HOOK_TRUST_BYPASS_FLAG], override), false);
+  });
+});
+
+test("remote and Codex-worktree launches cannot be probed locally and are refused (review CR-2.1)", async () => {
+  await withDir(async (dir) => {
+    for (const args of [["--remote", "ws://127.0.0.1:9"], ["--remote=ws://127.0.0.1:9"], ["--worktree"]]) {
+      await assert.rejects(
+        prepareAgentTuiLaunch(meta({ args }), dependencies(dir)),
+        /runs the session somewhere the local inventory probe cannot see/u,
+      );
+    }
+  });
+});
+
 test("the override is a TOML inline table naming the quoted sidecar command", () => {
   const launch = { command: "/usr/bin/node", args: ["cli.ts", MANAGED_WORKTREE_GUARD_MODE, "--protections", "/h/it's here.json"] };
   const override = codexGuardConfigOverride(launch);

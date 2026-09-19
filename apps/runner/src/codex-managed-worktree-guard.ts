@@ -69,6 +69,11 @@ const CODEX_FEATURE_FLAGS: ReadonlySet<string> = new Set(["--enable", "--disable
  * a profiled launch is treated as un-enumerable rather than enumerated incorrectly.
  */
 const CODEX_PROFILE_FLAGS: ReadonlySet<string> = new Set(["-p", "--profile"]);
+/**
+ * `--remote` attaches the TUI to another app-server, whose hooks are its own, and `--worktree` runs
+ * the session in a new Codex-made worktree; a local probe describes neither.
+ */
+const CODEX_UNPROBEABLE_FLAGS: ReadonlySet<string> = new Set(["--remote", "--worktree"]);
 /** `-C`/`--cd` moves the directory Codex resolves project-scoped hooks from. */
 const CODEX_CWD_FLAGS: ReadonlySet<string> = new Set(["-C", "--cd"]);
 /** Trust states under which Codex runs an enabled hook without the invocation-wide bypass. */
@@ -116,17 +121,29 @@ function declaresPreToolUseHooks(argument: string): boolean {
  * runner-owned Claude settings file is recognised by declaring the guard.
  */
 export function withoutCodexGuardArgs(args: readonly string[]): string[] {
+  const { options, rest } = splitAtOptionTerminator(args);
   const result: string[] = [];
-  for (let index = 0; index < args.length; index++) {
-    const value = args[index + 1];
-    if (CODEX_CONFIG_FLAGS.has(args[index]!) && value !== undefined &&
+  for (let index = 0; index < options.length; index++) {
+    const value = options[index + 1];
+    if (CODEX_CONFIG_FLAGS.has(options[index]!) && value !== undefined &&
         value.startsWith(CODEX_GUARD_OVERRIDE_PREFIX) && value.includes(MANAGED_WORKTREE_GUARD_MODE)) {
       index += 1;
       continue;
     }
-    result.push(args[index]!);
+    result.push(options[index]!);
   }
-  return result;
+  return [...result, ...rest];
+}
+
+/**
+ * Everything after a `--` is positional (a prompt), never an option: the guard's flags must go
+ * before it, and nothing after it is read as a flag.
+ */
+function splitAtOptionTerminator(args: readonly string[]): { options: string[]; rest: string[] } {
+  const terminator = args.indexOf("--");
+  return terminator < 0
+    ? { options: [...args], rest: [] }
+    : { options: args.slice(0, terminator), rest: args.slice(terminator) };
 }
 
 /**
@@ -139,9 +156,10 @@ export function codexGuardLaunchArgs(
   args: readonly string[],
   override: string,
 ): string[] {
-  const result = [...withoutCodexGuardArgs(args), "-c", override];
+  const { options, rest } = splitAtOptionTerminator(withoutCodexGuardArgs(args));
+  const result = [...options, "-c", override];
   if (!result.includes(CODEX_HOOK_TRUST_BYPASS_FLAG)) result.push(CODEX_HOOK_TRUST_BYPASS_FLAG);
-  return result;
+  return [...result, ...rest];
 }
 
 /**
@@ -151,13 +169,14 @@ export function codexGuardLaunchArgs(
  * replaces it — and the trust bypass has to be there, without which Codex skips the hook silently.
  */
 export function codexGuardArgsActive(args: readonly string[], override: string): boolean {
+  const { options } = splitAtOptionTerminator(args);
   let last = -1;
-  for (let index = 0; index < args.length; index++) {
-    if (declaresPreToolUseHooks(args[index]!)) last = index;
+  for (let index = 0; index < options.length; index++) {
+    if (declaresPreToolUseHooks(options[index]!)) last = index;
   }
   if (last < 1) return false;
-  return args[last] === override && CODEX_CONFIG_FLAGS.has(args[last - 1]!) &&
-    args.includes(CODEX_HOOK_TRUST_BYPASS_FLAG);
+  return options[last] === override && CODEX_CONFIG_FLAGS.has(options[last - 1]!) &&
+    options.includes(CODEX_HOOK_TRUST_BYPASS_FLAG);
 }
 
 export interface CodexHookEntry {
@@ -238,9 +257,14 @@ export function codexHookInventoryProbe(
 ): CodexHookInventoryProbe {
   const replayed: string[] = [];
   let probeCwd = cwd;
-  const args = withoutCodexGuardArgs(launch.args);
+  const { options: args } = splitAtOptionTerminator(withoutCodexGuardArgs(launch.args));
   for (let index = 0; index < args.length; index++) {
     const argument = args[index]!;
+    if (CODEX_UNPROBEABLE_FLAGS.has(argument) || /^--(?:remote|worktree)=/u.test(argument)) {
+      throw new Error(
+        `${argument.split("=")[0]} runs the session somewhere the local inventory probe cannot see`,
+      );
+    }
     if (CODEX_PROFILE_FLAGS.has(argument) || /^--profile=/u.test(argument) || /^-p./u.test(argument)) {
       throw new Error("a Codex profile may declare hooks that the inventory probe cannot enumerate");
     }

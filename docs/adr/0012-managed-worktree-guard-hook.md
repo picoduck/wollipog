@@ -357,7 +357,8 @@ control-channel veto keeps reading the live inventory.
   inventory (`--disable hooks`, a changed config schema, a quoting mistake) is a guard that would
   never have run. Enumeration that fails, times out, or reports a hook discovery error refuses;
   so does a launch carrying a
-  `--profile`, which may declare hooks and which `app-server` cannot replay; so do WSL/container
+  `--profile`, which may declare hooks and which `app-server` cannot replay, or a `--remote` or
+  `--worktree`, which run the session where a local probe cannot see; so do WSL/container
   contexts, non-host targets, and Windows, where how Codex runs a hook command was not measured.
   A Codex session that owns no runner-created worktree opens exactly as before: nothing is
   written and no probe runs.
