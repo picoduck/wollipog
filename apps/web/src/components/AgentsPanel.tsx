@@ -435,11 +435,16 @@ export function AgentsPanel(props: Props) {
     // evidence it was chasing unspent, or its pages are never selected again and the panel keeps
     // showing what it failed to re-read.
     refreshedTo: ReadonlyMap<string, string>,
-    sweepDue: boolean,
+    idleTier: boolean,
   ) => {
     const key = `${session.id}:${session.eventEpoch ?? 0}:refresh:${progress}`;
     if (registryRequest.current === key) return;
     registryRequest.current = key;
+    // Counted only once the refresh is accepted: a callback deduplicated against the same refresh
+    // still in flight reads nothing, and counting it could let the Nth idle refresh pass unswept.
+    // Only the idle tier counts, so a burst of roster changes on the 1 s tier never becomes sweeps.
+    const sweepDue = idleTier &&
+      (idleRefreshes.current = idleRefreshes.current + 1) % REGISTRY_SWEEP_EVERY_IDLE_REFRESHES === 0;
     lastRegistryRefresh.current = Date.now();
     setRegistryLoading(true);
     const held = registryRef.current ?? [];
@@ -514,13 +519,9 @@ export function AgentsPanel(props: Props) {
         // request slot away from the page load still in flight.
         if (remaining() > 0) return arm();
         refreshedRosterKey.current = rosterKey;
-        // Only the idle tier counts toward the backstop, so a burst of roster changes on the 1 s
-        // tier never turns into full sweeps.
-        const sweepDue = !rosterChanged &&
-          (idleRefreshes.current = idleRefreshes.current + 1) % REGISTRY_SWEEP_EVERY_IDLE_REFRESHES === 0;
         refreshRegistry(progressKey,
           changedRosterIds(refreshedFingerprints.current, agentFingerprints), loadedAgentIds,
-          agentFingerprints, sweepDue);
+          agentFingerprints, !rosterChanged);
       }, remaining());
     };
     arm();
