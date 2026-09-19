@@ -6,6 +6,8 @@ import {
   CONTROL_PLANE_SERVICE,
   isControlPlaneService,
   isDurableSessionCommandErrorCode,
+  isTerminalDurableDeliveryState,
+  type DurableDeliveryState,
   LEGACY_CONTROL_PLANE_SERVICE,
   LEGACY_POLICY_HOOK_POLL_CAPABILITY_HEADER,
   POLICY_HOOK_POLL_CAPABILITY_HEADER,
@@ -113,6 +115,31 @@ test("durable session command error-code validation accepts protocol values and 
   assert.equal(isDurableSessionCommandErrorCode("UNKNOWN_CODE"), false);
   assert.equal(isDurableSessionCommandErrorCode("toString"), false, "prototype properties are not codes");
   assert.equal(isDurableSessionCommandErrorCode(null), false);
+});
+
+/** Every member of the union, so adding one without extending this list fails to typecheck here as
+ * well as against the classification record the predicate reads. */
+const DURABLE_DELIVERY_STATES = [
+  "pending",
+  "queued",
+  "failed",
+  "uncertain",
+] as const satisfies readonly DurableDeliveryState[];
+
+test("terminal durable delivery covers exactly the settled states", () => {
+  const classified = Object.fromEntries(
+    DURABLE_DELIVERY_STATES.map((state) => [state, isTerminalDurableDeliveryState(state)]),
+  );
+  assert.deepEqual(classified, {
+    // Delivery may still run: pending work the user can cancel or wait out.
+    pending: false,
+    queued: false,
+    // Delivery has stopped: a settled receipt, dismissible and never pending work.
+    failed: true,
+    uncertain: true,
+  });
+  assert.equal(isTerminalDurableDeliveryState(undefined), false,
+    "an entry with no durable delivery state is a live runner queue entry, not a receipt");
 });
 
 test("control-plane discovery accepts both service markers while emission uses Wollipog", () => {

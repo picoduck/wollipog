@@ -23,6 +23,7 @@ import {
   externalizeSessionEventPayload,
 } from "./event-payloads.js";
 import {
+  isTerminalDurableDeliveryState,
   EVENT_PAYLOAD_CHUNK_BYTES,
   EVENT_PAYLOAD_PREVIEW_BYTES,
   HUMAN_ONLY_PARENT_CONTROL_POLICY,
@@ -17144,7 +17145,7 @@ export class ControlPlaneDb {
           text: command.text.length > 500 ? `${command.text.slice(0, 500)}…` : command.text,
           hasImages: Boolean(command.images?.length),
           steerable: false,
-          steerDisabledReason: durableDeliveryState === "failed" || durableDeliveryState === "uncertain"
+          steerDisabledReason: isTerminalDurableDeliveryState(durableDeliveryState)
             ? (row.error ?? "Durable delivery did not complete.")
             : "Waiting for durable runner admission.",
           durableDeliveryState,

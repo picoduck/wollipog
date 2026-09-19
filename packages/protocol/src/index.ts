@@ -4784,6 +4784,26 @@ export interface BackgroundDeliveryView {
   watchdogState?: BackgroundDeliveryWatchdogState;
 }
 
+export type DurableDeliveryState = "pending" | "queued" | "failed" | "uncertain";
+
+/** Terminal delivery has already stopped: the entry is a settled receipt, retained only so it can
+ * be dismissed. It is never pending work, can be neither cancelled nor waited out, and never
+ * corresponds to a prompt the runner still holds. */
+const TERMINAL_DURABLE_DELIVERY_STATES = {
+  pending: false,
+  queued: false,
+  failed: true,
+  uncertain: true,
+} as const satisfies Record<DurableDeliveryState, boolean>;
+
+/** The single definition of a terminal delivery receipt, shared by the control plane's queue
+ * projection and overlay and by the web client's busy gates and composer row. The exhaustive record
+ * above makes adding a delivery state fail typechecking until it is classified here, rather than
+ * defaulting to "not terminal" at every call site independently. */
+export function isTerminalDurableDeliveryState(state: DurableDeliveryState | undefined): boolean {
+  return state !== undefined && TERMINAL_DURABLE_DELIVERY_STATES[state];
+}
+
 /** A prompt waiting behind the running turn (the runner serializes turns one at a time). Ephemeral
  * runner state surfaced to the UI so queued messages are visible + individually cancelable. */
 export interface QueuedPromptView {
@@ -4798,7 +4818,7 @@ export interface QueuedPromptView {
   steerable?: boolean;
   steerDisabledReason?: string;
   /** Control-plane durable delivery state before the runner exposes its live queue identity. */
-  durableDeliveryState?: "pending" | "queued" | "failed" | "uncertain";
+  durableDeliveryState?: DurableDeliveryState;
   durableDeliveryError?: string;
   /** True only when this entry came from the current runner's live in-memory queue. */
   liveQueueObserved?: boolean;
