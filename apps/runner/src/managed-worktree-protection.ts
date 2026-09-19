@@ -1328,27 +1328,33 @@ export function parseApplyPatchPaths(patch: string): string[] | "malformed" {
 }
 
 /**
- * Trailing padding a header's filename may lose before the file is opened.
+ * Trailing padding a header's filename loses before the file is opened.
  *
- * The union of two trim sets, deliberately. JavaScript's own (`\s`) is what `trimEnd` removes and
- * includes U+FEFF; Unicode `White_Space` adds U+0085, which `trimEnd` leaves and which Rust — and
- * so codex-cli — removes. Neither set is authoritative here, so the guard judges the verbatim
- * spelling AND the maximally stripped one: a character wrongly included only adds a second
- * reading, while one wrongly left out drops the reading codex would actually act on.
+ * Unicode `White_Space` — which is exactly what Rust's `str::trim_end` removes, and so what
+ * codex-cli removes. Deliberately NOT JavaScript's `trimEnd`, whose set differs on precisely two
+ * code points, both of them measured here. U+0085 is `White_Space` but not JavaScript whitespace,
+ * and codex strips it: judging only `trimEnd`'s result let `*** Delete File: <worktree>/.git<U+0085>`
+ * read as an ordinary workspace path while codex resolved it to the protected gitdir pointer.
+ * U+FEFF is JavaScript whitespace but not `White_Space`, and codex keeps it: stripping it would
+ * refuse `*** Add File: .git<U+FEFF>`, an ordinary workspace file. Those two are the whole
+ * disagreement, so this set is pinned by measurement rather than chosen for safety margin.
  */
-const PATCH_TRAILING_PAD = /[\p{White_Space}\s]+$/u;
+const PATCH_TRAILING_PAD = /\p{White_Space}+$/u;
 
 /**
  * Where a patch header's filename can land.
  *
  * The grammar takes the rest of the line verbatim, but codex-cli does not. Measured at 0.155.1 by
- * driving live calls and reading the bytes of the files created: `*** Add File: trailing.txt `
- * created `trailing.txt` and `*** Add File: nel.txt<U+0085>` created `nel.txt`, so trailing padding
- * names a second location — and `trimEnd` alone would have missed the second one. `*** Add File:
- * bom.txt<U+FEFF>` created `bom.txt<U+FEFF>`, so the trim set is not JavaScript's either. And
- * `*** Add File:  leading.txt` created ` leading.txt`, so a LEADING space is part of the name:
- * stripping it would refuse `*** Add File:  .git/x`, an ordinary workspace file whose trimmed
- * spelling only looks like Git administration.
+ * driving live calls and reading the bytes of the files created:
+ *
+ *     *** Add File: trailing.txt      ->  trailing.txt
+ *     *** Add File: nel.txt<U+0085>   ->  nel.txt
+ *     *** Add File: bom.txt<U+FEFF>   ->  bom.txt<U+FEFF>
+ *     *** Add File:  leading.txt      ->   leading.txt
+ *
+ * So a trailing pad names a SECOND location, which is judged alongside the verbatim one, while a
+ * LEADING space is part of the name: stripping it would refuse `*** Add File:  .git/x`, an
+ * ordinary workspace file whose trimmed spelling only looks like Git administration.
  */
 function patchPathSpellings(filename: string): string[] {
   const unpadded = filename.replace(PATCH_TRAILING_PAD, "");

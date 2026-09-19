@@ -178,12 +178,13 @@ the same way — a throwaway `CODEX_HOME` against a throwaway repository — by 
   contract promises; the guard now names `apply_patch` outright.
 - `apply_patch` invoked from the SHELL (`apply_patch <<'PATCH' … PATCH`) arrives as an ordinary
   `Bash` call with that whole command as its text, which the Bash classifier already judges.
-- A header's filename is not taken quite verbatim, and the trim set is neither JavaScript's nor
-  exactly guessable. Reading back the bytes of the files created: `*** Add File: trailing.txt `
+- A header's filename is not taken quite verbatim, and the trim set is Unicode `White_Space` —
+  Rust's, not JavaScript's. Reading back the bytes of the files created: `*** Add File: trailing.txt `
   created `trailing.txt`; `*** Add File: nel.txt<U+0085>` created `nel.txt`, though JavaScript's
   `trimEnd` leaves U+0085 alone; and `*** Add File: bom.txt<U+FEFF>` created `bom.txt<U+FEFF>`,
-  though `trimEnd` would have stripped it. `*** Add File:  leading.txt` created ` leading.txt`, so
-  a leading space is part of the name.
+  though `trimEnd` would have stripped it. Those two code points are the whole disagreement between
+  the sets. `*** Add File:  leading.txt` created ` leading.txt`, so a leading space is part of the
+  name.
 - End to end with the real sidecar: a patch naming a file inside the hook state directory was
   refused with `Command blocked by PreToolUse hook:` and the managed-worktree refusal, and the file
   was not created; against the same payload the pre-#1437 sidecar wrote it. Ordinary edits inside
@@ -461,17 +462,18 @@ control-channel veto keeps reading the live inventory.
 
   Two things the cross-model review of #1437 turned up, both measured rather than argued:
 
-  - codex-cli does not take a header's filename quite verbatim, and its trim set is its own. At
-    0.155.1, `*** Add File: trailing.txt ` created `trailing.txt`, `*** Add File: nel.txt<U+0085>`
-    created `nel.txt`, `*** Add File: bom.txt<U+FEFF>` created `bom.txt<U+FEFF>`, and
-    `*** Add File:  leading.txt` created ` leading.txt`. So a trailing pad names a second location
-    and both readings are judged — and the pad is stripped with the UNION of JavaScript's trim set
-    and Unicode `White_Space`, because `trimEnd` alone leaves U+0085, which codex removes: a
-    `*** Delete File: <worktree>/.git<U+0085>` would otherwise have read as an ordinary workspace
-    path and deleted the protected gitdir pointer. A character wrongly included in that union only
-    adds a second reading; one wrongly left out drops the reading codex acts on. A LEADING space,
-    by contrast, is part of the name: stripping it would refuse `*** Add File:  .git/x`, an
-    ordinary workspace file whose trimmed spelling only looks like Git administration.
+  - codex-cli does not take a header's filename quite verbatim, and its trim set is Rust's, not
+    JavaScript's. At 0.155.1, `*** Add File: trailing.txt ` created `trailing.txt`,
+    `*** Add File: nel.txt<U+0085>` created `nel.txt`, `*** Add File: bom.txt<U+FEFF>` created
+    `bom.txt<U+FEFF>`, and `*** Add File:  leading.txt` created ` leading.txt`. So a trailing pad
+    names a second location, which is judged alongside the verbatim one, and the pad is Unicode
+    `White_Space` — exactly what Rust's `str::trim_end` removes. The two sets differ on precisely
+    two code points and both were measured: `trimEnd` leaves U+0085, which codex strips, so
+    `*** Delete File: <worktree>/.git<U+0085>` read as an ordinary workspace path while codex
+    resolved it to the protected gitdir pointer; and `trimEnd` strips U+FEFF, which codex keeps, so
+    using it would have refused `*** Add File: .git<U+FEFF>`, an ordinary workspace file. A LEADING
+    space is part of the name either way: stripping it would refuse `*** Add File:  .git/x`, whose
+    trimmed spelling only looks like Git administration.
   - The shared physical-path resolver gave up quietly. It climbs to the nearest existing ancestor
     and appends the not-yet-existing remainder, bounded at 256 steps, and on exhaustion returned the
     spelling unresolved — which a classifier then compares textually. A spelling like

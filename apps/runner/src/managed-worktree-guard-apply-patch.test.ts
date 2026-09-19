@@ -276,6 +276,16 @@ test("a trailing-padded apply_patch header is judged by both spellings, a leadin
     ),
     GUARD_STATE_REFUSAL,
   );
+  // U+FEFF is JavaScript whitespace but NOT Unicode `White_Space`, and codex keeps it: the file
+  // it creates is an ordinary one whose name merely ends in a zero-width no-break space. Stripping
+  // it — as `trimEnd()` and as a union of both sets would — refuses normal editing.
+  assert.equal(
+    applyPatchTargetsProtected(
+      patch(`*** Add File: ${WORKTREE}/.git\ufeff`, "+x"), WORKTREE, directory, PROTECTIONS,
+    ),
+    null,
+    "codex keeps U+FEFF, so this names an ordinary workspace file",
+  );
   // A file whose name begins with a space is an ordinary, if odd, workspace file: codex creates
   // `<cwd>/ .git/probe`, which is nothing to do with the worktree's Git administration.
   assert.equal(
