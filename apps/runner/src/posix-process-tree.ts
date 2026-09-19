@@ -433,14 +433,10 @@ export class PosixProcessBoundary {
     }
   }
 
-  private async fallbackRootGroupAfterEnumerationFailure(liftEarlyFreeze: () => void): Promise<void> {
-    // Preserve main's dependency-free TERM/KILL path.
-    const delivered = this.signalRootGroupUnverified("SIGTERM");
-    // A group frozen before enumeration cannot act on that SIGTERM until it is resumed, and the
-    // resume has to happen here rather than after the escalation sleep below: a resume deferred
-    // across two seconds can land on a PGID the kernel has since handed to somebody else.
-    liftEarlyFreeze();
-    if (!delivered) return;
+  private async fallbackRootGroupAfterEnumerationFailure(): Promise<void> {
+    // Preserve main's dependency-free TERM/KILL path. Callers lift any pre-enumeration freeze
+    // before reaching here, so this SIGTERM is not delivered to a group that cannot act on it.
+    if (!this.signalRootGroupUnverified("SIGTERM")) return;
     await this.sleep(2_000);
     this.signalRootGroupUnverified("SIGKILL");
   }
@@ -475,21 +471,29 @@ export class PosixProcessBoundary {
     // observation true immediately and closes the fork window the discovery passes exist to close.
     let outstandingFreeze = this.signalRootGroupUnverified("SIGSTOP");
 
-    /** Lift the pre-enumeration freeze, at most once, and never long after it was delivered.
+    /** Lift the pre-enumeration freeze, at most once, and only while the bare PGID is still
+     * provably this root's.
      *
-     * Not gated on `rootExited`, unlike every other bare-PID group signal, because the matching
-     * SIGSTOP already reached this PID's group: the resume repairs that rather than intruding
-     * somewhere new. That argument only survives while the two signals stay close together, so
-     * every caller lifts within the same phase as its own SIGTERM and never across a sleep — a
-     * resume deferred by seconds could reach a PGID the kernel has since reissued. `outstanding`
-     * also carries `signalRootGroupUnverified`'s own refusals, so a root PID of 0 or 1, or an
-     * already-reaped root, never reaches the send. */
-    const liftEarlyFreeze = (): void => {
+     * It is tempting to resume unconditionally, on the argument that the matching SIGSTOP already
+     * reached this PID's group so the SIGCONT only repairs it. That argument does not survive the
+     * root being reaped mid-attempt: a successful group stop proves a member existed, not that the
+     * root was among the live ones, and once Node has waited on the root the kernel may reissue
+     * the PGID to unrelated work that a stray SIGCONT would resume. So this shares
+     * `signalRootGroupUnverified`'s refusals — root PID 0 or 1, or an already-reaped root — and
+     * every caller lifts within the same phase as its own SIGTERM rather than across a sleep, so
+     * the resume follows the stop by microseconds in the overwhelmingly common case.
+     *
+     * When it does refuse, group members frozen here are resumed instead by identity, from the
+     * ownership snapshot, wherever the attempt holds one. An attempt that holds none failed
+     * outright and returns false, which keeps the boundary registered; the retry re-enumerates and
+     * signals survivors by proven identity. Leaving that narrow case to the retry is the
+     * deliberate trade: this file treats a recyclable numeric PGID as permanently unsafe after
+     * exit, and that rule outranks resuming promptly. */
+    const liftEarlyFreeze = (table?: PosixProcessTable): void => {
       if (!outstandingFreeze) return;
       outstandingFreeze = false;
-      try {
-        (this.testRuntime?.signal ?? globalThis.process.kill.bind(globalThis.process))(-this.rootPid, "SIGCONT");
-      } catch { /* already gone */ }
+      if (this.signalRootGroupUnverified("SIGCONT")) return;
+      if (table) for (const process of liveOwned(this.owned, table)) this.signal(process, table, "SIGCONT");
     };
 
     try {
@@ -503,7 +507,7 @@ export class PosixProcessBoundary {
     }
   }
 
-  private async terminateFrozenTree(liftEarlyFreeze: () => void): Promise<boolean> {
+  private async terminateFrozenTree(liftEarlyFreeze: (table?: PosixProcessTable) => void): Promise<boolean> {
     let table: PosixProcessTable | undefined;
     const frozen = new Map<number, PosixProcessIdentity>();
     try {
@@ -536,8 +540,10 @@ export class PosixProcessBoundary {
         for (const process of frozen.values()) this.signal(process, table, "SIGCONT");
         this.signalRootGroup(table, "SIGCONT");
       }
-      // The fallback lifts the early freeze immediately after its own SIGTERM, before it sleeps.
-      await this.fallbackRootGroupAfterEnumerationFailure(liftEarlyFreeze);
+      // Lift here, before the fallback's two-second escalation sleep rather than after it, so the
+      // resume never trails the stop by long enough for the PGID to be reissued.
+      liftEarlyFreeze(table);
+      await this.fallbackRootGroupAfterEnumerationFailure();
       return false;
     }
 
@@ -551,7 +557,7 @@ export class PosixProcessBoundary {
     // Lift here, in the same phase as the SIGTERM above, rather than leaving it to the backstop:
     // the graceful window below gives a TERM handler up to two seconds to unwind and it cannot
     // use them while stopped, and a resume deferred that long could reach a reissued PGID.
-    liftEarlyFreeze();
+    liftEarlyFreeze(table);
 
     const gracefulDeadline = this.now() + 2_000;
     while (this.now() < gracefulDeadline) {
