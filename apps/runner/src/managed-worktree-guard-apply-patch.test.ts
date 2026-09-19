@@ -234,10 +234,39 @@ test("a home-relative apply_patch header is expanded before the guard state is c
 });
 
 test("a trailing-padded apply_patch header is judged by both spellings, a leading space by neither", () => {
-  // Measured at codex-cli 0.155.1: `*** Add File: trailing.txt ` created `trailing.txt`, while
-  // `*** Add File:  leading.txt` created ` leading.txt`. So a trailing pad names a second location
-  // and both are judged — and a leading space is part of the name, never stripped.
+  // Measured at codex-cli 0.155.1 by reading the bytes of the files it created:
+  // `*** Add File: trailing.txt ` -> `trailing.txt`; `*** Add File: nel.txt<U+0085>` -> `nel.txt`;
+  // `*** Add File: bom.txt<U+FEFF>` -> `bom.txt<U+FEFF>`; `*** Add File:  leading.txt` ->
+  // ` leading.txt`. So trailing padding names a second location, the trim set is neither
+  // JavaScript's nor exactly Rust's, and a leading space is part of the name.
   const directory = join(homedir(), ".wollipog-test-data", "hooks");
+  // Padding only matters where the STRIPPED spelling is the protected location itself: a padded
+  // path beneath a protected directory is already inside it under the verbatim reading. So these
+  // name the worktree's own gitdir pointer and the hook directory itself.
+  for (const [why, pad] of [
+    ["an ordinary space, which both trim sets remove", " "],
+    // U+0085 is Unicode White_Space but NOT JavaScript whitespace: `trimEnd()` leaves it where
+    // codex removes it, so judging only `trimEnd`'s result let this exact spelling through.
+    ["U+0085, which codex removes and `trimEnd` does not", "\u0085"],
+    ["U+00A0", "\u00a0"],
+    ["a tab", "\t"],
+  ] as Array<[string, string]>) {
+    assert.equal(
+      applyPatchTargetsProtected(
+        patch(`*** Delete File: ${WORKTREE}/.git${pad}`), WORKTREE, directory, PROTECTIONS,
+      ),
+      MANAGED_WORKTREE_REFUSAL,
+      `${why}: the worktree's gitdir pointer`,
+    );
+    assert.equal(
+      applyPatchTargetsProtected(
+        patch(`*** Delete File: ~/.wollipog-test-data/hooks${pad}`), WORKTREE, directory, PROTECTIONS,
+      ),
+      GUARD_STATE_REFUSAL,
+      `${why}: the hook state directory itself`,
+    );
+  }
+  // And a padded path already beneath a protected directory is refused under either reading.
   assert.equal(
     applyPatchTargetsProtected(
       patch("*** Add File: ~/.wollipog-test-data/hooks/s1.protections.json  ", "+{}"),
@@ -246,7 +275,6 @@ test("a trailing-padded apply_patch header is judged by both spellings, a leadin
       PROTECTIONS,
     ),
     GUARD_STATE_REFUSAL,
-    "the location codex would actually write is inside the guard state",
   );
   // A file whose name begins with a space is an ordinary, if odd, workspace file: codex creates
   // `<cwd>/ .git/probe`, which is nothing to do with the worktree's Git administration.

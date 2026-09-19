@@ -1328,16 +1328,30 @@ export function parseApplyPatchPaths(patch: string): string[] | "malformed" {
 }
 
 /**
+ * Trailing padding a header's filename may lose before the file is opened.
+ *
+ * The union of two trim sets, deliberately. JavaScript's own (`\s`) is what `trimEnd` removes and
+ * includes U+FEFF; Unicode `White_Space` adds U+0085, which `trimEnd` leaves and which Rust — and
+ * so codex-cli — removes. Neither set is authoritative here, so the guard judges the verbatim
+ * spelling AND the maximally stripped one: a character wrongly included only adds a second
+ * reading, while one wrongly left out drops the reading codex would actually act on.
+ */
+const PATCH_TRAILING_PAD = /[\p{White_Space}\s]+$/u;
+
+/**
  * Where a patch header's filename can land.
  *
- * The grammar takes the rest of the line verbatim, but codex-cli does not: measured at 0.155.1,
- * `*** Add File: trailing.txt ` created `trailing.txt` while `*** Add File:  leading.txt` created
- * ` leading.txt`. So a trailing pad names a second location and is judged as well, and a LEADING
- * space is part of the name — trimming it would refuse `*** Add File:  .git/x`, an ordinary
- * workspace file whose trimmed spelling only looks like Git administration.
+ * The grammar takes the rest of the line verbatim, but codex-cli does not. Measured at 0.155.1 by
+ * driving live calls and reading the bytes of the files created: `*** Add File: trailing.txt `
+ * created `trailing.txt` and `*** Add File: nel.txt<U+0085>` created `nel.txt`, so trailing padding
+ * names a second location — and `trimEnd` alone would have missed the second one. `*** Add File:
+ * bom.txt<U+FEFF>` created `bom.txt<U+FEFF>`, so the trim set is not JavaScript's either. And
+ * `*** Add File:  leading.txt` created ` leading.txt`, so a LEADING space is part of the name:
+ * stripping it would refuse `*** Add File:  .git/x`, an ordinary workspace file whose trimmed
+ * spelling only looks like Git administration.
  */
 function patchPathSpellings(filename: string): string[] {
-  const unpadded = filename.trimEnd();
+  const unpadded = filename.replace(PATCH_TRAILING_PAD, "");
   return unpadded && unpadded !== filename ? [filename, unpadded] : [filename];
 }
 
