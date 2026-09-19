@@ -155,6 +155,119 @@ help and app-server schema (`codex app-server generate-json-schema`) and by runn
 - A sidecar that cannot start (a bare `--import tsx` resolved from the wrong directory) is shown as
   a failed hook and the command RUNS, exactly the fail-open hole described below for Claude.
 
+## Measurements (codex-cli 0.155.1, this machine, 2026-09-19)
+
+Can Codex's OWN sandbox deny the hook state directory in `provider` mode, where the runner does not
+sandbox the provider at all (#1336 slice 2)? Measured in a throwaway `CODEX_HOME` against a
+throwaway repository, with `codex sandbox` (which runs an arbitrary command under the resolved
+profile), the `app-server` `command/exec` method (which takes the same `sandboxPolicy` shape a turn
+does), and real `codex exec` and TUI turns. Every probe ran from a STRICT ANCESTOR of the denied
+directory, and every claim below has a paired control run without the deny entry.
+
+### The mechanism
+
+- Permission profiles are config, not a flag: `[permissions.<id>]` with `extends`, and
+  `[permissions.<id>.filesystem]` mapping an absolute path to `"read"`, `"write"`, or `"deny"`. One
+  is selected with `default_permissions = "<id>"`. `-P/--permission-profile` exists ONLY on
+  `codex sandbox`; `codex exec` and the TUI have no such flag.
+- Both keys can be supplied entirely on argv, as one `-c` each, so nothing has to be written into
+  the user's `config.toml`:
+  `-c 'permissions.<id>={extends=":workspace",filesystem={"<dir>"="deny"}}' -c 'default_permissions="<id>"'`.
+- Three built-in base profiles exist: `:read-only`, `:workspace`, `:danger-full-access`. Only the
+  first two can be extended — `extends = ":danger-full-access"` is a hard error ("cannot extend
+  unsupported built-in profile").
+
+### What a deny entry actually enforces
+
+Under both `:workspace` and `:read-only`, every one of these failed at the OS level, and every one
+of them succeeded in the paired control without the deny:
+
+`cat`, `python3 -c open()`, `head -c`, `ls`, `find -maxdepth 999`, `grep -r`, `rg`, `du -a`,
+`touch` inside, `mv` of the directory from its ancestor, and `rm -rf`. `git clean -dfx`, run from an
+ancestor Git repository that ignores the directory, reported `failed to remove vault/` and left it
+in place; the control run removed it. The classes #1334, #1390, and #1398 could not close by command
+text are therefore closed by the OS here, without the guard recognising the command.
+
+### The legacy sandbox silently WINS, and drops the profile
+
+This corrects the summary carried into this slice, which said Codex REFUSES to combine the legacy
+`sandbox_mode`/`sandboxPolicy` with a permission profile. It does not refuse. It accepts both and
+silently ignores the profile:
+
+- `codex exec -s workspace-write` with `default_permissions` set: the denied file was read
+  (`TOPSECRET`, exit 0). Without `-s`, the same prompt got `Permission denied`.
+- `app-server` `command/exec` with an explicit `sandboxPolicy` — `workspaceWrite`, `readOnly`, and
+  `dangerFullAccess` alike — read the file while the profile was the configured default. With
+  `sandboxPolicy` omitted, the same command was denied.
+
+A silent fail-open is worse than a refusal: nothing in the launch reports that the deny was
+dropped. Anything that wants the deny must stop sending the legacy policy AND verify the result
+rather than trusting that the configuration was accepted.
+
+A user's own `sandbox_mode` in `config.toml` does NOT defeat an argv `default_permissions` — the
+deny still held. Only an argv `-s`, an app-server `sandboxPolicy`, or
+`--dangerously-bypass-approvals-and-sandbox` defeats it.
+
+### The three legacy policies are the three built-ins
+
+`thread/start` reports both the `activePermissionProfile` and the legacy projection of it, so the
+equivalence can be read directly rather than inferred:
+
+| Configured | `activePermissionProfile` | Legacy `sandbox` projection |
+| --- | --- | --- |
+| nothing (Codex's own default) | `:workspace` | `workspaceWrite`, `writableRoots: []`, `networkAccess: false`, `excludeTmpdirEnvVar: false`, `excludeSlashTmp: false` |
+| `:read-only` | `:read-only` | `readOnly`, `networkAccess: false` |
+| `:workspace` | `:workspace` | `workspaceWrite` with the defaults above |
+| `:danger-full-access` | `:danger-full-access` | `dangerFullAccess` |
+| `:workspace` + a deny entry | the derived profile, `extends: ":workspace"` | unchanged from `:workspace` |
+
+Adding a deny entry does not move the projection, so the projection is lossy — which is exactly the
+property wanted here: the mode is carried unchanged and the deny rides alongside it.
+
+Non-default legacy options have profile equivalents: `network = { enabled = true }` projects to
+`networkAccess: true`, and a `deny` entry on `/tmp` reproduces `excludeSlashTmp` and
+`excludeTmpdirEnvVar` (plain `:workspace` left `/tmp`, `$TMPDIR`, and the cwd writable; with the
+deny, `/tmp` and `$TMPDIR` were both refused while the cwd stayed writable).
+
+### Hooks and MCP servers both run OUTSIDE the sandbox
+
+In ONE run, with the deny active and no `-s`:
+
+- The model's own shell call, reaching the directory indirectly through a script so the classifier
+  could not see it, got `/bin/cat: …: Permission denied`.
+- The `PreToolUse` hook process, in the same turn, read the file successfully.
+
+So the guard sidecar keeps ordinary file access to its protection list under a Codex permission
+profile, and needs no verdict socket the way a runner-sandboxed launch does (#1336 slice 1).
+
+A configured stdio MCP server also read the file successfully, at startup, outside the sandbox.
+**The MCP acceptance criterion of #1336 is therefore NOT met by this mechanism** and must not be
+claimed: a user-configured MCP filesystem server with a root above the hook directory can still
+read it in `provider` mode.
+
+Codex also discloses deny entries to the model: asked directly, it declined before issuing any tool
+call, naming the denied path. Indirection through a script still ran and still hit the OS deny.
+
+### Failure modes that matter for a launch
+
+- `default_permissions` naming an undefined profile is a hard startup error. That direction fails
+  closed.
+- An unrecognised top-level `-c` key is accepted silently. An OLDER codex-cli that does not know
+  `permissions`/`default_permissions` therefore ignores both and runs with no deny at all, reporting
+  nothing. Mixed-version hosts need an explicit probe, not a version string.
+- Inside a profile table, an unknown key is ignored and the deny still applies.
+- `"<dir>" = { access = "deny" }` — the shape the app-server's `FileSystemSandboxEntry` suggests —
+  parses without error and does NOT deny. Only the bare string form works. Another silent fail-open.
+
+### Per launch path
+
+| Launch path | Sends a legacy policy today | Can carry a profile |
+| --- | --- | --- |
+| `codex` native driver (`codex exec -s <mode>`) | Yes, `-s` on argv | Yes, once `-s` is dropped (verified: deny held with the profile on argv and no `-s`) |
+| `codex-app-server` driver (`turn/start` `sandboxPolicy`) | Yes, in the turn params | Yes, once `sandboxPolicy` is dropped (verified through `command/exec`) |
+| Native Codex TUI | No `-s` is passed | Yes (verified from the TUI's own rollout: `Permission denied`, no `TOPSECRET`) |
+| Generic `acp` driver | No | No. It spawns the catalog's command and args verbatim and injects no `-c`, so the runner cannot express a deny for an ACP-bridged Codex |
+
 ## Fail closed, and the fail-safe
 
 Two different failure domains, two different answers:
@@ -437,7 +550,17 @@ control-channel veto keeps reading the live inventory.
 - One extra short-lived process runs before each Bash, Edit, MultiEdit, Write, NotebookEdit, Read,
   Grep, and Glob call in a guarded session — since #1303, every guardable session.
 - The runner's hook state directory is invisible to the provider: reading it is refused as firmly
-  as writing it. In `provider` mode that refusal is the command-text veto. Under runner `bwrap` and
-  Seatbelt it is the sandbox itself (#1336).
+  as writing it. Under runner `bwrap` and Seatbelt the refusal is the runner's own sandbox (#1336
+  slice 1). In `provider` mode it is Codex's permission profile for a Codex launch (#1336 slice 2),
+  and the command-text veto for a Claude one. The veto remains defence in depth wherever an OS
+  boundary carries the directory, and the only control where none does.
+- A Codex launch in `provider` mode sends a permission profile and NO legacy sandbox policy, because
+  Codex silently ignores the profile when both are present. The modes whose legacy policy IS a
+  built-in profile migrate with their projection unchanged; `danger-full-access`, the Orchestrator
+  preset, and an ACP-bridged Codex keep their legacy policy and are documented as unenforced. Each
+  launch proves the deny through its own profile arguments first, which is also what catches a
+  codex-cli too old to know the keys — it would otherwise ignore them in silence.
+- MCP servers run outside Codex's sandbox and still reach the directory, so #1336's MCP acceptance
+  criterion is NOT met in `provider` mode and the issue stays open for it.
 - Native hooks remain a cooperative same-user governance mechanism, not an OS isolation boundary,
   exactly as §2.3.1 already states.
