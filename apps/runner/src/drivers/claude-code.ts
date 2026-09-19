@@ -2332,6 +2332,10 @@ export class ClaudeCodeDriver implements Driver {
                   // are replayed against this line in claude-code-managed-worktree.test.ts.
                   this.managedWorktreeGuardActive ? PLACELESS_CWD : this.cwd,
                   protections,
+                  // The environment this process gave Claude is the one its Bash tool starts
+                  // from, so a worktree path held in a variable resolves here too (#1324).
+                  // `spawnAgent` overlays it on the inherited environment, so both halves count.
+                  { ...process.env, ...this.childEnv() },
                 )
               : null);
           if (managedRefusal) {

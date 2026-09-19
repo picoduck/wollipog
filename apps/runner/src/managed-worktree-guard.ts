@@ -40,6 +40,7 @@ import {
   commandTargetsManagedWorktree,
   toolTargetsGuardState,
   type ManagedWorktreeProtection,
+  type ProviderEnvironment,
 } from "./managed-worktree-protection.js";
 import { quote } from "shell-quote";
 import { protectedWrite } from "./protected-file.js";
@@ -145,6 +146,9 @@ export function managedWorktreeGuardDecision(
   hookInput: string,
   loadProtections: () => ManagedWorktreeProtection[],
   guardStateDirectory: string,
+  // This process is spawned by the provider, so its own environment IS the one the provider's
+  // shell starts from: the variable holding the protected worktree path resolves here (#1324).
+  environment: ProviderEnvironment = process.env,
 ): ManagedWorktreeGuardDecision {
   let payload: { tool_name?: unknown; tool_input?: unknown; cwd?: unknown };
   try {
@@ -199,7 +203,7 @@ export function managedWorktreeGuardDecision(
     // otherwise disarm every later check.
     const stateRefusal = commandTargetsGuardState(command, cwd, guardStateDirectory);
     if (stateRefusal) return { kind: "deny", reason: stateRefusal };
-    const refusal = commandTargetsManagedWorktree(command, cwd, protections);
+    const refusal = commandTargetsManagedWorktree(command, cwd, protections, environment);
     return refusal ? { kind: "deny", reason: refusal } : { kind: "allow" };
   } catch (error) {
     return { kind: "block", reason: `managed worktree guard failed to classify the call: ${(error as Error).message}` };
@@ -307,6 +311,7 @@ export function requestManagedWorktreeGuardVerdict(
 export function runManagedWorktreeGuardDecision(
   hookInput: string,
   protectionsFile: string | null,
+  environment: ProviderEnvironment = process.env,
 ): ManagedWorktreeGuardOutcome {
   if (!protectionsFile) {
     return {
@@ -319,6 +324,7 @@ export function runManagedWorktreeGuardDecision(
     hookInput,
     () => readManagedWorktreeGuardProtections(protectionsFile),
     dirname(resolve(protectionsFile)),
+    environment,
   );
   if (decision.kind === "deny") {
     return { stdout: `${managedWorktreeGuardDenyPayload(decision.reason)}\n`, stderr: "", exitCode: 0 };

@@ -7,16 +7,35 @@ const MAX_COMMAND_LENGTH = 32_768;
 const MAX_GLOB_METACHARACTERS = 64;
 const MAX_GLOB_BRACE_GROUPS = 8;
 const MAX_ENV_SPLIT_STRING_EXPANSIONS = 8;
+const MAX_EMPTY_COMMAND_EXPANSIONS = 16;
 export const MANAGED_WORKTREE_REFUSAL =
   "Wollipog protects this runner-owned worktree. Use discard_worktree so retirement can wait for the provider to exit and then apply the managed safety checks.";
+
+/**
+ * Refusal for a destructive command whose target the classifier cannot place (#1324): an unknown
+ * variable, a command substitution, a backtick, or a relative path after a `cd` it cannot follow.
+ */
+export const MANAGED_WORKTREE_UNRESOLVED_REFUSAL =
+  "Wollipog cannot tell where this destructive command's target resolves while a runner-owned worktree is protected, so it was not run. Name the target as a literal path, or through a variable the session environment already defines; to retire the worktree itself, use discard_worktree.";
 
 export interface ManagedWorktreeProtection {
   worktreePath: string;
   repoPath: string;
 }
 
-interface EnvironmentReference { env: string }
-type ShellToken = ParseEntry | EnvironmentReference;
+/**
+ * The environment the provider's shell starts from: the one the runner passed it. A value may be
+ * undefined only because `process.env` is typed that way.
+ */
+export type ProviderEnvironment = Readonly<Record<string, string | undefined>>;
+
+type ShellToken = ParseEntry;
+
+/**
+ * What one command, segment, or operand amounts to: it reaches a protected root (`protected`), it
+ * is destructive but its target cannot be placed (`unresolved`), or neither (`null`).
+ */
+type Verdict = "protected" | "unresolved" | null;
 
 /**
  * Raised when provider input exceeds an explicit parsing bound. The exported guard turns it into a
@@ -24,9 +43,29 @@ type ShellToken = ParseEntry | EnvironmentReference;
  */
 class UnclassifiableCommandError extends Error {}
 
-function environmentReference(token: ShellToken | undefined): token is EnvironmentReference {
-  return token != null && typeof token === "object" && "env" in token && typeof token.env === "string";
-}
+/**
+ * Variable references are parsed into NUL-delimited placeholders rather than values, so a word such
+ * as `"$W/x"` stays ONE word (shell-quote splits a reference returned as an object from its
+ * neighbours) and is expanded only when it is read, against the assignments seen up to that point.
+ * The exported guard rejects any command containing NUL, so provider text cannot forge one.
+ */
+const REFERENCE = /\0([^\0]*)\0/gu;
+const reference = (name: string) => `\0${name}\0`;
+/** A reference that is known not to resolve: `$(`, a bare `$`, or a value built from one. */
+const UNRESOLVED_REFERENCE = reference("");
+/** Rendered in place of an unresolved reference when a script is re-parsed; never resolves. */
+const UNRESOLVED_NAME = "__WOLLIPOG_UNRESOLVED__";
+/**
+ * Variables the shell rewrites as it runs, so the value the runner passed the provider is stale.
+ * `PWD` and `CWD` are answered from the tracked working directory instead; the rest never resolve.
+ */
+const SHELL_MAINTAINED = new Set(["OLDPWD", "DIRSTACK", "_", UNRESOLVED_NAME]);
+
+/**
+ * The working directory after a `cd` whose target could not be resolved. Absolute operands are
+ * still judged; anything relative to it is unresolved.
+ */
+const UNKNOWN_CWD = `${sep}.wollipog-unknown-cwd${`${sep}x`.repeat(64)}`;
 
 function operator(token: ShellToken | undefined): string | null {
   return token != null && typeof token === "object" && "op" in token && token.op !== "glob" &&
@@ -70,23 +109,103 @@ function protectionRepository(path: string, protections: readonly ManagedWorktre
     pathContains(repoPath, path) || pathContains(worktreePath, path));
 }
 
+/** The raw text of a word token (a plain word or a glob), placeholders included. */
+function wordText(token: ShellToken | undefined): string | null {
+  if (typeof token === "string") return token;
+  if (token != null && typeof token === "object" && "op" in token && token.op === "glob" &&
+      "pattern" in token && typeof token.pattern === "string") return token.pattern;
+  return null;
+}
+
+function lookup(name: string, cwd: string, environment: ReadonlyMap<string, string>): string | undefined {
+  if (name === "PWD" || name === "CWD") return cwd === UNKNOWN_CWD ? undefined : cwd;
+  if (SHELL_MAINTAINED.has(name)) return undefined;
+  return environment.get(name);
+}
+
+/** Expand every placeholder that resolves; one that does not becomes `UNRESOLVED_REFERENCE`. */
+function expandReferences(text: string, cwd: string, environment: ReadonlyMap<string, string>): string {
+  return text.replace(REFERENCE, (_, name: string) => lookup(name, cwd, environment) ?? UNRESOLVED_REFERENCE);
+}
+
+/**
+ * A word as the shell will see it, or null when it is not a word or cannot be resolved: a variable
+ * neither the provider environment nor this command defines, a command substitution, a backtick.
+ */
 function word(
   token: ShellToken | undefined,
   cwd: string,
   environment: ReadonlyMap<string, string>,
 ): string | null {
-  if (typeof token === "string" && !token.includes("`")) return token;
-  if (token != null && typeof token === "object" && "op" in token && token.op === "glob" &&
-      "pattern" in token && typeof token.pattern === "string") return token.pattern;
-  if (!environmentReference(token)) return null;
-  if (token.env === "PWD" || token.env === "CWD") return cwd;
-  return environment.get(token.env) ?? null;
+  const text = wordText(token);
+  if (text == null || text.includes("`")) return null;
+  const value = expandReferences(text, cwd, environment);
+  return value.includes("\0") || value.includes("`") ? null : value;
 }
 
-function globPattern(token: ShellToken | undefined): string | null {
-  if (token != null && typeof token === "object" && "op" in token && token.op === "glob" &&
-      "pattern" in token && typeof token.pattern === "string") return token.pattern;
-  if (typeof token === "string" && /[*?\[\]{}]/u.test(token)) return token;
+/**
+ * The characters the shell splits an unquoted expansion on, or `null` when `IFS` is set to
+ * something this code cannot see. The default is whitespace; a custom `IFS` is taken as ADDITIONAL
+ * separators rather than as a replacement, so a field is never missed for splitting too eagerly.
+ */
+function fieldSeparators(cwd: string, environment: ReadonlyMap<string, string>): Set<string> | null {
+  const ifs = lookup("IFS", cwd, environment);
+  if (ifs != null && (ifs.includes("\0") || ifs.includes("`"))) return null;
+  return new Set([" ", "\t", "\n", ...(ifs ?? "")]);
+}
+
+/**
+ * The fields an unquoted expansion becomes. A word with no reference in it is one field whatever it
+ * contains — the shell does not re-split literal text — so only a word built from a reference is
+ * split. `null` when the separators themselves are unknown.
+ */
+function expansionFields(
+  text: string,
+  value: string,
+  cwd: string,
+  environment: ReadonlyMap<string, string>,
+): string[] | null {
+  if (!text.includes("\0")) return [value];
+  const separators = fieldSeparators(cwd, environment);
+  if (separators === null) return null;
+  const fields: string[] = [];
+  let current = "";
+  for (const character of value) {
+    if (!separators.has(character)) { current += character; continue; }
+    if (current) fields.push(current);
+    current = "";
+  }
+  if (current) fields.push(current);
+  return fields;
+}
+
+/**
+ * A word rendered back into shell text for a nested parse (`sh -c`, `eval`). The outer shell has
+ * already expanded what it can, so a resolved value is inlined as text and the nested parse splits
+ * it as the nested shell would; a reference that cannot be resolved becomes one that never does,
+ * so it reaches the nested classification as unresolved rather than vanishing.
+ */
+function scriptText(
+  token: ShellToken | undefined,
+  cwd: string,
+  environment: ReadonlyMap<string, string>,
+): string | null {
+  const text = wordText(token);
+  if (text == null || text.includes("`")) return text;
+  return text.replace(REFERENCE, (_, name: string) => {
+    const value = lookup(name, cwd, environment);
+    return value == null || value.includes("\0") ? `\${${UNRESOLVED_NAME}}` : value;
+  });
+}
+
+function globPattern(
+  token: ShellToken | undefined,
+  cwd: string,
+  environment: ReadonlyMap<string, string>,
+): string | null {
+  const value = word(token, cwd, environment);
+  if (value == null) return null;
+  if (typeof token !== "string" || /[*?\[\]{}]/u.test(value)) return value;
   return null;
 }
 
@@ -104,9 +223,10 @@ function ancestors(path: string): string[] {
 function globTargetsProtected(
   token: ShellToken | undefined,
   cwd: string,
+  environment: ReadonlyMap<string, string>,
   protections: readonly ManagedWorktreeProtection[],
 ): boolean {
-  const pattern = globPattern(token);
+  const pattern = globPattern(token, cwd, environment);
   if (!pattern || pattern.includes("\0")) return false;
   const metacharacters = pattern.match(/[*?\[\]{}]/gu)?.length ?? 0;
   const braceGroups = pattern.match(/\{/gu)?.length ?? 0;
@@ -197,7 +317,11 @@ function shellInsideManagedRoot(cwd: string, protections: readonly ManagedWorktr
     withinProtectedRoot(physicalCwd(cwd), physicalProtections(protections));
 }
 
-function operandTargetsProtected(
+/**
+ * Judge one operand of a destructive command. An operand the classifier cannot place is
+ * `unresolved`, never harmless (#1324): the shell will expand it into a path this code never sees.
+ */
+function operandVerdict(
   token: ShellToken | undefined,
   cwd: string,
   environment: ReadonlyMap<string, string>,
@@ -206,20 +330,60 @@ function operandTargetsProtected(
   // harmless alias that points at the worktree is not a removal of the worktree. A trailing slash
   // (or `/.`) makes the kernel follow it after all.
   followFinalSymlink = true,
-): boolean {
-  const target = resolvedOperand(token, cwd, environment);
-  if (target == null) {
-    return globTargetsProtected(token, cwd, protections) ||
-      globTargetsProtected(token, physicalCwd(cwd), physicalProtections(protections));
+  // Past a `--` every remaining word is an operand, however it is spelled.
+  optionsEnded = false,
+): Verdict {
+  const value = word(token, cwd, environment);
+  if (value == null) return wordText(token) == null ? null : "unresolved";
+  // An unquoted expansion is field-split by the shell, and this parser no longer knows which
+  // expansions were quoted. A value built from a reference is judged whole AND field by field; if
+  // the separators themselves cannot be read, the operand cannot be placed at all.
+  const fields = expansionFields(wordText(token) ?? "", value, cwd, environment);
+  if (fields === null) return "unresolved";
+  if (fields.length !== 1 || fields[0] !== value) {
+    return strongest([value, ...fields].map((field) =>
+      literalOperandVerdict(field, field, cwd, environment, protections, followFinalSymlink, optionsEnded)));
   }
-  if (protectedTarget(target, protections)) return true;
+  return literalOperandVerdict(value, token, cwd, environment, protections, followFinalSymlink, optionsEnded);
+}
+
+function literalOperandVerdict(
+  value: string,
+  token: ShellToken | undefined,
+  cwd: string,
+  environment: ReadonlyMap<string, string>,
+  protections: readonly ManagedWorktreeProtection[],
+  followFinalSymlink: boolean,
+  optionsEnded: boolean,
+): Verdict {
+  // An option word names no path, so it must not read as a relative operand once the working
+  // directory is unknown: `rm -rf /tmp/scratch` is placeable there and `rm -rf build` is not. After
+  // `--` there are no options left, so a dashed word there IS a path (`rm -- -managed`).
+  if (cwd === UNKNOWN_CWD && !isAbsolute(value) && (optionsEnded || !value.startsWith("-"))) {
+    return "unresolved";
+  }
+  const target = resolvedPath(value, cwd);
+  if (target == null) {
+    return globTargetsProtected(token, cwd, environment, protections) ||
+        globTargetsProtected(token, physicalCwd(cwd), environment, physicalProtections(protections))
+      ? "protected"
+      : null;
+  }
+  if (protectedTarget(target, protections)) return "protected";
   // The shell's `cd` is logical, but the command this operand belongs to is external and the
   // kernel resolves it from the PHYSICAL directory: `..` beneath a symlink lands where the link
   // points, not where the shell prints. Judge that reading too, against the physical protections.
-  const value = word(token, cwd, environment) ?? "";
   const follows = followFinalSymlink ||
     (process.platform === "win32" ? /[\\/]\.?$/u : /\/\.?$/u).test(value);
-  return protectedTarget(physicalResolve(cwd, value, follows), physicalProtections(protections));
+  return protectedTarget(physicalResolve(cwd, value, follows), physicalProtections(protections))
+    ? "protected"
+    : null;
+}
+
+function resolvedPath(value: string, cwd: string): string | null {
+  if (!value || value.includes("\0") || /[*?\[\]{}]/u.test(value)) return null;
+  if (cwd === UNKNOWN_CWD && !isAbsolute(value)) return null;
+  return normalize(isAbsolute(value) ? value : resolve(cwd, value));
 }
 
 function resolvedOperand(
@@ -228,8 +392,7 @@ function resolvedOperand(
   environment: ReadonlyMap<string, string>,
 ): string | null {
   const value = word(token, cwd, environment);
-  if (!value || value.includes("\0") || /[*?\[\]{}]/u.test(value)) return null;
-  return normalize(isAbsolute(value) ? value : resolve(cwd, value));
+  return value == null ? null : resolvedPath(value, cwd);
 }
 
 /**
@@ -302,11 +465,48 @@ function executableName(value: string): string {
   return value.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase().replace(/\.exe$/u, "") ?? "";
 }
 
+/**
+ * The command word at `index`, with the shell's field splitting already applied to the token list:
+ * `CMD="command rm -rf"` contributes three words, and an expansion with no fields at all
+ * (`$EMPTY rm -rf x`) removes itself so the next word becomes the command. Splitting before the
+ * wrapper dispatch below is what lets `sudo`/`command`/`env` be recognised inside such a value.
+ */
+function commandWordAt(
+  tokens: ShellToken[],
+  index: number,
+  cwd: string,
+  environment: ReadonlyMap<string, string>,
+): string | null {
+  for (let expansions = 0; expansions <= MAX_EMPTY_COMMAND_EXPANSIONS; expansions += 1) {
+    const text = wordText(tokens[index]);
+    if (text === null) return null;
+    const value = word(tokens[index], cwd, environment);
+    if (value == null) return null;
+    if (!text.includes("\0")) return value;
+    const fields = expansionFields(text, value, cwd, environment);
+    if (fields === null) throw new UnclassifiableCommandError("IFS cannot be read for a command word");
+    tokens.splice(index, 1, ...fields);
+    const first = fields[0];
+    if (first !== undefined) return first;
+  }
+  throw new UnclassifiableCommandError("too many empty command expansions");
+}
+
+interface ParsedCommand {
+  words: ShellToken[];
+  executable: string;
+  /**
+   * The environment the command RUNS in: its prefix and `env` assignments, which its own words were
+   * expanded before and which do not outlive it. A nested shell (`sh -c`, `eval`) inherits it.
+   */
+  childEnvironment: Map<string, string>;
+}
+
 function commandWords(
   tokens: ShellToken[],
   cwd: string,
   environment: Map<string, string>,
-): { words: ShellToken[]; executable: string } | null {
+): ParsedCommand | null {
   let index = 0;
   let splitStringExpansions = 0;
   // Each `env --split-string` value is re-parsed in place, so a chain of them re-reads its own
@@ -333,15 +533,36 @@ function commandWords(
     if (/[\\$#`]/u.test(script)) {
       throw new UnclassifiableCommandError("env --split-string payload uses env's own word grammar");
     }
-    return parse<EnvironmentReference>(script, (env) => ({ env }));
+    return parse(script, reference);
   };
+  // `W=/tmp rm -rf "$W"` removes the PRE-assignment `W`: the shell expands a command's words before
+  // its assignment prefix takes effect, and the prefix does not outlive the command. So assignments
+  // build the CHILD environment — which a nested `sh -c` does inherit — and reach `environment`
+  // only when they stand alone as their own command. Within the prefix they apply left to right,
+  // so `A=$B B=$A` leaves both holding B's original value.
+  const childEnvironment = new Map(environment);
+  const assigned: string[] = [];
   while (typeof tokens[index] === "string" && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(tokens[index] as string)) {
     const assignment = tokens[index] as string;
     const equals = assignment.indexOf("=");
-    environment.set(assignment.slice(0, equals), assignment.slice(equals + 1));
+    const name = assignment.slice(0, equals);
+    childEnvironment.set(name, expandReferences(assignment.slice(equals + 1), cwd, childEnvironment));
+    assigned.push(name);
     index += 1;
   }
-  let executable = word(tokens[index], cwd, environment);
+  if (tokens[index] === undefined) {
+    // Applied exactly once: the caller does not classify a segment that parsed to no command.
+    for (const name of assigned) environment.set(name, childEnvironment.get(name) ?? "");
+    return null;
+  }
+  let executable = commandWordAt(tokens, index, cwd, environment);
+  // Before a POSIX special builtin the assignment survives in `/bin/sh` and is discarded by bash
+  // outside POSIX mode. Which shell runs the command is not knowable here, and the two readings
+  // disagree about what a later `"$W"` names, so the name stops being readable at all: a later
+  // destructive operand built from it is unresolved rather than guessed in the wrong direction.
+  if (assigned.length > 0 && executable != null && SPECIAL_BUILTINS.has(executableName(executable))) {
+    for (const name of assigned) environment.set(name, UNRESOLVED_REFERENCE);
+  }
   while (executable) {
     const name = executableName(executable);
     if (name === "sudo") {
@@ -356,23 +577,27 @@ function commandWords(
           index += 1;
         }
       }
-      executable = word(tokens[index], cwd, environment);
+      executable = commandWordAt(tokens, index, cwd, environment);
       continue;
     }
     if (["command", "nohup", "setsid"].includes(name)) {
       index += 1;
       while (typeof word(tokens[index], cwd, environment) === "string" &&
           word(tokens[index], cwd, environment)!.startsWith("-")) index += 1;
-      executable = word(tokens[index], cwd, environment);
+      executable = commandWordAt(tokens, index, cwd, environment);
       continue;
     }
     if (name === "env") {
       index += 1;
       while (typeof tokens[index] === "string") {
-        const value = tokens[index] as string;
+        // `env` reads its ARGV, so an assignment that arrived through an expansion
+        // (`env "$ASSIGNMENT" sh -c ...`) is an assignment to it like any other.
+        const value = word(tokens[index], cwd, environment) ?? (tokens[index] as string);
+        // Like a prefix assignment, this builds the environment of the command `env` runs; it is
+        // not in effect while the shell expands the words of this very command.
         if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(value)) {
           const equals = value.indexOf("=");
-          environment.set(value.slice(0, equals), value.slice(equals + 1));
+          childEnvironment.set(value.slice(0, equals), value.slice(equals + 1));
           index += 1;
           continue;
         }
@@ -401,7 +626,7 @@ function commandWords(
         if (value.startsWith("-")) { index += 1; continue; }
         break;
       }
-      executable = word(tokens[index], cwd, environment);
+      executable = commandWordAt(tokens, index, cwd, environment);
       continue;
     }
     if (name === "nice") {
@@ -409,7 +634,7 @@ function commandWords(
       const option = word(tokens[index], cwd, environment);
       if (option === "-n" || option === "--adjustment") index += 2;
       else if (option && (/^-\d+$/u.test(option) || option.startsWith("--adjustment="))) index += 1;
-      executable = word(tokens[index], cwd, environment);
+      executable = commandWordAt(tokens, index, cwd, environment);
       continue;
     }
     if (name === "timeout") {
@@ -421,34 +646,72 @@ function commandWords(
         else index += 1;
       }
       if (word(tokens[index], cwd, environment)) index += 1; // duration
-      executable = word(tokens[index], cwd, environment);
+      executable = commandWordAt(tokens, index, cwd, environment);
       continue;
     }
     break;
   }
   if (!executable) return null;
-  return { words: tokens.slice(index + 1), executable: executableName(executable) };
+  return { words: tokens.slice(index + 1), executable: executableName(executable), childEnvironment };
 }
 
-function gitWorktreeRefusal(
+/** The most severe of several verdicts: a protected target outranks one that cannot be placed. */
+function strongest(verdicts: Iterable<Verdict>): Verdict {
+  let result: Verdict = null;
+  for (const verdict of verdicts) {
+    if (verdict === "protected") return verdict;
+    result ??= verdict;
+  }
+  return result;
+}
+
+const REMOVERS = ["rm", "rmdir", "unlink", "trash", "trash-put", "mv", "move"];
+
+/**
+ * POSIX special builtins: a prefix assignment before one of these SURVIVES the command in
+ * `/bin/sh` (and in bash's POSIX mode), so `W=<root> : ; rm -rf "$W"` removes the root. The list is
+ * applied in every shell, which over-refuses under a bash that would have discarded the value —
+ * the safe direction, and the provider's shell is not knowable from here.
+ */
+const SPECIAL_BUILTINS = new Set([
+  ":", ".", "source", "break", "continue", "eval", "exec", "exit", "export",
+  "readonly", "return", "set", "shift", "times", "trap", "unset",
+]);
+
+/** Every word of a remover, with `--` ending the options so a dashed operand after it is a path. */
+function removerVerdicts(
+  words: readonly ShellToken[],
+  cwd: string,
+  environment: ReadonlyMap<string, string>,
+  protections: readonly ManagedWorktreeProtection[],
+): Verdict[] {
+  let optionsEnded = false;
+  return words.map((token) => {
+    const verdict = operandVerdict(token, cwd, environment, protections, false, optionsEnded);
+    if (word(token, cwd, environment) === "--") optionsEnded = true;
+    return verdict;
+  });
+}
+
+function gitWorktreeVerdict(
   words: ShellToken[],
   initialCwd: string,
   environment: ReadonlyMap<string, string>,
   protections: readonly ManagedWorktreeProtection[],
-): boolean {
+): Verdict {
   let cwd = initialCwd;
   const actionIndex = words.findIndex((token, index) =>
     word(token, cwd, environment) === "worktree" &&
     ["remove", "move", "prune"].includes(word(words[index + 1], cwd, environment) ?? ""));
-  if (actionIndex < 0) return false;
+  if (actionIndex < 0) return null;
   let index = 0;
   while (index < actionIndex) {
     const value = word(words[index], cwd, environment);
     if (value === "-C") {
-      const next = resolvedOperand(words[index + 1], cwd, environment);
-      // A dynamic -C cannot make an absolute protected removal operand safe. Retain the last
-      // known cwd and continue scanning so the worktree subcommand and target still reach the veto.
-      if (next) cwd = next;
+      // A dynamic -C cannot make an absolute protected removal operand safe, so scanning goes on
+      // and the worktree subcommand and target still reach the veto; but a RELATIVE target, or a
+      // prune, is judged from a directory nobody can name and is therefore unresolved.
+      cwd = resolvedOperand(words[index + 1], cwd, environment) ?? UNKNOWN_CWD;
       index += 2;
       continue;
     }
@@ -465,7 +728,7 @@ function gitWorktreeRefusal(
       index += 1;
       continue;
     }
-    return false;
+    return null;
   }
   const action = word(words[actionIndex + 1], cwd, environment);
   const operands = words.slice(actionIndex + 2).filter((token) => {
@@ -473,34 +736,98 @@ function gitWorktreeRefusal(
     return value !== "--" && !value?.startsWith("-");
   });
   if (action === "prune") {
+    if (cwd === UNKNOWN_CWD) return "unresolved";
     return protectionRepository(cwd, protections) ||
-      protectionRepository(physicalCwd(cwd), physicalProtections(protections));
+        protectionRepository(physicalCwd(cwd), physicalProtections(protections))
+      ? "protected"
+      : null;
   }
-  if (action !== "remove" && action !== "move") return false;
-  return operandTargetsProtected(operands[0], cwd, environment, protections);
+  if (action !== "remove" && action !== "move") return null;
+  return operandVerdict(operands[0], cwd, environment, protections);
 }
 
-function segmentRefusal(
+/**
+ * Every reading of a command's words this classifier has to consider.
+ *
+ * `shell-quote` does not report whether an expansion was quoted, and the two possibilities are
+ * different commands: unquoted, `$PAIR` becomes as many words as it has fields; quoted, it stays
+ * one. Roles follow from that — an `mv` destination is its LAST word, a `find` root is a word
+ * before the expression — so a single hybrid reading gets them wrong in one direction or the
+ * other: `mv $PAIR` must read a protected first field as a source, while `mv /tmp/a "$W"` must
+ * read a protected path that merely contains a space as the destination it lands in.
+ *
+ * So both readings are classified in full and the stronger verdict stands. Where nothing splits,
+ * the two coincide and only one reading is produced.
+ */
+function wordReadings(
+  words: readonly ShellToken[],
+  cwd: string,
+  environment: ReadonlyMap<string, string>,
+): ShellToken[][] {
+  const split: ShellToken[] = [];
+  const whole: ShellToken[] = [];
+  let divided = false;
+  for (const token of words) {
+    const text = wordText(token);
+    const value = text === null ? null : word(token, cwd, environment);
+    const fields = text === null || value == null || !text.includes("\0")
+      ? null
+      : expansionFields(text, value, cwd, environment);
+    if (fields === null || value == null) {
+      // Unresolvable, or nothing to expand: the token is carried into both readings as it is.
+      split.push(token);
+      whole.push(token);
+      continue;
+    }
+    split.push(...fields);
+    whole.push(value);
+    if (fields.length !== 1 || fields[0] !== value) divided = true;
+  }
+  return divided ? [split, whole] : [split];
+}
+
+function segmentVerdict(
   tokens: ShellToken[],
   cwd: string,
   environment: Map<string, string>,
   protections: readonly ManagedWorktreeProtection[],
   depth: number,
-): boolean {
-  const command = commandWords(tokens, cwd, environment);
-  if (!command) return false;
-  const { executable, words } = command;
+  // Parsing splits command expansions in place and applies assignments, so a caller that has
+  // already parsed this segment passes its result rather than parsing it a second time.
+  command: ParsedCommand | null = commandWords(tokens, cwd, environment),
+): Verdict {
+  if (!command) return null;
+  return strongest(wordReadings(command.words, cwd, environment).map((words) =>
+    commandVerdict(words, command, cwd, environment, protections, depth)));
+}
+
+/** One command, judged in one reading of its words. */
+function commandVerdict(
+  words: ShellToken[],
+  command: ParsedCommand,
+  cwd: string,
+  environment: Map<string, string>,
+  protections: readonly ManagedWorktreeProtection[],
+  depth: number,
+): Verdict {
+  const { executable, childEnvironment } = command;
   if (["sh", "bash", "zsh", "dash", "fish", "cmd"].includes(executable) && depth < 3) {
+    // A `-c` script is consumed WHOLE by the shell it is handed to, so the unsplit words are read
+    // here whichever reading this is. Where the expansion really was unquoted the shell would keep
+    // only its first field as the script, which this over-refuses rather than misses.
+    const words = command.words;
     const flag = words.findIndex((token) => {
       const value = word(token, cwd, environment)?.toLowerCase() ?? "";
       return value === "/c" || /^-[a-z]*c[a-z]*$/u.test(value);
     });
-    const script = flag >= 0 ? word(words[flag + 1], cwd, environment) : null;
-    return script ? commandTargetsManagedWorktree(script, cwd, protections, depth + 1) != null : false;
+    const script = flag >= 0 ? scriptText(words[flag + 1], cwd, environment) : null;
+    // The nested shell runs in the child environment, so `W=<root> sh -c \'rm -rf "$W"\'` resolves
+    // there even though the outer command's own words never saw that assignment.
+    return script ? classify(script, cwd, protections, childEnvironment, depth + 1) : null;
   }
   if (executable === "eval" && depth < 3) {
-    const script = words.map((token) => word(token, cwd, environment) ?? "").join(" ");
-    return commandTargetsManagedWorktree(script, cwd, protections, depth + 1) != null;
+    const script = command.words.map((token) => scriptText(token, cwd, environment) ?? "").join(" ");
+    return classify(script, cwd, protections, childEnvironment, depth + 1);
   }
   if (executable === "xargs" && depth < 3) {
     let commandIndex = 0;
@@ -516,27 +843,35 @@ function segmentRefusal(
       }
     }
     const nested = words.slice(commandIndex);
-    if (segmentRefusal(nested, cwd, new Map(environment), protections, depth + 1)) return true;
-    const nestedExecutable = commandWords(nested, cwd, new Map(environment))?.executable ?? "";
-    return shellInsideManagedRoot(cwd, protections) &&
-      ["rm", "rmdir", "unlink", "trash", "trash-put", "mv", "move"].includes(nestedExecutable);
+    // These words are ARGV: the outer shell expanded them before the prefix assignment applied, so
+    // they are read in the outer environment. Where the two disagree this over-refuses, never less.
+    const nestedCommand = commandWords(nested, cwd, new Map(environment));
+    const verdict = segmentVerdict(nested, cwd, new Map(environment), protections, depth + 1, nestedCommand);
+    const nestedExecutable = nestedCommand?.executable ?? "";
+    if (!REMOVERS.includes(nestedExecutable)) return verdict;
+    // What arrives on stdin is invisible, so a remover run from inside a managed root is refused
+    // outright, and one run from a directory the classifier lost track of cannot be placed.
+    if (shellInsideManagedRoot(cwd, protections)) return "protected";
+    return strongest([verdict, cwd === UNKNOWN_CWD ? "unresolved" : null]);
   }
-  if (executable === "git") return gitWorktreeRefusal(words, cwd, environment, protections);
+  if (executable === "git") return gitWorktreeVerdict(words, cwd, environment, protections);
   if (["rm", "rmdir", "unlink", "trash", "trash-put", "remove-item", "del", "rd"].includes(executable)) {
-    return words.some((token) => operandTargetsProtected(token, cwd, environment, protections, false));
+    return strongest(removerVerdicts(words, cwd, environment, protections));
   }
   if (executable === "gio" && word(words[0], cwd, environment) === "trash") {
-    return words.slice(1).some((token) => operandTargetsProtected(token, cwd, environment, protections, false));
+    return strongest(removerVerdicts(words.slice(1), cwd, environment, protections));
   }
   if (["mv", "move", "rename-item"].includes(executable)) {
     let targetDirectory = false;
+    let optionsEnded = false;
     const operands: ShellToken[] = [];
     for (let index = 0; index < words.length; index += 1) {
       const token = words[index];
       if (token == null) continue;
       const value = word(token, cwd, environment);
       if (value === "--") {
-        operands.push(...words.slice(index + 1));
+        for (const operand of words.slice(index + 1)) operands.push(operand);
+        optionsEnded = true;
         break;
       }
       if (value?.startsWith("-")) {
@@ -547,8 +882,11 @@ function segmentRefusal(
       }
       operands.push(token);
     }
+    // The last operand is where the files LAND unless `-t` named that directory already. Moving
+    // something into a protected worktree is ordinary work; moving the worktree away is not.
     const sources = targetDirectory ? operands : operands.slice(0, -1);
-    return sources.some((source) => operandTargetsProtected(source, cwd, environment, protections, false));
+    return strongest(sources.map((source) =>
+      operandVerdict(source, cwd, environment, protections, false, optionsEnded)));
   }
   if (executable === "find") {
     const actionIndex = words.findIndex((token) =>
@@ -577,28 +915,30 @@ function segmentRefusal(
       const followsRoots = words.slice(0, rootStart).some((token) =>
         ["-H", "-L"].includes(word(token, cwd, environment) ?? "")) ||
         words.some((token) => word(token, cwd, environment) === "-follow");
-      const protectedRoot = effectiveRoots.some((token) =>
-        operandTargetsProtected(token, cwd, environment, protections, followsRoots));
+      const rootVerdict = strongest(effectiveRoots.map((token) =>
+        operandVerdict(token, cwd, environment, protections, followsRoots, true)));
       const action = word(words[actionIndex], cwd, environment);
-      if (action === "-delete") return protectedRoot;
+      if (action === "-delete") return rootVerdict;
       if (depth < 3) {
         const end = words.findIndex((token, index) => index > actionIndex &&
           [";", "+"].includes(word(token, cwd, environment) ?? ""));
         const nested = words.slice(actionIndex + 1, end < 0 ? undefined : end);
-        if (segmentRefusal(nested, cwd, new Map(environment), protections, depth + 1)) return true;
-        const nestedExecutable = commandWords(nested, cwd, new Map(environment))?.executable ?? "";
-        if (protectedRoot && ["rm", "rmdir", "unlink", "trash", "trash-put", "mv", "move"].includes(nestedExecutable)) {
-          return true;
-        }
+        const nestedCommand = commandWords(nested, cwd, new Map(environment));
+        const verdict = segmentVerdict(nested, cwd, new Map(environment), protections, depth + 1, nestedCommand);
+        const nestedExecutable = nestedCommand?.executable ?? "";
+        const removal = REMOVERS.includes(nestedExecutable) ? rootVerdict : null;
+        if (verdict || removal) return strongest([verdict, removal]);
       }
     }
   }
   if (["python", "python3", "node", "perl", "ruby", "pwsh", "powershell"].includes(executable)) {
     const rendered = words.map((token) => word(token, cwd, environment) ?? "").join(" ");
     const destructive = /\b(?:rmtree|remove|unlink|rmdir|rename|remove-item)\b/iu.test(rendered);
-    return destructive && protections.some(({ worktreePath }) => rendered.includes(worktreePath));
+    return destructive && protections.some(({ worktreePath }) => rendered.includes(worktreePath))
+      ? "protected"
+      : null;
   }
-  return false;
+  return null;
 }
 
 /**
@@ -635,60 +975,120 @@ function segmentRefusal(
  *   observes files a Bash command creates.
  *
  * `managed-worktree-protection.test.ts` pins both halves of this contract.
+ *
+ * What an operand RESOLVES to is the other half (#1324). A command is judged in the environment the
+ * provider's shell starts from — the one the runner passed it, which is where
+ * `WOLLIPOG_WORKTREE_PATH` and the rest of the worktree setup keys live — so
+ * `rm -rf "$WOLLIPOG_WORKTREE_PATH"` is the same command as naming the root, and is refused the
+ * same way. `PWD` reads the tracked working directory, and variables the shell rewrites as it runs
+ * (`OLDPWD`, `DIRSTACK`, `_`) never resolve, because the value passed at launch is stale for them.
+ *
+ * An operand of a DESTRUCTIVE command that still cannot be resolved — a variable neither that
+ * environment nor the command defines, a command substitution, a backtick, a path relative to a
+ * `cd` or `git -C` this code could not follow — fails closed with
+ * `MANAGED_WORKTREE_UNRESOLVED_REFUSAL`, because the shell will expand it into a path the classifier
+ * never sees, and that path may be the root. The destructive positions are exactly the ones judged
+ * for a protected target: every word of a remover (`rm`, `rmdir`, `unlink`, `trash`, `del`, `rd`,
+ * `Remove-Item`, `gio trash`), every `mv` source, the target of `git worktree remove`/`move`, the
+ * directory of `git worktree prune`, and the roots of a `find` that deletes or runs a remover.
+ * Anything else — an unresolved read, an unresolved `cd` on its own, an unresolved `mv`
+ * destination — is not refused for being unresolved.
+ *
+ * The environment is the one at LAUNCH. It is exact for Codex, which starts each command from it,
+ * and for Claude's Bash tool, which keeps its working directory between calls but not its exported
+ * variables; a variable exported by a startup file the shell sources is not seen, and a command
+ * that indirects through a script file or an interpreter is not parsed at all.
  */
-function commandTargetsManagedWorktreeUnsafe(
+function classify(
   command: string,
   cwd: string,
   protections: readonly ManagedWorktreeProtection[],
-  depth = 0,
-): string | null {
+  providerEnvironment: ReadonlyMap<string, string>,
+  depth: number,
+): Verdict {
+  // A nested script is rebuilt from expanded values, so it is bounded again here.
+  if (command.length > MAX_COMMAND_LENGTH) throw new UnclassifiableCommandError("nested script is too long");
   let tokens: ShellToken[];
   try {
-    tokens = parse<EnvironmentReference>(command, (env) => ({ env }));
+    tokens = parse(command, reference);
   } catch {
     return null;
   }
   let segment: ShellToken[] = [];
   let currentCwd = normalize(cwd);
-  const environment = new Map<string, string>();
-  const evaluate = () => {
-    if (!segment.length) return false;
+  const environment = new Map(providerEnvironment);
+  let unresolved = false;
+  const evaluate = (): Verdict => {
+    if (!segment.length) return null;
     const localEnvironment = new Map(environment);
     const parsed = commandWords(segment, currentCwd, localEnvironment);
-    if (parsed?.executable === "cd" || parsed?.executable === "pushd") {
-      const target = resolvedOperand(parsed.words[0], currentCwd, localEnvironment);
+    if (parsed === null) {
+      // Assignments standing alone, or a command word this code cannot resolve. `commandWords` has
+      // already applied the former to `localEnvironment`; re-parsing would apply them twice.
+      for (const [key, value] of localEnvironment) environment.set(key, value);
+      return null;
+    }
+    if (parsed.executable === "cd" || parsed.executable === "pushd") {
+      const operand = parsed.words[0];
+      // A bare `cd` goes home; `cd -`, a bare `pushd`, and a target that does not resolve go
+      // somewhere this code cannot name, and a later relative operand is then unresolved.
+      // `HOME=<root> cd` enters the prefix-assigned HOME: the builtin reads the environment it is
+      // given, which is the child environment, not the one its own words were expanded in.
+      const home = operand === undefined && parsed.executable === "cd"
+        ? lookup("HOME", currentCwd, parsed.childEnvironment)
+        : undefined;
+      const target = operand === undefined
+        ? (home == null ? null : resolvedPath(home, currentCwd))
+        : word(operand, currentCwd, localEnvironment) === "-"
+          ? null
+          : resolvedOperand(operand, currentCwd, localEnvironment);
       // Claude's Bash tool keeps its shell directory between calls. Refuse an escape from every
       // managed root so a later relative removal cannot be resolved against an unobservable cwd.
       if (target && shellInsideManagedRoot(currentCwd, protections) &&
-          !withinProtectedRoot(canonicalPath(target), physicalProtections(protections))) return true;
-      if (target) currentCwd = target;
+          !withinProtectedRoot(canonicalPath(target), physicalProtections(protections))) return "protected";
+      currentCwd = target ?? UNKNOWN_CWD;
       for (const [key, value] of localEnvironment) environment.set(key, value);
-      return false;
+      return null;
     }
-    const refused = segmentRefusal(segment, currentCwd, localEnvironment, protections, depth);
+    const verdict = segmentVerdict(segment, currentCwd, localEnvironment, protections, depth, parsed);
     for (const [key, value] of localEnvironment) environment.set(key, value);
-    return refused;
+    return verdict;
   };
   for (const token of tokens) {
     if (operator(token)) {
-      if (evaluate()) return MANAGED_WORKTREE_REFUSAL;
+      const verdict = evaluate();
+      if (verdict === "protected") return verdict;
+      if (verdict === "unresolved") unresolved = true;
       segment = [];
     } else {
       segment.push(token);
     }
   }
-  return evaluate() ? MANAGED_WORKTREE_REFUSAL : null;
+  return strongest([evaluate(), unresolved ? "unresolved" : null]);
+}
+
+/** The provider environment as a lookup table, keeping only values a shell could hold. */
+function providerEnvironmentMap(environment: ProviderEnvironment): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const [name, value] of Object.entries(environment)) {
+    if (name && typeof value === "string" && !value.includes("\0")) map.set(name, value);
+  }
+  return map;
 }
 
 export function commandTargetsManagedWorktree(
   command: string,
   cwd: string,
   protections: readonly ManagedWorktreeProtection[],
-  depth = 0,
+  // The environment the runner passed the provider. Omitting it resolves no variable at all, so
+  // every variable in a destructive operand fails closed as unresolved.
+  environment: ProviderEnvironment = {},
 ): string | null {
   if (!protections.length || !command || command.length > MAX_COMMAND_LENGTH || command.includes("\0")) return null;
   try {
-    return commandTargetsManagedWorktreeUnsafe(command, cwd, protections, depth);
+    const verdict = classify(command, cwd, protections, providerEnvironmentMap(environment), 0);
+    if (verdict === "protected") return MANAGED_WORKTREE_REFUSAL;
+    return verdict === "unresolved" ? MANAGED_WORKTREE_UNRESOLVED_REFUSAL : null;
   } catch {
     // Provider-controlled syntax must never escape the guard or crash the runner. If a bounded
     // destructive target cannot be classified safely, retain the managed worktree.
