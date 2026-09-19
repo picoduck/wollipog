@@ -2178,7 +2178,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           },
           // The TUI is a spawn like any other: it gets the same fresh settings document and the
           // same live protection list a runner-driven launch gets (#1337).
-          provisionManagedWorktreeGuard: (prepared) => provisionAgentTuiManagedWorktreeGuard(
+          provisionManagedWorktreeGuard: (prepared, cwd) => provisionAgentTuiManagedWorktreeGuard(
             prepared,
             {
               controlPlaneUrl: config.controlPlaneUrl,
@@ -2198,6 +2198,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             },
             log,
             claudeHookHost,
+            cwd,
           ),
         }),
         open: (message, target, launch, cleanupBoundary) => {

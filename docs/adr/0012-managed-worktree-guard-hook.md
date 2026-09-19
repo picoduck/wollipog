@@ -129,6 +129,32 @@ on this channel, `request.agent_id` does. The placeless judgment stopped keying 
 #1373; the one remaining consumer on this path, attention ownership, is unreachable for Claude
 today and is kept unchanged rather than re-keyed, because `agent_id` is the wrong id space for it.
 
+## Measurements (codex-cli 0.155.1, this machine, 2026-09-18)
+
+Does Codex offer a provider-side interception point that survives a TUI launch (#1377)? Measured
+in a throwaway `CODEX_HOME` against a throwaway repository and worktree, by reading the CLI's own
+help and app-server schema (`codex app-server generate-json-schema`) and by running it:
+
+- `hooks` is a stable feature, enabled with no configuration (`codex features list`); its events
+  include `PreToolUse`.
+- A `PreToolUse` hook receives JSON on stdin with `tool_name` (`Bash` for a shell call,
+  `apply_patch` for an edit), `tool_input.command`, `cwd`, and `permission_mode`. It blocks with the
+  same `hookSpecificOutput` deny document Claude uses, or with exit 2 and a reason on stderr. The
+  model sees `Command blocked by PreToolUse hook: <reason>`.
+- `-c hooks.PreToolUse=[…]` installs a hook from argv alone; `hooks/list` reports it with source
+  `sessionFlags`. Hooks from different sources merge: a `config.toml` hook and a `-c` hook are both
+  listed.
+- A session-flags hook reports `trustStatus: untrusted`, and an untrusted hook does not run and
+  says nothing: with the override and no bypass, `git worktree remove <worktree>` removed the
+  worktree and the hook was never invoked. `--dangerously-bypass-hook-trust` makes it run. No way
+  to persist trust for a session-flags hook was found, and a `hooks.managed_dir` passed through `-c`
+  loaded nothing.
+- With the real sidecar wired in that way, `git status --short` ran and the reproduction's
+  `git worktree remove <worktree>` was refused with the managed-worktree refusal, leaving the
+  worktree in place.
+- A sidecar that cannot start (a bare `--import tsx` resolved from the wrong directory) is shown as
+  a failed hook and the command RUNS, exactly the fail-open hole described below for Claude.
+
 ## Fail closed, and the fail-safe
 
 Two different failure domains, two different answers:
@@ -341,10 +367,55 @@ control-channel veto keeps reading the live inventory.
   provisioning runs, not from the launch snapshot, which predates the awaited worktree proof and
   the Orchestrator's scratch and credential work.
 
-  Non-Claude TUI launches remain unprotected. Codex's worktree protection is carried in the turn
-  parameters its driver sends, so it has no TUI form at all and nothing to provision; only a
-  refusal could cover it, which would withdraw the TUI from every worktree session. That is left
-  open deliberately rather than closed by #1337.
+  Amended by #1377: a Codex TUI launch is guarded too. Codex's structured protection lives in the
+  driver (`buildCodexTurnParams` and its approval decisions) and has no TUI form, but Codex has
+  its own `PreToolUse` hook with a Claude-shaped contract (see "Measurements (codex-cli 0.155.1)"
+  below), so the same sidecar is installed as a Codex hook through
+  `-c hooks.PreToolUse=[{matcher=…,hooks=[{type="command",command="<quoted sidecar>"}]}]`, over the
+  same per-session protections file — which the live refresh therefore keeps in step for a Codex
+  TUI as well. The tripwire, the compromise marker, and the launch self-test are shared with
+  Claude's.
+
+  A session-flags hook is never trusted, and Codex skips an untrusted hook silently, so the
+  launch has to carry `--dangerously-bypass-hook-trust`. That flag un-gates EVERY enabled hook for
+  the invocation, not just the runner's. So before launching, the runner enumerates the effective
+  hook inventory (`codex app-server` → `hooks/list`, replaying the launch's own `-c`/`--config`/
+  `--enable`/`--disable` flags in every spelling Codex accepts — `--disable=hooks` turns every hook
+  off and `-cVALUE` adds one — plus the guard override, in the directory the TUI resolves
+  project-scoped hooks from, which a `-C`/`--cd` in the launch moves) and passes the flag
+  only when the runner's hook is present, enabled, and the sole enabled hook that is neither
+  `trusted` nor `managed`. Otherwise the TUI is refused for a session that owns a runner-created
+  worktree, with an error that names the offending hooks and says to trust (`/hooks`) or disable
+  them. The same enumeration is the Codex half of the self-test: a runner hook absent from the
+  inventory (`--disable hooks`, a changed config schema, a quoting mistake) is a guard that would
+  never have run. Enumeration that fails, times out, or reports a hook discovery error refuses;
+  so does a launch carrying a
+  `--profile`, which may declare hooks and which `app-server` cannot replay, or a `--remote` or
+  `--worktree`, which run the session where a local probe cannot see; so do WSL/container
+  contexts, non-host targets, and Windows, where how Codex runs a hook command was not measured.
+  A Codex session that owns no runner-created worktree opens exactly as before: nothing is
+  written and no probe runs.
+
+  Residual limits of the Codex form:
+
+  - Codex's edit tool is `apply_patch`, whose input is patch text rather than a path, so the
+    guard-state file-tool veto does not classify it. Worktree removal is a Bash-level operation
+    and is covered; an edit of the protections document through `apply_patch` is not refused, but
+    the tripwire makes it evident and invalidates the guard for the next spawn.
+  - A Codex TUI opened while the session owned no runner-created worktree carries no hook, so a
+    worktree the session creates from inside that TUI is unprotected there until the TUI is
+    reopened. (A Claude TUI is guarded over an empty list since #1303; a Codex one is not, because
+    that would mean passing the trust bypass on every Codex TUI launch.)
+  - The inventory is a check, not a pin: a hook configuration written between the probe's answer
+    and the TUI's start is loaded by the TUI under the trust bypass. Codex offers no flag that
+    restricts an invocation to the hooks it was shown, so the window cannot be closed from the
+    runner, only narrowed. It is accepted because it grants nothing new: a hook appearing in that
+    window needs an active writer running as the same OS user, which can already run that code
+    directly, while the hooks the trust gate exists for — ones acquired passively, such as a cloned
+    repository's project hooks — are present before the probe and are refused.
+  - Everything above rests on Codex hook behaviour measured at codex-cli 0.155.1. The inventory
+    check fails closed if a later build stops installing the hook, but not if one changes how a
+    deny is honoured.
 - One extra short-lived process runs before each Bash, Edit, MultiEdit, Write, NotebookEdit, Read,
   Grep, and Glob call in a guarded session — since #1303, every guardable session.
 - The runner's hook state directory is invisible to the provider: reading it is refused as firmly

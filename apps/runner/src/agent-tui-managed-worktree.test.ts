@@ -338,19 +338,35 @@ test("a refusal from the protection source leaves no runner-owned files behind",
   }
 });
 
-test("a TUI launch for a provider without a guard mechanism is unchanged", async () => {
+test("a Codex TUI for a session with no managed worktree opens unchanged, with no probe", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wollipog-tui-guard-"));
   resetClaudeGuardState();
   try {
+    const deps = dependencies(dir, []);
     const launch = await prepareAgentTuiLaunch(
       meta({ sessionId: "s1337cdx", driver: "codex", command: "codex", args: ["--profile", "team"] }),
       {
-        ...dependencies(dir, [{ worktreePath: WORKTREE, repoPath: REPO }]),
-        provisionManagedWorktreeGuard: () => assert.fail("only Claude launches carry the guard hook"),
+        ...deps,
+        provisionManagedWorktreeGuard: (spec: SessionMeta, cwd?: string) => provisionAgentTuiManagedWorktreeGuard(
+          spec,
+          {
+            controlPlaneUrl: "ws://127.0.0.1:4317/runner",
+            controlPlaneProtocolVersion: PROTOCOL_VERSION,
+            enabled: false,
+            protections: () => [],
+            verifyGuardLaunch: () => assert.fail("no worktree means no self-test"),
+            readCodexHookInventory: () => assert.fail("no worktree means no hook inventory probe"),
+          },
+          () => {},
+          hookHost(dir),
+          cwd,
+        ),
       },
     );
     assert.ok(launch);
+    // Even a profile, which a guarded launch cannot enumerate, is untouched here (#1377).
     assert.deepEqual(launch.args, ["--profile", "team"]);
+    assert.deepEqual(readdirSync(dir), []);
   } finally {
     resetClaudeGuardState();
     rmSync(dir, { recursive: true, force: true });

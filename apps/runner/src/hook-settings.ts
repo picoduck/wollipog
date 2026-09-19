@@ -34,6 +34,17 @@ import {
   writeManagedWorktreeGuardProtections,
 } from "./managed-worktree-guard.js";
 import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
+import {
+  codexGuardArgsActive,
+  codexGuardCommandString,
+  codexGuardConfigOverride,
+  codexGuardLaunchArgs,
+  codexHookInventoryProbe,
+  codexHookInventoryVerdict,
+  readCodexHookInventory,
+  withoutCodexGuardArgs,
+  type CodexHookEntry,
+} from "./codex-managed-worktree-guard.js";
 import { deriveCpHttpUrl } from "./runner-credential-file.js";
 import { effectiveClaudePermissionMode } from "./claude-permission.js";
 import {
@@ -938,6 +949,114 @@ export function refreshClaudeGuardProtections(
   } catch (error) {
     return reasonFor(`the protected worktree list could not be updated: ${(error as Error).message}`);
   }
+}
+
+export interface CodexGuardProvisioning {
+  /** The argv this spawn must use: the override and trust bypass appended when the guard is active. */
+  args: string[];
+  /** Whether the guard really is in `args`, read back from the argv itself. */
+  guardActive: boolean;
+  /** Why the guard is not active, worded for the person opening the TUI. */
+  reason?: string;
+}
+
+/**
+ * Provision the managed-worktree guard for a Codex native TUI launch (#1377).
+ *
+ * Codex's structured protection lives in the driver (`buildCodexTurnParams` and its approval
+ * decisions), which a TUI does not run, so this installs the SAME sidecar Claude uses as a Codex
+ * `PreToolUse` hook through `-c`, over the SAME per-session protections file — which is why the
+ * session store's live refresh (`refreshClaudeGuardProtections`) keeps it in step too, and why the
+ * tripwire, the compromise marker, and the launch self-test are shared with Claude's.
+ *
+ * Only called for a session that owns a runner-created worktree: one that owns none opens exactly
+ * as it did before, with nothing written and no probe run. Every failure returns an inactive guard
+ * with a reason, and the caller refuses the TUI; nothing here launches a Codex TUI unguarded.
+ */
+export async function provisionCodexGuard(
+  spec: Pick<SessionLaunchSpec, "sessionId" | "command" | "args" | "env" | "context" | "executionTarget">,
+  config: {
+    protections: readonly ManagedWorktreeProtection[];
+    /** The TUI's working directory, where Codex resolves project-scoped hooks. */
+    cwd: string;
+    platform?: NodeJS.Platform;
+    /** Seam for tests: prove the guard sidecar actually refuses before relying on it. */
+    verifyGuardLaunch?: typeof verifyManagedWorktreeGuardLaunch;
+    /** Seam for tests: enumerate the launch's effective Codex hooks. */
+    readHookInventory?: typeof readCodexHookInventory;
+  },
+  log: (message: string) => void,
+  host: ClaudeHookHost = defaultClaudeHookHost(),
+): Promise<CodexGuardProvisioning> {
+  assertSafeSessionFileId(spec.sessionId);
+  // A runner-owned override left in the argv would claim a guard this spawn has not proved.
+  const args = withoutCodexGuardArgs(spec.args);
+  const inactive = (reason: string): CodexGuardProvisioning => {
+    log(`Codex managed worktree guard ${spec.sessionId}: ${reason}`);
+    return { args, guardActive: false, reason };
+  };
+  if (compromisedGuardSessions.has(spec.sessionId)) {
+    return inactive("its guard state was invalidated and has not been re-proved");
+  }
+  if ((spec.context?.kind ?? "native") !== "native") {
+    return inactive("WSL/container hook path translation is not supported");
+  }
+  if (spec.executionTarget && spec.executionTarget.adapter !== "host") {
+    return inactive("container/cloud hook injection is not supported");
+  }
+  // Codex runs a hook command through a POSIX shell's `-lc`; how it runs one on Windows was not
+  // measured, and a guard whose quoting is a guess is not a guard.
+  if ((config.platform ?? process.platform) === "win32") {
+    return inactive("Codex hook injection is not supported on Windows");
+  }
+  const protectionsFile = claudeHookSessionProtectionsPath(host.configDir, spec.sessionId);
+  let override: string;
+  let guardCommand: string;
+  try {
+    const launch = runnerReentryCommand(host, MANAGED_WORKTREE_GUARD_MODE);
+    const hookLaunch = { command: launch.command, args: [...launch.args, "--protections", protectionsFile] };
+    override = codexGuardConfigOverride(hookLaunch);
+    guardCommand = codexGuardCommandString(hookLaunch);
+    // Tripwire BEFORE overwriting, exactly as for Claude: tampering is made evident, not repaired.
+    const baseline = guardStateDigests.get(spec.sessionId);
+    if (baseline && existsSync(protectionsFile) &&
+        !managedWorktreeGuardStateMatches(protectionsFile, baseline)) {
+      poisonClaudeGuardState(spec.sessionId, protectionsFile);
+      return inactive("the protected worktree list was modified outside the runner");
+    }
+    // Written even if this launch then refuses: a Codex TUI already open for this session loads
+    // the same file on every matched tool call, so it is refreshed and never retired here.
+    guardStateDigests.set(
+      spec.sessionId,
+      writeManagedWorktreeGuardProtections(protectionsFile, config.protections),
+    );
+    // Codex, like Claude, treats a hook that fails to START as a failed hook and runs the call.
+    const verdict = verifiedGuardLaunch(
+      { launch, protectionsFile, protections: config.protections },
+      config.verifyGuardLaunch,
+    );
+    if (!verdict.ok) return inactive(`the guard's launch self-test failed (${verdict.reason})`);
+  } catch (error) {
+    return inactive(`the guard could not be provisioned (${(error as Error).message})`);
+  }
+  // Enumerate with the same flags the TUI will carry. This proves Codex installs the runner's hook
+  // in THIS build and decides whether the invocation-wide trust bypass is acceptable at all.
+  let entries: CodexHookEntry[];
+  try {
+    entries = await (config.readHookInventory ?? readCodexHookInventory)(
+      codexHookInventoryProbe(spec, config.cwd, override),
+    );
+  } catch (error) {
+    return inactive(`its Codex hook inventory could not be enumerated (${(error as Error).message})`);
+  }
+  const inventory = codexHookInventoryVerdict(entries, guardCommand);
+  if (!inventory.ok) return inactive(inventory.reason);
+  const guarded = codexGuardLaunchArgs(args, override);
+  if (!codexGuardArgsActive(guarded, override)) {
+    return inactive("a later hooks.PreToolUse override in the launch arguments would replace the guard");
+  }
+  log(`Codex managed worktree guard ${spec.sessionId}: provisioned (${protectionsFile})`);
+  return { args: guarded, guardActive: true };
 }
 
 /** Persist the CP acknowledgement that fences the first HTTP hook request after provisioning. */
