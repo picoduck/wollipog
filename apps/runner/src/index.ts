@@ -870,7 +870,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
     const provider = providerForDriver(meta.driver);
     if (!provider) return undefined;
     const env = runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context);
-    return provider === "claude" ? env.CLAUDE_CONFIG_DIR : env.CODEX_HOME;
+    return (provider === "claude" ? env.CLAUDE_CONFIG_DIR : env.CODEX_HOME) ?? env.HOME ?? homedir();
   },
 );
 authorizeSubscriptionUsageProbe = (agent, env, sourceId) =>
@@ -1502,7 +1502,7 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
     await Promise.all(config.providerAccounts.map(async (account) => {
       const agent = agentForProviderAccount(metadata.agents, account);
       if (!agent || agent.available !== true) {
-        providerAccountAuthStatus.set(account.id, "unknown");
+        providerAccountAuthStatus.set(account.id, mergeProviderAccountAuthStatus(account, "unknown"));
         return;
       }
       const env = runnerLocalAgentEnv(agent.id, agent.driver ?? "acp", agent.context ?? { kind: "native" });
@@ -1517,7 +1517,7 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
         ));
       } catch (error) {
         void error;
-        providerAccountAuthStatus.set(account.id, "unknown");
+        providerAccountAuthStatus.set(account.id, mergeProviderAccountAuthStatus(account, "unknown"));
         log(`${account.provider} provider-account authentication probe failed`);
       }
     }));

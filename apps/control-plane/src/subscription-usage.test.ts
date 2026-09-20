@@ -227,6 +227,29 @@ test("an account for one provider preserves the other provider's legacy source",
   db.close();
 });
 
+test("an unbound WSL agent keeps its legacy source beside a same-provider account", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const now = 1_000_000;
+  const wsl = {
+    ...claudeAgent("claude-wsl"),
+    context: { kind: "wsl" as const, distro: "Ubuntu" },
+  };
+  db.registerRunner({
+    ...meta("runner-1", [claudeAgent(), wsl]),
+    providerAccounts: [{ id: "work", label: "Work", provider: "claude", authStatus: "authenticated" }],
+  }, now, PROTOCOL_VERSION, {
+    organizationId: "org_personal", owner: { kind: "user", userId: "alice" },
+  });
+
+  assert.deepEqual(
+    db.subscriptionUsageForPrincipal(human(), now).sources.map((source) => [
+      source.agentId, source.providerAccountId,
+    ]),
+    [["claude", "work"], ["claude-wsl", undefined]],
+  );
+  db.close();
+});
+
 test("an unavailable account transition never retains another account's last-known usage", () => {
   const db = ControlPlaneDb.open(":memory:");
   const now = 1_000_000;

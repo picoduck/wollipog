@@ -1246,6 +1246,28 @@ test("provider events without an advertised account source are ignored", () => {
   assert.deepEqual(published, []);
 });
 
+test("an unbound WSL agent keeps its legacy source beside same-provider accounts", () => {
+  const wsl = {
+    ...claudeAgent(),
+    id: "claude-wsl",
+    context: { kind: "wsl" as const, distro: "Ubuntu" },
+  };
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [claudeAgent(), wsl],
+    providerAccounts: () => [
+      { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+    ],
+    resolveEnv: () => ({}),
+    publish: () => {},
+  });
+  manager.syncSources();
+  assert.deepEqual(manager.inventory().map((source) => [source.agentId, source.providerAccountId]), [
+    ["claude", "work"],
+    ["claude-wsl", undefined],
+  ]);
+});
+
 test("a failed account refresh preserves the configured label over provider identity", async () => {
   const manager = new SubscriptionUsageManager({
     runnerId: "runner-1",

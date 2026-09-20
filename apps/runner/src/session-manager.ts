@@ -6153,7 +6153,7 @@ export class SessionManager {
       ? meta?.providerCredentialHome ?? (meta ? this.resolveProviderCredentialHome?.(meta) : undefined)
       : undefined;
     const seatbeltAccount = credentialHome
-      ? createHash("sha256").update(credentialHome).digest("hex").slice(0, 16)
+      ? createHash("sha256").update(resolve(credentialHome)).digest("hex").slice(0, 16)
       : "default";
     return {
       sessionId,

@@ -624,7 +624,6 @@ export class SubscriptionUsageManager {
     const result: SubscriptionSource[] = [];
     const seen = new Set<string>();
     const accounts = this.options.providerAccounts?.() ?? [];
-    const accountProviders = new Set(accounts.map((account) => account.provider));
     for (const account of accounts) {
         const agent = agentForProviderAccount(
           this.options.agents(),
@@ -650,7 +649,10 @@ export class SubscriptionUsageManager {
     }
     for (const agent of this.options.agents()) {
       const provider = providerForDriver(agent.driver ?? "acp");
-      if (!provider || agent.driver === "codex" || accountProviders.has(provider)) continue;
+      if (!provider || agent.driver === "codex") continue;
+      const mappedToAccount = accounts.some((account) => account.provider === provider &&
+        ((agent.context?.kind ?? "native") === "native" || agent.defaultProviderAccountId === account.id));
+      if (mappedToAccount) continue;
       const sourceId = subscriptionUsageSourceId(
         this.options.runnerId,
         agent.id,

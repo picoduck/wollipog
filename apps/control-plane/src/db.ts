@@ -10706,7 +10706,6 @@ export class ControlPlaneDb {
     const sources: SubscriptionUsageResponse["sources"] = [];
     for (const runner of runners) {
       const providerAccounts = runner.providerAccounts ?? [];
-      const accountProviders = new Set(providerAccounts.map((account) => account.provider));
       const sourceCoordinates = [
         ...providerAccounts.flatMap((account) => {
           const compatible = runner.agents.filter((candidate) => account.provider === "codex"
@@ -10722,7 +10721,10 @@ export class ControlPlaneDb {
               : agent.driver === "claude-code"
                 ? "claude" as const
                 : null;
-            return provider && !accountProviders.has(provider)
+            const mappedToAccount = provider && providerAccounts.some((account) =>
+              account.provider === provider &&
+              ((agent.context?.kind ?? "native") === "native" || agent.defaultProviderAccountId === account.id));
+            return provider && !mappedToAccount
               ? [{ agent, provider, account: undefined }]
               : [];
           }),

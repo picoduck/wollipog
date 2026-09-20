@@ -377,7 +377,9 @@ export function NewSessionDialog({
   const agent = selectedAgentOption?.agent;
   const provider = agent?.driver === "claude-code" ? "claude"
     : agent?.driver === "codex" || agent?.driver === "codex-app-server" ? "codex" : null;
-  const providerAccounts = (runner?.providerAccounts ?? []).filter((account) => account.provider === provider);
+  const providerAccounts = (runner?.providerAccounts ?? []).filter((account) =>
+    account.provider === provider &&
+    ((agent?.context?.kind ?? "native") === "native" || account.id === agent?.defaultProviderAccountId));
   useEffect(() => {
     const preferred = agent?.defaultProviderAccountId;
     setProviderAccountId((current) => providerAccounts.some((account) => account.id === current)

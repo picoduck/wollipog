@@ -1305,6 +1305,30 @@ test("multiple provider accounts expose a picker and submit the selected account
   }
 });
 
+test("a WSL agent does not submit an implicit runner-host provider account", async () => {
+  const accountRunner: RunnerView = {
+    ...runner,
+    protocolVersion: PROTOCOL_VERSION,
+    agents: runner.agents.map((agent) => ({
+      ...agent,
+      context: { kind: "wsl" as const, distro: "Ubuntu" },
+      defaultProviderAccountId: undefined,
+    })),
+    providerAccounts: [
+      { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+    ],
+  };
+  const fixture = await mountFixture({ runners: [accountRunner] }, { projectId: null });
+  try {
+    assert.equal(fixture.container.querySelector('[aria-label^="Account:"]'), null);
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests.length, 1);
+    assert.equal(fixture.requests[0]?.providerAccountId, undefined);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("container targets hide and omit runner-local provider accounts", async () => {
   const boundaries = {
     filesystem: "container" as const,

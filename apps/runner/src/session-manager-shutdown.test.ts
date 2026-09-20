@@ -201,7 +201,7 @@ test("Seatbelt naming and legacy sessions share an env-configured credential-hom
     releaseAll: () => {},
   };
   (manager as unknown as { resolveProviderCredentialHome: () => string }).resolveProviderCredentialHome =
-    () => "/accounts/claude-alt";
+    () => "/accounts/claude-alt/../claude-alt/";
   const sessionGroup = (manager as unknown as {
     admissionRequest(id: string): { exclusiveGroup?: string };
   }).admissionRequest("legacy").exclusiveGroup;
