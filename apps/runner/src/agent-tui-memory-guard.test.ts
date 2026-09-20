@@ -118,12 +118,21 @@ function dependencies(
         protections,
         verifyGuardLaunch: () => ({ ok: true as const }),
         readCodexHookInventory: async (probe: CodexHookInventoryProbe): Promise<CodexHookEntry[]> => {
-          const command = /command=("(?:[^"\\]|\\.)*")/u.exec(probe.args[probe.args.length - 1]!)?.[1];
+          // Modelled on the measured transition: untrusted until the probe's argv names the hash
+          // (#1499), which is what the runner reads back before claiming the guard.
+          const key = "/<session-flags>/config.toml:pre_tool_use:0:0";
+          const hash = "sha256:af53a04b1de0d999ef8d0c76cebd19593b265fa285eab2eb11d410391cdb8c26";
+          const override = probe.args.find((arg) => arg.includes("hooks.PreToolUse="))
+            ?? probe.args[probe.args.length - 1]!;
+          const command = /command=("(?:[^"\\]|\\.)*")/u.exec(override)?.[1];
+          const trusted = probe.args.some((arg) =>
+            arg.startsWith("hooks.state=") && arg.includes(hash) && arg.includes(key));
           return [{
-            key: "/<session-flags>/config.toml:pre_tool_use:0:0",
+            key,
             enabled: true,
-            trustStatus: "untrusted",
+            trustStatus: trusted ? "trusted" : "untrusted",
             source: "sessionFlags",
+            currentHash: hash,
             command: JSON.parse(command!) as string,
           }];
         },
