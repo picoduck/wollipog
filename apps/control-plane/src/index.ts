@@ -220,10 +220,15 @@ import { normalizeDriverTelemetry, telemetryWindowDays } from "./driver-telemetr
 import { registerUsageRoutes } from "./usage-routes.js";
 import { UsageRateTableService, defaultUsagePricingCachePath, resolveUsagePricingUrl } from "./usage-rate-table.js";
 import {
+  SUBSCRIPTION_USAGE_STALE_AFTER_MS,
   validateSubscriptionUsageInventory,
   validateSubscriptionUsageSnapshot,
 } from "./subscription-usage.js";
 import { validateRegistryApproval, type RegistryApprovalInput } from "./registry-approval.js";
+import {
+  providerAccountSwitchOptions,
+  providerForSessionAccountSwitch,
+} from "./provider-account-switch.js";
 import { AutomationsService } from "./automations.js";
 import { buildAuthorizedSessionTranscriptExport, type TranscriptExportFormat } from "./session-exports.js";
 import { principalCanReadWorkflowArtifact } from "./artifact-exports.js";
@@ -945,6 +950,20 @@ function runnerCapabilityError(
     : runnerCapabilityRequirement(protocolVersion, capability, label);
 }
 
+function sessionProviderAccountOptions(
+  principal: HumanPrincipal,
+  session: SessionView,
+) {
+  const runner = db.getRunner(session.runnerId);
+  if (!runner) return [];
+  const usage = db.subscriptionUsageForPrincipal(
+    principal,
+    Date.now(),
+    SUBSCRIPTION_USAGE_STALE_AFTER_MS,
+  );
+  return providerAccountSwitchOptions(session, runner.providerAccounts ?? [], usage.sources);
+}
+
 // Push-on-change/push-on-registration for managed skills: fire-and-forget the authoritative
 // desired set; no-ops (with a debug log) for offline or capability-lacking runners.
 const pushSkillsSync = makeSkillsSyncPusher({
@@ -1399,6 +1418,7 @@ app.register(async (instance) => {
       case "session_worktree_result":
       case "workspace_worktree_setup_result":
       case "logout_agent_result":
+      case "switch_session_provider_account_result":
       case "acp_registry_approval_result":
       case "host_action_result":
       case "interrupt_turn_result":
@@ -3799,6 +3819,71 @@ app.post("/api/sessions/:id/cancel", async (req, reply) =>
 app.post("/api/sessions/:id/restart", async (req, reply) =>
   respond(reply, svc.restart((req.params as { id: string }).id)),
 );
+
+app.get("/api/sessions/:id/provider-accounts", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestHuman(req);
+  if (!principal) return reply.code(403).send({ error: "account switching is available to organization members only" });
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  const session = db.getSession(id);
+  if (!session) return reply.code(404).send({ error: "session not found" });
+  const unsupported = runnerCapabilityError(
+    session.runnerId,
+    "sessionProviderAccountSwitch",
+    "Session account switching",
+  );
+  if (unsupported) return reply.code(409).send({ error: unsupported });
+  if (!session.providerAccountId || !providerForSessionAccountSwitch(session.driver)) {
+    return reply.code(409).send({ error: "this session is not bound to a switchable provider account" });
+  }
+  return { accounts: sessionProviderAccountOptions(principal, session) };
+});
+
+app.post("/api/sessions/:id/provider-account", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestHuman(req);
+  if (!principal) return reply.code(403).send({ error: "account switching is available to organization members only" });
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  const session = db.getSession(id);
+  if (!session) return reply.code(404).send({ error: "session not found" });
+  if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
+  const unsupported = runnerCapabilityError(
+    session.runnerId,
+    "sessionProviderAccountSwitch",
+    "Session account switching",
+  );
+  if (unsupported) return reply.code(409).send({ error: unsupported });
+  const body = (req.body ?? {}) as { providerAccountId?: unknown };
+  if (typeof body.providerAccountId !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(body.providerAccountId)) {
+    return reply.code(400).send({ error: "providerAccountId is invalid" });
+  }
+  if (!sessionProviderAccountOptions(principal, session).some((account) =>
+    account.id === body.providerAccountId)) {
+    return reply.code(409).send({ error: "that account is unavailable, exhausted, or not compatible with this session" });
+  }
+  const requestId = `account_switch_${randomUUID().slice(0, 8)}`;
+  try {
+    const result = await hub.requestFromRunner(
+      session.runnerId,
+      requestId,
+      {
+        type: "switch_session_provider_account",
+        requestId,
+        sessionId: id,
+        providerAccountId: body.providerAccountId,
+      },
+      30_000,
+    );
+    if (result.type !== "switch_session_provider_account_result") {
+      return reply.code(502).send({ error: "unexpected runner reply" });
+    }
+    if (!result.ok) return reply.code(409).send({ error: result.error ?? "account switch failed" });
+    return { accepted: true, scheduled: result.scheduled === true };
+  } catch (error) {
+    return reply.code(504).send({ error: (error as Error).message });
+  }
+});
 
 app.post("/api/sessions/:id/logout-agent", async (req, reply) => {
   const id = (req.params as { id: string }).id;

@@ -2639,9 +2639,12 @@ function SessionDetailLoaded({
   // composer must not invite retries that cannot succeed.
   const historyQuarantine = session.historyQuarantine;
   const worktreeRecovery = session.worktreeRecovery;
-  const canPrompt = runnerOnline && !terminal && !policyPaused && !historyQuarantine && !worktreeRecovery;
+  const accountSwitchFailure = session.providerAccountSwitchFailure;
+  const canPrompt = runnerOnline && !terminal && !policyPaused && !historyQuarantine &&
+    !worktreeRecovery && !accountSwitchFailure;
   const composerPlaceholder = terminal ? `Session is ${session.status}.`
     : !runnerOnline ? "Runner is offline."
+    : accountSwitchFailure ? "Choose another account before sending another message."
     : worktreeRecovery ? "Worktree recovery is required before sending another message."
     : historyQuarantine ? "Conversation quarantined. Recover this session to continue."
     : policyPaused ? "Session is paused by guardrails. Review the pending decision to continue."
@@ -5042,6 +5045,21 @@ function SessionDetailLoaded({
                     </button>
                   </div>
                 )}
+              </div>
+            )}
+            {accountSwitchFailure && (
+              <div className="quarantine-banner" role="status" aria-label="Account Switch Failed">
+                <div className="quarantine-copy">
+                  <span className="quarantine-title">Account Switch Failed</span>
+                  <p>
+                    Wollipog could not resume this conversation with {accountSwitchFailure.providerAccountLabel}.
+                    {" "}{accountSwitchFailure.reason}
+                  </p>
+                  <p>
+                    The session is parked. Use <strong>Switch Account…</strong> in More Actions to
+                    retry this account or choose another account with usage headroom.
+                  </p>
+                </div>
               </div>
             )}
             {retitleFeedback && (

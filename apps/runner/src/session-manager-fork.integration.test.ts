@@ -199,6 +199,20 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
         legacy: { configHash: "source-only-config", environment: {}, teardown: [] },
       },
       worktreeProcessMarkers: { legacy: "source-only-process-marker" },
+      providerAccountId: "work",
+      providerAccountLabel: "Work",
+      providerAccountProvider: "codex",
+      providerCredentialHome: "/accounts/work",
+      pendingProviderAccountId: "personal",
+      pendingProviderAccountLabel: "Personal",
+      pendingProviderAccountProvider: "codex",
+      pendingProviderCredentialHome: "/accounts/personal",
+      providerAccountSwitchFailure: {
+        providerAccountId: "personal",
+        providerAccountLabel: "Personal",
+        reason: "the provider could not resume this conversation with the selected account",
+        detectedAt: 1,
+      },
       turnCount: 1,
       forkPoints: { "1": { agentTurnId: "turn-1", tree, baseCommit, eventSeq: 3 } },
       seq: 0,
@@ -277,6 +291,13 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     const target = store.readMeta("s_target")!;
     assert.equal(target.agentSessionId, "thread-forked");
     assert.equal(target.preview, null);
+    assert.equal(target.pendingProviderAccountId, undefined,
+      "a fork never inherits the source's account-switch request");
+    assert.equal(target.pendingProviderAccountLabel, undefined);
+    assert.equal(target.pendingProviderAccountProvider, undefined);
+    assert.equal(target.pendingProviderCredentialHome, undefined);
+    assert.equal(target.providerAccountSwitchFailure, undefined,
+      "a fork never inherits the source's account-switch failure");
     assert.equal(target.worktreeHooks, undefined, "a fork never inherits the source worktree's teardown identity");
     assert.ok(target.worktreeProcessMarkers?.legacy, "fork setup stamps its own process boundary");
     assert.notEqual(

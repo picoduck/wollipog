@@ -496,12 +496,12 @@ test("every distinct wire projection gets its own dense sequence space", () => {
   const { store, root } = tmpStore();
   try {
     store.create(meta());
-    // Three omission policies mean four projections, and they must never share an epoch: a control
+    // Four omission policies mean five projections, and they must never share an epoch: a control
     // plane that hydrated through one and reconnects through the other has to resync rather than
     // reuse cursors whose sequence numbers now name different events.
-    const epochs = [86, 129, 147, CURRENT_PEER].map((peer) => store.snapshots(peer)[0]!.historyEpoch);
+    const epochs = [86, 129, 147, 170, CURRENT_PEER].map((peer) => store.snapshots(peer)[0]!.historyEpoch);
     assert.equal(new Set(epochs).size, epochs.length, `distinct epochs per projection, got ${epochs.join(",")}`);
-    assert.deepEqual(epochs, [86, 129, 147, CURRENT_PEER].map((peer) => wireEpoch(0, peer)));
+    assert.deepEqual(epochs, [86, 129, 147, 170, CURRENT_PEER].map((peer) => wireEpoch(0, peer)));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -514,27 +514,33 @@ test("the projection-count encoding fences every prior one-policy wire generatio
     const legacy = store.snapshots(86)[0]!;
     const intermediate = store.snapshots(129)[0]!;
     const recent = store.snapshots(147)[0]!;
+    const previous = store.snapshots(170)[0]!;
     const current = store.snapshots(CURRENT_PEER)[0]!;
 
     // Before v130 the one-policy encoding at local epoch zero was 1 for v86 and 0 for every
-    // v87+ peer. Before v148 the three-variant encoding used offset 2. The advanced offset makes
+    // v87+ peer. Before v148 the three-variant encoding used offset 2, and before v171 the
+    // four-variant encoding used offset 5. The advanced offset makes
     // every current projection larger than either predecessor at the same local epoch, so every
     // control plane resyncs when the runner upgrades even if its protocol changes at the same time.
     assert.notEqual(legacy.historyEpoch, 1);
     assert.notEqual(intermediate.historyEpoch, 0);
-    assert.equal(legacy.historyEpoch, 8);
-    assert.equal(intermediate.historyEpoch, 7);
-    assert.equal(recent.historyEpoch, 6);
+    assert.equal(legacy.historyEpoch, 13);
+    assert.equal(intermediate.historyEpoch, 12);
+    assert.equal(recent.historyEpoch, 11);
+    assert.equal(previous.historyEpoch, 10);
 
-    assert.equal(current.historyEpoch, 5);
+    assert.equal(current.historyEpoch, 9);
     for (let localEpoch = 0; localEpoch < 8; localEpoch++) {
       const retiredFormatMaximum = localEpoch * 2 + 1;
       const precedingFormatMaximum = 2 + localEpoch * 3 + 2;
-      for (const peer of [86, 129, 147, CURRENT_PEER]) {
+      const previousFormatMaximum = 5 + localEpoch * 4 + 3;
+      for (const peer of [86, 129, 147, 170, CURRENT_PEER]) {
         assert.ok(store.projectedHistoryEpoch(localEpoch, peer) > retiredFormatMaximum,
           `v${peer} local epoch ${localEpoch} sorts above the retired encoding`);
         assert.ok(store.projectedHistoryEpoch(localEpoch, peer) > precedingFormatMaximum,
           `v${peer} local epoch ${localEpoch} sorts above the preceding three-variant encoding`);
+        assert.ok(store.projectedHistoryEpoch(localEpoch, peer) > previousFormatMaximum,
+          `v${peer} local epoch ${localEpoch} sorts above the preceding four-variant encoding`);
       }
     }
 

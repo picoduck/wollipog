@@ -515,7 +515,10 @@
 // 170: runners advertise opaque provider-account ids and labels, bind a selected account to a
 //      session, and report account-scoped subscription usage. Credential directories remain
 //      runner-local and never cross the protocol boundary.
-export const PROTOCOL_VERSION = 170;
+// 171: an existing Claude or Codex session can schedule a same-Machine provider-account switch.
+//      The runner applies it only at a safe turn boundary, re-pins provider identity for the new
+//      credential home, resumes the same conversation, and reports an explicit parked failure.
+export const PROTOCOL_VERSION = 171;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -641,6 +644,7 @@ export interface RunnerControlPlaneAttestation {
  * Keep this table aligned with the version history above. Missing protocol metadata means the
  * runner predates v15, so support cannot be proven and callers must fail closed. */
 export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
+  sessionProviderAccountSwitch: 171,
   providerAccounts: 170,
   piHarness: 155,
   piExternalSessions: 156,
@@ -945,8 +949,8 @@ export function worktreeRecoveryReceiptCode(
  *
  * Adding an entry changes the projected-history-epoch encoding (`localEpoch * VARIANTS + variant`).
  * Protocol v130 introduced offset 2 to fence the retired two-way encoding. Every later radix
- * change must advance the offset by the prior radix before adding the new variant; v148 therefore
- * uses 5 (= 2 + 3). For the same or any later local epoch, every new-format value then sorts above
+ * change must advance the offset by the prior radix before adding the new variant; v171 therefore
+ * uses 9 (= 5 + 4). For the same or any later local epoch, every new-format value then sorts above
  * every value the preceding format could publish, forcing a resync before a cached sequence number
  * can name a different event.
  *
@@ -957,6 +961,7 @@ const SESSION_EVENT_WIRE_POLICIES = {
   agent_response_completed: { minProtocol: 87, legacy: "omit" },
   policy_hook_decision: { minProtocol: 130, legacy: "omit" },
   workflow_action_admission_armed: { minProtocol: 151, legacy: "omit" },
+  provider_account_switched: { minProtocol: 171, legacy: "omit" },
 } as const satisfies Partial<Record<SessionEventKind, {
   minProtocol: number;
   legacy: "omit";
@@ -986,8 +991,8 @@ export function sessionEventWireProjectionVariant(
 export const SESSION_EVENT_WIRE_PROJECTION_VARIANTS =
   Object.keys(SESSION_EVENT_WIRE_POLICIES).length + 1;
 
-/** Numeric fence advanced at each projection-radix change; v148 follows v130's offset 2 + radix 3. */
-export const SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET = 5;
+/** Numeric fence advanced at each projection-radix change; v171 follows v148's offset 5 + radix 4. */
+export const SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET = 9;
 
 /** Whether this peer needs any explicit additive session-event compatibility projection.
  * Keeping policy inspection beside the policy table avoids callers probing it with a fabricated
@@ -2033,6 +2038,15 @@ export interface ProviderAccountDefinition {
   label: string;
   provider: "claude" | "codex";
   authStatus: "authenticated" | "unauthenticated" | "unknown";
+}
+
+/** Explicit, content-free failure from a requested account handoff. The old provider process is
+ * already retired when this is set, so the session remains parked until another account is chosen. */
+export interface ProviderAccountSwitchFailureView {
+  providerAccountId: string;
+  providerAccountLabel: string;
+  reason: string;
+  detectedAt: number;
 }
 
 /** Stable ACP capabilities observed from a live initialize handshake. Content-free and safe to
@@ -4177,6 +4191,7 @@ export type SessionEventPayload =
   | { kind: "checkpoint_restored"; turn: number }
   | { kind: "conversation_checkpoint"; turn: number }
   | { kind: "conversation_forked"; sourceSessionId: string; turn: number; handoff?: { sourceAgent: string; destinationAgent: string; disclosure: string } }
+  | { kind: "provider_account_switched"; providerAccountId: string; providerAccountLabel: string }
   | {
       kind: "token_usage";
       /** Provider-reported input count. Anthropic reports the uncached portion only; Codex reports
@@ -4646,6 +4661,31 @@ export interface SubscriptionUsageResponse {
   refresh?: { attempted: number; failed: number };
 }
 
+/** Principal-scoped choice for one session. Only accounts on its current Machine and provider are
+ * projected, and exhausted accounts are omitted by the control plane. */
+export interface SessionProviderAccountOption {
+  id: string;
+  label: string;
+  authStatus: ProviderAccountDefinition["authStatus"];
+  usageState: SubscriptionUsageState;
+  freshness: SubscriptionUsageFreshness;
+  buckets: SubscriptionUsageBucket[];
+}
+
+export interface SessionProviderAccountOptionsResponse {
+  accounts: SessionProviderAccountOption[];
+}
+
+export interface SwitchSessionProviderAccountRequest {
+  providerAccountId: string;
+}
+
+export interface SwitchSessionProviderAccountResponse {
+  accepted: true;
+  /** True while the current turn still owns the provider process. */
+  scheduled: boolean;
+}
+
 /* ------------------- Operational transcript projection ------------------- */
 
 /**
@@ -5070,6 +5110,7 @@ export interface SessionView {
   agentName: string | null;
   providerAccountId?: string;
   providerAccountLabel?: string;
+  providerAccountSwitchFailure?: ProviderAccountSwitchFailureView;
   title: string;
   titleSource?: SessionTitleSource;
   /** Canonical provider activity timestamp from stable ACP session_info_update; presentation-only. */
@@ -5249,6 +5290,8 @@ export interface SessionSnapshot {
   agentId: string | null;
   providerAccountId?: string;
   providerAccountLabel?: string;
+  /** Three-valued: undefined is an older peer; null explicitly clears an earlier failure. */
+  providerAccountSwitchFailure?: ProviderAccountSwitchFailureView | null;
   title: string;
   titleSource?: SessionTitleSource;
   providerUpdatedAt?: string;
@@ -6769,6 +6812,7 @@ export type RunnerToControlPlane =
   | SessionWorktreeResultMessage
   | WorkspaceWorktreeSetupResultMessage
   | LogoutAgentResultMessage
+  | SwitchSessionProviderAccountResultMessage
   | AcpRegistryApprovalResultMessage
   | SkillsStateMessage
   | SkillSnapshotResultMessage
@@ -7380,6 +7424,21 @@ export interface LogoutAgentResultMessage {
   type: "logout_agent_result";
   requestId: string;
   ok: boolean;
+  error?: string;
+}
+
+export interface SwitchSessionProviderAccountMessage {
+  type: "switch_session_provider_account";
+  requestId: string;
+  sessionId: string;
+  providerAccountId: string;
+}
+
+export interface SwitchSessionProviderAccountResultMessage {
+  type: "switch_session_provider_account_result";
+  requestId: string;
+  ok: boolean;
+  scheduled?: boolean;
   error?: string;
 }
 
@@ -8283,6 +8342,7 @@ export type ControlPlaneToRunner =
   | DeleteSessionNamingCustomModelKeyMessage
   | TestSessionNamingCustomModelMessage
   | LogoutAgentMessage
+  | SwitchSessionProviderAccountMessage
   | AcpRegistryApprovalMessage
   | SkillsSyncMessage
   | SkillSnapshotMessage

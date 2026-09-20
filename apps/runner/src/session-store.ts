@@ -55,6 +55,7 @@ import type {
   ExecutionTargetRef,
   PendingApproval,
   PromptImageInput,
+  ProviderAccountSwitchFailureView,
   ProviderHistoryQuarantineView,
   ProviderHistoryRecoveryMode,
   RunnerCapacityBlocker,
@@ -85,6 +86,13 @@ export interface SessionMeta {
   /** Runner-private binding captured once so config edits cannot redirect a durable session. */
   providerAccountProvider?: "claude" | "codex";
   providerCredentialHome?: string;
+  /** Durable runner-private handoff target. The current binding remains authoritative until the
+   * replacement provider has resumed successfully. */
+  pendingProviderAccountId?: string;
+  pendingProviderAccountLabel?: string;
+  pendingProviderAccountProvider?: "claude" | "codex";
+  pendingProviderCredentialHome?: string;
+  providerAccountSwitchFailure?: ProviderAccountSwitchFailureView;
   /** Discovered adapter/CLI version; telemetry dimension only, never an auth source. */
   agentVersion?: string;
   /** Discovery-verified optional CLI flags/modes, retained for restart and runner-side defense. */
@@ -2900,6 +2908,10 @@ export function metaToSnapshot(
     agentId: m.agentId,
     providerAccountId: m.providerAccountId,
     providerAccountLabel: m.providerAccountLabel,
+    providerAccountSwitchFailure: controlPlaneProtocolVersion != null &&
+      controlPlaneProtocolVersion >= RUNNER_CAPABILITY_MIN_PROTOCOL.sessionProviderAccountSwitch
+      ? m.providerAccountSwitchFailure ?? null
+      : undefined,
     title: m.title,
     titleSource: m.titleSource,
     providerUpdatedAt: m.providerUpdatedAt,

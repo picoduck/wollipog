@@ -9,6 +9,7 @@ import {
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { RenameSessionDialog } from "./RenameSessionDialog.js";
+import { SwitchAccountDialog } from "./SwitchAccountDialog.js";
 import {
   sessionArchiveActionLabel,
   sessionArchiveRequiresStop,
@@ -174,6 +175,7 @@ export function SessionHeader({
   const [moveProjectOpen, setMoveProjectOpen] = useState(false);
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
+  const [switchAccountDialogOpen, setSwitchAccountDialogOpen] = useState(false);
   const statusesRef = useRef<HTMLDivElement>(null);
   const [note, setNote] = useState<string | null>(null);
   const menu = useAccessibleMenu(menuOpen, setMenuOpen, "session-actions-menu");
@@ -211,6 +213,13 @@ export function SessionHeader({
     ?.find((delivery) => delivery.watchdogState)?.watchdogState;
   const reprocessSupported = runnerSupportsProtocol(runnerProtocolVersion, "sessionReprocess");
   const logoutSupported = runnerSupportsProtocol(runnerProtocolVersion, "acpLogout");
+  const accountSwitchSupported = runnerSupportsProtocol(
+    runnerProtocolVersion,
+    "sessionProviderAccountSwitch",
+  );
+  const accountSwitchApplicable = Boolean(session.providerAccountId) &&
+    (session.driver === "claude-code" || session.driver === "codex" ||
+      session.driver === "codex-app-server");
   const dashboardOrigin = instancePublicOrigin(instances);
   const internalSessionUrl = dashboardOrigin
     ? absoluteViewUrl(dashboardOrigin, { name: "session", id: session.id })
@@ -781,6 +790,29 @@ export function SessionHeader({
                   >
                     Rename Session…
                   </button>
+                  {accountSwitchApplicable && (
+                    <button
+                      className="menu-item"
+                      type="button"
+                      role="menuitem"
+                      disabled={busy || !runnerOnline || !accountSwitchSupported}
+                      title={!runnerOnline
+                        ? "Runner is offline."
+                        : accountSwitchSupported
+                          ? "Continue this conversation with another account on the same Machine"
+                          : runnerCapabilityRequirement(
+                              runnerProtocolVersion,
+                              "sessionProviderAccountSwitch",
+                              "Session account switching",
+                            )}
+                      onClick={() => {
+                        closeMenu(false);
+                        setSwitchAccountDialogOpen(true);
+                      }}
+                    >
+                      Switch Account…
+                    </button>
+                  )}
                   {onSnooze && (
                     <button
                       className="menu-item"
@@ -1026,6 +1058,18 @@ export function SessionHeader({
             session={session}
             onClose={() => setRenameDialogOpen(false)}
             onRenamed={() => setNote("Session renamed")}
+            returnFocusRef={menu.triggerRef}
+          />
+        )}
+        {switchAccountDialogOpen && (
+          <SwitchAccountDialog
+            session={session}
+            onClose={() => setSwitchAccountDialogOpen(false)}
+            onSwitched={(scheduled) => {
+              setNote(scheduled
+                ? "Account switch scheduled for the next turn boundary."
+                : "Account switched.");
+            }}
             returnFocusRef={menu.triggerRef}
           />
         )}

@@ -73,6 +73,7 @@ import {
   type BackgroundNotificationReceiptView,
   type BackgroundWorkState,
   type BackgroundWorkTracking,
+  type ProviderAccountSwitchFailureView,
   type ProviderHistoryQuarantineView,
   type WorktreeRecoveryView,
   type ChildSessionAttentionOwner,
@@ -544,6 +545,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   agent_id       TEXT,
   provider_account_id TEXT,
   provider_account_label TEXT,
+  provider_account_switch_failure TEXT,
   title          TEXT NOT NULL DEFAULT '',
   title_source   TEXT NOT NULL DEFAULT 'generated',
   semantic_title INTEGER NOT NULL DEFAULT 0,
@@ -2463,6 +2465,7 @@ interface SessionRow {
   agent_id: string | null;
   provider_account_id: string | null;
   provider_account_label: string | null;
+  provider_account_switch_failure: string | null;
   title: string;
   title_source: string | null;
   semantic_title: number;
@@ -4644,7 +4647,11 @@ export class ControlPlaneDb {
     } catch {
       /* column already present */
     }
-    for (const column of ["provider_account_id TEXT", "provider_account_label TEXT"]) {
+    for (const column of [
+      "provider_account_id TEXT",
+      "provider_account_label TEXT",
+      "provider_account_switch_failure TEXT",
+    ]) {
       try { db.exec(`ALTER TABLE sessions ADD COLUMN ${column}`); } catch { /* column already present */ }
     }
     try { db.exec("ALTER TABLE subscription_usage_snapshots ADD COLUMN provider_account_id TEXT"); } catch { /* column already present */ }
@@ -11271,6 +11278,12 @@ export class ControlPlaneDb {
         this.stmt("UPDATE sessions SET provider_account_id=?, provider_account_label=? WHERE id=?")
           .run(snap.providerAccountId, snap.providerAccountLabel ?? snap.providerAccountId, snap.id);
       }
+      if (snap.providerAccountSwitchFailure !== undefined) {
+        this.stmt("UPDATE sessions SET provider_account_switch_failure=? WHERE id=?")
+          .run(snap.providerAccountSwitchFailure
+            ? JSON.stringify(snap.providerAccountSwitchFailure)
+            : null, snap.id);
+      }
       if (snap.executionTarget) {
         this.stmt("UPDATE sessions SET execution_target=? WHERE id=?")
           .run(JSON.stringify(snap.executionTarget), snap.id);
@@ -11485,6 +11498,12 @@ export class ControlPlaneDb {
       if (snap.providerAccountId) {
         this.stmt("UPDATE sessions SET provider_account_id=?, provider_account_label=? WHERE id=?")
           .run(snap.providerAccountId, snap.providerAccountLabel ?? snap.providerAccountId, id);
+      }
+      if (snap.providerAccountSwitchFailure !== undefined) {
+        this.stmt("UPDATE sessions SET provider_account_switch_failure=? WHERE id=?")
+          .run(snap.providerAccountSwitchFailure
+            ? JSON.stringify(snap.providerAccountSwitchFailure)
+            : null, id);
       }
       if (snap.executionTarget) {
         this.stmt("UPDATE sessions SET execution_target=? WHERE id=?")
@@ -17033,6 +17052,8 @@ export class ControlPlaneDb {
       agentName,
       providerAccountId: row.provider_account_id ?? undefined,
       providerAccountLabel: row.provider_account_label ?? undefined,
+      providerAccountSwitchFailure:
+        parseJson<ProviderAccountSwitchFailureView>(row.provider_account_switch_failure) ?? undefined,
       title: row.title,
       titleSource: (row.title_source as SessionTitleSource | null) ?? "generated",
       providerUpdatedAt: row.provider_updated_at ?? undefined,
