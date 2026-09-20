@@ -871,7 +871,11 @@ test("reader-driven older pages extend the window downward without touching reco
   store.loadEvents("s1", [event("s1", 10), event("s1", 11)], 0, 1, true, generation, true);
   const cursorAfterOpen = store.recoveryAfter("s1");
 
-  store.beginOlderEventsLoad("s1", 10, 0);
+  assert.equal(store.beginOlderEventsLoad("s1", 10, 1), false,
+    "a stale rendered epoch does not claim that an older request started");
+  assert.equal(store.beginOlderEventsLoad("s1", 10, 0), true);
+  assert.equal(store.beginOlderEventsLoad("s1", 10, 0), false,
+    "an already-loading window does not claim that another request started");
   assert.equal(store.getState().eventWindows.get("s1")?.loadingOlder, true);
   store.loadOlderEvents("s1", [event("s1", 8), event("s1", 9)], true, 10, 0);
 

@@ -2134,7 +2134,10 @@ function SessionDetailLoaded({
     olderInFlightRef.current = true;
     // Every dispatch carries the base this page was requested below. A reopen re-reads the tail,
     // so a page that outlives its window must be dropped rather than prepended under a newer one.
-    beginOlderEventsLoad(sessionId, base, epoch);
+    if (!beginOlderEventsLoad(sessionId, base, epoch)) {
+      olderInFlightRef.current = false;
+      return false;
+    }
     void loadOlderSessionEvents(sessionId, base, epoch, api.getSessionEventTailPage, alignToTurn)
       .then((page) => {
         if (page) {
@@ -6943,15 +6946,22 @@ export function EarlierActivityControl({
   const rootRef = useRef<HTMLDivElement>(null);
   const actionRef = useRef<HTMLButtonElement>(null);
   const keyboardRequestRef = useRef(false);
+  const loadingFocusEstablishedRef = useRef(false);
 
   useLayoutEffect(() => {
     if (!keyboardRequestRef.current) return;
     const root = rootRef.current;
     if (!root) return;
     if (loading) {
-      root.focus();
+      // Hand focus to the persistent loading target once. Later in-flight state changes must not
+      // reclaim it if the reader has already moved to another control.
+      if (!loadingFocusEstablishedRef.current) {
+        root.focus();
+        loadingFocusEstablishedRef.current = true;
+      }
       return;
     }
+    loadingFocusEstablishedRef.current = false;
 
     if (root.ownerDocument.activeElement !== root) {
       keyboardRequestRef.current = false;
@@ -7001,15 +7011,12 @@ export function EarlierActivityControl({
     // users keep the browser's normal focus behavior instead of being moved after the request.
     const started = onLoad();
     keyboardRequestRef.current = event.detail === 0 && started;
+    loadingFocusEstablishedRef.current = false;
   };
 
   // Keep the root's DOM identity for the exhaustion commit so focus ownership can be checked
   // before moving it to the stable transcript region. This empty anchor has no layout or a11y
   // surface and remains inert for sessions that opened with no earlier history.
-  if (!available) {
-    return <div ref={rootRef} data-earlier-activity-focus-anchor tabIndex={-1} aria-hidden="true" />;
-  }
-
   if (loading) {
     return (
       <div
@@ -7024,6 +7031,10 @@ export function EarlierActivityControl({
         <span>Loading earlier activity…</span>
       </div>
     );
+  }
+
+  if (!available) {
+    return <div ref={rootRef} data-earlier-activity-focus-anchor tabIndex={-1} aria-hidden="true" />;
   }
 
   if (error) {

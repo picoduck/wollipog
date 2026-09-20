@@ -142,11 +142,12 @@ test("pointer pagination does not restore focus after the control changes", asyn
   }
 });
 
-test("settled pagination does not reclaim focus after the reader leaves the loading operation", async () => {
-  for (const settled of [
+test("pagination transitions do not reclaim focus after the reader leaves the loading operation", async () => {
+  for (const next of [
     { available: true, loading: false, error: null },
     { available: true, loading: false, error: "Could not load earlier activity." },
     { available: false, loading: false, error: null },
+    { available: false, loading: true, error: null },
   ] satisfies ControlState[]) {
     const view = await fixture();
     try {
@@ -154,7 +155,7 @@ test("settled pagination does not reclaim focus after the reader leaves the load
       await keyboardActivate(view.action("Load Earlier Activity"));
       await view.render({ available: true, loading: true, error: null });
       view.outside.focus();
-      await view.render(settled);
+      await view.render(next);
       assert.equal(domWindow.document.activeElement, view.outside);
     } finally {
       await view.cleanup();
