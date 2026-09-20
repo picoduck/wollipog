@@ -1,6 +1,7 @@
 import { browserRandomUUID } from "../browser-crypto.js";
 import {
   type KeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
   useCallback,
   useEffect,
@@ -4790,11 +4791,13 @@ function SessionDetailLoaded({
                     ? "Earlier activity loaded."
                     : ""}
               </div>
-              {eventWindow?.hasOlder === true && items.length > 0 && openingHistoryFillSettled && (
+              {items.length > 0 && openingHistoryFillSettled && (
                 <EarlierActivityControl
-                  loading={eventWindow.loadingOlder}
-                  error={eventWindow.error}
+                  available={eventWindow?.hasOlder === true}
+                  loading={eventWindow?.loadingOlder === true}
+                  error={eventWindow?.error ?? null}
                   onLoad={loadEarlierFromControl}
+                  fallbackFocusRef={scrollRef}
                 />
               )}
               {transcript.body !== "timeline" && standaloneRequestCard}
@@ -6920,18 +6923,53 @@ function TranscriptSkeleton() {
 
 /** Head of a bounded window: the transcript continues above, but only on request. Rendering it as a
  * real button keeps the reach-back available without a pointer scroll. */
-function EarlierActivityControl({
+export function EarlierActivityControl({
+  available,
   loading,
   error,
   onLoad,
+  fallbackFocusRef,
 }: {
+  available: boolean;
   loading: boolean;
   error: string | null;
   onLoad: () => void;
+  fallbackFocusRef: { current: HTMLElement | null };
 }) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const actionRef = useRef<HTMLButtonElement>(null);
+  const keyboardRequestRef = useRef(false);
+
+  useLayoutEffect(() => {
+    if (!keyboardRequestRef.current) return;
+    if (loading) {
+      rootRef.current?.focus();
+      return;
+    }
+
+    keyboardRequestRef.current = false;
+    if (available) actionRef.current?.focus();
+    else fallbackFocusRef.current?.focus();
+  }, [available, error, fallbackFocusRef, loading]);
+
+  const load = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    // Keyboard and assistive-technology activation dispatch a click with no click count. Pointer
+    // users keep the browser's normal focus behavior instead of being moved after the request.
+    keyboardRequestRef.current = event.detail === 0;
+    onLoad();
+  };
+
+  if (!available) return null;
+
   if (loading) {
     return (
-      <div className="transcript-earlier-activity" data-state="loading">
+      <div
+        ref={rootRef}
+        className="transcript-earlier-activity"
+        data-state="loading"
+        tabIndex={-1}
+        aria-label="Loading Earlier Activity"
+      >
         <Spinner decorative />
         <span>Loading earlier activity…</span>
       </div>
@@ -6940,19 +6978,20 @@ function EarlierActivityControl({
 
   if (error) {
     return (
-      <div className="transcript-earlier-activity error" data-state="error">
+      <div ref={rootRef} className="transcript-earlier-activity error" data-state="error">
         <span>{error}</span>
-        <button className="btn ghost sm" type="button" onClick={onLoad}>Retry</button>
+        <button ref={actionRef} className="btn ghost sm" type="button" onClick={load}>Retry</button>
       </div>
     );
   }
 
   return (
-    <div className="transcript-earlier-activity" data-state="idle">
+    <div ref={rootRef} className="transcript-earlier-activity" data-state="idle">
       <button
+        ref={actionRef}
         className="icon-btn transcript-earlier-activity-fallback"
         type="button"
-        onClick={onLoad}
+        onClick={load}
         aria-label="Load Earlier Activity"
         title="Load Earlier Activity"
       >
