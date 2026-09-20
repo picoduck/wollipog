@@ -13004,7 +13004,16 @@ body.shell-dock-dragging * {
 }
 .transcript-earlier-activity {
   display: flex; align-items: center; justify-content: center; gap: 8px;
-  padding: 10px 12px 2px; color: var(--text-dim); font-size: var(--text-sm);
+  min-height: 30px; padding: 2px 12px 0; color: var(--text-dim); font-size: var(--text-sm);
+}
+.transcript-earlier-activity[data-state="idle"] {
+  justify-content: flex-start;
+}
+.transcript-earlier-activity-fallback {
+  width: 28px; height: 28px; padding: 0;
+}
+.transcript-earlier-activity.error {
+  color: var(--red);
 }
 .transcript-skeleton { display: grid; gap: 20px; padding: 28px 20px; }
 .transcript-skeleton-row { display: grid; gap: 8px; width: min(68%, 620px); }

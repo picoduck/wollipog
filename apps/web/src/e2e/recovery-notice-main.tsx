@@ -33,7 +33,9 @@ const frameHeight = Number(params.get("height") ?? "600");
 const frameWidth = Number(params.get("width") ?? "900");
 const pinnedOpen = params.get("pinned") === "1";
 const pagination = params.get("pagination") === "1";
-const resolvedPagination = params.get("pagination") === "resolve";
+const retryPagination = params.get("pagination") === "retry";
+const resolvedPagination = params.get("pagination") === "resolve" || retryPagination;
+const oneEarlierPage = params.get("one-earlier-page") === "1";
 const eventHeavyOpening = params.get("event-heavy") === "1";
 const liveDuringPagination = params.get("live") === "1";
 const paginationDelay = Number(params.get("pagination-delay") ?? "80");
@@ -241,6 +243,7 @@ function recoveredByCreate(input: { branch: string; baseRef?: string }) {
 }
 
 let tailRequestCount = 0;
+let rejectNextOlderPage = retryPagination;
 const client = {
   ...api,
   getSessionEventPage: () => new Promise<never>(() => {}),
@@ -253,9 +256,17 @@ const client = {
       });
     }
     if (resolvedPagination && before !== undefined) {
+      if (rejectNextOlderPage) {
+        rejectNextOlderPage = false;
+        return new Promise((_, reject) => window.setTimeout(() => reject(new Error(
+          "Fixture rejected the first earlier-activity request.",
+        )), paginationDelay));
+      }
+      const sourceEvents = servedFixtureEvents;
       const pageSize = eventHeavyOpening ? 200 : 8;
-      const pageStart = Math.max(0, before - 1 - pageSize);
-      const events = activeFixtureEvents.slice(pageStart, before - 1);
+      const pageEnd = sourceEvents.findIndex((event) => event.seq === before);
+      const pageStart = Math.max(0, pageEnd - pageSize);
+      const events = sourceEvents.slice(pageStart, pageEnd);
       if (liveDuringPagination && tailRequestCount === 2) {
         window.setTimeout(() => fixtureSocket?.onmessage?.({ data: JSON.stringify({
           type: "session_event",
@@ -281,8 +292,8 @@ const client = {
       }), paginationDelay));
     }
     if ((!pagination && !resolvedPagination) || before !== undefined) return new Promise<never>(() => {});
-    const openingWindow = activeFixtureEvents.slice(-24);
-    const boundedOpeningWindow = eventHeavyOpening ? activeFixtureEvents.slice(-200) : openingWindow;
+    const openingWindow = servedFixtureEvents.slice(-24);
+    const boundedOpeningWindow = eventHeavyOpening ? servedFixtureEvents.slice(-200) : openingWindow;
     return Promise.resolve({
       events: boundedOpeningWindow, eventEpoch, nextBefore: boundedOpeningWindow[0]?.seq ?? 0,
       hasMoreOlder: true, turnAligned: eventHeavyOpening ? false : true, cacheComplete: true,
@@ -404,13 +415,14 @@ const worktreeRecoveryEvents: SessionEvent[] = [{
 const activeFixtureEvents = worktreeRecoveryFixture
   ? worktreeRecoveryEvents
   : eventHeavyOpening ? eventHeavyFixtureEvents : fixtureEvents;
+const servedFixtureEvents = oneEarlierPage ? activeFixtureEvents.slice(-32) : activeFixtureEvents;
 
 function EventSeeder() {
   const ready = useStoreSelector((state) => state.sessions.has(SESSION_ID));
   const { dispatch } = useStoreActions();
   React.useEffect(() => {
     if (!ready) return;
-    for (const event of activeFixtureEvents) {
+    for (const event of servedFixtureEvents) {
       dispatch({ type: "msg", msg: { type: "session_event", event } });
     }
   }, [dispatch, ready]);

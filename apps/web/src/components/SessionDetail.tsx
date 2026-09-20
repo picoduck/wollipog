@@ -4765,6 +4765,15 @@ function SessionDetailLoaded({
                   onRetry={() => setHistoryRetry((value) => value + 1)}
                 />
               )}
+              <div className="sr-only" role="status" aria-live="polite" aria-atomic="true" data-earlier-activity-announcement>
+                {eventWindow?.loadingOlder
+                  ? "Loading earlier activity."
+                  : olderRequestSettled > 0
+                    ? eventWindow?.error
+                      ? `${eventWindow.error} Retry is available.`
+                      : "Earlier activity loaded."
+                    : ""}
+              </div>
               {eventWindow?.hasOlder === true && items.length > 0 && openingHistoryFillSettled && (
                 <EarlierActivityControl
                   loading={eventWindow.loadingOlder}
@@ -6904,17 +6913,35 @@ function EarlierActivityControl({
   error: string | null;
   onLoad: () => void;
 }) {
+  if (loading) {
+    return (
+      <div className="transcript-earlier-activity" data-state="loading">
+        <Spinner decorative />
+        <span>Loading Earlier Activity…</span>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="transcript-earlier-activity error" data-state="error">
+        <span>{error}</span>
+        <button className="btn ghost sm" type="button" onClick={onLoad}>Retry</button>
+      </div>
+    );
+  }
+
   return (
-    <div className="transcript-earlier-activity">
+    <div className="transcript-earlier-activity" data-state="idle">
       <button
-        className="btn ghost sm"
+        className="icon-btn transcript-earlier-activity-fallback"
         type="button"
-        disabled={loading}
         onClick={onLoad}
+        aria-label="Load Earlier Activity"
+        title="Load Earlier Activity"
       >
-        {loading ? "Loading Earlier Activity…" : "Load Earlier Activity"}
+        <ArrowUpIcon size={14} />
       </button>
-      {error && <span role="status">{error}</span>}
     </div>
   );
 }

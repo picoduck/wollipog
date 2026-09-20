@@ -79,7 +79,10 @@ test("an event-heavy desktop opening fills itself before exposing earlier activi
     .toBeGreaterThan(160);
   await expect(control).toHaveCount(1);
   await expect(control).not.toBeInViewport();
-  await expect(control).toHaveText("Load Earlier Activity");
+  await expect(control).toHaveAttribute("data-state", "idle");
+  const fallback = control.getByRole("button", { name: "Load Earlier Activity" });
+  await expect(fallback).toHaveCount(1);
+  expect(await fallback.evaluate((element) => element.getBoundingClientRect().width)).toBeLessThanOrEqual(28);
   await expect(page.getByText("A response near the beginning of the loaded activity may be incomplete."))
     .toHaveCount(0);
   await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "following");
@@ -191,4 +194,55 @@ test("an upward reading key at the head loads the next page without a scroll eve
   await expect(page.locator("body")).toHaveAttribute("data-tail-request-count", "2");
   await expect.poll(() => reader.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
   await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "paused");
+});
+
+test("a failed automatic load exposes Retry and a successful retry restores the compact fallback", async ({ page }) => {
+  await page.goto(
+    "/recovery-notice-e2e.html?pagination=retry&pagination-delay=300&height=800&width=1000",
+  );
+  const reader = page.locator(".detail-scroll");
+  const control = page.locator(".transcript-earlier-activity");
+  const announcement = page.locator("[data-earlier-activity-announcement]");
+  await positionPausedReader(page, reader, 0);
+
+  await reader.hover();
+  await page.mouse.wheel(0, -100);
+  await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("2");
+  await expect(control).toHaveAttribute("data-state", "loading");
+  await expect(control).toContainText("Loading Earlier Activity…");
+  await expect(announcement).toHaveText("Loading earlier activity.");
+
+  await expect(control).toHaveAttribute("data-state", "error");
+  await expect(control).toContainText("Could not load earlier activity.");
+  const retry = control.getByRole("button", { name: "Retry" });
+  await expect(retry).toBeVisible();
+  await expect(announcement).toHaveText("Could not load earlier activity. Retry is available.");
+
+  await retry.click();
+  await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("3");
+  await expect(control).toHaveAttribute("data-state", "loading");
+  await expect(announcement).toHaveText("Loading earlier activity.");
+  await expect(announcement).toHaveText("Earlier activity loaded.");
+  await expect(control).toHaveAttribute("data-state", "idle");
+  await expect(control.getByRole("button", { name: "Load Earlier Activity" })).toBeVisible();
+});
+
+test("exhausting earlier history removes the fallback and ignores further head input", async ({ page }) => {
+  await page.goto(
+    "/recovery-notice-e2e.html?pagination=resolve&one-earlier-page=1&pagination-delay=150&height=800&width=1000",
+  );
+  const reader = page.locator(".detail-scroll");
+  const control = page.locator(".transcript-earlier-activity");
+  const announcement = page.locator("[data-earlier-activity-announcement]");
+  await positionPausedReader(page, reader, 0);
+
+  await reader.hover();
+  await page.mouse.wheel(0, -100);
+  await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("2");
+  await expect(announcement).toHaveText("Earlier activity loaded.");
+  await expect(control).toHaveCount(0);
+
+  await page.mouse.wheel(0, -100);
+  await page.waitForTimeout(300);
+  await expect(page.locator("body")).toHaveAttribute("data-tail-request-count", "2");
 });
