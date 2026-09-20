@@ -285,15 +285,16 @@ runs, against the list of the session that owns the socket:
 | Native TUI launches | Not by the runner, which does not sandbox a TUI. A native **Codex** TUI could deny it through Codex's own permission profile, but that is withheld on codex-cli 0.155.1 (see "Codex in `provider` Mode"); neither a Codex nor a Claude TUI denies it today | In `provider` mode on native Linux, Claude and Codex alike: runner memory over the abstract verdict socket. Elsewhere the protections file, or the session's path socket when a sandboxed launch already provisioned one | `agent-tui-memory-guard.test.ts` (real provisioning, real socket, real sidecar entry point), and a real Claude TUI under a pty. Codex deny: `agent-tui-codex-permission-profile.test.ts` |
 
 What the providers' own sandboxes can do in `provider` mode was measured (Linux, Claude Code 2.1.278,
-codex-cli 0.155.1). Claude's is not used; Codex's is, and carries the rule in `provider` mode:
+codex-cli 0.155.1). Neither is used by this rule today:
 
 - **Claude Code's sandbox** covers only Bash and the processes it starts. Hooks and MCP servers run
   outside it. It needs `bubblewrap` and `socat`; without them it warns and runs commands
   **unsandboxed** unless `sandbox.failIfUnavailable` is set. Enabling it also confines writes to the
   working directory and puts the network behind a domain allowlist for every session.
 - **Codex's sandbox** enforces a `deny` entry in a named permission profile at the OS level, for
-  reads, walks from an ancestor, writes, and renames. Hooks and MCP servers run outside it. The
-  runner now uses this in `provider` mode — see "Codex in `provider` mode" below.
+  reads, walks from an ancestor, writes, and renames. Hooks and MCP servers run outside it. #1464
+  used this in `provider` mode; it is withheld again because the same `deny` entry disables every
+  approved network escalation — see "Codex in `provider` Mode" below.
 
   An earlier version of this page said Codex *refuses* to combine the legacy
   `sandbox_mode`/`sandboxPolicy` with a permission profile. **That was wrong.** Re-measured on

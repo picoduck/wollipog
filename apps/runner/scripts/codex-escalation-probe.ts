@@ -120,6 +120,14 @@ function modelServer(state: { tool: Json | null; guardian: "allow" | "deny"; cal
   });
 }
 
+/** Kill a child's whole process group; an already-gone group is not an error. */
+function killTree(child: ChildProcess): void {
+  if (typeof child.pid === "number") {
+    try { process.kill(-child.pid, "SIGKILL"); } catch { /* the group is already gone */ }
+  }
+  try { child.kill("SIGKILL"); } catch { /* already exited */ }
+}
+
 function message(text: string): Json {
   return { type: "message", id: "m", role: "assistant", status: "completed", content: [{ type: "output_text", text }] };
 }
@@ -146,10 +154,14 @@ function runCase(testCase: Case, fixture: Fixture, model: { tool: Json | null; g
     ? ["-c", codexPermissionProfileOverrides(":workspace", fixture.hookDir)[0],
        "-c", codexPermissionProfileOverrides(":workspace", fixture.hookDir)[1]]
     : [];
+  // Its own process group, like the runner's own probes: the configured command may be a wrapper
+  // that starts the real `codex` without `exec`, and killing only the wrapper leaks one app-server
+  // per case.
   const child = spawn(CODEX, [...args, "app-server"], {
     cwd: fixture.repo,
     env: { ...process.env, CODEX_HOME: fixture.codexHome, PROBE_KEY: "x" },
     stdio: ["pipe", "pipe", "pipe"],
+    detached: true,
   });
 
   return new Promise<string>((resolve) => {
@@ -159,11 +171,20 @@ function runCase(testCase: Case, fixture: Fixture, model: { tool: Json | null; g
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      child.kill("SIGKILL");
+      killTree(child);
       resolve(value);
     };
     const timer = setTimeout(() => finish("TIMED OUT"), TURN_TIMEOUT_MS);
-    const send = (payload: Json) => child.stdin.write(`${JSON.stringify(payload)}\n`);
+    // A command that exits before reading its input — an older CLI, a rejected argument, a config
+    // error — turns every write into EPIPE. Unhandled, that is an 'error' event that takes the whole
+    // script down and skips the temporary-directory cleanup in `main`'s `finally`. Reproduced with
+    // `CODEX_BIN=/bin/false`. It is recorded rather than settled on, so the process's own 'close'
+    // reports WHY it exited; the per-case timeout still bounds one that never exits.
+    child.stdin.on("error", (error: Error) => { outcome = `STDIN FAILED: ${error.message}`; });
+    const send = (payload: Json) => {
+      if (settled || child.stdin.destroyed) return;
+      child.stdin.write(`${JSON.stringify(payload)}\n`);
+    };
 
     let buffer = "";
     child.stdout.setEncoding("utf8");
@@ -277,22 +298,50 @@ async function main(): Promise<number> {
     models.close();
     rmSync(root, { recursive: true, force: true });
   }
+  // "no command ran" on every case means the harness never got a turn out of `codex` — a wrong
+  // CODEX_BIN, a rejected argument, a config error — not a behaviour change. Say so, rather than
+  // sending the reader to the ADR for a measurement that was never taken.
   process.stdout.write(failures === 0
     ? `\nAll ${CASES.length} cases matched the recorded measurement.\n`
-    : `\n${failures} of ${CASES.length} cases did NOT match. Codex's behaviour has moved; re-read ADR 0012 before changing code.\n`);
+    : failures === CASES.length
+      ? `\nNo case produced a command. Check that ${CODEX} runs \`codex app-server\`; nothing about ` +
+        "Codex's sandbox behaviour was measured here.\n"
+      : `\n${failures} of ${CASES.length} cases did NOT match. Codex's behaviour has moved; re-read ` +
+        "ADR 0012 before changing code.\n");
   return failures === 0 ? 0 : 1;
 }
 
+const FIXTURE_TIMEOUT_MS = 30_000;
+
+/**
+ * The throwaway repository the cases run in.
+ *
+ * Every `git` here is bounded and stripped of the developer's own configuration: a global
+ * `core.hooksPath` whose `pre-commit` hook blocks, or `commit.gpgsign` with an unresponsive signer,
+ * would otherwise hang the fixture before any per-case timeout exists — and `main`'s `finally`,
+ * which removes the temporary tree, would never run.
+ */
 function gitInit(repo: string): Promise<void> {
   const run = (args: string[]): Promise<void> => new Promise((resolve, reject) => {
-    const child: ChildProcess = spawn("git", args, { cwd: repo, stdio: "ignore" });
-    child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`git ${args[0]} exited ${String(code)}`))));
-    child.on("error", reject);
+    const child: ChildProcess = spawn("git", [
+      "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false",
+      "-c", "user.email=probe@example.invalid", "-c", "user.name=probe", ...args,
+    ], { cwd: repo, stdio: "ignore", detached: true });
+    const timer = setTimeout(() => {
+      killTree(child);
+      reject(new Error(`git ${args[0]} did not finish within ${FIXTURE_TIMEOUT_MS}ms`));
+    }, FIXTURE_TIMEOUT_MS);
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(`git ${args[0]} exited ${String(code)}`));
+    });
+    child.on("error", (error) => { clearTimeout(timer); reject(error); });
   });
   writeFileSync(join(repo, "file.txt"), "hello\n");
   return run(["init", "-q", "."])
     .then(() => run(["add", "-A"]))
-    .then(() => run(["-c", "user.email=probe@example.invalid", "-c", "user.name=probe", "commit", "-qm", "init"]));
+    .then(() => run(["commit", "-qm", "init"]));
 }
 
 main().then((code) => { process.exitCode = code; }, (error: unknown) => {
