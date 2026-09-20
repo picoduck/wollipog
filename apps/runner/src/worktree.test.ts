@@ -489,6 +489,20 @@ test("safe discard removes only a clean fully-pushed runner-owned worktree", { s
     assert.equal(existsSync(verifiedMerged.path), false,
       "the exact forge-verified merged head replaces only the missing upstream proof");
 
+    const unknownDefault = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "agent/unknown-default",
+    }, { dataDir });
+    execFileSync("git", ["-C", unknownDefault.path, "switch", "-c", "fix/unknown-default"]);
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...unknownDefault,
+      source: "created",
+    }, { dataDir }), {
+      removed: false,
+      reason: "branch_changed",
+      checkedOutBranch: "fix/unknown-default",
+    }, "a changed branch is retained when the default branch cannot be proved");
+
     execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
     const unchangedBranch = await createRequestedWorktree(repo, "s_safe", {
       baseRef: "HEAD",
@@ -623,9 +637,44 @@ test("managed discard verifies a changed checkout and names an unproved branch",
     );
     await assert.rejects(
       manager.discardWorktree("s_changed_branch", unmerged.worktree.path),
-      /checked out on branch "fix\/unmerged-changed-branch", not its registered branch "agent\/s_changed_branch_unmerged"/u,
+      /checked out on branch "fix\/unmerged-changed-branch".*neither verified as merged nor known to be contained/u,
     );
     assert.equal(existsSync(unmerged.worktree.path), true);
+
+    const discovered = await manager.requestWorktree(
+      "s_changed_branch",
+      { baseRef: "HEAD", branch: "agent/s_changed_branch_discovered" },
+    );
+    execFileSync("git", ["-C", discovered.worktree.path, "switch", "-c", "fix/discovered-changed-branch"]);
+    writeFileSync(join(discovered.worktree.path, "discovered.txt"), "externally merged work\n");
+    execFileSync("git", ["-C", discovered.worktree.path, "add", "discovered.txt"]);
+    execFileSync("git", ["-C", discovered.worktree.path, "commit", "-m", "externally merged work"]);
+    const discoveredHead = execFileSync("git", ["-C", discovered.worktree.path, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    }).trim();
+    let discoveryBranch: string | undefined;
+    (manager as unknown as {
+      discoverMergedWorktreePullRequest: (path: string, branch: string) => Promise<{
+        url: string; state: "merged"; headOid: string; provider: "github"; kind: "pull_request";
+      } | null>;
+    }).discoverMergedWorktreePullRequest = async (path, branch) => {
+      if (path !== discovered.worktree.path) return null;
+      discoveryBranch = branch;
+      return {
+        url: "https://github.com/picoduck/wollipog/pull/1320",
+        state: "merged",
+        headOid: discoveredHead,
+        provider: "github",
+        kind: "pull_request",
+      };
+    };
+    await manager.discardWorktree("s_changed_branch", discovered.worktree.path);
+    assert.equal(discoveryBranch, "fix/discovered-changed-branch",
+      "unlinked merged-PR discovery follows the branch checked out by Git");
+    assert.equal(existsSync(discovered.worktree.path), false);
+    execFileSync("git", [
+      "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/agent/s_changed_branch_discovered",
+    ]);
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
@@ -2214,6 +2263,8 @@ test("merged PR worktrees remain discardable after their remote branches are del
     assert.equal(discoveryCalls.get(discoveredExplicit.worktree.path) ?? 0, discoveryCallsBeforeActiveDiscard + 1,
       "safe-discard eligibility is checked before an active provider is retired");
     activeEntries.delete("s_merged_no_upstream");
+    const launchGenerations = (manager as unknown as { launchGenerations: Map<string, number> }).launchGenerations;
+    launchGenerations.set("s_merged_no_upstream", 1);
     store.patchMeta("s_merged_no_upstream", {
       status: "starting",
       worktreePath: discoveredExplicit.worktree.path,
@@ -2233,6 +2284,7 @@ test("merged PR worktrees remain discardable after their remote branches are del
       worktreeBranch: undefined,
       worktreePending: false,
     });
+    launchGenerations.delete("s_merged_no_upstream");
     await manager.discardWorktree("s_merged_no_upstream", explicit.worktree.path);
     assert.equal(existsSync(explicit.worktree.path), false,
       "explicit discard also accepts the verified merged worktree without its remote branch");
@@ -2328,6 +2380,7 @@ test("missing-upstream reconciliation is bounded, fair, identity-aware, and lane
     let ineligiblePath: string | undefined;
     let forgeUnavailablePath: string | undefined;
     const internals = manager as unknown as {
+      readWorktreeBranch: (path: string) => Promise<string | undefined>;
       discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch;
       resolveWorktreePullRequestState: () => Promise<null>;
       discardSessionWorktreeIfSafe: () => Promise<{ removed: false; reason: "unavailable" }>;
@@ -2336,6 +2389,10 @@ test("missing-upstream reconciliation is bounded, fair, identity-aware, and lane
       worktreePullRequestDiscoveryRetryAt: Map<string, { identity: string; retryAt: number }>;
     };
     internals.worktreePullRequestDiscoveryNow = () => now;
+    internals.readWorktreeBranch = async (path) => {
+      const index = candidatePaths.indexOf(path);
+      return index >= 0 ? `fix/candidate-${index}` : undefined;
+    };
     internals.resolveWorktreePullRequestState = async () => null;
     internals.discardSessionWorktreeIfSafe = async () => ({ removed: false, reason: "unavailable" });
     internals.discoverMergedWorktreePullRequest = async (path, branch, options = {}) => {
@@ -3113,15 +3170,18 @@ test("replay refreshes a merged-head proof the launching deferral was journaled 
     for (const worktree of [merged.worktree, unmerged.worktree, diverged.worktree]) {
       execFileSync("git", ["-C", worktree.path, "push", "-u", "origin", worktree.branch]);
       execFileSync("git", ["-C", worktree.path, "push", "origin", "--delete", worktree.branch]);
+      execFileSync("git", ["-C", worktree.path, "switch", "-c", `${worktree.branch}-actual`]);
     }
     let discoveryEnabled = false;
     const discoveryCalls = new Map<string, number>();
+    const discoveryBranches = new Map<string, string>();
     (manager as unknown as {
-      discoverMergedWorktreePullRequest: (path: string) => Promise<{
+      discoverMergedWorktreePullRequest: (path: string, branch: string) => Promise<{
         url: string; state: "merged"; headOid: string; provider: "github"; kind: "pull_request";
       } | null>;
-    }).discoverMergedWorktreePullRequest = async (path) => {
+    }).discoverMergedWorktreePullRequest = async (path, branch) => {
       discoveryCalls.set(path, (discoveryCalls.get(path) ?? 0) + 1);
+      discoveryBranches.set(path, branch);
       if (!discoveryEnabled || path === unmerged.worktree.path) return null;
       return {
         url: `https://github.com/picoduck/wollipog/pull/${path === merged.worktree.path ? "810" : "811"}`,
@@ -3180,6 +3240,8 @@ test("replay refreshes a merged-head proof the launching deferral was journaled 
       "the removed worktree leaves no inventory row behind");
     await waitForCondition(() => discoveryCalls.size === 3,
       "replay did not consult the forge for the proof each deferral lacks");
+    assert.equal(discoveryBranches.get(merged.worktree.path), `${merged.worktree.branch}-actual`,
+      "replay discovers merge proof for the branch Git actually has checked out");
 
     const replay = manager as unknown as {
       cleanupJournal: { list: () => WorktreeCleanupRecord[] };

@@ -192,6 +192,7 @@ import {
   removeWorktree,
   requestedWorktreeBoundary,
   sameWorktreePath,
+  worktreeBranch,
   worktreeHead,
   mergedWorktreePullRequestForBranch,
   worktreePullRequestState,
@@ -1029,6 +1030,7 @@ export class SessionManager {
   /** Test seam for the expensive subprocess; production always uses createWorktree. */
   private createSessionWorktree: typeof createWorktree = createWorktree;
   /** Test seams keep forge availability and destructive Git behavior deterministic. */
+  private readWorktreeBranch: typeof worktreeBranch = worktreeBranch;
   private discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch = mergedWorktreePullRequestForBranch;
   private resolveWorktreePullRequestState: typeof worktreePullRequestState = worktreePullRequestState;
   private discardSessionWorktreeIfSafe: typeof discardWorktreeIfSafe = discardWorktreeIfSafe;
@@ -2634,9 +2636,11 @@ export class SessionManager {
     const worktree = this.attributedWorktrees(initial)
       .find((item) => sameWorktreePath(initial.context, item.path, path));
     if (!worktree || worktree.source === "attached" || worktree.pullRequest) return;
+    const checkedOutBranch = await this.readWorktreeBranch(worktree.path, { context: initial.context });
+    if (!checkedOutBranch) return;
     const discovered = await this.discoverMergedWorktreePullRequest(
       worktree.path,
-      worktree.branch,
+      checkedOutBranch,
       { context: initial.context },
     );
     if (!discovered) return;
@@ -2677,12 +2681,14 @@ export class SessionManager {
         const worktree = this.attributedWorktrees(initial)
           .find((item) => sameWorktreePath(initial.context, item.path, path));
         if (!worktree || worktree.source === "attached" || worktree.pullRequest) return;
+        const checkedOutBranch = await this.readWorktreeBranch(worktree.path, { context: initial.context });
+        if (!checkedOutBranch) return;
         const pathKey = JSON.stringify([sessionId, worktree.path]);
         let attemptedIdentity: string | undefined;
         let forgeUnavailable = false;
         const discovered = await this.discoverMergedWorktreePullRequest(
           worktree.path,
-          worktree.branch,
+          checkedOutBranch,
           {
             context: initial.context,
             preflightTimeoutMs: 8_000,
@@ -2696,7 +2702,7 @@ export class SessionManager {
             onForgeAttempt: (identity: MissingUpstreamPullRequestIdentity) => {
               const identityKey = JSON.stringify([
                 initial.context,
-                worktree.branch,
+                checkedOutBranch,
                 identity.remote,
                 identity.merge,
                 identity.headOid,
@@ -3267,10 +3273,17 @@ export class SessionManager {
           this.removeWorktreeCleanupRecord(cleanup);
         }
         if (result.reason === "branch_changed") {
+          if (result.checkedOutBranch === "(detached HEAD)") {
+            return {
+              removed: false,
+              reason: `the worktree has a detached HEAD instead of its registered branch ${JSON.stringify(worktree.branch)}`,
+            };
+          }
           return {
             removed: false,
             reason: `the worktree is checked out on branch ${JSON.stringify(result.checkedOutBranch)}, ` +
-              `not its registered branch ${JSON.stringify(worktree.branch)}`,
+              `not its registered branch ${JSON.stringify(worktree.branch)}; its checked-out HEAD is neither ` +
+              "verified as merged nor known to be contained in the default branch",
           };
         }
         const reasons = {

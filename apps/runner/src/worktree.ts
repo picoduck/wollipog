@@ -849,6 +849,20 @@ export async function worktreeHead(worktreePath: string, options: WorktreeOption
   return (await command(options.context ?? nativeContext, worktreePath, ["rev-parse", "HEAD"])).trim();
 }
 
+/** Return the branch Git currently has checked out, or no value for a detached/unavailable tree. */
+export async function worktreeBranch(
+  worktreePath: string,
+  options: WorktreeOptions = {},
+): Promise<string | undefined> {
+  const context = options.context ?? nativeContext;
+  try {
+    const branch = (await command(context, worktreePath, ["branch", "--show-current"])).trim();
+    return branch ? await validateBranch(context, worktreePath, branch) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export type PullRequestLifecycleState = "open" | "merged" | "closed";
 export type PullRequestLifecycleProof = {
   state: PullRequestLifecycleState;
