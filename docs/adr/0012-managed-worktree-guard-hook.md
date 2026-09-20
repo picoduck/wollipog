@@ -777,8 +777,9 @@ measurements (Linux 6.17, node 24.18.1, claude 2.1.278, codex-cli 0.155.1) chang
 - **An abstract-namespace socket is not.** The same attempt got `EADDRINUSE`, the runner kept
   answering, there is no entry to delete, and once the runner closed it a request got
   `ECONNREFUSED`, which the sidecar turns into exit 2.
-- **The settings documents were never tripwired.** The "Tripwire" bullet above covers the
-  protections list only. With the hook `command` rewritten to `/bin/true` in the live file, the heal
+- **The settings documents were not tripwired before #1475.** At the time of this measurement, the
+  tripwire covered the protections list only. With the hook `command` rewritten to `/bin/true` in
+  the live file, the heal
   template, and the guard-only copy, and the arguments untouched, `prepareClaudeHookArgs` still
   returned `guardActive: true`: `describeManagedSettings` reads the arguments, never the command.
   The next spawn ran a no-op hook with mediation switched off. So an in-memory list alone would have
@@ -843,9 +844,12 @@ or guard-only). A missing live file remains healable, but changed bytes in any e
 including a rewritten hook `command` with untouched arguments — drop the settings argument,
 return `guardActive: false`, and report that the guard became inactive. A structured launch then
 uses the existing driver mediation. A TUI ordinarily re-provisions a fresh set before preparing
-its spawn; if a mismatch is observed after that provisioning, it is refused because it has no
-driver fallback. A runner restart has no old baseline to trust: ordinary pre-spawn provisioning
-writes and records a fresh set before it can be active.
+its spawn; if a mismatch is observed after that provisioning, a session that owns a managed
+worktree is refused because it has no driver fallback. A runner restart has no old baseline to
+trust: ordinary pre-spawn provisioning writes and records a fresh set before it can be active.
+Unlike a changed protections list, a settings mismatch does not permanently poison the session:
+fresh provisioning re-authors every settings copy from runner state and establishes a new exact
+baseline before the guard can become active again.
 
 The comparison is platform-independent and therefore covers macOS, Windows, path-socket launches,
 and any other launch that keeps the file form without a platform-specific macOS branch. Measured
