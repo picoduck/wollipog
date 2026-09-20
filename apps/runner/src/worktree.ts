@@ -849,6 +849,27 @@ export async function worktreeHead(worktreePath: string, options: WorktreeOption
   return (await command(options.context ?? nativeContext, worktreePath, ["rev-parse", "HEAD"])).trim();
 }
 
+/** Return the branch Git currently has checked out, or no value for a detached/unavailable tree. */
+export async function worktreeBranch(
+  worktreePath: string,
+  options: WorktreeOptions & { timeoutMs?: number } = {},
+): Promise<string | undefined> {
+  const context = options.context ?? nativeContext;
+  try {
+    // Git can only point HEAD at a valid ref, so one bounded symbolic-ref probe supplies both the
+    // detached check and the already-validated short branch name.
+    const branch = (await command(
+      context,
+      worktreePath,
+      ["symbolic-ref", "--quiet", "--short", "HEAD"],
+      options.timeoutMs,
+    )).trim();
+    return branch ? safeGitArgument(branch, "worktree branch") : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export type PullRequestLifecycleState = "open" | "merged" | "closed";
 export type PullRequestLifecycleProof = {
   state: PullRequestLifecycleState;
@@ -1064,7 +1085,12 @@ export type SafeWorktreeDiscardResult =
   | { removed: true }
   | {
       removed: false;
-      reason: "not_runner_owned" | "branch_changed" | "dirty" | "no_upstream" | "unpushed" | "unavailable";
+      reason: "branch_changed";
+      checkedOutBranch: string;
+    }
+  | {
+      removed: false;
+      reason: "detached_head" | "not_runner_owned" | "dirty" | "no_upstream" | "unpushed" | "unavailable";
     };
 
 /** Remove one inactive runner-owned worktree only after proving it has no local-only state.
@@ -1078,7 +1104,7 @@ export async function discardWorktreeIfSafe(
   options: WorktreeOptions & { verifiedMergedHead?: string; beforeRemove?: () => Promise<void> } = {},
 ): Promise<SafeWorktreeDiscardResult> {
   const context = options.context ?? nativeContext;
-  const branch = await validateBranch(context, repoPath, handle.branch);
+  const recordedBranch = await validateBranch(context, repoPath, handle.branch);
   const requestedBoundary = await requestedWorktreeBoundaryPath(repoPath, sessionId, options, false);
   const currentLegacyPath = await sessionPath(repoPath, sessionId, options, false);
   const legacyPaths = [currentLegacyPath];
@@ -1093,12 +1119,24 @@ export async function discardWorktreeIfSafe(
   }
 
   try {
-    const ref = `refs/heads/${branch}`;
     const listed = parseWorktreePorcelain(
       await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]),
     );
     const registered = listed.find((entry) => sameWorktreePath(context, entry.path, handle.path));
-    if (registered && registered.branch !== branch) return { removed: false, reason: "branch_changed" };
+    // The runner-owned path remains the ownership boundary after an issue workflow switches its
+    // branch. Use the checkout's real branch for safety and deletion, never the stale recorded ref.
+    let branch = recordedBranch;
+    let branchChanged = false;
+    if (registered && registered.branch !== recordedBranch) {
+      if (!registered.branch) {
+        return { removed: false, reason: "detached_head" };
+      }
+      branch = await validateBranch(context, repoPath, registered.branch);
+      branchChanged = true;
+    }
+    const branchCheckedOutElsewhere = listed.some((entry) =>
+      !sameWorktreePath(context, entry.path, handle.path) && entry.branch === branch);
+    const ref = `refs/heads/${branch}`;
     if (!registered) {
       // A missing registration is not proof that the on-disk directory is disposable. Native can
       // distinguish a missing leaf below the already-attested root; WSL transport errors cannot
@@ -1129,26 +1167,59 @@ export async function discardWorktreeIfSafe(
     }
     if (!/^[a-f0-9]{40,64}$/u.test(head)) return { removed: false, reason: "unavailable" };
 
-    let hasUpstream = true;
-    try {
-      await command(context, repoPath, ["rev-parse", "--verify", `${branch}@{upstream}`]);
-    } catch {
-      hasUpstream = false;
-    }
-    if (hasUpstream) {
-      const ahead = (await command(
-        context,
-        repoPath,
-        ["rev-list", "--count", `${branch}@{upstream}..${ref}`],
-      )).trim();
-      if (!/^\d+$/u.test(ahead)) return { removed: false, reason: "unavailable" };
-      if (ahead !== "0") return { removed: false, reason: "unpushed" };
-    } else {
+    let preserveCheckedOutRef = false;
+    if (branchChanged) {
+      // A pushed-but-unmerged replacement is not enough: unlike the recorded branch, its upstream
+      // was never part of the ownership record. Require delivery proof or no work beyond default.
       const mergedHead = options.verifiedMergedHead;
-      if (typeof mergedHead !== "string" || !/^[a-f0-9]{40,64}$/u.test(mergedHead)) {
-        return { removed: false, reason: "no_upstream" };
+      let safeChangedHead = typeof mergedHead === "string" && /^[a-f0-9]{40,64}$/u.test(mergedHead) &&
+        mergedHead === head;
+      const defaultBranch = await readRepositoryDefaultBranch(repoPath, options);
+      // Removing a runner-owned worktree must not remove the repository's conventional local base
+      // ref when an agent temporarily checked it out for inspection. An unknown default cannot
+      // prove the checked-out ref is disposable, and another worktree may deliberately share the
+      // ref via --ignore-other-worktrees, so retain the ref while still removing this tree.
+      preserveCheckedOutRef = !defaultBranch || defaultBranch === branch || branchCheckedOutElsewhere;
+      if (!safeChangedHead) {
+        if (defaultBranch) {
+          try {
+            const defaultRef = `refs/remotes/origin/${await validateBranch(context, repoPath, defaultBranch)}`;
+            const ahead = (await command(
+              context,
+              repoPath,
+              ["rev-list", "--count", `${defaultRef}..${ref}`],
+            )).trim();
+            safeChangedHead = ahead === "0";
+          } catch {
+            // An unreadable default cannot replace exact merged-head proof.
+          }
+        }
       }
-      if (mergedHead !== head) return { removed: false, reason: "unpushed" };
+      if (!safeChangedHead) {
+        return { removed: false, reason: "branch_changed", checkedOutBranch: branch };
+      }
+    } else {
+      let hasUpstream = true;
+      try {
+        await command(context, repoPath, ["rev-parse", "--verify", `${branch}@{upstream}`]);
+      } catch {
+        hasUpstream = false;
+      }
+      if (hasUpstream) {
+        const ahead = (await command(
+          context,
+          repoPath,
+          ["rev-list", "--count", `${branch}@{upstream}..${ref}`],
+        )).trim();
+        if (!/^\d+$/u.test(ahead)) return { removed: false, reason: "unavailable" };
+        if (ahead !== "0") return { removed: false, reason: "unpushed" };
+      } else {
+        const mergedHead = options.verifiedMergedHead;
+        if (typeof mergedHead !== "string" || !/^[a-f0-9]{40,64}$/u.test(mergedHead)) {
+          return { removed: false, reason: "no_upstream" };
+        }
+        if (mergedHead !== head) return { removed: false, reason: "unpushed" };
+      }
     }
 
     // Hooks/process retirement are intentionally after the first complete safety proof and before
@@ -1165,7 +1236,11 @@ export async function discardWorktreeIfSafe(
       if (finalHead !== head) return { removed: false, reason: "unpushed" };
       await command(context, repoPath, ["worktree", "remove", handle.path], 120_000);
     }
-    await command(context, repoPath, ["update-ref", "-d", ref, head]);
+    // For a changed checkout `ref` is the branch actually removed with the worktree; the recorded
+    // branch is deliberately untouched, whether its ref still exists or has already disappeared.
+    if (!preserveCheckedOutRef) {
+      await command(context, repoPath, ["update-ref", "-d", ref, head]);
+    }
     await command(context, repoPath, ["worktree", "prune"]);
     return { removed: true };
   } catch {

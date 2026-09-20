@@ -489,17 +489,135 @@ test("safe discard removes only a clean fully-pushed runner-owned worktree", { s
     assert.equal(existsSync(verifiedMerged.path), false,
       "the exact forge-verified merged head replaces only the missing upstream proof");
 
+    const unknownDefault = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "agent/unknown-default",
+    }, { dataDir });
+    execFileSync("git", ["-C", unknownDefault.path, "switch", "-c", "fix/unknown-default"]);
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...unknownDefault,
+      source: "created",
+    }, { dataDir }), {
+      removed: false,
+      reason: "branch_changed",
+      checkedOutBranch: "fix/unknown-default",
+    }, "a changed branch is retained when the default branch cannot be proved");
+
+    execFileSync("git", ["-C", repo, "switch", "-c", "operator/primary"]);
+    const unknownDefaultMerged = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "agent/unknown-default-merged",
+    }, { dataDir });
+    execFileSync("git", ["-C", unknownDefaultMerged.path, "switch", "main"]);
+    const unknownDefaultMergedHead = execFileSync(
+      "git", ["-C", unknownDefaultMerged.path, "rev-parse", "HEAD"], { encoding: "utf8" },
+    ).trim();
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...unknownDefaultMerged,
+      source: "created",
+    }, { dataDir, verifiedMergedHead: unknownDefaultMergedHead }), { removed: true });
+    execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/main"]);
+
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
+    const defaultCheckout = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "agent/default-checkout",
+    }, { dataDir });
+    execFileSync("git", ["-C", defaultCheckout.path, "switch", "main"]);
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...defaultCheckout,
+      source: "created",
+    }, { dataDir }), { removed: true });
+    execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/main"]);
+
+    const detached = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "agent/detached",
+    }, { dataDir });
+    execFileSync("git", ["-C", detached.path, "checkout", "--detach"]);
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...detached,
+      source: "created",
+    }, { dataDir }), { removed: false, reason: "detached_head" });
+
+    execFileSync("git", ["-C", repo, "switch", "-c", "operator/shared"]);
+    const sharedCheckout = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "agent/shared-checkout",
+    }, { dataDir });
+    execFileSync("git", [
+      "-C", sharedCheckout.path, "switch", "--ignore-other-worktrees", "operator/shared",
+    ]);
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...sharedCheckout,
+      source: "created",
+    }, { dataDir }), { removed: true });
+    execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/operator/shared"]);
+    execFileSync("git", ["-C", repo, "switch", "operator/primary"]);
+
+    const defaultContainedBranch = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "agent/safe-unchanged",
+    }, { dataDir });
+    execFileSync("git", ["-C", defaultContainedBranch.path, "switch", "-c", "fix/safe-unchanged"]);
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...defaultContainedBranch,
+      source: "created",
+    }, { dataDir }), { removed: true });
+    execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/agent/safe-unchanged"]);
+    assert.throws(() => execFileSync(
+      "git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/fix/safe-unchanged"],
+    ));
+
     const drifted = await createRequestedWorktree(repo, "s_safe", {
       baseRef: "HEAD",
       branch: "fix/drift-original",
     }, { dataDir });
     execFileSync("git", ["-C", drifted.path, "push", "-u", "origin", drifted.branch]);
     execFileSync("git", ["-C", drifted.path, "switch", "-c", "fix/drift-replacement"]);
+    writeFileSync(join(drifted.path, "replacement.txt"), "merged replacement\n");
+    execFileSync("git", ["-C", drifted.path, "add", "replacement.txt"]);
+    execFileSync("git", ["-C", drifted.path, "commit", "-m", "replacement work"]);
     assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
       ...drifted,
       source: "created",
-    }, { dataDir }), { removed: false, reason: "branch_changed" });
+    }, { dataDir }), {
+      removed: false,
+      reason: "branch_changed",
+      checkedOutBranch: "fix/drift-replacement",
+    });
     assert.equal(existsSync(drifted.path), true);
+    const driftedHead = execFileSync("git", ["-C", drifted.path, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    }).trim();
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...drifted,
+      source: "created",
+    }, { dataDir, verifiedMergedHead: driftedHead }), { removed: true });
+    execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", `refs/heads/${drifted.branch}`]);
+    assert.throws(() => execFileSync(
+      "git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/fix/drift-replacement"],
+    ));
+
+    const missingRegistered = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "agent/missing-registered",
+    }, { dataDir });
+    execFileSync("git", ["-C", missingRegistered.path, "switch", "-c", "fix/missing-registered"]);
+    writeFileSync(join(missingRegistered.path, "merged.txt"), "merged work\n");
+    execFileSync("git", ["-C", missingRegistered.path, "add", "merged.txt"]);
+    execFileSync("git", ["-C", missingRegistered.path, "commit", "-m", "merged work"]);
+    const missingRegisteredHead = execFileSync("git", ["-C", missingRegistered.path, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    }).trim();
+    execFileSync("git", ["-C", repo, "update-ref", "-d", `refs/heads/${missingRegistered.branch}`]);
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...missingRegistered,
+      source: "created",
+    }, { dataDir, verifiedMergedHead: missingRegisteredHead }), { removed: true });
+    assert.throws(() => execFileSync(
+      "git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/fix/missing-registered"],
+    ));
 
     assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
       path: join(root, "operator-owned"),
@@ -507,6 +625,110 @@ test("safe discard removes only a clean fully-pushed runner-owned worktree", { s
       source: "created",
     }, { dataDir }), { removed: false, reason: "not_runner_owned" });
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("managed discard verifies a changed checkout and names an unproved branch", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-changed-branch-discard-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_changed_branch", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "cleanup",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+
+    const merged = await manager.requestWorktree(
+      "s_changed_branch",
+      { baseRef: "HEAD", branch: "agent/s_changed_branch" },
+    );
+    execFileSync("git", ["-C", merged.worktree.path, "switch", "-c", "fix/merged-changed-branch"]);
+    writeFileSync(join(merged.worktree.path, "merged.txt"), "merged work\n");
+    execFileSync("git", ["-C", merged.worktree.path, "add", "merged.txt"]);
+    execFileSync("git", ["-C", merged.worktree.path, "commit", "-m", "merged work"]);
+    const mergedHead = execFileSync("git", ["-C", merged.worktree.path, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    }).trim();
+    await manager.linkWorktreePullRequest(
+      "s_changed_branch", merged.worktree.path, "https://github.com/picoduck/wollipog/pull/1318",
+    );
+    const linked = store.readMeta("s_changed_branch")!;
+    store.patchMeta("s_changed_branch", {
+      worktrees: linked.worktrees?.map((worktree) => worktree.id === merged.worktree.id
+        ? { ...worktree, pullRequest: { ...worktree.pullRequest!, state: "merged" as const, headOid: mergedHead } }
+        : worktree),
+    });
+
+    await manager.discardWorktree("s_changed_branch", merged.worktree.path);
+    assert.equal(existsSync(merged.worktree.path), false);
+    execFileSync("git", [
+      "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/agent/s_changed_branch",
+    ]);
+    assert.throws(() => execFileSync("git", [
+      "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/fix/merged-changed-branch",
+    ]));
+
+    const unmerged = await manager.requestWorktree(
+      "s_changed_branch",
+      { baseRef: "HEAD", branch: "agent/s_changed_branch_unmerged" },
+    );
+    execFileSync("git", ["-C", unmerged.worktree.path, "switch", "-c", "fix/unmerged-changed-branch"]);
+    writeFileSync(join(unmerged.worktree.path, "unmerged.txt"), "unmerged work\n");
+    execFileSync("git", ["-C", unmerged.worktree.path, "add", "unmerged.txt"]);
+    execFileSync("git", ["-C", unmerged.worktree.path, "commit", "-m", "unmerged work"]);
+    await manager.linkWorktreePullRequest(
+      "s_changed_branch", unmerged.worktree.path, "https://github.com/picoduck/wollipog/pull/1319",
+    );
+    await assert.rejects(
+      manager.discardWorktree("s_changed_branch", unmerged.worktree.path),
+      /checked out on branch "fix\/unmerged-changed-branch".*neither verified as merged nor known to be contained/u,
+    );
+    assert.equal(existsSync(unmerged.worktree.path), true);
+
+    const discovered = await manager.requestWorktree(
+      "s_changed_branch",
+      { baseRef: "HEAD", branch: "agent/s_changed_branch_discovered" },
+    );
+    execFileSync("git", ["-C", discovered.worktree.path, "switch", "-c", "fix/discovered-changed-branch"]);
+    writeFileSync(join(discovered.worktree.path, "discovered.txt"), "externally merged work\n");
+    execFileSync("git", ["-C", discovered.worktree.path, "add", "discovered.txt"]);
+    execFileSync("git", ["-C", discovered.worktree.path, "commit", "-m", "externally merged work"]);
+    const discoveredHead = execFileSync("git", ["-C", discovered.worktree.path, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    }).trim();
+    let discoveryBranch: string | undefined;
+    (manager as unknown as {
+      discoverMergedWorktreePullRequest: (path: string, branch: string) => Promise<{
+        url: string; state: "merged"; headOid: string; provider: "github"; kind: "pull_request";
+      } | null>;
+    }).discoverMergedWorktreePullRequest = async (path, branch) => {
+      if (path !== discovered.worktree.path) return null;
+      discoveryBranch = branch;
+      return {
+        url: "https://github.com/picoduck/wollipog/pull/1320",
+        state: "merged",
+        headOid: discoveredHead,
+        provider: "github",
+        kind: "pull_request",
+      };
+    };
+    await manager.discardWorktree("s_changed_branch", discovered.worktree.path);
+    assert.equal(discoveryBranch, "fix/discovered-changed-branch",
+      "unlinked merged-PR discovery follows the branch checked out by Git");
+    assert.equal(existsSync(discovered.worktree.path), false);
+    execFileSync("git", [
+      "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/agent/s_changed_branch_discovered",
+    ]);
+  } finally {
+    manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -2093,6 +2315,10 @@ test("merged PR worktrees remain discardable after their remote branches are del
     assert.equal(discoveryCalls.get(discoveredExplicit.worktree.path) ?? 0, discoveryCallsBeforeActiveDiscard + 1,
       "safe-discard eligibility is checked before an active provider is retired");
     activeEntries.delete("s_merged_no_upstream");
+    const launchGenerations = (manager as unknown as { launchGenerations: Map<string, number> }).launchGenerations;
+    // A real `starting` session always owns a launch generation. Model that fence so this test's
+    // explicit-discovery assertions do not race the missed-boundary `setImmediate` replay.
+    launchGenerations.set("s_merged_no_upstream", 1);
     store.patchMeta("s_merged_no_upstream", {
       status: "starting",
       worktreePath: discoveredExplicit.worktree.path,
@@ -2112,6 +2338,7 @@ test("merged PR worktrees remain discardable after their remote branches are del
       worktreeBranch: undefined,
       worktreePending: false,
     });
+    launchGenerations.delete("s_merged_no_upstream");
     await manager.discardWorktree("s_merged_no_upstream", explicit.worktree.path);
     assert.equal(existsSync(explicit.worktree.path), false,
       "explicit discard also accepts the verified merged worktree without its remote branch");
@@ -2207,6 +2434,7 @@ test("missing-upstream reconciliation is bounded, fair, identity-aware, and lane
     let ineligiblePath: string | undefined;
     let forgeUnavailablePath: string | undefined;
     const internals = manager as unknown as {
+      readWorktreeBranch: (path: string, options?: { timeoutMs?: number }) => Promise<string | undefined>;
       discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch;
       resolveWorktreePullRequestState: () => Promise<null>;
       discardSessionWorktreeIfSafe: () => Promise<{ removed: false; reason: "unavailable" }>;
@@ -2215,6 +2443,11 @@ test("missing-upstream reconciliation is bounded, fair, identity-aware, and lane
       worktreePullRequestDiscoveryRetryAt: Map<string, { identity: string; retryAt: number }>;
     };
     internals.worktreePullRequestDiscoveryNow = () => now;
+    internals.readWorktreeBranch = async (path, options) => {
+      assert.equal(options?.timeoutMs, 8_000, "periodic branch discovery uses the bounded Git preflight");
+      const index = candidatePaths.indexOf(path);
+      return index >= 0 ? `fix/candidate-${index}-actual` : undefined;
+    };
     internals.resolveWorktreePullRequestState = async () => null;
     internals.discardSessionWorktreeIfSafe = async () => ({ removed: false, reason: "unavailable" });
     internals.discoverMergedWorktreePullRequest = async (path, branch, options = {}) => {
@@ -2992,15 +3225,18 @@ test("replay refreshes a merged-head proof the launching deferral was journaled 
     for (const worktree of [merged.worktree, unmerged.worktree, diverged.worktree]) {
       execFileSync("git", ["-C", worktree.path, "push", "-u", "origin", worktree.branch]);
       execFileSync("git", ["-C", worktree.path, "push", "origin", "--delete", worktree.branch]);
+      execFileSync("git", ["-C", worktree.path, "switch", "-c", `${worktree.branch}-actual`]);
     }
     let discoveryEnabled = false;
     const discoveryCalls = new Map<string, number>();
+    const discoveryBranches = new Map<string, string>();
     (manager as unknown as {
-      discoverMergedWorktreePullRequest: (path: string) => Promise<{
+      discoverMergedWorktreePullRequest: (path: string, branch: string) => Promise<{
         url: string; state: "merged"; headOid: string; provider: "github"; kind: "pull_request";
       } | null>;
-    }).discoverMergedWorktreePullRequest = async (path) => {
+    }).discoverMergedWorktreePullRequest = async (path, branch) => {
       discoveryCalls.set(path, (discoveryCalls.get(path) ?? 0) + 1);
+      discoveryBranches.set(path, branch);
       if (!discoveryEnabled || path === unmerged.worktree.path) return null;
       return {
         url: `https://github.com/picoduck/wollipog/pull/${path === merged.worktree.path ? "810" : "811"}`,
@@ -3059,6 +3295,8 @@ test("replay refreshes a merged-head proof the launching deferral was journaled 
       "the removed worktree leaves no inventory row behind");
     await waitForCondition(() => discoveryCalls.size === 3,
       "replay did not consult the forge for the proof each deferral lacks");
+    assert.equal(discoveryBranches.get(merged.worktree.path), `${merged.worktree.branch}-actual`,
+      "replay discovers merge proof for the branch Git actually has checked out");
 
     const replay = manager as unknown as {
       cleanupJournal: { list: () => WorktreeCleanupRecord[] };
