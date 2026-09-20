@@ -156,6 +156,9 @@ export class ManagedWorktreeGuardSockets {
     address: string;
     /** Device and inode of a path socket; an abstract name cannot be replaced while we listen. */
     identity: string | null;
+    /** The runner's one-time self-test passed against this very server. Kept here, not in a set of
+     * addresses, so it goes with the server on every close path and cannot outlive it (#1476). */
+    proven: boolean;
   }>();
 
   /** Per-session tail of in-flight `ensure`/`close` work. Two launch preparations of one session
@@ -189,6 +192,19 @@ export class ManagedWorktreeGuardSockets {
     return this.serialized(sessionId, () => this.closeNow(sessionId));
   }
 
+  /** Whether the socket this session is served on right now is `address` and has been proven. */
+  isProven(sessionId: string, address: string): boolean {
+    const entry = this.servers.get(sessionId);
+    return entry?.address === address && entry.proven;
+  }
+
+  /** Record a passed self-test of `address`. A proof that lands after that socket closed, or was
+   * re-created under a new name, proves nothing the runner still serves and is dropped. */
+  markProven(sessionId: string, address: string): void {
+    const entry = this.servers.get(sessionId);
+    if (entry?.address === address) entry.proven = true;
+  }
+
   private listen(server: Server, address: string): Promise<void> {
     return new Promise<void>((resolvePromise, reject) => {
       server.once("error", reject);
@@ -214,7 +230,7 @@ export class ManagedWorktreeGuardSockets {
         serveVerdict(socket, () => this.memoryProtections(sessionId), guardStateDirectory));
       await this.listen(server, address);
       server.on("error", () => { /* a per-connection failure never takes the server down */ });
-      this.servers.set(sessionId, { server, kind, address, identity: null });
+      this.servers.set(sessionId, { server, kind, address, identity: null, proven: false });
       return address;
     }
     const path = managedWorktreeGuardSocketPath(this.configDir, sessionId);
@@ -242,7 +258,7 @@ export class ManagedWorktreeGuardSockets {
       await new Promise<void>((resolvePromise) => server.close(() => resolvePromise()));
       throw new Error("the guard socket was replaced while it was being created");
     }
-    this.servers.set(sessionId, { server, kind, address: path, identity });
+    this.servers.set(sessionId, { server, kind, address: path, identity, proven: false });
     return path;
   }
 

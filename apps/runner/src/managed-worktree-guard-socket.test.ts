@@ -388,6 +388,41 @@ test("an abstract socket the runner listens on cannot be taken over by another l
   }
 });
 
+test("a proven abstract socket is forgotten when it closes, and a re-created one is proven again", { skip: !LINUX }, async () => {
+  // The runner proves each abstract address once with the real sidecar and skips the proof on later
+  // launches of the same session. The proof belongs to the listening server: it goes with the
+  // server on every close path (deletion, shutdown, re-creation), so the runner holds at most one
+  // proof per live socket rather than one per address it ever listened on (#1476).
+  const { configDir } = fixture();
+  const host = new ManagedWorktreeGuardSockets(configDir, () => []);
+  hosts.push(host);
+  const first = await host.ensure("s_proof", "abstract");
+  assert.equal(host.isProven("s_proof", first), false, "a fresh socket is unproven");
+  host.markProven("s_proof", first);
+  assert.equal(host.isProven("s_proof", first), true);
+  assert.equal(host.isProven("s_other", first), false, "a proof is the session's, not the address's");
+  assert.equal(await host.ensure("s_proof", "abstract"), first);
+  assert.equal(host.isProven("s_proof", first), true, "a socket that is kept keeps its proof");
+
+  await host.close("s_proof");
+  assert.equal(host.isProven("s_proof", first), false, "closing forgets the proof");
+  // A proof that finishes after the socket it proved has closed must not be remembered either.
+  host.markProven("s_proof", first);
+  assert.equal(host.isProven("s_proof", first), false);
+
+  const second = await host.ensure("s_proof", "abstract");
+  assert.notEqual(second, first, "a re-created socket gets a new name");
+  assert.equal(host.isProven("s_proof", second), false, "and has to be proven again");
+  host.markProven("s_proof", first);
+  assert.equal(host.isProven("s_proof", second), false, "a stale proof does not prove the new socket");
+  host.markProven("s_proof", second);
+  assert.equal(host.isProven("s_proof", second), true);
+
+  // Shutdown closes every server, and every proof with it.
+  await host.closeAll();
+  assert.equal(host.isProven("s_proof", second), false);
+});
+
 test("an abstract socket is refused where the platform has none", async () => {
   const host = new ManagedWorktreeGuardSockets(join(tmpdir(), "wgs-none"), () => [], "darwin");
   await assert.rejects(host.ensure("s_mac", "abstract"), /only on Linux/u);
