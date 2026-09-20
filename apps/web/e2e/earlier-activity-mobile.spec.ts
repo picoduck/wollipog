@@ -49,7 +49,7 @@ test("the first native mobile touch traversal loads earlier activity", async ({ 
   await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 
   await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("2");
-  await expect(control).toContainText("Loading Earlier Activity…");
+  await expect(control).toContainText("Loading earlier activity…");
 });
 
 test("an event-heavy mobile opening fills itself before exposing earlier activity", async ({ page }) => {
@@ -234,7 +234,7 @@ test("a downward finger drag at the head loads the next page without a scroll ev
   await dispatchTouch("touchmove", 170);
   await dispatchTouch("touchend");
   await expect(page.locator("body")).toHaveAttribute("data-tail-request-count", "2");
-  await expect(control).toContainText("Loading Earlier Activity…");
+  await expect(control).toContainText("Loading earlier activity…");
   await expect.poll(() => reader.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
   await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "paused");
 });

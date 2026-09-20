@@ -1005,9 +1005,15 @@ function SessionDetailLoaded({
   );
   const viewGenerationRef = useRef(0);
   const [historyRetry, setHistoryRetry] = useState(0);
-  const [olderRequestSettled, setOlderRequestSettled] = useState(0);
+  const timelineHistoryKey = `${session.id}:${session.eventEpoch ?? 0}`;
+  const timelineHistoryKeyRef = useRef(timelineHistoryKey);
+  timelineHistoryKeyRef.current = timelineHistoryKey;
+  const [olderRequestSettled, setOlderRequestSettled] = useState({
+    historyKey: timelineHistoryKey,
+    version: 0,
+  });
   const [openingHistoryFill, setOpeningHistoryFill] = useState({
-    historyKey: `${session.id}:${session.eventEpoch ?? 0}`,
+    historyKey: timelineHistoryKey,
     settled: false,
   });
   const [optimisticModel, setOptimisticModel] = useState<string | undefined>();
@@ -1016,7 +1022,6 @@ function SessionDetailLoaded({
   const timelineRevealRequestRef = useRef<TimelineRevealRequest | null>(null);
   const timelineRevealRestoreState = useRef<{ requestId: number; state: FollowTailState } | null>(null);
   const timelineRevealRequestId = useRef(0);
-  const timelineHistoryKey = `${session.id}:${session.eventEpoch ?? 0}`;
   const automaticEarlierLoadRef = useRef({
     historyKey: timelineHistoryKey,
     requestedBase: null as number | null,
@@ -2143,7 +2148,11 @@ function SessionDetailLoaded({
       .catch(() => failOlderEventsLoad(sessionId, "Could not load earlier activity.", base, epoch))
       .finally(() => {
         olderInFlightRef.current = false;
-        setOlderRequestSettled((version) => version + 1);
+        if (timelineHistoryKeyRef.current !== timelineHistoryKey) return;
+        setOlderRequestSettled((current) => ({
+          historyKey: timelineHistoryKey,
+          version: current.historyKey === timelineHistoryKey ? current.version + 1 : 1,
+        }));
       });
     return true;
   }, [api, sessionId, recoveryEventEpoch, eventWindowBase, beginOlderEventsLoad, loadOlderEvents, failOlderEventsLoad]);
@@ -3014,6 +3023,13 @@ function SessionDetailLoaded({
 
   const openingHistoryFillSettled = (
     openingHistoryFill.historyKey === timelineHistoryKey && openingHistoryFill.settled
+  );
+  const currentEarlierRequestSettled = (
+    olderRequestSettled.historyKey === timelineHistoryKey && olderRequestSettled.version > 0
+  );
+  const readerStartedEarlierActivity = (
+    automaticEarlierLoadRef.current.historyKey === timelineHistoryKey &&
+    automaticEarlierLoadRef.current.readerStarted
   );
 
   useEffect(() => {
@@ -4766,12 +4782,12 @@ function SessionDetailLoaded({
                 />
               )}
               <div className="sr-only" role="status" aria-live="polite" aria-atomic="true" data-earlier-activity-announcement>
-                {eventWindow?.loadingOlder
+                {currentEarlierRequestSettled && eventWindow?.error
+                  ? `${eventWindow.error} Retry is available.`
+                  : readerStartedEarlierActivity && eventWindow?.loadingOlder
                   ? "Loading earlier activity."
-                  : olderRequestSettled > 0
-                    ? eventWindow?.error
-                      ? `${eventWindow.error} Retry is available.`
-                      : "Earlier activity loaded."
+                  : readerStartedEarlierActivity && currentEarlierRequestSettled
+                    ? "Earlier activity loaded."
                     : ""}
               </div>
               {eventWindow?.hasOlder === true && items.length > 0 && openingHistoryFillSettled && (
@@ -6917,7 +6933,7 @@ function EarlierActivityControl({
     return (
       <div className="transcript-earlier-activity" data-state="loading">
         <Spinner decorative />
-        <span>Loading Earlier Activity…</span>
+        <span>Loading earlier activity…</span>
       </div>
     );
   }

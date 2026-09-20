@@ -252,7 +252,7 @@ const client = {
     document.body.dataset.tailRequestCount = String(tailRequestCount);
     if (settled && before === undefined) {
       return Promise.resolve({
-        events: activeFixtureEvents, eventEpoch, nextBefore: 0, hasMoreOlder: false, cacheComplete: true,
+        events: servedFixtureEvents, eventEpoch, nextBefore: 0, hasMoreOlder: false, cacheComplete: true,
       });
     }
     if (resolvedPagination && before !== undefined) {
@@ -265,6 +265,7 @@ const client = {
       const sourceEvents = servedFixtureEvents;
       const pageSize = eventHeavyOpening ? 200 : 8;
       const pageEnd = sourceEvents.findIndex((event) => event.seq === before);
+      if (pageEnd < 0) throw new Error(`Fixture could not find pagination cursor ${before}.`);
       const pageStart = Math.max(0, pageEnd - pageSize);
       const events = sourceEvents.slice(pageStart, pageEnd);
       if (liveDuringPagination && tailRequestCount === 2) {

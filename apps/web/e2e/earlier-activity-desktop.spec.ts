@@ -209,7 +209,7 @@ test("a failed automatic load exposes Retry and a successful retry restores the 
   await page.mouse.wheel(0, -100);
   await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("2");
   await expect(control).toHaveAttribute("data-state", "loading");
-  await expect(control).toContainText("Loading Earlier Activity…");
+  await expect(control).toContainText("Loading earlier activity…");
   await expect(announcement).toHaveText("Loading earlier activity.");
 
   await expect(control).toHaveAttribute("data-state", "error");
@@ -219,9 +219,9 @@ test("a failed automatic load exposes Retry and a successful retry restores the 
   await expect(announcement).toHaveText("Could not load earlier activity. Retry is available.");
 
   await retry.click();
-  await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("3");
   await expect(control).toHaveAttribute("data-state", "loading");
   await expect(announcement).toHaveText("Loading earlier activity.");
+  await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("3");
   await expect(announcement).toHaveText("Earlier activity loaded.");
   await expect(control).toHaveAttribute("data-state", "idle");
   await expect(control.getByRole("button", { name: "Load Earlier Activity" })).toBeVisible();

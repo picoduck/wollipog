@@ -716,6 +716,11 @@ test("an underfilled partial opening automatically reaches a complete scrollable
       "both the initial window and automatic opening fill request a semantic turn boundary");
     assert.equal(fixture.container.querySelector(".transcript-earlier-activity"), null,
       "the manual fallback stays out of the underfilled opening while recovery is active");
+    const announcement = fixture.container.querySelector(
+      "[data-earlier-activity-announcement]",
+    ) as HTMLElement;
+    assert.equal(announcement.textContent, "",
+      "opening recovery does not announce reader-navigation progress");
 
     const earlierPage = fixture.events.slice(-15, -7);
     assert.ok(earlierPage.some((entry) => entry.payload.kind === "user_message"));
@@ -736,6 +741,8 @@ test("an underfilled partial opening automatically reaches a complete scrollable
     assert.ok(fallback, "older history remains reachable after bounded opening recovery");
     assert.equal(fallback.dataset.state, "idle");
     assert.equal(fallback.querySelector("button")?.getAttribute("aria-label"), "Load Earlier Activity");
+    assert.equal(announcement.textContent, "",
+      "completing opening recovery stays silent until the reader requests history");
   } finally {
     await unmountFixture(fixture);
   }
