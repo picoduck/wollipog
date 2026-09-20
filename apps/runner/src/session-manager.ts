@@ -3354,7 +3354,7 @@ export class SessionManager {
         // later automatic retry after they merely clean the tree. Once process/teardown work began,
         // retain the journal so startup can finish the interrupted explicit operation.
         if (!cleanup.processTerminationStartedAt) {
-          this.removeWorktreeCleanupRecord(cleanup);
+          this.removeWorktreeCleanupRecord(cleanup, true);
         }
         if (result.reason === "branch_changed") {
           return {
@@ -12153,8 +12153,14 @@ export class SessionManager {
     });
   }
 
-  private removeWorktreeCleanupRecord(record: Pick<WorktreeCleanupRecord, "sessionId" | "worktreeId">): boolean {
+  private removeWorktreeCleanupRecord(
+    record: Pick<WorktreeCleanupRecord, "sessionId" | "worktreeId" | "cleanupId">,
+    removeUnarmedRetainedRefs = false,
+  ): boolean {
     try {
+      if (removeUnarmedRetainedRefs) {
+        this.cleanupJournal.removeUnarmedRetainedRefs(record.sessionId, record.worktreeId, record.cleanupId);
+      }
       this.cleanupJournal.remove(record.sessionId, record.worktreeId ?? "legacy");
       this.deferredMergedHeadRetryAt.delete(this.deferredMergedHeadKey(record));
       return true;

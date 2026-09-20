@@ -1318,6 +1318,9 @@ test("retained ref journal survives restart and never re-arms a completed or rep
     journal.armRetainedRefs("s1", "wt1", "cleanup-1");
     const armedRecord = new WorktreeCleanupJournal(dataDir).listRetainedRefs()[0]!;
     assert.equal(typeof armedRecord.armedAt, "number");
+    journal.removeUnarmedRetainedRefs("s1", "wt1", "cleanup-1");
+    assert.equal(new WorktreeCleanupJournal(dataDir).listRetainedRefs().length, 1,
+      "an armed ownership row is never removed as an abandoned intent");
 
     const changed = { ...record, expectedOid: "b".repeat(40), updatedAt: 2 };
     assert.equal(journal.addRetainedRef(changed).expectedOid, record.expectedOid,
@@ -1342,6 +1345,9 @@ test("retained ref journal survives restart and never re-arms a completed or rep
     restarted.addRetainedRef(laterGeneration);
     assert.deepEqual(new WorktreeCleanupJournal(dataDir).listRetainedRefs(), [laterGeneration],
       "a later cleanup occurrence owns its ref independently of an old terminal receipt");
+    restarted.removeUnarmedRetainedRefs("s1", "wt1", "cleanup-2");
+    assert.deepEqual(new WorktreeCleanupJournal(dataDir).listRetainedRefs(), [],
+      "an abandoned cleanup removes only its own unarmed ownership rows");
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }

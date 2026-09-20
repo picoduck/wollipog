@@ -359,6 +359,18 @@ export class WorktreeCleanupJournal {
     if (changed) this.flushRetainedRefs();
   }
 
+  removeUnarmedRetainedRefs(sessionId: string, worktreeId?: string, cleanupId?: string): void {
+    let changed = false;
+    for (const [key, record] of this.retainedRefs) {
+      if (record.sessionId !== sessionId || record.armedAt ||
+          (record.worktreeId ?? "legacy") !== (worktreeId ?? "legacy") ||
+          (record.cleanupId ?? "legacy-cleanup") !== (cleanupId ?? "legacy-cleanup")) continue;
+      this.retainedRefs.delete(key);
+      changed = true;
+    }
+    if (changed) this.flushRetainedRefs();
+  }
+
   finishRetainedRef(
     record: RetainedWorktreeRefRecord,
     state: "completed" | "retained",
