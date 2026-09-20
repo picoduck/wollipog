@@ -20,7 +20,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildCodexTurnParams } from "./codex-app-server.js";
-import { codexGuardActiveInArgs, withoutCodexGuardArgs } from "../codex-managed-worktree-guard.js";
+import {
+  codexGuardActiveInArgs,
+  codexGuardLaunchArgs,
+  withoutCodexGuardArgs,
+} from "../codex-managed-worktree-guard.js";
 
 const GUARD_OVERRIDE =
   'hooks.PreToolUse=[{matcher="Bash|apply_patch",hooks=[{type="command",' +
@@ -147,15 +151,28 @@ test("--disable hooks disarms the guard, whatever the overrides still say", () =
   assert.equal(codexGuardActiveInArgs([...GUARDED, "--disable", "web_search"]), true);
 });
 
-test("a person's own hook-trust configuration is never stripped from their launch", () => {
-  // Review finding CR-1.2. Only the runner's own trust override is runner-owned, and Codex keys
-  // the hook the runner installs through `-c` under `/<session-flags>/`. A hook from config.toml,
-  // a project, or a plugin is keyed by its own path, and its trust must survive.
-  const userTrust = 'hooks.state={"/home/u/.codex/config.toml:pre_tool_use:0:0"={trusted_hash="sha256:user"}}';
-  assert.deepEqual(withoutCodexGuardArgs(["-c", userTrust]), ["-c", userTrust]);
-  // The runner's own is still replaced rather than stacked across re-preparation.
-  assert.deepEqual(withoutCodexGuardArgs(["-c", TRUST_OVERRIDE]), []);
-  // And the isolation override (#1473), which shares the prefix, survives either way.
+test("no hook-trust configuration is stripped before the runner knows its own key", () => {
+  // Review findings CR-1.2 and round 2. `withoutCodexGuardArgs` runs before the inventory is read,
+  // so it cannot tell a person's trust override from the runner's — a person can install their own
+  // session-flags hook through `-c` too, and Codex keys that under `/<session-flags>/` as well. It
+  // therefore strips neither. It still strips the runner's own PreToolUse override.
+  const userConfigTrust = 'hooks.state={"/home/u/.codex/config.toml:pre_tool_use:0:0"={trusted_hash="sha256:u"}}';
+  const userFlagsTrust = 'hooks.state={"/<session-flags>/config.toml:pre_tool_use:0:1"={trusted_hash="sha256:v"}}';
+  for (const value of [userConfigTrust, userFlagsTrust, TRUST_OVERRIDE]) {
+    assert.deepEqual(withoutCodexGuardArgs(["-c", value]), ["-c", value], value);
+  }
   const disable = 'hooks.state={"/home/u/.codex/config.toml:pre_tool_use:0:0"={enabled=false}}';
   assert.deepEqual(withoutCodexGuardArgs(["-c", disable]), ["-c", disable]);
+});
+
+test("appending the runner's trust replaces only overrides naming the same hook", () => {
+  // The runner's own must not stack across re-preparation, and a person's trust for a DIFFERENT
+  // hook — including another session-flags hook, which is the round-2 case — must survive. Codex
+  // replaces the whole `hooks.state` table with the last override, so a same-key one is superseded
+  // anyway; dropping it just keeps the argv from growing.
+  const userFlagsTrust = 'hooks.state={"/<session-flags>/config.toml:pre_tool_use:0:1"={trusted_hash="sha256:v"}}';
+  const twice = codexGuardLaunchArgs(["-c", TRUST_OVERRIDE, "-c", userFlagsTrust], GUARD_OVERRIDE, TRUST_OVERRIDE);
+  assert.equal(twice.filter((arg) => arg === TRUST_OVERRIDE).length, 1, "the runner's own is not stacked");
+  assert.ok(twice.includes(userFlagsTrust), "a person's trust for another hook survives");
+  assert.equal(codexGuardActiveInArgs(twice), true);
 });
