@@ -11,6 +11,10 @@ import {
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
 } from "@wollipog/protocol";
 import type { McpFetch } from "./session-management-mcp.js";
+import {
+  AGENT_CONTROL_RELAY_ENDPOINT_ENV,
+  AGENT_CONTROL_RELAY_KEY_ENV,
+} from "./agent-control-relay.js";
 import { runWollipogCli, runWollipogInit } from "./wollipog-cli.js";
 import { expandCommandAlias, resolveHelp } from "./wollipog-help.js";
 
@@ -299,6 +303,42 @@ test("CLI emits stable JSON and authenticates list requests as the exact session
     assert.equal(calls[0]!.init?.headers?.[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER], "s_parent");
     assert.equal(calls[1]!.init?.headers?.authorization, "Bearer session-secret");
     assert.equal(calls[1]!.init?.headers?.[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER], "s_parent");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an explicit CLI token file overrides an injected runner relay", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-cli-relay-override-"));
+  try {
+    const tokenFile = join(root, "device-token");
+    writeFileSync(tokenFile, "explicit-device-token", { mode: 0o600 });
+    const authorizations: string[] = [];
+    const fetch: McpFetch = async (url, init) => {
+      authorizations.push(init?.headers?.authorization ?? "");
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify(url.endsWith("/api/compatibility")
+          ? { protocolVersion: PROTOCOL_VERSION }
+          : { sessions: [] }),
+      };
+    };
+    let stdout = "";
+    const code = await runWollipogCli(
+      ["node", "cli.js", "--wollipog-cli", "session", "list", "--token-file", tokenFile, "--json"],
+      {
+        WOLLIPOG_CONTROL_PLANE_URL: "http://cp",
+        WOLLIPOG_SESSION_ID: "s_provider",
+        [AGENT_CONTROL_RELAY_ENDPOINT_ENV]: "tcp://127.0.0.1:9",
+        [AGENT_CONTROL_RELAY_KEY_ENV]: "k".repeat(32),
+      },
+      { stdout: (text) => { stdout += text; }, stderr: () => assert.fail("unexpected CLI error") },
+      fetch,
+    );
+    assert.equal(code, 0);
+    assert.deepEqual(JSON.parse(stdout), { sessions: [] });
+    assert.deepEqual(authorizations, ["Bearer explicit-device-token", "Bearer explicit-device-token"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

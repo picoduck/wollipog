@@ -464,10 +464,13 @@ export async function runWollipogCli(
   const sessionId = env.WOLLIPOG_SESSION_ID ?? "";
   const relayEndpoint = env[AGENT_CONTROL_RELAY_ENDPOINT_ENV];
   const relayKey = env[AGENT_CONTROL_RELAY_KEY_ENV];
+  const explicitTokenFile = option(args, "--token-file");
   let activeFetch = fetchImpl;
   let token = "";
   try {
-    if (relayEndpoint || relayKey) {
+    if (explicitTokenFile) {
+      token = readToken(env, explicitTokenFile);
+    } else if (relayEndpoint || relayKey) {
       if (!relayEndpoint || !relayKey) throw new Error("incomplete runner relay configuration");
       activeFetch = agentControlRelayFetch(relayEndpoint, relayKey);
     } else {

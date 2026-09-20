@@ -545,6 +545,12 @@ test("provider-mode Agent Control keeps the registered credential in runner memo
     assert.equal(response.status, 200);
     assert.match(observedAuthorization, /^Bearer wollipoga_[A-Za-z0-9_-]{43}$/u);
     assert.notEqual(observedAuthorization, `Bearer ${planted}`, "a planted file never selects the accepted credential");
+    await assert.rejects(() => relayAgentControlRequest(launch.sessionId, {
+      key: relayKey,
+      method: "GET",
+      path: "/\\example.com/api/sessions",
+    }, new AbortController().signal), /destination changed origin/,
+    "the origin comparison rejects WHATWG backslash authority escapes");
 
     provisionAgentControl(launch, control, () => {}, host);
     assert.equal(hashes[1], hashes[0], "resume re-registers the same runner-memory credential");

@@ -80,6 +80,18 @@ test("the Agent Control relay preserves every method used by the control-plane a
   }
 });
 
+test("closing a session relay refuses subsequent connections to its former endpoint", async () => {
+  const sockets = new AgentControlRelaySockets(async () => ({ status: 200, body: "{}" }));
+  try {
+    const endpoint = await sockets.ensure("s_relay_close");
+    const fetchImpl = agentControlRelayFetch(endpoint, "k".repeat(32));
+    await sockets.close("s_relay_close");
+    await assert.rejects(() => fetchImpl("http://unused/api/sessions"), /ECONNREFUSED|closed/u);
+  } finally {
+    await sockets.closeAll();
+  }
+});
+
 test("the injected CLI works through the relay without any token file or token environment", async () => {
   const sockets = new AgentControlRelaySockets(async (_sessionId, request) => request.path === "/api/compatibility"
     ? { status: 200, body: JSON.stringify({ protocolVersion: PROTOCOL_VERSION }) }
