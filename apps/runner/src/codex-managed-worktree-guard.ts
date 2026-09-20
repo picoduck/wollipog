@@ -110,6 +110,27 @@ export function codexGuardConfigOverride(launch: { command: string; args: readon
     `hooks=[{type="command",command=${tomlString(codexGuardCommandString(launch))}}]}]`;
 }
 
+/** Any hook TRUST override, whoever owns it, as distinct from the isolation override (#1473),
+ * which writes the same `hooks.state=` prefix with `enabled=false`. */
+function declaresHookTrust(argument: string): boolean {
+  return argument.startsWith(CODEX_HOOK_STATE_OVERRIDE_PREFIX) && argument.includes("trusted_hash");
+}
+
+/**
+ * The hook keys a `hooks.state` override names, as written.
+ *
+ * Ownership cannot be inferred from where a hook came from. Codex keys the hook the runner
+ * installs through `-c` under `/<session-flags>/`, but so is a hook a PERSON installs the same way,
+ * and both appear in the same table (review round 2). What identifies the runner's own entry is its
+ * KEY, and the runner knows that only after reading its own inventory — which is why replacement
+ * happens in `codexGuardLaunchArgs`, with the built override in hand, and never in
+ * `withoutCodexGuardArgs`, which runs before the key is known and would have to guess.
+ */
+function hookTrustKeys(argument: string): string[] {
+  return [...argument.matchAll(/"((?:[^"\\]|\\.)*)"\s*=\s*\{[^}]*trusted_hash/gu)]
+    .map((match) => match[1]!);
+}
+
 /** Does this argument carry a `hooks.PreToolUse` override, in any spelling Codex accepts? */
 function declaresPreToolUseHooks(argument: string): boolean {
   return argument.includes(CODEX_GUARD_OVERRIDE_PREFIX);
@@ -155,11 +176,75 @@ function splitAtOptionTerminator(args: readonly string[]): { options: string[]; 
 export function codexGuardLaunchArgs(
   args: readonly string[],
   override: string,
+  trustOverride?: string,
 ): string[] {
-  const { options, rest } = splitAtOptionTerminator(withoutCodexGuardArgs(args));
+  const { options: arrived, rest } = splitAtOptionTerminator(withoutCodexGuardArgs(args));
+  // `hooks.state` is a dotted path where the LAST `-c` replaces the whole table, so a prior
+  // override naming a key this one also names would be superseded anyway; dropping it keeps the
+  // runner's own from stacking across re-preparation. One naming only OTHER hooks is a person's
+  // trust for a hook that is not the runner's, and is left exactly where it is.
+  const superseded = new Set(trustOverride ? hookTrustKeys(trustOverride) : []);
+  const options: string[] = [];
+  for (let index = 0; index < arrived.length; index++) {
+    const value = arrived[index + 1];
+    if (CODEX_CONFIG_FLAGS.has(arrived[index]!) && value !== undefined && declaresHookTrust(value) &&
+        hookTrustKeys(value).some((key) => superseded.has(key))) {
+      index += 1;
+      continue;
+    }
+    options.push(arrived[index]!);
+  }
   const result = [...options, "-c", override];
+  // Both trust mechanisms travel, because they cover different entry points: the bypass flag is
+  // what a TUI and `codex exec` honour, and the hash override is the only one `codex app-server`
+  // honours. Neither is taken on faith — the inventory read-back is what decides `guardActive`.
+  if (trustOverride) result.push("-c", trustOverride);
   if (!result.includes(CODEX_HOOK_TRUST_BYPASS_FLAG)) result.push(CODEX_HOOK_TRUST_BYPASS_FLAG);
   return [...result, ...rest];
+}
+
+/**
+ * Whether THIS argv carries a proven runner guard, without knowing the override texts.
+ *
+ * `codexGuardArgsActive` compares against the exact strings provisioning built, which only
+ * provisioning holds. A driver re-spawns on its own — every resume and transport restart — from
+ * args it was handed, so it needs the same question answered from the argv alone, exactly as
+ * `prepareClaudeHookArgs` re-derives Claude's `guardActive` at each spawn.
+ *
+ * Both halves are required. A `hooks.PreToolUse` override alone is the pre-#1499 contract, which is
+ * unfalsifiable on an entry point where the trust bypass does nothing: Codex would report the hook
+ * enabled and untrusted, and skip it silently. The trust override is what makes the claim real.
+ */
+export function codexGuardActiveInArgs(args: readonly string[]): boolean {
+  const { options } = splitAtOptionTerminator(args);
+  let guard = false;
+  let trust = false;
+  for (let index = 1; index < options.length; index++) {
+    if (!CODEX_CONFIG_FLAGS.has(options[index - 1]!)) continue;
+    const value = options[index]!;
+    // The LAST override of each dotted path is the one Codex honours, so a later foreign override
+    // of either path disarms the guard rather than merely shadowing part of it.
+    if (declaresPreToolUseHooks(value)) guard = value.includes(MANAGED_WORKTREE_GUARD_MODE);
+    if (value.startsWith(CODEX_HOOK_STATE_OVERRIDE_PREFIX)) {
+      // Last wins and replaces the table, so the operative trust is whatever the final override
+      // says. The isolation override (#1473) says nothing about trust and must not revoke it.
+      if (declaresHookTrust(value)) trust = true;
+      else if (!value.includes("enabled=false")) trust = false;
+    }
+  }
+  // `--disable hooks` switches the whole feature off, so Codex runs NO hook whatever the overrides
+  // say, and the argv still carries every string this function looks for (review finding CR-1.1).
+  // Provisioning drops the flag for an isolated launch and proves that argv; anything that re-adds
+  // it afterwards has taken the guard away again, silently.
+  for (let index = 0; index < options.length; index++) {
+    if (disablesCodexHooksFeature(options[index]!, options[index + 1]) > 0) return false;
+  }
+  // The bypass flag is required here for the same reason `codexGuardArgsActive` requires it: the
+  // two derivations must agree, or a launch is guarded by one and unguarded by the other. It is
+  // inert on `app-server` and load-bearing on a TUI and `codex exec`, and anything that strips it
+  // after provisioning — `stripOrchestratorLaunchArgs` does — has changed the argv out from under
+  // the proof, so the safe reading is that this launch is no longer the one that was proven.
+  return guard && trust && options.includes(CODEX_HOOK_TRUST_BYPASS_FLAG);
 }
 
 /**
@@ -168,13 +253,29 @@ export function codexGuardLaunchArgs(
  * It has to be the LAST `hooks.PreToolUse` override present — a later one, in any spelling,
  * replaces it — and the trust bypass has to be there, without which Codex skips the hook silently.
  */
-export function codexGuardArgsActive(args: readonly string[], override: string): boolean {
+export function codexGuardArgsActive(
+  args: readonly string[],
+  override: string,
+  trustOverride?: string,
+): boolean {
   const { options } = splitAtOptionTerminator(args);
   let last = -1;
   for (let index = 0; index < options.length; index++) {
     if (declaresPreToolUseHooks(options[index]!)) last = index;
   }
   if (last < 1) return false;
+  if (trustOverride) {
+    // The trust override must be the LAST `hooks.state` override naming a trusted hash, for the
+    // same reason the guard override must be last: a later one replaces it.
+    let lastTrust = -1;
+    for (let index = 0; index < options.length; index++) {
+      if (declaresHookTrust(options[index]!)) lastTrust = index;
+    }
+    if (lastTrust < 1 || options[lastTrust] !== trustOverride ||
+        !CODEX_CONFIG_FLAGS.has(options[lastTrust - 1]!)) {
+      return false;
+    }
+  }
   return options[last] === override && CODEX_CONFIG_FLAGS.has(options[last - 1]!) &&
     options.includes(CODEX_HOOK_TRUST_BYPASS_FLAG);
 }
@@ -185,6 +286,11 @@ export interface CodexHookEntry {
   trustStatus: string;
   command?: string;
   source?: string;
+  /**
+   * Codex's own digest of this hook's definition. A trust override names it, and it moves whenever
+   * the hook's command string or matcher moves, so it cannot be computed here — only read back.
+   */
+  currentHash?: string;
 }
 
 export type CodexHookInventoryVerdict =
@@ -261,6 +367,59 @@ const CODEX_HOOK_STATE_OVERRIDE_PREFIX = "hooks.state=";
  * spelling `hooks.state."<key>".enabled=false` is accepted and changes nothing, because the key
  * itself contains dots. Whether it took effect is read back from the inventory, never assumed.
  */
+/**
+ * The `-c hooks.state=…` override that TRUSTS the runner's own hook for one invocation.
+ *
+ * `--dangerously-bypass-hook-trust` is what a Codex TUI or `codex exec` uses for this, and measured
+ * on codex-cli 0.155.1 it has NO EFFECT on `codex app-server`: the same argv that fired the hook
+ * and blocked under `codex exec` did nothing at all under `app-server` — no hook process, no bypass
+ * warning, no error, and `hooks/list` still reporting the hook `enabled` and `untrusted`. That is
+ * the documented silent skip, and it is why a structured launch trusts by hash instead.
+ *
+ * The hash is Codex's own digest of the hook's definition, so it moves with the hook's command
+ * string and matcher and cannot be computed here. It is read from the launch's own inventory and
+ * then proven again on a second read — a stale or mistyped hash fails exactly the way an untrusted
+ * hook fails, which is silently.
+ */
+export function codexGuardTrustOverride(entries: readonly CodexHookEntry[], guardCommand: string): string | null {
+  const trustable = entries.filter((entry) =>
+    entry.command === guardCommand && typeof entry.currentHash === "string" && entry.currentHash);
+  if (trustable.length === 0) return null;
+  const pairs = trustable.map((entry) =>
+    `${tomlString(entry.key)}={trusted_hash=${tomlString(entry.currentHash!)}}`);
+  return `${CODEX_HOOK_STATE_OVERRIDE_PREFIX}{${pairs.join(",")}}`;
+}
+
+/**
+ * Whether the runner's own hook is enabled AND trusted in this inventory.
+ *
+ * `codexHookInventoryVerdict` deliberately checks only that the runner's hook is present and
+ * enabled, and checks trust for FOREIGN hooks. That was sufficient while the bypass flag carried
+ * the runner's own hook. Where the bypass does nothing, "enabled" is not enough: an enabled,
+ * untrusted hook is skipped without a word, so a launch that stopped here would report a guard it
+ * does not have.
+ */
+export function codexHookTrustVerdict(
+  entries: readonly CodexHookEntry[],
+  guardCommand: string,
+): CodexHookInventoryVerdict {
+  const ours = entries.filter((entry) => entry.command === guardCommand);
+  if (ours.length === 0) {
+    return { ok: false, reason: "Codex did not install the runner's PreToolUse hook" };
+  }
+  const untrusted = ours.filter((entry) => !CODEX_TRUSTED_STATUSES.has(entry.trustStatus));
+  if (untrusted.length > 0) {
+    return {
+      ok: false,
+      reason: "Codex still reports the runner's PreToolUse hook as " +
+        `${untrusted[0]!.trustStatus}, so it would be skipped silently`,
+    };
+  }
+  return ours.every((entry) => entry.enabled)
+    ? { ok: true }
+    : { ok: false, reason: "Codex reports the runner's PreToolUse hook as disabled" };
+}
+
 export function codexHookStateDisableOverride(keys: readonly string[]): string {
   return `${CODEX_HOOK_STATE_OVERRIDE_PREFIX}{${keys.map((key) => `${tomlString(key)}={enabled=false}`).join(",")}}`;
 }
@@ -315,6 +474,13 @@ export function codexHookInventoryProbe(
   cwd: string,
   override: string,
   hostEnv: NodeJS.ProcessEnv = process.env,
+  /**
+   * The trust override to enumerate WITH (#1499). It travels as its own parameter rather than
+   * inside `launch.args`, because the replay above strips runner-owned overrides — including this
+   * one — so an override smuggled through the argv would be removed before the probe ever ran, and
+   * the inventory would answer `untrusted` about a launch that is in fact trusted.
+   */
+  trustOverride?: string,
 ): CodexHookInventoryProbe {
   const replayed: string[] = [];
   let probeCwd = cwd;
@@ -353,7 +519,10 @@ export function codexHookInventoryProbe(
   }
   return {
     command: launch.command,
-    args: ["app-server", ...replayed, "-c", override],
+    args: [
+      "app-server", ...replayed, "-c", override,
+      ...(trustOverride ? ["-c", trustOverride] : []),
+    ],
     cwd: probeCwd,
     env: { ...hostEnv, ...launch.env },
   };
@@ -361,7 +530,10 @@ export function codexHookInventoryProbe(
 
 interface HooksListEntry {
   errors?: { path?: unknown; message?: unknown }[];
-  hooks?: { key?: unknown; enabled?: unknown; trustStatus?: unknown; command?: unknown; source?: unknown }[];
+  hooks?: {
+    key?: unknown; enabled?: unknown; trustStatus?: unknown; command?: unknown; source?: unknown;
+    currentHash?: unknown;
+  }[];
 }
 
 function parseHookEntries(payload: unknown): CodexHookEntry[] {
@@ -387,6 +559,7 @@ function parseHookEntries(payload: unknown): CodexHookEntry[] {
         trustStatus: hook.trustStatus,
         ...(typeof hook.command === "string" ? { command: hook.command } : {}),
         ...(typeof hook.source === "string" ? { source: hook.source } : {}),
+        ...(typeof hook.currentHash === "string" ? { currentHash: hook.currentHash } : {}),
       });
     }
   }

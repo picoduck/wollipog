@@ -24,6 +24,7 @@ import { UnguardedAgentTuiRegistry, unguardedAgentTuiNotice } from "./agent-tui-
 import {
   CODEX_HOOK_TRUST_BYPASS_FLAG,
   codexGuardArgsActive,
+  codexGuardActiveInArgs,
   codexGuardCommandString,
   codexGuardConfigOverride,
   codexHookInventoryProbe,
@@ -93,16 +94,29 @@ function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
   };
 }
 
-/** What `codex app-server` reports for a session-flags hook: enabled, and never trusted. */
+/**
+ * What `codex app-server` reports for a session-flags hook, measured on codex-cli 0.155.1: enabled,
+ * carrying a content hash, and `untrusted` — until the probe's own argv carries a `hooks.state`
+ * override naming that hash, at which point it reports `trusted`. The runner reads exactly that
+ * transition back to decide `guardActive` (#1499), so the fake has to model it rather than answer
+ * `untrusted` forever.
+ */
+const RUNNER_HOOK_KEY = "/<session-flags>/config.toml:pre_tool_use:0:0";
+const RUNNER_HOOK_HASH = "sha256:af53a04b1de0d999ef8d0c76cebd19593b265fa285eab2eb11d410391cdb8c26";
+
 function runnerHookEntry(probe: CodexHookInventoryProbe): CodexHookEntry {
-  const override = probe.args[probe.args.length - 1]!;
+  const override = probe.args.find((arg) => arg.includes("hooks.PreToolUse="))
+    ?? probe.args[probe.args.length - 1]!;
   const command = /command=("(?:[^"\\]|\\.)*")/u.exec(override)?.[1];
   assert.ok(command, "the probe must carry the runner's override");
+  const trusted = probe.args.some((arg) =>
+    arg.startsWith("hooks.state=") && arg.includes(RUNNER_HOOK_HASH) && arg.includes(RUNNER_HOOK_KEY));
   return {
-    key: "/<session-flags>/config.toml:pre_tool_use:0:0",
+    key: RUNNER_HOOK_KEY,
     enabled: true,
-    trustStatus: "untrusted",
+    trustStatus: trusted ? "trusted" : "untrusted",
     source: "sessionFlags",
+    currentHash: RUNNER_HOOK_HASH,
     command: JSON.parse(command) as string,
   };
 }
@@ -205,8 +219,14 @@ test("a Codex TUI for a session with a managed worktree carries the guard hook a
     assert.equal(protectionsFile, claudeHookSessionProtectionsPath(dir, "s1377"));
     assert.deepEqual(readManagedWorktreeGuardProtections(protectionsFile), PROTECTED);
 
-    // The inventory was enumerated with the same flags, in the TUI's directory.
-    assert.equal(harness.probes.length, 1);
+    // The argv provisioning produced is the argv a driver re-derives `guardActive` from at every
+    // later spawn (#1499). If these two ever disagree, a guarded launch reports itself unguarded —
+    // or worse, an unguarded one reports a guard — so they are asserted against each other here.
+    assert.equal(codexGuardActiveInArgs(launch.args), true,
+      "provisioning's argv satisfies the driver's own re-derivation");
+
+    // The inventory was enumerated with the same flags, in the TUI's directory, twice.
+    assert.equal(harness.probes.length, 2, "read once for the hook's content hash, then again to prove the trust override landed (#1499)");
     assert.deepEqual(harness.probes[0]!.args, [
       "app-server", "-c", 'model="gpt-5-codex"', "-c", override,
     ]);
@@ -274,7 +294,7 @@ test("a Codex TUI opened before the first worktree is guarded over an empty list
     assert.ok(override && codexGuardArgsActive(launch.args, override));
     assert.deepEqual(launch.managedWorktreeGuard, { active: true });
     // The #1377 rule was applied, not skipped: the inventory was enumerated for this launch too.
-    assert.equal(harness.probes.length, 1);
+    assert.equal(harness.probes.length, 2, "read once for the hook's content hash, then again to prove the trust override landed (#1499)");
     assert.equal(harness.probes[0]!.cwd, REPO);
 
     // Over an empty list the guard holds no opinion beyond its own state.
@@ -710,15 +730,21 @@ test("a Codex Orchestrator TUI drops --disable hooks, disables every foreign hoo
   });
 });
 
-test("a Codex Orchestrator TUI with no foreign hook is guarded after a single enumeration (#1473)", async () => {
+test("a Codex Orchestrator TUI with no foreign hook needs no isolation enumeration of its own (#1473)", async () => {
   await withDir(async (dir) => {
     const harness: Harness = { probes: [], logs: [] };
     const launch = await prepareAgentTuiLaunch(orchestratorMeta(), orchestratorDependencies(dir, { protections: [] }, harness));
     assert.ok(launch);
     assert.deepEqual(launch.managedWorktreeGuard, { active: true });
-    assert.equal(harness.probes.length, 1);
+    // Two, not three: with nothing foreign to disable, the trust re-read (#1499) is the only
+    // second enumeration, so isolation costs this launch no extra probe.
+    assert.equal(harness.probes.length, 2, "read once for the hook's content hash, then again to prove the trust override landed (#1499)");
     assert.equal(hasHooksDisable(launch.args), false);
-    assert.equal(stateOverrideOf(launch.args), null);
+    // A `hooks.state` override IS present now — the trust override (#1499) — but it must carry no
+    // `enabled=false`, which is what this test has always been about: nothing foreign was disabled.
+    const state = stateOverrideOf(launch.args);
+    assert.ok(state?.includes("trusted_hash"), "the state override is the trust one");
+    assert.equal(state?.includes("enabled=false"), false, "no hook was disabled for this launch");
   });
 });
 
@@ -783,7 +809,7 @@ test("an ordinary Codex TUI still admits a trusted foreign hook and never rewrit
     // reports as such — it is not rewritten for them.
     assert.ok(launch instanceof Error);
     assert.match(launch.message, /reports the runner's PreToolUse hook as disabled/u);
-    assert.equal(harness.probes.length, 1);
+    assert.equal(harness.probes.length, 2, "read once for the hook's content hash, then again to prove the trust override landed (#1499)");
     assert.ok(hasHooksDisable(harness.probes[0]!.args));
   });
 });

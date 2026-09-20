@@ -41,6 +41,8 @@ import {
   codexGuardCommandString,
   codexGuardConfigOverride,
   codexGuardLaunchArgs,
+  codexGuardTrustOverride,
+  codexHookTrustVerdict,
   codexHookInventoryProbe,
   codexHookInventoryVerdict,
   codexHookIsolationVerdict,
@@ -1456,30 +1458,54 @@ export async function provisionCodexGuard(
   } catch (error) {
     return inactive(`its Codex hook inventory could not be enumerated (${(error as Error).message})`);
   }
+  // Trust the runner's own hook by hash (#1499). `--dangerously-bypass-hook-trust` is what a TUI
+  // and `codex exec` honour; measured on codex-cli 0.155.1 it does NOTHING on `codex app-server`,
+  // where an enabled-but-untrusted hook is skipped without a word. The hash is Codex's own digest
+  // of the hook's definition, so it can only come from this first enumeration.
+  // A hook Codex never installed has no hash either, and "no content hash" would be the wrong
+  // cause to report for it, so presence is judged on its own first and keeps its own message.
+  if (!entries.some((entry) => entry.command === guardCommand)) {
+    return inactive("Codex did not install the runner's PreToolUse hook");
+  }
+  const trustOverride = codexGuardTrustOverride(entries, guardCommand);
+  if (!trustOverride) {
+    return inactive("Codex reported no content hash for the runner's PreToolUse hook, so it cannot be trusted");
+  }
   let launchArgs = args;
   if (isolate) {
     // Every enabled hook that is not the runner's is switched off for this invocation, and the
     // result is READ BACK rather than assumed: the override's spelling is what makes it work.
     const foreign = entries.filter((entry) => entry.enabled && entry.command !== guardCommand);
+    // A key the override cannot spell (a control character) is a hook that cannot be switched
+    // off from argv, so the launch keeps the preset's own flag rather than failing outright.
     if (foreign.length > 0) {
       try {
-        // A key the override cannot spell (a control character) is a hook that cannot be switched
-        // off from argv, so the launch keeps the preset's own flag rather than failing outright.
         launchArgs = [...args, "-c", codexHookStateDisableOverride(foreign.map((entry) => entry.key))];
-        entries = await readInventory(
-          codexHookInventoryProbe({ ...spec, args: launchArgs }, config.cwd, override),
-        );
       } catch (error) {
         return inactive(`its foreign Codex hooks could not be disabled for this launch (${(error as Error).message})`);
       }
     }
   }
+  // ONE re-enumeration, carrying everything this launch will carry: the isolation override when
+  // there is one, and the trust override always. Both verdicts are then read off the same
+  // authoritative inventory, and the isolate path costs no more probes than it did before.
+  try {
+    entries = await readInventory(codexHookInventoryProbe(
+      { ...spec, args: launchArgs }, config.cwd, override, undefined, trustOverride,
+    ));
+  } catch (error) {
+    return inactive(`its Codex hook inventory could not be re-enumerated (${(error as Error).message})`);
+  }
   const inventory = isolate
     ? codexHookIsolationVerdict(entries, guardCommand)
     : codexHookInventoryVerdict(entries, guardCommand);
   if (!inventory.ok) return inactive(inventory.reason);
-  const guarded = codexGuardLaunchArgs(launchArgs, override);
-  if (!codexGuardArgsActive(guarded, override)) {
+  // The trust override is not taken on faith either: a stale or mistyped hash leaves the hook
+  // untrusted, which Codex acts on silently, so the guard would otherwise be claimed and absent.
+  const trusted = codexHookTrustVerdict(entries, guardCommand);
+  if (!trusted.ok) return inactive(trusted.reason);
+  const guarded = codexGuardLaunchArgs(launchArgs, override, trustOverride);
+  if (!codexGuardArgsActive(guarded, override, trustOverride)) {
     return inactive("a later hooks.PreToolUse override in the launch arguments would replace the guard");
   }
   log(`Codex managed worktree guard ${spec.sessionId}: provisioned (${protectionsFile})`);

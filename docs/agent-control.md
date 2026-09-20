@@ -276,13 +276,13 @@ runs, against the list of the session that owns the socket:
 | --- | --- | --- | --- |
 | Runner `bwrap`, native Linux | Yes: reads, enumeration, writes, `git clean` | Verdict socket | Real-kernel test in the Platform Isolation Ubuntu job (`managed-worktree-guard-sandbox.integration.test.ts`) |
 | Runner `seatbelt`, native macOS | Yes: reads, enumeration, writes | Verdict socket | **macOS CI only** (`managed-worktree-guard-seatbelt.integration.test.ts`), not verified on a developer machine |
-| Runner `provider` (the default), Codex structured launch | **No on codex-cli 0.155.1.** The permission-profile deny works, but it costs every approved network escalation, so it is withheld (see below) | No hook: the driver's own structured protection, from runner memory | `codex-permission-profile.test.ts` and `codex-permission-profile-launch.test.ts`, over behaviour measured by `pnpm probe:codex-escalation` |
+| Runner `provider` (the default), Codex structured launch | **No** at the OS level: the permission-profile deny works but costs every approved network escalation, so it is withheld (see below). The `PreToolUse` guard hook IS carried since #1499, which vetoes a command targeting a managed worktree whoever reviews the approval | The guard hook, trusted by hash and proven from the launch's own inventory; the driver's structured protection remains as a second layer | `codex-permission-profile*.test.ts` and `codex-guard-reviewer.test.ts`, over behaviour measured by `pnpm probe:codex-escalation` and `pnpm probe:codex-guard-hook` |
 | Runner `provider` (the default), Claude, native Linux | **No.** Readable and writable by the runner's OS user | **Runner memory, over an abstract verdict socket; the settings document is passed inline.** No file in the directory is consulted | `hook-settings.test.ts`, `managed-worktree-guard-socket.test.ts`, and a real claude 2.1.278 run (see below) |
 | Runner `provider`, Claude, macOS and Windows | **No** | Protections file and settings files, unchanged: neither platform has an abstract socket namespace | Existing guard tests; the command-text veto and the list tripwire are the only controls |
 | Direct WSL `bwrap` | No | No guard (WSL hook paths are not translated) | Unchanged |
 | `windows-job` | No: Job Objects do not restrict the filesystem | Protections file, unchanged | Unchanged |
 | `container` and `cloud` targets | Not reachable: the hook state directory is not in the workspace bind or snapshot | No guard (not provisioned there) | Unchanged |
-| Native TUI launches | Not by the runner, which does not sandbox a TUI. A native **Codex** TUI could deny it through Codex's own permission profile, but that is withheld on codex-cli 0.155.1 (see "Codex in `provider` Mode"); neither a Codex nor a Claude TUI denies it today | In `provider` mode on native Linux, Claude and Codex alike: runner memory over the abstract verdict socket. Elsewhere the protections file, or the session's path socket when a sandboxed launch already provisioned one | `agent-tui-memory-guard.test.ts` (real provisioning, real socket, real sidecar entry point), and a real Claude TUI under a pty. Codex deny: `agent-tui-codex-permission-profile.test.ts` |
+| Native TUI launches | Not by the runner, which does not sandbox a TUI. A native **Codex** TUI could deny it through Codex's own permission profile, but that is withheld on codex-cli 0.155.1 (see "Codex in `provider` Mode"); neither a Codex nor a Claude TUI denies it today. A Codex TUI does carry the `PreToolUse` guard hook (#1377), now trusted by hash and proven from the inventory rather than by passing a flag (#1499) | In `provider` mode on native Linux, Claude and Codex alike: runner memory over the abstract verdict socket. Elsewhere the protections file, or the session's path socket when a sandboxed launch already provisioned one | `agent-tui-memory-guard.test.ts` (real provisioning, real socket, real sidecar entry point), and a real Claude TUI under a pty. Codex deny: `agent-tui-codex-permission-profile.test.ts` |
 
 What the providers' own sandboxes can do in `provider` mode was measured (Linux, Claude Code 2.1.278,
 codex-cli 0.155.1). Neither is used by this rule today:
@@ -553,6 +553,36 @@ every row reads **No**, because the escalation gate refuses them all.
 | Generic `acp` driver (an ACP-bridged Codex) | **No.** It spawns the catalog's command and arguments verbatim and injects no `-c` |
 | A launch whose own arguments carry `-s`/`--sandbox` (in any spelling, including `-svalue`, `-s=value`, and `--sandbox=value`) or `--dangerously-bypass-approvals-and-sandbox` | **No.** Those defeat a profile, so the launch is left on its legacy policy rather than having the user's flag stripped |
 | A launch whose own arguments carry `-C`/`--cd`, `--remote`, or `--worktree` | **No.** They move where configuration resolves, or run the session elsewhere, so the proof cannot read the right configuration |
+
+### Who Reviews an Escalation in a Structured Codex Session
+
+`auto-review` routes escalations to Codex's own Guardian. Until #1499 the runner overrode that to
+`user` whenever the session owned a runner-created worktree — which is every issue-workflow session
+— so the default mode silently became manual review in exactly the sessions doing the most work.
+
+That override was load-bearing rather than cautious. Guardian cannot know which host paths belong
+to the runner lifecycle, so the request was routed to the driver, where `commandTargetsManagedWorktree`
+could veto a command targeting a managed worktree before any grant was returned. For a structured
+Codex session that veto was the ONLY managed-worktree protection: a Claude session carries the
+`PreToolUse` guard hook, a Codex TUI has carried it since #1377, and a structured Codex launch
+carried none.
+
+It now carries one. With the guard proven for the launch, the veto runs at the tool-call boundary
+whoever reviews — measured, a protected command is denied before the approval is even raised, under
+a client `accept` and under `approvalsReviewer: "auto_review"` alike — so Guardian owns the review
+again and the driver-side veto becomes a second layer instead of the only one.
+
+- **The relaxation is gated on proof, not on intent.** `codexGuardActiveInArgs` re-derives the
+  answer from the argv each spawn uses, and requires both the hook override and the trust override.
+  A launch that cannot prove the guard keeps routing escalations to the human, which is the
+  pre-#1499 behaviour rather than a new failure mode.
+- **Trust is by hash, because the flag does not work here.** `--dangerously-bypass-hook-trust`
+  carries a TUI and `codex exec`; on `codex app-server` it does nothing at all, and the hook is
+  skipped silently. The runner reads Codex's own `currentHash` from the launch's inventory, trusts
+  by it, and reads the inventory back to confirm `trustStatus: trusted`.
+- **A failed provisioning is not a refusal.** Unlike a TUI, a structured session still has the
+  driver's approval-time veto, so it launches with escalations routed to the human and the runner
+  logs why.
 
 Known limits of the `provider`-mode form:
 
