@@ -1499,23 +1499,17 @@ export async function discardWorktreeIfSafe(
       }
       // Once Git no longer registers the worktree, no current branch identity links an arbitrary
       // local ref to this cleanup occurrence. Treat removal as complete and let any candidate
-      // durably captured by the original pass flow through the retained-ref reclaimer.
+      // durably captured by the original pass flow through the retained-ref reclaimer. Process
+      // retirement and teardown still run: the missing directory does not prove its descendants
+      // exited, and their port allocation must not be released while they remain live.
+      await options.beforeRemove?.();
       return { removed: true };
     }
 
-    let head: string;
-    if (registered) {
-      if (await command(context, handle.path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])) {
-        return { removed: false, reason: "dirty" };
-      }
-      head = (await command(context, handle.path, ["rev-parse", "--verify", "HEAD"])).trim();
-    } else {
-      try {
-        head = (await command(context, repoPath, ["rev-parse", "--verify", ref])).trim();
-      } catch {
-        return { removed: true };
-      }
+    if (await command(context, handle.path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])) {
+      return { removed: false, reason: "dirty" };
     }
+    const head = (await command(context, handle.path, ["rev-parse", "--verify", "HEAD"])).trim();
     if (!/^[a-f0-9]{40,64}$/u.test(head)) return { removed: false, reason: "unavailable" };
 
     // Git permits another worktree to deliberately share this branch via
@@ -1616,16 +1610,14 @@ export async function discardWorktreeIfSafe(
     // the final race-closing status/head checks. A failure here retains the worktree.
     await options.beforeRemove?.();
 
-    if (registered) {
-      // Close the widest observable race before the non-force removal. Git independently rejects
-      // a dirty tree, and update-ref below rejects a branch that advanced after this comparison.
-      if (await command(context, handle.path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])) {
-        return { removed: false, reason: "dirty" };
-      }
-      const finalHead = (await command(context, handle.path, ["rev-parse", "--verify", "HEAD"])).trim();
-      if (finalHead !== head) return { removed: false, reason: "unpushed" };
-      await command(context, repoPath, ["worktree", "remove", handle.path], 120_000);
+    // Close the widest observable race before the non-force removal. Git independently rejects
+    // a dirty tree, and update-ref below rejects a branch that advanced after this comparison.
+    if (await command(context, handle.path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])) {
+      return { removed: false, reason: "dirty" };
     }
+    const finalHead = (await command(context, handle.path, ["rev-parse", "--verify", "HEAD"])).trim();
+    if (finalHead !== head) return { removed: false, reason: "unpushed" };
+    await command(context, repoPath, ["worktree", "remove", handle.path], 120_000);
     // For a changed checkout `ref` is the branch actually removed with the worktree; the recorded
     // branch is deliberately untouched, whether its ref still exists or has already disappeared.
     if (!preserveCheckedOutRef) {

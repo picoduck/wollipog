@@ -636,10 +636,17 @@ test("safe discard removes only a clean fully-pushed runner-owned worktree", { s
     execFileSync("git", [
       "-C", repo, "update-ref", `refs/heads/${removedBeforeRetry.branch}`, removedAdvanced, removedOriginal,
     ]);
+    execFileSync("git", ["-C", repo, "push", "origin", removedBeforeRetry.branch]);
+    let missingRegistrationCleanupRan = false;
     assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
       ...removedBeforeRetry,
       source: "created",
-    }, { dataDir }), { removed: true });
+    }, {
+      dataDir,
+      beforeRemove: async () => { missingRegistrationCleanupRan = true; },
+    }), { removed: true });
+    assert.equal(missingRegistrationCleanupRan, true,
+      "missing-registration replay still retires descendants and runs teardown");
     assert.equal(execFileSync("git", ["-C", repo, "rev-parse", removedBeforeRetry.branch], {
       encoding: "utf8",
     }).trim(), removedAdvanced, "missing-registration replay never claims the current branch generation");
