@@ -1174,8 +1174,9 @@ export async function discardWorktreeIfSafe(
         mergedHead === head;
       const defaultBranch = await readRepositoryDefaultBranch(repoPath, options);
       // Removing a runner-owned worktree must not remove the repository's conventional local base
-      // ref when an agent temporarily checked it out for inspection.
-      preserveCheckedOutRef = defaultBranch === branch;
+      // ref when an agent temporarily checked it out for inspection. An unknown default cannot
+      // prove the checked-out ref is disposable, so retain the ref while still removing the tree.
+      preserveCheckedOutRef = !defaultBranch || defaultBranch === branch;
       if (!safeChangedHead) {
         if (defaultBranch) {
           try {

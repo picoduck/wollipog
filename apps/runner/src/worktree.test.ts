@@ -503,8 +503,22 @@ test("safe discard removes only a clean fully-pushed runner-owned worktree", { s
       checkedOutBranch: "fix/unknown-default",
     }, "a changed branch is retained when the default branch cannot be proved");
 
-    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
     execFileSync("git", ["-C", repo, "switch", "-c", "operator/primary"]);
+    const unknownDefaultMerged = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "agent/unknown-default-merged",
+    }, { dataDir });
+    execFileSync("git", ["-C", unknownDefaultMerged.path, "switch", "main"]);
+    const unknownDefaultMergedHead = execFileSync(
+      "git", ["-C", unknownDefaultMerged.path, "rev-parse", "HEAD"], { encoding: "utf8" },
+    ).trim();
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...unknownDefaultMerged,
+      source: "created",
+    }, { dataDir, verifiedMergedHead: unknownDefaultMergedHead }), { removed: true });
+    execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/main"]);
+
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
     const defaultCheckout = await createRequestedWorktree(repo, "s_safe", {
       baseRef: "HEAD",
       branch: "agent/default-checkout",
@@ -2414,7 +2428,7 @@ test("missing-upstream reconciliation is bounded, fair, identity-aware, and lane
     internals.readWorktreeBranch = async (path, options) => {
       assert.equal(options?.timeoutMs, 8_000, "periodic branch discovery uses the bounded Git preflight");
       const index = candidatePaths.indexOf(path);
-      return index >= 0 ? `fix/candidate-${index}` : undefined;
+      return index >= 0 ? `fix/candidate-${index}-actual` : undefined;
     };
     internals.resolveWorktreePullRequestState = async () => null;
     internals.discardSessionWorktreeIfSafe = async () => ({ removed: false, reason: "unavailable" });
