@@ -11498,6 +11498,11 @@ export class SessionManager {
         providerAuthBlock: undefined,
         providerAuthRetryAttemptedRecoveryId: undefined,
         providerAuthDismissedCommandIds: undefined,
+        pendingProviderAccountId: undefined,
+        pendingProviderAccountLabel: undefined,
+        pendingProviderAccountProvider: undefined,
+        pendingProviderCredentialHome: undefined,
+        providerAccountSwitchFailure: undefined,
         // The fork's history stops at the checkpoint, so the source's quarantine is not inherited.
         // Its provenance is, so a fork poisoned again escalates to a fresh thread.
         providerHistoryBlock: undefined,
