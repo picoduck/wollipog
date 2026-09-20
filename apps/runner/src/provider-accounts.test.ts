@@ -9,6 +9,7 @@ import {
   agentForProviderAccount,
   agentsWithoutConfiguredProviderAccounts,
   bindSessionProviderAccount,
+  mergeProviderAccountAuthStatus,
   providerAccountDefinition,
   providerAccountEnvironment,
   selectProviderAccount,
@@ -46,6 +47,23 @@ test("selectProviderAccount preserves legacy default-home behavior when no accou
   assert.equal(selectProviderAccount([], { id: "claude", driver: "claude-code" }, "claude-code"), undefined);
 });
 
+test("WSL agents do not inherit a host-path account without an explicit or configured binding", () => {
+  const accounts = [
+    { id: "work", label: "Work", provider: "claude" as const, directory: "C:\\credentials\\work" },
+  ];
+  const wsl = {
+    id: "claude-wsl", driver: "claude-code" as const,
+    context: { kind: "wsl" as const, distro: "Ubuntu" },
+  };
+  assert.equal(selectProviderAccount(accounts, wsl, "claude-code"), undefined);
+  assert.equal(selectProviderAccount(accounts, wsl, "claude-code", "work")?.id, "work");
+  assert.equal(selectProviderAccount(
+    accounts,
+    { ...wsl, defaultProviderAccountId: "work" },
+    "claude-code",
+  )?.id, "work");
+});
+
 test("partial account configuration preserves the other provider's legacy harness", () => {
   assert.deepEqual(
     agentsWithoutConfiguredProviderAccounts([claudeAgent, codexAgent], [{ provider: "codex" }])
@@ -71,6 +89,10 @@ test("account login observations are isolated to each credential home", () => {
   writeFileSync(join(signedIn, "auth.json"), "{}");
   assert.equal(providerAccountDefinition({ id: "a", label: "A", provider: "codex", directory: signedIn }).authStatus, "authenticated");
   assert.equal(providerAccountDefinition({ id: "b", label: "B", provider: "codex", directory: signedOut }).authStatus, "unauthenticated");
+  assert.equal(mergeProviderAccountAuthStatus(
+    { id: "b", label: "B", provider: "codex", directory: signedOut },
+    "unknown",
+  ), "unauthenticated");
 });
 
 test("a persisted session keeps its exact credential home across runner config changes", () => {
@@ -99,6 +121,16 @@ test("a persisted session keeps its exact credential home across runner config c
     credentialHome: "/new/codex-home",
   }));
   assert.equal(binding?.credentialHome, "/old/codex-home");
+});
+
+test("a legacy persisted session stays on its original default home after accounts are configured", () => {
+  const prior = { sessionId: "session-legacy" } as never;
+  const spec = {
+    sessionId: "session-legacy", driver: "codex-app-server",
+  } as SessionLaunchSpec;
+  assert.equal(bindSessionProviderAccount(prior, spec, () => ({
+    id: "work", label: "Work", provider: "codex", credentialHome: "/accounts/work",
+  })), undefined);
 });
 
 test("container and cloud launches never bind runner-local provider accounts", () => {

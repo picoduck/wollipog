@@ -780,11 +780,14 @@ export class SubscriptionUsageManager {
     const sourceId = subscriptionUsageSourceId(this.options.runnerId, agentId, provider, context, providerAccountId);
     if (update.kind === "response_observed") return this.observeProviderResponse(sourceId);
     const source = this.sources().find((candidate) => candidate.sourceId === sourceId);
+    // Remote targets intentionally have no runner-local account source. Ignore their provider
+    // events instead of publishing snapshots the control plane must reject.
+    if (!source) return null;
     const base = {
       sourceId,
       runnerId: this.options.runnerId,
       agentId,
-      ...(source?.providerAccountId ? { providerAccountId: source.providerAccountId } : {}),
+      ...(source.providerAccountId ? { providerAccountId: source.providerAccountId } : {}),
     };
     const normalized = provider === "codex"
       ? normalizeCodexRateLimits(update.payload, base, this.now())

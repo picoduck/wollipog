@@ -1227,6 +1227,25 @@ test("configured accounts have independent sources, homes, and targeted refreshe
     ?.buckets[0]?.usedPercent, 75);
 });
 
+test("provider events without an advertised account source are ignored", () => {
+  const published: unknown[] = [];
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [claudeAgent()],
+    providerAccounts: () => [
+      { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+    ],
+    resolveEnv: () => ({}),
+    publish: (snapshot) => published.push(snapshot),
+  });
+  const observed = manager.observe(
+    "claude", "claude-code", { kind: "native" },
+    { kind: "usage", provider: "claude", payload: { fiveHour: { utilization: 0.5 } } },
+  );
+  assert.equal(observed, null);
+  assert.deepEqual(published, []);
+});
+
 test("a failed account refresh preserves the configured label over provider identity", async () => {
   const manager = new SubscriptionUsageManager({
     runnerId: "runner-1",

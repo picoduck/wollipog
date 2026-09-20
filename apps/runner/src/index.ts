@@ -133,6 +133,7 @@ import {
   agentForProviderAccount,
   agentWithDefaultProviderAccount,
   agentsWithoutConfiguredProviderAccounts,
+  mergeProviderAccountAuthStatus,
   providerAccountDefinition,
   providerAccountEnvironment,
   providerForDriver,
@@ -1510,7 +1511,10 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
         credentialHome: account.directory,
       }));
       try {
-        providerAccountAuthStatus.set(account.id, await sessions.probeProviderAccountAuthentication(agent, env));
+        providerAccountAuthStatus.set(account.id, mergeProviderAccountAuthStatus(
+          account,
+          await sessions.probeProviderAccountAuthentication(agent, env),
+        ));
       } catch (error) {
         void error;
         providerAccountAuthStatus.set(account.id, "unknown");

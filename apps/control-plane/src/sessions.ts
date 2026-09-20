@@ -3376,9 +3376,12 @@ export class SessionsService {
       : [];
     const defaultProviderAccountId = runner.agents.find((agent) => agent.id === req.agentId)
       ?.defaultProviderAccountId;
+    const implicitProviderAccountId = (launch.context?.kind ?? "native") === "native"
+      ? compatibleProviderAccounts[0]?.id
+      : undefined;
     const providerAccountId = usesRunnerProviderAccount
       ? snapshotSpec?.providerAccountId ?? req.providerAccountId ??
-        defaultProviderAccountId ?? compatibleProviderAccounts[0]?.id
+        defaultProviderAccountId ?? implicitProviderAccountId
       : undefined;
     const providerAccount = providerAccountId
       ? compatibleProviderAccounts.find((account) => account.id === providerAccountId)

@@ -6149,7 +6149,9 @@ export class SessionManager {
         : meta?.driver === "pi"
           ? "pi"
           : null;
-    const credentialHome = meta?.providerCredentialHome ?? (meta ? this.resolveProviderCredentialHome?.(meta) : undefined);
+    const credentialHome = this.executionIsolation.mode === "seatbelt"
+      ? meta?.providerCredentialHome ?? (meta ? this.resolveProviderCredentialHome?.(meta) : undefined)
+      : undefined;
     const seatbeltAccount = credentialHome
       ? createHash("sha256").update(credentialHome).digest("hex").slice(0, 16)
       : "default";

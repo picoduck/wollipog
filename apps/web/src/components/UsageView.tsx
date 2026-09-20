@@ -376,7 +376,7 @@ export function UsageView() {
                   >
                     {source.freshness === "stale" ? "⚠ " : ""}{sourceStateLabel(source)}
                   </span>
-                  {source.providerAccountId && (
+                  {source.provider === "codex" && source.providerAccountId && (
                     <button
                       type="button"
                       className="btn ghost sm"

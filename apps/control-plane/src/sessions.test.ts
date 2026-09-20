@@ -6413,6 +6413,27 @@ test("provider account selection is capability-gated, persisted, and sent on res
   assert.equal(restart.spec.providerAccountLabel, "Personal");
 });
 
+test("a WSL agent does not implicitly inherit a runner-host provider account", () => {
+  const { db, hub, svc } = makeHarness();
+  const accountMeta = runnerMeta();
+  accountMeta.providerAccounts = [
+    { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+  ];
+  accountMeta.agents = accountMeta.agents.map((agent) => agent.id === AGENT_ID
+    ? { ...agent, context: { kind: "wsl" as const, distro: "Ubuntu" } }
+    : agent);
+  db.registerRunner(accountMeta, Date.now(), PROTOCOL_VERSION);
+
+  const created = svc.createSession({
+    runnerId: RUNNER_ID,
+    workspaceId: WORKSPACE_ID,
+    agentId: AGENT_ID,
+  });
+  assert.ok(created.ok && created.data, created.error);
+  assert.equal(created.data.providerAccountId, undefined);
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.providerAccountId, undefined);
+});
+
 test("createSession rejects unsupported image input before creating or sending", () => {
   const { hub, svc, db } = makeHarness();
   const before = db.listSessions().length;

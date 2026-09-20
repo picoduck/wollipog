@@ -176,6 +176,22 @@ test("Subscription Usage shows remaining allowance, local and relative resets, s
         status,
       }],
       spendControls: [{ id: "monthly", label: "Monthly Limit", limit: "$100" }],
+    }, {
+      sourceId: "b".repeat(32),
+      runnerId: "runner-1",
+      agentId: "claude",
+      provider: "claude",
+      providerAccountId: "personal",
+      accountLabel: "Personal",
+      state: "unavailable",
+      detail: "Usage appears after a provider response.",
+      fetchedAt: now,
+      freshness: "fresh",
+      runnerStatus: "online",
+      runnerName: "Build Machine",
+      agentName: "Claude",
+      buckets: [],
+      spendControls: [],
     }],
   });
   let refreshes = 0;
@@ -226,6 +242,12 @@ test("Subscription Usage shows remaining allowance, local and relative resets, s
   assert.match(pageText(), /Subscription usage refreshed/);
   const refreshAccount = [...container.querySelectorAll("button")]
     .find((button) => button.textContent?.trim() === "Refresh Account") as HTMLButtonElement;
+  assert.equal(
+    [...container.querySelectorAll("button")]
+      .filter((button) => button.textContent?.trim() === "Refresh Account").length,
+    1,
+    "only a Codex account exposes an active refresh probe",
+  );
   await act(async () => {
     refreshAccount.click();
     await Promise.resolve();
