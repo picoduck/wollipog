@@ -368,6 +368,98 @@ call, naming the denied path. Indirection through a script still ran and still h
   resumed `codex exec` turn pass no `-s`, so what they had is Codex's configured default, not the
   session's structured mode. They are compared with that default and migrate only as `:workspace`.
 
+## Measurements (codex-cli 0.155.1, this machine, 2026-09-20): a deny entry disables approved network escalation
+
+#1464 measured what a permission profile enforces. It never measured what a profile **costs**, and
+the answer is an approved sandbox escalation's network access — the whole point of an escalation for
+`gh`, `git fetch`, `npm install`, and every other network command. Reported from two dogfood
+sessions where Guardian and the user each approved a `gh` call and Codex still answered
+`error connecting to api.github.com`.
+
+Measured with `pnpm probe:codex-escalation`
+(`apps/runner/scripts/codex-escalation-probe.ts`), which is the harness this section was written
+from and is kept runnable so a future codex-cli is re-measured rather than re-argued. Nothing in it
+reaches the internet or a model: "the network" is a loopback HTTP server, and "the model" is a
+scripted OpenAI Responses-API server behind a throwaway `CODEX_HOME` that emits exactly one
+`exec_command` tool call per case — and, for the Guardian cases, answers Codex's own
+`codex-auto-review` request with a scripted verdict. Every case is one real `codex app-server`
+process, one real turn, one real command. The sandbox blocks loopback exactly as it blocks the
+internet, which is what makes a local reply a faithful stand-in.
+
+### The matrix
+
+The turn is identical in every row but the sandbox and the approval:
+
+| Sandbox the turn ran on | `require_escalated`? | Approved by | Command's output |
+| --- | --- | --- | --- |
+| legacy `sandboxPolicy` `{type: workspaceWrite}` | yes | the client (`accept`) | **reached the server** |
+| the runner's profile (`extends :workspace` + one deny entry) | yes | the client (`accept`) | **blocked** |
+| the runner's profile | yes | the client (`acceptForSession`) | **blocked** |
+| legacy policy | yes | Guardian (`auto_review`, allow) | **reached the server** |
+| the runner's profile | yes | Guardian (`auto_review`, allow) | **blocked** |
+| either | no | — | blocked (correct, and unchanged) |
+| either | yes | declined / Guardian deny | the command never ran |
+
+So the approval is recorded and acted on — the command runs, and its exit code is 0 — and it simply
+has no network. Nothing on any stream says the grant was dropped. That is the same silent shape as
+the legacy policy quietly winning over a profile, in the opposite direction.
+
+### It is the `deny` entry, not the profile
+
+Each of these ran the same approved escalation; only the profile's contents changed:
+
+| Active profile | Approved escalation's network |
+| --- | --- |
+| none (legacy policy only) | reached the server |
+| `default_permissions = ":workspace"`, the plain built-in | reached the server |
+| a custom profile `extends = ":workspace"` with **no** `filesystem` table | reached the server |
+| a custom profile with `filesystem = { "<dir>" = "read" }` | reached the server |
+| a custom profile with `filesystem = { "<dir>" = "write" }` | reached the server |
+| **a custom profile with `filesystem = { "<dir>" = "deny" }`** | **blocked** |
+| the same, with the deny written as a glob (`"<dir>/**"`) | **blocked** |
+| the same, plus the legacy `sandboxPolicy` sent as well | **blocked** |
+
+The deny is the only ingredient that matters, in every spelling. And the escalation is not inert:
+under the deny profile, the same approved command created a file **outside** the workspace roots,
+exactly as it did on the legacy policy, while a read of the denied directory still returned
+`Permission denied`. So Codex is doing something coherent — it cannot go fully unsandboxed without
+dropping a deny it has been told to enforce, so it keeps the command inside a sandbox that grants
+the filesystem and not the network.
+
+### There is no profile shape that keeps both
+
+- `network = { enabled = true }` on the deny-carrying profile restores the approved escalation's
+  network — and gives the network to ORDINARY, unescalated sandboxed commands too, which is the
+  property the sandbox exists for. Measured both ways.
+- Sending the legacy `sandboxPolicy` alongside that profile takes the network back from ordinary
+  commands (the policy governs the network) **and** from the approved escalation, while the deny
+  still holds. The worst of both.
+
+The deny and an approved network escalation are therefore mutually exclusive on codex-cli 0.155.1.
+
+### Decision
+
+The escalation wins. `codexPermissionProfileEscalationLoss` withholds the profile from every
+permission mode that can reach an approval — `auto-review`, `on-request`, `untrusted`, `on-failure`,
+`workspace-write`, `read-only`, and Codex's own implicit default for a TUI or a resumed
+`codex exec` turn. That is every mode #1336 slice 2 could migrate, so nothing migrates on this
+build, and every Codex launch in `provider` mode keeps the legacy sandbox policy it had before, with
+no proof spawned and no change to its timing.
+
+The gate is a list of modes rather than an unconditional refusal on purpose: a codex-cli that
+carries the network through an approved escalation, or a future mode that can never reach an
+approval, needs only that list changed — after the probe above has been re-run against it.
+
+What this costs is the `provider`-mode half of #1336: Codex's sandbox no longer hides the hook state
+directory there, so the command-text veto is again the only control for Codex as well as for Claude,
+and #1336 stays open for both. Slice 1 is untouched — a runner-sandboxed launch (`bwrap`,
+`seatbelt`) still hides the directory outright, and the escalation question does not arise there,
+because the runner's sandbox is not something a Codex approval can widen. Slice 3 is untouched too:
+nothing in the directory decides the guard's verdict any more.
+
+A silently network-less approval is worse than a documented gap. The gap is visible in the docs and
+in the veto's behaviour; the network-less approval looked to the operator like GitHub being down.
+
 ## Measurements (claude 2.1.278 and codex-cli 0.155.1, this machine, 2026-09-19): the Orchestrator preset
 
 Can the Orchestrator preset carry the guard while keeping every user hook out (#1473)? The preset

@@ -47,6 +47,17 @@
  *   3. An unrecognised top-level `-c` key is accepted SILENTLY, so a codex-cli that predates
  *      permission profiles ignores both keys and runs with no deny at all. No version string is
  *      parsed for this; the launch proof below is what tells the two apart.
+ *
+ * And the one way it fails SHUT, which is the regression #1464 shipped and why nothing
+ * migrates today:
+ *
+ *   4. A `deny` entry disables approved network escalation. On this build an approved
+ *      `sandbox_permissions: "require_escalated"` command runs fully unsandboxed only while the
+ *      active profile carries no deny entry; with one, Codex keeps the command sandboxed so the
+ *      deny stays enforced, and the retained sandbox has no network. Approval then buys the
+ *      filesystem escape and not the network, silently. See
+ *      `codexPermissionProfileEscalationLoss`, which withholds every mode that can reach an
+ *      approval — which today is every mode that could otherwise migrate.
  */
 
 import { spawn as spawnProcess, type ChildProcess } from "node:child_process";
@@ -119,6 +130,52 @@ export function codexPermissionProfileBase(
   const mode = permissionMode || "auto-review";
   if (mode === "read-only") return ":read-only";
   return CODEX_WORKSPACE_MODES.has(mode) ? ":workspace" : null;
+}
+
+/**
+ * The permission modes that reach the network through an APPROVED sandbox escalation, which a
+ * `deny` entry takes away from them. This is the regression #1464 shipped.
+ *
+ * Measured on codex-cli 0.155.1 (ADR 0012, "A deny entry disables approved network escalation"):
+ * an approved `sandbox_permissions: "require_escalated"` command runs fully unsandboxed only while
+ * the active permission profile carries NO `deny` filesystem entry. With one present — in any
+ * spelling, exact path or glob, alongside a legacy `sandboxPolicy` or not — Codex keeps the
+ * escalated command inside a sandbox so the deny stays enforced, and that retained sandbox takes
+ * the turn's network setting, which for `:workspace` and `:read-only` alike is off. The approval
+ * still buys the filesystem escape; it no longer buys the network. `gh`, `git fetch`, `npm
+ * install` and every other approved network command then fails as if it had never been approved,
+ * with no report that the grant was dropped — the same silent fail shape as the legacy policy
+ * winning, in the opposite direction.
+ *
+ * Granting network in the profile itself is NOT the repair: measured, `network = { enabled = true }`
+ * gives the network to ORDINARY sandboxed commands too, which is the property the sandbox exists
+ * for. Sending the legacy policy alongside it takes the network back from the escalation as well.
+ *
+ * So the deny and an approved network escalation are mutually exclusive on this build, and the
+ * escalation wins: a mode listed here keeps its legacy sandbox policy and is documented as
+ * unenforced, exactly like `danger-full-access` and the Orchestrator preset above.
+ *
+ * This is written as a per-mode question rather than a blanket refusal on purpose. Every mode that
+ * can migrate today is on this list, so nothing migrates today; a codex-cli that carries the
+ * network through an approved escalation, or a future mode that can never reach an approval, needs
+ * only this list changed — with the escalation re-measured first.
+ */
+const CODEX_ESCALATION_DEPENDENT_MODES: ReadonlySet<string> = new Set([
+  ...CODEX_WORKSPACE_MODES, "read-only",
+]);
+
+/**
+ * Why this launch must keep its legacy sandbox policy rather than migrate, or `null` when the
+ * profile costs it nothing. An `implicit` launch — a native TUI, a resumed `codex exec` turn —
+ * runs under Codex's own default, which is an approval-capable `:workspace`, so it counts too.
+ */
+export function codexPermissionProfileEscalationLoss(legacy: CodexLegacySandbox): string | null {
+  const mode = legacy.kind === "implicit" ? "(Codex's own default)" : legacy.permissionMode || "auto-review";
+  const dependent = legacy.kind === "implicit" || CODEX_ESCALATION_DEPENDENT_MODES.has(mode);
+  return dependent
+    ? `permission mode ${mode} can approve a sandbox escalation, and a profile deny entry ` +
+      "would leave that approval without network access"
+    : null;
 }
 
 /** A TOML basic string. Control characters are refused rather than escaped, exactly as the Codex
@@ -762,6 +819,12 @@ export async function decideCodexPermissionProfile(
   if (!codexPermissionProfileArgsActive(args, overrides)) {
     return { active: false, reason: "the profile override is not the last one in the launch arguments" };
   }
+  // The deny would cost this launch every APPROVED network escalation (#1464). Last of the
+  // static checks and before the proof, so a withheld launch spawns nothing — its timing, like
+  // its sandbox, is exactly what it was before #1336 slice 2 — while every earlier refusal still
+  // reports its own reason rather than being masked by this one.
+  const escalationLoss = codexPermissionProfileEscalationLoss(launch.legacy);
+  if (escalationLoss) return { active: false, reason: escalationLoss };
   const proof = await prove({
     command: launch.command, args: launch.args, legacy: launch.legacy, base,
     hookStateDir: launch.hookStateDir, cwd: launch.cwd, env: launch.env,
