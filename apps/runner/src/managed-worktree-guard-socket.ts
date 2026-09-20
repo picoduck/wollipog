@@ -134,39 +134,58 @@ function serveVerdict(
 ): void {
   const chunks: Buffer[] = [];
   let total = 0;
+  let relaying = false;
   socket.setTimeout(REQUEST_TIMEOUT_MS, () => socket.destroy());
   socket.on("error", () => socket.destroy());
   socket.on("data", (chunk: Buffer) => {
+    if (relaying) return;
     total += chunk.length;
     // An oversized payload gets no verdict at all; the sidecar reads that as a refusal.
-    if (total > MAX_REQUEST_BYTES) socket.destroy();
-    else chunks.push(chunk);
-  });
-  socket.on("end", () => {
-    if (socket.destroyed) return;
-    const request = Buffer.concat(chunks).toString("utf8");
-    let relayed: PolicyHookRelayRequest | null = null;
-    if (relay) {
-      try {
-        relayed = parsePolicyHookRelayRequest(JSON.parse(request));
-      } catch {
-        // Not a relay request, or a broken one: judged as a guard request below, which refuses it.
-      }
-    }
-    if (!relayed || !relay) {
-      socket.end(JSON.stringify(judge(request, loadProtections, guardStateDirectory)));
+    if (total > MAX_REQUEST_BYTES) {
+      socket.destroy();
       return;
     }
+    chunks.push(chunk);
+    // The two requests are framed differently, on purpose. A guard request ends with the client's
+    // FIN. A relay request ends with a NEWLINE and the client keeps its side open, because a
+    // relayed ask can park and the runner has to learn when its sidecar goes away: measured on
+    // Linux, a peer that has already sent FIN and then dies produces no further event here, so a
+    // FIN-framed relay could never be abandoned (review CR-1.1). Serialized JSON holds no raw
+    // newline, so a newline before FIN cannot be a guard request.
+    if (!chunk.includes(0x0a)) return;
+    const received = Buffer.concat(chunks);
+    let request: PolicyHookRelayRequest | null = null;
+    try {
+      if (relay) request = parsePolicyHookRelayRequest(JSON.parse(received.subarray(0, received.indexOf(0x0a)).toString("utf8")));
+    } catch {
+      // A broken relay request is refused like any other below.
+    }
+    if (!request || !relay) {
+      // Newline-framed but not a relay request this socket serves (a path socket relays nothing):
+      // closed without an answer, which the sidecar reads as its fail-closed outcome. Waiting for a
+      // FIN that a relay client never sends would only hold the connection until the idle timeout.
+      socket.destroy();
+      return;
+    }
+    relaying = true;
     // A relayed `PreToolUse` may park for as long as a human takes to answer, so the idle timeout
-    // that bounds a guard verdict does not apply once the request is in. A sidecar that goes away
-    // meanwhile (Claude killed it) closes the connection, which is the signal to stop on its behalf.
+    // that bounds a guard verdict does not apply once the request is in.
     socket.setTimeout(0);
     const abort = new AbortController();
     socket.once("close", () => abort.abort());
-    relay(relayed, abort.signal).then(
+    relay(request, abort.signal).then(
       (output) => { if (!socket.destroyed) socket.end(policyHookRelayAnswer(output)); },
       () => socket.destroy(),
     );
+  });
+  socket.on("end", () => {
+    if (socket.destroyed) return;
+    if (relaying) {
+      // The sidecar went away before its answer (Claude killed it): stop on its behalf.
+      socket.destroy();
+      return;
+    }
+    socket.end(JSON.stringify(judge(Buffer.concat(chunks).toString("utf8"), loadProtections, guardStateDirectory)));
   });
 }
 
@@ -276,10 +295,8 @@ export class ManagedWorktreeGuardSockets {
       if (existing?.kind === "abstract" && existing.server.listening) return existing.address;
       await this.closeNow(sessionId);
       const address = `${MANAGED_WORKTREE_GUARD_ABSTRACT_PREFIX}wollipog-guard-${randomBytes(ABSTRACT_NAME_RANDOM_BYTES).toString("base64url")}`;
-      // Half-open: the client's FIN frames its request, and a relayed answer arrives after it —
-      // possibly much later. Without this, Node ends the server side right behind the client's.
       const connections = new Set<Socket>();
-      const server = createServer({ allowHalfOpen: true }, (socket) => {
+      const server = createServer((socket) => {
         connections.add(socket);
         socket.once("close", () => connections.delete(socket));
         serveVerdict(

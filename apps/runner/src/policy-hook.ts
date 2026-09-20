@@ -295,6 +295,9 @@ export async function servePolicyHookRelay(
 ): Promise<string> {
   const state = managerHookRelayState(sessionId, request.key);
   if (!state) return failureOutput(request.event);
+  // The sidecar bounds its stdin; a caller that skips the sidecar is held to the same bound, before
+  // the runner parses anything and without feeding the circuit.
+  if (Buffer.byteLength(request.input, "utf8") > MAX_HOOK_INPUT_BYTES) return failureOutput(request.event);
   const result = await evaluatePolicyHook(request.event, () => ({
     circuit: state.circuit,
     coordinates: () => ({

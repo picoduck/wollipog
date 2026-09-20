@@ -98,13 +98,19 @@ export function requestPolicyHookRelay(socketPath: string, request: PolicyHookRe
       else resolvePromise(output!);
     };
     const socket = connect(managedWorktreeGuardSocketAddress(socketPath));
-    socket.on("connect", () => socket.end(policyHookRelayRequest(request)));
+    // Newline-framed, and this side stays open until the answer: the runner can only learn that a
+    // parked sidecar went away from a connection that has not already sent its FIN.
+    socket.on("connect", () => socket.write(`${policyHookRelayRequest(request)}\n`));
     socket.on("data", (chunk: Buffer) => {
       total += chunk.length;
       if (total > MAX_RELAY_ANSWER_BYTES) finish(new Error("the runner's answer is too large"));
       else chunks.push(chunk);
     });
     socket.on("end", () => {
+      if (total === 0) {
+        finish(new Error("the runner closed the connection without an answer"));
+        return;
+      }
       try {
         finish(null, parsePolicyHookRelayAnswer(Buffer.concat(chunks).toString("utf8")));
       } catch (error) {

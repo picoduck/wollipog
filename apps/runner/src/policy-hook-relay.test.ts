@@ -445,6 +445,22 @@ test("the runner evaluates a relayed event with its own credential and moves onl
   assert.deepEqual(readHookCircuitState(claudeHookCircuitPath(file)), { consecutiveFailures: 0, open: false });
 });
 
+test("a relayed payload beyond the sidecar's own bound is refused before it is parsed", async () => {
+  const dir = temp();
+  resetClaudeGuardState();
+  const registered: string[] = [];
+  const launch = provisionRelayed(dir, spec(), registered);
+  markClaudeHookCredentialReady(dir, SESSION, registered[0]!);
+  const key = relayKey(launch.args);
+  let fetched = false;
+  const output = await servePolicyHookRelay(SESSION, { key, event: "PreToolUse", input: "x".repeat(128 * 1024 + 1) }, new AbortController().signal, {
+    fetch: async () => { fetched = true; return allow(); },
+  });
+  assert.equal(JSON.parse(output).hookSpecificOutput.permissionDecision, "deny");
+  assert.equal(fetched, false);
+  assert.deepEqual(managerHookRelayState(SESSION, key)!.circuit.read(), { consecutiveFailures: 0, open: false });
+});
+
 test("a relayed ask whose sidecar went away stops polling on its behalf", async () => {
   const dir = temp();
   resetClaudeGuardState();
@@ -494,8 +510,8 @@ test("an abstract socket relays a manager hook event for its own session, and st
   // The guard's own verdict request on the same socket is judged as before.
   const remove = JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash", cwd: "/work", tool_input: { command: "git worktree remove /trees/one" } });
   assert.ok((await requestManagedWorktreeGuardVerdict(address, remove)).stdout.includes(MANAGED_WORKTREE_REFUSAL));
-  // A malformed relay request is refused as a guard request, never relayed.
-  await assert.rejects(requestPolicyHookRelay(address, { key: "k", event: "Nope" as "PreToolUse", input: "{}" }), /not a hook response/u);
+  // A malformed relay request is closed without an answer, never relayed.
+  await assert.rejects(requestPolicyHookRelay(address, { key: "k", event: "Nope" as "PreToolUse", input: "{}" }), /without an answer/u);
   assert.equal(served.length, 1);
   // A caller that disconnects while parked aborts the evaluation on the runner's side.
   const parked = requestPolicyHookRelay(address, { key: "k", event: "PreToolUse", input: "park" });
@@ -505,13 +521,40 @@ test("an abstract socket relays a manager hook event for its own session, and st
   assert.equal(served.length, 2);
 });
 
-test("a path socket does not relay: a relay request there is a refused guard request", { skip: process.platform === "win32" }, async () => {
+test("a path socket does not relay: a relay request there gets no answer", { skip: process.platform === "win32" }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wgs-r-"));
   roots.push(root);
   const host = new ManagedWorktreeGuardSockets(join(root, "h"), () => [], "linux", async () => "must not be reached");
   hosts.push(host);
   const address = await host.ensure("s_path");
-  await assert.rejects(requestPolicyHookRelay(address, { key: "k", event: "PreToolUse", input: "{}" }), /not a hook response/u);
+  await assert.rejects(requestPolicyHookRelay(address, { key: "k", event: "PreToolUse", input: "{}" }), /without an answer/u);
+});
+
+test("a parked sidecar that is killed ends the runner's evaluation for it (review CR-1.1)", { skip: !LINUX }, async () => {
+  // Measured on Linux: a peer that has already sent FIN and then dies produces no further event on
+  // the server, so the relay request is newline-framed and the sidecar keeps its side open.
+  const dir = temp();
+  let parked: () => void = () => {};
+  const isParked = new Promise<void>((resolvePromise) => { parked = resolvePromise; });
+  let abandoned: () => void = () => {};
+  const isAbandoned = new Promise<void>((resolvePromise) => { abandoned = resolvePromise; });
+  const host = new ManagedWorktreeGuardSockets(join(dir, "hooks"), () => [], "linux", async (_sessionId, _request, signal) => {
+    parked();
+    await new Promise<void>((resolvePromise) => signal.addEventListener("abort", () => resolvePromise(), { once: true }));
+    abandoned();
+    return "nobody is listening";
+  });
+  hosts.push(host);
+  const address = await host.ensure("s_killed", "abstract");
+  const cli = fileURLToPath(new URL("./cli.ts", import.meta.url));
+  const child = spawn(process.execPath, ["--import", "tsx", cli, "--policy-hook", "--hook-event", "PreToolUse", POLICY_HOOK_RELAY_FLAG, POLICY_HOOK_RELAY_SOCKET_FLAG, address], {
+    env: { ...process.env, [POLICY_HOOK_RELAY_KEY_ENV]: "the-key" },
+    stdio: ["pipe", "ignore", "ignore"],
+  });
+  child.stdin.end(payload());
+  await isParked;
+  child.kill("SIGKILL");
+  await isAbandoned;
 });
 
 test("the real sidecar relays through the real socket and prints exactly the runner's answer", { skip: !LINUX }, async () => {

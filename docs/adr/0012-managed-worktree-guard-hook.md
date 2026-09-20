@@ -694,6 +694,10 @@ So the runner relays. For a native Linux host launch the runner does not sandbox
   on the answer: a `PreToolUse` ask parks for as long as a human takes, and the runner holds the
   connection open. A sidecar that goes away closes it, which stops the runner polling on its
   behalf; closing a session's socket destroys parked connections rather than waiting for them.
+  For that to work a relay request is framed by a newline and the sidecar keeps its side open,
+  unlike a guard request, which its FIN frames. Measured on Linux: a peer that has already sent FIN
+  and is then killed produces no further event on the listening side, so a FIN-framed relay could
+  never have been abandoned (found in the cross-model review of this change).
 - The pre-authorization `start_session` provisioning knows neither the worktree set nor the socket.
   On a relaying runner it keeps the state in memory too, so no credential touches disk on the way
   to a relayed launch. A launch whose socket could not be created or proven keeps the file form,
