@@ -189,6 +189,33 @@ test("reconcile materializes verified versions and links every harness through t
   }
 });
 
+test("provider account harness overrides reconcile the same skill into each credential home", async () => {
+  const roots = makeRoots();
+  try {
+    const workSkills = join(roots.root, "codex-work", "skills");
+    const personalSkills = join(roots.root, "codex-personal", "skills");
+    const alpha = entry("alpha", [{ agentId: codexAgent.id, invocation: "agent" }]);
+    for (const accountSkills of [workSkills, personalSkills]) {
+      const result = await reconcileSkills({
+        dataDir: roots.dataDir,
+        home: roots.home,
+        agents: [codexAgent],
+        harnessDirectories: { ".codex/skills": accountSkills },
+        desired: [alpha],
+        allowRemovals: true,
+      });
+      assert.equal(result.deployed[0]?.links[0]?.status, "linked");
+    }
+    const expected = join(realpathSync(skillsStoreRoot(roots.dataDir)), "alpha", alpha.versionDigest);
+    assert.equal(realpathSync(join(workSkills, "alpha")), expected);
+    assert.equal(realpathSync(join(personalSkills, "alpha")), expected);
+    assert.equal(existsSync(join(roots.home, ".codex", "skills", "alpha")), false,
+      "account reconciliation never falls back to the process HOME");
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
 test("chunked content is validated and cached immediately with the shared manual-variant policy", () => {
   const roots = makeRoots();
   try {

@@ -100,6 +100,23 @@ test("provider-home leases are process-reentrant and reject a live competing own
   );
 });
 
+test("provider-specific config homes, not the process HOME, own account leases", (t) => {
+  const processHome = mkdtempSync(join(tmpdir(), "wollipog-process-home-"));
+  const accountHome = mkdtempSync(join(tmpdir(), "wollipog-account-home-"));
+  t.after(() => rmSync(processHome, { recursive: true, force: true }));
+  t.after(() => rmSync(accountHome, { recursive: true, force: true }));
+  const registry = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 101, hostname: "host-a" });
+  registry.acquire({
+    driver: "codex-app-server",
+    command: "codex",
+    context: { kind: "native" },
+    env: { HOME: processHome, CODEX_HOME: accountHome },
+  });
+  assert.equal(existsSync(leasePaths(accountHome).lock), true);
+  assert.equal(existsSync(leasePaths(processHome).lock), false);
+  registry.releaseAll();
+});
+
 test("a validated stale same-owner legacy lease is migrated and reclaimed without emptying the lock", (t) => {
   const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-stale-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));

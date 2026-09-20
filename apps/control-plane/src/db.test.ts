@@ -1744,6 +1744,32 @@ test("editors: persist across a pre-discovery re-register, but hide when the run
   assert.deepEqual(db.getRunner("runner-1")!.editors, [{ id: "zed", name: "Zed" }]);
 });
 
+test("provider account inventory is principal-safe, version-gated, and session-durable", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(meta({
+    providerAccounts: [
+      { id: "work", label: "Work", provider: "codex", authStatus: "authenticated" },
+      { id: "personal", label: "Personal", provider: "claude", authStatus: "unauthenticated" },
+    ],
+  }), 500, RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts);
+  assert.deepEqual(db.getRunner("runner-1")?.providerAccounts, [
+    { id: "work", label: "Work", provider: "codex", authStatus: "authenticated" },
+    { id: "personal", label: "Personal", provider: "claude", authStatus: "unauthenticated" },
+  ]);
+  assert.doesNotMatch(JSON.stringify(db.getRunner("runner-1")?.providerAccounts), /credential|directory|home|path/i);
+
+  const session = db.createSession(newSession({
+    providerAccountId: "work",
+    providerAccountLabel: "Work",
+  }));
+  assert.equal(session.providerAccountId, "work");
+  assert.equal(session.providerAccountLabel, "Work");
+
+  db.registerRunner(meta({ providerAccounts: [] }), 600, RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts - 1);
+  assert.equal(db.getRunner("runner-1")?.providerAccounts, undefined);
+  assert.equal(db.getSession(session.id)?.providerAccountId, "work", "runner downgrade cannot rewrite session history");
+});
+
 test("agentsRefreshed: register resets the marker, a discovery push sets it (gap 15 gating)", () => {
   const db = withRunner();
   // Fresh register: discovery hasn't reported yet — an empty agent list means "probing", so the

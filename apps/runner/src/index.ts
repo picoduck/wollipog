@@ -34,6 +34,7 @@ import {
   type ListDirectoryRequestMessage,
   type ListSessionFilesRequestMessage,
   type OS,
+  type ProviderAccountDefinition,
   type ReadSessionFileRequestMessage,
   type SearchWorkspaceReferencesRequestMessage,
   type RegisterMessage,
@@ -128,6 +129,12 @@ import {
   writeStarterWorktreeSetupConfig,
 } from "./worktree-setup-generator.js";
 import { createRunnerProviderAuthRecovery } from "./provider-auth-recovery.js";
+import {
+  agentWithDefaultProviderAccount,
+  providerAccountDefinition,
+  providerAccountEnvironment,
+  selectProviderAccount,
+} from "./provider-accounts.js";
 import { handleResolveSteeringAttemptMessage, handleSteerSessionMessage } from "./steering-handler.js";
 import {
   CLAUDE_GRACEFUL_STOP_BUDGET_MS,
@@ -440,7 +447,7 @@ const configuredAgentDefinitions = config.agents.map((a) => {
   // into runner-local metadata so Windows readiness can honor literal/fromEnv agent config while
   // all credentials remain redacted from discovery and the control plane.
   const projectedEnv = projectAgentDiscoveryEnvironment(a);
-  return {
+  return agentWithDefaultProviderAccount({
     id: a.id,
     name: a.name,
     command: a.command,
@@ -458,7 +465,7 @@ const configuredAgentDefinitions = config.agents.map((a) => {
     context: a.context ?? { kind: "native" as const },
     capabilities: capabilitiesFor(driver),
     source: "config" as const,
-  };
+  }, a);
 });
 const metadata: RunnerMetadata = {
   runnerId: config.runnerId,
@@ -470,6 +477,7 @@ const metadata: RunnerMetadata = {
   agents: withOrchestratorAdditiveRole(
     withOrchestratorPreset(configuredAgentDefinitions, { isolationMode: config.executionIsolation.mode }),
   ),
+  providerAccounts: config.providerAccounts.map(providerAccountDefinition),
   workspaces: config.workspaces.map((w) => ({
     id: w.id,
     name: w.name,
@@ -540,6 +548,17 @@ function agentsForControlPlane() {
     });
 }
 
+const providerAccountAuthStatus = new Map<string, ProviderAccountDefinition["authStatus"]>();
+
+function providerAccountsForControlPlane() {
+  return config.providerAccounts.map((account) => ({
+    ...providerAccountDefinition(account),
+    ...(providerAccountAuthStatus.has(account.id)
+      ? { authStatus: providerAccountAuthStatus.get(account.id)! }
+      : {}),
+  }));
+}
+
 /** Resolve exact configured/discovered agent env at the last responsible moment. */
 function runnerLocalAgentEnv(agentId: string | null, driver: AgentDriverKind, context: AgentContext): Record<string, string> {
   const exact = agentId ? metadata.agents.find((agent) => agent.id === agentId) : undefined;
@@ -553,8 +572,16 @@ let authorizeSubscriptionUsageProbe: SubscriptionUsageManagerOptions["authorizeP
 const subscriptionUsage = new SubscriptionUsageManager({
   runnerId: config.runnerId,
   agents: () => metadata.agents,
-  resolveEnv: (agentId, driver, context) =>
-    runnerLocalAgentEnv(agentId, driver ?? "acp", context),
+  providerAccounts: providerAccountsForControlPlane,
+  resolveEnv: (agentId, driver, context, providerAccountId) => {
+    const env = runnerLocalAgentEnv(agentId, driver ?? "acp", context);
+    const account = config.providerAccounts.find((candidate) => candidate.id === providerAccountId);
+    if (account) Object.assign(env, providerAccountEnvironment({
+      provider: account.provider,
+      credentialHome: account.directory,
+    }));
+    return env;
+  },
   usesDiscoveredClaudeAccount: (agent) => {
     const configured = config.agents.find((candidate) => candidate.id === agent.id);
     if (!configured?.env) return true;
@@ -694,6 +721,12 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
   config.agents.map((agent) => agent.context ?? { kind: "native" as const }),
   async (meta) => {
     meta.env = runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context);
+    if (meta.providerCredentialHome && meta.providerAccountProvider) {
+      Object.assign(meta.env, providerAccountEnvironment({
+        provider: meta.providerAccountProvider,
+        credentialHome: meta.providerCredentialHome,
+      }));
+    }
     const localAgent = metadata.agents.find((candidate) => candidate.id === meta.agentId);
     // A sandboxed native host launch cannot see the protections file, so its guard asks the
     // runner. No socket means no guard for that launch (and so mediation), never a file-mode guard
@@ -802,8 +835,8 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
   () => controlPlaneProtocolVersion,
   dataDirLease.ownerHash,
   createRunnerProviderAuthRecovery(config),
-  (agentId, driver, context, update) => {
-    subscriptionUsage.observe(agentId, driver, context, update);
+  (agentId, driver, context, update, providerAccountId) => {
+    subscriptionUsage.observe(agentId, driver, context, update, providerAccountId);
   },
   config.workspaces.map((workspace) => workspace.path),
   (meta) => {
@@ -819,6 +852,12 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
       agent.args.every((arg, index) => arg === args[index]);
   },
   config.worktreePorts,
+  (spec) => selectProviderAccount(
+    config.providerAccounts,
+    config.agents.find((agent) => agent.id === spec.agentId),
+    spec.driver ?? "acp",
+    spec.providerAccountId,
+  ),
 );
 authorizeSubscriptionUsageProbe = (agent, env, sourceId) =>
   sessions.prepareSubscriptionUsageProbe(agent, env, sourceId);
@@ -1218,10 +1257,13 @@ function queueSkillsReconcile(requestId?: string): void {
     const desired = lastDesiredSkills;
     try {
       const allowRemovals = desired !== null && !chunkedSkillsSync.inProgress;
+      const baseAgents = config.providerAccounts.length
+        ? metadata.agents.filter((agent) => !["claude-code", "codex", "codex-app-server"].includes(agent.driver ?? "acp"))
+        : metadata.agents;
       let result = await reconcileSkills({
         dataDir: config.dataDir,
         home: homedir(),
-        agents: metadata.agents,
+        agents: baseAgents,
         desired: desired ?? [],
         // Content frames are published immediately to bound memory. While their completion fence
         // is pending, suppress removal/GC so an interleaved discovery pass cannot reclaim that
@@ -1233,6 +1275,33 @@ function queueSkillsReconcile(requestId?: string): void {
         removedSkillRetentionMs: config.skillRetention.removedSkillDays * 24 * 60 * 60 * 1000,
         previousVersionGraceMs: config.skillRetention.previousVersionMinutes * 60 * 1000,
       });
+      for (const account of config.providerAccounts) {
+        const accountAgents = metadata.agents.filter((agent) => account.provider === "claude"
+          ? agent.driver === "claude-code"
+          : agent.driver === "codex" || agent.driver === "codex-app-server");
+        if (accountAgents.length === 0) continue;
+        const relDir = account.provider === "claude" ? ".claude/skills" : ".codex/skills";
+        const accountResult = await reconcileSkills({
+          dataDir: config.dataDir,
+          home: homedir(),
+          agents: accountAgents,
+          harnessDirectories: { [relDir]: resolve(account.directory, "skills") },
+          desired: desired ?? [],
+          allowRemovals,
+          log,
+          acquireProviderHomeLease: () =>
+            sessions.acquireSkillReconciliationProviderHome(account.directory),
+          removedSkillRetentionMs: config.skillRetention.removedSkillDays * 24 * 60 * 60 * 1000,
+          previousVersionGraceMs: config.skillRetention.previousVersionMinutes * 60 * 1000,
+        });
+        result = {
+          ...result,
+          deployed: [...result.deployed, ...accountResult.deployed],
+          unmanaged: [...result.unmanaged, ...accountResult.unmanaged],
+          removedLinks: [...result.removedLinks, ...accountResult.removedLinks],
+          error: [result.error, accountResult.error].filter(Boolean).join("; ") || undefined,
+        };
+      }
       if (process.platform === "win32" && metadata.agents.some((agent) => agent.context?.kind === "wsl")) {
         const wsl = await reconcileWslSkills({
           dataDir: config.dataDir,
@@ -1415,6 +1484,27 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
     }
     metadata.agents = overlayAcpAuthStatus(metadata.agents, acpAuthStatus);
     metadata.editors = editors;
+    await Promise.all(config.providerAccounts.map(async (account) => {
+      const agent = metadata.agents.find((candidate) => account.provider === "claude"
+        ? candidate.driver === "claude-code"
+        : candidate.driver === "codex" || candidate.driver === "codex-app-server");
+      if (!agent || agent.available !== true) {
+        providerAccountAuthStatus.set(account.id, "unknown");
+        return;
+      }
+      const env = runnerLocalAgentEnv(agent.id, agent.driver ?? "acp", agent.context ?? { kind: "native" });
+      Object.assign(env, providerAccountEnvironment({
+        provider: account.provider,
+        credentialHome: account.directory,
+      }));
+      try {
+        providerAccountAuthStatus.set(account.id, await sessions.probeProviderAccountAuthentication(agent, env));
+      } catch (error) {
+        void error;
+        providerAccountAuthStatus.set(account.id, "unknown");
+        log(`${account.provider} provider-account authentication probe failed`);
+      }
+    }));
     discoveryDone = true;
     const extra = metadata.agents.length - configAgents.length;
     log(
@@ -1430,6 +1520,7 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
       type: "agents_updated",
       runnerId: config.runnerId,
       agents: agentsForControlPlane(),
+      providerAccounts: providerAccountsForControlPlane(),
       editors,
     };
     sendUp(update);
@@ -1545,7 +1636,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       // re-push the last completed result to restore the marker. Idempotent: the CP replaces its
       // agent rows, and a duplicate next to a just-flushed agents_updated is harmless.
       if (discoveryDone) {
-        sendUp({ type: "agents_updated", runnerId: config.runnerId, agents: agentsForControlPlane(), editors: metadata.editors });
+        sendUp({ type: "agents_updated", runnerId: config.runnerId, agents: agentsForControlPlane(), providerAccounts: providerAccountsForControlPlane(), editors: metadata.editors });
       }
       publishSubscriptionUsageInventory(true);
       // The CP dropped this runner's queue overlays on register (in-memory queues are assumed
@@ -2120,7 +2211,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         });
         break;
       }
-      void subscriptionUsage.refreshAll()
+      void (msg.providerAccountId
+        ? subscriptionUsage.refreshAccount(msg.providerAccountId)
+        : subscriptionUsage.refreshAll())
         .then((snapshots) => sendUp({
           type: "subscription_usage_refresh_result",
           requestId: msg.requestId,
@@ -2176,6 +2269,19 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       const env = agent
         ? runnerLocalAgentEnv(agent.id, agent.driver ?? "acp", agent.context ?? { kind: "native" })
         : {};
+      if (meta?.providerCredentialHome && meta.providerAccountProvider) {
+        Object.assign(env, providerAccountEnvironment({
+          provider: meta.providerAccountProvider,
+          credentialHome: meta.providerCredentialHome,
+        }));
+      } else if (agent) {
+        const account = selectProviderAccount(
+          config.providerAccounts,
+          config.agents.find((candidate) => candidate.id === agent.id),
+          agent.driver ?? "acp",
+        );
+        if (account) Object.assign(env, providerAccountEnvironment(account));
+      }
       runCommandTask("generate_session_title", sessionNaming.execute(
         msg,
         agent,
@@ -2377,6 +2483,12 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           assertSessionNotDeleted: (sessionId) => void agentTuiSessionMeta(sessionId),
           provision: async (prepared) => {
             prepared.env = runnerLocalAgentEnv(prepared.agentId, prepared.driver, prepared.context);
+            if (prepared.providerCredentialHome && prepared.providerAccountProvider) {
+              Object.assign(prepared.env, providerAccountEnvironment({
+                provider: prepared.providerAccountProvider,
+                credentialHome: prepared.providerCredentialHome,
+              }));
+            }
             await provisionAgentControl(prepared, {
               controlPlaneUrl: config.controlPlaneUrl, controlPlaneProtocolVersion,
               allowInsecureTransport, registerCredential: registerAgentControlCredential,
@@ -2978,7 +3090,7 @@ function connect(): void {
     const register: RegisterMessage = {
       type: "register",
       token: config.token,
-      runner: { ...metadata, agents: agentsForControlPlane() },
+      runner: { ...metadata, agents: agentsForControlPlane(), providerAccounts: providerAccountsForControlPlane() },
       // Lets the dashboard flag this runner as outdated when its own PROTOCOL_VERSION is newer.
       protocolVersion: PROTOCOL_VERSION,
       liveSessions: sessions.liveSessionIds(),

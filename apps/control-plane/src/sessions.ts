@@ -3335,6 +3335,32 @@ export class SessionsService {
     if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
     const runner = this.db.getRunner(req.runnerId);
     if (!runner) return fail("runner not found", 404);
+    if (req.providerAccountId !== undefined &&
+        (typeof req.providerAccountId !== "string" ||
+          !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(req.providerAccountId))) {
+      return fail("providerAccountId is invalid", 400);
+    }
+    if (req.providerAccountId && !runnerSupportsProtocol(runner.protocolVersion, "providerAccounts")) {
+      return fail(
+        `Provider account selection requires a protocol-v${RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts} runner; update the runner and retry.`,
+        409,
+      );
+    }
+    const launchProvider = launch.driver === "claude-code" ? "claude"
+      : launch.driver === "codex" || launch.driver === "codex-app-server" ? "codex" : null;
+    const compatibleProviderAccounts = launchProvider
+      ? (runner.providerAccounts ?? []).filter((account) => account.provider === launchProvider)
+      : [];
+    const defaultProviderAccountId = runner.agents.find((agent) => agent.id === req.agentId)
+      ?.defaultProviderAccountId;
+    const providerAccountId = snapshotSpec?.providerAccountId ?? req.providerAccountId ??
+      defaultProviderAccountId ?? compatibleProviderAccounts[0]?.id;
+    const providerAccount = providerAccountId
+      ? compatibleProviderAccounts.find((account) => account.id === providerAccountId)
+      : undefined;
+    if (providerAccountId && !providerAccount) {
+      return fail(`provider account '${providerAccountId}' is not available for the selected agent`, 409);
+    }
     if (launch.driver === "pi") {
       const unsupported = this.capabilityFailure(req.runnerId, "piHarness", "Pi RPC sessions");
       if (unsupported) return unsupported;
@@ -3878,6 +3904,8 @@ export class SessionsService {
       workspaceId,
       workspacePath,
       agentId: req.agentId,
+      providerAccountId: providerAccount?.id,
+      providerAccountLabel: providerAccount?.label,
       agentVersion: launch.version,
       capabilities: launch.capabilities,
       codexExecFallbackReason: codexExecFallbackReason(this.db, req.runnerId, launch),
@@ -3915,6 +3943,7 @@ export class SessionsService {
       (requestedProject.data.projectLocationId !== undefined &&
         existing.projectLocationId !== requestedProject.data.projectLocationId) ||
       existing.agentId !== req.agentId ||
+      existing.providerAccountId !== providerAccount?.id ||
       existing.title !== title ||
       (existing.titleSource ?? "generated") !== titleSource ||
       existing.useWorktree !== useWorktree ||
@@ -3944,6 +3973,8 @@ export class SessionsService {
       workspaceId,
       ...requestedProject.data,
       agentId: req.agentId,
+      providerAccountId: providerAccount?.id,
+      providerAccountLabel: providerAccount?.label,
       title,
       titleSource,
       useWorktree,
@@ -3992,6 +4023,8 @@ export class SessionsService {
       workspaceId,
       workspacePath,
       agentId: req.agentId,
+      providerAccountId: providerAccount?.id,
+      providerAccountLabel: providerAccount?.label,
       agentVersion: launch.version,
       capabilities: launch.capabilities,
       codexExecFallbackReason: codexExecFallbackReason(this.db, req.runnerId, launch),
@@ -5976,6 +6009,8 @@ export class SessionsService {
       workspaceId: session.workspaceId,
       workspacePath,
       agentId,
+      providerAccountId: session.providerAccountId,
+      providerAccountLabel: session.providerAccountLabel,
       agentVersion: launch.version,
       capabilities: launch.capabilities,
       codexExecFallbackReason: codexExecFallbackReason(this.db, session.runnerId, launch),

@@ -512,7 +512,10 @@
 //      named file on the runner host, uploads it there, and returns the artifact id, media type,
 //      size, and SHA-256. The gate runs runner-to-control-plane: the tool refuses a pre-v169
 //      control plane, which has no such route, rather than falling back to a base64 tool argument.
-export const PROTOCOL_VERSION = 169;
+// 170: runners advertise opaque provider-account ids and labels, bind a selected account to a
+//      session, and report account-scoped subscription usage. Credential directories remain
+//      runner-local and never cross the protocol boundary.
+export const PROTOCOL_VERSION = 170;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -638,6 +641,7 @@ export interface RunnerControlPlaneAttestation {
  * Keep this table aligned with the version history above. Missing protocol metadata means the
  * runner predates v15, so support cannot be proven and callers must fail closed. */
 export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
+  providerAccounts: 170,
   piHarness: 155,
   piExternalSessions: 156,
   verifiedAgentAvailability: 154,
@@ -1984,6 +1988,8 @@ export interface AgentDefinition {
    * environment names, environment values, or provider diagnostics. */
   unavailableReason?: string;
   authStatus?: "authenticated" | "unauthenticated" | "unknown";
+  /** Opaque runner-local account selected when a client omits an explicit account. */
+  defaultProviderAccountId?: string;
   /** Secret-free Codex billing boundary derived locally from configured auth or CLI account state. */
   codexBillingSource?: "api" | "provider_account";
   /** Runtime-negotiated ACP capabilities safe for presentation; absent for native/legacy agents. */
@@ -2019,6 +2025,14 @@ export interface AgentDefinition {
     safeLauncherProtocolVersion?: 1;
     bwrapRuntime?: string;
   };
+}
+
+/** Secret-free runner-local provider account safe for a principal-scoped Machine view. */
+export interface ProviderAccountDefinition {
+  id: string;
+  label: string;
+  provider: "claude" | "codex";
+  authStatus: "authenticated" | "unauthenticated" | "unknown";
 }
 
 /** Stable ACP capabilities observed from a live initialize handshake. Content-free and safe to
@@ -2193,6 +2207,8 @@ export interface RunnerMetadata {
   os: OS;
   version: string;
   agents: AgentDefinition[];
+  /** Protocol v170 opaque account inventory. Credential homes never leave the runner. */
+  providerAccounts?: ProviderAccountDefinition[];
   workspaces: WorkspaceInfo[];
   /** Editors found on the host (discovery fills this; absent on pre-v22 runners). */
   editors?: EditorInfo[];
@@ -2310,6 +2326,7 @@ export interface RunnerView {
   version: string;
   status: RunnerStatus;
   agents: AgentDefinition[];
+  providerAccounts?: ProviderAccountDefinition[];
   workspaces: WorkspaceInfo[];
   /** Editors found on the host (for "Open in …"); absent/empty hides the control. */
   editors?: EditorInfo[];
@@ -4593,7 +4610,7 @@ export interface SubscriptionUsageSpendControl {
 }
 
 /** Credential-free runner snapshot for one configured provider source. `sourceId` is an opaque
- * hash of runner-local agent/context metadata, never an account id, email, credential, or
+ * hash of runner-local source coordinates, never an account id, email, credential, or
  * filesystem path. `accountLabel`, when present, is bounded personal display data and is never an
  * identity or authorization key. */
 export interface SubscriptionUsageSnapshot {
@@ -4607,6 +4624,8 @@ export interface SubscriptionUsageSnapshot {
   buckets: SubscriptionUsageBucket[];
   plan?: string;
   accountLabel?: string;
+  /** Opaque runner account coordinate; absent preserves the legacy per-agent source. */
+  providerAccountId?: string;
   credits?: SubscriptionUsageCredits;
   spendControls?: SubscriptionUsageSpendControl[];
 }
@@ -5049,6 +5068,8 @@ export interface SessionView {
   importLocationReady?: boolean;
   agentId: string | null;
   agentName: string | null;
+  providerAccountId?: string;
+  providerAccountLabel?: string;
   title: string;
   titleSource?: SessionTitleSource;
   /** Canonical provider activity timestamp from stable ACP session_info_update; presentation-only. */
@@ -5226,6 +5247,8 @@ export interface SessionSnapshot {
   controlPlaneLaunchId?: string;
   workspaceId: string | null;
   agentId: string | null;
+  providerAccountId?: string;
+  providerAccountLabel?: string;
   title: string;
   titleSource?: SessionTitleSource;
   providerUpdatedAt?: string;
@@ -6479,6 +6502,7 @@ export interface AgentsUpdatedMessage {
   type: "agents_updated";
   runnerId: string;
   agents: AgentDefinition[];
+  providerAccounts?: ProviderAccountDefinition[];
   /** Editors found by the same discovery pass (absent on pre-v22 runners). */
   editors?: EditorInfo[];
 }
@@ -6781,6 +6805,8 @@ export interface SessionLaunchSpec {
   workspaceId: string | null;
   workspacePath: string;
   agentId: string;
+  providerAccountId?: string;
+  providerAccountLabel?: string;
   /** Discovered CLI/adapter version used only as an operational telemetry dimension. */
   agentVersion?: string;
   /** Discovery-verified launch capabilities; the runner re-checks these before emitting CLI flags. */
@@ -7295,6 +7321,8 @@ export interface ConfigureRunnerCapacityMessage extends RunnerCapacityConfigurat
 export interface RefreshSubscriptionUsageMessage {
   type: "refresh_subscription_usage";
   requestId: string;
+  /** Opaque account coordinate; omission refreshes every source for legacy clients. */
+  providerAccountId?: string;
 }
 
 export interface SessionNamingPromptMessage {
@@ -8528,6 +8556,8 @@ export interface CreateSessionRequest {
   projectId?: string | null;
   projectLocationId?: string | null;
   agentId: string;
+  /** Protocol v170 opaque runner account selection. */
+  providerAccountId?: string;
   /** One-shot launch intent. Omitted by older clients and defaults to the structured Direct flow. */
   launchSurface?: "direct" | "native_tui";
   title?: string;

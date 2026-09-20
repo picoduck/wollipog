@@ -160,6 +160,13 @@ For a WSL installation, set an explicit execution context:
 
 The checked-in [runner.config.example.json](runner.config.example.json) contains additional examples. Keep credentials out of that file; use the agent's own host-side login or protected secret files and environment injection. Detailed lifecycle and capability behavior is documented in [Drivers](docs/DRIVERS.md), and repository hooks plus stable worktree port blocks are documented in [Worktree Hooks and Ports](docs/worktree-hooks-and-ports.md).
 
+To use more than one Claude or Codex subscription on one runner, configure `providerAccounts`
+with an opaque id, display label, provider, and absolute credential directory, then optionally set
+an agent's `defaultProviderAccountId`. Wollipog maps the selected directory to
+`CLAUDE_CONFIG_DIR` or `CODEX_HOME` only on the runner; the control plane receives only the id,
+label, provider, and login state. Omitting `providerAccounts` preserves the provider's ordinary
+default home exactly.
+
 ## Security Model
 
 Wollipog runs tools that can modify source code and execute commands. Its primary trust boundaries are:

@@ -6371,6 +6371,48 @@ test("ACP context fails closed against a pre-v38 runner instead of being silentl
   assert.equal(hub.sentToRunner.length, 0);
 });
 
+test("provider account selection is capability-gated, persisted, and sent on restart", async () => {
+  const { db, hub, svc } = makeHarness();
+  const accountMeta = runnerMeta();
+  accountMeta.providerAccounts = [
+    { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+    { id: "personal", label: "Personal", provider: "claude", authStatus: "authenticated" },
+  ];
+  accountMeta.agents = accountMeta.agents.map((agent) => agent.id === AGENT_ID
+    ? { ...agent, defaultProviderAccountId: "work" }
+    : agent);
+
+  db.registerRunner(accountMeta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts - 1);
+  const unsupported = svc.createSession({
+    runnerId: RUNNER_ID,
+    workspaceId: WORKSPACE_ID,
+    agentId: AGENT_ID,
+    providerAccountId: "personal",
+  });
+  assert.equal(unsupported.status, 409);
+  assert.match(unsupported.error ?? "", /protocol-v170/);
+
+  db.registerRunner(accountMeta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts);
+  const created = svc.createSession({
+    runnerId: RUNNER_ID,
+    workspaceId: WORKSPACE_ID,
+    agentId: AGENT_ID,
+    providerAccountId: "personal",
+  });
+  assert.ok(created.ok && created.data, created.error);
+  assert.equal(created.data.providerAccountLabel, "Personal");
+  const start = hub.sentOfType("start_session").at(-1)!;
+  assert.equal(start.spec.providerAccountId, "personal");
+  assert.equal(start.spec.providerAccountLabel, "Personal");
+
+  svc.onSessionStatus(created.data.id, "stopped");
+  const restarted = await svc.restart(created.data.id);
+  assert.ok(restarted.ok, restarted.error);
+  const restart = hub.sentOfType("start_session").at(-1)!;
+  assert.equal(restart.spec.providerAccountId, "personal");
+  assert.equal(restart.spec.providerAccountLabel, "Personal");
+});
+
 test("createSession rejects unsupported image input before creating or sending", () => {
   const { hub, svc, db } = makeHarness();
   const before = db.listSessions().length;

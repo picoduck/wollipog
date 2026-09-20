@@ -1233,7 +1233,7 @@ app.register(async (instance) => {
         break;
       case "agents_updated":
         if (runnerId === msg.runnerId) {
-          db.updateRunnerAgents(msg.runnerId, msg.agents, Date.now(), msg.editors);
+          db.updateRunnerAgents(msg.runnerId, msg.agents, Date.now(), msg.editors, msg.providerAccounts);
           hub.runnerChanged(msg.runnerId);
           // A runner may register with an empty or stale agent list and only discover its
           // harnesses afterward — the registration-time skills_sync then resolved no targets.

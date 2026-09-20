@@ -47,6 +47,20 @@
       "additionalDirectoryGrants": []
     }
   ],
+  "providerAccounts": [
+    {
+      "id": "codex-work",
+      "label": "Work",
+      "provider": "codex",
+      "directory": "/home/you/.codex-work"
+    },
+    {
+      "id": "claude-work",
+      "label": "Work",
+      "provider": "claude",
+      "directory": "/home/you/.claude-work"
+    }
+  ],
   "agents": [
     {
       "id": "claude-native",
@@ -54,7 +68,8 @@
       "command": "claude",
       "args": [],
       "env": {},
-      "driver": "claude-code"
+      "driver": "claude-code",
+      "defaultProviderAccountId": "claude-work"
     },
     {
       "id": "claude-wsl",
@@ -93,7 +108,8 @@
       "command": "codex",
       "args": [],
       "env": {},
-      "driver": "codex-app-server"
+      "driver": "codex-app-server",
+      "defaultProviderAccountId": "codex-work"
     },
     {
       "id": "gemini-cli",

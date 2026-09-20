@@ -49,9 +49,11 @@ function human(userId = "alice", organizationId = "org_personal"): HumanPrincipa
   };
 }
 
-function sourceId(runnerId: string, agentId = "codex"): string {
+function sourceId(runnerId: string, agentId = "codex", providerAccountId?: string): string {
   return createHash("sha256")
-    .update(JSON.stringify({ runnerId, agentId, provider: "codex", context: "native" }))
+    .update(JSON.stringify(providerAccountId
+      ? { runnerId, provider: "codex", providerAccountId }
+      : { runnerId, agentId, provider: "codex", context: "native" }))
     .digest("hex")
     .slice(0, 32);
 }
@@ -146,6 +148,44 @@ test("account labels remain isolated by runner and switch atomically with availa
   const matching = db.subscriptionUsageForPrincipal(human(), now + 2).sources;
   assert.equal(matching.length, 2, "matching display labels never deduplicate distinct runner sources");
   assert.deepEqual(matching.map((source) => source.runnerId), ["runner-1", "runner-2"]);
+  db.close();
+});
+
+test("one provider account on two Machines remains two independently validated sources", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const now = 1_000_000;
+  for (const runnerId of ["runner-1", "runner-2"]) {
+    db.registerRunner({
+      ...meta(runnerId),
+      providerAccounts: [{ id: "work", label: "Work", provider: "codex", authStatus: "authenticated" }],
+    }, now, PROTOCOL_VERSION, {
+      organizationId: "org_personal", owner: { kind: "user", userId: "alice" },
+    });
+  }
+  const accountSnapshot = (runnerId: string, usedPercent: number) => ({
+    ...snapshot(runnerId, now),
+    sourceId: sourceId(runnerId, "codex", "work"),
+    providerAccountId: "work",
+    accountLabel: "Work",
+    buckets: [{ ...snapshot(runnerId, now).buckets[0], usedPercent }],
+  });
+  const first = validateSubscriptionUsageSnapshot(accountSnapshot("runner-1", 10), "runner-1", db, now);
+  const second = validateSubscriptionUsageSnapshot(accountSnapshot("runner-2", 80), "runner-2", db, now);
+  db.upsertSubscriptionUsageSnapshot(first);
+  db.upsertSubscriptionUsageSnapshot(second);
+
+  assert.deepEqual(
+    db.subscriptionUsageForPrincipal(human(), now).sources.map((source) => [
+      source.runnerId, source.providerAccountId, source.accountLabel, source.buckets[0]?.usedPercent,
+    ]),
+    [
+      ["runner-1", "work", "Work", 10],
+      ["runner-2", "work", "Work", 80],
+    ],
+  );
+  assert.throws(() => validateSubscriptionUsageSnapshot({
+    ...accountSnapshot("runner-1", 10), providerAccountId: "personal",
+  }, "runner-1", db, now), /not advertised/);
   db.close();
 });
 

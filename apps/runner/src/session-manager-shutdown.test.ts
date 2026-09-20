@@ -196,7 +196,7 @@ test("Seatbelt session naming shares the provider-exclusive admission group", as
     id: "claude-code", name: "Claude Code", command: "claude", args: [], env: {},
     driver: "claude-code", context: { kind: "native" },
   }, {}, "/neutral");
-  assert.equal(admission?.exclusiveGroup, "seatbelt:claude");
+  assert.equal(admission?.exclusiveGroup, "seatbelt:claude:default");
   assert.match(admission?.sessionId ?? "", /^session-naming:/);
   await authorization.cleanup();
   assert.equal(released, admission?.sessionId);

@@ -108,6 +108,9 @@ export interface ReconcileSkillsOptions {
   dataDir: string;
   home: string;
   agents: AgentDefinition[];
+  /** Exact runner-local harness directories, keyed by SKILL_DIRS value. Provider accounts use
+   * this to reconcile each configured credential home without treating it as an OS home. */
+  harnessDirectories?: Record<string, string>;
   desired: ReconcileSkillEntry[];
   /** Removal sweeps and store GC run only when an authoritative CP desired list is in hand. */
   allowRemovals?: boolean;
@@ -1090,13 +1093,14 @@ function scanUnmanagedSkills(
   home: string,
   agents: AgentDefinition[],
   isForeignLink?: (linkPath: string) => boolean,
+  harnessDirectories?: Record<string, string>,
 ): UnmanagedSkillInfo[] {
   const perDir = new Map<string, { name: string; description?: string }[]>();
   const results: UnmanagedSkillInfo[] = [];
   for (const binding of harnessBindings(agents)) {
     let found = perDir.get(binding.relDir);
     if (!found) {
-      found = scanHarnessSkillDir(join(home, binding.relDir), isForeignLink);
+      found = scanHarnessSkillDir(harnessDirectories?.[binding.relDir] ?? join(home, binding.relDir), isForeignLink);
       perDir.set(binding.relDir, found);
     }
     for (const skill of found) {
@@ -1113,12 +1117,13 @@ function linkedStoreVersionKeys(
   home: string,
   realStoreRoot: string,
   platform: NodeJS.Platform = process.platform,
+  harnessDirectories?: Record<string, string>,
 ): Set<string> {
   const protectedVersions = new Set<string>();
   const canonicalDir = canonicalSkillsDir(home);
   const dirs = new Set([
     canonicalDir,
-    ...Object.values(SKILL_DIRS).map((relDir) => join(home, relDir)),
+    ...Object.values(SKILL_DIRS).map((relDir) => harnessDirectories?.[relDir] ?? join(home, relDir)),
   ]);
   const protectDirectStoreLink = (linkPath: string): void => {
     const probe = probeLink(linkPath, realStoreRoot, canonicalDir, platform);
@@ -1192,7 +1197,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       })),
       // No store root means no managed-link classification, so symlinks are skipped here rather
       // than misreported; nothing is removed on this path either.
-      unmanaged: scanUnmanagedSkills(home, agents),
+      unmanaged: scanUnmanagedSkills(home, agents, undefined, options.harnessDirectories),
       removedLinks: [],
     };
   }
@@ -1279,7 +1284,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
             removedSkillMs: options.removedSkillRetentionMs ?? DEFAULT_REMOVED_SKILL_RETENTION_MS,
             previousVersionMs: options.previousVersionGraceMs ?? DEFAULT_PREVIOUS_VERSION_GRACE_MS,
             now: options.now ?? Date.now(),
-            protectedVersions: linkedStoreVersionKeys(home, realStoreRoot, platform),
+            protectedVersions: linkedStoreVersionKeys(home, realStoreRoot, platform, options.harnessDirectories),
           },
           options.log,
         );
@@ -1291,7 +1296,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
           (probe.via === "canonical" && !contendedOwned.has(linkPath));
         foundForeignSymlink ||= foreign;
         return foreign;
-      });
+      }, options.harnessDirectories);
       return {
         deployed: prepared.map(({ entry, invalid, materializationError }) => {
           if (invalid) {
@@ -1484,7 +1489,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         // its harness link must point straight at the `-manual` digest dir; it cannot route
         // through the canonical link.
         outcome = ensureManagedSymlink(
-          join(home, relDir, entry.name),
+          join(options.harnessDirectories?.[relDir] ?? join(home, relDir), entry.name),
           manualVariantDir,
           realStoreRoot,
           `~/${relDir}/${entry.name}`,
@@ -1499,7 +1504,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         // and report the removal. A canonical-shaped link this runner has no record of creating
         // belongs to the user: it is left in place and reported, never removed. The foreign
         // canonical path itself is never touched either way.
-        const linkPath = join(home, relDir, entry.name);
+        const linkPath = join(options.harnessDirectories?.[relDir] ?? join(home, relDir), entry.name);
         const shownPath = `~/${relDir}/${entry.name}`;
         const probe = probeLink(linkPath, realStoreRoot, canonicalDir, platform);
         const removable = probe.kind === "ours" && (probe.via === "store" || !!ownedLink(owned, linkPath, platform));
@@ -1537,7 +1542,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         // switches every harness at once, and a crash mid-reconcile can never leave harness
         // links on different versions.
         outcome = ensureManagedSymlink(
-          join(home, relDir, entry.name),
+          join(options.harnessDirectories?.[relDir] ?? join(home, relDir), entry.name),
           canonicalPath,
           realStoreRoot,
           `~/${relDir}/${entry.name}`,
@@ -1555,7 +1560,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         );
       }
       if (outcome.ok) {
-        ownLink(join(home, relDir, entry.name));
+        ownLink(join(options.harnessDirectories?.[relDir] ?? join(home, relDir), entry.name));
         linkedDirs.add(relDir);
         // A shared harness directory (codex and codex-app-server both read ~/.codex/skills)
         // cannot scope a skill to one of its agents: every other native agent reading this
@@ -1608,7 +1613,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     // canonical link first would leave dangling harness links if this pass crashed in between.
     for (const [relDir, keep] of harnessKeep) {
       sweepManagedLinks(
-        join(home, relDir),
+        options.harnessDirectories?.[relDir] ?? join(home, relDir),
         keep,
         realStoreRoot,
         { owned, removedLinks, shownDir: `~/${relDir}`, log: options.log, platform },
@@ -1649,7 +1654,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       const probe = probeLink(linkPath, realStoreRoot, canonicalDir, platform);
       if (probe.kind !== "ours") return true;
       return probe.via === "canonical" && !ownedLink(owned, linkPath, platform);
-    }),
+    }, options.harnessDirectories),
     removedLinks,
   };
 }

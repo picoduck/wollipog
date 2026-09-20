@@ -133,6 +133,7 @@ export interface GuardStateSandbox {
   ) => Promise<{ ok: true } | { ok: false; reason: string } | undefined>;
 }
 import type { SubscriptionUsageProbeAuthorization } from "./subscription-usage.js";
+import { bindSessionProviderAccount } from "./provider-accounts.js";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import { cleanupPiExternalSession } from "./external/sources.js";
 import {
@@ -224,6 +225,12 @@ export interface SessionNamingExecutionAuthorization {
 type Send = (msg: RunnerToControlPlane) => void;
 type Logger = (msg: string) => void;
 export type AcpContextResolver = (spec: SessionLaunchSpec) => SessionLaunchSpec["acpSessionContext"];
+export type ProviderAccountResolver = (spec: SessionLaunchSpec) => {
+  id: string;
+  label: string;
+  provider: "claude" | "codex";
+  credentialHome: string;
+} | undefined;
 export type PromptImageResolver = (sessionId: string, references: PromptImageReference[]) => Promise<PromptImage[]>;
 export type SafeWslLaunchAuthorizer = (meta: Pick<SessionMeta,
   "agentId" | "command" | "args" | "driver" | "context" | "config" | "executionTarget"
@@ -1108,12 +1115,14 @@ export class SessionManager {
       driver: AgentDriverKind,
       context: AgentContext,
       update: DriverSubscriptionUsageUpdate,
+      providerAccountId?: string,
     ) => void,
     /** Exact operator-configured Project Location roots eligible for existing-worktree attach. */
     private readonly configuredProjectPaths: string[] = [],
     /** Fresh runner-local catalog authorization for the one target-local WSL launcher path. */
     private readonly authorizeSafeWslLaunch?: SafeWslLaunchAuthorizer,
     private readonly worktreePorts: RunnerWorktreePorts = DEFAULT_WORKTREE_PORTS,
+    private readonly resolveProviderAccount?: ProviderAccountResolver,
   ) {
     this.lockOwner = `${runnerId}#${randomUUID()}`;
     // Every worktree creation, activation, attach, and discard lands as a `worktrees` patch. The
@@ -3577,6 +3586,47 @@ export class SessionManager {
     this.providerHomeLeases?.acquireHome(home);
   }
 
+  /** Probe one exact provider-account environment during discovery. The synthetic metadata never
+   * enters the session store; it only reuses the same provider-native status contract and
+   * credential-scope lease as real sessions. */
+  async probeProviderAccountAuthentication(
+    agent: AgentDefinition,
+    env: Record<string, string>,
+  ): Promise<"authenticated" | "unauthenticated" | "unknown"> {
+    const driver = agent.driver ?? "acp";
+    const context = agent.context ?? { kind: "native" as const };
+    const controller = this.providerAuthRecovery;
+    if (!controller) return "unknown";
+    const meta = {
+      sessionId: `provider-account-probe:${randomUUID()}`,
+      agentId: agent.id,
+      workspaceId: null,
+      repoPath: context.kind === "wsl" ? "/" : homedir(),
+      worktreePath: null,
+      driver,
+      command: agent.command,
+      args: [...(agent.args ?? [])],
+      env: { ...env },
+      context,
+      agentSessionId: null,
+      status: "idle",
+      title: "Provider Account Probe",
+      config: {},
+      tokensIn: 0,
+      tokensOut: 0,
+      costUsd: 0,
+      preview: null,
+      pendingApproval: null,
+      seq: 0,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    } satisfies SessionMeta;
+    const scope = controller.describe(meta);
+    if (!scope) return "unknown";
+    this.providerHomeLeases?.acquire({ driver, command: agent.command, context, env: meta.env });
+    return (await controller.revalidate(meta)).status;
+  }
+
   /** Account probes are no-turn provider launches, but the provider may still mutate its effective
    * HOME while initializing. Bind them to the same attested owner lease as sessions and TUIs. */
   async prepareSubscriptionUsageProbe(
@@ -3650,6 +3700,10 @@ export class SessionManager {
     };
     try {
       if (this.executionIsolation.mode === "seatbelt" && provider) {
+        const credentialHome = provider === "claude" ? env.CLAUDE_CONFIG_DIR : env.CODEX_HOME;
+        const accountGroup = credentialHome
+          ? createHash("sha256").update(credentialHome).digest("hex").slice(0, 16)
+          : "default";
         seatbeltAdmitted = this.boxAdmission.acquire({
           sessionId: taskId,
           agentId: agent.id,
@@ -3657,7 +3711,7 @@ export class SessionManager {
           ...(this.admissionPolicy.agentLimits[agent.id] !== undefined
             ? { agentLimit: this.admissionPolicy.agentLimits[agent.id] }
             : {}),
-          exclusiveGroup: `seatbelt:${provider}`,
+          exclusiveGroup: `seatbelt:${provider}:${accountGroup}`,
         });
         if (!seatbeltAdmitted) throw new Error("provider isolation is currently busy");
       }
@@ -4748,6 +4802,15 @@ export class SessionManager {
     }
     let prior = this.store.readMeta(spec.sessionId);
     const driver = spec.driver ?? "acp";
+    let providerAccount: ReturnType<NonNullable<ProviderAccountResolver>>;
+    try {
+      providerAccount = bindSessionProviderAccount(prior, spec, this.resolveProviderAccount);
+    } catch (error) {
+      const message = `provider account rejected: ${errText(error)}`;
+      if (prior) this.emitEvent(spec.sessionId, { kind: "error", message });
+      durable?.failed(message, "INVALID_COMMAND");
+      return false;
+    }
     const executionTarget = spec.executionTarget ?? prior?.executionTarget;
     const priorMatchesWorkspace = prior?.repoPath === repoPath &&
       agentContextKey(prior.context) === agentContextKey(context);
@@ -4800,6 +4863,10 @@ export class SessionManager {
       sessionId: spec.sessionId,
       controlPlaneLaunchId: spec.controlPlaneLaunchId,
       agentId: spec.agentId,
+      providerAccountId: providerAccount?.id,
+      providerAccountLabel: providerAccount?.label,
+      providerAccountProvider: providerAccount?.provider,
+      providerCredentialHome: providerAccount?.credentialHome,
       agentVersion: spec.agentVersion ?? prior?.agentVersion,
       capabilities: spec.capabilities ?? prior?.capabilities,
       sessionSlashCommands: carrySlashCommandCatalog ? prior?.sessionSlashCommands : undefined,
@@ -6079,12 +6146,15 @@ export class SessionManager {
         : meta?.driver === "pi"
           ? "pi"
           : null;
+    const seatbeltAccount = meta?.providerCredentialHome
+      ? createHash("sha256").update(meta.providerCredentialHome).digest("hex").slice(0, 16)
+      : "default";
     return {
       sessionId,
       agentId,
       weight: this.admissionPolicy.agentWeights[agentId] ?? 1,
       ...(this.executionIsolation.mode === "seatbelt" && seatbeltProvider
-        ? { exclusiveGroup: `seatbelt:${seatbeltProvider}` }
+        ? { exclusiveGroup: `seatbelt:${seatbeltProvider}:${seatbeltAccount}` }
         : {}),
       ...(this.admissionPolicy.agentLimits[agentId] !== undefined
         ? { agentLimit: this.admissionPolicy.agentLimits[agentId] }
@@ -6569,7 +6639,13 @@ export class SessionManager {
         },
         onSubscriptionUsage: (update) => {
           if (meta.agentId) {
-            this.onSubscriptionUsageUpdate?.(meta.agentId, meta.driver, meta.context, update);
+            this.onSubscriptionUsageUpdate?.(
+              meta.agentId,
+              meta.driver,
+              meta.context,
+              update,
+              meta.providerAccountId,
+            );
           }
         },
         onSteeringTurnChanged: () => {

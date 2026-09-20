@@ -1280,6 +1280,31 @@ test("an explicit No Project preset is selected and launchable on mount", async 
   }
 });
 
+test("multiple provider accounts expose a picker and submit the selected account", async () => {
+  const accountRunner: RunnerView = {
+    ...runner,
+    protocolVersion: PROTOCOL_VERSION,
+    agents: runner.agents.map((agent) => ({ ...agent, defaultProviderAccountId: "work" })),
+    providerAccounts: [
+      { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+      { id: "personal", label: "Personal", provider: "claude", authStatus: "unauthenticated" },
+    ],
+  };
+  const fixture = await mountFixture({ runners: [accountRunner] }, { projectId: null });
+  try {
+    assert.match(
+      fixture.container.querySelector<HTMLButtonElement>('[aria-label^="Account:"]')?.getAttribute("aria-label") ?? "",
+      /Account: Work/,
+    );
+    await chooseSelectOption(fixture.container, "Account", "Personal");
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests.length, 1);
+    assert.equal(fixture.requests[0]?.providerAccountId, "personal");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("a delayed Project preset hydrates once its exact Project and Location arrive", async () => {
   const fixture = await mountFixture(
     { projects: [] },

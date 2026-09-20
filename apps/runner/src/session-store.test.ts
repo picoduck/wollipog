@@ -92,12 +92,32 @@ test("create + readMeta round-trips", () => {
       includeUserCommands: true,
       handoffManifestDigest: null,
     };
-    store.create(meta({ sessionSlashCommandProvenance }));
+    store.create(meta({
+      sessionSlashCommandProvenance,
+      providerAccountId: "work",
+      providerAccountLabel: "Work",
+      providerAccountProvider: "codex",
+      providerCredentialHome: "/credentials/work",
+    }));
     assert.equal(store.has("s_abc"), true);
     const m = store.readMeta("s_abc");
     assert.equal(m?.agentSessionId, "thread_123");
     assert.equal(m?.driver, "codex");
     assert.deepEqual(m?.sessionSlashCommandProvenance, sessionSlashCommandProvenance);
+    const restarted = new SessionStore(root).readMeta("s_abc");
+    assert.deepEqual({
+      id: restarted?.providerAccountId,
+      label: restarted?.providerAccountLabel,
+      provider: restarted?.providerAccountProvider,
+      credentialHome: restarted?.providerCredentialHome,
+      transcript: restarted?.agentSessionId,
+    }, {
+      id: "work",
+      label: "Work",
+      provider: "codex",
+      credentialHome: "/credentials/work",
+      transcript: "thread_123",
+    });
     assert.equal(store.readMeta("missing"), null);
   } finally {
     rmSync(root, { recursive: true, force: true });

@@ -185,6 +185,20 @@ function statePath(driver: AgentDriverKind): { provider: string; relative: strin
   return null;
 }
 
+/** Resolve the provider's real transcript leaf. Explicit provider homes replace the conventional
+ * `~/.claude` or `~/.codex` root; they are not alternate OS HOME directories. */
+function providerTranscriptPath(state: IsolationStateOptions, fallbackHome: string, label: string): string | null {
+  const mapping = statePath(state.driver);
+  if (!mapping) return null;
+  if (state.driver === "claude-code" && state.env.CLAUDE_CONFIG_DIR) {
+    return posix.join(absoluteHome(state.env.CLAUDE_CONFIG_DIR, `${label} CLAUDE_CONFIG_DIR`), "projects");
+  }
+  if ((state.driver === "codex" || state.driver === "codex-app-server") && state.env.CODEX_HOME) {
+    return posix.join(absoluteHome(state.env.CODEX_HOME, `${label} CODEX_HOME`), "sessions");
+  }
+  return posix.join(absoluteHome(state.env.HOME ?? fallbackHome, `${label} HOME`), ...mapping.relative.split("/"));
+}
+
 /** Session ids cross a trust boundary from the control plane. Hashing keeps them out of host and
  * WSL path syntax while preserving one stable partition for reconnect/resume. */
 export function providerStateKey(sessionId: string): string {
@@ -274,9 +288,7 @@ export function seatbeltWritableRoots(
   const paths = new Set(state.orchestratorScratchOnly
     ? [state.cwd]
     : [state.cwd, state.dataDir, nativeTmp, ...(state.additionalWritableRoots ?? [])]);
-  if (mapping) paths.add(state.providerStatePath ?? posix.join(
-    absoluteHome(state.env.HOME ?? home, "HOME on macOS"), ...mapping.relative.split("/"),
-  ));
+  if (mapping) paths.add(state.providerStatePath ?? providerTranscriptPath(state, home, "on macOS")!);
   return [...paths];
 }
 
@@ -597,7 +609,7 @@ export async function resolveExecutionIsolation(
       context.distro, state.ownerHash, providerStateKey(state.sessionId), resolved.uid,
     );
     if (mapping) {
-      const target = posix.join(targetHome, ...mapping.relative.split("/"));
+      const target = providerTranscriptPath(state, targetHome, "inside WSL")!;
       ensure.push(target);
       binds.push({ mode: "rw", source: sessionState.provider, target });
     }
@@ -650,7 +662,7 @@ export async function resolveExecutionIsolation(
     if (!binary) throw new Error("Seatbelt isolation requires /usr/bin/sandbox-exec but it was not found");
     const home = await runtime.realpathNative(state.env.HOME ?? runtime.nativeHome());
     const mapping = statePath(state.driver);
-    const providerStatePath = mapping ? posix.join(home, ...mapping.relative.split("/")) : undefined;
+    const providerStatePath = mapping ? providerTranscriptPath(state, home, "on macOS")! : undefined;
     if (providerStatePath) await runtime.mkdirNative([providerStatePath]);
     const additionalWritableRoots = state.orchestratorScratchOnly
       ? undefined
@@ -717,7 +729,7 @@ export async function resolveExecutionIsolation(
     const location = providerStateLocation(state.dataDir, state.driver, state.sessionId)!;
     return [{
       source: location.leaf,
-      target: posix.join(targetHome, ...mapping.relative.split("/")),
+      target: providerTranscriptPath(state!, targetHome, "on Linux")!,
     }];
   })() : [];
   for (const root of state?.additionalWritableRoots ?? []) writableBinds.push({ source: root, target: root });

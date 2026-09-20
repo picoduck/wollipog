@@ -397,6 +397,33 @@ function RunnerDetails({ runner, online }: { runner: RunnerView; online: boolean
             </>
           )}
         </dl>
+        {(runner.providerAccounts?.length ?? 0) > 0 && (
+          <details className="runner-agents">
+            <summary>
+              <span className="runner-agents-label">Accounts</span>
+              <span className="group-count">{runner.providerAccounts!.length}</span>
+              <ChevronRightIcon className="runner-disclosure-chevron" />
+            </summary>
+            <div className="runner-agents-body">
+              <div className="agent-list">
+                {runner.providerAccounts!.map((account) => (
+                  <div className="agent-row" key={account.id}>
+                    <div className="agent-row-head">
+                      <span className="agent-name">{account.label}</span>
+                    </div>
+                    <div className="agent-row-meta">
+                      <span className="atag">{account.provider === "claude" ? "Claude" : "Codex"}</span>
+                      <span className={`atag ${account.authStatus === "unauthenticated" ? "broken" : "discovered"}`}>
+                        {account.authStatus === "authenticated" ? "Logged In" :
+                          account.authStatus === "unauthenticated" ? "Login Required" : "Login Unknown"}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </details>
+        )}
         <details className="runner-agents">
           <summary>
             <span className="runner-agents-label">Agents</span>

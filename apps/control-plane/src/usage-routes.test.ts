@@ -117,6 +117,9 @@ test("subscription usage routes are human-scoped and refresh only visible curren
   };
   const register = (runnerId: string, protocolVersion: number, userId: string) => db.registerRunner({
     runnerId, hostname: runnerId, os: "linux", version: "1", agents: [agent], workspaces: [],
+    ...(runnerId === "current" ? {
+      providerAccounts: [{ id: "work", label: "Work", provider: "codex" as const, authStatus: "authenticated" as const }],
+    } : {}),
   }, Date.now(), protocolVersion, {
     organizationId: "org_personal", owner: { kind: "user", userId },
   });
@@ -125,7 +128,7 @@ test("subscription usage routes are human-scoped and refresh only visible curren
   register("foreign-private", PROTOCOL_VERSION, "someone-else");
   const sent: Array<{ runnerId: string; message: ControlPlaneToRunner; timeoutMs: number }> = [];
   const sourceId = createHash("sha256").update(JSON.stringify({
-    runnerId: "current", agentId: "codex", provider: "codex", context: "native",
+    runnerId: "current", provider: "codex", providerAccountId: "work",
   })).digest("hex").slice(0, 32);
   const app = Fastify();
   registerUsageRoutes(app, db, (request) => {
@@ -141,6 +144,7 @@ test("subscription usage routes are human-scoped and refresh only visible curren
       sent.push({ runnerId, message, timeoutMs });
       const snapshot = {
         sourceId, runnerId, agentId: "codex", provider: "codex" as const, state: "available" as const,
+        providerAccountId: "work", accountLabel: "Work",
         fetchedAt: Date.now(), buckets: [{ id: "codex:primary", label: "Five-Hour Window", usedPercent: 20 }],
       };
       db.upsertSubscriptionUsageSnapshot(snapshot);
@@ -164,6 +168,31 @@ test("subscription usage routes are human-scoped and refresh only visible curren
   assert.equal(sent[0]?.timeoutMs, 10_000);
   assert.equal(response.json().sources[0].state, "available");
   assert.deepEqual(response.json().refresh, { attempted: 1, failed: 0 });
+
+  const targeted = await app.inject({
+    method: "POST",
+    url: "/api/usage/subscriptions/refresh",
+    headers: { authorization: "Bearer operator" },
+    payload: { runnerId: "current", providerAccountId: "work" },
+  });
+  assert.equal(targeted.statusCode, 200);
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1]?.runnerId, "current");
+  assert.equal(sent[1]?.message.type, "refresh_subscription_usage");
+  assert.equal(sent[1]?.message.type === "refresh_subscription_usage"
+    ? sent[1].message.providerAccountId : undefined, "work");
+  assert.equal((await app.inject({
+    method: "POST",
+    url: "/api/usage/subscriptions/refresh",
+    headers: { authorization: "Bearer operator" },
+    payload: { runnerId: "current", providerAccountId: "missing" },
+  })).statusCode, 404);
+  assert.equal((await app.inject({
+    method: "POST",
+    url: "/api/usage/subscriptions/refresh",
+    headers: { authorization: "Bearer operator" },
+    payload: { runnerId: "current" },
+  })).statusCode, 400);
   await app.close();
   db.close();
 });

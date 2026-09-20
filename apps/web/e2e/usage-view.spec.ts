@@ -113,6 +113,7 @@ test("subscription cards show provider allowances in presentation order (#223, #
   const current = cards.filter({ hasText: "Claude Code on build-box" }).first();
   await expect(current.locator("h4")).toHaveText("Claude — Max");
   await expect(current.locator(".subscription-account")).toHaveText("Account: primary@example.com");
+  await expect(current.getByRole("button", { name: "Refresh Account" })).toBeVisible();
   const buckets = current.locator(".subscription-bucket");
   await expect(buckets).toHaveCount(3);
   await expect(buckets.nth(0)).toContainText("Five-Hour Window");
@@ -129,6 +130,7 @@ test("subscription cards show provider allowances in presentation order (#223, #
   // has not answered yet.
   const resetOnly = cards.filter({ hasText: "Claude Code (Ubuntu)" }).first();
   await expect(resetOnly.locator(".subscription-account")).toHaveText("Account: alternate@example.com");
+  await expect(resetOnly.getByRole("button", { name: "Refresh Account" })).toBeVisible();
   await expect(resetOnly).toContainText("without utilization percentages");
   await expect(resetOnly).not.toContainText("after the first provider response");
 

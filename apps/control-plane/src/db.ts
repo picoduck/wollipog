@@ -280,6 +280,27 @@ export const MAX_PENDING_STEERING_RESOLUTION_REPLAYS = 50;
 const SESSION_PROMPT_TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60_000;
 const SESSION_PROMPT_ATTEMPT_RETENTION_LIMIT = 128;
 
+function safeProviderAccounts(value: RunnerView["providerAccounts"]): NonNullable<RunnerView["providerAccounts"]> {
+  if (!Array.isArray(value) || value.length > 32) throw new Error("runner provider account inventory is invalid");
+  const ids = new Set<string>();
+  return value.map((account) => {
+    if (!account || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(account.id) || ids.has(account.id) ||
+        typeof account.label !== "string" || !account.label.trim() || account.label.trim().length > 100 ||
+        /[\u0000-\u001f\u007f]/.test(account.label) ||
+        (account.provider !== "claude" && account.provider !== "codex") ||
+        !["authenticated", "unauthenticated", "unknown"].includes(account.authStatus)) {
+      throw new Error("runner provider account inventory is invalid");
+    }
+    ids.add(account.id);
+    return {
+      id: account.id,
+      label: account.label.trim(),
+      provider: account.provider,
+      authStatus: account.authStatus,
+    };
+  });
+}
+
 const ARTIFACT_TABLE_SCHEMA = /* sql */ `
 CREATE TABLE IF NOT EXISTS artifacts (
   id              TEXT PRIMARY KEY,
@@ -503,6 +524,7 @@ CREATE TABLE IF NOT EXISTS runner_agents (
   codex_app_server TEXT,
   claude_code TEXT,
   native_tui_accounting TEXT,
+  default_provider_account_id TEXT,
   wsl_agent_control TEXT,
   acp TEXT,
   registry TEXT,
@@ -519,6 +541,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   project_id     TEXT,
   project_location_id TEXT,
   agent_id       TEXT,
+  provider_account_id TEXT,
+  provider_account_label TEXT,
   title          TEXT NOT NULL DEFAULT '',
   title_source   TEXT NOT NULL DEFAULT 'generated',
   semantic_title INTEGER NOT NULL DEFAULT 0,
@@ -2243,6 +2267,7 @@ CREATE TABLE IF NOT EXISTS subscription_usage_snapshots (
   source_id           TEXT NOT NULL,
   agent_id            TEXT NOT NULL,
   provider            TEXT NOT NULL CHECK (provider IN ('codex', 'claude')),
+  provider_account_id TEXT,
   snapshot             TEXT NOT NULL,
   fetched_at           INTEGER NOT NULL,
   updated_at           INTEGER NOT NULL,
@@ -2406,6 +2431,7 @@ interface RunnerRow {
   runtime: string | null;
   container_targets: string | null;
   capacity_status: string | null;
+  provider_accounts: string | null;
 }
 
 interface RunnerCredentialRow {
@@ -2434,6 +2460,8 @@ interface SessionRow {
   project_id: string | null;
   project_location_id: string | null;
   agent_id: string | null;
+  provider_account_id: string | null;
+  provider_account_label: string | null;
   title: string;
   title_source: string | null;
   semantic_title: number;
@@ -3392,6 +3420,8 @@ export interface NewSessionInput {
   projectId?: string | null;
   projectLocationId?: string | null;
   agentId: string | null;
+  providerAccountId?: string;
+  providerAccountLabel?: string;
   title: string;
   titleSource?: SessionTitleSource;
   useWorktree: boolean;
@@ -4520,7 +4550,7 @@ export class ControlPlaneDb {
     );
     db.prepare("DELETE FROM driver_telemetry_hourly WHERE bucket_ts < ?").run(Date.now() - 180 * 86_400_000);
     // Additive migrations for DBs created before discovery columns existed.
-    for (const col of ["version TEXT", "auth_status TEXT", "available INTEGER", "unavailable_reason TEXT", "source TEXT", "codex_app_server TEXT", "claude_code TEXT", "native_tui_accounting TEXT", "wsl_agent_control TEXT", "acp TEXT", "registry TEXT", "acp_transport TEXT"]) {
+    for (const col of ["version TEXT", "auth_status TEXT", "available INTEGER", "unavailable_reason TEXT", "source TEXT", "codex_app_server TEXT", "claude_code TEXT", "native_tui_accounting TEXT", "default_provider_account_id TEXT", "wsl_agent_control TEXT", "acp TEXT", "registry TEXT", "acp_transport TEXT"]) {
       try {
         db.exec(`ALTER TABLE runner_agents ADD COLUMN ${col}`);
       } catch {
@@ -4583,6 +4613,8 @@ export class ControlPlaneDb {
       "container_targets TEXT",
       // v132 live lease accounting and precise queued-demand bottlenecks.
       "capacity_status TEXT",
+      // Protocol v170 secret-free provider account inventory.
+      "provider_accounts TEXT",
     ]) {
       try {
         db.exec(`ALTER TABLE runners ADD COLUMN ${col}`);
@@ -4611,6 +4643,10 @@ export class ControlPlaneDb {
     } catch {
       /* column already present */
     }
+    for (const column of ["provider_account_id TEXT", "provider_account_label TEXT"]) {
+      try { db.exec(`ALTER TABLE sessions ADD COLUMN ${column}`); } catch { /* column already present */ }
+    }
+    try { db.exec("ALTER TABLE subscription_usage_snapshots ADD COLUMN provider_account_id TEXT"); } catch { /* column already present */ }
     for (const col of [
       "input_tokens INTEGER NOT NULL DEFAULT 0",
       "output_tokens INTEGER NOT NULL DEFAULT 0",
@@ -5146,6 +5182,9 @@ export class ControlPlaneDb {
 
       const editors = meta.editors ? JSON.stringify(meta.editors) : null;
       const runtime = meta.runtime ? JSON.stringify(meta.runtime) : null;
+      const providerAccounts = runnerSupportsProtocol(protocolVersion, "providerAccounts")
+        ? JSON.stringify(safeProviderAccounts(meta.providerAccounts ?? []))
+        : null;
       let containerTargets: string | null = null;
       if (runnerSupportsProtocol(protocolVersion, "containerExecutionTargets")) {
         const advertised = meta.executionTargets ?? [];
@@ -5168,16 +5207,16 @@ export class ControlPlaneDb {
         this.stmt(
             `UPDATE runners SET hostname=?, os=?, version=?, protocol_version=?, status='online',
                 connected_at=?, last_seen=?, updated_at=?, agents_refreshed_at=NULL,
-                editors=COALESCE(?, editors), runtime=?, container_targets=?, capacity_status=NULL WHERE runner_id=?`,
+                editors=COALESCE(?, editors), runtime=?, container_targets=?, provider_accounts=?, capacity_status=NULL WHERE runner_id=?`,
           )
-          .run(meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, editors, runtime, containerTargets, meta.runnerId);
+          .run(meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, editors, runtime, containerTargets, providerAccounts, meta.runnerId);
       } else {
         this.stmt(
             `INSERT INTO runners
-               (runner_id, hostname, os, version, protocol_version, status, connected_at, last_seen, created_at, updated_at, editors, runtime, container_targets)
-             VALUES (?, ?, ?, ?, ?, 'online', ?, ?, ?, ?, ?, ?, ?)`,
+               (runner_id, hostname, os, version, protocol_version, status, connected_at, last_seen, created_at, updated_at, editors, runtime, container_targets, provider_accounts)
+             VALUES (?, ?, ?, ?, ?, 'online', ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
-          .run(meta.runnerId, meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, now, editors, runtime, containerTargets);
+          .run(meta.runnerId, meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, now, editors, runtime, containerTargets, providerAccounts);
       }
 
       const ownerKind = scope.owner.kind;
@@ -5247,8 +5286,8 @@ export class ControlPlaneDb {
     );
     const insRa = this.stmt(
       `INSERT INTO runner_agents
-         (runner_id, agent_id, command, args, env, driver, context, capabilities, version, auth_status, available, unavailable_reason, source, codex_app_server, claude_code, native_tui_accounting, wsl_agent_control, acp, registry, acp_transport)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (runner_id, agent_id, command, args, env, driver, context, capabilities, version, auth_status, available, unavailable_reason, source, codex_app_server, claude_code, native_tui_accounting, default_provider_account_id, wsl_agent_control, acp, registry, acp_transport)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const a of agents) {
       upAgent.run(a.id, a.name, now);
@@ -5269,6 +5308,7 @@ export class ControlPlaneDb {
         a.codexAppServer ? JSON.stringify(a.codexAppServer) : null,
         a.claudeCode ? JSON.stringify(a.claudeCode) : null,
         persistNativeTuiAccounting && a.nativeTuiAccounting ? JSON.stringify(a.nativeTuiAccounting) : null,
+        a.defaultProviderAccountId ?? null,
         persistWslSafeLauncher && a.wslAgentControl?.safeLauncherProtocolVersion === 1
           ? JSON.stringify(a.wslAgentControl)
           : null,
@@ -5282,7 +5322,7 @@ export class ControlPlaneDb {
   /** Replace a runner's advertised agents (e.g. after a discovery re-probe). Also stamps
    * agents_refreshed_at — agents_updated only ever carries a COMPLETED discovery result, so from
    * here on an empty list truthfully means "no agent CLIs found", not "still probing". */
-  updateRunnerAgents(runnerId: string, agents: AgentDefinition[], now: number, editors?: EditorInfo[]): void {
+  updateRunnerAgents(runnerId: string, agents: AgentDefinition[], now: number, editors?: EditorInfo[], providerAccounts?: RunnerView["providerAccounts"]): void {
     this.db.exec("BEGIN");
     try {
       const protocol = this.stmt("SELECT protocol_version FROM runners WHERE runner_id=?")
@@ -5296,9 +5336,10 @@ export class ControlPlaneDb {
         runnerSupportsProtocol(protocol?.protocol_version, "wslSafeLauncher"),
       );
       this.stmt(
-          "UPDATE runners SET agents_refreshed_at=?, updated_at=?, editors=COALESCE(?, editors) WHERE runner_id=?",
+          "UPDATE runners SET agents_refreshed_at=?, updated_at=?, editors=COALESCE(?, editors), provider_accounts=COALESCE(?, provider_accounts) WHERE runner_id=?",
         )
-        .run(now, now, editors ? JSON.stringify(editors) : null, runnerId);
+        .run(now, now, editors ? JSON.stringify(editors) : null,
+          providerAccounts ? JSON.stringify(safeProviderAccounts(providerAccounts)) : null, runnerId);
       this.db.exec("COMMIT");
     } catch (err) {
       this.db.exec("ROLLBACK");
@@ -6394,7 +6435,7 @@ export class ControlPlaneDb {
 
   getRunner(runnerId: string): RunnerView | null {
     const row = this.stmt(
-        "SELECT runner_id, hostname, os, version, status, connected_at, last_seen, protocol_version, agents_refreshed_at, editors, runtime, container_targets, capacity_status FROM runners WHERE runner_id=?",
+        "SELECT runner_id, hostname, os, version, status, connected_at, last_seen, protocol_version, agents_refreshed_at, editors, runtime, container_targets, capacity_status, provider_accounts FROM runners WHERE runner_id=?",
       )
       .get(runnerId) as unknown as RunnerRow | undefined;
     return row ? this.runnerView(row) : null;
@@ -6402,7 +6443,7 @@ export class ControlPlaneDb {
 
   listRunners(): RunnerView[] {
     const rows = this.stmt(
-        "SELECT runner_id, hostname, os, version, status, connected_at, last_seen, protocol_version, agents_refreshed_at, editors, runtime, container_targets, capacity_status FROM runners ORDER BY runner_id",
+        "SELECT runner_id, hostname, os, version, status, connected_at, last_seen, protocol_version, agents_refreshed_at, editors, runtime, container_targets, capacity_status, provider_accounts FROM runners ORDER BY runner_id",
       )
       .all() as unknown as RunnerRow[];
     return rows.map((r) => this.runnerView(r));
@@ -9559,6 +9600,7 @@ export class ControlPlaneDb {
                   ra.unavailable_reason AS unavailable_reason, ra.source AS source,
                   ra.codex_app_server AS codex_app_server, ra.claude_code AS claude_code,
                   ra.native_tui_accounting AS native_tui_accounting,
+                  ra.default_provider_account_id AS default_provider_account_id,
                   ra.wsl_agent_control AS wsl_agent_control,
                   ra.acp AS acp, ra.registry AS registry, ra.acp_transport AS acp_transport
              FROM runner_agents ra JOIN agent_definitions ad ON ad.id = ra.agent_id
@@ -9581,6 +9623,7 @@ export class ControlPlaneDb {
         codex_app_server: string | null;
         claude_code: string | null;
         native_tui_accounting: string | null;
+        default_provider_account_id: string | null;
         wsl_agent_control: string | null;
         acp: string | null;
         registry: string | null;
@@ -9605,6 +9648,7 @@ export class ControlPlaneDb {
       codexAppServer: parseJson<AgentDefinition["codexAppServer"]>(a.codex_app_server) ?? undefined,
       claudeCode: parseJson<AgentDefinition["claudeCode"]>(a.claude_code) ?? undefined,
       nativeTuiAccounting: parseJson<AgentDefinition["nativeTuiAccounting"]>(a.native_tui_accounting) ?? undefined,
+      defaultProviderAccountId: a.default_provider_account_id ?? undefined,
       wslAgentControl: parseJson<AgentDefinition["wslAgentControl"]>(a.wsl_agent_control) ?? undefined,
       acp: parseJson<AgentDefinition["acp"]>(a.acp) ?? undefined,
       registry: parseJson<AgentDefinition["registry"]>(a.registry) ?? undefined,
@@ -9626,6 +9670,9 @@ export class ControlPlaneDb {
       protocolVersion: row.protocol_version ?? null,
       agentsRefreshed: row.agents_refreshed_at != null,
       agents,
+      providerAccounts: runnerSupportsProtocol(row.protocol_version, "providerAccounts")
+        ? (parseJson<RunnerView["providerAccounts"]>(row.provider_accounts) ?? [])
+        : undefined,
       workspaces,
       // The editors COLUMN survives re-registers by design (COALESCE), so gate the VIEW on
       // the registered protocol version: a downgraded runner (or an old runner reusing this
@@ -10545,8 +10592,9 @@ export class ControlPlaneDb {
     // Claude discovery owns even an absent label, while Codex learns its label only after a
     // provider probe. An unlabeled starting Codex snapshot after restart is therefore unknown,
     // not evidence that the account changed; a present replacement label remains authoritative.
-    const accountChanged = prior?.accountLabel !== snapshot.accountLabel &&
-      (snapshot.provider === "claude" || snapshot.accountLabel !== undefined);
+    const accountChanged = prior?.providerAccountId !== snapshot.providerAccountId ||
+      (prior?.accountLabel !== snapshot.accountLabel &&
+        (snapshot.provider === "claude" || snapshot.accountLabel !== undefined));
     if (snapshot.state !== "unavailable" || snapshot.buckets.length > 0 ||
         !Array.isArray(prior?.buckets) || prior.buckets.length === 0 ||
         prior.provider !== snapshot.provider || prior.agentId !== snapshot.agentId ||
@@ -10562,11 +10610,12 @@ export class ControlPlaneDb {
   private writeSubscriptionUsageSnapshot(snapshot: SubscriptionUsageSnapshot, now: number): void {
     this.stmt(
       `INSERT INTO subscription_usage_snapshots
-         (runner_id, source_id, agent_id, provider, snapshot, fetched_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+         (runner_id, source_id, agent_id, provider, provider_account_id, snapshot, fetched_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(runner_id, source_id) DO UPDATE SET
          agent_id=excluded.agent_id,
          provider=excluded.provider,
+         provider_account_id=excluded.provider_account_id,
          snapshot=excluded.snapshot,
          fetched_at=excluded.fetched_at,
          updated_at=excluded.updated_at`,
@@ -10575,6 +10624,7 @@ export class ControlPlaneDb {
       snapshot.sourceId,
       snapshot.agentId,
       snapshot.provider,
+      snapshot.providerAccountId ?? null,
       JSON.stringify(snapshot),
       snapshot.fetchedAt,
       now,
@@ -10654,16 +10704,28 @@ export class ControlPlaneDb {
 
     const sources: SubscriptionUsageResponse["sources"] = [];
     for (const runner of runners) {
-      for (const agent of runner.agents) {
-        const provider = agent.driver === "codex-app-server"
-          ? "codex" as const
-          : agent.driver === "claude-code"
-            ? "claude" as const
-            : null;
-        if (!provider) continue;
+      const providerAccounts = runner.providerAccounts ?? [];
+      const sourceCoordinates = providerAccounts.length > 0
+        ? providerAccounts.flatMap((account) => {
+            const agent = runner.agents.find((candidate) => account.provider === "codex"
+              ? candidate.driver === "codex-app-server"
+              : candidate.driver === "claude-code");
+            return agent ? [{ agent, provider: account.provider, account }] : [];
+          })
+        : runner.agents.flatMap((agent) => {
+            const provider = agent.driver === "codex-app-server"
+              ? "codex" as const
+              : agent.driver === "claude-code"
+                ? "claude" as const
+                : null;
+            return provider ? [{ agent, provider, account: undefined }] : [];
+          });
+      for (const { agent, provider, account } of sourceCoordinates) {
         const context = agent.context?.kind === "wsl" ? `wsl:${agent.context.distro}` : "native";
         const sourceId = createHash("sha256")
-          .update(JSON.stringify({ runnerId: runner.runnerId, agentId: agent.id, provider, context }))
+          .update(JSON.stringify(account
+            ? { runnerId: runner.runnerId, provider, providerAccountId: account.id }
+            : { runnerId: runner.runnerId, agentId: agent.id, provider, context }))
           .digest("hex")
           .slice(0, 32);
         const persisted = stored.get(`${runner.runnerId}:${sourceId}`);
@@ -10673,14 +10735,19 @@ export class ControlPlaneDb {
           runnerId: runner.runnerId,
           agentId: agent.id,
           provider,
-          state: runnerSupportsProtocol(runner.protocolVersion, "subscriptionUsage")
-            ? "unavailable"
-            : "unsupported",
-          detail: runnerSupportsProtocol(runner.protocolVersion, "subscriptionUsage")
-            ? "This provider has not reported subscription usage yet."
-            : "Update this runner to view subscription usage.",
+          state: account?.authStatus === "unauthenticated"
+            ? "unauthenticated"
+            : runnerSupportsProtocol(runner.protocolVersion, "subscriptionUsage")
+              ? "unavailable"
+              : "unsupported",
+          detail: account?.authStatus === "unauthenticated"
+            ? `${account.label} is not signed in.`
+            : runnerSupportsProtocol(runner.protocolVersion, "subscriptionUsage")
+              ? "This provider has not reported subscription usage yet."
+              : "Update this runner to view subscription usage.",
           fetchedAt,
           buckets: [],
+          ...(account ? { providerAccountId: account.id, accountLabel: account.label } : {}),
         };
         sources.push({
           ...snapshot,
@@ -11009,6 +11076,10 @@ export class ControlPlaneDb {
         input.now,
         input.now,
       );
+      if (input.providerAccountId) {
+        this.stmt("UPDATE sessions SET provider_account_id=?, provider_account_label=? WHERE id=?")
+          .run(input.providerAccountId, input.providerAccountLabel ?? input.providerAccountId, input.id);
+      }
       if (input.executionTarget) {
         this.stmt("UPDATE sessions SET execution_target=? WHERE id=?")
           .run(JSON.stringify(input.executionTarget), input.id);
@@ -11187,6 +11258,10 @@ export class ControlPlaneDb {
         snap.seq,
         snap.adopted ? 1 : 0,
       );
+      if (snap.providerAccountId) {
+        this.stmt("UPDATE sessions SET provider_account_id=?, provider_account_label=? WHERE id=?")
+          .run(snap.providerAccountId, snap.providerAccountLabel ?? snap.providerAccountId, snap.id);
+      }
       if (snap.executionTarget) {
         this.stmt("UPDATE sessions SET execution_target=? WHERE id=?")
           .run(JSON.stringify(snap.executionTarget), snap.id);
@@ -11398,6 +11473,10 @@ export class ControlPlaneDb {
         now,
         id,
       );
+      if (snap.providerAccountId) {
+        this.stmt("UPDATE sessions SET provider_account_id=?, provider_account_label=? WHERE id=?")
+          .run(snap.providerAccountId, snap.providerAccountLabel ?? snap.providerAccountId, id);
+      }
       if (snap.executionTarget) {
         this.stmt("UPDATE sessions SET execution_target=? WHERE id=?")
           .run(JSON.stringify(snap.executionTarget), id);
@@ -16943,6 +17022,8 @@ export class ControlPlaneDb {
       importLocationReady: row.adopted === 1 ? Boolean(row.workspace_path?.trim()) : undefined,
       agentId: row.agent_id,
       agentName,
+      providerAccountId: row.provider_account_id ?? undefined,
+      providerAccountLabel: row.provider_account_label ?? undefined,
       title: row.title,
       titleSource: (row.title_source as SessionTitleSource | null) ?? "generated",
       providerUpdatedAt: row.provider_updated_at ?? undefined,

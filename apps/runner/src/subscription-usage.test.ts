@@ -1182,3 +1182,65 @@ test("Claude window ids that collide once bounded do not fuse into a hybrid wind
   );
   assert.equal(snapshot.buckets[0]?.resetsAt, FIVE_HOUR_RESET * 1_000);
 });
+
+test("configured accounts have independent sources, homes, and targeted refreshes", async () => {
+  let now = 20_000;
+  const probedHomes: string[] = [];
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent()],
+    providerAccounts: () => [
+      { id: "work", label: "Work", provider: "codex", authStatus: "authenticated" },
+      { id: "personal", label: "Personal", provider: "codex", authStatus: "authenticated" },
+    ],
+    resolveEnv: (_agentId, _driver, _context, accountId) => ({ CODEX_HOME: `/accounts/${accountId}` }),
+    authorizeProbe: () => ({ cwd: "/safe/subscription-probe" }),
+    publish: () => {},
+    now: () => now,
+    probeCodex: async (_agent, env) => {
+      probedHomes.push(env.CODEX_HOME!);
+      return {
+        state: "available",
+        rateLimits: { rateLimits: { limitId: "codex", primary: {
+          usedPercent: env.CODEX_HOME?.endsWith("work") ? 25 : 75,
+        } } },
+      };
+    },
+  });
+  manager.syncSources();
+  assert.deepEqual(manager.inventory().map((snapshot) => [
+    snapshot.providerAccountId, snapshot.accountLabel, snapshot.sourceId,
+  ]), [
+    ["work", "Work", subscriptionUsageSourceId("runner-1", "codex", "codex", { kind: "native" }, "work")],
+    ["personal", "Personal", subscriptionUsageSourceId("runner-1", "codex", "codex", { kind: "native" }, "personal")],
+  ]);
+  await manager.refreshAccount("work");
+  assert.deepEqual(probedHomes, ["/accounts/work"]);
+  assert.equal(manager.inventory().find((snapshot) => snapshot.providerAccountId === "work")
+    ?.buckets[0]?.usedPercent, 25);
+  assert.equal(manager.inventory().find((snapshot) => snapshot.providerAccountId === "personal")
+    ?.buckets.length, 0, "refreshing Work leaves Personal unchanged");
+  now += 20_000;
+  await manager.refreshAccount("personal");
+  assert.deepEqual(probedHomes, ["/accounts/work", "/accounts/personal"]);
+  assert.equal(manager.inventory().find((snapshot) => snapshot.providerAccountId === "personal")
+    ?.buckets[0]?.usedPercent, 75);
+});
+
+test("configured account login state does not inherit a sibling or agent-wide status", () => {
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [{ ...agent(), authStatus: "authenticated" }],
+    providerAccounts: () => [
+      { id: "work", label: "Work", provider: "codex", authStatus: "authenticated" },
+      { id: "personal", label: "Personal", provider: "codex", authStatus: "unauthenticated" },
+    ],
+    resolveEnv: () => ({}),
+    publish: () => {},
+  });
+  manager.syncSources();
+  assert.deepEqual(manager.inventory().map((snapshot) => [snapshot.providerAccountId, snapshot.state]), [
+    ["work", "unavailable"],
+    ["personal", "unauthenticated"],
+  ]);
+});

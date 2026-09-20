@@ -268,7 +268,11 @@ export class ProviderHomeLeaseRegistry {
         `shared ${provider} provider home in WSL cannot be safely owner-leased; use a supported native, container, or cloud execution target`,
       );
     }
-    const requestedHome = request.env.HOME || homedir();
+    const requestedHome = provider === "claude"
+      ? request.env.CLAUDE_CONFIG_DIR || request.env.HOME || homedir()
+      : provider === "codex"
+        ? request.env.CODEX_HOME || request.env.HOME || homedir()
+        : request.env.HOME || homedir();
     this.acquireHome(requestedHome, provider);
   }
 

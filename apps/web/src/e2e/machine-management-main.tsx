@@ -73,6 +73,20 @@ let runner: RunnerView | null = {
       source: "config",
     },
   ],
+  providerAccounts: [
+    {
+      id: "claude-work",
+      label: "Work",
+      provider: "claude",
+      authStatus: "authenticated",
+    },
+    {
+      id: "claude-personal",
+      label: "Personal",
+      provider: "claude",
+      authStatus: "unauthenticated",
+    },
+  ],
   workspaces: [{ id: "home", name: "Home", path: "C:\\Users\\misko" }],
   connectedAt: 1,
   lastSeen: 1,

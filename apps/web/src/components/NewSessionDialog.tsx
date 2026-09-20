@@ -228,6 +228,7 @@ export function NewSessionDialog({
   const initialAgentOptions = agentOptions(runner?.agents ?? []);
   const initialAgentSelection = savedAgentSelection(initialAgentOptions, agentDefaults[runnerId]);
   const [agentId, setAgentId] = useState(initialAgentSelection.agentId);
+  const [providerAccountId, setProviderAccountId] = useState("");
   // `undefined` until the user chooses: a saved Orchestrator harness default then selects the role
   // on the user's behalf, exactly as the saved preset did before the role became independent.
   const [roleOverride, setRoleOverride] = useState<"normal" | "orchestrator" | undefined>(undefined);
@@ -374,6 +375,15 @@ export function NewSessionDialog({
     executionTargets.find((target) => target.adapter === "host" &&
       target.workspaceStrategy === (useWorktree ? "worktree" : "in_place"));
   const agent = selectedAgentOption?.agent;
+  const provider = agent?.driver === "claude-code" ? "claude"
+    : agent?.driver === "codex" || agent?.driver === "codex-app-server" ? "codex" : null;
+  const providerAccounts = (runner?.providerAccounts ?? []).filter((account) => account.provider === provider);
+  useEffect(() => {
+    const preferred = agent?.defaultProviderAccountId;
+    setProviderAccountId((current) => providerAccounts.some((account) => account.id === current)
+      ? current
+      : providerAccounts.find((account) => account.id === preferred)?.id ?? providerAccounts[0]?.id ?? "");
+  }, [agent?.defaultProviderAccountId, agentId, runnerId, providerAccounts.map((account) => account.id).join("\0")]);
   const nativeTuiAccountingExplanation = nativeTuiAccountingDetail(agent);
   const savedPermissionMode = savedSessionPermissionMode(defaultsReady ? harnessDefaults?.view ?? null : null, agent);
   const savedPiModeUnavailableForTarget = agent?.driver === "pi" && executionTarget !== undefined &&
@@ -1129,6 +1139,7 @@ export function NewSessionDialog({
       const session = await api.createSession({
         ...placement,
         agentId,
+        ...(providerAccountId ? { providerAccountId } : {}),
         ...(orchestratorRoleSupported && roleOverride !== undefined ? { role: roleOverride } : {}),
         useWorktree,
         executionTargetId: executionTarget?.id,
@@ -1479,6 +1490,25 @@ export function NewSessionDialog({
               </div>
             )}
           </div>
+
+          {providerAccounts.length > 1 && (
+            <div className="field">
+              <label className="new-session-field-label">Account</label>
+              <Select<string>
+                className="new-session-choice-control"
+                label="Account"
+                value={providerAccountId || null}
+                onChange={setProviderAccountId}
+                options={providerAccounts.map((account) => ({
+                  value: account.id,
+                  label: account.label,
+                  description: account.authStatus === "authenticated" ? "Logged In" :
+                    account.authStatus === "unauthenticated" ? "Login Required" : "Login Unknown",
+                }))}
+                placeholder="Choose an Account…"
+              />
+            </div>
+          )}
 
           <div className="field">
             <span>Session Role</span>
