@@ -229,6 +229,42 @@ test("a partial Claude account config retains the legacy Codex refresh deadline"
   db.close();
 });
 
+test("refresh deadlines include configured and unmapped legacy Codex sources", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const codexAgent = (id: string, context: { kind: "native" } | { kind: "wsl"; distro: string }) => ({
+    id, name: id, command: "codex", args: [], env: {},
+    driver: "codex-app-server" as const, context,
+    codexAppServer: { status: "supported" as const, appServerAvailable: true, transport: "stdio" as const,
+      contractFingerprint: "test" },
+  });
+  db.registerRunner({
+    runnerId: "mixed", hostname: "mixed", os: "windows", version: "1",
+    agents: [
+      codexAgent("codex-native", { kind: "native" }),
+      codexAgent("codex-wsl", { kind: "wsl", distro: "Ubuntu" }),
+    ],
+    workspaces: [],
+    providerAccounts: [
+      { id: "work", label: "Work", provider: "codex", authStatus: "authenticated" },
+    ],
+  }, Date.now(), PROTOCOL_VERSION, {
+    organizationId: "org_personal", owner: { kind: "user", userId: "operator-user" },
+  });
+  let timeoutMs = 0;
+  const app = Fastify();
+  registerUsageRoutes(app, db, () => human("operator"), {
+    requestFromRunner: async (_runnerId, requestId, _message, timeout) => {
+      timeoutMs = timeout;
+      return { type: "subscription_usage_refresh_result", requestId, ok: true, snapshots: [] };
+    },
+  });
+  const response = await app.inject({ method: "POST", url: "/api/usage/subscriptions/refresh" });
+  assert.equal(response.statusCode, 200);
+  assert.equal(timeoutMs, 18_000, "one account plus one unmapped WSL source receive two probe budgets");
+  await app.close();
+  db.close();
+});
+
 test("usage responses carry rate-table status and members can force a bounded pricing refresh", async () => {
   const db = ControlPlaneDb.open(":memory:");
   const principals = new Map<string, AuthPrincipal>([["viewer", human("viewer")]]);

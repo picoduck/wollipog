@@ -56,6 +56,7 @@ test("WSL agents do not inherit a host-path account without an explicit or confi
     context: { kind: "wsl" as const, distro: "Ubuntu" },
   };
   assert.equal(selectProviderAccount(accounts, wsl, "claude-code"), undefined);
+  assert.equal(selectProviderAccount(accounts, undefined, "claude-code"), undefined);
   assert.equal(selectProviderAccount(accounts, wsl, "claude-code", "work")?.id, "work");
   assert.equal(selectProviderAccount(
     accounts,

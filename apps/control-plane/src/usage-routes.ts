@@ -82,8 +82,14 @@ export function registerUsageRoutes(
       runnerSupportsProtocol(runner.protocolVersion, "subscriptionUsage") &&
       runner.agents.some((agent) => agent.driver === "codex-app-server" || agent.driver === "claude-code"));
     const results = await Promise.allSettled(runners.map(async (runner) => {
-      const codexAccountCount = runner.providerAccounts
-        ?.filter((account) => account.provider === "codex").length ?? 0;
+      const codexAccounts = runner.providerAccounts
+        ?.filter((account) => account.provider === "codex") ?? [];
+      const unmappedLegacyCodexCount = runner.agents.filter((agent) =>
+        agent.driver === "codex-app-server" &&
+        !codexAccounts.some((account) =>
+          (agent.context?.kind ?? "native") === "native" ||
+          agent.defaultProviderAccountId === account.id)).length;
+      const codexSourceCount = codexAccounts.length + unmappedLegacyCodexCount;
       const requestId = randomUUID();
       const result = await hub.requestFromRunner(
         runner.runnerId,
@@ -93,9 +99,7 @@ export function registerUsageRoutes(
         subscriptionUsageRefreshTimeoutMs(
           targeted
             ? 1
-            : codexAccountCount > 0
-              ? codexAccountCount
-              : runner.agents.filter((agent) => agent.driver === "codex-app-server").length,
+            : codexSourceCount,
         ),
       );
       if (result.type !== "subscription_usage_refresh_result" || !result.ok) {

@@ -863,7 +863,11 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
     ? undefined
     : selectProviderAccount(
         config.providerAccounts,
-        config.agents.find((agent) => agent.id === spec.agentId),
+        metadata.agents.find((agent) => agent.id === spec.agentId) ?? {
+          id: spec.agentId ?? "unknown",
+          driver: spec.driver ?? "acp",
+          context: spec.context,
+        },
         spec.driver ?? "acp",
         spec.providerAccountId,
       ),
@@ -1281,6 +1285,15 @@ function queueSkillsReconcile(requestId?: string): void {
       // home on restart. Keep that home's managed skills live until the final such session is
       // discarded; afterward the ordinary sweep reclaims the stale links.
       for (const relDir of legacySessionHarnessScopes(store.listSessions())) baseHarnessScope.add(relDir);
+      // An account may intentionally name the provider's conventional credential home. In that
+      // case the base and account passes share one harness directory; keep it in the base pass so
+      // the sweep does not remove and immediately recreate the same managed links.
+      for (const account of config.providerAccounts) {
+        const relDir = account.provider === "claude" ? ".claude/skills" : ".codex/skills";
+        if (resolve(account.directory, "skills") === resolve(homedir(), relDir)) {
+          baseHarnessScope.add(relDir);
+        }
+      }
       let result = await reconcileSkills({
         dataDir: config.dataDir,
         home: homedir(),
@@ -2295,10 +2308,10 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           provider: meta.providerAccountProvider,
           credentialHome: meta.providerCredentialHome,
         }));
-      } else if (agent) {
+      } else if (agent && !meta) {
         const account = selectProviderAccount(
           config.providerAccounts,
-          config.agents.find((candidate) => candidate.id === agent.id),
+          agent,
           agent.driver ?? "acp",
         );
         if (account) Object.assign(env, providerAccountEnvironment(account));

@@ -82,7 +82,7 @@ export function providerAccountEnvironment(
 
 export function selectProviderAccount(
   accounts: RunnerProviderAccount[],
-  agent: Pick<RunnerConfigAgent, "id" | "driver" | "context" | "defaultProviderAccountId"> | undefined,
+  agent: Pick<AgentDefinition, "id" | "driver" | "context" | "defaultProviderAccountId"> | undefined,
   driver: AgentDriverKind,
   requestedId?: string,
 ): BoundProviderAccount | undefined {
@@ -99,7 +99,7 @@ export function selectProviderAccount(
   // Account directories use runner-host path syntax. A WSL agent may opt in explicitly (or via
   // its configured default), but must not inherit the first native account implicitly.
   const selectedId = requestedId ?? agent?.defaultProviderAccountId ??
-    ((agent?.context?.kind ?? "native") === "native" ? matching[0]?.id : undefined);
+    (agent && (agent.context?.kind ?? "native") === "native" ? matching[0]?.id : undefined);
   if (!selectedId) return undefined;
   const selected = matching.find((candidate) => candidate.id === selectedId);
   if (!selected) throw new Error(`provider account '${selectedId}' is not configured for ${provider}`);
