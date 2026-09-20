@@ -247,6 +247,21 @@ test("an unbound WSL agent keeps its legacy source beside a same-provider accoun
     ]),
     [["claude", "work"], ["claude-wsl", undefined]],
   );
+  const wslSourceId = createHash("sha256")
+    .update(JSON.stringify({
+      runnerId: "runner-1", agentId: "claude-wsl", provider: "claude", context: "wsl:Ubuntu",
+    }))
+    .digest("hex")
+    .slice(0, 32);
+  assert.doesNotThrow(() => validateSubscriptionUsageSnapshot({
+    sourceId: wslSourceId,
+    runnerId: "runner-1",
+    agentId: "claude-wsl",
+    provider: "claude",
+    state: "available",
+    fetchedAt: now,
+    buckets: [],
+  }, "runner-1", db, now));
   db.close();
 });
 

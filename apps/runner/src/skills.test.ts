@@ -25,6 +25,7 @@ import {
   MAX_RETAINED_STALE_SKILL_VERSIONS,
   SKILL_SCAN_LIMITS,
   linkManifestPath,
+  legacySessionHarnessScopes,
   parseSkillFrontmatter,
   reconcileSkills,
   skillRetentionStatePath,
@@ -52,6 +53,14 @@ const codexAgent: AgentDefinition = {
   context: { kind: "native" },
 };
 const agents = [claudeAgent, codexAgent];
+
+test("legacy host sessions retain their provider harness scope after accounts are configured", () => {
+  assert.deepEqual(legacySessionHarnessScopes([
+    { driver: "claude-code" },
+    { driver: "codex-app-server", providerAccountId: "work" },
+    { driver: "codex-app-server", executionTarget: { adapter: "container" } },
+  ]), [".claude/skills"]);
+});
 
 function makeRoots(): { root: string; home: string; dataDir: string } {
   const root = mkdtempSync(join(tmpdir(), "runner-skills-"));

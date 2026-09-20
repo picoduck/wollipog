@@ -133,10 +133,13 @@ export function validateSubscriptionUsageSnapshot(
   const providerAccount = providerAccountId
     ? runner?.providerAccounts?.find((candidate) => candidate.id === providerAccountId)
     : undefined;
+  const agentMapsToProviderAccount = providerAccountId === undefined && !!agent &&
+    (runner?.providerAccounts?.some((candidate) => candidate.provider === provider &&
+      ((agent.context?.kind ?? "native") === "native" ||
+        agent.defaultProviderAccountId === candidate.id)) ?? false);
   if (!agent || agent.driver !== expectedDriver ||
       (providerAccountId !== undefined && providerAccount?.provider !== provider) ||
-      (providerAccountId === undefined &&
-        (runner?.providerAccounts?.some((candidate) => candidate.provider === provider) ?? false)) ||
+      agentMapsToProviderAccount ||
       sourceId !== expectedSourceId(runnerId, agent, provider, providerAccountId)) {
     throw new Error("subscription usage source is not advertised by this runner");
   }

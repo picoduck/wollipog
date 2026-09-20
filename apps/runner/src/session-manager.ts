@@ -3703,10 +3703,9 @@ export class SessionManager {
     };
     try {
       if (this.executionIsolation.mode === "seatbelt" && provider) {
-        const credentialHome = provider === "claude" ? env.CLAUDE_CONFIG_DIR : env.CODEX_HOME;
-        const accountGroup = credentialHome
-          ? createHash("sha256").update(credentialHome).digest("hex").slice(0, 16)
-          : "default";
+        const credentialHome = (provider === "claude" ? env.CLAUDE_CONFIG_DIR : env.CODEX_HOME) ??
+          env.HOME ?? homedir();
+        const accountGroup = createHash("sha256").update(resolve(credentialHome)).digest("hex").slice(0, 16);
         seatbeltAdmitted = this.boxAdmission.acquire({
           sessionId: taskId,
           agentId: agent.id,
@@ -6149,8 +6148,8 @@ export class SessionManager {
         : meta?.driver === "pi"
           ? "pi"
           : null;
-    const credentialHome = this.executionIsolation.mode === "seatbelt"
-      ? meta?.providerCredentialHome ?? (meta ? this.resolveProviderCredentialHome?.(meta) : undefined)
+    const credentialHome = this.executionIsolation.mode === "seatbelt" && seatbeltProvider
+      ? meta?.providerCredentialHome ?? (meta ? this.resolveProviderCredentialHome?.(meta) : undefined) ?? homedir()
       : undefined;
     const seatbeltAccount = credentialHome
       ? createHash("sha256").update(resolve(credentialHome)).digest("hex").slice(0, 16)

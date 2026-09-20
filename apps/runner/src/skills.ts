@@ -78,6 +78,21 @@ import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
 import { replaceWindowsSkillJunction } from "./windows-skill-junction.js";
 import { validWslDistroName } from "./wsl-context.js";
 
+export function legacySessionHarnessScopes(sessions: Array<{
+  driver: AgentDriverKind;
+  providerAccountId?: string;
+  executionTarget?: { adapter: "host" | "container" | "cloud" };
+}>): string[] {
+  const scopes = new Set<string>();
+  for (const session of sessions) {
+    if (session.providerAccountId ||
+        session.executionTarget && session.executionTarget.adapter !== "host") continue;
+    const relDir = SKILL_DIRS[session.driver];
+    if (relDir) scopes.add(relDir);
+  }
+  return [...scopes];
+}
+
 /** Harness skill directories, home-relative. */
 export const SKILL_DIRS: Partial<Record<AgentDriverKind, string>> = {
   "claude-code": ".claude/skills",

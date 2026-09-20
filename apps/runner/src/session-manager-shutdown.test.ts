@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AgentDefinition } from "@wollipog/protocol";
@@ -200,8 +200,9 @@ test("Seatbelt naming and legacy sessions share an env-configured credential-hom
     release: (id) => { released = id; },
     releaseAll: () => {},
   };
+  let resolvedCredentialHome = "/accounts/claude-alt/../claude-alt/";
   (manager as unknown as { resolveProviderCredentialHome: () => string }).resolveProviderCredentialHome =
-    () => "/accounts/claude-alt/../claude-alt/";
+    () => resolvedCredentialHome;
   const sessionGroup = (manager as unknown as {
     admissionRequest(id: string): { exclusiveGroup?: string };
   }).admissionRequest("legacy").exclusiveGroup;
@@ -213,6 +214,17 @@ test("Seatbelt naming and legacy sessions share an env-configured credential-hom
   assert.match(admission?.sessionId ?? "", /^session-naming:/);
   await authorization.cleanup();
   assert.equal(released, admission?.sessionId);
+
+  resolvedCredentialHome = homedir();
+  const defaultSessionGroup = (manager as unknown as {
+    admissionRequest(id: string): { exclusiveGroup?: string };
+  }).admissionRequest("legacy").exclusiveGroup;
+  const defaultAuthorization = await manager.prepareSessionNamingExecution({
+    id: "claude-code", name: "Claude Code", command: "claude", args: [], env: {},
+    driver: "claude-code", context: { kind: "native" },
+  }, {}, "/neutral");
+  assert.equal(admission?.exclusiveGroup, defaultSessionGroup);
+  await defaultAuthorization.cleanup();
   manager.shutdownAll();
 });
 

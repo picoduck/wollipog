@@ -205,6 +205,7 @@ import {
   mergeReconcileSkillsResults,
   reconcileSkills,
   SKILL_DIRS,
+  legacySessionHarnessScopes,
   skillNeedsManualVariant,
   skillsStateMessage,
   storedSkillVersionAvailable,
@@ -1272,15 +1273,19 @@ function queueSkillsReconcile(requestId?: string): void {
     try {
       const allowRemovals = desired !== null && !chunkedSkillsSync.inProgress;
       const baseAgents = agentsWithoutConfiguredProviderAccounts(metadata.agents, config.providerAccounts);
-      const baseHarnessScope = [...new Set(baseAgents.flatMap((agent) => {
+      const baseHarnessScope = new Set(baseAgents.flatMap((agent) => {
         const relDir = SKILL_DIRS[agent.driver ?? "acp"];
         return relDir ? [relDir] : [];
-      }))];
+      }));
+      // Sessions created before accounts were configured remain bound to the legacy provider
+      // home on restart. Keep that home's managed skills live until the final such session is
+      // discarded; afterward the ordinary sweep reclaims the stale links.
+      for (const relDir of legacySessionHarnessScopes(store.listSessions())) baseHarnessScope.add(relDir);
       let result = await reconcileSkills({
         dataDir: config.dataDir,
         home: homedir(),
         agents: metadata.agents,
-        harnessScope: baseHarnessScope,
+        harnessScope: [...baseHarnessScope],
         sweepHarnessScope: Object.values(SKILL_DIRS),
         desired: desired ?? [],
         // Content frames are published immediately to bound memory. While their completion fence
