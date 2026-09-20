@@ -3266,9 +3266,15 @@ export class SessionManager {
         if (!cleanup.processTerminationStartedAt) {
           this.removeWorktreeCleanupRecord(cleanup);
         }
+        if (result.reason === "branch_changed") {
+          return {
+            removed: false,
+            reason: `the worktree is checked out on branch ${JSON.stringify(result.checkedOutBranch)}, ` +
+              `not its registered branch ${JSON.stringify(worktree.branch)}`,
+          };
+        }
         const reasons = {
           not_runner_owned: "runner ownership could not be proven",
-          branch_changed: "the registered worktree branch changed",
           dirty: "the worktree has uncommitted changes",
           no_upstream: "the branch has no upstream",
           unpushed: "the branch has unpushed commits",
