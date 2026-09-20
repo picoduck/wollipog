@@ -16,7 +16,7 @@ import type { Readable, Writable } from "node:stream";
 import { posix, win32 } from "node:path";
 import type { AgentContext } from "@wollipog/protocol";
 import { containerLabelArgs } from "./container-identity.js";
-import { sensitiveEnvironmentName } from "./env-security.js";
+import { RUNNER_CREDENTIAL_ENVIRONMENT, sensitiveEnvironmentName } from "./env-security.js";
 import { WSL_BWRAP_UNAVAILABLE_ERROR } from "./execution-isolation-policy.js";
 import { encodeWindowsJobSpec, materializeWindowsJobLauncher } from "./windows-job.js";
 import {
@@ -35,8 +35,9 @@ import {
 import { buildWslBwrapRelayArgs } from "./wsl-bwrap-launcher.js";
 
 const isWindows = process.platform === "win32";
-/** Runner policy switches are daemon input and must never become agent input. */
+/** Runner credentials and policy switches are daemon input and must never become agent input. */
 const RUNNER_ONLY_ENV = [
+  ...RUNNER_CREDENTIAL_ENVIRONMENT,
   "WOLLIPOG_CLAUDE_HOOKS",
   "MAM_CLAUDE_HOOKS",
   "WOLLIPOG_POLICY_HOOK_CP_URL",
@@ -57,6 +58,10 @@ const RUNNER_ONLY_ENV = [
   WORKTREE_DESCENDANT_MARKER_ENV,
   "MANAGER_TOKEN_FILE",
 ];
+
+function inheritedEnvironmentScrub(names: readonly string[] = []): string[] {
+  return [...new Set([...RUNNER_ONLY_ENV, ...names])];
+}
 
 function withoutRunnerOnlyEnv(env: Record<string, string> | undefined): Record<string, string> {
   const result = { ...(env ?? {}) };
@@ -352,8 +357,8 @@ export function buildBwrapArgs(opts: Pick<SpawnAgentOptions, "command" | "args" 
  * silently never arrived.
  */
 export function buildWslArgs(distro: string, cwd: string, pidfile: string, opts: SpawnAgentOptions): string[] {
-  const configured = new Set(Object.keys(opts.env ?? {}).map((key) => key.toLowerCase()));
-  const unsets = (opts.scrubInheritedEnv ?? [])
+  const configured = new Set(Object.keys(withoutRunnerOnlyEnv(opts.env)).map((key) => key.toLowerCase()));
+  const unsets = inheritedEnvironmentScrub(opts.scrubInheritedEnv)
     .filter((key) => !configured.has(key.toLowerCase()))
     .flatMap((k) => ["-u", k]);
   const inner =
@@ -403,7 +408,7 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
     throw new Error(WSL_BWRAP_UNAVAILABLE_ERROR);
   }
   const remoteBoundary = opts.isolation?.backend === "container" || opts.isolation?.backend === "cloud";
-  const scrubInheritedEnv = [...RUNNER_ONLY_ENV, ...(opts.scrubInheritedEnv ?? [])];
+  const scrubInheritedEnv = inheritedEnvironmentScrub(opts.scrubInheritedEnv);
   let file = opts.command;
   let args = opts.args;
   let cwd: string | undefined = opts.cwd;

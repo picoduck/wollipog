@@ -531,6 +531,8 @@ test("spawnAgent scrubs inherited env keys but explicit env still wins", async (
 
 test("spawnAgent always scrubs runner-only credential and hook policy environment", async () => {
   const keys = [
+    "RUNNER_TOKEN",
+    "RUNNER_TOKEN_FILE",
     "WOLLIPOG_CLAUDE_HOOKS",
     "MAM_CLAUDE_HOOKS",
     "WOLLIPOG_POLICY_HOOK_CP_URL",
@@ -1057,7 +1059,7 @@ test("termination rescans the exact marker for a helper forked by a SIGTERM hand
   await assert.rejects(fs.access(helperReady), /ENOENT/, "helper reaped without executing readiness code");
 });
 
-test("buildWslArgs scrubs names in-distro and never places agent env values in argv", () => {
+test("buildWslArgs always scrubs runner credentials in-distro and never places agent env values in argv", () => {
   const args = buildWslArgs("Ubuntu", "/home/me/repo", "/tmp/x.pgid", {
     command: "claude",
     args: ["-p", "--verbose"],
@@ -1069,19 +1071,20 @@ test("buildWslArgs scrubs names in-distro and never places agent env values in a
   // Riding --exec: env prefix must come after the positional wrapper params (sh, pidfile).
   const i = args.indexOf("/tmp/x.pgid");
   assert.ok(i > 0);
-  assert.deepEqual(args.slice(i + 1), [
-    "env",
-    "-u",
-    "ANTHROPIC_API_KEY",
-    "claude",
-    "-p",
-    "--verbose",
-  ]);
+  const inner = args.slice(i + 1);
+  const command = inner.indexOf("claude");
+  assert.ok(command > 0);
+  assert.equal(inner[0], "env");
+  const unsetNames = inner.slice(1, command).filter((_, index) => index % 2 === 1);
+  assert.ok(unsetNames.includes("RUNNER_TOKEN"));
+  assert.ok(unsetNames.includes("RUNNER_TOKEN_FILE"));
+  assert.ok(unsetNames.includes("ANTHROPIC_API_KEY"));
+  assert.deepEqual(inner.slice(command), ["claude", "-p", "--verbose"]);
   assert.equal(args.join(" ").includes("tok-123"), false);
   assert.equal(args.join(" ").includes("http://p:8080"), false);
 });
 
-test("buildWslArgs without env/scrub launches the bare command (no env wrapper)", () => {
+test("buildWslArgs without driver-specific scrub still unsets runner-only environment", () => {
   const args = buildWslArgs("Ubuntu", "/home/me/repo", "/tmp/x.pgid", {
     command: "codex",
     args: ["exec"],
@@ -1089,7 +1092,13 @@ test("buildWslArgs without env/scrub launches the bare command (no env wrapper)"
     context: { kind: "wsl", distro: "Ubuntu" },
   });
   const i = args.indexOf("/tmp/x.pgid");
-  assert.deepEqual(args.slice(i + 1), ["codex", "exec"]);
+  const inner = args.slice(i + 1);
+  const command = inner.indexOf("codex");
+  assert.ok(command > 0);
+  const unsetNames = inner.slice(1, command).filter((_, index) => index % 2 === 1);
+  assert.ok(unsetNames.includes("RUNNER_TOKEN"));
+  assert.ok(unsetNames.includes("RUNNER_TOKEN_FILE"));
+  assert.deepEqual(inner.slice(command), ["codex", "exec"]);
 });
 
 test("waitForPendingKills drains kill work registered by an earlier pending operation", async () => {

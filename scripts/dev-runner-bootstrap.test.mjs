@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
@@ -9,8 +9,10 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import {
   controlPlaneHttp,
+  createDevelopmentRunnerCredentialFile,
   developmentConfigPath,
   developmentDataDir,
+  developmentRunnerEnvironment,
   isControlPlaneService,
   isRunnerCredentialToken,
   developmentRunnerWatch,
@@ -327,4 +329,30 @@ test("runner launch argv drops only the watcher and keeps the config pairing int
   // The config path must stay adjacent to its flag, and must never be parsed as the entrypoint.
   assert.equal(unwatched[unwatched.indexOf("--config") + 1], "/repo/runner.config.json");
   assert.equal(unwatched[1], "apps/runner/src/cli.ts");
+});
+
+test("development runner credential handoff uses a protected temporary file and no token environment", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-dev-credential-test-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const credential = createDevelopmentRunnerCredentialFile("opaque-runner-token", root);
+  assert.equal(readFileSync(credential.path, "utf8"), "opaque-runner-token");
+  if (process.platform !== "win32") {
+    assert.equal(statSync(dirname(credential.path)).mode & 0o777, 0o700);
+    assert.equal(statSync(credential.path).mode & 0o777, 0o600);
+  }
+
+  const env = developmentRunnerEnvironment(
+    credential.path,
+    "http://127.0.0.1:4317",
+    "/runner-data",
+    { RUNNER_TOKEN: "legacy", runner_token_file: "old", KEEP: "yes" },
+  );
+  assert.equal(env.RUNNER_TOKEN, undefined);
+  assert.equal(env.runner_token_file, undefined);
+  assert.equal(env.RUNNER_TOKEN_FILE, credential.path);
+  assert.equal(env.KEEP, "yes");
+
+  credential.remove();
+  credential.remove();
+  assert.equal(existsSync(credential.path), false);
 });

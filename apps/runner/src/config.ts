@@ -272,6 +272,21 @@ export function parseEnv(env: NodeJS.ProcessEnv = process.env): Partial<RunnerCo
   return o;
 }
 
+/** Capture the file handoff before removing both runner-credential inputs from the daemon's
+ * environment. The legacy token has already been copied by parseEnv, so deleting it here preserves
+ * startup compatibility while ensuring later child launches cannot inherit either name. */
+export function consumeRunnerCredentialEnvironment(
+  env: NodeJS.ProcessEnv = process.env,
+): { tokenFile?: string } {
+  let tokenFile = env.RUNNER_TOKEN_FILE;
+  for (const key of Object.keys(env)) {
+    const normalized = key.toUpperCase();
+    if (normalized === "RUNNER_TOKEN_FILE" && tokenFile === undefined) tokenFile = env[key];
+    if (normalized === "RUNNER_TOKEN" || normalized === "RUNNER_TOKEN_FILE") delete env[key];
+  }
+  return { tokenFile };
+}
+
 /** Resolve only genuinely-relative paths; leave Windows (C:\) and POSIX/WSL (/…) absolutes intact. */
 export function resolveWorkspacePath(p: string): string {
   if (p.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(p)) return p;

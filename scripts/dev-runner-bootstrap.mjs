@@ -4,15 +4,15 @@
  * The control plane accepts exact runner credentials, so the historical fixed
  * `dev-local-token` cannot register a new runner (and intentionally cannot be copied across a
  * fleet). This helper waits for the local control plane, issues or rotates one credential for the
- * runner id in runner.config.json, and passes the one-time secret only in the runner child's
- * environment. The secret is never written to disk, placed in argv, or logged.
+ * runner id in runner.config.json, and passes the one-time secret through a protected temporary
+ * file. The secret is never placed in argv, inherited by agent processes, or logged.
  */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { readCompatibleEnv } from "./env-compat.mjs";
 
@@ -224,18 +224,52 @@ export function runnerLaunchArgs(tsxCli, configPath, watch) {
   return watch ? [tsxCli, "watch", ...runner] : [tsxCli, ...runner];
 }
 
-function startRunner(token, baseUrl, configPath, dataDir, watch = true) {
+/** Materialize the short-lived bootstrap handoff outside the source checkout. The runner persists
+ * its accepted credential in its owned data directory after registration; this copy lasts only as
+ * long as the bootstrap/watch supervisor may need to restart the runner entrypoint. */
+export function createDevelopmentRunnerCredentialFile(token, temporaryRoot = tmpdir()) {
+  const directory = mkdtempSync(join(temporaryRoot, "wollipog-dev-runner-"));
+  const path = join(directory, "runner-token");
+  try {
+    writeFileSync(path, token, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    try { chmodSync(path, 0o600); } catch { /* Windows ACLs are managed by the owning account. */ }
+  } catch (error) {
+    rmSync(directory, { recursive: true, force: true });
+    throw error;
+  }
+  let removed = false;
+  return {
+    path,
+    remove() {
+      if (removed) return;
+      rmSync(directory, { recursive: true, force: true });
+      removed = true;
+    },
+  };
+}
+
+/** Build the runner child environment without preserving a legacy credential under any casing. */
+export function developmentRunnerEnvironment(tokenFile, baseUrl, dataDir, inherited = process.env) {
+  const env = { ...inherited };
+  for (const key of Object.keys(env)) {
+    const normalized = key.toUpperCase();
+    if (normalized === "RUNNER_TOKEN" || normalized === "RUNNER_TOKEN_FILE") delete env[key];
+  }
+  return {
+    ...env,
+    RUNNER_TOKEN_FILE: tokenFile,
+    CONTROL_PLANE_URL: runnerWebSocketUrl(baseUrl),
+    RUNNER_DATA_DIR: dataDir,
+  };
+}
+
+function startRunner(tokenFile, baseUrl, configPath, dataDir, watch = true) {
   const tsxCli = fileURLToPath(import.meta.resolve("tsx/cli"));
-  // Invoke Node + tsx by argv so config paths remain inert on every platform. The credential stays
-  // exclusively in the child environment, never in argv or a shell command.
+  // Invoke Node + tsx by argv so config paths remain inert on every platform. Only the protected
+  // credential-file path enters the child environment; the credential never enters argv or env.
   return spawn(process.execPath, runnerLaunchArgs(tsxCli, configPath, watch), {
     cwd: repoRoot,
-    env: {
-      ...process.env,
-      RUNNER_TOKEN: token,
-      CONTROL_PLANE_URL: runnerWebSocketUrl(baseUrl),
-      RUNNER_DATA_DIR: dataDir,
-    },
+    env: developmentRunnerEnvironment(tokenFile, baseUrl, dataDir),
     stdio: "inherit",
   });
 }
@@ -255,17 +289,27 @@ export async function main() {
   const watch = developmentRunnerWatch(process.env, process.argv, warnLegacyEnvironment);
   console.log(`[dev-runner] starting ${runnerId} with an ephemeral exact-id credential and isolated state at ${dataDir}`);
   if (!watch) console.log("[dev-runner] watch mode disabled; restart manually to pick up source changes");
-  const child = startRunner(token, baseUrl, configPath, dataDir, watch);
+  const credentialFile = createDevelopmentRunnerCredentialFile(token);
+  let child;
+  try {
+    child = startRunner(credentialFile.path, baseUrl, configPath, dataDir, watch);
+  } catch (error) {
+    credentialFile.remove();
+    throw error;
+  }
+  process.once("exit", credentialFile.remove);
   const forward = (signal) => {
     if (!child.killed) child.kill(signal);
   };
   process.once("SIGINT", () => forward("SIGINT"));
   process.once("SIGTERM", () => forward("SIGTERM"));
   child.on("error", (error) => {
+    credentialFile.remove();
     console.error(`[dev-runner] runner launch failed: ${error.message}`);
     process.exitCode = 1;
   });
   child.on("exit", (code, signal) => {
+    credentialFile.remove();
     process.exitCode = signal ? 1 : (code ?? 1);
   });
 }

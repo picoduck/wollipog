@@ -54,6 +54,17 @@ test("ConPTY environment scrubs inherited provider keys but preserves explicit c
   );
 });
 
+test("runner credential environment is never admitted to ConPTY launches", () => {
+  assert.deepEqual(
+    windowsEnvironmentForLaunch(
+      { RUNNER_TOKEN: "configured", runner_token_file: "configured-file", KEEP: "configured" },
+      [],
+      { runner_token: "inherited", RUNNER_TOKEN_FILE: "inherited-file", KEEP: "inherited" },
+    ),
+    ["KEEP=configured"],
+  );
+});
+
 test("native ConPTY failed setup is cleaned before the next process opens", { skip: process.platform !== "win32" }, async () => {
   assert.throws(() => openWindowsConpty({
     command: `wollipog-missing-conpty-command-${process.pid}.exe`,

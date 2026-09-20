@@ -18,6 +18,7 @@ import { getAsset, isSea } from "node:sea";
 import { PassThrough } from "node:stream";
 import { Socket } from "node:net";
 import { Worker } from "node:worker_threads";
+import { RUNNER_CREDENTIAL_ENVIRONMENT } from "./env-security.js";
 import { trackPendingKill } from "./spawn.js";
 
 const requireFromHere = createRequire(typeof __filename === "string" ? __filename : import.meta.url);
@@ -135,7 +136,8 @@ export function windowsEnvironmentForLaunch(
   scrubInheritedEnv: readonly string[] = [],
   inherited: NodeJS.ProcessEnv = process.env,
 ): string[] {
-  const scrubbed = new Set(scrubInheritedEnv.map((key) => key.toLowerCase()));
+  const runnerOnly = new Set(RUNNER_CREDENTIAL_ENVIRONMENT.map((key) => key.toLowerCase()));
+  const scrubbed = new Set([...RUNNER_CREDENTIAL_ENVIRONMENT, ...scrubInheritedEnv].map((key) => key.toLowerCase()));
   const merged = new Map<string, [string, string]>();
   for (const [key, value] of Object.entries(inherited)) {
     if (value === undefined || scrubbed.has(key.toLowerCase())) continue;
@@ -144,6 +146,7 @@ export function windowsEnvironmentForLaunch(
   // Windows treats environment names case-insensitively. Replacing by the folded name prevents
   // ambiguous Path/PATH duplicates while retaining the configured key's spelling and value.
   for (const [key, value] of Object.entries(configured)) {
+    if (runnerOnly.has(key.toLowerCase())) continue;
     merged.set(key.toLowerCase(), [key, value]);
   }
   return windowsEnvironment(Object.fromEntries(merged.values()));
