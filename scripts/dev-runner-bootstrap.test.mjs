@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { EventEmitter } from "node:events";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
@@ -8,9 +9,12 @@ import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import {
+  bindDevelopmentRunnerCredentialLifetime,
   controlPlaneHttp,
+  createDevelopmentRunnerCredentialFile,
   developmentConfigPath,
   developmentDataDir,
+  developmentRunnerEnvironment,
   isControlPlaneService,
   isRunnerCredentialToken,
   developmentRunnerWatch,
@@ -327,4 +331,61 @@ test("runner launch argv drops only the watcher and keeps the config pairing int
   // The config path must stay adjacent to its flag, and must never be parsed as the entrypoint.
   assert.equal(unwatched[unwatched.indexOf("--config") + 1], "/repo/runner.config.json");
   assert.equal(unwatched[1], "apps/runner/src/cli.ts");
+});
+
+test("development runner credential handoff uses a protected temporary file and no token environment", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-dev-credential-test-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const credential = createDevelopmentRunnerCredentialFile("opaque-runner-token", root);
+  assert.equal(readFileSync(credential.path, "utf8"), "opaque-runner-token");
+  if (process.platform !== "win32") {
+    assert.equal(statSync(dirname(credential.path)).mode & 0o777, 0o700);
+    assert.equal(statSync(credential.path).mode & 0o777, 0o600);
+  }
+
+  const env = developmentRunnerEnvironment(
+    credential.path,
+    "http://127.0.0.1:4317",
+    "/runner-data",
+    { RUNNER_TOKEN: "legacy", runner_token_file: "old", KEEP: "yes" },
+  );
+  assert.equal(env.RUNNER_TOKEN, undefined);
+  assert.equal(env.runner_token_file, undefined);
+  assert.equal(env.RUNNER_TOKEN_FILE, credential.path);
+  assert.equal(env.KEEP, "yes");
+
+  credential.remove();
+  credential.remove();
+  assert.equal(existsSync(credential.path), false);
+});
+
+test("bootstrap starts the runner with the credential file rather than the token", () => {
+  const source = readFileSync(
+    fileURLToPath(new URL("./dev-runner-bootstrap.mjs", import.meta.url)),
+    "utf8",
+  );
+
+  assert.match(source, /startRunner\(credentialFile\.path,/u);
+  assert.doesNotMatch(source, /RUNNER_TOKEN\s*:/u);
+});
+
+test("credential file remains available until the runner or bootstrap exits", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-runner-lifetime-test-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const runnerExitCredential = createDevelopmentRunnerCredentialFile("runner-exit-token", root);
+  const runner = new EventEmitter();
+  const runnerHost = new EventEmitter();
+  bindDevelopmentRunnerCredentialLifetime(runner, runnerExitCredential, runnerHost);
+  assert.equal(existsSync(runnerExitCredential.path), true);
+  runner.emit("exit", 0, null);
+  assert.equal(existsSync(runnerExitCredential.path), false);
+
+  const hostExitCredential = createDevelopmentRunnerCredentialFile("host-exit-token", root);
+  const hostRunner = new EventEmitter();
+  const host = new EventEmitter();
+  bindDevelopmentRunnerCredentialLifetime(hostRunner, hostExitCredential, host);
+  assert.equal(existsSync(hostExitCredential.path), true);
+  host.emit("exit");
+  assert.equal(existsSync(hostExitCredential.path), false);
 });

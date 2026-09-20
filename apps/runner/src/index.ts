@@ -53,8 +53,8 @@ import {
 } from "@wollipog/protocol";
 import {
   loadConfig,
+  parseAndConsumeRunnerEnvironment,
   parseArgs,
-  parseEnv,
   projectAgentDiscoveryEnvironment,
   resolveAgentEnvironment,
   resolveRunnerLocalAgentEnvironment,
@@ -272,11 +272,13 @@ if (parsed.showVersion) {
 
 // Connection/identity precedence: flags > env > config file. Lets the control plane launch a
 // runner remotely with no JSON on the box (--runner-id/--control-plane-url/--token/--workspace).
-const overrides: Partial<RunnerConfig> = { ...parseEnv(), ...parsed.overrides };
+const credentialEnvironment = parseAndConsumeRunnerEnvironment();
+const environmentOverrides = credentialEnvironment.overrides;
+const overrides: Partial<RunnerConfig> = { ...environmentOverrides, ...parsed.overrides };
 
 // --token-file / RUNNER_TOKEN_FILE: read the token from a file so the secret never appears in any
 // process's argv. Takes precedence over a flag/env/file token.
-const tokenFile = parsed.tokenFile ?? process.env.RUNNER_TOKEN_FILE;
+const tokenFile = parsed.tokenFile ?? credentialEnvironment.tokenFile;
 if (tokenFile) {
   try {
     overrides.token = readFileSync(tokenFile, "utf8").trim();

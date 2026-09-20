@@ -6,7 +6,9 @@ import { tmpdir } from "node:os";
 import {
   DEFAULT_MAX_CONCURRENT_SESSIONS,
   DEFAULT_WORKTREE_PORTS,
+  consumeRunnerCredentialEnvironment,
   loadConfig,
+  parseAndConsumeRunnerEnvironment,
   parseArgs,
   parseEnv,
   parseWorkspaceArg,
@@ -162,6 +164,33 @@ test("parseEnv reads RUNNER_ID / CONTROL_PLANE_URL / RUNNER_TOKEN / RUNNER_WORKS
   assert.equal(o.controlPlaneUrl, "ws://h:1/runner");
   assert.equal(o.token, "t");
   assert.deepEqual(o.workspaces, [{ id: "w", name: "w", path: "/p" }]);
+});
+
+test("runner credential environment is consumed after legacy authentication is loaded", () => {
+  const env = {
+    RUNNER_TOKEN: "legacy-runner-token",
+    RUNNER_TOKEN_FILE: "/run/secrets/runner-token",
+    KEEP: "yes",
+  } as NodeJS.ProcessEnv;
+  const consumed = parseAndConsumeRunnerEnvironment(env);
+
+  assert.equal(consumed.overrides.token, "legacy-runner-token");
+  assert.equal(consumed.tokenFile, "/run/secrets/runner-token");
+  assert.deepEqual(env, { KEEP: "yes" });
+});
+
+test("credential file lookup preserves platform casing rules while scrubbing every variant", () => {
+  const posixEnv = { runner_token_file: "/tmp/lowercase-token" } as NodeJS.ProcessEnv;
+  const windowsEnv = { runner_token_file: "C:\\Temp\\runner-token" } as NodeJS.ProcessEnv;
+
+  assert.deepEqual(consumeRunnerCredentialEnvironment(posixEnv, "linux"), {
+    tokenFile: undefined,
+  });
+  assert.deepEqual(posixEnv, {});
+  assert.deepEqual(consumeRunnerCredentialEnvironment(windowsEnv, "win32"), {
+    tokenFile: "C:\\Temp\\runner-token",
+  });
+  assert.deepEqual(windowsEnv, {});
 });
 
 test("parseEnv ignores malformed RUNNER_WORKSPACES", () => {
