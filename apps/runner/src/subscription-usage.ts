@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type {
   AgentContext,
   AgentDefinition,
+  AgentDriverKind,
   ProviderAccountDefinition,
   SubscriptionUsageBucket,
   SubscriptionUsageProvider,
@@ -581,12 +582,19 @@ interface SubscriptionSource {
   accountLabel?: string;
   providerAccountId?: string;
   authStatus?: ProviderAccountDefinition["authStatus"];
+  unsupportedDetail?: string;
 }
 
 export interface SubscriptionUsageManagerOptions {
   runnerId: string;
   agents: () => AgentDefinition[];
   providerAccounts?: () => ProviderAccountDefinition[];
+  /** Production resolves the runner-local credential home against agent execution contexts. The
+   * secret-free account passed here never exposes that path to snapshots or the control plane. */
+  resolveProviderAccountAgent?: (
+    account: ProviderAccountDefinition,
+    supportedDrivers: AgentDriverKind[],
+  ) => AgentDefinition | undefined;
   resolveEnv: (agentId: string, driver: AgentDefinition["driver"], context: AgentContext, providerAccountId?: string) => Record<string, string>;
   /** Discovery probes the context-default Claude credential scope. Configured sources that select
    * another credential scope must not inherit that probe's account label. */
@@ -623,14 +631,24 @@ export class SubscriptionUsageManager {
   private sources(): SubscriptionSource[] {
     const result: SubscriptionSource[] = [];
     const seen = new Set<string>();
+    const accountContexts = new Set<string>();
     const accounts = this.options.providerAccounts?.() ?? [];
     for (const account of accounts) {
-        const agent = agentForProviderAccount(
-          this.options.agents(),
-          account,
-          account.provider === "codex" ? ["codex-app-server"] : ["claude-code"],
-        );
+        const supportedDrivers: AgentDriverKind[] = account.provider === "codex"
+          ? ["codex-app-server"] : ["claude-code"];
+        const agents = this.options.agents();
+        const resolved = this.options.resolveProviderAccountAgent
+          ? this.options.resolveProviderAccountAgent(account, supportedDrivers)
+          : agentForProviderAccount(agents, account, supportedDrivers);
+        const providerAgents = agents.filter((candidate) =>
+          providerForDriver(candidate.driver ?? "acp") === account.provider &&
+          supportedDrivers.includes(candidate.driver ?? "acp"));
+        const agent = resolved ??
+          providerAgents.find((candidate) => candidate.defaultProviderAccountId === account.id) ??
+          providerAgents.find((candidate) => (candidate.context?.kind ?? "native") === "native") ??
+          providerAgents[0];
         if (!agent) continue;
+        if (resolved) accountContexts.add(`${account.provider}\0${contextKey(agent.context)}`);
         const sourceId = subscriptionUsageSourceId(
           this.options.runnerId,
           agent.id,
@@ -645,13 +663,15 @@ export class SubscriptionUsageManager {
           providerAccountId: account.id,
           accountLabel: account.label,
           authStatus: account.authStatus,
+          ...(!resolved && this.options.resolveProviderAccountAgent
+            ? { unsupportedDetail: "This provider account's credential home is not available in a compatible provider execution context on this runner." }
+            : {}),
         });
     }
     for (const agent of this.options.agents()) {
       const provider = providerForDriver(agent.driver ?? "acp");
       if (!provider || agent.driver === "codex") continue;
-      const mappedToAccount = accounts.some((account) => account.provider === provider &&
-        ((agent.context?.kind ?? "native") === "native" || agent.defaultProviderAccountId === account.id));
+      const mappedToAccount = accountContexts.has(`${provider}\0${contextKey(agent.context)}`);
       if (mappedToAccount) continue;
       const sourceId = subscriptionUsageSourceId(
         this.options.runnerId,
@@ -691,6 +711,9 @@ export class SubscriptionUsageManager {
       ...(source.accountLabel ? { accountLabel: source.accountLabel } : {}),
       ...(source.providerAccountId ? { providerAccountId: source.providerAccountId } : {}),
     };
+    if (source.unsupportedDetail) {
+      return { ...base, state: "unsupported", detail: source.unsupportedDetail };
+    }
     if (agent.available !== true) {
       return { ...base, state: "unavailable", detail: `${agent.name} is not available on this runner.` };
     }

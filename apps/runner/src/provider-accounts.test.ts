@@ -10,6 +10,7 @@ import {
   agentsWithoutConfiguredProviderAccounts,
   bindSessionProviderAccount,
   mergeProviderAccountAuthStatus,
+  providerAccountAgentContextCompatible,
   providerAccountDefinition,
   providerAccountEnvironment,
   selectProviderAccount,
@@ -73,12 +74,43 @@ test("partial account configuration preserves the other provider's legacy harnes
   );
 });
 
-test("background account work prefers an explicit default, then a native agent", () => {
+test("background account work selects only a context compatible with the credential home", () => {
   const wsl = { ...claudeAgent, id: "claude-wsl", context: { kind: "wsl" as const, distro: "Ubuntu" } };
-  assert.equal(agentForProviderAccount([wsl, claudeAgent], { id: "work", provider: "claude" })?.id, "claude");
+  const hostAccount = { id: "work", provider: "claude" as const, directory: "C:\\credentials\\work" };
+  assert.equal(providerAccountAgentContextCompatible(hostAccount, claudeAgent, "win32"), true);
+  assert.equal(providerAccountAgentContextCompatible(hostAccount, wsl, "win32"), false);
+  assert.equal(agentForProviderAccount([wsl, claudeAgent], hostAccount, undefined, "win32")?.id, "claude");
   assert.equal(agentForProviderAccount([
     { ...wsl, defaultProviderAccountId: "work" }, claudeAgent,
-  ], { id: "work", provider: "claude" })?.id, "claude-wsl");
+  ], hostAccount, undefined, "win32")?.id, "claude",
+  "an explicit WSL default cannot pull a host credential path across contexts");
+  assert.equal(agentForProviderAccount([wsl], hostAccount, undefined, "win32"), undefined);
+});
+
+test("background account work supports unambiguous and explicit WSL-local homes", () => {
+  const ubuntu = { ...claudeAgent, id: "claude-ubuntu", context: { kind: "wsl" as const, distro: "Ubuntu" } };
+  const debian = { ...claudeAgent, id: "claude-debian", context: { kind: "wsl" as const, distro: "Debian" } };
+  const account = { id: "work", provider: "claude" as const, directory: "/home/operator/.claude-work" };
+  assert.equal(agentForProviderAccount([ubuntu], account, undefined, "win32")?.id, "claude-ubuntu");
+  assert.equal(agentForProviderAccount([ubuntu, debian], account, undefined, "win32"), undefined,
+    "a POSIX path alone cannot identify one of several WSL distributions");
+  assert.equal(agentForProviderAccount([
+    ubuntu, { ...debian, defaultProviderAccountId: "work" },
+  ], account, undefined, "win32")?.id, "claude-debian");
+  assert.equal(agentForProviderAccount([ubuntu], account, undefined, "linux"), undefined,
+    "a non-Windows runner never treats WSL as a local credential context");
+  assert.equal(agentForProviderAccount([claudeAgent], account, undefined, "linux")?.id, "claude");
+});
+
+test("secret-free account definitions retain legacy target-context selection", () => {
+  const first = { ...claudeAgent, id: "claude-ubuntu", context: { kind: "wsl" as const, distro: "Ubuntu" } };
+  const second = { ...claudeAgent, id: "claude-debian", context: { kind: "wsl" as const, distro: "Debian" } };
+  assert.equal(agentForProviderAccount(
+    [first, second],
+    { id: "work", provider: "claude" },
+    undefined,
+    "win32",
+  )?.id, "claude-ubuntu");
 });
 
 test("account login observations are isolated to each credential home", () => {
@@ -94,6 +126,9 @@ test("account login observations are isolated to each credential home", () => {
     { id: "b", label: "B", provider: "codex", directory: signedOut },
     "unknown",
   ), "unauthenticated");
+  assert.equal(providerAccountDefinition({
+    id: "wsl", label: "WSL", provider: "codex", directory: "/home/operator/.codex-work",
+  }, "win32").authStatus, "unknown", "the Windows host cannot inspect an in-distro marker");
 });
 
 test("a persisted session keeps its exact credential home across runner config changes", () => {

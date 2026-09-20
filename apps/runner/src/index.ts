@@ -484,7 +484,7 @@ const metadata: RunnerMetadata = {
   agents: withOrchestratorAdditiveRole(
     withOrchestratorPreset(configuredAgentDefinitions, { isolationMode: config.executionIsolation.mode }),
   ),
-  providerAccounts: config.providerAccounts.map(providerAccountDefinition),
+  providerAccounts: config.providerAccounts.map((account) => providerAccountDefinition(account)),
   workspaces: config.workspaces.map((w) => ({
     id: w.id,
     name: w.name,
@@ -580,6 +580,12 @@ const subscriptionUsage = new SubscriptionUsageManager({
   runnerId: config.runnerId,
   agents: () => metadata.agents,
   providerAccounts: providerAccountsForControlPlane,
+  resolveProviderAccountAgent: (account, supportedDrivers) => {
+    const configured = config.providerAccounts.find((candidate) => candidate.id === account.id);
+    return configured
+      ? agentForProviderAccount(metadata.agents, configured, supportedDrivers)
+      : undefined;
+  },
   resolveEnv: (agentId, driver, context, providerAccountId) => {
     const env = runnerLocalAgentEnv(agentId, driver ?? "acp", context);
     const account = config.providerAccounts.find((candidate) => candidate.id === providerAccountId);

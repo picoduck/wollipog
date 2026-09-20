@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, posix, win32 } from "node:path";
 import type {
   AgentDefinition,
   AgentDriverKind,
@@ -45,20 +45,44 @@ export function providerForDriver(driver: AgentDriverKind): "claude" | "codex" |
   return null;
 }
 
-/** Background account work needs one provider CLI. Prefer an agent that explicitly defaults to
- * this account, then a native context: account directories are runner-local host paths unless an
- * operator deliberately binds the account to a target-context agent. */
+/** Whether one background provider process can address the configured credential home without
+ * guessing a cross-context mapping. On Windows a POSIX root belongs to WSL; a native process uses
+ * drive/UNC syntax. Other runner hosts have no WSL execution context and accept POSIX roots only. */
+export function providerAccountAgentContextCompatible(
+  account: Pick<RunnerProviderAccount, "directory">,
+  agent: Pick<AgentDefinition, "context">,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  const context = agent.context?.kind ?? "native";
+  if (platform === "win32") {
+    return context === "wsl"
+      ? posix.isAbsolute(account.directory)
+      : win32.isAbsolute(account.directory) && !posix.isAbsolute(account.directory);
+  }
+  return context === "native" && posix.isAbsolute(account.directory);
+}
+
+/** Background account work needs one provider CLI whose execution context can address the
+ * credential home. Prefer an explicit compatible default, then native, then a sole compatible
+ * target context. Multiple WSL contexts require an explicit default because a POSIX path alone
+ * does not identify which distribution owns it. Accounts without a directory retain the legacy
+ * selection contract for internal callers that only hold the secret-free wire definition. */
 export function agentForProviderAccount(
   agents: AgentDefinition[],
-  account: Pick<ProviderAccountDefinition, "id" | "provider">,
+  account: Pick<ProviderAccountDefinition, "id" | "provider"> & Partial<Pick<RunnerProviderAccount, "directory">>,
   supportedDrivers?: AgentDriverKind[],
+  platform: NodeJS.Platform = process.platform,
 ): AgentDefinition | undefined {
-  const compatible = agents.filter((candidate) =>
+  const providerAgents = agents.filter((candidate) =>
     providerForDriver(candidate.driver ?? "acp") === account.provider &&
     (!supportedDrivers || supportedDrivers.includes(candidate.driver ?? "acp")));
-  return compatible.find((candidate) => candidate.defaultProviderAccountId === account.id) ??
+  const preferred = (compatible: AgentDefinition[], ambiguousTargetContexts: boolean) =>
+    compatible.find((candidate) => candidate.defaultProviderAccountId === account.id) ??
     compatible.find((candidate) => (candidate.context?.kind ?? "native") === "native") ??
-    compatible[0];
+    (!ambiguousTargetContexts || compatible.length === 1 ? compatible[0] : undefined);
+  if (account.directory === undefined) return preferred(providerAgents, false);
+  return preferred(providerAgents.filter((candidate) => providerAccountAgentContextCompatible(
+    { directory: account.directory! }, candidate, platform)), true);
 }
 
 export function agentsWithoutConfiguredProviderAccounts(
@@ -114,13 +138,20 @@ export function selectProviderAccount(
 /** Content-free, account-scoped login observation. Live launch/auth recovery performs the
  * authoritative provider check; this inventory probe deliberately reads only the provider's
  * standard credential marker inside the configured home. */
-export function providerAccountDefinition(account: RunnerProviderAccount): ProviderAccountDefinition {
+export function providerAccountDefinition(
+  account: RunnerProviderAccount,
+  platform: NodeJS.Platform = process.platform,
+): ProviderAccountDefinition {
   const marker = account.provider === "claude" ? ".credentials.json" : "auth.json";
   return {
     id: account.id,
     label: account.label,
     provider: account.provider,
-    authStatus: existsSync(join(account.directory, marker)) ? "authenticated" : "unauthenticated",
+    // A POSIX account path on Windows belongs to WSL and is not host-inspectable. The selected
+    // in-distro authentication probe supplies the authoritative state when one is available.
+    authStatus: platform === "win32" && posix.isAbsolute(account.directory)
+      ? "unknown"
+      : existsSync(join(account.directory, marker)) ? "authenticated" : "unauthenticated",
   };
 }
 
