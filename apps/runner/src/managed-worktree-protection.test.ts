@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import fc from "fast-check";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   commandTargetsManagedWorktree,
@@ -464,6 +464,92 @@ const providerEnvironment = {
   TMPDIR: "/tmp",
   OLDPWD: protectedPath,
 };
+
+test("a leading tilde is resolved from the provider's home before judging a destructive operand", () => {
+  const providerHome = "/provider/home";
+  const homeWorktree = `${providerHome}/worktrees/managed`;
+  const homeProtection = [{ worktreePath: homeWorktree, repoPath: "/projects/repo" }];
+  const environment = { ...providerEnvironment, HOME: providerHome };
+
+  for (const command of [
+    "rm -rf ~",
+    "rmdir ~/worktrees/managed",
+    "unlink ~/worktrees/managed",
+    "trash-put ~/worktrees/managed",
+    "gio trash ~/worktrees/managed",
+    "mv ~/worktrees/managed /tmp/away",
+    "git worktree remove ~/worktrees/managed",
+    "git worktree move ~/worktrees/managed /tmp/moved",
+    "find ~/worktrees/managed -delete",
+    "find ~/worktrees/managed -name '*.tmp' -exec rm -rf {} +",
+  ]) {
+    assert.equal(commandTargetsManagedWorktree(command, "/elsewhere", homeProtection, environment),
+      MANAGED_WORKTREE_REFUSAL, command);
+  }
+
+  for (const command of [
+    "rm -rf ~/scratch",
+    "mv ~/scratch /tmp/away",
+    "git worktree remove ~/scratch",
+    "find ~/scratch -delete",
+  ]) {
+    assert.equal(commandTargetsManagedWorktree(command, "/elsewhere", homeProtection, environment), null, command);
+  }
+
+  assert.equal(commandTargetsManagedWorktree("rm -rf ~+/worktrees/managed", providerHome,
+    homeProtection, environment), MANAGED_WORKTREE_REFUSAL, "~+ expands from the shell's current directory");
+  assert.equal(commandTargetsManagedWorktree('rm -rf "$TILDE"', "/elsewhere", homeProtection,
+    { ...environment, TILDE: "~" }), null, "a tilde produced by parameter expansion stays literal");
+  assert.equal(commandTargetsManagedWorktree("rm -rf $TWO_FIELDS", "/elsewhere", homeProtection,
+    { ...environment, TWO_FIELDS: "~ /tmp/scratch" }), null,
+    "a tilde produced by a split parameter expansion stays literal");
+  assert.equal(commandTargetsManagedWorktree("rm -rf ~/$HOME_RELATIVE", "/elsewhere", homeProtection,
+    { ...environment, HOME_RELATIVE: "worktrees/managed" }), MANAGED_WORKTREE_REFUSAL,
+    "a syntactic tilde still expands when the rest of its word comes from a parameter");
+  assert.equal(commandTargetsManagedWorktree("rm -rf ~", "/provider",
+    [{ worktreePath: homeWorktree, repoPath: "/projects/repo" }], { HOME: "home" }),
+    MANAGED_WORKTREE_REFUSAL, "a relative provider HOME is resolved from the provider's cwd");
+
+  // shell-quote does not retain whether the tilde was quoted, so the classifier deliberately
+  // over-refuses this literal spelling even though a real shell would leave the `~` unexpanded.
+  assert.equal(commandTargetsManagedWorktree('rm -rf "~"', "/elsewhere", homeProtection, environment),
+    MANAGED_WORKTREE_REFUSAL);
+
+  const runnerHomeWorktree = join(homedir(), "worktrees", "managed");
+  assert.equal(commandTargetsManagedWorktree("rm -rf ~", "/elsewhere",
+    [{ worktreePath: runnerHomeWorktree, repoPath: "/projects/repo" }]), MANAGED_WORKTREE_REFUSAL,
+    "the runner home is the fallback when the provider environment has no HOME");
+});
+
+test("tilde and absolute provider-home spellings have the same destructive verdict", () => {
+  const providerHome = "/provider/home";
+  const homeProtection = [{
+    worktreePath: `${providerHome}/worktrees/managed`,
+    repoPath: "/projects/repo",
+  }];
+  const relativePath = fc.oneof(
+    fc.constantFrom("", "worktrees/managed", "worktrees/managed/.git", "scratch"),
+    fc.array(fc.constantFrom("worktrees", "managed", "scratch", "src", ".", ".."),
+      { minLength: 1, maxLength: 5 }).map((segments) => segments.join("/")),
+  );
+  const command = fc.constantFrom<(target: string) => string>(
+    (target) => `rm -rf -- ${target}`,
+    (target) => `rmdir ${target}`,
+    (target) => `mv ${target} /tmp/away`,
+    (target) => `git worktree remove ${target}`,
+    (target) => `git worktree move ${target} /tmp/moved`,
+    (target) => `find ${target} -delete`,
+  );
+
+  fc.assert(fc.property(relativePath, command, (relative, render) => {
+    const tilde = relative ? `~/${relative}` : "~";
+    const absolute = relative ? `${providerHome}/${relative}` : providerHome;
+    assert.equal(
+      commandTargetsManagedWorktree(render(tilde), "/elsewhere", homeProtection, { HOME: providerHome }),
+      commandTargetsManagedWorktree(render(absolute), "/elsewhere", homeProtection, { HOME: providerHome }),
+    );
+  }));
+});
 
 test("a protected root held in the provider's environment is the protected root", () => {
   for (const command of [
