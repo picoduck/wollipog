@@ -12,8 +12,14 @@ import { Modal } from "./common.js";
 import { Checkbox, Select } from "./ui/ChoiceControls.js";
 
 const contents = (file?: SkillFile) => !file ? "(File absent)" : file.encoding === "utf8" ? file.content : `Binary content (base64):\n${file.content}`;
-const candidateLocation = (candidate: MachineSkillDiscovery["candidates"][number]) =>
-  `${candidate.context?.kind === "wsl" ? `WSL: ${candidate.context.distro} · ` : ""}${candidate.sourceDirectory}/${candidate.name}`;
+const accountLabel = (runner: RunnerView | undefined, providerAccountId: string | undefined) =>
+  providerAccountId
+    ? runner?.providerAccounts?.find((account) => account.id === providerAccountId)?.label ?? "Provider Account"
+    : null;
+const candidateLocation = (candidate: MachineSkillDiscovery["candidates"][number], runner?: RunnerView) => {
+  const account = accountLabel(runner, candidate.providerAccountId);
+  return `${account ? `Account: ${account} · ` : ""}${candidate.context?.kind === "wsl" ? `WSL: ${candidate.context.distro} · ` : ""}${candidate.sourceDirectory}/${candidate.name}`;
+};
 const adoptionBlocker = (blocker: string) => ({
   library_skill_missing: "The skill is not in the library.",
   executable_mode_adoption_unsupported: "The source contains executable files. Import is available, but adoption cannot preserve executable metadata yet.",
@@ -172,7 +178,9 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
           const restorable = operation.state === "source_preserved" || operation.state === "managed_linked";
           return <section className="skills-section" key={operation.operationId}>
             <strong>{operation.name}</strong>
-            <p className="skills-hint">{operation.sourceDirectory}/{operation.name} · {operation.state.replaceAll("_", " ")} · {operation.operationId}</p>
+            <p className="skills-hint">{operation.providerAccountId
+              ? `Account: ${accountLabel(selectedRunner, operation.providerAccountId)} · `
+              : ""}{operation.sourceDirectory}/{operation.name} · {operation.state.replaceAll("_", " ")} · {operation.operationId}</p>
             <p>{operation.detail}</p>
             {restorable && <>
               <label className="field"><span>
@@ -190,8 +198,8 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
         <p className="skills-hint">Up to 64 real skill directories are listed from native and WSL harness locations. Same-name variants are shown separately; identical imports reuse the existing version.</p>
         {!discovery.candidates.length && <p>No importable skill directories were found.</p>}
         {discovery.candidates.map((candidate) => <section className="skills-section" key={candidate.id}>
-          <strong>{candidate.name}</strong><p className="skills-hint">{candidateLocation(candidate)}</p>
-          <button className="btn sm" type="button" disabled={busy} onClick={() => void read(candidate.id)} aria-label={`Preview Files for ${candidate.name} from ${candidateLocation(candidate)}`}>Preview Files</button>
+          <strong>{candidate.name}</strong><p className="skills-hint">{candidateLocation(candidate, selectedRunner)}</p>
+          <button className="btn sm" type="button" disabled={busy} onClick={() => void read(candidate.id)} aria-label={`Preview Files for ${candidate.name} from ${candidateLocation(candidate, selectedRunner)}`}>Preview Files</button>
         </section>)}
       </>}
       {preview && <section className="skills-section">

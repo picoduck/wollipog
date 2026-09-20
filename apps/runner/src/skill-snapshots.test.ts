@@ -39,6 +39,40 @@ test("machine snapshot discovery is bounded metadata; reading pins parents and r
   assert.ok(snapshots.handle({ ...message, operation: "read", candidateId: candidate.id }).error);
 });
 
+test("account-scoped discovery keeps identical names separate and rejects a disappeared scope", { skip: process.platform !== "linux" }, (t) => {
+  const home = mkdtempSync(join(tmpdir(), "skill-snapshot-accounts-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  let accounts = ["work", "personal"].map((id) => ({
+    id,
+    label: id === "work" ? "Work" : "Personal",
+    provider: "codex" as const,
+    directory: join(home, id),
+  }));
+  for (const account of accounts) {
+    const root = join(account.directory, "skills", "alpha");
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "SKILL.md"), `---\nname: alpha\n---\n${account.id}`);
+  }
+  const snapshots = new MachineSkillSnapshots({
+    home,
+    agents: () => agents,
+    providerAccounts: () => accounts,
+    accountScopesEnabled: () => true,
+  });
+  const listed = snapshots.handle(message);
+  assert.deepEqual(listed.candidates?.map((candidate) =>
+    [candidate.name, candidate.sourceDirectory, candidate.providerAccountId]), [
+    ["alpha", ".codex/skills", "work"],
+    ["alpha", ".codex/skills", "personal"],
+  ]);
+  assert.doesNotMatch(JSON.stringify(listed), new RegExp(accounts[0]!.directory));
+  const personal = listed.candidates?.find((candidate) => candidate.providerAccountId === "personal");
+  assert.equal(snapshots.handle({ ...message, operation: "read", candidateId: personal!.id })
+    .snapshot?.candidate.providerAccountId, "personal");
+  accounts = accounts.filter((account) => account.id !== "personal");
+  assert.match(snapshots.handle({ ...message, operation: "read", candidateId: personal!.id }).error ?? "", /changed|expired/u);
+});
+
 for (const unsafe of ["file-link", "directory-link", "hard-link", "oversized", "too-many", "stale", "expired", "parent-link"]) {
   test(`machine snapshots reject ${unsafe}`, { skip: process.platform !== "linux" }, (t) => {
     const home = mkdtempSync(join(tmpdir(), "skill-snapshot-"));

@@ -9,6 +9,7 @@ import {
 } from "@wollipog/protocol";
 import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
 import { inspectSkillTree, openSkillDirectory } from "./skill-snapshots.js";
+import type { RunnerProviderAccount } from "./config.js";
 import { SKILL_DIRS } from "./skills.js";
 
 const JOURNAL_PREFIX = ".wollipog-adoption-";
@@ -20,9 +21,11 @@ const fdPath = (fd: number) => `/proc/self/fd/${fd}`;
 const identity = (fd: number) => { const stat = fstatSync(fd); return `${stat.dev}:${stat.ino}`; };
 
 interface Intent {
-  format: 1;
+  format: 1 | 2;
   operationId: string;
   sourceDirectory: string;
+  localSourceDirectory: string;
+  providerAccountId?: string;
   name: string;
   digest: string;
   generation: string;
@@ -50,6 +53,28 @@ function directories(agents: AgentDefinition[]): string[] {
   return [...result];
 }
 
+interface RecoveryScope {
+  home: string;
+  sourceDirectory: string;
+  localSourceDirectory: string;
+  providerAccountId?: string;
+}
+
+function recoveryScopes(home: string, agents: AgentDefinition[],
+  providerAccounts: RunnerProviderAccount[] = []): RecoveryScope[] {
+  return [
+    ...directories(agents).map((sourceDirectory) => ({
+      home, sourceDirectory, localSourceDirectory: sourceDirectory,
+    })),
+    ...providerAccounts.map((account) => ({
+      home: account.directory,
+      sourceDirectory: account.provider === "claude" ? ".claude/skills" : ".codex/skills",
+      localSourceDirectory: "skills",
+      providerAccountId: account.id,
+    })),
+  ];
+}
+
 function readJsonFile(parent: number, name: string): unknown {
   const fd = openSync(`${fdPath(parent)}/${name}`,
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -60,10 +85,17 @@ function readJsonFile(parent: number, name: string): unknown {
   } finally { closeSync(fd); }
 }
 
-function parseIntent(value: unknown, operationId: string, sourceDirectory: string): Intent | null {
+function parseIntent(value: unknown, operationId: string, scope: RecoveryScope): Intent | null {
   if (!value || typeof value !== "object") return null;
   const entry = value as Record<string, unknown>;
-  if (entry.format !== 1 || entry.operationId !== operationId || entry.sourceDirectory !== sourceDirectory ||
+  const legacy = entry.format === 1 && scope.providerAccountId === undefined;
+  const accountScoped = entry.format === 2 && scope.providerAccountId !== undefined &&
+    entry.providerAccountId === scope.providerAccountId;
+  const localSourceDirectory = typeof entry.localSourceDirectory === "string"
+    ? entry.localSourceDirectory
+    : entry.sourceDirectory;
+  if ((!legacy && !accountScoped) || entry.operationId !== operationId ||
+      entry.sourceDirectory !== scope.sourceDirectory || localSourceDirectory !== scope.localSourceDirectory ||
       typeof entry.name !== "string" || !validSkillName(entry.name) ||
       typeof entry.digest !== "string" || !DIGEST.test(entry.digest) ||
       typeof entry.generation !== "string" || !DIGEST.test(entry.generation) ||
@@ -71,7 +103,7 @@ function parseIntent(value: unknown, operationId: string, sourceDirectory: strin
       typeof entry.parentIdentity !== "string" || !IDENTITY.test(entry.parentIdentity) ||
       typeof entry.targetIdentity !== "string" || !IDENTITY.test(entry.targetIdentity) ||
       entry.targetRelative !== `skills/store/${entry.name}/${entry.digest}`) return null;
-  return entry as unknown as Intent;
+  return { ...(entry as unknown as Intent), localSourceDirectory };
 }
 
 function openOptionalDirectory(parent: number, name: string): number | null {
@@ -107,18 +139,19 @@ function writeRecord(parent: number, name: string, value: unknown): void {
   fsyncSync(parent);
 }
 
-function operationView(home: string, dataDir: string, sourceDirectory: string,
+function operationView(scope: RecoveryScope, dataDir: string,
   operationId: string): SkillAdoptionRecoveryOperation | null {
   let parent: number | undefined;
   let backup: number | undefined;
   let original: number | null = null;
   try {
-    parent = openSkillDirectory(home, sourceDirectory);
+    parent = openSkillDirectory(scope.home, scope.localSourceDirectory);
     backup = openSync(`${fdPath(parent)}/${JOURNAL_PREFIX}${operationId}`, directoryFlags);
-    const parsed = parseIntent(readJsonFile(backup, "intent.json"), operationId, sourceDirectory);
+    const parsed = parseIntent(readJsonFile(backup, "intent.json"), operationId, scope);
     if (!parsed) return null;
-    const base = { operationId, backupDirectory: `${sourceDirectory}/${JOURNAL_PREFIX}${operationId}`,
-      sourceDirectory, name: parsed.name, digest: parsed.digest };
+    const base = { operationId, backupDirectory: `${scope.sourceDirectory}/${JOURNAL_PREFIX}${operationId}`,
+      sourceDirectory: scope.sourceDirectory, name: parsed.name, digest: parsed.digest,
+      ...(scope.providerAccountId ? { providerAccountId: scope.providerAccountId } : {}) };
     if (identity(parent) !== parsed.parentIdentity) {
       return { ...base, state: "blocked", detail: "The source parent identity changed." };
     }
@@ -142,7 +175,7 @@ function operationView(home: string, dataDir: string, sourceDirectory: string,
         if (linkTarget === target) {
           return { ...base, state: "managed_linked", detail: "The managed link is active and the original is preserved." };
         }
-        const originalTarget = join(realpathSync(home), sourceDirectory,
+        const originalTarget = join(realpathSync(scope.home), scope.localSourceDirectory,
           `${JOURNAL_PREFIX}${operationId}`, "original");
         if (linkTarget === originalTarget) {
           return { ...base, state: "restored", detail: "A recovery link exposes the preserved original at its source path." };
@@ -168,13 +201,16 @@ function operationView(home: string, dataDir: string, sourceDirectory: string,
 }
 
 export function listSkillAdoptionRecovery(home: string, dataDir: string,
-  agents: AgentDefinition[]): { operations: SkillAdoptionRecoveryOperation[]; truncated: boolean } {
+  agents: AgentDefinition[], providerAccounts: RunnerProviderAccount[] = []): {
+    operations: SkillAdoptionRecoveryOperation[];
+    truncated: boolean;
+  } {
   const operations: SkillAdoptionRecoveryOperation[] = [];
   let truncated = false;
-  for (const sourceDirectory of directories(agents)) {
+  for (const scope of recoveryScopes(home, agents, providerAccounts)) {
     let parent: number | undefined;
     try {
-      parent = openSkillDirectory(home, sourceDirectory);
+      parent = openSkillDirectory(scope.home, scope.localSourceDirectory);
       const dir = opendirSync(fdPath(parent));
       try {
         let raw = 0;
@@ -184,7 +220,7 @@ export function listSkillAdoptionRecovery(home: string, dataDir: string,
           const operationId = entry.name.slice(JOURNAL_PREFIX.length);
           if (!UUID.test(operationId)) continue;
           if (operations.length >= SKILL_RECOVERY_SCAN_LIMITS.operations) { truncated = true; break; }
-          const view = operationView(home, dataDir, sourceDirectory, operationId);
+          const view = operationView(scope, dataDir, operationId);
           if (view) operations.push(view);
         }
       } finally { dir.closeSync(); }
@@ -213,8 +249,9 @@ export interface RestoreSkillAdoptionRecoveryOptions {
   home: string;
   dataDir: string;
   agents: AgentDefinition[];
+  providerAccounts?: RunnerProviderAccount[];
   operationId: string;
-  acquireProviderHomeLease: () => void;
+  acquireProviderHomeLease: (home: string) => void;
   platform?: NodeJS.Platform;
   checkpoint?: (stage: RestoreStage) => void;
 }
@@ -230,12 +267,12 @@ export function restoreSkillAdoptionRecovery(options: RestoreSkillAdoptionRecove
   if ((options.platform ?? process.platform) !== "linux" || !UUID.test(options.operationId)) {
     return { status: "blocked", error: "Invalid or unsupported recovery operation." };
   }
-  try { options.acquireProviderHomeLease(); }
-  catch { return { status: "blocked", error: "The provider home is currently in use." }; }
-  const matches = directories(options.agents).map((sourceDirectory) => ({ sourceDirectory,
-    view: operationView(options.home, options.dataDir, sourceDirectory, options.operationId) }))
+  const matches = recoveryScopes(options.home, options.agents, options.providerAccounts).map((scope) => ({ scope,
+    view: operationView(scope, options.dataDir, options.operationId) }))
     .filter((entry) => entry.view);
   if (matches.length !== 1) return { status: "blocked", error: "The recovery operation was not found uniquely." };
+  try { options.acquireProviderHomeLease(matches[0]!.scope.home); }
+  catch { return { status: "blocked", error: "The provider home is currently in use." }; }
   const initial = matches[0]!.view!;
   if (initial.state === "intent_only" || initial.state === "restored") {
     return { status: "not_needed", operation: initial };
@@ -248,11 +285,12 @@ export function restoreSkillAdoptionRecovery(options: RestoreSkillAdoptionRecove
   let backup: number | undefined;
   let original: number | undefined;
   try {
-    const home = realpathSync(options.home);
+    const scope = matches[0]!.scope;
+    const home = realpathSync(scope.home);
     const dataDir = realpathSync(options.dataDir);
-    parent = openSkillDirectory(home, initial.sourceDirectory, true);
+    parent = openSkillDirectory(home, scope.localSourceDirectory, true);
     backup = openSync(`${fdPath(parent)}/${JOURNAL_PREFIX}${options.operationId}`, directoryFlags);
-    const parsed = parseIntent(readJsonFile(backup, "intent.json"), options.operationId, initial.sourceDirectory);
+    const parsed = parseIntent(readJsonFile(backup, "intent.json"), options.operationId, scope);
     if (!parsed || identity(parent) !== parsed.parentIdentity) throw new Error();
     original = openSync(`${fdPath(backup)}/original`, directoryFlags);
     if (identity(original) !== parsed.sourceIdentity ||
@@ -279,7 +317,7 @@ export function restoreSkillAdoptionRecovery(options: RestoreSkillAdoptionRecove
       options.checkpoint?.("managed_link_preserved");
     } else if (preservedLinkKind !== "absent") throw new Error();
     if (sourceKind !== "absent") throw new Error();
-    const originalPath = join(home, initial.sourceDirectory,
+    const originalPath = join(home, scope.localSourceDirectory,
       `${JOURNAL_PREFIX}${options.operationId}`, "original");
     // symlink() is the portable Node primitive with no-replace semantics: any last-instant file,
     // link, or directory at the source name makes it fail with EEXIST and remains untouched.
@@ -290,10 +328,9 @@ export function restoreSkillAdoptionRecovery(options: RestoreSkillAdoptionRecove
         skillVersionDigest(inspectSkillTree(original, true).files) !== parsed.digest) throw new Error();
     writeRecord(backup, "restored.json", { sourceIdentity: parsed.sourceIdentity, digest: parsed.digest });
     return { status: "restored",
-      operation: operationView(home, dataDir, initial.sourceDirectory, options.operationId) ?? initial };
+      operation: operationView(scope, dataDir, options.operationId) ?? initial };
   } catch {
-    const operation = operationView(options.home, options.dataDir, initial.sourceDirectory,
-      options.operationId) ?? initial;
+    const operation = operationView(matches[0]!.scope, options.dataDir, options.operationId) ?? initial;
     return { status: "recovery_required", operation,
       error: "Restore stopped safely. Inspect the journal and source path before retrying." };
   } finally {

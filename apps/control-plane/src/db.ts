@@ -3318,7 +3318,7 @@ export interface SkillVersionView extends SkillVersionSummary {
   note: string | null;
   gitSource?: { url: string; ref: string; subdirectory: string; path: string; commit: string };
   machineSource?: { runnerId: string; sourceDirectory: string; name: string; digest: string; importedAt: number;
-    context?: AgentContext };
+    context?: AgentContext; providerAccountId?: string };
 }
 
 export interface SkillGroupView {
@@ -3353,11 +3353,15 @@ function normalizeSkillLinkRemovals(value: unknown): SkillLinkRemoval[] {
   if (!Array.isArray(value)) return [];
   const normalized: SkillLinkRemoval[] = [];
   for (const candidate of value.slice(0, RUNNER_SKILL_REMOVAL_LIMIT)) {
-    const entry = candidate as { path?: unknown; reason?: unknown };
+    const entry = candidate as { path?: unknown; reason?: unknown; providerAccountId?: unknown };
     if (typeof entry?.path !== "string" || !entry.path.startsWith("~/") ||
         entry.path.length > RUNNER_SKILL_REMOVAL_TEXT_LIMIT || typeof entry.reason !== "string" ||
         entry.reason.length < 1 || entry.reason.length > RUNNER_SKILL_REMOVAL_TEXT_LIMIT) continue;
-    normalized.push({ path: entry.path, reason: entry.reason });
+    if (entry.providerAccountId !== undefined &&
+        (typeof entry.providerAccountId !== "string" ||
+          !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(entry.providerAccountId))) continue;
+    normalized.push({ path: entry.path, reason: entry.reason,
+      ...(entry.providerAccountId ? { providerAccountId: entry.providerAccountId } : {}) });
   }
   return normalized;
 }

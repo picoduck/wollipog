@@ -3,7 +3,7 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { RunnerView, UiSnapshotMessage } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, type RunnerView, type UiSnapshotMessage } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
@@ -43,10 +43,11 @@ const runner: RunnerView = {
   agents: [
     { id: "claude", name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code", available: true },
   ],
+  providerAccounts: [{ id: "work", label: "Work", provider: "claude", authStatus: "authenticated" }],
   workspaces: [],
   connectedAt: 1,
   lastSeen: 1,
-  protocolVersion: 96,
+  protocolVersion: PROTOCOL_VERSION,
 };
 
 class FakeSocket implements UiSocket {
@@ -84,11 +85,14 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
     removalReporting: "supported",
     desired: [{ name: "code-review", versionDigest: "d1", targets: [{ agentId: "claude", invocation: "agent" }] }],
     reported: {
-      deployed: [{ name: "code-review", digest: "d1", links: [{ agentId: "claude", status: "linked" }] }],
-      unmanaged: [{ agentId: "claude", name: "local-notes", description: "Scratch skill" }],
+      deployed: [{ name: "code-review", digest: "d1", providerAccountId: "work",
+        links: [{ agentId: "claude", status: "linked" }] }],
+      unmanaged: [{ agentId: "claude", name: "local-notes", description: "Scratch skill",
+        providerAccountId: "work" }],
       removals: [{
         path: "~/.codex/skills/retired-skill",
         reason: "No longer in the desired skill list.",
+        providerAccountId: "work",
       }],
       removalsUpdatedAt: 1_699_999_000_000,
       updatedAt: 1_700_000_000_000,
@@ -179,6 +183,7 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
   assert.match(pageText(), /Deployed/);
   assert.match(pageText(), /Unmanaged Skills/);
   assert.match(pageText(), /local-notes/);
+  assert.match(pageText(), /Work/, "account-scoped inventory names the credential home without exposing its path");
   assert.match(pageText(), /can then be adopted with an explicit recovery-aware confirmation/);
   assert.match(pageText(), /Recent Link Removals/);
   assert.match(pageText(), /~\/\.codex\/skills\/retired-skill/);

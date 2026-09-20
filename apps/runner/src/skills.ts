@@ -141,6 +141,8 @@ export interface ReconcileSkillsOptions {
   /** The base pass alone owns ~/.agents/skills and runner-local store GC. Account passes only
    * reconcile their exact provider harness directory through the already-created canonical link. */
   manageCanonical?: boolean;
+  /** Opaque identity for the credential home reconciled by this pass. */
+  providerAccountId?: string;
   desired: ReconcileSkillEntry[];
   /** Removal sweeps and store GC run only when an authoritative CP desired list is in hand. */
   allowRemovals?: boolean;
@@ -195,6 +197,16 @@ export interface ReconcileSkillsResult {
   removedLinks: SkillLinkRemoval[];
 }
 
+function scopedResult(result: ReconcileSkillsResult, providerAccountId?: string): ReconcileSkillsResult {
+  if (!providerAccountId) return result;
+  return {
+    ...result,
+    deployed: result.deployed.map((state) => ({ ...state, providerAccountId })),
+    unmanaged: result.unmanaged.map((entry) => ({ ...entry, providerAccountId })),
+    removedLinks: result.removedLinks.map((entry) => ({ ...entry, providerAccountId })),
+  };
+}
+
 /** Merge independently scoped harness passes into one authoritative runner report. A target is
  * represented once; if account homes disagree, the most severe outcome wins instead of hiding a
  * failed credential scope behind a successful sibling. */
@@ -206,7 +218,8 @@ export function mergeReconcileSkillsResults(
   const severity = { linked: 0, unsupported: 1, conflict: 2, error: 3 } as const;
   for (const incoming of right.deployed) {
     const existing = deployed.find((state) =>
-      state.name === incoming.name && state.digest === incoming.digest);
+      state.name === incoming.name && state.digest === incoming.digest &&
+      state.providerAccountId === incoming.providerAccountId);
     if (!existing) {
       deployed.push({ ...incoming, links: [...incoming.links] });
       continue;
@@ -221,7 +234,8 @@ export function mergeReconcileSkillsResults(
   }
   const unmanaged = [...left.unmanaged];
   for (const candidate of right.unmanaged) {
-    if (!unmanaged.some((entry) => entry.agentId === candidate.agentId && entry.name === candidate.name)) {
+    if (!unmanaged.some((entry) => entry.agentId === candidate.agentId && entry.name === candidate.name &&
+      entry.providerAccountId === candidate.providerAccountId)) {
       unmanaged.push(candidate);
     }
   }
@@ -1275,7 +1289,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     // ancestry before mkdir can follow anything, then re-verify by realpath equality after.
     realStoreRoot = prepareSkillStoreRoot(dataDir);
   } catch (error) {
-    return {
+    return scopedResult({
       deployed: desired.map((entry) => ({
         name: String(entry.name),
         digest: String(entry.versionDigest),
@@ -1286,7 +1300,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       // than misreported; nothing is removed on this path either.
       unmanaged: scanUnmanagedSkills(home, managedAgents, undefined, options.harnessDirectories),
       removedLinks: [],
-    };
+    }, options.providerAccountId);
   }
   const bindings = harnessBindings(managedAgents);
   const agentBinding = new Map(bindings.map((binding) => [binding.agentId, binding]));
@@ -1389,7 +1403,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         foundForeignSymlink ||= foreign;
         return foreign;
       }, options.harnessDirectories);
-      return {
+      return scopedResult({
         deployed: prepared.map(({ entry, invalid, materializationError }) => {
           if (invalid) {
             return { name: String(entry.name), digest: String(entry.versionDigest), links: [], error: invalid };
@@ -1426,7 +1440,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         unmanaged,
         removedLinks: [],
         error: `${detail}${foundForeignSymlink ? ` ${scanDetail}` : ""}`,
-      };
+      }, options.providerAccountId);
     }
   }
   const canonicalDir = canonicalSkillsDir(home);
@@ -1756,7 +1770,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     saveOwnedLinks(manifestPath, owned, options.log);
   }
 
-  return {
+  return scopedResult({
     deployed,
     unmanaged: scanUnmanagedSkills(home, managedAgents, (linkPath) => {
       // Foreign is anything the sweep would refuse to touch: a link with a foreign target, or a
@@ -1766,5 +1780,5 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       return probe.via === "canonical" && !ownedLink(owned, linkPath, platform);
     }, options.harnessDirectories),
     removedLinks,
-  };
+  }, options.providerAccountId);
 }

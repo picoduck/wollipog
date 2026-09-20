@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { AgentDefinition, SkillAdoptionMessage } from "@wollipog/protocol";
 import { handleSkillAdoption } from "./skill-adoption-command.js";
 import { MachineSkillSnapshots } from "./skill-snapshots.js";
+import { listSkillAdoptionRecovery, restoreSkillAdoptionRecovery } from "./skill-adoption-recovery.js";
 import { cacheSkillSyncEntry, type ReconcileSkillEntry } from "./skills.js";
 
 const linux = { skip: process.platform !== "linux" };
@@ -66,4 +67,47 @@ test("shared directory readers require explicit impact consent", linux, (t) => {
     acquireProviderHomeLease: () => undefined };
   assert.equal(handleSkillAdoption(base).status, "rejected");
   assert.equal(handleSkillAdoption({ ...base, message: { ...f.message, acceptSharedImpact: true } }).status, "adopted");
+});
+
+test("account-scoped adoption and recovery use and retain the selected credential home", linux, (t) => {
+  const root = fs.mkdtempSync(join(tmpdir(), "skill-adoption-account-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home"), dataDir = join(root, "data"), accountHome = join(root, "work");
+  const accounts = [{ id: "work", label: "Work", provider: "codex" as const, directory: accountHome }];
+  fs.mkdirSync(join(accountHome, "skills/alpha"), { recursive: true });
+  fs.mkdirSync(home);
+  fs.mkdirSync(dataDir);
+  fs.writeFileSync(join(accountHome, "skills/alpha/SKILL.md"), "---\nname: alpha\n---\nAccount original");
+  const snapshots = new MachineSkillSnapshots({ home, agents: () => agents,
+    providerAccounts: () => accounts, accountScopesEnabled: () => true });
+  const candidate = snapshots.handle({ type: "skill_snapshot", runnerId: "runner", requestId: "list",
+    operation: "list" }).candidates![0]!;
+  const snapshot = snapshots.handle({ type: "skill_snapshot", runnerId: "runner", requestId: "read",
+    operation: "read", candidateId: candidate.id }).snapshot!;
+  const desired: ReconcileSkillEntry = { name: "alpha", versionDigest: snapshot.digest, files: snapshot.files,
+    targets: [{ agentId: "codex", invocation: "agent" }] };
+  cacheSkillSyncEntry(dataDir, agents, desired);
+  const leased: string[] = [];
+  const result = handleSkillAdoption({
+    message: { type: "skill_adoption", runnerId: "runner", requestId: "adopt", candidate,
+      digest: snapshot.digest, confirmation: "explicit", acceptSharedImpact: false },
+    runnerId: "runner", home, dataDir, agents, snapshots, desired: [desired],
+    providerAccounts: () => accounts,
+    acquireProviderHomeLease: (credentialHome) => { leased.push(credentialHome); },
+  });
+  assert.equal(result.status, "adopted", JSON.stringify(result));
+  assert.equal(result.providerAccountId, "work");
+  assert.deepEqual(leased, [accountHome]);
+  assert.ok(fs.lstatSync(join(accountHome, "skills/alpha")).isSymbolicLink());
+  const listed = listSkillAdoptionRecovery(home, dataDir, agents, accounts);
+  assert.deepEqual(listed.operations.map((operation) =>
+    [operation.providerAccountId, operation.sourceDirectory, operation.state]), [
+    ["work", ".codex/skills", "managed_linked"],
+  ]);
+  const restored = restoreSkillAdoptionRecovery({ home, dataDir, agents, providerAccounts: accounts,
+    operationId: result.operationId!, acquireProviderHomeLease: (credentialHome) => {
+      assert.equal(credentialHome, accountHome);
+    } });
+  assert.equal(restored.status, "restored", JSON.stringify(restored));
+  assert.equal(restored.operation?.providerAccountId, "work");
 });

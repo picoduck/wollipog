@@ -23,7 +23,22 @@ export function skillAdoptionPreflight(db: ControlPlaneDb, runnerId: string, can
   const directory = (driver: string | undefined) => driver === "claude-code" ? ".claude/skills"
     : driver === "codex" || driver === "codex-app-server" ? ".codex/skills"
       : driver === "pi" ? ".pi/agent/skills" : null;
-  const readers = agents.filter((agent) => (agent.context?.kind ?? "native") === "native" &&
+  const account = candidate.providerAccountId
+    ? runner?.providerAccounts?.find((entry) => entry.id === candidate.providerAccountId)
+    : undefined;
+  const provider = (driver: string | undefined) => driver === "claude-code" ? "claude"
+    : driver === "codex" || driver === "codex-app-server" ? "codex" : null;
+  if (candidate.providerAccountId &&
+      (!runnerSupportsProtocol(runner?.protocolVersion, "accountScopedAgentSkills") || !account)) {
+    blockers.push("provider_account_scope_unavailable");
+  }
+  const sameContext = (agent: typeof agents[number]) => candidate.context?.kind === "wsl"
+    ? agent.context?.kind === "wsl" && agent.context.distro === candidate.context.distro
+    : (agent.context?.kind ?? "native") === "native";
+  const readers = agents.filter((agent) =>
+    (candidate.providerAccountId
+      ? provider(agent.driver) === account?.provider && sameContext(agent)
+      : (agent.context?.kind ?? "native") === "native") &&
     (agent.driver !== "pi" || piEnabled) && directory(agent.driver) &&
     (candidate.sourceDirectory === ".agents/skills" || directory(agent.driver) === candidate.sourceDirectory));
   const targets = (desired?.targets ?? []).map((target) => ({ ...target,

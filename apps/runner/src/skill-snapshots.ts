@@ -7,7 +7,12 @@ import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
 import { listMacosSkillCandidates, readMacosSkillCandidate } from "./macos-skill-snapshots.js";
 import { SKILL_DIRS } from "./skills.js";
 import { listWindowsSkillCandidates, readWindowsSkillCandidate } from "./windows-skill-snapshots.js";
-import { resolveWslHomeUnc } from "./wsl-skill-snapshots.js";
+import type { RunnerProviderAccount } from "./config.js";
+import {
+  agentForProviderAccount,
+  agentsWithoutConfiguredProviderAccounts,
+} from "./provider-accounts.js";
+import { resolveWslHomeUnc, wslHomeToUnc } from "./wsl-skill-snapshots.js";
 
 const directoryFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 const fingerprint = (stat: Stats) => `${stat.dev}:${stat.ino}:${stat.ctimeMs}:${stat.mtimeMs}`;
@@ -48,17 +53,54 @@ export function openSkillDirectory(home: string, relative: string, durable = fal
  * to a pinned parent. A concurrent parent rename cannot redirect the read outside that parent.
  * No filesystem writes, subprocesses, script execution, or arbitrary client paths. */
 export class MachineSkillSnapshots {
-  private readonly candidates = new Map<string, { candidate: MachineSkillCandidate; expires: number; home?: string }>();
+  private readonly candidates = new Map<string, {
+    candidate: MachineSkillCandidate;
+    expires: number;
+    home?: string;
+    localSourceDirectory?: string;
+  }>();
   constructor(private readonly options: { home: string; agents: () => AgentDefinition[]; platform?: NodeJS.Platform;
+    providerAccounts?: () => RunnerProviderAccount[]; accountScopesEnabled?: () => boolean;
     now?: () => number; maxRawEntriesPerDirectory?: number;
     macosList?: typeof listMacosSkillCandidates; macosRead?: typeof readMacosSkillCandidate;
     windowsList?: typeof listWindowsSkillCandidates; windowsRead?: typeof readWindowsSkillCandidate;
     wslHome?: (distro: string) => string | null }) {}
   private now() { return this.options.now?.() ?? Date.now(); }
   private platform() { return this.options.platform ?? process.platform; }
+  private accountScopesEnabled() { return this.options.accountScopesEnabled?.() === true; }
+  private providerAccounts() {
+    return this.accountScopesEnabled() ? (this.options.providerAccounts?.() ?? []) : [];
+  }
+  private accountScopes(): Array<{
+    id: string;
+    home: string;
+    sourceDirectory: string;
+    context?: AgentDefinition["context"];
+  }> {
+    return this.providerAccounts().flatMap((account) => {
+      const agent = agentForProviderAccount(this.options.agents(), account, undefined, this.platform());
+      if (!agent) return [];
+      const context = agent.context?.kind === "wsl" ? agent.context : undefined;
+      let home = account.directory;
+      if (this.platform() === "win32" && context?.kind === "wsl") {
+        try { home = wslHomeToUnc(context.distro, account.directory); } catch { return []; }
+      }
+      return [{
+        id: account.id,
+        home,
+        sourceDirectory: account.provider === "claude" ? ".claude/skills" : ".codex/skills",
+        ...(context ? { context } : {}),
+      }];
+    });
+  }
+  private discoveryAgents(): AgentDefinition[] {
+    return this.accountScopesEnabled()
+      ? agentsWithoutConfiguredProviderAccounts(this.options.agents(), this.providerAccounts())
+      : this.options.agents();
+  }
   private directories(): string[] {
     const dirs = new Set<string>([".agents/skills"]);
-    for (const agent of this.options.agents()) {
+    for (const agent of this.discoveryAgents()) {
       if ((agent.context?.kind ?? "native") !== "native") continue;
       const dir = SKILL_DIRS[agent.driver ?? "acp"];
       if (dir) dirs.add(dir);
@@ -67,7 +109,7 @@ export class MachineSkillSnapshots {
   }
   private wslDirectories(distro: string): string[] {
     const dirs = new Set<string>([".agents/skills"]);
-    for (const agent of this.options.agents()) {
+    for (const agent of this.discoveryAgents()) {
       if (agent.context?.kind !== "wsl" || agent.context.distro !== distro) continue;
       const dir = SKILL_DIRS[agent.driver ?? "acp"];
       if (dir) dirs.add(dir);
@@ -75,21 +117,29 @@ export class MachineSkillSnapshots {
     return [...dirs];
   }
   private wslDistros(): string[] {
-    return [...new Set(this.options.agents().flatMap((agent) =>
+    return [...new Set(this.discoveryAgents().flatMap((agent) =>
       agent.context?.kind === "wsl" && SKILL_DIRS[agent.driver ?? "acp"] ? [agent.context.distro] : []))];
-  }
-  private openDirectory(relative: string): number {
-    return openSkillDirectory(this.options.home, relative);
   }
   /** Resolve only an exact, still-live candidate minted by this runner process. */
   resolveCandidate(expected: MachineSkillCandidate): MachineSkillCandidate | null {
     for (const [id, entry] of this.candidates) if (entry.expires <= this.now()) this.candidates.delete(id);
-    const current = this.candidates.get(expected.id)?.candidate;
+    const entry = this.candidates.get(expected.id);
+    const current = entry?.candidate;
+    const accountScope = current?.providerAccountId
+      ? this.accountScopes().find((scope) => scope.id === current.providerAccountId)
+      : undefined;
     return current && current.name === expected.name && current.sourceDirectory === expected.sourceDirectory &&
-      current.generation === expected.generation && current.context?.kind === expected.context?.kind &&
+      current.generation === expected.generation && current.providerAccountId === expected.providerAccountId &&
+      current.context?.kind === expected.context?.kind &&
       (current.context?.kind !== "wsl" || (expected.context?.kind === "wsl" &&
-        current.context.distro === expected.context.distro && this.wslDistros().includes(current.context.distro))) &&
-      (current.context?.kind === "wsl"
+        current.context.distro === expected.context.distro &&
+        (current.providerAccountId
+          ? accountScope?.context?.kind === "wsl" && accountScope.context.distro === current.context.distro
+          : this.wslDistros().includes(current.context.distro)))) &&
+      (current.providerAccountId
+        ? accountScope?.home === entry?.home && accountScope?.sourceDirectory === current.sourceDirectory &&
+          entry?.localSourceDirectory === "skills"
+        : current.context?.kind === "wsl"
         ? this.wslDirectories(current.context.distro).includes(current.sourceDirectory)
         : this.directories().includes(current.sourceDirectory))
       ? current : null;
@@ -106,22 +156,24 @@ export class MachineSkillSnapshots {
       const entry = typeof message.candidateId === "string" ? this.candidates.get(message.candidateId) : undefined;
       if (!entry) throw new Error();
       const candidate = entry.candidate;
+      if (!this.resolveCandidate(candidate)) throw new Error();
+      const home = entry.home ?? this.options.home;
+      const localSourceDirectory = entry.localSourceDirectory ?? candidate.sourceDirectory;
+      const localCandidate = { ...candidate, sourceDirectory: localSourceDirectory };
       if (candidate.context?.kind === "wsl") {
-        if (this.platform() !== "win32" || !entry.home ||
-            !this.wslDirectories(candidate.context.distro).includes(candidate.sourceDirectory)) throw new Error();
-        const files = (this.options.windowsRead ?? readWindowsSkillCandidate)(entry.home, candidate);
+        if (this.platform() !== "win32" || !entry.home) throw new Error();
+        const files = (this.options.windowsRead ?? readWindowsSkillCandidate)(home, localCandidate);
         return { ...result, snapshot: { candidate, files, digest: skillVersionDigest(files), executablePaths: [] } };
       }
-      if (!this.directories().includes(candidate.sourceDirectory)) throw new Error();
       if (this.platform() === "darwin") {
-        const snapshot = (this.options.macosRead ?? readMacosSkillCandidate)(this.options.home, candidate);
+        const snapshot = (this.options.macosRead ?? readMacosSkillCandidate)(home, localCandidate);
         return { ...result, snapshot: { candidate, ...snapshot, digest: skillVersionDigest(snapshot.files) } };
       }
       if (this.platform() === "win32") {
-        const files = (this.options.windowsRead ?? readWindowsSkillCandidate)(this.options.home, candidate);
+        const files = (this.options.windowsRead ?? readWindowsSkillCandidate)(home, localCandidate);
         return { ...result, snapshot: { candidate, files, digest: skillVersionDigest(files), executablePaths: [] } };
       }
-      const fd = this.openDirectory(`${candidate.sourceDirectory}/${candidate.name}`);
+      const fd = openSkillDirectory(home, `${localSourceDirectory}/${candidate.name}`);
       try {
         if (directoryGeneration(fd) !== candidate.generation) throw new Error();
         const first = inspectSkillTree(fd);
@@ -139,20 +191,41 @@ export class MachineSkillSnapshots {
     }
   }
   private list(): MachineSkillCandidate[] {
+    const found: MachineSkillCandidate[] = [];
+    const remember = (
+      candidate: MachineSkillCandidate,
+      home?: string,
+      localSourceDirectory?: string,
+    ) => {
+      if (found.length >= 64) return;
+      found.push(candidate);
+      this.candidates.set(candidate.id, {
+        candidate,
+        expires: this.now() + 600_000,
+        ...(home ? { home } : {}),
+        ...(localSourceDirectory ? { localSourceDirectory } : {}),
+      });
+    };
     if (this.platform() === "darwin") {
-      const found = (this.options.macosList ?? listMacosSkillCandidates)(this.options.home, this.directories())
-        .map((entry) => ({ id: randomUUID(), ...entry }));
-      for (const candidate of found) this.candidates.set(candidate.id, { candidate, expires: this.now() + 600_000 });
+      for (const entry of (this.options.macosList ?? listMacosSkillCandidates)(this.options.home, this.directories())) {
+        remember({ id: randomUUID(), ...entry });
+      }
+      for (const scope of this.accountScopes()) {
+        if (found.length >= 64) break;
+        try {
+          for (const entry of (this.options.macosList ?? listMacosSkillCandidates)(scope.home, ["skills"])) {
+            remember({ id: randomUUID(), ...entry, sourceDirectory: scope.sourceDirectory,
+              providerAccountId: scope.id }, scope.home, "skills");
+          }
+        } catch { /* One unavailable account home must not hide the remaining scopes. */ }
+      }
       while (this.candidates.size > 256) this.candidates.delete(this.candidates.keys().next().value!);
       return found;
     }
     if (this.platform() === "win32") {
       const native = (this.options.windowsList ?? listWindowsSkillCandidates)(this.options.home, this.directories())
         .map((entry) => ({ id: randomUUID(), ...entry }));
-      const found: MachineSkillCandidate[] = [...native];
-      for (const candidate of native) {
-        this.candidates.set(candidate.id, { candidate, expires: this.now() + 600_000 });
-      }
+      for (const candidate of native) remember(candidate);
       for (const distro of this.wslDistros()) {
         if (found.length >= 64) break;
         try {
@@ -162,21 +235,30 @@ export class MachineSkillSnapshots {
           const candidates = (this.options.windowsList ?? listWindowsSkillCandidates)(home, this.wslDirectories(distro))
             .slice(0, remaining)
             .map((entry): MachineSkillCandidate => ({ id: randomUUID(), ...entry, context: { kind: "wsl", distro } }));
-          for (const candidate of candidates) {
-            found.push(candidate);
-            this.candidates.set(candidate.id, { candidate, expires: this.now() + 600_000, home });
-          }
+          for (const candidate of candidates) remember(candidate, home);
         } catch {
           // One stopped, wedged, or malformed distro must not hide native or other WSL candidates.
         }
       }
+      for (const scope of this.accountScopes()) {
+        if (found.length >= 64) break;
+        try {
+          const remaining = 64 - found.length;
+          const candidates = (this.options.windowsList ?? listWindowsSkillCandidates)(scope.home, ["skills"])
+            .slice(0, remaining)
+            .map((entry): MachineSkillCandidate => ({ id: randomUUID(), ...entry,
+              sourceDirectory: scope.sourceDirectory, providerAccountId: scope.id,
+              ...(scope.context?.kind === "wsl" ? { context: scope.context } : {}) }));
+          for (const candidate of candidates) remember(candidate, scope.home, "skills");
+        } catch { /* One unavailable account home must not hide the remaining scopes. */ }
+      }
       while (this.candidates.size > 256) this.candidates.delete(this.candidates.keys().next().value!);
       return found;
     }
-    const found: MachineSkillCandidate[] = [];
-    for (const relative of this.directories()) {
+    const scan = (home: string, relative: string, sourceDirectory: string,
+      providerAccountId?: string) => {
       let fd: number;
-      try { fd = this.openDirectory(relative); } catch { continue; }
+      try { fd = openSkillDirectory(home, relative); } catch { return; }
       try {
         const dir = opendirSync(fdPath(fd));
         try {
@@ -195,15 +277,26 @@ export class MachineSkillSnapshots {
               child = openSync(`${fdPath(fd)}/${entry.name}`, directoryFlags);
               manifest = openSync(`${fdPath(child)}/SKILL.md`, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
               if (!fstatSync(manifest).isFile()) continue;
-              const candidate = { id: randomUUID(), name: entry.name, sourceDirectory: relative,
-                generation: directoryGeneration(child) };
-              found.push(candidate);
-              this.candidates.set(candidate.id, { candidate, expires: this.now() + 600_000 });
+              const candidate: MachineSkillCandidate = {
+                id: randomUUID(), name: entry.name, sourceDirectory,
+                generation: directoryGeneration(child),
+                ...(providerAccountId ? { providerAccountId } : {}),
+              };
+              remember(candidate, providerAccountId ? home : undefined,
+                providerAccountId ? relative : undefined);
             } catch { /* Unsupported or concurrently removed candidates are not offered. */ }
             finally { if (manifest !== undefined) closeSync(manifest); if (child !== undefined) closeSync(child); }
           }
         } finally { dir.closeSync(); }
       } finally { closeSync(fd); }
+    };
+    for (const relative of this.directories()) {
+      if (found.length >= 64) break;
+      scan(this.options.home, relative, relative);
+    }
+    for (const scope of this.accountScopes()) {
+      if (found.length >= 64) break;
+      scan(scope.home, "skills", scope.sourceDirectory, scope.id);
     }
     while (this.candidates.size > 256) this.candidates.delete(this.candidates.keys().next().value!);
     return found;

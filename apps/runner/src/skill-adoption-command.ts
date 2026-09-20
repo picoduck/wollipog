@@ -4,6 +4,8 @@ import type {
   SkillAdoptionResultMessage,
 } from "@wollipog/protocol";
 import { adoptMachineSkill } from "./skill-adoption.js";
+import type { RunnerProviderAccount } from "./config.js";
+import { providerAccountAgentContextCompatible, providerForDriver } from "./provider-accounts.js";
 import type { MachineSkillSnapshots } from "./skill-snapshots.js";
 import { SKILL_DIRS, type ReconcileSkillEntry } from "./skills.js";
 
@@ -13,9 +15,10 @@ export interface SkillAdoptionCommandOptions {
   home: string;
   dataDir: string;
   agents: AgentDefinition[];
+  providerAccounts?: () => RunnerProviderAccount[];
   snapshots: MachineSkillSnapshots;
   desired: ReconcileSkillEntry[] | null;
-  acquireProviderHomeLease: () => void;
+  acquireProviderHomeLease: (home: string) => void;
 }
 
 const rejected = (message: SkillAdoptionMessage, runnerId: string, error: string): SkillAdoptionResultMessage => ({
@@ -36,12 +39,27 @@ export function handleSkillAdoption(options: SkillAdoptionCommandOptions): Skill
   }
   const candidate = options.snapshots.resolveCandidate(message.candidate);
   if (!candidate) return rejected(message, runnerId, "The machine discovery expired or changed. Discover it again.");
+  const account = candidate.providerAccountId
+    ? options.providerAccounts?.().find((entry) => entry.id === candidate.providerAccountId)
+    : undefined;
+  if (candidate.providerAccountId && !account) {
+    return rejected(message, runnerId, "The selected provider account is no longer configured. Discover it again.");
+  }
+  if (account && candidate.sourceDirectory !== (account.provider === "claude" ? ".claude/skills" : ".codex/skills")) {
+    return rejected(message, runnerId, "The selected provider account no longer matches this skill source.");
+  }
   const desired = options.desired?.find((entry) =>
     entry.name === candidate.name && entry.versionDigest === message.digest);
   if (!desired) return rejected(message, runnerId, "The approved skill version is no longer assigned to this machine.");
 
   const readers = agents.filter((agent) => {
-    if ((agent.context?.kind ?? "native") !== "native") return false;
+    if (account) {
+      if (providerForDriver(agent.driver ?? "acp") !== account.provider ||
+          !providerAccountAgentContextCompatible(account, agent)) return false;
+      if (candidate.context?.kind === "wsl") {
+        if (agent.context?.kind !== "wsl" || agent.context.distro !== candidate.context.distro) return false;
+      } else if ((agent.context?.kind ?? "native") !== "native") return false;
+    } else if ((agent.context?.kind ?? "native") !== "native") return false;
     const directory = SKILL_DIRS[agent.driver ?? "acp"];
     return directory && (candidate.sourceDirectory === ".agents/skills" || directory === candidate.sourceDirectory);
   });
@@ -58,6 +76,11 @@ export function handleSkillAdoption(options: SkillAdoptionCommandOptions): Skill
   }
 
   const stillAuthorized = () => {
+    if (account) {
+      const currentAccount = options.providerAccounts?.().find((entry) => entry.id === account.id);
+      if (!currentAccount || currentAccount.provider !== account.provider ||
+          currentAccount.directory !== account.directory) throw new Error();
+    }
     const current = options.desired?.find((entry) => entry.name === candidate.name);
     if (!current || current.versionDigest !== message.digest) throw new Error();
     const currentTargets = current.targets.filter((target) => readers.some((reader) => reader.id === target.agentId));
@@ -67,12 +90,16 @@ export function handleSkillAdoption(options: SkillAdoptionCommandOptions): Skill
     return undefined;
   };
   const result = adoptMachineSkill({
-    home: options.home,
+    home: account?.directory ?? options.home,
     dataDir: options.dataDir,
     agents,
     candidate,
+    ...(account ? { localSourceDirectory: "skills" } : {}),
     digest: message.digest,
-    acquireProviderHomeLease: () => { options.acquireProviderHomeLease(); return undefined; },
+    acquireProviderHomeLease: () => {
+      options.acquireProviderHomeLease(account?.directory ?? options.home);
+      return undefined;
+    },
     assertAuthorized: stillAuthorized,
   });
   return { type: "skill_adoption_result", runnerId, requestId: message.requestId, ...result };

@@ -16,6 +16,9 @@ export interface SkillAdoptionOptions {
   agents: AgentDefinition[];
   /** Trusted caller resolves the opaque candidate, expiration and approval before calling. */
   candidate: MachineSkillCandidate;
+  /** Runner-resolved path beneath `home`; account candidates keep their public harness-relative
+   * sourceDirectory while mutating `<credential-home>/skills`. */
+  localSourceDirectory?: string;
   digest: string;
   /** Required synchronous guards. Authorization checks durable version, targeting, invocation
    * variant and accepted shared-directory impact. Callers must not pass an async function. */
@@ -27,7 +30,8 @@ export interface SkillAdoptionOptions {
 }
 export type SkillAdoptionResult =
   | { status: "rejected"; error: string }
-  | { status: "adopted" | "recovery_required"; operationId: string; backupDirectory: string; error?: string };
+  | { status: "adopted" | "recovery_required"; operationId: string; backupDirectory: string;
+      providerAccountId?: string; error?: string };
 
 const flags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 const fdPath = (fd: number) => `/proc/self/fd/${fd}`;
@@ -63,11 +67,12 @@ export function adoptMachineSkill(options: SkillAdoptionOptions): SkillAdoptionR
     guard(options.assertAuthorized);
     const home = realpathSync(options.home);
     const dataDir = realpathSync(options.dataDir);
-    const sourcePath = join(home, candidate.sourceDirectory, candidate.name);
+    const localSourceDirectory = options.localSourceDirectory ?? candidate.sourceDirectory;
+    const sourcePath = join(home, localSourceDirectory, candidate.name);
     const targetRelative = `skills/store/${candidate.name}/${digest}`;
     const targetPath = join(dataDir, targetRelative);
     if (targetPath === sourcePath || targetPath.startsWith(sourcePath + sep) || sourcePath.startsWith(targetPath + sep)) throw new Error();
-    const parent = keep(openSkillDirectory(home, candidate.sourceDirectory, true));
+    const parent = keep(openSkillDirectory(home, localSourceDirectory, true));
     const source = keep(openSync(`${fdPath(parent)}/${candidate.name}`, flags));
     const target = keep(openSkillDirectory(dataDir, targetRelative, true));
     const parentIdentity = identity(parent), sourceIdentity = identity(source), targetIdentity = identity(target);
@@ -85,8 +90,8 @@ export function adoptMachineSkill(options: SkillAdoptionOptions): SkillAdoptionR
       if (directoryGeneration(fd) !== generation) throw new Error();
     };
     const checkSource = () => {
-      checkPath(home, candidate.sourceDirectory, parentIdentity);
-      checkPath(home, `${candidate.sourceDirectory}/${candidate.name}`, sourceIdentity);
+      checkPath(home, localSourceDirectory, parentIdentity);
+      checkPath(home, `${localSourceDirectory}/${candidate.name}`, sourceIdentity);
       if (directoryGeneration(source) !== candidate.generation) throw new Error();
       checkContent(source, true);
       if (directoryGeneration(source) !== candidate.generation) throw new Error();
@@ -99,8 +104,22 @@ export function adoptMachineSkill(options: SkillAdoptionOptions): SkillAdoptionR
     mkdirSync(`${fdPath(parent)}/${backupName}`, { mode: 0o700 });
     recovery = { operationId, backupDirectory: `${candidate.sourceDirectory}/${backupName}` };
     const backup = keep(openSync(`${fdPath(parent)}/${backupName}`, flags));
-    record(backup, "intent.json", { format: 1, operationId, sourceDirectory: candidate.sourceDirectory, name: candidate.name,
-      digest, generation: candidate.generation, sourceIdentity, parentIdentity, targetIdentity, targetRelative });
+    record(backup, "intent.json", {
+      format: candidate.providerAccountId ? 2 : 1,
+      operationId,
+      sourceDirectory: candidate.sourceDirectory,
+      ...(candidate.providerAccountId ? {
+        localSourceDirectory,
+        providerAccountId: candidate.providerAccountId,
+      } : {}),
+      name: candidate.name,
+      digest,
+      generation: candidate.generation,
+      sourceIdentity,
+      parentIdentity,
+      targetIdentity,
+      targetRelative,
+    });
     fsyncSync(parent);
     options.checkpoint?.("intent_durable");
     // Check again after journal creation. A concurrently renamed parent cannot redirect the
@@ -115,7 +134,7 @@ export function adoptMachineSkill(options: SkillAdoptionOptions): SkillAdoptionR
     if (identity(preserved) !== sourceIdentity) throw new Error();
     checkContent(preserved, true);
     record(backup, "preserved.json", { sourceIdentity, digest });
-    checkPath(home, candidate.sourceDirectory, parentIdentity);
+    checkPath(home, localSourceDirectory, parentIdentity);
     checkPath(dataDir, targetRelative, targetIdentity);
     checkContent(target);
     guard(options.assertAuthorized);
@@ -123,14 +142,16 @@ export function adoptMachineSkill(options: SkillAdoptionOptions): SkillAdoptionR
     symlinkSync(targetPath, `${fdPath(parent)}/${candidate.name}`, "dir");
     fsyncSync(parent);
     options.checkpoint?.("link_created");
-    checkPath(home, candidate.sourceDirectory, parentIdentity);
+    checkPath(home, localSourceDirectory, parentIdentity);
     checkPath(dataDir, targetRelative, targetIdentity);
     checkContent(target);
     if (readlinkSync(`${fdPath(parent)}/${candidate.name}`) !== targetPath) throw new Error();
     record(backup, "linked.json", { digest });
-    return { status: "adopted", ...recovery };
+    return { status: "adopted", ...recovery,
+      ...(candidate.providerAccountId ? { providerAccountId: candidate.providerAccountId } : {}) };
   } catch {
     return recovery ? { status: "recovery_required", ...recovery,
+      ...(candidate.providerAccountId ? { providerAccountId: candidate.providerAccountId } : {}),
       error: "Adoption stopped. Inspect the private journal and preserved original; no automatic restore or cleanup was attempted." }
       : { status: "rejected", error: "Adoption authorization, source or stored version could not be validated. No source directory was replaced." };
   } finally {

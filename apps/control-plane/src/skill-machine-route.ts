@@ -25,9 +25,18 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       context.distro.length > 0 && context.distro.length <= 256 &&
       !/[\\/:*?"<>|\p{Cc}\p{Cf}]/u.test(context.distro) && !context.distro.endsWith("."));
   };
+  const validCandidateAccount = (candidate: MachineSkillCandidate, runner: NonNullable<ReturnType<typeof deps.db.getRunner>>) => {
+    if (candidate.providerAccountId === undefined) return true;
+    if (!runnerSupportsProtocol(runner.protocolVersion, "accountScopedAgentSkills") ||
+        !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(candidate.providerAccountId)) return false;
+    const account = runner.providerAccounts?.find((entry) => entry.id === candidate.providerAccountId);
+    return !!account && candidate.sourceDirectory ===
+      (account.provider === "claude" ? ".claude/skills" : ".codex/skills");
+  };
   const sameCandidate = (left: MachineSkillCandidate, right: MachineSkillCandidate) =>
     left.id === right.id && left.generation === right.generation && left.name === right.name &&
     left.sourceDirectory === right.sourceDirectory &&
+    left.providerAccountId === right.providerAccountId &&
     left.context?.kind === right.context?.kind &&
     (left.context?.kind !== "wsl" || (right.context?.kind === "wsl" && left.context.distro === right.context.distro));
   let pending = false;
@@ -102,22 +111,31 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
     }
     return true;
   };
-  const recoveryOperation = (value: unknown): SkillAdoptionRecoveryOperation | null => {
+  const recoveryOperation = (value: unknown,
+    runner: NonNullable<ReturnType<typeof deps.db.getRunner>>): SkillAdoptionRecoveryOperation | null => {
     if (!value || typeof value !== "object") return null;
     const operation = value as SkillAdoptionRecoveryOperation;
     const allowedStates = new Set(["intent_only", "source_preserved", "managed_linked", "restored", "blocked"]);
     const allowedDirectories = new Set([".agents/skills", ".claude/skills", ".codex/skills"]);
+    const providerAccountId = operation.providerAccountId;
+    const account = providerAccountId === undefined
+      ? undefined
+      : runner.providerAccounts?.find((entry) => entry.id === providerAccountId);
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(operation.operationId) ||
         !allowedDirectories.has(operation.sourceDirectory) || !validSkillName(operation.name) ||
         !/^[0-9a-f]{64}$/.test(operation.digest) || !allowedStates.has(operation.state) ||
         typeof operation.detail !== "string" || operation.detail.length > 300 ||
-        operation.backupDirectory !== `${operation.sourceDirectory}/.wollipog-adoption-${operation.operationId}`) return null;
+        operation.backupDirectory !== `${operation.sourceDirectory}/.wollipog-adoption-${operation.operationId}` ||
+        (providerAccountId !== undefined &&
+          (!runnerSupportsProtocol(runner.protocolVersion, "accountScopedAgentSkills") || !account ||
+            operation.sourceDirectory !== (account.provider === "claude" ? ".claude/skills" : ".codex/skills")))) return null;
     return {
       operationId: operation.operationId,
       backupDirectory: operation.backupDirectory,
       sourceDirectory: operation.sourceDirectory,
       name: operation.name,
       digest: operation.digest,
+      ...(providerAccountId ? { providerAccountId } : {}),
       state: operation.state,
       detail: operation.detail,
     };
@@ -129,22 +147,25 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
     const error = result.error;
     if (error !== undefined && (typeof error !== "string" || error.length === 0 || error.length > 300)) return null;
     if (result.status === "rejected") {
-      return typeof error === "string" && result.operationId === undefined && result.backupDirectory === undefined
+      return typeof error === "string" && result.operationId === undefined && result.backupDirectory === undefined &&
+        result.providerAccountId === undefined
         ? { status: "rejected" as const, error }
         : null;
     }
     const operationId = result.operationId;
     if (typeof operationId !== "string" ||
         !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(operationId) ||
-        result.backupDirectory !== `${candidate.sourceDirectory}/.wollipog-adoption-${operationId}`) return null;
+        result.backupDirectory !== `${candidate.sourceDirectory}/.wollipog-adoption-${operationId}` ||
+        result.providerAccountId !== candidate.providerAccountId) return null;
+    const scope = candidate.providerAccountId ? { providerAccountId: candidate.providerAccountId } : {};
     if (result.status === "adopted") {
       return error === undefined
-        ? { status: "adopted" as const, operationId, backupDirectory: result.backupDirectory as string }
+        ? { status: "adopted" as const, operationId, backupDirectory: result.backupDirectory as string, ...scope }
         : null;
     }
     return typeof error === "string"
       ? { status: "recovery_required" as const, operationId,
-          backupDirectory: result.backupDirectory as string, error }
+          backupDirectory: result.backupDirectory as string, ...scope, error }
       : null;
   };
 
@@ -163,10 +184,12 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       if (result.candidates.some((c) => !c || typeof c.id !== "string" || c.id.length > 64 || !validSkillName(c.name) ||
         ![".agents/skills", ".claude/skills", ".codex/skills"].includes(c.sourceDirectory) || typeof c.generation !== "string" || c.generation.length > 200) ||
         result.candidates.some((candidate) => !validCandidateContext(candidate, runner.protocolVersion)) ||
+        result.candidates.some((candidate) => !validCandidateAccount(candidate, runner)) ||
         new Set(result.candidates.map((c) => c.id)).size !== result.candidates.length) throw new Error();
       // Keep only bounded metadata; unrecognized runner properties must not enter the cache/UI.
-      const candidates = result.candidates.map(({ id, name, sourceDirectory, generation, context }) =>
+      const candidates = result.candidates.map(({ id, name, sourceDirectory, generation, context, providerAccountId }) =>
         ({ id, name, sourceDirectory, generation,
+          ...(providerAccountId ? { providerAccountId } : {}),
           ...(context?.kind === "wsl" ? { context: { kind: "wsl" as const, distro: context.distro } } : {}) }));
       const discoveryId = randomUUID();
       discoveries.set(discoveryId, { owner: ownerKey(principal), runnerId, expires: Date.now() + 600_000, candidates });
@@ -377,7 +400,9 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       if (result.type !== "skill_adoption_recovery_result" || result.runnerId !== runnerId ||
           result.requestId !== requestId || result.status !== "listed" || !Array.isArray(result.operations) ||
           result.operations.length > 64 || typeof result.truncated !== "boolean") throw new Error();
-      const operations = result.operations.map(recoveryOperation);
+      const runner = deps.db.getRunner(runnerId);
+      if (!runner) throw new Error();
+      const operations = result.operations.map((operation) => recoveryOperation(operation, runner));
       if (operations.some((operation) => !operation) ||
           new Set(operations.map((operation) => operation!.operationId)).size !== operations.length) throw new Error();
       return { operations: operations as SkillAdoptionRecoveryOperation[], truncated: result.truncated };
@@ -409,7 +434,9 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       if (result.type !== "skill_adoption_recovery_result" || result.runnerId !== runnerId ||
           result.requestId !== requestId || !["restored", "not_needed", "blocked", "recovery_required"].includes(result.status) ||
           (result.error !== undefined && (typeof result.error !== "string" || result.error.length > 300))) throw new Error();
-      const operation = result.operation === undefined ? undefined : recoveryOperation(result.operation);
+      const runner = deps.db.getRunner(runnerId);
+      if (!runner) throw new Error();
+      const operation = result.operation === undefined ? undefined : recoveryOperation(result.operation, runner);
       if (result.operation !== undefined && (!operation || operation.operationId !== operationId)) throw new Error();
       if ((result.status === "restored" || result.status === "not_needed") && !operation) throw new Error();
       if (result.status === "restored" || result.status === "not_needed") deps.pushSkillsSync(runnerId);
@@ -438,6 +465,9 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       const skill = deps.db.importMachineSkill({ ...preview.payload, expectedVersionId: preview.expectedVersionId,
         source: { runnerId: discovery.runnerId, sourceDirectory: preview.candidate.sourceDirectory,
           name: preview.candidate.name, digest: preview.payload.digest, importedAt: Date.now(),
+          ...(preview.candidate.providerAccountId
+            ? { providerAccountId: preview.candidate.providerAccountId }
+            : {}),
           ...(preview.candidate.context?.kind === "wsl" ? { context: preview.candidate.context } : {}) },
         scope: { organizationId: principal.organizationId, owner: { kind: "organization", organizationId: principal.organizationId } } });
       delete discovery.preview;
