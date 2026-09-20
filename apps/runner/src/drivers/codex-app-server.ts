@@ -53,6 +53,7 @@ import {
 } from "../codex-permission-profile.js";
 import { readCodexRolloutCompletedCommand } from "./codex-rollout-proof.js";
 import { commandTargetsManagedWorktree } from "../managed-worktree-protection.js";
+import { codexGuardActiveInArgs } from "../codex-managed-worktree-guard.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any;
@@ -234,6 +235,15 @@ export function buildCodexTurnParams(
    * exactly when this turn's mode is the profile already in force — never mixed with it.
    */
   activeProfileBase: CodexPermissionProfileBase | null = null,
+  /**
+   * Whether this launch carries a PROVEN managed-worktree guard hook (#1499). With one, the
+   * worktree veto runs at the tool-call boundary whoever reviews the approval — measured: a
+   * protected command is denied before the approval is even raised, under a client `accept` and
+   * under `approvalsReviewer: "auto_review"` alike — so Guardian can own the review again. Without
+   * one, the driver's own approval-time veto is the ONLY managed-worktree protection a structured
+   * Codex session has, and it is reachable only while the request comes to this client.
+   */
+  managedWorktreeGuardActive = false,
 ): Json {
   const configuredMode = cfg.permissionMode || AUTO_REVIEW_MODE;
   // Full access would let the provider unlink the worktree root or its shared Git registration
@@ -278,8 +288,12 @@ export function buildCodexTurnParams(
   };
   // Guardian owns ordinary automatic review, but it cannot know which host paths belong to the
   // runner lifecycle. Route boundary-crossing asks through this driver while a managed worktree
-  // exists so the local target veto runs before any grant is returned.
-  if (autoReview) params.approvalsReviewer = protectManagedWorktrees ? "user" : "auto_review";
+  // exists so the local target veto runs before any grant is returned — UNLESS the guard hook is
+  // proven for this launch, which enforces the same veto a step earlier and independently of the
+  // reviewer (#1499). Forcing every escalation to a human is what made `auto-review` mean manual
+  // review in exactly the sessions that own a worktree.
+  const vetoNeedsThisClient = protectManagedWorktrees && !managedWorktreeGuardActive;
+  if (autoReview) params.approvalsReviewer = vetoNeedsThisClient ? "user" : "auto_review";
   if (cfg.model && cfg.model !== "default") params.model = cfg.model;
   if (cfg.effort) params.effort = cfg.effort;
   Object.assign(params, configuredServiceTier(cfg, capabilities));
@@ -436,6 +450,11 @@ export class CodexAppServerDriver implements Driver {
    * selection (#1336).
    */
   private permissionProfileBase: CodexPermissionProfileBase | null = null;
+  /**
+   * Re-derived from the launch argv at every spawn rather than remembered across one, because a
+   * resume or a transport restart spawns again from args this driver was handed (#1499).
+   */
+  private managedWorktreeGuardActive = false;
   /**
    * Whether a legacy `sandboxPolicy` has already been sent on the CURRENT thread.
    *
@@ -671,6 +690,7 @@ export class CodexAppServerDriver implements Driver {
     }
     this.permissionProfileBase = profile?.active ? profile.base : null;
     const launchArgs = profile?.active ? profile.args : [...this.opts.args, ...isolationArgs];
+    this.managedWorktreeGuardActive = codexGuardActiveInArgs(launchArgs);
     const child = this.spawn({
       command: this.opts.command,
       args: codexAppServerArgs(launchArgs, enableDefaultModeQuestions),
@@ -905,6 +925,7 @@ export class CodexAppServerDriver implements Driver {
         this.opts.capabilities,
         (this.opts.managedWorktreeProtections?.().length ?? 0) > 0,
         this.threadCarriesLegacySandboxPolicy ? null : this.permissionProfileBase,
+        this.managedWorktreeGuardActive,
       );
       if (params.sandboxPolicy !== undefined) this.threadCarriesLegacySandboxPolicy = true;
 

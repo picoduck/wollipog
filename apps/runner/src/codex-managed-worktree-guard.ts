@@ -175,6 +175,36 @@ export function codexGuardLaunchArgs(
 }
 
 /**
+ * Whether THIS argv carries a proven runner guard, without knowing the override texts.
+ *
+ * `codexGuardArgsActive` compares against the exact strings provisioning built, which only
+ * provisioning holds. A driver re-spawns on its own — every resume and transport restart — from
+ * args it was handed, so it needs the same question answered from the argv alone, exactly as
+ * `prepareClaudeHookArgs` re-derives Claude's `guardActive` at each spawn.
+ *
+ * Both halves are required. A `hooks.PreToolUse` override alone is the pre-#1499 contract, which is
+ * unfalsifiable on an entry point where the trust bypass does nothing: Codex would report the hook
+ * enabled and untrusted, and skip it silently. The trust override is what makes the claim real.
+ */
+export function codexGuardActiveInArgs(args: readonly string[]): boolean {
+  const { options } = splitAtOptionTerminator(args);
+  let guard = false;
+  let trust = false;
+  for (let index = 1; index < options.length; index++) {
+    if (!CODEX_CONFIG_FLAGS.has(options[index - 1]!)) continue;
+    const value = options[index]!;
+    // The LAST override of each dotted path is the one Codex honours, so a later foreign override
+    // of either path disarms the guard rather than merely shadowing part of it.
+    if (declaresPreToolUseHooks(value)) guard = value.includes(MANAGED_WORKTREE_GUARD_MODE);
+    if (value.startsWith(CODEX_HOOK_STATE_OVERRIDE_PREFIX)) {
+      if (declaresRunnerHookTrust(value)) trust = true;
+      else if (!value.includes("enabled=false")) trust = false;
+    }
+  }
+  return guard && trust;
+}
+
+/**
  * Whether the guard really is in this argv, read from the argv itself rather than inferred.
  *
  * It has to be the LAST `hooks.PreToolUse` override present — a later one, in any spelling,
