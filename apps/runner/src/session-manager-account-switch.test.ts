@@ -342,6 +342,120 @@ test("orphan recovery crosses a pending account-switch barrier before the handof
   }
 });
 
+test("a deferred account switch resumes as soon as background ownership clears", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-account-switch-background-settled-"));
+  const messages: RunnerToControlPlane[] = [];
+  const launches: string[] = [];
+  let manager: SessionManager | undefined;
+  try {
+    const made = makeManager(root, (_driver: unknown, launch: { env: Record<string, string> }) => {
+      launches.push(launch.env.CODEX_HOME!);
+      return {
+        pid: launches.length,
+        initialize: async () => {},
+        newSession: async () => {},
+        prompt: async () => "end_turn" as const,
+        cancel: () => {},
+        dispose: () => {},
+        setConfig: async () => {},
+        resolvePermission: () => false,
+        agentSessionId: () => "codex-thread",
+      };
+    }, messages);
+    manager = made.manager;
+    const spec = launchSpec(root, "codex-app-server", "work");
+    assert.equal(await manager.start(spec), true);
+    made.store.patchMeta(spec.sessionId, {
+      agentSessionId: "codex-thread",
+      backgroundWorkState: "running",
+      pendingBackgroundTaskIds: ["task-1"],
+    });
+
+    assert.deepEqual(await manager.switchProviderAccount(spec.sessionId, "personal"), {
+      ok: true,
+      scheduled: true,
+    });
+    made.store.patchMeta(spec.sessionId, {
+      backgroundWorkState: undefined,
+      pendingBackgroundTaskIds: [],
+    });
+    (manager as unknown as { resumeDeferredHandoff: (sessionId: string) => void })
+      .resumeDeferredHandoff(spec.sessionId);
+    await waitFor(() => launches.length === 2, "settled background work did not resume the account switch");
+
+    assert.deepEqual(launches, [accounts.work.credentialHome, accounts.personal.credentialHome]);
+    assert.equal(made.store.readMeta(spec.sessionId)?.providerAccountId, "personal");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a crash-recovered account switch crosses the previous credential's authentication block", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-account-switch-auth-recovery-"));
+  const messages: RunnerToControlPlane[] = [];
+  const launches: string[] = [];
+  const prompts: Array<{ home: string; text: string }> = [];
+  let manager: SessionManager | undefined;
+  try {
+    const driverFactory = (_driver: unknown, launch: { env: Record<string, string> }) => {
+      const home = launch.env.CODEX_HOME!;
+      launches.push(home);
+      return {
+        pid: launches.length,
+        initialize: async () => {},
+        newSession: async () => {},
+        prompt: async (text: string) => { prompts.push({ home, text }); return "end_turn" as const; },
+        cancel: () => {},
+        dispose: () => {},
+        setConfig: async () => {},
+        resolvePermission: () => false,
+        agentSessionId: () => "codex-thread",
+      };
+    };
+    const first = makeManager(root, driverFactory, messages);
+    manager = first.manager;
+    const spec = launchSpec(root, "codex-app-server", "work");
+    assert.equal(await manager.start(spec), true);
+    first.store.patchMeta(spec.sessionId, {
+      agentSessionId: "codex-thread",
+      pendingProviderAccountId: accounts.personal.id,
+      pendingProviderAccountLabel: accounts.personal.label,
+      pendingProviderAccountProvider: accounts.personal.provider,
+      pendingProviderCredentialHome: accounts.personal.credentialHome,
+      providerAuthBlock: {
+        version: 1,
+        recoveryId: "recovery-work",
+        credentialScopeId: "scope-work",
+        detectedAt: 1,
+        phase: "turn",
+        delivery: "uncertain",
+        canStartLogin: true,
+        configuredCredential: true,
+      },
+      pendingApproval: {
+        requestId: "provider-auth:recovery-work",
+        title: "Authentication Required — Codex",
+        options: [{ optionId: "auth:cancel", name: "Cancel", kind: "reject_once" }],
+      },
+    });
+    manager.shutdownAll();
+
+    const recovered = makeManager(root, driverFactory, messages);
+    manager = recovered.manager;
+    assert.equal(await manager.start(spec), true);
+    assert.equal(manager.prompt(spec.sessionId, "continue after recovery"), true);
+    await waitFor(() => prompts.length === 1, "recovered account switch remained behind the old auth block");
+
+    assert.deepEqual(prompts, [{ home: accounts.personal.credentialHome, text: "continue after recovery" }]);
+    assert.equal(recovered.store.readMeta(spec.sessionId)?.providerAuthBlock, undefined);
+    assert.equal(recovered.store.readMeta(spec.sessionId)?.providerAccountId, "personal");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a newer account selection made mid-handoff is preserved as a follow-up switch", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-account-switch-overlap-"));
   const messages: RunnerToControlPlane[] = [];

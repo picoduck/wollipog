@@ -6798,6 +6798,7 @@ export class SessionManager {
         retainedPromotions.set(operation.source.id, operation);
       }
     }
+    const pendingProviderAccountSwitch = this.pendingProviderAccount(meta);
     const entry: ActiveSession = {
       sessionId,
       launchGeneration,
@@ -6813,11 +6814,12 @@ export class SessionManager {
       running: false,
       queue: [],
       permissionOptionKinds: new Map(),
-      ...(meta.providerAuthBlock ? { authenticationBlocked: true } : {}),
+      // A durable account switch intentionally leaves the blocked credential home. On recovery,
+      // let that handoff cross the old account's authentication barrier just as a live selection
+      // does in switchProviderAccount().
+      ...(meta.providerAuthBlock && !pendingProviderAccountSwitch ? { authenticationBlocked: true } : {}),
       ...(meta.providerHistoryBlock ? { historyQuarantined: true } : {}),
-      ...(this.pendingProviderAccount(meta)
-        ? { pendingProviderAccountSwitch: this.pendingProviderAccount(meta) }
-        : {}),
+      ...(pendingProviderAccountSwitch ? { pendingProviderAccountSwitch } : {}),
       steerFenceIds: new Set(
         [...retainedPromotions.values()]
           .filter((operation) => !operation.settled)
@@ -7266,7 +7268,7 @@ export class SessionManager {
       return { ok: false, error: errText(error) };
     } finally {
       this.loggingOut.delete(sessionId);
-      this.resumeDeferredWorktreeRebind(sessionId);
+      this.resumeDeferredHandoff(sessionId);
     }
   }
 
@@ -9989,9 +9991,9 @@ export class SessionManager {
     }
   }
 
-  private resumeDeferredWorktreeRebind(sessionId: string): void {
+  private resumeDeferredHandoff(sessionId: string): void {
     const entry = this.active.get(sessionId);
-    if (entry?.pendingWorktreeRebind && !entry.running) {
+    if ((entry?.pendingWorktreeRebind || entry?.pendingProviderAccountSwitch) && !entry.running) {
       setImmediate(() => this.scheduleDrain(sessionId));
     }
   }
@@ -11142,7 +11144,7 @@ export class SessionManager {
       if (!(await this.acquireAdmission(sourceSessionId))) {
         this.forking.delete(sourceSessionId);
         this.forkingTargets.delete(targetSessionId);
-        this.resumeDeferredWorktreeRebind(sourceSessionId);
+        this.resumeDeferredHandoff(sourceSessionId);
         return { ok: false, error: "provider transcript store is busy on this macOS runner" };
       }
       seatbeltForkAdmission = true;
@@ -11150,7 +11152,7 @@ export class SessionManager {
         this.releaseAdmission(sourceSessionId);
         this.forking.delete(sourceSessionId);
         this.forkingTargets.delete(targetSessionId);
-        this.resumeDeferredWorktreeRebind(sourceSessionId);
+        this.resumeDeferredHandoff(sourceSessionId);
         return { ok: false, error: "source session was removed while waiting for provider isolation" };
       }
     }
@@ -11158,7 +11160,7 @@ export class SessionManager {
       if (seatbeltForkAdmission) this.releaseAdmission(sourceSessionId);
       this.forking.delete(sourceSessionId);
       this.forkingTargets.delete(targetSessionId);
-      this.resumeDeferredWorktreeRebind(sourceSessionId);
+      this.resumeDeferredHandoff(sourceSessionId);
       return { ok: false, error: "another runner is driving the source session" };
     }
     const forkLockRefresh = setInterval(
@@ -11623,7 +11625,7 @@ export class SessionManager {
       this.store.releaseLock(sourceSessionId, this.lockOwner);
       this.forking.delete(sourceSessionId);
       this.forkingTargets.delete(targetSessionId);
-      this.resumeDeferredWorktreeRebind(sourceSessionId);
+      this.resumeDeferredHandoff(sourceSessionId);
       if (seatbeltForkAdmission) this.releaseAdmissionIfInactive(sourceSessionId);
     }
   }
@@ -12584,7 +12586,7 @@ export class SessionManager {
   /** Release a fence taken by fenceRewind when the rewind will NOT run (expiry). */
   releaseRewindFence(sessionId: string): void {
     this.rewinding.delete(sessionId);
-    this.resumeDeferredWorktreeRebind(sessionId);
+    this.resumeDeferredHandoff(sessionId);
   }
 
   async rewind(sessionId: string, turn: number, alreadyFenced = false): Promise<{ ok: boolean; error?: string }> {
@@ -12644,7 +12646,7 @@ export class SessionManager {
       return { ok: false, error: errText(err) };
     } finally {
       this.rewinding.delete(sessionId);
-      this.resumeDeferredWorktreeRebind(sessionId);
+      this.resumeDeferredHandoff(sessionId);
     }
   }
 
@@ -13950,7 +13952,7 @@ export class SessionManager {
     if (updated?.orphanedWork && update.state === "orphaned" && automaticClaudeRecoveryAllowed(updated)) {
       this.scheduleOrphanRecovery(sessionId);
     }
-    if (!updated?.backgroundWorkState) this.resumeDeferredWorktreeRebind(sessionId);
+    if (!updated?.backgroundWorkState) this.resumeDeferredHandoff(sessionId);
   }
 
   private mergeDurableBackgroundJobs(
@@ -14292,7 +14294,7 @@ export class SessionManager {
       backgroundWorkState: managedBackgroundWorkState(backgroundJobs),
     });
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
-    if (!updated?.backgroundWorkState) this.resumeDeferredWorktreeRebind(sessionId);
+    if (!updated?.backgroundWorkState) this.resumeDeferredHandoff(sessionId);
   }
 
   private finishBackgroundContinuation(sessionId: string, jobIds: string[]): void {
@@ -14341,7 +14343,7 @@ export class SessionManager {
     });
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
     if (this.queuedBackgroundJobIds(updated).length > 0) this.scheduleBackgroundContinuation(sessionId);
-    if (!updated?.backgroundWorkState) this.resumeDeferredWorktreeRebind(sessionId);
+    if (!updated?.backgroundWorkState) this.resumeDeferredHandoff(sessionId);
   }
 
   /** A legacy peer or a disconnected socket can make the durable delivery proof use the
