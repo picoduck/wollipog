@@ -246,6 +246,9 @@ const COMPOSER_POINTER_CLICK_FALLBACK_MS = 500;
 const EARLIER_ACTIVITY_TRIGGER_PX = 160;
 const EARLIER_ACTIVITY_REARM_DISTANCE_PX = 32;
 const EARLIER_ACTIVITY_REARM_FRAMES = 8;
+/** The virtual list owns an eight-frame post-prepend measurement window. Reveal keyboard focus
+ * after that window plus two boundary frames so its final correction cannot hide the fallback. */
+const EARLIER_ACTIVITY_FOCUS_REVEAL_FRAMES = 10;
 /** One reader gesture rarely maps to one scroll event: a wheel tick or reading key under smooth
  * scrolling, and a touch drag with its momentum, each emit a stream of scroll events. An armed
  * traversal survives that stream while it keeps moving upward and expires after this idle gap. */
@@ -6950,10 +6953,47 @@ export function EarlierActivityControl({
       return;
     }
 
-    keyboardRequestRef.current = false;
-    if (root.ownerDocument.activeElement !== root) return;
-    if (available) actionRef.current?.focus();
-    else fallbackFocusRef.current?.focus();
+    if (root.ownerDocument.activeElement !== root) {
+      keyboardRequestRef.current = false;
+      return;
+    }
+    if (!available) {
+      keyboardRequestRef.current = false;
+      fallbackFocusRef.current?.focus();
+      return;
+    }
+    if (error) {
+      keyboardRequestRef.current = false;
+      actionRef.current?.focus();
+      return;
+    }
+
+    // A successful prepend corrects the virtual-list anchor in the following animation frames.
+    // Restore the fallback afterwards so its native focus reveal is not immediately undone. Keep
+    // checking ownership because the reader may move to another control while those frames settle.
+    const view = root.ownerDocument.defaultView;
+    if (!view) return;
+    let revealFrame = 0;
+    const revealAfterAnchor = (frames: number) => {
+      revealFrame = view.requestAnimationFrame(() => {
+        if (root.ownerDocument.activeElement !== root) {
+          keyboardRequestRef.current = false;
+          return;
+        }
+        if (frames > 1) {
+          revealAfterAnchor(frames - 1);
+          return;
+        }
+        keyboardRequestRef.current = false;
+        const action = actionRef.current;
+        action?.focus();
+        action?.scrollIntoView({ block: "nearest" });
+      });
+    };
+    revealAfterAnchor(EARLIER_ACTIVITY_FOCUS_REVEAL_FRAMES);
+    return () => {
+      if (revealFrame) view.cancelAnimationFrame(revealFrame);
+    };
   }, [available, error, fallbackFocusRef, loading]);
 
   const load = (event: ReactMouseEvent<HTMLButtonElement>) => {

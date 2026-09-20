@@ -227,6 +227,7 @@ test("a failed automatic load exposes Retry and a successful retry restores the 
   await expect(announcement).toHaveText("Earlier activity loaded.");
   await expect(control).toHaveAttribute("data-state", "idle");
   await expect(control.getByRole("button", { name: "Load Earlier Activity" })).toBeFocused();
+  await expect(control.getByRole("button", { name: "Load Earlier Activity" })).toBeInViewport();
 });
 
 test("keyboard fallback activation keeps focus through loading and history exhaustion", async ({ page }) => {

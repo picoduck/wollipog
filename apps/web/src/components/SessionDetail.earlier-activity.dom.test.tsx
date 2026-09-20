@@ -78,6 +78,16 @@ async function keyboardActivate(button: HTMLButtonElement): Promise<void> {
   await act(async () => button.click());
 }
 
+async function settleAnchorFrames(): Promise<void> {
+  await act(async () => new Promise<void>((resolve) => {
+    const wait = (frames: number) => domWindow.requestAnimationFrame(() => {
+      if (frames > 1) wait(frames - 1);
+      else resolve();
+    });
+    wait(12);
+  }));
+}
+
 test("keyboard pagination keeps logical focus through fallback, Retry, and exhaustion", async () => {
   const view = await fixture();
   try {
@@ -99,6 +109,7 @@ test("keyboard pagination keeps logical focus through fallback, Retry, and exhau
     await keyboardActivate(view.action("Retry"));
     await view.render({ available: true, loading: true, error: null });
     await view.render({ available: true, loading: false, error: null });
+    await settleAnchorFrames();
     assert.equal(domWindow.document.activeElement, view.action("Load Earlier Activity"));
 
     await keyboardActivate(view.action("Load Earlier Activity"));
