@@ -376,6 +376,11 @@ export class WorktreeCleanupJournal {
     state: "completed" | "retained",
     terminalReason: RetainedWorktreeRefTerminalReason,
   ): void {
+    const key = this.retainedRefKey(record);
+    // Concurrent startup/periodic/post-cleanup sweeps can all hold the same pending snapshot.
+    // The first terminal receipt is authoritative: a later stale sweep that observes the ref
+    // already missing must not replace an exact `deleted` receipt with `already_missing`.
+    if (this.completedRetainedRefs.has(key)) return;
     const completed = {
       ...structuredClone(record),
       state,
@@ -384,7 +389,6 @@ export class WorktreeCleanupJournal {
       updatedAt: Date.now(),
       completedAt: Date.now(),
     } satisfies RetainedWorktreeRefRecord;
-    const key = this.retainedRefKey(completed);
     this.completedRetainedRefs.set(key, completed);
     while (this.completedRetainedRefs.size > 256) {
       const oldest = this.completedRetainedRefs.keys().next().value as string | undefined;

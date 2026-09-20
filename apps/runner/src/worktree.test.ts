@@ -1331,10 +1331,13 @@ test("retained ref journal survives restart and never re-arms a completed or rep
     assert.equal(new WorktreeCleanupJournal(dataDir).listRetainedRefs()[0]?.pendingReason, "checked_out");
 
     journal.finishRetainedRef(armedRecord, "completed", "deleted");
+    journal.finishRetainedRef(armedRecord, "completed", "already_missing");
     const restarted = new WorktreeCleanupJournal(dataDir);
     assert.deepEqual(restarted.listRetainedRefs(), []);
     assert.equal(restarted.retainedRefHistory()[0]?.state, "completed");
     assert.equal(restarted.retainedRefHistory()[0]?.terminalReason, "deleted");
+    assert.equal(restarted.retainedRefHistory().length, 1,
+      "a stale concurrent reaper cannot replace the first terminal receipt");
     writeFileSync(join(dataDir, "worktree-retained-refs.json"), JSON.stringify([record]));
     assert.deepEqual(new WorktreeCleanupJournal(dataDir).listRetainedRefs(), [],
       "a terminal receipt wins the crash window before pending-state removal");
