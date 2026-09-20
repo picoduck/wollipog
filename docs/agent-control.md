@@ -229,8 +229,9 @@ the provider at creation time, not changing the sandbox rule.
 > that mode has no OS boundary at all: the directory stays readable and writable to anything running
 > as the runner's user. What changed there (#1336 slice 3, native Linux only) is that **nothing in
 > the directory decides the guard's verdict any more** — see "The Guard's Verdict in `provider`
-> Mode". Reading it is still possible, and it still holds the manager policy hook's credential, so
-> issue #1336 stays open for Claude in `provider` mode and for MCP servers under every provider.
+> Mode" — and, since #1472, that **it holds no manager policy hook credential and no circuit the
+> runner honours** — see "The Manager Policy Hook in `provider` Mode". Reading it is still possible,
+> so issue #1336 stays open for Claude in `provider` mode and for MCP servers under every provider.
 > The veto and its history are in [ADR 0012](adr/0012-managed-worktree-guard-hook.md).
 
 The managed-worktree guard keeps its protection list in the runner's hook state directory
@@ -402,11 +403,11 @@ What this does **not** deliver, stated plainly:
   whole hook command, name included, into the error the model reads, and so into that session's own
   timeline. The sidecar's own message does not repeat it. Both disclose nothing beyond
   `/proc/net/unix`.
-- **The manager policy hook still keeps its state there.** Its credential, acknowledgement, and
-  circuit files are read and rewritten by a provider-spawned re-entry. A reader gets that
-  credential, and a writer can open the circuit, which drops the manager hooks for the next spawn.
-  Neither touches the guard: an open circuit selects the guard-only document, which is also held in
-  memory.
+- **The manager policy hook kept its state there until #1472.** See "The Manager Policy Hook in
+  `provider` Mode" below for what a native Linux launch does now. On macOS and Windows its
+  credential, acknowledgement, and circuit files are still read and rewritten by a provider-spawned
+  re-entry: a reader gets that credential, and a writer can open the circuit, which drops the
+  manager hooks for the next spawn.
 - **Not the runner itself.** A process of the same OS user can still kill the runner (every verdict
   then refuses), rewrite the runner's own code on disk, or remove the worktree directly. None of
   that is new, and no file-level design can close it; only an OS boundary or a separate user can.
@@ -415,6 +416,64 @@ What this does **not** deliver, stated plainly:
   there are still untripwired.
 - **An inline document must fit one argv string.** Linux caps a single argument at 128 KiB; the
   documents are about 1 to 4 KiB. One above 96 KiB is not launched, and the driver mediates.
+
+### The Manager Policy Hook in `provider` Mode
+
+The manager policy hook (`WOLLIPOG_CLAUDE_HOOKS=1`) is a sidecar the provider starts for every
+`PreToolUse`, `PostToolUse`, and `UserPromptSubmit`. In its file form it reads a bearer **token**
+and the **ready** file that says the control plane acknowledged it, and it reads and rewrites a
+**circuit** under a **lock**: three consecutive transport failures open the circuit, after which
+the sidecar stops denying and the next spawn drops the manager hooks, so an unreachable control
+plane does not brick the session. All four files sit in the hook state directory. In `provider`
+mode the provider can read and write them, so a reader had the credential and a writer could drop
+the manager hooks for the next spawn, with nothing saying why (#1472).
+
+A sidecar the provider starts cannot read a credential the provider cannot, so on a native Linux
+host launch the runner does not sandbox, **the sidecar holds nothing and the runner relays**:
+
+- **The credential, acknowledgement, and circuit are in runner memory.** No token, ready, circuit,
+  or lock file is written; ones left by an earlier file-form launch are removed; ones planted later
+  are never read, by the runner or by the sidecar.
+- **The sidecar hands the event to the session's abstract verdict socket**, the same one the guard
+  asks. The runner runs the same evaluation the file-form sidecar runs, makes the control-plane
+  request with the credential it holds, and returns the hook response for the sidecar to print.
+- **A relay request carries a key from the spawn environment.** A relayed event reaches the control
+  plane, unlike a guard verdict, and an abstract socket has no permission bits. The key (256 random
+  bits, per session per runner process) is in the provider's environment, which is owner-only in
+  `/proc`, and never in its argv, which is world-readable. A request without it gets the
+  fail-closed response and reaches neither the control plane nor the circuit.
+- **A circuit file written by the provider is ignored.** Only the runner's own circuit chooses
+  between the combined settings document and the guard-only one. When the runner opens it, the next
+  spawn reports it through the existing policy-transport notice.
+- **No answer is the existing fail-closed response.** `PreToolUse` denies; the other two events do
+  not block. The sidecar never falls back to a file. An approval that parks for a human holds its
+  connection open without a deadline; a sidecar that goes away ends the runner's polling for it.
+
+| Launch | Manager hook credential and circuit | Verified by |
+| --- | --- | --- |
+| Runner `provider`, Claude, native Linux | **Runner memory, relayed over the abstract socket.** Nothing in the hook state directory is a credential, and a circuit written there is ignored | `policy-hook-relay.test.ts` (real provisioning, real socket, real sidecar entry point), and a real claude 2.1.278 run |
+| Runner `seatbelt`, native macOS | Files, granted back through the mask's `managerTransport` rules (#1447), unchanged | **macOS CI only** (`managed-worktree-guard-seatbelt.integration.test.ts`) |
+| Runner `bwrap`, native Linux | Files, unchanged. `bwrap` cannot grant the circuit write, so the hook fails closed on every call, as it did before (see the known limits above) | Unchanged |
+| Runner `provider`, Claude, macOS and Windows | Files, unchanged: readable and writable by the provider | Existing `policy-hook.test.ts` and `hook-settings.test.ts` |
+| A launch whose abstract socket could not be created or proven | Files, as before, and the runner log says the guard reads its file | `policy-hook-relay.test.ts` |
+| WSL, container, and cloud launches | No manager hooks (not provisioned there) | Unchanged |
+
+Measured with the runner's own provisioning, the real socket and sidecar, a stand-in control plane,
+and claude 2.1.278 in `bypassPermissions`: all three events arrived with the runner-held bearer, a
+policy deny blocked the tool call, and the hook state directory held only the three settings
+documents before and after. With an open circuit and a token planted there first, the run was
+identical.
+
+What this does **not** deliver:
+
+- **The provider can still use the hook it starts.** A process of the runner's OS user that reads
+  the key from its environment can submit hook events for that session, and enough rejected ones
+  open the circuit. That is what the token allowed, without the token, and an opened circuit is now
+  always announced at the next spawn. The key is in the environment of every process the provider
+  starts, MCP servers included.
+- **It is not an OS boundary**, like everything else in `provider` mode.
+- **A runner restart forgets the credential and the circuit.** A provider that outlived it is denied
+  on every `PreToolUse` until its next spawn provisions afresh, as with the guard's verdicts.
 
 ### Codex in `provider` Mode
 

@@ -37,6 +37,12 @@ import {
   MANAGED_WORKTREE_REFUSAL,
   type ManagedWorktreeProtection,
 } from "./managed-worktree-protection.js";
+import { servePolicyHookRelay } from "./policy-hook.js";
+import {
+  parsePolicyHookRelayRequest,
+  policyHookRelayAnswer,
+  type PolicyHookRelayRequest,
+} from "./policy-hook-relay.js";
 import { isSafeSessionFileId } from "./session-file-id.js";
 import { buildBwrapArgs, type SpawnIsolation } from "./spawn.js";
 
@@ -108,19 +114,77 @@ function judge(request: string, loadProtections: GuardProtectionsLoader, guardSt
   );
 }
 
-function serveVerdict(socket: Socket, loadProtections: GuardProtectionsLoader, guardStateDirectory: string): void {
+/**
+ * The runner's side of a relayed manager policy hook event (#1472): the hook response to print,
+ * for the session that owns the socket. Only an `abstract` socket relays; it is the socket of a
+ * launch the runner does not sandbox, which is where the hook's files would otherwise be the
+ * provider's to read and rewrite.
+ */
+export type PolicyHookRelayHandler = (
+  sessionId: string,
+  request: PolicyHookRelayRequest,
+  signal: AbortSignal,
+) => Promise<string>;
+
+function serveVerdict(
+  socket: Socket,
+  loadProtections: GuardProtectionsLoader,
+  guardStateDirectory: string,
+  relay?: (request: PolicyHookRelayRequest, signal: AbortSignal) => Promise<string>,
+): void {
   const chunks: Buffer[] = [];
   let total = 0;
+  let relaying = false;
   socket.setTimeout(REQUEST_TIMEOUT_MS, () => socket.destroy());
   socket.on("error", () => socket.destroy());
   socket.on("data", (chunk: Buffer) => {
+    if (relaying) return;
     total += chunk.length;
     // An oversized payload gets no verdict at all; the sidecar reads that as a refusal.
-    if (total > MAX_REQUEST_BYTES) socket.destroy();
-    else chunks.push(chunk);
+    if (total > MAX_REQUEST_BYTES) {
+      socket.destroy();
+      return;
+    }
+    chunks.push(chunk);
+    // The two requests are framed differently, on purpose. A guard request ends with the client's
+    // FIN. A relay request ends with a NEWLINE and the client keeps its side open, because a
+    // relayed ask can park and the runner has to learn when its sidecar goes away: measured on
+    // Linux, a peer that has already sent FIN and then dies produces no further event here, so a
+    // FIN-framed relay could never be abandoned (review CR-1.1). Serialized JSON holds no raw
+    // newline, so a newline before FIN cannot be a guard request.
+    if (!chunk.includes(0x0a)) return;
+    const received = Buffer.concat(chunks);
+    let request: PolicyHookRelayRequest | null = null;
+    try {
+      if (relay) request = parsePolicyHookRelayRequest(JSON.parse(received.subarray(0, received.indexOf(0x0a)).toString("utf8")));
+    } catch {
+      // A broken relay request is refused like any other below.
+    }
+    if (!request || !relay) {
+      // Newline-framed but not a relay request this socket serves (a path socket relays nothing):
+      // closed without an answer, which the sidecar reads as its fail-closed outcome. Waiting for a
+      // FIN that a relay client never sends would only hold the connection until the idle timeout.
+      socket.destroy();
+      return;
+    }
+    relaying = true;
+    // A relayed `PreToolUse` may park for as long as a human takes to answer, so the idle timeout
+    // that bounds a guard verdict does not apply once the request is in.
+    socket.setTimeout(0);
+    const abort = new AbortController();
+    socket.once("close", () => abort.abort());
+    relay(request, abort.signal).then(
+      (output) => { if (!socket.destroyed) socket.end(policyHookRelayAnswer(output)); },
+      () => socket.destroy(),
+    );
   });
   socket.on("end", () => {
     if (socket.destroyed) return;
+    if (relaying) {
+      // The sidecar went away before its answer (Claude killed it): stop on its behalf.
+      socket.destroy();
+      return;
+    }
     socket.end(JSON.stringify(judge(Buffer.concat(chunks).toString("utf8"), loadProtections, guardStateDirectory)));
   });
 }
@@ -159,6 +223,9 @@ export class ManagedWorktreeGuardSockets {
     /** The runner's one-time self-test passed against this very server. Kept here, not in a set of
      * addresses, so it goes with the server on every close path and cannot outlive it (#1476). */
     proven: boolean;
+    /** Open connections. `server.close` waits for them, and a relayed ask may be parked for as
+     * long as a human takes, so closing a session's server destroys them instead (#1472). */
+    connections: Set<Socket>;
   }>();
 
   /** Per-session tail of in-flight `ensure`/`close` work. Two launch preparations of one session
@@ -172,6 +239,8 @@ export class ManagedWorktreeGuardSockets {
     private readonly memoryProtections: (sessionId: string) => ManagedWorktreeProtection[] =
       managedWorktreeGuardMemoryProtections,
     private readonly platform: NodeJS.Platform = process.platform,
+    /** Answers a relayed manager policy hook event on an `abstract` socket (#1472). */
+    private readonly policyHookRelay: PolicyHookRelayHandler = servePolicyHookRelay,
   ) {}
 
   private serialized<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
@@ -226,11 +295,20 @@ export class ManagedWorktreeGuardSockets {
       if (existing?.kind === "abstract" && existing.server.listening) return existing.address;
       await this.closeNow(sessionId);
       const address = `${MANAGED_WORKTREE_GUARD_ABSTRACT_PREFIX}wollipog-guard-${randomBytes(ABSTRACT_NAME_RANDOM_BYTES).toString("base64url")}`;
-      const server = createServer((socket) =>
-        serveVerdict(socket, () => this.memoryProtections(sessionId), guardStateDirectory));
+      const connections = new Set<Socket>();
+      const server = createServer((socket) => {
+        connections.add(socket);
+        socket.once("close", () => connections.delete(socket));
+        serveVerdict(
+          socket,
+          () => this.memoryProtections(sessionId),
+          guardStateDirectory,
+          (request, signal) => this.policyHookRelay(sessionId, request, signal),
+        );
+      });
       await this.listen(server, address);
       server.on("error", () => { /* a per-connection failure never takes the server down */ });
-      this.servers.set(sessionId, { server, kind, address, identity: null, proven: false });
+      this.servers.set(sessionId, { server, kind, address, identity: null, proven: false, connections });
       return address;
     }
     const path = managedWorktreeGuardSocketPath(this.configDir, sessionId);
@@ -248,8 +326,12 @@ export class ManagedWorktreeGuardSockets {
     mkdirSync(this.configDir, { recursive: true, mode: 0o700 });
     ensurePrivateDirectory(directory);
     rmSync(path, { force: true });
-    const server = createServer((socket) =>
-      serveVerdict(socket, () => readManagedWorktreeGuardProtections(protectionsFile), guardStateDirectory));
+    const connections = new Set<Socket>();
+    const server = createServer((socket) => {
+      connections.add(socket);
+      socket.once("close", () => connections.delete(socket));
+      serveVerdict(socket, () => readManagedWorktreeGuardProtections(protectionsFile), guardStateDirectory);
+    });
     await this.listen(server, path);
     server.on("error", () => { /* a per-connection failure never takes the server down */ });
     chmodSync(path, 0o600);
@@ -258,14 +340,19 @@ export class ManagedWorktreeGuardSockets {
       await new Promise<void>((resolvePromise) => server.close(() => resolvePromise()));
       throw new Error("the guard socket was replaced while it was being created");
     }
-    this.servers.set(sessionId, { server, kind, address: path, identity, proven: false });
+    this.servers.set(sessionId, { server, kind, address: path, identity, proven: false, connections });
     return path;
   }
 
   private async closeNow(sessionId: string): Promise<void> {
     const entry = this.servers.get(sessionId);
     this.servers.delete(sessionId);
-    if (entry) await new Promise<void>((resolvePromise) => entry.server.close(() => resolvePromise()));
+    if (entry) {
+      // A verdict or answer still owed is refused rather than waited for: the sidecar reads a
+      // connection closed without one as its fail-closed outcome.
+      for (const socket of entry.connections) socket.destroy();
+      await new Promise<void>((resolvePromise) => entry.server.close(() => resolvePromise()));
+    }
     try {
       rmSync(managedWorktreeGuardSocketDirectory(this.configDir, sessionId), { recursive: true, force: true });
     } catch { /* best effort: a stale directory is re-verified before the next listen */ }

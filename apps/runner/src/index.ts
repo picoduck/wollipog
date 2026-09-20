@@ -354,9 +354,15 @@ const stagedRunnerCredential = stageRunnerCredentialFile(
   runnerDataIdentity,
 );
 const runnerCredentialFile = stagedRunnerCredential.activePath;
+const sandboxHidesGuardState = config.executionIsolation.mode === "bwrap" ||
+  config.executionIsolation.mode === "seatbelt";
 const claudeHookHost = {
   ...defaultClaudeHookHost(),
   configDir: claudeHookRunnerConfigDir(config.dataDir, config.runnerId),
+  // Where the runner sandboxes nothing, the manager policy hook's credential and circuit are kept
+  // in runner memory and its events relayed over the session's abstract socket (#1472); under
+  // bwrap and Seatbelt the hook keeps its files, which the mask grants back to it (#1447).
+  managerHookRelay: !sandboxHidesGuardState && process.platform === "linux",
 };
 const agentControlHost = defaultAgentControlHost(config.dataDir);
 sweepClaudeHookFiles(claudeHookHost.configDir);
@@ -364,8 +370,6 @@ sweepClaudeHookFiles(claudeHookHost.configDir);
 // hidden hook state directory. One that does not (`provider` mode) serves an abstract-namespace
 // socket on Linux and answers from its own memory; elsewhere the guard reads its file as before.
 const guardSockets = new ManagedWorktreeGuardSockets(claudeHookHost.configDir);
-const sandboxHidesGuardState = config.executionIsolation.mode === "bwrap" ||
-  config.executionIsolation.mode === "seatbelt";
 
 /**
  * The abstract verdict socket for a launch the runner does not sandbox, proven once per address by
