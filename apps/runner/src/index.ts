@@ -2360,6 +2360,20 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         }),
       ));
       break;
+    case "switch_session_provider_account":
+      runCommandTask(
+        "switch_session_provider_account",
+        sessions.switchProviderAccount(msg.sessionId, msg.providerAccountId).then((result) =>
+          sendUp({
+            type: "switch_session_provider_account_result",
+            requestId: msg.requestId,
+            ok: result.ok,
+            scheduled: result.scheduled,
+            error: result.error,
+          }),
+        ),
+      );
+      break;
     case "acp_registry_approval":
       void (async () => {
         const fail = (error: string) => sendUp({

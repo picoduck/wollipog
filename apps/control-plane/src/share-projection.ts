@@ -218,6 +218,7 @@ function publicMessages(
       case "checkpoint_restored":
       case "conversation_checkpoint":
       case "conversation_forked":
+      case "provider_account_switched":
       case "token_usage":
         mergeableAssistantIndex = null;
         mergeableAssistantMessageId = undefined;

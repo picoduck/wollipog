@@ -3195,6 +3195,36 @@ test("the provider-resolved model round-trips through create and update snapshot
   assert.equal(db.getSession("resolved-model")?.resolvedModel, "claude-opus-5-20260701");
 });
 
+test("provider account switch failures round-trip and clear through runner snapshots", () => {
+  const db = withRunner();
+  const failure = {
+    providerAccountId: "personal",
+    providerAccountLabel: "Personal",
+    reason: "the provider could not resume this conversation",
+    detectedAt: 2_000,
+  };
+  db.createSessionFromSnapshot(snapshot({
+    id: "account-switch-failure",
+    providerAccountId: "personal",
+    providerAccountLabel: "Personal",
+    providerAccountSwitchFailure: failure,
+  }), "runner-1", 2_000);
+  assert.deepEqual(db.getSession("account-switch-failure")?.providerAccountSwitchFailure, failure);
+
+  db.updateSessionFromSnapshot(
+    "account-switch-failure",
+    snapshot({
+      id: "account-switch-failure",
+      providerAccountId: "work",
+      providerAccountLabel: "Work",
+      providerAccountSwitchFailure: null,
+    }),
+    3_000,
+  );
+  assert.equal(db.getSession("account-switch-failure")?.providerAccountSwitchFailure, undefined);
+  assert.equal(db.getSession("account-switch-failure")?.providerAccountId, "work");
+});
+
 test("session worktree identity round-trips through create and update snapshots", () => {
   const db = withRunner();
   const first = {

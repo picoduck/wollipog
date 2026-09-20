@@ -34,6 +34,7 @@ import type {
   PromptImage,
   PromptImageInput,
   PromptImageReference,
+  ProviderAccountSwitchFailureView,
   ProviderHistoryRecoveryMode,
   WorkspaceReference,
   QueuedPromptDraft,
@@ -133,7 +134,7 @@ export interface GuardStateSandbox {
   ) => Promise<{ ok: true } | { ok: false; reason: string } | undefined>;
 }
 import type { SubscriptionUsageProbeAuthorization } from "./subscription-usage.js";
-import { bindSessionProviderAccount } from "./provider-accounts.js";
+import { bindSessionProviderAccount, type BoundProviderAccount } from "./provider-accounts.js";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import { cleanupPiExternalSession } from "./external/sources.js";
 import {
@@ -551,6 +552,9 @@ interface ActiveSession {
    * original OS cwd, then the drain resumes the same conversation inside the selected worktree
    * before admitting another turn. */
   pendingWorktreeRebind?: string;
+  /** A validated provider account selected after this process launched. It is applied only after
+   * the current turn settles, before any queued turn can reach a provider. */
+  pendingProviderAccountSwitch?: BoundProviderAccount;
   /** Exact canonical roots rendered into this live process's Seatbelt profile at launch. */
   seatbeltWritableRoots?: readonly string[];
 }
@@ -903,6 +907,12 @@ export class SessionManager {
     /** Exact target captured once provider launch preparation begins. A later selection may move
      * durable metadata again, but cleanup must keep fencing the cwd already handed to launch(). */
     launchingWorktreePath?: string;
+  }>();
+  /** Turn-boundary provider-account handoffs share the worktree handoff's replacement guarantees
+   * but keep a distinct lane so neither operation can accidentally consume the other's target. */
+  private readonly providerAccountSwitches = new Map<string, {
+    entry: ActiveSession;
+    promise: Promise<void>;
   }>();
   /** Deletions that installed their durable tombstone but remain fenced on exact-client exit. */
   private readonly pendingDeletions = new Set<string>();
@@ -4869,6 +4879,11 @@ export class SessionManager {
       providerAccountLabel: providerAccount?.label,
       providerAccountProvider: providerAccount?.provider,
       providerCredentialHome: providerAccount?.credentialHome,
+      pendingProviderAccountId: prior?.pendingProviderAccountId,
+      pendingProviderAccountLabel: prior?.pendingProviderAccountLabel,
+      pendingProviderAccountProvider: prior?.pendingProviderAccountProvider,
+      pendingProviderCredentialHome: prior?.pendingProviderCredentialHome,
+      providerAccountSwitchFailure: prior?.providerAccountSwitchFailure,
       agentVersion: spec.agentVersion ?? prior?.agentVersion,
       capabilities: spec.capabilities ?? prior?.capabilities,
       sessionSlashCommands: carrySlashCommandCatalog ? prior?.sessionSlashCommands : undefined,
@@ -6016,7 +6031,8 @@ export class SessionManager {
   private idleProviderCanPark(sessionId: string, entry: ActiveSession): boolean {
     const meta = this.store.readMeta(sessionId);
     return !!meta && entry.status === "idle" && !entry.running && !entry.providerInitiatedTurnActive &&
-      entry.queue.length === 0 && !entry.pendingWorktreeRebind && !entry.authenticationBlocked &&
+      entry.queue.length === 0 && !entry.pendingWorktreeRebind && !entry.pendingProviderAccountSwitch &&
+      !entry.authenticationBlocked &&
       !entry.historyQuarantined && !entry.historyIntegrityFailure && !entry.governanceTripped &&
       !this.queueHeld(entry) && !this.hasPendingApproval(sessionId) && !this.steerFences(entry).size &&
       this.reservedPromotions(entry).size === 0 && !meta.backgroundWorkState &&
@@ -6781,6 +6797,9 @@ export class SessionManager {
       permissionOptionKinds: new Map(),
       ...(meta.providerAuthBlock ? { authenticationBlocked: true } : {}),
       ...(meta.providerHistoryBlock ? { historyQuarantined: true } : {}),
+      ...(this.pendingProviderAccount(meta)
+        ? { pendingProviderAccountSwitch: this.pendingProviderAccount(meta) }
+        : {}),
       steerFenceIds: new Set(
         [...retainedPromotions.values()]
           .filter((operation) => !operation.settled)
@@ -8573,7 +8592,8 @@ export class SessionManager {
         this.reservedPromotions(entry).delete(sourceId);
       }
       this.emitQueue(sessionId);
-      if (!this.steerFences(entry).size && (entry.queue.length || entry.pendingWorktreeRebind) &&
+      if (!this.steerFences(entry).size &&
+          (entry.queue.length || entry.pendingProviderAccountSwitch || entry.pendingWorktreeRebind) &&
           !entry.governanceTripped && !this.queueHeld(entry)) {
         setImmediate(() => this.scheduleDrain(sessionId));
       }
@@ -9154,7 +9174,28 @@ export class SessionManager {
       return;
     }
     if (config) this.patchSessionConfig(sessionId, config);
-    const fresh = this.store.readMeta(sessionId)!;
+    let fresh = this.store.readMeta(sessionId)!;
+    const pendingAccount = this.pendingProviderAccount(fresh);
+    let switchedAccount: BoundProviderAccount | undefined;
+    if (pendingAccount) {
+      try {
+        switchedAccount = this.providerAccountForSession(fresh, pendingAccount.id);
+      } catch (error) {
+        this.parkProviderAccountSwitchFailure(sessionId, pendingAccount, errText(error));
+        durable?.failed("provider account switch could not be applied", "INVALID_COMMAND");
+        return;
+      }
+      const rebound = this.store.patchMeta(
+        sessionId,
+        this.providerAccountBindingPatch(fresh, switchedAccount),
+      );
+      if (!rebound) {
+        durable?.failed("session disappeared while applying the provider account switch", "SESSION_NOT_FOUND");
+        return;
+      }
+      this.store.flush(sessionId);
+      fresh = rebound;
+    }
     // Resume only when established AND the driver supports it; a never-established session (e.g. the
     // runner restarted before its first turn finished) re-launches fresh so it stays promptable.
     const resumeId = established && canResumeSession(fresh) ? (fresh.agentSessionId ?? undefined) : undefined;
@@ -9245,6 +9286,13 @@ export class SessionManager {
     if (!ok) {
       this.releaseAdmissionIfInactive(sessionId);
       if (resumeId) this.releaseResumeLock(sessionId, launchGeneration);
+      if (switchedAccount) {
+        this.parkProviderAccountSwitchFailure(
+          sessionId,
+          switchedAccount,
+          "the provider could not resume this conversation with the selected account",
+        );
+      }
       const blocked = this.store.readMeta(sessionId);
       let retainedDurable = false;
       if (blocked?.providerAuthBlock?.delivery === "not_delivered" && durable && !syntheticRecovery) {
@@ -9300,6 +9348,15 @@ export class SessionManager {
       finishPreLaunch(false);
       return;
     }
+    if (switchedAccount) {
+      this.emitEvent(sessionId, {
+        kind: "provider_account_switched",
+        providerAccountId: switchedAccount.id,
+        providerAccountLabel: switchedAccount.label,
+      });
+      const switched = this.store.patchMeta(sessionId, { providerAccountSwitchFailure: undefined });
+      if (switched) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(switched) });
+    }
     if (resumeId) this.handoffResumeLockToTurn(sessionId, launchGeneration);
     if (queueBeforeLaunch) {
       this.activatePreLaunchQueue(sessionId);
@@ -9350,6 +9407,12 @@ export class SessionManager {
         this.steerFences(entry).size ||
         this.reservedPromotionPrecedesQueue(sessionId, entry)) return;
     if (!this.promoteQueuedRecoveredAnswer(sessionId, entry.queue)) return;
+    if (entry.pendingProviderAccountSwitch) {
+      if (this.providerAccountSwitchCanProceed(sessionId, entry)) {
+        await this.rebindSelectedProviderAccount(sessionId, entry);
+      }
+      return;
+    }
     if (entry.pendingWorktreeRebind) {
       if (this.worktreeRebindCanProceed(sessionId, entry)) {
         await this.rebindSelectedWorktree(sessionId, entry);
@@ -9464,7 +9527,7 @@ export class SessionManager {
           entry.activeTurnId = undefined;
           entry.activeTurnConfig = undefined;
         }
-        if (entry.pendingWorktreeRebind) break;
+        if (entry.pendingProviderAccountSwitch || entry.pendingWorktreeRebind) break;
         if (entry.authenticationBlocked || entry.historyQuarantined) break;
         if (this.steerFences(entry).size) {
           await this.waitForSteeringFences(entry);
@@ -9498,11 +9561,14 @@ export class SessionManager {
         entry.governanceTripped = pending === "resume" ? undefined : pending;
         entry.governanceTrip = undefined;
         this.emitStatus(sessionId, "idle");
-        if (!entry.governanceTripped && (entry.queue.length || entry.pendingWorktreeRebind)) {
+        if (!entry.governanceTripped &&
+            (entry.queue.length || entry.pendingProviderAccountSwitch || entry.pendingWorktreeRebind)) {
           setImmediate(() => this.scheduleDrain(sessionId));
         }
       }
-      if (entry.pendingWorktreeRebind && this.worktreeRebindCanProceed(sessionId, entry)) {
+      if (entry.pendingProviderAccountSwitch && this.providerAccountSwitchCanProceed(sessionId, entry)) {
+        await this.rebindSelectedProviderAccount(sessionId, entry);
+      } else if (entry.pendingWorktreeRebind && this.worktreeRebindCanProceed(sessionId, entry)) {
         await this.rebindSelectedWorktree(sessionId, entry);
       } else if (this.active.get(sessionId) === entry && entry.queue.length &&
           !entry.authenticationBlocked && !entry.historyQuarantined && !entry.historyIntegrityFailure &&
@@ -9536,6 +9602,319 @@ export class SessionManager {
       !this.hasPendingApproval(sessionId) &&
       !this.steerFences(entry).size &&
       !this.reservedPromotionPrecedesQueue(sessionId, entry);
+  }
+
+  private providerAccountForSession(meta: SessionMeta, providerAccountId: string): BoundProviderAccount {
+    if (!this.resolveProviderAccount || !meta.agentId) {
+      throw new Error("this session does not support provider accounts");
+    }
+    if (meta.executionTarget && meta.executionTarget.adapter !== "host") {
+      throw new Error("provider accounts are available only for host sessions");
+    }
+    const account = this.resolveProviderAccount({
+      sessionId: meta.sessionId,
+      workspaceId: meta.workspaceId,
+      workspacePath: meta.repoPath,
+      agentId: meta.agentId,
+      providerAccountId,
+      command: meta.command,
+      args: meta.args,
+      env: {},
+      useWorktree: meta.worktreePath != null,
+      executionTarget: meta.executionTarget,
+      driver: meta.driver,
+      context: meta.context,
+      config: meta.config,
+    });
+    if (!account) throw new Error(`provider account '${providerAccountId}' is not configured`);
+    if (!meta.providerAccountProvider || account.provider !== meta.providerAccountProvider) {
+      throw new Error("the selected account belongs to a different provider");
+    }
+    return account;
+  }
+
+  private pendingProviderAccount(meta: SessionMeta): BoundProviderAccount | undefined {
+    if (!meta.pendingProviderAccountId || !meta.pendingProviderAccountLabel ||
+        !meta.pendingProviderAccountProvider || !meta.pendingProviderCredentialHome) return undefined;
+    return {
+      id: meta.pendingProviderAccountId,
+      label: meta.pendingProviderAccountLabel,
+      provider: meta.pendingProviderAccountProvider,
+      credentialHome: meta.pendingProviderCredentialHome,
+    };
+  }
+
+  private providerAccountBindingPatch(
+    meta: SessionMeta,
+    target: BoundProviderAccount,
+  ): Partial<SessionMeta> {
+    return {
+      providerAccountId: target.id,
+      providerAccountLabel: target.label,
+      providerAccountProvider: target.provider,
+      providerCredentialHome: target.credentialHome,
+      pendingProviderAccountId: undefined,
+      pendingProviderAccountLabel: undefined,
+      pendingProviderAccountProvider: undefined,
+      pendingProviderCredentialHome: undefined,
+      providerAccountSwitchFailure: undefined,
+      // Provider identity is scoped to the credential home. An intentional account change starts
+      // a new pin instead of presenting the previous account as a suspicious identity mismatch.
+      providerCredentialScopeId: undefined,
+      providerCredentialIdentityId: undefined,
+      providerCredentialIdentityEvidence: undefined,
+      providerAuthBlock: undefined,
+      providerAuthRetryAttemptedRecoveryId: undefined,
+      providerAuthDismissedCommandIds: undefined,
+      ...(isProviderAuthenticationBlock(meta.pendingApproval) ? { pendingApproval: null } : {}),
+    };
+  }
+
+  private parkProviderAccountSwitchFailure(
+    sessionId: string,
+    target: Pick<BoundProviderAccount, "id" | "label">,
+    reason: string,
+  ): void {
+    const failure: ProviderAccountSwitchFailureView = {
+      providerAccountId: target.id,
+      providerAccountLabel: target.label,
+      reason,
+      detectedAt: Date.now(),
+    };
+    this.emitEvent(sessionId, {
+      kind: "error",
+      message: `Account switch to ${target.label} failed: ${reason}`,
+    });
+    const updated = this.store.patchMeta(sessionId, {
+      pendingProviderAccountId: undefined,
+      pendingProviderAccountLabel: undefined,
+      pendingProviderAccountProvider: undefined,
+      pendingProviderCredentialHome: undefined,
+      providerAccountSwitchFailure: failure,
+      status: "input_required",
+    });
+    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+  }
+
+  /** Validate and durably schedule a same-provider account handoff. An idle process switches now;
+   * a running process keeps its credential home through the current turn and switches afterward. */
+  async switchProviderAccount(
+    sessionId: string,
+    providerAccountId: string,
+  ): Promise<{ ok: boolean; scheduled?: boolean; error?: string }> {
+    const meta = this.store.readMeta(sessionId);
+    if (!meta) return { ok: false, error: "session not found" };
+    if (!meta.providerAccountId || !meta.providerAccountProvider || !meta.providerCredentialHome) {
+      return { ok: false, error: "this session is not bound to a configured provider account" };
+    }
+    if (providerAccountId === meta.providerAccountId && !meta.providerAccountSwitchFailure) {
+      return { ok: false, error: "the session already uses that provider account" };
+    }
+    let target: BoundProviderAccount;
+    try {
+      target = this.providerAccountForSession(meta, providerAccountId);
+    } catch (error) {
+      return { ok: false, error: errText(error) };
+    }
+    if (!meta.agentSessionId && meta.seq > 0) {
+      return { ok: false, error: "this provider conversation has no resumable session id" };
+    }
+    if (meta.agentSessionId && !canResumeSession(meta)) {
+      return { ok: false, error: "this provider conversation cannot resume under another account" };
+    }
+    const updated = this.store.patchMeta(sessionId, {
+      pendingProviderAccountId: target.id,
+      pendingProviderAccountLabel: target.label,
+      pendingProviderAccountProvider: target.provider,
+      pendingProviderCredentialHome: target.credentialHome,
+      providerAccountSwitchFailure: undefined,
+    });
+    if (!updated) return { ok: false, error: "session disappeared while scheduling the account switch" };
+    this.store.flush(sessionId);
+    this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    const entry = this.active.get(sessionId);
+    if (!entry) return { ok: true, scheduled: true };
+    entry.pendingProviderAccountSwitch = target;
+    if (entry.authenticationBlocked) entry.authenticationBlocked = false;
+    if (entry.running || entry.providerInitiatedTurnActive || !this.providerAccountSwitchCanProceed(sessionId, entry)) {
+      return { ok: true, scheduled: true };
+    }
+    await this.rebindSelectedProviderAccount(sessionId, entry);
+    return { ok: true, scheduled: false };
+  }
+
+  private providerAccountSwitchCanProceed(sessionId: string, entry: ActiveSession): boolean {
+    const meta = this.store.readMeta(sessionId);
+    const backgroundWorkBlocksSwitch =
+      (!!meta?.backgroundWorkState || !!meta?.pendingBackgroundTaskIds?.length) &&
+      !meta?.orphanedWork?.recoveryAttemptedAt;
+    return !entry.running && !entry.providerInitiatedTurnActive &&
+      this.active.get(sessionId) === entry &&
+      !backgroundWorkBlocksSwitch &&
+      !this.rewinding.has(sessionId) &&
+      !this.forking.has(sessionId) &&
+      !this.loggingOut.has(sessionId) &&
+      !this.closing.has(sessionId) &&
+      !this.deleting.has(sessionId) &&
+      !entry.historyQuarantined &&
+      !entry.historyIntegrityFailure &&
+      !entry.governanceTripped &&
+      !this.queueHeld(entry) &&
+      (!this.hasPendingApproval(sessionId) || isProviderAuthenticationBlock(meta?.pendingApproval)) &&
+      !this.steerFences(entry).size &&
+      !this.reservedPromotionPrecedesQueue(sessionId, entry);
+  }
+
+  private rebindSelectedProviderAccount(sessionId: string, entry: ActiveSession): Promise<void> {
+    const current = this.providerAccountSwitches.get(sessionId);
+    if (current) return current.promise;
+    let promise: Promise<void>;
+    promise = this.performSelectedProviderAccountSwitch(sessionId, entry).finally(() => {
+      if (this.providerAccountSwitches.get(sessionId)?.promise === promise) {
+        this.providerAccountSwitches.delete(sessionId);
+      }
+    });
+    this.providerAccountSwitches.set(sessionId, { entry, promise });
+    return promise;
+  }
+
+  private async performSelectedProviderAccountSwitch(
+    sessionId: string,
+    entry: ActiveSession,
+  ): Promise<void> {
+    const requested = entry.pendingProviderAccountSwitch;
+    if (!requested || !this.providerAccountSwitchCanProceed(sessionId, entry)) return;
+    const persisted = this.store.readMeta(sessionId);
+    const pending = persisted ? this.pendingProviderAccount(persisted) : undefined;
+    if (!persisted || !pending || pending.id !== requested.id) {
+      entry.pendingProviderAccountSwitch = undefined;
+      if (entry.queue.length) setImmediate(() => this.scheduleDrain(sessionId));
+      return;
+    }
+    let target: BoundProviderAccount;
+    try {
+      target = this.providerAccountForSession(persisted, pending.id);
+    } catch (error) {
+      entry.pendingProviderAccountSwitch = undefined;
+      this.parkProviderAccountSwitchFailure(sessionId, pending, errText(error));
+      return;
+    }
+    this.captureAgentSessionId(sessionId, entry.client);
+    const resumable = this.store.readMeta(sessionId);
+    const resumeId = resumable?.agentSessionId ?? undefined;
+    const hasConversation = (resumable?.seq ?? 0) > 0;
+    if (!resumable || (!resumeId && hasConversation) || (resumeId && !canResumeSession(resumable))) {
+      entry.pendingProviderAccountSwitch = undefined;
+      this.parkProviderAccountSwitchFailure(
+        sessionId,
+        target,
+        "the provider conversation cannot be resumed under another account",
+      );
+      return;
+    }
+    let switchLockHeld = false;
+    if (resumeId) {
+      if (!this.store.acquireLock(sessionId, this.lockOwner)) {
+        this.parkProviderAccountSwitchFailure(
+          sessionId,
+          target,
+          "this session is being driven by another runner process",
+        );
+        return;
+      }
+      switchLockHeld = true;
+    }
+
+    const launchGeneration = this.beginLaunchGeneration(sessionId);
+    this.preLaunchAdmissionGenerations.set(sessionId, launchGeneration);
+    const queued = entry.queue.splice(0);
+    if (queued.length) this.preLaunchQueues.set(sessionId, queued);
+    this.deleteActiveSession(sessionId, entry, false, false);
+    this.emitQueue(sessionId);
+    let launched = false;
+    let preserveLockForQueue = false;
+    try {
+      try {
+        const retirement = this.beginProviderRetirement(sessionId, entry, {
+          preserveAdmission: true,
+          preserveLock: true,
+          acceptPromptsDuringHandoff: true,
+        });
+        await retirement.promise;
+        if (this.closing.get(sessionId) === retirement) {
+          throw new Error("provider process retirement is unconfirmed");
+        }
+      } catch (error) {
+        const retirement = this.closing.get(sessionId);
+        if (retirement?.client === entry.client) {
+          retirement.preserveAdmission = false;
+          retirement.preserveLock = false;
+          retirement.acceptPromptsDuringHandoff = false;
+        }
+        this.parkProviderAccountSwitchFailure(
+          sessionId,
+          target,
+          `the previous provider could not be stopped: ${errText(error)}`,
+        );
+        return;
+      }
+      const fresh = this.store.readMeta(sessionId);
+      if (!fresh || !this.launchIsCurrent(sessionId, launchGeneration)) return;
+      const switched = this.store.patchMeta(
+        sessionId,
+        this.providerAccountBindingPatch(fresh, target),
+      );
+      if (!switched) return;
+      this.store.flush(sessionId);
+      try {
+        launched = await this.launch(switched, resumeId, launchGeneration);
+      } catch (error) {
+        this.log(`session ${sessionId} provider launch failed during account switch: ${errText(error)}`);
+      }
+      if (!launched) {
+        const failedEntry = this.active.get(sessionId);
+        if (failedEntry?.launchGeneration === launchGeneration) {
+          this.deleteActiveSession(sessionId, failedEntry, false);
+          try {
+            await this.beginProviderRetirement(sessionId, failedEntry).promise;
+          } catch (error) {
+            this.log(`session ${sessionId} failed account-switch replacement disposal: ${errText(error)}`);
+          }
+        }
+        this.parkProviderAccountSwitchFailure(
+          sessionId,
+          target,
+          "the provider could not resume this conversation with the selected account",
+        );
+        return;
+      }
+      const reboundEntry = this.active.get(sessionId);
+      if (reboundEntry) reboundEntry.pendingProviderAccountSwitch = undefined;
+      this.emitEvent(sessionId, {
+        kind: "provider_account_switched",
+        providerAccountId: target.id,
+        providerAccountLabel: target.label,
+      });
+      const latest = this.store.patchMeta(sessionId, { providerAccountSwitchFailure: undefined });
+      if (latest) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(latest) });
+      const hasQueuedWork = (this.preLaunchQueues.get(sessionId)?.length ?? 0) > 0;
+      this.activatePreLaunchQueue(sessionId);
+      preserveLockForQueue = hasQueuedWork;
+      if (!hasQueuedWork) this.emitStatus(sessionId, "idle");
+    } finally {
+      const superseded = this.launchWasSuperseded(sessionId, launchGeneration);
+      const ownsGeneration = this.launchGenerations.get(sessionId) === launchGeneration;
+      const retirementPending = this.closing.has(sessionId);
+      if (!launched && ownsGeneration && !superseded) {
+        this.rejectPreLaunchQueue(sessionId, "provider could not resume with the selected account");
+      }
+      if (this.preLaunchAdmissionGenerations.get(sessionId) === launchGeneration) {
+        this.preLaunchAdmissionGenerations.delete(sessionId);
+      }
+      this.finishLaunchGeneration(sessionId, launchGeneration);
+      if (!launched && !superseded && !retirementPending) this.releaseAdmissionIfInactive(sessionId);
+      if (switchLockHeld && !preserveLockForQueue && !retirementPending) this.clearLock(sessionId);
+    }
   }
 
   private resumeDeferredWorktreeRebind(sessionId: string): void {
@@ -11306,7 +11685,9 @@ export class SessionManager {
         this.recoveryHolds.delete(sessionId);
         this.setControlPlaneHold(sessionId, entry, false);
         if (!entry.running && !entry.governanceTripped && !this.queueHeld(entry) &&
-            (entry.queue.length || entry.pendingWorktreeRebind)) this.scheduleDrain(sessionId);
+            (entry.queue.length || entry.pendingProviderAccountSwitch || entry.pendingWorktreeRebind)) {
+          this.scheduleDrain(sessionId);
+        }
       }
       return;
     }
@@ -11373,7 +11754,10 @@ export class SessionManager {
     // Ordinary threshold synchronization must not erase a provider-owned question/permission.
     // The runner store is authoritative for that barrier, just as it is on provider callbacks.
     this.emitStatus(sessionId, meta.pendingApproval ? "input_required" : "idle");
-    if (!holdFor && (entry.queue.length || entry.pendingWorktreeRebind)) this.scheduleDrain(sessionId);
+    if (!holdFor &&
+        (entry.queue.length || entry.pendingProviderAccountSwitch || entry.pendingWorktreeRebind)) {
+      this.scheduleDrain(sessionId);
+    }
   }
 
   stop(sessionId: string): void {
@@ -14152,7 +14536,8 @@ export class SessionManager {
         this.settleTurnInterruption(sessionId, live);
       }
       this.emitStatus(sessionId, pending ? "input_required" : state === "started" ? "running" : "idle");
-      if (interrupted && (live.queue.length || live.pendingWorktreeRebind)) {
+      if (interrupted &&
+          (live.queue.length || live.pendingProviderAccountSwitch || live.pendingWorktreeRebind)) {
         setImmediate(() => this.scheduleDrain(sessionId));
       }
     }

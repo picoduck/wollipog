@@ -11128,6 +11128,14 @@ body.shell-dock-dragging * {
   flex-direction: column;
   gap: 4px;
 }
+
+.switch-account-picker {
+  margin: 16px 0;
+}
+.switch-account-picker > .field-label {
+  display: block;
+  margin-bottom: 9px;
+}
 .agent-session-agent-name {
   display: flex;
   align-items: center;

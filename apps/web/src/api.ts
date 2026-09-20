@@ -94,6 +94,8 @@ import type {
   SessionEventsResponse,
   SessionFileEntry,
   SessionView,
+  SessionProviderAccountOptionsResponse,
+  SwitchSessionProviderAccountResponse,
   SessionWorktreeView,
   SessionReminderReadResponse,
   SessionReminderView,
@@ -784,6 +786,15 @@ export function createApiClient(transport: ApiTransport) {
     ),
 
   restart: (id: string) => req<SessionView>(`/api/sessions/${id}/restart`, { method: "POST" }),
+  sessionProviderAccounts: (id: string) =>
+    req<SessionProviderAccountOptionsResponse>(
+      `/api/sessions/${encodeURIComponent(id)}/provider-accounts`,
+    ),
+  switchSessionProviderAccount: (id: string, providerAccountId: string) =>
+    req<SwitchSessionProviderAccountResponse>(
+      `/api/sessions/${encodeURIComponent(id)}/provider-account`,
+      { method: "POST", body: JSON.stringify({ providerAccountId }) },
+    ),
   unarchiveAndRestart: (id: string) =>
     req<SessionView>(`/api/sessions/${id}/unarchive-and-restart`, { method: "POST" }),
 

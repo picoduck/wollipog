@@ -198,7 +198,8 @@ export type TimelineItem =
   | { kind: "checkpoint"; id: number; turn: number }
   | { kind: "checkpoint_restored"; id: number; turn: number }
   | { kind: "conversation_checkpoint"; id: number; turn: number }
-  | { kind: "conversation_forked"; id: number; sourceSessionId: string; turn: number; handoff?: { sourceAgent: string; destinationAgent: string; disclosure: string } };
+  | { kind: "conversation_forked"; id: number; sourceSessionId: string; turn: number; handoff?: { sourceAgent: string; destinationAgent: string; disclosure: string } }
+  | { kind: "provider_account_switched"; id: number; providerAccountId: string; providerAccountLabel: string };
 
 type AgentTextItem = Extract<TimelineItem, { kind: "agent_message" | "agent_thought" }>;
 const streamingTimelineItems = new WeakSet<AgentTextItem>();
@@ -1138,6 +1139,15 @@ export class TimelineBuilder {
       case "conversation_forked":
         this.breakText();
         this.markDirty(this.items.push({ kind: "conversation_forked", id: ev.seq, sourceSessionId: p.sourceSessionId, turn: p.turn, ...(p.handoff ? { handoff: p.handoff } : {}) }) - 1);
+        break;
+      case "provider_account_switched":
+        this.breakText();
+        this.markDirty(this.items.push({
+          kind: "provider_account_switched",
+          id: ev.seq,
+          providerAccountId: p.providerAccountId,
+          providerAccountLabel: p.providerAccountLabel,
+        }) - 1);
         break;
       case "error":
         this.breakText();

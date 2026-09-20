@@ -1105,6 +1105,27 @@ test("conversation fork points and provenance render as standalone timeline item
   assert.ok(groupTimeline(items).every((group) => group.kind === "item"));
 });
 
+test("provider account switches render as standalone timeline boundaries", () => {
+  const items = deriveTimeline([
+    ev({ kind: "agent_message", text: "before", final: true }),
+    ev({
+      kind: "provider_account_switched",
+      providerAccountId: "personal",
+      providerAccountLabel: "Personal",
+    }),
+    ev({ kind: "user_message", text: "after" }),
+  ]);
+  const switched = items.find((item) => item.kind === "provider_account_switched");
+  assert.deepEqual(switched, {
+    kind: "provider_account_switched",
+    id: switched?.id,
+    providerAccountId: "personal",
+    providerAccountLabel: "Personal",
+  });
+  assert.ok(groupTimeline(items).some((group) =>
+    group.kind === "item" && group.item.kind === "provider_account_switched"));
+});
+
 test("only a matching completed provider checkpoint makes a user message edit-addressable", () => {
   const items = deriveTimeline([
     ev({ kind: "user_message", text: "completed one" }),

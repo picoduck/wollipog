@@ -200,6 +200,7 @@ export const estimateTimelineRow = (row: TimelineRenderRow, pendingQuestionReque
     case "stderr": return 96;
     case "tool_call": return 72;
     case "conversation_forked": return row.item.handoff ? 76 : 52;
+    case "provider_account_switched": return 52;
     default: return 52;
   }
 };
@@ -1755,6 +1756,21 @@ const TimelineRow = memo(function TimelineRow({
           <p id={descriptionId} className="checkpoint-description">
             Fresh provider conversation. {item.handoff.disclosure}
           </p>
+        </div>
+      );
+    }
+    case "provider_account_switched": {
+      const label = `Switched Account to ${item.providerAccountLabel}`;
+      return (
+        <div
+          className="tl-checkpoint restored"
+          role="separator"
+          aria-label={label}
+          title={`Provider conversation resumed with ${item.providerAccountLabel}`}
+        >
+          <span className="checkpoint-line" />
+          <span className="checkpoint-label">{label}</span>
+          <span className="checkpoint-line" />
         </div>
       );
     }
