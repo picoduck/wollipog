@@ -37,11 +37,12 @@ after(() => {
 
 type ControlState = { available: boolean; loading: boolean; error: string | null };
 
-async function fixture() {
+async function fixture(loadStarts = true) {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   const reader = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  const outside = domWindow.document.createElement("input") as unknown as HTMLInputElement;
   reader.tabIndex = 0;
-  domWindow.document.body.append(container as never, reader as never);
+  domWindow.document.body.append(container as never, reader as never, outside as never);
   const root = createRoot(container);
   const fallbackFocusRef = { current: reader };
   const loads: string[] = [];
@@ -49,7 +50,10 @@ async function fixture() {
     await act(async () => root.render(
       <EarlierActivityControl
         {...state}
-        onLoad={() => loads.push("load")}
+        onLoad={() => {
+          loads.push("load");
+          return loadStarts;
+        }}
         fallbackFocusRef={fallbackFocusRef}
       />,
     ));
@@ -64,8 +68,9 @@ async function fixture() {
     await act(async () => root.unmount());
     container.remove();
     reader.remove();
+    outside.remove();
   };
-  return { container, reader, loads, render, action, cleanup };
+  return { container, reader, outside, loads, render, action, cleanup };
 }
 
 async function keyboardActivate(button: HTMLButtonElement): Promise<void> {
@@ -121,6 +126,38 @@ test("pointer pagination does not restore focus after the control changes", asyn
     await view.render({ available: true, loading: false, error: null });
     assert.notEqual(domWindow.document.activeElement, view.action("Load Earlier Activity"));
     assert.equal(view.loads.length, 1);
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("settled pagination does not reclaim focus after the reader leaves the loading operation", async () => {
+  for (const settled of [
+    { available: true, loading: false, error: null },
+    { available: true, loading: false, error: "Could not load earlier activity." },
+    { available: false, loading: false, error: null },
+  ] satisfies ControlState[]) {
+    const view = await fixture();
+    try {
+      await view.render({ available: true, loading: false, error: null });
+      await keyboardActivate(view.action("Load Earlier Activity"));
+      await view.render({ available: true, loading: true, error: null });
+      view.outside.focus();
+      await view.render(settled);
+      assert.equal(domWindow.document.activeElement, view.outside);
+    } finally {
+      await view.cleanup();
+    }
+  }
+});
+
+test("a refused request cannot retain keyboard focus ownership for a later load", async () => {
+  const view = await fixture(false);
+  try {
+    await view.render({ available: true, loading: false, error: null });
+    await keyboardActivate(view.action("Load Earlier Activity"));
+    await view.render({ available: true, loading: true, error: null });
+    assert.notEqual(domWindow.document.activeElement, view.container.querySelector("[data-state='loading']"));
   } finally {
     await view.cleanup();
   }

@@ -2397,7 +2397,7 @@ function SessionDetailLoaded({
     requestEarlierFromInputAtHead();
   }, [requestEarlierFromInputAtHead]);
 
-  const loadEarlierFromControl = useCallback(() => {
+  const loadEarlierFromControl = useCallback((): boolean => {
     const state = automaticEarlierLoadRef.current;
     if (state.historyKey !== timelineHistoryKey) {
       cancelEarlierActivitySettle();
@@ -2408,11 +2408,12 @@ function SessionDetailLoaded({
       state.readerStarted = false;
     }
     const base = eventWindow?.baseSeq;
-    if (base === undefined || !loadOlder()) return;
+    if (base === undefined || !loadOlder()) return false;
     clearEarlierActivityIntent();
     state.readerStarted = true;
     state.nextTriggerTop = null;
     state.requestedBase = base;
+    return true;
   }, [cancelEarlierActivitySettle, clearEarlierActivityIntent, eventWindow?.baseSeq, loadOlder, timelineHistoryKey]);
 
   // Once a prepend settles, require a fresh upward traversal before requesting another page. The
@@ -6933,7 +6934,7 @@ export function EarlierActivityControl({
   available: boolean;
   loading: boolean;
   error: string | null;
-  onLoad: () => void;
+  onLoad: () => boolean;
   fallbackFocusRef: { current: HTMLElement | null };
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
@@ -6942,12 +6943,15 @@ export function EarlierActivityControl({
 
   useLayoutEffect(() => {
     if (!keyboardRequestRef.current) return;
+    const root = rootRef.current;
+    if (!root) return;
     if (loading) {
-      rootRef.current?.focus();
+      root.focus();
       return;
     }
 
     keyboardRequestRef.current = false;
+    if (root.ownerDocument.activeElement !== root) return;
     if (available) actionRef.current?.focus();
     else fallbackFocusRef.current?.focus();
   }, [available, error, fallbackFocusRef, loading]);
@@ -6955,11 +6959,16 @@ export function EarlierActivityControl({
   const load = (event: ReactMouseEvent<HTMLButtonElement>) => {
     // Keyboard and assistive-technology activation dispatch a click with no click count. Pointer
     // users keep the browser's normal focus behavior instead of being moved after the request.
-    keyboardRequestRef.current = event.detail === 0;
-    onLoad();
+    const started = onLoad();
+    keyboardRequestRef.current = event.detail === 0 && started;
   };
 
-  if (!available) return null;
+  // Keep the root's DOM identity for the exhaustion commit so focus ownership can be checked
+  // before moving it to the stable transcript region. This empty anchor has no layout or a11y
+  // surface and remains inert for sessions that opened with no earlier history.
+  if (!available) {
+    return <div ref={rootRef} data-earlier-activity-focus-anchor tabIndex={-1} aria-hidden="true" />;
+  }
 
   if (loading) {
     return (
@@ -6968,6 +6977,7 @@ export function EarlierActivityControl({
         className="transcript-earlier-activity"
         data-state="loading"
         tabIndex={-1}
+        role="group"
         aria-label="Loading Earlier Activity"
       >
         <Spinner decorative />
@@ -6978,7 +6988,7 @@ export function EarlierActivityControl({
 
   if (error) {
     return (
-      <div ref={rootRef} className="transcript-earlier-activity error" data-state="error">
+      <div ref={rootRef} className="transcript-earlier-activity error" data-state="error" tabIndex={-1}>
         <span>{error}</span>
         <button ref={actionRef} className="btn ghost sm" type="button" onClick={load}>Retry</button>
       </div>
@@ -6986,7 +6996,7 @@ export function EarlierActivityControl({
   }
 
   return (
-    <div ref={rootRef} className="transcript-earlier-activity" data-state="idle">
+    <div ref={rootRef} className="transcript-earlier-activity" data-state="idle" tabIndex={-1}>
       <button
         ref={actionRef}
         className="icon-btn transcript-earlier-activity-fallback"
