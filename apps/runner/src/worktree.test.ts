@@ -619,6 +619,31 @@ test("safe discard removes only a clean fully-pushed runner-owned worktree", { s
       "git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/fix/missing-registered"],
     ));
 
+    const removedBeforeRetry = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "agent/removed-before-retry",
+    }, { dataDir });
+    execFileSync("git", ["-C", removedBeforeRetry.path, "push", "-u", "origin", removedBeforeRetry.branch]);
+    const removedOriginal = execFileSync("git", ["-C", repo, "rev-parse", removedBeforeRetry.branch], {
+      encoding: "utf8",
+    }).trim();
+    execFileSync("git", ["-C", repo, "worktree", "remove", removedBeforeRetry.path]);
+    const removedAdvanced = execFileSync(
+      "git",
+      ["-C", repo, "commit-tree", `${removedOriginal}^{tree}`, "-p", removedOriginal, "-m", "operator advance"],
+      { encoding: "utf8" },
+    ).trim();
+    execFileSync("git", [
+      "-C", repo, "update-ref", `refs/heads/${removedBeforeRetry.branch}`, removedAdvanced, removedOriginal,
+    ]);
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...removedBeforeRetry,
+      source: "created",
+    }, { dataDir }), { removed: true });
+    assert.equal(execFileSync("git", ["-C", repo, "rev-parse", removedBeforeRetry.branch], {
+      encoding: "utf8",
+    }).trim(), removedAdvanced, "missing-registration replay never claims the current branch generation");
+
     assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
       path: join(root, "operator-owned"),
       branch: "fix/not-owned",
@@ -1268,6 +1293,7 @@ test("retained ref journal survives restart and never re-arms a completed or rep
     const record: RetainedWorktreeRefRecord = {
       sessionId: "s1",
       worktreeId: "wt1",
+      cleanupId: "cleanup-1",
       repoPath: "/repo",
       context: { kind: "native" },
       branch: "fix/retained",
@@ -1280,9 +1306,9 @@ test("retained ref journal survives restart and never re-arms a completed or rep
     const journal = new WorktreeCleanupJournal(dataDir);
     journal.addRetainedRef(record);
     assert.deepEqual(new WorktreeCleanupJournal(dataDir).listRetainedRefs(), [record]);
-    journal.armRetainedRefs("s1", "other-worktree");
+    journal.armRetainedRefs("s1", "other-worktree", "cleanup-1");
     assert.equal(new WorktreeCleanupJournal(dataDir).listRetainedRefs()[0]?.armedAt, undefined);
-    journal.armRetainedRefs("s1", "wt1");
+    journal.armRetainedRefs("s1", "wt1", "cleanup-1");
     const armedRecord = new WorktreeCleanupJournal(dataDir).listRetainedRefs()[0]!;
     assert.equal(typeof armedRecord.armedAt, "number");
 
@@ -1305,6 +1331,10 @@ test("retained ref journal survives restart and never re-arms a completed or rep
     restarted.addRetainedRef(changed);
     assert.deepEqual(new WorktreeCleanupJournal(dataDir).listRetainedRefs(), [],
       "stale cleanup replay cannot re-arm a terminal generation");
+    const laterGeneration = { ...changed, cleanupId: "cleanup-2", updatedAt: 4 };
+    restarted.addRetainedRef(laterGeneration);
+    assert.deepEqual(new WorktreeCleanupJournal(dataDir).listRetainedRefs(), [laterGeneration],
+      "a later cleanup occurrence owns its ref independently of an old terminal receipt");
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }

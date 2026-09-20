@@ -116,6 +116,8 @@ export interface WorktreeCleanupRecord {
   sessionId: string;
   /** Stable per-worktree identity. Absent records are the singular legacy session worktree. */
   worktreeId?: string;
+  /** Unique durable cleanup occurrence; added lazily when replaying legacy rows. */
+  cleanupId?: string;
   repoPath: string;
   worktreePath: string;
   context: AgentContext;
@@ -192,6 +194,8 @@ export type RetainedWorktreeRefTerminalReason =
 export interface RetainedWorktreeRefRecord {
   sessionId: string;
   worktreeId?: string;
+  /** Binds ownership to one cleanup occurrence even when a requested slot is reused later. */
+  cleanupId?: string;
   repoPath: string;
   context: AgentContext;
   branch: string;
@@ -342,12 +346,13 @@ export class WorktreeCleanupJournal {
     this.flushRetainedRefs();
   }
 
-  armRetainedRefs(sessionId: string, worktreeId?: string): void {
+  armRetainedRefs(sessionId: string, worktreeId?: string, cleanupId?: string): void {
     const now = Date.now();
     let changed = false;
     for (const [key, record] of this.retainedRefs) {
       if (record.sessionId !== sessionId ||
-          (record.worktreeId ?? "legacy") !== (worktreeId ?? "legacy") || record.armedAt) continue;
+          (record.worktreeId ?? "legacy") !== (worktreeId ?? "legacy") ||
+          (record.cleanupId ?? "legacy-cleanup") !== (cleanupId ?? "legacy-cleanup") || record.armedAt) continue;
       this.retainedRefs.set(key, { ...record, armedAt: now, updatedAt: now });
       changed = true;
     }
@@ -382,8 +387,10 @@ export class WorktreeCleanupJournal {
     return `${record.sessionId}\0${record.worktreeId ?? "legacy"}`;
   }
 
-  private retainedRefKey(record: Pick<RetainedWorktreeRefRecord, "sessionId" | "worktreeId" | "branch">): string {
-    return `${record.sessionId}\0${record.worktreeId ?? "legacy"}\0${record.branch}`;
+  private retainedRefKey(
+    record: Pick<RetainedWorktreeRefRecord, "sessionId" | "worktreeId" | "cleanupId" | "branch">,
+  ): string {
+    return `${record.sessionId}\0${record.worktreeId ?? "legacy"}\0${record.cleanupId ?? "legacy-cleanup"}\0${record.branch}`;
   }
 
   private flush(): void {
@@ -1490,6 +1497,10 @@ export async function discardWorktreeIfSafe(
           return { removed: false, reason: "unavailable" };
         }
       }
+      // Once Git no longer registers the worktree, no current branch identity links an arbitrary
+      // local ref to this cleanup occurrence. Treat removal as complete and let any candidate
+      // durably captured by the original pass flow through the retained-ref reclaimer.
+      return { removed: true };
     }
 
     let head: string;

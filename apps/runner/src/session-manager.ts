@@ -2995,12 +2995,17 @@ export class SessionManager {
   }
 
   private async removeRecordedWorktree(record: WorktreeCleanupRecord, meta?: SessionMeta): Promise<SafeWorktreeDiscardResult> {
+    if (!record.cleanupId) {
+      record.cleanupId = randomUUID();
+      this.cleanupJournal.add(record);
+    }
     const retainRefs = async (candidates: RetainedWorktreeRefCandidate[]) => {
       const now = Date.now();
       for (const candidate of candidates) {
         this.cleanupJournal.addRetainedRef({
           sessionId: record.sessionId,
           ...(record.worktreeId ? { worktreeId: record.worktreeId } : {}),
+          cleanupId: record.cleanupId,
           repoPath: record.repoPath,
           context: record.context,
           branch: candidate.branch,
@@ -3080,11 +3085,11 @@ export class SessionManager {
       if (record.worktreeId) {
         this.worktreePortAllocator.release(this.worktreePortOwner(record.sessionId, record.worktreeId));
       }
-      this.cleanupJournal.armRetainedRefs(record.sessionId, record.worktreeId);
+      this.cleanupJournal.armRetainedRefs(record.sessionId, record.worktreeId, record.cleanupId);
       record.completedAt = Date.now();
       this.cleanupJournal.complete(record);
       this.deferredMergedHeadRetryAt.delete(this.deferredMergedHeadKey(record));
-      this.scheduleRetainedRefReclaims(record.sessionId, record.worktreeId);
+      this.scheduleRetainedRefReclaims(record.sessionId, record.worktreeId, record.cleanupId);
       return true;
     } catch (error) {
       this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after cleanup journal update or port release: ${errText(error)}`);
@@ -3105,9 +3110,10 @@ export class SessionManager {
     this.cleanupJournal.finishRetainedRef(record, result.state, result.reason);
   }
 
-  private scheduleRetainedRefReclaims(sessionId: string, worktreeId?: string): void {
+  private scheduleRetainedRefReclaims(sessionId: string, worktreeId?: string, cleanupId?: string): void {
     const records = this.cleanupJournal.listRetainedRefs().filter((record) =>
-      record.sessionId === sessionId && (record.worktreeId ?? "legacy") === (worktreeId ?? "legacy"));
+      record.sessionId === sessionId && (record.worktreeId ?? "legacy") === (worktreeId ?? "legacy") &&
+      (record.cleanupId ?? "legacy-cleanup") === (cleanupId ?? "legacy-cleanup"));
     if (!records.length) return;
     setImmediate(() => {
       if (this.shuttingDown) return;
